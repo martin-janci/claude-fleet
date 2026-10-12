@@ -275,4 +275,11 @@
 //!   new at this revision without a bump: a hub without it answers
 //!   `E_HUB_PROTOCOL`, and the desktop keeps the pins in its own store, as
 //!   it did before they moved to the hub.
-pub const CONTRACT_REVISION: u32 = 17;
+//! - **18** — *session environment variables* (spec 2026-10-11). New tool:
+//!   `env_vars` (the desktop's Settings › Environment routes to it);
+//!   `new_session` takes `env` (session-scope plain values), and a form's
+//!   `secret` field takes `env_target`. A revision-17 hub serves no
+//!   `env_vars` and ignores `env`, so the desktop's minimum stays 16: there
+//!   the Environment page's actions fail as an unknown tool, and nothing
+//!   else changes.
+pub const CONTRACT_REVISION: u32 = 18;

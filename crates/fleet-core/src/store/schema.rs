@@ -1994,6 +1994,8 @@ const MIGRATIONS: &[Migration] = &[
         178,
         include_str!("../../migrations/178_pinned_dashboards.sql"),
     ),
+    // Session environment variables and secrets.
+    Migration::plain(179, include_str!("../../migrations/179_env_vars.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -2422,6 +2424,7 @@ mod tests {
     use super::*;
 
     const EXPECTED_TABLES: &[&str] = &[
+        "env_vars",
         "hosts",
         "projects",
         "worktrees",

@@ -833,7 +833,7 @@ pub fn validate_credential_ref(r: &str) -> Result<(), IpcError> {
 /// Read a credential reference. `None` when it cannot be read (unset
 /// variable, missing file, empty value); the reason is logged without the
 /// value.
-pub(super) fn read_credential_ref(r: &str) -> Option<String> {
+pub(crate) fn read_credential_ref(r: &str) -> Option<String> {
     let value = if let Some(name) = r.strip_prefix("env:") {
         std::env::var(name).ok()
     } else if let Some(path) = r.strip_prefix("file:") {

@@ -868,6 +868,7 @@ async fn rewind_conversation_with(
                     over_limit_ok: false,
                     owner_person_id: sess.owner_person_id,
                     start_token: None,
+                    env: None,
                 })
                 .await;
             // A failed start leaves nothing a new-worktree fork made: the

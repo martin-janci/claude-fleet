@@ -776,6 +776,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Session environment variables (spec 2026-10-11): a person's, like the
+    // fleet's settings; a write needs a trusted full device, a reference
+    // the master (checked in the tool).
+    ToolPolicy {
+        name: "env_vars",
+        access: Access::Person,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // Trusting a client widens what its token can do (unmarked delivery), so
     // it is credential administration like minting and revoking.
     ToolPolicy {
@@ -2519,14 +2529,16 @@ const REDACT_KEYS: &[&str] = &[
 /// tracker credential, for the same reason. `code` is `link_peer`'s one-time
 /// pairing code, still valid when the link fails (review r04 S3), and
 /// `add_account`'s sign-in code. `api_key` is `add_account`'s Anthropic key
-/// (M15 G2.9), which fleet never stores.
-const SKIP_KEYS: &[&str] = &["confirm_nonce", "value", "secret", "code", "api_key"];
+/// (M15 G2.9), which fleet never stores. `value` is also `env_vars`'s, and
+/// `ref` its credential reference (a path or variable name on the hub).
+const SKIP_KEYS: &[&str] = &["confirm_nonce", "value", "secret", "code", "api_key", "ref"];
 /// Argument keys whose value is an object of person-typed answers (`ask`'s
 /// `values` may carry a form's secret fields): only the field count is kept,
 /// as `<N fields>`, never a name or a value. `args` is a nested payload
 /// (`catalog_admin`'s `set_secret` carries its value there, review r04 S2),
-/// which the top-level keys above cannot see into.
-const COUNT_KEYS: &[&str] = &["values", "args"];
+/// which the top-level keys above cannot see into. `env` is `new_session`'s
+/// session-scope variables: their names and values are the session's own.
+const COUNT_KEYS: &[&str] = &["values", "args", "env"];
 const SUMMARY_MAX_CHARS: usize = 240;
 
 /// Replace every character that could end a line downstream — see
@@ -3151,6 +3163,32 @@ mod tests {
         ] {
             assert!(!could_pass_for_a_marker_line(line), "{line:?}");
         }
+    }
+
+    #[test]
+    fn redact_args_never_keeps_an_env_value_or_reference() {
+        let args = serde_json::json!({
+            "action": "set",
+            "scope": "global",
+            "name": "TOKEN",
+            "value": "sk-live-abcdef123456",
+            "ref": "file:/run/secrets/t",
+        });
+        let out = redact_args(args.as_object());
+        assert!(
+            !out.contains("sk-live") && !out.contains("/run/secrets") && !out.contains("ref="),
+            "{out}"
+        );
+        assert!(out.contains("name=TOKEN"), "{out}");
+        let ns = serde_json::json!({
+            "host_alias": "local",
+            "env": { "A": "secret-value-xyz", "B": "2" },
+        });
+        let out = redact_args(ns.as_object());
+        assert!(
+            out.contains("<2 fields>") && !out.contains("secret-value-xyz") && !out.contains("A"),
+            "{out}"
+        );
     }
 
     #[test]

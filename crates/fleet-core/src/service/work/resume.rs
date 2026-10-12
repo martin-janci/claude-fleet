@@ -937,6 +937,7 @@ pub fn resume_session_args(
         over_limit_ok: false,
         owner_person_id,
         start_token: None,
+        env: None,
     })
 }
 

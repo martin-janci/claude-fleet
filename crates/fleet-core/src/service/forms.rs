@@ -492,17 +492,37 @@ pub async fn answer(
     }
     let form: forms::FormSpec = serde_json::from_str(&row.spec)
         .map_err(|e| IpcError::new(codes::E_INTERNAL, format!("stored form {form_id}: {e}")))?;
-    let answers = forms::check_answers(&form, values).map_err(|problems: Vec<FieldProblem>| {
-        IpcError::new(
-            codes::E_INVALID,
-            problems
-                .iter()
-                .map(|p| format!("{}: {}", p.field, p.problem))
-                .collect::<Vec<_>>()
-                .join("; "),
-        )
-        .with_details(serde_json::json!({ "problems": problems }))
-    })?;
+    let mut answers =
+        forms::check_answers(&form, values).map_err(|problems: Vec<FieldProblem>| {
+            IpcError::new(
+                codes::E_INVALID,
+                problems
+                    .iter()
+                    .map(|p| format!("{}: {}", p.field, p.problem))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            )
+            .with_details(serde_json::json!({ "problems": problems }))
+        })?;
+    // A secret field with an `env_target` becomes the session's secret
+    // environment variable (spec 2026-10-11): no host file, not in the
+    // result's `secrets`; the session gets it when it next starts.
+    let env_fields: Vec<(String, String)> = form
+        .steps
+        .iter()
+        .flat_map(|st| st.fields.iter())
+        .filter_map(|f| f.env_target.clone().map(|t| (f.name.clone(), t)))
+        .collect();
+    for (field, target) in &env_fields {
+        if let Some(secret) = answers.secrets.remove(field) {
+            lock(store)?.set_env_var(
+                "session",
+                &row.session_id.to_string(),
+                target,
+                &crate::store::EnvValue::Secret(crate::store::Secret::new(secret)),
+            )?;
+        }
+    }
     let mut paths = BTreeMap::new();
     if let Some(first) = answers.secrets.keys().next() {
         let (dir, abs) = secret_dir(ssh, &row.host_alias, form_id)
@@ -580,20 +600,20 @@ pub fn expire_and_purge(store: &Mutex<Store>, now: i64) -> usize {
 
 /// First retry delay for a host whose sweep failed; doubles per consecutive
 /// failure up to [`SWEEP_BACKOFF_MAX`].
-const SWEEP_BACKOFF_BASE: Duration = Duration::from_secs(10 * 60);
+pub(crate) const SWEEP_BACKOFF_BASE: Duration = Duration::from_secs(10 * 60);
 const SWEEP_BACKOFF_MAX: Duration = Duration::from_secs(6 * 3600);
 
 /// Per host: when the sweep may try it again, and how many times in a row it
 /// failed. An unreachable host costs ~30 s a try, so without this every tick
 /// paid it again for as long as the host stayed down.
-type SweepBackoff = Mutex<HashMap<String, (Instant, u32)>>;
+pub(crate) type SweepBackoff = Mutex<HashMap<String, (Instant, u32)>>;
 
 /// In-process only: a restart tries every host once more, which is fine.
 static SWEEP_BACKOFF: std::sync::LazyLock<SweepBackoff> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// The wait after the `failures`-th consecutive failure (1-based).
-fn sweep_backoff_delay(failures: u32) -> Duration {
+pub(crate) fn sweep_backoff_delay(failures: u32) -> Duration {
     let doublings = failures.saturating_sub(1).min(16);
     SWEEP_BACKOFF_BASE
         .saturating_mul(1u32 << doublings)
@@ -910,6 +930,53 @@ mod tests {
         let r = result_of(&st.lock().unwrap().form(&id).unwrap().unwrap());
         assert_eq!(r.secrets.unwrap().get("pw"), Some(&path));
         assert_eq!(r.note.as_deref(), Some(SECRET_NOTE));
+    }
+
+    #[tokio::test]
+    async fn a_secret_with_an_env_target_becomes_the_sessions_variable_and_touches_no_host() {
+        let (st, sid) = fixture();
+        let spec = json!({ "spec": "fleet.form/1", "title": "Token", "steps": [
+            { "title": "T", "fields": [
+                { "name": "tok", "type": "secret", "label": "Token", "required": true,
+                  "env_target": "GITHUB_TOKEN" } ] } ] });
+        let id = open(&st, sid, &spec, None).unwrap().form_id;
+        let fake = FakeSsh::new();
+        let r = answer(&st, &fake, &id, &values(json!({ "tok": PASSWORD })), "ada")
+            .await
+            .unwrap();
+        assert!(fake.calls().is_empty(), "no host file for an env target");
+        assert!(
+            r.secrets.as_ref().is_none_or(|m| m.is_empty()),
+            "{:?}",
+            r.secrets
+        );
+        assert_eq!(r.note, None);
+        let row = st.lock().unwrap().form(&id).unwrap().unwrap();
+        assert!(!row.secrets_on_host);
+        assert!(!row.answers.unwrap().contains(PASSWORD));
+        let rows = st.lock().unwrap().list_env_vars().unwrap();
+        let got: Vec<_> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.scope.as_str(),
+                    r.scope_key.clone(),
+                    r.name.as_str(),
+                    r.secret,
+                    r.value.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [("session", sid.to_string(), "GITHUB_TOKEN", true, None)]
+        );
+        let launch = st
+            .lock()
+            .unwrap()
+            .env_for_launch("h", None, Some(sid))
+            .unwrap();
+        assert_eq!(launch.len(), 1, "the session gets it at launch");
     }
 
     #[tokio::test]

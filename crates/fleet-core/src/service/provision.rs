@@ -1259,8 +1259,9 @@ pub async fn write_host_file(
 ///
 /// - remote: an empty `<path>.fleet-tmp` is created under `umask 077` +
 ///   `chmod 600` (a script with only paths in it), the content is streamed
-///   over stdin through `SshExec::upload_file` (`cat > <path>.fleet-tmp`),
-///   then `mv -f <path>.fleet-tmp <path>` renames it onto the target
+///   over stdin through `SshExec::upload_file` (which replaces the tmp file
+///   with one under the remote umask), then the tmp file is `chmod 600`ed
+///   and `mv -f <path>.fleet-tmp <path>` renames it onto the target
 ///   atomically. The tmp file is removed (best-effort) if any step fails;
 /// - local: the content is written to `<path>.fleet-tmp` with mode 0600
 ///   ([`write_private_file`]), then renamed onto `path`; the tmp file is
@@ -1572,9 +1573,17 @@ fn place_private_file(
 /// follows the copy because an in-place write keeps the TARGET's mode, and
 /// every caller of this script is writing a secret ([`write_host_file_secret`]
 /// is the only one) — a pre-existing 0644 file must not keep that mode.
+///
+/// The tmp file is `chmod 600`ed first: `upload_file` replaces it with a
+/// fresh file under the remote umask ([`crate::ssh::atomic_upload_command`]
+/// writes a temp file and renames it over), so the 0600 the touch step gave
+/// it is gone by now, and a rename would carry that umask's 0644 onto the
+/// target.
 fn remote_rename_script(tmp: &str, path: &str) -> String {
     let (t, p) = (remote_path(tmp), remote_path(path));
-    format!("mv -f {t} {p} 2>/dev/null || {{ cat {t} > {p} && chmod 600 {p} && rm -f {t}; }}")
+    format!(
+        "chmod 600 {t} && {{ mv -f {t} {p} 2>/dev/null || {{ cat {t} > {p} && chmod 600 {p} && rm -f {t}; }}; }}"
+    )
 }
 
 /// Expand a leading `~/` — or a bare `~` — against the LOCAL home dir.
@@ -1899,8 +1908,11 @@ mod tests {
     #[test]
     fn remote_rename_script_falls_back_to_an_in_place_write() {
         let s = remote_rename_script("~/.claude.json.fleet-tmp", "~/.claude.json");
-        // The rename is still the normal path…
-        assert!(s.starts_with("mv -f \"$HOME\"/'.claude.json.fleet-tmp' \"$HOME\"/'.claude.json'"));
+        // The rename is still the normal path, of a tmp file made private
+        // first (the upload replaced it with one under the remote umask)…
+        assert!(s.starts_with(
+            "chmod 600 \"$HOME\"/'.claude.json.fleet-tmp' && { mv -f \"$HOME\"/'.claude.json.fleet-tmp' \"$HOME\"/'.claude.json'"
+        ));
         // …and the fallback writes THROUGH the target, which is the only way
         // onto a bind-mounted file (EBUSY on rename): `claude-fleet-host`
         // containers mount ~/.claude.json in.
@@ -1980,6 +1992,31 @@ mod tests {
         .unwrap();
         assert!(renamed);
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "v");
+        assert!(!tmp.exists());
+    }
+
+    /// `upload_file` leaves the tmp file at the remote umask (it writes a
+    /// temp file of its own and renames it over); the target still ends 0600.
+    #[cfg(unix)]
+    #[test]
+    fn the_renamed_secret_is_private_whatever_mode_the_upload_left() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let tmp = home.path().join("tok.fleet-tmp");
+        std::fs::write(&tmp, "s").unwrap();
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(remote_rename_script("~/tok.fleet-tmp", "~/tok"))
+            .env("HOME", home.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let mode = std::fs::metadata(home.path().join("tok"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
         assert!(!tmp.exists());
     }
 

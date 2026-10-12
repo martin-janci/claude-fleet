@@ -373,6 +373,7 @@ async fn new_codex_bg_session(
         over_limit_ok: true,
         owner_person_id: owner,
         start_token: None,
+        env: None,
     };
     let row = crate::service::sessions::new_session(session_args, store, ssh, reg).await?;
     let mut warning = over.map(|o| format!("{}; it may stall at the limit", o.reason()));

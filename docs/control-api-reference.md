@@ -191,6 +191,12 @@ Parameters: `confirm_nonce`, `new_worker`, `prompt`, `raw`, `requester_session_i
 
 Ensure the UX agent's operator session exists on a reachable host; returns its row.
 
+### `env_vars`
+
+Session environment variables for the next start; global < host < project < session. list; set {scope, scope_key, name, value|ref, secret?}; unset {scope, scope_key, name}. Secrets and refs are never listed; ref (env:NAME|file:/abs) is master-only. E_INVALID, E_FORBIDDEN.
+
+Parameters: `action`, `name`, `ref`, `scope`, `scope_key`, `secret`, `value`
+
 ### `fleet_health`
 
 Backend health: app and schema version, database readiness, the cached fleet roll-up, per-host reverse-tunnel health (tunnels_flapping: supervised but crash-looping, so the Control API is unreachable from that host), and ESTIMATED token usage and cost (micro-USD) per host and UTC day for 7 days, and trackers (each ok/degraded/failing, failures in a row, last error and success; detection_backlog: suggestions undecided for detection_backlog_days). A per-host token sees its own host's usage and its org's trackers. hub: uptime and last reconcile pass; tunnels_mode none|reverse; peer_links_total. devices: {paired, last_seen_at, last_sync_at}. playbooks_week: runs per kind. hosts[]: per host disk_home_pct/disk_low, claude_behind, agent_behind, hooks_silent. decide (master only): Jev's last hour, degraded if its breaker is open or >20% failed; week: 7 days' answers. loops[]: each background job's last and next run and result (ok/error/paused); automation_paused.
@@ -371,7 +377,7 @@ Parameters: `agent`, `confirm_nonce`, `host_alias`, `name`, `project_id`, `promp
 
 Create a Claude Code tmux session on a host, in a project (and optional worktree, or a fresh one with new_worktree). Auto-clones the repo on remote hosts.
 
-Parameters: `agent`, `base_branch`, `confirm_nonce`, `effort`, `friendly_name`, `host_alias`, `kind`, `model`, `name`, `new_worktree`, `over_limit_ok`, `profile`, `project_id`, `resume_claude_session_id`, `start_command`, `start_token`, `worktree_id`
+Parameters: `agent`, `base_branch`, `confirm_nonce`, `effort`, `env`, `friendly_name`, `host_alias`, `kind`, `model`, `name`, `new_worktree`, `over_limit_ok`, `profile`, `project_id`, `resume_claude_session_id`, `start_command`, `start_token`, `worktree_id`
 
 ### `new_shell_session`
 
@@ -1219,6 +1225,10 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::wizard_state::wizard_state`
 - `commands::dashboards::dashboards`
 - `commands::api_tokens::api_tokens`
+- `commands::env_vars::env_vars`
+- `commands::env_vars::env_vars_list`
+- `commands::env_vars::env_var_set`
+- `commands::env_vars::env_var_unset`
 - `commands::add_account::add_account`
 - `commands::presence::session_presence`
 - `commands::pages::setting_history`
