@@ -74,7 +74,7 @@ pub struct PersonRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled_at: Option<i64>,
     /// The user's `id` in a Keycloak realm export; the integer `id` stays
-    /// internal. Filled by `Store::backfill_person_uuids` and at creation.
+    /// internal. Filled by `Store::backfill_realm_uuids` and at creation.
     pub uuid: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,

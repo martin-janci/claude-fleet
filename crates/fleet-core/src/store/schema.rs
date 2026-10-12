@@ -1996,12 +1996,15 @@ const MIGRATIONS: &[Migration] = &[
     ),
     // Identity sub-project 1: a person is a Keycloak user (uuid, email,
     // names, attributes). ADD COLUMN, so guarded; the uuids are filled by
-    // `Store::backfill_person_uuids` on every open.
+    // `Store::backfill_realm_uuids` on every open.
     Migration {
         version: 177,
         sql: include_str!("../../migrations/177_people_profile.sql"),
         already_applied: Some(people_has_uuid),
     },
+    // Identity sub-project 1: the realm model (clients, roles, groups and
+    // their mappings), seeded from orgs, org_members and trusted devices.
+    Migration::plain(178, include_str!("../../migrations/178_realm_model.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -2161,26 +2164,44 @@ impl Store {
         self.ensure_work_rules_start_columns()?;
         self.backfill_stale_demoted()?;
         self.backfill_session_owner()?;
-        self.backfill_person_uuids()?;
+        self.backfill_realm_uuids()?;
         self.reap_orphan_session_events()?;
         Ok(())
     }
 
-    /// Migration 177's backfill: every person without a uuid gets a v4 one.
-    /// Runs on every open, so a row an older binary inserted gets one too.
-    fn backfill_person_uuids(&self) -> Result<usize> {
-        let ids: Vec<i64> = self
-            .conn
-            .prepare("SELECT id FROM people WHERE uuid IS NULL")?
-            .query_map([], |r| r.get(0))?
-            .collect::<Result<_>>()?;
-        for id in &ids {
-            self.conn.execute(
-                "UPDATE people SET uuid = ?1 WHERE id = ?2 AND uuid IS NULL",
-                rusqlite::params![uuid::Uuid::new_v4().to_string(), id],
-            )?;
+    /// Migrations 177 and 178's backfill: every person, role, group and
+    /// client without a uuid gets a v4 one. Runs on every open, so a row an
+    /// older binary inserted gets one too.
+    fn backfill_realm_uuids(&self) -> Result<usize> {
+        let mut total = 0;
+        // A uuid decides nothing about access, so filling one must not
+        // re-resolve every cached caller: keep the epoch the triggers of the
+        // realm tables would otherwise bump.
+        let epoch: i64 =
+            self.conn
+                .query_row("SELECT epoch FROM auth_epoch WHERE id = 1", [], |r| {
+                    r.get(0)
+                })?;
+        // Constants, never input: table names cannot be bound.
+        for table in ["people", "roles", "groups", "clients"] {
+            let ids: Vec<i64> = self
+                .conn
+                .prepare(&format!("SELECT id FROM {table} WHERE uuid IS NULL"))?
+                .query_map([], |r| r.get(0))?
+                .collect::<Result<_>>()?;
+            for id in &ids {
+                self.conn.execute(
+                    &format!("UPDATE {table} SET uuid = ?1 WHERE id = ?2 AND uuid IS NULL"),
+                    rusqlite::params![uuid::Uuid::new_v4().to_string(), id],
+                )?;
+            }
+            total += ids.len();
         }
-        Ok(ids.len())
+        if total > 0 {
+            self.conn
+                .execute("UPDATE auth_epoch SET epoch = ?1 WHERE id = 1", [epoch])?;
+        }
+        Ok(total)
     }
 
     /// Migration 080's backfill: a row the tick demoted before the veto had
@@ -3655,6 +3676,96 @@ mod tests {
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(s.get_person_by_name("ada").unwrap().unwrap().uuid, ada.uuid);
+    }
+
+    #[test]
+    fn migration_178_turns_org_members_into_managed_groups_and_roles() {
+        let s = store_at_version(177);
+        s.conn
+            .execute_batch(
+                "
+        INSERT INTO people (id, name, is_personal_owner, created_at) VALUES (10,'ada',0,1),(11,'bob',0,1),(12,'cy',0,1),(13,'dee',0,1),(14,'eve',0,1),(15,'fay',0,1);
+        INSERT INTO orgs (id, name, isolate_sessions, created_at) VALUES (1,'acme',0,1);
+        INSERT INTO org_members (org_id, person_id, role, added_at, added_by, shares_since, removed_at) VALUES
+          (1,10,'admin',5,NULL,5,NULL),(1,11,'viewer',6,10,NULL,NULL),(1,12,'member',7,NULL,7,9);
+        INSERT INTO client_tokens (name, token_sha256, mode, created_at, trusted_at, person_id) VALUES ('ada-mac','x','full',1,2,10);
+        INSERT INTO client_tokens (name, token_sha256, mode, created_at, assets_admin_at, person_id) VALUES ('dee-pc','d','full',1,2,13);
+        INSERT INTO client_tokens (name, token_sha256, mode, created_at, person_id) VALUES ('eve-pc','e','full',1,14);
+        INSERT INTO client_tokens (name, token_sha256, mode, created_at, assets_admin_at, revoked_at, person_id) VALUES ('fay-pc','f','full',1,2,3,15);
+        INSERT INTO catalogs (name, repo_path, org_id, created_at) VALUES ('personal', '/tmp/x', NULL, 1);
+        INSERT INTO client_catalog_grants (client_id, catalog_id, granted_at)
+          SELECT t.id, c.id, 1 FROM client_tokens t, catalogs c WHERE t.name IN ('eve-pc','fay-pc') AND c.name='personal';
+    ",
+            )
+            .unwrap();
+        s.migrate().unwrap();
+        let q = |sql: &str| -> Vec<String> {
+            s.conn
+                .prepare(sql)
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        assert_eq!(
+            q("SELECT name FROM roles WHERE client_id IS NULL ORDER BY name"),
+            ["assets-admin", "fleet-admin", "fleet-trusted"]
+        );
+        assert_eq!(
+            q("SELECT r.name FROM roles r JOIN clients c ON c.id = r.client_id WHERE c.client_id='fleet' ORDER BY r.name"),
+            ["org-admin", "org-member", "org-viewer"]
+        );
+        // Live members land in their subgroup; the removed one does not.
+        assert_eq!(
+            q("SELECT p.name || ':' || g.name FROM group_members m JOIN groups g ON g.id=m.group_id
+               JOIN people p ON p.id=m.person_id ORDER BY p.name"),
+            ["ada:admins", "bob:viewers"]
+        );
+        assert_eq!(
+            q("SELECT g.name FROM groups g JOIN groups o ON o.id=g.parent_id WHERE o.org_id=1 ORDER BY g.name"),
+            ["admins", "members", "viewers"]
+        );
+        // The owner is fleet-admin; ada (trusted device) is fleet-trusted.
+        let owner = s.personal_owner_id().unwrap().unwrap();
+        assert_eq!(
+            q(&format!("SELECT r.name FROM user_role_mappings u JOIN roles r ON r.id=u.role_id WHERE u.person_id={owner}")),
+            ["fleet-admin"]
+        );
+        assert_eq!(
+            q("SELECT r.name FROM user_role_mappings u JOIN roles r ON r.id=u.role_id WHERE u.person_id=10"),
+            ["fleet-trusted"]
+        );
+        // assets-admin: the flag alone (dee) and a personal-catalog grant
+        // (eve) both carry over; a revoked device (fay) does not.
+        assert_eq!(
+            q(
+                "SELECT p.name FROM user_role_mappings u JOIN roles r ON r.id=u.role_id
+               JOIN people p ON p.id=u.person_id WHERE r.name='assets-admin' ORDER BY p.name"
+            ),
+            ["dee", "eve"]
+        );
+        // Every new row has a uuid; re-running adds nothing.
+        for t in ["groups", "roles", "clients"] {
+            let no_uuid: i64 = s
+                .conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {t} WHERE uuid IS NULL"),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(no_uuid, 0, "{t}");
+        }
+        let shape = "SELECT (SELECT COUNT(*) FROM groups) || '/' || (SELECT COUNT(*) FROM group_members) \
+                     || '/' || (SELECT COUNT(*) FROM user_role_mappings) || '/' || (SELECT COUNT(*) FROM roles) \
+                     || '/' || (SELECT COUNT(*) FROM role_composites) || '/' || (SELECT COUNT(*) FROM group_role_mappings)";
+        let before = q(shape);
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 178;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(q(shape), before);
     }
 
     /// 091 on a database stopped at 090: existing host_layers rows and managed
