@@ -33,7 +33,8 @@ impl FleetTools {
         host, used from any session that may see them; commands run on the \
         device's host. run: one adb / simctl / devicectl command. install \
         copies the app from your host. screenshot answers an image. A claim \
-        keeps others off (E_CONFLICT); use extends it.")]
+        keeps others off (E_CONFLICT); use extends it. claim with queue \
+        waits in line for a held one; it is yours when your turn comes.")]
     pub(super) async fn debug_devices(
         &self,
         Extension(caller): Extension<Caller>,
@@ -70,6 +71,7 @@ impl FleetTools {
                     need(&p.device, "device", action)?,
                     p.claim_s,
                     p.note.as_deref(),
+                    p.queue.unwrap_or(false),
                 )
                 .map_err(to_mcp_err)?;
                 ok_json_compact(&d)

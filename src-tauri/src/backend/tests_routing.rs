@@ -394,7 +394,7 @@ fn installing_with_a_claim_claims_the_device_first() {
         vec![
             (
                 "debug_devices".to_string(),
-                json!({ "action": "claim", "device": "3", "note": "login flow", "claim_s": null })
+                json!({ "action": "claim", "device": "3", "note": "login flow", "claim_s": null, "queue": null })
             ),
             (
                 "debug_devices".to_string(),
@@ -1192,6 +1192,30 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "agents_status",
+            "agents",
+            json!({ "action": "status", "agent": "review", "limit": 5 }),
+            r#"{"rules":[],"jobs":[],"pending":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::agents::routed::agents_status(
+                    b,
+                    s,
+                    Some("review".into()),
+                    Some(5),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "agents_decide",
+            "agents",
+            json!({ "action": "reject", "id": 7 }),
+            r#"{"id":7,"job_id":1,"kind":"post_review","payload":"{}","state":"rejected","decided_by":"device:phone","decided_at":5,"executed_at":null,"error":null,"created_at":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::agents::routed::agents_decide(b, s, 7, false)).map(|_| ())
+            }),
+        ),
+        (
             "routines",
             "routines",
             json!({ "action": "failing" }),
@@ -1537,6 +1561,26 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                     b,
                     commands::work_view::WorkTrackerCommentsArgs {
                         key: "ABC-1".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // A task becomes a tracker's ticket (owner decision 2026-10-11).
+        (
+            "promote_work_item",
+            "work_link",
+            json!({ "session_id": null, "action": "promote", "key": null, "item_id": 9,
+                    "link_id": null, "source": null, "tracker_id": 2, "container": "ENG" }),
+            NATIVE_ITEM_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::promote_work_item(
+                    b,
+                    commands::work_view::PromoteWorkItemArgs {
+                        item_id: 9,
+                        tracker_id: Some(2),
+                        container: Some("ENG".into()),
                     },
                     s,
                 ))
@@ -3118,7 +3162,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
         (
             "claim_debug_device",
             "debug_devices",
-            json!({ "action": "claim", "device": "3", "note": "login flow", "claim_s": null }),
+            json!({ "action": "claim", "device": "3", "note": "login flow", "claim_s": null, "queue": true }),
             DEBUG_DEVICE_JSON,
             Box::new(|b, s, _| {
                 block_on(commands::debug_devices::routed::claim_debug_device(
@@ -3128,6 +3172,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         id: 3,
                         note: Some("login flow".into()),
                         claim_s: None,
+                        queue: Some(true),
                     },
                 ))
                 .map(|_| ())
@@ -7305,6 +7350,7 @@ const SOURCES: &[(&str, &str)] = &[
         "commands/account_usage.rs",
         include_str!("../commands/account_usage.rs"),
     ),
+    ("commands/agents.rs", include_str!("../commands/agents.rs")),
     ("commands/assets.rs", include_str!("../commands/assets.rs")),
     ("commands/cancel.rs", include_str!("../commands/cancel.rs")),
     (
@@ -7350,6 +7396,10 @@ const SOURCES: &[(&str, &str)] = &[
     (
         "commands/debug_devices.rs",
         include_str!("../commands/debug_devices.rs"),
+    ),
+    (
+        "commands/device_mirror.rs",
+        include_str!("../commands/device_mirror.rs"),
     ),
     (
         "commands/federation.rs",

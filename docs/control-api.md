@@ -668,7 +668,13 @@ Index by area (names only; see the reference for details):
   post_to_tracker: true }` on a ticket also posts the comment there, signed
   `— <name> via fleet`, through the same outbox, drained at once; refused
   for a per-host token, fleet's own work, or with the setting off, and then
-  nothing is written). `work { action: "tracker_comments", key }` reads a
+  nothing is written), and for Jira (Cloud and Data Center) and Asana
+  `write_back: { create_tickets }` (off by default: a person's `work_link {
+  promote, item_id, tracker_id?, container? }` turns a task of fleet's own
+  into a ticket there — a subtask of a ticket under that ticket, a task at
+  the top into `container`, a Jira project key or an Asana project gid — and
+  the task becomes that ticket once the outbox sends it; `work { task }`
+  answers `promotion` and `promote_targets`). `work { action: "tracker_comments", key }` reads a
   ticket's own comments live (newest 50, oldest first, no cache; the ones
   fleet posted from a live comment left out; bodies fenced for a per-host
   token; `can_post` says whether the caller may post there), and for Asana
@@ -1069,9 +1075,12 @@ Index by area (names only; see the reference for details):
   copies the app from the caller's host (a per-host token: its own host
   only) to the device's host first; `logs` (`logcat -d`, a simulator's
   `log show`), `screenshot` (an image content block), `boot`, `shutdown`.
-  `claim { device, claim_s?, note? }` keeps every other caller off the
-  device (`E_CONFLICT`) until it lapses or is released; each use by its
-  holder extends it. A per-host token sees its own host's devices and the
+  `claim { device, claim_s?, note?, queue? }` keeps every other caller off
+  the device (`E_CONFLICT`) until it lapses or is released; each use by its
+  holder extends it. With `queue: true` a held device answers your place in
+  its line (`queue_place`) instead of `E_CONFLICT`, and the claim passes to
+  the first in line when the holder releases it or lets it lapse;
+  `release` from someone in that line only leaves it. A per-host token sees its own host's devices and the
   ones a person marked `shared` on hosts of its own org; `configure {
   label, shared }` and `forget` are a person's. See `docs/debug-devices.md`.
 - **Pull requests** — `prs`, `action: list { state?: open|merged|closed|all,
@@ -1109,6 +1118,18 @@ Index by area (names only; see the reference for details):
   `pause_all`. Served only to the hub owner's own paired device, never to
   the master an agent holds (the operator has `fleet-hub shepherd`); a write
   needs a trusted full device.
+- **Agents** — `agents`, the built-in agents (the PR reviewer, the support
+  agent) and the standing rules they work under
+  (`docs/superpowers/specs/2026-10-11-review-and-support-agents-design.md`):
+  `status { agent?, limit? }` (rules, newest jobs, actions waiting for a
+  person), `grant { agent: review|support, scope: gh:<owner>/<repo> |
+  jira:<tracker id>:<PROJECT>, host, level: watch|propose|act, project_id?,
+  config?, hours? }`, `revoke { id }`, `pause_all`, `approve { id }`,
+  `reject { id }`. An approved action is carried out by its agent on the
+  next run pass (the reviewer posts the review, unless the pull request's
+  head moved on). Served only to the hub owner's own paired device, never
+  to the master an agent holds (the operator has `fleet-hub agents`); a
+  write needs a trusted full device.
 - **Chat forms** — `ask`. Chat forms: open a `fleet.form/1` form in your own session's chat and wait for a person's answers; the person's side lists, gets, answers and declines. See `docs/forms.md`.
 - **Wizards** — `wizard_state`, a wizard left half-way, to resume on
   another of your devices: `list {kind?}` | `get {kind, key?}` | `save

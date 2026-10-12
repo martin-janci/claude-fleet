@@ -1,4 +1,4 @@
-//! Dashboards a person pinned (migration 173, persona design step 6): one
+//! Dashboards a person pinned (migration 178, persona design step 6): one
 //! row per dashboard id and person. Who may read and write a row and what
 //! it may hold are in `service::dashboards`; this is the rows.
 

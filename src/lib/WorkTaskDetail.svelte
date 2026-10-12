@@ -28,6 +28,7 @@
   import { hubConnection } from './hub_connection';
   import WorkPlaceDialog from './WorkPlaceDialog.svelte';
   import EditTaskDialog from './EditTaskDialog.svelte';
+  import PromoteTaskDialog from './PromoteTaskDialog.svelte';
   import WorkOrgDialog from './WorkOrgDialog.svelte';
   import WorkRuleEditor from './WorkRuleEditor.svelte';
   import TaskWorkSections from './TaskWorkSections.svelte';
@@ -61,6 +62,8 @@
     TASK_TAB_LABELS,
     TASK_TABS,
     postStateLabel,
+    promotionLabel,
+    promoteTitle,
     workTrackerComments,
     type TaskTab,
   } from './task_detail';
@@ -113,6 +116,12 @@
   let rules = $state<WorkRule[]>([]);
   let placing = $state(false);
   let editing = $state(false);
+  // Promoting a task of fleet's own to a tracker's ticket: where it may go
+  // (the hub's answer), and one on its way or refused.
+  let promoting = $state(false);
+  const promoteTargets = $derived(detail?.promote_targets ?? []);
+  const promotion = $derived(detail?.promotion ?? null);
+  const promoteBlocked = $derived(hubActionBlocked('promote_work_item', $hubStatus, $hubConnection));
   let assigning = $state(false);
   let ruleDraft = $state<WorkRuleDraft | null>(null);
 
@@ -533,6 +542,16 @@
             onclick={() => (editing = true)}><Icon name="edit" size={12} />Edit…</button
           >
         {/if}
+        {#if task?.item_id != null && promoteTargets.length > 0 && promotion?.state !== 'pending'}
+          <button
+            class="btn"
+            type="button"
+            data-testid="work-task-promote"
+            disabled={promoteBlocked !== null}
+            title={promoteBlocked ?? promoteTitle(promoteTargets)}
+            onclick={() => (promoting = true)}>Promote to ticket…</button
+          >
+        {/if}
       </div>
     </div>
     {#if task}
@@ -566,6 +585,16 @@
             >{trackerDownLabel(task)} — what is shown is the last sync</span
           >{/if}
       </div>
+      {#if promotionLabel(promotion)}
+        <p
+          class="promotion"
+          class:promotion--failed={promotion?.state === 'failed'}
+          role={promotion?.state === 'failed' ? 'alert' : 'status'}
+          data-testid="work-task-promotion"
+        >
+          {promotionLabel(promotion)}
+        </p>
+      {/if}
     {/if}
   </header>
 
@@ -1081,6 +1110,16 @@
   {/if}
 </section>
 
+{#if promoting && task && task.item_id != null}
+  <PromoteTaskDialog
+    itemId={task.item_id}
+    title={task.title ?? ''}
+    targets={promoteTargets}
+    onclose={() => (promoting = false)}
+    ondone={() => void load(taskId)}
+  />
+{/if}
+
 {#if editing && task}
   <EditTaskDialog taskId={task.task_id} onclose={() => (editing = false)} ondone={() => void load(taskId)} />
 {/if}
@@ -1315,6 +1354,14 @@
   }
   .icon-only {
     padding-inline: 5px;
+  }
+  .promotion {
+    margin: var(--space-1) 0 0;
+    font-size: var(--text-2xs);
+    color: var(--fg-muted);
+  }
+  .promotion--failed {
+    color: var(--danger);
   }
   .chips {
     display: flex;

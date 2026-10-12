@@ -71,7 +71,7 @@ describe('Debug devices: claim, install, logs, screenshot (11.6)', () => {
     await fireEvent.click(screen.getByTestId('record-action-debug_device.claim'));
     await fireEvent.input(screen.getByTestId('param-debug_device.claim-note'), { target: { value: 'login flow' } });
     await fireEvent.click(screen.getByTestId('run-debug_device.claim'));
-    await waitFor(() => expect(argsOf('claim_debug_device')).toEqual({ id: 3, note: 'login flow' }));
+    await waitFor(() => expect(argsOf('claim_debug_device')).toEqual({ id: 3, note: 'login flow', queue: false }));
   });
 
   it('installs an app from a path, on the device’s own host unless one is picked, and shows the output', async () => {

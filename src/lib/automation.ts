@@ -10,6 +10,7 @@ import { healthCheck, type LoopHealth } from './ipc';
 import { listRuns, type RunRow } from './runs';
 import { fleetSettings, setFleetSetting, SETTING_KEYS, settingBool, type FleetSettings } from './fleet_settings';
 import type { Result } from './result';
+import { agentState, type AgentsStatus } from './agents';
 
 export type AutomationTab = 'routines' | 'rules' | 'runs' | 'agents';
 
@@ -84,7 +85,7 @@ export function loopEvery(loop: LoopHealth): string | null {
 }
 
 export interface BuiltInAgent {
-  id: 'operator' | 'orchestrator' | 'jev';
+  id: 'operator' | 'orchestrator' | 'jev' | 'review' | 'support';
   name: string;
   does: string;
   state: string;
@@ -97,12 +98,15 @@ export function jevFeaturesOn(settings: FleetSettings): number {
   ).length;
 }
 
-/** The three agents fleet runs itself, with what each is doing now. */
+/** The agents fleet runs itself, with what each is doing now. The PR
+ *  reviewer and the support agent work under rules a person grants;
+ *  `agents` is their last status read (null: not reported). */
 export function builtInAgents(
   settings: FleetSettings,
   loops: readonly LoopHealth[],
   runs: readonly RunRow[],
   nowSec: number,
+  agents: AgentsStatus | null = null,
 ): BuiltInAgent[] {
   const lastOperator = runs.filter((r) => r.kind === 'operator').sort((a, b) => b.started_at - a.started_at)[0];
   const missions = loops.find((l) => l.name === 'missions');
@@ -126,6 +130,18 @@ export function builtInAgents(
       name: 'Jev',
       does: 'Proposes the small calls a person would otherwise make; a person confirms.',
       state: jevOn ? `on · ${features} use case${features === 1 ? '' : 's'}` : 'off',
+    },
+    {
+      id: 'review',
+      name: 'PR reviewer',
+      does: 'Reviews a granted repo’s pull requests; posts the review as its rule allows.',
+      state: agentState('review', agents),
+    },
+    {
+      id: 'support',
+      name: 'Support',
+      does: 'Investigates a granted Jira project’s tickets; writes back as its rule allows.',
+      state: agentState('support', agents),
     },
   ];
 }

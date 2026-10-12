@@ -184,12 +184,13 @@ fn the_union_lists_every_source_newest_first() {
     );
     assert_eq!(total, 8);
     let sources: std::collections::BTreeSet<_> = rows.iter().map(|r| r.source.as_str()).collect();
-    // Every source but `routine`, whose fires have a fixture of their own
-    // (`a_routines_fires_are_runs_linked_to_their_sessions`).
+    // Every source but `routine` and `agent`, which have fixtures of their
+    // own (`a_routines_fires_are_runs_linked_to_their_sessions`,
+    // `an_agents_jobs_are_runs_seen_with_whole_fleet_spend`).
     let want: std::collections::BTreeSet<_> = RUN_SOURCES
         .iter()
         .copied()
-        .filter(|s| *s != "routine")
+        .filter(|s| *s != "routine" && *s != "agent")
         .collect();
     assert_eq!(sources, want);
     with_routine(&fx);
@@ -581,7 +582,8 @@ fn the_union_walks_its_indexes() {
     has(&p, "decision_runs_at");
     has(&p, "idx_aux_usage_at");
     has(&p, "routine_runs_started");
-    none_scans(&p, &["t", "e", "d", "a", "rr"]);
+    has(&p, "agent_jobs_created");
+    none_scans(&p, &["t", "e", "d", "a", "rr", "j"]);
 
     let by_org = RunsFilter {
         org_id: Some(fx.org_a),
@@ -828,4 +830,150 @@ fn every_aux_origin_is_a_kind_a_filter_finds() {
     for origin in crate::store::AUX_ORIGINS {
         assert!(RUN_KINDS.contains(origin), "{origin} is not a run kind");
     }
+}
+
+/// An agent's jobs (migration 173): a done review, a skipped one and a
+/// failed one, under a rule on host `a`.
+#[test]
+fn an_agents_jobs_are_runs_seen_with_whole_fleet_spend() {
+    let fx = fixture();
+    let rid =
+        fx.s.grant_agent_rule(&crate::store::NewAgentRule {
+            agent: "review".into(),
+            scope: "gh:o/r".into(),
+            level: "watch".into(),
+            host_alias: "a".into(),
+            project_id: None,
+            config: "{}".into(),
+            granted_by: "t".into(),
+            granted_at: 0,
+            expires_at: None,
+        })
+        .unwrap();
+    let job = |subject: &str, key: &str| crate::store::NewAgentJob {
+        rule_id: rid,
+        agent: "review".into(),
+        subject: subject.into(),
+        trigger: "opened".into(),
+        dedup_key: key.into(),
+        not_before: 0,
+    };
+    fx.s.record_agent_poll(
+        rid,
+        50,
+        None,
+        &[
+            job("gh:o/r#1", "k1"),
+            job("gh:o/r#2", "k2"),
+            job("gh:o/r#3", "k3"),
+        ],
+    )
+    .unwrap();
+    let ends = [
+        crate::store::AgentJobEnd::Final {
+            state: "done",
+            result: None,
+            error_kind: None,
+            error: None,
+        },
+        crate::store::AgentJobEnd::Final {
+            state: "skipped",
+            result: None,
+            error_kind: None,
+            error: Some("draft".into()),
+        },
+        crate::store::AgentJobEnd::Final {
+            state: "failed",
+            result: None,
+            error_kind: Some("permanent".into()),
+            error: Some("no checkout".into()),
+        },
+    ];
+    for (j, end) in
+        fx.s.claim_agent_jobs(&["review"], 60, 10, 60)
+            .unwrap()
+            .iter()
+            .zip(ends)
+    {
+        fx.s.finish_agent_job(j.id, &end, 70, 62).unwrap();
+    }
+    let kind = RunsFilter {
+        kind: Some("review".into()),
+        ..Default::default()
+    };
+    let (rows, total) = list(&fx, kind.clone());
+    assert_eq!(total, 3);
+    let by_subject = |n: &str| {
+        rows.iter()
+            .find(|r| r.summary.as_deref().is_some_and(|s| s.starts_with(n)))
+            .unwrap()
+    };
+    let done = by_subject("gh:o/r#1");
+    assert_eq!(done.source, "agent");
+    assert_eq!(
+        (done.owner.as_str(), done.outcome.as_str()),
+        ("gh:o/r", "ok")
+    );
+    assert_eq!(
+        (done.cost_micros, done.host.as_deref()),
+        (Some(70), Some("a"))
+    );
+    assert_eq!(
+        (done.started_at, done.ended_at, done.duration_ms),
+        (50, Some(62), Some(12_000))
+    );
+    let skip = by_subject("gh:o/r#2");
+    assert_eq!(skip.outcome, "nothing_to_do");
+    assert_eq!(skip.summary.as_deref(), Some("gh:o/r#2 (opened): draft"));
+    let fail = by_subject("gh:o/r#3");
+    assert_eq!(
+        (fail.outcome.as_str(), fail.error.as_deref()),
+        ("failed", Some("no checkout"))
+    );
+    // No org, mission or session: those filters find none, and only
+    // whole-fleet spend sees them.
+    for f in [
+        RunsFilter {
+            org_id: Some(fx.org_a),
+            ..kind.clone()
+        },
+        RunsFilter {
+            session_id: Some(fx.w),
+            ..kind.clone()
+        },
+        RunsFilter {
+            mission_id: Some(fx.mission),
+            ..kind.clone()
+        },
+    ] {
+        assert_eq!(list(&fx, f).1, 0);
+    }
+    let reach = |spend: bool| RunsReach::Scoped {
+        sessions: vec![fx.w],
+        missions: vec![],
+        routines: vec![],
+        spend,
+    };
+    assert_eq!(
+        list(
+            &fx,
+            RunsFilter {
+                reach: reach(false),
+                ..kind.clone()
+            }
+        )
+        .1,
+        0
+    );
+    assert_eq!(
+        list(
+            &fx,
+            RunsFilter {
+                reach: reach(true),
+                ..kind
+            }
+        )
+        .1,
+        3
+    );
 }

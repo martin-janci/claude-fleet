@@ -185,8 +185,9 @@ fn ps_lister() -> ProcessLister {
 /// Production killer: `SIGTERM`. An `ssh -R` exits cleanly on it and drops its
 /// forward, which is all we need before rebinding. Windows has no signal to
 /// send, so there it is `TerminateProcess`, which drops the forward just the
-/// same.
-fn signal_killer() -> ProcessKiller {
+/// same. `device_mirror::Mirrors::kill_all` uses it too, to stop scrcpy
+/// synchronously on app exit.
+pub(crate) fn signal_killer() -> ProcessKiller {
     Arc::new(|pid: u32| {
         #[cfg(unix)]
         // SAFETY: `kill` with a positive pid and SIGTERM; a stale pid simply

@@ -1541,8 +1541,9 @@ pub struct SessionClaimParams {
 /// one entry.
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct DebugDevicesParams {
-    /// list | scan | claim | release | run | install | logs | screenshot |
-    /// boot | shutdown | configure | forget (configure, forget: a person).
+    /// list | scan | claim | release (in a line: leaves it) | run | install |
+    /// logs | screenshot | boot | shutdown | configure | forget (configure,
+    /// forget: a person).
     pub action: String,
     /// An id, label, name or serial (`host/<that>`).
     #[serde(default)]
@@ -1586,6 +1587,10 @@ pub struct DebugDevicesParams {
     /// claim: what for.
     #[serde(default)]
     pub note: Option<String>,
+    /// claim: when someone else holds it, wait in line (answers your
+    /// `queue_place`); the claim passes to you when your turn comes.
+    #[serde(default)]
+    pub queue: Option<bool>,
     /// configure: "" clears.
     #[serde(default)]
     pub label: Option<String>,

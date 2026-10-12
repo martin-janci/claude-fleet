@@ -1968,11 +1968,31 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/172_tracker_comment_writes.sql"),
         already_applied: Some(tracker_writes_has_remote_url),
     },
+    // Agent runtime (reviewer and support agents, step 1): `agent_rules`,
+    // `agent_cursors`, `agent_jobs`, `agent_actions`. New tables, idempotent.
+    Migration::plain(173, include_str!("../../migrations/173_agents.sql")),
+    // The PR reviewer (agents step 3): `review_prs`, `review_records`. New
+    // tables, idempotent.
+    Migration::plain(174, include_str!("../../migrations/174_review_prs.sql")),
+    Migration::plain(
+        175,
+        include_str!("../../migrations/175_support_fingerprints.sql"),
+    ),
+    Migration::plain(
+        176,
+        include_str!("../../migrations/176_review_test_exemptions.sql"),
+    ),
+    // Debug devices: the line waiting for a claimed device,
+    // `debug_device_queue`. New table, idempotent.
+    Migration::plain(
+        177,
+        include_str!("../../migrations/177_debug_device_queue.sql"),
+    ),
     // Persona dashboards step 6: dashboards a person pinned, on the hub.
     // `IF NOT EXISTS` throughout, so idempotent.
     Migration::plain(
-        173,
-        include_str!("../../migrations/173_pinned_dashboards.sql"),
+        178,
+        include_str!("../../migrations/178_pinned_dashboards.sql"),
     ),
 ];
 

@@ -75,7 +75,7 @@ and *Clear all*; an empty list names the filters that hide it.
 
 The Work tab opens in **List** layout; the header, filters and saved views are unchanged, and **List | Grouped** switches to the organisation → group tree described below.
 
-- **List** sorts every task the filters match into **To do**, **Doing** (in progress) and **Done** (the last 7 days, collapsed). A ticket keeps its tracker's own status name in its row; its section follows fleet's effective status, by the same rule as the Board: only a bare key, which has no status, follows its live sessions.
+- **List** sorts every task the filters match into **To do**, **Doing** (in progress) and **Done** (the last 7 days, collapsed). A ticket keeps its tracker's own status name in its row; its section follows fleet's effective status, by the same rule as the Board: only a task with no status (a bare key, or a ticket its tracker has not reported on yet) follows its live sessions — Doing while one runs, and off the List and the Board once none does, since nothing says where it stands. A line under the sections counts those (*N tasks not shown*); the Grouped tree lists them, and *Name this work…* gives a bare key a status of its own.
 - **+ New task** writes a task in fleet itself (`TASK-<id>`); ▾ opens the **New task** dialog, which ⌘N (Ctrl+Shift+N) also opens anywhere in Work: title, project, notes, and **Start a session for it now**, which opens the new task's start menu next. A new task stays in fleet: fleet creates no ticket in a tracker. Its **Work** button (below) opens a session in that project with the title and notes as its first prompt.
 - **The Work button** (2026-10-06) is on every task row. Its main half reads **Open** (a live session: select it), **Continue** (no live session but a past one: resume its last conversation) or **Start**. Start asks fleet first where it would land; when everything is known and nothing is in the way it starts at once, with the brief on — for a Jira, Asana, Linear or GitHub ticket too. Otherwise it opens the *start popover*: pick the **Repo**, the **Host** (an offline one says so), edit the **Branch**, turn the **Brief** off or preview it as text, and see what is in the way: a live session on the task (Start then makes a *parallel* session in a checkout of its own, `<branch>-2`, never the same tree; *Open it* jumps there — the warning names that session, unless its name is the task's key over again, which says nothing twice), a task that is done, a proposal (*Accept & start*), another organisation (tick *Start across organisations* if it is meant). ▾ offers *Start new…* (always the popover), *Continue* one of the last past sessions, *Attach running session…* and *Copy key*; Alt-click on Start opens the popover as well. In the list, `j` / `k` move the selection, `s` runs the selected task's Work button and ⇧S opens its popover. The task page's **Start new** asks the same way.
 - **Attach running session…** (2026-10-06) puts a session that is already running on the task. The picker lists every session not on it yet — the same repository first, then sessions with no task, then idle ones — with a filter. A session already on another task offers **Switch** (that task's link ends and this one becomes its primary; the old task keeps the conversation, and *Continue* there resumes it) or **Add** (this task is a secondary link and the other stays primary). Add is the default while the session is mid-turn or when its checkout is named after the other key, Switch otherwise. When the task is already open in another session the picker says so (naming it when it is yours to see, "someone" otherwise) and the button becomes *Attach anyway*. For ten seconds after, *Undo* puts things back: a Switch switches back, an attach to a session with no task removes the link.
@@ -708,6 +708,43 @@ off or the task has no ticket — then nothing is saved at all.
 
 This changes D29 on the owner's word (2026-10-11): comments a person posts
 are written back; transitions and worklogs still are not.
+
+### Local tasks, and promoting one to a ticket (off by default)
+
+Work can stay in fleet while it is small: a task of fleet's own, or a
+subtask under a Jira or Asana ticket (*+ Add subtask* on the ticket's page).
+Such a subtask is fleet's alone — the tracker never sees it — and starts,
+comments and sprints like any other task.
+
+When it should be tracked, **Promote to ticket…** on the task's page makes it
+one. With **Create tickets** on (Settings → Trackers → Write-back, Jira
+Cloud, Jira Data Center and Asana, off by default, behind a confirm):
+
+- **A subtask of a ticket** is created under that ticket, in its tracker: a
+  Jira sub-task (the project's first sub-task issue type), an Asana subtask.
+  Nothing to pick.
+- **A task at the top** goes to the tracker you pick: into a Jira project
+  the site owns (its *Task* type, else its first standard type), or into an
+  Asana project — or, with none, into the workspace, assigned to the
+  tracker's account so it shows in its views.
+- **What is sent**: the title and the description, signed `— <your name> via
+  fleet`. Assignees, due dates, priority, labels and estimates stay in fleet
+  for now.
+- **The task becomes the ticket.** Once the tracker answers, the same task
+  is that ticket — its new key (`ABC-7`; an Asana task draws its tracker's
+  display key), its tracker's status — and its sessions, comments,
+  subtasks, sprint and history stay with it. Its old fleet key still finds
+  it. Local subtasks under it stay fleet's own, and can be promoted in turn.
+- **Not promoted**: a tracker's ticket, an epic, a delegated job, an open
+  proposal, and a task under a task of fleet's own (promote its parent
+  first, or take it out to the top). Only a person promotes; an agent's
+  `promote` is refused.
+- **Once.** A create is not idempotent, so it is sent at most once, through
+  the same outbox as a comment: within seconds on the desktop or hub that
+  owns the trackers. The task page says *Creating the ticket in …* meanwhile,
+  or *Not created in …: <why>* after a refusal, and offers Promote again.
+- **The token needs permission to create issues** (Jira: *Create issues* in
+  the project; Asana: a key that may add tasks there).
 
 ### Sync
 

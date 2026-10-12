@@ -406,6 +406,24 @@ and URL; `TaskDetail.comments_tracker` / `can_post_to_tracker` say whose
 comments the tab reads and whether the reader may post. Not yet: the phone,
 editing a posted comment, attachments from trackers other than Asana.
 
+Promoting a task to a ticket (owner decision 2026-10-11: local tasks and
+subtasks first, tracked later): `work_link { promote, item_id, tracker_id?,
+container? }` (routed desktop `promote_work_item`, `service/work/promote.rs`)
+queues the outbox's `create_item` op (`url` `fleet-item:<id>`; `item_key` /
+`external_id` the parent ticket for a subtask, else the container), and the
+drain's `WriteOp::CreateItem` creates a Jira sub-task or task (createmeta
+picks the issue type) or an Asana task / subtask, then converts the task IN
+PLACE (`Store::promote_local_item`: same row, the tracker's key and id, the
+old key an alias) and reads the ticket back. Per tracker
+`settings.write_back.create_tickets`, **off by default** (Settings → Trackers
+→ Write-back → *Create tickets*, confirm-gated, Jira Cloud, Jira DC and
+Asana). Refused for a per-host token (`E_FORBIDDEN`), the setting off
+(`E_INVALID_STATE`), a tracker's ticket, an epic, a job, a proposal or a task
+under a task of fleet's own (`E_INVALID`). A failed promotion may be tried
+again. `TaskDetail.promotion` / `promote_targets` drive *Promote to
+ticket…* on the task page. Not yet: Linear and GitHub, sending assignees,
+due dates, priority, labels or estimates, epics, and the phone.
+
 Task attachments (migration 168, `work_item_attachments` and the
 content-addressed `work_attachment_blobs`, deduplicated by SHA-256 and kept
 in SQLite so a hub backup carries them; a blob goes with the last live
@@ -753,6 +771,51 @@ Jev's `pr_triage` (`decide.jev.pr_triage`, off by default) records in
 shadow what each new episode most likely needs. Not built: the Inbox
 card, the UI.
 
+The agent runtime (reviewer and support agents, steps 1 to 7 of 8) is
+built, and the PR reviewer works end to end under a granted rule (spec
+`docs/superpowers/specs/2026-10-11-review-and-support-agents-design.md`).
+Migration 173 (`agent_rules`, `agent_cursors`, `agent_jobs`,
+`agent_actions`), `service/agents/` with the loops `agents_poll` and
+`agents_run` (stopped by `automation.paused`), the settings
+`agents.poll_interval_secs`, `agents.max_concurrent` and
+`agents.max_retries`, `fleet-hub agents grant | revoke | pause-all |
+approve | reject | status`, and the `agents` tool, served only to the
+owner's own paired device. The run vehicle (step 2): a locked-down
+`claude -p` with read-only tools (`claude_print::isolation_flags_with`,
+`service/agents/vehicle.rs`), its MCP config and system prompt carried on
+stdin, in a detached worktree beside the checkout
+(`service/agents/workspace.rs`). The reviewer (steps 3 and 4, migration
+174, `service/agents/review/`): polls a granted repo's open PRs, reviews
+each new head with read-only tools, records the placed review in
+`review_records`, and by the rule's level keeps it (`watch`), queues it
+for a person (`propose`, an action the `agents` tool or `fleet-hub agents
+approve` answers) or posts it (`act`); it re-reviews a posted review
+GitHub lost and answers a `/review` comment. Its jobs are in the Runs
+list (source `agent`). The UI (step 5): Automation › Agents lists the
+reviewer's and the support agent's rules, waiting actions and newest jobs,
+and the Inbox's Needs you carries the waiting actions with Approve and
+Reject (`src/lib/agents.ts`, `automation/AgentActions.svelte`, the
+desktop commands `agents_status` / `agents_decide`). The support agent's
+read side (step 6, `service/agents/support/`): a `support` rule on
+`jira:<tracker id>:<PROJECT>` polls the project's comments and
+assignments, and investigates a ticket with read-only tools plus the
+catalog MCP servers its rule names (the `support-agent` repo's `graylog`,
+`tenant-resolver`, `support-kb`), keeping the investigation as the job's
+result. Its write side (step 7, migration 175): at `propose` or `act` the
+investigation becomes actions (the comment or the question for the
+reporter, a bug in the rule's `bug_project` linked to the ticket, or a
+link to the open bug its fingerprint or a search matches); `act` runs the
+comment and the link alone and a new bug only when the rule lists it in
+`auto` and the investigation is sure; the executor refuses a write
+outside the rule's projects or over `max_body_chars`. Step 8 in part: the
+reviewer labels its pull requests (`labels`), describes an empty one
+(`auto_description`) and answers an author who argues a missing-test
+finding (test debate, migration 176), each an action like the review;
+the support agent scans a catalog MCP server (`graylog`) for new errors
+(`scan`) and proposes known-error entries for its KB repo (`kb`). Not
+built: outbound Slack/Teams notifications (a new channel of the 11.9
+matrix, the owner's call).
+
 Session state machine hardening (plan A, #343) is landed: a `working` row
 with no activity for `reconcile.stale_working_secs` turns `idle` with
 `stale_working_at` (migration 065); a StopFailure reads as failed; one
@@ -1025,7 +1088,10 @@ iOS devices (migration 120), the `debug_devices` control-API tool (list,
 scan, claim / release, run, install across hosts, logs, screenshot, boot,
 shutdown; configure / forget for a person) and the desktop's Debug devices
 page (the `debug_device` resource, routed to the hub, contract revision
-10). Not built: an adb-server bridge so native tools on one host reach
-another host's devices, live screen and input, physical-iOS logs, and a
+10). The device mirror is landed for a local device (standalone) and for a
+host reached over SSH (`relay/`, `service/device_mirror/`): a native scrcpy
+window, with a loopback relay and an adb version check. Not built: the mirror
+through the hub (`/relay`) or an agent host, an adb-server bridge so native
+tools on one host reach another host's devices, physical-iOS logs, and a
 device page in fleet-mobile. None of it has run against real hardware yet:
 the scripts are tested against stub `adb` / `simctl` output.

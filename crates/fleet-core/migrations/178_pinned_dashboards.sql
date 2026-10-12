@@ -26,4 +26,4 @@ CREATE TABLE IF NOT EXISTS pinned_dashboards (
 CREATE UNIQUE INDEX IF NOT EXISTS pinned_dashboards_one
   ON pinned_dashboards (dash_id, COALESCE(person_id, 0));
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (173);
+INSERT OR IGNORE INTO schema_version (version) VALUES (178);

@@ -203,7 +203,7 @@ pub(super) struct SessionChange {
 }
 
 impl SessionChange {
-    const ALL: SessionChange = SessionChange {
+    pub(super) const ALL: SessionChange = SessionChange {
         primary: true,
         suggested: true,
         rejected: true,
