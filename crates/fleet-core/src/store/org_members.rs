@@ -24,7 +24,7 @@
 //! membership changes what a cached caller resolves to, and the grant
 //! generation, because it changes which org grants reach whom.
 
-use super::{now_unix, ClientBinding, ClientTokenRow, Store};
+use super::{ClientBinding, ClientTokenRow, Store};
 use crate::ipc_error::{codes, IpcError};
 use rusqlite::OptionalExtension;
 use std::collections::BTreeMap;
@@ -171,12 +171,9 @@ impl Store {
         added_by: Option<i64>,
     ) -> Result<OrgMemberRow, IpcError> {
         let role = validate_org_role(role)?;
-        if self.get_org(org)?.is_none() {
-            return Err(IpcError::new(
-                codes::E_NOTFOUND,
-                format!("org {org} not found"),
-            ));
-        }
+        let org_row = self
+            .get_org(org)?
+            .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("org {org} not found")))?;
         let p = self
             .get_person(person)?
             .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("no person {person}")))?;
@@ -189,41 +186,9 @@ impl Store {
                 ),
             ));
         }
-        let now = now_unix();
-        let shares = role_receives_shares(role);
-        match self.org_member(org, person)? {
-            Some(m) if m.is_live() => {
-                // A change of role. Gaining the right to receive shares
-                // starts it now; keeping it keeps when it started; losing it
-                // clears it.
-                let since = match (shares, m.shares_since) {
-                    (false, _) => None,
-                    (true, Some(t)) => Some(t),
-                    (true, None) => Some(now),
-                };
-                self.conn.execute(
-                    "UPDATE org_members SET role = ?3, shares_since = ?4 \
-                      WHERE org_id = ?1 AND person_id = ?2",
-                    rusqlite::params![org, person, role, since],
-                )?;
-            }
-            Some(_) => {
-                self.conn.execute(
-                    "UPDATE org_members SET role = ?3, added_at = ?4, added_by = ?5, \
-                            shares_since = ?6, removed_at = NULL \
-                      WHERE org_id = ?1 AND person_id = ?2",
-                    rusqlite::params![org, person, role, now, added_by, shares.then_some(now)],
-                )?;
-            }
-            None => {
-                self.conn.execute(
-                    "INSERT INTO org_members \
-                       (org_id, person_id, role, added_at, added_by, shares_since) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    rusqlite::params![org, person, role, now, added_by, shares.then_some(now)],
-                )?;
-            }
-        }
+        // The org's groups are the truth: move the person into the subgroup
+        // for `role` and let the projection write the row.
+        self.with_tx(|c| self.place_in_org_in_tx(c, org, &org_row.name, person, role, added_by))?;
         super::session_grants::bump_grant_generation();
         self.org_member(org, person)?.ok_or_else(|| {
             IpcError::new(
@@ -236,15 +201,15 @@ impl Store {
     /// Take `person` out of `org`: the row stays as a former membership.
     /// `false` when they were not a live member.
     pub fn remove_org_member(&self, org: i64, person: i64) -> Result<bool, IpcError> {
-        let n = self.conn.execute(
-            "UPDATE org_members SET removed_at = ?3 \
-              WHERE org_id = ?1 AND person_id = ?2 AND removed_at IS NULL",
-            rusqlite::params![org, person, now_unix()],
-        )?;
-        if n > 0 {
+        let ended = self.with_tx(|c| {
+            let was_live = super::realm::live_org_member_in_tx(c, org, person)?;
+            self.take_out_of_org_in_tx(c, org, person)?;
+            Ok(was_live && !super::realm::live_org_member_in_tx(c, org, person)?)
+        })?;
+        if ended {
             super::session_grants::bump_grant_generation();
         }
-        Ok(n > 0)
+        Ok(ended)
     }
 
     /// One membership row, live or former.

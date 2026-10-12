@@ -22,7 +22,6 @@ pub const ROLE_FLEET_ADMIN: &str = "fleet-admin";
 pub const ROLE_FLEET_TRUSTED: &str = "fleet-trusted";
 pub const ROLE_ASSETS_ADMIN: &str = "assets-admin";
 /// (subgroup of an org's root group, the `fleet` client role it maps to).
-#[allow(dead_code)] // used by the org projection (next task)
 pub const ORG_ROLES: [(&str, &str); 3] = [
     ("admins", "org-admin"),
     ("members", "org-member"),
@@ -850,6 +849,398 @@ impl Store {
         let mut stmt = self.conn.prepare(PEOPLE_WITH_REALM_ROLE)?;
         let ids = stmt.query_map(rusqlite::params![name], |r| r.get(0))?;
         Ok(ids.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+}
+
+// ---- the org projection -------------------------------------------------
+//
+// An org's membership lives in its managed groups: `/orgs/<org>` (the root,
+// `org_id` set) and its `admins` / `members` / `viewers` subgroups, mapped to
+// the `fleet` client roles `org-admin` / `org-member` / `org-viewer`.
+// `org_members` is their materialised projection, so its readers
+// (`ViewScope`, the org admin's authority, grant checks) are unchanged, and
+// nothing but the writers below touches it.
+
+/// The `org_members` role (`admin` | `member` | `viewer`) and its rank for a
+/// `fleet` client org role; `None` for any other role.
+fn member_role_of(client_role: &str) -> Option<(&'static str, u8)> {
+    use super::org_members::{ROLE_ADMIN, ROLE_MEMBER, ROLE_VIEWER};
+    match client_role {
+        "org-admin" => Some((ROLE_ADMIN, 3)),
+        "org-member" => Some((ROLE_MEMBER, 2)),
+        "org-viewer" => Some((ROLE_VIEWER, 1)),
+        _ => None,
+    }
+}
+
+/// The subgroup of an org's root that carries `role` (`admin` → `admins`).
+fn subgroup_for(role: &str) -> Result<&'static str, IpcError> {
+    ORG_ROLES
+        .iter()
+        .find(|(_, r)| member_role_of(r).map(|(m, _)| m) == Some(role))
+        .map(|(g, _)| *g)
+        .ok_or_else(|| invalid(format!("unknown org role {role:?}")))
+}
+
+/// The id of org `org`'s root group `/orgs/<org>`, if it has one.
+pub(crate) fn org_root_group_in_tx(conn: &Connection, org: i64) -> Result<Option<i64>, IpcError> {
+    Ok(conn
+        .query_row(
+            "SELECT id FROM groups WHERE org_id = ?1",
+            rusqlite::params![org],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// The child of `parent` named `name`, if any.
+fn child_group_in_tx(conn: &Connection, parent: i64, name: &str) -> Result<Option<i64>, IpcError> {
+    Ok(conn
+        .query_row(
+            "SELECT id FROM groups WHERE parent_id = ?1 AND name = ?2",
+            rusqlite::params![parent, name],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// The org roles a person holds through the org groups, as `org_members`
+/// would read them: per org the highest of admin > member > viewer. A
+/// disabled person holds none. Ascending org ids.
+pub(crate) fn org_roles_from_groups_in_tx(
+    conn: &Connection,
+    person: i64,
+) -> Result<Vec<(i64, String)>, IpcError> {
+    let mut stmt = conn.prepare(
+        "SELECT root.org_id, r.name FROM group_members gm
+         JOIN groups sg ON sg.id = gm.group_id AND sg.managed = 1
+         JOIN groups root ON root.id = sg.parent_id AND root.org_id IS NOT NULL
+         JOIN group_role_mappings m ON m.group_id = sg.id
+         JOIN roles r ON r.id = m.role_id
+         WHERE gm.person_id = ?1
+           AND EXISTS (SELECT 1 FROM people p WHERE p.id = ?1 AND p.disabled_at IS NULL)",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![person], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+    })?;
+    let mut best: BTreeMap<i64, (&'static str, u8)> = BTreeMap::new();
+    for row in rows {
+        let (org, role) = row?;
+        let Some((member_role, rank)) = member_role_of(&role) else {
+            continue;
+        };
+        let e = best.entry(org).or_insert((member_role, rank));
+        if rank > e.1 {
+            *e = (member_role, rank);
+        }
+    }
+    Ok(best
+        .into_iter()
+        .map(|(org, (role, _))| (org, role.to_string()))
+        .collect())
+}
+
+/// Write `person`'s live membership of `org` as `role`: a change of role, a
+/// re-join of a former member (a new `added_at`; org shares from before do
+/// not come back) or a first join. Gaining the right to receive shares
+/// starts it now; keeping it keeps when it started; losing it clears it.
+/// The caller bumps the grant generation after its commit.
+fn write_org_member_row_in_tx(
+    conn: &Connection,
+    org: i64,
+    person: i64,
+    role: &str,
+    by: Option<i64>,
+) -> Result<(), IpcError> {
+    let now = now_unix();
+    let shares = super::org_members::role_receives_shares(role);
+    let cur: Option<(Option<i64>, Option<i64>)> = conn
+        .query_row(
+            "SELECT shares_since, removed_at FROM org_members \
+              WHERE org_id = ?1 AND person_id = ?2",
+            rusqlite::params![org, person],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    match cur {
+        Some((shares_since, None)) => {
+            let since = match (shares, shares_since) {
+                (false, _) => None,
+                (true, Some(t)) => Some(t),
+                (true, None) => Some(now),
+            };
+            conn.execute(
+                "UPDATE org_members SET role = ?3, shares_since = ?4 \
+                  WHERE org_id = ?1 AND person_id = ?2",
+                rusqlite::params![org, person, role, since],
+            )?;
+        }
+        Some(_) => {
+            conn.execute(
+                "UPDATE org_members SET role = ?3, added_at = ?4, added_by = ?5, \
+                        shares_since = ?6, removed_at = NULL \
+                  WHERE org_id = ?1 AND person_id = ?2",
+                rusqlite::params![org, person, role, now, by, shares.then_some(now)],
+            )?;
+        }
+        None => {
+            conn.execute(
+                "INSERT INTO org_members \
+                   (org_id, person_id, role, added_at, added_by, shares_since) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![org, person, role, now, by, shares.then_some(now)],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// End `person`'s live membership of `org`: the row stays as a former
+/// membership. `false` when there was no live one.
+fn end_org_member_row_in_tx(conn: &Connection, org: i64, person: i64) -> Result<bool, IpcError> {
+    Ok(conn.execute(
+        "UPDATE org_members SET removed_at = ?3 \
+          WHERE org_id = ?1 AND person_id = ?2 AND removed_at IS NULL",
+        rusqlite::params![org, person, now_unix()],
+    )? > 0)
+}
+
+/// Every live member of `org` becomes a former member at `at`: the
+/// projection of an org whose groups are gone.
+pub(crate) fn end_all_org_member_rows_in_tx(
+    conn: &Connection,
+    org: i64,
+    at: i64,
+) -> Result<usize, IpcError> {
+    Ok(conn.execute(
+        "UPDATE org_members SET removed_at = ?2 WHERE org_id = ?1 AND removed_at IS NULL",
+        rusqlite::params![org, at],
+    )?)
+}
+
+/// Delete org `org`'s root group with its subgroups, their memberships and
+/// role mappings. Explicit rather than only the FK cascades, which need
+/// `foreign_keys = ON` (as `remove_org` does for its other tables).
+pub(crate) fn delete_org_groups_in_tx(conn: &Connection, org: i64) -> Result<(), IpcError> {
+    let Some(root) = org_root_group_in_tx(conn, org)? else {
+        return Ok(());
+    };
+    const TREE: &str = "SELECT id FROM groups WHERE id = ?1 OR parent_id = ?1";
+    conn.execute(
+        &format!("DELETE FROM group_members WHERE group_id IN ({TREE})"),
+        rusqlite::params![root],
+    )?;
+    conn.execute(
+        &format!("DELETE FROM group_role_mappings WHERE group_id IN ({TREE})"),
+        rusqlite::params![root],
+    )?;
+    conn.execute(
+        "DELETE FROM groups WHERE parent_id = ?1",
+        rusqlite::params![root],
+    )?;
+    conn.execute("DELETE FROM groups WHERE id = ?1", rusqlite::params![root])?;
+    Ok(())
+}
+
+/// Is `person` a live member of `org` in `org_members`?
+pub(crate) fn live_org_member_in_tx(
+    conn: &Connection,
+    org: i64,
+    person: i64,
+) -> Result<bool, IpcError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM org_members \
+          WHERE org_id = ?1 AND person_id = ?2 AND removed_at IS NULL)",
+        rusqlite::params![org, person],
+        |r| r.get(0),
+    )?)
+}
+
+/// Bring `person`'s live `org_members` rows in line with their org groups:
+/// a desired (org, role) that is absent or different is written, a live
+/// org that is no longer desired ends. `by` is recorded on a (re-)join.
+pub(crate) fn reproject_org_memberships_in_tx(
+    conn: &Connection,
+    person: i64,
+    by: Option<i64>,
+) -> Result<(), IpcError> {
+    let desired: BTreeMap<i64, String> = org_roles_from_groups_in_tx(conn, person)?
+        .into_iter()
+        .collect();
+    let current: BTreeMap<i64, String> = {
+        let mut stmt = conn.prepare(
+            "SELECT org_id, role FROM org_members WHERE person_id = ?1 AND removed_at IS NULL",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![person], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    for (org, role) in &desired {
+        if current.get(org) != Some(role) {
+            write_org_member_row_in_tx(conn, *org, person, role, by)?;
+        }
+    }
+    for org in current.keys() {
+        if !desired.contains_key(org) {
+            end_org_member_row_in_tx(conn, *org, person)?;
+        }
+    }
+    Ok(())
+}
+
+impl Store {
+    /// The direct computation the `org_members` projection must equal: the
+    /// org roles `person` holds through the org groups, per org the highest.
+    pub fn org_roles_from_groups(&self, person: i64) -> Result<Vec<(i64, String)>, IpcError> {
+        org_roles_from_groups_in_tx(&self.conn, person)
+    }
+
+    /// Make sure org `org_id` has its groups: `/orgs`, the root
+    /// `/orgs/<org_name>` (managed, `org_id` set) and the three managed
+    /// subgroups mapped to their org roles. Idempotent, and agrees with what
+    /// migration 178 seeded. Returns the root group's id.
+    ///
+    /// The root is written by hand rather than through `create_group_in_tx`:
+    /// its name is the org's, already validated by the org (which allows a
+    /// few characters a group name does not), exactly as migration 178 does.
+    pub(crate) fn ensure_org_groups_in_tx(
+        &self,
+        conn: &Connection,
+        org_id: i64,
+        org_name: &str,
+    ) -> Result<i64, IpcError> {
+        let root = match org_root_group_in_tx(conn, org_id)? {
+            Some(id) => id,
+            None => {
+                let orgs: i64 = match conn
+                    .query_row(
+                        "SELECT id FROM groups WHERE parent_id IS NULL AND name = 'orgs'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+                {
+                    Some(id) => id,
+                    None => {
+                        self.create_group_in_tx(conn, None, "orgs", true, None, None)?
+                            .id
+                    }
+                };
+                if sibling_named(conn, Some(orgs), org_name, None)? {
+                    return Err(IpcError::new(
+                        codes::E_EXISTS,
+                        format!("a group named /orgs/{org_name} already exists"),
+                    ));
+                }
+                conn.execute(
+                    "INSERT INTO groups (uuid, name, parent_id, managed, org_id, created_at) \
+                     VALUES (?1, ?2, ?3, 1, ?4, ?5)",
+                    rusqlite::params![
+                        uuid::Uuid::new_v4().to_string(),
+                        org_name,
+                        orgs,
+                        org_id,
+                        now_unix()
+                    ],
+                )?;
+                conn.last_insert_rowid()
+            }
+        };
+        for (sub, role) in ORG_ROLES {
+            let g = match child_group_in_tx(conn, root, sub)? {
+                Some(id) => id,
+                None => {
+                    self.create_group_in_tx(conn, Some(root), sub, true, None, None)?
+                        .id
+                }
+            };
+            let role_id: i64 = conn
+                .query_row(
+                    "SELECT r.id FROM roles r JOIN clients c ON c.id = r.client_id \
+                      WHERE c.client_id = ?1 AND r.name = ?2",
+                    rusqlite::params![CLIENT_FLEET, role],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .ok_or_else(|| {
+                    IpcError::new(
+                        codes::E_INTERNAL,
+                        format!("the seeded role {role:?} is missing"),
+                    )
+                })?;
+            self.map_role_in_tx(conn, Principal::Group(g), role_id, true)?;
+        }
+        Ok(root)
+    }
+
+    /// Rename org `org_id`'s root group to the org's new name (validated by
+    /// the org). A no-op when it has none.
+    pub(crate) fn rename_org_groups_in_tx(
+        &self,
+        conn: &Connection,
+        org_id: i64,
+        name: &str,
+    ) -> Result<(), IpcError> {
+        let Some(root) = org_root_group_in_tx(conn, org_id)? else {
+            return Ok(());
+        };
+        let parent: Option<i64> = conn.query_row(
+            "SELECT parent_id FROM groups WHERE id = ?1",
+            rusqlite::params![root],
+            |r| r.get(0),
+        )?;
+        if sibling_named(conn, parent, name, Some(root))? {
+            return Err(IpcError::new(
+                codes::E_EXISTS,
+                format!("a group named /orgs/{name} already exists"),
+            ));
+        }
+        conn.execute(
+            "UPDATE groups SET name = ?2 WHERE id = ?1 AND name <> ?2",
+            rusqlite::params![root, name],
+        )?;
+        Ok(())
+    }
+
+    /// Put `person` in org `org`'s subgroup for `role` (and out of the other
+    /// two), then reproject. The caller validated org, person and role.
+    pub(crate) fn place_in_org_in_tx(
+        &self,
+        conn: &Connection,
+        org: i64,
+        org_name: &str,
+        person: i64,
+        role: &str,
+        by: Option<i64>,
+    ) -> Result<(), IpcError> {
+        let target = subgroup_for(role)?;
+        let root = self.ensure_org_groups_in_tx(conn, org, org_name)?;
+        for (sub, _) in ORG_ROLES {
+            if let Some(g) = child_group_in_tx(conn, root, sub)? {
+                if sub == target {
+                    self.add_group_member_in_tx(conn, g, person, by)?;
+                } else {
+                    self.remove_group_member_in_tx(conn, g, person)?;
+                }
+            }
+        }
+        reproject_org_memberships_in_tx(conn, person, by)
+    }
+
+    /// Take `person` out of every subgroup of org `org`, then reproject.
+    pub(crate) fn take_out_of_org_in_tx(
+        &self,
+        conn: &Connection,
+        org: i64,
+        person: i64,
+    ) -> Result<(), IpcError> {
+        if let Some(root) = org_root_group_in_tx(conn, org)? {
+            for (sub, _) in ORG_ROLES {
+                if let Some(g) = child_group_in_tx(conn, root, sub)? {
+                    self.remove_group_member_in_tx(conn, g, person)?;
+                }
+            }
+        }
+        reproject_org_memberships_in_tx(conn, person, None)
     }
 }
 

@@ -217,3 +217,180 @@ fn composites_cannot_carry_org_roles_in_or_out_of_the_org_model() {
     // The seeded direction stays legal.
     s.add_composite(org_admin.id, org_viewer.id).unwrap();
 }
+
+// ---- Task 5: org_members is a projection of the org groups ----------------
+
+#[test]
+fn set_org_member_moves_the_person_between_the_orgs_subgroups() {
+    let s = s();
+    let org = s.add_org("acme", None, false).unwrap();
+    let ada = s.create_person("ada", None).unwrap().id;
+    s.set_org_member(org.id, ada, "viewer", None).unwrap();
+    s.set_org_member(org.id, ada, "admin", None).unwrap();
+    let paths: Vec<String> = s
+        .groups_of(ada)
+        .unwrap()
+        .into_iter()
+        .map(|g| g.path)
+        .collect();
+    assert_eq!(paths, ["/orgs/acme/admins"]);
+    let m = s.org_member(org.id, ada).unwrap().unwrap();
+    assert_eq!(m.role, "admin");
+    assert!(
+        m.shares_since.is_some(),
+        "viewer → admin starts receiving shares"
+    );
+}
+
+#[test]
+fn the_projection_never_widens_an_existing_grant() {
+    let s = s();
+    let org = s.add_org("acme", None, false).unwrap();
+    let ada = s.create_person("ada", None).unwrap().id;
+    s.set_org_member(org.id, ada, "member", None).unwrap();
+    let since = s.org_member(org.id, ada).unwrap().unwrap().shares_since;
+    s.set_org_member(org.id, ada, "admin", None).unwrap();
+    assert_eq!(
+        s.org_member(org.id, ada).unwrap().unwrap().shares_since,
+        since,
+        "member → admin keeps shares_since"
+    );
+    s.remove_org_member(org.id, ada).unwrap();
+    assert!(s
+        .org_member(org.id, ada)
+        .unwrap()
+        .unwrap()
+        .removed_at
+        .is_some());
+    assert!(s.groups_of(ada).unwrap().is_empty());
+}
+
+#[test]
+fn org_rename_and_removal_follow_into_the_groups() {
+    let s = s();
+    let org = s.add_org("acme", None, false).unwrap();
+    assert!(s.group_by_path("/orgs/acme/members").unwrap().is_some());
+    s.update_org(org.id, Some("acme2"), None, None).unwrap();
+    assert!(s.group_by_path("/orgs/acme2/members").unwrap().is_some());
+    let ada = s.create_person("ada", None).unwrap().id;
+    s.set_org_member(org.id, ada, "member", None).unwrap();
+    s.remove_org(org.id).unwrap();
+    assert!(s.group_by_path("/orgs/acme2").unwrap().is_none());
+    assert!(s
+        .org_member(org.id, ada)
+        .unwrap()
+        .unwrap()
+        .removed_at
+        .is_some());
+}
+
+#[test]
+fn disabling_a_person_ends_every_group_membership_and_mapping() {
+    let s = s();
+    let org = s.add_org("acme", None, false).unwrap();
+    let ada = s.create_person("ada", None).unwrap().id;
+    s.set_org_member(org.id, ada, "member", None).unwrap();
+    let t = s.role(RoleRef::Realm(ROLE_FLEET_TRUSTED)).unwrap().unwrap();
+    s.map_role(Principal::Person(ada), t.id).unwrap();
+    s.disable_person(ada).unwrap();
+    assert!(s.groups_of(ada).unwrap().is_empty());
+    assert!(s
+        .org_member(org.id, ada)
+        .unwrap()
+        .unwrap()
+        .removed_at
+        .is_some());
+    let mapped: i64 = s
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM user_role_mappings WHERE person_id = ?1",
+            [ada],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(mapped, 0);
+}
+
+/// Random membership writes: the projected `org_members` always equals the
+/// direct computation from the groups.
+#[test]
+fn the_projection_equals_the_direct_computation() {
+    use rand::{RngExt, SeedableRng};
+    let s = s();
+    let orgs: Vec<i64> = (0..3)
+        .map(|i| s.add_org(&format!("o{i}"), None, false).unwrap().id)
+        .collect();
+    let people: Vec<i64> = (0..4)
+        .map(|i| s.create_person(&format!("p{i}"), None).unwrap().id)
+        .collect();
+    let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+    for _ in 0..300 {
+        let (o, p) = (orgs[rng.random_range(0..3)], people[rng.random_range(0..4)]);
+        match rng.random_range(0..4) {
+            0 => {
+                s.remove_org_member(o, p).unwrap();
+            }
+            n => {
+                s.set_org_member(o, p, ["admin", "member", "viewer"][n - 1], None)
+                    .unwrap();
+            }
+        }
+        for &p in &people {
+            let mut direct = s.org_roles_from_groups(p).unwrap();
+            let mut projected: Vec<(i64, String)> = s
+                .memberships_of(p)
+                .unwrap()
+                .into_iter()
+                .filter(|m| m.removed_at.is_none())
+                .map(|m| (m.org_id, m.role))
+                .collect();
+            direct.sort();
+            projected.sort();
+            assert_eq!(direct, projected);
+        }
+    }
+}
+
+/// Nothing but the projection writes org_members.
+#[test]
+fn only_the_projection_writes_org_members() {
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                walk(&p, out)
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p)
+            }
+        }
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    walk(&root, &mut files);
+    let writes = [
+        "INSERT INTO org_members",
+        "UPDATE org_members",
+        "DELETE FROM org_members",
+    ];
+    let mut offenders = Vec::new();
+    for f in files {
+        let rel = f
+            .strip_prefix(&root)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        if rel == "store/realm.rs" || rel.contains("tests") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&f).unwrap();
+        // Production code only: drop everything from the first `#[cfg(test)]`.
+        let prod = text.split("#[cfg(test)]").next().unwrap();
+        if writes.iter().any(|w| prod.contains(w)) {
+            offenders.push(rel);
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "org_members written outside the projection: {offenders:?}"
+    );
+}

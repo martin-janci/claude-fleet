@@ -503,7 +503,20 @@ impl Store {
         // not that authority either — it narrows, it names no session, and it
         // is reached only by disabling the recipient.
         super::session_grants::revoke_live_grants_to_person(&tx, id, at)?;
+        // Realm (identity sub-project 1): every group membership and direct
+        // role mapping ends, and with them every org membership, which
+        // `org_members` projects.
+        tx.execute(
+            "DELETE FROM group_members WHERE person_id = ?1",
+            rusqlite::params![id],
+        )?;
+        tx.execute(
+            "DELETE FROM user_role_mappings WHERE person_id = ?1",
+            rusqlite::params![id],
+        )?;
+        super::realm::reproject_org_memberships_in_tx(&tx, id, None)?;
         tx.commit()?;
+        super::session_grants::bump_grant_generation();
         self.get_person(id)?.ok_or_else(|| person_not_found(id))
     }
 
