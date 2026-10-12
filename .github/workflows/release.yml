@@ -819,3 +819,14 @@ jobs:
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
           FLEET_RELEASE: target/release/fleet-release
         run: scripts/update-channels.sh add "$TAG"
+      # Hubs on `dev` take a new build within seconds instead of at their next
+      # poll: `POST /update/poke` only makes a hub re-read the signed channel.
+      # FLEET_HUB_POKE_URLS (a repository variable): space-separated hub URLs.
+      - if: steps.leg.outputs.has == '1' && vars.FLEET_HUB_POKE_URLS != ''
+        name: Tell the hubs
+        env:
+          URLS: ${{ vars.FLEET_HUB_POKE_URLS }}
+        run: |
+          for u in $URLS; do
+            curl -fsS -m 20 -X POST "${u%/}/update/poke" || echo "::warning::$u did not take the poke"
+          done

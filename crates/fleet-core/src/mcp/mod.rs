@@ -671,7 +671,7 @@ fn build_app(
                     axum::routing::get(update_route::handle_artifact),
                 )
                 .layer(axum::extract::DefaultBodyLimit::max(update_route::BODY_MAX))
-                .with_state(report_state),
+                .with_state(report_state.clone()),
         )
         .layer(axum::middleware::from_fn_with_state(auth_state, authorize));
     // `/healthz` and `/pair` are registered on a SEPARATE router merged after
@@ -690,6 +690,14 @@ fn build_app(
     // what authorizes the exchange.
     axum::Router::new()
         .route("/healthz", axum::routing::get(healthz))
+        // `/update/poke`: the release workflow's "something was published".
+        // Outside `authorize` because GitHub holds no hub token; all it can
+        // cause is a rate-limited re-read of the signed channel
+        // (`update_route::handle_poke`).
+        .route(
+            "/update/poke",
+            axum::routing::post(update_route::handle_poke).with_state(report_state),
+        )
         .route(
             "/pair",
             // GET is the page a camera scan lands on (static, no JavaScript,

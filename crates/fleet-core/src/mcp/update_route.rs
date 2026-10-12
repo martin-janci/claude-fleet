@@ -68,6 +68,45 @@ pub async fn handle_check(
     }
 }
 
+/// `POST /update/poke`: "a release was just published" — the release
+/// workflow's ping, so a `dev` hub picks a build up within seconds instead
+/// of at its next poll. Unauthenticated on purpose, and it can do nothing
+/// but what the poll does: re-read the channel, which is signed, verified
+/// against the compiled-in release key, and fetched from the hub's own
+/// configured base URL — never from anything in the request. It takes no
+/// body, answers 202 at once, and the re-read itself runs at most once a
+/// minute across every caller (`refresh_asked`), so a flood costs nothing.
+///
+/// The channel is served through a CDN that may hold the old document for up
+/// to five minutes after the push, so a poke reads it now and once more
+/// [`POKE_REREAD_SECS`] later; one such second read is pending at a time.
+pub async fn handle_poke(State(state): State<ReportState>) -> Response {
+    use std::sync::atomic::Ordering::SeqCst;
+    let store = state.store_arc();
+    crate::rt::spawn(async move {
+        read_and_decide(&store).await;
+        if POKE_REREAD_PENDING.swap(true, SeqCst) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(POKE_REREAD_SECS)).await;
+        POKE_REREAD_PENDING.store(false, SeqCst);
+        read_and_decide(&store).await;
+    });
+    StatusCode::ACCEPTED.into_response()
+}
+
+/// Past `raw.githubusercontent.com`'s `max-age=300`.
+pub const POKE_REREAD_SECS: u64 = 330;
+static POKE_REREAD_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Re-read the channel, then push the decisions it moves now (waking the
+/// hub's own updater when its target moved) rather than at the next beat.
+async fn read_and_decide(store: &std::sync::Mutex<crate::store::Store>) {
+    update::refresh_asked(store, crate::store::now_unix()).await;
+    update::decisions_may_have_changed();
+}
+
 /// `GET /update/artifact/<sha256>`: a release file from the hub's mirror
 /// (`update.mirror`, S9), for a target that cannot reach GitHub. Any
 /// credential that may ask `/update/check` may fetch; a hub link may not.

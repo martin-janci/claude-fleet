@@ -928,3 +928,44 @@ fn data_center_reads_the_due_date_too() {
         Some("2026-10-16")
     );
 }
+
+#[tokio::test]
+async fn data_center_gets_the_support_agents_writes_as_wiki_text() {
+    let f = FakeTransport::new();
+    f.once(
+        Method::Post,
+        "/rest/api/2/issue/L2S-7/comment",
+        Ok(Response::json(201, &serde_json::json!({ "id": "5" }))),
+    );
+    f.once(
+        Method::Post,
+        "/rest/api/2/issue",
+        Ok(Response::json(201, &serde_json::json!({ "key": "PD-3" }))),
+    );
+    let d = dc(&f);
+    let created = d
+        .write(&WriteOp::CreateIssue {
+            project: "PD".into(),
+            issue_type: "Bug".into(),
+            summary: "NPE".into(),
+            adf: serde_json::json!({ "type": "doc" }),
+            wiki: "h2. Problem".into(),
+            labels: vec![],
+        })
+        .await
+        .unwrap();
+    assert_eq!(created.remote_id.as_deref(), Some("PD-3"));
+    d.write(&WriteOp::RichComment {
+        key: "L2S-7".into(),
+        adf: serde_json::json!({ "type": "doc" }),
+        wiki: "h3. Investigation".into(),
+    })
+    .await
+    .unwrap();
+    let sent = f.requests();
+    assert_eq!(
+        sent[0].json_body().unwrap()["fields"]["description"],
+        "h2. Problem"
+    );
+    assert_eq!(sent[1].json_body().unwrap()["body"], "h3. Investigation");
+}

@@ -613,6 +613,19 @@ pub trait TrackerProvider: Send + Sync {
     /// and capped by [`DESCRIBE_MAX_CHARS`], with its true length (see
     /// [`FullDescription`]). `None` means this provider does not serve one;
     /// the default says so for every adapter that has not implemented it.
+    /// The issues `jql` matches (at most `max`), each with its description
+    /// and newest comments as plain text, for the support agent's poll
+    /// (`service::agents::support`). Only Jira Cloud answers; the default
+    /// refuses.
+    async fn issue_threads(
+        &self,
+        _jql: &str,
+        _max: usize,
+    ) -> Result<Vec<IssueThread>, TrackerError> {
+        Err(TrackerError::Refused(
+            "this tracker does not list issues with their comments".into(),
+        ))
+    }
     async fn describe(&self, _r: &ItemRef) -> Result<Option<FullDescription>, TrackerError> {
         Ok(None)
     }
@@ -661,6 +674,127 @@ pub enum WriteOp {
         external_id: Option<String>,
         body: String,
     },
+    /// Post a formatted comment on Jira issue `key`: `adf` to Jira Cloud,
+    /// `wiki` (the same text as wiki markup) to Jira Data Center. Jira
+    /// only; the support agent's (`service::agents::support`).
+    RichComment {
+        key: String,
+        adf: serde_json::Value,
+        wiki: String,
+    },
+    /// Create an issue of `issue_type` in `project`; the outcome's
+    /// `remote_id` is its key. The description is `adf` on Cloud, `wiki` on
+    /// Data Center. Jira only.
+    CreateIssue {
+        project: String,
+        issue_type: String,
+        summary: String,
+        adf: serde_json::Value,
+        wiki: String,
+        labels: Vec<String>,
+    },
+    /// Link two issues: `inward` `link_type` `outward` (a `Causes` link:
+    /// the bug causes the ticket). Jira only.
+    LinkIssues {
+        link_type: String,
+        inward: String,
+        outward: String,
+    },
+}
+
+/// PURE: a Jira project key (`PD`, `L2S`, `ABC_2`).
+pub fn is_project_key(s: &str) -> bool {
+    let b = s.as_bytes();
+    !b.is_empty()
+        && b.len() <= 32
+        && b[0].is_ascii_uppercase()
+        && b.iter()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == b'_')
+}
+
+/// PURE: the body of a Jira issue-create call (API v3 with ADF, v2 with wiki text).
+pub(crate) fn create_issue_body(op: &WriteOp, v3: bool) -> Result<serde_json::Value, TrackerError> {
+    let WriteOp::CreateIssue {
+        project,
+        issue_type,
+        summary,
+        adf,
+        wiki,
+        labels,
+    } = op
+    else {
+        return Err(TrackerError::Invalid("not an issue to create".into()));
+    };
+    if !is_project_key(project) {
+        return Err(TrackerError::Invalid(format!(
+            "{project:?} is not a Jira project key"
+        )));
+    }
+    if summary.trim().is_empty() || summary.contains('\n') {
+        return Err(TrackerError::Invalid(
+            "an issue summary is one non-empty line".into(),
+        ));
+    }
+    let description = if v3 {
+        adf.clone()
+    } else {
+        serde_json::Value::String(wiki.clone())
+    };
+    Ok(serde_json::json!({
+        "fields": {
+            "project": { "key": project },
+            "issuetype": { "name": issue_type },
+            "summary": summary,
+            "description": description,
+            "labels": labels,
+        }
+    }))
+}
+
+/// PURE: the body of a Jira issue-link call, the keys checked.
+pub(crate) fn link_issues_body(
+    link_type: &str,
+    inward: &str,
+    outward: &str,
+) -> Result<serde_json::Value, TrackerError> {
+    for k in [inward, outward] {
+        if !jira_common::is_key(k) {
+            return Err(TrackerError::Invalid(format!("{k:?} is not a Jira key")));
+        }
+    }
+    Ok(serde_json::json!({
+        "type": { "name": link_type },
+        "inwardIssue": { "key": inward.to_ascii_uppercase() },
+        "outwardIssue": { "key": outward.to_ascii_uppercase() },
+    }))
+}
+
+/// One issue with its comments, as the support agent reads it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IssueThread {
+    pub key: String,
+    pub summary: String,
+    /// Plain text, capped at [`DESCRIBE_MAX_CHARS`].
+    pub description: String,
+    /// The assignee's account id.
+    pub assignee_id: Option<String>,
+    pub status: String,
+    /// Unix seconds.
+    pub updated: Option<i64>,
+    /// Oldest first.
+    pub comments: Vec<IssueComment>,
+}
+
+/// One comment of an [`IssueThread`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IssueComment {
+    pub id: String,
+    pub author_id: Option<String>,
+    pub author: String,
+    /// Plain text, capped at [`DESCRIPTION_MAX_CHARS`].
+    pub body: String,
+    /// Unix seconds.
+    pub created: Option<i64>,
 }
 
 /// The provider for `row`, over the transport `net` picks for it. `cred` is
