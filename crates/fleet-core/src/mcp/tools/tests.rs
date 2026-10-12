@@ -4450,8 +4450,12 @@ fn the_served_definition_budget_stays_bounded() {
     /// bytes for 140 tools (799 a tool). Raised to 814 on 2026-10-11 when
     /// work_link gained task attachments (`attach`, `attachment_delete`,
     /// `mime`, `data_base64`, `attachment_id`) and `work` its `attachment`
-    /// read: measured 113,486 bytes for 141 tools (804 a tool).
-    const BYTES_PER_TOOL: usize = 814;
+    /// read: measured 113,486 bytes for 141 tools (804 a tool). Raised to
+    /// 825 on 2026-10-12: main took #874 (debug devices) and #873 (task
+    /// promotion, `promote` / `tracker_id` / `container`) each inside the
+    /// old budget, together over it: measured 118,264 bytes for 145 tools
+    /// (815 a tool).
+    const BYTES_PER_TOOL: usize = 825;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
