@@ -120,7 +120,7 @@ pub use control_handoffs::{
 };
 pub use control_tokens::{ApiScope, ControlTokenRow, NewControlToken};
 pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};
-pub use debug_devices::{DebugDeviceRow, DebugDeviceScan, SeenDevice};
+pub use debug_devices::{DebugDeviceRow, DebugDeviceScan, DebugDeviceWaiter, SeenDevice};
 pub use decisions::{
     is_decision_word, DecisionKeyStatus, DecisionRunFilter, DecisionRunRow, DecisionStatRow,
     NewDecisionRun, RunScope, DECISION_BENCH_SUBJECT, DECISION_CALL_FAILURES, DECISION_FALLBACKS,
