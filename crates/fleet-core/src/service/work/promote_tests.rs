@@ -600,15 +600,312 @@ async fn an_asana_subtask_goes_under_its_parent_task() {
 }
 
 #[test]
-fn creating_tickets_is_a_jira_and_asana_setting() {
-    for (provider, ok) in [
-        ("jira", true),
-        ("jira_dc", true),
-        ("asana", true),
-        ("linear", false),
-        ("github", false),
-    ] {
+fn every_provider_takes_the_create_tickets_setting() {
+    for provider in crate::store::TRACKER_PROVIDERS {
         let r = crate::store::validate_tracker_settings(provider, settings(true));
-        assert_eq!(r.is_ok(), ok, "{provider}: {r:?}");
+        assert_eq!(
+            r.is_ok(),
+            crate::service::trackers::creates_items(provider),
+            "{provider}: {r:?}"
+        );
     }
+    for provider in ["jira", "jira_dc", "asana", "linear", "github"] {
+        assert!(
+            crate::service::trackers::creates_items(provider),
+            "{provider}"
+        );
+    }
+}
+
+/// A GraphQL answer.
+fn gql(data: serde_json::Value) -> Result<Response, crate::net::https::TransportError> {
+    Ok(Response::json(200, &json!({ "data": data })))
+}
+
+/// A tracker of `provider` with creating on, `config` probed and `repos`
+/// narrowed (GitHub).
+fn tracker(s: &Store, provider: &str, site: &str, config: TrackerConfig, repos: &[&str]) -> i64 {
+    let t = s.add_tracker(provider, provider, site).unwrap();
+    s.set_tracker_probe(t.id, None, &config).unwrap();
+    let mut st = settings(true);
+    st.repos = repos.iter().map(|r| r.to_string()).collect();
+    s.set_tracker_settings(t.id, &st).unwrap();
+    t.id
+}
+
+fn local(s: &Store, title: &str, parent: Option<i64>) -> i64 {
+    s.create_native_item(&NativeItem {
+        title,
+        parent_id: parent,
+        project_id: None,
+        notes: Some("Why it matters."),
+    })
+    .unwrap()
+    .id
+}
+
+fn linear_provider(fake: &FakeTransport) -> crate::service::trackers::linear::Linear {
+    crate::service::trackers::linear::Linear::new(
+        "https://linear.app/acme",
+        TrackerConfig {
+            key_prefixes: vec!["ENG".into()],
+            ..Default::default()
+        },
+        Some(TrackerCredential {
+            auth_kind: "bearer".into(),
+            username: None,
+            secret: crate::store::Secret::new(format!("{}_{}", "lin_api", "n0tRea1".repeat(5))),
+        }),
+        Arc::new(fake.clone()),
+    )
+}
+
+#[tokio::test]
+async fn a_linear_task_goes_into_its_team_and_a_subtask_under_its_parent() {
+    let s = Store::open_in_memory().unwrap();
+    let t = tracker(
+        &s,
+        "linear",
+        "https://linear.app/acme",
+        TrackerConfig {
+            key_prefixes: vec!["ENG".into()],
+            ..Default::default()
+        },
+        &[],
+    );
+    let parent = s
+        .upsert_tracker_item(
+            t,
+            &TrackerItemWrite {
+                external_id: "issue-uuid-1".into(),
+                key: Some("ENG-1".into()),
+                title: "Launch".into(),
+                status_name: "Todo".into(),
+                status_category: "todo".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .id;
+    let top = local(&s, "Audit logins", None);
+    let sub = local(&s, "Write the migration", Some(parent));
+    let store = Mutex::new(s);
+    // One team: picked without asking; a bad team key is refused.
+    let mut a = args(top);
+    a.tracker_id = Some(t);
+    a.container = Some("not a key".into());
+    assert_eq!(
+        code(promote(&a, &store, &OrgScope::All, None)),
+        codes::E_INVALID
+    );
+    a.container = None;
+    promote(&a, &store, &OrgScope::All, None).unwrap();
+    promote(&args(sub), &store, &OrgScope::All, None).unwrap();
+
+    let fake = FakeTransport::new();
+    for answer in [
+        gql(json!({ "teams": { "nodes": [{ "id": "team-uuid" }] } })),
+        gql(json!({ "issueCreate": { "success": true, "issue": {
+            "id": "issue-uuid-2", "identifier": "ENG-2", "url": "https://linear.app/acme/issue/ENG-2" } } })),
+        // The read-back of ENG-2 (an answer without it: read next pass).
+        gql(json!({})),
+        gql(json!({ "issue": { "id": "issue-uuid-1", "team": { "id": "team-uuid" } } })),
+        gql(json!({ "issueCreate": { "success": true, "issue": {
+            "id": "issue-uuid-3", "identifier": "ENG-3", "url": "https://linear.app/acme/issue/ENG-3" } } })),
+        gql(json!({})),
+    ] {
+        fake.once(Method::Post, "api.linear.app/graphql", answer);
+    }
+    let row = store.lock().unwrap().require_tracker(t).unwrap();
+    let r = drain(
+        &row,
+        &linear_provider(&fake),
+        &store,
+        crate::store::now_unix() + 1,
+    )
+    .await;
+    assert_eq!(r.sent, 2, "{r:?}");
+    let creates: Vec<serde_json::Value> = fake
+        .requests()
+        .iter()
+        .filter_map(|r| r.json_body())
+        .filter(|b| {
+            b["query"]
+                .as_str()
+                .is_some_and(|q| q.contains("issueCreate"))
+        })
+        .collect();
+    assert_eq!(creates.len(), 2);
+    let top_input = &creates[0]["variables"]["input"];
+    assert_eq!(top_input["teamId"], "team-uuid");
+    assert_eq!(top_input["title"], "Audit logins");
+    assert!(top_input.get("parentId").is_none());
+    assert!(top_input["description"]
+        .as_str()
+        .unwrap()
+        .starts_with("Why it matters.\n\n— via fleet"));
+    assert_eq!(creates[1]["variables"]["input"]["parentId"], "issue-uuid-1");
+    let s = store.lock().unwrap();
+    let a = s.get_work_item(top).unwrap().unwrap();
+    assert_eq!(
+        (a.source.as_str(), a.key.as_deref()),
+        ("linear", Some("ENG-2"))
+    );
+    let b = s.get_work_item(sub).unwrap().unwrap();
+    assert_eq!(b.key.as_deref(), Some("ENG-3"));
+    assert_eq!(b.external_id.as_deref(), Some("issue-uuid-3"));
+    assert_eq!(b.parent_id, Some(parent));
+}
+
+fn github_provider(
+    fake: &FakeTransport,
+    repos: &[&str],
+) -> crate::service::trackers::github::GitHub {
+    crate::service::trackers::github::GitHub::new(
+        "https://github.com/acme",
+        TrackerConfig::default(),
+        TrackerSettings {
+            repos: repos.iter().map(|r| r.to_string()).collect(),
+            ..Default::default()
+        },
+        Arc::new(fake.clone()),
+    )
+}
+
+#[tokio::test]
+async fn a_github_task_goes_into_a_repository_and_a_subtask_becomes_a_sub_issue() {
+    let s = Store::open_in_memory().unwrap();
+    let t = tracker(
+        &s,
+        "github",
+        "https://github.com/acme",
+        TrackerConfig::default(),
+        &["acme/api"],
+    );
+    let parent = s
+        .upsert_tracker_item(
+            t,
+            &TrackerItemWrite {
+                external_id: "I_parent".into(),
+                key: Some("acme/api#7".into()),
+                title: "Launch".into(),
+                status_name: "Open".into(),
+                status_category: "todo".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .id;
+    let top = local(&s, "Audit logins", None);
+    let sub = local(&s, "Write the migration", Some(parent));
+    let store = Mutex::new(s);
+    let mut a = args(top);
+    a.tracker_id = Some(t);
+    a.container = Some("acme/other".into());
+    assert_eq!(
+        code(promote(&a, &store, &OrgScope::All, None)),
+        codes::E_INVALID,
+        "not a repository the tracker is narrowed to"
+    );
+    a.container = Some("Acme/API".into());
+    promote(&a, &store, &OrgScope::All, None).unwrap();
+    promote(&args(sub), &store, &OrgScope::All, None).unwrap();
+
+    let fake = FakeTransport::new();
+    for answer in [
+        gql(json!({ "repository": { "id": "R_api" } })),
+        gql(
+            json!({ "createIssue": { "issue": { "id": "I_new40", "number": 40,
+            "url": "https://github.com/acme/api/issues/40",
+            "repository": { "nameWithOwner": "acme/api" } } } }),
+        ),
+        // The read-back of #40 (not found: read next pass).
+        gql(json!({ "nodes": [null] })),
+        gql(json!({ "node": { "id": "I_parent", "repository": { "id": "R_api" } } })),
+        gql(
+            json!({ "createIssue": { "issue": { "id": "I_new41", "number": 41,
+            "url": "https://github.com/acme/api/issues/41",
+            "repository": { "nameWithOwner": "acme/api" } } } }),
+        ),
+        gql(json!({ "addSubIssue": { "issue": { "id": "I_parent" } } })),
+        gql(json!({ "nodes": [null] })),
+    ] {
+        fake.once(Method::Post, "api.github.com/graphql", answer);
+    }
+    let row = store.lock().unwrap().require_tracker(t).unwrap();
+    let r = drain(
+        &row,
+        &github_provider(&fake, &["acme/api"]),
+        &store,
+        crate::store::now_unix() + 1,
+    )
+    .await;
+    assert_eq!(r.sent, 2, "{r:?}");
+    let bodies: Vec<serde_json::Value> = fake
+        .requests()
+        .iter()
+        .filter_map(|r| r.json_body())
+        .collect();
+    let create = bodies
+        .iter()
+        .find(|b| {
+            b["query"]
+                .as_str()
+                .is_some_and(|q| q.contains("createIssue"))
+        })
+        .unwrap();
+    assert_eq!(create["variables"]["repo"], "R_api");
+    assert_eq!(create["variables"]["title"], "Audit logins");
+    let link = bodies
+        .iter()
+        .find(|b| {
+            b["query"]
+                .as_str()
+                .is_some_and(|q| q.contains("addSubIssue"))
+        })
+        .expect("the sub-issue link");
+    assert_eq!(
+        (
+            link["variables"]["p"].as_str(),
+            link["variables"]["c"].as_str()
+        ),
+        (Some("I_parent"), Some("I_new41"))
+    );
+    let s = store.lock().unwrap();
+    let a = s.get_work_item(top).unwrap().unwrap();
+    assert_eq!(
+        (a.source.as_str(), a.key.as_deref()),
+        ("github", Some("acme/api#40"))
+    );
+    assert_eq!(
+        a.url.as_deref(),
+        Some("https://github.com/acme/api/issues/40")
+    );
+    let b = s.get_work_item(sub).unwrap().unwrap();
+    assert_eq!(b.key.as_deref(), Some("acme/api#41"));
+    assert_eq!(b.parent_id, Some(parent));
+}
+
+#[tokio::test]
+async fn a_github_repository_outside_the_trackers_scope_is_never_written_to() {
+    // Narrowed to no repositories: the person types one, and the adapter
+    // still holds it to the site's owner.
+    let fake = FakeTransport::new();
+    let g = github_provider(&fake, &[]);
+    let e = crate::service::trackers::TrackerProvider::write(
+        &g,
+        &crate::service::trackers::WriteOp::CreateItem {
+            container: Some("someone-else/repo".into()),
+            parent: None,
+            title: "x".into(),
+            description: String::new(),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(e, crate::service::trackers::TrackerError::Invalid(_)),
+        "{e:?}"
+    );
+    assert!(fake.requests().is_empty());
 }
