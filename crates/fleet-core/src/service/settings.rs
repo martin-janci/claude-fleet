@@ -771,6 +771,9 @@ pub const DECIDE_JEV_MODEL: &str = "decide.jev.model";
 pub const DECIDE_JEV_MODELS: &[&str] = &["jev-1.13.0", "jev-latest"];
 /// Days a `decision_runs` row is kept (`0` = forever).
 pub const DECIDE_RETENTION_DAYS: &str = "decide.retention_days";
+/// Days an admin event (`store::admin_events`, the identity audit log) is
+/// kept (`0` = forever); swept by `service::gc`.
+pub const AUDIT_RETENTION_DAYS: &str = "auth.audit_retention_days";
 /// A second opinion: every question a use case in `shadow` or `assist`
 /// asks Jev is also asked of Claude in print mode on
 /// [`DECIDE_HAIKU_HOST`], and its answer recorded beside Jev's (provider
@@ -1922,6 +1925,15 @@ pub const SPECS: &[Spec] = &[
         Kind::Int { min: 0, max: 3650 },
         "Jev: keep runs",
         "Days a decision record (ids and numbers, never text) is kept.",
+    )
+    .unit(Unit::Days)
+    .zero("forever"),
+    Spec::new(
+        AUDIT_RETENTION_DAYS,
+        "365",
+        Kind::Int { min: 0, max: 3650 },
+        "Audit: keep admin events",
+        "Days an administrative change (who changed which person, group, role or device) is kept.",
     )
     .unit(Unit::Days)
     .zero("forever"),

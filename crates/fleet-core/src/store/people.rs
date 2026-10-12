@@ -526,6 +526,43 @@ impl Store {
         self.get_person(id)?.ok_or_else(|| person_not_found(id))
     }
 
+    /// Lift a person's disable (identity sub-project 1): they may sign in
+    /// and be paired a device again. It restores NOTHING `disable_person`
+    /// took — no device, no grant, no group membership, no role mapping:
+    /// each is given back on purpose, by whoever administers it.
+    ///
+    /// `E_NOTFOUND` for an unknown id; an already-live person comes back
+    /// unchanged; `E_EXISTS` when a live person has since taken their name
+    /// or their email address (`idx_people_live_name`, and Task 2's live
+    /// email index).
+    pub fn enable_person(&self, id: i64) -> Result<PersonRow, IpcError> {
+        let row = self.get_person(id)?.ok_or_else(|| person_not_found(id))?;
+        if row.disabled_at.is_none() {
+            return Ok(row);
+        }
+        match self.conn.execute(
+            "UPDATE people SET disabled_at = NULL WHERE id = ?1 AND disabled_at IS NOT NULL",
+            rusqlite::params![id],
+        ) {
+            Ok(_) => {}
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::ConstraintViolation
+                    && e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
+            {
+                return Err(IpcError::new(
+                    codes::E_EXISTS,
+                    format!(
+                        "person {id} ({:?}) cannot be re-enabled: a live person now holds \
+                         that name or email address; rename one of them first",
+                        row.name
+                    ),
+                ));
+            }
+            Err(e) => return Err(e.into()),
+        }
+        self.get_person(id)?.ok_or_else(|| person_not_found(id))
+    }
+
     /// This hub's personal owner, or `None`.
     ///
     /// One index seek on `idx_people_personal_owner`. It returns `Some(id)`
@@ -721,6 +758,72 @@ mod tests {
 
     fn store() -> Store {
         Store::open_in_memory().expect("store")
+    }
+
+    #[test]
+    fn enable_person_restores_sign_in_but_not_devices() {
+        let s = Store::open_in_memory().unwrap();
+        let ada = s.create_person("ada", None).unwrap().id;
+        s.disable_person(ada).unwrap();
+        let p = s.enable_person(ada).unwrap();
+        assert!(p.disabled_at.is_none());
+        assert!(s.groups_of(ada).unwrap().is_empty());
+        let bob = s.create_person("bob", None).unwrap().id;
+        s.disable_person(bob).unwrap();
+        s.create_person("bob", None).unwrap();
+        assert_eq!(
+            s.enable_person(bob).unwrap_err().code,
+            codes::E_EXISTS,
+            "the name is taken by a live person"
+        );
+    }
+
+    #[test]
+    fn enable_person_restores_no_device_membership_or_role() {
+        let s = store();
+        let org = s.add_org("Acme", None, false).unwrap().id;
+        let ada = s.create_person("ada", None).unwrap().id;
+        s.set_org_member(org, ada, "member", None).unwrap();
+        s.insert_client_token("ada-phone", "digest-ada-phone", "full")
+            .unwrap();
+        s.set_client_person("ada-phone", Some(ada)).unwrap();
+        assert!(!s.groups_of(ada).unwrap().is_empty());
+        s.disable_person(ada).unwrap();
+        let again = s.enable_person(ada).unwrap();
+        assert!(again.disabled_at.is_none());
+        assert!(s.groups_of(ada).unwrap().is_empty(), "no group comes back");
+        assert!(
+            s.org_member(org, ada).unwrap().is_none_or(|m| !m.is_live()),
+            "no org membership comes back"
+        );
+        assert!(
+            !s.active_client_tokens()
+                .unwrap()
+                .iter()
+                .any(|c| c.person_id == Some(ada)),
+            "no device comes back"
+        );
+        // Already live: unchanged. Unknown: not found.
+        assert_eq!(s.enable_person(ada).unwrap(), again);
+        assert_eq!(s.enable_person(9_999).unwrap_err().code, codes::E_NOTFOUND);
+    }
+
+    #[test]
+    fn enable_person_is_refused_when_a_live_person_took_the_email() {
+        let s = store();
+        let ada = s.create_person("ada", None).unwrap().id;
+        let email = |e: &str| PersonProfile {
+            email: Some(Some(e.into())),
+            ..Default::default()
+        };
+        s.update_person_profile(ada, &email("ada@example.com"))
+            .unwrap();
+        s.disable_person(ada).unwrap();
+        let ann = s.create_person("ann", None).unwrap().id;
+        s.update_person_profile(ann, &email("ADA@example.com"))
+            .unwrap();
+        assert_eq!(s.enable_person(ada).unwrap_err().code, codes::E_EXISTS);
+        assert!(s.get_person(ada).unwrap().unwrap().disabled_at.is_some());
     }
 
     #[test]

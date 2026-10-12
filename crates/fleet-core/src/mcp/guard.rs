@@ -2514,7 +2514,7 @@ const REDACT_KEYS: &[&str] = &[
 /// pairing code, still valid when the link fails (review r04 S3), and
 /// `add_account`'s sign-in code. `api_key` is `add_account`'s Anthropic key
 /// (M15 G2.9), which fleet never stores.
-const SKIP_KEYS: &[&str] = &["confirm_nonce", "value", "secret", "code", "api_key"];
+pub(crate) const SKIP_KEYS: &[&str] = &["confirm_nonce", "value", "secret", "code", "api_key"];
 /// Argument keys whose value is an object of person-typed answers (`ask`'s
 /// `values` may carry a form's secret fields): only the field count is kept,
 /// as `<N fields>`, never a name or a value. `args` is a nested payload

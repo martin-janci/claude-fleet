@@ -253,12 +253,12 @@ enum Cmd {
         opts: HubOptions,
     },
     /// The people this hub knows: list them with their ids, rename one,
-    /// end one's reach (multi-user M1).
+    /// end one's reach and lift that again (multi-user M1).
     ///
     /// `client list` names a device's person as `person 3`; `person list`
     /// is what says who 3 is. A person is CREATED by naming them (`pair
-    /// --person`, `client bind-person`), so there is no `add` here, and
-    /// there is no re-enable after `disable`. Reads and writes `state.db`
+    /// --person`, `client bind-person`), so there is no `add` here; `enable`
+    /// lifts a `disable` but gives back nothing it revoked. Reads and writes `state.db`
     /// directly — the control API answers nobody about this hub's people —
     /// so no running hub is needed; a running one honours the change from
     /// its next request.

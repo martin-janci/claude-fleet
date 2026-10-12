@@ -43,6 +43,7 @@ fn every_action_parses_and_assign_client_is_not_one() {
         "list_people",
         "rename_person",
         "disable_person",
+        "enable_person",
     ] {
         assert!(Action::parse(a).is_ok(), "{a}");
     }
@@ -530,6 +531,7 @@ fn an_org_admin_manages_their_own_orgs_members_and_nobody_elses() {
         ("assign_host", Some(c.acme)),
         ("bind_device", Some(c.acme)),
         ("disable_person", None),
+        ("enable_person", None),
         ("rename_person", None),
         ("set_hub_org", Some(c.acme)),
         ("set_admins_see_unclaimed", Some(c.acme)),
@@ -1510,4 +1512,103 @@ fn untrusting_a_device_of_ones_own_person_is_a_lock_out() {
     a.device = Some(other.name.clone());
     a.trusted = Some(false);
     assert_eq!(run(&a, &st, me).unwrap()["trusted"], false);
+}
+
+fn events(st: &Mutex<Store>) -> Vec<crate::store::AdminEventRow> {
+    st.lock()
+        .unwrap()
+        .admin_events(&crate::store::AdminEventQuery {
+            limit: 50,
+            ..Default::default()
+        })
+        .unwrap()
+}
+
+/// Identity sub-project 1: every write through `run` leaves one admin
+/// event naming who did it, through which device, and to what.
+#[test]
+fn a_write_records_one_admin_event_and_a_read_none() {
+    let c = company();
+    let me = c.jane();
+    run(&c.with_org("list_members", c.acme), &c.st, me).unwrap();
+    assert!(events(&c.st).is_empty(), "a read records nothing");
+    let mut set = c.with_org("set_member", c.acme);
+    set.person_id = Some(c.bob);
+    set.role = Some("viewer".into());
+    run(&set, &c.st, me).unwrap();
+    let ev = events(&c.st);
+    assert_eq!(ev.len(), 1, "{ev:?}");
+    assert_eq!(ev[0].action, "set_member");
+    assert_eq!(ev[0].resource_type, "org_member");
+    assert_eq!(ev[0].resource_id, format!("{}/{}", c.acme, c.bob));
+    assert_eq!(ev[0].actor_person, Some(c.jane));
+    let phone =
+        c.st.lock()
+            .unwrap()
+            .active_client_tokens()
+            .unwrap()
+            .into_iter()
+            .find(|t| t.name == "jane-phone")
+            .unwrap()
+            .id;
+    assert_eq!(ev[0].actor_device, Some(phone));
+    assert_eq!(ev[0].representation["role"], "viewer");
+    // A refused write records nothing.
+    let mut myself = c.with_org("set_member", c.acme);
+    myself.person_id = Some(c.jane);
+    myself.role = Some("viewer".into());
+    assert!(run(&myself, &c.st, me).is_err());
+    assert_eq!(events(&c.st).len(), 1);
+}
+
+#[test]
+fn enable_person_is_the_fleets_and_is_recorded() {
+    let c = company();
+    c.st.lock().unwrap().disable_person(c.bob).unwrap();
+    let mut en = args("enable_person");
+    en.person_id = Some(c.bob);
+    assert_eq!(err_code(run(&en, &c.st, c.jane())), "E_FORBIDDEN");
+    let out = run(&en, &c.st, Me::LOCAL).unwrap();
+    assert!(out["disabled_at"].is_null(), "{out}");
+    let ev = events(&c.st);
+    assert_eq!(ev.len(), 1);
+    assert_eq!(ev[0].action, "enable_person");
+    assert_eq!(ev[0].resource_type, "person");
+    assert_eq!(ev[0].resource_id, c.bob.to_string());
+    assert_eq!(
+        ev[0].actor_person, None,
+        "the desktop's own store has no actor"
+    );
+    assert!(
+        c.st.lock()
+            .unwrap()
+            .org_member(c.acme, c.bob)
+            .unwrap()
+            .is_none_or(|m| !m.is_live()),
+        "re-enabling restores no membership"
+    );
+}
+
+#[test]
+fn a_set_org_setting_event_never_keeps_the_value() {
+    let st = store();
+    let mut add = args("add_org");
+    add.name = Some("Acme".into());
+    run(&add, &st, Me::LOCAL).unwrap();
+    let ev = events(&st);
+    assert_eq!(ev[0].resource_type, "org");
+    assert_eq!(ev[0].resource_id, "Acme");
+    let mut set = args("set_org_setting");
+    set.org = Some("Acme".into());
+    set.key = Some(crate::service::settings::BUDGET_ORG_DAILY_USD.into());
+    set.value = Some("25".into());
+    run(&set, &st, Me::LOCAL).unwrap();
+    let ev = events(&st);
+    assert_eq!(ev.len(), 2);
+    assert_eq!(ev[0].action, "set_org_setting");
+    assert_eq!(
+        ev[0].representation["key"],
+        crate::service::settings::BUDGET_ORG_DAILY_USD
+    );
+    assert!(ev[0].representation.get("value").is_none(), "{:?}", ev[0]);
 }

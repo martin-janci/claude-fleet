@@ -4583,6 +4583,20 @@
       ]
     },
     {
+      "default_widget": "number",
+      "key": "auth.audit_retention_days",
+      "kind": {
+        "max": 3650,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Audit: keep admin events",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
       "default_widget": "text",
       "key": "decide.jev.floors",
       "kind": {

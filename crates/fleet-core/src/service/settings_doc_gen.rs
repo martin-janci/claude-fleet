@@ -135,6 +135,7 @@ fn group_title(prefix: &str) -> &str {
         "health" => "Health",
         "work" => "Work graph",
         "decide" => "Decisions (Jev)",
+        "auth" => "Identity and audit",
         "hub" => "Hub daemon (read-only)",
         "mcp" => "Control API (read-only)",
         other => other,

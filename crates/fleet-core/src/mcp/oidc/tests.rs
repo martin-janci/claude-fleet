@@ -372,6 +372,50 @@ fn a_first_sign_in_provisions_a_person_and_the_next_finds_them() {
     assert_eq!(again.id, p.id);
 }
 
+/// Identity sub-project 1: a first sign-in's two writes are admin events —
+/// the person provisioned and the identity linked — and a sign-in that
+/// finds them is not one.
+#[test]
+fn a_provisioning_sign_in_records_provision_and_link_and_a_login_nothing() {
+    let s = Store::open_in_memory().unwrap();
+    let oidc = OidcProvider::with_transport(config(), Arc::new(FakeTransport::new()));
+    let epoch = |s: &Store| -> i64 {
+        s.conn_ref()
+            .query_row("SELECT epoch FROM auth_epoch WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    };
+    let p = oidc
+        .resolve_person(&s, &signed_in(Some("ada"), &[]))
+        .unwrap();
+    let all = || {
+        s.admin_events(&crate::store::AdminEventQuery {
+            limit: 10,
+            ..Default::default()
+        })
+        .unwrap()
+    };
+    let ev = all();
+    let actions: Vec<(&str, &str)> = ev
+        .iter()
+        .map(|e| (e.action.as_str(), e.resource_type.as_str()))
+        .collect();
+    assert_eq!(actions, [("link", "identity"), ("provision", "person")]);
+    assert!(ev.iter().all(|e| e.actor_person == Some(p.id)));
+    assert_eq!(ev[1].resource_id, p.id.to_string());
+    // The next sign-in stamps last_login_at: no event, and no auth-epoch
+    // bump (the update trigger ignores that column).
+    let before = epoch(&s);
+    oidc.resolve_person(&s, &signed_in(Some("ada"), &[]))
+        .unwrap();
+    assert_eq!(all().len(), 2);
+    assert_eq!(epoch(&s), before);
+    // Unlinking the account re-resolves every cached caller.
+    s.unlink_identity(ISS, "0b7d-uuid").unwrap();
+    assert!(epoch(&s) > before);
+}
+
 #[test]
 fn an_existing_person_is_never_taken_over_by_name() {
     let s = Store::open_in_memory().unwrap();

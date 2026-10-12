@@ -80,8 +80,8 @@ pub enum PersonCmd {
     /// departed person's work; the grants THEY made stand, because a grant
     /// belongs to the session's owner and this is no authority over
     /// somebody else's share; and this hub's own owner cannot be disabled
-    /// at all, since every access gate keys on that row. **There is no
-    /// re-enable in this release.**
+    /// at all, since every access gate keys on that row. `person enable`
+    /// lifts it, but gives back none of what was revoked.
     ///
     /// Refused without `--force`, which is where the count of devices and
     /// grants about to go is printed.
@@ -92,6 +92,17 @@ pub enum PersonCmd {
         /// changes nothing.
         #[arg(long)]
         force: bool,
+    },
+    /// Lift a disable: the person may sign in and be paired a device again.
+    ///
+    /// Restores NOTHING `disable` took — no device, no share made to them,
+    /// no group, org membership or role: each is given back on purpose.
+    /// Refused when a live person has since taken their name or email
+    /// address (rename one of them first).
+    Enable {
+        /// The disabled person, by name, or by id (`person list`) when
+        /// several disabled people held the name.
+        person: String,
     },
     /// Link a single-sign-on account (Keycloak, or any OpenID Connect
     /// provider) to a live person, so signing in at `/auth/oidc/start`
@@ -160,6 +171,59 @@ fn live_person(store: &Store, name: &str) -> Result<PersonRow, String> {
                  this hub knows, disabled ones included"
             )
         })
+}
+
+/// The disabled person `which` names: an id, or a name exactly one
+/// disabled person holds.
+fn disabled_person(store: &Store, which: &str) -> Result<PersonRow, String> {
+    let people = store.list_people().map_err(|e| e.message)?;
+    if let Ok(id) = which.trim().parse::<i64>() {
+        if let Some(p) = people.iter().find(|p| p.id == id) {
+            return Ok(p.clone());
+        }
+    }
+    let named: Vec<&PersonRow> = people
+        .iter()
+        .filter(|p| p.name == which.trim() && p.disabled_at.is_some())
+        .collect();
+    match named.as_slice() {
+        [one] => Ok((*one).clone()),
+        [] => Err(format!(
+            "no disabled person named '{}'; `fleet-hub person list` names every person this \
+             hub knows, with their ids",
+            which.trim()
+        )),
+        _ => Err(format!(
+            "{} disabled people were named '{}'; pass the id (`fleet-hub person list`)",
+            named.len(),
+            which.trim()
+        )),
+    }
+}
+
+/// Record an operator's change as an admin event (`store::admin_events`;
+/// the operator on the hub machine has no person or device). The change
+/// has already happened, so a failure is a warning, never an error.
+fn record(
+    store: &Store,
+    action: &str,
+    resource_type: &str,
+    resource_id: &str,
+    rep: serde_json::Value,
+) {
+    if let Err(e) = store.record_admin_event(&fleet_core::store::AdminEvent {
+        actor_person: None,
+        actor_device: None,
+        action,
+        resource_type,
+        resource_id,
+        representation: rep,
+    }) {
+        out::line(&format!(
+            "warning: the admin event was not recorded: {}",
+            e.message
+        ));
+    }
 }
 
 /// How many live devices belong to `person`.
@@ -237,6 +301,13 @@ pub fn run(
             let after = store
                 .rename_person(row.id, to.as_deref(), display_name.as_deref())
                 .map_err(|e| e.message)?;
+            record(
+                &store,
+                "rename_person",
+                "person",
+                &row.id.to_string(),
+                serde_json::json!({ "name": to, "display_name": display_name }),
+            );
             out::line(&format!(
                 "person {} is now '{}'{}; every grant and session of theirs is addressed to \
                  the id, so nothing else moved",
@@ -275,12 +346,19 @@ pub fn run(
                 return Err(format!(
                     "disabling {} (person {}) would revoke {devices} device(s) of theirs and \
                      {grants} grant(s) made TO them, in one transaction. Their own sessions \
-                     stay private and stay theirs, and the shares they MADE stand. There is \
-                     no re-enable in this release. Pass --force to do it.",
+                     stay private and stay theirs, and the shares they MADE stand. `person \
+                     enable` lifts it later but gives none of it back. Pass --force to do it.",
                     row.name, row.id
                 ));
             }
             store.disable_person(row.id).map_err(|e| e.message)?;
+            record(
+                &store,
+                "disable_person",
+                "person",
+                &row.id.to_string(),
+                serde_json::json!({ "person_id": row.id, "name": row.name }),
+            );
             // Measured, not assumed: the two halves are counted again after
             // the write, so the line below is evidence that both happened
             // rather than a restatement of what was meant to happen.
@@ -296,8 +374,29 @@ pub fn run(
             out::line(
                 "Their own sessions are untouched: still private, still theirs, readable by \
                  nobody else. The shares they made stand — those belong to each session's \
-                 owner. There is no re-enable in this release.",
+                 owner. `fleet-hub person enable` lifts this, but gives back none of it.",
             );
+        }
+        PersonCmd::Enable { person } => {
+            let row = disabled_person(&store, &person)?;
+            if row.disabled_at.is_none() {
+                out::line(&format!("{} (person {}) is not disabled", row.name, row.id));
+                return Ok(ExitCode::SUCCESS);
+            }
+            store.enable_person(row.id).map_err(|e| e.message)?;
+            record(
+                &store,
+                "enable_person",
+                "person",
+                &row.id.to_string(),
+                serde_json::json!({ "person_id": row.id, "name": row.name }),
+            );
+            out::line(&format!(
+                "enabled {} (person {}): they may sign in and be paired a device again. \
+                 Nothing was given back — pair their devices, and add them to their orgs \
+                 and groups, again.",
+                row.name, row.id
+            ));
         }
         PersonCmd::LinkSso {
             person,
@@ -306,9 +405,20 @@ pub fn run(
         } => {
             let issuer = sso_issuer(issuer, env)?;
             let row = live_person(&store, &person)?;
-            store
+            let link = store
                 .link_identity(&issuer, &subject, row.id)
                 .map_err(|e| e.message)?;
+            record(
+                &store,
+                "link",
+                "identity",
+                &format!("{} {}", link.issuer, link.subject),
+                serde_json::json!({
+                    "issuer": link.issuer,
+                    "subject": link.subject,
+                    "person_id": row.id,
+                }),
+            );
             out::line(&format!(
                 "linked {issuer} account {} to {} (person {}): signing in with it pairs a                  device as them",
                 subject.trim(),
@@ -327,6 +437,13 @@ pub fn run(
                     subject.trim()
                 ));
             }
+            record(
+                &store,
+                "unlink",
+                "identity",
+                &format!("{issuer} {}", subject.trim()),
+                serde_json::json!({ "issuer": issuer, "subject": subject.trim() }),
+            );
             out::line(&format!(
                 "unlinked {issuer} account {}; devices already paired with it stay paired                  until `fleet-hub client revoke`",
                 subject.trim()
@@ -361,6 +478,12 @@ mod tests {
         );
         let t = T::try_parse_from(["t", "disable", "ada", "--force"]).unwrap();
         assert!(matches!(t.cmd, PersonCmd::Disable { person, force: true } if person == "ada"));
+    }
+
+    #[test]
+    fn enable_parses() {
+        let t = T::try_parse_from(["t", "enable", "ada"]).unwrap();
+        assert!(matches!(t.cmd, PersonCmd::Enable { person } if person == "ada"));
     }
 
     /// `--force` is a flag the operator types, never a default: a parse
@@ -437,6 +560,45 @@ mod tests {
                 .expect("grant");
             id
         }
+    }
+
+    /// Identity sub-project 1: `enable` lifts a disable and gives nothing
+    /// back, and each change the operator makes is an admin event with no
+    /// actor.
+    #[test]
+    fn enable_lifts_a_disable_and_every_change_is_recorded() {
+        let hub = Hub::new();
+        let ada = hub.person("ada");
+        hub.device("ada-phone", ada);
+        hub.run(PersonCmd::Disable {
+            person: "ada".into(),
+            force: true,
+        })
+        .expect("disable");
+        hub.run(PersonCmd::Enable {
+            person: "ada".into(),
+        })
+        .expect("enable");
+        let s = hub.store();
+        assert!(s.get_person(ada).unwrap().unwrap().disabled_at.is_none());
+        assert_eq!(live_devices(&s, ada).unwrap(), 0, "no device comes back");
+        let ev = s
+            .admin_events(&fleet_core::store::AdminEventQuery {
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        let actions: Vec<&str> = ev.iter().map(|e| e.action.as_str()).collect();
+        assert_eq!(actions, ["enable_person", "disable_person"]);
+        assert!(ev
+            .iter()
+            .all(|e| e.actor_person.is_none() && e.resource_id == ada.to_string()));
+        // A live person is not "a disabled person named …".
+        assert!(hub
+            .run(PersonCmd::Enable {
+                person: "nobody".into()
+            })
+            .is_err());
     }
 
     #[test]

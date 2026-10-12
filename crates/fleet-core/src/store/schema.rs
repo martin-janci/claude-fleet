@@ -2005,6 +2005,10 @@ const MIGRATIONS: &[Migration] = &[
     // Identity sub-project 1: the realm model (clients, roles, groups and
     // their mappings), seeded from orgs, org_members and trusted devices.
     Migration::plain(178, include_str!("../../migrations/178_realm_model.sql")),
+    // Identity sub-project 1: the append-only admin audit log
+    // (`store::admin_events`) and the auth-epoch triggers on
+    // `person_identities`. New tables and IF NOT EXISTS triggers, idempotent.
+    Migration::plain(179, include_str!("../../migrations/179_admin_events.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -3688,6 +3692,43 @@ mod tests {
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(s.get_person_by_name("ada").unwrap().unwrap().uuid, ada.uuid);
+    }
+
+    #[test]
+    fn migration_179_adds_the_admin_log_and_the_identity_epoch_triggers() {
+        let s = store_at_version(178);
+        s.migrate().unwrap();
+        let count = |sql: &str| -> i64 { s.conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        for name in [
+            "admin_events_no_update",
+            "admin_events_no_delete",
+            "auth_epoch_person_identities_insert",
+            "auth_epoch_person_identities_update",
+            "auth_epoch_person_identities_delete",
+        ] {
+            assert_eq!(
+                count(&format!(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = '{name}'"
+                )),
+                1,
+                "trigger {name} is missing"
+            );
+        }
+        assert_eq!(count("SELECT open FROM admin_events_gc WHERE id = 1"), 0);
+        s.conn
+            .execute_batch(
+                "INSERT INTO admin_events (ts, action, resource_type, resource_id) \
+                 VALUES (1, 'create', 'person', 'ada');",
+            )
+            .unwrap();
+        // Re-running keeps the log and the closed gate.
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 179;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(count("SELECT COUNT(*) FROM admin_events"), 1);
+        assert_eq!(count("SELECT COUNT(*) FROM admin_events_gc"), 1);
+        assert_eq!(count("SELECT open FROM admin_events_gc WHERE id = 1"), 0);
     }
 
     #[test]

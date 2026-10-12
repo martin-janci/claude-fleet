@@ -693,10 +693,36 @@ impl OidcProvider {
                 link_hint.replace("<person>", &name)
             )));
         }
+        // The two writes are admin events (identity sub-project 1), in the
+        // same transaction; the sign-in itself is not one.
         s.atomically(|s| {
             let p = s.create_person(&name, who.display_name.as_deref())?;
             s.link_identity(&cfg.issuer, &who.subject, p.id)?;
             s.touch_identity_login(&cfg.issuer, &who.subject)?;
+            s.record_admin_event(&crate::store::AdminEvent {
+                actor_person: Some(p.id),
+                actor_device: None,
+                action: "provision",
+                resource_type: "person",
+                resource_id: &p.id.to_string(),
+                representation: serde_json::json!({
+                    "name": p.name,
+                    "display_name": p.display_name,
+                    "issuer": cfg.issuer,
+                }),
+            })?;
+            s.record_admin_event(&crate::store::AdminEvent {
+                actor_person: Some(p.id),
+                actor_device: None,
+                action: "link",
+                resource_type: "identity",
+                resource_id: &format!("{} {}", cfg.issuer, who.subject),
+                representation: serde_json::json!({
+                    "issuer": cfg.issuer,
+                    "subject": who.subject,
+                    "person_id": p.id,
+                }),
+            })?;
             Ok(p)
         })
         .map_err(internal)

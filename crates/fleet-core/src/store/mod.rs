@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 mod access_requests;
 mod account_usage_snapshots;
+mod admin_events;
 mod agents;
 mod aux_usage;
 pub mod backup;
@@ -97,6 +98,7 @@ mod work_view;
 
 pub use access_requests::{AccessRequestRow, ACCESS_REQUEST_COOLDOWN_SECS};
 pub use account_usage_snapshots::{UsageSnapshotRow, USAGE_HISTORY_KEEP_SECS};
+pub use admin_events::{AdminEvent, AdminEventQuery, AdminEventRow, ADMIN_EVENTS_MAX_LIMIT};
 pub use agents::{
     AgentActionRow, AgentCursorRow, AgentJobEnd, AgentJobRow, AgentRuleRow, NewAgentJob,
     NewAgentRule, AGENT_ACTION_STATES, AGENT_CONFIG_MAX_CHARS, AGENT_JOB_STATES, AGENT_KINDS,
@@ -134,6 +136,10 @@ pub use downloads::{DownloadRow, NewDownload};
 pub use forms::{FormFinish, FormRow, NewForm, FORM_STATES};
 pub use guides::{GuideProposalRow, NewGuideProposal, DECIDED_GUIDE_KEEP_SECS};
 pub use host_setup::{AgentInstallRow, HostSetupRow, SetupCheck};
+// For `realm_admin` (identity sub-project 1), which records its events
+// inside its own transactions.
+#[allow(unused_imports)]
+pub(crate) use admin_events::record_admin_event_in_tx;
 pub use identities::{normalize_issuer, IdentityRow, MAX_IDENTITY_FIELD_LEN};
 pub use item_deps::{ItemDepRow, DEP_SOURCES};
 pub use item_verify::{

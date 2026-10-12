@@ -3252,6 +3252,28 @@
       "danger": {
         "level": "none"
       },
+      "default": "365",
+      "help": "Days an administrative change (who changed which person, group, role or device) is kept.",
+      "key": "auth.audit_retention_days",
+      "kind": {
+        "max": 3650,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Audit: keep admin events",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "days",
+      "value": "365",
+      "zero": "forever"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "",
       "help": "Per-feature confidence floors fitted from runs a person confirmed, corrected or rejected (fleet-hub decide floor fit). A fitted floor only raises a feature's built-in one, and only for the question version and model it was fitted against.",
       "key": "decide.jev.floors",
@@ -4279,6 +4301,16 @@
             }
           ],
           "title": "Error reports"
+        },
+        {
+          "intro": "How long the record of administrative changes is kept.",
+          "items": [
+            {
+              "key": "auth.audit_retention_days",
+              "type": "field"
+            }
+          ],
+          "title": "Audit"
         }
       ],
       "spec": "fleet.page/1",

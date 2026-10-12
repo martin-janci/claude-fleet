@@ -221,6 +221,16 @@
           "key": "reports.max_age_secs"
         }
       ]
+    },
+    {
+      "title": "Audit",
+      "intro": "How long the record of administrative changes is kept.",
+      "items": [
+        {
+          "type": "field",
+          "key": "auth.audit_retention_days"
+        }
+      ]
     }
   ]
 }
