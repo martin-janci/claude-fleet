@@ -1,0 +1,475 @@
+# Configurable agents: design
+
+Status: proposed, 2026-10-12. Not built.
+Asked for by the owner after the built-in reviewer and support agent landed
+(`2026-10-11-review-and-support-agents-design.md`, PRs
+martin-janci/claude-fleet#871, martin-janci/fleet-mobile#217,
+martin-janci/support-agent#1): make an agent something a person **configures**
+rather than something fleet **compiles**. Its triggers, the MCP servers it
+reads, its instructions, the shape of its answer and the writes it may
+propose are all set in a form. Several instances of one agent run in parallel,
+each with its own variables and its own **stores**.
+
+## The problem
+
+The runtime from the previous spec (rules, jobs, actions, the locked-down
+`claude -p`, the Inbox) is generic. The two agents on it are not:
+
+- **The trigger is code.** The reviewer polls `gh pr list`. The support agent
+  polls Jira for phrases and assignments, plus an optional Graylog scan. A
+  third kind of agent means a new poller in Rust.
+- **The answer is code.** `review/output.rs` and `support/output.rs` each
+  validate one JSON schema.
+- **The writes are code.** `post_review`, `jira_comment`,
+  `jira_create_bug`, `kb_learn`, … each have their own payload, plan function
+  and executor branch.
+- **Stores are host-global.** A rule names MCP servers by install name, and
+  `support/mod.rs` reads them from the host's `~/.claude.json`. Each name exists
+  once per host, with one set of secrets. So two support rules on one host
+  cannot read two Graylogs (prod and staging, or two customers' clusters), two
+  knowledge bases, or two tenant registries. Fleet's own state is fixed tables
+  (`review_prs`, `support_fingerprints`, `review_test_exemptions`), each owned
+  by one agent.
+- **Configuration is raw JSON.** `fleet-hub agents grant … --config '{…}'`,
+  checked only by `SupportConfig::parse`. There is no form, so neither the
+  phone nor a chat agent can set one up.
+
+What the owner wants is to describe a new agent (an incident triager, a
+release-notes writer, a dependency watcher, an L2 agent for a second
+product) as data: pick its sources and stores in a form, and run several
+instances side by side.
+
+## What it does
+
+- A **definition** (`kind: fleet_agent` in the asset catalog) declares an
+  agent:
+  - its **inputs**: typed variables, rendered as a fleet form;
+  - its **store roles**: what kind of data source it needs, e.g. `logs`,
+    `kb`, `tenants`, `state`;
+  - its **trigger**: one of a fixed set of sources, configured by inputs;
+  - the run: skill, read-only tools, the MCP servers from its store bindings,
+    the answer's JSON schema;
+  - its **actions**: what the answer may turn into, each with a condition, a
+    template, an allow-list, and whether `act` runs it alone.
+- An **instance** is a rule: one definition, the inputs' values, **store
+  bindings** (role → a concrete store), a host, optionally a project, and a
+  level. Two instances of one definition with different bindings run in
+  parallel and share nothing but the definition.
+- A **store** is either:
+  - an **MCP store**: a catalog `mcp_server` with per-binding environment.
+    Fleet renders it for each run with the binding's secrets and sends it on
+    stdin. It is never installed into `~/.claude.json`, so a host can hold any
+    number of them.
+  - a **fleet store**: a namespaced record table in the hub's SQLite, private
+    to one instance or shared by name between instances.
+- **The model proposes, fleet acts** stays the rule. The run gets read-only
+  tools and the *read* tools of its MCP stores. A write is always an action
+  that fleet carries out:
+  - a built-in write (a tracker comment, an issue, a link, a PR review);
+  - `mcp_call`: one named write tool on one bound store, with arguments the
+    model proposed and the definition's allow-list and schema checked;
+  - `record`: a fleet-store write.
+- The reviewer and the support agent stay as they are. Each can later be
+  restated as a definition (*Migration*). The generic runtime does not need
+  them to move.
+
+## A. Definitions
+
+A definition is a catalog asset, so it is versioned in git, synced, scoped
+(private or shared, S1b), edited in the Assets tab, and imported like a skill.
+Directory `fleet-agents/<name>/`, with `asset.yaml` and `skill.md` as the body,
+so the instructions live next to the definition. The kind is `fleet_agent`, not
+`agent`: `agent` is already the catalog's Claude Code subagent.
+
+```yaml
+kind: fleet_agent
+name: l2-support
+description: L2 investigation of support tickets
+version: "1"
+inputs:
+  - { name: jira_tracker, type: tracker, label: Jira, required: true }
+  - { name: project, type: text, label: Jira project key, required: true }
+  - { name: phrases, type: text, label: Trigger phrases, value: "Tech help!, /analyze" }
+  - { name: bug_project, type: text, label: Bug project }
+stores:
+  - { role: logs, kind: mcp, label: Logs, required: true, read_tools: [search_logs] }
+  - { role: tenants, kind: mcp, label: Tenant registry, read_tools: [resolve_tenant, lookup_client] }
+  - { role: kb, kind: mcp, label: Knowledge base,
+      read_tools: [search_known_errors, search_docs], write_tools: [add_known_error] }
+  - { role: memory, kind: fleet, label: Fingerprints, shared_by_default: false }
+trigger:
+  source: tracker_comments          # see B
+  tracker: "{{jira_tracker}}"
+  query: 'project = "{{project}}"'
+  match: { any_phrase: "{{phrases}}", not_from_bot: true }
+run:
+  workspace: project                # project | home
+  tools: [Read, Grep, Glob]
+  max_turns: 40
+  timeout_secs: 900
+  output_schema:                    # JSON Schema subset, see C
+    type: object
+    required: [rootCause, confidence, severity]
+    properties:
+      rootCause: { type: string }
+      confidence: { enum: [high, medium, low] }
+      severity: { enum: [critical, major, minor] }
+      exceptionClass: { type: string }
+      needsMoreInfo: { type: string }
+actions:
+  - id: ask
+    when: { field: needsMoreInfo, truthy: true }
+    do: tracker_comment
+    target: "{{subject.key}}"
+    body: "❓ {{answer.needsMoreInfo}}"
+    auto: true
+    stop: true                      # no further actions after this one
+  - id: comment
+    do: tracker_comment
+    target: "{{subject.key}}"
+    body_template: investigation    # a named template in skill.md's front matter
+    auto: true
+  - id: learn
+    when: { all: [ { field: confidence, eq: high }, { field: exceptionClass, truthy: true } ] }
+    do: mcp_call
+    store: kb
+    tool: add_known_error
+    arguments: { exception: "{{answer.exceptionClass}}", rootCause: "{{answer.rootCause}}" }
+  - id: remember
+    when: { field: exceptionClass, truthy: true }
+    do: record
+    store: memory
+    key: "{{answer.exceptionClass}}"
+    value: { ticket: "{{subject.key}}", seen: "{{now}}" }
+    auto: true
+limits:
+  max_body_chars: 5000
+  write_projects: ["{{project}}", "{{bug_project}}"]
+```
+
+**Validation** (`fleet_agents/definition.rs`, PURE). The pages' style reports
+every problem with where it is (`actions › learn: tool add_known_error is not a
+write_tool of store kb`):
+
+- Inputs are form fields (`docs/forms.md` → *Fields*) plus three
+  fleet-reference types:
+  - `tracker`: a configured tracker, rendered as a `select` of the
+    trackers;
+  - `project`: a project;
+  - `host`: a host.
+
+  `secret` is refused: secrets belong to store bindings, never to inputs.
+- Templates use one syntax, `{{path}}`, over four roots: `inputs.*`,
+  `subject.*`, `answer.*` and `now`. A path is checked against what exists:
+  inputs by name, `answer.*` against `output_schema`, `subject.*` against
+  the trigger source's subject shape. Templates have no expressions, loops or
+  filters.
+- Conditions are the form conditions (`field` / `eq` / `in` / `truthy` /
+  `all` / `any` / `not`) over the answer's fields. No other language.
+- Every `mcp_call` names a `store` role of `kind: mcp` and a tool in that
+  role's `write_tools`. Every read the run may make is in `read_tools`; both
+  lists are explicit, never `*`.
+- Limits: at most 30 inputs, 8 stores, 12 actions, 64 KiB of YAML;
+  `max_turns` and `timeout_secs` stay within the vehicle's bounds.
+
+## B. Triggers
+
+Trigger sources are a **fixed set in Rust**. A definition picks one and
+configures it; it never supplies code.
+
+| `source` | polls | subject | job key |
+|---|---|---|---|
+| `tracker_comments` | issues updated since the cursor, through `TrackerProvider::issue_threads` | `{key, summary, description, status, assignee, url}` + the comment | `<tracker>:<KEY>#c<id>` |
+| `tracker_assigned` | the same, assignee = `match.assignee` | issue | `<tracker>:<KEY>#assigned` |
+| `tracker_query` | a query's results that are new since the cursor | issue | `<tracker>:<KEY>` |
+| `github_prs` | open PRs, new heads (the reviewer's `plan.rs` gating) | `{repo, number, title, head_sha, …}` | `gh:o/r#N@sha` |
+| `github_comments` | issue/PR comments matching `match` | comment + PR | `gh:o/r#N@c<id>` |
+| `mcp_scan` | a read tool of a bound MCP store, every `every_mins` (the support scanner, generalised) | one entry of the answer, keyed by `key_template` | `scan:<hash of key>` |
+| `schedule` | a cron expression (routines' parser) | `{at}` | `cron:<rule>:<slot>` |
+| `manual` | nothing: a person or a chat agent starts it with inputs | the inputs | `manual:<uuid>` |
+
+`issue_threads` is Jira-only today. `tracker_*` on GitHub, Linear or Asana
+needs that method on their providers first. Each provider is a small step, and
+a definition naming a provider without it is refused at grant time.
+
+The **loop guard** is generic: a comment the instance's own writes made
+(fleet records the remote id of every write it sends) or a comment carrying
+the instance's marker never triggers. This replaces the support agent's
+`marker` and `bot_account_id` checks.
+
+## C. The run and its answer
+
+The run vehicle is the current one (`service/agents/vehicle.rs`), unchanged:
+`claude -p --output-format json`, `--tools` from `run.tools` (read-only only:
+the validator refuses `Bash`, `Edit`, `Write` and every tool in
+`NEVER_TOOLS`), and the MCP config and system prompt on stdin. Only the MCP
+config is assembled differently (*D. Stores*). `--allowedTools` lists
+`mcp__<binding>__<tool>` for exactly the bound stores' `read_tools`.
+
+The prompt is the skill (`skill.md`) as the system prompt, plus a user message
+the runtime builds:
+
+- the subject as JSON, labelled as data and never as instructions (as both
+  agents do now);
+- the inputs' values;
+- what the bound stores are (role, label, tools);
+- the output schema, with "answer with ONLY a JSON object matching it".
+
+**The answer** is read in the three tiers both agents use (whole text,
+```` ```json ```` fence, the object ending at the last `}`) and validated
+against `output_schema`. The schema is a subset: `object` / `string` /
+`number` / `integer` / `boolean` / `array` / `enum` / `required` /
+`maxLength`. An answer that does not validate fails its job (Permanent), as
+today. The validated answer is the job's `result`.
+
+## D. Stores
+
+### Store bindings
+
+A rule binds each role of its definition to a store. A role is either an
+`mcp` store or a `fleet` store.
+
+**MCP store binding.** The binding names:
+- a catalog `mcp_server` asset;
+- a binding name, unique per rule, e.g. `logs-prod`;
+- env overrides that map the server's `${NAME}` placeholders to secret names.
+
+```json
+{ "role": "logs", "server": "graylog", "name": "logs-prod",
+  "env": { "GRAYLOG_BASE_URL": "${GRAYLOG_PROD_URL}", "GRAYLOG_API_TOKEN": "${GRAYLOG_PROD_TOKEN}" } }
+```
+
+For each run the hub renders the binding:
+1. It takes the asset's command, args and env.
+2. It applies the overrides.
+3. It substitutes the secrets with the catalog's own resolver
+   (`catalog/sync/secrets.rs::resolve`: host override, then global, then
+   built-ins).
+4. It writes the result into the run's MCP config under the binding's name.
+
+That config goes on stdin into the run's private temp dir, as the support
+agent's does today. The same server asset can therefore be bound any number of
+times, on one host and in parallel: `logs-prod`, `logs-staging`,
+`logs-customer-b`. Nothing is installed in the host's `~/.claude.json`, so
+nothing there drifts, and a revoked rule leaves nothing behind.
+
+The command must exist on the host. The asset says how it is installed (today
+`node ${SUPPORT_AGENT_DIR}/dist/…`). A grant checks the binding:
+1. render it;
+2. run `initialize` and `tools/list` over stdio, with the scanner's call
+   script, `support/scan.rs::call_script`;
+3. confirm the role's `read_tools` and `write_tools` are all listed.
+
+A store that is not there fails the grant with the reason, not the first job.
+
+**Fleet store binding.** The binding names:
+- a namespace: by default `rule:<id>`, private to the rule;
+- or a shared name such as `l2-fingerprints`. Two instances binding the same
+  shared name read and write the same records, e.g. two support rules sharing
+  one fingerprint memory.
+
+```json
+{ "role": "memory", "namespace": "shared:l2-fingerprints" }
+```
+
+### The fleet store
+
+There is one new table, `agent_records`, with:
+- the key `(namespace, kind, key)`;
+- `value` (JSON, ≤ 64 KiB);
+- `created_at`, `updated_at`;
+- `expires_at`, optional;
+- `written_by_job`.
+
+The run reads it two ways:
+- **Before the run**, the definition's `run.context` can name lookups whose
+  results go into the prompt, e.g.
+  `{ store: memory, key: "{{subject.key}}" }` or
+  `{ store: memory, recent: 20 }`.
+- **During the run**, a built-in MCP server `fleet-records`, read-only, is
+  scoped to the rule's fleet bindings. It offers `get` and `search` over its
+  namespaces only, and the hub serves it through its existing control API with
+  a run-scoped token.
+
+Writes are `record` actions only. A namespace a rule does not bind is
+invisible to it.
+
+The reviewer's and support agent's tables stay. If they move (*Migration*),
+`support_fingerprints` becomes a `memory` namespace.
+
+**Paralelism and isolation.** Instances share nothing but what they bind:
+- Jobs are keyed per rule.
+- Cursors are per rule.
+- MCP bindings are rendered per run with their own secrets.
+- Fleet namespaces are private unless explicitly shared.
+
+The existing runtime keeps one running job per subject and global concurrency
+(`agents.max_concurrent`). A definition may lower the concurrency for its own
+instances with `run.max_parallel`.
+
+## E. Actions
+
+An action turns the validated answer into one `agent_actions` row, queued the
+way the reviewer's and the support agent's are: kept at `watch`, waiting for a
+person at `propose`, run at `act` when `auto` is true.
+
+| `do` | payload | executor |
+|---|---|---|
+| `tracker_comment` | `{tracker, key, body}` (ADF / wiki rendered as now) | `WriteOp::RichComment` |
+| `tracker_issue` | `{tracker, project, type, summary, body, labels, link?}` | `WriteOp::CreateIssue` (+ `LinkIssues`) |
+| `tracker_link` | `{tracker, from, to, type}` | `WriteOp::LinkIssues` |
+| `pr_review` | the reviewer's `ReviewRequest` | the reviewer's executor |
+| `pr_comment`, `pr_labels` | as the reviewer's | gh |
+| `mcp_call` | `{binding, tool, arguments}` | calls the tool over stdio on the host with the binding rendered, as the scanner does |
+| `record` | `{namespace, key, value, expires_at?}` | `agent_records` upsert |
+
+**Guardrails**, checked by the executor at send time (not only at plan
+time):
+- the rule still exists and is above `watch`;
+- the target is inside `limits` (`write_projects`, repos, …);
+- the text is within `max_body_chars`;
+- for `mcp_call`:
+  - the tool is in the bound role's `write_tools`;
+  - the arguments validate against that tool's `inputSchema`, as `tools/list`
+    returned it at grant time and stored with the rule;
+  - the arguments are within 16 KiB.
+- An `mcp_call` never runs at `act` unless the action says `auto: true` **and**
+  the definition's store role marks the tool `auto_ok: true`. A person must
+  have said, in the definition, that this write is safe to run unattended.
+
+The **body** of every action, the text a person sees under Show before
+approving, is what will be sent:
+- the rendered template;
+- for `mcp_call`, the tool name and its arguments as JSON.
+
+**Templates for bodies.** A named template is a front-matter block of
+`skill.md` with `{{…}}` paths and the same shortening rules the support
+comment uses, so a template fits `max_body_chars` by dropping its longest
+optional sections first.
+
+## F. Configuring an instance
+
+**Forms.** A definition's `inputs` and `stores` render as a fleet form
+(`docs/forms.md`, `fleet.form/1`), generated by
+`fleet_agents/form.rs::grant_form(definition)`:
+- Step 1, *What*: the inputs.
+- Step 2, *Where*: host and project.
+- Step 3, *Stores*: each role is a `select` of compatible servers or
+  namespaces. A new MCP binding's secrets are `secret` fields: their values go
+  to the hub's secret store under the names the form shows, never into the
+  rule.
+- Step 4, *How much*: the level, and `expires`.
+
+The same spec renders three ways:
+- **As the Agents tab's *New instance* dialog** (`WizardDialog.svelte`).
+- **On the phone.** fleet-mobile already renders forms.
+- **In a chat.** An agent asked "put the L2 agent on project L2S with the
+  staging Graylog" drafts the form with `ask { draft }` and fills what it can
+  (`drafted`). The person sends it, and the answer becomes the grant.
+
+An agent never grants anything itself (*G*).
+
+**The Agents tab** lists definitions with their instances under them. Each
+instance shows its bindings, its level, its newest jobs and its waiting
+actions (the current rows, generalised). *Edit* reopens the form with the
+instance's values. *Pause* and *Revoke* are as today.
+
+**fleet-hub** gains `agents define` (validate a definition file) and
+`agents grant <definition> --values <file.json>`. The latter is the form's
+answer as a file, for scripts.
+
+## G. Security
+
+The configurable part is exactly where an agent could be talked into
+something, so:
+
+1. **Only a person grants.** A rule is created only from a form answered by a
+   person with the owner's device or the master token, as `agents` is today
+   (`ToolPolicy::PersonDevice`). A definition is catalog data and grants
+   nothing by existing.
+2. **No write tool in the run.** `run.tools` refuses everything but
+   read-only tools. `--allowedTools` names only the bound stores'
+   `read_tools`, and a `write_tools` entry is never offered to the model. The
+   model can only *propose* a write by putting it in its answer, where an
+   action template picks it up.
+3. **Every write is checked when sent**, against the rule as it is then.
+4. **Secrets** live in the hub's secret store and are rendered into a run's
+   stdin. They never go into a rule, a form answer, a job's result or a log.
+   A binding's env override can only reference secret names, never literal
+   values.
+5. **Definitions from a shared catalog** can be granted only if the catalog
+   is the person's own or their org's (S1b scope). An imported definition
+   shows its `write_tools` and `auto` actions in the grant form, in red.
+6. **Data stays data.** The subject, store answers and fleet records reach the
+   model inside JSON blocks labelled as data, as now.
+
+## Migration
+
+The built-in agents do not move in v1. Later, each one is restated as a
+definition and deleted from Rust, step by step:
+
+- **The support agent's read side** fits the definition above almost
+  directly. Its trigger is `tracker_comments` + `tracker_assigned`. Its stores
+  are `logs`, `tenants` and `kb` (MCP) plus `memory` (fleet, for
+  fingerprints). The fingerprint and similarity steps stay in Rust as a
+  built-in `fingerprint` helper a definition can call from `run.context`:
+  hashing is not the model's job.
+- **The reviewer** keeps its Rust-only parts as built-in helpers:
+  - diff filtering and line placement;
+  - verification of posted reviews;
+  - the debate.
+
+  A definition with `source: github_prs` and `do: pr_review` covers the rest.
+
+That is follow-up work and gets its own decision once the generic runtime has
+run real instances.
+
+## Steps
+
+1. **Definitions**: the `fleet_agent` catalog kind (load, render nothing on
+   hosts, lint in the Assets tab), the PURE validator, and templates and
+   conditions with their tests. `fleet-hub agents define`.
+2. **Store bindings**: rendering an MCP binding per run (asset + env
+   overrides + secrets), the grant-time `tools/list` check, migration
+   `agent_records` and the `fleet-records` read server. Rules gain `definition`
+   and `bindings`, and `agents grant` takes them.
+3. **Generic runner**: trigger sources `tracker_comments`, `tracker_assigned`,
+   `mcp_scan`, `schedule`, `manual`; prompt assembly; answer validation
+   against `output_schema`.
+4. **Actions**: `tracker_*`, `record` and `mcp_call` with their guardrails;
+   the generic loop guard.
+5. **Forms and UI**: `grant_form`, *New instance* / *Edit* in Automation ›
+   Agents, the phone's Inbox and instance list, the chat draft path.
+6. **Later**:
+   - `github_*` sources and `pr_*` actions for generic agents;
+   - `tracker_*` on GitHub, Linear and Asana;
+   - restating the built-in agents as definitions (*Migration*);
+   - a definition gallery.
+
+## Not in scope
+
+- Code in a definition: no scripts, no expressions beyond the form
+  conditions, no custom triggers.
+- Write tools offered to the model.
+- Webhooks: polling stays (D13).
+- Outbound Slack/Teams: it stays the owner's decision from the previous spec.
+  A Slack MCP store with a `write_tools` entry would technically make it an
+  `mcp_call` action, which is one more reason for guardrail 5.
+
+## Open questions
+
+1. **Where a store's server runs.**
+   - v1: on the rule's host, as every run does now.
+   - A store reachable only from another host (a Graylog inside one customer's
+     network) would need the run, or just that store, on that host.
+   - Should a binding name its own host, the call relayed through the hub?
+2. **Secret naming.** Should per-binding secrets be generated names
+   (`AGENT_<RULE>_<ROLE>_<VAR>`), so the form needs no naming, or names the
+   person picks so they can be reused across instances?
+3. **Shared fleet namespaces across orgs.**
+   - v1: a shared namespace is per hub.
+   - Should it be per org, so one org's instances cannot read another's
+     records?
+4. **Cost.** Each instance has its own spend. Should a definition carry a
+   default budget (`run.max_cost_usd`) that an instance may lower but not
+   raise?
