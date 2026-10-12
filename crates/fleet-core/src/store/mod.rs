@@ -45,6 +45,7 @@ mod orgs;
 mod participants;
 mod peer_links;
 mod people;
+mod pinned_dashboards;
 mod pr_shepherd;
 mod project_picks;
 mod projects;
@@ -186,6 +187,7 @@ pub use people::{
     machine_token_kind, validate_person_name, PersonProfile, PersonRow, MAX_PERSON_NAME_LEN,
     PERSONAL_OWNER_NAME,
 };
+pub use pinned_dashboards::{PinnedDashboardRow, PinnedDashboardWrite};
 pub use pr_shepherd::{
     ShepherdEpisodeRow, ShepherdMergeRow, ShepherdRuleRow, SHEPHERD_LEVELS,
     SHEPHERD_RECIPES_MAX_CHARS,

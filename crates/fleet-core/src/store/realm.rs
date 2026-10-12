@@ -1,10 +1,10 @@
-//! The realm model (identity sub-project 1, migration 179): clients, roles
+//! The realm model (identity sub-project 1, migration 180): clients, roles
 //! (realm and per-client, with composites), a group tree, group membership,
 //! and role mappings to people and groups. Groups and mappings are the
 //! source of truth; `org_members` is a projection of them (Task 5).
 //!
 //! Every write here moves the `auth_epoch` through the table triggers of
-//! migration 179, so a cached caller re-resolves.
+//! migration 180, so a cached caller re-resolves.
 //!
 //! Two layers: the public methods open their own transaction; the `_in_tx`
 //! helpers take the caller's `&Connection` and never open one, so the org
@@ -127,7 +127,7 @@ pub(crate) fn realm_role_holders(conn: &Connection, name: &str) -> rusqlite::Res
 }
 
 /// The id of the seeded realm role `name` (`fleet-trusted`, `assets-admin`,
-/// …). `E_INTERNAL` when it is missing: migration 179 seeds them all.
+/// …). `E_INTERNAL` when it is missing: migration 180 seeds them all.
 pub(crate) fn realm_role_id_in_tx(conn: &Connection, name: &str) -> Result<i64, IpcError> {
     conn.query_row(
         "SELECT id FROM roles WHERE client_id IS NULL AND name = ?1",
@@ -1219,11 +1219,11 @@ impl Store {
     /// Make sure org `org_id` has its groups: `/orgs`, the root
     /// `/orgs/<org_name>` (managed, `org_id` set) and the three managed
     /// subgroups mapped to their org roles. Idempotent, and agrees with what
-    /// migration 179 seeded. Returns the root group's id.
+    /// migration 180 seeded. Returns the root group's id.
     ///
     /// The root is written by hand rather than through `create_group_in_tx`:
     /// its name is the org's, already validated by the org (which allows a
-    /// few characters a group name does not), exactly as migration 179 does.
+    /// few characters a group name does not), exactly as migration 180 does.
     pub(crate) fn ensure_org_groups_in_tx(
         &self,
         conn: &Connection,

@@ -1028,6 +1028,9 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "wizard_state",
         },
     ),
+    // Pinned dashboards (persona design step 6) are kept on the hub, so
+    // every device of the person shows them.
+    ("dashboards", Verdict::Routed { tool: "dashboards" }),
     (
         "session_presence",
         Verdict::Routed {

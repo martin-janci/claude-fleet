@@ -664,6 +664,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Pinned dashboards (persona design step 6): a person's, on the hub so
+    // every device of theirs shows them. The agent reads; a person pins.
+    ToolPolicy {
+        name: "dashboards",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // Presence (redesign 11.7b): reports into the hub's in-memory board and
     // reads it back; touches no row. A person's tool, not a host token's.
     // Search phase 3: one query over the full-text index. Every hit is
@@ -1817,6 +1826,7 @@ pub const NOT_FOR_HOST_TOKENS: &[&str] = &[
     "routines",
     "start_rules",
     "wizard_state",
+    "dashboards",
     "propose_host_placement",
     "session_share",
     "session_unshare",

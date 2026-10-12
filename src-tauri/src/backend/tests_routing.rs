@@ -1107,6 +1107,23 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "dashboards",
+            "dashboards",
+            json!({ "action": "list" }),
+            r#"[{"id":"dash.r42","title":"R","spec":{},"pinned_at":1,"updated_at":2}]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::dashboards::routed::dashboards(
+                    b,
+                    s,
+                    fleet_core::service::dashboards::DashboardsArgs {
+                        action: "list".into(),
+                        ..Default::default()
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "control_handoffs",
             "control_handoffs",
             json!({ "limit": 5 }),
@@ -7398,6 +7415,10 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../commands/wizard_state.rs"),
     ),
     (
+        "commands/dashboards.rs",
+        include_str!("../commands/dashboards.rs"),
+    ),
+    (
         "commands/api_tokens.rs",
         include_str!("../commands/api_tokens.rs"),
     ),
@@ -8542,4 +8563,53 @@ fn update_routes_are_the_only_contract_exemption() {
             assert_eq!(err.code, codes::E_INTERNAL, "{path}: {err:?}");
         }
     }
+}
+
+/// Persona dashboards step 6: a hub that does not serve `dashboards` yet
+/// answers unknown tool, and the desktop keeps the pin in its own store,
+/// as it did before they moved to the hub.
+#[test]
+fn a_hub_without_dashboards_keeps_them_on_this_desktop() {
+    let unknown_tool = || {
+        Arc::new(Fake {
+            body: format!(
+                "event: message\ndata: {}\n\n",
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": { "code": -32602, "message": "tool not found" },
+                })
+            ),
+            seen: Mutex::new(Vec::new()),
+        })
+    };
+    let (_dir, st) = store();
+    let fake = unknown_tool();
+    let pin = fleet_core::service::dashboards::DashboardsArgs {
+        action: "pin".into(),
+        dashboard: Some(json!({
+            "spec": "fleet.ui/1", "kind": "dashboard", "id": "dash.r42", "title": "R",
+            "widgets": [ { "kind": "stat", "title": "Open", "value": "open" } ]
+        })),
+        ..Default::default()
+    };
+    let got = block_on(commands::dashboards::routed::dashboards(
+        &remote_backend(&fake),
+        &st,
+        pin,
+    ))
+    .expect("kept here, not an error");
+    assert_eq!(got["id"], "dash.r42");
+    assert_eq!(fake.only_call().0, "dashboards");
+    let fake = unknown_tool();
+    let listed = block_on(commands::dashboards::routed::dashboards(
+        &remote_backend(&fake),
+        &st,
+        fleet_core::service::dashboards::DashboardsArgs {
+            action: "list".into(),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    assert_eq!(listed.as_array().map(Vec::len), Some(1));
 }

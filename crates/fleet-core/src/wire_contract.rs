@@ -271,4 +271,8 @@
 //!   as the edit's or the checklist's error. A paired desktop also routes
 //!   `discover_hosts` and `add_host` (the hub owner's trusted full device
 //!   since revision 13, as the phone's Add host does).
+//!   `dashboards` (persona design step 6: a person's pinned dashboards) is
+//!   new at this revision without a bump: a hub without it answers
+//!   `E_HUB_PROTOCOL`, and the desktop keeps the pins in its own store, as
+//!   it did before they moved to the hub.
 pub const CONTRACT_REVISION: u32 = 17;

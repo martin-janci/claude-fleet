@@ -101,7 +101,7 @@ device     pr_shepherd agents mcp_confirms answer_mcp_confirm setting_proposals
            decide_setting_proposals setting_history control_route
            resume_or_new control_handoffs list_pages project_picks
            set_project_pick
-           org_admin update_policy session_claim wizard_state
+           org_admin update_policy session_claim wizard_state dashboards
 ```
 
 ## Status vocabulary
@@ -293,7 +293,9 @@ a stage), `groups` (`query.group_by`; `show`: stages or done) or
 app counts each query itself under the person's access. Check the filters
 with `work { stats }` first. When their message starts with a dashboard
 block they pinned ("My pinned dashboard …"), answer with the changed block
-under the **same** `id`: the card offers it as a replacement.
+under the **same** `id`: the card offers it as a replacement. Before you
+change one, read what is pinned with `dashboards { list }` or
+`dashboards { get, id }`; pinning and unpinning are the person's.
 
 When the person asks in their own words for what a wizard does ("set up a
 new project for acme/pos on mercury"), answer with its `wizard` block and
