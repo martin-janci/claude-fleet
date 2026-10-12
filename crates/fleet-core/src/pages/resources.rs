@@ -1238,7 +1238,7 @@ const PERSON_RESOURCE: ResourceType = ResourceType {
     update: Some(ActionSpec::new("person.update", "Apply", "rename_person", &[("person_id", Bind::Record("id"))])),
     delete: Some(
         ActionSpec::new("person.disable", "Disable", "disable_person", &[("person_id", Bind::Record("id"))])
-            .confirm("Revokes every device of theirs and every share made to them, at once. Their own sessions stay private and theirs. There is no re-enable."),
+            .confirm("Revokes every device of theirs and every share made to them, at once. Their own sessions stay private and theirs. They can be re-enabled later (org_admin enable_person, or fleet-hub person enable), but nothing revoked comes back."),
     ),
     actions: &[],
     create_flow: None,

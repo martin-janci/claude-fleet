@@ -152,6 +152,19 @@ impl Store {
         record_admin_event_in_tx(&self.conn, ev)
     }
 
+    /// Record `ev` after a write that has already committed: a failure is
+    /// logged, never raised, since the change it describes happened.
+    pub fn record_admin_event_or_log(&self, ev: &AdminEvent<'_>) {
+        if let Err(e) = self.record_admin_event(ev) {
+            tracing::error!(
+                error = %e,
+                action = ev.action,
+                resource_type = ev.resource_type,
+                "[admin_events] could not record an admin event"
+            );
+        }
+    }
+
     /// The log, newest first, narrowed by `q`.
     pub fn admin_events(&self, q: &AdminEventQuery) -> Result<Vec<AdminEventRow>, IpcError> {
         let limit = q.limit.clamp(1, ADMIN_EVENTS_MAX_LIMIT) as i64;

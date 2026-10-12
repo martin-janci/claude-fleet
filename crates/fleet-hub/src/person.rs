@@ -204,7 +204,7 @@ fn disabled_person(store: &Store, which: &str) -> Result<PersonRow, String> {
 /// Record an operator's change as an admin event (`store::admin_events`;
 /// the operator on the hub machine has no person or device). The change
 /// has already happened, so a failure is a warning, never an error.
-fn record(
+pub(crate) fn record(
     store: &Store,
     action: &str,
     resource_type: &str,

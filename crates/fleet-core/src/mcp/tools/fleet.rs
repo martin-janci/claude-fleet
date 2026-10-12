@@ -789,7 +789,16 @@ impl FleetTools {
         audit("revoke_client", &format!("name={}", p.name.escape_debug()));
         let row = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
-            s.revoke_client_token(&p.name).map_err(to_mcp_err)?
+            let row = s.revoke_client_token(&p.name).map_err(to_mcp_err)?;
+            s.record_admin_event_or_log(&crate::store::AdminEvent {
+                actor_person: None,
+                actor_device: None,
+                action: "revoke_client",
+                resource_type: "device",
+                resource_id: &row.name,
+                representation: serde_json::json!({ "name": p.name, "by": "master" }),
+            });
+            row
         };
         tracing::info!(client = %row.name, "[mcp] revoked a client token");
         ok_json(&ClientSummary::from(row))
@@ -810,7 +819,20 @@ impl FleetTools {
         );
         let row = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
-            s.set_client_trust(&p.name, p.trusted).map_err(to_mcp_err)?
+            let row = s.set_client_trust(&p.name, p.trusted).map_err(to_mcp_err)?;
+            s.record_admin_event_or_log(&crate::store::AdminEvent {
+                actor_person: None,
+                actor_device: None,
+                action: "set_client_trust",
+                resource_type: "device",
+                resource_id: &row.name,
+                representation: serde_json::json!({
+                    "name": p.name,
+                    "trusted": p.trusted,
+                    "by": "master",
+                }),
+            });
+            row
         };
         tracing::info!(
             client = %row.name,
@@ -1141,7 +1163,32 @@ impl FleetTools {
             authority,
         };
         if action == Action::PairDevice {
-            return ok_json(&self.pair_device(args, authority)?);
+            let rep = serde_json::to_value(&args).unwrap_or_default();
+            let device = args.device.clone().or(args.name.clone()).unwrap_or_default();
+            let out = self.pair_device(args, authority)?;
+            // The code lives in memory until it is redeemed; minting it is
+            // still an administrative act, recorded with who minted it (the
+            // redemption records the device row's own events).
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            let actor_device = match me.device {
+                Some(d) => s
+                    .active_client_tokens()
+                    .map_err(to_mcp_err)?
+                    .into_iter()
+                    .find(|c| c.name == d)
+                    .map(|c| c.id),
+                None => None,
+            };
+            s.record_admin_event_or_log(&crate::store::AdminEvent {
+                actor_person: me.person,
+                actor_device,
+                action: "pair_device",
+                resource_type: "device",
+                resource_id: device.trim(),
+                representation: rep,
+            });
+            drop(s);
+            return ok_json(&out);
         }
         let out = oa::run(&args, &self.store, me).map_err(to_mcp_err)?;
         ok_json_compact(&out)

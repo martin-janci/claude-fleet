@@ -580,6 +580,13 @@ pub fn client_grant(
             let row = store
                 .set_client_assets_admin(name, on)
                 .map_err(|e| e.message)?;
+            crate::person::record(
+                &store,
+                "grant_catalog",
+                "device",
+                &row.name,
+                serde_json::json!({ "device": row.name, "catalog": "personal", "on": on }),
+            );
             out::line(&if on {
                 format!(
                     "{} may manage the asset catalog (since {}): editing assets, Sync and Secrets \
@@ -603,6 +610,13 @@ pub fn client_grant(
             let row = store
                 .set_client_catalog_grant(name, id, on)
                 .map_err(|e| e.message)?;
+            crate::person::record(
+                &store,
+                "grant_catalog",
+                "device",
+                &row.name,
+                serde_json::json!({ "device": row.name, "catalog": cat, "on": on }),
+            );
             out::line(&if on {
                 format!("{} may manage catalog {cat} from its next call", row.name)
             } else {
@@ -668,7 +682,17 @@ pub fn client_bind_person(
             let p = fleet_core::store::validate_person_name(p).map_err(|e| e.message)?;
             Some(match store.get_person_by_name(&p).map_err(|e| e.message)? {
                 Some(existing) => existing,
-                None => store.create_person(&p, None).map_err(|e| e.message)?,
+                None => {
+                    let created = store.create_person(&p, None).map_err(|e| e.message)?;
+                    crate::person::record(
+                        &store,
+                        "provision",
+                        "person",
+                        &created.id.to_string(),
+                        serde_json::json!({ "name": created.name, "via": "bind-person" }),
+                    );
+                    created
+                }
             })
         }
         None => None,
@@ -676,6 +700,13 @@ pub fn client_bind_person(
     let row = store
         .set_client_person(name, target.as_ref().map(|p| p.id))
         .map_err(|e| e.message)?;
+    crate::person::record(
+        &store,
+        "set_device_person",
+        "device",
+        &row.name,
+        serde_json::json!({ "device": row.name, "person_id": row.person_id }),
+    );
     out::line(&match &target {
         Some(p) => format!(
             "{} is {}'s device from its next request: it sees their sessions and the ones \
@@ -1401,6 +1432,75 @@ mod tests {
         )
         .unwrap_err()
         .contains("nope"));
+        // Identity sub-project 1: each change is an admin event with no
+        // actor (the operator on the hub machine); the refused one is none.
+        let ev = crate::serve::open_store(&opts, &env)
+            .unwrap()
+            .admin_events(&fleet_core::store::AdminEventQuery {
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        let on: Vec<(&str, &str, bool)> = ev
+            .iter()
+            .map(|e| {
+                (
+                    e.action.as_str(),
+                    e.resource_id.as_str(),
+                    e.representation["on"].as_bool().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            on,
+            [("grant_catalog", "desk", false), ("grant_catalog", "desk", true)]
+        );
+        assert!(ev.iter().all(|e| e.actor_person.is_none() && e.resource_type == "device"));
+    }
+
+    /// `client bind-person` to a new name records the person it creates and
+    /// the hand-over.
+    #[test]
+    fn bind_person_records_the_provision_and_the_hand_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = opts_for(&dir, None);
+        let env = HashMap::new();
+        {
+            let s = fleet_core::store::Store::open_with_bus(
+                &dir.path().join("state.db"),
+                std::sync::Arc::new(fleet_core::events::NoopEventBus),
+            )
+            .unwrap();
+            s.insert_client_token("desk", "aa11", "full").unwrap();
+        }
+        client_bind_person(&opts, &env, "desk", Some("ada")).unwrap();
+        let s = crate::serve::open_store(&opts, &env).unwrap();
+        let ada = s.get_person_by_name("ada").unwrap().unwrap();
+        let ev = s
+            .admin_events(&fleet_core::store::AdminEventQuery {
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        let got: Vec<(&str, &str, &str)> = ev
+            .iter()
+            .map(|e| {
+                (
+                    e.action.as_str(),
+                    e.resource_type.as_str(),
+                    e.resource_id.as_str(),
+                )
+            })
+            .collect();
+        let ada_id = ada.id.to_string();
+        assert_eq!(
+            got,
+            [
+                ("set_device_person", "device", "desk"),
+                ("provision", "person", ada_id.as_str()),
+            ]
+        );
+        assert_eq!(ev[0].representation["person_id"], ada.id);
     }
 
     /// `--catalog personal` is the default grant: the personal catalog, and

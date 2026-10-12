@@ -613,51 +613,93 @@ pub async fn handle_pair(
         // row behind that nobody holds the token for and that keeps the
         // name taken. The code is spent either way.
         s.atomically(|s| {
-            s.insert_client_token(&req.name, &hash, &req.mode)
-                .and_then(|row| match req.org_id {
-                    // The org binding rides on the code too (work graph M14).
-                    Some(org) => s.set_client_org(&row.name, Some(org)),
-                    None => Ok(row),
+            let row = s.insert_client_token(&req.name, &hash, &req.mode)?;
+            // The org binding rides on the code too (work graph M14).
+            let row = match req.org_id {
+                Some(org) => s.set_client_org(&row.name, Some(org))?,
+                None => row,
+            };
+            // Every write below is an admin event (identity sub-project 1),
+            // in this same transaction. The redeemed device is the actor of
+            // its own pairing; who minted the code is not carried on it (the
+            // `org_admin { pair_device }` event records that).
+            let device_id = row.id;
+            let event = |action: &str, resource_type: &str, resource_id: &str, actor: Option<i64>, rep: serde_json::Value| {
+                s.record_admin_event(&crate::store::AdminEvent {
+                    actor_person: actor,
+                    actor_device: Some(device_id),
+                    action,
+                    resource_type,
+                    resource_id,
+                    representation: rep,
                 })
-                .and_then(|row| match req.person.as_deref() {
-                    // And WHOSE device it is (multi-user M1). The `people` row
-                    // is created HERE, at redemption, not at mint: a code minted
-                    // and never walked to the phone must not leave an orphan
-                    // person behind. An existing live person of that name is
-                    // reused, which is what makes "pair my second phone" and
-                    // "pair a colleague's laptop" the same command.
-                    Some(person) => {
-                        let row_id = match s.get_person_by_name(person)? {
-                            Some(p) => p.id,
-                            None => s.create_person(person, None)?.id,
-                        };
-                        s.set_client_person(&row.name, Some(row_id))
-                    }
-                    // A `peer` link and an `updater` token are nobody's device;
-                    // `pair_client` refuses `person` for both.
-                    None => Ok(row),
-                })
-                // The trust grant rides on the same code the operator minted:
-                // a `--trusted` pairing lands trusted, nothing else does. It
-                // goes last because trust is the PERSON's (`fleet-trusted`,
-                // identity sub-project 1), so the device must be theirs
-                // first; a person-less trusted code fails here and the
-                // whole redemption rolls back.
-                .and_then(|row| {
-                    if req.trusted {
-                        s.set_client_trust(&row.name, true)
-                    } else {
-                        Ok(row)
-                    }
-                })
-                // What the device IS, not what this code granted: a full
-                // device of a person already trusted lands trusted too. Read
-                // inside the transaction, so a failed read rolls the
-                // redemption back rather than leaving a row nobody holds.
-                .and_then(|row| {
-                    let trusted = row.trusted_by(&s.people_with_realm_role(ROLE_FLEET_TRUSTED)?);
-                    Ok((row, trusted))
-                })
+            };
+            // And WHOSE device it is (multi-user M1). The `people` row is
+            // created HERE, at redemption, not at mint: a code minted and
+            // never walked to the phone must not leave an orphan person
+            // behind. An existing live person of that name is reused, which
+            // is what makes "pair my second phone" and "pair a colleague's
+            // laptop" the same command. A `peer` link and an `updater`
+            // token are nobody's device; `pair_client` refuses `person` for
+            // both.
+            let row = match req.person.as_deref() {
+                Some(person) => {
+                    let person_id = match s.get_person_by_name(person)? {
+                        Some(p) => p.id,
+                        None => {
+                            let p = s.create_person(person, None)?;
+                            event(
+                                "provision",
+                                "person",
+                                &p.id.to_string(),
+                                None,
+                                serde_json::json!({ "name": p.name, "via": "pairing" }),
+                            )?;
+                            p.id
+                        }
+                    };
+                    s.set_client_person(&row.name, Some(person_id))?
+                }
+                None => row,
+            };
+            event(
+                "pair",
+                "device",
+                &row.name,
+                row.person_id,
+                serde_json::json!({
+                    "name": row.name,
+                    "mode": row.mode,
+                    "org_id": row.org_id,
+                    "person_id": row.person_id,
+                    "trusted": req.trusted,
+                }),
+            )?;
+            // The trust grant rides on the same code the operator minted:
+            // a `--trusted` pairing lands trusted, nothing else does. It
+            // goes last because trust is the PERSON's (`fleet-trusted`,
+            // identity sub-project 1), so the device must be theirs first;
+            // a person-less trusted code fails here and the whole
+            // redemption rolls back.
+            let row = if req.trusted {
+                let row = s.set_client_trust(&row.name, true)?;
+                event(
+                    "set_client_trust",
+                    "device",
+                    &row.name,
+                    None,
+                    serde_json::json!({ "name": row.name, "trusted": true, "via": "pairing" }),
+                )?;
+                row
+            } else {
+                row
+            };
+            // What the device IS, not what this code granted: a full device
+            // of a person already trusted lands trusted too. Read inside the
+            // transaction, so a failed read rolls the redemption back rather
+            // than leaving a row nobody holds.
+            let trusted = row.trusted_by(&s.people_with_realm_role(ROLE_FLEET_TRUSTED)?);
+            Ok((row, trusted))
         })
     };
     match inserted {

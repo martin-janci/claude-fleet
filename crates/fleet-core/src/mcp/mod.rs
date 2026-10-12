@@ -1460,6 +1460,59 @@ mod tests {
             "the name stays free:\n{retried}"
         );
 
+        // Identity sub-project 1: each redemption's writes are admin events,
+        // in its own transaction — the rolled-back one left none, the
+        // retried one left exactly its `pair`.
+        {
+            let s = store.lock().unwrap();
+            let ev = s
+                .admin_events(&crate::store::AdminEventQuery {
+                    limit: 50,
+                    ..Default::default()
+                })
+                .unwrap();
+            let of = |device: &str| -> Vec<(String, String)> {
+                let mut v: Vec<(String, String)> = ev
+                    .iter()
+                    .filter(|e| e.resource_id == device || e.representation["name"] == device)
+                    .map(|e| (e.action.clone(), e.resource_type.clone()))
+                    .collect();
+                v.sort();
+                v
+            };
+            let pair = ("pair".to_string(), "device".to_string());
+            assert_eq!(of("kiosk"), [pair.clone()]);
+            assert_eq!(
+                of("desk"),
+                [pair.clone(), ("set_client_trust".into(), "device".into())]
+            );
+            assert_eq!(of("orphan"), [pair.clone()], "the failed attempt left none");
+            let ada = s.get_person_by_name("ada").unwrap().unwrap();
+            let laptop = s
+                .active_client_tokens()
+                .unwrap()
+                .into_iter()
+                .find(|r| r.name == "ada-laptop")
+                .unwrap();
+            let provision = ev
+                .iter()
+                .find(|e| e.action == "provision")
+                .expect("the new person is an event");
+            assert_eq!(provision.resource_id, ada.id.to_string());
+            assert_eq!(provision.actor_device, Some(laptop.id));
+            let paired = ev
+                .iter()
+                .find(|e| e.action == "pair" && e.resource_id == "ada-laptop")
+                .unwrap();
+            assert_eq!(paired.actor_person, Some(ada.id), "the device is its own actor");
+            assert_eq!(paired.actor_device, Some(laptop.id));
+            assert!(
+                ev.iter().all(|e| e.representation.get("token").is_none()
+                    && e.representation.get("code").is_none()),
+                "{ev:?}"
+            );
+        }
+
         // A camera scan opens `GET /pair`, which must explain what to do
         // rather than answer 405. No secret is in it: the code lives in the
         // URL fragment, which a browser never sends.

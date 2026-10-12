@@ -3671,6 +3671,56 @@ async fn revoke_client_returns_the_row_it_revoked_and_hides_the_hash() {
     assert!(err.message.starts_with("E_NOTFOUND"), "{}", err.message);
 }
 
+/// Identity sub-project 1: the master's device writes are admin events,
+/// with no actor (the master is nobody) and `by: master`.
+#[tokio::test]
+async fn the_masters_revoke_and_trust_are_admin_events() {
+    let (tools, _guards, store) = client_tools();
+    {
+        let s = store.lock().unwrap();
+        s.insert_client_token("mac-desktop", "aa11", "full")
+            .unwrap();
+        s.set_client_person("mac-desktop", s.personal_owner_id().unwrap())
+            .unwrap();
+    }
+    tools
+        .set_client_trust(Parameters(SetClientTrustParams {
+            name: "mac-desktop".into(),
+            trusted: true,
+        }))
+        .await
+        .expect("trust");
+    tools
+        .revoke_client(Parameters(RevokeClientParams {
+            name: "mac-desktop".into(),
+        }))
+        .await
+        .expect("revoke");
+    tools
+        .revoke_client(Parameters(RevokeClientParams {
+            name: "mac-desktop".into(),
+        }))
+        .await
+        .expect_err("a refused revoke records nothing");
+    let ev = store
+        .lock()
+        .unwrap()
+        .admin_events(&crate::store::AdminEventQuery {
+            limit: 10,
+            ..Default::default()
+        })
+        .unwrap();
+    let actions: Vec<&str> = ev.iter().map(|e| e.action.as_str()).collect();
+    assert_eq!(actions, ["revoke_client", "set_client_trust"]);
+    for e in &ev {
+        assert_eq!(e.resource_type, "device");
+        assert_eq!(e.resource_id, "mac-desktop");
+        assert_eq!((e.actor_person, e.actor_device), (None, None));
+        assert_eq!(e.representation["by"], "master");
+    }
+    assert_eq!(ev[1].representation["trusted"], true);
+}
+
 /// A paired client the operator vouched for delivers its text unmarked —
 /// with or without `raw` — while an ordinary client is marked and refused
 /// `raw`, and a per-host token is refused `raw` as before.
@@ -19591,6 +19641,21 @@ async fn org_admin_refuses_a_device_that_administers_nothing() {
         call(admin, pair).await.is_err(),
         "whose device must be named"
     );
+    // Identity sub-project 1: the one code minted is an admin event, by
+    // jane; the refused mints are none.
+    let ev = store
+        .lock()
+        .unwrap()
+        .admin_events(&crate::store::AdminEventQuery {
+            limit: 10,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(ev.len(), 1, "{ev:?}");
+    assert_eq!(ev[0].action, "pair_device");
+    assert_eq!(ev[0].resource_type, "device");
+    assert_eq!(ev[0].resource_id, "bob-phone");
+    assert_eq!(ev[0].actor_person, Some(jane));
 }
 
 /// Review r04 F1/F2: an org admin invites new people and pairs their first

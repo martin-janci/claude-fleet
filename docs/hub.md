@@ -1478,9 +1478,12 @@ those rows stay theirs and stay private, readable by nobody, and no command
 here moves them; it does not touch the grants *they* made, which belong to each
 session's own owner; it cannot disable this hub's owner, because every access
 gate keys on that row (rename the owner instead, or revoke their devices one at
-a time with `client revoke`); and **there is no re-enable in this release** —
-`person disable` has no inverse, and a device cannot be bound to a disabled
-person, so plan on adding a fresh person if someone comes back. No tool over
+a time with `client revoke`); and it is not undone by **re-enabling** —
+`fleet-hub person enable <name|id>` (or `org_admin { enable_person }`) lets
+someone who comes back sign in and be paired again, but gives back none of
+their devices, shares, groups, org memberships or roles: pair and add them
+again. Re-enabling is refused while a live person holds their name or email
+address. No tool over
 the control API disables anybody either: this is a command on the hub machine,
 run as the person at its console, like `client bind-person` and `session
 claim`. It needs no running hub, and a running one honours it from its next
