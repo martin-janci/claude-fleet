@@ -988,6 +988,14 @@ const TRACKER: ResourceType = ResourceType {
         )
         .merge("settings", &["write_back", "comments"])
         .confirm("Fleet will write to this tracker: a comment a person posts from fleet appears on the ticket under this credential's account."),
+        FieldSpec::new(
+            "create_tickets",
+            "Create tickets",
+            "Let a person promote a task made in fleet to a ticket here: a subtask of a ticket becomes that ticket's subtask, a task goes into the project they pick. Agents never create one. The token needs permission to create issues.",
+            FieldKind::Bool { on_off: false, default: false },
+        )
+        .merge("settings", &["write_back", "create_tickets"])
+        .confirm("Fleet will write to this tracker: each task a person promotes is created as a ticket under this credential's account."),
     ],
     create: None,
     update: Some(ActionSpec::new("tracker.update", "Apply", "update_tracker", &[TRACKER_ID])),

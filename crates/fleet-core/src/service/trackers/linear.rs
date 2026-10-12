@@ -662,6 +662,7 @@ impl TrackerProvider for Linear {
                 .as_str()
                 .filter(|u| u.starts_with(WEB_PREFIX) && u.len() <= 2048)
                 .map(str::to_string),
+            key: None,
         })
     }
 }

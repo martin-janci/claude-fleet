@@ -231,8 +231,8 @@ pub use ticket_keys::{
 pub(crate) use tracker_items::ItemUpsertOutcome;
 pub use tracker_items::{github_covers, tracker_claims, ItemMeta, TrackerItemWrite, UpsertOutcome};
 pub use tracker_writes::{
-    comment_write_url, NewTrackerWrite, TrackerWriteRow, WRITE_MAX_ATTEMPTS, WRITE_OP_COMMENT,
-    WRITE_OP_PR_REMOTE_LINK,
+    comment_write_url, item_write_url, NewTrackerWrite, TrackerWriteRow, WRITE_MAX_ATTEMPTS,
+    WRITE_OP_COMMENT, WRITE_OP_CREATE_ITEM, WRITE_OP_PR_REMOTE_LINK,
 };
 pub use trackers::{
     ghes_host_ok, ghes_host_part, github_site, is_allowed_tracker_host, normalize_dc_site,

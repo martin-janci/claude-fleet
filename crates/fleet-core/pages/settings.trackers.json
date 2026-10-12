@@ -143,6 +143,18 @@
         {
           "type": "field",
           "key": "post_comments"
+        },
+        {
+          "type": "field",
+          "key": "create_tickets",
+          "when": {
+            "key": "provider",
+            "in": [
+              "jira",
+              "jira_dc",
+              "asana"
+            ]
+          }
         }
       ]
     },

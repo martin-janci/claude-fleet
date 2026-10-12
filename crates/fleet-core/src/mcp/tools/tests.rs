@@ -12035,6 +12035,9 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     ("work_link", "set_parent", &["Drive"]),
     // A comment is written into the owner's task: `edit`'s gate.
     ("work_link", "comment", &["Drive"]),
+    // Promoting a task makes the owner's task a tracker's ticket: `edit`'s
+    // gate, with no agent exception.
+    ("work_link", "promote", &["Drive"]),
     // So is an attachment: `edit`'s gate, as a comment.
     ("work_link", "attach", &["Drive"]),
     // Sprint and release membership: `set_status`'s person gate, on the
