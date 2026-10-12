@@ -20,6 +20,7 @@ fn discovery() -> serde_json::Value {
         "issuer": ISS,
         "authorization_endpoint": format!("{ISS}/protocol/openid-connect/auth"),
         "token_endpoint": format!("{ISS}/protocol/openid-connect/token"),
+        "jwks_uri": format!("{ISS}/protocol/openid-connect/certs"),
     })
 }
 
@@ -30,17 +31,24 @@ fn fake_with_discovery() -> FakeTransport {
         "/.well-known/openid-configuration",
         Ok(HttpResponse::json(200, &discovery())),
     );
+    fake.always(
+        Method::Get,
+        "/protocol/openid-connect/certs",
+        Ok(HttpResponse::json(200, &jwks_doc())),
+    );
     fake
 }
 
+thread_local! {
+    static SIGNER: super::jwks::tests::EsSigner = super::jwks::tests::EsSigner::new("k1");
+}
+
 fn jwt(claims: &serde_json::Value) -> String {
-    let b = |v: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v);
-    format!(
-        "{}.{}.{}",
-        b(br#"{"alg":"RS256","typ":"JWT"}"#),
-        b(claims.to_string().as_bytes()),
-        b(b"sig")
-    )
+    SIGNER.with(|s| s.sign(claims))
+}
+
+fn jwks_doc() -> serde_json::Value {
+    SIGNER.with(|s| serde_json::json!({ "keys": [s.jwk()] }))
 }
 
 fn query_param(url: &str, key: &str) -> String {
@@ -268,7 +276,11 @@ async fn discovery_must_name_this_issuer_and_stay_on_its_host() {
     wrong_issuer["issuer"] = "https://sso.example.com/realms/other".into();
     let mut foreign_token = discovery();
     foreign_token["token_endpoint"] = "https://collector.example.net/token".into();
-    for doc in [wrong_issuer, foreign_token] {
+    let mut foreign_jwks = discovery();
+    foreign_jwks["jwks_uri"] = "https://evil.example.com/certs".into();
+    let mut no_jwks = discovery();
+    no_jwks.as_object_mut().unwrap().remove("jwks_uri");
+    for doc in [wrong_issuer, foreign_token, foreign_jwks, no_jwks] {
         let fake = FakeTransport::new();
         fake.always(
             Method::Get,
@@ -279,6 +291,55 @@ async fn discovery_must_name_this_issuer_and_stay_on_its_host() {
         let err = oidc.begin(&redirect, None).await.unwrap_err();
         assert!(matches!(err, Refusal::Provider(_)), "{err:?}");
     }
+}
+
+#[tokio::test]
+async fn an_id_token_signed_by_another_key_is_refused() {
+    let fake = fake_with_discovery();
+    let oidc = OidcProvider::with_transport(config(), Arc::new(fake.clone()));
+    let redirect = format!("{HUB}/auth/oidc/callback");
+    let (url, state) = oidc.begin(&redirect, None).await.unwrap();
+    let forger = super::jwks::tests::EsSigner::new("k1");
+    let id = forger.sign(&id_claims(&query_param(&url, "nonce")));
+    fake.once(
+        Method::Post,
+        "/protocol/openid-connect/token",
+        Ok(HttpResponse::json(
+            200,
+            &serde_json::json!({"id_token": id, "access_token": jwt(&serde_json::json!({})), "token_type": "Bearer"}),
+        )),
+    );
+    let err = oidc.finish(&redirect, "c", &state).await.unwrap_err();
+    assert!(matches!(err, Refusal::Invalid(_)), "{err:?}");
+}
+
+#[tokio::test]
+async fn an_unknown_kid_refetches_the_jwks_once() {
+    let fake = fake_with_discovery();
+    let oidc = OidcProvider::with_transport(config(), Arc::new(fake.clone()));
+    let redirect = format!("{HUB}/auth/oidc/callback");
+    // Prime the cache with the current key by one good sign-in.
+    let (url, state) = oidc.begin(&redirect, None).await.unwrap();
+    token_answer(&fake, &id_claims(&query_param(&url, "nonce")), &[]);
+    oidc.finish(&redirect, "c", &state).await.unwrap();
+    // A token under a kid nobody published: exactly one more JWKS fetch, then refused.
+    let before = fake.count("/protocol/openid-connect/certs");
+    let (url, state) = oidc.begin(&redirect, None).await.unwrap();
+    let stranger = super::jwks::tests::EsSigner::new("k-rotated");
+    fake.once(
+        Method::Post,
+        "/protocol/openid-connect/token",
+        Ok(HttpResponse::json(
+            200,
+            &serde_json::json!({"id_token": stranger.sign(&id_claims(&query_param(&url, "nonce"))),
+                "access_token": jwt(&serde_json::json!({})), "token_type": "Bearer"}),
+        )),
+    );
+    assert!(matches!(
+        oidc.finish(&redirect, "c", &state).await,
+        Err(Refusal::Invalid(_))
+    ));
+    assert_eq!(fake.count("/protocol/openid-connect/certs"), before + 1);
 }
 
 fn signed_in(username: Option<&str>, roles: &[&str]) -> SignedIn {

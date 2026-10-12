@@ -1,3 +1,144 @@
+//! The issuer's signing keys (its JWKS) and the ID-token signature check.
+//! Only asymmetric algorithms a provider publishes keys for: RS256, PS256,
+//! ES256. `none` and every HMAC algorithm are refused before a key is
+//! looked at — an HMAC "key" would be the client secret, which the hub
+//! shares with the provider and must never accept a signature from.
+
+use base64::Engine;
+use ring::signature::{self, UnparsedPublicKey};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Jwk {
+    kid: Option<String>,
+    kty: String,
+    alg: Option<String>,
+    n: Option<String>,
+    e: Option<String>,
+    crv: Option<String>,
+    x: Option<String>,
+    y: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Verdict {
+    Valid,
+    /// No published key fits the token's `kid` / algorithm: the provider may
+    /// have rotated, so the caller refetches once.
+    UnknownKey,
+    Invalid(String),
+}
+
+const ALGS: [&str; 3] = ["RS256", "PS256", "ES256"];
+
+pub(super) fn parse_jwks(doc: &serde_json::Value) -> Result<Vec<Jwk>, String> {
+    let keys = doc["keys"]
+        .as_array()
+        .ok_or("the JWKS has no `keys` array")?;
+    let s = |v: &serde_json::Value, k: &str| v[k].as_str().map(str::to_string);
+    Ok(keys
+        .iter()
+        // A key published for encryption never verifies a signature.
+        .filter(|k| k["use"].as_str().is_none_or(|u| u == "sig"))
+        .filter_map(|k| {
+            Some(Jwk {
+                kid: s(k, "kid"),
+                kty: s(k, "kty")?,
+                alg: s(k, "alg"),
+                n: s(k, "n"),
+                e: s(k, "e"),
+                crv: s(k, "crv"),
+                x: s(k, "x"),
+                y: s(k, "y"),
+            })
+        })
+        .collect())
+}
+
+fn b64d(v: &str) -> Option<Vec<u8>> {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(v)
+        .ok()
+}
+
+pub(super) fn verify(jwt: &str, keys: &[Jwk]) -> Verdict {
+    let mut parts = jwt.split('.');
+    let (Some(h), Some(b), Some(sig), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Verdict::Invalid("not a three-part JWT".into());
+    };
+    let Some(header) = b64d(h).and_then(|v| serde_json::from_slice::<serde_json::Value>(&v).ok())
+    else {
+        return Verdict::Invalid("unreadable JWT header".into());
+    };
+    let alg = header["alg"].as_str().unwrap_or("");
+    if !ALGS.contains(&alg) {
+        return Verdict::Invalid(format!("algorithm {alg:?} is not accepted"));
+    }
+    let Some(sig) = b64d(sig) else {
+        return Verdict::Invalid("unreadable signature".into());
+    };
+    let kty = if alg == "ES256" { "EC" } else { "RSA" };
+    let kid = header["kid"].as_str();
+    let candidates: Vec<&Jwk> = keys
+        .iter()
+        .filter(|k| k.kty == kty)
+        .filter(|k| k.alg.as_deref().is_none_or(|a| a == alg))
+        .filter(|k| kid.is_none() || k.kid.as_deref() == kid)
+        .collect();
+    if candidates.is_empty() {
+        return Verdict::UnknownKey;
+    }
+    let msg = format!("{h}.{b}");
+    if candidates
+        .iter()
+        .any(|k| verify_one(alg, k, msg.as_bytes(), &sig))
+    {
+        Verdict::Valid
+    } else {
+        Verdict::Invalid("the signature does not verify".into())
+    }
+}
+
+fn verify_one(alg: &str, k: &Jwk, msg: &[u8], sig: &[u8]) -> bool {
+    match alg {
+        "RS256" | "PS256" => {
+            let (Some(n), Some(e)) = (k.n.as_deref().and_then(b64d), k.e.as_deref().and_then(b64d))
+            else {
+                return false;
+            };
+            let params = if alg == "RS256" {
+                &signature::RSA_PKCS1_2048_8192_SHA256
+            } else {
+                &signature::RSA_PSS_2048_8192_SHA256
+            };
+            signature::RsaPublicKeyComponents { n: &n, e: &e }
+                .verify(params, msg, sig)
+                .is_ok()
+        }
+        "ES256" => {
+            if k.crv.as_deref() != Some("P-256") {
+                return false;
+            }
+            let (Some(x), Some(y)) = (k.x.as_deref().and_then(b64d), k.y.as_deref().and_then(b64d))
+            else {
+                return false;
+            };
+            if x.len() != 32 || y.len() != 32 {
+                return false;
+            }
+            let mut pt = Vec::with_capacity(65);
+            pt.push(0x04);
+            pt.extend_from_slice(&x);
+            pt.extend_from_slice(&y);
+            UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_FIXED, pt)
+                .verify(msg, sig)
+                .is_ok()
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
@@ -20,12 +161,9 @@ pub(super) mod tests {
             let rng = SystemRandom::new();
             let pkcs8 =
                 EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
-            let pair = EcdsaKeyPair::from_pkcs8(
-                &ECDSA_P256_SHA256_FIXED_SIGNING,
-                pkcs8.as_ref(),
-                &rng,
-            )
-            .unwrap();
+            let pair =
+                EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &rng)
+                    .unwrap();
             Self {
                 pair,
                 rng,
@@ -89,7 +227,11 @@ pub(super) mod tests {
         let rsa = rsa_pair();
         for alg in ["RS256", "PS256"] {
             let t = rsa_sign(&rsa, alg, "r1", &serde_json::json!({"a":1}));
-            assert_eq!(verify(&t, &keys(rsa_jwk(&rsa, "r1"))), Verdict::Valid, "{alg}");
+            assert_eq!(
+                verify(&t, &keys(rsa_jwk(&rsa, "r1"))),
+                Verdict::Valid,
+                "{alg}"
+            );
         }
     }
 
@@ -105,7 +247,10 @@ pub(super) mod tests {
             Verdict::Invalid(_)
         ));
         let other = EsSigner::new("e1");
-        assert!(matches!(verify(&t, &keys(other.jwk())), Verdict::Invalid(_)));
+        assert!(matches!(
+            verify(&t, &keys(other.jwk())),
+            Verdict::Invalid(_)
+        ));
     }
 
     #[test]

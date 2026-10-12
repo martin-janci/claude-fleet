@@ -1131,10 +1131,11 @@ browser by an `HttpOnly`, `SameSite=Lax` cookie (a callback from another
 browser is refused — login CSRF), and a `nonce` checked in the ID token.
 The hub exchanges the code itself over TLS, at the token endpoint the
 provider's discovery document names, which must be on the issuer's own
-host; it checks the ID token's `iss`, `aud`/`azp`, `exp` and `nonce`, and
-relies on TLS rather than the token's signature — what OIDC Core §3.1.3.7
-allows for a token taken straight from the token endpoint; the token never
-passes through the browser. Starts and callbacks are rate-limited per
+host; it checks the ID token's `iss`, `aud`/`azp`, `exp` and `nonce`. The
+hub verifies the ID token's signature against the provider's published keys
+(`jwks_uri` from discovery, on the issuer's host; RS256, PS256 or ES256). It
+re-reads the keys hourly, and once more when a token names a key it does not
+hold. The token never passes through the browser. Starts and callbacks are rate-limited per
 address. A hub restart forgets every sign-in in flight, like every pairing
 code. What is not built: logout at the provider (a paired device lives
 until `client revoke` or `person disable`, as before), org membership from
