@@ -871,6 +871,13 @@
             }
           ]
         },
+        "env_target": {
+          "description": "secret: store the answer as the session's environment variable NAME\n(secret, write-only; applied on its next start or restart) instead\nof writing a host file.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "help": {
           "type": [
             "string",

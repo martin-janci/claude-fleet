@@ -10,4 +10,4 @@ CREATE TRIGGER IF NOT EXISTS auth_epoch_settings_device_token_update AFTER UPDAT
 WHEN NEW.key LIKE 'auth.device_token_%' BEGIN UPDATE auth_epoch SET epoch = epoch + 1 WHERE id = 1; END;
 CREATE TRIGGER IF NOT EXISTS auth_epoch_settings_device_token_delete AFTER DELETE ON settings
 WHEN OLD.key LIKE 'auth.device_token_%' BEGIN UPDATE auth_epoch SET epoch = epoch + 1 WHERE id = 1; END;
-INSERT OR IGNORE INTO schema_version (version) VALUES (182);
+INSERT OR IGNORE INTO schema_version (version) VALUES (183);

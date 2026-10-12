@@ -2012,6 +2012,7 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
                 start_token: None,
                 over_limit_ok: None,
                 confirm_nonce: None,
+                env: None,
             }),
         )
         .await
@@ -2257,6 +2258,7 @@ async fn new_session_threads_kind_start_command_and_friendly_name_through() {
                 start_token: None,
                 over_limit_ok: None,
                 confirm_nonce: None,
+                env: None,
             }),
         )
         .await
@@ -2854,6 +2856,7 @@ fn router_sum_serves_every_tool() {
         include_str!("library.rs"),
         include_str!("runs.rs"),
         include_str!("search.rs"),
+        include_str!("env_vars.rs"),
     ]
     .iter()
     .map(|src| src.matches("#[tool(").count())
@@ -4512,9 +4515,12 @@ fn the_served_definition_budget_stays_bounded() {
     /// work_link gained task attachments (`attach`, `attachment_delete`,
     /// `mime`, `data_base64`, `attachment_id`) and `work` its `attachment`
     /// read: measured 113,486 bytes for 141 tools (804 a tool). Raised to
-    /// 825 on 2026-10-12 when the identity realm branch (org_admin's
-    /// `enable_person`, the realm/trust prose) met main's tools in one
-    /// merge: measured 118,264 bytes for 145 tools (815 a tool).
+    /// 825 on 2026-10-12: main took #874 (debug devices) and #873 (task
+    /// promotion, `promote` / `tracker_id` / `container`) each inside the
+    /// old budget, together over it: measured 118,264 bytes for 145 tools
+    /// (815 a tool).
+    /// The identity realm branch (org_admin's `enable_person`, the realm /
+    /// trust prose) lands inside the same 825.
     const BYTES_PER_TOOL: usize = 825;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()

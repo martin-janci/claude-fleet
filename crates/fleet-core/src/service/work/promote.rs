@@ -10,11 +10,13 @@
 //!
 //! **Where it goes.** A subtask of a tracker's ticket is created as that
 //! ticket's subtask, in the ticket's own tracker (a Jira sub-task, an Asana
-//! subtask). A top-level task goes to the tracker the person names
-//! (`tracker_id`), into `container`: a Jira project key (one the site
-//! owns; optional when it owns exactly one), or an Asana project gid (one
-//! the tracker reads; none puts it in the workspace, assigned to the API
-//! user). A task under a task of fleet's own is refused: promote the parent
+//! subtask, a Linear sub-issue, a GitHub sub-issue). A top-level task goes
+//! to the tracker the person names (`tracker_id`), into `container`: a Jira
+//! project key or Linear team key (one the site owns; optional when it owns
+//! exactly one), an Asana project gid (one the tracker reads; none puts it
+//! in the workspace, assigned to the API user), or a GitHub `owner/repo`
+//! (one of the repositories the tracker is narrowed to, else any in its
+//! scope). A task under a task of fleet's own is refused: promote the parent
 //! first, or take the task out to the top. Epics, delegated jobs and open
 //! proposals are refused too.
 //!
@@ -90,6 +92,17 @@ fn not_promotable(item: &WorkItemRow) -> Option<&'static str> {
 fn containers(t: &TrackerRow) -> (Vec<(String, String)>, bool) {
     match t.provider.as_str() {
         "asana" => (t.config.projects.clone(), false),
+        // The repositories the tracker is narrowed to; with none, any
+        // repository in its scope is typed in.
+        "github" => (
+            t.settings
+                .repos
+                .iter()
+                .map(|r| (r.clone(), r.clone()))
+                .collect(),
+            true,
+        ),
+        // Jira project keys, Linear team keys.
         _ => (
             t.config
                 .key_prefixes
@@ -291,17 +304,27 @@ pub fn promote(
                 .filter(|c| !c.is_empty());
             let container = match picked {
                 Some(c) => {
-                    let c = if t.provider == "asana" {
-                        c.to_string()
-                    } else {
-                        c.to_ascii_uppercase()
+                    let (c, shape) = match t.provider.as_str() {
+                        "asana" => (
+                            c.to_string(),
+                            c.len() <= 24 && c.bytes().all(|b| b.is_ascii_digit()),
+                        ),
+                        "github" => match trackers::github::normalize_repo(c) {
+                            Some(r) => (r, true),
+                            None => (c.to_string(), false),
+                        },
+                        "linear" => {
+                            let c = c.to_ascii_uppercase();
+                            let ok = trackers::linear::team_key_ok(&c);
+                            (c, ok)
+                        }
+                        _ => {
+                            let c = c.to_ascii_uppercase();
+                            let ok = trackers::jira_common::is_project_key(&c);
+                            (c, ok)
+                        }
                     };
-                    let known = choices.iter().any(|(id, _)| *id == c);
-                    let shape = if t.provider == "asana" {
-                        !c.is_empty() && c.len() <= 24 && c.bytes().all(|b| b.is_ascii_digit())
-                    } else {
-                        trackers::jira_common::is_project_key(&c)
-                    };
+                    let known = choices.iter().any(|(id, _)| id.eq_ignore_ascii_case(&c));
                     if !shape || (!choices.is_empty() && !known) {
                         return Err(IpcError::new(
                             codes::E_INVALID,

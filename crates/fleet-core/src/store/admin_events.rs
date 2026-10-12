@@ -1,4 +1,4 @@
-//! Admin events (identity sub-project 1, spec §3, migration 181): a
+//! Admin events (identity sub-project 1, spec §3, migration 182): a
 //! Keycloak-style audit log of every administrative change — who changed
 //! which person, group, role, device or org, when, and with what.
 //!

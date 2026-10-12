@@ -146,7 +146,7 @@ impl Store {
         // table moves the epoch, so the sets are the ones at this epoch too.
         let realm = self.realm_sets()?;
         // When a device token expires: the `auth.device_token_%` settings
-        // move the epoch too (migration 182).
+        // move the epoch too (migration 183).
         let device_policy = self.device_token_policy()?;
         tx.commit()?;
         Ok((epoch, hosts, clients, controls, realm, device_policy))
@@ -155,7 +155,7 @@ impl Store {
     /// When a paired device's token expires (identity sub-project 1, spec
     /// §3): `auth.device_token_ttl_days` and `auth.device_token_max_age_days`
     /// as their effective values (stored, else the registered default; `0`
-    /// is off), and `auth.device_token_ttl_since`, which migration 182
+    /// is off), and `auth.device_token_ttl_since`, which migration 183
     /// writes (missing or unreadable: `0`, no floor).
     pub fn device_token_policy(
         &self,

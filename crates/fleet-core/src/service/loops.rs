@@ -74,7 +74,7 @@ pub const LOOPS: &[LoopSpec] = &[
     keeps(
         "forms",
         "Chat forms expiry",
-        "Expires unanswered forms and deletes their secrets from hosts; pausing would leave secrets behind.",
+        "Expires unanswered forms; deletes their secrets and env files from hosts. Pausing leaves secrets behind.",
     ),
     acts("playbooks", "Stuck playbooks"),
     acts("pr_shepherd", "PR shepherd"),

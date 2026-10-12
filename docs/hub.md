@@ -794,7 +794,9 @@ the same loop, just in the foreground, under whatever supervises it instead.)
   home directory, which is the same model as an ssh remote command. Its
   environment is the service's, not a login shell's. Fleet's own commands
   start a login shell themselves where they need one. A child's stdin is
-  `/dev/null`.
+  `/dev/null`, unless the hub pipes input (a tracker request body for
+  `via_host:` / `via_cli:`, the haiku benchmark's prompt), which the agent
+  writes to the child and closes.
 - **Reconnecting.** It reconnects after any drop, waiting up to 60 s with
   jitter. A connection the hub has accepted resets that wait. It answers the
   hub's heartbeat, which the hub sends every 30 s. It gives up on a hub that
@@ -2263,7 +2265,8 @@ Without `--provider jev` or `--provider haiku` neither sends anything
 D33) asks the same question — the same redacted state and options — of
 `claude -p --model haiku` (no tools, no MCP, no hooks, no transcript) on
 the host `--haiku-host` names, which is required: each case leaves the hub
-over SSH for that host — the prompt on stdin, never in argv — and reaches
+for that host, over SSH or through its fleet-agent — the prompt on stdin,
+never in argv — and reaches
 Anthropic through its Claude account, a note on stderr says so before the
 first call, and nothing is recorded in `decision_runs`. It never crosses
 the org boundary: the host's org is read from the database, and a case of

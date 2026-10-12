@@ -1305,6 +1305,11 @@ impl HubBackend {
         if args.over_limit_ok {
             body["over_limit_ok"] = json!(true);
         }
+        // Session-scope variables (contract 18). Sent only when given, so an
+        // older hub sees the same arguments it always did.
+        if let Some(env) = &args.env {
+            body["env"] = json!(env);
+        }
         self.route("new_session", &body).await
     }
 

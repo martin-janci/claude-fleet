@@ -252,6 +252,23 @@ async fn hub_and_agent_talking_over_a_real_socket() {
         "children start in the agent's home"
     );
 
+    // Stdin reaches the child and is closed after it: `cat` reads the bytes
+    // and gets EOF, so the script finishes on its own.
+    let script = fleet_core::shell::quote("cat; printf ' <- on stdin'");
+    let out = SshExec::run_with_stdin(
+        &hub.ssh,
+        "laptop",
+        &["bash", "-c", &script],
+        b"piped".to_vec(),
+        PATIENCE,
+        PATIENCE,
+        1024,
+    )
+    .await
+    .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "piped <- on stdin");
+
     // An answer past tungstenite's 16 MiB default frame, both directions'
     // limits included: 17 MiB of stdout comes back whole.
     let out = SshExec::run(

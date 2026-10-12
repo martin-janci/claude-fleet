@@ -49,4 +49,4 @@ BEGIN
   UPDATE auth_epoch SET epoch = epoch + 1 WHERE id = 1;
 END;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (181);
+INSERT OR IGNORE INTO schema_version (version) VALUES (182);

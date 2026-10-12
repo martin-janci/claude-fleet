@@ -2855,7 +2855,14 @@ fn matches_filters(t: &WorkTask, f: &WorkTreeFilters, with_group: bool) -> bool 
     if !f.stages.is_empty() && !f.stages.contains(&t.stage) {
         return false;
     }
-    let status = t.status_category.as_deref();
+    // The Board and List's rule (`taskColumnOf`): a task with a status is
+    // that status, live sessions or not; one with none (a bare key, a ticket
+    // its tracker has not reported on) is in progress while a session runs
+    // on it, and no status at all otherwise.
+    let status = t
+        .status_category
+        .as_deref()
+        .or((t.counts.active > 0).then_some("in_progress"));
     let ok = match f.status.as_deref() {
         None | Some("any") => true,
         Some("open") => status != Some("done"),

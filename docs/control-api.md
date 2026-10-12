@@ -103,6 +103,20 @@ with Anthropic and written to the host only (`api_key`, with an optional
 hub owner's devices; everything but `login_status` needs the master or a
 trusted full device. The key and the code are never logged or returned.
 
+### Environment
+
+`env_vars` sets the environment variables every session fleet starts gets,
+by scope (`global` < `host` < `project` as `owner/repo` < `session`, the
+narrower winning): `list`, `set { scope, scope_key, name, value | ref,
+secret? }`, `unset`. A secret or a reference is never listed again; a
+reference (`env:NAME` or `file:/abs`, read by the hub at launch) is the
+master's alone, a device gets `E_FORBIDDEN`. A change applies when a session
+next starts or restarts. `new_session { env }` sets session-scope plain
+values for the session it starts, and a form's `secret` field with an
+`env_target` stores its answer as the session's secret variable
+([forms.md](forms.md#secrets)). Served to the master and the hub owner's
+devices; a write needs the master or a trusted full device.
+
 ### Named tokens
 
 Settings → Control API → **+ Token** (or the `api_tokens` tool) creates a
@@ -668,11 +682,12 @@ Index by area (names only; see the reference for details):
   post_to_tracker: true }` on a ticket also posts the comment there, signed
   `— <name> via fleet`, through the same outbox, drained at once; refused
   for a per-host token, fleet's own work, or with the setting off, and then
-  nothing is written), and for Jira (Cloud and Data Center) and Asana
+  nothing is written), and for every provider
   `write_back: { create_tickets }` (off by default: a person's `work_link {
   promote, item_id, tracker_id?, container? }` turns a task of fleet's own
   into a ticket there — a subtask of a ticket under that ticket, a task at
-  the top into `container`, a Jira project key or an Asana project gid — and
+  the top into `container`, a Jira project key, an Asana project gid, a
+  Linear team key or a GitHub `owner/repo` — and
   the task becomes that ticket once the outbox sends it; `work { task }`
   answers `promotion` and `promote_targets`). `work { action: "tracker_comments", key }` reads a
   ticket's own comments live (newest 50, oldest first, no cache; the ones

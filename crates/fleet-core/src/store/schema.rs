@@ -137,7 +137,7 @@ fn client_tokens_has_trusted_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 179: `people` already has its
+/// `already_applied` guard of migration 180: `people` already has its
 /// `uuid` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
 /// See [`Migration`].
 fn people_has_uuid(conn: &Connection) -> rusqlite::Result<bool> {
@@ -2006,25 +2006,27 @@ const MIGRATIONS: &[Migration] = &[
         178,
         include_str!("../../migrations/178_pinned_dashboards.sql"),
     ),
+    // Session environment variables and secrets.
+    Migration::plain(179, include_str!("../../migrations/179_env_vars.sql")),
     // Identity sub-project 1: a person is a Keycloak user (uuid, email,
     // names, attributes). ADD COLUMN, so guarded; the uuids are filled by
     // `Store::backfill_realm_uuids` on every open.
     Migration {
-        version: 179,
-        sql: include_str!("../../migrations/179_people_profile.sql"),
+        version: 180,
+        sql: include_str!("../../migrations/180_people_profile.sql"),
         already_applied: Some(people_has_uuid),
     },
     // Identity sub-project 1: the realm model (clients, roles, groups and
     // their mappings), seeded from orgs, org_members and trusted devices.
-    Migration::plain(180, include_str!("../../migrations/180_realm_model.sql")),
+    Migration::plain(181, include_str!("../../migrations/181_realm_model.sql")),
     // Identity sub-project 1: the append-only admin audit log
     // (`store::admin_events`) and the auth-epoch triggers on
     // `person_identities`. New tables and IF NOT EXISTS triggers, idempotent.
-    Migration::plain(181, include_str!("../../migrations/181_admin_events.sql")),
+    Migration::plain(182, include_str!("../../migrations/182_admin_events.sql")),
     // Identity sub-project 1: device tokens expire. Writes the idle clock's
     // start (`auth.device_token_ttl_since`, INSERT OR IGNORE) and the
     // auth-epoch triggers on the `auth.device_token_%` settings.
-    Migration::plain(182, include_str!("../../migrations/182_device_token_ttl.sql")),
+    Migration::plain(183, include_str!("../../migrations/183_device_token_ttl.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -2182,7 +2184,7 @@ impl Store {
         }
         self.repair_skipped_main_migrations()?;
         self.ensure_work_rules_start_columns()?;
-        if v < 180 {
+        if v < 181 {
             self.backfill_assets_admin_roles()?;
         }
         self.backfill_stale_demoted()?;
@@ -2192,7 +2194,7 @@ impl Store {
         Ok(())
     }
 
-    /// Migrations 179 and 180's backfill: every person, role, group and
+    /// Migrations 180 and 181's backfill: every person, role, group and
     /// client without a uuid gets a v4 one. Runs on every open, so a row an
     /// older binary inserted gets one too.
     fn backfill_realm_uuids(&self) -> Result<usize> {
@@ -2215,7 +2217,7 @@ impl Store {
         Ok(total)
     }
 
-    /// Migration 180's assets-admin mapping, run once after the repair of
+    /// Migration 181's assets-admin mapping, run once after the repair of
     /// skipped migrations (see the comment in the SQL). Exactly
     /// `client_is_assets_admin`: a live, full, org-free device holding a grant
     /// on a catalog with no org, or the `assets_admin_at` flag while no such
@@ -2501,6 +2503,7 @@ mod tests {
     use super::*;
 
     const EXPECTED_TABLES: &[&str] = &[
+        "env_vars",
         "hosts",
         "projects",
         "worktrees",
@@ -3684,8 +3687,8 @@ mod tests {
     }
 
     #[test]
-    fn migration_179_gives_every_person_a_uuid_and_an_empty_profile() {
-        let s = store_at_version(178);
+    fn migration_180_gives_every_person_a_uuid_and_an_empty_profile() {
+        let s = store_at_version(179);
         s.conn
             .execute_batch(
                 "INSERT INTO people (name, is_personal_owner, created_at) VALUES ('ada', 0, 1);",
@@ -3704,15 +3707,15 @@ mod tests {
         assert_ne!(owner.uuid, ada.uuid);
         // Re-running keeps the uuids.
         s.conn
-            .execute_batch("DELETE FROM schema_version WHERE version >= 179;")
+            .execute_batch("DELETE FROM schema_version WHERE version >= 180;")
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(s.get_person_by_name("ada").unwrap().unwrap().uuid, ada.uuid);
     }
 
     #[test]
-    fn migration_181_adds_the_admin_log_and_the_identity_epoch_triggers() {
-        let s = store_at_version(180);
+    fn migration_182_adds_the_admin_log_and_the_identity_epoch_triggers() {
+        let s = store_at_version(181);
         s.migrate().unwrap();
         let count = |sql: &str| -> i64 { s.conn.query_row(sql, [], |r| r.get(0)).unwrap() };
         for name in [
@@ -3739,7 +3742,7 @@ mod tests {
             .unwrap();
         // Re-running keeps the log and the closed gate.
         s.conn
-            .execute_batch("DELETE FROM schema_version WHERE version >= 181;")
+            .execute_batch("DELETE FROM schema_version WHERE version >= 182;")
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(count("SELECT COUNT(*) FROM admin_events"), 1);
@@ -3748,8 +3751,8 @@ mod tests {
     }
 
     #[test]
-    fn migration_182_starts_the_device_idle_clock_now_and_moves_the_epoch_on_its_settings() {
-        let s = store_at_version(181);
+    fn migration_183_starts_the_device_idle_clock_now_and_moves_the_epoch_on_its_settings() {
+        let s = store_at_version(182);
         s.migrate().unwrap();
         let since = || -> i64 {
             s.get_setting("auth.device_token_ttl_since")
@@ -3788,7 +3791,7 @@ mod tests {
         s.conn
             .execute_batch(
                 "UPDATE settings SET value = '12345' WHERE key = 'auth.device_token_ttl_since';
-                 DELETE FROM schema_version WHERE version >= 182;",
+                 DELETE FROM schema_version WHERE version >= 183;",
             )
             .unwrap();
         s.migrate().unwrap();
@@ -3796,8 +3799,8 @@ mod tests {
     }
 
     #[test]
-    fn migration_180_turns_org_members_into_managed_groups_and_roles() {
-        let s = store_at_version(179);
+    fn migration_181_turns_org_members_into_managed_groups_and_roles() {
+        let s = store_at_version(180);
         s.conn
             .execute_batch(
                 "
@@ -3883,15 +3886,15 @@ mod tests {
                      || '/' || (SELECT COUNT(*) FROM role_composites) || '/' || (SELECT COUNT(*) FROM group_role_mappings)";
         let before = q(shape);
         s.conn
-            .execute_batch("DELETE FROM schema_version WHERE version >= 180;")
+            .execute_batch("DELETE FROM schema_version WHERE version >= 181;")
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(q(shape), before);
     }
 
     #[test]
-    fn migration_180_counts_the_assets_admin_flag_while_no_personal_catalog_exists() {
-        let s = store_at_version(179);
+    fn migration_181_counts_the_assets_admin_flag_while_no_personal_catalog_exists() {
+        let s = store_at_version(180);
         s.conn
             .execute_batch(
                 "INSERT INTO people (id, name, is_personal_owner, created_at) VALUES (13,'dee',0,1),(16,'gus',0,1);

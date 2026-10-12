@@ -41,7 +41,17 @@
 
   const blocked = $derived(hubActionBlocked('promote_work_item', $hubStatus, $hubConnection));
   const canSubmit = $derived(
-    !busy && blocked === null && target !== null && (!target.container_required || container !== ''),
+    !busy && blocked === null && target !== null && (!target.container_required || container.trim() !== ''),
+  );
+  /** What a container is called on this tracker. */
+  const containerLabel = $derived(
+    target?.provider === 'asana'
+      ? 'Project (optional)'
+      : target?.provider === 'linear'
+        ? 'Team'
+        : target?.provider === 'github'
+          ? 'Repository'
+          : 'Project',
   );
 
   async function submit(e?: Event) {
@@ -51,7 +61,7 @@
     failure = null;
     const r = target.parent_key
       ? await promoteWorkItem(itemId)
-      : await promoteWorkItem(itemId, target.tracker_id, container || null);
+      : await promoteWorkItem(itemId, target.tracker_id, container.trim() || null);
     busy = false;
     if (!r.ok) {
       failure = readErrorText(r.error);
@@ -87,14 +97,27 @@
       {/if}
       {#if containers.length > 0}
         <label class="field">
-          <span>{target?.provider === 'asana' ? 'Project (optional)' : 'Project'}</span>
+          <span>{containerLabel}</span>
           <select bind:value={container} data-testid="promote-task-container">
             {#if !target?.container_required}<option value="">None: my tasks in the workspace</option>{/if}
-            {#if target?.container_required && containers.length > 1}<option value="" disabled>Pick a project</option>{/if}
+            {#if target?.container_required && containers.length > 1}<option value="" disabled>Pick one</option>{/if}
             {#each containers as [id, name] (id)}
               <option value={id}>{name}</option>
             {/each}
           </select>
+        </label>
+      {:else if target?.container_required}
+        <!-- A GitHub tracker narrowed to no repositories: any in its scope. -->
+        <label class="field">
+          <span>{containerLabel}</span>
+          <input
+            type="text"
+            bind:value={container}
+            placeholder={target.provider === 'github' ? 'owner/repo' : ''}
+            autocomplete="off"
+            spellcheck="false"
+            data-testid="promote-task-container-text"
+          />
         </label>
       {/if}
     {/if}
@@ -119,7 +142,8 @@
   .form p { margin: 0; font-size: var(--text-xs); }
   .field { display: flex; flex-direction: column; gap: 0.25rem; }
   .field span { font-size: var(--text-2xs); color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.04em; }
-  .field select {
+  .field select,
+  .field input {
     font: inherit;
     padding: 0.35rem 0.5rem;
     border: 1px solid var(--border);

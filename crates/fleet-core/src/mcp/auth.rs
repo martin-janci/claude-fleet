@@ -655,7 +655,7 @@ pub fn apply_realm(caller: &mut Caller, realm: &RealmSets) {
 /// When a paired device's token stops resolving (identity sub-project 1,
 /// spec §3): `auth.device_token_ttl_days` / `auth.device_token_max_age_days`
 /// in seconds (`None` = off) and `auth.device_token_ttl_since`, the moment
-/// migration 182 started every existing token's idle clock. The `Default`
+/// migration 183 started every existing token's idle clock. The `Default`
 /// — everything off — is what a hub with no such settings means.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DeviceTokenPolicy {

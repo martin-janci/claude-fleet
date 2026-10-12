@@ -17,8 +17,8 @@
 //! made in fleet into a tracker's ticket (`work_link { promote }`,
 //! `service::work::promote`). The outbox row (op `create_item`, url
 //! `fleet-item:<id>`) goes out only where the tracker's admin turned
-//! `write_back.create_tickets` on (off by default; Jira Cloud, Data Center
-//! and Asana). The drain re-checks the setting and the org, creates the
+//! `write_back.create_tickets` on (off by default; every provider in
+//! `CREATE_PROVIDERS`). The drain re-checks the setting and the org, creates the
 //! ticket once — a create is not idempotent — and converts the task in
 //! place into that ticket ([`Store::promote_local_item`]), then reads the
 //! ticket back so its status shows at once.

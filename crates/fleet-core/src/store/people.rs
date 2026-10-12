@@ -667,7 +667,7 @@ impl Store {
         )?;
         let id = tx.last_insert_rowid();
         // Identity sub-project 1: the owner administers the fleet through
-        // the realm role, as migration 180 maps the owner it finds.
+        // the realm role, as migration 181 maps the owner it finds.
         tx.execute(
             "INSERT OR IGNORE INTO user_role_mappings (person_id, role_id) \
              SELECT ?1, id FROM roles WHERE client_id IS NULL AND name = ?2",

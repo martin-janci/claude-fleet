@@ -89,7 +89,7 @@ pub struct AuthRows {
     /// The realm's role holders at the same epoch as the rows.
     pub realm: RealmSets,
     /// When a device token expires (identity sub-project 1), at the same
-    /// epoch: every `auth.device_token_%` setting moves it (migration 182).
+    /// epoch: every `auth.device_token_%` setting moves it (migration 183).
     pub device_policy: DeviceTokenPolicy,
 }
 

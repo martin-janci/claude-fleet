@@ -781,7 +781,7 @@ pub const DEVICE_TOKEN_TTL_DAYS: &str = "auth.device_token_ttl_days";
 /// Days after pairing a device's token stops resolving, used or not
 /// (`0` = off).
 pub const DEVICE_TOKEN_MAX_AGE_DAYS: &str = "auth.device_token_max_age_days";
-/// Not a registered setting: the Unix second migration 182 started every
+/// Not a registered setting: the Unix second migration 183 started every
 /// existing token's idle clock, so the upgrade signs nobody out.
 pub const DEVICE_TOKEN_TTL_SINCE: &str = "auth.device_token_ttl_since";
 /// A second opinion: every question a use case in `shadow` or `assist`

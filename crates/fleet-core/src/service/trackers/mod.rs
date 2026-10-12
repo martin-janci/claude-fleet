@@ -707,10 +707,10 @@ pub enum WriteOp {
     /// Create a ticket from a fleet task (owner decision 2026-10-11:
     /// promoting a local task to a tracked one). Under `parent` — a ticket
     /// of this tracker — it is that ticket's subtask; otherwise it goes into
-    /// `container` (a Jira project key, an Asana project gid, or none for
-    /// the Asana workspace). `description` is plain text. Not idempotent at
-    /// the tracker: the outbox sends it once. Jira (Cloud and Data Center)
-    /// and Asana only.
+    /// `container` (a Jira project key, an Asana project gid or none for
+    /// the Asana workspace, a Linear team key, a GitHub `owner/repo`).
+    /// `description` is plain text. Not idempotent at the tracker: the
+    /// outbox sends it once. Every provider in [`CREATE_PROVIDERS`].
     CreateItem {
         container: Option<String>,
         parent: Option<CreateParent>,
@@ -729,7 +729,7 @@ pub struct CreateParent {
 
 /// The providers that create a ticket from a fleet task
 /// ([`WriteOp::CreateItem`]).
-pub const CREATE_PROVIDERS: &[&str] = &["jira", "jira_dc", "asana"];
+pub const CREATE_PROVIDERS: &[&str] = &["jira", "jira_dc", "asana", "linear", "github"];
 
 /// PURE: `provider` creates tickets ([`CREATE_PROVIDERS`]).
 pub fn creates_items(provider: &str) -> bool {

@@ -160,8 +160,8 @@ pub struct WriteBack {
     pub comments: bool,
     /// Let a person promote a fleet task to a ticket here: fleet creates it
     /// (a subtask of the parent's ticket, or in a project they pick) and
-    /// the task becomes that ticket (owner decision 2026-10-11). Jira Cloud,
-    /// Jira Data Center and Asana.
+    /// the task becomes that ticket (owner decision 2026-10-11). Every
+    /// provider in `service::trackers::CREATE_PROVIDERS`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub create_tickets: bool,
 }
@@ -743,11 +743,9 @@ pub fn validate_tracker_settings(
         ));
     }
     if s.write_back.create_tickets && !crate::service::trackers::creates_items(provider) {
-        return Err(bad(
-            "write_back.create_tickets is a Jira and Asana setting: only Jira Cloud, Data \
-             Center and Asana create tickets from fleet"
-                .into(),
-        ));
+        return Err(bad(format!(
+            "write_back.create_tickets: fleet does not create tickets in a {provider} tracker"
+        )));
     }
     if let Some(h) = &s.hostname {
         if provider != "github" {
@@ -835,7 +833,7 @@ pub fn validate_credential_ref(r: &str) -> Result<(), IpcError> {
 /// Read a credential reference. `None` when it cannot be read (unset
 /// variable, missing file, empty value); the reason is logged without the
 /// value.
-pub(super) fn read_credential_ref(r: &str) -> Option<String> {
+pub(crate) fn read_credential_ref(r: &str) -> Option<String> {
     let value = if let Some(name) = r.strip_prefix("env:") {
         std::env::var(name).ok()
     } else if let Some(path) = r.strip_prefix("file:") {

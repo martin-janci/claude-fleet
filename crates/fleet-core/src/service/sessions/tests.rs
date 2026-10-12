@@ -7934,6 +7934,7 @@ fn a_new_shell_session_refuses_a_profile() {
         over_limit_ok: false,
         owner_person_id: None,
         start_token: None,
+        env: None,
     };
     assert_eq!(normalize_launch(&mut args).unwrap_err().code, "E_INVALID");
     args.kind = None;
@@ -8154,4 +8155,388 @@ async fn killing_a_ghost_whose_tmux_is_gone_removes_it() {
         .get_session_by_id(id)
         .unwrap()
         .is_none());
+}
+
+/// Session environment at launch (spec 2026-10-11-session-env-and-secrets):
+/// a remote host `h` whose `ssh` is a fake that runs each remote script on
+/// this machine under `sh` with `HOME` at a tempdir (the catalog testkit's
+/// `ssh_with_home` pattern), and a fake `tmux` on the resolved toolchain
+/// PATH that records every pane command it is handed and lists the
+/// sessions it created. The env file therefore lands in the harness HOME.
+#[cfg(unix)]
+mod env_launch {
+    use super::*;
+    use crate::store::EnvValue;
+    use crate::tmux::fake_exec::{write_exec, PROBE_GUARD};
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    pub(super) const PREFIX: &str = "__fleet_env_file=\"$HOME\"/'.claude-fleet/env/";
+
+    pub(super) struct Harness {
+        pub dir: tempfile::TempDir,
+        pub store: Mutex<Store>,
+        pub ssh: Arc<SshClient>,
+        pub reg: Arc<crate::cancel::CancellationRegistry>,
+        pub project_id: i64,
+    }
+
+    impl Harness {
+        pub fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let home = dir.path().join("home");
+            let bin = dir.path().join("bin");
+            let work = dir.path().join("work");
+            for d in [&home, &bin, &work] {
+                std::fs::create_dir_all(d).unwrap();
+            }
+            let d = dir.path().display().to_string();
+            write_exec(
+                &bin,
+                "tmux",
+                &format!(
+                    "#!/bin/sh\n{PROBE_GUARD}\
+                     d='{d}'\n\
+                     printf '%s\\n' \"$*\" >> \"$d/tmux-calls.log\"\n\
+                     last=''; name=''; prev=''\n\
+                     for a in \"$@\"; do if [ \"$prev\" = -s ]; then name=\"$a\"; fi; prev=\"$a\"; last=\"$a\"; done\n\
+                     case \"$1\" in\n\
+                     new-session) printf '%s\\n' \"$name\" >> \"$d/live\"; printf '%s\\n' \"$last\" >> \"$d/panes.log\";;\n\
+                     respawn-pane) printf '%s\\n' \"$last\" >> \"$d/panes.log\";;\n\
+                     capture-pane) if [ -e \"$d/trust\" ]; then printf 'Do you trust the files in this folder?\\n ❯ 1. Yes, proceed\\n   2. No\\n'; fi;;\n\
+                     list-sessions)\n\
+                       if [ ! -s \"$d/live\" ]; then echo 'no server running on /tmp/fake'; exit 1; fi\n\
+                       case \"$*\" in\n\
+                       *pane_id*) while IFS= read -r n; do printf '%s|1700000000|1700000000|0|%s|%%1\\n' \"$n\" '{d}/work'; done < \"$d/live\";;\n\
+                       *) cat \"$d/live\";;\n\
+                       esac;;\n\
+                     esac\n\
+                     exit 0\n"
+                ),
+            );
+            let ssh_bin = write_exec(
+                &bin,
+                "ssh",
+                &format!(
+                    "#!/bin/sh\n{PROBE_GUARD}\
+                     case \"$*\" in *'-O check'*|*'-O exit'*) exit 0;; esac\n\
+                     while [ \"$#\" -gt 0 ] && [ \"$1\" != \"--\" ]; do shift; done\n\
+                     shift 2\n\
+                     printf '%s\\n' \"$*\" >> '{d}/ssh-calls.log'\n\
+                     case \"$*\" in *FLEET-TC*) printf 'FLEET-TC home=%s\\nFLEET-TC path=%s\\nFLEET-TC tmux=%s\\n' '{home}' '{bin}:/usr/bin:/bin' '{bin}/tmux'; exit 0;; esac\n\
+                     HOME='{home}' PATH='{bin}':\"$PATH\" exec sh -c \"$*\"\n",
+                    home = home.display(),
+                    bin = bin.display(),
+                    d = d,
+                ),
+            );
+            let s = Store::open_in_memory().unwrap();
+            s.upsert_host("h").unwrap();
+            let project_id = s
+                .upsert_system_project("acme", "envproj", &work.display().to_string())
+                .unwrap();
+            Harness {
+                dir,
+                store: Mutex::new(s),
+                ssh: Arc::new(SshClient::with_ssh_binary(ssh_bin)),
+                reg: crate::cancel::CancellationRegistry::new(),
+                project_id,
+            }
+        }
+
+        pub fn home(&self) -> PathBuf {
+            self.dir.path().join("home")
+        }
+
+        /// Every pane command the fake tmux was handed, in order.
+        pub fn panes(&self) -> Vec<String> {
+            std::fs::read_to_string(self.dir.path().join("panes.log"))
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_string)
+                .collect()
+        }
+
+        pub fn set_global(&self, name: &str, v: EnvValue) {
+            self.store
+                .lock()
+                .unwrap()
+                .set_env_var("global", "", name, &v)
+                .unwrap();
+        }
+
+        pub fn args(&self, name: &str, env: Option<&[(&str, &str)]>) -> NewSessionArgs {
+            NewSessionArgs {
+                host_alias: "h".into(),
+                project_id: self.project_id,
+                worktree_id: None,
+                name: name.into(),
+                call_id: None,
+                new_worktree: None,
+                base_branch: None,
+                kind: Some("shell".into()),
+                start_command: None,
+                friendly_name: None,
+                resume_claude_session_id: None,
+                model: None,
+                effort: None,
+                profile: None,
+                agent: None,
+                origin: None,
+                over_limit_ok: false,
+                owner_person_id: None,
+                start_token: None,
+                env: env.map(|kv| {
+                    kv.iter()
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect()
+                }),
+            }
+        }
+    }
+
+    impl Harness {
+        /// Every remote command the fake ssh ran.
+        pub fn ssh_calls(&self) -> String {
+            std::fs::read_to_string(self.dir.path().join("ssh-calls.log")).unwrap_or_default()
+        }
+
+        /// `owner/repo` as a git checkout at the remote layout's default
+        /// root under the harness HOME, so a remote create needs no clone.
+        pub fn remote_checkout(&self, owner: &str, repo: &str) -> i64 {
+            let root = self
+                .home()
+                .join("projects/github.com")
+                .join(owner)
+                .join(repo);
+            std::fs::create_dir_all(&root).unwrap();
+            let git = |args: &[&str]| {
+                let out = std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&root)
+                    .env_remove("GIT_DIR")
+                    .env_remove("GIT_WORK_TREE")
+                    .env_remove("GIT_INDEX_FILE")
+                    .output()
+                    .unwrap();
+                assert!(out.status.success(), "git {args:?}: {out:?}");
+            };
+            git(&["init", "-q"]);
+            git(&[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ]);
+            self.store
+                .lock()
+                .unwrap()
+                .upsert_project(owner, repo, &root.display().to_string())
+                .unwrap()
+        }
+    }
+
+    /// The env file a wrapped pane command names, under `home`.
+    pub(super) fn env_file_of(home: &Path, pane: &str) -> PathBuf {
+        let rest = pane
+            .strip_prefix(PREFIX)
+            .unwrap_or_else(|| panic!("{pane}"));
+        let file = &rest[..rest.find('\'').unwrap()];
+        home.join(".claude-fleet/env").join(file)
+    }
+
+    #[tokio::test]
+    async fn a_new_session_sources_its_environment_and_stores_the_session_scope() {
+        let h = Harness::new();
+        h.set_global("GLOBAL_ONE", EnvValue::Plain("globalvalue-7731".into()));
+        let row = new_session(
+            h.args("dev-env-create", Some(&[("FOO", "bar")])),
+            &h.store,
+            &h.ssh,
+            &h.reg,
+        )
+        .await
+        .expect("the create succeeds over the fake host");
+        let panes = h.panes();
+        assert_eq!(panes.len(), 1, "{panes:?}");
+        let pane = &panes[0];
+        assert!(pane.starts_with(PREFIX), "{pane}");
+        assert!(
+            !pane.contains("bar") && !pane.contains("globalvalue-7731"),
+            "no value in the pane command: {pane}"
+        );
+        let file = env_file_of(&h.home(), pane);
+        let meta = std::fs::metadata(&file).unwrap_or_else(|e| panic!("{file:?}: {e}"));
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        let body = std::fs::read_to_string(&file).unwrap();
+        assert!(body.contains("export FOO='bar'"), "{body}");
+        assert!(
+            body.contains("export GLOBAL_ONE='globalvalue-7731'"),
+            "{body}"
+        );
+        let rows = h.store.lock().unwrap().list_env_vars().unwrap();
+        assert!(
+            rows.iter().any(|r| r.scope == "session"
+                && r.scope_key == row.id.to_string()
+                && r.name == "FOO"),
+            "{rows:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_restart_writes_a_fresh_file_with_the_edited_value() {
+        let h = Harness::new();
+        h.set_global("A", EnvValue::Plain("1".into()));
+        new_session(h.args("dev-env-restart", None), &h.store, &h.ssh, &h.reg)
+            .await
+            .expect("create");
+        h.set_global("A", EnvValue::Plain("2".into()));
+        let restart = serde_json::from_value(serde_json::json!({
+            "host_alias": "h", "name": "dev-env-restart"
+        }))
+        .unwrap();
+        restart_session(restart, &h.store, &h.ssh)
+            .await
+            .expect("restart");
+        let panes = h.panes();
+        assert_eq!(panes.len(), 2, "{panes:?}");
+        let created = env_file_of(&h.home(), &panes[0]);
+        let restarted = env_file_of(&h.home(), &panes[1]);
+        assert_ne!(created, restarted, "a restart writes a fresh file");
+        let body = std::fs::read_to_string(&restarted).unwrap();
+        assert!(body.contains("export A='2'"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn an_unresolved_reference_refuses_the_create_and_starts_no_tmux_session() {
+        let h = Harness::new();
+        h.set_global(
+            "R",
+            EnvValue::Ref("file:/nonexistent/fleet-env-launch-test".into()),
+        );
+        let err = new_session(h.args("dev-env-unres", None), &h.store, &h.ssh, &h.reg)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_ENV_UNRESOLVED, "{err:?}");
+        let calls =
+            std::fs::read_to_string(h.dir.path().join("tmux-calls.log")).unwrap_or_default();
+        assert!(!calls.contains("new-session"), "{calls}");
+        assert!(h.panes().is_empty());
+    }
+
+    /// The environment refuses BEFORE the workspace step: a create that asks
+    /// for a new worktree leaves no worktree or branch behind to collide
+    /// with on a retry.
+    #[tokio::test]
+    async fn an_unresolved_reference_refuses_before_a_new_worktree_is_added() {
+        let h = Harness::new();
+        let pid = h.remote_checkout("acme", "wtproj");
+        h.set_global(
+            "R",
+            EnvValue::Ref("file:/nonexistent/fleet-env-launch-test".into()),
+        );
+        let mut args = h.args("dev-env-wt", None);
+        args.project_id = pid;
+        args.kind = None;
+        args.new_worktree = Some("feat-env".into());
+        let err = new_session(args, &h.store, &h.ssh, &h.reg)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_ENV_UNRESOLVED, "{err:?}");
+        let calls = h.ssh_calls();
+        assert!(!calls.contains("worktree add"), "{calls}");
+        let wt_dir = h
+            .home()
+            .join("projects/github.com/acme/wtproj/.worktrees/feat-env");
+        assert!(!wt_dir.exists(), "{wt_dir:?}");
+        assert!(h.panes().is_empty());
+    }
+
+    /// A project-scope variable reaches the restart too: the row keeps the
+    /// project it was created against even where reconcile's cwd match
+    /// finds none (here a system project on a remote host).
+    #[tokio::test]
+    async fn a_restart_keeps_the_project_scope() {
+        let h = Harness::new();
+        h.store
+            .lock()
+            .unwrap()
+            .set_env_var(
+                "project",
+                "acme/envproj",
+                "P",
+                &EnvValue::Plain("proj-v".into()),
+            )
+            .unwrap();
+        let row = new_session(h.args("dev-env-proj", None), &h.store, &h.ssh, &h.reg)
+            .await
+            .expect("create");
+        assert_eq!(row.project_id, Some(h.project_id), "{row:?}");
+        let restart = serde_json::from_value(serde_json::json!({
+            "host_alias": "h", "name": "dev-env-proj"
+        }))
+        .unwrap();
+        restart_session(restart, &h.store, &h.ssh)
+            .await
+            .expect("restart");
+        let panes = h.panes();
+        assert_eq!(panes.len(), 2, "{panes:?}");
+        for pane in &panes {
+            let body = std::fs::read_to_string(env_file_of(&h.home(), pane)).unwrap();
+            assert!(body.contains("export P='proj-v'"), "{pane}: {body}");
+        }
+    }
+
+    /// A review session's pane sources the environment too (its project's
+    /// scope; the review row does not exist yet, so no session scope).
+    #[tokio::test]
+    async fn a_review_session_launches_with_its_environment() {
+        let h = Harness::new();
+        let row = new_session(h.args("dev-env-review", None), &h.store, &h.ssh, &h.reg)
+            .await
+            .expect("create");
+        h.set_global("FLEET_T", EnvValue::Plain("1".into()));
+        // The pane shows the trust dialog, so the prompt seed gives up at
+        // once instead of waiting for a REPL the fake never draws.
+        std::fs::write(h.dir.path().join("trust"), "").unwrap();
+        let review = serde_json::from_value(serde_json::json!({
+            "source_session_id": row.id, "prompt": "review it"
+        }))
+        .unwrap();
+        spawn_review(review, &h.store, &h.ssh)
+            .await
+            .expect("spawn_review");
+        let panes = h.panes();
+        assert_eq!(panes.len(), 2, "{panes:?}");
+        let pane = &panes[1];
+        assert!(pane.starts_with(PREFIX), "{pane}");
+        assert!(!pane.contains("FLEET_T=1"), "{pane}");
+        let body = std::fs::read_to_string(env_file_of(&h.home(), pane)).unwrap();
+        assert!(body.contains("export FLEET_T='1'"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_recreate_sources_its_environment() {
+        let h = Harness::new();
+        let row = new_session(h.args("dev-env-recreate", None), &h.store, &h.ssh, &h.reg)
+            .await
+            .expect("create");
+        h.set_global("G", EnvValue::Plain("gv".into()));
+        let recreate = serde_json::from_value(serde_json::json!({ "session_id": row.id })).unwrap();
+        recreate_session(recreate, &h.store, &h.ssh)
+            .await
+            .expect("recreate");
+        let panes = h.panes();
+        assert_eq!(panes.len(), 2, "{panes:?}");
+        let pane = &panes[1];
+        assert!(pane.starts_with(PREFIX), "{pane}");
+        assert!(!pane.contains("gv"), "{pane}");
+        let body = std::fs::read_to_string(env_file_of(&h.home(), pane)).unwrap();
+        assert!(body.contains("export G='gv'"), "{body}");
+    }
 }

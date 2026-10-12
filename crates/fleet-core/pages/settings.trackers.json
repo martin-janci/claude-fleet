@@ -146,15 +146,7 @@
         },
         {
           "type": "field",
-          "key": "create_tickets",
-          "when": {
-            "key": "provider",
-            "in": [
-              "jira",
-              "jira_dc",
-              "asana"
-            ]
-          }
+          "key": "create_tickets"
         }
       ]
     },

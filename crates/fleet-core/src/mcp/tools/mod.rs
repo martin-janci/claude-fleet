@@ -44,6 +44,7 @@ mod assets;
 mod dashboards;
 mod devices;
 mod downloads;
+mod env_vars;
 mod fleet;
 mod forms;
 mod library;
@@ -400,6 +401,7 @@ impl FleetTools {
             + Self::library_router()
             + Self::runs_router()
             + Self::search_router()
+            + Self::env_vars_router()
     }
 }
 

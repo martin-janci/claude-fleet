@@ -120,6 +120,9 @@ pub struct NewSessionParams {
     /// Approved confirmation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_nonce: Option<String>,
+    /// Session-scope variables {NAME: value}, plain values only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

@@ -1419,6 +1419,66 @@ const PEER_LINK: ResourceType = ResourceType {
     variant_by: None,
 };
 
+const ENV_SCOPES: &[(&str, &str)] = &[
+    ("global", "Global"),
+    ("host", "Host"),
+    ("project", "Project"),
+    ("session", "Session"),
+];
+
+/// Session environment variables (spec 2026-10-11-session-env-and-secrets-design.md):
+/// Settings › Environment. Add and Remove are `env_var_set` / `env_var_unset`,
+/// `env_vars set` / `unset` with the action supplied by the command, since a
+/// resource action binds no constant.
+const ENV_VAR: ResourceType = ResourceType {
+    id: "env_var",
+    label: "Environment variable",
+    plural: "Environment variables",
+    help: "Set in every session fleet starts, by scope: global, then host, then project (owner/repo), then session; the narrower wins. A change applies when a session next starts or restarts. A secret's value is never shown again.",
+    list: "env_vars_list",
+    id_field: "id",
+    title_field: "name",
+    color_field: None,
+    empty: "No variables. Add one to have it in every session fleet starts.",
+    fields: &[
+        FieldSpec::new("name", "Name", "The variable's name.", FieldKind::Text { max: 128 }),
+        FieldSpec::new("scope", "Scope", "Where it applies: everywhere, one host, one project or one session.", FieldKind::Choice { options: ENV_SCOPES }).badge(Badge::Label),
+        FieldSpec::new("scope_key", "Applies to", "The host alias, owner/repo or session id; empty for global.", FieldKind::Text { max: 255 }),
+        FieldSpec::new("value", "Value", "Shown for a plain value only.", FieldKind::Text { max: 32768 }),
+        FieldSpec::new("secret", "Secret", "Write-only: never shown again.", FieldKind::Bool { on_off: false, default: false }).badge(Badge::True { text: "secret" }),
+        FieldSpec::new("is_ref", "Reference", "Read from the hub's environment or a file on it when a session starts.", FieldKind::Bool { on_off: false, default: false }).badge(Badge::True { text: "ref" }),
+        FieldSpec::new("updated_at", "Changed", "When it was last set.", FieldKind::Time),
+    ],
+    create: Some(
+        ActionSpec::new("env_var.set", "Add variable", "env_var_set", &[
+            ("scope", Bind::Param("scope")),
+            ("scope_key", Bind::Param("scope_key")),
+            ("name", Bind::Param("name")),
+            ("value", Bind::Param("value")),
+            ("secret", Bind::Param("secret")),
+        ])
+        .params(&[
+            param("scope", "Scope", ParamKind::Choice { options: &[("global", "Global"), ("host", "Host"), ("project", "Project")] }, true),
+            param("scope_key", "Host or owner/repo", text(255, "mercury · owner/repo · empty for global"), false),
+            param("name", "Name", text(128, "DATABASE_URL"), true),
+            param("value", "Value", ParamKind::Secret, true),
+            param("secret", "Keep it secret (never shown again)", ParamKind::Toggle { default: true }, false),
+        ]),
+    ),
+    update: None,
+    delete: Some(
+        ActionSpec::new("env_var.remove", "Remove", "env_var_unset", &[
+            ("scope", Bind::Record("scope")),
+            ("scope_key", Bind::Record("scope_key")),
+            ("name", Bind::Record("name")),
+        ])
+        .confirm("Remove this variable? A running session keeps it until it restarts."),
+    ),
+    actions: &[],
+    create_flow: None,
+    variant_by: None,
+};
+
 pub const RESOURCES: &[ResourceType] = &[
     ORG,
     TRACKER,
@@ -1427,6 +1487,7 @@ pub const RESOURCES: &[ResourceType] = &[
     PERSON_RESOURCE,
     DEBUG_DEVICE,
     PEER_LINK,
+    ENV_VAR,
 ];
 
 pub fn resource(id: &str) -> Option<&'static ResourceType> {
@@ -1647,6 +1708,9 @@ mod tests {
                 "debug_device_logs",
                 "debug_device_screenshot",
                 "disable_person",
+                "env_var_set",
+                "env_var_unset",
+                "env_vars_list",
                 "flow_back",
                 "flow_cancel",
                 "flow_start",
