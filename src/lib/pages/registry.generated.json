@@ -3274,6 +3274,50 @@
       "danger": {
         "level": "none"
       },
+      "default": "90",
+      "help": "Days a paired device may go unused before it is signed out and must be paired again. Peer hubs and updaters are never signed out.",
+      "key": "auth.device_token_ttl_days",
+      "kind": {
+        "max": 3650,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Devices: sign out after idle days",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "days",
+      "value": "90",
+      "zero": "never"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "0",
+      "help": "Days after pairing a device is signed out, however often it is used. Peer hubs and updaters are never signed out.",
+      "key": "auth.device_token_max_age_days",
+      "kind": {
+        "max": 3650,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Devices: sign out days after pairing",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "days",
+      "value": "0",
+      "zero": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "",
       "help": "Per-feature confidence floors fitted from runs a person confirmed, corrected or rejected (fleet-hub decide floor fit). A fitted floor only raises a feature's built-in one, and only for the question version and model it was fitted against.",
       "key": "decide.jev.floors",
@@ -4315,6 +4359,20 @@
             }
           ],
           "title": "Audit"
+        },
+        {
+          "intro": "When a paired device that has gone unused, or grown old, is signed out and must be paired again.",
+          "items": [
+            {
+              "key": "auth.device_token_ttl_days",
+              "type": "field"
+            },
+            {
+              "key": "auth.device_token_max_age_days",
+              "type": "field"
+            }
+          ],
+          "title": "Devices"
         }
       ],
       "spec": "fleet.page/1",

@@ -403,8 +403,11 @@ async fn an_idle_device_token_is_refused_and_a_policy_change_reaches_the_next_re
             [long_ago],
         )
         .unwrap();
-    cli.set_setting(crate::service::settings::DEVICE_TOKEN_TTL_SINCE, &long_ago.to_string())
-        .unwrap();
+    cli.set_setting(
+        crate::service::settings::DEVICE_TOKEN_TTL_SINCE,
+        &long_ago.to_string(),
+    )
+    .unwrap();
     // The default idle limit is 90 days.
     hub.refused(PHONE_TOK).await;
     hub.accepted(MASTER_TOK).await;
@@ -436,8 +439,11 @@ async fn a_device_this_hub_saw_is_not_idle_though_its_row_reads_old() {
     let cli = hub.other_process();
     cli.set_setting(crate::service::settings::DEVICE_TOKEN_TTL_DAYS, "3650")
         .unwrap();
-    cli.set_setting(crate::service::settings::DEVICE_TOKEN_TTL_SINCE, &long_ago.to_string())
-        .unwrap();
+    cli.set_setting(
+        crate::service::settings::DEVICE_TOKEN_TTL_SINCE,
+        &long_ago.to_string(),
+    )
+    .unwrap();
     cli.conn_ref()
         .execute(
             "UPDATE client_tokens SET created_at = ?1, last_seen_at = ?1 WHERE name = 'phone'",

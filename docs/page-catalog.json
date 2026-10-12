@@ -4891,6 +4891,34 @@
       ]
     },
     {
+      "default_widget": "number",
+      "key": "auth.device_token_ttl_days",
+      "kind": {
+        "max": 3650,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Devices: sign out after idle days",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "auth.device_token_max_age_days",
+      "kind": {
+        "max": 3650,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Devices: sign out days after pairing",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
       "default_widget": "text",
       "key": "decide.jev.floors",
       "kind": {

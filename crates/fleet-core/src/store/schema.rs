@@ -2026,7 +2026,10 @@ const MIGRATIONS: &[Migration] = &[
     // Identity sub-project 1: device tokens expire. Writes the idle clock's
     // start (`auth.device_token_ttl_since`, INSERT OR IGNORE) and the
     // auth-epoch triggers on the `auth.device_token_%` settings.
-    Migration::plain(183, include_str!("../../migrations/183_device_token_ttl.sql")),
+    Migration::plain(
+        183,
+        include_str!("../../migrations/183_device_token_ttl.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -3763,7 +3766,10 @@ mod tests {
         };
         let first = since();
         let now = crate::store::now_unix();
-        assert!((now - first).abs() < 60, "ttl_since {first} is not now ({now})");
+        assert!(
+            (now - first).abs() < 60,
+            "ttl_since {first} is not now ({now})"
+        );
         let epoch = || -> i64 {
             s.conn
                 .query_row("SELECT epoch FROM auth_epoch WHERE id = 1", [], |r| {

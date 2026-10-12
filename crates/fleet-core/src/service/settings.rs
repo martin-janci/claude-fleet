@@ -1960,7 +1960,7 @@ pub const SPECS: &[Spec] = &[
         DEVICE_TOKEN_MAX_AGE_DAYS,
         "0",
         Kind::Int { min: 0, max: 3650 },
-        "Devices: sign out after days, used or not",
+        "Devices: sign out days after pairing",
         "Days after pairing a device is signed out, however often it is used. Peer hubs and updaters are never signed out.",
     )
     .unit(Unit::Days)
