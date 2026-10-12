@@ -4430,15 +4430,17 @@ mod tests {
     ) {
         use crate::store::EnvValue;
         let f = fixture();
+        // `/nonexistent` is not an absolute path on Windows, and the reference
+        // must be one to be stored at all.
+        let reference = if cfg!(windows) {
+            r"file:C:\nonexistent\fleet-move-env-test"
+        } else {
+            "file:/nonexistent/fleet-move-env-test"
+        };
         f.store
             .lock()
             .unwrap()
-            .set_env_var(
-                "global",
-                "",
-                "TOKEN",
-                &EnvValue::Ref("file:/nonexistent/fleet-move-env-test".into()),
-            )
+            .set_env_var("global", "", "TOKEN", &EnvValue::Ref(reference.into()))
             .unwrap();
         let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
         let mut a = args(&f, false);

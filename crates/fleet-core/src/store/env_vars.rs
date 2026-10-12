@@ -313,13 +313,21 @@ mod tests {
             "global",
             "",
             "REF",
-            &EnvValue::Ref("file:/run/secrets/x".into()),
+            // Absolute on Windows too, or the store refuses it.
+            &EnvValue::Ref(
+                if cfg!(windows) {
+                    r"file:C:\run\fleet-ref-leaf"
+                } else {
+                    "file:/run/fleet-ref-leaf"
+                }
+                .into(),
+            ),
         )
         .unwrap();
         let json = serde_json::to_string(&s.list_env_vars().unwrap()).unwrap();
         assert!(json.contains("visible"), "{json}");
         assert!(
-            !json.contains("hunter2") && !json.contains("/run/secrets"),
+            !json.contains("hunter2") && !json.contains("fleet-ref-leaf"),
             "{json}"
         );
     }

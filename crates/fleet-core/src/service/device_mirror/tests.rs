@@ -3,7 +3,6 @@ use crate::ipc_error::codes;
 use crate::service::debug_devices::DebugDevice;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 fn device(platform: &str, kind: &str, ready: bool, host: &str) -> DebugDevice {
     serde_json::from_value(serde_json::json!({
@@ -15,11 +14,14 @@ fn device(platform: &str, kind: &str, ready: bool, host: &str) -> DebugDevice {
     .expect("DebugDevice fields changed: update this fixture")
 }
 
+// Only the unix-only `lifecycle` tests use it.
+#[cfg(unix)]
 #[derive(Default)]
 struct CountingLease {
     renewed: AtomicUsize,
     released: AtomicUsize,
 }
+#[cfg(unix)]
 #[async_trait::async_trait]
 impl Lease for CountingLease {
     async fn renew(&self) -> Result<(), IpcError> {
@@ -258,6 +260,7 @@ fn the_local_scrcpy_command_has_no_tunnel() {
 mod lifecycle {
     use super::*;
     use crate::tmux::fake_exec::{write_exec, PROBE_GUARD};
+    use std::time::Duration;
 
     /// A stub scrcpy: logs argv and env to `<dir>/scrcpy.log`, then sleeps
     /// (a running mirror) or exits with `code` at once.
