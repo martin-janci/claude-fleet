@@ -5,6 +5,7 @@ pub mod api_tokens;
 pub mod assets;
 pub mod cancel;
 pub mod context_help;
+pub mod dashboards;
 pub mod debug_devices;
 pub mod device_mirror;
 pub mod diagnostics;

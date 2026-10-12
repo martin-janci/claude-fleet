@@ -1988,6 +1988,12 @@ const MIGRATIONS: &[Migration] = &[
         177,
         include_str!("../../migrations/177_debug_device_queue.sql"),
     ),
+    // Persona dashboards step 6: dashboards a person pinned, on the hub.
+    // `IF NOT EXISTS` throughout, so idempotent.
+    Migration::plain(
+        178,
+        include_str!("../../migrations/178_pinned_dashboards.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

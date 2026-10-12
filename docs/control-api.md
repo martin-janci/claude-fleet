@@ -1135,6 +1135,13 @@ Index by area (names only; see the reference for details):
   another of your devices: `list {kind?}` | `get {kind, key?}` | `save
   {kind, key?, step, answers, label?}` | `clear {kind, key?}`. Rows name the
   device that saved last.
+- **Dashboards** — `dashboards`, the dashboards a person pinned from a
+  `dashboard` block (`docs/chat-blocks.md`), kept on the hub so every
+  device of theirs shows them: `list` | `get {id}` | `pin {dashboard, why?}`
+  | `unpin {id}`. A pin checks the block as the app draws it, refuses a
+  built-in's id and keeps at most 20 per person. The agent (Control's
+  operator) reads them; its `pin` and `unpin` answer `E_FORBIDDEN`. Not
+  served to a per-host token.
 - **Operator settings** — `get_settings` (every registered key of the
   settings registry, `service/settings.rs`, with its effective value; a
   read, but master token only, since the values name hosts and their

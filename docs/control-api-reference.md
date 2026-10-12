@@ -135,6 +135,12 @@ Where a message just sent in Control goes (propose {text}), or record the person
 
 Parameters: `action`, `chosen`, `run_id`, `text`
 
+### `dashboards`
+
+The person's pinned dashboards (`dashboard` blocks): list | get {id} | pin {dashboard, why?} | unpin {id}. The agent only reads (E_FORBIDDEN).
+
+Parameters: `action`, `dashboard`, `id`, `why`
+
 ### `debug_devices`
 
 Phones, emulators and simulators on any fleet host, used from any session that may see them; commands run on the device's host. run: one adb / simctl / devicectl command. install copies the app from your host. screenshot answers an image. A claim keeps others off (E_CONFLICT); use extends it. claim with queue waits in line for a held one; it is yours when your turn comes.
@@ -1211,6 +1217,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::prs::list_pull_requests`
 - `commands::start_rules::start_rules`
 - `commands::wizard_state::wizard_state`
+- `commands::dashboards::dashboards`
 - `commands::api_tokens::api_tokens`
 - `commands::add_account::add_account`
 - `commands::presence::session_presence`
