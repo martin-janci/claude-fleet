@@ -824,8 +824,9 @@ impl Store {
     }
 
     /// Grant `role` to a person or a group. The `fleet` client's `org-*`
-    /// roles are always refused (`E_VALIDATE`): only the org projection
-    /// grants them, through `map_role_in_tx(.., true)`.
+    /// roles are always refused (`E_VALIDATE`), and so is any role on a
+    /// managed group (`E_FORBIDDEN`): only the org projection grants them,
+    /// through `map_role_in_tx(.., true)`.
     pub fn map_role(&self, p: Principal, role: i64) -> Result<(), IpcError> {
         self.with_tx(|c| self.map_role_in_tx(c, p, role, false))
     }
@@ -856,7 +857,16 @@ impl Store {
                 )?;
             }
             Principal::Group(group) => {
-                group_or_404(conn, group)?;
+                // Symmetric with the unmapping: a managed group's roles come
+                // from its org (the projection's seeding passes `true`). A
+                // mapping made here could never be removed, and the org's
+                // admins would hand the role out through its membership.
+                if group_or_404(conn, group)?.managed && !allow_org_roles {
+                    return Err(IpcError::new(
+                        codes::E_FORBIDDEN,
+                        "this group is managed by its org; its roles come from the org",
+                    ));
+                }
                 conn.execute(
                     "INSERT OR IGNORE INTO group_role_mappings (group_id, role_id) VALUES (?1, ?2)",
                     rusqlite::params![group, role],

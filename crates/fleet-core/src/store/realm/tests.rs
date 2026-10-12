@@ -155,6 +155,29 @@ fn the_public_map_role_never_grants_an_org_role() {
     }
 }
 
+/// Nor mapped: a managed group takes no role by hand (it could never be
+/// unmapped, and the org's admins would hand it out through membership);
+/// the projection's `_in_tx(.., true)` path still seeds.
+#[test]
+fn a_managed_group_takes_no_role_mapping_publicly() {
+    let s = s();
+    let (root, viewers) = managed_org(&s);
+    let fa = s.role(RoleRef::Realm(ROLE_FLEET_ADMIN)).unwrap().unwrap();
+    for g in [root.id, viewers.id] {
+        assert_eq!(
+            s.map_role(Principal::Group(g), fa.id).unwrap_err().code,
+            codes::E_FORBIDDEN
+        );
+    }
+    let v = s
+        .role(RoleRef::Client(CLIENT_FLEET, "org-viewer"))
+        .unwrap()
+        .unwrap();
+    s.with_tx(|c| s.map_role_in_tx(c, Principal::Group(root.id), v.id, true))
+        .unwrap();
+    assert!(s.group_roles(root.id).unwrap().iter().any(|r| r.id == v.id));
+}
+
 #[test]
 fn a_managed_groups_mappings_cannot_be_unmapped_publicly() {
     let s = s();

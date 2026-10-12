@@ -316,3 +316,107 @@ fn roles_composites_and_effective_roles() {
     del.role = Some("fleet:deployer".into());
     run(&del, &store, fleet).unwrap();
 }
+
+/// A managed org group takes no role by hand, so an org admin can never
+/// mint a fleet admin through `add_member`.
+#[test]
+fn a_managed_group_takes_no_role_and_org_admins_mint_no_fleet_admin() {
+    let (store, acme, _) = fixture();
+    let fleet = Me {
+        device: None,
+        person: Some(person(&store, "root")),
+        authority: Authority::Fleet,
+    };
+    let mut map = args("map_role");
+    map.group = Some("/orgs/acme/admins".into());
+    map.role = Some("fleet-admin".into());
+    assert_eq!(code(run(&map, &store, fleet)), codes::E_FORBIDDEN);
+    let ann = Me {
+        device: None,
+        person: Some(person(&store, "ann")),
+        authority: Authority::Org {
+            org: acme,
+            hub: false,
+        },
+    };
+    let mut add = args("add_member");
+    add.group = Some("/orgs/acme/admins".into());
+    add.user = Some("mo".into());
+    run(&add, &store, ann).unwrap();
+    let mo = person(&store, "mo");
+    assert!(!store.lock().unwrap().is_fleet_admin(mo).unwrap());
+}
+
+/// Spec §5's table for an org admin: every action, with arguments a fleet
+/// admin could run, is refused outside their slots and narrowed reads.
+#[test]
+fn an_org_admin_is_refused_every_action_outside_their_slots() {
+    let (store, acme, _) = fixture();
+    {
+        // Something for each fleet-only action to act on.
+        let s = store.lock().unwrap();
+        s.create_group(None, "eng", None).unwrap();
+        s.create_role(None, "deployer", None).unwrap();
+    }
+    let ann = Me {
+        device: None,
+        person: Some(person(&store, "ann")),
+        authority: Authority::Org {
+            org: acme,
+            hub: false,
+        },
+    };
+    let full = |action: &str| -> RealmAdminArgs {
+        let mut a = args(action);
+        a.user = Some("mo".into());
+        match action {
+            "create_group" => a.name = Some("new".into()),
+            "rename_group" => {
+                a.group = Some("/eng".into());
+                a.name = Some("eng2".into());
+            }
+            "move_group" | "delete_group" | "get_group" => a.group = Some("/eng".into()),
+            "add_member" | "remove_member" => a.group = Some("/orgs/acme/viewers".into()),
+            "create_role" => a.name = Some("ops".into()),
+            "update_role" | "delete_role" => a.role = Some("deployer".into()),
+            "add_composite" | "remove_composite" => {
+                a.role = Some("deployer".into());
+                a.child = Some("fleet-trusted".into());
+            }
+            "map_role" | "unmap_role" => a.role = Some("deployer".into()),
+            "update_user" => a.profile = Some(serde_json::json!({ "first_name": "Mo" })),
+            // A live member of acme throughout (mo leaves in remove_member).
+            "get_user" | "effective_roles" => a.user = Some("ann".into()),
+            _ => {}
+        }
+        a
+    };
+    let allowed_reads = ["list_groups", "list_users", "get_user", "effective_roles"];
+    for (name, _) in ACTIONS {
+        let r = run(&full(name), &store, ann);
+        match name {
+            n if allowed_reads.contains(&n) => assert!(r.is_ok(), "{n}: {r:?}"),
+            // Allowed, but "/eng" is outside acme.
+            "get_group" => assert_eq!(code(r), codes::E_FORBIDDEN, "get_group /eng"),
+            "add_member" | "remove_member" => assert!(r.is_ok(), "{name}: {r:?}"),
+            n => assert_eq!(code(r), codes::E_FORBIDDEN, "{n}"),
+        }
+    }
+    let mut inside = args("get_group");
+    inside.group = Some("/orgs/acme/admins".into());
+    assert!(run(&inside, &store, ann).is_ok());
+    for slot in ["admins", "members", "viewers"] {
+        let mut a = args("add_member");
+        a.group = Some(format!("/orgs/acme/{slot}"));
+        a.user = Some("mo".into());
+        assert!(run(&a, &store, ann).is_ok(), "{slot}");
+    }
+    let mut other = args("add_member");
+    other.group = Some("/orgs/other/members".into());
+    other.user = Some("mo".into());
+    assert_eq!(code(run(&other, &store, ann)), codes::E_FORBIDDEN);
+    let mut root = args("add_member");
+    root.group = Some("/orgs/acme".into());
+    root.user = Some("mo".into());
+    assert_eq!(code(run(&root, &store, ann)), codes::E_FORBIDDEN);
+}

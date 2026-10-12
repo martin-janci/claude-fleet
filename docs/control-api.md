@@ -1280,8 +1280,8 @@ Index by area (names only; see the reference for details):
   `remove_member` on one of those changes the org membership itself (the
   role from the subgroup's name; removing revokes what was shared with
   them on the org's sessions, as `org_admin`'s `remove_member` does). Any
-  other managed group, and renaming, moving or deleting one, is
-  `E_FORBIDDEN`. A fleet admin's device reaches every action; an org
+  other managed group, renaming, moving or deleting one, and mapping or
+  unmapping a role on one, is `E_FORBIDDEN`: its roles come from the org. A fleet admin's device reaches every action; an org
   admin's reads its org's subtree and live members only and changes who is
   in its org's three groups — never their own membership or a fleet
   admin's — and is refused everything else (`E_FORBIDDEN`). Nobody removes
