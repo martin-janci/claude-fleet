@@ -16,6 +16,7 @@ pub mod add_account;
 pub mod add_project;
 pub mod address;
 pub mod agent_install;
+pub mod agents;
 pub mod attachments;
 pub mod attention;
 pub mod bg_sessions;

@@ -276,6 +276,16 @@ pub fn spawn_reconcile_tick(
                 if service::loops::gate("pr_shepherd", store, Some(period)) {
                     service::pr_shepherd::spawn_run(store, ssh, period);
                 }
+                // Agents (reviewer, support): each granted rule's poller finds
+                // work, and due jobs run. No rule, no work. Both stop while
+                // `automation.paused` is on; detached and single-flight, as a
+                // poll calls GitHub or Jira and a run takes minutes.
+                if service::loops::gate("agents_poll", store, Some(period)) {
+                    service::agents::spawn_poll(store, ssh, period);
+                }
+                if service::loops::gate("agents_run", store, Some(period)) {
+                    service::agents::spawn_run(store, ssh, period);
+                }
                 // Step 5.10: a prompt queued for a busy session goes in once the
                 // session is idle; the Stop hook delivers it first, this catches
                 // a hook that never came. Detached and single-flight.

@@ -5,8 +5,10 @@
   switch, and today's spend with Pause all (`automation.paused`) at its
   foot. Routines (RoutinesPanel) lists the ones a person writes (8.6), then
   the built-in ones, fleet's own loops (8.1); Runs lists every run (8.3),
-  each linked to its session; Agents names the three agents fleet runs
-  itself; Rules holds the start rules (8.11, StartRules).
+  each linked to its session; Agents names the agents fleet runs itself,
+  then the PR reviewer's and the support agent's rules, the actions they
+  wait on a person for (AgentActions) and their newest jobs; Rules holds
+  the start rules (8.11, StartRules).
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -20,6 +22,8 @@
   import Loader from './Loader.svelte';
   import RoutinesPanel from './automation/RoutinesPanel.svelte';
   import StartRules from './StartRules.svelte';
+  import AgentActions from './automation/AgentActions.svelte';
+  import { agents as agentsStatus, jobLine, loadAgents, ruleLine } from './agents';
   import { fleetSettings, loadFleetSettings } from './fleet_settings';
   import { listRuns, outcomeLabel, type RunOutcome, type RunRow } from './runs';
   import { goTo } from './destination';
@@ -88,12 +92,14 @@
     void loadFleetSettings();
     void load();
     void loadRuns();
+    void loadAgents();
     // The loops' "next in" and "ago" move; the data itself is re-read on the
     // same beat, as a loop's last run changes without an event.
     const t = setInterval(() => {
       if (windowHidden()) return;
       nowSec = Math.floor(Date.now() / 1000);
       void load();
+      void loadAgents();
     }, 30_000);
     return () => clearInterval(t);
   });
@@ -101,7 +107,7 @@
   const paused = $derived(auto?.paused ?? false);
   const spend = $derived(auto ? spendMicros(auto.today) : null);
   const running = $derived(auto?.today.filter((r) => r.outcome === 'running').length ?? 0);
-  const agents = $derived(auto ? builtInAgents($fleetSettings, auto.loops, auto.today, nowSec) : []);
+  const agents = $derived(auto ? builtInAgents($fleetSettings, auto.loops, auto.today, nowSec, $agentsStatus) : []);
 
   async function togglePause() {
     busy = true;
@@ -120,6 +126,8 @@
     if (focusSession(id, run.owner)) goTo('session');
   }
 
+  /** An agent job's state in the Runs list's words (`store::runs`). */
+  const JOB_OUTCOME: Record<string, string> = { done: 'ok', failed: 'failed', skipped: 'nothing_to_do', needs_person: 'needs_person' };
   const RUN_DOT: Record<string, OfState> = { ok: 'done', nothing_to_do: 'idle', failed: 'failed', needs_person: 'waiting', running: 'working' };
 
   const OUTCOMES: { id: RunOutcome | null; label: string; state: OfState }[] = [
@@ -140,7 +148,7 @@
   const TABS: { id: AutomationTab; label: string; count?: () => number | undefined; title?: string }[] = [
     { id: 'routines', label: 'Routines' },
     { id: 'runs', label: 'Runs' },
-    { id: 'agents', label: 'Agents', count: () => 3, title: 'The agents fleet runs itself' },
+    { id: 'agents', label: 'Agents', count: () => agents.length, title: 'The agents fleet runs itself' },
     { id: 'rules', label: 'Rules', title: 'Start rules: what starts on its own' },
   ];
 
@@ -288,6 +296,40 @@
               </li>
             {/each}
           </ul>
+          {#if $agentsStatus}
+            <h3 class="sub">Rules</h3>
+            {#if $agentsStatus.rules.length === 0}
+              <p class="none" data-testid="agent-rules-none">
+                No agent has a rule. Grant one on the hub: <code>fleet-hub agents grant review gh:owner/repo --host HOST</code>.
+              </p>
+            {:else}
+              <ul class="table agents" data-testid="agent-rules">
+                {#each $agentsStatus.rules as r (r.id)}
+                  <li data-testid="agent-rule">
+                    <StatusDot state={r.active ? 'done' : 'idle'} label={null} />
+                    <span class="main"><strong>{r.agent === 'review' ? 'PR reviewer' : 'Support'}</strong> <span class="summary">{ruleLine(r)}</span></span>
+                    <span class="meta state">rule {r.id}</span>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+            {#if $agentsStatus.pending.length > 0}
+              <h3 class="sub">Waiting for you</h3>
+              <AgentActions />
+            {/if}
+            {#if $agentsStatus.jobs.length > 0}
+              <h3 class="sub">Newest jobs</h3>
+              <ul class="table agents" data-testid="agent-jobs">
+                {#each $agentsStatus.jobs as j (j.id)}
+                  <li data-testid="agent-job">
+                    <StatusDot state={RUN_DOT[JOB_OUTCOME[j.state] ?? 'running'] ?? 'idle'} label={null} />
+                    <span class="main"><span class="summary">{jobLine(j)}</span></span>
+                    <span class="meta state">{j.agent}</span>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+          {/if}
         </div>
         {:else if error}
           <LoadError title="Couldn't load automation" {error} onretry={() => retry(load)} {retrying} testid="automation-load-error" />
@@ -323,6 +365,7 @@
   .table li { display: grid; grid-template-columns: 16px 80px minmax(0, 1fr) 64px 52px 64px; gap: 4px 10px; align-items: center; padding: 9px 12px; font-size: var(--text-sm); }
   .table li + li { border-top: 1px solid var(--border); }
   .table.agents li { grid-template-columns: 16px minmax(0, 1fr) auto; }
+  .sub { margin: 16px 0 6px; font-size: var(--text-sm); font-weight: 600; }
   .main { min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
   .summary { flex-basis: 100%; font-size: var(--text-xs); color: var(--fg-muted); overflow-wrap: anywhere; }
   .outcome.failed { color: var(--status-failed); }

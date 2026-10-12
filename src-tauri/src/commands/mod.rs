@@ -1,5 +1,6 @@
 pub mod account_usage;
 pub mod add_account;
+pub mod agents;
 pub mod api_tokens;
 pub mod assets;
 pub mod cancel;

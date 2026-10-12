@@ -21,4 +21,4 @@ BEGIN
   DELETE FROM env_vars WHERE scope = 'session' AND scope_key = CAST(old.id AS TEXT);
 END;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (173);
+INSERT OR IGNORE INTO schema_version (version) VALUES (177);

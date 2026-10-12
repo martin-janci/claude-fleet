@@ -1,11 +1,11 @@
 //! Every background loop reports (redesign step 8.1): one registry holds,
 //! per loop, when it last ran, when it runs next and how that went, and
 //! `fleet_health.loops` reads it. Every loop that acts on the person's
-//! behalf (missions, GC, catalog scans, playbooks, the PR shepherd, repairs,
-//! syncs, routines, host refresh) also asks [`gate`] first, which answers
-//! "paused" while `automation.paused` is on: the one switch a person flips
-//! to stop every automatic action at once. Each of them is proven to stop
-//! by a behaviour test next to its pass (`pause_all_stops_*`).
+//! behalf (missions, GC, catalog scans, playbooks, the PR shepherd, the
+//! agents, repairs, syncs, routines, host refresh) also asks [`gate`] first,
+//! which answers "paused" while `automation.paused` is on: the one switch a
+//! person flips to stop every automatic action at once. Each of them is
+//! proven to stop by a behaviour test next to its pass (`pause_all_stops_*`).
 //!
 //! The rest keep running while paused, each with the reason it says in
 //! [`LoopSpec::keeps_running`] (shown in the Automation view): they observe
@@ -78,6 +78,8 @@ pub const LOOPS: &[LoopSpec] = &[
     ),
     acts("playbooks", "Stuck playbooks"),
     acts("pr_shepherd", "PR shepherd"),
+    acts("agents_poll", "Agents: find work"),
+    acts("agents_run", "Agents: run jobs"),
     acts("gc", "Garbage collection"),
     keeps("usage", "Session usage", "Only reads token usage."),
     keeps(

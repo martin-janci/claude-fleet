@@ -948,6 +948,54 @@ pub(super) fn project_taken_slugs(
     Ok(taken)
 }
 
+/// The checkout of project `project_id` on `host`: the project's own path
+/// on `local`, else the projects-root layout on that host, cloned there
+/// first when it is missing (as a new session would). A system project has
+/// no repository and is refused. For the agents' runs
+/// (`service::agents::review`), which work beside this checkout.
+pub(crate) async fn project_checkout_on(
+    store: &Mutex<Store>,
+    ssh: &SshClient,
+    host: &str,
+    project_id: i64,
+) -> Result<String, IpcError> {
+    crate::service::hub::ensure_local_allowed(host)?;
+    let system = {
+        let s = lock(store)?;
+        fetch_system_base_path(&s, project_id)?.is_some()
+    };
+    if system {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!("project {project_id} is a system project without a repository"),
+        ));
+    }
+    if host == "local" {
+        let s = lock(store)?;
+        return fetch_base_path(&s, project_id);
+    }
+    let (owner, repo) = {
+        let s = lock(store)?;
+        fetch_owner_repo(&s, project_id)?
+    };
+    let home = ssh.remote_home(host).await?;
+    let (root, _) = {
+        let s = lock(store)?;
+        remote_project_path_for(&s, host, &home, &owner, &repo, None)
+    };
+    ensure_remote_project(
+        ssh,
+        host,
+        &owner,
+        &repo,
+        &root,
+        None,
+        CancellationToken::new(),
+    )
+    .await?;
+    Ok(root)
+}
+
 /// The pane cwd for a SYSTEM project (`Some`), or `None` for an ordinary one.
 ///
 /// A system project (the UX agent's operator dir) is not a repository: its

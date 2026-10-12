@@ -1114,6 +1114,10 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("list_tasks", Verdict::Routed { tool: "list_tasks" }),
     // Orbit Fleet 8.3: the Automation screen's Runs list.
     ("list_runs", Verdict::Routed { tool: "runs" }),
+    // Agents step 5: the Automation screen's Agents tab and the Inbox's
+    // agent actions. The hub serves `agents` to the owner's own device only.
+    ("agents_status", Verdict::Routed { tool: "agents" }),
+    ("agents_decide", Verdict::Routed { tool: "agents" }),
     // Orbit Fleet 8.6: the Automation screen's Routines and the Inbox's failed runs.
     ("routines", Verdict::Routed { tool: "routines" }),
     // ── tasks ───────────────────────────────────────────────────────────────

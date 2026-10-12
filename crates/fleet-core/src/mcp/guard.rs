@@ -733,6 +733,18 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Agents (reviewer, support): a person's standing rule per repo or
+    // Jira project, which lets an agent read and write outside fleet, and
+    // a person's answer to a write an agent proposes. The owner's own
+    // device only, never the master an agent holds (the operator has
+    // `fleet-hub agents`); a write also needs a trusted full device.
+    ToolPolicy {
+        name: "agents",
+        access: Access::PersonDevice,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // Named Control API tokens (M15 step G2.8): the master and the owner's
     // own device. Creating or revoking needs the master or a trusted full
     // device, and only the master creates an admin token

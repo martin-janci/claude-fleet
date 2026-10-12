@@ -1,6 +1,6 @@
 # HANDOVER — session environment variables and secrets
 
-Branch: `feat/session-env-secrets` (pushed to origin). Cut from `origin/main` 27e1a2235; main is 13 commits ahead now (no conflicts expected; migration 173 is still free on main).
+Branch: `feat/session-env-secrets` (pushed to origin). Cut from `origin/main` 27e1a2235; main is 13 commits ahead now (no conflicts expected; migration 177 is still free on main).
 Status on 2026-10-12: **Tasks 1–5 of 9 implemented and committed; Task 5 not yet reviewed; Tasks 6–9 not started.**
 
 Read in this order:

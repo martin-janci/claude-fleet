@@ -738,7 +738,7 @@ desktop). Not yet: a filesystem watcher, a three-way merge editor.
 
 Chat forms, part 1 (spec 2026-10-07-chat-forms-design.md): the ask tool, fleet.form/1, the form card in the Conversation panel, secrets to host files (migration 119; guide `docs/forms.md`). Contract revision 9: the desktop and its hub ship together. The app's own wizards (New session, Add host, Pair a device, Add project, Link to a hub, Get started) are fleet.form/1 specs too (redesign 10.12, `src/lib/forms/wizards/`, `docs/forms.md` → *Wizards are forms too*). As dialogs: Link to a hub (Settings › Hub), Pair a device (Settings › Devices) and Get started's first session (`get_started`). In the chat (`ChatForm` at the end of the Conversation panel and of Control's chat): an agent's `wizard` block (`docs/chat-blocks.md`) opens Add host, Add project, Get started, New session or Pair a device, and Control's *Add project* chip opens Add project; nothing runs until the last button. An agent may stream a long form while it writes it, `ask { draft }` (migration 153, the row's `form_draft`), which the chat draws in as skeleton fields until `ask { form }` opens it. The phone's form sheet (14.7) is fleet-mobile's. Part 2 (forms in guide steps) is not started; the fleet-mobile card is its own plan.
 
-Session environment variables (spec 2026-10-11-session-env-and-secrets-design.md, migration 173, contract 18): `env_vars` (global < host < project < session), `new_session { env }`, a form's `env_target`, Settings › Environment (resource `env_var`, `env_var_set` / `env_var_unset`), the launch file under `~/.claude-fleet/env` sourced by every pane command (create, restart, recreate, repair, review, move) and swept after 10 minutes, and `env_secret_literals` masked in diagnostics. Not built: encryption at rest, `op://` references, a per-worktree scope, a session panel editor.
+Session environment variables (spec 2026-10-11-session-env-and-secrets-design.md, migration 177, contract 18): `env_vars` (global < host < project < session), `new_session { env }`, a form's `env_target`, Settings › Environment (resource `env_var`, `env_var_set` / `env_var_unset`), the launch file under `~/.claude-fleet/env` sourced by every pane command (create, restart, recreate, repair, review, move) and swept after 10 minutes, and `env_secret_literals` masked in diagnostics. Not built: encryption at rest, `op://` references, a per-worktree scope, a session panel editor.
 
 PR shepherd, steps 1 to 4 of 5 (step 2 without its Inbox card), are built and do nothing until a person
 grants a rule (spec `docs/superpowers/specs/2026-10-08-pr-shepherd-design.md`):
@@ -756,6 +756,51 @@ shepherd grant | revoke | pause-all | status` or the control API's
 Jev's `pr_triage` (`decide.jev.pr_triage`, off by default) records in
 shadow what each new episode most likely needs. Not built: the Inbox
 card, the UI.
+
+The agent runtime (reviewer and support agents, steps 1 to 7 of 8) is
+built, and the PR reviewer works end to end under a granted rule (spec
+`docs/superpowers/specs/2026-10-11-review-and-support-agents-design.md`).
+Migration 173 (`agent_rules`, `agent_cursors`, `agent_jobs`,
+`agent_actions`), `service/agents/` with the loops `agents_poll` and
+`agents_run` (stopped by `automation.paused`), the settings
+`agents.poll_interval_secs`, `agents.max_concurrent` and
+`agents.max_retries`, `fleet-hub agents grant | revoke | pause-all |
+approve | reject | status`, and the `agents` tool, served only to the
+owner's own paired device. The run vehicle (step 2): a locked-down
+`claude -p` with read-only tools (`claude_print::isolation_flags_with`,
+`service/agents/vehicle.rs`), its MCP config and system prompt carried on
+stdin, in a detached worktree beside the checkout
+(`service/agents/workspace.rs`). The reviewer (steps 3 and 4, migration
+174, `service/agents/review/`): polls a granted repo's open PRs, reviews
+each new head with read-only tools, records the placed review in
+`review_records`, and by the rule's level keeps it (`watch`), queues it
+for a person (`propose`, an action the `agents` tool or `fleet-hub agents
+approve` answers) or posts it (`act`); it re-reviews a posted review
+GitHub lost and answers a `/review` comment. Its jobs are in the Runs
+list (source `agent`). The UI (step 5): Automation › Agents lists the
+reviewer's and the support agent's rules, waiting actions and newest jobs,
+and the Inbox's Needs you carries the waiting actions with Approve and
+Reject (`src/lib/agents.ts`, `automation/AgentActions.svelte`, the
+desktop commands `agents_status` / `agents_decide`). The support agent's
+read side (step 6, `service/agents/support/`): a `support` rule on
+`jira:<tracker id>:<PROJECT>` polls the project's comments and
+assignments, and investigates a ticket with read-only tools plus the
+catalog MCP servers its rule names (the `support-agent` repo's `graylog`,
+`tenant-resolver`, `support-kb`), keeping the investigation as the job's
+result. Its write side (step 7, migration 175): at `propose` or `act` the
+investigation becomes actions (the comment or the question for the
+reporter, a bug in the rule's `bug_project` linked to the ticket, or a
+link to the open bug its fingerprint or a search matches); `act` runs the
+comment and the link alone and a new bug only when the rule lists it in
+`auto` and the investigation is sure; the executor refuses a write
+outside the rule's projects or over `max_body_chars`. Step 8 in part: the
+reviewer labels its pull requests (`labels`), describes an empty one
+(`auto_description`) and answers an author who argues a missing-test
+finding (test debate, migration 176), each an action like the review;
+the support agent scans a catalog MCP server (`graylog`) for new errors
+(`scan`) and proposes known-error entries for its KB repo (`kb`). Not
+built: outbound Slack/Teams notifications (a new channel of the 11.9
+matrix, the owner's call).
 
 Session state machine hardening (plan A, #343) is landed: a `working` row
 with no activity for `reconcile.stale_working_secs` turns `idle` with

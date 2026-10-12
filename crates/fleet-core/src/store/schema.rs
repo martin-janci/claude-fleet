@@ -1968,8 +1968,22 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/172_tracker_comment_writes.sql"),
         already_applied: Some(tracker_writes_has_remote_url),
     },
+    // Agent runtime (reviewer and support agents, step 1): `agent_rules`,
+    // `agent_cursors`, `agent_jobs`, `agent_actions`. New tables, idempotent.
+    Migration::plain(173, include_str!("../../migrations/173_agents.sql")),
+    // The PR reviewer (agents step 3): `review_prs`, `review_records`. New
+    // tables, idempotent.
+    Migration::plain(174, include_str!("../../migrations/174_review_prs.sql")),
+    Migration::plain(
+        175,
+        include_str!("../../migrations/175_support_fingerprints.sql"),
+    ),
+    Migration::plain(
+        176,
+        include_str!("../../migrations/176_review_test_exemptions.sql"),
+    ),
     // Session environment variables and secrets.
-    Migration::plain(173, include_str!("../../migrations/173_env_vars.sql")),
+    Migration::plain(177, include_str!("../../migrations/177_env_vars.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
