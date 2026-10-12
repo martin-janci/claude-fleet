@@ -122,3 +122,98 @@ fn every_realm_write_moves_the_auth_epoch() {
     s.create_group(None, "eng", None).unwrap();
     assert!(s.auth_epoch().unwrap() > e0);
 }
+
+/// What migration 178 seeds for an org, built by hand: `/orgs/acme` and its
+/// `viewers` subgroup, managed, with viewers mapped to org-viewer.
+fn managed_org(s: &Store) -> (GroupRow, GroupRow) {
+    s.with_tx(|c| {
+        let orgs = s.group_by_path("/orgs")?.unwrap();
+        let root = s.create_group_in_tx(c, Some(orgs.id), "acme", true, Some(9001), None)?;
+        let viewers = s.create_group_in_tx(c, Some(root.id), "viewers", true, None, None)?;
+        let v = s
+            .role(RoleRef::Client(CLIENT_FLEET, "org-viewer"))?
+            .unwrap();
+        s.map_role_in_tx(c, Principal::Group(viewers.id), v.id, true)?;
+        Ok((root, viewers))
+    })
+    .unwrap()
+}
+
+#[test]
+fn the_public_map_role_never_grants_an_org_role() {
+    let s = s();
+    let (root, viewers) = managed_org(&s);
+    let admin = s
+        .role(RoleRef::Client(CLIENT_FLEET, "org-admin"))
+        .unwrap()
+        .unwrap();
+    for g in [root.id, viewers.id] {
+        assert_eq!(
+            s.map_role(Principal::Group(g), admin.id).unwrap_err().code,
+            codes::E_VALIDATE
+        );
+    }
+}
+
+#[test]
+fn a_managed_groups_mappings_cannot_be_unmapped_publicly() {
+    let s = s();
+    let (_, viewers) = managed_org(&s);
+    let v = s
+        .role(RoleRef::Client(CLIENT_FLEET, "org-viewer"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        s.unmap_role(Principal::Group(viewers.id), v.id)
+            .unwrap_err()
+            .code,
+        codes::E_FORBIDDEN
+    );
+    assert!(s
+        .with_tx(|c| s.unmap_role_in_tx(c, Principal::Group(viewers.id), v.id, true))
+        .unwrap());
+}
+
+#[test]
+fn the_seeded_org_chain_cannot_be_taken_apart() {
+    let s = s();
+    let a = s
+        .role(RoleRef::Client(CLIENT_FLEET, "org-admin"))
+        .unwrap()
+        .unwrap();
+    let m = s
+        .role(RoleRef::Client(CLIENT_FLEET, "org-member"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        s.remove_composite(a.id, m.id).unwrap_err().code,
+        codes::E_FORBIDDEN
+    );
+}
+
+#[test]
+fn composites_cannot_carry_org_roles_in_or_out_of_the_org_model() {
+    let s = s();
+    let custom = s.create_role(None, "custom", None).unwrap();
+    let org_admin = s
+        .role(RoleRef::Client(CLIENT_FLEET, "org-admin"))
+        .unwrap()
+        .unwrap();
+    let org_viewer = s
+        .role(RoleRef::Client(CLIENT_FLEET, "org-viewer"))
+        .unwrap()
+        .unwrap();
+    let fleet_admin = s.role(RoleRef::Realm(ROLE_FLEET_ADMIN)).unwrap().unwrap();
+    assert_eq!(
+        s.add_composite(custom.id, org_admin.id).unwrap_err().code,
+        codes::E_VALIDATE
+    );
+    assert_eq!(
+        s.add_composite(org_viewer.id, fleet_admin.id)
+            .unwrap_err()
+            .code,
+        codes::E_VALIDATE
+    );
+    // The seeded direction stays legal.
+    s.add_composite(org_admin.id, org_viewer.id).unwrap();
+}

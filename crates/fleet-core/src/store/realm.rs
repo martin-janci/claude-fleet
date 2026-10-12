@@ -355,10 +355,29 @@ impl Store {
     /// already reaches `parent`, which would make a cycle.
     pub fn add_composite(&self, parent: i64, child: i64) -> Result<(), IpcError> {
         self.with_tx(|c| {
-            role_or_404(c, parent)?;
-            role_or_404(c, child)?;
+            let prole = role_or_404(c, parent)?;
+            let crole = role_or_404(c, child)?;
             if parent == child {
                 return Err(invalid("a role cannot include itself"));
+            }
+            // Org roles stay inside the org model: nothing outside it may
+            // reach one through a composite, and one may not reach out.
+            if is_org_role(&prole) && !is_org_role(&crole) {
+                return Err(invalid("an org role can only include org roles"));
+            }
+            if !is_org_role(&prole) {
+                let reaches_org: bool = c.query_row(
+                    "WITH RECURSIVE d(id) AS (SELECT ?1 \
+                       UNION SELECT rc.child_id FROM role_composites rc JOIN d ON rc.parent_id = d.id) \
+                     SELECT EXISTS(SELECT 1 FROM d JOIN roles r ON r.id = d.id \
+                       JOIN clients cl ON cl.id = r.client_id \
+                       WHERE cl.client_id = ?2 AND substr(r.name, 1, 4) = 'org-')",
+                    rusqlite::params![child, CLIENT_FLEET],
+                    |r| r.get(0),
+                )?;
+                if reaches_org {
+                    return Err(org_role_err());
+                }
             }
             let cycle: bool = c.query_row(
                 "WITH RECURSIVE d(id) AS (SELECT ?1 \
@@ -378,11 +397,22 @@ impl Store {
         })
     }
 
+    /// Remove an edge. An edge between two seeded roles is `E_FORBIDDEN`.
     pub fn remove_composite(&self, parent: i64, child: i64) -> Result<bool, IpcError> {
-        Ok(self.conn.execute(
-            "DELETE FROM role_composites WHERE parent_id = ?1 AND child_id = ?2",
-            rusqlite::params![parent, child],
-        )? > 0)
+        self.with_tx(|c| {
+            if let (Some(p), Some(ch)) = (load_role(c, parent)?, load_role(c, child)?) {
+                if p.seeded && ch.seeded {
+                    return Err(IpcError::new(
+                        codes::E_FORBIDDEN,
+                        "a composite between seeded roles cannot be removed",
+                    ));
+                }
+            }
+            Ok(c.execute(
+                "DELETE FROM role_composites WHERE parent_id = ?1 AND child_id = ?2",
+                rusqlite::params![parent, child],
+            )? > 0)
+        })
     }
 
     // ---- groups ----------------------------------------------------------
@@ -647,8 +677,8 @@ impl Store {
     }
 
     /// Grant `role` to a person or a group. The `fleet` client's `org-*`
-    /// roles are refused (`E_VALIDATE`): they are granted through an org's
-    /// groups.
+    /// roles are always refused (`E_VALIDATE`): only the org projection
+    /// grants them, through `map_role_in_tx(.., true)`.
     pub fn map_role(&self, p: Principal, role: i64) -> Result<(), IpcError> {
         self.with_tx(|c| self.map_role_in_tx(c, p, role, false))
     }
@@ -662,7 +692,9 @@ impl Store {
         allow_org_roles: bool,
     ) -> Result<(), IpcError> {
         let r = role_or_404(conn, role)?;
-        let is_org_role = r.client.as_deref() == Some(CLIENT_FLEET) && r.name.starts_with("org-");
+        if is_org_role(&r) && !allow_org_roles {
+            return Err(org_role_err());
+        }
         match p {
             Principal::Person(person) => {
                 if !person_exists(conn, person)? {
@@ -671,19 +703,13 @@ impl Store {
                         format!("person {person} not found"),
                     ));
                 }
-                if is_org_role && !allow_org_roles {
-                    return Err(org_role_err());
-                }
                 conn.execute(
                     "INSERT OR IGNORE INTO user_role_mappings (person_id, role_id) VALUES (?1, ?2)",
                     rusqlite::params![person, role],
                 )?;
             }
             Principal::Group(group) => {
-                let g = group_or_404(conn, group)?;
-                if is_org_role && !allow_org_roles && !(g.managed && g.path.starts_with("/orgs/")) {
-                    return Err(org_role_err());
-                }
+                group_or_404(conn, group)?;
                 conn.execute(
                     "INSERT OR IGNORE INTO group_role_mappings (group_id, role_id) VALUES (?1, ?2)",
                     rusqlite::params![group, role],
@@ -693,16 +719,37 @@ impl Store {
         Ok(())
     }
 
+    /// Revoke a mapping. A managed group's mappings are `E_FORBIDDEN`.
     pub fn unmap_role(&self, p: Principal, role: i64) -> Result<bool, IpcError> {
+        self.with_tx(|c| self.unmap_role_in_tx(c, p, role, false))
+    }
+
+    /// The raw writer; `allow_managed` is for the org projection.
+    pub fn unmap_role_in_tx(
+        &self,
+        conn: &Connection,
+        p: Principal,
+        role: i64,
+        allow_managed: bool,
+    ) -> Result<bool, IpcError> {
         let n = match p {
-            Principal::Person(person) => self.conn.execute(
+            Principal::Person(person) => conn.execute(
                 "DELETE FROM user_role_mappings WHERE person_id = ?1 AND role_id = ?2",
                 rusqlite::params![person, role],
             )?,
-            Principal::Group(group) => self.conn.execute(
-                "DELETE FROM group_role_mappings WHERE group_id = ?1 AND role_id = ?2",
-                rusqlite::params![group, role],
-            )?,
+            Principal::Group(group) => {
+                if !allow_managed {
+                    if let Some(g) = load_group(conn, group)? {
+                        if g.managed {
+                            return Err(managed_err());
+                        }
+                    }
+                }
+                conn.execute(
+                    "DELETE FROM group_role_mappings WHERE group_id = ?1 AND role_id = ?2",
+                    rusqlite::params![group, role],
+                )?
+            }
         };
         Ok(n > 0)
     }
@@ -804,6 +851,10 @@ impl Store {
         let ids = stmt.query_map(rusqlite::params![name], |r| r.get(0))?;
         Ok(ids.collect::<rusqlite::Result<Vec<_>>>()?)
     }
+}
+
+fn is_org_role(r: &RoleRow) -> bool {
+    r.client.as_deref() == Some(CLIENT_FLEET) && r.name.starts_with("org-")
 }
 
 fn org_role_err() -> IpcError {
