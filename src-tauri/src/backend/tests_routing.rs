@@ -1050,6 +1050,15 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "env_vars_list",
+            "env_vars",
+            json!({ "action": "list" }),
+            r#"[]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::env_vars::routed::env_vars_list(b, s)).map(|_| ())
+            }),
+        ),
+        (
             "add_account",
             "add_account",
             json!({ "action": "daily_limit", "host_alias": "trn", "profile": "api", "daily_limit_usd": 5.0 }),
@@ -2936,6 +2945,66 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
     };
 
     vec![
+        (
+            "env_vars",
+            "env_vars",
+            json!({ "action": "set", "scope": "global", "name": "A", "value": "v", "secret": false }),
+            r#"{"set":"A","scope":"global","scope_key":"","applies":"on the next start or restart"}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::env_vars::routed::env_vars(
+                    b,
+                    s,
+                    fleet_core::service::env::EnvVarsArgs {
+                        action: "set".into(),
+                        scope: Some("global".into()),
+                        scope_key: None,
+                        name: Some("A".into()),
+                        value: Some("v".into()),
+                        r#ref: None,
+                        secret: Some(false),
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "env_var_set",
+            "env_vars",
+            json!({ "action": "set", "scope": "host", "scope_key": "mercury", "name": "B", "value": "w", "secret": true }),
+            r#"{"set":"B","scope":"host","scope_key":"mercury","applies":"on the next start or restart"}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::env_vars::routed::env_var_set(
+                    b,
+                    s,
+                    fleet_core::service::env::EnvVarSetArgs {
+                        scope: "host".into(),
+                        scope_key: Some("mercury".into()),
+                        name: "B".into(),
+                        value: "w".into(),
+                        secret: Some(true),
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "env_var_unset",
+            "env_vars",
+            json!({ "action": "unset", "scope": "global", "name": "A" }),
+            r#"{"removed":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::env_vars::routed::env_var_unset(
+                    b,
+                    s,
+                    fleet_core::service::env::EnvVarUnsetArgs {
+                        scope: "global".into(),
+                        scope_key: None,
+                        name: "A".into(),
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
         (
             "link_peer_hub",
             "link_peer",
@@ -7352,6 +7421,10 @@ const SOURCES: &[(&str, &str)] = &[
     (
         "commands/api_tokens.rs",
         include_str!("../commands/api_tokens.rs"),
+    ),
+    (
+        "commands/env_vars.rs",
+        include_str!("../commands/env_vars.rs"),
     ),
     (
         "commands/add_account.rs",

@@ -1,0 +1,99 @@
+//! Session environment variables (spec 2026-10-11-session-env-and-secrets-design.md):
+//! Settings › Environment and the hub's `env_vars` tool. Standalone it runs
+//! `service::env::run` as this app's own master (references allowed);
+//! paired, the hub's tool decides, so a reference from a device is refused
+//! there.
+
+use crate::backend::FleetBackend;
+use fleet_core::ipc_error::IpcError;
+use fleet_core::service::env::{self, EnvVarSetArgs, EnvVarUnsetArgs, EnvVarsArgs};
+use fleet_core::store::Store;
+use std::sync::{Arc, Mutex};
+use tauri::State;
+
+#[tauri::command]
+pub async fn env_vars(
+    args: EnvVarsArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<serde_json::Value, IpcError> {
+    routed::env_vars(&backend, &store, args).await
+}
+
+/// The resource page's list: `env_vars { action: "list" }` with no
+/// arguments of its own.
+#[tauri::command]
+pub async fn env_vars_list(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<serde_json::Value, IpcError> {
+    routed::env_vars_list(&backend, &store).await
+}
+
+/// Settings › Environment's Add: a resource action binds its arguments by
+/// name and carries no constant, so the action is this command's.
+#[tauri::command]
+pub async fn env_var_set(
+    args: EnvVarSetArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<serde_json::Value, IpcError> {
+    routed::env_var_set(&backend, &store, args).await
+}
+
+/// Settings › Environment's Remove.
+#[tauri::command]
+pub async fn env_var_unset(
+    args: EnvVarUnsetArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<serde_json::Value, IpcError> {
+    routed::env_var_unset(&backend, &store, args).await
+}
+
+pub(crate) mod routed {
+    use super::*;
+
+    pub async fn env_vars(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: EnvVarsArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("env_vars", &args).await,
+            // The standalone desktop is its own master: references allowed.
+            None => env::run(store, &args, true),
+        }
+    }
+
+    pub async fn env_var_set(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: EnvVarSetArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        env_vars(backend, store, args.into_args()).await
+    }
+
+    pub async fn env_var_unset(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: EnvVarUnsetArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        env_vars(backend, store, args.into_args()).await
+    }
+
+    pub async fn env_vars_list(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+    ) -> Result<serde_json::Value, IpcError> {
+        env_vars(
+            backend,
+            store,
+            EnvVarsArgs {
+                action: "list".into(),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+}

@@ -8,6 +8,7 @@ pub mod debug_devices;
 pub mod diagnostics;
 pub mod downloads;
 pub mod editor;
+pub mod env_vars;
 pub mod federation;
 pub mod files;
 pub mod forms;

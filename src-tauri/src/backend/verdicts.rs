@@ -1001,6 +1001,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     // window is onto, so the hub's. Its tool serves the owner's trusted full
     // device read and act tokens; an admin one stays the hub master's.
     ("api_tokens", Verdict::Routed { tool: "api_tokens" }),
+    // Session environment variables (spec 2026-10-11): the variables of the
+    // fleet this window is onto, so the hub's. Its tool serves the owner's
+    // trusted full device values and secrets; a reference (env:/file: on
+    // the hub) stays the hub master's.
+    ("env_vars", Verdict::Routed { tool: "env_vars" }),
+    ("env_vars_list", Verdict::Routed { tool: "env_vars" }),
+    ("env_var_set", Verdict::Routed { tool: "env_vars" }),
+    ("env_var_unset", Verdict::Routed { tool: "env_vars" }),
     // Add account (M15 step G2.9): the profile goes on a host of the fleet
     // this window is onto, and its account into that fleet's list.
     (
