@@ -194,6 +194,7 @@ fn only_the_owner_reaches_a_private_sessions_download() {
             mode: TokenMode::Full,
             pane: None,
             is_personal_owner: false,
+            is_fleet_admin: false,
         }
         .view_scope(&s)
         .unwrap()
@@ -208,6 +209,7 @@ fn only_the_owner_reaches_a_private_sessions_download() {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     }
     .view_scope(&s)
     .unwrap();
@@ -436,6 +438,7 @@ fn a_reaped_sessions_download_stays_the_owners() {
             mode: TokenMode::Full,
             pane: None,
             is_personal_owner: false,
+            is_fleet_admin: false,
         }
         .view_scope(&s)
         .unwrap()

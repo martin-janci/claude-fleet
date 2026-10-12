@@ -113,6 +113,62 @@ fn managed_err() -> IpcError {
     IpcError::new(codes::E_FORBIDDEN, "this group is managed by its org")
 }
 
+/// Live holders of realm role `name`, read through `conn`.
+fn holders_in_tx(conn: &Connection, name: &str) -> Result<Vec<i64>, IpcError> {
+    let mut stmt = conn.prepare(PEOPLE_WITH_REALM_ROLE)?;
+    let ids = stmt.query_map(rusqlite::params![name], |r| r.get(0))?;
+    Ok(ids.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn personal_owner_in_tx(conn: &Connection) -> Result<Option<i64>, IpcError> {
+    Ok(conn
+        .query_row(
+            "SELECT id FROM people WHERE is_personal_owner = 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// Run `change` through `conn` and refuse it (`E_FORBIDDEN`) when it takes
+/// `fleet-admin` away from the personal owner, or from its last live holder
+/// (identity sub-project 1: nobody can lock the fleet out of its own
+/// administration). Judged as a transition — who held the role before the
+/// change against who holds it after — so a database where the owner was
+/// never mapped does not refuse every unrelated write. The owner's
+/// unconditional place in `Store::realm_sets` is not counted: at least one
+/// live person must still hold the mapping, directly or through a group.
+///
+/// On `Err` the change has already run through `conn`: the caller's
+/// transaction must roll back, which every caller does by returning the
+/// error out of `with_tx` / its own transaction.
+pub(crate) fn keeping_fleet_admin<T>(
+    conn: &Connection,
+    change: impl FnOnce() -> Result<T, IpcError>,
+) -> Result<T, IpcError> {
+    let before = holders_in_tx(conn, ROLE_FLEET_ADMIN)?;
+    let v = change()?;
+    if before.is_empty() {
+        return Ok(v);
+    }
+    let after = holders_in_tx(conn, ROLE_FLEET_ADMIN)?;
+    if after.is_empty() {
+        return Err(IpcError::new(
+            codes::E_FORBIDDEN,
+            "this would leave nobody holding fleet-admin; grant it to someone else first",
+        ));
+    }
+    if let Some(owner) = personal_owner_in_tx(conn)? {
+        if before.contains(&owner) && !after.contains(&owner) {
+            return Err(IpcError::new(
+                codes::E_FORBIDDEN,
+                "the personal owner keeps fleet-admin",
+            ));
+        }
+    }
+    Ok(v)
+}
+
 /// Trim and check a role or group name: non-empty, bounded, one line, and
 /// for a group no `/` (it is the path separator).
 fn validate_realm_name(kind: &str, name: &str, group: bool) -> Result<String, IpcError> {
@@ -346,7 +402,9 @@ impl Store {
                     format!("role {:?} is seeded and cannot be deleted", role.name),
                 ));
             }
-            Ok(c.execute("DELETE FROM roles WHERE id = ?1", rusqlite::params![id])? > 0)
+            keeping_fleet_admin(c, || {
+                Ok(c.execute("DELETE FROM roles WHERE id = ?1", rusqlite::params![id])? > 0)
+            })
         })
     }
 
@@ -407,10 +465,12 @@ impl Store {
                     ));
                 }
             }
-            Ok(c.execute(
-                "DELETE FROM role_composites WHERE parent_id = ?1 AND child_id = ?2",
-                rusqlite::params![parent, child],
-            )? > 0)
+            keeping_fleet_admin(c, || {
+                Ok(c.execute(
+                    "DELETE FROM role_composites WHERE parent_id = ?1 AND child_id = ?2",
+                    rusqlite::params![parent, child],
+                )? > 0)
+            })
         })
     }
 
@@ -600,7 +660,7 @@ impl Store {
                     return Err(managed_err());
                 }
             }
-            self.delete_group_in_tx(c, id)
+            keeping_fleet_admin(c, || self.delete_group_in_tx(c, id))
         })
     }
 
@@ -663,16 +723,20 @@ impl Store {
     }
 
     /// Remove `person` from `group`; `false` when they were not a member.
+    /// `E_FORBIDDEN` when it would take `fleet-admin` from the personal
+    /// owner or its last holder (the caller's transaction must roll back).
     pub fn remove_group_member_in_tx(
         &self,
         conn: &Connection,
         group: i64,
         person: i64,
     ) -> Result<bool, IpcError> {
-        Ok(conn.execute(
-            "DELETE FROM group_members WHERE group_id = ?1 AND person_id = ?2",
-            rusqlite::params![group, person],
-        )? > 0)
+        keeping_fleet_admin(conn, || {
+            Ok(conn.execute(
+                "DELETE FROM group_members WHERE group_id = ?1 AND person_id = ?2",
+                rusqlite::params![group, person],
+            )? > 0)
+        })
     }
 
     /// Grant `role` to a person or a group. The `fleet` client's `org-*`
@@ -718,13 +782,26 @@ impl Store {
         Ok(())
     }
 
-    /// Revoke a mapping. A managed group's mappings are `E_FORBIDDEN`.
+    /// Revoke a mapping. A managed group's mappings are `E_FORBIDDEN`, and
+    /// so is taking `fleet-admin` from the personal owner or its last holder.
     pub fn unmap_role(&self, p: Principal, role: i64) -> Result<bool, IpcError> {
         self.with_tx(|c| self.unmap_role_in_tx(c, p, role, false))
     }
 
     /// The raw writer; `allow_managed` is for the org projection.
     pub fn unmap_role_in_tx(
+        &self,
+        conn: &Connection,
+        p: Principal,
+        role: i64,
+        allow_managed: bool,
+    ) -> Result<bool, IpcError> {
+        keeping_fleet_admin(conn, || {
+            self.unmap_role_raw_in_tx(conn, p, role, allow_managed)
+        })
+    }
+
+    fn unmap_role_raw_in_tx(
         &self,
         conn: &Connection,
         p: Principal,
@@ -846,9 +923,36 @@ impl Store {
     /// Live people holding the realm role `name` (directly, through a group
     /// or its ancestors, or through a composite), ascending ids.
     pub fn people_with_realm_role(&self, name: &str) -> Result<Vec<i64>, IpcError> {
-        let mut stmt = self.conn.prepare(PEOPLE_WITH_REALM_ROLE)?;
-        let ids = stmt.query_map(rusqlite::params![name], |r| r.get(0))?;
-        Ok(ids.collect::<rusqlite::Result<Vec<_>>>()?)
+        holders_in_tx(&self.conn, name)
+    }
+
+    /// The holders of the three seeded realm roles — `fleet-admin`,
+    /// `fleet-trusted`, `assets-admin`, in that order — for the auth layer
+    /// (`token_cache::RealmSets`). The personal owner is added to the
+    /// fleet admins unconditionally, so an owner is never locked out by a
+    /// missing mapping.
+    #[allow(clippy::type_complexity)]
+    pub fn realm_sets(&self) -> Result<(Vec<i64>, Vec<i64>, Vec<i64>), IpcError> {
+        let mut admins = holders_in_tx(&self.conn, ROLE_FLEET_ADMIN)?;
+        if let Some(owner) = personal_owner_in_tx(&self.conn)? {
+            if let Err(at) = admins.binary_search(&owner) {
+                admins.insert(at, owner);
+            }
+        }
+        Ok((
+            admins,
+            holders_in_tx(&self.conn, ROLE_FLEET_TRUSTED)?,
+            holders_in_tx(&self.conn, ROLE_ASSETS_ADMIN)?,
+        ))
+    }
+
+    /// Whether `person` administers the fleet: the personal owner, or a live
+    /// holder of the realm role `fleet-admin`.
+    pub fn is_fleet_admin(&self, person: i64) -> Result<bool, IpcError> {
+        if personal_owner_in_tx(&self.conn)? == Some(person) {
+            return Ok(true);
+        }
+        Ok(holders_in_tx(&self.conn, ROLE_FLEET_ADMIN)?.contains(&person))
     }
 }
 

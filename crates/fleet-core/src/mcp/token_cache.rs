@@ -39,8 +39,32 @@
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::store::{ClientTokenRow, ControlTokenRow, HostTokenRow, ReadPool};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
+
+/// Who holds the seeded realm roles (identity sub-project 1), as of one auth
+/// epoch: live person ids. `auth::apply_realm` decides a resolved caller's
+/// role flags from them. The personal owner is always in `fleet_admins`
+/// (`Store::realm_sets`). The `Default` — every set empty — is the
+/// fail-closed answer for a read that failed: no device holds any role.
+#[derive(Clone, Debug, Default)]
+pub struct RealmSets {
+    pub fleet_admins: Arc<BTreeSet<i64>>,
+    pub trusted: Arc<BTreeSet<i64>>,
+    pub assets_admins: Arc<BTreeSet<i64>>,
+}
+
+impl RealmSets {
+    /// From `Store::realm_sets`' three vectors (fleet admins, trusted,
+    /// assets admins).
+    pub fn from_vecs((admins, trusted, assets): (Vec<i64>, Vec<i64>, Vec<i64>)) -> Self {
+        Self {
+            fleet_admins: Arc::new(admins.into_iter().collect()),
+            trusted: Arc::new(trusted.into_iter().collect()),
+            assets_admins: Arc::new(assets.into_iter().collect()),
+        }
+    }
+}
 
 /// The token rows at one auth epoch.
 struct Snapshot {
@@ -48,6 +72,7 @@ struct Snapshot {
     hosts: Arc<Vec<HostTokenRow>>,
     clients: Arc<Vec<ClientTokenRow>>,
     controls: Arc<Vec<ControlTokenRow>>,
+    realm: RealmSets,
 }
 
 /// Everything `authorize` matches a bearer token against, as of one auth
@@ -59,6 +84,8 @@ pub struct AuthRows {
     /// refused by time in `auth::resolve_token_at`.
     pub controls: Arc<Vec<ControlTokenRow>>,
     pub personal_owner: Option<i64>,
+    /// The realm's role holders at the same epoch as the rows.
+    pub realm: RealmSets,
 }
 
 /// How often, at most, `authorize` stamps one client's `last_seen_at` — the
@@ -100,12 +127,13 @@ impl TokenCache {
 
     fn load(pool: &ReadPool) -> Result<Snapshot, IpcError> {
         let conn = pool.get().ok_or_else(no_connection)?;
-        let (epoch, hosts, clients, controls) = lock(conn)?.auth_snapshot()?;
+        let (epoch, hosts, clients, controls, realm) = lock(conn)?.auth_snapshot()?;
         Ok(Snapshot {
             epoch,
             hosts: Arc::new(hosts),
             clients: Arc::new(clients),
             controls: Arc::new(controls),
+            realm: RealmSets::from_vecs(realm),
         })
     }
 
@@ -126,12 +154,13 @@ impl TokenCache {
             // Epoch and rows in one read transaction: the rows are the ones
             // at the epoch recorded with them (possibly newer than
             // `current`, never older).
-            let (epoch, hosts, clients, controls) = lock(conn)?.auth_snapshot()?;
+            let (epoch, hosts, clients, controls, realm) = lock(conn)?.auth_snapshot()?;
             *snap = Snapshot {
                 epoch,
                 hosts: Arc::new(hosts),
                 clients: Arc::new(clients),
                 controls: Arc::new(controls),
+                realm: RealmSets::from_vecs(realm),
             };
         }
         Ok(AuthRows {
@@ -139,6 +168,7 @@ impl TokenCache {
             clients: Arc::clone(&snap.clients),
             controls: Arc::clone(&snap.controls),
             personal_owner: owner,
+            realm: snap.realm.clone(),
         })
     }
 

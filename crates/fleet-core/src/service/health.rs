@@ -1685,6 +1685,7 @@ mod tests {
             mode: crate::mcp::auth::TokenMode::Full,
             pane: None,
             is_personal_owner: false,
+            is_fleet_admin: false,
         }
         .view_scope(&s)
         .unwrap();

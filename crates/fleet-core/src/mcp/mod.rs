@@ -43,6 +43,7 @@ use tokio_util::sync::CancellationToken;
 
 pub use auth::normalize_allowed_hosts;
 pub use auth::Caller;
+pub use auth::RealmSets;
 #[cfg(test)]
 pub use auth::TokenMode;
 pub use events_route::{EventFeed, EventHistory, EventSubscriber, EventsState};
@@ -274,6 +275,12 @@ async fn authorize(
                 clients: Arc::new(s.auth_client_tokens().unwrap_or_default()),
                 controls: Arc::new(s.auth_control_tokens().unwrap_or_default()),
                 personal_owner: s.personal_owner_id().unwrap_or_default(),
+                // Empty sets on a failed read: no device holds a realm role
+                // (fail closed).
+                realm: s
+                    .realm_sets()
+                    .map(token_cache::RealmSets::from_vecs)
+                    .unwrap_or_default(),
             }
         }
     };
@@ -339,6 +346,9 @@ async fn authorize(
             return Err(status);
         }
     };
+    // Identity sub-project 1: the caller's realm roles, before any gate
+    // reads them — for the `/hook?token=` fallback as for the header form.
+    auth::apply_realm(&mut caller, &rows.realm);
     // Liveness for the pairing UI ("last seen"). Best-effort and rate-limited
     // in the store (at most one write a minute per client); a second brief
     // sync lock, again released before the `.await` below.

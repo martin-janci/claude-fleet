@@ -106,12 +106,13 @@ async fn hub() -> Hub {
         },
         axum::routing::any(|axum::Extension(c): axum::Extension<Caller>| async move {
             format!(
-                "caller={} mode={:?} trusted={} pane={:?} owner={}",
+                "caller={} mode={:?} trusted={} pane={:?} owner={} fleet_admin={}",
                 c.label(),
                 c.mode,
                 c.is_trusted_client(),
                 c.pane,
-                c.is_personal_owner
+                c.is_personal_owner,
+                c.is_fleet_admin
             )
         }),
         None,
@@ -332,4 +333,52 @@ async fn the_connection_carries_the_pane_and_whether_this_is_the_hubs_owner() {
         r.contains("owner=false"),
         "an unbound device is nobody, never everybody: {r}"
     );
+}
+
+/// Identity sub-project 1: `authorize` decides `is_fleet_admin` from the
+/// realm's role mappings, which ride the cache's auth epoch — a grant or a
+/// revoke by any writer holds from the very next request.
+#[tokio::test]
+async fn a_fleet_admin_grant_and_revoke_hold_on_the_next_request() {
+    use crate::store::{Principal, RoleRef, ROLE_FLEET_ADMIN};
+    let hub = hub().await;
+    let r = hub.accepted(MASTER_TOK).await;
+    assert!(r.contains("fleet_admin=true"), "{r}");
+    let r = hub.accepted(HOST_TOK).await;
+    assert!(r.contains("fleet_admin=false"), "{r}");
+
+    let (ada, fa) = {
+        let s = hub.store.lock().unwrap();
+        let ada = s.create_person("ada", None).unwrap().id;
+        s.set_client_person("phone", Some(ada)).unwrap();
+        let fa = s
+            .role(RoleRef::Realm(ROLE_FLEET_ADMIN))
+            .unwrap()
+            .unwrap()
+            .id;
+        (ada, fa)
+    };
+    let r = hub.accepted(PHONE_TOK).await;
+    assert!(
+        r.contains("owner=false") && r.contains("fleet_admin=false"),
+        "{r}"
+    );
+
+    // Granted by another process, as `fleet-hub` would.
+    hub.other_process()
+        .map_role(Principal::Person(ada), fa)
+        .unwrap();
+    let r = hub.accepted(PHONE_TOK).await;
+    assert!(
+        r.contains("owner=false") && r.contains("fleet_admin=true"),
+        "{r}"
+    );
+
+    hub.store
+        .lock()
+        .unwrap()
+        .unmap_role(Principal::Person(ada), fa)
+        .unwrap();
+    let r = hub.accepted(PHONE_TOK).await;
+    assert!(r.contains("fleet_admin=false"), "the revoke holds: {r}");
 }

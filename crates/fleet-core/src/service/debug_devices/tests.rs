@@ -48,6 +48,7 @@ fn host(store: &Mutex<Store>, alias: &str) -> Asker {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     };
     asker_for(store, caller, &format!("host:{alias}"))
 }
@@ -111,6 +112,7 @@ fn a_bound_client_never_sees_another_orgs_devices() {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     };
     let bound = asker_for(&st, caller, "client:work");
     // Its own org's, and unassigned hosts' (D31's default); never Beta's.

@@ -64,6 +64,7 @@ fn host_caller(alias: &str, mode: TokenMode) -> Caller {
         mode,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     }
 }
 
@@ -91,6 +92,7 @@ fn client_caller(name: &str, mode: TokenMode) -> Caller {
         mode,
         pane: None,
         is_personal_owner: true,
+        is_fleet_admin: true,
     }
 }
 
@@ -105,6 +107,7 @@ fn another_person(mut c: Caller) -> Caller {
         cl.person_id = Some(OWNER_PERSON + 1);
     }
     c.is_personal_owner = false;
+    c.is_fleet_admin = false;
     c
 }
 
@@ -1213,6 +1216,7 @@ fn a_client_name_cannot_forge_a_second_audit_line() {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     };
     // Both shapes of the detail string: with a summary and without one. Both
     // tool names here must be MUTATING (not in `guard::READONLY_TOOLS`) — a
@@ -3703,6 +3707,7 @@ fn a_trusted_client_delivers_unmarked_and_an_ordinary_one_does_not() {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     };
     let err = apply_marker("body".into(), "an agent on host mefistos", &host, true)
         .expect_err("a host token is never trusted");
@@ -3811,6 +3816,7 @@ fn marker_origin_can_never_be_split_by_a_client_name() {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     };
     let origin = marker_origin(&c);
     assert!(
@@ -3834,6 +3840,7 @@ fn marker_origin_can_never_be_split_by_a_client_name() {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     };
     let origin = marker_origin(&sneaky);
     assert_eq!(origin, "the paired client evil x y z", "{origin:?}");
@@ -8887,6 +8894,7 @@ fn production_operator() -> Caller {
         cl.person_id = None;
     }
     c.is_personal_owner = false;
+    c.is_fleet_admin = false;
     c
 }
 
@@ -10039,6 +10047,7 @@ fn settings_reach_a_persons_device_and_never_a_host_or_an_org_bound_client() {
     // `access_allows` as one boolean).
     let mut ownerless = Caller::master();
     ownerless.is_personal_owner = false;
+    ownerless.is_fleet_admin = false;
     assert!(!can(&ownerless, "get_settings"));
     assert!(!can(&ownerless, "set_setting"));
 }
@@ -10394,6 +10403,7 @@ async fn add_project_and_list_github_repos_are_fenced_to_the_callers_host_and_or
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     };
     for who in [host_caller("hosta", TokenMode::Full), bound_a] {
         forbidden(
@@ -10870,6 +10880,7 @@ fn device_of(person: i64, owner: i64) -> Caller {
         // together, because a caller where they disagree cannot be produced
         // by the resolver and must not be produced by a test either.
         is_personal_owner: person == owner,
+        is_fleet_admin: person == owner,
     }
 }
 
@@ -13102,6 +13113,7 @@ fn pane_caller(pane: Option<&str>) -> Caller {
         mode: TokenMode::Full,
         pane: pane.map(str::to_string),
         is_personal_owner: false,
+        is_fleet_admin: false,
     }
 }
 
@@ -14934,6 +14946,7 @@ fn the_result_gate_runs_for_a_paired_client_bound_to_no_org() {
         c.person_id = None;
     }
     unbound.is_personal_owner = false;
+    unbound.is_fleet_admin = false;
     let mut res = {
         let s = t.store.lock().unwrap();
         unfiltered_rows(&s, &[a_row, b_row])
@@ -16409,6 +16422,7 @@ async fn fleet_health_for_an_org_bound_client_counts_only_its_own_sessions() {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     };
     let t = test_tools(g.store);
     let out = t.fleet_health(Extension(bound)).await.expect("the roll-up");
@@ -19448,6 +19462,82 @@ fn org_admin_reaches_a_persons_full_device_only() {
     }
 }
 
+/// Identity sub-project 1: a SECOND person's trusted full device
+/// administers the fleet exactly while that person holds the realm role
+/// `fleet-admin` — `org_admin` answers with the fleet's reach (an org they
+/// are not a member of) and an `Access::Person` tool is served — and loses
+/// both on the next call once the role is taken away. The caller is built
+/// the way `authorize` builds it: resolved from the store's rows, then
+/// `apply_realm` over `Store::realm_sets`.
+#[tokio::test]
+async fn a_fleet_admin_role_grants_and_revokes_fleet_reach() {
+    use crate::mcp::auth::{apply_realm, resolve_token, sha256_hex, RealmSets};
+    use crate::store::{Principal, RoleRef, ROLE_FLEET_ADMIN};
+    const TOK: &str = "ada-phone-tok";
+    let (tools, _guards, store) = client_tools();
+    let (acme, ada, fa) = {
+        let s = store.lock().unwrap();
+        let acme = s.add_org("Acme", None, false).unwrap().id;
+        let ada = s.create_person("ada", None).unwrap().id;
+        s.insert_client_token("ada-phone", &sha256_hex(TOK), "full")
+            .unwrap();
+        s.set_client_person("ada-phone", Some(ada)).unwrap();
+        s.set_client_trust("ada-phone", true).unwrap();
+        let fa = s
+            .role(RoleRef::Realm(ROLE_FLEET_ADMIN))
+            .unwrap()
+            .unwrap()
+            .id;
+        (acme, ada, fa)
+    };
+    let caller = || {
+        let s = store.lock().unwrap();
+        let rows = s.auth_client_tokens().unwrap();
+        let mut c = resolve_token(TOK, "master", &[], &rows, s.personal_owner_id().unwrap())
+            .expect("the device resolves");
+        apply_realm(&mut c, &RealmSets::from_vecs(s.realm_sets().unwrap()));
+        c
+    };
+    let list_orgs =
+        |c: Caller| tools.org_admin(Extension(c), Parameters(org_admin_args("list_orgs")));
+
+    let before = caller();
+    assert!(!before.is_personal_owner && !before.is_fleet_admin);
+    assert!(
+        list_orgs(before.clone()).await.is_err(),
+        "administers nothing"
+    );
+    assert!(!present::visible_to(&before, "set_setting"));
+
+    store
+        .lock()
+        .unwrap()
+        .map_role(Principal::Person(ada), fa)
+        .unwrap();
+    let admin = caller();
+    assert!(admin.is_fleet_admin && !admin.is_personal_owner);
+    let v = result_json(&list_orgs(admin.clone()).await.expect("the fleet's reach"));
+    assert!(
+        v.as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o["id"].as_i64() == Some(acme)),
+        "an org ada is not a member of: {v}"
+    );
+    assert!(present::visible_to(&admin, "set_setting"));
+    assert!(enforce_admin(&admin, "set_setting").is_ok());
+
+    store
+        .lock()
+        .unwrap()
+        .unmap_role(Principal::Person(ada), fa)
+        .unwrap();
+    let after = caller();
+    assert!(!after.is_fleet_admin);
+    assert!(list_orgs(after.clone()).await.is_err(), "the role is gone");
+    assert!(!present::visible_to(&after, "set_setting"));
+}
+
 /// Phase D, the tool's half of the gate: a person's device that administers
 /// no org is refused every action, lists included; an org admin's device
 /// reaches its own org, and pairs devices only for that org's members.
@@ -19478,6 +19568,7 @@ async fn org_admin_refuses_a_device_that_administers_nothing() {
         c.org_id = Some(acme);
     }
     admin.is_personal_owner = false;
+    admin.is_fleet_admin = false;
     let mut members = org_admin_args("list_members");
     members.org_id = Some(acme);
     let v = result_json(&call(admin.clone(), members).await.expect("her org"));
@@ -19532,6 +19623,7 @@ async fn org_admin_never_takes_over_a_person_who_already_exists() {
         c.org_id = Some(acme);
     }
     admin.is_personal_owner = false;
+    admin.is_fleet_admin = false;
     let forbidden = |r: Result<CallToolResult, McpError>, what: &str| {
         let e = r.expect_err(what);
         assert!(format!("{e:?}").contains("E_FORBIDDEN"), "{what}: {e:?}");
@@ -20090,6 +20182,7 @@ async fn update_policy_is_an_org_admins_for_their_own_org() {
         c.org_id = Some(acme);
     }
     admin.is_personal_owner = false;
+    admin.is_fleet_admin = false;
 
     // Her org, by default: manual for the desktops.
     let mut set = update_policy_args("set");
@@ -20120,6 +20213,7 @@ async fn update_policy_is_an_org_admins_for_their_own_org() {
         c.org_id = Some(acme);
     }
     untrusted.is_personal_owner = false;
+    untrusted.is_fleet_admin = false;
     let v = result_json(
         &call(untrusted.clone(), update_policy_args("list"))
             .await

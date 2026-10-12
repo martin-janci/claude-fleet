@@ -1103,6 +1103,7 @@ fn person_view(c: &Company, person: i64) -> crate::service::view_scope::ViewScop
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
         api: None,
     };
     caller.view_scope(&c.st.lock().unwrap()).unwrap()

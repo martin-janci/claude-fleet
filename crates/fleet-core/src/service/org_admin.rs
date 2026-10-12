@@ -330,8 +330,8 @@ impl Action {
 /// Who is asking, as far as WHAT they may administer goes (phase D).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Authority {
-    /// The desktop's own store, or the hub owner's own unbound device:
-    /// every action.
+    /// The desktop's own store, or a fleet admin's own unbound device (the
+    /// hub owner's among them): every action.
     Fleet,
     /// An admin of `org`, through a device fenced to it. `hub`: that org
     /// owns the hub, so they also route hosts (owner's answer 1).
@@ -339,9 +339,10 @@ pub enum Authority {
 }
 
 /// The authority of a person's device, or `None` when it has none:
-/// `fleet` is the hub owner's unbound device (`Access::PersonDevice`'s
+/// `fleet` is a fleet admin's unbound device (`Access::PersonDevice`'s
 /// rule); otherwise the device's (effective) org, when its person
-/// administers it — the hub's owner counts as every org's admin. A former
+/// administers it — a fleet admin (the hub's owner among them) counts as
+/// every org's admin. A former
 /// member's device ([`crate::store::NO_ORG`]) administers nothing.
 pub fn authority_for(
     s: &Store,
@@ -358,8 +359,9 @@ pub fn authority_for(
     if o == crate::store::NO_ORG || s.get_org(o)?.is_none() {
         return Ok(None);
     }
-    let owner = matches!(s.personal_owner_id()?, Some(x) if x == p);
-    let admin = owner || s.org_role(o, p)?.as_deref() == Some(crate::store::ROLE_ADMIN);
+    // A fleet admin (the hub's owner among them) administers any org.
+    let admin =
+        s.is_fleet_admin(p)? || s.org_role(o, p)?.as_deref() == Some(crate::store::ROLE_ADMIN);
     Ok(admin.then(|| Authority::Org {
         org: o,
         hub: s.hub_owner_org().ok().flatten() == Some(o),
@@ -495,7 +497,7 @@ pub fn count_member_sessions(
 }
 
 /// Whose hosts' unclaimed counts `person` is served (phase D): every host
-/// for a host administrator — the hub's owner, or an admin of the company
+/// for a host administrator — a fleet admin (the hub's owner among them), or an admin of the company
 /// that owns the hub (owner's answer 1) — else the hosts of each org they
 /// administer whose `admins_see_unclaimed` the hub's owner turned on
 /// (answer 3).
@@ -504,7 +506,8 @@ pub fn unclaimed_reach(
     person: i64,
 ) -> Result<crate::service::view_scope::UnclaimedReach, IpcError> {
     use crate::service::view_scope::UnclaimedReach;
-    if matches!(s.personal_owner_id()?, Some(o) if o == person) {
+    // A fleet admin (the hub's owner among them): every host.
+    if s.is_fleet_admin(person)? {
         return Ok(UnclaimedReach::Every);
     }
     let admin_of: Vec<i64> = s
@@ -725,7 +728,7 @@ fn check(s: &Store, action: Action, args: &OrgAdminArgs, me: Me<'_>) -> Result<(
 }
 
 /// For an org admin: `row` is a device of their org (fenced to it, by its
-/// membership) and not the hub owner's.
+/// membership) and not a fleet admin's (the hub owner's among them).
 fn require_org_device(s: &Store, row: &ClientTokenRow, me: Me<'_>) -> Result<(), IpcError> {
     let Authority::Org { org, .. } = me.authority else {
         return Ok(());
@@ -735,8 +738,13 @@ fn require_org_device(s: &Store, row: &ClientTokenRow, me: Me<'_>) -> Result<(),
         .into_iter()
         .find(|c| c.id == row.id)
         .and_then(|c| c.org_id);
-    let owners = row.person_id.is_some() && row.person_id == s.personal_owner_id()?;
-    if effective != Some(org) || owners {
+    // Any fleet admin's device is off-limits to an org admin, not only the
+    // hub owner's.
+    let admins = match row.person_id {
+        Some(p) => s.is_fleet_admin(p)?,
+        None => false,
+    };
+    if effective != Some(org) || admins {
         return Err(IpcError::new(
             codes::E_FORBIDDEN,
             format!("{:?} is not a device of your org's members", row.name),
@@ -807,10 +815,10 @@ fn require_other_member(s: &Store, person: i64, me: Me<'_>) -> Result<(), IpcErr
              changes it",
         ));
     }
-    if s.personal_owner_id()? == Some(person) {
+    if s.is_fleet_admin(person)? {
         return Err(IpcError::new(
             codes::E_FORBIDDEN,
-            "the hub's owner administers every org; their membership is theirs",
+            "a fleet admin administers every org; their membership is theirs",
         ));
     }
     Ok(())
@@ -1283,7 +1291,8 @@ pub fn run(
             let org = org_of(&s, args)?;
             // Phase D: a device's org is one of its person's memberships.
             if let (Some(p), Some(o)) = (row.person_id, org) {
-                let owner = s.personal_owner_id()? == Some(p);
+                // A fleet admin (the hub's owner among them) may bind anywhere.
+                let owner = s.is_fleet_admin(p)?;
                 let live: Vec<i64> = s
                     .memberships_of(p)?
                     .into_iter()

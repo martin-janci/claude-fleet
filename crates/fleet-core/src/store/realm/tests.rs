@@ -394,3 +394,81 @@ fn only_the_projection_writes_org_members() {
         "org_members written outside the projection: {offenders:?}"
     );
 }
+
+#[test]
+fn the_owner_and_the_last_fleet_admin_keep_the_role() {
+    let s = s();
+    let owner = s.personal_owner_id().unwrap().unwrap();
+    let fa = s.role(RoleRef::Realm(ROLE_FLEET_ADMIN)).unwrap().unwrap();
+    assert_eq!(
+        s.unmap_role(Principal::Person(owner), fa.id)
+            .unwrap_err()
+            .code,
+        codes::E_FORBIDDEN
+    );
+    assert!(s.is_fleet_admin(owner).unwrap());
+    assert_eq!(
+        s.people_with_realm_role(ROLE_FLEET_ADMIN).unwrap(),
+        vec![owner]
+    );
+}
+
+/// A second fleet admin comes and goes freely while the owner holds the
+/// role; `realm_sets` and `is_fleet_admin` follow the mappings.
+#[test]
+fn a_second_fleet_admin_is_granted_and_revoked() {
+    let s = s();
+    let owner = s.personal_owner_id().unwrap().unwrap();
+    let ada = s.create_person("ada", None).unwrap().id;
+    let fa = s.role(RoleRef::Realm(ROLE_FLEET_ADMIN)).unwrap().unwrap();
+    assert!(!s.is_fleet_admin(ada).unwrap());
+    let ops = s.create_group(None, "ops", None).unwrap();
+    s.map_role(Principal::Group(ops.id), fa.id).unwrap();
+    s.with_tx(|c| s.add_group_member_in_tx(c, ops.id, ada, None))
+        .unwrap();
+    assert!(s.is_fleet_admin(ada).unwrap());
+    assert_eq!(s.realm_sets().unwrap().0, vec![owner, ada]);
+    assert!(s
+        .with_tx(|c| s.remove_group_member_in_tx(c, ops.id, ada))
+        .unwrap());
+    assert!(!s.is_fleet_admin(ada).unwrap());
+    assert_eq!(s.realm_sets().unwrap().0, vec![owner]);
+}
+
+/// On a database whose owner holds no mapping (only the unconditional
+/// union in `realm_sets`), the last LIVE holder cannot be unmapped, removed
+/// from their group or disabled; nor can a hub be left with nobody.
+#[test]
+fn the_last_live_holder_cannot_drop_fleet_admin() {
+    let s = s();
+    let owner = s.personal_owner_id().unwrap().unwrap();
+    let fa = s.role(RoleRef::Realm(ROLE_FLEET_ADMIN)).unwrap().unwrap();
+    s.conn
+        .execute(
+            "DELETE FROM user_role_mappings WHERE person_id = ?1",
+            rusqlite::params![owner],
+        )
+        .unwrap();
+    // The owner is still a fleet admin, through the union.
+    assert!(s.is_fleet_admin(owner).unwrap());
+    assert_eq!(s.realm_sets().unwrap().0, vec![owner]);
+    let ada = s.create_person("ada", None).unwrap().id;
+    s.map_role(Principal::Person(ada), fa.id).unwrap();
+    assert_eq!(
+        s.unmap_role(Principal::Person(ada), fa.id)
+            .unwrap_err()
+            .code,
+        codes::E_FORBIDDEN
+    );
+    assert_eq!(s.disable_person(ada).unwrap_err().code, codes::E_FORBIDDEN);
+    assert!(s.is_fleet_admin(ada).unwrap(), "the refusal rolled back");
+    assert!(s.get_person(ada).unwrap().unwrap().disabled_at.is_none());
+    // A second holder makes the first one removable.
+    let bo = s.create_person("bo", None).unwrap().id;
+    s.map_role(Principal::Person(bo), fa.id).unwrap();
+    assert!(s.unmap_role(Principal::Person(ada), fa.id).unwrap());
+    assert_eq!(
+        s.people_with_realm_role(ROLE_FLEET_ADMIN).unwrap(),
+        vec![bo]
+    );
+}

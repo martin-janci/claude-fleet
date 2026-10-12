@@ -19,6 +19,7 @@
 //!    NEITHER the master NOR a host, so the fleet-admin tools stay out of
 //!    its reach.
 
+pub use crate::mcp::token_cache::RealmSets;
 use crate::store::{ApiScope, ClientTokenRow, ControlTokenRow, HostTokenRow};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 
@@ -184,6 +185,19 @@ pub struct Caller {
     /// here, so the fleet's settings are refused rather than served to
     /// whoever asked.
     pub is_personal_owner: bool,
+    /// Whether this caller has the effective realm role `fleet-admin`, or is
+    /// the master / an admin-scoped control token (identity sub-project 1).
+    /// The AUTHORITY half of what [`Self::is_personal_owner`] meant before;
+    /// `is_personal_owner` keeps the identity half: whose sessions an
+    /// unscoped caller acts as.
+    ///
+    /// The resolver sets it as it sets `is_personal_owner` (a host token:
+    /// never); [`apply_realm`] then decides it for a paired device from the
+    /// realm's role mappings, which ride the auth epoch in the token cache's
+    /// `AuthRows::realm` — so the gates
+    /// (`guard::access_allows`) read a precomputed bool and take no store
+    /// lock (R6-l).
+    pub is_fleet_admin: bool,
     /// `Some(_)` for a named Control API token (see [`ApiTokenRef`]). The
     /// caller then has the master's shape; its scope decides the rest.
     pub api: Option<ApiTokenRef>,
@@ -202,6 +216,7 @@ impl Caller {
             mode: TokenMode::Full,
             pane: None,
             is_personal_owner: true,
+            is_fleet_admin: true,
             api: None,
         }
     }
@@ -530,6 +545,7 @@ pub fn resolve_token_at(
     if !master.is_empty() && constant_time_eq(presented.as_bytes(), master.as_bytes()) {
         found = Some(Caller {
             is_personal_owner: personal_owner.is_some(),
+            is_fleet_admin: personal_owner.is_some(),
             ..Caller::master()
         });
     }
@@ -543,6 +559,7 @@ pub fn resolve_token_at(
                 // A machine's token is never a person, so it is never the
                 // person who owns this hub.
                 is_personal_owner: false,
+                is_fleet_admin: false,
                 api: None,
             });
         }
@@ -566,6 +583,7 @@ pub fn resolve_token_at(
                 mode: TokenMode::parse_client(&row.mode),
                 pane: None,
                 is_personal_owner: is_the_personal_owner(row.person_id, personal_owner),
+                is_fleet_admin: is_the_personal_owner(row.person_id, personal_owner),
                 api: None,
             });
         }
@@ -590,6 +608,7 @@ pub fn resolve_token_at(
                     // The owner's token, as the master is: true exactly when
                     // the hub can say who its owner is (T1).
                     is_personal_owner: personal_owner.is_some(),
+                    is_fleet_admin: personal_owner.is_some(),
                     api: Some(ApiTokenRef {
                         id: row.id,
                         name: row.name.clone(),
@@ -607,6 +626,19 @@ pub fn resolve_token_at(
         }
     }
     found
+}
+
+/// Decide the realm-role half of a resolved caller (identity sub-project 1).
+/// Run on every resolved caller before any gate reads it.
+///
+/// Only a paired device bound to a person is decided here: the master, an
+/// admin-scoped control token and a host token keep what the resolver gave
+/// them. Empty sets (a realm read that failed) decide every device `false` —
+/// fail closed.
+pub fn apply_realm(caller: &mut Caller, realm: &RealmSets) {
+    if let Some(p) = caller.client.as_ref().and_then(|c| c.person_id) {
+        caller.is_fleet_admin = realm.fleet_admins.contains(&p);
+    }
 }
 
 /// Whether a paired device's `person_id` is the hub's personal owner.
@@ -793,6 +825,7 @@ pub(crate) fn device_view(
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     }
     .view_scope(store)
     .expect("the scope reads")
@@ -989,6 +1022,7 @@ mod tests {
                 mode: TokenMode::Full,
                 pane: None,
                 is_personal_owner: false,
+                is_fleet_admin: false,
             })
         );
         assert_eq!(
@@ -1000,6 +1034,7 @@ mod tests {
                 mode: TokenMode::Readonly,
                 pane: None,
                 is_personal_owner: false,
+                is_fleet_admin: false,
             })
         );
         // Unknown mode strings fail closed to readonly.
@@ -1089,6 +1124,7 @@ mod tests {
             mode: TokenMode::Full,
             pane: None,
             is_personal_owner: false,
+            is_fleet_admin: false,
         };
         assert!(!c.is_master());
         assert!(!c.is_client());
@@ -1375,6 +1411,45 @@ mod tests {
                 .person(),
             None
         );
+    }
+
+    /// Identity sub-project 1: a SECOND person's device administers the
+    /// fleet exactly when that person holds the realm role `fleet-admin`.
+    #[test]
+    fn a_second_persons_device_is_fleet_admin_only_with_the_role() {
+        let mut row = client_row(7, "phone", "tok-phone", "full");
+        row.person_id = Some(22);
+        let mut c = resolve_token("tok-phone", "s3cret", &[], &[row], OWNER).unwrap();
+        assert!(!c.is_fleet_admin);
+        apply_realm(&mut c, &RealmSets::default());
+        assert!(!c.is_fleet_admin, "empty sets fail closed");
+        apply_realm(
+            &mut c,
+            &RealmSets {
+                fleet_admins: std::sync::Arc::new([22].into()),
+                ..Default::default()
+            },
+        );
+        assert!(c.is_fleet_admin);
+        assert!(!c.is_personal_owner, "the role is authority, not identity");
+    }
+
+    #[test]
+    fn the_master_is_always_fleet_admin() {
+        let mut c = resolve_token("s3cret", "s3cret", &[], &[], OWNER).unwrap();
+        apply_realm(&mut c, &RealmSets::default());
+        assert!(c.is_fleet_admin);
+        // And a machine's token never is, whatever the sets say.
+        let hosts = [host_row("mefistos", "tok-mef", "full")];
+        let mut h = resolve_token("tok-mef", "s3cret", &hosts, &[], OWNER).unwrap();
+        apply_realm(
+            &mut h,
+            &RealmSets {
+                fleet_admins: std::sync::Arc::new([1].into()),
+                ..Default::default()
+            },
+        );
+        assert!(!h.is_fleet_admin);
     }
 
     /// T2a's boolean, answered where the token is resolved: the master and

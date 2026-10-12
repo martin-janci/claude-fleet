@@ -374,7 +374,7 @@ impl FleetTools {
         // person's device or an org-bound one reads it, never replaces it
         // (review r04 F4).
         if p.set.is_some()
-            && !(caller.is_master() || (caller.is_personal_owner && caller.is_person_device()))
+            && !(caller.is_master() || (caller.is_fleet_admin && caller.is_person_device()))
         {
             return Err(to_mcp_err(IpcError::new(
                 codes::E_FORBIDDEN,
@@ -1121,7 +1121,7 @@ impl FleetTools {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             oa::authority_for(
                 &s,
-                caller.is_personal_owner && caller.is_person_device(),
+                caller.is_fleet_admin && caller.is_person_device(),
                 caller.person(),
                 caller.client.as_ref().and_then(|c| c.org_id),
             )
@@ -1130,7 +1130,7 @@ impl FleetTools {
         .ok_or_else(|| {
             mcp_err(
                 "E_FORBIDDEN",
-                "org_admin is for the hub owner's own device, or an org admin's for \
+                "org_admin is for a fleet admin's own device, or an org admin's for \
                  their org; this device administers no org",
                 None,
             )
@@ -1212,7 +1212,7 @@ impl FleetTools {
                 let found = s.get_person_by_name(person).map_err(to_mcp_err)?;
                 let member = match &found {
                     Some(p) => {
-                        s.personal_owner_id().map_err(to_mcp_err)? != Some(p.id)
+                        !s.is_fleet_admin(p.id).map_err(to_mcp_err)?
                             && s.org_role(org, p.id).map_err(to_mcp_err)?.is_some()
                     }
                     None => false,

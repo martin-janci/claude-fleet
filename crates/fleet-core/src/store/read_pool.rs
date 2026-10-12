@@ -129,6 +129,7 @@ impl Store {
             Vec<HostTokenRow>,
             Vec<ClientTokenRow>,
             Vec<super::ControlTokenRow>,
+            (Vec<i64>, Vec<i64>, Vec<i64>),
         ),
         crate::ipc_error::IpcError,
     > {
@@ -140,8 +141,11 @@ impl Store {
         let clients = self.auth_client_tokens()?;
         // Named tokens (migration 157); expiry is judged per request.
         let controls = self.auth_control_tokens()?;
+        // Who holds the realm roles (identity sub-project 1): every realm
+        // table moves the epoch, so the sets are the ones at this epoch too.
+        let realm = self.realm_sets()?;
         tx.commit()?;
-        Ok((epoch, hosts, clients, controls))
+        Ok((epoch, hosts, clients, controls, realm))
     }
 }
 
@@ -232,7 +236,7 @@ mod tests {
         s.insert_client_token("old", &"c".repeat(64), "full")
             .unwrap();
         s.revoke_client_token("old").unwrap();
-        let (epoch, hosts, clients, _) = s.auth_snapshot().unwrap();
+        let (epoch, hosts, clients, _, _) = s.auth_snapshot().unwrap();
         assert_eq!(epoch, s.auth_epoch().unwrap());
         assert_eq!(hosts.len(), 1);
         let names: Vec<_> = clients.iter().map(|c| c.name.as_str()).collect();

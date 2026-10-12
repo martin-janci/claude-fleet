@@ -2792,6 +2792,7 @@ fn a_person_sees_their_own_device_names_and_no_one_elses() {
             mode: TokenMode::Full,
             pane: None,
             is_personal_owner: false,
+            is_fleet_admin: false,
         }
         .view_scope(&w.st.lock().unwrap())
         .unwrap()

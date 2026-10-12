@@ -25,6 +25,7 @@ fn person(store: &Mutex<Store>, org: Option<i64>, id: i64) -> ViewScope {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     }
     .view_scope(&lock(store).unwrap())
     .unwrap()
@@ -206,6 +207,7 @@ fn a_caller_without_a_person_owns_no_mission() {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     }
     .view_scope(&lock(&st).unwrap())
     .unwrap();

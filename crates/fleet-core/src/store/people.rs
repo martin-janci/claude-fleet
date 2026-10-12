@@ -472,10 +472,8 @@ impl Store {
         }
         let at = now_unix();
         let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
-            "UPDATE people SET disabled_at = COALESCE(disabled_at, ?2) WHERE id = ?1",
-            rusqlite::params![id, at],
-        )?;
+        // `disabled_at` is stamped below, with the realm rows, so the
+        // fleet-admin check sees who held the role before this person left.
         // Half of "disabled" is that no device of theirs answers any more —
         // through the one function that knows what revoking a device means,
         // not a second `UPDATE` of our own.
@@ -505,15 +503,23 @@ impl Store {
         super::session_grants::revoke_live_grants_to_person(&tx, id, at)?;
         // Realm (identity sub-project 1): every group membership and direct
         // role mapping ends, and with them every org membership, which
-        // `org_members` projects.
-        tx.execute(
-            "DELETE FROM group_members WHERE person_id = ?1",
-            rusqlite::params![id],
-        )?;
-        tx.execute(
-            "DELETE FROM user_role_mappings WHERE person_id = ?1",
-            rusqlite::params![id],
-        )?;
+        // `org_members` projects. Refused (`E_FORBIDDEN`, the transaction
+        // dropped) when they are the last live holder of `fleet-admin`.
+        super::realm::keeping_fleet_admin(&tx, || {
+            tx.execute(
+                "UPDATE people SET disabled_at = COALESCE(disabled_at, ?2) WHERE id = ?1",
+                rusqlite::params![id, at],
+            )?;
+            tx.execute(
+                "DELETE FROM group_members WHERE person_id = ?1",
+                rusqlite::params![id],
+            )?;
+            tx.execute(
+                "DELETE FROM user_role_mappings WHERE person_id = ?1",
+                rusqlite::params![id],
+            )?;
+            Ok(())
+        })?;
         super::realm::reproject_org_memberships_in_tx(&tx, id, None)?;
         tx.commit()?;
         super::session_grants::bump_grant_generation();
@@ -612,7 +618,8 @@ impl Store {
                 ),
             ));
         }
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO people (name, is_personal_owner, created_at, uuid) \
              VALUES (?1, 1, ?2, ?3)",
             rusqlite::params![
@@ -621,7 +628,16 @@ impl Store {
                 uuid::Uuid::new_v4().to_string()
             ],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        let id = tx.last_insert_rowid();
+        // Identity sub-project 1: the owner administers the fleet through
+        // the realm role, as migration 178 maps the owner it finds.
+        tx.execute(
+            "INSERT OR IGNORE INTO user_role_mappings (person_id, role_id) \
+             SELECT ?1, id FROM roles WHERE client_id IS NULL AND name = ?2",
+            rusqlite::params![id, super::realm::ROLE_FLEET_ADMIN],
+        )?;
+        tx.commit()?;
+        Ok(id)
     }
 
     /// Bind the live client named `name` to `person` (multi-user M1), or

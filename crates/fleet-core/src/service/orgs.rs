@@ -1172,7 +1172,7 @@ impl AdminView {
         caller: &crate::mcp::auth::Caller,
         store: &Mutex<Store>,
     ) -> Result<Self, IpcError> {
-        if caller.is_master() || (caller.is_person_device() && caller.is_personal_owner) {
+        if caller.is_master() || (caller.is_person_device() && caller.is_fleet_admin) {
             return Ok(AdminView::Admin);
         }
         let Some(p) = caller.person() else {
@@ -1185,8 +1185,9 @@ impl AdminView {
             .filter(|m| m.is_live())
             .map(|m| (m.org_id, m.role))
             .collect();
-        // The hub's owner on a device bound to an org administers it.
-        if caller.is_personal_owner {
+        // A fleet admin (the hub's owner among them) on a device bound to an
+        // org administers it.
+        if caller.is_fleet_admin {
             if let Some(o) = caller.client.as_ref().and_then(|c| c.org_id) {
                 roles.insert(o, crate::store::ROLE_ADMIN.to_string());
             }
