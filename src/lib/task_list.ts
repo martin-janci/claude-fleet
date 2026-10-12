@@ -10,23 +10,24 @@ export interface TaskNode {
   task: WorkTask;
   children: WorkTask[];
 }
-export interface StatusSections {
-  todo: TaskNode[];
-  doing: TaskNode[];
-  done: TaskNode[];
-}
+export type StatusColumn = 'todo' | 'doing' | 'done';
+export type StatusSections = Record<StatusColumn, TaskNode[]>;
 
 /** The one status rule List and Board share (plan step 1.6): a task sits
  *  where its status says, not where its sessions are. A tracker item sits in
  *  the column its tracker reports (sprints design §2, E11), a native item in
  *  its effective status (the hub has already lifted a live one to
- *  `in_progress`, and a person's setting is final). Only a bare key, which has
- *  no status at all, follows its sessions. */
-export function taskColumnOf(t: WorkTask): keyof StatusSections {
+ *  `in_progress`, and a person's setting is final). Only a task with no
+ *  status at all — a bare key, or a ticket its tracker has said nothing about
+ *  yet — follows its sessions: In progress while one runs, and `null` (no
+ *  column) once none does. Nothing says where such a task stands, so neither
+ *  List nor Board guesses To do: a key typed months ago would sit there
+ *  forever, a card nobody can move. The Grouped tree still lists it. */
+export function taskColumnOf(t: WorkTask): StatusColumn | null {
   if (t.status_category === 'done') return 'done';
   if (t.status_category === 'in_progress') return 'doing';
-  if (!t.status_category && (t.counts?.active ?? 0) > 0) return 'doing';
-  return 'todo';
+  if (t.status_category) return 'todo';
+  return (t.counts?.active ?? 0) > 0 ? 'doing' : null;
 }
 
 /** Every task under the topmost ancestor the list has loaded: a subtask of
@@ -59,10 +60,26 @@ export function groupTasksByStatus(tasks: WorkTask[], nowSecs: number): StatusSe
   const out: StatusSections = { todo: [], doing: [], done: [] };
   for (const t of [...roots].sort(newestFirst)) {
     const s = taskColumnOf(t);
+    if (!s) continue;
     if (s === 'done' && (t.last_activity_at ?? 0) < nowSecs - DONE_WINDOW_SECS) continue;
     out[s].push({ task: t, children: [...(kids.get(t.task_id) ?? [])].sort(newestFirst) });
   }
   return out;
+}
+
+/** How many top-level tasks List and Board leave out for having no status
+ *  and no live session (`taskColumnOf` is `null`). A subtask rides on its
+ *  parent and is not counted. */
+export function unplacedCount(tasks: readonly WorkTask[]): number {
+  return nestUnderRoots(tasks).roots.filter((t) => taskColumnOf(t) === null).length;
+}
+
+/** The line that says where those tasks went, or `null` when there are none. */
+export function unplacedNote(n: number): string | null {
+  if (n <= 0) return null;
+  return n === 1
+    ? '1 task not shown: it has no status and no live session. Grouped lists it.'
+    : `${n} tasks not shown: they have no status and no live session. Grouped lists them.`;
 }
 
 export function displayTitle(t: WorkTask): string {
@@ -79,7 +96,7 @@ export function displayTitle(t: WorkTask): string {
 // of one. A native task, and a ticket with no status name, sits in its
 // status's own column: To do, In progress, Done.
 
-export type BoardColumn = keyof StatusSections;
+export type BoardColumn = StatusColumn;
 export const BOARD_COLUMNS: readonly BoardColumn[] = ['todo', 'doing', 'done'];
 export const BOARD_COLUMN_LABELS: Record<BoardColumn, string> = {
   todo: 'To do',
@@ -93,7 +110,7 @@ export const BOARD_COLUMN_STATUS: Record<BoardColumn, 'todo' | 'in_progress' | '
   done: 'done',
 };
 
-export const boardColumnOf: (t: WorkTask) => BoardColumn = taskColumnOf;
+export const boardColumnOf: (t: WorkTask) => BoardColumn | null = taskColumnOf;
 
 /** One column of the board: a status's own (`id` is the status), or a
  *  tracker's status name under it (`id` is `<status>:<name, lower case>`). */
@@ -108,9 +125,10 @@ export interface BoardLane {
 const laneKey = (name: string) => name.trim().replace(/\s+/g, ' ').toLowerCase();
 
 /** The column a task sits in: its tracker's status name when it has one,
- *  else its status's own. */
-export function boardLaneOf(t: WorkTask): BoardLane {
+ *  else its status's own; `null` when it has no column (`taskColumnOf`). */
+export function boardLaneOf(t: WorkTask): BoardLane | null {
   const status = taskColumnOf(t);
+  if (!status) return null;
   const name = t.kind !== 'local' && t.kind !== 'ref' ? t.status_name?.trim() : '';
   if (!name || laneKey(name) === laneKey(BOARD_COLUMN_LABELS[status])) {
     return { id: status, label: BOARD_COLUMN_LABELS[status], status };
@@ -124,6 +142,8 @@ export interface BoardColumns {
   cards: Record<string, TaskNode[]>;
   /** Done tasks older than the window, left off the Done columns. */
   doneHidden: number;
+  /** Tasks with no status and no live session: on no column at all. */
+  unplaced: number;
 }
 
 /** The board's columns: the three statuses' own, and every status name a
@@ -146,9 +166,13 @@ export function groupTasksForBoard(
   const lanes = new Map<string, BoardLane>(
     BOARD_COLUMNS.map((c) => [c, { id: c, label: BOARD_COLUMN_LABELS[c], status: c }]),
   );
-  const out: BoardColumns = { lanes: [], cards: {}, doneHidden: 0 };
+  const out: BoardColumns = { lanes: [], cards: {}, doneHidden: 0, unplaced: 0 };
   for (const t of [...roots].sort(newestFirst)) {
     const own = boardLaneOf(t);
+    if (!own) {
+      out.unplaced++;
+      continue;
+    }
     if (!lanes.has(own.id)) lanes.set(own.id, own);
     const lane = lanes.get(overrides.get(t.task_id) ?? own.id) ?? lanes.get(own.id)!;
     if (doneWindow && lane.status === 'done' && !keep.has(t.task_id) && (t.last_activity_at ?? 0) < nowSecs - DONE_WINDOW_SECS) {
@@ -180,7 +204,9 @@ export function boardStep(lanes: readonly BoardLane[], from: BoardLane, dir: 1 |
 export function boardMoveRefusal(t: WorkTask): string | null {
   if (t.kind === 'local' && t.item_id != null) return null;
   const name = t.key || displayTitle(t);
-  if (t.kind === 'ref') return `${name} is a bare key with no status of its own; it follows its sessions.`;
+  if (t.kind === 'ref') {
+    return `${name} is a bare key with no status of its own: it is In progress while a session runs on it. Name it as local work ("Name this work…") to give it a status.`;
+  }
   const where = t.tracker_name || t.provider || 'its tracker';
   return `${name}'s status belongs to ${where}. Change it there.`;
 }

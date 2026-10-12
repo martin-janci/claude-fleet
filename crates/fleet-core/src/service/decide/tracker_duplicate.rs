@@ -34,7 +34,7 @@ use std::sync::{Arc, Mutex};
 pub use super::duplicate::item_of;
 
 /// The question's version: bump it when the question below changes.
-pub const QUESTION_VERSION: &str = "tracker_duplicate.v1";
+pub const QUESTION_VERSION: &str = "tracker_duplicate.v2";
 /// What a run is about: the local task.
 pub const SUBJECT_KIND: &str = PROPOSAL_SUBJECT_WORK_ITEM;
 /// No ticket is the same work.
@@ -47,12 +47,15 @@ pub const MIN_CONFIDENCE: f64 = 0.5;
 pub const RECENT_DAYS: i64 = 90;
 
 /// The instruction, read literally.
-pub const INSTRUCTIONS: &str = "state.local is a task a person or an agent just created in a \
+pub const INSTRUCTIONS: &str = concat!(
+    "state.local is a task a person or an agent just created in a \
      local task list: its title and why. Each option i<id> is an open ticket of the team's \
      issue tracker, with its key and title. Decide whether one ticket is the SAME piece of work \
      as state.local, so that the two would be done twice: a ticket that is only related, \
      overlaps in part or touches the same area is not the same work. Choose none when no ticket \
-     is, and unsure when the titles do not show it.";
+     is, and unsure when the titles do not show it.",
+    super::quoted_data!()
+);
 
 /// PURE: a ticket as the question describes it.
 fn described(i: &WorkItemRow) -> String {

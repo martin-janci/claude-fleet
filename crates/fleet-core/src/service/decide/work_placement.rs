@@ -40,7 +40,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 /// The question's version: bump it when the question below changes.
-pub const QUESTION_VERSION: &str = "work_placement.v1";
+pub const QUESTION_VERSION: &str = "work_placement.v2";
 /// What a run is about: the task's work item (its id as text).
 pub const SUBJECT_KIND: &str = PROPOSAL_SUBJECT_WORK_ITEM;
 /// The option that places the task in no group.
@@ -53,11 +53,14 @@ pub const MIN_CONFIDENCE: f64 = 0.5;
 pub const MAX_GROUPS: usize = 20;
 
 /// The instruction, read literally.
-pub const INSTRUCTIONS: &str = "state.task is a task a person just created: its title and key. \
+pub const INSTRUCTIONS: &str = concat!(
+    "state.task is a task a person just created: its title and key. \
     Each option except none and unsure is one group of a person's Work view, named by its \
     label; people put tasks about the same area, product or project in the same group. Decide \
     which group this task belongs in, using only the task's text and the group labels. Choose \
-    none when the task fits no group, and unsure when the text does not show which.";
+    none when the task fits no group, and unsure when the text does not show which.",
+    super::quoted_data!()
+);
 
 /// PURE: a group's option word under the fingerprint key: `g` and 12 hex
 /// digits, so the label (a person's text) is never recorded.

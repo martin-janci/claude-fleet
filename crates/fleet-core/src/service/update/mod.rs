@@ -235,6 +235,12 @@ pub fn push_decisions(store: &Mutex<Store>, keys: &TrustedKeys, now: i64) -> Vec
             if let Ok(s) = lock(store) {
                 s.emit_update_decision(&o.target, &status, version.as_deref());
             }
+            // `fleet-updater` hears nothing pushed: wake it, so a release
+            // the hub just verified is decided on now rather than at its
+            // next poll. It still installs only what its decision says.
+            if wakes_hub_updater(&o.target, d.status) {
+                wake_hub_updater();
+            }
             pushed.push(o.target);
         }
     }
@@ -504,6 +510,10 @@ fn decide_for(
     if d.reason.code == fleet_update::ReasonCode::Pinned && d.target.is_some() {
         d.next_check_secs = d.next_check_secs.min(PINNED_RECHECK_SECS);
     }
+    // No later than the hub's own next look at the channel: on `dev` and
+    // `nightly` a release the hub verified reaches `fleet-updater` and the
+    // agents within that, not after the six-hour default.
+    d.next_check_secs = d.next_check_secs.min(channel_poll_secs(store));
     Ok(d)
 }
 
@@ -1421,6 +1431,16 @@ pub fn update_now(
         agents,
         hub_woken,
     })
+}
+
+/// Whether a moved decision for `target` should wake the hub's own
+/// updater: its own target, and something for it to act on.
+fn wakes_hub_updater(target: &str, status: Status) -> bool {
+    target == "hub:self"
+        && matches!(
+            status,
+            Status::UpdateAvailable | Status::UpdateRequired | Status::Rollback
+        )
 }
 
 /// Write `<data_dir>/update-now`; false when this process has no data dir.

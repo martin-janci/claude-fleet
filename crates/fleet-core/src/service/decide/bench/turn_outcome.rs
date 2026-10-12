@@ -8,7 +8,7 @@
 //!   ([`turn_outcome::ends_with_question`]).
 //! * `jev` — the adapter's own request ([`turn_outcome::prepare_tail`],
 //!   [`turn_outcome::question_for`]) through [`decide`] (subject `bench`,
-//!   question `turn_outcome.bench.v1`, the adapter's floor). Its gate needs
+//!   question `turn_outcome.bench.v2`, the adapter's floor). Its gate needs
 //!   both consents (D31 and D48); a fixture row has no org, so
 //!   `decide.jev.unassigned` and `decide.jev.unassigned_reply`.
 //!
@@ -28,7 +28,7 @@ use crate::store::{DECISION_BENCH_SUBJECT, DECISION_NO_BASELINE, TURN_OUTCOMES};
 use serde::{Deserialize, Serialize};
 
 /// What the benchmark's Jev runs are recorded under.
-pub const QUESTION_VERSION: &str = "turn_outcome.bench.v1";
+pub const QUESTION_VERSION: &str = "turn_outcome.bench.v2";
 /// The built-in synthetic set: 72 hand-written tails, 51 of them `asked`
 /// (LLM-written, D43; not a measurement of real sessions).
 pub const FIXTURE: &str = include_str!("../../testdata/decide/turn_outcome_tails.jsonl");

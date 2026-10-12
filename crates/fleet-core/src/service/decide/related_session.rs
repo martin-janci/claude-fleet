@@ -39,7 +39,7 @@ use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 
 /// The question's version: bump it when the question below changes.
-pub const QUESTION_VERSION: &str = "related_session.v1";
+pub const QUESTION_VERSION: &str = "related_session.v2";
 /// What a run is about: one session (its row's id), the subject the row's
 /// proposals are read by.
 pub const SUBJECT_KIND: &str = PROPOSAL_SUBJECT_SESSION;
@@ -53,11 +53,14 @@ pub const MAX_CANDIDATES: usize = 8;
 pub const PROMPT_CHARS: usize = 400;
 
 /// The instruction, read literally.
-pub const INSTRUCTIONS: &str = "state.session is the first prompt a person typed into a coding \
+pub const INSTRUCTIONS: &str = concat!(
+    "state.session is the first prompt a person typed into a coding \
     session. Each option except none is another session of the same person, described by its \
     own first prompt. Decide whether one of them works on the SAME problem or change as \
     state.session, so that the two would do the same work twice. Choose none when no option \
-    does: sessions in the same repository or on related topics are not the same work.";
+    does: sessions in the same repository or on related topics are not the same work.",
+    super::quoted_data!()
+);
 
 const NONE_MEANS: &str = "No other session works on the same thing.";
 

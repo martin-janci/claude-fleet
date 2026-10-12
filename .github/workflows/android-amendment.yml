@@ -85,3 +85,12 @@ jobs:
             --sha256 "$SHA256" --size "$SIZE" --version-code "$VERSION_CODE" \
             --signer-sha256 "$SIGNER" --mobile-accepts "$CMIN,$CMAX" --out android.json
           scripts/update-channels.sh amend "v$VERSION" android.json
+      # The phones' hubs re-read the channel now (see release.yml's channel job).
+      - if: vars.FLEET_HUB_POKE_URLS != ''
+        name: Tell the hubs
+        env:
+          URLS: ${{ vars.FLEET_HUB_POKE_URLS }}
+        run: |
+          for u in $URLS; do
+            curl -fsS -m 20 -X POST "${u%/}/update/poke" || echo "::warning::$u did not take the poke"
+          done

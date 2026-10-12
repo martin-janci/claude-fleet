@@ -295,6 +295,18 @@ mod tests {
         assert_eq!(http(addr, "GET", &path, "nope", "").await.0, 401);
     }
 
+    /// The release workflow's ping holds no token: the poke answers anyone,
+    /// at once, and nothing else under `/update/` opens with it.
+    #[tokio::test]
+    async fn a_release_poke_needs_no_token_and_opens_nothing_else() {
+        let (addr, _store) = app().await;
+        assert_eq!(http(addr, "POST", "/update/poke", "nope", "").await.0, 202);
+        assert_eq!(
+            http(addr, "POST", "/update/check", "nope", "{}").await.0,
+            401
+        );
+    }
+
     #[tokio::test]
     async fn an_updater_token_has_one_door_and_a_peer_token_none_here() {
         let (addr, _store) = app().await;
