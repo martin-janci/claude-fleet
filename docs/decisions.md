@@ -813,8 +813,8 @@ stdin, never in argv** — `claude -p` reads it there — so the command line
 validated model. One call at a time per host, each
 under `--haiku-timeout` seconds (10–600, default 120; the host-side
 `timeout` stops `claude` 10 s earlier), and `--max-calls` bounds the run.
-The host must be reachable over SSH from where the benchmark runs (an
-agent-only host is not: its transport cannot pipe stdin). `--haiku-model` is `haiku` (default), `sonnet` or
+The host must be reachable from where the benchmark runs, over SSH or
+through its fleet-agent. `--haiku-model` is `haiku` (default), `sonnet` or
 `opus`.
 
 **How it is read.** The last JSON object in the model's text that has a
