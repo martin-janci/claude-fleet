@@ -50,6 +50,7 @@ mod projects;
 mod pull_requests;
 mod read_cursors;
 mod read_pool;
+mod realm;
 mod reconcile;
 mod reports;
 mod review_prs;
@@ -190,6 +191,7 @@ pub use pull_requests::{
 };
 pub use read_cursors::CursorRow;
 pub use read_pool::{read_via, ReadPool, READ_POOL_SIZE};
+pub use realm::*;
 pub use reports::{ReportFilter, ReportRow};
 pub use review_prs::{
     NewReviewRecord, ReviewPrRow, ReviewRecordRow, TestExemptionRow, REVIEW_PR_STATUSES,
@@ -921,6 +923,20 @@ impl Store {
     /// waiting the busy timeout for it; WAL readers never block it.
     pub(crate) fn immediate_transaction(&self) -> Result<rusqlite::Transaction<'_>> {
         rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+    }
+
+    /// Run `f` on the connection inside one IMMEDIATE transaction: commit on
+    /// `Ok`, roll back on `Err`. For the `_in_tx` helpers of the realm model
+    /// (`store/realm.rs`), which take the `&Connection` and never open a
+    /// transaction of their own. Must not be nested.
+    pub fn with_tx<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> std::result::Result<T, crate::ipc_error::IpcError>,
+    ) -> std::result::Result<T, crate::ipc_error::IpcError> {
+        let tx = self.immediate_transaction()?;
+        let v = f(&tx)?;
+        tx.commit()?;
+        Ok(v)
     }
 
     /// Run `f` inside a single `conn.transaction()`. Test-only since the
