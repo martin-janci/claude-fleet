@@ -975,13 +975,27 @@ fn a_hidden_primary_is_neither_named_nor_reported_missing_to_a_bound_client() {
 #[test]
 fn the_status_filter_places_a_live_bare_key_in_progress() {
     let w = world();
-    {
+    let todo_ticket = {
         let s = w.st.lock().unwrap();
         s.link_session_work(w.s2, WorkTarget::Ref("FREE-7"), "manual")
             .unwrap();
-    }
-    // TK-1 is To do in its tracker, with a live session on it.
-    link(&w, w.s1, w.t1, true);
+        s.upsert_tracker_item(
+            w.tracker,
+            &TrackerItemWrite {
+                external_id: "8".into(),
+                key: Some("TK-8".into()),
+                title: "Not started in Jira".into(),
+                status_name: "To Do".into(),
+                status_category: "todo".into(),
+                containers: vec!["TP".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .id
+    };
+    // TK-8 is To do in its tracker, with a live session on it.
+    link(&w, w.s1, todo_ticket, true);
     let with = |status: &str| -> BTreeSet<String> {
         page(
             &w,
@@ -998,9 +1012,12 @@ fn the_status_filter_places_a_live_bare_key_in_progress() {
     };
     let doing = with("in_progress");
     assert!(doing.contains("FREE-7"), "{doing:?}");
-    assert!(!doing.contains("TK-1"), "{doing:?}");
+    assert!(!doing.contains("TK-8"), "{doing:?}");
     let todo = with("todo");
-    assert!(!todo.contains("FREE-7") && todo.contains("TK-1"), "{todo:?}");
+    assert!(
+        !todo.contains("FREE-7") && todo.contains("TK-8"),
+        "{todo:?}"
+    );
     assert!(with("open").contains("FREE-7"));
     assert!(!with("done").contains("FREE-7"));
 }
