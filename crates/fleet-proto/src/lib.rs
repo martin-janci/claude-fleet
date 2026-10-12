@@ -326,9 +326,11 @@ pub enum HubFrame {
         id: String,
         argv: Vec<String>,
         /// Written to the child's stdin and closed. Absent means no stdin.
-        /// Text only: `SshExec` has no stdin parameter today, so nothing sends
-        /// this yet. If a caller ever needs non-UTF-8 stdin, this has to
-        /// become a `stdin_b64` — it cannot be widened in place.
+        /// Text only: the hub's `AgentTransport::run_with_stdin` refuses
+        /// non-UTF-8 input before sending (a tracker request body or a
+        /// `claude -p` prompt is always text). If a caller ever needs
+        /// non-UTF-8 stdin, this has to become a `stdin_b64` — it cannot be
+        /// widened in place.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stdin: Option<String>,
         /// Wall clock the agent gives the child before killing it. The hub
