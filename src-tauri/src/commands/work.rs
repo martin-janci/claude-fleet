@@ -8,22 +8,32 @@
 //! local one does here (work graph M2.4 added the resume half).
 //!
 //! Work graph M7.2 adds the lifecycle: `work_tidy` / `work_reopened` →
-//! `work`, and archive / unarchive / snooze / never / tidy_apply / dismiss →
-//! `work_link`.
+//! `work`, and unarchive / tidy_apply (which carries archive, snooze and
+//! never per item) / dismiss → `work_link`.
 //!
 //! Work graph M11.1 adds local work ("Name this work…"):
-//! `list_local_work_items` → `work { local_items }`, and `name_session_work`
-//! / `rename_work_item` → `work_link { name }`.
+//! `name_session_work` / `rename_work_item` → `work_link { name }`.
 //!
 //! Shared work context (design 2026-09-29): `create_work_task` →
 //! `work_link { create }`, and `accept_work_proposal` /
 //! `reject_work_proposal` → `work_link { accept | reject }`.
+//!
+//! The board (sprints design 2026-09-28 §6c): `set_work_status` →
+//! `work_link { set_status }`, a person's status for a native item.
+//!
+//! Task editing: `edit_work_item` → `work_link { edit }`, a person's
+//! title, notes, assignees and epic flag for a native item.
+//!
+//! Epics (sprints design 2026-09-28 §3): `set_work_parent` →
+//! `work_link { set_parent }`, a local item filed under an epic or a task,
+//! or taken out to the top.
 
 use crate::backend::FleetBackend;
 use fleet_core::cancel::CancellationRegistry;
 use fleet_core::ipc_error::IpcError;
+use fleet_core::service::decide::resume_or_new::{self, ResumeOrNew};
+use fleet_core::service::decide::DecideCtx;
 use fleet_core::service::work::card::TicketCard;
-use fleet_core::service::work::local::LocalWorkItem;
 use fleet_core::service::work::resume::ResumePlan;
 use fleet_core::service::work::summary::SummaryOutcome;
 use fleet_core::service::work::tidy::{TidyApplyItem, TidyApplyReport, TidyReport};
@@ -54,6 +64,11 @@ pub struct LinkSessionWorkArgs {
     /// graph M14); absent: no check.
     #[serde(default)]
     pub expected_version: Option<i64>,
+    /// `false`: refuse with `E_EXISTS` when the task has another live
+    /// session (task → session P-3); `true`: the person saw that and goes
+    /// ahead. Absent: no check.
+    #[serde(default)]
+    pub ack_live: Option<bool>,
 }
 
 /// Say a session does NOT work on a key or item (sticky) — or, with
@@ -143,22 +158,11 @@ pub struct WorkPurgeImpactArgs {
     pub host_aliases: Vec<String>,
 }
 
-/// Archive a live session from the UI (it collapses into its work group's
-/// Done; tmux keeps running), or un-archive it — which an attach also does.
+/// Un-archive a session (it leaves its work group's Done) — which an attach
+/// also does.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionLifecycleArgs {
     pub session_id: i64,
-}
-
-/// Snooze tidy-up for a session's work (`days`, default 7), or never
-/// suggest it (`days` ignored).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct TidyFlagArgs {
-    pub session_id: i64,
-    #[serde(default)]
-    pub link_id: Option<i64>,
-    #[serde(default)]
-    pub days: Option<u32>,
 }
 
 /// The Tidy-up sheet's choices, one per session.
@@ -188,15 +192,6 @@ pub struct NameSessionWorkArgs {
 pub struct RenameWorkItemArgs {
     pub item_id: i64,
     pub title: String,
-}
-
-/// The local work items (work graph M11.1).
-#[tauri::command]
-pub async fn list_local_work_items(
-    backend: State<'_, Arc<FleetBackend>>,
-    store: State<'_, Arc<Mutex<Store>>>,
-) -> Result<Vec<LocalWorkItem>, IpcError> {
-    routed::list_local_work_items(&backend, &store).await
 }
 
 /// A person names the session's work from the desktop.
@@ -229,12 +224,22 @@ pub struct CreateWorkTaskArgs {
     pub project_id: Option<i64>,
     #[serde(default)]
     pub notes: Option<String>,
+    /// Display names.
+    #[serde(default)]
+    pub assignees: Option<Vec<String>>,
+    /// `YYYY-MM-DD`.
+    #[serde(default)]
+    pub due_at: Option<String>,
 }
 
 /// A person's decision on an agent's proposal.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorkProposalArgs {
     pub item_id: i64,
+    /// Reject only: Merge (redesign 6.9) — the task the proposal duplicates;
+    /// what hangs on the proposal moves there before it closes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_into: Option<i64>,
 }
 
 #[tauri::command]
@@ -244,6 +249,79 @@ pub async fn create_work_task(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<WorkItemRow, IpcError> {
     routed::create_work_task(&backend, args, &store).await
+}
+
+/// A person's status for a native item (`todo` | `in_progress` | `done`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SetWorkStatusArgs {
+    pub item_id: i64,
+    pub status: String,
+}
+
+/// A person's edit of a native item; a field left out stays as it is.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EditWorkItemArgs {
+    pub item_id: i64,
+    #[serde(default)]
+    pub title: Option<String>,
+    /// `""` clears.
+    #[serde(default)]
+    pub notes: Option<String>,
+    /// `[]` clears.
+    #[serde(default)]
+    pub assignees: Option<Vec<String>>,
+    /// `YYYY-MM-DD`; `""` clears.
+    #[serde(default)]
+    pub due_at: Option<String>,
+    /// A top-level item is an epic (`true`) or a task (`false`).
+    #[serde(default)]
+    pub epic: Option<bool>,
+    /// `urgent | high | medium | low`; `""` clears.
+    #[serde(default)]
+    pub priority: Option<String>,
+    /// `[]` clears.
+    #[serde(default)]
+    pub labels: Option<Vec<String>>,
+    /// 0 to 1000; `0` clears it and its unit.
+    #[serde(default)]
+    pub estimate: Option<f64>,
+    /// `points | hours`.
+    #[serde(default)]
+    pub estimate_unit: Option<String>,
+}
+
+/// `set_work_parent`: `parent` is `item:<id>`, or `""` for the top.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SetWorkParentArgs {
+    pub item_id: i64,
+    pub parent: String,
+}
+
+#[tauri::command]
+pub async fn edit_work_item(
+    args: EditWorkItemArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<WorkItemRow, IpcError> {
+    routed::edit_work_item(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn set_work_parent(
+    args: SetWorkParentArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<WorkItemRow, IpcError> {
+    routed::set_work_parent(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn set_work_status(
+    args: SetWorkStatusArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<WorkItemRow, IpcError> {
+    routed::set_work_status(&backend, args, &store).await
 }
 
 #[tauri::command]
@@ -283,39 +361,12 @@ pub async fn work_reopened(
 }
 
 #[tauri::command]
-pub async fn archive_session_work(
-    args: SessionLifecycleArgs,
-    backend: State<'_, Arc<FleetBackend>>,
-    store: State<'_, Arc<Mutex<Store>>>,
-) -> Result<SessionRow, IpcError> {
-    routed::archive_session_work(&backend, args, &store).await
-}
-
-#[tauri::command]
 pub async fn unarchive_session_work(
     args: SessionLifecycleArgs,
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<SessionRow, IpcError> {
     routed::unarchive_session_work(&backend, args, &store).await
-}
-
-#[tauri::command]
-pub async fn snooze_tidy(
-    args: TidyFlagArgs,
-    backend: State<'_, Arc<FleetBackend>>,
-    store: State<'_, Arc<Mutex<Store>>>,
-) -> Result<SessionRow, IpcError> {
-    routed::snooze_tidy(&backend, args, &store).await
-}
-
-#[tauri::command]
-pub async fn never_tidy(
-    args: TidyFlagArgs,
-    backend: State<'_, Arc<FleetBackend>>,
-    store: State<'_, Arc<Mutex<Store>>>,
-) -> Result<SessionRow, IpcError> {
-    routed::never_tidy(&backend, args, &store).await
 }
 
 #[tauri::command]
@@ -493,6 +544,37 @@ pub async fn unlink_session_work(
     routed::unlink_session_work(&backend, args, &store).await
 }
 
+/// Gap plan G7.10 (Jev N2): the New session dialog's "Resume or start
+/// fresh" for a work key with past work. `chosen` (`new` or `l<link id>`)
+/// is the follow-up's only.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResumeOrNewArgs {
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen: Option<String>,
+}
+
+/// The proposal for `key`: a rule's (the only recent past session), else
+/// Jev's at assist (`decide.jev.resume_or_new`, off by default), else none.
+#[tauri::command]
+pub async fn resume_or_new_propose(
+    args: ResumeOrNewArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<ResumeOrNew, IpcError> {
+    routed::resume_or_new_propose(&backend, args, &store).await
+}
+
+/// The person resumed or started fresh: records the follow-up.
+#[tauri::command]
+pub async fn resume_or_new_follow(
+    args: ResumeOrNewArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<bool, IpcError> {
+    routed::resume_or_new_follow(&backend, args, &store).await
+}
+
 pub(crate) mod routed {
     use super::*;
 
@@ -510,7 +592,11 @@ pub(crate) mod routed {
         };
         match backend.hub() {
             Some(hub) => hub.route("work_tidy", &args).await,
-            None => work::tidy::work_tidy(store, &fleet_core::service::orgs::OrgScope::All, now()),
+            None => work::tidy::work_tidy(
+                store,
+                &fleet_core::service::view_scope::ViewScope::internal(),
+                now(),
+            ),
         }
     }
 
@@ -536,18 +622,6 @@ pub(crate) mod routed {
         }
     }
 
-    pub async fn archive_session_work(
-        backend: &FleetBackend,
-        args: SessionLifecycleArgs,
-        store: &Mutex<Store>,
-    ) -> Result<SessionRow, IpcError> {
-        let args = lifecycle("archive", args.session_id);
-        match backend.hub() {
-            Some(hub) => hub.route("archive_session_work", &args).await,
-            None => work::work_link(&args, store, &fleet_core::service::orgs::OrgScope::All),
-        }
-    }
-
     pub async fn unarchive_session_work(
         backend: &FleetBackend,
         args: SessionLifecycleArgs,
@@ -556,37 +630,6 @@ pub(crate) mod routed {
         let args = lifecycle("unarchive", args.session_id);
         match backend.hub() {
             Some(hub) => hub.route("unarchive_session_work", &args).await,
-            None => work::work_link(&args, store, &fleet_core::service::orgs::OrgScope::All),
-        }
-    }
-
-    pub async fn snooze_tidy(
-        backend: &FleetBackend,
-        args: TidyFlagArgs,
-        store: &Mutex<Store>,
-    ) -> Result<SessionRow, IpcError> {
-        let args = WorkLinkArgs {
-            link_id: args.link_id,
-            days: args.days,
-            ..lifecycle("snooze", args.session_id)
-        };
-        match backend.hub() {
-            Some(hub) => hub.route("snooze_tidy", &args).await,
-            None => work::work_link(&args, store, &fleet_core::service::orgs::OrgScope::All),
-        }
-    }
-
-    pub async fn never_tidy(
-        backend: &FleetBackend,
-        args: TidyFlagArgs,
-        store: &Mutex<Store>,
-    ) -> Result<SessionRow, IpcError> {
-        let args = WorkLinkArgs {
-            link_id: args.link_id,
-            ..lifecycle("never", args.session_id)
-        };
-        match backend.hub() {
-            Some(hub) => hub.route("never_tidy", &args).await,
             None => work::work_link(&args, store, &fleet_core::service::orgs::OrgScope::All),
         }
     }
@@ -634,20 +677,6 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("dismiss_reopened", &args).await,
             None => work::dismiss_reopened(&args, store),
-        }
-    }
-
-    pub async fn list_local_work_items(
-        backend: &FleetBackend,
-        store: &Mutex<Store>,
-    ) -> Result<Vec<LocalWorkItem>, IpcError> {
-        let args = WorkArgs {
-            action: Some("local_items".into()),
-            ..Default::default()
-        };
-        match backend.hub() {
-            Some(hub) => hub.route("list_local_work_items", &args).await,
-            None => work::local::local_items(store, &fleet_core::service::orgs::OrgScope::All),
         }
     }
 
@@ -705,6 +734,8 @@ pub(crate) mod routed {
             parent: args.parent,
             project_id: args.project_id,
             notes: args.notes,
+            assignees: args.assignees,
+            due_at: args.due_at,
             ..Default::default()
         };
         match backend.hub() {
@@ -712,6 +743,82 @@ pub(crate) mod routed {
             None => {
                 work::local::create_task(&args, store, &fleet_core::service::orgs::OrgScope::All)
             }
+        }
+    }
+
+    /// `work_link { set_status }`: a tracker item is refused by the
+    /// service (its status is its tracker's), naming the ticket.
+    pub async fn set_work_status(
+        backend: &FleetBackend,
+        args: SetWorkStatusArgs,
+        store: &Mutex<Store>,
+    ) -> Result<WorkItemRow, IpcError> {
+        let args = WorkLinkArgs {
+            action: "set_status".into(),
+            item_id: Some(args.item_id),
+            status: Some(args.status),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("set_work_status", &args).await,
+            None => work::status::set_status(
+                store,
+                &fleet_core::service::orgs::OrgScope::All,
+                args.item_id.unwrap_or_default(),
+                args.status.as_deref().unwrap_or_default(),
+            ),
+        }
+    }
+
+    /// `work_link { set_parent }`: a tracker item is refused by the service
+    /// (its tracker files it), naming the ticket.
+    pub async fn set_work_parent(
+        backend: &FleetBackend,
+        args: SetWorkParentArgs,
+        store: &Mutex<Store>,
+    ) -> Result<WorkItemRow, IpcError> {
+        let args = WorkLinkArgs {
+            action: "set_parent".into(),
+            item_id: Some(args.item_id),
+            parent: Some(args.parent),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("set_work_parent", &args).await,
+            None => {
+                work::local::set_parent(&args, store, &fleet_core::service::orgs::OrgScope::All)
+            }
+        }
+    }
+
+    /// `work_link { edit }`: a tracker item is refused by the service (its
+    /// text is its tracker's), naming the ticket.
+    pub async fn edit_work_item(
+        backend: &FleetBackend,
+        args: EditWorkItemArgs,
+        store: &Mutex<Store>,
+    ) -> Result<WorkItemRow, IpcError> {
+        let args = WorkLinkArgs {
+            action: "edit".into(),
+            item_id: Some(args.item_id),
+            title: args.title,
+            notes: args.notes,
+            assignees: args.assignees,
+            due_at: args.due_at,
+            epic: args.epic,
+            priority: args.priority,
+            labels: args.labels,
+            estimate: args.estimate,
+            estimate_unit: args.estimate_unit,
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("edit_work_item", &args).await,
+            None => work::local::edit_local_item(
+                &args,
+                store,
+                &fleet_core::service::orgs::OrgScope::All,
+            ),
         }
     }
 
@@ -726,6 +833,10 @@ pub(crate) mod routed {
         let args = WorkLinkArgs {
             action: if accept { "accept" } else { "reject" }.into(),
             item_id: Some(args.item_id),
+            task_id: args
+                .merge_into
+                .filter(|_| !accept)
+                .map(|id| format!("item:{id}")),
             ..Default::default()
         };
         match backend.hub() {
@@ -747,7 +858,13 @@ pub(crate) mod routed {
     ) -> Result<Vec<WorkLinkRow>, IpcError> {
         match backend.hub() {
             Some(hub) => hub.route("session_work_links", &args).await,
-            None => work::work(&args, store, &fleet_core::service::orgs::OrgScope::All),
+            // The standalone desktop is the hub's own reader: one person at
+            // the keyboard and no `Caller` to ask (multi-user M1, T8d).
+            None => work::work(
+                &args,
+                store,
+                &fleet_core::service::view_scope::ViewScope::internal(),
+            ),
         }
     }
 
@@ -766,11 +883,19 @@ pub(crate) mod routed {
             force_cross_org: args.force_cross_org.then_some(true),
             primary: args.primary,
             expected_version: args.expected_version,
+            ack_live: args.ack_live,
             ..Default::default()
         };
         match backend.hub() {
             Some(hub) => hub.route("link_session_work", &args).await,
-            None => work::work_link(&args, store, &fleet_core::service::orgs::OrgScope::All),
+            None => {
+                work::check_live_elsewhere(
+                    &args,
+                    store,
+                    &fleet_core::service::view_scope::ViewScope::internal(),
+                )?;
+                work::work_link(&args, store, &fleet_core::service::orgs::OrgScope::All)
+            }
         }
     }
 
@@ -880,8 +1005,13 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("work_resume_plan", &args).await,
             None => {
-                work::work_resume_plan(&args, store, ssh, &fleet_core::service::orgs::OrgScope::All)
-                    .await
+                work::work_resume_plan(
+                    &args,
+                    store,
+                    ssh,
+                    &fleet_core::service::view_scope::ViewScope::internal(),
+                )
+                .await
             }
         }
     }
@@ -931,7 +1061,7 @@ pub(crate) mod routed {
                     ssh.as_ref(),
                     &args.key,
                     args.link_id,
-                    &fleet_core::service::orgs::OrgScope::All,
+                    &fleet_core::service::view_scope::ViewScope::internal(),
                 )
                 .await
             }
@@ -964,6 +1094,7 @@ pub(crate) mod routed {
                     ssh,
                     reg,
                     &fleet_core::service::orgs::OrgScope::All,
+                    &fleet_core::service::view_scope::ViewScope::internal(),
                 )
                 .await
             }
@@ -982,9 +1113,11 @@ pub(crate) mod routed {
         };
         match backend.hub() {
             Some(hub) => hub.route("work_today", &wire).await,
-            None => {
-                work::today::today(store, args.since, &fleet_core::service::orgs::OrgScope::All)
-            }
+            None => work::today::today(
+                store,
+                args.since,
+                &fleet_core::service::view_scope::ViewScope::internal(),
+            ),
         }
     }
 
@@ -1000,7 +1133,11 @@ pub(crate) mod routed {
         };
         match backend.hub() {
             Some(hub) => hub.route("work_ticket_card", &wire).await,
-            None => work::card::card(store, &args.key, &fleet_core::service::orgs::OrgScope::All),
+            None => work::card::card(
+                store,
+                &args.key,
+                &fleet_core::service::view_scope::ViewScope::internal(),
+            ),
         }
     }
 
@@ -1020,6 +1157,56 @@ pub(crate) mod routed {
             None => {
                 work::work_purge_impact(&args, store, &fleet_core::service::orgs::OrgScope::All)
             }
+        }
+    }
+
+    pub async fn resume_or_new_propose(
+        backend: &FleetBackend,
+        args: ResumeOrNewArgs,
+        store: &Arc<Mutex<Store>>,
+    ) -> Result<ResumeOrNew, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                let wire = serde_json::json!({ "action": "propose", "key": args.key });
+                // A hub from before N2 has no such tool: propose nothing.
+                match hub.route("resume_or_new_propose", &wire).await {
+                    Err(e) if e.code == fleet_core::ipc_error::codes::E_HUB_PROTOCOL => {
+                        Ok(ResumeOrNew::default())
+                    }
+                    r => r,
+                }
+            }
+            None => {
+                let ctx = DecideCtx::jev(Arc::clone(store));
+                resume_or_new::propose_for_key(
+                    &ctx,
+                    &fleet_core::service::view_scope::ViewScope::internal(),
+                    &args.key,
+                )
+                .await
+            }
+        }
+    }
+
+    pub async fn resume_or_new_follow(
+        backend: &FleetBackend,
+        args: ResumeOrNewArgs,
+        store: &Mutex<Store>,
+    ) -> Result<bool, IpcError> {
+        let chosen = args.chosen.unwrap_or_default();
+        match backend.hub() {
+            Some(hub) => {
+                let wire =
+                    serde_json::json!({ "action": "follow", "key": args.key, "chosen": chosen });
+                hub.route("resume_or_new_follow", &wire).await
+            }
+            None => resume_or_new::follow_for_key(
+                store,
+                &fleet_core::service::view_scope::ViewScope::internal(),
+                &args.key,
+                &chosen,
+                fleet_core::store::now_unix(),
+            ),
         }
     }
 }

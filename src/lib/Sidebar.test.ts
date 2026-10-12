@@ -1,7 +1,10 @@
+import { sidebarView } from './work_view';
+import { inboxGroupBy, notWaitingSaid } from './inbox';
+import { waitingMissions, waitingOf } from './mission_waits';
 import { fireEvent, render, screen, within, waitFor } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tick } from 'svelte';
-import { readPref } from './prefs';
+import { readPref, uiDensity } from './prefs';
 
 // Three sample projects. Sessions are attached per-test so we can verify
 // the new "hide projects without sessions" behavior.
@@ -63,7 +66,7 @@ import { buildSessionsByProject, buildRelatedCountById } from './sidebar_index';
 import { get } from 'svelte/store';
 import Sidebar from './Sidebar.svelte';
 import { projects, loadProjects } from './projects';
-import { sessions, loadSessions, showBgAgents, showRowDetails, sidebarGroupBy, resetTombstonesForTests, type SessionRow } from './sessions';
+import { sessions, loadSessions, showBgAgents, showFriendlyNames, showRowDetails, sidebarGroupBy, resetTombstonesForTests, type SessionRow } from './sessions';
 import { selectedSession, selectSession, selectSessionExplicitly } from './selection';
 import { sessionFocus, focusSession } from './session_focus';
 import { hosts, loadHosts, hostFilter, resetTombstonesForTests as resetHostTombstones } from './hosts';
@@ -73,7 +76,15 @@ import { toasts, clearToasts } from './toasts';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { hubConnection } from './hub_connection';
 import { workFilters, mineItemIds, mineLoaded, DEFAULT_WORK_FILTERS } from './work_filters';
+import { resetAccessForTests, setMyGrants } from './access';
 import { trackers } from './trackers';
+import { switcherRequest } from './switcher_request';
+import { addProjectRequest } from './app_views';
+import { newSessionRequest, clearNewSessionRequest } from './new_session_request';
+import { expectAccessible } from './a11y_check';
+import { bootstrapError } from './bootstrap_state';
+import { agentFilter, scopeTab } from './session_scope';
+import { orgs } from './orgs';
 
 /** Open the sidebar's Filters panel (hosts, recency, work filters, include). */
 async function openFilters() {
@@ -88,6 +99,22 @@ async function openViewOptions() {
     await fireEvent.click(screen.getByTestId('view-options-open'));
     await tick();
   }
+}
+
+/** The Needs you pill, in the Filters panel (step 3.7). */
+async function needsYouPill(): Promise<HTMLElement> {
+  await openFilters();
+  return screen.getByTestId('needs-you-filter');
+}
+/** The Select several switch, in the ⋯ view-options menu. */
+async function selectModeSwitch(): Promise<HTMLElement> {
+  await openViewOptions();
+  return screen.getByTestId('select-mode');
+}
+/** Pick a grouping in the list head's Group select. */
+async function groupBy(id: string) {
+  await fireEvent.change(screen.getByTestId('group-select'), { target: { value: id } });
+  await tick();
 }
 
 function mockBackend(projs: typeof fakeProjects, sess: ReturnType<typeof sessionFor>[]) {
@@ -128,6 +155,10 @@ function mockBackend(projs: typeof fakeProjects, sess: ReturnType<typeof session
 }
 
 beforeEach(() => {
+  // Most row tests here read 0.5.4's Comfortable row; Compact (the default
+  // since the UX audit) has its own tests in SessionRowDensity / below.
+  uiDensity.set('comfortable');
+  clearNewSessionRequest();
   resetTombstonesForTests();
   resetHostTombstones();
   projects.set([]);
@@ -141,8 +172,13 @@ beforeEach(() => {
   sessionFocus.set(null);
   hubStatus.set({ ...STANDALONE });
   hubConnection.set({ state: 'standalone' });
-  // Suppress the OnboardingCard so tests don't need stubs for its IPC calls
-  // (check_local_prereqs, tunnel_status, mcp_status).
+  switcherRequest.set(null);
+  addProjectRequest.set(null);
+  // Multi-user M1: forget who this client is, the way a fresh launch has not
+  // asked yet. Standalone (the default above) owns every row regardless, so
+  // every existing test in this file is unaffected by the access gate.
+  resetAccessForTests();
+  // Keep Get started (FirstRun) out of the way of these tests.
   onboardingDismissed.set(true);
   (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
   // Wipe persisted prefs so one test's recency choice doesn't leak into
@@ -505,7 +541,7 @@ describe('Sidebar (sessions-grouped view)', () => {
       const row = (await screen.findAllByTestId('sess-row'))[0];
       const e = keydown(row, 'Enter');
       await tick();
-      // The row IS a role="button": Space/Enter on it must scroll nothing.
+      // The row is a treeitem: Space/Enter on it must scroll nothing.
       expect(e.defaultPrevented).toBe(true);
       expect(get(selectedSession)?.id).toBe(sess.id);
     });
@@ -797,95 +833,59 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(cfRows.some((r) => r.textContent?.includes('otherperson/'))).toBe(true);
   });
 
-  it('footer "+ New session" button opens project picker', async () => {
+  it('"+ New…" in the list header opens the switcher in New session mode', async () => {
     mockBackend(fakeProjects, []);
     render(Sidebar);
     await tick(); await tick();
-    const newBtn = screen.getByTestId('new-session-footer');
-    await fireEvent.click(newBtn);
-    // Picker now lists all known projects, even those without sessions.
-    await tick();
-    expect(screen.getByRole('listbox')).toBeInTheDocument();
+    await fireEvent.click(screen.getByTestId('new-session-head'));
+    expect(get(switcherRequest)).toEqual({ mode: 'new', host: undefined });
+    expect(screen.queryByRole('listbox', { name: 'Pick project for new session' })).toBeNull();
   });
 
-  it('project picker shows ALL projects regardless of recency/search filter', async () => {
-    // Filter to "1d" so only the freshest project (claude-fleet, 60s ago)
-    // would be in the main tree. The picker must still list everything.
-    mockBackend(fakeProjects, [sessionFor(1, 'dev-a')]);
-    render(Sidebar);
-    await tick(); await tick();
-    // Apply a restrictive filter.
-    await openFilters();
-    await fireEvent.click(screen.getByTestId('recency-1d'));
-    await fireEvent.input(screen.getByTestId('sidebar-search'), { target: { value: 'phone' } });
-    await tick();
-    // Open the picker.
-    await fireEvent.click(screen.getByTestId('new-session-footer'));
-    await tick();
-    const listbox = screen.getByRole('listbox');
-    // All three fixture projects should be in the picker, including
-    // pos-frontend (14 days old, would be filtered by "1d") and
-    // phone-manager (no last_session_at at all).
-    expect(listbox.textContent).toContain('claude-fleet');
-    expect(listbox.textContent).toContain('pos-frontend');
-    expect(listbox.textContent).toContain('phone-manager');
-  });
-
-  it('the project picker hides the UX agent\'s system project, but the tree still shows its session', async () => {
-    // The design: "flagged `system` and hidden from the project picker".
-    // Starting an ordinary session in `~/.claude-fleet/operator` — not a
-    // repository, and the agent's own working directory — is never what
-    // "+ New session" means. The tree is a different question: the operator
-    // session is meant to be visible, attachable and restartable there.
-    const operatorProject = {
-      project: {
-        id: 9,
-        owner: 'fleet',
-        repo: 'operator',
-        base_path: '/home/u/.claude-fleet/operator',
-        last_session_at: Math.floor(Date.now() / 1000),
-        adopted: false,
-        system: true,
-      },
+  it('an Add project request opens the dialog prefilled, and the added project is kept', async () => {
+    const added = {
+      project: { id: 42, owner: 'newowner', repo: 'fresh-repo', base_path: '/r/fresh', last_session_at: null, adopted: false, system: false },
       worktrees: [],
     };
-    mockBackend([...fakeProjects, operatorProject], [sessionFor(9, 'fleet-operator')]);
+    mockBackend(fakeProjects, []);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (cmd: string, args?: unknown) => Promise<unknown>;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, args?: unknown) =>
+      cmd === 'add_project' ? added : cmd === 'set_project_pick' ? (args as { args: unknown }).args : base(cmd, args),
+    );
     render(Sidebar);
     await tick(); await tick();
-    expect(screen.getByText('fleet-operator')).toBeInTheDocument();
-
-    await fireEvent.click(screen.getByTestId('new-session-footer'));
-    await tick();
-    const listbox = screen.getByRole('listbox');
-    expect(listbox.textContent).toContain('claude-fleet');
-    expect(listbox.textContent).not.toContain('operator');
+    addProjectRequest.set({ cloneUrl: 'newowner/fresh-repo' });
+    await tick(); await tick();
+    expect((screen.getByTestId('clone-url') as HTMLInputElement).value).toBe('newowner/fresh-repo');
+    await fireEvent.click(screen.getByTestId('add-create'));
+    await vi.waitFor(() => expect(screen.queryByTestId('add-project-dialog')).toBeNull());
+    expect(mockedInvoke).toHaveBeenCalledWith('set_project_pick', {
+      args: { owner: 'newowner', repo: 'fresh-repo', pinned: false, vis: 'keep', grp: null },
+    });
+    expect(get(newSessionRequest)?.project.project.repo).toBe('fresh-repo');
   });
 
-  it('the project picker offers Add project, which opens the dialog', async () => {
-    mockBackend(fakeProjects, [sessionFor(1)]);
+  it('a failed keep write after Add project stays quiet (no toast)', async () => {
+    const added = {
+      project: { id: 42, owner: 'newowner', repo: 'fresh-repo', base_path: '/r/fresh', last_session_at: null, adopted: false, system: false },
+      worktrees: [],
+    };
+    mockBackend(fakeProjects, []);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (cmd: string, args?: unknown) => Promise<unknown>;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'set_project_pick') throw { code: 'E_HUB_PROTOCOL', message: 'the hub refused the set_project_pick call' };
+      return cmd === 'add_project' ? added : base(cmd, args);
+    });
+    clearToasts();
     render(Sidebar);
     await tick(); await tick();
-    await fireEvent.click(screen.getByTestId('new-session-footer'));
-    await tick();
-    const addRow = screen.getByTestId('add-project-row');
-    // Pinned first, above the projects.
-    expect(screen.getByRole('listbox').firstElementChild).toBe(addRow);
-    await fireEvent.click(addRow);
-    await tick();
-    expect(screen.getByTestId('add-project-dialog')).toBeInTheDocument();
-    // The popover closes behind the dialog.
-    expect(screen.queryByTestId('add-project-row')).toBeNull();
-  });
-
-  it('Add project is reachable with no projects at all', async () => {
-    mockBackend([], []);
-    render(Sidebar);
+    addProjectRequest.set({ cloneUrl: 'newowner/fresh-repo' });
     await tick(); await tick();
-    await fireEvent.click(screen.getByTestId('new-session-footer'));
+    await fireEvent.click(screen.getByTestId('add-create'));
+    await vi.waitFor(() => expect(screen.queryByTestId('add-project-dialog')).toBeNull());
+    await vi.waitFor(() => expect(mockedInvoke).toHaveBeenCalledWith('set_project_pick', expect.anything()));
     await tick();
-    await fireEvent.click(screen.getByTestId('add-project-row'));
-    await tick();
-    expect(screen.getByTestId('add-project-dialog')).toBeInTheDocument();
+    expect(get(toasts)).toEqual([]);
   });
 
   it('after a successful add, NewSessionDialog opens on the returned project', async () => {
@@ -900,14 +900,17 @@ describe('Sidebar (sessions-grouped view)', () => {
     );
     render(Sidebar);
     await tick(); await tick();
-    await fireEvent.click(screen.getByTestId('new-session-footer'));
-    await tick();
-    await fireEvent.click(screen.getByTestId('add-project-row'));
-    await tick();
+    addProjectRequest.set({});
+    await tick(); await tick();
+    // Add project opens on From GitHub (redesign 6.11); this adds by URL.
+    await fireEvent.click(screen.getByTestId('add-mode-clone'));
     await fireEvent.input(screen.getByTestId('clone-url'), { target: { value: 'newowner/fresh-repo' } });
     await fireEvent.click(screen.getByTestId('add-create'));
     await vi.waitFor(() => expect(screen.queryByTestId('add-project-dialog')).toBeNull());
-    expect(screen.getByRole('heading', { name: /New session/ }).textContent).toContain('newowner/fresh-repo');
+    // App's one New session mount opens on it (redesign 1.9): the Sidebar
+    // publishes the request and mounts no dialog of its own.
+    expect(get(newSessionRequest)?.project.project.id).toBe(42);
+    expect(screen.queryByRole('dialog', { name: 'New session' })).toBeNull();
     expect(get(projects).some((p) => p.project.id === 42)).toBe(true);
   });
 
@@ -928,10 +931,8 @@ describe('Sidebar (sessions-grouped view)', () => {
     ]);
     render(Sidebar);
     await tick(); await tick();
-    await fireEvent.click(screen.getByTestId('new-session-footer'));
-    await tick();
-    await fireEvent.click(screen.getByTestId('add-project-row'));
-    await tick();
+    addProjectRequest.set({});
+    await tick(); await tick();
     const chipFor = (alias: string) =>
       Array.from(document.querySelectorAll<HTMLButtonElement>('.host-pick')).find((b) => (b as HTMLElement).dataset.alias === alias)!;
     await fireEvent.click(chipFor('mefistos'));
@@ -940,22 +941,18 @@ describe('Sidebar (sessions-grouped view)', () => {
     await vi.waitFor(() => expect((screen.getByTestId('add-create') as HTMLButtonElement).disabled).toBe(false));
     await fireEvent.click(screen.getByTestId('add-create'));
     await vi.waitFor(() => expect(screen.queryByTestId('add-project-dialog')).toBeNull());
-    expect(screen.getByRole('heading', { name: /New session/ }).textContent).toContain('me/thing');
-    expect(document.querySelector(".host-pick[aria-pressed='true']")?.getAttribute('data-alias')).toBe('local');
+    expect(get(newSessionRequest)?.project.project.id).toBe(43);
+    expect(get(newSessionRequest)?.initialHost).toBe('local');
   });
 
-  it('a native <dialog> close on NewSessionDialog still closes it (Modal reopen only when the parent declines)', async () => {
-    mockBackend(fakeProjects, []);
+  it("a project row's + asks App's one New session dialog for that project (redesign 1.9)", async () => {
+    mockBackend(fakeProjects, [sessionFor(1)]);
     render(Sidebar);
     await tick(); await tick();
-    await fireEvent.click(screen.getByTestId('new-session-footer'));
+    await fireEvent.click(screen.getAllByTitle('New session in this project')[0]);
     await tick();
-    await fireEvent.click(screen.getByText('claude-fleet'));
-    await tick();
-    const dlg = screen.getByRole('dialog', { name: 'New session' }) as HTMLDialogElement;
-    dlg.removeAttribute('open');
-    dlg.dispatchEvent(new Event('close'));
-    await tick(); await tick();
+    expect(get(newSessionRequest)?.project.project.id).toBe(fakeProjects[0].project.id);
+    expect(get(newSessionRequest)?.initialHost).toBeUndefined();
     expect(screen.queryByRole('dialog', { name: 'New session' })).toBeNull();
   });
 
@@ -1009,15 +1006,21 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(screen.queryByTestId('sidebar-collapse')).toBeNull();
   });
 
-  it('header (search + filter) and footer (theme + new) stay rendered even with no projects', async () => {
+  it('header (search, filter, + New) and footer (keys, count) stay rendered even with no projects', async () => {
     mockBackend([], []);
     render(Sidebar);
     await tick(); await tick();
     expect(screen.getByTestId('sidebar-chrome-top')).toBeInTheDocument();
     expect(screen.getByTestId('sidebar-chrome-bottom')).toBeInTheDocument();
     expect(screen.getByTestId('sidebar-search')).toBeInTheDocument();
-    expect(screen.getByTestId('theme-toggle')).toBeInTheDocument();
-    expect(screen.getByTestId('new-session-footer')).toBeInTheDocument();
+    expect(screen.getByTestId('new-session-head')).toBeInTheDocument();
+    // UX audit L4: the footer names the list's keys and how many rows it holds.
+    expect(screen.getByTestId('sidebar-keys').textContent).toMatch(/move.*open.*select/);
+    expect(screen.getByTestId('sidebar-count').textContent).toBe('0 sessions');
+    // Redesign 1.4: the "theme: auto" line is gone from the footer; the
+    // picker lives in Settings › Appearance (AppearanceSettings.test.ts).
+    expect(screen.queryByTestId('theme-toggle')).toBeNull();
+    expect(screen.getByTestId('sidebar-chrome-bottom').textContent).not.toMatch(/theme:/);
   });
 
   it('renders a host pill for each non-hidden host plus "all"', async () => {
@@ -1177,7 +1180,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(title).not.toContain('(max)');
   });
 
-  it('renders 🔗N badge for sessions with related siblings', async () => {
+  it('renders the link-icon N badge for sessions with related siblings', async () => {
     const a = sessionFor(1, 'dev-a');
     a.worktree_key = 'main';
     const b = sessionFor(1, 'dev-b');
@@ -1191,7 +1194,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(badges[0].textContent).toContain('1');
   });
 
-  it('omits 🔗 badge for solo sessions', async () => {
+  it('omits the related badge for solo sessions', async () => {
     const solo = sessionFor(1, 'dev-solo');
     solo.worktree_key = 'main';
     mockBackend(fakeProjects, [solo]);
@@ -1201,7 +1204,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(screen.queryAllByTestId('related-badge')).toHaveLength(0);
   });
 
-  it('omits 🔗 badge for same-project sessions with different worktree_key', async () => {
+  it('omits the related badge for same-project sessions with different worktree_key', async () => {
     const a = sessionFor(1, 'dev-a');
     a.worktree_key = 'main';
     const b = sessionFor(1, 'dev-b');
@@ -1213,14 +1216,14 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(screen.queryAllByTestId('related-badge')).toHaveLength(0);
   });
 
-  it('shows a 🔍 badge for review sessions', async () => {
+  it('shows a search-icon badge for review sessions', async () => {
     const rev = sessionFor(1, 'dev-foo--review-1');
     rev.kind = 'review';
     rev.reviews_session_id = 999;
     mockBackend(fakeProjects, [sessionFor(1, 'dev-foo'), rev]);
     render(Sidebar);
     await tick(); await tick();
-    expect(screen.getByText('🔍')).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'review session' }).querySelector('[data-icon="search"]')).not.toBeNull();
   });
 
   describe('background-session filter', () => {
@@ -1232,7 +1235,7 @@ describe('Sidebar (sessions-grouped view)', () => {
       render(Sidebar);
       await tick(); await tick();
       expect(screen.queryByText('bg:abc')).not.toBeNull();
-      expect(screen.queryByText('🤖')).not.toBeNull();
+      expect(screen.queryByRole('img', { name: 'background agent' })).not.toBeNull();
 
       showBgAgents.set(false);
       await tick(); await tick();
@@ -1309,7 +1312,7 @@ describe('Sidebar triage (W2 Track D)', () => {
     await tick(); await tick();
     const chips = screen.getAllByTestId('stuck-chip');
     expect(chips).toHaveLength(1);
-    expect(chips[0]).toHaveTextContent('stuck: press Enter');
+    expect(chips[0]).toHaveTextContent('Failed · press Enter');
     // The stuck row shows no claude chip; the healthy one does.
     const rows = screen.getAllByTestId('sess-row');
     const stuckRow = rows.find((r) => r.getAttribute('data-stuck') === 'press_enter')!;
@@ -1338,7 +1341,10 @@ describe('Sidebar triage (W2 Track D)', () => {
     await tick(); await tick();
     const cards = screen.getAllByTestId('answer-card');
     expect(cards).toHaveLength(1);
-    expect(screen.getAllByTestId('answer-option').map((o) => o.getAttribute('data-n'))).toEqual(['1', '2']);
+    const opts = screen.getAllByTestId('answer-option');
+    expect(opts).toHaveLength(2);
+    expect(opts[0].textContent).toMatch(/1.*Yes/);
+    expect(opts[1].textContent).toMatch(/2.*No/);
     // Sidebar density: the choices only — Escape and Open terminal live on
     // the full card in the Conversation panel.
     expect(screen.queryByTestId('answer-esc')).toBeNull();
@@ -1416,7 +1422,7 @@ describe('Sidebar triage (W2 Track D)', () => {
     mockBackend(fakeProjects, [stuck, fine]);
     render(Sidebar);
     await tick(); await tick();
-    const pill = screen.getByTestId('needs-you-filter');
+    const pill = await needsYouPill();
     expect(pill).toHaveTextContent('Needs you 1');
     expect(screen.getAllByTestId('sess-row')).toHaveLength(2);
     await fireEvent.click(pill);
@@ -1438,7 +1444,7 @@ describe('Sidebar triage (W2 Track D)', () => {
     render(Sidebar);
     await tick(); await tick();
     // Needs you would hide the healthy row; the focus shows it anyway.
-    await fireEvent.click(screen.getByTestId('needs-you-filter'));
+    await fireEvent.click(await needsYouPill());
     hostFilter.set('elsewhere');
     focusSession(fine.id, 'dev-fine');
     await tick(); await tick();
@@ -1467,7 +1473,7 @@ describe('Sidebar triage (W2 Track D)', () => {
     mockBackend(fakeProjects, [fine]);
     render(Sidebar);
     await tick(); await tick();
-    const pill = screen.getByTestId('needs-you-filter');
+    const pill = await needsYouPill();
     expect(pill).toBeTruthy();
     expect(pill.textContent?.trim()).toBe('Needs you');
     expect(pill.textContent).not.toContain('⚠');
@@ -1484,7 +1490,7 @@ describe('Sidebar triage (W2 Track D)', () => {
     mockBackend(fakeProjects, [stuck, externalStuck]);
     render(Sidebar);
     await tick(); await tick();
-    const pill = screen.getByTestId('needs-you-filter');
+    const pill = await needsYouPill();
     expect(pill).toHaveTextContent('Needs you 1');
   });
 
@@ -1497,8 +1503,10 @@ describe('Sidebar triage (W2 Track D)', () => {
     mockBackend(fakeProjects, [stuck, sk, ghost, failed, fine]);
     render(Sidebar);
     await tick(); await tick();
-    const pill = screen.getByTestId('needs-you-filter');
-    expect(pill).toHaveTextContent('Needs you 4');
+    const pill = await needsYouPill();
+    // Redesign 0.4: the safe-kill and ghost rows (Paused) stay in the queue
+    // but leave the count; stuck and failed still raise it.
+    expect(pill).toHaveTextContent('Needs you 2');
     await fireEvent.click(pill);
     await tick();
     const names = screen.getAllByTestId('sess-row').map((r) => r.textContent ?? '');
@@ -1542,13 +1550,65 @@ describe('Sidebar triage (W2 Track D)', () => {
     expect(screen.queryByTestId('bulk-bar')).toBeNull();
   });
 
+  it('bulk Archive archives the rows with work, says what it left, and Undo un-archives (step 1.7)', async () => {
+    const work = { link_id: 70, item_id: 5, key: 'TASK-5', title: 'Login', source: 'local' } as SessionRow['work'];
+    const a = { ...sessionFor(1, 'dev-a'), work };
+    const b = sessionFor(1, 'dev-b');
+    mockBackend(fakeProjects, [a, b]);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (cmd: string, raw?: unknown) => Promise<unknown>;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, raw?: unknown) => {
+      if (cmd === 'tidy_apply') return { results: [{ session_id: a.id, action: 'archive', ok: true, outcome: 'archived' }] };
+      if (cmd === 'unarchive_session_work') return a;
+      if (cmd === 'tidy_candidates') return { candidates: [] };
+      return base(cmd, raw);
+    });
+    render(Sidebar);
+    await tick(); await tick();
+    const rows = screen.getAllByTestId('sess-row');
+    await fireEvent.click(rows[0], { shiftKey: true });
+    await fireEvent.click(rows[1], { metaKey: true });
+    await tick();
+    await fireEvent.click(screen.getByTestId('bulk-archive'));
+    await waitFor(() => expect(get(toasts).length).toBeGreaterThan(0));
+    const apply = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'tidy_apply');
+    expect((apply[0][1] as { args: { items: unknown[] } }).args.items).toEqual([{ session_id: a.id, action: 'archive', link_id: 70 }]);
+    const t = get(toasts).at(-1)!;
+    expect(t.message).toBe('Archived 1 session · 1 left as they were (no work linked)');
+    expect(t.action?.label).toBe('Undo');
+    t.action!.run();
+    await waitFor(() =>
+      expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'unarchive_session_work')).toHaveLength(1),
+    );
+    expect(screen.queryByTestId('bulk-bar')).toBeNull();
+  });
+
+  it('bulk Clean up opens the Kill dialog in Clean up mode and never kills', async () => {
+    const a = sessionFor(1, 'dev-a');
+    const b = sessionFor(1, 'dev-b');
+    mockBackend(fakeProjects, [a, b]);
+    render(Sidebar);
+    await tick(); await tick();
+    const rows = screen.getAllByTestId('sess-row');
+    await fireEvent.click(rows[0], { shiftKey: true });
+    await fireEvent.click(rows[1], { metaKey: true });
+    await tick();
+    await fireEvent.click(screen.getByTestId('bulk-cleanup'));
+    expect(await screen.findByRole('dialog', { name: 'Clean up 2 sessions?' })).toBeTruthy();
+    await waitFor(() => expect((screen.getByTestId('kill-cleanup') as HTMLButtonElement).disabled).toBe(false));
+    await fireEvent.click(screen.getByTestId('kill-cleanup'));
+    await waitFor(() =>
+      expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'safe_kill_session')).toHaveLength(2),
+    );
+    expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'kill_session')).toHaveLength(0);
+  });
+
   it('select mode shows checkboxes and bulk send opens the prompt dialog', async () => {
     const a = sessionFor(1, 'dev-a');
     mockBackend(fakeProjects, [a]);
     render(Sidebar);
     await tick(); await tick();
     expect(screen.queryAllByTestId('select-box')).toHaveLength(0);
-    await fireEvent.click(screen.getByTestId('select-mode'));
+    await fireEvent.click(await selectModeSwitch());
     await tick();
     const box = screen.getByTestId('select-box');
     await fireEvent.click(box);
@@ -1621,7 +1681,7 @@ describe('Sidebar triage (W2 Track D)', () => {
     const row = screen.getByTestId('sess-row');
     const line1 = row.querySelector('.sess-line1')!;
     expect(line1.querySelector('.sess-name')).toHaveTextContent('dev-martin-janci-claude-fleet--fix-login');
-    expect(line1.querySelector('[data-testid="claude-chip"]')).toHaveTextContent('working');
+    expect(line1.querySelector('[data-testid="claude-chip"]')).toHaveTextContent('Working');
     const details = screen.getByTestId('sess-details');
     expect(details.querySelector('[data-testid="host-badge"]')).toHaveTextContent('local');
     // The tmux name already ends in "--fix-login" — showing the worktree
@@ -1768,7 +1828,7 @@ describe('Outside fleet group', () => {
     await tick(); await tick();
 
     const chip = screen.getByTestId('inactive-chip');
-    expect(chip).toHaveTextContent('inactive');
+    expect(chip).toHaveTextContent('Idle · process ended');
     expect(screen.queryByTestId('claude-chip')).toBeNull();
 
     const removeBtn = screen.getByTestId('remove-from-list');
@@ -1834,7 +1894,7 @@ describe('Outside fleet group', () => {
     await tick();
     expect(screen.queryByTestId('bulk-bar')).toBeNull();
 
-    await fireEvent.click(screen.getByTestId('select-mode'));
+    await fireEvent.click(await selectModeSwitch());
     await tick();
     expect(extRow.querySelector('[data-testid="select-box"]')).toBeNull();
     await fireEvent.click(extRow);
@@ -1910,7 +1970,8 @@ describe('Sidebar: a hub contract skew', () => {
     render(Sidebar);
     await tick(); await tick();
     const empty = await screen.findByTestId('sidebar-empty');
-    expect(empty.textContent).toContain('No projects yet');
+    // No hosts: the ordinary first-run state (review r13), not a skew sentence.
+    expect(empty.textContent).toContain('Start with one host');
   });
 
   it('standalone mode is untouched', async () => {
@@ -1918,7 +1979,8 @@ describe('Sidebar: a hub contract skew', () => {
     render(Sidebar);
     await tick(); await tick();
     const empty = await screen.findByTestId('sidebar-empty');
-    expect(empty.textContent).toContain('No projects yet');
+    // No hosts: the ordinary first-run state (review r13), not a skew sentence.
+    expect(empty.textContent).toContain('Start with one host');
   });
 
   it('Add project is enabled on a connected hub client', async () => {
@@ -1927,11 +1989,10 @@ describe('Sidebar: a hub contract skew', () => {
     mockBackend(fakeProjects, [sessionFor(1)]);
     render(Sidebar);
     await tick(); await tick();
-    await fireEvent.click(screen.getByTestId('new-session-footer'));
-    await tick();
-    const addRow = screen.getByTestId('add-project-row') as HTMLButtonElement;
-    expect(addRow.disabled).toBe(false);
-    expect(addRow.title).toBe('');
+    addProjectRequest.set({ cloneUrl: 'acme/widgets' });
+    await tick(); await tick();
+    expect((screen.getByTestId('add-create') as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByTestId('add-blocked')).toBeNull();
   });
 
   it('Add project is disabled with the offline sentence while the hub is unreachable', async () => {
@@ -1940,15 +2001,17 @@ describe('Sidebar: a hub contract skew', () => {
     mockBackend(fakeProjects, [sessionFor(1)]);
     render(Sidebar);
     await tick(); await tick();
-    await fireEvent.click(screen.getByTestId('new-session-footer'));
-    await tick();
-    const addRow = screen.getByTestId('add-project-row') as HTMLButtonElement;
-    expect(addRow.disabled).toBe(true);
-    expect(addRow.title).toContain('unreachable');
-    expect(addRow.title).toContain('fleet.example.com');
+    addProjectRequest.set({});
+    await tick(); await tick();
+    // A valid repository would enable Add anywhere else; the blocked hub holds it.
+    await fireEvent.click(screen.getByTestId('add-mode-clone'));
+    await fireEvent.input(screen.getByTestId('clone-url'), { target: { value: 'acme/widgets' } });
+    expect((screen.getByTestId('add-create') as HTMLButtonElement).disabled).toBe(true);
+    const why = screen.getByTestId('add-blocked');
+    expect(why.textContent).toContain('unreachable');
+    expect(why.textContent).toContain('fleet.example.com');
   });
 });
-
 
 describe('Sidebar — group by work (roadmap M1)', () => {
   // A worktree whose branch names a ticket, on project 1.
@@ -1990,9 +2053,7 @@ describe('Sidebar — group by work (roadmap M1)', () => {
     render(Sidebar);
     await tick(); await tick();
 
-    await openViewOptions();
-    await fireEvent.click(screen.getByTestId('group-by-toggle'));
-    await tick();
+    await groupBy('work');
 
     const workRows = await screen.findAllByTestId('work-row');
     expect(workRows).toHaveLength(1);
@@ -2075,6 +2136,113 @@ describe('Sidebar — group by work (roadmap M1)', () => {
     expect(mockedInvoke).toHaveBeenCalledWith('name_session_work', {
       args: { session_id: p1.id, title: 'POS cleanup' },
     });
+  });
+
+  // Multi-user M1: `name_session_work` is `drive` in `share.ts::SESSION_TIER`,
+  // and `SessionRowItem`'s per-session "Rename…" has composed both halves since
+  // F2 while this group header asked only the hub's — the same control, two
+  // surfaces, two answers. Narrowed the way select mode's `bulkKillTargets`
+  // narrows, so a mixed group still names the sessions that ARE this client's.
+  it('work mode: the group header only names work for sessions this client may drive', async () => {
+    const REMOTE: HubStatus = {
+      ...STANDALONE,
+      remote: true,
+      url: 'https://fleet.example.com',
+      configured_url: 'https://fleet.example.com',
+    };
+    const mineA = { ...sessionFor(2, 'dev-mine-a'), owner_person_id: 7 };
+    const mineB = { ...sessionFor(2, 'dev-mine-b'), owner_person_id: 7 };
+    const theirs = { ...sessionFor(2, 'dev-theirs'), owner_person_id: 9 };
+    mockBackend(workProjects, [mineA, mineB, theirs]);
+    hubStatus.set(REMOTE);
+    hubConnection.set({ state: 'connected' });
+    // Watch on the other person's row: a read, so no work link may be written.
+    setMyGrants(7, [{ session_id: theirs.id, level: 'watch' }]);
+    sidebarGroupBy.set('work');
+    render(Sidebar);
+    await tick(); await tick();
+    const button = (await screen.findAllByTestId('name-work-group'))[0] as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+    // Two of the three, not all three: the watched row is not a target.
+    expect(button.getAttribute('title')).toContain('2 sessions with no work');
+    await fireEvent.click(button);
+    await tick();
+    const dialog = screen.getByTestId('name-work-dialog');
+    expect(within(dialog).getAllByTestId('name-work-session')).toHaveLength(2);
+    expect(dialog.textContent).toContain('dev-mine-a');
+    expect(dialog.textContent).toContain('dev-mine-b');
+    expect(dialog.textContent).not.toContain('dev-theirs');
+  });
+
+  it('work mode: with nothing in the group to drive, the header says why', async () => {
+    const REMOTE: HubStatus = {
+      ...STANDALONE,
+      remote: true,
+      url: 'https://fleet.example.com',
+      configured_url: 'https://fleet.example.com',
+    };
+    const theirs = { ...sessionFor(2, 'dev-theirs'), owner_person_id: 9 };
+    mockBackend(workProjects, [theirs]);
+    hubStatus.set(REMOTE);
+    hubConnection.set({ state: 'connected' });
+    setMyGrants(7, [{ session_id: theirs.id, level: 'watch' }]);
+    sidebarGroupBy.set('work');
+    render(Sidebar);
+    await tick(); await tick();
+    // A shared row sits in Shared with me (5.8); focused, it is back in its
+    // group, under the header this test is about.
+    focusSession(theirs.id, 'dev-theirs');
+    await tick(); await tick();
+    const button = (await screen.findAllByTestId('name-work-group'))[0] as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute('title')).toMatch(/watch is read-only/i);
+    await fireEvent.click(button);
+    await tick();
+    expect(screen.queryByTestId('name-work-dialog')).toBeNull();
+  });
+
+  // Multi-user M1, F2b: the Done section's `archived · show` chip was gated by
+  // NEITHER half — `unarchive_session_work` is `drive` and ROUTES, so both
+  // apply. Asked per row, because one group's Done can hold rows of more than
+  // one owner.
+  it('work mode: the archived chip is per row, and a watched row offers none', async () => {
+    const REMOTE: HubStatus = {
+      ...STANDALONE,
+      remote: true,
+      url: 'https://fleet.example.com',
+      configured_url: 'https://fleet.example.com',
+    };
+    const work = (archived: number | null) => ({
+      link_id: 5, item_id: 9, key: 'PAY-7', title: 'Retry', source: 'manual',
+      status_category: 'done', status_name: 'Done', archived_at: archived,
+    });
+    const mine = { ...sessionFor(1, 'dev-mine'), owner_person_id: 7, work: work(1_700_000_000) };
+    const theirs = { ...sessionFor(1, 'dev-theirs'), owner_person_id: 9, work: work(1_700_000_000) };
+    mockBackend(workProjects, [mine, theirs]);
+    hubStatus.set(REMOTE);
+    hubConnection.set({ state: 'connected' });
+    setMyGrants(7, [{ session_id: theirs.id, level: 'watch' }]);
+    sidebarGroupBy.set('work');
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(await screen.findByTestId('work-done'));
+    await tick();
+    // The watched row is not in this Done: it sits in Shared with me (5.8),
+    // which offers no un-archive at all.
+    const rows = screen.getAllByTestId('archived-session');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent('dev-mine');
+    expect(within(screen.getByTestId('shared-with-me')).getByText(/dev-theirs/)).toBeTruthy();
+    expect(within(screen.getByTestId('shared-with-me')).queryByTestId('archived-chip')).toBeNull();
+    // The owner's own row keeps its chip, and it sends.
+    const ownChip = within(rows[0]).getByTestId('archived-chip') as HTMLButtonElement;
+    expect(ownChip.disabled).toBe(false);
+    await fireEvent.click(ownChip);
+    await waitFor(() =>
+      expect(mockedInvoke).toHaveBeenCalledWith('unarchive_session_work', {
+        args: { session_id: mine.id },
+      }),
+    );
   });
 
   it('rolls up PRs and the worst CI state on the group header', async () => {
@@ -2255,6 +2423,11 @@ describe('Sidebar — group by work (roadmap M1)', () => {
     await tick();
     const archived = screen.getByTestId('archived-session');
     expect(archived).toHaveTextContent('dev-parked');
+    // Redesign step 7.2: the chip is a control of the archived row itself,
+    // and the whole group (header, Done, rows) passes as a tree.
+    const parkedRow = within(archived).getByRole('treeitem');
+    expect(within(parkedRow).getByRole('button', { name: 'archived · show' })).toBeTruthy();
+    await expectAccessible(group);
     await fireEvent.click(within(archived).getByTestId('archived-chip'));
     await waitFor(() =>
       expect(mockedInvoke).toHaveBeenCalledWith('unarchive_session_work', {
@@ -2424,7 +2597,7 @@ describe('Sidebar work filters (work graph M10.4)', () => {
     expect(names()[0]).toContain('dev-b');
     expect(mockedInvoke).toHaveBeenCalledWith('work_tickets', { args: { view: 'mine', limit: 200 } });
     // Needs-you on top: nothing of mine needs me.
-    await fireEvent.click(screen.getByTestId('needs-you-filter'));
+    await fireEvent.click(await needsYouPill());
     await tick();
     expect(names()).toHaveLength(0);
   });
@@ -2692,7 +2865,7 @@ describe('Sidebar filters: one set of rules for every section', () => {
     mockBackend(fakeProjects, [a, b]);
     render(Sidebar);
     await tick(); await tick();
-    await fireEvent.click(screen.getByTestId('select-mode'));
+    await fireEvent.click(await selectModeSwitch());
     await tick();
     for (const box of screen.getAllByTestId('select-box')) await fireEvent.click(box);
     await tick();
@@ -2722,9 +2895,998 @@ describe('Sidebar filters: one set of rules for every section', () => {
     sidebarGroupBy.set('work');
     render(Sidebar);
     await screen.findByTestId('past-work-group');
-    await fireEvent.click(screen.getByTestId('needs-you-filter'));
+    await fireEvent.click(await needsYouPill());
     await tick();
     expect(screen.queryByTestId('past-work-group')).toBeNull();
     expect(names()).toHaveLength(1);
+  });
+});
+
+// ── Multi-user M1 (F2): the bulk paths, and the unclaimed count ─────────────
+describe('bulk actions and a shared session', () => {
+  /** A paired desktop that knows who it is: person 9, who owns nothing here. */
+  function paired(grants: { session_id: number; level: string }[]) {
+    hubStatus.set({ ...STANDALONE, remote: true, url: 'https://fleet.example.com' });
+    hubConnection.set({ state: 'connected' });
+    setMyGrants(9, grants);
+  }
+  /** A row owned by somebody else, so the grant map is what decides. */
+  const owned = (projectId: number, name: string) => ({
+    ...sessionFor(projectId, name),
+    visibility: 'private' as const,
+    owner_person_id: 1,
+  });
+
+  it('bulk kill skips a shared row and says how many it left alone', async () => {
+    // Kill is in the spec §4.3 `own` tier: a `drive` grant does not reach it,
+    // which is the case this test uses deliberately — a watch-only row would
+    // also be skipped by the bulk PROMPT, and then the test would not show
+    // that the two actions ask different questions of the same selection.
+    const mine = owned(1, 'dev-mine');
+    const theirs = owned(1, 'dev-theirs');
+    mockBackend(fakeProjects, [mine, theirs]);
+    paired([{ session_id: mine.id, level: 'drive' }, { session_id: theirs.id, level: 'drive' }]);
+    sessions.set([mine, theirs]);
+    render(Sidebar);
+    await tick(); await tick();
+
+    const rows = screen.getAllByTestId('sess-row');
+    await fireEvent.click(rows[0], { shiftKey: true });
+    await fireEvent.click(rows[1], { metaKey: true });
+    await tick();
+    expect(screen.getByTestId('bulk-bar')).toHaveTextContent('2 selected');
+    await fireEvent.click(screen.getByTestId('bulk-kill'));
+    await tick();
+    // Nothing to kill, and the dialog says so rather than offering a confirm
+    // whose click would do nothing.
+    expect(screen.getByTestId('bulk-kill-none').textContent).toMatch(/never killed/i);
+    await fireEvent.click(screen.getByTestId('confirm-bulk-kill'));
+    await tick(); await tick();
+    const kills = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter(
+      (c) => c[0] === 'kill_session',
+    );
+    expect(kills).toHaveLength(0);
+  });
+
+  it('bulk prompt fans out to the drive rows and leaves a watch-only one out', async () => {
+    const driveable = owned(1, 'dev-drive');
+    const watchOnly = owned(1, 'dev-watch');
+    mockBackend(fakeProjects, [driveable, watchOnly]);
+    paired([
+      { session_id: driveable.id, level: 'drive' },
+      { session_id: watchOnly.id, level: 'watch' },
+    ]);
+    sessions.set([driveable, watchOnly]);
+    render(Sidebar);
+    await tick(); await tick();
+
+    await fireEvent.click(await selectModeSwitch());
+    await tick();
+    for (const box of screen.getAllByTestId('select-box')) await fireEvent.click(box);
+    await tick();
+    expect(screen.getByTestId('bulk-bar')).toHaveTextContent('2 selected');
+    await fireEvent.click(screen.getByTestId('bulk-send'));
+    await tick();
+    // One rule, two answers: the selection is the same, the targets are not.
+    expect(screen.getByTestId('bulk-target-' + driveable.id)).toBeInTheDocument();
+    expect(screen.queryByTestId('bulk-target-' + watchOnly.id)).toBeNull();
+  });
+
+  it('the bulk paths are untouched when every row is this client’s own', async () => {
+    // The single-user shape, pinned so the gate cannot quietly start excluding
+    // rows a standalone desktop owns.
+    const a = sessionFor(1, 'dev-a');
+    const b = sessionFor(1, 'dev-b');
+    mockBackend(fakeProjects, [a, b]);
+    render(Sidebar);
+    await tick(); await tick();
+    const rows = screen.getAllByTestId('sess-row');
+    await fireEvent.click(rows[0], { shiftKey: true });
+    await fireEvent.click(rows[1], { metaKey: true });
+    await tick();
+    await fireEvent.click(screen.getByTestId('bulk-kill'));
+    await tick();
+    expect(screen.queryByTestId('bulk-kill-none')).toBeNull();
+    expect(screen.queryByTestId('bulk-kill-skipped')).toBeNull();
+    await fireEvent.click(screen.getByTestId('confirm-bulk-kill'));
+    await tick(); await tick();
+    const kills = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter(
+      (c) => c[0] === 'kill_session',
+    );
+    expect(kills).toHaveLength(2);
+  });
+});
+
+describe('the per-host unclaimed count', () => {
+  // A count with no rows and no expand: an unclaimed session is one fleet did
+  // not start, and the only thing anyone out of its scope may learn about it is
+  // the number (multi-user M1, rule 6).
+  const h = (alias: string, unclaimed: number | null | undefined) => ({
+    alias,
+    ssh_alias: null,
+    reachable: true,
+    claude_version: null,
+    tmux_version: null,
+    hidden: false,
+    last_pinged_at: 1,
+    account_uuid: null,
+    provisioned: true,
+    transport: 'ssh' as const,
+    ...(unclaimed === undefined ? {} : { unclaimed_sessions: unclaimed }),
+  });
+
+  it('renders the count, per host, with nothing to click', async () => {
+    mockBackend(fakeProjects, []);
+    hosts.set([h('mefistos', 2), h('turanga', 1)]);
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.getByTestId('unclaimed-count').textContent).toContain('Unclaimed (3)');
+    const perHost = screen.getByTestId('unclaimed-hosts').textContent ?? '';
+    expect(perHost).toContain('mefistos');
+    expect(perHost).toContain('turanga');
+    // No rows, and nothing that could open any: the section is a label.
+    const section = screen.getByTestId('unclaimed-section');
+    expect(section.querySelectorAll('[data-testid="sess-row"]')).toHaveLength(0);
+    expect(section.querySelectorAll('button')).toHaveLength(0);
+  });
+
+  it('renders NOTHING when the hub sends null — not a zero, not a dash', async () => {
+    // The normal case on a hub with more than one person (R5-d): a zero would
+    // itself be a claim about the host, so the backend serves null and this
+    // surface must say nothing at all.
+    mockBackend(fakeProjects, []);
+    hosts.set([h('mefistos', null), h('turanga', undefined)]);
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.queryByTestId('unclaimed-section')).toBeNull();
+    expect(screen.queryByTestId('unclaimed-count')).toBeNull();
+  });
+
+  it('a real zero is not rendered either, and the host filter applies', async () => {
+    mockBackend(fakeProjects, []);
+    hosts.set([h('mefistos', 0)]);
+    const first = render(Sidebar);
+    await tick(); await tick();
+    expect(screen.queryByTestId('unclaimed-section')).toBeNull();
+    first.unmount();
+
+    hosts.set([h('mefistos', 2), h('turanga', 5)]);
+    hostFilter.set('mefistos');
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.getByTestId('unclaimed-count').textContent).toContain('Unclaimed (2)');
+  });
+});
+
+describe('Sidebar: a mass loss folds into one row (redesign 1.1)', () => {
+  function lostOn(host: string, n: number, blocked = true): SessionRow[] {
+    return Array.from({ length: n }, (_, i) => ({
+      ...sessionFor(1, `${host}-lost-${i}`),
+      host_alias: host,
+      lost_at: 50,
+      claude_session_id: `c-${host}-${i}`,
+      claude_status: blocked ? ('blocked' as const) : null,
+    }));
+  }
+
+  it('shows "12 stopped on trn" instead of twelve rows, and keeps them out of the badge', async () => {
+    const waiting = { ...sessionFor(2, 'dev-waiting'), claude_status: 'blocked' as const };
+    mockBackend(fakeProjects, [...lostOn('trn', 12), waiting]);
+    render(Sidebar);
+    await tick(); await tick();
+    const fold = screen.getByTestId('lost-fold');
+    expect(within(fold).getByTestId('lost-fold-toggle')).toHaveTextContent('12 stopped on trn');
+    expect(within(fold).getByTestId('lost-fold-restore')).toHaveTextContent('Restore');
+    // Only the live waiting session is in the tree and in the count.
+    expect(screen.getAllByTestId('sess-row')).toHaveLength(1);
+    expect(await needsYouPill()).toHaveTextContent('Needs you 1');
+  });
+
+  it('the fold expands to its rows, so every stopped session is still one click away', async () => {
+    mockBackend(fakeProjects, lostOn('trn', 3));
+    render(Sidebar);
+    await tick(); await tick();
+    const toggle = screen.getByTestId('lost-fold-toggle');
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryAllByTestId('sess-row')).toHaveLength(0);
+    await fireEvent.click(toggle);
+    await tick();
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    const rows = within(screen.getByTestId('lost-fold')).getAllByTestId('sess-row');
+    expect(rows.map((r) => r.textContent)).toEqual(
+      expect.arrayContaining([expect.stringContaining('trn-lost-0'), expect.stringContaining('trn-lost-2')]),
+    );
+  });
+
+  it('two lost rows are not a mass loss and stay where they are', async () => {
+    mockBackend(fakeProjects, lostOn('trn', 2));
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.queryByTestId('lost-fold')).toBeNull();
+    expect(screen.getAllByTestId('sess-row')).toHaveLength(2);
+  });
+
+  it('Restore plans with restore_host_sessions, confirms, then restores the fold', async () => {
+    const lost = lostOn('trn', 3);
+    mockBackend(fakeProjects, lost);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (c: string, x?: unknown) => Promise<unknown>;
+    const calls: { dry_run: boolean; session_ids: number[] | null }[] = [];
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (c: string, x?: unknown) => {
+      if (c === 'restore_host_sessions') {
+        const a = (x as { args: { host_alias: string; dry_run: boolean; session_ids: number[] | null } }).args;
+        calls.push({ dry_run: a.dry_run, session_ids: a.session_ids });
+        const plan = lost.map((s) => ({
+          session_id: s.id,
+          tmux_name: s.tmux_name,
+          cwd: null,
+          claude_session_id: s.claude_session_id,
+          friendly_name: null,
+          action: 'restore',
+          reason: null,
+        }));
+        return {
+          host_alias: a.host_alias,
+          dry_run: a.dry_run,
+          plan,
+          results: a.dry_run ? [] : lost.map((s) => ({ session_id: s.id, tmux_name: s.tmux_name, ok: true, error: null })),
+        };
+      }
+      return base(c, x);
+    });
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('lost-fold-restore'));
+    const confirm = await screen.findByTestId('lost-fold-confirm');
+    expect(screen.getByTestId('confirm-dialog')).toHaveTextContent('trn-lost-1');
+    expect(calls).toEqual([{ dry_run: true, session_ids: lost.map((s) => s.id) }]);
+    await fireEvent.click(confirm);
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(calls[1]).toEqual({ dry_run: false, session_ids: lost.map((s) => s.id) });
+    await waitFor(() => expect(get(toasts).some((t) => t.message === 'Restored 3 of 3 sessions on trn.')).toBe(true));
+  });
+});
+
+describe('Group by state, host or agent (redesign step 3.6)', () => {
+  beforeEach(() => sidebarGroupBy.set('project'));
+
+  function fleet() {
+    const now = Math.floor(Date.now() / 1000);
+    return [
+      { ...sessionFor(1, 'dev-a'), claude_status: 'working' as const, last_activity_at: now },
+      { ...sessionFor(2, 'dev-b'), host_alias: 'nas', claude_status: 'blocked' as const, last_activity_at: now },
+      { ...sessionFor(null, 'dev-orphan'), host_alias: 'nas', agent: 'codex' as const, last_activity_at: now },
+    ];
+  }
+
+  it('the Group select offers State, Host, Agent and Organisation after Project and Work', async () => {
+    mockBackend(fakeProjects, fleet());
+    render(Sidebar);
+    await tick(); await tick();
+    const select = screen.getByTestId('group-select') as HTMLSelectElement;
+    expect(Array.from(select.options).map((o) => o.textContent?.trim())).toEqual([
+      'Project', 'Work', 'State', 'Host', 'Agent', 'Organisation',
+    ]);
+    await groupBy('host');
+    expect(get(sidebarGroupBy)).toBe('host');
+    const isStr = (v: unknown): v is string => typeof v === 'string';
+    expect(readPref('sidebar.group', 'unset', isStr)).toBe('host');
+    sidebarGroupBy.set('project');
+  });
+
+  it('state groups hold the same rows as the project tree, orphans included', async () => {
+    mockBackend(fakeProjects, fleet());
+    render(Sidebar);
+    await tick(); await tick();
+    const projectMode = screen.getAllByTestId('sess-row').map((r) => r.dataset.sessionId).sort();
+    expect(projectMode).toHaveLength(3);
+
+    sidebarGroupBy.set('state');
+    await tick();
+    expect(screen.queryAllByTestId('proj-row')).toHaveLength(0);
+    expect(screen.queryByTestId('orphan-sessions')).toBeNull();
+    const headers = screen.getAllByTestId('flat-group');
+    expect(headers.map((h) => h.dataset.group)).toEqual(['state:action_required', 'state:working', 'state:idle']);
+    expect(headers[0]).toHaveTextContent('Needs you');
+    expect(headers[0]).toHaveTextContent('1');
+    expect(screen.getAllByTestId('sess-row').map((r) => r.dataset.sessionId).sort()).toEqual(projectMode);
+    sidebarGroupBy.set('project');
+  });
+
+  it('host and agent groups, and a header collapses its rows', async () => {
+    mockBackend(fakeProjects, fleet());
+    render(Sidebar);
+    await tick(); await tick();
+    sidebarGroupBy.set('host');
+    await tick();
+    let headers = screen.getAllByTestId('flat-group');
+    expect(headers.map((h) => h.textContent?.replace(/\s+/g, ' ').trim())).toEqual(['▾ local 1', '▾ nas 2']);
+
+    await fireEvent.click(headers[1]);
+    await tick();
+    expect(screen.getAllByTestId('sess-row')).toHaveLength(1);
+    expect(headers[1].getAttribute('aria-expanded')).toBe('false');
+
+    sidebarGroupBy.set('agent');
+    await tick();
+    headers = screen.getAllByTestId('flat-group');
+    expect(headers.map((h) => h.dataset.group)).toEqual(['agent:claude', 'agent:codex']);
+    expect(screen.getAllByTestId('sess-row')).toHaveLength(3);
+    sidebarGroupBy.set('project');
+  });
+});
+
+describe('List keys (redesign step 3.8)', () => {
+  beforeEach(() => sidebarGroupBy.set('project'));
+
+  function three() {
+    return [
+      { ...sessionFor(1, 'dev-one'), claude_status: 'working' as const },
+      { ...sessionFor(1, 'dev-two'), claude_status: 'working' as const },
+      { ...sessionFor(1, 'dev-three'), claude_status: 'blocked' as const },
+    ];
+  }
+
+  it('j and k move between rows, x picks one for a bulk action, Enter opens', async () => {
+    const rows = three();
+    mockBackend(fakeProjects, rows);
+    selectSession(null);
+    render(Sidebar);
+    await tick(); await tick();
+    const els = screen.getAllByTestId('sess-row');
+    els[0].focus();
+    await fireEvent.keyDown(els[0], { key: 'j' });
+    expect(document.activeElement).toBe(els[1]);
+    await fireEvent.keyDown(els[1], { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(els[2]);
+    await fireEvent.keyDown(els[2], { key: 'k' });
+    expect(document.activeElement).toBe(els[1]);
+
+    await fireEvent.keyDown(els[1], { key: 'x' });
+    await tick();
+    expect(screen.getAllByTestId('select-box').filter((b) => (b as HTMLInputElement).checked)).toHaveLength(1);
+
+    await fireEvent.keyDown(document.activeElement!, { key: 'x' });
+    await tick();
+    await fireEvent.click(await selectModeSwitch());
+    await tick();
+    const row = screen.getAllByTestId('sess-row')[0];
+    await fireEvent.keyDown(row, { key: 'Enter' });
+    expect(get(selectedSession)?.id).toBe(rows[0].id);
+  });
+
+  it('the next-needs-you chord opens the next row that needs you, and wraps', async () => {
+    const rows = three();
+    mockBackend(fakeProjects, rows);
+    selectSession(null);
+    render(Sidebar);
+    await tick(); await tick();
+    const isMac = /Mac/.test(navigator.platform) || /Macintosh/.test(navigator.userAgent);
+    const chord = isMac ? { key: 'n', metaKey: true, altKey: true } : { key: 'n', ctrlKey: true, altKey: true };
+    await fireEvent.keyDown(document.body, chord);
+    expect(get(selectedSession)?.id).toBe(rows[2].id);
+    await fireEvent.keyDown(document.body, chord);
+    expect(get(selectedSession)?.id).toBe(rows[2].id);
+  });
+
+  it('⌘2 opens the second row on a Mac', async () => {
+    const plat = Object.getOwnPropertyDescriptor(Navigator.prototype, 'platform');
+    Object.defineProperty(navigator, 'platform', { value: 'MacIntel', configurable: true });
+    try {
+      const rows = three();
+      mockBackend(fakeProjects, rows);
+      selectSession(null);
+      render(Sidebar);
+      await tick(); await tick();
+      await fireEvent.keyDown(document.body, { key: '2', metaKey: true });
+      expect(get(selectedSession)?.id).toBe(rows[1].id);
+      // A digit typed into a field is the field's.
+      const input = document.createElement('input');
+      document.body.appendChild(input);
+      await fireEvent.keyDown(input, { key: '3', metaKey: true });
+      expect(get(selectedSession)?.id).toBe(rows[1].id);
+      input.remove();
+    } finally {
+      delete (navigator as unknown as Record<string, unknown>).platform;
+      if (plat) Object.defineProperty(Navigator.prototype, 'platform', plat);
+    }
+  });
+});
+
+describe('Inbox (redesign step 3.3)', () => {
+  afterEach(() => sidebarView.set('sessions'));
+
+  function fleet() {
+    const now = Math.floor(Date.now() / 1000);
+    return [
+      { ...sessionFor(1, 'dev-busy'), claude_status: 'working' as const, last_activity_at: now },
+      { ...sessionFor(2, 'dev-asking'), claude_status: 'blocked' as const, last_activity_at: now },
+      { ...sessionFor(null, 'dev-crashed'), claude_status: 'failed' as const, last_activity_at: now },
+    ];
+  }
+
+  it('lists only what needs you, counts the rest and links to All sessions', async () => {
+    mockBackend(fakeProjects, fleet());
+    sidebarView.set('inbox');
+    render(Sidebar);
+    await tick(); await tick();
+    const shown = screen.getAllByTestId('sess-row').map((r) => r.textContent ?? '');
+    expect(shown).toHaveLength(2);
+    expect(shown.some((t) => t.includes('dev-busy'))).toBe(false);
+    expect(screen.getByTestId('inbox-head').textContent).toContain('2 need you');
+    expect(screen.getByTestId('inbox-rest').textContent).toContain('1 running');
+    // Links to review and sessions to tidy stay on the Inbox's attention line.
+    expect(screen.getByTestId('attention-line')).toBeTruthy();
+    await fireEvent.click(screen.getByTestId('inbox-all-sessions'));
+    await tick();
+    expect(get(sidebarView)).toBe('sessions');
+    expect(screen.getAllByTestId('sess-row')).toHaveLength(3);
+  });
+
+  // G3.1: the Main board's Inbox, from the one attention model.
+  it('groups by state: Needs you with its missions and "+1 proposed", then Failed', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const jev = { ...sessionFor(2, 'dev-maybe'), claude_status: 'idle' as const, turn_outcome: 'asked' as const, last_stop_at: now - 30, last_activity_at: now };
+    mockBackend(fakeProjects, [...fleet(), jev]);
+    inboxGroupBy.set('state');
+    sidebarView.set('inbox');
+    render(Sidebar);
+    await tick(); await tick();
+    waitingMissions.set(
+      waitingOf([
+        { id: 7, name: 'Hub federation v2', goal: 'g', mode: 'finite', state: 'active', level: 2, plan_version: 1, created_at: 1, updated_at: 1, version: 1, waiting_on: { reason: 'sign_grant', since: now - 60, open_cards: 0 } },
+      ]),
+    );
+    await tick();
+    const secs = screen.getAllByTestId('inbox-section');
+    expect(secs.map((x) => x.dataset.key)).toEqual(['needs_you', 'failed']);
+    const [needs, failed] = secs;
+    expect(within(needs).getByTestId('inbox-section-head').textContent).toMatch(/Needs you\s*2\s*\+1 proposed/);
+    expect(within(needs).getAllByTestId('sess-row').map((r) => r.textContent ?? '').some((t) => t.includes('dev-asking'))).toBe(true);
+    expect(within(needs).getByTestId('mission-wait').textContent).toContain('sign the autonomy grant');
+    // Jev's row sits at the foot of Needs you with its pill, out of the count.
+    const proposed = within(needs).getByTestId('inbox-proposed');
+    expect(within(proposed).getByTestId('sess-row').textContent).toContain('dev-maybe');
+    expect(within(proposed).getByTestId('inbox-proposed-by').textContent).toContain('Proposed by Jev');
+    expect(within(failed).getByTestId('inbox-section-head').textContent).toMatch(/Failed\s*1/);
+    expect(within(failed).getByTestId('sess-row').textContent).toContain('dev-crashed');
+    expect(screen.getByTestId('inbox-head').textContent).toContain('3 need you');
+    // "Not waiting" sets the reading aside: the row and "+1 proposed" go.
+    await fireEvent.click(within(proposed).getByTestId('inbox-proposed-by-change'));
+    await tick();
+    expect(screen.queryByTestId('inbox-proposed')).toBeNull();
+    expect(screen.queryByTestId('inbox-proposed-count')).toBeNull();
+    waitingMissions.set([]);
+    notWaitingSaid.set(new Set());
+  });
+
+  it('"Group: None" lists one queue under no section header', async () => {
+    mockBackend(fakeProjects, fleet());
+    sidebarView.set('inbox');
+    inboxGroupBy.set('state');
+    render(Sidebar);
+    await tick(); await tick();
+    const select = screen.getByTestId('inbox-group-select') as HTMLSelectElement;
+    expect(select.value).toBe('state');
+    await fireEvent.change(select, { target: { value: 'none' } });
+    await tick();
+    expect(get(inboxGroupBy)).toBe('none');
+    expect(screen.getAllByTestId('inbox-section')).toHaveLength(1);
+    expect(screen.queryByTestId('inbox-section-head')).toBeNull();
+    expect(screen.getAllByTestId('sess-row')).toHaveLength(2);
+    // The Sessions list keeps its own grouping.
+    expect(get(sidebarGroupBy)).not.toBe('none');
+    inboxGroupBy.set('state');
+  });
+
+  it('says what finished today and folds a mass loss into one Restore line', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const lost = Array.from({ length: 4 }, (_, i) => ({
+      ...sessionFor(1, `trn-lost-${i}`),
+      host_alias: 'trn',
+      lost_at: now - 100,
+      claude_session_id: `c-trn-${i}`,
+      claude_status: 'idle' as const,
+    }));
+    const finished = { ...sessionFor(2, 'dev-finished'), claude_status: 'completed' as const, last_stop_at: now - 5, last_activity_at: now - 5 };
+    mockBackend(fakeProjects, [...fleet(), finished, ...lost]);
+    sidebarView.set('inbox');
+    render(Sidebar);
+    await tick(); await tick();
+    const rest = screen.getByTestId('inbox-rest').textContent ?? '';
+    expect(rest).toContain('1 running');
+    expect(rest).toContain('1 completed today');
+    // The stopped rows are the Restore line, not "4 paused".
+    expect(rest).not.toContain('paused');
+    const fold = within(screen.getByTestId('inbox')).getByTestId('lost-fold');
+    expect(within(fold).getByTestId('lost-fold-toggle')).toHaveTextContent('4 stopped on trn');
+    expect(within(fold).getByTestId('lost-fold-restore')).toHaveTextContent('Restore');
+  });
+
+  it('has no Today tab: Today lives in Control since step 9.1', async () => {
+    mockBackend(fakeProjects, fleet());
+    sidebarView.set('inbox');
+    render(Sidebar);
+    await tick();
+    expect(screen.getByTestId('inbox-title').textContent).toContain('Inbox');
+    expect(screen.queryByTestId('inbox-tab-today')).toBeNull();
+  });
+});
+
+describe('Sidebar accessibility (7.2)', () => {
+  it('passes the axe and audit checks; a project row says whether it is open', async () => {
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-a'), sessionFor(1, 'dev-b'), sessionFor(2, 'dev-c')]);
+    const { container } = render(Sidebar);
+    await tick(); await tick();
+    const projRows = await screen.findAllByTestId('proj-row');
+    for (const r of projRows) expect(r.getAttribute('aria-expanded')).toBe('true');
+    await expectAccessible(container);
+  });
+
+  it('lists projects and sessions as a tree whose rows keep their own buttons', async () => {
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-a'), sessionFor(2, 'dev-c')]);
+    render(Sidebar);
+    await tick(); await tick();
+    const tree = await screen.findByRole('tree', { name: 'Projects' });
+    const project = within(tree).getAllByTestId('proj-row')[0];
+    expect(project.getAttribute('role')).toBe('treeitem');
+    // A project's sessions are its group; a session row is a treeitem whose
+    // actions a screen reader reaches as buttons, not as hidden children.
+    const group = within(tree).getAllByRole('group')[0];
+    const row = within(group).getAllByRole('treeitem')[0];
+    expect(row.dataset.testid).toBe('sess-row');
+    expect(within(row).getAllByRole('button').length).toBeGreaterThan(0);
+  });
+});
+
+describe('Shared with me (redesign step 5.8)', () => {
+  const REMOTE: HubStatus = {
+    ...STANDALONE,
+    remote: true,
+    url: 'https://fleet.example.com',
+    configured_url: 'https://fleet.example.com',
+  };
+
+  function fleet() {
+    const mine = { ...sessionFor(1, 'dev-mine'), owner_person_id: 7 };
+    const watched = { ...sessionFor(2, 'dev-watched'), owner_person_id: 9 };
+    const driven = { ...sessionFor(null, 'dev-driven'), owner_person_id: 9 };
+    return { mine, watched, driven };
+  }
+
+  it('the New layout lifts shared sessions into their own group', async () => {
+    const { mine, watched, driven } = fleet();
+    mockBackend(fakeProjects, [mine, watched, driven]);
+    hubStatus.set(REMOTE);
+    hubConnection.set({ state: 'connected' });
+    setMyGrants(7, [
+      { session_id: watched.id, level: 'watch' },
+      { session_id: driven.id, level: 'drive' },
+    ]);
+    render(Sidebar);
+    await tick(); await tick();
+    const group = await screen.findByTestId('shared-with-me');
+    expect(within(group).getByTestId('shared-with-me-toggle').textContent).toContain('Shared with me (2)');
+    const inGroup = within(group).getAllByTestId('sess-row').map((r) => r.textContent ?? '');
+    expect(inGroup.some((t) => t.includes('dev-watched'))).toBe(true);
+    expect(inGroup.some((t) => t.includes('dev-driven'))).toBe(true);
+    // Each row shows once: the tree and Other sessions no longer hold them.
+    const all = screen.getAllByTestId('sess-row').map((r) => r.textContent ?? '');
+    expect(all.filter((t) => t.includes('dev-watched'))).toHaveLength(1);
+    expect(all.filter((t) => t.includes('dev-driven'))).toHaveLength(1);
+    expect(all.some((t) => t.includes('dev-mine'))).toBe(true);
+    expect(within(group).queryByText(/dev-mine/)).toBeNull();
+    await fireEvent.click(within(group).getByTestId('shared-with-me-toggle'));
+    expect(within(group).queryAllByTestId('sess-row')).toHaveLength(0);
+  });
+});
+
+describe('Sidebar rows and the lost fold in the New layout (parity P8, H7, H8)', () => {
+  beforeEach(() => {
+    sidebarGroupBy.set('project');
+    showFriendlyNames.set(true);
+  });
+  afterEach(() => {
+    showFriendlyNames.set(true);
+  });
+
+  function lostOn(host: string, n: number): SessionRow[] {
+    return Array.from({ length: n }, (_, i) => ({
+      ...sessionFor(1, `${host}-lost-${i}`),
+      host_alias: host,
+      lost_at: 50,
+      claude_session_id: `c-${host}-${i}`,
+      claude_status: 'blocked' as const,
+    }));
+  }
+
+  it('New layout: a mass loss folds into "12 stopped on trn" with Restore, and only the live row is in the tree', async () => {
+    const waiting = { ...sessionFor(2, 'dev-waiting'), claude_status: 'blocked' as const };
+    mockBackend(fakeProjects, [...lostOn('trn', 12), waiting]);
+    render(Sidebar);
+    await tick(); await tick();
+    const fold = screen.getByTestId('lost-fold');
+    expect(within(fold).getByTestId('lost-fold-toggle')).toHaveTextContent('12 stopped on trn');
+    expect(within(fold).getByTestId('lost-fold-restore')).toHaveTextContent('Restore');
+    expect(screen.getAllByTestId('sess-row')).toHaveLength(1);
+  });
+
+  it('New layout: the fold expands to its rows', async () => {
+    mockBackend(fakeProjects, lostOn('trn', 3));
+    render(Sidebar);
+    await tick(); await tick();
+    const toggle = screen.getByTestId('lost-fold-toggle');
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryAllByTestId('sess-row')).toHaveLength(0);
+    await fireEvent.click(toggle);
+    await tick();
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    const rows = within(screen.getByTestId('lost-fold')).getAllByTestId('sess-row');
+    expect(rows.map((r) => r.textContent)).toEqual(
+      expect.arrayContaining([expect.stringContaining('trn-lost-0'), expect.stringContaining('trn-lost-2')]),
+    );
+  });
+
+  it('New layout: two lost rows are not a mass loss and stay where they are', async () => {
+    mockBackend(fakeProjects, lostOn('trn', 2));
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.queryByTestId('lost-fold')).toBeNull();
+    expect(screen.getAllByTestId('sess-row')).toHaveLength(2);
+  });
+
+  it('New layout: Restore on the fold plans, confirms, then restores', async () => {
+    const lost = lostOn('trn', 3);
+    mockBackend(fakeProjects, lost);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (c: string, x?: unknown) => Promise<unknown>;
+    const calls: { dry_run: boolean; session_ids: number[] | null }[] = [];
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (c: string, x?: unknown) => {
+      if (c === 'restore_host_sessions') {
+        const a = (x as { args: { host_alias: string; dry_run: boolean; session_ids: number[] | null } }).args;
+        calls.push({ dry_run: a.dry_run, session_ids: a.session_ids });
+        return {
+          host_alias: a.host_alias,
+          dry_run: a.dry_run,
+          plan: lost.map((s) => ({
+            session_id: s.id,
+            tmux_name: s.tmux_name,
+            cwd: null,
+            claude_session_id: s.claude_session_id,
+            friendly_name: null,
+            action: 'restore',
+            reason: null,
+          })),
+          results: a.dry_run ? [] : lost.map((s) => ({ session_id: s.id, tmux_name: s.tmux_name, ok: true, error: null })),
+        };
+      }
+      return base(c, x);
+    });
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('lost-fold-restore'));
+    const confirm = await screen.findByTestId('lost-fold-confirm');
+    expect(screen.getByTestId('confirm-dialog')).toHaveTextContent('trn-lost-1');
+    expect(calls).toEqual([{ dry_run: true, session_ids: lost.map((s) => s.id) }]);
+    await fireEvent.click(confirm);
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(calls[1]).toEqual({ dry_run: false, session_ids: lost.map((s) => s.id) });
+    await waitFor(() => expect(get(toasts).some((t) => t.message === 'Restored 3 of 3 sessions on trn.')).toBe(true));
+  });
+
+  it('New layout: a ghost row stays one line with an unbracketed host badge', async () => {
+    const ghost = { ...sessionFor(2, 'dev-ghost'), status: 'ghost', lost_at: 5 };
+    mockBackend(fakeProjects, [ghost]);
+    render(Sidebar);
+    await tick(); await tick();
+    const row = screen.getByTestId('sess-row');
+    expect(row.querySelector('.sess-lines')).toBeNull();
+    expect(row.querySelector('.sess-details')).toBeNull();
+    expect(screen.getByTestId('host-badge').textContent).toBe('local');
+  });
+
+  it('New layout: the row shows the friendly name with the tmux name secondary', async () => {
+    const named = { ...sessionFor(1, 'dev-martin-janci-claude-fleet--fix-login'), friendly_name: 'Fix login' };
+    mockBackend(fakeProjects, [named]);
+    render(Sidebar);
+    await tick(); await tick();
+    const row = screen.getByTestId('sess-row');
+    expect(row.querySelector('.sess-line1 .sess-name')).toHaveTextContent('Fix login');
+    const tmux = screen.getByTestId('sess-tmux-name');
+    expect(tmux).toHaveTextContent('dev-martin-janci-claude-fleet--fix-login');
+    expect(tmux.closest('[data-testid="sess-details"]')).not.toBeNull();
+  });
+
+  it('New layout: the Friendly names switch in ⋯ swaps the row to the tmux name and persists', async () => {
+    const named = { ...sessionFor(1, 'dev-martin-janci-claude-fleet--fix-login'), friendly_name: 'Fix login' };
+    mockBackend(fakeProjects, [named]);
+    render(Sidebar);
+    await tick(); await tick();
+    await openViewOptions();
+    const sw = within(screen.getByTestId('view-options')).getByTestId('friendly-name-toggle');
+    expect(sw).toHaveAttribute('aria-checked', 'true');
+    await fireEvent.click(sw);
+    await tick();
+    expect(sw).toHaveAttribute('aria-checked', 'false');
+    const row = screen.getByTestId('sess-row');
+    expect(row.querySelector('.sess-line1 .sess-name')).toHaveTextContent('dev-martin-janci-claude-fleet--fix-login');
+    expect(row).not.toHaveTextContent('Fix login');
+    expect(JSON.parse(localStorage.getItem('cf:pref:show-friendly-names')!)).toBe(false);
+    await fireEvent.click(sw);
+    await tick();
+    expect(sw).toHaveAttribute('aria-checked', 'true');
+    expect(row.querySelector('.sess-line1 .sess-name')).toHaveTextContent('Fix login');
+    expect(JSON.parse(localStorage.getItem('cf:pref:show-friendly-names')!)).toBe(true);
+  });
+
+  it('New layout: the Row details switch in ⋯ hides the second row line and persists', async () => {
+    mockBackend(fakeProjects, [{ ...sessionFor(1, 'dev-a'), started_at: Math.floor(Date.now() / 1000) - 60 }]);
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.getByTestId('sess-details')).toBeInTheDocument();
+    await openViewOptions();
+    const pill = within(screen.getByTestId('view-options')).getByTestId('toggle-row-details');
+    expect(pill).toHaveAttribute('aria-checked', 'true');
+    await fireEvent.click(pill);
+    await tick();
+    expect(screen.queryByTestId('sess-details')).toBeNull();
+    expect(pill).toHaveAttribute('aria-checked', 'false');
+    expect(JSON.parse(localStorage.getItem('cf:pref:rows.details')!)).toBe(false);
+    await fireEvent.click(pill);
+    await tick();
+    expect(screen.getByTestId('sess-details')).toBeInTheDocument();
+    expect(pill).toHaveAttribute('aria-checked', 'true');
+    expect(JSON.parse(localStorage.getItem('cf:pref:rows.details')!)).toBe(true);
+  });
+});
+
+
+// Review round 13: an empty list is only empty when the list could load. A
+// hub that cannot be used, or a failed startup load, is said as a failure;
+// a quiet Inbox says what is going on and where to go.
+describe('Sidebar empty states (review r13)', () => {
+  afterEach(() => {
+    bootstrapError.set(null);
+    hubStatus.set(STANDALONE);
+    sidebarView.set('sessions');
+  });
+
+  it('a hub that cannot be used is not "No projects yet"', async () => {
+    hubStatus.set({ ...STANDALONE, unavailable: 'cannot read the client token (locked)' });
+    mockBackend([], []);
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.queryByTestId('sidebar-empty')).toBeNull();
+    expect(screen.getByTestId('sessions-unavailable').textContent).toContain('Not connected to the hub');
+  });
+
+  it('a failed startup load says so with Retry, which refreshes', async () => {
+    bootstrapError.set({ code: 'E_HUB_UNREACHABLE', message: 'connection refused' });
+    mockBackend(fakeProjects, []);
+    render(Sidebar);
+    await tick(); await tick();
+    const err = screen.getByTestId('sessions-load-error');
+    expect(err.textContent).toContain("Couldn't load sessions");
+    expect(screen.getByTestId('sessions-load-error-text').textContent).toBe("Couldn't reach the hub.");
+    await fireEvent.click(screen.getByTestId('sessions-load-error-retry'));
+    await waitFor(() => expect(screen.queryByTestId('sessions-load-error')).toBeNull());
+    expect(get(bootstrapError)).toBeNull();
+  });
+
+  it('the Inbox does not say "Nothing needs you" when sessions could not load', async () => {
+    bootstrapError.set({ code: 'E_HUB_TIMEOUT', message: 'deadline' });
+    mockBackend(fakeProjects, []);
+    sidebarView.set('inbox');
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.getByTestId('inbox-head').textContent).not.toContain('Nothing needs you');
+    expect(screen.getByTestId('inbox-load-error')).toBeTruthy();
+  });
+
+  it('a calm Inbox offers See running and Today', async () => {
+    mockBackend(fakeProjects, [sessionFor(1)]);
+    sidebarView.set('inbox');
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.getByTestId('inbox-calm').dataset.kind).toBe('calm');
+    await fireEvent.click(screen.getByTestId('inbox-calm-running'));
+    expect(get(sidebarView)).toBe('sessions');
+  });
+
+  it('a calm Inbox names the next routine (G7.15)', async () => {
+    const next = Math.floor(Date.now() / 1000) + 3600;
+    mockBackend(fakeProjects, [sessionFor(1)]);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (c: string, x?: unknown) => Promise<unknown>;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, x?: { args?: { action?: string } }) =>
+      cmd === 'routines' && x?.args?.action === 'list'
+        ? [{ id: 1, name: 'Morning PR sweep', enabled: true, trigger: 'cron', skip_next: false, next_run_at: next }]
+        : base(cmd, x),
+    );
+    sidebarView.set('inbox');
+    render(Sidebar);
+    await waitFor(() => expect(screen.getByTestId('inbox-calm').textContent).toContain('The next routine is Morning PR sweep'));
+  });
+
+  it('a search with no results starts a session named after it (G7.15)', async () => {
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-a')]);
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.input(screen.getByTestId('sidebar-search'), { target: { value: 'receipt totals' } });
+    await waitFor(() => expect(screen.getByTestId('sidebar-empty-new').textContent).toBe('Start new session “receipt totals”…'));
+    await fireEvent.click(screen.getByTestId('sidebar-empty-new'));
+    expect(get(switcherRequest)).toMatchObject({ mode: 'new', name: 'receipt totals' });
+  });
+
+  it('a first run offers this machine when its host is hidden (G7.15)', async () => {
+    mockBackend([], []);
+    hosts.set([
+      { alias: 'local', ssh_alias: null, reachable: true, claude_version: null, tmux_version: null, hidden: true, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
+    ]);
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.getByTestId('sidebar-empty').textContent).toMatch(/This (Mac|computer) counts\./);
+    expect(screen.getByTestId('sidebar-empty-add-host').textContent).toContain('Add a remote host');
+    await fireEvent.click(screen.getByTestId('sidebar-empty-use-local'));
+    await waitFor(() => expect(mockedInvoke).toHaveBeenCalledWith('hide_host', { args: { alias: 'local', hidden: false } }));
+    // The host is back on the list, so the first run has done its job.
+    await waitFor(() => expect(screen.queryByTestId('sidebar-empty-use-local')).toBeNull());
+  });
+
+  it('a first run starts with one host', async () => {
+    mockBackend([], []);
+    render(Sidebar);
+    await tick(); await tick();
+    const empty = screen.getByTestId('sidebar-empty');
+    expect(empty.dataset.kind).toBe('first');
+    expect(screen.getByTestId('sidebar-empty-add-host')).toBeTruthy();
+    expect(screen.getByTestId('sidebar-empty-pair')).toBeTruthy();
+    // No local host to offer: nothing says this machine counts.
+    expect(screen.queryByTestId('sidebar-empty-use-local')).toBeNull();
+  });
+});
+
+describe('the Sessions board: tabs, agent, organisation, the running cap', () => {
+  const REMOTE: HubStatus = {
+    ...STANDALONE,
+    remote: true,
+    url: 'https://fleet.example.com',
+    configured_url: 'https://fleet.example.com',
+  };
+  beforeEach(() => {
+    scopeTab.set('all');
+    agentFilter.set('any');
+    orgs.set([]);
+    sidebarGroupBy.set('project');
+  });
+  afterEach(() => {
+    scopeTab.set('all');
+    agentFilter.set('any');
+    orgs.set([]);
+    sidebarGroupBy.set('project');
+  });
+
+  function fleet() {
+    const mine = { ...sessionFor(1, 'dev-mine'), owner_person_id: 7 };
+    const watched = { ...sessionFor(2, 'dev-watched'), owner_person_id: 9 };
+    const steered = { ...sessionFor(null, 'dev-steered'), owner_person_id: 11 };
+    mockBackend(fakeProjects, [mine, watched, steered]);
+    hubStatus.set(REMOTE);
+    hubConnection.set({ state: 'connected' });
+    setMyGrants(7, [
+      { session_id: watched.id, level: 'watch' },
+      { session_id: steered.id, level: 'drive' },
+    ]);
+  }
+  const names = () => screen.queryAllByTestId('sess-row').map((r) => r.textContent ?? '');
+
+  it('All / Mine / Shared with me: counts on All and Shared, each tab narrows the list', async () => {
+    fleet();
+    render(Sidebar);
+    await tick(); await tick();
+    const tabs = await screen.findByTestId('scope-tabs');
+    expect(within(tabs).getByTestId('scope-tab-all').textContent).toBe('All3');
+    expect(within(tabs).getByTestId('scope-tab-mine').textContent).toBe('Mine');
+    expect(within(tabs).getByTestId('scope-tab-shared').textContent).toBe('Shared with me2');
+    expect(within(tabs).getByTestId('scope-tab-all').getAttribute('aria-selected')).toBe('true');
+    expect(names()).toHaveLength(3);
+
+    await fireEvent.click(within(tabs).getByTestId('scope-tab-mine'));
+    await tick();
+    expect(names().map((t) => t.includes('dev-mine'))).toEqual([true]);
+    expect(screen.queryByTestId('shared-with-me')).toBeNull();
+    expect(JSON.parse(localStorage.getItem('cf:pref:sessions.scope-tab')!)).toBe('mine');
+
+    await fireEvent.click(within(tabs).getByTestId('scope-tab-shared'));
+    await tick();
+    const shown = names();
+    expect(shown).toHaveLength(2);
+    expect(shown.some((t) => t.includes('dev-mine'))).toBe(false);
+    expect(screen.getByTestId('shared-with-me')).toBeTruthy();
+    // The arrows move between the tabs (wrapping), as every tablist does.
+    await fireEvent.keyDown(within(tabs).getByTestId('scope-tab-shared'), { key: 'ArrowRight' });
+    await tick();
+    expect(get(scopeTab)).toBe('all');
+  });
+
+  it('a standalone desktop owns every row, so it shows no tabs and the whole list', async () => {
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-a'), sessionFor(2, 'dev-b')]);
+    scopeTab.set('shared');
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.queryByTestId('scope-tabs')).toBeNull();
+    expect(names()).toHaveLength(2);
+  });
+
+  it('a shared row says who shared it and at what level (Watch board); an unknown sharer reads "Shared with you"', async () => {
+    fleet();
+    orgs.set([{ id: 1, name: 'Acme', members: [{ person_id: 9, name: 'petra', display_name: 'Petra', role: 'member' }] }] as never);
+    render(Sidebar);
+    await tick(); await tick();
+    const group = await screen.findByTestId('shared-with-me');
+    const lines = within(group).getAllByTestId('shared-by').map((e) => e.textContent);
+    expect(lines.sort()).toEqual(['Petra · Read', 'Shared with you · Steer']);
+    // Only shared rows carry the line.
+    expect(screen.getAllByTestId('shared-by')).toHaveLength(2);
+  });
+
+  it('a share at the answer level is shared too, not left in the tree', async () => {
+    const theirs = { ...sessionFor(1, 'dev-answer'), owner_person_id: 9 };
+    mockBackend(fakeProjects, [theirs]);
+    hubStatus.set(REMOTE);
+    hubConnection.set({ state: 'connected' });
+    setMyGrants(7, [{ session_id: theirs.id, level: 'answer' }]);
+    render(Sidebar);
+    await tick(); await tick();
+    const group = await screen.findByTestId('shared-with-me');
+    expect(within(group).getByTestId('shared-by').textContent).toBe('Shared with you · Answer');
+    expect(screen.queryAllByTestId('proj-row')).toHaveLength(0);
+  });
+
+  it('Agent: the facet narrows the list to one agent and shows as a chip that clears', async () => {
+    const codex = { ...sessionFor(1, 'dev-codex'), agent: 'codex' as const };
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-claude'), codex]);
+    render(Sidebar);
+    await tick(); await tick();
+    await openFilters();
+    await fireEvent.click(screen.getByTestId('filter-agent-codex'));
+    await tick();
+    expect(names().map((t) => t.includes('dev-codex'))).toEqual([true]);
+    expect(get(agentFilter)).toBe('codex');
+    const chip = screen.getAllByText('Agent: Codex');
+    expect(chip.length).toBeGreaterThan(0);
+    await fireEvent.click(screen.getByTestId('filter-agent-any'));
+    await tick();
+    expect(names()).toHaveLength(2);
+  });
+
+  it('Group by Organisation: one group per org, owner scopes next, Unassigned last', async () => {
+    const acme = { ...sessionFor(1, 'dev-acme'), org_id: 3 };
+    const owned = sessionFor(2, 'dev-owned');
+    const loose = sessionFor(null, 'dev-loose');
+    mockBackend(fakeProjects, [loose, owned, acme]);
+    orgs.set([{ id: 3, name: 'Acme', color: null }] as never);
+    render(Sidebar);
+    await tick(); await tick();
+    await groupBy('org');
+    const groups = screen.getAllByTestId('flat-group');
+    expect(groups.map((g) => g.querySelector('.label')?.textContent)).toEqual(['Acme', fakeProjects[1].project.owner, 'Unassigned']);
+    expect(screen.getByTestId('flat-groups').dataset.groupBy).toBe('org');
+  });
+
+  it('grouped by state, Working shows two rows and "4 more running ›" opens the rest', async () => {
+    const rows = Array.from({ length: 6 }, (_, i) => ({
+      ...sessionFor(1, `dev-run-${i}`),
+      claude_status: 'working' as const,
+      last_activity_at: Math.floor(Date.now() / 1000),
+    }));
+    mockBackend(fakeProjects, rows);
+    render(Sidebar);
+    await tick(); await tick();
+    await groupBy('state');
+    expect(names()).toHaveLength(2);
+    const more = screen.getByTestId('group-more');
+    expect(more.textContent).toBe('4 more running ›');
+    await fireEvent.click(more);
+    await tick();
+    expect(names()).toHaveLength(6);
+    expect(screen.queryByTestId('group-more')).toBeNull();
   });
 });

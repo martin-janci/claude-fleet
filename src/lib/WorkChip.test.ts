@@ -63,7 +63,25 @@ describe('WorkChip', () => {
     });
     const chip = screen.getByTestId('work-chip');
     expect(chip.className).toContain('unbound');
-    expect(chip.title).toContain('connect its tracker in Settings → Work to see ZED-9');
+    expect(chip.title).toContain('connect its tracker in Settings → Trackers to see ZED-9');
+  });
+
+  it('shows the ticket key fleet issued, and a key fleet issued needs no tracker', () => {
+    render(WorkChip, {
+      props: {
+        workKey: { key: 'asana:1209876543210987', display: 'CB-4', source: 'link', from: 'Refunds' },
+        now: () => T,
+      },
+    });
+    expect(screen.getByTestId('work-chip').textContent).toContain('CB-4');
+    render(WorkChip, {
+      props: {
+        workKey: { key: 'CF-12', display: 'CF-12', source: 'link', from: 'Native task' },
+        testid: 'native',
+        now: () => T,
+      },
+    });
+    expect(screen.getByTestId('native').className).not.toContain('unbound');
   });
 
   it('a plain key without a tracker item is just a key', () => {
@@ -98,7 +116,7 @@ describe('WorkChip', () => {
     // whose status the dot is, and what connecting a tracker would ADD —
     // never "connect a tracker to see its status" beside a status dot.
     expect(chip.title).toContain(
-      "the dot is fleet's own status; connect its tracker in Settings → Work to see ZED-9's too",
+      "the dot is fleet's own status; connect its tracker in Settings → Trackers to see ZED-9's too",
     );
     expect(chip.title).not.toContain("to see ZED-9's status");
   });

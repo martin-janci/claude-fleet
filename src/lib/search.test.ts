@@ -89,3 +89,23 @@ describe('sessionMatchesSearch', () => {
     expect(sessionMatchesSearch(s, 'sidebar')).toBe(true);
   });
 });
+
+describe('the one rule for finding a session', () => {
+  it('needs every word, in any field and any order, accents ignored', () => {
+    const s = sessionFor({ friendly_name: 'Oprava prihlásenia', host_alias: 'mefistos', tags: [] });
+    expect(sessionMatchesSearch(s, 'mefistos prihlasenia')).toBe(true);
+    expect(sessionMatchesSearch(s, 'prihlasenia gpu-box')).toBe(false);
+    expect(sessionMatchesSearch(s, '   ')).toBe(true);
+  });
+
+  it('finds a session by its project, branch and task', () => {
+    const s = sessionFor({
+      worktree_key: 'feat/sso',
+      tags: [],
+      work: { link_id: 1, item_id: 7, key: 'PAY-7', title: 'Refunds', source: 'manual' },
+    } as Partial<SessionRow>);
+    expect(sessionMatchesSearch(s, 'acme/api sso', 'acme/api')).toBe(true);
+    expect(sessionMatchesSearch(s, 'pay-7 refunds')).toBe(true);
+    expect(sessionMatchesSearch(s, 'acme/api')).toBe(false);
+  });
+});

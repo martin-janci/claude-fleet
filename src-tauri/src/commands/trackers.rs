@@ -23,10 +23,11 @@ use fleet_core::ipc_error::IpcError;
 use fleet_core::service::decide::status_map;
 use fleet_core::service::trackers::admin::{self, TestReport, WorkAdminArgs};
 use fleet_core::service::trackers::sync::SyncMetrics;
-use fleet_core::service::trackers::tickets::{MultiStart, Ticket};
+use fleet_core::service::trackers::tickets::{MultiStart, StartPreview, Ticket};
+use fleet_core::service::work::abandon::AbandonOutcome;
 use fleet_core::service::work::retention;
 use fleet_core::ssh::SshClient;
-use fleet_core::store::{SessionRow, Store, TrackerRow};
+use fleet_core::store::{SessionRow, Store, TicketPrefixRow, TrackerRow};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -84,7 +85,7 @@ fn row(v: serde_json::Value) -> Result<TrackerRow, IpcError> {
         .map_err(|e| IpcError::new(fleet_core::ipc_error::codes::E_SERIALIZE, e.to_string()))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn add_tracker(
     backend: State<'_, Arc<FleetBackend>>,
     args: AddTrackerArgs,
@@ -105,7 +106,7 @@ pub fn add_tracker(
     )?)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_tracker(
     backend: State<'_, Arc<FleetBackend>>,
     args: UpdateTrackerArgs,
@@ -125,7 +126,7 @@ pub fn update_tracker(
     )?)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_tracker_credential(
     backend: State<'_, Arc<FleetBackend>>,
     args: SetTrackerCredentialArgs,
@@ -172,7 +173,7 @@ pub async fn test_tracker(
     .await
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn remove_tracker(
     backend: State<'_, Arc<FleetBackend>>,
     args: TrackerIdArgs,
@@ -193,7 +194,7 @@ pub fn remove_tracker(
 /// Work graph M11.4: the tracker sync's counters for each tracker's last
 /// pass (this process's sync, in memory). Fleet administration like the
 /// rest: `work_admin { action: status }` is master-only on the hub.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn tracker_sync_metrics(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
@@ -208,6 +209,61 @@ pub fn tracker_sync_metrics(
     )?;
     serde_json::from_value(v)
         .map_err(|e| IpcError::new(fleet_core::ipc_error::codes::E_SERIALIZE, e.to_string()))
+}
+
+// --- Ticket keys (`fleet_core::store::ticket_keys`) ------------------------------
+//
+// Which prefix a project's tickets carry is fleet administration, the hub's
+// master-only `work_admin { ticket_prefixes | set_ticket_prefix }`, so both
+// are `LocalOnly` on a paired desktop.
+
+#[derive(Deserialize)]
+pub struct SetTicketPrefixArgs {
+    /// The space to rename; or `project_id` for a project's (made if new).
+    #[serde(default)]
+    pub space_id: Option<i64>,
+    #[serde(default)]
+    pub project_id: Option<i64>,
+    pub prefix: String,
+}
+
+fn prefix_rows(v: serde_json::Value) -> Result<Vec<TicketPrefixRow>, IpcError> {
+    serde_json::from_value(v)
+        .map_err(|e| IpcError::new(fleet_core::ipc_error::codes::E_SERIALIZE, e.to_string()))
+}
+
+#[tauri::command(async)]
+pub fn ticket_prefixes(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<TicketPrefixRow>, IpcError> {
+    backend.refuse_local_only("ticket_prefixes")?;
+    prefix_rows(admin::admin_sync(
+        &WorkAdminArgs {
+            action: "ticket_prefixes".into(),
+            ..Default::default()
+        },
+        &store,
+    )?)
+}
+
+#[tauri::command(async)]
+pub fn set_ticket_prefix(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: SetTicketPrefixArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<TicketPrefixRow>, IpcError> {
+    backend.refuse_local_only("set_ticket_prefix")?;
+    prefix_rows(admin::admin_sync(
+        &WorkAdminArgs {
+            action: "set_ticket_prefix".into(),
+            space_id: args.space_id,
+            project_id: args.project_id,
+            prefix: Some(args.prefix),
+            ..Default::default()
+        },
+        &store,
+    )?)
 }
 
 // --- Jev J3 `status_map` in assist: a person decides the proposals --------------
@@ -234,7 +290,7 @@ pub struct DecideStatusMapProposalArgs {
 /// answer per section, the shadow comparisons, and the mode. Tracker
 /// administration: `LocalOnly` like `update_tracker` (the hub's operator
 /// reads them with `fleet-hub decide proposals`).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn status_map_proposals(
     backend: State<'_, Arc<FleetBackend>>,
     args: StatusMapProposalsArgs,
@@ -249,7 +305,7 @@ pub fn status_map_proposals(
 /// named by its decision run. An apply writes the tracker's section map
 /// through `work_admin update`, as `update_tracker` does; `LocalOnly` like
 /// it (the hub's operator has `fleet-hub decide proposals apply|reject`).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn decide_status_map_proposal(
     backend: State<'_, Arc<FleetBackend>>,
     args: DecideStatusMapProposalArgs,
@@ -300,6 +356,9 @@ pub struct WorkTicketsArgs {
     pub query: Option<String>,
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Own tasks too (task → session P-4).
+    #[serde(default)]
+    pub include_local: Option<bool>,
 }
 
 /// One ticket by key or URL.
@@ -327,6 +386,10 @@ pub struct StartWorkArgs {
     /// The brief as a person edited it in the preview.
     #[serde(default)]
     pub brief: Option<String>,
+    /// The preview only: have a model draft the brief on the planned host
+    /// (redesign 6.10). A start never drafts; it sends `brief`.
+    #[serde(default)]
+    pub draft_brief: bool,
     /// The session name as edited in the dialog.
     #[serde(default)]
     pub name: Option<String>,
@@ -336,6 +399,10 @@ pub struct StartWorkArgs {
     /// Start on another org's ticket anyway (work graph M5).
     #[serde(default)]
     pub force_cross_org: bool,
+    /// Start beside a live session on the same key, in a checkout of its
+    /// own (task → session spec P-8).
+    #[serde(default)]
+    pub parallel: bool,
 }
 
 #[tauri::command]
@@ -384,6 +451,18 @@ pub async fn start_work_multi(
     routed::start_work_multi(&backend, args, &store, &ssh, &reg).await
 }
 
+/// Where a start would land, what it would send and what is in the way —
+/// nothing is made (task → session spec P-1). The Work button's popover.
+#[tauri::command]
+pub async fn preview_start_work(
+    args: StartWorkArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<StartPreview, IpcError> {
+    routed::preview_start_work(&backend, args, &store, &ssh).await
+}
+
 #[tauri::command]
 pub async fn start_work(
     args: StartWorkArgs,
@@ -393,6 +472,22 @@ pub async fn start_work(
     reg: State<'_, Arc<CancellationRegistry>>,
 ) -> Result<SessionRow, IpcError> {
     routed::start_work(&backend, args, &store, &ssh, &reg).await
+}
+
+/// `abandon_start` (task → session P-6): cancel a start nobody worked in.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AbandonStartArgs {
+    pub session_id: i64,
+}
+
+#[tauri::command]
+pub async fn abandon_start(
+    args: AbandonStartArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<AbandonOutcome, IpcError> {
+    routed::abandon_start(&backend, args, &store, &ssh).await
 }
 
 pub(crate) mod routed {
@@ -425,17 +520,19 @@ pub(crate) mod routed {
             view: args.view.clone(),
             query: args.query.clone(),
             limit: args.limit,
+            include_local: args.include_local,
             ..Default::default()
         };
         match backend.hub() {
             Some(hub) => hub.route("work_tickets", &wire).await,
-            None => tickets::tickets(
+            None => tickets::tickets_and_tasks(
                 store,
                 args.tracker_id,
                 args.view.as_deref(),
                 args.query.as_deref(),
                 args.limit,
-                &fleet_core::service::orgs::OrgScope::All,
+                args.include_local == Some(true),
+                &fleet_core::service::view_scope::ViewScope::internal(),
             ),
         }
     }
@@ -458,7 +555,7 @@ pub(crate) mod routed {
                 tickets::lookup(
                     store,
                     &args.reference,
-                    &fleet_core::service::orgs::OrgScope::All,
+                    &fleet_core::service::view_scope::ViewScope::internal(),
                     &default_net(),
                 )
                 .await
@@ -498,7 +595,7 @@ pub(crate) mod routed {
                     reg,
                     &fleet_core::service::work::start_args(&wire),
                     &args.project_ids,
-                    &fleet_core::service::orgs::OrgScope::All,
+                    &fleet_core::service::view_scope::ViewScope::internal(),
                     &default_net(),
                 )
                 .await
@@ -506,15 +603,10 @@ pub(crate) mod routed {
         }
     }
 
-    pub async fn start_work(
-        backend: &FleetBackend,
-        args: StartWorkArgs,
-        store: &Arc<Mutex<Store>>,
-        ssh: &Arc<SshClient>,
-        reg: &Arc<CancellationRegistry>,
-    ) -> Result<SessionRow, IpcError> {
+    /// One start's wire arguments, the same for the start and its preview.
+    fn start_wire(args: &StartWorkArgs) -> WorkLinkArgs {
         let is_url = args.reference.as_deref().is_some_and(|r| r.contains("://"));
-        let wire = WorkLinkArgs {
+        WorkLinkArgs {
             action: "start".into(),
             key: args.reference.clone().filter(|_| !is_url),
             url: args.reference.clone().filter(|_| is_url),
@@ -526,8 +618,59 @@ pub(crate) mod routed {
             name: args.name.clone(),
             worktree: args.worktree.clone(),
             force_cross_org: args.force_cross_org.then_some(true),
+            parallel: args.parallel.then_some(true),
             ..Default::default()
+        }
+    }
+
+    pub async fn preview_start_work(
+        backend: &FleetBackend,
+        args: StartWorkArgs,
+        store: &Arc<Mutex<Store>>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<StartPreview, IpcError> {
+        let wire = WorkLinkArgs {
+            action: "preview_start".into(),
+            draft_brief: args.draft_brief.then_some(true),
+            ..start_wire(&args)
         };
+        match backend.hub() {
+            Some(hub) => hub.route("preview_start_work", &wire).await,
+            None => {
+                // A standalone desktop owns its fleet: Jev K1 may ask (off by
+                // default). A paired one routed to its hub above.
+                let decide = fleet_core::service::decide::DecideCtx::jev(Arc::clone(store));
+                let view = fleet_core::service::view_scope::ViewScope::internal();
+                let mut preview = tickets::preview_start_decided(
+                    store,
+                    &fleet_core::service::work::start_args(&wire),
+                    &view,
+                    &default_net(),
+                    Some(&decide),
+                )
+                .await?;
+                if args.draft_brief {
+                    fleet_core::service::work::brief_draft::draft_into(
+                        store,
+                        ssh.as_ref(),
+                        &mut preview,
+                        &view,
+                    )
+                    .await?;
+                }
+                Ok(preview)
+            }
+        }
+    }
+
+    pub async fn start_work(
+        backend: &FleetBackend,
+        args: StartWorkArgs,
+        store: &Arc<Mutex<Store>>,
+        ssh: &Arc<SshClient>,
+        reg: &Arc<CancellationRegistry>,
+    ) -> Result<SessionRow, IpcError> {
+        let wire = start_wire(&args);
         match backend.hub() {
             Some(hub) => hub.route("start_work", &wire).await,
             None => {
@@ -536,10 +679,29 @@ pub(crate) mod routed {
                     ssh,
                     reg,
                     &fleet_core::service::work::start_args(&wire),
-                    &fleet_core::service::orgs::OrgScope::All,
+                    &fleet_core::service::view_scope::ViewScope::internal(),
                     &default_net(),
                 )
                 .await
+            }
+        }
+    }
+
+    pub async fn abandon_start(
+        backend: &FleetBackend,
+        args: AbandonStartArgs,
+        store: &Arc<Mutex<Store>>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<AbandonOutcome, IpcError> {
+        let wire = WorkLinkArgs {
+            action: "abandon_start".into(),
+            session_id: Some(args.session_id),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("abandon_start", &wire).await,
+            None => {
+                fleet_core::service::work::abandon::abandon_start(store, ssh, args.session_id).await
             }
         }
     }

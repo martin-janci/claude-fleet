@@ -19,6 +19,41 @@ pub struct DiscoveredWorktree {
     pub branch: Option<String>,
 }
 
+/// The directory a NEW worktree for branch `branch` is created in, below
+/// `.worktrees/` or `.claude/worktrees/`, and the name its row is recorded
+/// under: `feat/imports` → `feat-imports`. A worktree name is one path
+/// component everywhere it is used (`<root>/.worktrees/<name>`,
+/// `validate::path_component`), while a branch may contain `/`.
+pub fn worktree_dir_name(branch: &str) -> String {
+    branch.replace('/', "-")
+}
+
+/// The name a linked worktree checked out at `path` is recorded under. Below
+/// a worktree marker (`/.claude/worktrees/`, then `/.worktrees/`) it is
+/// everything under the marker joined with `-`, so a checkout made at
+/// `.worktrees/feat/imports` (before [`worktree_dir_name`] flattened new
+/// ones) is `feat-imports`, the same name whichever scan or hook records
+/// it; anywhere else it is the directory name. `None` for a path with no
+/// usable last component.
+pub fn worktree_name_for_path(path: &str) -> Option<String> {
+    let path = path.trim_end_matches('/');
+    for marker in ["/.claude/worktrees/", "/.worktrees/"] {
+        if let Some(idx) = path.find(marker) {
+            let below: Vec<&str> = path[idx + marker.len()..]
+                .split('/')
+                .filter(|c| !c.is_empty())
+                .collect();
+            if !below.is_empty() {
+                return Some(below.join("-"));
+            }
+        }
+    }
+    path.rsplit('/')
+        .next()
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+}
+
 /// On-disk arrangement of repositories under a projects root.
 ///
 /// The root is the directory whose children are the layout's top-level
@@ -293,8 +328,7 @@ fn parse_worktree_porcelain(input: &str) -> Vec<DiscoveredWorktree> {
             let name = if i == 0 {
                 "main".to_string()
             } else {
-                path.file_name()
-                    .map(|s| s.to_string_lossy().into_owned())
+                worktree_name_for_path(&path.to_string_lossy())
                     .unwrap_or_else(|| "unknown".to_string())
             };
             DiscoveredWorktree { name, path, branch }
@@ -307,6 +341,38 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn worktree_dir_name_flattens_a_branch_into_one_component() {
+        assert_eq!(worktree_dir_name("feat"), "feat");
+        assert_eq!(worktree_dir_name("feat/imports"), "feat-imports");
+        assert_eq!(worktree_dir_name("a/b/c"), "a-b-c");
+    }
+
+    #[test]
+    fn worktree_name_for_path_joins_what_is_below_the_marker() {
+        let name = |p| worktree_name_for_path(p);
+        assert_eq!(name("/r/.worktrees/feat").as_deref(), Some("feat"));
+        assert_eq!(name("/r/.worktrees/feat/").as_deref(), Some("feat"));
+        assert_eq!(
+            name("/r/.worktrees/feat/imports").as_deref(),
+            Some("feat-imports")
+        );
+        assert_eq!(
+            name("/r/.claude/worktrees/feat/imports").as_deref(),
+            Some("feat-imports")
+        );
+        // Outside a marker: the directory name, as before.
+        assert_eq!(name("/repos/app-wt").as_deref(), Some("app-wt"));
+        assert_eq!(name("/"), None);
+        // The name is always one path component.
+        for p in ["/r/.worktrees/a/b/c", "/r/.claude/worktrees/x/y"] {
+            assert!(
+                crate::validate::path_component("worktree name", &name(p).unwrap()).is_ok(),
+                "{p}"
+            );
+        }
+    }
 
     #[test]
     fn parse_worktree_porcelain_first_entry_is_main_wherever_it_ran() {

@@ -20,7 +20,7 @@ use super::{now_unix, Secret, Store};
 use crate::ipc_error::{codes, IpcError};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// `decision_runs.fallback`: why a decision was not (or not only) the
 /// model's. Closed; the migration's CHECK holds the same list.
@@ -64,6 +64,62 @@ pub const DECISION_BENCH_SUBJECT: &str = "bench";
 /// — the same count the status_map proposals view prints.
 pub const DECISION_NO_BASELINE: &str = "none";
 
+/// The proposals about one subject (step 2.8), as one JSON array: per
+/// feature, the LATEST run about `$subject` of kind `$kind`, kept only when
+/// it is a live `assist` answer with no fallback and no follow-up (save a
+/// `related_session` a person confirmed with Link, which stays as the
+/// row's `linked` partner, M15 G4.3), not
+/// `unsure`, and at or above `PROPOSAL_MIN_CONFIDENCE` (0.5, spelled out
+/// in [`proposal_keep_sql!`] because `concat!` takes literals;
+/// `tests::the_proposal_floor_is_the_constant` keeps them equal). A later shadow run or fallback about the same subject
+/// therefore withdraws an earlier proposal, as a confirm or a change does;
+/// the second opinion's runs (provider `haiku`) are never the latest, so
+/// they withdraw nothing.
+/// `$subject` is an SQL expression over the outer row (`CAST(sessions.id AS
+/// TEXT)`); the `decision_runs_subject` index (migration 129) serves both
+/// lookups. Decoded by `rows::decode_proposals`.
+#[macro_export]
+macro_rules! proposals_sql {
+    ($kind:literal, $subject:literal) => {
+        concat!(
+            "(SELECT json_group_array(json_object(\
+                 'feature', d.feature, 'value', d.answer, \
+                 'source', CASE d.provider WHEN 'rules' THEN 'rule' \
+                                           WHEN 'llm' THEN 'llm' ELSE 'jev' END, \
+                 'confidence_pct', CAST(ROUND(d.confidence * 100) AS INTEGER), \
+                 'run_id', d.id, 'at', d.at, \
+                 'linked', json(CASE WHEN d.followup = 'confirmed' THEN 'true' END))) \
+               FROM decision_runs d \
+              WHERE d.subject_kind = '",
+            $kind,
+            "' AND d.subject_id = ",
+            $subject,
+            " AND d.id = (SELECT MAX(d2.id) FROM decision_runs d2 \
+                            WHERE d2.subject_kind = d.subject_kind \
+                              AND d2.subject_id = d.subject_id \
+                              AND d2.feature = d.feature \
+                              AND d2.provider <> 'haiku') \
+                AND ",
+            $crate::proposal_keep_sql!(),
+            ")"
+        )
+    };
+}
+
+/// Which of a subject's latest runs [`proposals_sql!`] and
+/// [`Store::current_proposals`] keep, over a run aliased `d`.
+#[macro_export]
+macro_rules! proposal_keep_sql {
+    () => {
+        "d.mode = 'assist' AND d.fallback IS NULL \
+         AND (d.followup IS NULL \
+              OR (d.feature = 'related_session' AND d.followup = 'confirmed')) \
+         AND d.answer IS NOT NULL \
+         AND d.answer <> 'unsure' \
+         AND (d.confidence IS NULL OR d.confidence >= 0.5)"
+    };
+}
+
 /// Which runs the circuit breaker and the daily budget count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunScope {
@@ -90,6 +146,9 @@ pub const DECISION_MAX_CANDIDATES: usize = 255;
 
 /// Most runs [`Store::decision_runs_for_subjects`] returns.
 pub const DECISION_SUBJECT_RUNS_MAX: usize = 5_000;
+
+/// The most labelled runs [`Store::labelled_decision_runs`] returns.
+pub const DECISION_LABELLED_RUNS_MAX: usize = 20_000;
 
 /// Longest id or vocabulary word a run records.
 pub const DECISION_WORD_MAX_CHARS: usize = 80;
@@ -376,7 +435,67 @@ impl Store {
                 run.cost_microusd,
             ],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        let id = self.conn.last_insert_rowid();
+        self.emit_proposal_subject(&run.subject_kind, &run.subject_id)?;
+        Ok(id)
+    }
+
+    /// Every proposal about subjects of `subject_kind`, by subject id: the
+    /// same runs [`proposals_sql!`] reads for one row, for a reader that
+    /// builds many rows at once (the Work view's tasks). Sorted by feature.
+    pub fn current_proposals(
+        &self,
+        subject_kind: &str,
+    ) -> Result<HashMap<String, Vec<super::DecisionProposal>>, IpcError> {
+        let mut stmt = self.conn.prepare(concat!(
+            "SELECT d.subject_id, d.feature, d.answer, d.provider, d.confidence, d.id, d.at, \
+                    d.followup \
+               FROM decision_runs d \
+              WHERE d.subject_kind = ?1 \
+                AND d.id IN (SELECT MAX(id) FROM decision_runs \
+                              WHERE subject_kind = ?1 AND provider <> 'haiku' \
+                              GROUP BY subject_id, feature) \
+                AND ",
+            crate::proposal_keep_sql!(),
+            " ORDER BY d.subject_id, d.feature"
+        ))?;
+        let rows = stmt.query_map([subject_kind], |r| {
+            let provider: String = r.get(3)?;
+            let confidence: Option<f64> = r.get(4)?;
+            Ok((
+                r.get::<_, String>(0)?,
+                super::DecisionProposal {
+                    feature: r.get(1)?,
+                    value: r.get(2)?,
+                    source: super::proposal_source(&provider).to_string(),
+                    reason: None,
+                    confidence_pct: confidence.map(|c| (c.clamp(0.0, 1.0) * 100.0).round() as u8),
+                    run_id: Some(r.get(5)?),
+                    at: Some(r.get(6)?),
+                    linked: (r.get::<_, Option<String>>(7)?.as_deref() == Some("confirmed"))
+                        .then_some(true),
+                },
+            ))
+        })?;
+        let mut out: HashMap<String, Vec<super::DecisionProposal>> = HashMap::new();
+        for row in rows {
+            let (subject, p) = row?;
+            out.entry(subject).or_default().push(p);
+        }
+        Ok(out)
+    }
+
+    /// A run about a session changes what its row proposes
+    /// ([`SessionRow::proposals`](super::SessionRow::proposals) is read from
+    /// `decision_runs`, not stored on the row), so the row is re-emitted for
+    /// clients to merge. Nothing for any other subject.
+    fn emit_proposal_subject(&self, subject_kind: &str, subject_id: &str) -> Result<(), IpcError> {
+        if subject_kind == super::PROPOSAL_SUBJECT_SESSION {
+            if let Ok(id) = subject_id.parse::<i64>() {
+                self.emit_session(id)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn get_decision_run(&self, id: i64) -> Result<Option<DecisionRunRow>, IpcError> {
@@ -410,18 +529,31 @@ impl Store {
             return Err(invalid("corrected_to goes only with followup corrected"));
         }
         check_opt_word("corrected_to", corrected_to)?;
-        Ok(self.conn.execute(
-            "UPDATE decision_runs SET followup = ?2, followup_at = ?3, corrected_to = ?4 \
-             WHERE id = ?1",
-            rusqlite::params![id, followup, at, corrected_to],
-        )? > 0)
+        let subject: Option<(String, String)> = self
+            .conn
+            .query_row(
+                "UPDATE decision_runs SET followup = ?2, followup_at = ?3, corrected_to = ?4 \
+                 WHERE id = ?1 RETURNING subject_kind, subject_id",
+                rusqlite::params![id, followup, at, corrected_to],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((kind, subject_id)) = subject else {
+            return Ok(false);
+        };
+        // A decided proposal leaves the row.
+        self.emit_proposal_subject(&kind, &subject_id)?;
+        Ok(true)
     }
 
     /// Mark `ignored` every earlier usable answer (no fallback, an answer)
     /// of `feature` in `mode` about the same subject, older than run
     /// `newer_id`, that has no follow-up yet: a newer answer took its place
     /// before anyone decided it. Never overwrites a follow-up (a person's
-    /// decision racing this one wins). Returns the runs marked.
+    /// decision racing this one wins; the second opinion's runs are left
+    /// alone). Returns the runs marked; when it
+    /// marked any, the subject's row is re-emitted, since a withdrawn
+    /// proposal must leave the screen (`quick_answer::withdraw`).
     pub fn supersede_decision_runs(
         &self,
         feature: &str,
@@ -431,12 +563,16 @@ impl Store {
         newer_id: i64,
         at: i64,
     ) -> Result<usize, IpcError> {
-        Ok(self.conn.execute(
+        let n = self.conn.execute(
             "UPDATE decision_runs SET followup = 'ignored', followup_at = ?6 \
              WHERE feature = ?1 AND subject_kind = ?2 AND subject_id = ?3 AND mode = ?4 \
-               AND id < ?5 AND followup IS NULL AND fallback IS NULL AND answer IS NOT NULL",
+               AND provider <> 'haiku' AND id < ?5 AND followup IS NULL AND fallback IS NULL AND answer IS NOT NULL",
             rusqlite::params![feature, subject_kind, subject_id, mode, newer_id, at],
-        )?)
+        )?;
+        if n > 0 {
+            self.emit_proposal_subject(subject_kind, subject_id)?;
+        }
+        Ok(n)
     }
 
     /// Recent runs, newest first.
@@ -465,7 +601,8 @@ impl Store {
     /// `subject_prefix` (an adapter's own namespace, e.g. `3:` for tracker
     /// 3's sections), at or after `since` when given, newest first, at most
     /// [`DECISION_SUBJECT_RUNS_MAX`]. What an adapter reads to skip a
-    /// question it asked recently, and to list its proposals.
+    /// question it asked recently, and to list its proposals. The second
+    /// opinion's runs (provider `haiku`) are not the adapter's and are left out.
     pub fn decision_runs_for_subjects(
         &self,
         feature: &str,
@@ -475,7 +612,7 @@ impl Store {
     ) -> Result<Vec<DecisionRunRow>, IpcError> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {RUN_COLUMNS} FROM decision_runs \
-             WHERE feature = ?1 AND subject_kind = ?2 \
+             WHERE feature = ?1 AND subject_kind = ?2 AND provider <> 'haiku' \
                AND substr(subject_id, 1, length(?3)) = ?3 \
                AND (?4 IS NULL OR at >= ?4) \
              ORDER BY id DESC LIMIT ?5"
@@ -488,6 +625,22 @@ impl Store {
                 since,
                 DECISION_SUBJECT_RUNS_MAX as i64
             ],
+            map_run,
+        )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// A feature's runs a person followed up ([`DECISION_PERSON_FOLLOWUPS`]),
+    /// newest first, at most [`DECISION_LABELLED_RUNS_MAX`]: what
+    /// `decide::floor` fits on.
+    pub fn labelled_decision_runs(&self, feature: &str) -> Result<Vec<DecisionRunRow>, IpcError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {RUN_COLUMNS} FROM decision_runs \
+             WHERE feature = ?1 AND followup IN ('confirmed', 'corrected', 'rejected') \
+             ORDER BY id DESC LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(
+            rusqlite::params![feature, DECISION_LABELLED_RUNS_MAX as i64],
             map_run,
         )?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -550,6 +703,22 @@ impl Store {
                AND (?3 = 1 OR subject_kind != ?4)",
             rusqlite::params![provider, since, scope.with_bench(), DECISION_BENCH_SUBJECT],
             |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
+    }
+
+    /// How many of `provider`'s runs in `scope` since `since` sent a request
+    /// (the second opinion's daily cap).
+    pub fn decision_calls_since(
+        &self,
+        provider: &str,
+        since: i64,
+        scope: RunScope,
+    ) -> Result<i64, IpcError> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM decision_runs WHERE provider = ?1 AND at >= ?2 AND called = 1 \
+               AND (?3 = 1 OR subject_kind != ?4)",
+            rusqlite::params![provider, since, scope.with_bench(), DECISION_BENCH_SUBJECT],
+            |r| r.get(0),
         )?)
     }
 
@@ -753,6 +922,10 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::{
+        DecisionProposal, PROPOSAL_MIN_CONFIDENCE, PROPOSAL_SUBJECT_SESSION,
+        PROPOSAL_SUBJECT_WORK_ITEM,
+    };
 
     fn run(feature: &str) -> NewDecisionRun {
         NewDecisionRun {
@@ -780,6 +953,146 @@ mod tests {
             input_tokens: 500,
             cost_microusd: 21,
         }
+    }
+
+    /// Step 2.8: an assist run about a session proposes on its row.
+    fn assist(subject: &str, feature: &str, answer: &str, confidence: f64) -> NewDecisionRun {
+        NewDecisionRun {
+            mode: "assist".into(),
+            subject_id: subject.into(),
+            answer: Some(answer.into()),
+            confidence: Some(confidence),
+            ..run(feature)
+        }
+    }
+
+    fn session_with_bus() -> (Store, i64, std::sync::Arc<crate::events::RecordingEventBus>) {
+        let bus = std::sync::Arc::new(crate::events::RecordingEventBus::new());
+        let s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+        s.upsert_host("h").unwrap();
+        let id = s
+            .upsert_session("w", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        (s, id, bus)
+    }
+
+    #[test]
+    fn a_live_assist_answer_is_proposed_on_its_session_row() {
+        let (s, id, bus) = session_with_bus();
+        let other = s
+            .upsert_session("w2", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        let row = |id| s.get_session_by_id(id).unwrap().unwrap();
+        assert!(row(id).proposals.is_empty(), "no decision, no proposal");
+
+        bus.take();
+        let run_id = s
+            .insert_decision_run(&assist(&id.to_string(), "turn_outcome", "finished", 0.82))
+            .unwrap();
+        assert!(
+            bus.take()
+                .iter()
+                .any(|e| e.starts_with("session") && e.ends_with(&format!(":{id}"))),
+            "the row is re-emitted: its proposals changed"
+        );
+        assert_eq!(
+            row(id).proposals,
+            vec![DecisionProposal {
+                feature: "turn_outcome".into(),
+                value: "finished".into(),
+                source: "jev".into(),
+                reason: None,
+                confidence_pct: Some(82),
+                run_id: Some(run_id),
+                at: Some(1_000),
+                linked: None,
+            }]
+        );
+        assert!(row(other).proposals.is_empty(), "only the subject's row");
+
+        // Deciding it takes it off the row, and says so.
+        bus.take();
+        assert!(s
+            .set_decision_followup(run_id, "confirmed", None, 2_000)
+            .unwrap());
+        assert!(row(id).proposals.is_empty());
+        assert!(bus.take().iter().any(|e| e.ends_with(&format!(":{id}"))));
+    }
+
+    #[test]
+    fn only_the_latest_live_assist_answer_per_feature_is_proposed() {
+        let (s, id, _bus) = session_with_bus();
+        let subject = id.to_string();
+        let row = || s.get_session_by_id(id).unwrap().unwrap();
+        let features =
+            || -> Vec<String> { row().proposals.into_iter().map(|p| p.feature).collect() };
+
+        // A shadow answer is recorded, never shown.
+        s.insert_decision_run(&NewDecisionRun {
+            subject_id: subject.clone(),
+            ..run("a")
+        })
+        .unwrap();
+        assert!(features().is_empty());
+        // Unsure, and an answer under the floor, pre-select nothing.
+        s.insert_decision_run(&assist(&subject, "b", "unsure", 0.9))
+            .unwrap();
+        s.insert_decision_run(&assist(&subject, "c", "x", PROPOSAL_MIN_CONFIDENCE - 0.01))
+            .unwrap();
+        assert!(features().is_empty());
+        // At the floor it is proposed; one per feature, sorted.
+        s.insert_decision_run(&assist(&subject, "c", "x", PROPOSAL_MIN_CONFIDENCE))
+            .unwrap();
+        s.insert_decision_run(&assist(&subject, "a", "y", 0.9))
+            .unwrap();
+        assert_eq!(features(), ["a", "c"]);
+        // A later rule answer replaces Jev's for its feature.
+        s.insert_decision_run(&NewDecisionRun {
+            provider: "rules".into(),
+            ..assist(&subject, "a", "z", 0.9)
+        })
+        .unwrap();
+        let a = row()
+            .proposals
+            .into_iter()
+            .find(|p| p.feature == "a")
+            .unwrap();
+        assert_eq!((a.value.as_str(), a.source.as_str()), ("z", "rule"));
+        // A later fallback withdraws the feature's proposal.
+        s.insert_decision_run(&NewDecisionRun {
+            fallback: Some("timeout".into()),
+            answer: None,
+            ..assist(&subject, "c", "x", 0.9)
+        })
+        .unwrap();
+        assert_eq!(features(), ["a"]);
+    }
+
+    /// The Work view reads many subjects at once through
+    /// [`Store::current_proposals`]; a row reads one through
+    /// [`proposals_sql!`]. Both keep the same runs, with the same floor.
+    #[test]
+    fn the_bulk_read_and_the_row_read_keep_the_same_runs() {
+        let (s, id, _bus) = session_with_bus();
+        let subject = id.to_string();
+        for (f, a, c) in [
+            ("a", "x", PROPOSAL_MIN_CONFIDENCE),
+            ("b", "y", PROPOSAL_MIN_CONFIDENCE - 0.01),
+            ("c", "unsure", 0.9),
+            ("d", "z", 0.7),
+        ] {
+            s.insert_decision_run(&assist(&subject, f, a, c)).unwrap();
+        }
+        let bulk = s.current_proposals(PROPOSAL_SUBJECT_SESSION).unwrap();
+        assert_eq!(
+            bulk.get(&subject).cloned().unwrap_or_default(),
+            s.get_session_by_id(id).unwrap().unwrap().proposals
+        );
+        assert_eq!(bulk[&subject].len(), 2);
+        assert!(s
+            .current_proposals(PROPOSAL_SUBJECT_WORK_ITEM)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

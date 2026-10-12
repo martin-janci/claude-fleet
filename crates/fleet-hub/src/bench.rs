@@ -31,9 +31,11 @@ use crate::config::HubOptions;
 use crate::dbarg::{db_path, open_read_only};
 use crate::out;
 use clap::Subcommand;
+use fleet_core::service::decide::bench::choice::{self as ch, UseCase};
 use fleet_core::service::decide::bench::perturb::Perturbation;
 use fleet_core::service::decide::bench::status_map as sm;
 use fleet_core::service::decide::bench::status_map_robust as robust;
+use fleet_core::service::decide::bench::turn_outcome as to;
 use fleet_core::service::decide::bench::work_link::{
     self as wl, BenchOptions, Provider, Shape, Split,
 };
@@ -112,9 +114,10 @@ pub enum BenchCmd {
         /// Also ask every asked case with its first prompt perturbed
         /// (dataset C) and compare each variant with its original at the
         /// provider's raw pick: fold (no diacritics), typo, code (fenced
-        /// blocks replaced by `[code: <lang>, N lines]`, D42). Repeat it.
+        /// blocks replaced by `[code: <lang>, N lines]`, D42), option-order
+        /// (the same request, its options in another order). Repeat it.
         /// Each perturbation is its own pass of at most --max-calls calls.
-        #[arg(long = "perturb", value_parser = ["fold", "typo", "code"], conflicts_with = "export_unlinked")]
+        #[arg(long = "perturb", value_parser = ["fold", "typo", "code", "option-order"], conflicts_with = "export_unlinked")]
         perturb: Vec<String>,
     },
     /// Card J3: an Asana section's status category. Cases are labeled
@@ -145,10 +148,11 @@ pub enum BenchCmd {
         paired_fixture: bool,
         /// Also ask every case perturbed (dataset C) and compare each
         /// variant with its original: fold (no diacritics), typo, emoji,
-        /// no-board, shuffle-board (repeat it). Only cases the perturbation
-        /// changes are asked; each perturbation is its own pass of at most
-        /// --max-calls calls.
-        #[arg(long = "perturb", value_parser = ["fold", "typo", "emoji", "no-board", "shuffle-board"])]
+        /// no-board, shuffle-board, option-order (the same request, its
+        /// options in another order) (repeat it). Only cases the
+        /// perturbation changes are asked; each perturbation is its own pass
+        /// of at most --max-calls calls.
+        #[arg(long = "perturb", value_parser = ["fold", "typo", "emoji", "no-board", "shuffle-board", "option-order"])]
         perturb: Vec<String>,
         /// Report jev's and haiku's numbers at every confidence floor
         /// (0-0.95); with --split all, also the lowest floor the dev boards
@@ -156,11 +160,13 @@ pub enum BenchCmd {
         /// call: the answers under the floor are kept already.
         #[arg(long)]
         floor_sweep: bool,
-        /// A provider to run: none, todo, rule, jev, haiku (repeat it).
-        /// [default: todo and rule]. jev sends each section's name and its
-        /// board's names to TypeSafe through the envelope's gate; haiku
-        /// sends the same to claude -p on --haiku-host.
-        #[arg(long = "provider", value_parser = ["none", "todo", "rule", "jev", "haiku"])]
+        /// A provider to run: none, todo, rule, jev, haiku, jev-split
+        /// (repeat it). [default: todo and rule]. jev sends each section's
+        /// name and its board's names to TypeSafe through the envelope's
+        /// gate; jev-split sends the same as four narrow yes/no questions
+        /// combined in code (four calls a section); haiku sends the same
+        /// to claude -p on --haiku-host.
+        #[arg(long = "provider", value_parser = ["none", "todo", "rule", "jev", "haiku", "jev-split"])]
         providers: Vec<String>,
         #[command(flatten)]
         haiku: HaikuArgs,
@@ -195,6 +201,99 @@ pub enum BenchCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Card J2: what a turn came to when hooks said nothing. Cases are
+    /// captured pane tails (--labels FILE, one JSON line each: pane_tail,
+    /// label = finished | asked | stuck | working, optional id) or the
+    /// built-in synthetic set (--fixture, LLM-written, D43).
+    /// Reports coverage, accuracy and `asked` precision / recall per
+    /// provider, and card J2's acceptance (asked precision >= 0.9, recall
+    /// >= 0.8, judged from 50 labeled asked cases).
+    ///
+    /// Offline unless --provider jev. No pane text is printed.
+    TurnOutcome {
+        /// The labeled pane tails (JSON lines).
+        #[arg(long, value_name = "FILE", conflicts_with = "fixture")]
+        labels: Option<PathBuf>,
+        /// Use the built-in synthetic set.
+        #[arg(long)]
+        fixture: bool,
+        /// A provider to run: rule (the pane rules), qmark (ends with ?),
+        /// jev (repeat it). [default: rule and qmark]. jev sends each tail,
+        /// redacted, to TypeSafe through the envelope's gate: a case has no
+        /// org, so decide.jev.unassigned AND decide.jev.unassigned_reply
+        /// (D48) must be on.
+        #[arg(long = "provider", value_parser = ["rule", "qmark", "jev"])]
+        providers: Vec<String>,
+        /// Jev calls at most in this run. [default: 500]
+        #[arg(long)]
+        max_calls: Option<usize>,
+        /// The database jev runs are gated by and recorded in, instead of
+        /// the hub's (only read with --provider jev).
+        #[arg(long, value_name = "FILE")]
+        db: Option<PathBuf>,
+        /// Print JSON instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Card K2: which mission or session a Control message is about
+    /// (control_route). Cases: a message and the targets a person may see.
+    /// The closed-choice benches below share their flags and report: rule
+    /// cases (answered without a call), coverage, accuracy, proposal
+    /// precision, pre-selects on unsure cases and never-list answers, and
+    /// the acceptance (precision >= 0.9 judged from 50 labelled model
+    /// cases, at most 5% of 20 unsure cases pre-selected, no never-list
+    /// answer). The built-in sets are synthetic and never judged. Offline
+    /// unless --provider jev. No case text is printed.
+    ControlRoute(ChoiceArgs),
+    /// Card K4: a proposed task that repeats an open one (duplicate).
+    Duplicate(ChoiceArgs),
+    /// Card N1: another of the person's sessions on the same work
+    /// (related_session).
+    RelatedSession(ChoiceArgs),
+    /// Card K5: the group of a task nobody placed (work_placement).
+    WorkPlacement(ChoiceArgs),
+    /// Card N5: the host of a project's new session (host_placement).
+    HostPlacement(ChoiceArgs),
+    /// Card N6: what a routine run came to (routine_run_outcome).
+    RoutineRunOutcome(ChoiceArgs),
+    /// Card N4: the project of a pane fleet did not start (adopt_target).
+    AdoptTarget(ChoiceArgs),
+    /// Card J10: the project of a found conversation (restore_target).
+    RestoreTarget(ChoiceArgs),
+    /// Card J6: the main ticket among several keys (main_ticket).
+    MainTicket(ChoiceArgs),
+    /// Card J7: a local task that repeats a tracker ticket
+    /// (tracker_duplicate).
+    TrackerDuplicate(ChoiceArgs),
+}
+
+/// The flags every closed-choice bench takes (`decide::bench::choice`).
+#[derive(clap::Args, Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChoiceArgs {
+    /// The labelled cases (JSON lines: id, input, label, by?, never?,
+    /// trap?; `#` lines are comments, `# synthetic` marks the set).
+    #[arg(long, value_name = "FILE", conflicts_with = "fixture")]
+    pub labels: Option<PathBuf>,
+    /// Use the built-in synthetic set.
+    #[arg(long)]
+    pub fixture: bool,
+    /// A provider to run: rule (the rule layer alone), baseline (what fleet
+    /// does without Jev), jev (the rule, else the decision model through
+    /// the envelope's gate; a case has no org, so decide.jev.unassigned
+    /// must be on, and decide.jev.unassigned_reply too for
+    /// routine-run-outcome). [default: rule and baseline]
+    #[arg(long = "provider", value_parser = ["rule", "baseline", "jev"])]
+    pub providers: Vec<String>,
+    /// Jev calls at most in this run. [default: 500]
+    #[arg(long)]
+    pub max_calls: Option<usize>,
+    /// The database jev runs are gated by and recorded in, instead of the
+    /// hub's (only read with --provider jev).
+    #[arg(long, value_name = "FILE")]
+    pub db: Option<PathBuf>,
+    /// Print JSON instead of lines.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// The `claude -p haiku` baseline's flags (D33), shared by both benches.
@@ -463,7 +562,157 @@ pub async fn run(
             }
             Ok(ExitCode::SUCCESS)
         }
+        BenchCmd::TurnOutcome {
+            labels,
+            fixture,
+            providers,
+            max_calls,
+            db,
+            json,
+        } => {
+            let all = turn_outcome(
+                labels.as_deref(),
+                fixture,
+                &providers,
+                max_calls,
+                db.as_deref(),
+                opts,
+                env,
+            )
+            .await?;
+            if json {
+                out::line(&serde_json::to_string_pretty(&all).map_err(|e| e.to_string())?);
+            } else {
+                for l in to::lines(&all) {
+                    out::line(&l);
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        BenchCmd::ControlRoute(a) => choice_cmd(UseCase::ControlRoute, a, opts, env).await,
+        BenchCmd::Duplicate(a) => choice_cmd(UseCase::Duplicate, a, opts, env).await,
+        BenchCmd::RelatedSession(a) => choice_cmd(UseCase::RelatedSession, a, opts, env).await,
+        BenchCmd::WorkPlacement(a) => choice_cmd(UseCase::WorkPlacement, a, opts, env).await,
+        BenchCmd::HostPlacement(a) => choice_cmd(UseCase::HostPlacement, a, opts, env).await,
+        BenchCmd::RoutineRunOutcome(a) => {
+            choice_cmd(UseCase::RoutineRunOutcome, a, opts, env).await
+        }
+        BenchCmd::AdoptTarget(a) => choice_cmd(UseCase::AdoptTarget, a, opts, env).await,
+        BenchCmd::RestoreTarget(a) => choice_cmd(UseCase::RestoreTarget, a, opts, env).await,
+        BenchCmd::MainTicket(a) => choice_cmd(UseCase::MainTicket, a, opts, env).await,
+        BenchCmd::TrackerDuplicate(a) => choice_cmd(UseCase::TrackerDuplicate, a, opts, env).await,
     }
+}
+
+/// One closed-choice bench, printed.
+async fn choice_cmd(
+    uc: UseCase,
+    a: ChoiceArgs,
+    opts: &HubOptions,
+    env: &HashMap<String, String>,
+) -> Result<ExitCode, String> {
+    let all = choice(uc, &a, opts, env).await?;
+    if a.json {
+        out::line(&serde_json::to_string_pretty(&all).map_err(|e| e.to_string())?);
+    } else {
+        for l in ch::lines(&all) {
+            out::line(&l);
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `decide bench <use case>`: the labelled cases (or the built-in set)
+/// through the providers. Only `--provider jev` opens a database — for
+/// writing, as the envelope records every call; a rule case sends nothing.
+async fn choice(
+    uc: UseCase,
+    a: &ChoiceArgs,
+    opts: &HubOptions,
+    env: &HashMap<String, String>,
+) -> Result<Vec<ch::Metrics>, String> {
+    let text = match (a.labels.as_deref(), a.fixture) {
+        (Some(f), _) => std::fs::read_to_string(f).map_err(|e| format!("{}: {e}", f.display()))?,
+        (None, true) => uc.fixture().to_string(),
+        (None, false) => return Err("give --labels FILE or --fixture".into()),
+    };
+    let set = ch::parse(uc, &text)?;
+    let mut ps: Vec<ch::Provider> = a
+        .providers
+        .iter()
+        .map(|p| ch::Provider::parse(p).ok_or_else(|| format!("unknown provider {p}")))
+        .collect::<Result<_, _>>()?;
+    if ps.is_empty() {
+        ps = vec![ch::Provider::Rule, ch::Provider::Baseline];
+    }
+    ps.dedup();
+    let mut all = Vec::with_capacity(ps.len());
+    for p in ps {
+        let answers = if p == ch::Provider::Jev {
+            let path = db_path(a.db.as_deref(), opts, env)?;
+            let store = Store::open_with_bus(&path, Arc::new(fleet_core::events::NoopEventBus))
+                .map_err(|e| format!("open {}: {e}", path.display()))?;
+            let max = a.max_calls.unwrap_or(ch::DEFAULT_MAX_CALLS);
+            out::error(&format!(
+                "jev: asking only the cases no rule decides, when decide.jev.unassigned passes \
+                 the gate, at most {max} calls; each call is recorded in decision_runs"
+            ));
+            let ctx = DecideCtx::jev(Arc::new(Mutex::new(store)));
+            ch::run_jev(&ctx, &set, max).await
+        } else {
+            set.cases.iter().map(|c| ch::offline(p, c)).collect()
+        };
+        all.push(ch::metrics(p, &set, &answers));
+    }
+    Ok(all)
+}
+
+/// `decide bench turn-outcome`: the labeled tails (or the built-in set)
+/// through the providers. Only `--provider jev` opens a database — for
+/// writing, as the envelope records every call.
+async fn turn_outcome(
+    labels: Option<&Path>,
+    fixture: bool,
+    providers: &[String],
+    max_calls: Option<usize>,
+    db: Option<&Path>,
+    opts: &HubOptions,
+    env: &HashMap<String, String>,
+) -> Result<Vec<to::Metrics>, String> {
+    let text = match (labels, fixture) {
+        (Some(f), _) => std::fs::read_to_string(f).map_err(|e| format!("{}: {e}", f.display()))?,
+        (None, true) => to::FIXTURE.to_string(),
+        (None, false) => return Err("give --labels FILE or --fixture".into()),
+    };
+    let cases = to::parse_labels(&text)?;
+    let synthetic = to::is_synthetic(&text);
+    let mut ps: Vec<to::Provider> = providers
+        .iter()
+        .map(|p| to::Provider::parse(p).ok_or_else(|| format!("unknown provider {p}")))
+        .collect::<Result<_, _>>()?;
+    if ps.is_empty() {
+        ps = vec![to::Provider::Rule, to::Provider::Qmark];
+    }
+    ps.dedup();
+    let mut all = Vec::with_capacity(ps.len());
+    for p in ps {
+        let answers = if p == to::Provider::Jev {
+            let path = db_path(db, opts, env)?;
+            let store = Store::open_with_bus(&path, Arc::new(fleet_core::events::NoopEventBus))
+                .map_err(|e| format!("open {}: {e}", path.display()))?;
+            let max = max_calls.unwrap_or(to::DEFAULT_MAX_CALLS);
+            out::error(&format!(
+                "jev: asking only when decide.jev.unassigned and decide.jev.unassigned_reply \
+                 pass the gate, at most {max} calls; each call is recorded in decision_runs"
+            ));
+            let ctx = DecideCtx::jev(Arc::new(Mutex::new(store)));
+            to::run_jev(&ctx, &cases, max).await
+        } else {
+            cases.iter().map(|c| to::offline(p, &c.pane_tail)).collect()
+        };
+        all.push(to::metrics(p, &cases, &answers, synthetic));
+    }
+    Ok(all)
 }
 
 fn parse_wl_perturb(v: &[String]) -> Result<Vec<Perturbation>, String> {
@@ -720,7 +969,10 @@ async fn status_map_with(
     let (cases, dropped) = sm::cases(&rows);
     let (cases, split_sizes) = sm::split_cases(cases, split);
     let note = haiku.as_ref().map(Haiku::consent_note);
-    let ctx = if providers.contains(&sm::Provider::Jev) {
+    let ctx = if providers
+        .iter()
+        .any(|p| matches!(p, sm::Provider::Jev | sm::Provider::JevSplit))
+    {
         let path = db_path(db, opts, env)?;
         let store = Store::open_with_bus(&path, Arc::new(fleet_core::events::NoopEventBus))
             .map_err(|e| format!("open {}: {e}", path.display()))?;
@@ -811,6 +1063,73 @@ mod tests {
         let mut all = vec!["t"];
         all.extend_from_slice(args);
         T::try_parse_from(all).map(|t| t.cmd)
+    }
+
+    #[tokio::test]
+    async fn turn_outcome_runs_the_baselines_on_the_fixture_offline() {
+        let Ok(BenchCmd::TurnOutcome {
+            fixture, providers, ..
+        }) = parse(&["turn-outcome", "--fixture"])
+        else {
+            panic!("parses");
+        };
+        let env = HashMap::new();
+        let all = turn_outcome(
+            None,
+            fixture,
+            &providers,
+            None,
+            None,
+            &HubOptions::default(),
+            &env,
+        )
+        .await
+        .unwrap();
+        let names: Vec<&str> = all.iter().map(|m| m.provider.as_str()).collect();
+        assert_eq!(names, ["rule", "qmark"]);
+        assert!(all.iter().all(|m| m.synthetic && m.asked_labeled == 51));
+        assert!(
+            turn_outcome(None, false, &[], None, None, &HubOptions::default(), &env)
+                .await
+                .is_err()
+        );
+        assert!(parse(&["turn-outcome", "--fixture", "--provider", "haiku"]).is_err());
+    }
+
+    /// Every closed-choice use case is a subcommand that runs its built-in
+    /// set offline: the rule and the baseline, nothing judged.
+    #[tokio::test]
+    async fn every_choice_bench_runs_its_fixture_offline() {
+        let env = HashMap::new();
+        for &uc in UseCase::ALL {
+            let cmd = uc.command();
+            let Ok(parsed) = parse(&[&cmd, "--fixture"]) else {
+                panic!("{cmd} parses");
+            };
+            let a = match parsed {
+                BenchCmd::ControlRoute(a)
+                | BenchCmd::Duplicate(a)
+                | BenchCmd::RelatedSession(a)
+                | BenchCmd::WorkPlacement(a)
+                | BenchCmd::HostPlacement(a)
+                | BenchCmd::RoutineRunOutcome(a)
+                | BenchCmd::AdoptTarget(a)
+                | BenchCmd::RestoreTarget(a)
+                | BenchCmd::MainTicket(a)
+                | BenchCmd::TrackerDuplicate(a) => a,
+                other => panic!("{cmd}: {other:?}"),
+            };
+            let all = choice(uc, &a, &HubOptions::default(), &env).await.unwrap();
+            let names: Vec<&str> = all.iter().map(|m| m.provider.as_str()).collect();
+            assert_eq!(names, ["rule", "baseline"], "{cmd}");
+            assert!(all.iter().all(|m| m.synthetic && m.calls == 0), "{cmd}");
+            assert!(ch::lines(&all)[0].contains("SYNTHETIC"), "{cmd}");
+            let none = ChoiceArgs::default();
+            assert!(choice(uc, &none, &HubOptions::default(), &env)
+                .await
+                .is_err());
+        }
+        assert!(parse(&["host-placement", "--fixture", "--provider", "haiku"]).is_err());
     }
 
     #[test]

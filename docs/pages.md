@@ -6,9 +6,12 @@ the page and in what order. Everything else comes from the registries in
 and each data source's shape. A renderer turns the file into the page. The
 design is `docs/superpowers/specs/2026-09-28-declarative-pages-design.md`.
 
-In the app, every page appears in Settings. The left-hand list shows
-"General" (the hand-written panels), the Settings overview and its pages,
-then any other top-level page such as Usage. The search box above it finds
+In the app, every page appears in Settings. The left-hand list is the one
+Settings tree (`src/lib/settings_tree.ts`, redesign step 7.1): groups such as
+General, Sessions, Work and System, each leaf a hand-written panel, a page,
+or one section of a page (Voice is the Voice section of Limits). A page the
+tree does not name still shows: nested under its parent's leaf, or in a
+"More" group at the end. The search box above it finds
 any setting by its label, key, help text or tags. `@modified` lists the
 settings that differ from their default, and `@tag:experimental` (or
 another tag) filters by tag. Choosing a result opens its page and tab and
@@ -23,9 +26,12 @@ registries don't know.
 1. Write `crates/fleet-core/pages/<id>.json`. The file is named after the
    page's `id`.
 2. List the file in `PAGE_FILES` in `crates/fleet-core/src/pages/mod.rs`.
-3. Run `cargo test -p fleet-core pages::`. Each problem is reported with the
+3. Run `cargo fleet-test -- pages::`. Each problem is reported with the
    page and where in it, for example
    `settings.work › tab 1 › section 2 › item 3: `work.nope` is not a registered setting`.
+4. Give it a leaf in `SETTINGS_TREE` (`src/lib/settings_tree.ts`) when it
+   should not just sit under its parent. `settings_tree.test.ts` fails a
+   page that no leaf reaches, and a leaf naming a section the page lacks.
 
 The two generated files are what you write a spec against:
 
@@ -39,7 +45,7 @@ The two generated files are what you write a spec against:
 
 Regenerate both, together with the frontend tests' fixture, after changing
 the model, the catalog, a setting or a source:
-`REGEN_PAGE_DOCS=1 cargo test -p fleet-core page_docs_are_current`.
+`REGEN_PAGE_DOCS=1 cargo fleet-test -- page_docs_are_current`.
 
 ## Shape
 
@@ -202,6 +208,13 @@ The renderer lives in `src/lib/pages/`:
 - `Tabs.svelte` and `Disclosure.svelte`, tabs and collapsible sections;
 - `SettingsNav.svelte`, the page list and search.
 
+A section with `"matrix": true` shows its fields as one grid
+(`MatrixSection.svelte`): a row per option, a column per field, a checkbox
+in each cell, as Settings → Notifications does with Desktop, Phone and
+Sound. Every field must be a `choice_set` setting over the same options,
+with no `widget`, and there must be at least two of them. A resource page
+has no matrix.
+
 Its tests run against `src/lib/pages/registry.generated.json`. That file holds
 exactly what `list_pages` and `describe_fleet_settings` answer on a fresh
 store, so it is never a hand copy. It is regenerated with the other page docs.
@@ -221,8 +234,22 @@ type declares:
   - `choice`, a closed set of values with labels (shown read-only, or as a
     `label` badge);
   - `time`, a unix time shown as "5 min ago";
+  - `count`, a whole number the backend counts, shown and never edited (an
+    absent value reads `0`);
+  - `money`, micro-USD shown as dollars, and `money_series`, a
+    `[{ day, cost_micros }]` list shown as a bar chart with a table toggle;
+    an absent value leaves either out (the caller may not see spend);
+  - `sync`, a transfer in progress (`{ done, total, both_ways, since? }`,
+    a hub link's): a Constellation with the real count ("412 of 1 280
+    messages · 18 s") while `total` is above `done`, a Counter-orbit while
+    both ends trade with nothing queued; absent while idle, and left out;
   - `items`: a list changed through its own `remove` and `add` actions,
-    shown by a closed formatter (`plain`, `field`, `org_rule`);
+    shown by a closed formatter (`plain`, `field`, `org_rule`, `device`,
+    `member`, or `admin_need`, which lists each need on its own line with
+    why or when).
+    A record that carries no such key at all (an older hub, or a list only
+    the operator is shown) leaves the field out rather than showing it
+    empty;
 - which fields are editable (`edit` names the update argument), with a
   `badge` shown in the list and a `confirm` asked before Apply. A field kept
   inside a JSON argument (a tracker's `settings.write_back.pr_remote_link`)
@@ -233,7 +260,9 @@ type declares:
   `text`, `secret` (a password input, never kept), `color` or `options`;
   `variants` limits an action to records whose `variant_by` field holds one
   of the listed values (Jira asks an email and a token, Asana a token); a
-  `report` action shows the command's `{ ok, error }` as a toast.
+  `report` action shows the command's `{ ok, error }` as a toast, and a
+  `busy` action shows that loader beside its form while the command runs
+  (`counter-orbit` when Link a hub talks to the other hub).
 
 Every action names an **existing desktop command** and binds each argument
 to one of: a record field, the sub-item or its field, a form param, or
@@ -242,7 +271,30 @@ unchanged. On a paired desktop the list routes to the hub, and the page is
 read-only with that command's reason.
 
 A `master_detail` page names its resource and lays out one record's fields
-in sections, each field exactly once:
+in sections, each field exactly once. A section with `"tiles": true` holds
+only `count` and `money` fields and shows them as tiles: the label, the
+value, and the field's `sub` line (`budget`: "82% of $750" from a budget in
+whole USD, with a Meter that warns from 80% and is critical once reached;
+`count`: "2 need you"), as the org overview does. The record's fields can be
+laid out in `tabs` instead of `sections` (the org's Overview, Members,
+Devices, Spend and Settings): the editor keeps one draft across them, and a
+tab whose sections hold exactly one list shows its count. A field label may
+name the record with `{title}`, its one placeholder ("Allow Jev (decision
+model) for {title}'s work" reads "… for Acme's work").
+
+A page may also draw its records as a `graph` above the list — the centre
+node joined to each record, the line solid while the record's `state`
+(a `choice` field) is one of `up` and dashed otherwise, with up to three
+plain `facts` (text, count or time fields) under each name. The list stays
+the keyboard path, and the figure says the same in its label and legend.
+Federation's linked hubs use it:
+
+```json
+"graph": { "center": "This hub", "state": "state", "up": ["connected"],
+           "facts": ["latency", "messages_today"] }
+```
+
+The org overview, shortened:
 
 ```json
 { "spec": "fleet.page/1", "id": "settings.orgs", "title": "Organisations",
@@ -410,6 +462,9 @@ desktop the guides are the hub's (`list_guides`, `decide_guide`,
   filtered parameter itself.
 - Titles are at most 60 characters. Text is plain, with no `<` or `>`.
 - Parents form a tree.
+- A `graph` is on a `master_detail` page; its `state` is a `choice` field,
+  `up` names some of its values (not none, not all), and its facts are at
+  most three plain fields.
 - Unknown fields and item types are refused when the file is parsed.
 
 ## Add a setting
@@ -418,7 +473,7 @@ desktop the guides are the hub's (`list_guides`, `decide_guide`,
    label, help, unit and the rest (see `every_spec_has_consistent_metadata`).
 2. Place the setting as a `field` on the right page.
 3. Regenerate the settings docs:
-   `REGEN_SETTINGS_DOCS=1 cargo test -p fleet-core settings_docs_are_current`.
+   `REGEN_SETTINGS_DOCS=1 cargo fleet-test -- settings_docs_are_current`.
 4. Regenerate the page docs (see above).
 
 ## Add a data source
@@ -429,9 +484,9 @@ desktop the guides are the hub's (`list_guides`, `decide_guide`,
 2. Add its reader to `fetch`.
 
 `every_source_has_a_reader_that_returns_its_shape` holds the reader to the
-declared shape. A **live** source (`live: { command, event }`, today only
-`accounts.usage`) has no reader: the app loads it with `command` and keeps
-it current from the `event` row kind, so `fetch_page_source` refuses it and
+declared shape. A **live** source (`live: { command, event }`, today
+`accounts.usage` and `updates.targets`) has no reader: the app loads it
+with `command` and keeps it current from the `event` row kind, so `fetch_page_source` refuses it and
 `resource_commands_exist` holds `command` to the handler list. A source is read-only; changes are made through actions
 (design P4). Every source reads the whole fleet, so it is only for whatever
 owns the fleet. An org-scoped view is a new source, not a parameter.

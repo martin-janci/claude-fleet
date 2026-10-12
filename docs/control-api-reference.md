@@ -1,11 +1,27 @@
 <!-- GENERATED FILE — do not edit by hand.
-     Regenerate with: REGEN_DOCS=1 cargo test -p fleet-core reference_is_current -->
+     Regenerate with: REGEN_DOCS=1 cargo fleet-test -- reference_is_current -->
 
 # claude-fleet Control API — Tool Reference
 
 Auto-generated from the embedded MCP tool router. See [`control-api.md`](control-api.md) for the narrative guide.
 
 ## MCP tools
+
+### `access_requests`
+
+Asks for a wider level on sessions you OWN. list (default; session_id narrows it), grant {id} (re-shares at the asked level) or decline {id}. Errors: E_NOTFOUND, E_FORBIDDEN, E_VALIDATE, E_INVALID_STATE (the asker's share is gone).
+
+Parameters: `action`, `id`, `session_id`
+
+### `account_usage`
+
+Each Claude account's latest plan usage: 5-hour and weekly utilization with reset times, status, fetched_at. Never fetches.
+
+### `add_account`
+
+Add a Claude login profile on a host: a subscription login or an API key.
+
+Parameters: `action`, `api_key`, `code`, `daily_limit_usd`, `host_alias`, `key`, `nickname`, `profile`
 
 ### `add_host`
 
@@ -19,15 +35,51 @@ Add a project on a host: clone a GitHub URL, adopt a folder (the hub's local hos
 
 Parameters: `confirm_nonce`, `host_alias`, `source`
 
+### `adopt_session`
+
+Adopt a live tmux session fleet did not start (started_at null: someone ran tmux by hand on the host). Fleet runs it from now on: started_at is set and the caller becomes its owner when it has none. project_id puts it in that project (lost_target proposes one). The pane is untouched. Errors with E_INVALID_STATE for a row fleet already runs, a lost one (use restore_host_sessions) or one with no pane (bg, external).
+
+Parameters: `project_id`, `session_id`
+
+### `agent_installs`
+
+fleet-agent install jobs, newest first: state, step, detail.
+
+Parameters: `alias`
+
 ### `agent_status`
 
 Which agent hosts (transport "agent") have a fleet-agent connected: since (unix s), version, host name, OS. Offline ones show connected=false; a call for one fails fast with E_AGENT_OFFLINE. enabled=false where no agents are accepted (the desktop).
+
+### `agents`
+
+The built-in agents (PR reviewer, support): status {agent?, limit?} (rules, newest jobs, actions waiting for a person), grant {agent: review | support, scope: gh:<owner>/<repo> | jira:<tracker id>:<PROJECT>, host, level: watch | propose | act, project_id?, config?, hours?}, revoke {id}, pause_all, approve {id}, reject {id}. The owner's own device; writes need a trusted full device.
+
+Parameters: `action`, `agent`, `config`, `host`, `hours`, `id`, `level`, `limit`, `project_id`, `scope`
+
+### `answer_mcp_confirm`
+
+Approve or deny one waiting call by nonce; false if already answered or expired.
+
+Parameters: `approved`, `nonce`
+
+### `api_tokens`
+
+Named Control API tokens. list; create {name, scope: read | act | admin, expires_in_days?, hosts?} answers the token ONCE, with env_line; revoke {name}. A device creates read or act only, and needs trust.
+
+Parameters: `action`, `expires_in_days`, `hosts`, `name`, `scope`
 
 ### `apply_sync`
 
 Apply a plan_sync plan: writes files with compare-and-swap, backs up overwritten files, merges config (files end up mode 0600), installs plugins, writes the managed manifest, then re-scans. Master token only; requires confirmation. restart_required marks hosts whose Claude must be restarted.
 
 Parameters: `confirm_nonce`, `force_partial`, `plan_id`
+
+### `ask`
+
+Chat forms: `form` (fleet.form/1) opens a form in YOUR session's chat and waits ≤600 s for the person's answers (status answered | pending | declined | cancelled | expired; on pending call `wait`). `draft` shows it while written. `cancel` withdraws. A person's side: list, get, answer, decline. Spec: docs/forms.md.
+
+Parameters: `answer`, `cancel`, `decline`, `draft`, `form`, `get`, `list`, `note`, `timeout_s`, `values`, `wait`, `why`
 
 ### `broadcast_prompt`
 
@@ -55,9 +107,51 @@ Parameters: `action`, `args`, `catalog`, `confirm_nonce`
 
 ### `changesets`
 
-Changeset cards that adopt, sync and fix assets: list (one in full with id), propose (rebuild from the last scan), apply (positions picks items; a drift card takes one), undo (the latest applied card per catalog), dismiss, reject_item. Mutating actions need a grant on every catalog the card names.
+Changeset cards that adopt, sync and fix assets: list (one in full with id), propose (rebuild from the last scan), propose_layer (a layer change as a card), apply (positions picks items; a drift card takes one), undo (the latest applied card per catalog), dismiss, reject_item. Mutating actions need a grant on every catalog the card names.
 
-Parameters: `action`, `confirm_nonce`, `id`, `positions`
+Parameters: `action`, `change`, `confirm_nonce`, `id`, `positions`
+
+### `check_account_headroom`
+
+Whether starting or switching a session on host_alias under login `profile` (a profile name; omitted or "" for the host's own) crosses accounts.pause_at, and the login on that host with the most headroom: {pause_at_pct, chosen?, over, suggestion?, logins:[{profile?, account_uuid, used_pct?}]}. From the usage account_usage serves; never fetches. Errors: E_NOTFOUND (no such host), E_INVALID.
+
+Parameters: `host_alias`, `profile`
+
+### `check_host`
+
+A host's health checklist over SSH: tmux, the agents on PATH, fleet's hooks and worker guard in ~/.claude/settings.json; base_path: whether it exists and is writable. Reads only.
+
+Parameters: `alias`, `base_path`
+
+### `control_handoffs`
+
+What the agent handed on, newest first: prompts and tasks sent to sessions, new sessions, missions, tasks and proposed trees, each with its target's state now.
+
+Parameters: `limit`
+
+### `control_route`
+
+Where a message just sent in Control goes (propose {text}), or record the person's pick (follow {run_id, chosen}).
+
+Parameters: `action`, `chosen`, `run_id`, `text`
+
+### `dashboards`
+
+The person's pinned dashboards (`dashboard` blocks): list | get {id} | pin {dashboard, why?} | unpin {id}. The agent only reads (E_FORBIDDEN).
+
+Parameters: `action`, `dashboard`, `id`, `why`
+
+### `debug_devices`
+
+Phones, emulators and simulators on any fleet host, used from any session that may see them; commands run on the device's host. run: one adb / simctl / devicectl command. install copies the app from your host. screenshot answers an image. A claim keeps others off (E_CONFLICT); use extends it. claim with queue waits in line for a held one; it is yours when your turn comes.
+
+Parameters: `action`, `args`, `claim_s`, `contains`, `device`, `downgrade`, `filter`, `host`, `label`, `lines`, `name`, `note`, `path`, `queue`, `refresh`, `shared`, `since_s`, `timeout_s`
+
+### `decide_related_session`
+
+Answer a session's related_session proposal {session_id, run_id, linked}: linked=true (Link) keeps the other session listed as linked, false (Not related) withdraws it. Nothing is stopped or merged. Returns the session's row.
+
+Parameters: `linked`, `run_id`, `session_id`
 
 ### `decide_setting_proposals`
 
@@ -95,11 +189,11 @@ Parameters: `confirm_nonce`, `new_worker`, `prompt`, `raw`, `requester_session_i
 
 ### `ensure_operator`
 
-Ensure the UX agent's operator session exists; returns its row.
+Ensure the UX agent's operator session exists on a reachable host; returns its row.
 
 ### `fleet_health`
 
-Backend health: app and schema version, database readiness, the cached fleet roll-up, per-host reverse-tunnel health (tunnels_flapping: supervised but crash-looping, so the Control API is unreachable from that host), and ESTIMATED token usage and cost (micro-USD) per host and UTC day for 7 days, and trackers (each ok/degraded/failing, failures in a row, last error and success; detection_backlog: suggestions undecided for detection_backlog_days). A per-host token sees its own host's usage and its org's trackers. hub: uptime and last reconcile pass; tunnels_mode none|reverse; peer_links_total. hosts[]: per host disk_home_pct/disk_low, claude_behind, agent_behind, hooks_silent. decide (master only): Jev's last hour, degraded if its breaker is open or >20% failed.
+Backend health: app and schema version, database readiness, the cached fleet roll-up, per-host reverse-tunnel health (tunnels_flapping: supervised but crash-looping, so the Control API is unreachable from that host), and ESTIMATED token usage and cost (micro-USD) per host and UTC day for 7 days, and trackers (each ok/degraded/failing, failures in a row, last error and success; detection_backlog: suggestions undecided for detection_backlog_days). A per-host token sees its own host's usage and its org's trackers. hub: uptime and last reconcile pass; tunnels_mode none|reverse; peer_links_total. devices: {paired, last_seen_at, last_sync_at}. playbooks_week: runs per kind. hosts[]: per host disk_home_pct/disk_low, claude_behind, agent_behind, hooks_silent. decide (master only): Jev's last hour, degraded if its breaker is open or >20% failed; week: 7 days' answers. loops[]: each background job's last and next run and result (ok/error/paused); automation_paused.
 
 ### `forget_project`
 
@@ -143,11 +237,29 @@ Read the messages sent TO session_id, newest first; task results arrive as kind=
 
 Parameters: `fresh_for`, `limit`, `mark_read`, `session_id`, `summary`, `unread_only`
 
+### `install_agent`
+
+Install fleet-agent on a host this hub reaches over SSH and move the host onto it. Returns the job at once (see agent_installs): target, download (SHA256SUMS-checked), start, connect (no hello in 120 s: back on SSH). Hub only.
+
+Parameters: `alias`, `hub_url`, `version`
+
 ### `kill_session`
 
 Kill a session: a tmux session, or a background agent row (`bg:<uuid>`, kind `bg`) via `claude stop`; an inactive one (claude_status `stopped`) is removed from the list instead. Rows of kind `external` (Claude running outside fleet) are refused with E_INVALID_STATE: close them where they run. For disposable or already-pushed work you want gone NOW; prefer safe_kill_session when the worktree may hold unpushed work. Returns the killed id. May return E_CONFIRM_REQUIRED when desktop confirmation is on.
 
 Parameters: `confirm_nonce`, `force`, `host_alias`, `name`, `session_id`
+
+### `library`
+
+Library: files a person put on a host (Upload or a prompt's attachment). list {session_id?, host_alias?, limit?}: {items}; add {kind: upload|attachment, session_id, files: [{path, name?, size?}]} records files already on the session's host; remove {id} drops a row, never the file. Downloads: list_downloads. E_NOTFOUND, E_INVALID.
+
+Parameters: `action`, `files`, `host_alias`, `id`, `kind`, `limit`, `session_id`
+
+### `link_peer`
+
+Link this hub to another fleet's hub: redeem a peer code minted there (fleet-hub pair --mode peer) against its https URL. Answers the new link; it connects within seconds. The master, or the hub owner's trusted full device.
+
+Parameters: `code`, `url`
 
 ### `list_accounts`
 
@@ -157,9 +269,11 @@ The cached Claude accounts seen across hosts.
 
 The asset catalog (skills, agents, hooks, MCP servers, plugin refs) with each asset's per-host drift state from the last scan, plus unmanaged assets on hosts and catalog parse problems. E_CATALOG_NOT_CONFIGURED until a catalog is set (in the app, or `fleet-hub catalog set` on a hub).
 
+Parameters: `all_catalogs`
+
 ### `list_clients`
 
-Paired client devices and what each token may do. The token digest is never returned: a token exists in plaintext only in the /pair response that minted it. Read-only but master token only (it names every paired device). Rows: { id, name, mode, created_at, last_seen_at, revoked_at, trusted_at }.
+Paired client devices and what each token may do. The token digest is never returned: a token exists in plaintext only in the /pair response that minted it. Read-only but master token only (it names every paired device). Rows: { id, name, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id, person_id }.
 
 Parameters: `include_revoked`
 
@@ -173,7 +287,7 @@ Parameters: `limit`, `session_id`
 
 Repositories gh on the host can see, for choosing what to clone with add_project.
 
-Parameters: `host_alias`
+Parameters: `host_alias`, `owner`
 
 ### `list_host_worktrees`
 
@@ -183,7 +297,7 @@ Parameters: `host_alias`, `project_id`
 
 ### `list_hosts`
 
-Registered hosts: reachability, claude/tmux versions, linked account.
+Registered hosts: reachability, claude/tmux versions, linked account. unclaimed_sessions is how many sessions on that host nobody owns, served to a one-person fleet and to who administers the host: null means not told, 0 means none.
 
 ### `list_layers`
 
@@ -195,7 +309,7 @@ The settings page specs, data source shapes, resources and page actions a device
 
 ### `list_peer_links`
 
-List this hub's links to other fleets' hubs: fleet, role, state, pending count, last exchange and error. Never a token. Read-only, master token only.
+List this hub's links to other fleets' hubs: fleet, role, state, pending count, last exchange and error. Never a token. Read-only; the master or the hub owner's own device.
 
 ### `list_projects`
 
@@ -211,15 +325,25 @@ Parameters: `claude_status`, `force`, `fresh_for`, `host_alias`, `include_lost`,
 
 ### `list_tasks`
 
-Tasks, newest first. Read-only. A per-host token sees only tasks it requested from its host or whose worker is on its host.
+Tasks, newest first. Read-only. A per-host token sees only tasks it requested from its host or whose worker is on its host. `mine: true` from inside a fleet session lists the tasks your own session dispatched or was given; every row names your end (`is_self_requester` / `is_self_worker`).
 
-Parameters: `limit`, `requester_session_id`, `state`
+Parameters: `limit`, `mine`, `requester_session_id`, `state`, `worker_session_id`
 
 ### `list_worktrees`
 
 Git worktrees fleet knows about, with their alive-session occupants (0 = free to delete via delete_worktree). Returns {total, worktrees}: total counts every match. Narrow with project_id / host_alias: a fleet-wide call answers hundreds of rows.
 
 Parameters: `host_alias`, `limit`, `project_id`, `summary`
+
+### `lost_target`
+
+Read-only: the project a Lost and found entry would go into, to prefill Adopt or Restore. Pass session_id (a pane fleet did not start) or host_alias, claude_session_id, cwd and git_branch (a conversation discover_lost_sessions found). A directory inside a fleet project answers source rule; otherwise, with decide.jev.adopt_target / restore_target at assist, Jev may answer source jev with a confidence, or unsure (leave the form blank). Never adopts or restores anything.
+
+Parameters: `claude_session_id`, `cwd`, `git_branch`, `host_alias`, `session_id`
+
+### `mcp_confirms`
+
+Calls waiting for your OK (the agent's starts and kills), oldest first.
 
 ### `merge_host`
 
@@ -233,17 +357,21 @@ Move a work session to another host, carrying its work as it is: the transcript,
 
 Parameters: `clean_target`, `confirm_nonce`, `dry_run`, `force_cross_org`, `keep_source`, `session_id`, `strict`, `target_host_alias`, `when`
 
+### `my_grants`
+
+Who you are on this fleet and every live grant TO you: { person_id, grants: [{ session_id, level }] }. With each row's owner_person_id and visibility, this is what a client derives its access from. Re-read after a reconnect the hub could not replay.
+
 ### `new_bg_session`
 
-Launch a supervised headless (background) Claude session on a host with an initial prompt, which becomes its default friendly name. Returns the claude_session_id AND the fleet row (`session`; absent until reconcile matches it, on the next tick) for session_transcript { session_id }.
+Launch a supervised headless (background) Claude session on a host with an initial prompt, which becomes its default friendly name. Returns the claude_session_id AND the fleet row (`session`; absent until reconcile matches it, on the next tick) for session_transcript { session_id }. agent "codex" needs project_id and takes no read_only or stop limits.
 
-Parameters: `confirm_nonce`, `host_alias`, `name`, `prompt`, `requester_session_id`
+Parameters: `agent`, `confirm_nonce`, `host_alias`, `name`, `project_id`, `prompt`, `read_only`, `requester_session_id`, `stop_after_secs`, `stop_after_usd`
 
 ### `new_session`
 
 Create a Claude Code tmux session on a host, in a project (and optional worktree, or a fresh one with new_worktree). Auto-clones the repo on remote hosts.
 
-Parameters: `base_branch`, `confirm_nonce`, `effort`, `friendly_name`, `host_alias`, `kind`, `model`, `name`, `new_worktree`, `project_id`, `resume_claude_session_id`, `start_command`, `worktree_id`
+Parameters: `agent`, `base_branch`, `confirm_nonce`, `effort`, `friendly_name`, `host_alias`, `kind`, `model`, `name`, `new_worktree`, `over_limit_ok`, `profile`, `project_id`, `resume_claude_session_id`, `start_command`, `start_token`, `worktree_id`
 
 ### `new_shell_session`
 
@@ -253,13 +381,25 @@ Parameters: `base_branch`, `confirm_nonce`, `host_alias`, `name`, `new_worktree`
 
 ### `operator_status`
 
-Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_host.
+Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_host|host_down; fallback: where ensure_operator moves it.
+
+### `org_admin`
+
+Administer the company: orgs (work_admin's org actions), devices (list, pair_device → code + QR, revoke, trust, bind, hand over, grant a catalog), people and members (roles, a member's grants). Hub owner's device: all; an org admin's: their org. Changes need a trusted full device, never locking out the one in use.
+
+Parameters: `action`, `admins_see_unclaimed`, `auto_tidy`, `bound_sees_unassigned`, `catalog`, `color`, `device`, `display_name`, `grant_id`, `host_alias`, `hosts`, `isolate_sessions`, `jev`, `jev_reply`, `keep_grants`, `key`, `members_own_sessions_only`, `mode`, `name`, `on`, `org`, `org_id`, `owner`, `owns_hub`, `path`, `path_prefix`, `person`, `person_id`, `project_id`, `remote`, `repo`, `role`, `rule_id`, `tracker_id`, `trusted`, `ttl_s`, `value`
 
 ### `pair_client`
 
-Mint a single-use pairing code for a new client device (phone, browser) and return the URL to show as a QR. The code (not a token) travels in the URL FRAGMENT, so no proxy or access log sees it; the device posts it to /pair once for a token of its own. name: 1-64 chars, no control characters, not a live client's. mode full drives sessions fleet-wide, readonly observes, peer is another hub's link (see peer_exchange), updater is fleet-updater's (/update only); fleet-admin tools stay out of a client's reach. Codes are in memory only: a hub restart voids them. org_id binds it to one org (its work and sessions only). Master token only. Returns { url, code, expires_in_s, name, mode, trusted, org_id }.
+Mint a single-use pairing code for a new client device (phone, browser) and return the URL to show as a QR. The code (not a token) travels in the URL FRAGMENT, so no proxy or access log sees it; the device posts it to /pair once for a token of its own. name: 1-64 chars, no control characters, not a live client's. mode full drives sessions fleet-wide, readonly observes, peer is another hub's link (see peer_exchange), updater is fleet-updater's (/update only); fleet-admin tools stay out of a client's reach. Codes are in memory only: a hub restart voids them. org_id binds it to one org (its work and sessions only). person names whose device it is; the default is this hub's owner, and its sessions are private to that person. Master token only. Returns { url, code, expires_in_s, name, mode, trusted, org_id, person }.
 
-Parameters: `mode`, `name`, `org_id`, `trusted`, `ttl_s`
+Parameters: `mode`, `name`, `org_id`, `person`, `trusted`, `ttl_s`
+
+### `pause_download`
+
+Pause (paused: true) or resume a sent file's copy in flight; it stops between slices. Answers the row. E_INVALID_STATE when it is not being copied.
+
+Parameters: `id`, `paused`
 
 ### `peer_exchange`
 
@@ -273,11 +413,23 @@ What is a peer session doing: claude_status, current_activity, stuck_kind, conte
 
 Parameters: `session_id`
 
+### `place_transcript`
+
+Restore into a project: copy a conversation discover_lost_sessions found (not resumable where it ran) under the directory Claude Code keys that project's root by, on the same host, so claude --resume finds it there. Never moves or overwrites a transcript. Then resume with new_session { host_alias, project_id, name: tmux_name, resume_claude_session_id }.
+
+Parameters: `claude_session_id`, `host_alias`, `project_id`
+
 ### `plan_sync`
 
 Compute a sync plan: scan the hosts, compare every catalog asset with what is installed, and return per-host actions (create | update | overwrite | adopt | remove | plugin_install | plugin_update | noop | blocked) plus a plan_id for apply_sync. plugin_update fires when a pinned plugin's catalog version changes; a host left on the old version stays blocked. orphan: in the host's fleet manifest, no longer in the catalog. A remote host with no layers assigned is skipped (it would otherwise get the whole catalog) unless allow_unlayered is set. Nothing is written.
 
 Parameters: `allow_unlayered`, `host_alias`, `kind`, `name`
+
+### `pr_shepherd`
+
+The PR shepherd's standing rules per project: status (rules, episodes, merges), grant {project_id, level: watch | nudge | merge, hours?, recipes?}, revoke {project_id}, pause_all. The owner's own device; writes need a trusted full device.
+
+Parameters: `action`, `hours`, `level`, `limit`, `project_id`, `recipes`
 
 ### `probe_host`
 
@@ -285,15 +437,43 @@ Re-probe a host's reachability and versions. Returns the host row.
 
 Parameters: `alias`
 
+### `project_picks`
+
+The New session picker's choices per project: pinned, vis (hide|keep), group.
+
+### `propose_host_placement`
+
+Jev's host for a new session of project_id: {host_alias, confidence_pct, run_id}, or null (off, one candidate, unsure). E_FORBIDDEN for an org-bound client.
+
+Parameters: `project_id`
+
 ### `propose_layers`
 
 Propose a layer split from the last scan, grouping assets by the exact set of hosts they are on: the largest group becomes 'core'; single-host assets come back separately for triage. Read-only.
 
 ### `provision_hosts`
 
-Install fleet skills, the Stop / UserPromptSubmit / EnterWorktree http hooks and this fleet's MCP server entry (per-host bearer token) into every reachable host's ~/.claude.json (a reverse SSH tunnel when the hub is loopback-only). Returns per-host status; each host must restart Claude to load it. host: one alias; content_only: skills, CLAUDE.md and hooks only, no token.
+Install fleet skills, the Stop / UserPromptSubmit / EnterWorktree http hooks and this fleet's MCP server entry (per-host bearer token) into every reachable host's ~/.claude.json (a reverse SSH tunnel when the hub is loopback-only). Returns per-host status; each host must restart Claude to load it. host: one alias; content_only: skills, CLAUDE.md and hooks only, no token. The hub owner's device may run content_only for one host only.
 
 Parameters: `content_only`, `host`, `rotate`
+
+### `prs`
+
+Pull requests sessions opened, newest first, with state, CI, merge time and opener.
+
+Parameters: `action`, `limit`, `project_id`, `state`
+
+### `queue_prompt`
+
+Send a prompt as a new turn when the session is idle: typed now if it is, else kept and typed once its turn ends (never into a dialog). Send later: not_before (unix secs) holds it until then, until_limit_reset while the account is at its limit, skip_if_archived drops it if the session is archived first. Marked untrusted unless raw=true (master only). Returns { session_id, delivered, queued_id }.
+
+Parameters: `confirm_nonce`, `not_before`, `prompt`, `raw`, `session_id`, `skip_if_archived`, `until_limit_reset`
+
+### `queued_prompts`
+
+A session's prompts from queue_prompt still waiting, and any whose typing failed. cancel=<id> takes one back instead.
+
+Parameters: `cancel`, `session_id`
 
 ### `quick_replies`
 
@@ -343,25 +523,37 @@ Parameters: `host_alias`, `new_name`, `old_name`, `session_id`
 
 ### `repair_session`
 
-Repair a session workspace (the Repair workspace button): make its directory a healthy git worktree on its branch with its tmux session running there. Goes past the automatic checks: may unregister a stale worktree entry, adopt its branch checkout elsewhere, recreate the branch from base once origin confirms it is gone, and respawn a pane whose directory vanished. No-op when healthy. Call it after any tool answers E_REPAIR_REQUIRED, then retry that tool. Returns a RepairReport. Errors: E_REPO_MISSING, E_BRANCH_CHECKED_OUT, E_WORKSPACE_LOCKED, E_REPAIR_FAILED, E_HOST_OFFLINE, E_CONFIRM_REQUIRED (gated by mcp.confirm_destructive).
+Repair a session workspace (the Repair workspace button): make its directory a healthy git worktree on its branch with its tmux session running there. Goes past the automatic checks: may unregister a stale worktree entry, adopt its branch checkout elsewhere, recreate the branch from base once origin confirms it is gone, and respawn a pane whose directory vanished. No-op when healthy. Call it after any tool answers E_REPAIR_REQUIRED, then retry that tool. progress_token: steps arrive as repair:progress. Returns a RepairReport. Errors: E_REPO_MISSING, E_BRANCH_CHECKED_OUT, E_WORKSPACE_LOCKED, E_REPAIR_FAILED, E_HOST_OFFLINE, E_CONFIRM_REQUIRED (gated by mcp.confirm_destructive).
 
-Parameters: `confirm_nonce`, `host_alias`, `name`, `session_id`
+Parameters: `confirm_nonce`, `host_alias`, `name`, `progress_token`, `session_id`
+
+### `repo_blame`
+
+Blame of one worktree file as runs of lines: {path, hunks: [{start, lines, hash, author, time, summary, uncommitted}], truncated}.
+
+Parameters: `path`, `session_id`
+
+### `repo_branch_diff`
+
+What a session's branch carries: the commits no remote has and the files they change, and the files it changes against the base branch: {branch, upstream, unpushed, unpushedFiles, truncated, base, aheadOfBase, baseFiles, behindBase}.
+
+Parameters: `session_id`
 
 ### `repo_branches`
 
-Local + remote branches of a session's worktree, with ahead/behind.
+Local + remote branches of a session's worktree, with ahead/behind and `merged` (the base branch contains the tip).
 
 Parameters: `session_id`
 
 ### `repo_changes`
 
-A session's changed files (git status) in its worktree.
+A session's changed files (git status) in its worktree, each with added/removed line counts against HEAD when git diffs it.
 
 Parameters: `session_id`
 
 ### `repo_commit`
 
-One commit's metadata + changed files: {hash, subject, body, author, date, files}.
+One commit's metadata + changed files with added/removed line counts: {hash, subject, body, author, date, files, pushed}.
 
 Parameters: `hash`, `session_id`
 
@@ -389,6 +581,12 @@ Commit log (branch graph) of a session's worktree, newest first, with parents + 
 
 Parameters: `all`, `limit`, `session_id`, `skip`
 
+### `repo_range_diff`
+
+One file's diff over a session's unpushed commits (range `unpushed`) or against the base branch (range `base`): {path, diff, binary, truncated}.
+
+Parameters: `path`, `range`, `session_id`
+
 ### `repo_tree`
 
 A session's worktree files (tracked + untracked, gitignore respected): {entries, truncated}.
@@ -411,13 +609,19 @@ Parameters: `host_alias`
 
 Restart a tmux session in place (kill and recreate): for a wedged Claude REPL whose tmux and worktree are fine; cheaper than recreate_session. Returns the updated row.
 
-Parameters: `confirm_nonce`, `force`, `host_alias`, `name`, `session_id`
+Parameters: `confirm_nonce`, `effort`, `force`, `host_alias`, `model`, `name`, `profile`, `session_id`
 
 ### `restore_host_sessions`
 
 Restore sessions a host lost to a reboot or tmux restart: resume each one's conversation in its original worktree under its original name. Call dry_run first, and again after a timeout to see what is still lost. One failing session never fails the others; every outcome is listed. One restore per host at a time (E_INVALID_STATE otherwise); a lost fleet controller is skipped (recreate_session force=true). Paced by restore.batch_size / restore.stagger_ms.
 
 Parameters: `confirm_nonce`, `dry_run`, `host_alias`, `session_ids`
+
+### `resume_or_new`
+
+Whether a new session on a work key should resume a past session or start fresh (propose {key}), or record the person's pick (follow {key, chosen}).
+
+Parameters: `action`, `chosen`, `key`
 
 ### `revoke_client`
 
@@ -431,11 +635,23 @@ Truncate a session's transcript into a new conversation: "fork" starts a new ses
 
 Parameters: `anchor_uuid`, `confirm_nonce`, `mode`, `new_worktree`, `session_id`
 
+### `routines`
+
+Routines: a saved prompt that starts a session on cron, a session or PR event or Run now. list; get {routine_id}: runs and fixes; runs {routine_id, limit?}; failing: Inbox; budget: fleet spend today; save {routine, routine_id?}: the whole routine; preview: save's dry run; delete; set_enabled {enabled}; skip_next {skip?}; run_now; set_run_outcome {run_id, outcome}: a person's did_work | nothing | needs_person (needs_person lands it in the Inbox). Pause all stops the schedule, not run_now. E_NOTFOUND, E_INVALID.
+
+Parameters: `action`, `enabled`, `limit`, `outcome`, `routine`, `routine_id`, `run_id`, `skip`
+
 ### `run_prompt`
 
 send_prompt + wait_for_session(turn_gt) + session_transcript in one call. Returns { turn_seq, status: satisfied | timeout, transcript } (the reply as plain text; null with transcript_error when unreadable). Marked untrusted unless raw=true (master token only).
 
-Parameters: `max_chars`, `prompt`, `raw`, `session_id`, `timeout_s`
+Parameters: `confirm_nonce`, `max_chars`, `prompt`, `raw`, `session_id`, `timeout_s`
+
+### `runs`
+
+Runs, newest first: tasks, mission steps, Jev decisions, planner and summary runs, routine fires. list: {runs, total}; each run has kind, owner, outcome (ok | failed | needs_person | nothing_to_do | running), duration_ms, cost_micros and session_ids.
+
+Parameters: `action`, `kind`, `limit`, `mission_id`, `offset`, `org_id`, `outcome`, `routine_id`, `session_id`, `since`, `until`
 
 ### `safe_kill_session`
 
@@ -448,6 +664,12 @@ Parameters: `confirm_nonce`, `host_alias`, `session_id`, `tmux_name`
 Scan hosts for installed skills/agents/hooks/MCP servers/plugins and recompute each catalog asset's state (in_sync | drifted | missing | unmanaged | unsupported | orphan). Read-only on hosts.
 
 Parameters: `host_alias`
+
+### `search`
+
+Search everything the hub indexes: tasks and tickets (key, title, brief, description), sessions (name, host, branch, tags, last prompt, notes), conversations (first prompt), pull requests, the work journal, and conversation text when the hub indexes transcripts (setting search.index_transcripts, off by default). Every word must match, in any order; case and accents are ignored and each word matches as a prefix. Only what you may see is returned. Returns { hits: [{ kind, ref, title, title_marks?, snippet, snippet_marks?, at, session_id?, session_name?, host_alias?, claude_session_id?, task_id?, key? }], transcripts_indexed }; marks are [start, end) in UTF-16 units.
+
+Parameters: `kinds`, `limit`, `query`
 
 ### `send_file`
 
@@ -463,15 +685,39 @@ Parameters: `body`, `client_msg_id`, `deliver`, `from_session_id`, `kind`, `raw`
 
 ### `send_prompt`
 
-Send and SUBMIT a prompt to a running Claude session's REPL (pasted, then one Enter); the first prompt to an unnamed session also names it. Marked untrusted unless raw=true (master only) or a trusted client. keys presses a key instead. Returns { delivered, session_id, turn_seq_before, queued, acked }: pass turn_seq_before to wait_for_session { until: "turn_gt" } or session_transcript { since_turn } for the reply (run_prompt does all three). Refuses a blocked or stuck session (E_INVALID_STATE) unless force=true; a working one queues it. acked: true = hook-confirmed, false = not within 1.5 s (check capture_session), null = unknowable.
+Send and SUBMIT a prompt to a Claude session's REPL (pasted, then one Enter); the first prompt to an unnamed session also names it. Marked untrusted unless raw=true (master only) or a trusted client. Returns { delivered, session_id, turn_seq_before, queued, acked }: pass turn_seq_before to wait_for_session { until: "turn_gt" } or session_transcript { since_turn } for the reply (run_prompt does all three). Refuses a blocked or stuck session (E_INVALID_STATE) unless force=true; a working one queues it. acked: true = hook-confirmed, false = not within 1.5 s (check capture_session), null = unknowable.
 
-Parameters: `client_msg_id`, `force`, `host_alias`, `keys`, `prompt`, `raw`, `session_id`, `submit`, `tmux_name`
+Parameters: `client_msg_id`, `confirm_nonce`, `expect`, `force`, `host_alias`, `keys`, `prompt`, `raw`, `session_id`, `submit`, `tmux_name`
+
+### `session_access`
+
+Who holds a live grant on your session (a person or an org), the level, who granted it and when. Owner only: it names others. Errors: E_NOTFOUND, E_FORBIDDEN.
+
+Parameters: `session_id`
 
 ### `session_activity`
 
 What the session's pane shows now: claude_status, stuck_kind, current_activity, waiting_for and the spinner line. One capture, nothing stored: the cheap read behind a live indicator (capture_session is the whole pane). E_INVALID_STATE outside tmux.
 
 Parameters: `session_id`
+
+### `session_ask_access`
+
+Ask the owner of a session shared with you for a wider level (answer or drive). Confers nothing until they grant it; one open ask per session. Errors: E_NOTFOUND, E_FORBIDDEN, E_VALIDATE, E_EXISTS, E_INVALID_STATE (declined within the hour).
+
+Parameters: `level`, `session_id`
+
+### `session_claim`
+
+Claim the unclaimed session THIS pane is in for a person: it becomes theirs and private. Only the session whose active pane this request's X-Fleet-Pane header names — being on the same host is not enough. Errors: E_NOTFOUND, E_INVALID_STATE (no pane of it proven), E_FORBIDDEN (another session's pane), E_EXISTS (owned).
+
+Parameters: `person`, `session_id`
+
+### `session_context_help`
+
+Context help at a session's composer: a question about the draft (empty asks about the draft alone), with the earlier prompts and the commands the composer accepts as context. Returns { answer, command?, model, host_alias, history_items, at }: a few lines and at most one proposal for the composer, never run. Runs one claude -p on the session's host under its account, on work.help_model (booked as context_help), for the owner or an answer/drive grant. Errors: E_INVALID_STATE (work.context_help off), E_FORBIDDEN (a watch grant), E_INVALID (nothing to ask about), E_CLAUDE_CLI, E_TIMEOUT, as session_conversation.
+
+Parameters: `commands`, `history`, `line`, `question`, `session_id`
 
 ### `session_conversation`
 
@@ -491,6 +737,30 @@ A session's recorded event timeline, newest first: status changes, prompts, stuc
 
 Parameters: `fresh_for`, `limit`, `session_id`
 
+### `session_narrow`
+
+Lower a person's or org's grant on your session to watch (owner only). Nothing raises one: revoke and share again. Returns the session row. Errors: E_NOTFOUND, E_FORBIDDEN.
+
+Parameters: `org`, `person`, `session_id`
+
+### `session_presence`
+
+Presence: report that you have a session open (again every heartbeat_secs; leaving: true when you close it) and read who else has. The owner sees everyone; others see the owner and themselves. Returns { session_id, viewers: [{ person_id, name, device?, since, you? }], heartbeat_secs }.
+
+Parameters: `leaving`, `session_id`
+
+### `session_share`
+
+Share a session you OWN with a person, or an org you are in (its members from now), at watch (read), answer (also a dialog's keys) or drive (also prompt). Owner only; never 'own' or a terminal. Returns the row. Errors: E_NOTFOUND, E_FORBIDDEN, E_VALIDATE, E_EXISTS.
+
+Parameters: `level`, `org`, `person`, `session_id`
+
+### `session_summary_since`
+
+A short Claude-written summary of what a session did since a time (unix seconds), for whoever may read it: { text | null, check: off | shadow | passed | failed | unchecked, since, turns, model, host_alias, at }. Runs one claude -p on the session's host under its account (booked as watch_summary); only with the session org's consent; text is null when nothing happened since or when the Jev check hid it. Errors: E_FORBIDDEN (no consent), E_CLAUDE_CLI, E_TIMEOUT, as session_conversation.
+
+Parameters: `session_id`, `since`
+
 ### `session_tool_detail`
 
 One tool call's input and result (omitted by session_conversation): { id, name, input, edit {file_path, old, new} | null, command | null, result | null, is_error }; texts capped at 8000 chars. Read-only. Errors: as session_conversation, E_NOTFOUND.
@@ -502,6 +772,18 @@ Parameters: `claude_session_id`, `session_id`, `tool_use_id`
 Read a session's Claude Code transcript (the JSONL, not the pane): the last assistant turn as plain text, text blocks verbatim, one line per tool call, no thinking. Errors: E_INVALID_STATE (no claude_session_id yet), E_NO_TRANSCRIPT (nothing written yet). Read-only; prefer it over capture_session for the reply. unchanged costs no transcript read.
 
 Parameters: `fresh_for`, `max_chars`, `session_id`, `since_turn`
+
+### `session_unshare`
+
+Revoke a person's or org's grant on your session (owner only; kept, revoked, for audit). Returns the session row. Errors: E_NOTFOUND, E_FORBIDDEN.
+
+Parameters: `org`, `person`, `session_id`
+
+### `set_account_nickname`
+
+Name a Claude account (≤ 32 characters; empty or null clears). Returns the account row.
+
+Parameters: `nickname`, `uuid`
 
 ### `set_client_trust`
 
@@ -533,6 +815,12 @@ Replace a host's layer assignment: one optional role plus context layers. Edits 
 
 Parameters: `contexts`, `host_alias`, `role`
 
+### `set_project_pick`
+
+Replace one project's picker choices: pinned, vis hide|keep|null, group or null. The empty state clears.
+
+Parameters: `grp`, `owner`, `pinned`, `repo`, `vis`
+
 ### `set_secret`
 
 Store a value for a catalog ${NAME} placeholder (global, or per host with host_alias). Master token only. The value is never returned or logged.
@@ -561,17 +849,47 @@ Parameters: `key`, `limit`
 
 Settings proposals waiting for review, each with the key's value now, and can_write: whether this device may decide.
 
+### `shell_terminals`
+
+A session's shell terminals: tmux sessions <name>--sh<N> (N 1-9) beside its agent, started in the agent's directory (at=home: home) and never listed as sessions. action=list (default), open (n, or the lowest free) or close (n). Closing one never stops the session. Returns the open terminals, each with the command running in it.
+
+Parameters: `action`, `at`, `n`, `session_id`
+
 ### `spawn_review`
 
 Spawn a review session: a new Claude session in the source session's worktree, seeded with a review prompt. Returns its row.
 
-Parameters: `confirm_nonce`, `prompt`, `source_session_id`
+Parameters: `agent`, `confirm_nonce`, `prompt`, `source_session_id`
+
+### `start_rules`
+
+Start rules: a task key pattern (PD-*) that names the project, and optionally the host (with a fallback host for when it is offline), the account, model, effort and agent (claude | codex) of a start, decided before the key's history and Jev. Fleet offers one after five identical starts. list: offers, active and dismissed rules; save {rule, rule_id?}: the whole rule, active; accept {rule_id}: an offer, replacing the pattern's other rule; dismiss {rule_id}: never offered again; delete {rule_id}. E_NOTFOUND, E_INVALID, E_EXISTS.
+
+Parameters: `action`, `rule`, `rule_id`
+
+### `touch_session_viewed`
+
+Mark a session viewed now: the turns it has finished read as seen. Returns the row.
+
+Parameters: `session_id`
+
+### `unlink_peer`
+
+Remove a link to another fleet's hub by its id: messages waiting for it fail back to their senders. The master, or the hub owner's trusted full device.
+
+Parameters: `id`
 
 ### `update_admin`
 
-Update admin, master only: pin a version for a component or target (below installed = rollback), unpin, or refresh the signed channel. E_INVALID, E_UPDATE_UNVERIFIED.
+Update admin, master only: pin a version (below installed = rollback), unpin, update_now, refresh the channel, rollout_* in waves, or an org's policy (set_policy / clear_policy). E_INVALID, E_CONFLICT, E_UPDATE_UNVERIFIED.
 
-Parameters: `action`, `component`, `mandatory`, `reason`, `target`, `version`
+Parameters: `action`, `component`, `halt_failure_ratio`, `mandatory`, `minimum`, `mode`, `org_id`, `reason`, `target`, `version`, `waves`, `window`
+
+### `update_policy`
+
+An org's update policy from a person's device: list, set or clear its mode, floor, window and pin per component. The hub owner's device for any org, an org admin's for theirs. E_FORBIDDEN, E_INVALID.
+
+Parameters: `action`, `component`, `mandatory`, `minimum`, `mode`, `org_id`, `reason`, `version`, `window`
 
 ### `update_status`
 
@@ -605,27 +923,33 @@ Parameters: `task_id`, `timeout_s`
 
 ### `whoami`
 
-Find your own fleet row from your tmux session name (`tmux display-message -p '#S'`). E_NOTFOUND until fleet has reconciled it; E_AMBIGUOUS when the name exists on several hosts: pick yours from the error's {session_id, host_alias} candidates and use session_id from then on.
+Find your own fleet row. From inside a fleet session call it with no argument: your pane names you. Else pass your tmux session name (`tmux display-message -p '#S'`). E_NOTFOUND until fleet has reconciled it; E_AMBIGUOUS when the name exists on several hosts: pick yours from the error's {session_id, host_alias} candidates and use session_id from then on.
 
 Parameters: `tmux_name`
 
+### `wizard_state`
+
+A wizard left half-way, to resume on another of your devices: list {kind?} | get {kind, key?} | save {kind, key?, step, answers, label?} | clear {kind, key?}. Rows name the device that saved last. E_INVALID.
+
+Parameters: `action`, `answers`, `key`, `kind`, `label`, `step`
+
 ### `work`
 
-Work links: {session_id} → its live links; {key} → ended (past) links; neither → recently ended. action context|resume_plan {key}; purge_impact; tickets (cached); lookup {key|url}; trackers; scopes; orgs; org_suggestions; today {since}; card {key}; describe {key} (the tracker's whole description, cached); tidy; reopened. Work view: tree {filters, cursor} (archived: false hides archived tasks); task {task_id}; session_tasks; review; rules; rule_preview {rule}; views; org_impact.
+Work links: {session_id} → its live links; {key} → ended (past) links; neither → recently ended. action context|resume_plan {key}; purge_impact; tickets (cached); lookup {key|url}; trackers; scopes; orgs; org_suggestions; today {since}; card {key}; describe {key} (the tracker's whole description, cached); tracker_comments {key} (the ticket's own comments, live); tidy; reopened. Work view: tree {filters, cursor} (archived: false hides archived tasks); task {task_id}; session_tasks; review; rules; rule_preview {rule}; views; org_impact. buckets {kind?}: sprints, releases; bucket {bucket_id}. missions; mission {mission_id, before_event?}. attachment {attachment_id}: a file's bytes.
 
-Parameters: `action`, `cursor`, `filters`, `host_alias`, `host_aliases`, `key`, `limit`, `link_id`, `org_id`, `per_task`, `project_id`, `query`, `rule`, `session_id`, `since`, `task_id`, `tracker_id`, `url`, `view`, `with_brief`
+Parameters: `action`, `attachment_id`, `before_event`, `bucket_id`, `cursor`, `filters`, `host_alias`, `host_aliases`, `include_local`, `key`, `kind`, `limit`, `link_id`, `mission_id`, `org_id`, `per_task`, `project_id`, `query`, `rule`, `session_id`, `since`, `task_id`, `tracker_id`, `url`, `view`, `with_brief`
 
 ### `work_admin`
 
-Trackers, orgs, retention and usage counts; see action. Never returns a secret.
+Trackers, orgs, retention, usage counts, sprints and releases; see action. Never returns a secret.
 
-Parameters: `action`, `auth_kind`, `auto_tidy`, `bound_sees_unassigned`, `color`, `confirm_nonce`, `credential_ref`, `days`, `host_alias`, `isolate_sessions`, `jev`, `name`, `org_id`, `owner`, `path_prefix`, `provider`, `repo`, `rule_id`, `secret`, `settings`, `site_url`, `tracker_id`, `transport`, `username`
+Parameters: `action`, `auth_kind`, `auto_tidy`, `bound_sees_unassigned`, `bucket_id`, `carry`, `carry_to`, `color`, `confirm_nonce`, `credential_ref`, `days`, `ends_at`, `expected_version`, `external_id`, `goal`, `host_alias`, `isolate_sessions`, `jev`, `jev_reply`, `kind`, `name`, `org_id`, `owner`, `path_prefix`, `prefix`, `project_id`, `provider`, `repo`, `rule_id`, `secret`, `settings`, `shipped_ref`, `site_url`, `space_id`, `starts_at`, `state`, `tracker_id`, `transport`, `username`
 
 ### `work_link`
 
-Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket (project_ids: one per repo). handover {session_id}: ask it to write its hand-off. summarize {key, link_id}: a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe kill when dirty). set_status {item_id, status}: a person's status for work with no ticket. create {title, parent?, notes?}: a task or subtask. propose {parent, title, why?}: a subtask a person accepts or rejects {item_id, no session_id}. Work view: primary:false links a secondary; expected_* guard (E_CONFLICT).
+Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. switch {link_id, key|item_id}: end that link, take the primary. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket (project_ids: one per repo; parallel: beside a live one); preview_start: where it would land, nothing made. abandon_start {session_id}: undo an unused start. run {item_id, role?}: an attempt at the item in its own session and worktree, tracked as a task. handover {session_id}: ask it to write its hand-off. summarize {key, link_id}: a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe kill when dirty). set_status {item_id, status}: a person's status for work with no ticket. edit {item_id, title?, notes?, assignees?, due_at?, priority?, labels?, estimate?, estimate_unit?}: a person edits work with no ticket. attach {item_id, name, mime, data_base64, comment_id?}: a file on a task; attachment_delete {attachment_id}. create {title, parent?, notes?, assignees?, due_at?}: a task or subtask. promote {item_id, tracker_id?, container?}: make it a ticket. propose {parent, title, why?}: a subtask a person accepts or rejects {item_id, no session_id}. bucket_add|bucket_remove {bucket_id, item_id}: sprint/release. mission_save {mission, mission_id?, item_id?: root}; mission_state {mission_id, status} (paused reopens a finished one); mission_repo {project_id, role?, on?}; mission_item {item_id, on?}; mission_delete; mission_import {plan}. dep {item_id, depends_on, on?}; hold {item_id, on?}; propose_tree {parent, tree}; accept_many | undo_accept {item_ids}. done_when {item_id, done_when: [ci[:check] | review | test[:cmd] | person | text]}; verify {item_id, line, ok, note?}: a person's check. mission_start {mission_id, step?}: take the next steps; retry {item_id, note?}; mission_plan: ask the planner; card_decide {card_id, ok, note?}; mission_grant {mission_id, level, hours?, budget_cents?, hosts?, max_parallel?, profile?}; mission_revoke; missions_pause_all. mission_release_note {mission_id}: a drafted release note of a completed mission; today_brief {refresh?, org_id?, since?}: Today's morning brief, drafted only on refresh; mission_triage {mission_id, refresh?}: a stuck mission's card, Jev's proposed outcome and next step (never applied), and with refresh its drafted words. Work view: primary:false links a secondary; expected_* guard (E_CONFLICT). place {task_id|item_id, group, note?, expected_version}: group a task; unplace clears it.
 
-Parameters: `action`, `brief`, `confirm_nonce`, `days`, `decisions`, `expected_primary`, `expected_version`, `force_cross_org`, `group`, `host_alias`, `impact_token`, `item_id`, `items`, `key`, `link_id`, `mode`, `name`, `note`, `notes`, `on`, `org_id`, `parent`, `primary`, `project_id`, `project_ids`, `rule`, `rule_id`, `session_id`, `source`, `status`, `task_id`, `title`, `url`, `view`, `view_id`, `why`, `with_brief`, `worktree`
+Parameters: `ack_live`, `action`, `assignees`, `attachment_id`, `brief`, `bucket_id`, `bucket_op`, `budget_cents`, `card_id`, `comment_id`, `confirm_nonce`, `container`, `data_base64`, `days`, `decisions`, `depends_on`, `done_when`, `draft_brief`, `due_at`, `epic`, `estimate`, `estimate_unit`, `expected_primary`, `expected_version`, `force_cross_org`, `group`, `host_alias`, `hosts`, `hours`, `impact_token`, `item_id`, `item_ids`, `items`, `key`, `labels`, `level`, `line`, `link_id`, `max_parallel`, `mime`, `mission`, `mission_id`, `mode`, `name`, `note`, `notes`, `ok`, `on`, `org_id`, `parallel`, `parent`, `plan`, `post_to_tracker`, `primary`, `priority`, `profile`, `project_id`, `project_ids`, `refresh`, `role`, `rule`, `rule_id`, `session_id`, `since`, `source`, `status`, `step`, `task_id`, `title`, `tracker_id`, `tree`, `url`, `view`, `view_id`, `why`, `with_brief`, `worktree`
 
 ## Tauri IPC commands
 
@@ -634,23 +958,45 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::health::health_check`
 - `commands::diagnostics::collect_diagnostics`
 - `commands::diagnostics::open_log_folder`
+- `commands::tray::set_tray_state`
 - `commands::projects::list_projects`
 - `commands::projects::refresh_projects`
 - `commands::projects::add_project`
 - `commands::projects::list_github_repos`
+- `commands::projects::project_picks`
+- `commands::projects::set_project_pick`
+- `commands::local_workspaces::list_local_workspaces`
+- `commands::local_workspaces::enable_local_workspace`
+- `commands::local_workspaces::pause_local_workspace`
+- `commands::local_workspaces::resume_local_workspace`
+- `commands::local_workspaces::sync_local_workspace_now`
+- `commands::local_workspaces::disconnect_local_workspace`
+- `commands::local_workspaces::set_local_workspace_excludes`
+- `commands::local_workspaces::resolve_local_workspace_conflict`
+- `commands::local_workspaces::open_local_workspace`
+- `commands::local_workspaces::local_workspace_changes`
+- `commands::local_workspaces::local_workspace_diff`
+- `commands::local_workspaces::commit_local_workspace`
+- `commands::local_workspaces::discard_local_workspace_changes`
+- `commands::local_workspaces::dismiss_local_workspace_activity`
+- `commands::local_workspaces::compare_local_conflict`
+- `commands::local_workspaces::keep_both_local_conflict`
+- `commands::local_workspaces::ask_ai_about_local_changes`
+- `commands::local_workspaces::set_local_workspace_driver`
 - `commands::sessions::list_sessions`
-- `commands::sessions::related_sessions`
 - `commands::sessions::new_session`
 - `commands::sessions::kill_session`
+- `commands::sessions::shell_terminals`
 - `commands::sessions::safe_kill_session`
 - `commands::sessions::inspect_safe_kill`
 - `commands::sessions::discard_kill_session`
-- `commands::worktrees::list_worktrees`
 - `commands::worktrees::list_host_worktrees`
-- `commands::worktrees::delete_worktree`
 - `commands::sessions::repair_session`
 - `commands::sessions::rename_session`
 - `commands::sessions::set_session_friendly_name`
+- `commands::sessions::set_session_tags`
+- `commands::sessions::decide_related_session`
+- `commands::sessions::touch_session_viewed`
 - `commands::work::session_work_links`
 - `commands::work::link_session_work`
 - `commands::work::reject_session_work`
@@ -658,24 +1004,25 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::work::confirm_session_work`
 - `commands::work::work_tidy`
 - `commands::work::work_reopened`
-- `commands::work::archive_session_work`
 - `commands::work::unarchive_session_work`
-- `commands::work::snooze_tidy`
-- `commands::work::never_tidy`
 - `commands::work::tidy_apply`
 - `commands::work::dismiss_reopened`
 - `commands::work::set_work_project_trust`
 - `commands::work::work_resume_plan`
+- `commands::work::resume_or_new_propose`
+- `commands::work::resume_or_new_follow`
 - `commands::work::resume_work`
 - `commands::work::work_purge_impact`
 - `commands::work::work_today`
 - `commands::work::work_ticket_card`
 - `commands::work::request_work_handover`
 - `commands::work::summarize_past_work`
-- `commands::work::list_local_work_items`
 - `commands::work::name_session_work`
 - `commands::work::rename_work_item`
 - `commands::work::create_work_task`
+- `commands::work::set_work_status`
+- `commands::work::edit_work_item`
+- `commands::work::set_work_parent`
 - `commands::work::accept_work_proposal`
 - `commands::work::reject_work_proposal`
 - `commands::work_view::work_tree`
@@ -687,6 +1034,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::work_view::work_views`
 - `commands::work_view::work_org_impact`
 - `commands::work_view::set_primary_work`
+- `commands::work_view::switch_session_work`
 - `commands::work_view::reconsider_work_link`
 - `commands::work_view::ack_work_link`
 - `commands::work_view::decide_work_batch`
@@ -696,21 +1044,63 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::work_view::delete_work_rule`
 - `commands::work_view::save_work_view`
 - `commands::work_view::delete_work_view`
+- `commands::work_view::comment_on_work`
+- `commands::work_view::delete_work_comment`
+- `commands::work_view::attach_to_work`
+- `commands::work_view::delete_work_attachment`
+- `commands::work_view::work_attachment`
+- `commands::work_view::work_tracker_comments`
+- `commands::work_view::promote_work_item`
+- `commands::work_view::work_buckets`
+- `commands::work_view::work_stats`
+- `commands::work_view::work_bucket`
+- `commands::work_view::add_work_to_bucket`
+- `commands::work_view::remove_work_from_bucket`
+- `commands::work_view::work_bucket_admin`
+- `commands::missions::work_missions`
+- `commands::missions::work_mission`
+- `commands::missions::save_mission`
+- `commands::missions::set_mission_state`
+- `commands::missions::set_mission_repo`
+- `commands::missions::set_mission_item`
+- `commands::missions::import_mission_plan`
+- `commands::missions::delete_mission`
+- `commands::missions::set_work_dep`
+- `commands::missions::set_work_hold`
+- `commands::missions::accept_work_proposals`
+- `commands::missions::undo_work_accept`
+- `commands::missions::set_work_done_when`
+- `commands::missions::verify_work_item`
+- `commands::missions::start_mission_wave`
+- `commands::missions::retry_work_item`
+- `commands::missions::plan_mission`
+- `commands::missions::decide_mission_card`
+- `commands::missions::grant_mission`
+- `commands::missions::revoke_mission_grant`
+- `commands::missions::pause_all_missions`
+- `commands::missions::mission_release_note`
+- `commands::missions::today_brief`
+- `commands::missions::mission_triage`
 - `commands::trackers::add_tracker`
 - `commands::trackers::update_tracker`
 - `commands::trackers::set_tracker_credential`
 - `commands::trackers::test_tracker`
 - `commands::trackers::remove_tracker`
 - `commands::trackers::tracker_sync_metrics`
+- `commands::trackers::ticket_prefixes`
+- `commands::trackers::set_ticket_prefix`
 - `commands::trackers::status_map_proposals`
 - `commands::trackers::decide_status_map_proposal`
 - `commands::trackers::work_retention_status`
 - `commands::trackers::work_retention_sweep`
 - `commands::trackers::list_trackers`
 - `commands::trackers::work_tickets`
+- `commands::search::search`
 - `commands::trackers::work_lookup`
 - `commands::trackers::start_work_multi`
 - `commands::trackers::start_work`
+- `commands::trackers::abandon_start`
+- `commands::trackers::preview_start_work`
 - `commands::orgs::add_org`
 - `commands::orgs::update_org`
 - `commands::orgs::remove_org`
@@ -718,31 +1108,73 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::orgs::remove_org_rule`
 - `commands::orgs::assign_host_org`
 - `commands::orgs::assign_tracker_org`
-- `commands::orgs::work_scopes`
+- `commands::orgs::set_org_setting`
+- `commands::orgs::set_org_member`
+- `commands::orgs::remove_org_member`
+- `commands::orgs::org_member_grants`
+- `commands::orgs::org_rule_preview`
+- `commands::orgs::add_org_project`
+- `commands::orgs::remove_org_project`
+- `commands::orgs::revoke_org_share`
+- `commands::orgs::narrow_org_share`
+- `commands::orgs::revoke_org_member_grants`
 - `commands::orgs::list_orgs`
 - `commands::orgs::org_suggestions`
+- `commands::org_devices::list_devices`
+- `commands::org_devices::pair_device`
+- `commands::org_devices::revoke_device`
+- `commands::org_devices::set_device_trust`
+- `commands::org_devices::update_device`
+- `commands::org_devices::bind_device_org`
+- `commands::org_devices::set_device_person`
+- `commands::org_devices::grant_device_catalog`
+- `commands::org_devices::list_people`
+- `commands::org_devices::add_person`
+- `commands::org_devices::rename_person`
+- `commands::org_devices::disable_person`
 - `commands::sessions::session_history`
 - `commands::sessions::session_conversations`
 - `commands::sessions::session_conversation`
 - `commands::sessions::session_tool_detail`
 - `commands::sessions::session_activity`
+- `commands::sessions::capture_session`
+- `commands::sessions::session_summary_since`
+- `commands::sessions::session_share`
+- `commands::sessions::session_unshare`
+- `commands::sessions::session_narrow`
+- `commands::sessions::session_access`
+- `commands::sessions::my_grants`
+- `commands::sessions::session_ask_access`
+- `commands::sessions::access_requests`
 - `commands::sessions::restart_session`
 - `commands::sessions::rewind_conversation`
 - `commands::sessions::send_prompt`
 - `commands::sessions::spawn_review`
+- `commands::sessions::queue_prompt`
+- `commands::sessions::queued_prompts`
+- `commands::sessions::cancel_queued_prompt`
 - `commands::sessions::recreate_session`
 - `commands::sessions::restore_host_sessions`
+- `commands::sessions::restore_all_lost_sessions`
+- `commands::sessions::repair_workspaces_now`
 - `commands::sessions::discover_lost_sessions`
 - `commands::move_session::move_session`
 - `commands::resolve_move::resolve_move`
 - `commands::sessions::dismiss_ghost_session`
+- `commands::sessions::adopt_session`
+- `commands::sessions::lost_target`
+- `commands::sessions::place_transcript`
 - `commands::sessions::dismiss_agent_session`
 - `commands::sessions::new_bg_session`
 - `commands::sessions::purge_project`
 - `commands::quick_replies::quick_replies`
 - `commands::quick_replies::set_quick_replies`
 - `commands::downloads::list_downloads`
+- `commands::library::list_library`
+- `commands::library::add_library_items`
+- `commands::library::remove_library_item`
 - `commands::downloads::send_file`
+- `commands::downloads::pause_download`
 - `commands::downloads::remove_download`
 - `commands::downloads::save_download`
 - `commands::pages::get_fleet_settings`
@@ -758,14 +1190,52 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::pages::list_guides`
 - `commands::pages::decide_guide`
 - `commands::pages::remove_guide`
+- `commands::forms::list_forms`
+- `commands::forms::get_form`
+- `commands::forms::answer_form`
+- `commands::forms::decline_form`
+- `commands::federation::list_peer_links`
+- `commands::federation::link_peer_hub`
+- `commands::federation::unlink_peer_hub`
+- `commands::updates::list_update_targets`
+- `commands::updates::update_check`
+- `commands::updates::update_install`
+- `commands::debug_devices::list_debug_devices`
+- `commands::debug_devices::scan_debug_devices`
+- `commands::debug_devices::update_debug_device`
+- `commands::debug_devices::release_debug_device`
+- `commands::debug_devices::forget_debug_device`
+- `commands::debug_devices::boot_debug_device`
+- `commands::debug_devices::shutdown_debug_device`
+- `commands::debug_devices::claim_debug_device`
+- `commands::debug_devices::install_debug_device`
+- `commands::debug_devices::debug_device_logs`
+- `commands::debug_devices::debug_device_screenshot`
+- `commands::device_mirror::start_device_mirror`
+- `commands::device_mirror::stop_device_mirror`
+- `commands::device_mirror::list_device_mirrors`
+- `commands::prs::list_pull_requests`
+- `commands::start_rules::start_rules`
+- `commands::wizard_state::wizard_state`
+- `commands::dashboards::dashboards`
+- `commands::api_tokens::api_tokens`
+- `commands::add_account::add_account`
+- `commands::presence::session_presence`
 - `commands::pages::setting_history`
 - `commands::pages::set_fleet_setting`
+- `commands::runs::list_runs`
+- `commands::agents::agents_status`
+- `commands::agents::agents_decide`
+- `commands::routines::routines`
 - `commands::tasks::list_tasks`
 - `commands::tasks::cancel_task`
 - `commands::files::repo_changes`
 - `commands::files::repo_tree`
 - `commands::files::repo_file`
 - `commands::files::repo_diff`
+- `commands::files::repo_blame`
+- `commands::files::repo_branch_diff`
+- `commands::files::repo_range_diff`
 - `commands::upload::upload_to_session`
 - `commands::upload::pick_attachments`
 - `commands::upload::attachment_preview`
@@ -779,9 +1249,11 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::mutate::repo_checkout_commit`
 - `commands::mutate::repo_create_branch`
 - `commands::mutate::repo_delete_branch`
+- `commands::mutate::repo_delete_merged_branches`
 - `commands::mutate::repo_stage`
 - `commands::mutate::repo_unstage`
 - `commands::mutate::repo_commit_create`
+- `commands::mutate::draft_commit_message`
 - `commands::mutate::repo_fetch`
 - `commands::mutate::repo_pull`
 - `commands::mutate::repo_push`
@@ -790,6 +1262,13 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::hosts::list_accounts`
 - `commands::hosts::add_host`
 - `commands::hosts::probe_host`
+- `commands::hosts::check_host`
+- `commands::hosts::list_host_setups`
+- `commands::hosts::save_host_setup`
+- `commands::hosts::discard_host_setup`
+- `commands::hosts::run_host_setup_check`
+- `commands::hosts::install_agent`
+- `commands::hosts::agent_installs`
 - `commands::hosts::probe_ssh_alias`
 - `commands::hosts::remove_host`
 - `commands::hosts::merge_host`
@@ -797,6 +1276,11 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::hosts::set_account_nickname`
 - `commands::account_usage::list_account_usage`
 - `commands::account_usage::refresh_account_usage`
+- `commands::account_usage::account_usage_history`
+- `commands::account_usage::account_spend`
+- `commands::account_usage::check_account_headroom`
+- `commands::account_usage::propose_host_placement`
+- `commands::account_usage::record_host_placement`
 - `commands::mcp::mcp_status`
 - `commands::mcp::mcp_configure`
 - `commands::mcp::install_fleet_hook`
@@ -806,12 +1290,17 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::mcp::rotate_host_token`
 - `commands::mcp::mcp_confirm`
 - `commands::mcp::mcp_pending_confirms`
+- `commands::mcp::control_handoffs`
 - `commands::operator::ensure_operator`
 - `commands::operator::operator_status`
+- `commands::operator::control_route_propose`
+- `commands::operator::control_route_follow`
 - `commands::hub::hub_status`
 - `commands::hub::hub_pair`
 - `commands::hub::hub_disconnect`
 - `commands::hub::hub_connection`
+- `commands::hub::hub_retry_now`
+- `commands::hub::offline_local_sessions`
 - `commands::hub::hub_stranded_token`
 - `commands::hub::report_client_error`
 - `commands::onboarding::check_local_prereqs`
@@ -848,6 +1337,24 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::assets::catalog_commit_pending`
 - `commands::assets::catalog_push`
 - `commands::assets::catalog_repo_status`
+- `commands::assets::catalog_repo_status_in`
+- `commands::assets::catalog_list_catalogs`
+- `commands::assets::catalog_list_changesets`
+- `commands::assets::catalog_get_changeset`
+- `commands::assets::catalog_apply_changeset`
+- `commands::assets::catalog_undo_changeset`
+- `commands::assets::catalog_dismiss_changeset`
+- `commands::assets::catalog_reject_changeset_items`
+- `commands::assets::catalog_propose_changesets`
+- `commands::assets::catalog_propose_layer_change`
+- `commands::assets::catalog_add_catalog`
+- `commands::assets::catalog_remove_catalog`
+- `commands::assets::catalog_admit_catalog`
+- `commands::assets::catalog_unadmit_catalog`
+- `commands::assets::catalog_list_layers_in`
+- `commands::assets::catalog_host_provenance`
+- `commands::assets::catalog_drift_diff`
+- `commands::assets::catalog_asset_history`
 - `commands::assets::catalog_template`
 - `commands::assets::catalog_spawn_author_session`
 - `pty::pty_open`
@@ -855,5 +1362,11 @@ Frontend commands registered in `src/lib.rs`:
 - `pty::pty_resize`
 - `pty::pty_close`
 - `pty::pty_drain`
+- `commands::editor::open_session_in_editor`
+- `commands::windows::open_terminal_window`
+- `commands::context_help::context_help`
+- `commands::context_help::session_context_help`
+- `commands::voice::voice_claim`
+- `commands::voice::voice_release`
 - `cancel_command`
 

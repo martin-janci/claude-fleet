@@ -1,0 +1,45 @@
+{
+  "spec": "fleet.page/1",
+  "id": "settings.people",
+  "title": "People",
+  "parent": "settings",
+  "layout": "master_detail",
+  "resource": "person",
+  "intro": "The people this hub knows. Add one with + Person, or they are added when a device is paired or handed to them. Disabling someone revokes their devices and the shares made to them.",
+  "sections": [
+    {
+      "title": "Person",
+      "items": [
+        {
+          "type": "field",
+          "key": "name"
+        },
+        {
+          "type": "field",
+          "key": "display_name"
+        },
+        {
+          "type": "field",
+          "key": "owner"
+        }
+      ]
+    },
+    {
+      "title": "Access",
+      "items": [
+        {
+          "type": "field",
+          "key": "devices"
+        },
+        {
+          "type": "field",
+          "key": "created_at"
+        },
+        {
+          "type": "field",
+          "key": "disabled_at"
+        }
+      ]
+    }
+  ]
+}

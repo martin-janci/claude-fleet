@@ -24,7 +24,7 @@
 use crate::ipc_error::IpcError;
 use crate::service::orgs::OrgScope;
 use crate::service::trackers::tickets::{tickets_in, RECENT_DAYS};
-use crate::store::{SessionRow, Store};
+use crate::store::{SessionRow, Store, WorkItemRow, WorkLinkRow};
 use std::collections::BTreeSet;
 
 /// Turns a conversation has had, with no link, before the nudge may fire.
@@ -107,7 +107,18 @@ pub fn classify_nudge(
     conversation: &str,
     now: i64,
 ) -> Result<Option<String>, IpcError> {
-    if !crate::service::settings::get_bool(s, crate::service::settings::WORK_CLASSIFY_NUDGE) {
+    // Org administration phase C: the session's org may turn it on or off
+    // for itself.
+    if !crate::service::settings::get_bool_for(
+        s,
+        crate::service::settings::WORK_CLASSIFY_NUDGE,
+        row.org_id,
+    ) {
+        return Ok(None);
+    }
+    // The operator coordinates every task and is never a detection subject
+    // (`detect::subject_state`), so it is never asked to classify itself.
+    if crate::service::operator::is_operator_session(s, &row.host_alias, &row.tmux_name) {
         return Ok(None);
     }
     if s.conversation_nudged(row.id, conversation)? {
@@ -126,6 +137,29 @@ pub fn classify_nudge(
     {
         return Ok(None);
     }
+    let rejected = rejected_keys(s, &links)?;
+    let want = MAX_CANDIDATES + 1 + rejected.len();
+    let out: Vec<NudgeCandidate> = candidate_items(s, row, &rejected, want, now)?
+        .into_iter()
+        .filter_map(|i| {
+            Some(NudgeCandidate {
+                key: i.key?.to_uppercase(),
+                title: i.title,
+            })
+        })
+        .collect();
+    if out.is_empty() || out.len() > MAX_CANDIDATES {
+        return Ok(None);
+    }
+    Ok(Some(nudge_text(row.id, &out)))
+}
+
+/// The keys (upper case) of the links `links` holds that a person
+/// rejected: never offered again (R9).
+pub(crate) fn rejected_keys(
+    s: &Store,
+    links: &[WorkLinkRow],
+) -> Result<BTreeSet<String>, IpcError> {
     let mut rejected: BTreeSet<String> = BTreeSet::new();
     for l in links.iter().filter(|l| l.state == "rejected") {
         let key = match (&l.ref_key, l.item_id) {
@@ -137,33 +171,50 @@ pub fn classify_nudge(
             rejected.insert(k.to_uppercase());
         }
     }
+    Ok(rejected)
+}
+
+/// The work items a session on `row`'s host could be working on, at most
+/// `want`: the person's *My work* tickets inside the host's scope, then
+/// keyed local items changed in the last [`RECENT_DAYS`] days, less
+/// `rejected` (upper-case keys), one per key. Keyed items only: the
+/// resolver addresses work by key. The nudge's candidates (M4.6), and
+/// Jev's for `work_link` (J1, [`crate::service::decide::work_link`]).
+pub(crate) fn candidate_items(
+    s: &Store,
+    row: &SessionRow,
+    rejected: &BTreeSet<String>,
+    want: usize,
+    now: i64,
+) -> Result<Vec<WorkItemRow>, IpcError> {
     // The note is read by the Claude on the row's host, so it offers only
     // what that host may read (work graph M5, and M3's host fence on
     // tracker items) — exactly the SessionStart context's scope.
     let scope = OrgScope::for_host(s, &row.host_alias)?;
-    let want = MAX_CANDIDATES + 1 + rejected.len();
     let mut seen: BTreeSet<String> = BTreeSet::new();
-    let mut out: Vec<NudgeCandidate> = Vec::new();
-    let mut offer = |key: Option<String>, title: String| {
-        let Some(key) = key.map(|k| k.to_uppercase()) else {
+    let mut out: Vec<WorkItemRow> = Vec::new();
+    let mut offer = |item: WorkItemRow| {
+        let Some(key) = item.key.as_deref().map(str::to_uppercase) else {
             return;
         };
-        if rejected.contains(&key) || !seen.insert(key.clone()) {
+        if rejected.contains(&key) || !seen.insert(key) {
             return;
         }
-        out.push(NudgeCandidate { key, title });
+        out.push(item);
     };
-    for t in tickets_in(s, None, Some("mine"), None, Some(want), &scope)? {
-        offer(t.item.key, t.item.title);
+    // The hub's own hook reader, narrowed to that host's orgs: the
+    // candidates are tracker items (key and title), and `live_session_ids`
+    // is not read here at all.
+    let reader = crate::service::view_scope::ViewScope::internal().with_org(scope);
+    for t in tickets_in(s, None, Some("mine"), None, Some(want), &reader)? {
+        offer(t.item);
     }
     // Local items belong to no org, which every scope sees (M5).
     for item in s.recent_local_work_items(now - RECENT_DAYS * 86_400, want)? {
-        offer(item.key, item.title);
+        offer(item);
     }
-    if out.is_empty() || out.len() > MAX_CANDIDATES {
-        return Ok(None);
-    }
-    Ok(Some(nudge_text(row.id, &out)))
+    out.truncate(want);
+    Ok(out)
 }
 
 #[cfg(test)]

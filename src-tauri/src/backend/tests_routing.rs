@@ -76,6 +76,22 @@ impl Fake {
         )
     }
 
+    /// `(tool, arguments)` of every call it was given, in order.
+    fn calls(&self) -> Vec<(String, Value)> {
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|b| {
+                let v: Value = serde_json::from_str(b).expect("a JSON-RPC body");
+                (
+                    v["params"]["name"].as_str().expect("a tool").to_string(),
+                    v["params"]["arguments"].clone(),
+                )
+            })
+            .collect()
+    }
+
     fn was_not_called(&self) {
         let seen = self.seen.lock().unwrap();
         assert!(
@@ -169,6 +185,9 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
 
 /// A minimal but complete `SessionRow`, null-stripped the way the hub leaves
 /// one. Nothing in the local store ever looks like this.
+const RUN_OUTPUT_JSON: &str = r#"{"exit_code":0,"output":"Success","truncated":false}"#;
+const DEBUG_DEVICE_JSON: &str = r#"{"id":3,"title":"Pixel 8","host":"mac","platform":"android","kind":"physical","key":"R5","name":"Pixel 8","state":"online","ready":true,"shared":false,"first_seen_at":1,"last_seen_at":2}"#;
+const FORM_VIEW_JSON: &str = r#"{"form_id":"f_a","session_id":4,"host_alias":"h","title":"T","spec":{},"state":"pending","created_at":1}"#;
 const SESSION_PAYLOAD: &str = r#"{"id":42,"tmux_name":"from-the-hub","host_alias":"hetzner","created_at":1,"last_activity_at":2,"status":"running","kind":"tmux","turn_seq":0,"tags":[]}"#;
 /// `transport` is required on the wire (migration 034): it is a `String`,
 /// not an `Option`, so `ok_json_compact` never strips it and a row without
@@ -271,6 +290,13 @@ fn check(cases: Vec<Case>) {
 /// wrong.
 const ROUTED_WITHOUT_A_CASE: &[(&str, &str)] = &[
     (
+        "debug_device_screenshot",
+        "a_hub_screenshot_comes_back_as_the_image_block_it_answered holds its \
+         VERDICTS row against the tool the request carried, the same way check \
+         does; it is not a case because its answer is an image block, which the \
+         fake's text-only answer cannot carry",
+    ),
+    (
         "save_download",
         "a_hub_download_is_checked_through_list_downloads_before_a_byte_moves \
          holds its VERDICTS row against the tool the request carried, the same \
@@ -285,6 +311,98 @@ const ROUTED_WITHOUT_A_CASE: &[(&str, &str)] = &[
      a seeded local store to prove the answer is not the local one",
     ),
 ];
+
+/// M15 step G7.14: the device edit form picks the org and the person, and
+/// Apply sends each as its own `org_admin` action, the org before the
+/// person; "" unbinds.
+#[test]
+fn a_device_edit_binds_its_org_then_hands_it_over() {
+    let fake = Fake::answering(r#"{"name":"phone","mode":"full","trusted":false,"created_at":1}"#);
+    let (_dir, st) = store();
+    block_on(commands::org_devices::routed::update_device(
+        &remote_backend(&fake),
+        &st,
+        commands::org_devices::UpdateDeviceArgs {
+            device: "phone".into(),
+            org: Some("Acme".into()),
+            person: Some("ada".into()),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    assert_eq!(
+        fake.calls(),
+        vec![
+            (
+                "org_admin".to_string(),
+                json!({ "action": "bind_device", "device": "phone", "org": "Acme" })
+            ),
+            (
+                "org_admin".to_string(),
+                json!({ "action": "set_device_person", "device": "phone", "person": "ada" })
+            ),
+        ]
+    );
+    let fake = Fake::answering(r#"{"name":"phone","mode":"full","trusted":false,"created_at":1}"#);
+    block_on(commands::org_devices::routed::update_device(
+        &remote_backend(&fake),
+        &st,
+        commands::org_devices::UpdateDeviceArgs {
+            device: "phone".into(),
+            org: Some(String::new()),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    assert_eq!(
+        fake.calls(),
+        vec![(
+            "org_admin".to_string(),
+            json!({ "action": "bind_device", "device": "phone" })
+        )],
+        "an empty org unbinds"
+    );
+}
+
+/// M15 step G7.14: "Claim it while installing" claims the device first,
+/// with its note, then installs; both on the hub's `debug_devices`.
+#[test]
+fn installing_with_a_claim_claims_the_device_first() {
+    // One answer that reads as both a device (the claim) and a run (the
+    // install): the fake answers every call alike.
+    let both = format!(
+        "{},\"exit_code\":0,\"output\":\"Success\",\"truncated\":false}}",
+        DEBUG_DEVICE_JSON.trim_end_matches('}')
+    );
+    let fake = Fake::answering(&both);
+    let (_dir, st) = store();
+    block_on(commands::debug_devices::routed::install_debug_device(
+        &remote_backend(&fake),
+        &st,
+        &ssh(),
+        commands::debug_devices::InstallDebugDeviceArgs {
+            id: 3,
+            path: "~/app.apk".into(),
+            host: None,
+            claim: Some(true),
+            note: Some("login flow".into()),
+        },
+    ))
+    .unwrap();
+    assert_eq!(
+        fake.calls(),
+        vec![
+            (
+                "debug_devices".to_string(),
+                json!({ "action": "claim", "device": "3", "note": "login flow", "claim_s": null, "queue": null })
+            ),
+            (
+                "debug_devices".to_string(),
+                json!({ "action": "install", "device": "3", "path": "~/app.apk", "host": null })
+            ),
+        ]
+    );
+}
 
 /// The other half of the tool check in [`check`]: a wrong tool must not be
 /// able to hide by having no case at all.
@@ -361,12 +479,17 @@ fn every_routed_read_names_its_tool_and_arguments() {
 /// The table [`every_routed_read_names_its_tool_and_arguments`] runs; also run against a configured hub this
 /// launch cannot use, which must refuse every row.
 fn routed_read_cases() -> Vec<Case> {
+    let mut cases = routed_read_cases_but_org_admin();
+    cases.extend(org_admin_read_cases());
+    cases
+}
+
+fn routed_read_cases_but_org_admin() -> Vec<Case> {
     use fleet_core::service::repo::SessionIdArgs;
     use fleet_core::service::repo_read::{
-        RepoCommitArgs, RepoCommitDiffArgs, RepoFileArgs, RepoLogArgs,
+        DiffRange, RepoCommitArgs, RepoCommitDiffArgs, RepoFileArgs, RepoLogArgs, RepoRangeDiffArgs,
     };
-    use fleet_core::service::sessions::RelatedSessionsArgs;
-    use fleet_core::service::worktrees::{ListHostWorktreesArgs, ListWorktreesArgs};
+    use fleet_core::service::worktrees::ListHostWorktreesArgs;
 
     vec![
         (
@@ -385,14 +508,30 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
-            "related_sessions",
-            "related_sessions",
+            "queued_prompts",
+            "queued_prompts",
             json!({ "session_id": 7 }),
             "[]",
             Box::new(|b, s, _| {
-                block_on(commands::sessions::routed::related_sessions(
+                block_on(commands::sessions::routed::queued_prompts(
                     b,
-                    RelatedSessionsArgs { session_id: 7 },
+                    fleet_core::service::sessions::QueuedPromptsArgs { session_id: 7 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "agent_installs",
+            "agent_installs",
+            json!({ "alias": "trn" }),
+            "[]",
+            Box::new(|b, s, _| {
+                block_on(commands::hosts::routed::agent_installs(
+                    b,
+                    fleet_core::service::agent_install::AgentInstallsArgs {
+                        alias: Some("trn".into()),
+                    },
                     s,
                 ))
                 .map(|_| ())
@@ -412,6 +551,76 @@ fn routed_read_cases() -> Vec<Case> {
             "[]",
             Box::new(|b, s, _| block_on(commands::hosts::routed::list_accounts(b, s)).map(|_| ())),
         ),
+        // The hub's ~/.ssh/config: the candidates its own add_host can reach.
+        (
+            "discover_hosts",
+            "discover_hosts",
+            json!({}),
+            "[]",
+            Box::new(|b, _, _| block_on(commands::hosts::routed::discover_hosts(b)).map(|_| ())),
+        ),
+        (
+            "check_host",
+            "check_host",
+            json!({ "alias": "trn", "base_path": null }),
+            r#"{"alias":"trn","checked_at":1,"error":null,"tmux_version":"3.4","agents_on_path":["claude"],"fleet_hooks":true,"guard_hook":true}"#,
+            Box::new(|b, _, h| {
+                block_on(commands::hosts::routed::check_host(
+                    b,
+                    fleet_core::service::host_check::CheckHostArgs {
+                        alias: "trn".into(),
+                        base_path: None,
+                    },
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "list_account_usage",
+            "account_usage",
+            json!({}),
+            "[]",
+            Box::new(|b, s, _| {
+                let cache = Mutex::new(fleet_core::service::account_usage::UsageCache::new());
+                block_on(commands::account_usage::routed::list_account_usage(
+                    b, s, &cache,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "propose_host_placement",
+            "propose_host_placement",
+            json!({ "project_id": 7 }),
+            "null",
+            Box::new(|b, s, _| {
+                let cache = Mutex::new(fleet_core::service::account_usage::UsageCache::new());
+                let args =
+                    fleet_core::service::decide::host_placement::ProposeHostArgs { project_id: 7 };
+                block_on(commands::account_usage::routed::propose_host_placement(
+                    b, s, &cache, args,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "check_account_headroom",
+            "check_account_headroom",
+            json!({ "host_alias": "mac", "profile": "work" }),
+            r#"{"pause_at_pct":90.0,"over":false,"logins":[]}"#,
+            Box::new(|b, s, _| {
+                let cache = Mutex::new(fleet_core::service::account_usage::UsageCache::new());
+                let args = fleet_core::service::account_limits::CheckAccountHeadroomArgs {
+                    host_alias: "mac".into(),
+                    profile: Some("work".into()),
+                };
+                block_on(commands::account_usage::routed::check_account_headroom(
+                    b, args, s, &cache,
+                ))
+                .map(|_| ())
+            }),
+        ),
         (
             "list_projects",
             "list_projects",
@@ -419,6 +628,18 @@ fn routed_read_cases() -> Vec<Case> {
             "[]",
             Box::new(|b, s, _| {
                 block_on(commands::projects::routed::list_projects(b, s)).map(|_| ())
+            }),
+        ),
+        (
+            "project_picks",
+            "project_picks",
+            json!({}),
+            r#"[{"owner":"o","repo":"r","pinned":true,"vis":"keep","grp":"tools"}]"#,
+            Box::new(|b, s, _| {
+                let v = block_on(commands::projects::routed::project_picks(b, s))?;
+                assert!(v[0].pinned, "the hub's answer");
+                assert_eq!(v[0].grp.as_deref(), Some("tools"));
+                Ok(())
             }),
         ),
         (
@@ -440,6 +661,7 @@ fn routed_read_cases() -> Vec<Case> {
                     b,
                     commands::projects::ListGithubReposArgs {
                         host_alias: "trn".into(),
+                        owner: None,
                     },
                     s,
                     h,
@@ -448,39 +670,19 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
-            // The tool's own defaults (slim rows, one page, a {total,
-            // worktrees} envelope) are shaped for an agent; the desktop draws
-            // the whole tree, so it asks for full rows and limit 0 (no cap).
-            "list_worktrees",
-            "list_worktrees",
-            json!({ "project_id": 4, "summary": false, "limit": 0 }),
-            r#"{"total":0,"worktrees":[]}"#,
-            Box::new(|b, s, _| {
-                block_on(commands::worktrees::routed::list_worktrees(
+            "list_github_repos",
+            "list_github_repos",
+            json!({ "host_alias": "trn", "owner": "papaya-pos" }),
+            r#"[{"name_with_owner":"papaya-pos/receipts","is_private":true}]"#,
+            Box::new(|b, s, h| {
+                block_on(commands::projects::routed::list_github_repos(
                     b,
-                    ListWorktreesArgs {
-                        project_id: Some(4),
+                    commands::projects::ListGithubReposArgs {
+                        host_alias: "trn".into(),
+                        owner: Some("papaya-pos".into()),
                     },
                     s,
-                ))
-                .map(|_| ())
-            }),
-        ),
-        // The other shape of the same argument: an omitted project filter is
-        // sent as an explicit `null`, not left off the object. Which of the
-        // two the hub sees is the difference between "every worktree" and a
-        // parameter it never bound, so both shapes are pinned rather than
-        // one.
-        (
-            "list_worktrees",
-            "list_worktrees",
-            json!({ "project_id": null, "summary": false, "limit": 0 }),
-            r#"{"total":0,"worktrees":[]}"#,
-            Box::new(|b, s, _| {
-                block_on(commands::worktrees::routed::list_worktrees(
-                    b,
-                    ListWorktreesArgs { project_id: None },
-                    s,
+                    h,
                 ))
                 .map(|_| ())
             }),
@@ -580,12 +782,75 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            "pause_download",
+            "pause_download",
+            json!({ "id": 7, "paused": true }),
+            r#"{"id":7,"at":1,"host_alias":"trn","path":"/w/a.pdf","name":"a.pdf","size":3,"state":"fetching","source":"person","fetched_bytes":1,"paused":true}"#,
+            Box::new(|b, s, _| {
+                let args = fleet_core::service::downloads::PauseDownloadArgs {
+                    id: 7,
+                    paused: true,
+                };
+                block_on(commands::downloads::routed::pause_download(b, args, s)).map(|_| ())
+            }),
+        ),
+        (
             "remove_download",
             "remove_download",
             json!({ "id": 7 }),
             r#"{"removed":true}"#,
             Box::new(|b, s, _| {
                 block_on(commands::downloads::routed::remove_download(b, 7, s)).map(|_| ())
+            }),
+        ),
+        // Control's Library: one hub tool, by action.
+        (
+            "list_library",
+            "library",
+            json!({ "action": "list", "host_alias": "trn", "limit": 5 }),
+            r#"{"items":[{"id":3,"at":1,"kind":"upload","host_alias":"trn","session_id":4,"path":"/w/a.pdf","name":"a.pdf","size":3}]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::library::routed::list_library(
+                    b,
+                    fleet_core::service::library::ListArgs {
+                        session_id: None,
+                        host_alias: Some("trn".into()),
+                        limit: Some(5),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "add_library_items",
+            "library",
+            json!({ "action": "add", "kind": "upload", "session_id": 4, "files": [{ "path": "/w/a.pdf", "name": "a.pdf", "size": 3 }] }),
+            r#"{"items":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::library::routed::add_library_items(
+                    b,
+                    fleet_core::service::library::AddArgs {
+                        kind: "upload".into(),
+                        session_id: 4,
+                        files: vec![fleet_core::service::library::LibraryFile {
+                            path: "/w/a.pdf".into(),
+                            name: Some("a.pdf".into()),
+                            size: Some(3),
+                        }],
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "remove_library_item",
+            "library",
+            json!({ "action": "remove", "id": 3 }),
+            r#"{"removed":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::library::routed::remove_library_item(b, 3, s)).map(|_| ())
             }),
         ),
         (
@@ -696,6 +961,289 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            "list_forms",
+            "ask",
+            json!({ "list": { "session_id": 4, "state": "pending" } }),
+            r#"[]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::forms::routed::list_forms(
+                    b,
+                    s,
+                    Some(4),
+                    Some("pending".into()),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // `leaving` is skipped when false, so a heartbeat is the session id
+        // alone; the hub learns the device from the connection, never here.
+        (
+            "session_presence",
+            "session_presence",
+            json!({ "session_id": 42 }),
+            r#"{"session_id":42,"viewers":[{"person_id":3,"name":"jane","since":1700000000}],"heartbeat_secs":20}"#,
+            Box::new(|b, _, _| {
+                block_on(commands::presence::routed::session_presence(
+                    b,
+                    fleet_core::service::presence::SessionPresenceArgs {
+                        session_id: 42,
+                        leaving: false,
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "search",
+            "search",
+            json!({ "query": "prihlasenie sso", "limit": 5 }),
+            r#"{"hits":[{"kind":"item","ref":"7","title":"PAY-7 Prihlásenie cez SSO","snippet":"","at":1,"task_id":"item:7","key":"PAY-7"}],"transcripts_indexed":false}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::search::routed::search(
+                    b,
+                    fleet_core::service::search::SearchArgs {
+                        query: "prihlasenie sso".into(),
+                        kinds: Vec::new(),
+                        limit: Some(5),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "list_pull_requests",
+            "prs",
+            json!({ "action": "list", "state": "open" }),
+            r#"{"items":[],"total":0}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::prs::routed::list_pull_requests(
+                    b,
+                    s,
+                    fleet_core::service::prs::PrsArgs {
+                        action: "list".into(),
+                        state: Some("open".into()),
+                        ..Default::default()
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "api_tokens",
+            "api_tokens",
+            json!({ "action": "create", "name": "ci", "scope": "act", "expires_in_days": 90 }),
+            r#"{"id":1,"name":"ci","scope":"act","hosts":null,"expires_at":9,"created_at":1,"last_used_at":null,"revoked_at":null,"token":"flt_live_x","env_line":"FLEET_MCP_TOKEN=flt_live_x"}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::api_tokens::routed::api_tokens(
+                    b,
+                    s,
+                    fleet_core::service::control_tokens::ApiTokensArgs {
+                        action: "create".into(),
+                        name: Some("ci".into()),
+                        scope: Some("act".into()),
+                        expires_in_days: Some(90),
+                        hosts: None,
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "add_account",
+            "add_account",
+            json!({ "action": "daily_limit", "host_alias": "trn", "profile": "api", "daily_limit_usd": 5.0 }),
+            r#"{"account_uuid":"apikey-0123456789abcdef","daily_limit_usd":5.0}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::add_account::routed::add_account(
+                    b,
+                    s,
+                    h,
+                    fleet_core::service::add_account::AddAccountArgs {
+                        action: "daily_limit".into(),
+                        host_alias: "trn".into(),
+                        profile: "api".into(),
+                        daily_limit_usd: Some(5.0),
+                        ..Default::default()
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "start_rules",
+            "start_rules",
+            json!({ "action": "accept", "rule_id": 3 }),
+            r#"{"id":3,"pattern":"PD-*","project_id":2,"state":"active","confirmations":5,"hits":0,"created_at":1,"updated_at":2,"may_change":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::start_rules::routed::start_rules(
+                    b,
+                    s,
+                    fleet_core::service::start_rules::StartRulesArgs {
+                        action: "accept".into(),
+                        rule_id: Some(3),
+                        rule: None,
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "wizard_state",
+            "wizard_state",
+            json!({ "action": "get", "kind": "add_project" }),
+            r#"{"kind":"add_project","key":"","step":2,"answers":{},"checks":[],"created_at":1,"updated_at":2}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::wizard_state::routed::wizard_state(
+                    b,
+                    s,
+                    fleet_core::service::wizard_state::WizardStateArgs {
+                        action: "get".into(),
+                        kind: Some("add_project".into()),
+                        ..Default::default()
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "dashboards",
+            "dashboards",
+            json!({ "action": "list" }),
+            r#"[{"id":"dash.r42","title":"R","spec":{},"pinned_at":1,"updated_at":2}]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::dashboards::routed::dashboards(
+                    b,
+                    s,
+                    fleet_core::service::dashboards::DashboardsArgs {
+                        action: "list".into(),
+                        ..Default::default()
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "control_handoffs",
+            "control_handoffs",
+            json!({ "limit": 5 }),
+            r#"[{"id":1,"at":1,"kind":"session","tool":"send_prompt","session_id":3}]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::mcp::routed::control_handoffs(b, s, Some(5))).map(|_| ())
+            }),
+        ),
+        (
+            "mcp_pending_confirms",
+            "mcp_confirms",
+            json!({}),
+            r#"[{"nonce":"n","tool":"kill_session","summary":"","caller":"client:ux-agent","operator":true,"asked_at":1}]"#,
+            Box::new(|b, _, _| {
+                let guards = fleet_core::mcp::McpGuards::new(Arc::new(|_| {}));
+                block_on(commands::mcp::routed::mcp_pending_confirms(b, &guards)).map(|_| ())
+            }),
+        ),
+        (
+            "list_debug_devices",
+            "debug_devices",
+            json!({ "action": "list" }),
+            r#"{"devices":[],"hosts":[]}"#,
+            Box::new(|b, s, ssh| {
+                block_on(commands::debug_devices::routed::list_debug_devices(
+                    b, s, ssh,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "list_peer_links",
+            "list_peer_links",
+            json!({}),
+            "[]",
+            Box::new(|b, s, _| {
+                block_on(commands::federation::routed::list_peer_links(b, s)).map(|_| ())
+            }),
+        ),
+        (
+            "list_update_targets",
+            "update_status",
+            json!({}),
+            r#"{"targets":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::updates::routed::list_update_targets(b, s)).map(|_| ())
+            }),
+        ),
+        (
+            "list_runs",
+            "runs",
+            json!({ "action": "list", "since": 5, "kind": "jev", "limit": 20 }),
+            r#"{"runs":[{"id":"jev:1","source":"jev","kind":"jev","owner":"status_map","started_at":6,"outcome":"ok","session_ids":[]}],"total":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::runs::routed::list_runs(
+                    b,
+                    s,
+                    fleet_core::service::runs::RunsArgs {
+                        since: Some(5),
+                        kind: Some("jev".into()),
+                        limit: Some(20),
+                        ..Default::default()
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "agents_status",
+            "agents",
+            json!({ "action": "status", "agent": "review", "limit": 5 }),
+            r#"{"rules":[],"jobs":[],"pending":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::agents::routed::agents_status(
+                    b,
+                    s,
+                    Some("review".into()),
+                    Some(5),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "agents_decide",
+            "agents",
+            json!({ "action": "reject", "id": 7 }),
+            r#"{"id":7,"job_id":1,"kind":"post_review","payload":"{}","state":"rejected","decided_by":"device:phone","decided_at":5,"executed_at":null,"error":null,"created_at":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::agents::routed::agents_decide(b, s, 7, false)).map(|_| ())
+            }),
+        ),
+        (
+            "routines",
+            "routines",
+            json!({ "action": "failing" }),
+            r#"[]"#,
+            Box::new(|b, s, ssh| {
+                block_on(commands::routines::routed::routines(
+                    b,
+                    s,
+                    ssh,
+                    &fleet_core::cancel::CancellationRegistry::new(),
+                    commands::routines::RoutinesArgs {
+                        action: "failing".into(),
+                        ..Default::default()
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "get_form",
+            "ask",
+            json!({ "get": "f_a" }),
+            FORM_VIEW_JSON,
+            Box::new(|b, s, _| {
+                block_on(commands::forms::routed::get_form(b, s, "f_a".into())).map(|_| ())
+            }),
+        ),
+        (
             "setting_history",
             "setting_history",
             json!({ "key": "work.recent_days", "limit": null }),
@@ -720,13 +1268,6 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
-            "work_scopes",
-            "work",
-            json!({ "session_id": null, "key": null, "action": "scopes" }),
-            r#"[{"id":1,"label":"Company A","session_count":2,"needs_you":1}]"#,
-            Box::new(|b, s, _| block_on(commands::orgs::routed::work_scopes(b, s)).map(|_| ())),
-        ),
-        (
             "list_orgs",
             "work",
             json!({ "session_id": null, "key": null, "action": "orgs" }),
@@ -744,7 +1285,7 @@ fn routed_read_cases() -> Vec<Case> {
             "work_tickets",
             "work",
             json!({ "session_id": null, "key": null, "action": "tickets",
-                    "view": "mine", "query": "login", "limit": 20 }),
+                    "view": "mine", "query": "login", "limit": 20, "include_local": true }),
             r#"[{"id":3,"source":"jira","key":"ABC-1","title":"Login","status_category":"todo","created_at":1,"updated_at":1}]"#,
             Box::new(|b, s, _| {
                 block_on(commands::trackers::routed::work_tickets(
@@ -754,6 +1295,7 @@ fn routed_read_cases() -> Vec<Case> {
                         view: Some("mine".into()),
                         query: Some("login".into()),
                         limit: Some(20),
+                        include_local: Some(true),
                     },
                     s,
                 ))
@@ -842,15 +1384,6 @@ fn routed_read_cases() -> Vec<Case> {
             Box::new(|b, s, _| block_on(commands::work::routed::work_reopened(b, s)).map(|_| ())),
         ),
         (
-            "list_local_work_items",
-            "work",
-            json!({ "session_id": null, "key": null, "action": "local_items" }),
-            r#"[{"id":3,"key":"OPS","title":"Ops cleanup","created_at":1,"live_sessions":2}]"#,
-            Box::new(|b, s, _| {
-                block_on(commands::work::routed::list_local_work_items(b, s)).map(|_| ())
-            }),
-        ),
-        (
             "name_session_work",
             "work_link",
             json!({ "session_id": 7, "action": "name", "key": "OPS", "item_id": null,
@@ -903,6 +1436,200 @@ fn routed_read_cases() -> Vec<Case> {
                         parent: Some("item:5".into()),
                         project_id: Some(3),
                         notes: Some("v1".into()),
+                        assignees: None,
+                        due_at: None,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // The board (sprints design 2026-09-28 §6c).
+        (
+            "set_work_status",
+            "work_link",
+            json!({ "session_id": null, "action": "set_status", "key": null, "item_id": 9,
+                    "link_id": null, "source": null, "status": "in_progress" }),
+            NATIVE_ITEM_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::set_work_status(
+                    b,
+                    commands::work::SetWorkStatusArgs {
+                        item_id: 9,
+                        status: "in_progress".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Task comments.
+        (
+            "comment_on_work",
+            "work_link",
+            json!({ "session_id": null, "action": "comment", "key": null, "item_id": 9,
+                    "link_id": null, "source": null, "notes": "Looks good",
+                    "post_to_tracker": true }),
+            r#"{"id":3,"item_id":9,"author":"client:desk","body":"Looks good","created_at":1,"tracker_post":{"state":"pending"}}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::comment_on_work(
+                    b,
+                    commands::work_view::CommentOnWorkArgs {
+                        item_id: 9,
+                        body: "Looks good".into(),
+                        post_to_tracker: Some(true),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "delete_work_comment",
+            "work_link",
+            json!({ "session_id": null, "action": "comment_delete", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "comment_id": 3 }),
+            r#"{"id":3,"item_id":9,"author":"client:desk","body":"Looks good","created_at":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::delete_work_comment(
+                    b,
+                    commands::work_view::DeleteWorkCommentArgs { comment_id: 3 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Task attachments.
+        (
+            "attach_to_work",
+            "work_link",
+            json!({ "session_id": null, "action": "attach", "key": null, "item_id": 9,
+                    "link_id": null, "source": null, "name": "a.png", "mime": "image/png",
+                    "data_base64": "iVBORw0KGgo=" }),
+            r#"{"id":4,"item_id":9,"name":"a.png","mime":"image/png","size":8,"sha256":"ab","author":"client:desk","source":"fleet","created_at":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::attach_to_work(
+                    b,
+                    commands::work_view::AttachToWorkArgs {
+                        item_id: 9,
+                        name: "a.png".into(),
+                        mime: "image/png".into(),
+                        data_base64: "iVBORw0KGgo=".into(),
+                        comment_id: None,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "delete_work_attachment",
+            "work_link",
+            json!({ "session_id": null, "action": "attachment_delete", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "attachment_id": 4 }),
+            r#"{"id":4,"item_id":9,"name":"a.png","mime":"image/png","size":8,"sha256":"ab","author":"client:desk","source":"fleet","created_at":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::delete_work_attachment(
+                    b,
+                    commands::work_view::WorkAttachmentArgs { attachment_id: 4 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_attachment",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "attachment", "attachment_id": 4 }),
+            r#"{"attachment":{"id":4,"item_id":9,"name":"a.png","mime":"image/png","size":8,"sha256":"ab","author":"","source":"fleet","created_at":1},"data_base64":"iVBORw0KGgo="}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::work_attachment(
+                    b,
+                    commands::work_view::WorkAttachmentArgs { attachment_id: 4 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_tracker_comments",
+            "work",
+            json!({ "session_id": null, "key": "ABC-1", "action": "tracker_comments" }),
+            r#"{"key":"ABC-1","tracker":"Acme Jira","provider":"jira","comments":[{"id":"10","author":"Ann","body":"Looks good","created_at":1}],"can_post":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::work_tracker_comments(
+                    b,
+                    commands::work_view::WorkTrackerCommentsArgs {
+                        key: "ABC-1".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // A task becomes a tracker's ticket (owner decision 2026-10-11).
+        (
+            "promote_work_item",
+            "work_link",
+            json!({ "session_id": null, "action": "promote", "key": null, "item_id": 9,
+                    "link_id": null, "source": null, "tracker_id": 2, "container": "ENG" }),
+            NATIVE_ITEM_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::promote_work_item(
+                    b,
+                    commands::work_view::PromoteWorkItemArgs {
+                        item_id: 9,
+                        tracker_id: Some(2),
+                        container: Some("ENG".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Epics (sprints design 2026-09-28 §3).
+        (
+            "set_work_parent",
+            "work_link",
+            json!({ "session_id": null, "action": "set_parent", "key": null, "item_id": 9,
+                    "link_id": null, "source": null, "parent": "item:5" }),
+            NATIVE_ITEM_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::set_work_parent(
+                    b,
+                    commands::work::SetWorkParentArgs {
+                        item_id: 9,
+                        parent: "item:5".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Task editing.
+        (
+            "edit_work_item",
+            "work_link",
+            json!({ "session_id": null, "action": "edit", "key": null, "item_id": 9,
+                    "link_id": null, "source": null, "title": "Fix login",
+                    "notes": "", "assignees": ["Ana"], "due_at": "2026-10-16",
+                    "priority": "high", "labels": ["infra"], "estimate": 3.0,
+                    "estimate_unit": "points" }),
+            NATIVE_ITEM_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::edit_work_item(
+                    b,
+                    commands::work::EditWorkItemArgs {
+                        item_id: 9,
+                        title: Some("Fix login".into()),
+                        notes: Some(String::new()),
+                        assignees: Some(vec!["Ana".into()]),
+                        due_at: Some("2026-10-16".into()),
+                        epic: None,
+                        priority: Some("high".into()),
+                        labels: Some(vec!["infra".into()]),
+                        estimate: Some(3.0),
+                        estimate_unit: Some("points".into()),
                     },
                     s,
                 ))
@@ -918,7 +1645,10 @@ fn routed_read_cases() -> Vec<Case> {
             Box::new(|b, s, _| {
                 block_on(commands::work::routed::decide_work_proposal(
                     b,
-                    commands::work::WorkProposalArgs { item_id: 9 },
+                    commands::work::WorkProposalArgs {
+                        item_id: 9,
+                        merge_into: None,
+                    },
                     true,
                     s,
                 ))
@@ -934,7 +1664,10 @@ fn routed_read_cases() -> Vec<Case> {
             Box::new(|b, s, _| {
                 block_on(commands::work::routed::decide_work_proposal(
                     b,
-                    commands::work::WorkProposalArgs { item_id: 9 },
+                    commands::work::WorkProposalArgs {
+                        item_id: 9,
+                        merge_into: None,
+                    },
                     false,
                     s,
                 ))
@@ -1164,6 +1897,40 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            "repo_branch_diff",
+            "repo_branch_diff",
+            json!({ "session_id": 7 }),
+            r#"{"branch":"feat","upstream":null,"unpushed":[],"unpushedFiles":[],"truncated":false,"base":"origin/main","aheadOfBase":2,"baseFiles":[]}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::files::routed::repo_branch_diff(
+                    b,
+                    SessionIdArgs { session_id: 7 },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "repo_range_diff",
+            "repo_range_diff",
+            json!({ "session_id": 7, "path": "src/lib.rs", "range": "base" }),
+            r#"{"path":"src/lib.rs","diff":"","binary":false,"truncated":false}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::files::routed::repo_range_diff(
+                    b,
+                    RepoRangeDiffArgs {
+                        session_id: 7,
+                        path: "src/lib.rs".into(),
+                        range: DiffRange::Base,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "repo_tree",
             "repo_tree",
             json!({ "session_id": 7 }),
@@ -1214,6 +1981,24 @@ fn routed_read_cases() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        (
+            "repo_blame",
+            "repo_blame",
+            json!({ "session_id": 7, "path": "src/lib.rs" }),
+            r#"{"path":"src/lib.rs","hunks":[],"truncated":false}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::files::routed::repo_blame(
+                    b,
+                    RepoFileArgs {
+                        session_id: 7,
+                        path: "src/lib.rs".into(),
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
         // The simple `(b, s, _)` shape: `operator_status` needs neither ssh
         // nor a cancellation registry, unlike `ensure_operator` below.
         (
@@ -1230,7 +2015,9 @@ fn routed_read_cases() -> Vec<Case> {
         (
             "catalog_list_assets",
             "list_assets",
-            json!({}),
+            // Assets M5 fix round 1: this desktop asks for every catalog; an
+            // older one sends `{}` and gets personal's listing.
+            json!({ "all_catalogs": true }),
             r#"{"head":"abc","loaded_at":1,"assets":[{"kind":"skill","name":"worktree","version":"1","description":"d","tags":[],"hosts":[{"host_alias":"nas","harness":"claude","state":"in_sync"}]}],"unmanaged":[{"host_alias":"nas","harness":"claude","kind":"skill","name":"extra","state":"unmanaged","scanned_at":1,"managed":false}],"problems":[]}"#,
             Box::new(|b, s, _| {
                 block_on(commands::assets::routed::catalog_list_assets(b, s)).map(|_| ())
@@ -1282,6 +2069,7 @@ fn routed_read_cases() -> Vec<Case> {
                             limit: Some(50),
                         }]),
                         with_review_total: Some(true),
+                        with_missions: None,
                     },
                     s,
                 ))
@@ -1298,6 +2086,38 @@ fn routed_read_cases() -> Vec<Case> {
                     b,
                     commands::work_view::WorkTaskCmdArgs {
                         task_id: "item:3".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_missions",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "missions" }),
+            r#"[{"id":4,"name":"m","goal":"g","mode":"finite","state":"draft","level":0,"plan_version":1,"created_at":1,"updated_at":1,"version":1}]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::work_missions(
+                    b,
+                    commands::missions::WorkMissionsArgs {},
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_mission",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "mission", "mission_id": 4,
+                    "before_event": 90 }),
+            r#"{"mission":{"id":4,"name":"m","goal":"g","mode":"finite","state":"draft","level":0,"plan_version":1,"created_at":1,"updated_at":1,"version":1}}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::work_mission(
+                    b,
+                    commands::missions::WorkMissionArgs {
+                        mission_id: 4,
+                        before_event: Some(90),
                     },
                     s,
                 ))
@@ -1389,6 +2209,56 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            "work_stats",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "stats", "filters": { "group_by": "sprint" } }),
+            r#"{"group_by":"sprint","total":0,"stages":{"backlog":0,"in_progress":0,"in_review":0,"blocked":0,"done":0},"pct_done":0,"needs_you":0,"cost_micros":0,"groups":[],"generated_at":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::work_stats(
+                    b,
+                    commands::work_view::WorkStatsArgs {
+                        filters: Some(fleet_core::service::work::view::WorkTreeFilters {
+                            group_by: Some("sprint".into()),
+                            ..Default::default()
+                        }),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Sprints and releases (design 2026-09-28 §6a).
+        (
+            "work_buckets",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "buckets", "kind": "sprint" }),
+            "[]",
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::work_buckets(
+                    b,
+                    commands::work_view::WorkBucketsArgs {
+                        kind: Some("sprint".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_bucket",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "bucket", "bucket_id": 4 }),
+            r#"{"bucket":{"id":4,"kind":"sprint","name":"Sprint 24","state":"active","created_at":1,"updated_at":1,"version":1},"members":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::work_bucket(
+                    b,
+                    commands::work_view::WorkBucketArgs { bucket_id: 4 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "work_org_impact",
             "work",
             json!({ "session_id": null, "key": null, "action": "org_impact",
@@ -1406,6 +2276,102 @@ fn routed_read_cases() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // ── multi-user M1 (T13): the watcher's pane, and the two reads ──
+        //
+        // `capture_session` is the WATCHER's view of a live pane, which is
+        // the only one sharing gives: `pty_open` would be a direct SSH into
+        // the owner's pane that the hub could neither refuse nor revoke. Its
+        // two optional arguments are passed as `Some` here on purpose — a
+        // mapping that dropped them would still have "worked", with the
+        // watcher silently looking at the visible pane and a different cap.
+        (
+            "capture_session",
+            "capture_session",
+            json!({ "session_id": 42, "scrollback_lines": 400, "max_lines": 120 }),
+            "claude> working on the ticket\n",
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::capture_session(
+                    b,
+                    commands::sessions::CaptureSessionArgs {
+                        session_id: 42,
+                        scrollback_lines: Some(400),
+                        max_lines: Some(120),
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Redesign 11.11: the watcher's "Since 13:20" summary; `since`
+        // crosses as given.
+        (
+            "session_summary_since",
+            "session_summary_since",
+            json!({ "session_id": 42, "since": 1_791_465_600 }),
+            r#"{"text":"Fixed it.","check":"passed","since":1791465600,"turns":2,"model":"haiku","host_alias":"h","at":1791466000}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::session_summary_since(
+                    b,
+                    commands::sessions::SessionSummarySinceArgs {
+                        session_id: 42,
+                        since: 1_791_465_600,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Context help at the composer: the request crosses flat, beside
+        // the session id, as SessionContextHelpParams takes it.
+        (
+            "session_context_help",
+            "session_context_help",
+            json!({ "session_id": 42, "question": "why?", "line": "/plan", "history": ["fix it"], "commands": ["/plan — Plan"] }),
+            r#"{"answer":"Use /plan.","model":"haiku","host_alias":"h","history_items":1,"at":1791466000}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::context_help::routed::session_context_help(
+                    b,
+                    commands::context_help::SessionContextHelpArgs {
+                        session_id: 42,
+                        request: fleet_core::service::context_help::HelpRequest {
+                            question: "why?".into(),
+                            line: "/plan".into(),
+                            history: vec!["fix it".into()],
+                            commands: vec!["/plan — Plan".into()],
+                        },
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "session_access",
+            "session_access",
+            json!({ "session_id": 42 }),
+            r#"[{"session_id":42,"person_id":3,"person_name":"jane","level":"watch","granted_by":1,"granted_at":1700000000}]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::session_access(
+                    b,
+                    commands::sessions::SessionAccessArgs { session_id: 42 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // No arguments, and the empty object is the assertion: "whose grants"
+        // is the CONNECTION's own person on the hub, never a parameter this
+        // side could point at someone else.
+        (
+            "my_grants",
+            "my_grants",
+            json!({}),
+            r#"{"person_id":1,"grants":[{"session_id":42,"level":"drive"}]}"#,
+            Box::new(|b, s, _| block_on(commands::sessions::routed::my_grants(b, s)).map(|_| ())),
+        ),
     ]
 }
 
@@ -1417,12 +2383,599 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
     check(routed_mutation_cases());
 }
 
+/// Multi-user M1 (T5): a hub client may not name the OWNER of the session it
+/// asks the hub to create.
+///
+/// `NewSessionArgs::owner_person_id` is `#[serde(skip_deserializing)]` and
+/// `HubBackend::new_session` spells its arguments out one by one, so the field
+/// has two independent reasons never to cross the wire — and this is the
+/// assertion that notices if somebody "fixes" the spelled-out list by
+/// serialising the struct instead. Whose a session is follows from the
+/// connection the hub authenticated, never from a field in the request; a
+/// client that could set it could create a session in a colleague's name.
+///
+/// The table row above carries `owner_person_id: Some(42)` and asserts the JSON
+/// whole, which proves the same thing; this test states it on its own so the
+/// failure message names the rule rather than a diff.
+#[test]
+fn new_session_never_sends_an_owner_over_the_wire() {
+    let fake = Fake::answering(SESSION_PAYLOAD);
+    let (_dir, st) = store();
+    block_on(commands::sessions::routed::new_session(
+        &remote_backend(&fake),
+        fleet_core::service::sessions::NewSessionArgs {
+            host_alias: "trn".into(),
+            project_id: 4,
+            worktree_id: None,
+            name: "demo".into(),
+            call_id: None,
+            new_worktree: None,
+            base_branch: None,
+            kind: None,
+            start_command: None,
+            friendly_name: None,
+            resume_claude_session_id: None,
+            model: None,
+            effort: None,
+            profile: None,
+            agent: None,
+            origin: None,
+            over_limit_ok: false,
+            owner_person_id: Some(42),
+            start_token: None,
+        },
+        &st,
+        &ssh(),
+        &fleet_core::cancel::CancellationRegistry::new(),
+    ))
+    .expect("the hub answers with a row");
+    let (tool, args) = fake.only_call();
+    assert_eq!(tool, "new_session");
+    assert!(
+        args.get("owner_person_id").is_none(),
+        "the owner must never cross the wire — the hub resolves it from the \
+         connection's own person: {args}"
+    );
+}
+
 /// The table [`every_routed_mutation_names_its_tool_and_arguments`] runs; also run against a configured hub this
 /// launch cannot use, which must refuse every row.
 fn routed_mutation_cases() -> Vec<Case> {
     let mut cases = routed_mutation_cases_but_the_catalog();
     cases.extend(catalog_admin_cases());
+    cases.extend(org_admin_mutation_cases());
     cases
+}
+
+/// Org administration phase B: the reads of the hub's `org_admin`.
+fn org_admin_read_cases() -> Vec<Case> {
+    use fleet_core::service::org_admin::OrgAdminArgs;
+    vec![
+        (
+            "org_rule_preview",
+            "org_admin",
+            json!({ "action": "rule_preview", "org_id": 1, "owner": "acme" }),
+            r#"{"matches":0,"moving":0,"from":[],"kept":0,"sentence":""}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::org_rule_preview(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        org_id: Some(1),
+                        owner: Some("acme".into()),
+                        ..OrgAdminArgs::new("rule_preview")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "list_devices",
+            "org_admin",
+            json!({ "action": "list_devices" }),
+            r#"[]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::org_devices::routed::list_devices(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        ..OrgAdminArgs::new("list_devices")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "list_people",
+            "org_admin",
+            json!({ "action": "list_people" }),
+            r#"[]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::org_devices::routed::list_people(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        ..OrgAdminArgs::new("list_people")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+    ]
+}
+
+/// Org administration phase B: every org, device and people change routes
+/// to the hub's `org_admin` under its own action.
+fn org_admin_mutation_cases() -> Vec<Case> {
+    use fleet_core::service::org_admin::OrgAdminArgs;
+    vec![
+        (
+            "set_org_member",
+            "org_admin",
+            json!({ "action": "set_member", "org_id": 1, "person": "jane", "role": "admin" }),
+            r#"[]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::set_org_member(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        org_id: Some(1),
+                        person: Some("jane".into()),
+                        role: Some("admin".into()),
+                        ..OrgAdminArgs::new("set_member")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "remove_org_member",
+            "org_admin",
+            json!({ "action": "remove_member", "org_id": 1, "person_id": 3 }),
+            r#"{"removed":true,"revoked_grants":0}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::remove_org_member(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        org_id: Some(1),
+                        person_id: Some(3),
+                        ..OrgAdminArgs::new("remove_member")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "org_member_grants",
+            "org_admin",
+            json!({ "action": "member_grants", "org_id": 1, "person_id": 3 }),
+            r#"{"watch":4,"drive":2}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::org_member_grants(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        org_id: Some(1),
+                        person_id: Some(3),
+                        ..OrgAdminArgs::new("member_grants")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "set_org_setting",
+            "org_admin",
+            json!({ "action": "set_org_setting", "org_id": 1, "key": "budget.org_daily_usd", "value": "5" }),
+            r#"[]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::set_org_setting(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        org_id: Some(1),
+                        key: Some("budget.org_daily_usd".into()),
+                        value: Some("5".into()),
+                        ..OrgAdminArgs::new("set_org_setting")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "add_org",
+            "org_admin",
+            json!({ "action": "add_org", "name": "Acme" }),
+            r#"{"id":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::add_org(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        name: Some("Acme".into()),
+                        ..OrgAdminArgs::new("add_org")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "update_org",
+            "org_admin",
+            json!({ "action": "update_org", "org_id": 1, "jev": "on" }),
+            r#"{"id":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::update_org(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        org_id: Some(1),
+                        jev: Some("on".into()),
+                        ..OrgAdminArgs::new("update_org")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "remove_org",
+            "org_admin",
+            json!({ "action": "remove_org", "org_id": 1 }),
+            r#"{"removed":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::remove_org(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        org_id: Some(1),
+                        ..OrgAdminArgs::new("remove_org")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "add_org_rule",
+            "org_admin",
+            json!({ "action": "add_rule", "org_id": 1, "owner": "acme" }),
+            r#"{"id":3}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::add_org_rule(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        org_id: Some(1),
+                        owner: Some("acme".into()),
+                        ..OrgAdminArgs::new("add_rule")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "remove_org_rule",
+            "org_admin",
+            json!({ "action": "remove_rule", "rule_id": 3 }),
+            r#"{"removed":3}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::remove_org_rule(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        rule_id: Some(3),
+                        ..OrgAdminArgs::new("remove_rule")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "add_org_project",
+            "org_admin",
+            json!({ "action": "add_project", "org_id": 1, "name": "api", "hosts": "h" }),
+            r#"{"id":4}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::add_org_project(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        org_id: Some(1),
+                        name: Some("api".into()),
+                        hosts: Some("h".into()),
+                        ..OrgAdminArgs::new("add_project")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "remove_org_project",
+            "org_admin",
+            json!({ "action": "remove_project", "project_id": 4 }),
+            r#"{"removed":4}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::remove_org_project(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        project_id: Some(4),
+                        ..OrgAdminArgs::new("remove_project")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "revoke_org_share",
+            "org_admin",
+            json!({ "action": "revoke_share", "org_id": 1, "grant_id": 5 }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::revoke_org_share(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        org_id: Some(1),
+                        grant_id: Some(5),
+                        ..OrgAdminArgs::new("revoke_share")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "narrow_org_share",
+            "org_admin",
+            json!({ "action": "narrow_share", "org_id": 1, "grant_id": 5 }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::narrow_org_share(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        org_id: Some(1),
+                        grant_id: Some(5),
+                        ..OrgAdminArgs::new("narrow_share")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "revoke_org_member_grants",
+            "org_admin",
+            json!({ "action": "revoke_member_grants", "org_id": 1, "person_id": 2 }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::revoke_org_member_grants(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        org_id: Some(1),
+                        person_id: Some(2),
+                        ..OrgAdminArgs::new("revoke_member_grants")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "assign_host_org",
+            "org_admin",
+            json!({ "action": "assign_host", "host_alias": "h", "org_id": 1 }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::assign_host_org(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        host_alias: Some("h".into()),
+                        org_id: Some(1),
+                        ..OrgAdminArgs::new("assign_host")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "assign_tracker_org",
+            "org_admin",
+            json!({ "action": "assign_tracker", "tracker_id": 2, "org_id": 1 }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::assign_tracker_org(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        tracker_id: Some(2),
+                        org_id: Some(1),
+                        ..OrgAdminArgs::new("assign_tracker")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "pair_device",
+            "org_admin",
+            json!({ "action": "pair_device", "device": "phone", "mode": "readonly" }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::org_devices::routed::pair_device(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        device: Some("phone".into()),
+                        mode: Some("readonly".into()),
+                        ..OrgAdminArgs::new("pair_device")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "revoke_device",
+            "org_admin",
+            json!({ "action": "revoke_device", "device": "phone" }),
+            r#"{"revoked":"phone"}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::org_devices::routed::revoke_device(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        device: Some("phone".into()),
+                        ..OrgAdminArgs::new("revoke_device")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "set_device_trust",
+            "org_admin",
+            json!({ "action": "set_device_trust", "device": "phone", "trusted": true }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::org_devices::routed::set_device_trust(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        device: Some("phone".into()),
+                        trusted: Some(true),
+                        ..OrgAdminArgs::new("set_device_trust")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "update_device",
+            "org_admin",
+            json!({ "action": "rename_device", "device": "phone", "name": "Ada's phone" }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::org_devices::routed::update_device(
+                    b,
+                    s,
+                    commands::org_devices::UpdateDeviceArgs {
+                        device: "phone".into(),
+                        name: Some("Ada's phone".into()),
+                        ..Default::default()
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "bind_device_org",
+            "org_admin",
+            json!({ "action": "bind_device", "device": "phone", "org": "Acme" }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::org_devices::routed::bind_device_org(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        device: Some("phone".into()),
+                        org: Some("Acme".into()),
+                        ..OrgAdminArgs::new("bind_device")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "set_device_person",
+            "org_admin",
+            json!({ "action": "set_device_person", "device": "phone", "person": "ada" }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::org_devices::routed::set_device_person(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        device: Some("phone".into()),
+                        person: Some("ada".into()),
+                        ..OrgAdminArgs::new("set_device_person")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "grant_device_catalog",
+            "org_admin",
+            json!({ "action": "grant_catalog", "device": "phone", "catalog": "personal", "on": true }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::org_devices::routed::grant_device_catalog(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        device: Some("phone".into()),
+                        catalog: Some("personal".into()),
+                        on: Some(true),
+                        ..OrgAdminArgs::new("grant_catalog")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "add_person",
+            "org_admin",
+            json!({ "action": "add_person", "name": "ada", "display_name": "Ada" }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::org_devices::routed::add_person(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        name: Some("ada".into()),
+                        display_name: Some("Ada".into()),
+                        ..OrgAdminArgs::new("add_person")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "rename_person",
+            "org_admin",
+            json!({ "action": "rename_person", "person_id": 2, "name": "ada" }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::org_devices::routed::rename_person(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        person_id: Some(2),
+                        name: Some("ada".into()),
+                        ..OrgAdminArgs::new("rename_person")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "disable_person",
+            "org_admin",
+            json!({ "action": "disable_person", "person_id": 2 }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::org_devices::routed::disable_person(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        person_id: Some(2),
+                        ..OrgAdminArgs::new("disable_person")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+    ]
 }
 
 /// The mutations outside the asset catalog; [`catalog_admin_cases`] is the rest.
@@ -1436,13 +2989,42 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
     use fleet_core::service::rewind::{RewindArgs, RewindMode};
     use fleet_core::service::safe_kill::SafeKillSessionArgs;
     use fleet_core::service::sessions::{
-        DiscoverLostSessionsArgs, DismissGhostSessionArgs, KillSessionArgs, NewSessionArgs,
-        RecreateSessionArgs, RenameSessionArgs, RestartSessionArgs, RestoreHostSessionsArgs,
-        SendPromptArgs, SetFriendlyNameArgs, SpawnReviewArgs,
+        AdoptSessionArgs, DiscoverLostSessionsArgs, DismissGhostSessionArgs, KillSessionArgs,
+        LostTargetArgs, NewSessionArgs, PlaceTranscriptArgs, RecreateSessionArgs,
+        RenameSessionArgs, RestartSessionArgs, RestoreHostSessionsArgs, SendPromptArgs,
+        SetFriendlyNameArgs, SetSessionTagsArgs, SpawnReviewArgs, TouchSessionViewedArgs,
     };
-    use fleet_core::service::worktrees::DeleteWorktreeArgs;
 
     vec![
+        (
+            "link_peer_hub",
+            "link_peer",
+            json!({ "url": "https://hub.other.example", "code": "AB12-CD34" }),
+            "null",
+            Box::new(|b, _, _| {
+                block_on(commands::federation::routed::link_peer_hub(
+                    b,
+                    commands::federation::LinkPeerHubArgs {
+                        url: "https://hub.other.example".into(),
+                        code: "AB12-CD34".into(),
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "unlink_peer_hub",
+            "unlink_peer",
+            json!({ "id": 1 }),
+            r#"{"id":1,"failed_messages":0}"#,
+            Box::new(|b, _, _| {
+                block_on(commands::federation::routed::unlink_peer_hub(
+                    b,
+                    commands::federation::UnlinkPeerHubArgs { id: 1 },
+                ))
+                .map(|_| ())
+            }),
+        ),
         // Declarative pages P6: a write the hub records as this device.
         (
             "set_fleet_setting",
@@ -1483,6 +3065,268 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             }),
         ),
         (
+            "answer_form",
+            "ask",
+            json!({ "answer": "f_a", "values": { "x": "y" } }),
+            FORM_VIEW_JSON,
+            Box::new(|b, s, ssh| {
+                let values = serde_json::from_value(json!({ "x": "y" })).unwrap();
+                block_on(commands::forms::routed::answer_form(
+                    b,
+                    s,
+                    ssh,
+                    "f_a".into(),
+                    values,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "scan_debug_devices",
+            "debug_devices",
+            json!({ "action": "scan", "host": "mac" }),
+            r#"{"hosts":[]}"#,
+            Box::new(|b, s, ssh| {
+                block_on(commands::debug_devices::routed::scan_debug_devices(
+                    b,
+                    s,
+                    ssh,
+                    commands::debug_devices::ScanDebugDevicesArgs {
+                        host: Some("mac".into()),
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "update_debug_device",
+            "debug_devices",
+            json!({ "action": "configure", "device": "3", "label": "bench", "shared": true }),
+            DEBUG_DEVICE_JSON,
+            Box::new(|b, s, _| {
+                block_on(commands::debug_devices::routed::update_debug_device(
+                    b,
+                    s,
+                    commands::debug_devices::UpdateDebugDeviceArgs {
+                        id: 3,
+                        label: Some("bench".into()),
+                        shared: Some(true),
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "release_debug_device",
+            "debug_devices",
+            json!({ "action": "release", "device": "3" }),
+            DEBUG_DEVICE_JSON,
+            Box::new(|b, s, _| {
+                block_on(commands::debug_devices::routed::release_debug_device(
+                    b,
+                    s,
+                    commands::debug_devices::DebugDeviceArgs { id: 3 },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "forget_debug_device",
+            "debug_devices",
+            json!({ "action": "forget", "device": "3" }),
+            r#"{"removed":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::debug_devices::routed::forget_debug_device(
+                    b,
+                    s,
+                    commands::debug_devices::DebugDeviceArgs { id: 3 },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "boot_debug_device",
+            "debug_devices",
+            json!({ "action": "boot", "device": "3" }),
+            r#"{"state":"booted"}"#,
+            Box::new(|b, s, ssh| {
+                block_on(commands::debug_devices::routed::boot_debug_device(
+                    b,
+                    s,
+                    ssh,
+                    commands::debug_devices::DebugDeviceArgs { id: 3 },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "claim_debug_device",
+            "debug_devices",
+            json!({ "action": "claim", "device": "3", "note": "login flow", "claim_s": null, "queue": true }),
+            DEBUG_DEVICE_JSON,
+            Box::new(|b, s, _| {
+                block_on(commands::debug_devices::routed::claim_debug_device(
+                    b,
+                    s,
+                    commands::debug_devices::ClaimDebugDeviceArgs {
+                        id: 3,
+                        note: Some("login flow".into()),
+                        claim_s: None,
+                        queue: Some(true),
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "install_debug_device",
+            "debug_devices",
+            json!({ "action": "install", "device": "3", "path": "~/app.apk", "host": null }),
+            RUN_OUTPUT_JSON,
+            Box::new(|b, s, ssh| {
+                block_on(commands::debug_devices::routed::install_debug_device(
+                    b,
+                    s,
+                    ssh,
+                    commands::debug_devices::InstallDebugDeviceArgs {
+                        id: 3,
+                        path: "~/app.apk".into(),
+                        // An empty host means the device's own: sent as absent.
+                        host: Some(" ".into()),
+                        ..Default::default()
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "debug_device_logs",
+            "debug_devices",
+            json!({ "action": "logs", "device": "3", "lines": 200, "contains": "FATAL" }),
+            RUN_OUTPUT_JSON,
+            Box::new(|b, s, ssh| {
+                block_on(commands::debug_devices::routed::debug_device_logs(
+                    b,
+                    s,
+                    ssh,
+                    commands::debug_devices::DebugDeviceLogsArgs {
+                        id: 3,
+                        contains: Some("FATAL".into()),
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "shutdown_debug_device",
+            "debug_devices",
+            json!({ "action": "shutdown", "device": "3" }),
+            DEBUG_DEVICE_JSON,
+            Box::new(|b, s, ssh| {
+                block_on(commands::debug_devices::routed::shutdown_debug_device(
+                    b,
+                    s,
+                    ssh,
+                    commands::debug_devices::DebugDeviceArgs { id: 3 },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "decline_form",
+            "ask",
+            json!({ "decline": "f_a", "note": "later" }),
+            FORM_VIEW_JSON,
+            Box::new(|b, s, _| {
+                block_on(commands::forms::routed::decline_form(
+                    b,
+                    s,
+                    "f_a".into(),
+                    Some("later".into()),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "control_route_propose",
+            "control_route",
+            json!({ "action": "propose", "text": "how is the federation handshake doing" }),
+            r#"{"outcome":"none","targets":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::operator::routed::control_route_propose(
+                    b,
+                    s,
+                    "how is the federation handshake doing".into(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "control_route_follow",
+            "control_route",
+            json!({ "action": "follow", "run_id": 7, "chosen": "m3" }),
+            "true",
+            Box::new(|b, s, _| {
+                block_on(commands::operator::routed::control_route_follow(
+                    b,
+                    s,
+                    7,
+                    "m3".into(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "resume_or_new_propose",
+            "resume_or_new",
+            json!({ "action": "propose", "key": "PD-2412" }),
+            r#"{"value":"l7","link_id":7,"source":"jev","confidence_pct":82,"unsure":false}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::resume_or_new_propose(
+                    b,
+                    commands::work::ResumeOrNewArgs {
+                        key: "PD-2412".into(),
+                        chosen: None,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "resume_or_new_follow",
+            "resume_or_new",
+            json!({ "action": "follow", "key": "PD-2412", "chosen": "new" }),
+            "true",
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::resume_or_new_follow(
+                    b,
+                    commands::work::ResumeOrNewArgs {
+                        key: "PD-2412".into(),
+                        chosen: Some("new".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "mcp_confirm",
+            "answer_mcp_confirm",
+            json!({ "nonce": "n", "approved": true }),
+            "true",
+            Box::new(|b, _, _| {
+                let guards = fleet_core::mcp::McpGuards::new(Arc::new(|_| {}));
+                block_on(commands::mcp::routed::mcp_confirm(
+                    b,
+                    &guards,
+                    "n".into(),
+                    true,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "decide_setting_proposals",
             "decide_setting_proposals",
             json!({ "accept": [4], "reject": [5] }),
@@ -1514,6 +3358,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         prompt: "".into(),
                         submit: true,
                         keys: Some("Enter".into()),
+                        expect: None,
                     },
                     s,
                     h,
@@ -1533,6 +3378,26 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         host_alias: "trn".into(),
                         name: "demo".into(),
                         force: true,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "shell_terminals",
+            "shell_terminals",
+            json!({ "session_id": 7, "action": "open", "n": 2, "at": "home" }),
+            r#"{"session_id":7,"host_alias":"trn","terminals":[{"n":2,"tmux_name":"demo--sh2"}],"opened":2}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::shell_terminals(
+                    b,
+                    fleet_core::service::sessions::ShellTerminalsArgs {
+                        session_id: 7,
+                        action: fleet_core::service::sessions::ShellTerminalAction::Open,
+                        n: Some(2),
+                        at: fleet_core::service::sessions::ShellTerminalStart::Home,
                     },
                     s,
                     h,
@@ -1598,6 +3463,55 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             }),
         ),
         (
+            "set_session_tags",
+            "set_session_tags",
+            json!({ "session_id": 7, "tags": ["release"] }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::set_session_tags(
+                    b,
+                    SetSessionTagsArgs {
+                        session_id: 7,
+                        tags: vec!["release".into()],
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "decide_related_session",
+            "decide_related_session",
+            json!({ "session_id": 7, "run_id": 3, "linked": true }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::decide_related_session(
+                    b,
+                    fleet_core::service::decide::related_session::DecideRelatedSessionArgs {
+                        session_id: 7,
+                        run_id: 3,
+                        linked: true,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "touch_session_viewed",
+            "touch_session_viewed",
+            json!({ "session_id": 7 }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::touch_session_viewed(
+                    b,
+                    TouchSessionViewedArgs { session_id: 7 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "link_session_work",
             "work_link",
             // A person on the desktop: the source is always `manual`.
@@ -1640,6 +3554,47 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     s,
                     &ssh(),
                     &fleet_core::cancel::CancellationRegistry::new(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "preview_start_work",
+            "work_link",
+            // The start's own fields, under its own action.
+            json!({ "session_id": null, "action": "preview_start", "key": "ABC-1", "item_id": null,
+                    "link_id": null, "source": null, "project_id": 3, "host_alias": "h",
+                    "with_brief": true, "parallel": true }),
+            r#"{"key":"ABC-1","title":"","item_id":null,"plan":null,"missing":"host","projects":[],"hosts":[],"conflicts":[],"brief":null,"checkout":null}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::trackers::routed::preview_start_work(
+                    b,
+                    commands::trackers::StartWorkArgs {
+                        reference: Some("ABC-1".into()),
+                        project_id: Some(3),
+                        host_alias: Some("h".into()),
+                        with_brief: true,
+                        parallel: true,
+                        ..Default::default()
+                    },
+                    s,
+                    &ssh(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "abandon_start",
+            "work_link",
+            json!({ "session_id": 7, "action": "abandon_start", "key": null, "item_id": null,
+                    "link_id": null, "source": null }),
+            r#"{"session_id":7,"worktree_removed":true,"branch_deleted":true}"#,
+            Box::new(|b, s, ssh| {
+                block_on(commands::trackers::routed::abandon_start(
+                    b,
+                    commands::trackers::AbandonStartArgs { session_id: 7 },
+                    s,
+                    ssh,
                 ))
                 .map(|_| ())
             }),
@@ -1876,21 +3831,6 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             }),
         ),
         (
-            "archive_session_work",
-            "work_link",
-            json!({ "session_id": 7, "action": "archive", "key": null, "item_id": null,
-                    "link_id": null, "source": null }),
-            SESSION_PAYLOAD,
-            Box::new(|b, s, _| {
-                block_on(commands::work::routed::archive_session_work(
-                    b,
-                    commands::work::SessionLifecycleArgs { session_id: 7 },
-                    s,
-                ))
-                .map(|_| ())
-            }),
-        ),
-        (
             "unarchive_session_work",
             "work_link",
             json!({ "session_id": 7, "action": "unarchive", "key": null, "item_id": null,
@@ -1900,44 +3840,6 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                 block_on(commands::work::routed::unarchive_session_work(
                     b,
                     commands::work::SessionLifecycleArgs { session_id: 7 },
-                    s,
-                ))
-                .map(|_| ())
-            }),
-        ),
-        (
-            "snooze_tidy",
-            "work_link",
-            json!({ "session_id": 7, "action": "snooze", "key": null, "item_id": null,
-                    "link_id": 5, "source": null, "days": 3 }),
-            SESSION_PAYLOAD,
-            Box::new(|b, s, _| {
-                block_on(commands::work::routed::snooze_tidy(
-                    b,
-                    commands::work::TidyFlagArgs {
-                        session_id: 7,
-                        link_id: Some(5),
-                        days: Some(3),
-                    },
-                    s,
-                ))
-                .map(|_| ())
-            }),
-        ),
-        (
-            "never_tidy",
-            "work_link",
-            json!({ "session_id": 7, "action": "never", "key": null, "item_id": null,
-                    "link_id": null, "source": null }),
-            SESSION_PAYLOAD,
-            Box::new(|b, s, _| {
-                block_on(commands::work::routed::never_tidy(
-                    b,
-                    commands::work::TidyFlagArgs {
-                        session_id: 7,
-                        link_id: None,
-                        days: Some(3),
-                    },
                     s,
                 ))
                 .map(|_| ())
@@ -2003,7 +3905,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
         (
             "restart_session",
             "restart_session",
-            json!({ "host_alias": "trn", "name": "demo", "force": false }),
+            json!({ "host_alias": "trn", "name": "demo", "force": false, "profile": "work" }),
             SESSION_PAYLOAD,
             Box::new(|b, s, h| {
                 block_on(commands::sessions::routed::restart_session(
@@ -2012,6 +3914,9 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         host_alias: "trn".into(),
                         name: "demo".into(),
                         force: false,
+                        profile: Some("work".into()),
+                        model: None,
+                        effort: None,
                     },
                     s,
                     h,
@@ -2056,7 +3961,9 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     SpawnReviewArgs {
                         source_session_id: 7,
                         prompt: "review it".into(),
+                        agent: None,
                         call_id: None,
+                        origin: None,
                     },
                     s,
                     h,
@@ -2079,10 +3986,49 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     SpawnReviewArgs {
                         source_session_id: 7,
                         prompt: "review it".into(),
+                        agent: None,
                         call_id: Some(123),
+                        origin: None,
                     },
                     s,
                     h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "queue_prompt",
+            "queue_prompt",
+            json!({ "session_id": 7, "prompt": "rebase on main" }),
+            r#"{"session_id":7,"delivered":false,"queued_id":3}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::queue_prompt(
+                    b,
+                    fleet_core::service::sessions::QueuePromptArgs {
+                        session_id: 7,
+                        prompt: "rebase on main".into(),
+                        ..Default::default()
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Taking a prompt back is the same tool with `cancel` set.
+        (
+            "cancel_queued_prompt",
+            "queued_prompts",
+            json!({ "session_id": 7, "cancel": 3 }),
+            "[]",
+            Box::new(|b, s, _h| {
+                block_on(commands::sessions::routed::cancel_queued_prompt(
+                    b,
+                    fleet_core::service::sessions::CancelQueuedPromptArgs {
+                        session_id: 7,
+                        id: 3,
+                    },
+                    s,
                 ))
                 .map(|_| ())
             }),
@@ -2143,6 +4089,47 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             }),
         ),
         (
+            "lost_target",
+            "lost_target",
+            json!({ "session_id": 7 }),
+            "{}",
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::lost_target(
+                    b,
+                    LostTargetArgs {
+                        session_id: Some(7),
+                        ..Default::default()
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "place_transcript",
+            "place_transcript",
+            json!({
+                "host_alias": "trn",
+                "claude_session_id": "44366faf-ae97-426a-91cd-beaf3c74f1d7",
+                "project_id": 3,
+            }),
+            r#"{"project_id":3,"tmux_name":"dev-o-r","copied":true}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::place_transcript(
+                    b,
+                    PlaceTranscriptArgs {
+                        host_alias: "trn".into(),
+                        claude_session_id: "44366faf-ae97-426a-91cd-beaf3c74f1d7".into(),
+                        project_id: 3,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "dismiss_ghost_session",
             "dismiss_ghost_session",
             json!({ "session_id": 7 }),
@@ -2151,6 +4138,25 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                 block_on(commands::sessions::routed::dismiss_ghost_session(
                     b,
                     DismissGhostSessionArgs { session_id: 7 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "adopt_session",
+            "adopt_session",
+            json!({ "session_id": 7 }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::adopt_session(
+                    b,
+                    AdoptSessionArgs {
+                        session_id: 7,
+                        project_id: None,
+                        owner_person_id: Some(1),
+                        decider: Default::default(),
+                    },
                     s,
                 ))
                 .map(|_| ())
@@ -2169,27 +4175,11 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         name: "worker".into(),
                         prompt: "go".into(),
                         requester_session_id: Some(41),
+                        ..Default::default()
                     },
                     s,
                     h,
-                ))
-                .map(|_| ())
-            }),
-        ),
-        (
-            "delete_worktree",
-            "delete_worktree",
-            json!({ "worktree_id": 3, "force": true }),
-            "worktree deleted",
-            Box::new(|b, s, h| {
-                block_on(commands::worktrees::routed::delete_worktree(
-                    b,
-                    DeleteWorktreeArgs {
-                        worktree_id: 3,
-                        force: true,
-                    },
-                    s,
-                    h,
+                    &fleet_core::cancel::CancellationRegistry::new(),
                 ))
                 .map(|_| ())
             }),
@@ -2201,6 +4191,62 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             TASK_PAYLOAD,
             Box::new(|b, s, _| {
                 block_on(commands::tasks::routed::cancel_task(b, 11, s)).map(|_| ())
+            }),
+        ),
+        // Contract 13: the hub owner's trusted full device adds a host.
+        (
+            "add_host",
+            "add_host",
+            json!({ "alias": "trn", "ssh_alias": "trn-ssh", "transport": null }),
+            HOST_PAYLOAD,
+            Box::new(|b, s, h| {
+                block_on(commands::hosts::routed::add_host(
+                    b,
+                    fleet_core::service::hosts::AddHostArgs {
+                        alias: "trn".into(),
+                        ssh_alias: "trn-ssh".into(),
+                        transport: None,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "set_account_nickname",
+            "set_account_nickname",
+            json!({ "uuid": "u1", "nickname": "Work" }),
+            r#"{"uuid":"u1","nickname":"Work"}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::hosts::routed::set_account_nickname(
+                    b,
+                    fleet_core::service::hosts::SetAccountNicknameArgs {
+                        uuid: "u1".into(),
+                        nickname: Some("Work".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "install_agent",
+            "install_agent",
+            json!({ "alias": "trn", "hub_url": null, "version": null }),
+            r#"{"id":1,"host_alias":"trn","version":"0.6.0","state":"running","step":"target","started_at":1}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::hosts::routed::install_agent(
+                    b,
+                    fleet_core::service::agent_install::InstallAgentArgs {
+                        alias: "trn".into(),
+                        hub_url: None,
+                        version: None,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
             }),
         ),
         (
@@ -2391,6 +4437,27 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             }),
         ),
         (
+            // Every field non-default, so the whole struct is proven to cross the wire.
+            "set_project_pick",
+            "set_project_pick",
+            json!({ "owner": "o", "repo": "r", "pinned": true, "vis": "hide", "grp": "tools" }),
+            r#"{"owner":"o","repo":"r","pinned":true,"vis":"hide","grp":"tools"}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::projects::routed::set_project_pick(
+                    b,
+                    s,
+                    fleet_core::service::project_picks::SetProjectPickArgs {
+                        owner: "o".into(),
+                        repo: "r".into(),
+                        pinned: true,
+                        vis: Some("hide".into()),
+                        grp: Some("tools".into()),
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "new_session",
             "new_session",
             json!({
@@ -2406,6 +4473,9 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                 "resume_claude_session_id": "550e8400-e29b-41d4-a716-446655440000",
                 "model": "opus",
                 "effort": "high",
+                "profile": "work",
+                "agent": "claude",
+                "start_token": "st-demo-1",
             }),
             SESSION_PAYLOAD,
             Box::new(|b, s, h| {
@@ -2427,6 +4497,17 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         ),
                         model: Some("opus".into()),
                         effort: Some("high".into()),
+                        profile: Some("work".into()),
+                        agent: Some("claude".into()),
+                        origin: None,
+                        // Set, and absent from the asserted JSON above: whose
+                        // a session is follows from the CONNECTION, never from
+                        // an argument a client could choose (multi-user M1,
+                        // T5). `new_session_never_sends_an_owner_over_the_wire`
+                        // says it in one assertion as well.
+                        over_limit_ok: false,
+                        owner_person_id: Some(42),
+                        start_token: Some("st-demo-1".into()),
                     },
                     s,
                     h,
@@ -2451,6 +4532,25 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     },
                     s,
                     h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // One host without a rotation — "Re-provision this host" — routes as
+        // the hub's content-only refresh of that host (mefistos, 2026-10-11).
+        (
+            "provision_hosts",
+            "provision_hosts",
+            json!({ "host": "mefistos", "content_only": true }),
+            r#"[{"host":"mefistos","status":"provisioned"}]"#,
+            Box::new(|b, s, h| {
+                block_on(commands::mcp::routed::provision_hosts(
+                    b,
+                    false,
+                    Some("mefistos".into()),
+                    s,
+                    h,
+                    &Arc::new(fleet_core::service::tunnel::TunnelSupervisor::new()),
                 ))
                 .map(|_| ())
             }),
@@ -2499,6 +4599,29 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         session_id: 7,
                         link_id: 5,
                         expected_primary: Some(4),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "switch_session_work",
+            "work_link",
+            json!({ "session_id": 7, "action": "switch", "key": "PAY-2", "item_id": null,
+                    "link_id": 5, "source": null, "expected_primary": 5, "ack_live": false }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::switch_session_work(
+                    b,
+                    commands::work_view::SwitchSessionWorkArgs {
+                        session_id: 7,
+                        link_id: 5,
+                        key: Some("PAY-2".into()),
+                        item_id: None,
+                        expected_primary: Some(5),
+                        ack_live: Some(false),
+                        force_cross_org: false,
                     },
                     s,
                 ))
@@ -2696,8 +4819,581 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // Sprints and releases (design 2026-09-28 §6b).
+        (
+            "add_work_to_bucket",
+            "work_link",
+            json!({ "session_id": null, "action": "bucket_add", "key": null, "item_id": 9,
+                    "link_id": null, "source": null, "bucket_id": 4 }),
+            r#"{"id":4,"kind":"sprint","name":"Sprint 24","state":"active","created_at":1,"updated_at":1,"version":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::add_work_to_bucket(
+                    b,
+                    commands::work_view::BucketMemberArgs {
+                        bucket_id: 4,
+                        item_id: 9,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "remove_work_from_bucket",
+            "work_link",
+            json!({ "session_id": null, "action": "bucket_remove", "key": null, "item_id": 9,
+                    "link_id": null, "source": null, "bucket_id": 4 }),
+            r#"{"id":4,"kind":"sprint","name":"Sprint 24","state":"active","created_at":1,"updated_at":1,"version":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::remove_work_from_bucket(
+                    b,
+                    commands::work_view::BucketMemberArgs {
+                        bucket_id: 4,
+                        item_id: 9,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_bucket_admin",
+            "work_link",
+            json!({ "session_id": null, "action": "bucket_admin", "key": null, "item_id": null,
+                    "link_id": null, "source": null,
+                    "bucket_op": { "action": "bucket_create", "kind": "sprint", "name": "Mine" } }),
+            r#"{"bucket":{"id":4,"kind":"sprint","name":"Mine","state":"planned","created_at":1,"updated_at":1,"version":1}}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::work_bucket_admin(
+                    b,
+                    serde_json::from_value(json!({
+                        "action": "bucket_create", "kind": "sprint", "name": "Mine"
+                    }))
+                    .unwrap(),
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // ── orchestration O1: missions ────────────────────────────────────
+        (
+            "save_mission",
+            "work_link",
+            json!({ "session_id": null, "action": "mission_save", "key": null, "item_id": 3,
+                    "link_id": null, "source": null, "expected_version": 2, "mission_id": 4,
+                    "mission": { "name": "m", "goal": "g", "level": 1 } }),
+            r#"{"id":4,"name":"m","goal":"g","mode":"finite","state":"draft","level":0,"plan_version":1,"created_at":1,"updated_at":1,"version":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::save_mission(
+                    b,
+                    commands::missions::SaveMissionArgs {
+                        mission_id: Some(4),
+                        item_id: Some(3),
+                        expected_version: Some(2),
+                        mission: fleet_core::service::work::missions::MissionInput {
+                            name: Some("m".into()),
+                            goal: Some("g".into()),
+                            level: Some(1),
+                            ..Default::default()
+                        },
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "set_mission_state",
+            "work_link",
+            json!({ "session_id": null, "action": "mission_state", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "status": "active",
+                    "expected_version": 1, "mission_id": 4 }),
+            r#"{"id":4,"name":"m","goal":"g","mode":"finite","state":"draft","level":0,"plan_version":1,"created_at":1,"updated_at":1,"version":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::set_mission_state(
+                    b,
+                    commands::missions::SetMissionStateArgs {
+                        mission_id: 4,
+                        state: "active".into(),
+                        expected_version: Some(1),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "set_mission_repo",
+            "work_link",
+            json!({ "session_id": null, "action": "mission_repo", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "project_id": 8, "on": true,
+                    "role": "backend", "mission_id": 4 }),
+            r#"{"id":4,"name":"m","goal":"g","mode":"finite","state":"draft","level":0,"plan_version":1,"created_at":1,"updated_at":1,"version":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::set_mission_repo(
+                    b,
+                    commands::missions::SetMissionRepoArgs {
+                        mission_id: 4,
+                        project_id: 8,
+                        role: Some("backend".into()),
+                        on: true,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "set_mission_item",
+            "work_link",
+            json!({ "session_id": null, "action": "mission_item", "key": null, "item_id": 3,
+                    "link_id": null, "source": null, "on": false, "mission_id": 4 }),
+            r#"{"id":4,"name":"m","goal":"g","mode":"finite","state":"draft","level":0,"plan_version":1,"created_at":1,"updated_at":1,"version":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::set_mission_item(
+                    b,
+                    commands::missions::SetMissionItemArgs {
+                        mission_id: 4,
+                        item_id: 3,
+                        on: false,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "import_mission_plan",
+            "work_link",
+            json!({ "session_id": null, "action": "mission_import", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "mission_id": 4,
+                    "plan": [{ "step": "1.1", "title": "Schema", "lane": "A", "needs": ["0.9"] }] }),
+            r#"{"created":1,"updated":0,"unchanged":0,"deps_added":0,"deps_removed":0}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::import_mission_plan(
+                    b,
+                    commands::missions::ImportMissionPlanArgs {
+                        mission_id: 4,
+                        plan: vec![fleet_core::service::work::plan_import::PlanRow {
+                            step: "1.1".into(),
+                            title: "Schema".into(),
+                            lane: Some("A".into()),
+                            needs: vec!["0.9".into()],
+                            status: None,
+                            project_id: None,
+                        }],
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "delete_mission",
+            "work_link",
+            json!({ "session_id": null, "action": "mission_delete", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "mission_id": 4 }),
+            r#"{"removed":4}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::delete_mission(
+                    b,
+                    commands::missions::DeleteMissionArgs { mission_id: 4 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // ── orchestration O2: the mission graph ───────────────────────────
+        (
+            "set_work_dep",
+            "work_link",
+            json!({ "session_id": null, "action": "dep", "key": null, "item_id": 3,
+                    "link_id": null, "source": null, "on": true, "depends_on": 5 }),
+            r#"{"item_id":3,"changed":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::set_work_dep(
+                    b,
+                    commands::missions::SetWorkDepArgs {
+                        item_id: 3,
+                        depends_on: 5,
+                        on: true,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "set_work_hold",
+            "work_link",
+            json!({ "session_id": null, "action": "hold", "key": null, "item_id": 3,
+                    "link_id": null, "source": null, "on": false }),
+            r#"{"item_id":3,"changed":false}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::set_work_hold(
+                    b,
+                    commands::missions::SetWorkHoldArgs {
+                        item_id: 3,
+                        on: false,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "accept_work_proposals",
+            "work_link",
+            json!({ "session_id": null, "action": "accept_many", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "item_ids": [3, 4] }),
+            r#"[]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::accept_work_proposals(
+                    b,
+                    commands::missions::WorkProposalsArgs {
+                        item_ids: vec![3, 4],
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "undo_work_accept",
+            "work_link",
+            json!({ "session_id": null, "action": "undo_accept", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "item_ids": [3] }),
+            r#"[]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::undo_work_accept(
+                    b,
+                    commands::missions::WorkProposalsArgs { item_ids: vec![3] },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "set_work_done_when",
+            "work_link",
+            json!({ "session_id": null, "action": "done_when", "key": null, "item_id": 3,
+                    "link_id": null, "source": null, "done_when": ["review"] }),
+            r#"{"item_id":3,"changed":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::set_work_done_when(
+                    b,
+                    commands::missions::SetWorkDoneWhenArgs {
+                        item_id: 3,
+                        done_when: vec!["review".into()],
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "verify_work_item",
+            "work_link",
+            json!({ "session_id": null, "action": "verify", "key": null, "item_id": 3,
+                    "link_id": null, "source": null, "line": "review", "ok": true }),
+            r#"{"item_id":3,"changed":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::verify_work_item(
+                    b,
+                    commands::missions::VerifyWorkItemArgs {
+                        item_id: 3,
+                        line: "review".into(),
+                        ok: true,
+                        note: None,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // ── the mission loop (orchestration O4–O6) ──────────────────────
+        (
+            "start_mission_wave",
+            "work_link",
+            json!({ "session_id": null, "key": null, "link_id": null, "source": null, "action": "mission_start", "item_id": null,
+                    "mission_id": 1, "step": "run:3" }),
+            r#"{"mission_id":1,"results":[]}"#,
+            Box::new(|b, s, ssh| {
+                block_on(commands::missions::routed::start_mission_wave(
+                    b,
+                    commands::missions::StartMissionWaveArgs {
+                        mission_id: 1,
+                        step: Some("run:3".into()),
+                    },
+                    s,
+                    ssh,
+                    &fleet_core::cancel::CancellationRegistry::new(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "retry_work_item",
+            "work_link",
+            json!({ "session_id": null, "key": null, "link_id": null, "source": null, "action": "retry", "item_id": 3, "note": "smaller" }),
+            r#"{"step":{"kind":"retry","item_id":3,"reason":"r","auto":false},"ok":true,"detail":"d"}"#,
+            Box::new(|b, s, ssh| {
+                block_on(commands::missions::routed::retry_work_item(
+                    b,
+                    commands::missions::RetryWorkItemArgs {
+                        item_id: 3,
+                        note: Some("smaller".into()),
+                    },
+                    s,
+                    ssh,
+                    &fleet_core::cancel::CancellationRegistry::new(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "plan_mission",
+            "work_link",
+            json!({ "session_id": null, "key": null, "link_id": null, "source": null, "action": "mission_plan", "item_id": null, "mission_id": 1 }),
+            r#"{"mission_id":1}"#,
+            Box::new(|b, s, ssh| {
+                block_on(commands::missions::routed::plan_mission(
+                    b,
+                    commands::missions::MissionIdArgs { mission_id: 1 },
+                    s,
+                    ssh,
+                    &fleet_core::cancel::CancellationRegistry::new(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "decide_mission_card",
+            "work_link",
+            json!({ "session_id": null, "key": null, "link_id": null, "source": null, "action": "card_decide", "item_id": null, "card_id": 5, "ok": false }),
+            r#"{"id":5,"mission_id":1,"decision_id":"d","source":"planner","kind":"run","state":"dismissed","created_at":1}"#,
+            Box::new(|b, s, ssh| {
+                block_on(commands::missions::routed::decide_mission_card(
+                    b,
+                    commands::missions::DecideMissionCardArgs {
+                        card_id: 5,
+                        ok: false,
+                        note: None,
+                    },
+                    s,
+                    ssh,
+                    &fleet_core::cancel::CancellationRegistry::new(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "grant_mission",
+            "work_link",
+            json!({ "session_id": null, "key": null, "link_id": null, "source": null, "action": "mission_grant", "item_id": null, "mission_id": 1,
+                    "level": 2, "hours": 4, "budget_cents": 500 }),
+            r#"{"id":1,"mission_id":1,"plan_version":1,"level":2,"granted_by":"fleet","created_at":1,"expires_at":2}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::grant_mission(
+                    b,
+                    commands::missions::GrantMissionArgs {
+                        mission_id: 1,
+                        level: 2,
+                        hours: Some(4),
+                        budget_cents: Some(500),
+                        ..Default::default()
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "revoke_mission_grant",
+            "work_link",
+            json!({ "session_id": null, "key": null, "link_id": null, "source": null, "action": "mission_revoke", "item_id": null, "mission_id": 1 }),
+            "1",
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::revoke_mission_grant(
+                    b,
+                    commands::missions::MissionIdArgs { mission_id: 1 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "pause_all_missions",
+            "work_link",
+            json!({ "session_id": null, "key": null, "link_id": null, "source": null, "action": "missions_pause_all", "item_id": null }),
+            "[1]",
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::pause_all_missions(
+                    b,
+                    commands::missions::PauseAllMissionsArgs {},
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "mission_release_note",
+            "work_link",
+            json!({ "session_id": null, "key": null, "link_id": null, "source": null, "action": "mission_release_note", "item_id": null, "mission_id": 1 }),
+            r#"{"text":"t","model":"haiku","host_alias":"h","from":"1 task","at":1}"#,
+            Box::new(|b, s, ssh| {
+                block_on(commands::missions::routed::mission_release_note(
+                    b,
+                    commands::missions::MissionIdArgs { mission_id: 1 },
+                    s,
+                    ssh,
+                    &fleet_core::cancel::CancellationRegistry::new(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "today_brief",
+            "work_link",
+            json!({ "session_id": null, "key": null, "link_id": null, "source": null, "action": "today_brief", "item_id": null, "refresh": true, "since": 100 }),
+            "{}",
+            Box::new(|b, s, ssh| {
+                block_on(commands::missions::routed::today_brief(
+                    b,
+                    commands::missions::TodayBriefArgs {
+                        refresh: true,
+                        since: Some(100),
+                        org_id: None,
+                    },
+                    s,
+                    ssh,
+                    &fleet_core::cancel::CancellationRegistry::new(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "mission_triage",
+            "work_link",
+            json!({ "session_id": null, "key": null, "link_id": null, "source": null, "action": "mission_triage", "item_id": null, "mission_id": 1, "refresh": true }),
+            "{}",
+            Box::new(|b, s, ssh| {
+                block_on(commands::missions::routed::mission_triage(
+                    b,
+                    commands::missions::MissionTriageArgs {
+                        mission_id: 1,
+                        refresh: true,
+                    },
+                    s,
+                    ssh,
+                    &fleet_core::cancel::CancellationRegistry::new(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // ── multi-user M1 (T13): the three sharing mutations ─────────────
+        //
+        // `level` crosses as the string the user chose and is validated by
+        // the store, so this case proves the field arrives at all; `narrow`
+        // carries no level BECAUSE there is only one direction a grant moves
+        // (spec §4.3 invariant 3), and no tool raises one.
+        (
+            "session_share",
+            "session_share",
+            json!({ "session_id": 42, "person": "jane", "level": "drive" }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::session_share(
+                    b,
+                    commands::sessions::SessionShareArgs {
+                        session_id: 42,
+                        person: "jane".into(),
+                        org: None,
+                        level: "drive".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "session_unshare",
+            "session_unshare",
+            json!({ "session_id": 42, "person": "jane" }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::session_unshare(
+                    b,
+                    commands::sessions::SessionGrantArgs {
+                        session_id: 42,
+                        person: "jane".into(),
+                        org: None,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "session_narrow",
+            "session_narrow",
+            json!({ "session_id": 42, "person": "jane" }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::session_narrow(
+                    b,
+                    commands::sessions::SessionGrantArgs {
+                        session_id: 42,
+                        person: "jane".into(),
+                        org: None,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Gap plan G4.2: a recipient's ask, and the owner's answer to it.
+        (
+            "session_ask_access",
+            "session_ask_access",
+            json!({ "session_id": 42, "level": "answer" }),
+            ACCESS_REQUEST_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::session_ask_access(
+                    b,
+                    commands::sessions::SessionAskAccessArgs {
+                        session_id: 42,
+                        level: "answer".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "access_requests",
+            "access_requests",
+            json!({ "action": "grant", "id": 3 }),
+            ACCESS_REQUEST_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::access_requests(
+                    b,
+                    commands::sessions::AccessRequestsArgs {
+                        action: Some("grant".into()),
+                        session_id: None,
+                        id: Some(3),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
     ]
 }
+
+/// An `AccessRequestView` as the hub answers `session_ask_access` and an
+/// `access_requests` grant or decline.
+const ACCESS_REQUEST_PAYLOAD: &str = r#"{"id":3,"session_id":42,"person_id":2,"person_name":"bob","level":"answer","requested_at":1700000000}"#;
 
 /// A complete `MovePreview` (every field required — no `#[serde(default)]`,
 /// per the wire rule), wrapped as a `MoveOutcome::Preview` the way a hub
@@ -2923,7 +5619,13 @@ fn stop_waiting_on_a_hub_client_abandons_add_project() {
     use fleet_core::cancel::CancellationRegistry;
     use fleet_core::service::add_project::{AddProjectArgs, AddProjectSource};
     for (source, github) in [
-        (AddProjectSource::Clone { url: "o/r".into() }, false),
+        (
+            AddProjectSource::Clone {
+                url: "o/r".into(),
+                existing: false,
+            },
+            false,
+        ),
         (
             AddProjectSource::New {
                 owner: "o".into(),
@@ -3039,6 +5741,179 @@ fn standalone_reads_still_come_from_the_local_store() {
     ))
     .expect("history");
     assert!(events.is_empty());
+}
+
+/// Multi-user M1 (T13): the standalone arm of the sharing commands.
+///
+/// The thing under test is the one decision this layer makes that the hub
+/// makes differently — **who the caller is**. On a hub the person comes off
+/// the connection; standalone there is no connection, so the `None` arm has
+/// to resolve the fleet's own personal owner (migration 100). Getting that
+/// wrong is not a visible error: `person_id: null` is exactly what
+/// `src/lib/access.ts` reads as "we are nobody", and a client that is nobody
+/// holds no grants, so every session shared with this person would quietly
+/// stop being reachable while nothing failed.
+///
+/// A session row cannot be seeded from this crate (`Store::upsert_session` is
+/// `#[cfg(test)]` inside fleet-core), so the grant list is empty here by
+/// construction; `store/session_grants.rs` owns the filled case. What this
+/// proves is the identity, and that the local path ran at all.
+#[test]
+fn the_standalone_sharing_arm_is_this_fleets_own_person() {
+    let (_dir, st) = store();
+    let local = FleetBackend::local();
+
+    let owner = st
+        .lock()
+        .unwrap()
+        .personal_owner_id()
+        .unwrap()
+        .expect("a fresh store has a personal owner (migration 100)");
+
+    let mine = block_on(commands::sessions::routed::my_grants(&local, &st)).expect("my_grants");
+    assert_eq!(
+        mine.person_id,
+        Some(owner),
+        "the standalone arm must answer the fleet's own person; None here reads as \
+         `we are nobody` on the client and silently drops every grant"
+    );
+    assert!(mine.grants.is_empty(), "a fresh store has no grants");
+
+    // The local path ran, rather than a hub answering: `person_named` is the
+    // local store's own refusal for a name nobody holds.
+    let err = block_on(commands::sessions::routed::session_share(
+        &local,
+        commands::sessions::SessionShareArgs {
+            session_id: 1,
+            person: "nobody-by-that-name".into(),
+            org: None,
+            level: "watch".into(),
+        },
+        &st,
+    ))
+    .expect_err("sharing with a person this fleet does not know must refuse");
+    assert_eq!(
+        err.code,
+        fleet_core::ipc_error::codes::E_NOTFOUND,
+        "{err:?}"
+    );
+
+    // And the owner's own grant list for a session that does not exist is
+    // empty, not an error and not someone else's.
+    let grants = block_on(commands::sessions::routed::session_access(
+        &local,
+        commands::sessions::SessionAccessArgs { session_id: 1 },
+        &st,
+    ))
+    .expect("session_access");
+    assert!(grants.is_empty());
+}
+
+/// Multi-user M1 (T13): **every sharing command addresses its session by ROW
+/// ID only.**
+///
+/// The `host_alias` + `tmux_name` pair every other session command accepts is
+/// reusable — the next session started on a host can take a dead one's tmux
+/// name — so a grant resolved by name could land on a different row than the
+/// one the owner was looking at. The tools refuse the pair for exactly this
+/// reason (`mcp/tools/sharing.rs`'s header); this holds the desktop's
+/// argument structs to the same shape, because an added field here would be
+/// serialised straight through `route` to a tool that would then have to
+/// start ignoring it.
+#[test]
+fn the_sharing_commands_address_a_session_by_id_and_nothing_reusable() {
+    use commands::sessions::{
+        CaptureSessionArgs, SessionAccessArgs, SessionGrantArgs, SessionShareArgs,
+    };
+
+    fn keys<T: serde::Serialize>(v: &T) -> BTreeSet<String> {
+        match serde_json::to_value(v).expect("the args must serialise") {
+            Value::Object(m) => m.keys().cloned().collect(),
+            other => panic!("expected an object on the wire, got {other}"),
+        }
+    }
+    fn want(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    assert_eq!(
+        keys(&SessionShareArgs {
+            session_id: 1,
+            person: "jane".into(),
+            org: None,
+            level: "watch".into(),
+        }),
+        want(&["session_id", "person", "level"])
+    );
+    assert_eq!(
+        keys(&SessionGrantArgs {
+            session_id: 1,
+            person: "jane".into(),
+            org: None,
+        }),
+        want(&["session_id", "person"])
+    );
+    assert_eq!(
+        keys(&SessionAccessArgs { session_id: 1 }),
+        want(&["session_id"])
+    );
+    assert_eq!(
+        keys(&CaptureSessionArgs {
+            session_id: 1,
+            scrollback_lines: None,
+            max_lines: None,
+        }),
+        want(&["session_id", "scrollback_lines", "max_lines"])
+    );
+
+    // A client that sends the reusable pair anyway gets it DROPPED, not
+    // forwarded: the structs have no field for it, so it never reaches a tool.
+    let a: SessionGrantArgs = serde_json::from_value(
+        json!({ "session_id": 1, "person": "jane", "host_alias": "trn", "tmux_name": "demo" }),
+    )
+    .expect("unknown keys are ignored, as every args struct in this file does");
+    assert_eq!(keys(&a), want(&["session_id", "person"]));
+}
+
+/// Redesign 11.2: removing a member standalone says what happened to their
+/// shares in the local store, for each of the dialog's three choices.
+#[test]
+fn standalone_remove_member_takes_each_grants_choice() {
+    let (_dir, st) = store();
+    let local = FleetBackend::local();
+    let (org, people) = {
+        let s = st.lock().unwrap();
+        let org = s.add_org("Acme", None, false).unwrap().id;
+        let people: Vec<i64> = ["ann", "ben", "cy"]
+            .iter()
+            .map(|n| {
+                let p = s.create_person(n, None).unwrap().id;
+                s.set_org_member(org, p, "member", None).unwrap();
+                p
+            })
+            .collect();
+        (org, people)
+    };
+    let remove = |person_id: i64, grants: &str| {
+        block_on(commands::orgs::routed::remove_org_member_choosing(
+            &local,
+            &st,
+            commands::orgs::RemoveOrgMemberArgs {
+                org_id: org,
+                person_id,
+                grants: Some(grants.into()),
+                ..Default::default()
+            },
+        ))
+    };
+    assert_eq!(
+        remove(people[0], "narrow").unwrap(),
+        json!({ "removed": true, "revoked_grants": 0, "narrowed": 0 })
+    );
+    assert_eq!(remove(people[1], "keep").unwrap()["removed"], true);
+    assert_eq!(remove(people[2], "revoke").unwrap()["removed"], true);
+    assert_eq!(remove(people[2], "all").unwrap_err().code, codes::E_INVALID);
+    assert!(st.lock().unwrap().org_members(org).unwrap().is_empty());
 }
 
 /// The work-link commands answer from the local store when standalone.
@@ -3668,6 +6543,32 @@ fn a_command_the_table_cannot_answer_is_still_refused() {
     );
 }
 
+/// A full provisioning — every host, or a rotation — mints tokens and
+/// rewrites `~/.claude.json`, so a paired desktop refuses it rather than
+/// route it; only one host's content refresh reaches the hub.
+#[test]
+fn provision_hosts_routes_one_hosts_refresh_and_refuses_a_full_run() {
+    for (rotate, host) in [(false, None), (true, Some("mefistos".to_string()))] {
+        let fake = Fake::answering("[]");
+        let (_dir, st) = store();
+        let err = block_on(commands::mcp::routed::provision_hosts(
+            &remote_backend(&fake),
+            rotate,
+            host.clone(),
+            &st,
+            &ssh(),
+            &Arc::new(fleet_core::service::tunnel::TunnelSupervisor::new()),
+        ))
+        .expect_err("a full provisioning stays the hub operator's");
+        assert_eq!(
+            err.code,
+            codes::E_LOCAL_ONLY,
+            "rotate={rotate} host={host:?}: {err:?}"
+        );
+        fake.was_not_called();
+    }
+}
+
 /// #146: `repair_session` routes only
 /// `explicit: true` (the Repair workspace button, which maps one-to-one onto
 /// the tool's always-explicit repair). `explicit: false` — the automatic
@@ -3967,6 +6868,113 @@ fn registered_commands() -> Vec<(String, String)> {
     entries
 }
 
+/// **The desktop half of multi-user M1's review of what `main` added** — the
+/// nine commands that reached this table while M1 was being built, with the
+/// person-fence judgement each one was missing, and what it acts on.
+///
+/// Why it is needed at all. `every_command_has_a_verdict` holds this crate to
+/// a ROUTING decision per command; it has nothing to say about privacy. The
+/// routing verdict is nonetheless where the privacy answer lives for a hub
+/// client, because `Routed` means the hub's own tool runs the call — and the
+/// hub is where M1's fences are. So the row for each of these is a pair of
+/// claims a reader can check: the verdict is `Routed` to the named tool, and
+/// the fence is that tool's (recorded in `fleet_core`'s
+/// `SESSION_REACH` / `WORK_ACTION_REACH` / `WORK_ACTION_NO_GATE` /
+/// `REVIEWED_WITHOUT_A_SESSION`).
+///
+/// **A standalone desktop adds no fence of its own, and that is deliberate.**
+/// Its store has one person — the owner `personal_owner_id` mints — so there
+/// is nobody for a fence to keep out; spec §4.3's D1 promises exactly that
+/// nothing changes for a single user. The moment this desktop is a window onto
+/// a hub, every one of these calls is the hub's to judge.
+const M1_REVIEWED_DESKTOP_COMMANDS: &[(&str, &str, &str)] = &[
+    (
+        "create_work_task",
+        "work_link",
+        "a NEW work item (a task or subtask). No session is named; `work::local::create_task` refuses every scoped caller outright",
+    ),
+    (
+        "accept_work_proposal",
+        "work_link",
+        "a person's decision on an agent's proposal, by `item_id` — `work::local::decide`, which refuses every scoped caller because an agent never accepts its own proposal",
+    ),
+    (
+        "reject_work_proposal",
+        "work_link",
+        "the same decision, the other way. In its session-addressed shape `reject` is the LINK decision instead and takes the hub tail's `Reach::Drive`",
+    ),
+    (
+        "list_guides",
+        "guide",
+        "the fleet's page catalog, read: the live guides and the proposals \
+         waiting. A `guide_proposals` row records the proposing caller's \
+         LABEL (`host:<alias>`, `client:<name>`, `master` — \
+         `Caller::label`) and never a session, a pane or a tmux name. There \
+         is no desktop command for the agent's own `propose`: that arm is \
+         reached over the control API by the host session carrying the \
+         fleet-guides skill, and its row is `fleet_core`'s \
+         `REVIEWED_WITHOUT_A_SESSION`",
+    ),
+    (
+        "decide_guide",
+        "guide",
+        "approving or rejecting one guide — a person's, through the hub's `guide_decider`",
+    ),
+    ("remove_guide", "guide", "retiring one live guide"),
+    (
+        "list_forms",
+        "ask",
+        "the hub filters forms to sessions this device may read",
+    ),
+    (
+        "get_form",
+        "ask",
+        "the hub gates the form's session with Reach::Read",
+    ),
+    (
+        "answer_form",
+        "ask",
+        "the hub gates the form's session with Reach::Drive and refuses host tokens",
+    ),
+    (
+        "decline_form",
+        "ask",
+        "the hub gates the form's session with Reach::Drive and refuses host tokens",
+    ),
+    (
+        "catalog_set_host_harnesses",
+        "catalog_admin",
+        "which harnesses a HOST serves, i.e. what the next `apply_sync` \
+         writes to that host's filesystem. It is one of the dozen \
+         `catalog_*` commands that route to the hub's `catalog_admin`, which \
+         the operator's per-client `assets` grant fences and a person never \
+         does: the catalog is layers, checkouts, secrets and syncs, and the \
+         one place `service/catalog/` touches a session row is \
+         `catalog_spawn_author_session`, which CREATES one and stamps \
+         `hub_personal_owner` on it",
+    ),
+];
+
+/// Every row of [`M1_REVIEWED_DESKTOP_COMMANDS`] still describes the command
+/// it names: the table has a verdict for it, and that verdict routes to the
+/// tool the reason rests on.
+///
+/// A command that changes from `Routed` to `LocalOnly` (or routes somewhere
+/// else) fails here, because then the reason — "the hub's tool applies the
+/// fence" — has stopped being true and the judgement has to be made again.
+#[test]
+fn the_commands_main_added_carry_an_m1_person_fence_judgement() {
+    for (command, tool, why) in M1_REVIEWED_DESKTOP_COMMANDS {
+        let v = verdicts::verdict(command)
+            .unwrap_or_else(|| panic!("{command} is reviewed here but has no verdict row ({why})"));
+        assert_eq!(
+            v.tool(),
+            Some(*tool),
+            "{command} no longer routes to {tool}, so its M1 person-fence judgement ({why}) rests on a tool that does not run it any more"
+        );
+    }
+}
+
 /// **The test that matters six months from now.**
 ///
 /// Reads the `generate_handler!` list out of `lib.rs` and holds it to exactly
@@ -4219,7 +7227,7 @@ fn every_route_names_a_command_the_table_can_route() {
         .collect();
     for (file, src) in &stripped {
         let src = src.as_str();
-        for call in ["route(", "route_text("] {
+        for call in ["route(", "route_text(", "route_image("] {
             for (i, _) in src.match_indices(call) {
                 let Some(rest) = src[i + call.len()..].trim_start().strip_prefix('"') else {
                     continue;
@@ -4342,8 +7350,13 @@ const SOURCES: &[(&str, &str)] = &[
         "commands/account_usage.rs",
         include_str!("../commands/account_usage.rs"),
     ),
+    ("commands/agents.rs", include_str!("../commands/agents.rs")),
     ("commands/assets.rs", include_str!("../commands/assets.rs")),
     ("commands/cancel.rs", include_str!("../commands/cancel.rs")),
+    (
+        "commands/context_help.rs",
+        include_str!("../commands/context_help.rs"),
+    ),
     (
         "commands/diagnostics.rs",
         include_str!("../commands/diagnostics.rs"),
@@ -4352,6 +7365,11 @@ const SOURCES: &[(&str, &str)] = &[
         "commands/downloads.rs",
         include_str!("../commands/downloads.rs"),
     ),
+    (
+        "commands/library.rs",
+        include_str!("../commands/library.rs"),
+    ),
+    ("commands/editor.rs", include_str!("../commands/editor.rs")),
     ("commands/files.rs", include_str!("../commands/files.rs")),
     ("commands/health.rs", include_str!("../commands/health.rs")),
     (
@@ -4360,12 +7378,68 @@ const SOURCES: &[(&str, &str)] = &[
     ),
     ("commands/hosts.rs", include_str!("../commands/hosts.rs")),
     ("commands/hub.rs", include_str!("../commands/hub.rs")),
+    (
+        "commands/local_workspaces.rs",
+        include_str!("../commands/local_workspaces.rs"),
+    ),
     ("commands/mcp.rs", include_str!("../commands/mcp.rs")),
+    (
+        "commands/missions.rs",
+        include_str!("../commands/missions.rs"),
+    ),
     (
         "commands/move_session.rs",
         include_str!("../commands/move_session.rs"),
     ),
     ("commands/mutate.rs", include_str!("../commands/mutate.rs")),
+    ("commands/forms.rs", include_str!("../commands/forms.rs")),
+    (
+        "commands/debug_devices.rs",
+        include_str!("../commands/debug_devices.rs"),
+    ),
+    (
+        "commands/device_mirror.rs",
+        include_str!("../commands/device_mirror.rs"),
+    ),
+    (
+        "commands/federation.rs",
+        include_str!("../commands/federation.rs"),
+    ),
+    ("commands/prs.rs", include_str!("../commands/prs.rs")),
+    (
+        "commands/start_rules.rs",
+        include_str!("../commands/start_rules.rs"),
+    ),
+    (
+        "commands/wizard_state.rs",
+        include_str!("../commands/wizard_state.rs"),
+    ),
+    (
+        "commands/dashboards.rs",
+        include_str!("../commands/dashboards.rs"),
+    ),
+    (
+        "commands/api_tokens.rs",
+        include_str!("../commands/api_tokens.rs"),
+    ),
+    (
+        "commands/add_account.rs",
+        include_str!("../commands/add_account.rs"),
+    ),
+    (
+        "commands/presence.rs",
+        include_str!("../commands/presence.rs"),
+    ),
+    (
+        "commands/updates.rs",
+        include_str!("../commands/updates.rs"),
+    ),
+    ("commands/runs.rs", include_str!("../commands/runs.rs")),
+    ("commands/search.rs", include_str!("../commands/search.rs")),
+    (
+        "commands/routines.rs",
+        include_str!("../commands/routines.rs"),
+    ),
     ("commands/pages.rs", include_str!("../commands/pages.rs")),
     (
         "commands/onboarding.rs",
@@ -4392,7 +7466,13 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../commands/sessions.rs"),
     ),
     ("commands/tasks.rs", include_str!("../commands/tasks.rs")),
+    ("commands/tray.rs", include_str!("../commands/tray.rs")),
     ("commands/upload.rs", include_str!("../commands/upload.rs")),
+    ("commands/voice.rs", include_str!("../commands/voice.rs")),
+    (
+        "commands/windows.rs",
+        include_str!("../commands/windows.rs"),
+    ),
     ("commands/work.rs", include_str!("../commands/work.rs")),
     (
         "commands/work_view.rs",
@@ -4403,6 +7483,10 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../commands/trackers.rs"),
     ),
     ("commands/orgs.rs", include_str!("../commands/orgs.rs")),
+    (
+        "commands/org_devices.rs",
+        include_str!("../commands/org_devices.rs"),
+    ),
     (
         "commands/worktrees.rs",
         include_str!("../commands/worktrees.rs"),
@@ -4463,13 +7547,15 @@ fn payload_of<T: serde::Serialize>(value: &T) -> &'static str {
 fn catalog_admin_cases() -> Vec<Case> {
     use commands::assets::routed as r;
     use fleet_core::service::catalog::admin::{
-        DeleteSecretArgs, GetAssetArgs, LayerRef, LayerTemplateArgs, LoadArgs, ResolvePreviewArgs,
-        SetHostHarnessesArgs, SetHostLayersArgs, SetSecretArgs, WriteLayerArgs,
+        AdmitArgs, CatalogNameArgs, DeleteSecretArgs, GetAssetArgs, LayerRef, LayerTemplateArgs,
+        LoadArgs, ResolvePreviewArgs, SetHostHarnessesArgs, SetHostLayersArgs, SetSecretArgs,
+        WriteLayerArgs,
     };
     use fleet_core::service::catalog::author::{
         self, AddResourceArgs, AssetRef, CommitPendingArgs, CreateArgs, RemoveResourceArgs,
         UpdateArgs,
     };
+    use fleet_core::service::catalog::catalogs::AddCatalogArgs;
     use fleet_core::service::catalog::layer::Axis;
     use fleet_core::service::catalog::model::Kind;
     use fleet_core::service::catalog::sync::{ApplyArgs, PlanArgs};
@@ -4478,6 +7564,9 @@ fn catalog_admin_cases() -> Vec<Case> {
     const CONFIG: &str =
         r#"{"repo_path":"/srv/assets","remote_url":null,"head_commit":"abc","last_loaded_at":1}"#;
     const WRITE: &str = r#"{"commit":"abc","lint":{"errors":[],"warnings":[]}}"#;
+    // A minimal card, answering every `changesets` verb that returns one.
+    const VIEW: &str =
+        r#"{"id":3,"kind":"new","summary":"s","state":"applied","created_at":1,"items":[]}"#;
     const STATUS: &str =
         r#"{"head":"abc","dirty":0,"ahead":null,"behind":null,"has_upstream":false}"#;
     const SYNC_RUN: &str = r#"{"plan_id":"p1","started_at":1,"finished_at":2,"hosts":[]}"#;
@@ -4912,6 +8001,354 @@ fn catalog_admin_cases() -> Vec<Case> {
             asset,
             Box::new(move |b, _, _| block_on(r::catalog_template(b, skill("s"))).map(|_| ())),
         ),
+        // Assets M5 (R13): the workspace's reads. A named catalog travels as
+        // the tool's own top-level `catalog`, never inside `args`.
+        (
+            "catalog_list_catalogs",
+            "catalog_admin",
+            json!({ "action": "list_catalogs" }),
+            "[]",
+            Box::new(|b, s, _| block_on(r::catalog_list_catalogs(b, s)).map(|_| ())),
+        ),
+        (
+            "catalog_list_changesets",
+            "changesets",
+            json!({ "action": "list" }),
+            r#"[{"id":3,"kind":"new","summary":"New on oci: skill/w → core","state":"proposed","created_at":1,"groups":{"core":1},"pending":1,"undoable":false}]"#,
+            Box::new(|b, s, _| block_on(r::catalog_list_changesets(b, s)).map(|_| ())),
+        ),
+        // Assets M6 (R8): the card verbs — all `changesets`.
+        (
+            "catalog_get_changeset",
+            "changesets",
+            json!({ "action": "list", "id": 3 }),
+            VIEW,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_get_changeset(b, commands::assets::ChangesetIdArgs { id: 3 }, s))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_apply_changeset",
+            "changesets",
+            json!({ "action": "apply", "id": 3, "positions": [0, 2] }),
+            VIEW,
+            Box::new(|b, s, h| {
+                block_on(r::catalog_apply_changeset(
+                    b,
+                    commands::assets::ApplyChangesetArgs { id: 3, positions: Some(vec![0, 2]) },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_apply_changeset",
+            "changesets",
+            json!({ "action": "apply", "id": 3 }),
+            VIEW,
+            Box::new(|b, s, h| {
+                block_on(r::catalog_apply_changeset(
+                    b,
+                    commands::assets::ApplyChangesetArgs { id: 3, positions: None },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_undo_changeset",
+            "changesets",
+            json!({ "action": "undo", "id": 3 }),
+            VIEW,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_undo_changeset(b, commands::assets::ChangesetIdArgs { id: 3 }, s))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_dismiss_changeset",
+            "changesets",
+            json!({ "action": "dismiss", "id": 3 }),
+            VIEW,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_dismiss_changeset(b, commands::assets::ChangesetIdArgs { id: 3 }, s))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_reject_changeset_items",
+            "changesets",
+            json!({ "action": "reject_item", "id": 3, "positions": [1] }),
+            VIEW,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_reject_changeset_items(
+                    b,
+                    commands::assets::RejectItemsArgs { id: 3, positions: vec![1] },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_propose_changesets",
+            "changesets",
+            json!({ "action": "propose" }),
+            "[]",
+            Box::new(|b, s, _| {
+                block_on(r::catalog_propose_changesets(b, s))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_propose_layer_change",
+            "changesets",
+            json!({ "action": "propose_layer", "change": { "op": "rename", "layer": "core", "to": "base" } }),
+            VIEW,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_propose_layer_change(
+                    b,
+                    commands::assets::LayerChangeArgs {
+                        change: fleet_core::service::catalog::changesets::LayerChange::Rename {
+                            catalog: None,
+                            layer: "core".into(),
+                            to: "base".into(),
+                        },
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_repo_status_in",
+            "catalog_admin",
+            json!({ "action": "repo_status", "catalog": "acme" }),
+            STATUS,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_repo_status_in(
+                    b,
+                    CatalogNameArgs {
+                        name: "acme".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_asset_history",
+            "catalog_admin",
+            json!({ "action": "asset_history",
+                    "args": { "kind": "skill", "name": "s" },
+                    "catalog": "acme" }),
+            r#"[{"sha":"abc","at":1,"author":"a","subject":"edit s"}]"#,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_asset_history(
+                    b,
+                    commands::assets::AssetHistoryArgs {
+                        kind: Kind::Skill,
+                        name: "s".into(),
+                        catalog: Some("acme".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Personal (named or not) sends no `catalog`, exactly the pre-M5 shape.
+        (
+            "catalog_asset_history",
+            "catalog_admin",
+            json!({ "action": "asset_history", "args": { "kind": "skill", "name": "s" } }),
+            "[]",
+            Box::new(|b, s, _| {
+                block_on(r::catalog_asset_history(
+                    b,
+                    commands::assets::AssetHistoryArgs {
+                        kind: Kind::Skill,
+                        name: "s".into(),
+                        catalog: Some("personal".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Assets M6 (R9): the catalog set. The name travels in `args`, never
+        // as the tool's top-level `catalog` (the hub's `touches` reads it
+        // there).
+        (
+            "catalog_add_catalog",
+            "catalog_admin",
+            json!({ "action": "add_catalog",
+                    "args": { "name": "acme", "repo_path": "/r", "remote_url": null, "org": "Acme" } }),
+            r#"{"id":2,"name":"acme","org_id":1,"org":"Acme","repo_path":"/r","remote_url":null,"head_commit":null,"last_loaded_at":null,"state":"not_loaded","asset_count":0}"#,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_add_catalog(
+                    b,
+                    AddCatalogArgs {
+                        name: "acme".into(),
+                        repo_path: "/r".into(),
+                        remote_url: None,
+                        org: Some("Acme".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_remove_catalog",
+            "catalog_admin",
+            json!({ "action": "remove_catalog", "args": { "name": "acme" } }),
+            r#"{"id":2,"name":"acme","layer_rows":0,"admissions":1,"grants":0,"cards":0}"#,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_remove_catalog(
+                    b,
+                    CatalogNameArgs {
+                        name: "acme".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_admit_catalog",
+            "catalog_admin",
+            json!({ "action": "admit_catalog", "args": { "host_alias": "mefistos", "catalog": "acme" } }),
+            r#"["acme"]"#,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_admit_catalog(
+                    b,
+                    AdmitArgs {
+                        host_alias: "mefistos".into(),
+                        catalog: "acme".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_unadmit_catalog",
+            "catalog_admin",
+            json!({ "action": "unadmit_catalog", "args": { "host_alias": "mefistos", "catalog": "acme" } }),
+            "[]",
+            Box::new(|b, s, _| {
+                block_on(r::catalog_unadmit_catalog(
+                    b,
+                    AdmitArgs {
+                        host_alias: "mefistos".into(),
+                        catalog: "acme".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // One catalog's layers: a named catalog is the tool's top-level
+        // `catalog`; personal sends none, exactly `catalog_list_layers`.
+        (
+            "catalog_list_layers_in",
+            "catalog_admin",
+            json!({ "action": "list_layers", "catalog": "acme" }),
+            r#"{"layers":[],"hosts":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_list_layers_in(
+                    b,
+                    CatalogNameArgs {
+                        name: "acme".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_list_layers_in",
+            "catalog_admin",
+            json!({ "action": "list_layers" }),
+            r#"{"layers":[],"hosts":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_list_layers_in(
+                    b,
+                    CatalogNameArgs {
+                        name: "personal".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // One host's provenance is the MCP `resolve_preview` tool, and its
+        // answer is the summary view: `withheld` a list of `[kind, name]`
+        // pairs, `refused` a list of objects, `held_back` a map.
+        (
+            "catalog_host_provenance",
+            "resolve_preview",
+            json!({ "host_alias": "oci" }),
+            r#"{"provenance":{"skill/w":{"introduced_by":"core","overridden_by":[],"catalog":"personal"}},"excluded":{},"refused":[{"kind":"skill","name":"x","reason":"private","catalog":"personal"}],"withheld":[["skill","p"]],"held_back":{"acme":"not loaded"},"assets":[{"kind":"skill","name":"w","version":"1"}]}"#,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_host_provenance(
+                    b,
+                    ResolvePreviewArgs {
+                        host_alias: "oci".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_drift_diff",
+            "catalog_admin",
+            json!({ "action": "drift_diff",
+                    "args": { "host_alias": "oci", "kind": "skill", "name": "w" },
+                    "catalog": "acme" }),
+            r#"{"host_alias":"oci","harness":"claude","files":[]}"#,
+            Box::new(|b, s, h| {
+                block_on(r::catalog_drift_diff(
+                    b,
+                    commands::assets::DriftDiffCmdArgs {
+                        host_alias: "oci".into(),
+                        kind: Kind::Skill,
+                        name: "w".into(),
+                        harness: None,
+                        catalog: Some("acme".into()),
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Personal (named or not) sends no `catalog`.
+        (
+            "catalog_drift_diff",
+            "catalog_admin",
+            json!({ "action": "drift_diff",
+                    "args": { "host_alias": "oci", "kind": "skill", "name": "w", "harness": "codex" } }),
+            r#"{"host_alias":"oci","harness":"codex","files":[{"path":"~/.codex/skills/w/SKILL.md","catalog":"a","host":"b"}]}"#,
+            Box::new(|b, s, h| {
+                block_on(r::catalog_drift_diff(
+                    b,
+                    commands::assets::DriftDiffCmdArgs {
+                        host_alias: "oci".into(),
+                        kind: Kind::Skill,
+                        name: "w".into(),
+                        harness: Some("codex".into()),
+                        catalog: Some("personal".into()),
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
     ]
 }
 
@@ -4942,4 +8379,237 @@ fn a_hub_download_is_checked_through_list_downloads_before_a_byte_moves() {
     let e = got.expect_err("a file still copying is not saved");
     assert_eq!(e.code, codes::E_NOTFOUND);
     assert!(!asked.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+/// G7.3: a revision-16 hub serves neither `wizard_state` nor
+/// `propose_host_placement`, and answers a JSON-RPC error (unknown tool). The
+/// desktop's minimum stays 16, so against that hub wizard resume reads as
+/// nothing saved and the host proposal as nothing proposed, not as an error.
+#[test]
+fn a_hub_before_contract_17_reads_as_nothing_saved_and_nothing_proposed() {
+    let unknown_tool = || {
+        Arc::new(Fake {
+            body: format!(
+                "event: message\ndata: {}\n\n",
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": { "code": -32602, "message": "tool not found" },
+                })
+            ),
+            seen: Mutex::new(Vec::new()),
+        })
+    };
+    let (_dir, st) = store();
+    let fake = unknown_tool();
+    let cache = Mutex::new(fleet_core::service::account_usage::UsageCache::new());
+    let got = block_on(commands::account_usage::routed::propose_host_placement(
+        &remote_backend(&fake),
+        &st,
+        &cache,
+        fleet_core::service::decide::host_placement::ProposeHostArgs { project_id: 7 },
+    ))
+    .expect("nothing proposed, not an error");
+    assert!(got.is_none());
+    assert_eq!(fake.only_call().0, "propose_host_placement");
+    for (action, want) in [
+        ("list", json!([])),
+        ("get", Value::Null),
+        ("save", Value::Null),
+        ("clear", json!({ "removed": false })),
+    ] {
+        let fake = unknown_tool();
+        let args = fleet_core::service::wizard_state::WizardStateArgs {
+            action: action.into(),
+            kind: Some("add_project".into()),
+            step: Some(1),
+            ..Default::default()
+        };
+        let got = block_on(commands::wizard_state::routed::wizard_state(
+            &remote_backend(&fake),
+            &st,
+            args,
+        ))
+        .unwrap_or_else(|e| panic!("{action}: {e:?}"));
+        assert_eq!(got, want, "{action}");
+        assert_eq!(fake.only_call().0, "wizard_state", "{action}");
+    }
+    // Context help has nothing to fall back to: it says the hub needs
+    // updating, rather than the transport's own words.
+    let fake = unknown_tool();
+    let e = block_on(commands::context_help::routed::session_context_help(
+        &remote_backend(&fake),
+        commands::context_help::SessionContextHelpArgs {
+            session_id: 42,
+            request: fleet_core::service::context_help::HelpRequest {
+                line: "/plan".into(),
+                ..Default::default()
+            },
+        },
+        &st,
+        &ssh(),
+    ))
+    .expect_err("no tool, no answer");
+    assert_eq!(e.code, codes::E_HUB_PROTOCOL);
+    assert!(e.message.contains("hub updated"), "{e:?}");
+    assert_eq!(fake.only_call().0, "session_context_help");
+    // Any other refusal is still an error.
+    let fake = Fake::answering("not json");
+    let got = block_on(commands::account_usage::routed::propose_host_placement(
+        &remote_backend(&fake),
+        &st,
+        &cache,
+        fleet_core::service::decide::host_placement::ProposeHostArgs { project_id: 7 },
+    ));
+    assert!(got.is_err());
+}
+
+/// 11.6: the one routed command whose answer is an image block rather than
+/// the tool's JSON. The caption is the first text block, the image the first
+/// image block, and the row's tool is the one the request carried.
+#[test]
+fn a_hub_screenshot_comes_back_as_the_image_block_it_answered() {
+    let fake = Arc::new(Fake {
+        body: format!(
+            "event: message\ndata: {}\n\n",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": { "content": [
+                    { "type": "text", "text": "Pixel 8 on mac: 3 bytes" },
+                    { "type": "image", "data": "AAEC", "mimeType": "image/png" },
+                ] },
+            })
+        ),
+        seen: Mutex::new(Vec::new()),
+    });
+    let (_dir, st) = store();
+    let shot = block_on(commands::debug_devices::routed::debug_device_screenshot(
+        &remote_backend(&fake),
+        &st,
+        &ssh(),
+        commands::debug_devices::DebugDeviceArgs { id: 3 },
+    ))
+    .expect("the image block");
+    let (tool, args) = fake.only_call();
+    assert_eq!(args, json!({ "action": "screenshot", "device": "3" }));
+    assert_eq!(
+        verdicts::verdict("debug_device_screenshot").and_then(Verdict::tool),
+        Some(tool.as_str())
+    );
+    assert_eq!(
+        (
+            shot.caption.as_str(),
+            shot.mime.as_str(),
+            shot.data.as_str()
+        ),
+        ("Pixel 8 on mac: 3 bytes", "image/png", "AAEC")
+    );
+
+    // A text-only answer is not an image: an error, never an empty picture.
+    let fake = Fake::answering("{}");
+    let err = block_on(commands::debug_devices::routed::debug_device_screenshot(
+        &remote_backend(&fake),
+        &st,
+        &ssh(),
+        commands::debug_devices::DebugDeviceArgs { id: 3 },
+    ))
+    .expect_err("no image block");
+    assert_eq!(err.code, fleet_core::ipc_error::codes::E_PARSE);
+}
+
+/// Update-channel design §6.5: the one thing a skewed hub still answers is
+/// what to update to. `/update/check` and `/update/report` — and nothing
+/// else — bypass the wire-contract gate every routed command refuses at.
+#[test]
+fn update_routes_are_the_only_contract_exemption() {
+    assert_eq!(
+        remote::HubBackend::UPDATE_PATHS,
+        ["/update/check", "/update/report"]
+    );
+    for state in [
+        connection::HubConnection::HubTooOld {
+            hub_contract: 1,
+            min_contract: 3,
+        },
+        connection::HubConnection::HubTooNew {
+            hub_contract: 9,
+            max_contract: 1,
+        },
+    ] {
+        let fake = Fake::answering("{}");
+        let backend = skewed_backend(&fake, state);
+        let hub = backend.hub().expect("a remote backend");
+        block_on(hub.post_update("/update/check", r#"{"update_proto":1}"#.into()))
+            .expect("a skewed hub is still asked what to update to");
+        assert_eq!(
+            fake.seen.lock().unwrap().as_slice(),
+            [r#"{"update_proto":1}"#.to_string()]
+        );
+        let err = block_on(hub.post_update("/mcp", "{}".into())).unwrap_err();
+        assert_eq!(
+            err.code,
+            codes::E_INTERNAL,
+            "only the update routes: {err:?}"
+        );
+        // The artifact mirror: its own route only, never another GET.
+        let dest = std::env::temp_dir().join("fleet-not-written");
+        for path in [
+            "/downloads/3",
+            "/update/artifact/short",
+            "/update/artifact/../../x",
+        ] {
+            let err = block_on(hub.fetch_update_artifact(path, &dest, 10)).unwrap_err();
+            assert_eq!(err.code, codes::E_INTERNAL, "{path}: {err:?}");
+        }
+    }
+}
+
+/// Persona dashboards step 6: a hub that does not serve `dashboards` yet
+/// answers unknown tool, and the desktop keeps the pin in its own store,
+/// as it did before they moved to the hub.
+#[test]
+fn a_hub_without_dashboards_keeps_them_on_this_desktop() {
+    let unknown_tool = || {
+        Arc::new(Fake {
+            body: format!(
+                "event: message\ndata: {}\n\n",
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": { "code": -32602, "message": "tool not found" },
+                })
+            ),
+            seen: Mutex::new(Vec::new()),
+        })
+    };
+    let (_dir, st) = store();
+    let fake = unknown_tool();
+    let pin = fleet_core::service::dashboards::DashboardsArgs {
+        action: "pin".into(),
+        dashboard: Some(json!({
+            "spec": "fleet.ui/1", "kind": "dashboard", "id": "dash.r42", "title": "R",
+            "widgets": [ { "kind": "stat", "title": "Open", "value": "open" } ]
+        })),
+        ..Default::default()
+    };
+    let got = block_on(commands::dashboards::routed::dashboards(
+        &remote_backend(&fake),
+        &st,
+        pin,
+    ))
+    .expect("kept here, not an error");
+    assert_eq!(got["id"], "dash.r42");
+    assert_eq!(fake.only_call().0, "dashboards");
+    let fake = unknown_tool();
+    let listed = block_on(commands::dashboards::routed::dashboards(
+        &remote_backend(&fake),
+        &st,
+        fleet_core::service::dashboards::DashboardsArgs {
+            action: "list".into(),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    assert_eq!(listed.as_array().map(Vec::len), Some(1));
 }

@@ -203,6 +203,73 @@ pub(super) fn versions_due(claude_version_at: Option<i64>, now: i64) -> bool {
     claude_version_at.is_none_or(|at| now - at >= VERSIONS_REFRESH_SECS)
 }
 
+/// How often a host is asked how much disk fleet's worktrees hold (Orbit
+/// Fleet 4.6). A `du` over checkouts with `node_modules` can take seconds,
+/// so it runs on this interval, after reachability is settled, under
+/// [`WORKTREE_SIZE_TIMEOUT`].
+pub const WORKTREE_SIZE_REFRESH_SECS: i64 = 6 * 3600;
+
+/// The wall clock for one worktree-size read. On timeout the stored size is
+/// kept and the next try waits a full [`WORKTREE_SIZE_REFRESH_SECS`].
+pub(crate) const WORKTREE_SIZE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The wall clock for the latency round trip (an empty command).
+pub(crate) const ROUND_TRIP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
+
+/// Whether this pass should ask the host for its worktree size.
+pub(super) fn worktree_size_due(worktree_at: Option<i64>, now: i64) -> bool {
+    worktree_at.is_none_or(|at| now - at >= WORKTREE_SIZE_REFRESH_SECS)
+}
+
+/// `du -sk` over fleet's worktrees on the host (not the projects' main
+/// checkouts): one `wtp=<index> <kB>` line per path it could measure (the
+/// index into `paths`; G1.9, the per-session size), then their sum as one
+/// `wtkb=<kB>` line. Every path is quoted with [`crate::shell::quote`]; a
+/// leading `~/` becomes `"$HOME"/` so it still expands. `None` when the
+/// host has no worktrees to measure.
+pub(super) fn worktree_size_script(paths: &[&str]) -> Option<String> {
+    let quoted: Vec<String> = paths
+        .iter()
+        .filter(|p| !p.is_empty())
+        .map(|p| match p.strip_prefix("~/") {
+            Some(rest) => format!("\"$HOME\"/{}", crate::shell::quote(rest)),
+            None => crate::shell::quote(p),
+        })
+        .collect();
+    if quoted.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "s=0; i=0; for p in {}; do k=$(du -sk -- \"$p\" 2>/dev/null | cut -f1); \
+         case \"$k\" in ''|*[!0-9]*) ;; *) printf 'wtp=%s %s\\n' \"$i\" \"$k\"; s=$((s + k));; esac; \
+         i=$((i + 1)); done; printf 'wtkb=%s\\n' \"$s\"",
+        quoted.join(" ")
+    ))
+}
+
+/// Parse [`worktree_size_script`]'s per-path lines: `(index, kB)` for every
+/// `wtp=` line whose index is below `n` (the number of paths asked about).
+pub(super) fn parse_worktree_sizes(stdout: &str, n: usize) -> Vec<(usize, i64)> {
+    stdout
+        .lines()
+        .filter_map(|l| l.strip_prefix("wtp="))
+        .filter_map(|rest| {
+            let (i, kb) = rest.trim().split_once(' ')?;
+            let i: usize = i.parse().ok()?;
+            let kb: i64 = kb.trim().parse().ok()?;
+            (i < n && kb >= 0).then_some((i, kb))
+        })
+        .collect()
+}
+
+/// Parse [`worktree_size_script`] output: the `wtkb=` line, else `None`.
+pub(super) fn parse_worktree_size(stdout: &str) -> Option<i64> {
+    stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("wtkb="))
+        .and_then(|v| v.trim().parse().ok())
+}
+
 /// One host's probe result, carried from the off-lock probe task to the
 /// under-lock writer.
 pub(super) struct HostProbe {
@@ -225,6 +292,10 @@ pub(super) struct HostProbe {
     /// nor dismissal revival that pass — every agent counts as active.
     pub(super) agent_mtimes: Option<std::collections::HashMap<String, i64>>,
     pub(super) intel: PaneIntelMap,
+    /// The pane tails `intel` was read from, by `tmux_name`. `intel` is
+    /// Claude Code's reading; a row whose agent is another (Codex) is read
+    /// again from its tail by that agent's adapter when the row is known.
+    pub(super) pane_tails: std::collections::HashMap<String, String>,
     /// `tmux_name → gh pr view` result for the sessions probed THIS pass
     /// (PROD-5). A name absent from the map was not probed (cache still
     /// fresh, host has no `gh`, or the probe failed) and keeps its stored
@@ -236,6 +307,9 @@ pub(super) struct HostProbe {
     /// left untouched, never cleared. `local` always carries `None` here
     /// (it is synced by `service::hosts::sync_local_account` instead).
     pub(super) account: Option<crate::service::hosts::OauthAccount>,
+    /// The host's login profiles this pass (`TmuxExec::read_profiles`):
+    /// `None` = could not tell, and the stored list is left alone.
+    pub(super) profiles: Option<Vec<crate::tmux::HostProfile>>,
     /// This pass's read of the host's boot identity (`TmuxExec::host_identity`),
     /// read BEFORE `list_sessions` (so the list can never be older than the
     /// identity that judges it) and discarded unless the list succeeded. `None`
@@ -248,6 +322,14 @@ pub(super) struct HostProbe {
     /// a newer probe (e.g. `new_session`'s own reconcile) stamped after this
     /// probe listed tmux (BE-3).
     pub(super) started_at: i64,
+    /// The worktree-size read (Orbit Fleet 4.6): `None` = not asked this
+    /// pass; `Some(None)` = asked, no answer (the stamp still moves);
+    /// `Some(Some(kb))` = the size.
+    pub(super) worktree_kb: Option<Option<i64>>,
+    /// `tmux_name → the rollout its Codex is writing`, for this host's live
+    /// Codex rows (`codex::rollouts_script`). A name absent from the map was
+    /// not found this pass and keeps its stored conversation.
+    pub(super) codex_rollouts: HashMap<String, crate::agent_adapter::codex::PaneRollout>,
 }
 
 /// Executor factory + probe budget for the reconcile core. Production uses
@@ -270,7 +352,8 @@ pub(crate) struct ReconcileDeps {
     /// (`fake`/`fake_with_shell`) so the huge majority of reconcile tests
     /// never read a REAL `~/.claude.json` — only `fake_with_local_home` sets
     /// it, for tests that specifically exercise this behaviour. `real()`
-    /// always sets it to the process's actual `$HOME`.
+    /// always sets it to the directory holding the real `.claude.json`
+    /// (`CLAUDE_CONFIG_DIR`, else `$HOME`: `hosts::local_claude_json_dir`).
     pub(super) local_home: Option<std::path::PathBuf>,
     /// Whether this hub's own machine is a fleet host. False on a
     /// `fleet-hub` daemon (`hub.local_host = false`): no `local` row is
@@ -288,6 +371,49 @@ pub(crate) struct ReconcileDeps {
     /// applies. `ReconcileDeps::fake*` build a fresh `Arc` per call instead, so
     /// tests stay isolated from each other and from production's map.
     pub(super) last_agents: Arc<dashmap::DashMap<String, std::time::Instant>>,
+    /// How long a pass waits for its host probes before it completes without
+    /// the slow ones (`None`: for all of them, up to `probe_timeout`). A
+    /// probe still running then is detached, its host left out of the next
+    /// passes until it answers, and its result written at the start of the
+    /// next pass ([`LateProbes`]). One wedged host used to hold the gate for
+    /// `HOST_PROBE_TIMEOUT` (65 s), so every other host — and a dialog that
+    /// went up on one — waited 65 s instead of the 20 s tick.
+    pub(super) pass_budget: Option<std::time::Duration>,
+    /// The probes that outlived a pass's budget. Process-wide for `real()`
+    /// (built fresh per call, like `last_agents`); fresh per fake deps.
+    pub(super) late: Arc<std::sync::Mutex<LateProbes>>,
+}
+
+impl ReconcileDeps {
+    /// Whether a detached probe of `alias` is still running (tests).
+    #[cfg(test)]
+    pub(crate) fn probe_in_flight(&self, alias: &str) -> bool {
+        self.late.lock().is_ok_and(|l| l.in_flight.contains(alias))
+    }
+}
+
+/// How long a production pass waits for its host probes (see
+/// `ReconcileDeps::pass_budget`): well past a healthy host's few seconds,
+/// and under the 20 s tick, so the tick keeps its rhythm.
+pub(crate) const PASS_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Host probes that outlived their pass (`ReconcileDeps::pass_budget`).
+#[derive(Default)]
+pub(super) struct LateProbes {
+    /// Hosts whose detached probe is still running: left out of the passes
+    /// that start meanwhile (a forced pass probes them anyway).
+    pub(super) in_flight: std::collections::HashSet<String>,
+    /// Detached probes that finished, to write at the next pass's start.
+    pub(super) done: Vec<HostProbe>,
+    /// `started_at` of the newest probe written per host: a late result
+    /// older than it is dropped rather than written over newer rows.
+    pub(super) written: HashMap<String, i64>,
+}
+
+fn late_probes() -> Arc<std::sync::Mutex<LateProbes>> {
+    static LATE: std::sync::LazyLock<Arc<std::sync::Mutex<LateProbes>>> =
+        std::sync::LazyLock::new(Default::default);
+    Arc::clone(&LATE)
 }
 
 /// The process-wide `last_agents` map every `ReconcileDeps::real` shares (see
@@ -313,10 +439,12 @@ impl ReconcileDeps {
             probe_timeout: HOST_PROBE_TIMEOUT,
             shell,
             pr_cache: crate::service::outcome::pr_probe_cache(),
-            local_home: local_host.then(crate::service::hosts::local_home_dir),
+            local_home: local_host.then(crate::service::hosts::local_claude_json_dir),
             local_host,
             agents_every: AGENTS_CADENCE,
             last_agents: last_agents_map(),
+            pass_budget: Some(PASS_BUDGET),
+            late: late_probes(),
         })
     }
 
@@ -351,6 +479,9 @@ impl ReconcileDeps {
             // A fresh map per fake deps: tests must stay isolated from each
             // other (and from production's shared map above).
             last_agents: Arc::new(dashmap::DashMap::new()),
+            // Tests wait for every probe unless they opt into a budget.
+            pass_budget: None,
+            late: Arc::default(),
         })
     }
 
@@ -391,6 +522,14 @@ impl ReconcileDeps {
     pub(crate) fn with_agents_every(self: Arc<Self>, every: std::time::Duration) -> Arc<Self> {
         let mut deps = self;
         Arc::get_mut(&mut deps).expect("fresh Arc").agents_every = every;
+        deps
+    }
+
+    /// Give a freshly built fake a pass budget (see `pass_budget`).
+    #[cfg(test)]
+    pub(crate) fn with_pass_budget(self: Arc<Self>, budget: std::time::Duration) -> Arc<Self> {
+        let mut deps = self;
+        Arc::get_mut(&mut deps).expect("fresh Arc").pass_budget = Some(budget);
         deps
     }
 }
@@ -470,6 +609,14 @@ impl ReconcileGate {
         })
     }
 
+    /// Claim the single pass slot, waiting for a pass already running.
+    pub async fn begin(&self) -> ReconcilePass<'_> {
+        ReconcilePass {
+            _guard: self.running.lock().await,
+            gate: self,
+        }
+    }
+
     /// `true` when a full pass completed less than `window` ago.
     pub fn is_fresh(&self, window: std::time::Duration) -> bool {
         self.last_completed
@@ -514,7 +661,7 @@ pub(super) fn intel_from_tails(tails: &std::collections::HashMap<String, String>
     tails
         .iter()
         .filter(|(_, t)| !t.is_empty())
-        .map(|(name, t)| (name.clone(), crate::service::pane_intel::analyze(t)))
+        .map(|(name, t)| (name.clone(), crate::agent_adapter::claude().analyze_pane(t)))
         .collect()
 }
 
@@ -561,6 +708,17 @@ struct Prior {
     claude_session_id: Option<String>,
 }
 
+/// The rollout this pass found for `tmux_name`, when the stored row runs
+/// Codex (a first sighting is no Codex row yet).
+fn codex_rollout<'a>(
+    row: Option<&SessionRow>,
+    probe: &'a HostProbe,
+    tmux_name: &str,
+) -> Option<&'a crate::agent_adapter::codex::PaneRollout> {
+    row.filter(|r| r.agent == crate::store::AGENT_CODEX && r.kind != "shell")?;
+    probe.codex_rollouts.get(tmux_name)
+}
+
 /// Fallback rebind (spec §1.4): after the reconcile write, open the
 /// conversation of a row that `claude agents` moved onto another id (no
 /// hooks, or an old CLI), or first showed carrying one (a new row, or one
@@ -572,6 +730,7 @@ fn open_reconciled_conversation(
     host_alias: &str,
     row: &SessionRow,
     old_claude_id: Option<&str>,
+    transcript_path: Option<&str>,
 ) -> Result<(), IpcError> {
     let Some(new_id) = row.claude_session_id.as_deref() else {
         return Ok(());
@@ -582,7 +741,7 @@ fn open_reconciled_conversation(
     if old_claude_id == Some(new_id) {
         return Ok(());
     }
-    match s.rebind_conversation(row.id, new_id, StartSource::Unknown, None, None) {
+    match s.rebind_conversation(row.id, new_id, StartSource::Unknown, transcript_path, None) {
         Ok(_) => {
             if let Err(e) = s.insert_session_event_for(
                 row.id,
@@ -628,19 +787,22 @@ pub(super) fn reconcile_write_one_host(
             // Mark host unreachable; surface last-known sessions so the UI
             // can render them dimmed/red. We KEEP them (no delete).
             tracing::warn!(host = %host.alias, code = %e.code, error = %e.message, "[reconcile] host unreachable");
-            s.apply_host_reconcile(HostReconcile {
-                alias: &host.alias,
-                reachable: false,
-                claude_version: host.claude_version.as_deref(),
-                tmux_version: host.tmux_version.as_deref(),
-                last_pinged_at: now_unix(),
-                probe_started_at: probe.started_at,
-                sessions: &[],
-                keep: &[],
-                lost_ttl_cutoff: None,
-                skip_prune: false,
-                reconciled_at: None,
-            })?;
+            s.apply_host_reconcile_failed(
+                HostReconcile {
+                    alias: &host.alias,
+                    reachable: false,
+                    claude_version: host.claude_version.as_deref(),
+                    tmux_version: host.tmux_version.as_deref(),
+                    last_pinged_at: now_unix(),
+                    probe_started_at: probe.started_at,
+                    sessions: &[],
+                    keep: &[],
+                    lost_ttl_cutoff: None,
+                    skip_prune: false,
+                    reconciled_at: None,
+                },
+                (&e.code, &e.message),
+            )?;
         }
     }
     Ok(())
@@ -686,6 +848,25 @@ fn write_reachable_host(
                 host.account_uuid.clone()
             }
         };
+    // The host's login profiles and the account each is logged into, so a
+    // session under a profile is attributed to THAT login (docs/accounts.md).
+    // Best-effort like the host account above.
+    let profile_accounts = match crate::service::hosts::sync_host_profiles(
+        s,
+        &host.alias,
+        probe.profiles.as_deref(),
+    ) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(
+                host = %host.alias,
+                error = %e.message,
+                "[reconcile] host profile sync failed; keeping the stored list"
+            );
+            s.ensure_in_tx()?;
+            Default::default()
+        }
+    };
     let mut keep: Vec<String> = Vec::with_capacity(live.len());
     let mut sessions: Vec<ReconcileSession> = Vec::with_capacity(live.len());
     // ── Task G: reconcile transition-detection (event timeline) ──
@@ -724,10 +905,20 @@ fn write_reachable_host(
         let prior_row = stored.get(&sess.name);
         // Preservation invariant: if the session already has an
         // account_uuid in the DB, keep it; only capture the host's
-        // current account for newly-discovered sessions.
-        let account_uuid = prior_row
-            .and_then(|p| p.account_uuid.clone())
-            .or_else(|| host_account.clone());
+        // current account for newly-discovered sessions. A session under a
+        // credential profile bills that profile's login, never the host's:
+        // it takes the profile's account when the host reported one, and
+        // otherwise keeps what it has.
+        let account_uuid = match prior_row {
+            Some(p) if p.claude_profile.is_some() => p
+                .claude_profile
+                .as_ref()
+                .and_then(|name| profile_accounts.get(name).cloned().flatten())
+                .or_else(|| p.account_uuid.clone()),
+            _ => prior_row
+                .and_then(|p| p.account_uuid.clone())
+                .or_else(|| host_account.clone()),
+        };
         let worktree_key = worktree_key_for_host(&sess.path.to_string_lossy(), &paths);
         // The running Claude agent this session is paired with (see
         // `pair_session_agents`) — its id lets `recreate`/`restart`
@@ -737,7 +928,15 @@ fn write_reachable_host(
         // Pane-tail intel from the off-lock probe (may be absent if the
         // capture failed — then all four intel fields stay None and the
         // upsert's COALESCE preserves the session's prior values).
-        let pane = intel.get(&sess.name);
+        // A row running another agent (Codex) is read by its own adapter.
+        let own_read = prior_row
+            .filter(|r| r.agent != crate::store::AGENT_CLAUDE && r.kind != "shell")
+            .and_then(|r| crate::agent_adapter::by_id(&r.agent))
+            .and_then(|a| {
+                let tail = probe.pane_tails.get(&sess.name)?;
+                (!tail.is_empty()).then(|| a.analyze_pane(tail))
+            });
+        let pane = own_read.as_ref().or_else(|| intel.get(&sess.name));
         // PR probe result for this pass (PROD-5). `pr_observed`
         // makes the values authoritative so a closed PR's stale
         // link clears; an unprobed session keeps its stored fields.
@@ -764,7 +963,12 @@ fn write_reachable_host(
         // itself shows a turn (`stale_working_veto`, F2).
         let claude_status = stale_working_veto(
             stale,
-            status_candidate(probe.agent_rows.is_some(), agent_status_typed, pane_status),
+            status_candidate(
+                probe.agent_rows.is_some(),
+                agent_status_typed,
+                pane_status,
+                prior_row.is_some_and(|p| p.claude_status.as_deref() == Some("blocked")),
+            ),
             pane_status,
         )
         .map(|s| s.as_str().to_string());
@@ -787,7 +991,11 @@ fn write_reachable_host(
             last_activity_at: sess.last_activity,
             account_uuid,
             worktree_key,
-            claude_session_id: agent.and_then(|a| a.session_id.clone()),
+            // A Codex pane's conversation is the rollout found for it; it
+            // has no `claude agents` row.
+            claude_session_id: agent
+                .and_then(|a| a.session_id.clone())
+                .or_else(|| codex_rollout(prior_row, probe, &sess.name).map(|r| r.id.clone())),
             claude_status,
             effort_level: None, // not in claude agents --json; reserved for future
             pr_url: pr.and_then(|p| p.pr_url.clone()),
@@ -929,6 +1137,9 @@ fn write_reachable_host(
     if let Some(h) = &probe.health {
         s.set_host_health(&host.alias, h, now)?;
     }
+    if let Some(kb) = probe.worktree_kb {
+        s.set_host_worktree_size(&host.alias, kb, now)?;
+    }
     s.ensure_in_tx()?;
     s.apply_host_reconcile_in_tx(HostReconcile {
         alias: &host.alias,
@@ -1015,12 +1226,24 @@ fn write_reachable_host(
                 continue;
             }
         };
+        let rollout = codex_rollout(Some(&row), probe, tmux_name)
+            .filter(|r| row.claude_session_id.as_deref() == Some(r.id.as_str()));
         open_reconciled_conversation(
             s,
             &host.alias,
             &row,
             prior.as_ref().and_then(|p| p.claude_session_id.as_deref()),
+            rollout.map(|r| r.path.as_str()),
         )?;
+        // A Codex row's transcript is its rollout: stored, so every read
+        // goes straight to it (a no-op once it is).
+        if let Some(r) = rollout {
+            if let Err(e) = s.set_transcript_path_for_row(row.id, &r.id, &r.path) {
+                tracing::warn!(host = %host.alias, session = %row.tmux_name, error = %e.message,
+                    "[reconcile] codex rollout path write failed");
+                s.ensure_in_tx()?;
+            }
+        }
         let Some(prior) = prior else {
             continue;
         };
@@ -1444,11 +1667,16 @@ pub(super) async fn probe_pr_info(
         return PrInfoMap::new();
     }
     due.truncate(PR_PROBE_BATCH);
+    // Stamped BEFORE the script runs: a transport failure, or the caller's
+    // PR_PROBE_TIMEOUT dropping this future, must not retry the same batch on
+    // every 20 s pass, nor keep the sessions past the first PR_PROBE_BATCH
+    // from ever being due (review r16).
+    cache.mark_probed(host, due.iter().map(|(n, _)| n.as_str()));
     let script = build_pr_probe_script(&due);
     let stdout = match shell.run_script(host, &script).await {
         Ok(out) => out,
         Err(e) => {
-            // Best-effort and retried every pass: debug, not warn.
+            // Best-effort and retried after the cache's TTL: debug, not warn.
             tracing::debug!(host = %host, error = %e, "[reconcile] pr probe failed");
             return PrInfoMap::new();
         }
@@ -1458,12 +1686,8 @@ pub(super) async fn probe_pr_info(
             cache.mark_no_gh(host);
             PrInfoMap::new()
         }
-        ProbeOutput::Results(map) => {
-            // Every target the script ran for is throttled, observed or not:
-            // a transport failure must not be retried on every 20 s pass.
-            cache.mark_probed(host, due.iter().map(|(n, _)| n.as_str()));
-            map
-        }
+        // Every target the script ran for was throttled above, observed or not.
+        ProbeOutput::Results(map) => map,
     }
 }
 
@@ -1524,8 +1748,14 @@ pub(super) async fn probe_with_timeout(
         } else {
             None
         };
+        let profiles = if tmux_result.is_ok() {
+            snap.profiles
+        } else {
+            None
+        };
         // One pane-tail read per live session, parsed into reconcile intel.
         let intel = intel_from_tails(&snap.pane_tails);
+        let pane_tails = snap.pane_tails;
         // `None`: not due this pass (cadence) or the host could not be
         // asked. Either way the bg pruner below must not run this pass —
         // treating "not asked" as "no agents" is exactly what ghosts every
@@ -1556,29 +1786,40 @@ pub(super) async fn probe_with_timeout(
             tmux_result,
             agent_rows,
             agent_mtimes,
-            intel,
-            account,
+            (intel, pane_tails),
+            (account, profiles),
             identity,
             versions,
             health,
         )
     };
     let mut probe = match tokio::time::timeout(timeout, probe).await {
-        Ok((result, agent_rows, agent_mtimes, intel, account, identity, versions, health)) => {
-            HostProbe {
-                host,
-                versions,
-                health,
-                result,
-                agent_rows,
-                agent_mtimes,
-                intel,
-                pr_info: PrInfoMap::new(),
-                account,
-                identity,
-                started_at,
-            }
-        }
+        Ok((
+            result,
+            agent_rows,
+            agent_mtimes,
+            (intel, pane_tails),
+            (account, profiles),
+            identity,
+            versions,
+            health,
+        )) => HostProbe {
+            host,
+            versions,
+            health,
+            result,
+            agent_rows,
+            agent_mtimes,
+            intel,
+            pane_tails,
+            pr_info: PrInfoMap::new(),
+            account,
+            profiles,
+            identity,
+            started_at,
+            worktree_kb: None,
+            codex_rollouts: HashMap::new(),
+        },
         Err(_elapsed) => {
             tracing::warn!(
                 host = %host.alias,
@@ -1593,13 +1834,28 @@ pub(super) async fn probe_with_timeout(
                 agent_rows: None,
                 agent_mtimes: None,
                 intel: PaneIntelMap::new(),
+                pane_tails: Default::default(),
                 pr_info: PrInfoMap::new(),
                 account: None,
+                profiles: None,
                 identity: None,
                 started_at,
+                worktree_kb: None,
+                codex_rollouts: HashMap::new(),
             };
         }
     };
+    // Latency (Orbit Fleet 4.6): one empty command, timed, once the host
+    // has answered. Its own bound, like the PR probe below, so a slow
+    // round trip never costs the host its "reachable" verdict.
+    if probe.result.is_ok() {
+        if let Some(h) = probe.health.as_mut() {
+            h.latency_ms = tokio::time::timeout(ROUND_TRIP_TIMEOUT, tmux.round_trip_ms())
+                .await
+                .ok()
+                .flatten();
+        }
+    }
     // The PR probe is its own bounded step AFTER reachability is settled: it
     // talks to GitHub, not to the host, and must never cost the host its
     // "reachable" verdict. On timeout the stored outcome fields survive.
@@ -1618,8 +1874,62 @@ pub(super) async fn probe_with_timeout(
             ),
         }
     }
+    // Worktree size (Orbit Fleet 4.6): due once per interval, bounded on
+    // its own, best-effort.
+    if let (Ok(_), Some((shell, _, paths))) = (&probe.result, pr_probe) {
+        // Also due when this process has no per-worktree sizes for the host
+        // yet (G1.9): they live in memory only, so a restart measures once.
+        if worktree_size_due(probe.host.worktree_at, started_at)
+            || !super::worktree_sizes::known(&probe.host.alias)
+        {
+            let names: Vec<&str> = paths.named.iter().map(|(p, _)| p.as_str()).collect();
+            let mut per_path = Vec::new();
+            probe.worktree_kb = Some(match worktree_size_script(&names) {
+                None => Some(0),
+                Some(script) => tokio::time::timeout(
+                    WORKTREE_SIZE_TIMEOUT,
+                    shell.run_script(&probe.host.alias, &script),
+                )
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .and_then(|out| {
+                    per_path = parse_worktree_sizes(&out, names.len())
+                        .into_iter()
+                        .map(|(i, kb)| (names[i].to_string(), kb))
+                        .collect();
+                    parse_worktree_size(&out)
+                }),
+            });
+            super::worktree_sizes::record(&probe.host.alias, started_at, per_path);
+        }
+    }
+    // Codex conversations: Codex names its own, so each live Codex pane's
+    // id and rollout are looked up on the host, bounded on their own like
+    // the steps above. A failure finds nothing and the stored ids stay.
+    if let (Ok(live), Some((shell, _, paths))) = (&probe.result, pr_probe) {
+        let names: Vec<&str> = paths
+            .codex_panes
+            .iter()
+            .filter(|n| live.iter().any(|s| &s.name == *n))
+            .map(String::as_str)
+            .collect();
+        if let Some(script) = crate::agent_adapter::codex::rollouts_script(&names) {
+            if let Ok(Ok(out)) = tokio::time::timeout(
+                CODEX_ROLLOUT_TIMEOUT,
+                shell.run_script(&probe.host.alias, &script),
+            )
+            .await
+            {
+                probe.codex_rollouts = crate::agent_adapter::codex::parse_rollouts(&out);
+            }
+        }
+    }
     probe
 }
+
+/// Bound on the Codex rollout lookup of one host.
+const CODEX_ROLLOUT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Full fleet pass: probe every non-hidden host in parallel and apply each
 /// host's result as its probe completes, under its own short store-lock
@@ -1629,6 +1939,44 @@ pub(super) async fn probe_with_timeout(
 pub(crate) async fn reconcile_sessions_with(
     store: &Mutex<Store>,
     deps: &Arc<ReconcileDeps>,
+) -> Result<(), IpcError> {
+    reconcile_sessions_within(store, deps, deps.pass_budget).await
+}
+
+/// Write one host's probe, logging (not propagating) a failed write, and
+/// remember it as the newest written for its host.
+fn write_host_probe(
+    store: &Mutex<Store>,
+    deps: &ReconcileDeps,
+    probe: &HostProbe,
+    projects: &[crate::store::ProjectRow],
+) -> Result<(), IpcError> {
+    let mut s = lock(store)?;
+    // Per-host isolation: one host's DB write failure (e.g. an FK
+    // violation on a stale account_uuid) must NOT abort reconcile
+    // for every other host. The host's whole write is one
+    // transaction, so a failed host rolls back cleanly; we log it
+    // and carry on.
+    if let Err(e) = reconcile_write_one_host(&mut s, probe, projects) {
+        tracing::error!(
+            host = %probe.host.alias,
+            error = %e,
+            "[reconcile] write failed (rolled back; retried next pass)"
+        );
+    }
+    if let Ok(mut late) = deps.late.lock() {
+        let newest = late.written.entry(probe.host.alias.clone()).or_insert(0);
+        *newest = (*newest).max(probe.started_at);
+    }
+    Ok(())
+}
+
+/// [`reconcile_sessions_with`] with an explicit pass budget (`None`: wait for
+/// every probe — a forced listing's own pass).
+pub(super) async fn reconcile_sessions_within(
+    store: &Mutex<Store>,
+    deps: &Arc<ReconcileDeps>,
+    budget: Option<std::time::Duration>,
 ) -> Result<(), IpcError> {
     // 0. Ensure the `local` row exists (idempotent; step 1 does this again
     //    but `sync_local_account` needs the row to already be there — on the
@@ -1696,12 +2044,37 @@ pub(crate) async fn reconcile_sessions_with(
         let s = lock(store)?;
         s.list_projects()?
     };
+    // Probes that outlived an earlier pass and have answered since: written
+    // first (unless a newer probe of the host was written meanwhile), and
+    // the hosts still being probed are left out of this pass's fan-out.
+    let (late_done, still_in_flight) = match deps.late.lock() {
+        Ok(mut late) => (std::mem::take(&mut late.done), late.in_flight.clone()),
+        Err(_) => (Vec::new(), Default::default()),
+    };
+    for probe in late_done {
+        let newer = deps
+            .late
+            .lock()
+            .ok()
+            .and_then(|l| l.written.get(&probe.host.alias).copied())
+            .is_some_and(|w| w > probe.started_at);
+        if !newer {
+            write_host_probe(store, deps, &probe, &projects)?;
+        }
+    }
     let mut set = tokio::task::JoinSet::new();
+    let mut pending: HashMap<tokio::task::Id, String> = HashMap::new();
     // Hidden rows never enter the snapshot (`active_hosts`, step 1).
     for (host, paths) in hosts {
+        if budget.is_some() && still_in_flight.contains(&host.alias) {
+            continue;
+        }
+        let alias = host.alias.clone();
         let deps = Arc::clone(deps);
-        set.spawn(async move { probe_one_host(host, paths, &deps).await });
+        let handle = set.spawn(async move { probe_one_host(host, paths, &deps).await });
+        pending.insert(handle.id(), alias);
     }
+    let deadline = budget.map(|b| tokio::time::Instant::now() + b);
 
     // 3. Apply each host's result AS ITS PROBE COMPLETES, taking the store
     //    lock once per host (BE-12), rather than after every host has
@@ -1714,29 +2087,32 @@ pub(crate) async fn reconcile_sessions_with(
     //    under ONE `Store::atomically` transaction, events held until it
     //    commits, a failed host rolled back alone. Join errors (task panics)
     //    are logged and skipped — they don't abort the rest of reconcile.
-    while let Some(join) = set.join_next().await {
+    loop {
+        let next = match deadline {
+            Some(d) => match tokio::time::timeout_at(d, set.join_next_with_id()).await {
+                Ok(next) => next,
+                Err(_) => {
+                    // Over budget: the rest finish on their own and are
+                    // written by a later pass; this one completes now.
+                    detach_late_probes(set, pending, &deps.late);
+                    break;
+                }
+            },
+            None => set.join_next_with_id().await,
+        };
+        let Some(join) = next else { break };
         let probe = match join {
-            Ok(probe) => probe,
+            Ok((id, probe)) => {
+                pending.remove(&id);
+                probe
+            }
             Err(e) => {
+                pending.remove(&e.id());
                 tracing::error!(error = %e, "[reconcile] probe task panicked");
                 continue;
             }
         };
-        {
-            let mut s = lock(store)?;
-            // Per-host isolation: one host's DB write failure (e.g. an FK
-            // violation on a stale account_uuid) must NOT abort reconcile
-            // for every other host. The host's whole write is one
-            // transaction, so a failed host rolls back cleanly; we log it
-            // and carry on.
-            if let Err(e) = reconcile_write_one_host(&mut s, &probe, &projects) {
-                tracing::error!(
-                    host = %probe.host.alias,
-                    error = %e,
-                    "[reconcile] write failed (rolled back; retried next pass)"
-                );
-            }
-        }
+        write_host_probe(store, deps, &probe, &projects)?;
         // The guard is dropped above; now give a waiting reader its turn
         // (Task 4). `std::sync::Mutex` is not fair: re-locking straight away
         // for the next host usually wins against a reader already blocked
@@ -1755,6 +2131,41 @@ pub(crate) async fn reconcile_sessions_with(
     //    `claude_session_id`s intact — until the host is shown again.
     reap_unprobed_local(store, deps, now_unix());
     Ok(())
+}
+
+/// Hand the probes still running when a pass's budget ran out to a task of
+/// their own: each one's host is marked in flight until it answers, and its
+/// result is parked for the next pass to write.
+fn detach_late_probes(
+    mut set: tokio::task::JoinSet<HostProbe>,
+    pending: HashMap<tokio::task::Id, String>,
+    late: &Arc<std::sync::Mutex<LateProbes>>,
+) {
+    if let Ok(mut l) = late.lock() {
+        l.in_flight.extend(pending.values().cloned());
+    }
+    tracing::info!(
+        hosts = ?pending.values().collect::<Vec<_>>(),
+        "[reconcile] pass over budget; slow hosts finish in the background"
+    );
+    let late = Arc::clone(late);
+    tokio::spawn(async move {
+        let mut pending = pending;
+        while let Some(join) = set.join_next_with_id().await {
+            let (alias, probe) = match join {
+                Ok((id, probe)) => (pending.remove(&id), Some(probe)),
+                Err(e) => (pending.remove(&e.id()), None),
+            };
+            if let Ok(mut l) = late.lock() {
+                if let Some(alias) = alias {
+                    l.in_flight.remove(&alias);
+                }
+                if let Some(probe) = probe {
+                    l.done.push(probe);
+                }
+            }
+        }
+    });
 }
 
 /// Step 4 of [`reconcile_sessions_with`]: ghost, then (next pass) delete the
@@ -1798,6 +2209,22 @@ pub(super) async fn run_full_reconcile(
     Ok(true)
 }
 
+/// A pass of this caller's own: waits for one already running, then runs.
+/// A forced listing needs it: the running pass may have probed its hosts
+/// before the session the caller just started existed, so its rows cannot
+/// answer "what is there now" (review r06, from r17 F4).
+async fn run_own_reconcile(
+    store: &Mutex<Store>,
+    deps: &Arc<ReconcileDeps>,
+    gate: &ReconcileGate,
+) -> Result<(), IpcError> {
+    let pass = gate.begin().await;
+    // Every host, however slow: the caller asked for what is there NOW.
+    reconcile_sessions_within(store, deps, None).await?;
+    pass.complete();
+    Ok(())
+}
+
 /// Test access to the private gate entry point, so reconcile tests exercise
 /// the real claim → pass → complete sequence.
 #[cfg(test)]
@@ -1829,8 +2256,8 @@ pub(super) fn list_freshness_window(store: &Mutex<Store>) -> std::time::Duration
 /// `list_sessions` core with injectable deps/gate/window (tests). See the
 /// public `list_sessions` for the policy.
 ///
-/// `force` always awaits a pass inline (an explicit user refresh must show
-/// its own result). Otherwise: a COLD start — no pass has completed in this
+/// `force` always awaits a pass of its own inline (an explicit user refresh
+/// must show its own result), after any pass already running. Otherwise: a COLD start — no pass has completed in this
 /// process yet (`gate.has_completed_once()` false) — also awaits one inline,
 /// so the very first listing is not empty. Once at least one pass has
 /// completed, a stale gate no longer probes inline: the stored rows are
@@ -1861,7 +2288,7 @@ pub(super) async fn list_sessions_with_reader(
 ) -> Result<Vec<SessionRow>, IpcError> {
     let mut reader = reader;
     if force {
-        run_full_reconcile(store, deps, gate).await?;
+        run_own_reconcile(store, deps, gate).await?;
         reader = &**store;
     } else if !gate.has_completed_once() {
         // Cold start: keep today's inline pass so the first listing isn't
@@ -1982,8 +2409,8 @@ pub async fn list_sessions_reading(
 }
 
 /// `list_sessions` for an explicit user refresh: ignores the freshness window
-/// (a pass already in flight is still not duplicated — the stored rows it is
-/// about to write are returned instead).
+/// and runs a pass of its own, after waiting for one already in flight (whose
+/// probes may predate a session just started). Never overlaps that pass.
 pub async fn refresh_sessions(
     store: &Arc<Mutex<Store>>,
     ssh: &Arc<SshClient>,
@@ -2090,18 +2517,32 @@ pub(super) fn known_agent_status(tmux_name: &str, status: Option<&str>) -> Optio
 /// upsert's `COALESCE(excluded.claude_status, claude_status)` keeps
 /// whatever is stored (a hook-stamped `idle`/`working` survives between
 /// agent fetches).
+///
+/// Two exceptions, both about a dialog, the one thing the pane sees better
+/// than anyone:
+///  - a pane showing a dialog (`Blocked`) wins even over `claude agents`:
+///    the CLI can report `working` while a permission dialog is up, and
+///    letting it win flipped the row every agents pass (and re-alerted a
+///    phone each time it came back);
+///  - a stored `blocked` (`stored_blocked`) whose pane now shows a turn or
+///    the input box is over: a dialog answered in the terminal fires no
+///    hook, so without this `blocked` (and its "needs you") lasted until the
+///    next agents pass or the Stop hook.
 pub(super) fn status_candidate(
     agents_asked: bool,
     agent_status: Option<crate::service::pane_intel::ClaudeStatus>,
     pane: Option<crate::service::pane_intel::ClaudeStatus>,
+    stored_blocked: bool,
 ) -> Option<crate::service::pane_intel::ClaudeStatus> {
+    use crate::service::pane_intel::ClaudeStatus;
+    if pane == Some(ClaudeStatus::Blocked) {
+        return pane;
+    }
     if agents_asked {
         return agent_status.or(pane);
     }
     match pane {
-        Some(crate::service::pane_intel::ClaudeStatus::Blocked) => {
-            Some(crate::service::pane_intel::ClaudeStatus::Blocked)
-        }
+        Some(ClaudeStatus::Working | ClaudeStatus::Idle) if stored_blocked => pane,
         _ => None,
     }
 }

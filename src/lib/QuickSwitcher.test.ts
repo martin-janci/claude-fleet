@@ -1,13 +1,16 @@
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tick } from 'svelte';
 import { get } from 'svelte/store';
+import { ownNewTaskChord } from './new_task';
 import QuickSwitcher from './QuickSwitcher.svelte';
 import { sessions, type SessionRow } from './sessions';
 import { projects } from './projects';
 import { selectedSession, clearSelection } from './selection';
 import { newSessionRequest, clearNewSessionRequest } from './new_session_request';
 import { recentSessions } from './quick_switcher';
+import { assetsViewRequest } from './app_views';
+import { catalog } from './assets';
 
 function sess(over: Partial<SessionRow> & { id: number }): SessionRow {
   return {
@@ -218,12 +221,12 @@ describe('QuickSwitcher', () => {
     await fireEvent.keyDown(input, { key: 'ArrowUp' });
     await fireEvent.keyDown(input, { key: 'ArrowUp' });
     await tick();
-    // Wrapped past the top to the last row (the project row).
-    expect(document.querySelector('.row.active')?.getAttribute('data-key')).toBe('project:1');
+    // Wrapped past the top to the last row (the last command row; commands rank after projects).
+    expect(document.querySelector('.row.active')?.getAttribute('data-key')).toBe('command:propose');
     await tick();
     await Promise.resolve();
     expect(scrolled).toContain('session:38');
-    expect(scrolled[scrolled.length - 1]).toBe('project:1');
+    expect(scrolled[scrolled.length - 1]).toBe('command:propose');
     // @ts-expect-error restore jsdom default (undefined)
     delete Element.prototype.scrollIntoView;
   });
@@ -308,13 +311,19 @@ describe('QuickSwitcher tickets', () => {
   });
 
   it('Enter on a ticket with no session opens the dialog prefilled with the ticket', async () => {
+    // Asked for a proposal first (3.12); a hub without the preview proposes nothing.
+    const base = vi.mocked(__invoke).getMockImplementation()!;
+    vi.mocked(__invoke).mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'preview_start_work') throw { code: 'E_INVALID', message: 'unknown work_link action preview_start' };
+      return base(cmd, args as never);
+    });
     render(QuickSwitcher);
     const input = await openSwitcher();
     await vi.waitFor(() => expect(screen.getAllByTestId('switcher-ticket')).toHaveLength(2));
     await fireEvent.input(input, { target: { value: 'abc-1' } });
     await tick();
     await fireEvent.keyDown(input, { key: 'Enter' });
-    await tick();
+    await vi.waitFor(() => expect(get(newSessionRequest)).not.toBeNull());
     const req = get(newSessionRequest);
     expect(req?.initialName).toBe('ABC-1 ABC-1 title');
     expect(req?.ticket?.key).toBe('ABC-1');
@@ -391,5 +400,968 @@ describe('QuickSwitcher tickets', () => {
     await fireEvent.input(input, { target: { value: 'https://acme.atlassian.net/browse/ABC-77' } });
     await tick();
     expect(screen.getByTestId('switcher-lookup')).toBeTruthy();
+  });
+});
+
+// Redesign 3.12 (K1): the project a ticket start lands in, proposed by a
+// rule (earlier work on the key's family) or by Jev, with the shared chip.
+describe('QuickSwitcher ticket starts propose a project (New layout)', () => {
+  const other = {
+    project: { id: 2, owner: 'acme', repo: 'papaya-pos', base_path: '/r/pp', last_session_at: 1, adopted: false, system: false },
+    worktrees: [],
+  };
+  const ticket = { id: 101, tracker_id: 1, source: 'jira', key: 'ABC-1', title: 'ABC-1 title', status_category: 'todo', status_name: 'To Do', created_at: 1, updated_at: 1 };
+  let suggested: { project_id: number; confidence_pct?: number } | null;
+  let calls: [string, unknown][];
+  beforeEach(async () => {
+    projects.set([project, other]);
+    suggested = { project_id: 2, confidence_pct: 88 };
+    calls = [];
+    __trackers.set([
+      { id: 1, provider: 'jira', name: 'acme', site_url: 'https://acme.atlassian.net', state: 'ok', created_at: 1, config: { key_prefixes: ['ABC'] } },
+    ]);
+    vi.mocked(__invoke).mockImplementation(async (cmd: string, args?: unknown) => {
+      calls.push([cmd, args]);
+      const view = (args as { args?: { view?: string } } | undefined)?.args?.view;
+      if (cmd === 'work_tickets' && view === 'mine') return [ticket];
+      if (cmd === 'work_tickets') return [];
+      if (cmd === 'preview_start_work')
+        return {
+          key: 'ABC-1', title: 'ABC-1 title', item_id: 101, plan: null, missing: 'project',
+          projects: [{ id: 1, owner: 'martin-janci', repo: 'claude-fleet' }, { id: 2, owner: 'acme', repo: 'papaya-pos' }],
+          hosts: [], conflicts: [], suggested_project: suggested,
+        };
+      if (cmd === 'start_work') throw { code: 'E_AMBIGUOUS', message: 'pick a project' };
+      return null;
+    });
+  });
+  afterEach(async () => {
+  });
+
+  async function enterOnTicket(mod = false) {
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    await vi.waitFor(() => expect(screen.getAllByTestId('switcher-ticket')).toHaveLength(1));
+    await fireEvent.input(input, { target: { value: 'abc-1' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'Enter', ctrlKey: mod });
+    await vi.waitFor(() => expect(get(newSessionRequest)).not.toBeNull());
+    return get(newSessionRequest)!;
+  }
+
+  it('Jev above the floor picks the project and the dialog gets the chip', async () => {
+    const req = await enterOnTicket();
+    expect(req.project.project.id).toBe(2);
+    expect(req.proposal).toEqual({ value: '2', source: 'jev', confidence_pct: 88 });
+    expect(req.ticket?.key).toBe('ABC-1');
+  });
+
+  it('⌘↵ that needs a project lands on the same proposal', async () => {
+    const req = await enterOnTicket(true);
+    expect(calls.some(([c]) => c === 'start_work')).toBe(true);
+    expect(req.project.project.id).toBe(2);
+    expect(req.proposal?.source).toBe('jev');
+  });
+
+  it('unsure or below the floor proposes nothing: the context project, no chip', async () => {
+    suggested = { project_id: 2, confidence_pct: 40 };
+    const req = await enterOnTicket();
+    expect(req.project.project.id).toBe(1);
+    expect(req.proposal).toBeNull();
+  });
+
+  it('a rule beats Jev: earlier work on the family picks the project, no Jev call', async () => {
+    sessions.set([sess({ id: 77, project_id: 2, host_alias: 'mefistos', work: { key: 'ABC-9' } } as Partial<SessionRow> & { id: number })]);
+    const req = await enterOnTicket();
+    expect(req.project.project.id).toBe(2);
+    expect(req.initialHost).toBe('mefistos');
+    expect(req.proposal).toMatchObject({ value: '2', source: 'rule', reason: 'ABC work runs here' });
+    expect(calls.some(([c]) => c === 'preview_start_work')).toBe(false);
+  });
+
+  it("the dialog's Change re-opens the picker for the ticket; the pick keeps it", async () => {
+    render(QuickSwitcher);
+    const { openNewSessionPicker } = await import('./switcher_request');
+    openNewSessionPicker(undefined, ticket as never);
+    await tick();
+    const input = screen.getByTestId('switcher-input') as HTMLInputElement;
+    expect(input.placeholder).toBe('Repository for ABC-1…');
+    await fireEvent.input(input, { target: { value: 'papaya' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await tick();
+    const req = get(newSessionRequest)!;
+    expect(req.project.project.id).toBe(2);
+    expect(req.ticket?.key).toBe('ABC-1');
+    expect(req.initialName).toBe('ABC-1 ABC-1 title');
+  });
+});
+
+describe('QuickSwitcher assets and commands', () => {
+  const listing = {
+    head: null, loaded_at: null, unmanaged: [], problems: [],
+    assets: [
+      { kind: 'skill', name: 'zebra-wrangler', version: '1', description: 'Tame the stripes', tags: [], hosts: [], catalog: 'acme' },
+    ],
+  } as never;
+  beforeEach(() => {
+    assetsViewRequest.set(null);
+    catalog.set(listing);
+  });
+  afterEach(() => catalog.set(null));
+
+  it('typing an asset name lists it under Assets, and picking it requests the Assets view with it selected', async () => {
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    await fireEvent.input(input, { target: { value: 'zebra' } });
+    await tick();
+    const row = screen.getByTestId('switcher-asset');
+    expect(row.getAttribute('data-key')).toBe('asset:acme:skill/zebra-wrangler');
+    expect(screen.getByText('Assets', { selector: '.group, .group *' })).toBeTruthy();
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await tick();
+    expect(get(assetsViewRequest)).toMatchObject({ select: 'asset:acme:skill/zebra-wrangler' });
+    expect(get(assetsViewRequest)?.command).toBeUndefined();
+    expect(screen.queryByTestId('quick-switcher')).toBeNull();
+  });
+
+  it('picking Sync fleet requests the command', async () => {
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    await fireEvent.input(input, { target: { value: 'sync' } });
+    await tick();
+    expect(screen.getByText('Commands', { selector: '.group, .group *' })).toBeTruthy();
+    await fireEvent.click(screen.getByTestId('switcher-command'));
+    await tick();
+    expect(get(assetsViewRequest)).toMatchObject({ command: 'sync' });
+    expect(get(assetsViewRequest)?.select).toBeUndefined();
+    expect(screen.queryByTestId('quick-switcher')).toBeNull();
+  });
+
+  it('the three commands are listed with an empty query, below sessions and projects', async () => {
+    render(QuickSwitcher);
+    await openSwitcher();
+    expect(screen.getAllByTestId('switcher-command').map((e) => e.getAttribute('data-key'))).toEqual([
+      'command:rescan', 'command:sync', 'command:propose',
+    ]);
+    const kinds = Array.from(document.querySelectorAll('[data-testid^="switcher-"][data-key]')).map((e) => e.getAttribute('data-key')!.split(':')[0]);
+    expect(kinds.lastIndexOf('session')).toBeLessThan(kinds.indexOf('asset'));
+    expect(kinds.lastIndexOf('asset')).toBeLessThan(kinds.indexOf('command'));
+  });
+});
+
+// ---- New session mode (project picker spec v2) -------------------------------
+
+import { switcherRequest, openNewSessionPicker } from './switcher_request';
+import { projectPicks } from './project_picks';
+import { newSessionHostRequest, addProjectRequest } from './app_views';
+import { toasts } from './toasts';
+import { readFrecency } from './frecency';
+
+describe('QuickSwitcher — New session mode', () => {
+  const NOW = Math.floor(Date.now() / 1000);
+  const p = (id: number, owner: string, repo: string, ago: number | null) => ({
+    project: { id, owner, repo, base_path: `/r/${repo}`, last_session_at: ago === null ? null : NOW - ago, adopted: false, system: false },
+    worktrees: [],
+  });
+  const fleet = p(1, 'me', 'claude-fleet', 60);
+  const om = [p(2, 'pp', 'openmarket-ai', 3600), p(3, 'pp', 'openmarket-docs', 7200), p(4, 'pp', 'openmarket-app', null)];
+  const epic = p(5, 'me', 'ppt-epic-145', null);
+
+  beforeEach(() => {
+    projects.set([fleet, ...om, epic]);
+    sessions.set([]);
+    projectPicks.set(new Map());
+    switcherRequest.set(null);
+    addProjectRequest.set(null);
+    toasts.set([]);
+    __trackers.set([]);
+    vi.mocked(__invoke).mockImplementation(async (cmd: string, args?: unknown) =>
+      cmd === 'set_project_pick' ? (args as { args: unknown }).args : null);
+  });
+
+  async function openNew(host?: string) {
+    openNewSessionPicker(host);
+    await tick();
+    return screen.getByTestId('switcher-input') as HTMLInputElement;
+  }
+  const activeLabel = (input: HTMLInputElement) =>
+    document.getElementById(input.getAttribute('aria-activedescendant') ?? '')?.textContent ?? '';
+  /** Clear the query (Esc), so the empty-query keys (⌘Z, ⌘⌫) are the picker's. */
+  async function clearQuery(input: HTMLInputElement) {
+    await fireEvent.keyDown(input, { key: 'Escape' });
+    await tick();
+    expect(input.value).toBe('');
+  }
+  /** Highlight the row with this data-key (the mouse moves onto it). */
+  async function highlight(key: string) {
+    const row = document.querySelector(`[data-key="${key}"]`);
+    expect(row).not.toBeNull();
+    await fireEvent.mouseMove(row!);
+    await tick();
+  }
+
+  it('opens from the request with the mode chip, projects only, Hidden folded', async () => {
+    sessions.set([sess({ id: 1, project_id: 1 })]);
+    render(QuickSwitcher);
+    await openNew();
+    expect(screen.getByTestId('mode-chip').textContent).toBe('New session in');
+    expect(screen.queryAllByTestId('switcher-session')).toHaveLength(0);
+    expect(screen.getByText('openmarket-* · pp')).toBeTruthy(); // the cluster heading's subtitle
+    expect(screen.getByText(/Show 1 in Hidden/)).toBeTruthy();
+    expect(screen.queryByText('ppt-epic-145')).toBeNull();
+  });
+
+  it('Ctrl+Shift+N opens it; Backspace on an empty query leaves the mode', async () => {
+    render(QuickSwitcher);
+    await fireEvent.keyDown(window, { key: 'N', ctrlKey: true, shiftKey: true });
+    await tick();
+    const input = screen.getByTestId('switcher-input');
+    expect(screen.getByTestId('mode-chip')).toBeTruthy();
+    await fireEvent.keyDown(input, { key: 'Backspace' });
+    await tick();
+    expect(screen.queryByTestId('mode-chip')).toBeNull();
+    expect(screen.getByTestId('quick-switcher')).toBeTruthy();
+  });
+
+  it('stands aside while a Work view owns the chord for New task (G2.1)', async () => {
+    render(QuickSwitcher);
+    const release = ownNewTaskChord();
+    try {
+      await fireEvent.keyDown(window, { key: 'N', ctrlKey: true, shiftKey: true });
+      await tick();
+      expect(screen.queryByTestId('mode-chip')).toBeNull();
+    } finally {
+      release();
+    }
+    await fireEvent.keyDown(window, { key: 'N', ctrlKey: true, shiftKey: true });
+    await tick();
+    expect(screen.getByTestId('mode-chip')).toBeTruthy();
+  });
+
+  it('the Hosts view request opens it with that host as context', async () => {
+    sessions.set([sess({ id: 9, project_id: 3, host_alias: 'mefistos' })]);
+    render(QuickSwitcher);
+    newSessionHostRequest.set('mefistos');
+    await tick(); await tick();
+    expect(screen.getByText('on mefistos')).toBeTruthy();
+    expect(get(newSessionHostRequest)).toBeNull();
+  });
+
+  it('Enter opens the dialog and records the pick; Ctrl+Enter asks for autostart', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'openmarket-docs' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await tick();
+    expect(get(newSessionRequest)?.project.project.repo).toBe('openmarket-docs');
+    expect(readFrecency()['pp/openmarket-docs']).toBeTruthy(); // the pref, under the app's prefix
+    clearNewSessionRequest();
+    const input2 = await openNew();
+    await fireEvent.input(input2, { target: { value: 'openmarket-ai' } });
+    await tick();
+    await fireEvent.keyDown(input2, { key: 'Enter', ctrlKey: true });
+    await tick();
+    expect(get(newSessionRequest)?.autostart).toBe(true);
+  });
+
+  it('a host request carries the host into the dialog', async () => {
+    render(QuickSwitcher);
+    const input = await openNew('mefistos');
+    await fireEvent.input(input, { target: { value: 'openmarket-ai' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await tick();
+    expect(get(newSessionRequest)?.initialHost).toBe('mefistos');
+  });
+
+  it('a named request names the new session (G7.15: no-results carries the search)', async () => {
+    render(QuickSwitcher);
+    openNewSessionPicker(undefined, undefined, undefined, 'receipt totals');
+    await tick();
+    const input = screen.getByTestId('switcher-input') as HTMLInputElement;
+    expect(input.value).toBe('');
+    await fireEvent.input(input, { target: { value: 'openmarket-ai' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await tick();
+    expect(get(newSessionRequest)?.initialName).toBe('receipt totals');
+    clearNewSessionRequest();
+    const again = await openNew();
+    await fireEvent.input(again, { target: { value: 'openmarket-ai' } });
+    await tick();
+    await fireEvent.keyDown(again, { key: 'Enter' });
+    await tick();
+    expect(get(newSessionRequest)?.initialName).toBeUndefined();
+  });
+
+  it('Ctrl+1 opens the first numbered row', async () => {
+    projectPicks.set(new Map([['pp/openmarket-app', { owner: 'pp', repo: 'openmarket-app', pinned: true, vis: null, grp: null }]]));
+    render(QuickSwitcher);
+    const input = await openNew();
+    expect(screen.getByText('Ctrl+1')).toBeTruthy();
+    await fireEvent.keyDown(input, { key: '1', ctrlKey: true });
+    await tick();
+    expect(get(newSessionRequest)?.project.project.repo).toBe('openmarket-app');
+    expect(screen.queryByTestId('quick-switcher')).toBeNull();
+  });
+
+  it('Ctrl+P pins the highlighted project; Ctrl+Z undoes it', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'openmarket-ai' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'p', ctrlKey: true });
+    await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(true));
+    await clearQuery(input);
+    await fireEvent.keyDown(input, { key: 'z', ctrlKey: true });
+    await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(false));
+    // The undo says what it undid.
+    await vi.waitFor(() => expect(get(toasts).map((t) => t.message)).toContain('Undid: Pinned openmarket-ai'));
+  });
+
+  it('Ctrl+Z with a query is the input’s own undo: the pin stays', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'openmarket-ai' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'p', ctrlKey: true });
+    await vi.waitFor(() => expect(get(toasts).map((t) => t.message)).toContain('Pinned openmarket-ai'));
+    const calls = vi.mocked(__invoke).mock.calls.length;
+    expect(await fireEvent.keyDown(input, { key: 'z', ctrlKey: true })).toBe(true); // not defaultPrevented
+    await tick();
+    expect(vi.mocked(__invoke).mock.calls.length).toBe(calls);
+    expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(true);
+  });
+
+  it('Ctrl+Z after a close and reopen undoes nothing (undo is per open)', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'openmarket-ai' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'p', ctrlKey: true });
+    await vi.waitFor(() => expect(get(toasts).map((t) => t.message)).toContain('Pinned openmarket-ai'));
+    await clearQuery(input);
+    await fireEvent.keyDown(input, { key: 'Escape' }); // closes
+    await tick();
+    const input2 = await openNew();
+    const calls = vi.mocked(__invoke).mock.calls.filter((c) => c[0] === 'set_project_pick').length;
+    expect(await fireEvent.keyDown(input2, { key: 'z', ctrlKey: true })).toBe(true); // not taken
+    await tick();
+    await Promise.resolve();
+    expect(vi.mocked(__invoke).mock.calls.filter((c) => c[0] === 'set_project_pick').length).toBe(calls);
+    expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(true);
+  });
+
+  it('Ctrl+Backspace with a query is left to the input; with none it hides the highlighted row', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'openmarket-docs' } });
+    await tick();
+    expect(screen.queryByText('Ctrl⌫ hide')).toBeNull(); // the hint only offers it on an empty query
+    expect(await fireEvent.keyDown(input, { key: 'Backspace', ctrlKey: true })).toBe(true); // not defaultPrevented
+    await tick();
+    expect(get(projectPicks).get('pp/openmarket-docs')?.vis ?? null).toBeNull();
+    await clearQuery(input);
+    expect(screen.getByText('Ctrl⌫ hide')).toBeTruthy();
+    await highlight('project:3@g:c:pp:openmarket');
+    expect(await fireEvent.keyDown(input, { key: 'Backspace', ctrlKey: true })).toBe(false);
+    await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-docs')?.vis).toBe('hide'));
+  });
+
+  it('after Hide the highlight lands on the row that followed the hidden one', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    await highlight('project:3@g:c:pp:openmarket');
+    expect(activeLabel(input)).toContain('openmarket-docs');
+    await fireEvent.keyDown(input, { key: 'Backspace', ctrlKey: true });
+    await tick();
+    await tick();
+    expect(activeLabel(input)).toContain('openmarket-app');
+  });
+
+  it('a project moved into an automatic group of the same name still offers Back to automatic', async () => {
+    projects.set([fleet, ...om, epic, p(6, 'pp', 'zeta-tool', 60)]);
+    projectPicks.set(new Map([['pp/zeta-tool', { owner: 'pp', repo: 'zeta-tool', pinned: false, vis: null, grp: 'OpenMarket' }]]));
+    render(QuickSwitcher);
+    const input = await openNew();
+    // One openmarket section, with zeta-tool in it.
+    expect(document.querySelector('[data-key="project:6@g:c:pp:openmarket"]')).not.toBeNull();
+    await fireEvent.input(input, { target: { value: 'zeta' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'g', ctrlKey: true });
+    await tick();
+    expect(screen.getByText('Back to automatic')).toBeTruthy();
+  });
+
+  it('Ctrl+Z works at once, before the pin write answers', async () => {
+    let release: () => void = () => {};
+    vi.mocked(__invoke).mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd !== 'set_project_pick') return null;
+      const a = (args as { args: { pinned: boolean } }).args;
+      if (a.pinned) await new Promise<void>((r) => (release = r));
+      return a;
+    });
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'openmarket-ai' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'p', ctrlKey: true });
+    expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(true);
+    await clearQuery(input);
+    await fireEvent.keyDown(input, { key: 'z', ctrlKey: true });
+    release();
+    await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(false));
+  });
+
+  it('a pin shows on the list at once (the person acted), with an Undo toast once saved', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    expect(screen.queryByText('Pinned')).toBeNull();
+    await fireEvent.input(input, { target: { value: 'openmarket-ai' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'p', ctrlKey: true });
+    await fireEvent.input(input, { target: { value: '' } });
+    await tick();
+    expect(screen.getByText('Pinned')).toBeTruthy();
+    await vi.waitFor(() => expect(get(toasts).map((t) => t.message)).toContain('Pinned openmarket-ai'));
+    expect(get(toasts).find((t) => t.message === 'Pinned openmarket-ai')?.action?.label).toBe('Undo');
+  });
+
+  it('a failed write leaves nothing to undo', async () => {
+    vi.mocked(__invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'set_project_pick') throw { code: 'E_INTERNAL', message: 'nope' };
+      return null;
+    });
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'openmarket-ai' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'p', ctrlKey: true });
+    await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(false));
+    await clearQuery(input);
+    const calls = vi.mocked(__invoke).mock.calls.length;
+    await fireEvent.keyDown(input, { key: 'z', ctrlKey: true });
+    await tick();
+    expect(vi.mocked(__invoke).mock.calls.length).toBe(calls);
+  });
+
+  it('hiding a pinned project unpins it too, and says so', async () => {
+    projectPicks.set(new Map([['pp/openmarket-ai', { owner: 'pp', repo: 'openmarket-ai', pinned: true, vis: null, grp: null }]]));
+    render(QuickSwitcher);
+    const input = await openNew();
+    await highlight('project:2@pinned');
+    await fireEvent.keyDown(input, { key: 'Backspace', ctrlKey: true });
+    await vi.waitFor(() => expect(get(toasts).map((t) => t.message)).toContain('Hid openmarket-ai (unpinned)'));
+    expect(get(projectPicks).get('pp/openmarket-ai')).toMatchObject({ pinned: false, vis: 'hide' });
+    await fireEvent.keyDown(input, { key: 'z', ctrlKey: true });
+    await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-ai')).toMatchObject({ pinned: true, vis: null }));
+  });
+
+  it('the order is frozen while open: picks arriving later do not move the highlight', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    const before = input.getAttribute('aria-activedescendant');
+    projectPicks.set(new Map([['pp/openmarket-app', { owner: 'pp', repo: 'openmarket-app', pinned: true, vis: null, grp: null }]]));
+    await tick();
+    expect(input.getAttribute('aria-activedescendant')).toBe(before);
+    expect(screen.queryByText('Pinned')).toBeNull(); // shown on the next open
+  });
+
+  it('Esc clears a query first, then closes', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'zz' } });
+    await fireEvent.keyDown(input, { key: 'Escape' });
+    await tick();
+    expect(input.value).toBe('');
+    expect(screen.getByTestId('quick-switcher')).toBeTruthy();
+    // On an empty query Esc is left alone, so the dialog's cancel closes it.
+    expect(await fireEvent.keyDown(input, { key: 'Escape' })).toBe(true); // not defaultPrevented
+  });
+
+  it('macOS: ⌘N opens it, ⌘P pins and the picker stays open, ⌘Z undoes', async () => {
+    render(QuickSwitcher, { props: { isMac: true } });
+    await fireEvent.keyDown(window, { key: 'n', metaKey: true });
+    await tick();
+    const input = screen.getByTestId('switcher-input') as HTMLInputElement;
+    expect(screen.getByTestId('mode-chip')).toBeTruthy();
+    await fireEvent.input(input, { target: { value: 'openmarket-ai' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'p', metaKey: true });
+    await tick();
+    expect(screen.getByTestId('quick-switcher')).toBeTruthy();
+    await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(true));
+    await clearQuery(input);
+    await fireEvent.keyDown(input, { key: 'z', metaKey: true });
+    await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(false));
+    expect(screen.getByTestId('quick-switcher')).toBeTruthy();
+    // ⌘K still closes it.
+    await fireEvent.keyDown(input, { key: 'k', metaKey: true });
+    await tick();
+    expect(screen.queryByTestId('quick-switcher')).toBeNull();
+  });
+
+  it('an older toast’s Undo does nothing once a newer change was made', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'openmarket-ai' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'p', ctrlKey: true });
+    await vi.waitFor(() => expect(get(toasts).map((t) => t.message)).toContain('Pinned openmarket-ai'));
+    await clearQuery(input);
+    await highlight('project:3@g:c:pp:openmarket');
+    await fireEvent.keyDown(input, { key: 'Backspace', ctrlKey: true });
+    await vi.waitFor(() => expect(get(toasts).map((t) => t.message)).toContain('Hid openmarket-docs'));
+    const before = get(projectPicks);
+    const calls = vi.mocked(__invoke).mock.calls.length;
+    get(toasts).find((t) => t.message === 'Pinned openmarket-ai')!.action!.run();
+    await tick();
+    await Promise.resolve();
+    expect(vi.mocked(__invoke).mock.calls.length).toBe(calls);
+    expect(get(projectPicks)).toBe(before);
+    expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(true);
+    // The newest toast's Undo still works.
+    get(toasts).find((t) => t.message === 'Hid openmarket-docs')!.action!.run();
+    await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-docs')?.vis).toBeNull());
+  });
+
+  it('no match offers Add project with the query; an owner/repo prefills the clone URL', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'acme/widgets' } });
+    await tick();
+    expect(screen.getByText('Add project “acme/widgets”…')).toBeTruthy();
+    await fireEvent.click(screen.getByTestId('switcher-add'));
+    await tick();
+    expect(get(addProjectRequest)).toEqual({ cloneUrl: 'acme/widgets' });
+    expect(screen.queryByTestId('quick-switcher')).toBeNull();
+    const input2 = await openNew();
+    await fireEvent.input(input2, { target: { value: 'widgets thing' } });
+    await tick();
+    await fireEvent.click(screen.getByTestId('switcher-add'));
+    expect(get(addProjectRequest)).toEqual({ cloneUrl: undefined });
+  });
+
+  it('with no projects at all the Add row is still offered, and Enter on it asks for Add project', async () => {
+    projects.set([]);
+    render(QuickSwitcher);
+    const input = await openNew();
+    expect(screen.getByTestId('switcher-add')).toBeTruthy();
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await tick();
+    expect(get(addProjectRequest)).toEqual({ cloneUrl: undefined });
+    expect(screen.queryByTestId('quick-switcher')).toBeNull();
+  });
+
+  it('Enter on a fold row unfolds it', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    const fold = screen.getByText(/Show 1 in Hidden/).closest('[role=option]')!;
+    await fireEvent.mouseMove(fold);
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await tick();
+    expect(screen.getByText('ppt-epic-145')).toBeTruthy();
+    expect(screen.getByTestId('quick-switcher')).toBeTruthy();
+  });
+
+  it('a folded group is one row with its count; ArrowLeft folds an open group', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'openmarket-docs' } });
+    await fireEvent.input(input, { target: { value: '' } });
+    await tick();
+    // Highlight a member of the open openmarket group, then fold it.
+    const row = Array.from(document.querySelectorAll('[data-testid=switcher-project]')).find(
+      (e) => e.textContent?.includes('openmarket-app'),
+    )!;
+    await fireEvent.mouseMove(row);
+    await fireEvent.keyDown(input, { key: 'ArrowLeft' });
+    await tick();
+    expect(screen.getByText('openmarket · 3 projects')).toBeTruthy();
+    expect(activeLabel(input)).toContain('openmarket · 3 projects');
+    await fireEvent.keyDown(input, { key: 'ArrowRight' });
+    await tick();
+    expect(screen.queryByText('openmarket · 3 projects')).toBeNull();
+  });
+
+  it('Shift+F10 opens the actions menu; Esc closes it and focus returns to the input', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'openmarket-ai' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'F10', shiftKey: true });
+    await tick();
+    const menu = screen.getByTestId('project-actions');
+    expect(menu.getAttribute('aria-label')).toBe('pp/openmarket-ai');
+    await fireEvent.keyDown(menu, { key: 'Escape' });
+    await tick(); await tick();
+    expect(screen.queryByTestId('project-actions')).toBeNull();
+    expect(document.activeElement).toBe(input);
+    expect(screen.getByTestId('quick-switcher')).toBeTruthy();
+  });
+
+  it('Ctrl+G moves the project to a group through the menu', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'claude-fleet' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'g', ctrlKey: true });
+    await tick();
+    const gi = screen.getByLabelText('Group name');
+    await fireEvent.input(gi, { target: { value: 'Mine' } });
+    await fireEvent.keyDown(gi, { key: 'Enter' });
+    await vi.waitFor(() => expect(get(projectPicks).get('me/claude-fleet')?.grp).toBe('Mine'));
+    expect(screen.queryByTestId('project-actions')).toBeNull();
+  });
+
+  it('My work tickets with no session head the list under Start from work', async () => {
+    __trackers.set([
+      { id: 1, provider: 'jira', name: 'acme', site_url: 'https://acme.atlassian.net', state: 'ok', created_at: 1, config: { key_prefixes: ['ABC'] } },
+    ]);
+    vi.mocked(__invoke).mockImplementation(async (cmd: string, args?: unknown) => {
+      const view = (args as { args?: { view?: string } } | undefined)?.args?.view;
+      const t = (key: string, live: number[] = []) => ({ id: 100 + Number(key.split('-')[1]), tracker_id: 1, source: 'jira', key, title: `${key} title`, status_category: 'todo', status_name: 'To Do', created_at: 1, updated_at: 1, live_session_ids: live });
+      if (cmd === 'work_tickets' && view === 'mine') return [t('ABC-1'), t('ABC-2', [6])];
+      if (cmd === 'work_tickets') return [];
+      return null;
+    });
+    render(QuickSwitcher);
+    await openNew();
+    await vi.waitFor(() => expect(screen.getAllByTestId('switcher-ticket')).toHaveLength(1));
+    expect(screen.getByText('Start from work')).toBeTruthy();
+    expect(screen.getAllByTestId('switcher-ticket')[0].getAttribute('data-key')).toBe('ticket:ABC-1');
+  });
+
+  it('normal ⌘K mode drops picker-hidden projects from the empty-query list, keeps them for a query', async () => {
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    expect(screen.queryByTestId('mode-chip')).toBeNull();
+    expect(document.querySelector('[data-key="project:4"]')).not.toBeNull(); // unknown, not hidden
+    expect(document.querySelector('[data-key="project:5"]')).toBeNull();
+    await fireEvent.input(input, { target: { value: 'ppt-epic' } });
+    await tick();
+    expect(document.querySelector('[data-key="project:5"]')).not.toBeNull();
+  });
+});
+
+describe('QuickSwitcher — the header command field (3.17)', () => {
+  it('opens the plain switcher, not New session mode', async () => {
+    switcherRequest.set(null);
+    render(QuickSwitcher);
+    const { openSwitcher } = await import('./switcher_request');
+    openSwitcher();
+    await tick();
+    expect(screen.getByTestId('switcher-input')).toBeTruthy();
+    expect(screen.queryByTestId('mode-chip')).toBeNull();
+    expect(get(switcherRequest)).toBeNull();
+  });
+});
+
+// ---- Pin, hide and groups under the New layout (parity H1–H3) ----------------
+// The same keys as the session mode tests above: pin, hide and groups.
+
+describe('QuickSwitcher in the New layout', () => {
+  const NOW = Math.floor(Date.now() / 1000);
+  const p = (id: number, owner: string, repo: string, ago: number | null) => ({
+    project: { id, owner, repo, base_path: `/r/${repo}`, last_session_at: ago === null ? null : NOW - ago, adopted: false, system: false },
+    worktrees: [],
+  });
+  const fleet = p(1, 'me', 'claude-fleet', 60);
+  const om = [p(2, 'pp', 'openmarket-ai', 3600), p(3, 'pp', 'openmarket-docs', 7200), p(4, 'pp', 'openmarket-app', null)];
+  const epic = p(5, 'me', 'ppt-epic-145', null);
+
+  beforeEach(async () => {
+    projects.set([fleet, ...om, epic]);
+    sessions.set([]);
+    projectPicks.set(new Map());
+    switcherRequest.set(null);
+    addProjectRequest.set(null);
+    toasts.set([]);
+    __trackers.set([]);
+    vi.mocked(__invoke).mockImplementation(async (cmd: string, args?: unknown) =>
+      cmd === 'set_project_pick' ? (args as { args: unknown }).args : null);
+  });
+
+  afterEach(async () => {
+  });
+
+  async function openNew() {
+    openNewSessionPicker();
+    await tick();
+    return screen.getByTestId('switcher-input') as HTMLInputElement;
+  }
+  const activeLabel = (input: HTMLInputElement) =>
+    document.getElementById(input.getAttribute('aria-activedescendant') ?? '')?.textContent ?? '';
+  async function clearQuery(input: HTMLInputElement) {
+    await fireEvent.keyDown(input, { key: 'Escape' });
+    await tick();
+    expect(input.value).toBe('');
+  }
+  async function highlight(key: string) {
+    const row = document.querySelector(`[data-key="${key}"]`);
+    expect(row).not.toBeNull();
+    await fireEvent.mouseMove(row!);
+    await tick();
+  }
+
+  it('Ctrl+P pins the highlighted project; Ctrl+Z undoes it', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'openmarket-ai' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'p', ctrlKey: true });
+    await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(true));
+    await clearQuery(input);
+    await fireEvent.keyDown(input, { key: 'z', ctrlKey: true });
+    await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(false));
+    await vi.waitFor(() => expect(get(toasts).map((t) => t.message)).toContain('Undid: Pinned openmarket-ai'));
+  });
+
+  it('macOS: ⌘P pins the highlighted project and the picker stays open', async () => {
+    render(QuickSwitcher, { props: { isMac: true } });
+    await fireEvent.keyDown(window, { key: 'n', metaKey: true });
+    await tick();
+    const input = screen.getByTestId('switcher-input') as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: 'openmarket-ai' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'p', metaKey: true });
+    await tick();
+    expect(screen.getByTestId('quick-switcher')).toBeTruthy();
+    await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(true));
+  });
+
+  it('Ctrl+Backspace with a query is left to the input; with none it hides the highlighted row', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'openmarket-docs' } });
+    await tick();
+    expect(screen.queryByText('Ctrl⌫ hide')).toBeNull();
+    expect(await fireEvent.keyDown(input, { key: 'Backspace', ctrlKey: true })).toBe(true); // not defaultPrevented
+    await tick();
+    expect(get(projectPicks).get('pp/openmarket-docs')?.vis ?? null).toBeNull();
+    await clearQuery(input);
+    expect(screen.getByText('Ctrl⌫ hide')).toBeTruthy();
+    await highlight('project:3@g:c:pp:openmarket');
+    expect(await fireEvent.keyDown(input, { key: 'Backspace', ctrlKey: true })).toBe(false);
+    await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-docs')?.vis).toBe('hide'));
+  });
+
+  it('macOS: ⌘⌫ on an empty query hides the highlighted row', async () => {
+    render(QuickSwitcher, { props: { isMac: true } });
+    await fireEvent.keyDown(window, { key: 'n', metaKey: true });
+    await tick();
+    const input = screen.getByTestId('switcher-input') as HTMLInputElement;
+    await highlight('project:3@g:c:pp:openmarket');
+    expect(activeLabel(input)).toContain('openmarket-docs');
+    expect(await fireEvent.keyDown(input, { key: 'Backspace', metaKey: true })).toBe(false);
+    await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-docs')?.vis).toBe('hide'));
+  });
+
+  it('Ctrl+G moves the project to a group through the menu', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'claude-fleet' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'g', ctrlKey: true });
+    await tick();
+    const gi = screen.getByLabelText('Group name');
+    await fireEvent.input(gi, { target: { value: 'Mine' } });
+    await fireEvent.keyDown(gi, { key: 'Enter' });
+    await vi.waitFor(() => expect(get(projectPicks).get('me/claude-fleet')?.grp).toBe('Mine'));
+    expect(screen.queryByTestId('project-actions')).toBeNull();
+  });
+
+  it('a folded group is one row with its count; ArrowLeft folds an open group, ArrowRight opens it', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    const row = Array.from(document.querySelectorAll('[data-testid=switcher-project]')).find(
+      (e) => e.textContent?.includes('openmarket-app'),
+    )!;
+    await fireEvent.mouseMove(row);
+    await fireEvent.keyDown(input, { key: 'ArrowLeft' });
+    await tick();
+    expect(screen.getByText('openmarket · 3 projects')).toBeTruthy();
+    expect(activeLabel(input)).toContain('openmarket · 3 projects');
+    await fireEvent.keyDown(input, { key: 'ArrowRight' });
+    await tick();
+    expect(screen.queryByText('openmarket · 3 projects')).toBeNull();
+  });
+});
+
+// ---- tasks and the cache-wide ticket search ---------------------------------
+
+describe('QuickSwitcher finds work beyond the three views', () => {
+  const item = (id: number, key: string, title: string, source = 'jira') => ({
+    id,
+    tracker_id: source === 'local' ? null : 1,
+    source,
+    key,
+    title,
+    status_category: 'todo',
+    created_at: 1,
+    updated_at: 1,
+  });
+  let calls: { view?: string; query?: string; include_local?: boolean }[] = [];
+  beforeEach(() => {
+    calls = [];
+    vi.mocked(__invoke).mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd !== 'work_tickets') return null;
+      const a = (args as { args: { view?: string; query?: string; include_local?: boolean } }).args;
+      calls.push(a);
+      if (a.query) return [item(7, 'ABC-7', 'Oprava prihlásenia cez SSO')];
+      // The unfiltered list: a ticket, then the caller's own task.
+      if (a.include_local) return [item(1, 'ABC-1', 'Some ticket'), item(9, 'TASK-9', 'Napísať úlohu', 'local')];
+      return [];
+    });
+  });
+
+  it("lists the person's own tasks with no tracker connected", async () => {
+    __trackers.set([]);
+    render(QuickSwitcher);
+    await openSwitcher();
+    await vi.waitFor(() => expect(screen.getAllByTestId('switcher-ticket')).toHaveLength(1));
+    expect(screen.getByText('My tasks')).toBeTruthy();
+    // Only the tasks are kept from the unfiltered list.
+    expect(screen.queryByText(/Some ticket/)).toBeNull();
+    expect(calls.every((c) => c.view === undefined)).toBe(true);
+  });
+
+  it('a typed title searches the whole cache, accents ignored', async () => {
+    __trackers.set([
+      { id: 1, provider: 'jira', name: 'acme', site_url: 'https://acme.atlassian.net', state: 'ok', created_at: 1, config: { key_prefixes: ['ABC'] } },
+    ]);
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    await fireEvent.input(input, { target: { value: '#prihlasenia sso' } });
+    await vi.waitFor(() => expect(calls.some((c) => c.query === 'prihlasenia sso' && c.include_local)).toBe(true));
+    await vi.waitFor(() =>
+      expect(screen.getAllByTestId('switcher-ticket').some((el) => el.textContent?.includes('Oprava prihlásenia'))).toBe(true),
+    );
+    // The words found are marked in the row, accents and all.
+    const marks = Array.from(document.querySelectorAll('[data-testid="switcher-ticket"] mark.hit')).map((m) => m.textContent);
+    expect(marks).toEqual(expect.arrayContaining(['prihlásenia', 'SSO']));
+  });
+
+  it('an empty # search names tasks, not sessions', async () => {
+    __trackers.set([]);
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    await fireEvent.input(input, { target: { value: '#nothing-like-this' } });
+    await vi.waitFor(() => expect(screen.getByText(/No task matches “nothing-like-this”/)).toBeTruthy());
+  });
+});
+
+describe('QuickSwitcher planning rows and recent searches', () => {
+  beforeEach(() => {
+    __trackers.set([]);
+    vi.mocked(__invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_tree') {
+        return {
+          tasks: [], groups: [], orgs: [], trackers: [], total: 0,
+          facets: {
+            iterations: [{ name: 'Sprint 42', active: true, count: 3 }],
+            epics: [{ task_id: 'item:10', key: 'PAY-10', title: 'Checkout', count: 2 }],
+          },
+        };
+      }
+      return cmd === 'work_tickets' ? [] : null;
+    });
+  });
+
+  it('a sprint or an epic opens the Work view filtered to it', async () => {
+    const { knownWorkFacets, workViewFilters, sidebarView } = await import('./work_view');
+    knownWorkFacets.set(null);
+    workViewFilters.set({ query: 'old' });
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    await fireEvent.input(input, { target: { value: 'current sprint' } });
+    await vi.waitFor(() => expect(screen.getAllByTestId('switcher-planning').length).toBeGreaterThan(0));
+    expect(screen.getAllByTestId('switcher-planning')[0].textContent).toContain('Current sprint');
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await tick();
+    expect(get(workViewFilters)).toEqual({ iteration: 'current' });
+    expect(get(sidebarView)).toBe('work');
+  });
+
+  it('remembers the query a row was picked with and offers it next time', async () => {
+    const { recentQueries } = await import('./quick_switcher');
+    recentQueries.set([]);
+    render(QuickSwitcher);
+    let input = await openSwitcher();
+    await fireEvent.input(input, { target: { value: 'checkout' } });
+    await vi.waitFor(() => expect(screen.getAllByTestId('switcher-planning').length).toBeGreaterThan(0));
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await tick();
+    expect(get(recentQueries)).toEqual(['checkout']);
+    input = await openSwitcher();
+    const chip = screen.getByTestId('switcher-recent-query');
+    expect(chip.textContent).toBe('checkout');
+    await fireEvent.click(chip);
+    await tick();
+    expect(input.value).toBe('checkout');
+  });
+});
+
+describe('QuickSwitcher searches everywhere on the hub', () => {
+  const hit = (over: Record<string, unknown>) => ({ ref: '1', title: '', snippet: '', at: 1, ...over });
+  beforeEach(() => {
+    __trackers.set([]);
+    vi.mocked(__invoke).mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'search') {
+        const q = (args as { args: { query: string } }).args.query;
+        if (q !== 'token refresh') return { hits: [], transcripts_indexed: true };
+        return {
+          transcripts_indexed: true,
+          hits: [
+            hit({ kind: 'transcript', ref: 'c-1:0', snippet: 'the race is in the token refresh', snippet_marks: [[23, 33]], session_id: 1, session_name: 'blue-sirius', host_alias: 'mefistos' }),
+            hit({ kind: 'item', ref: '7', title: 'PAY-7 Token refresh fails', title_marks: [[6, 19]], task_id: 'item:7', key: 'PAY-7' }),
+          ],
+        };
+      }
+      return cmd === 'work_tickets' ? [] : null;
+    });
+  });
+
+  it('lists what was said and the tasks it found, under Everywhere', async () => {
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    await fireEvent.input(input, { target: { value: 'token refresh' } });
+    await vi.waitFor(() => expect(screen.getAllByTestId('switcher-found')).toHaveLength(2));
+    expect(screen.getByText('Everywhere')).toBeTruthy();
+    const rows = screen.getAllByTestId('switcher-found').map((el) => el.textContent ?? '');
+    expect(rows[0]).toContain('Said in · blue-sirius · mefistos');
+    expect(Array.from(document.querySelectorAll('[data-testid="switcher-found"] mark.hit')).map((m) => m.textContent)).toContain(
+      'Token refresh',
+    );
+  });
+
+  it('a hit in a conversation opens its session on Find', async () => {
+    const { conversationFindRequest } = await import('./search_api');
+    const { sessionView } = await import('./prefs');
+    conversationFindRequest.set(null);
+    sessionView.set('terminal');
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    await fireEvent.input(input, { target: { value: 'token refresh' } });
+    await vi.waitFor(() => expect(screen.getAllByTestId('switcher-found')).toHaveLength(2));
+    const row = screen.getAllByTestId('switcher-found')[0];
+    await fireEvent.click(row);
+    await tick();
+    expect(get(selectedSession)?.id).toBe(1);
+    expect(get(sessionView)).toBe('conversation');
+    await vi.waitFor(() => expect(get(conversationFindRequest)).toMatchObject({ sessionId: 1, query: 'token refresh' }));
+  });
+
+  it('a task hit opens it in the Work view', async () => {
+    const { sidebarView } = await import('./work_view');
+    sidebarView.set('sessions');
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    await fireEvent.input(input, { target: { value: 'token refresh' } });
+    await vi.waitFor(() => expect(screen.getAllByTestId('switcher-found')).toHaveLength(2));
+    await fireEvent.click(screen.getAllByTestId('switcher-found')[1]);
+    await vi.waitFor(() => expect(get(sidebarView)).toBe('work'));
   });
 });

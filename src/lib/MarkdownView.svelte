@@ -93,13 +93,13 @@
 
 <style>
   p {
-    margin: 0 0 0.6em;
+    margin: 0 0 0.8em;
   }
   p:last-child {
     margin-bottom: 0;
   }
   .md-h {
-    margin: 0.9em 0 0.4em;
+    margin: 1.2em 0 0.45em;
     line-height: 1.3;
     font-weight: 650;
     color: var(--fg);
@@ -114,9 +114,9 @@
   .md-h5,
   .md-h6 { font-size: 0.95em; color: var(--fg-muted); }
   .md-pre-wrap {
-    margin: 0.5em 0 0.7em;
+    margin: 0.6em 0 0.9em;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: var(--bg-pane);
     overflow: hidden;
   }
@@ -124,20 +124,20 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0.15rem 0.4rem 0.15rem 0.6rem;
+    padding: 0.15rem 0.4rem 0.15rem var(--space-2);
     border-bottom: 1px solid var(--border);
-    font-size: 0.7rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .md-lang {
-    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    font-family: var(--mono);
   }
   .md-copy {
     background: none;
     border: 1px solid transparent;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: var(--fg-muted);
-    font-size: 0.7rem;
+    font-size: var(--text-2xs);
     padding: 0.05rem 0.45rem;
     cursor: pointer;
   }
@@ -147,11 +147,11 @@
   }
   .md-pre {
     margin: 0;
-    padding: 0.55rem 0.7rem;
+    padding: var(--space-2) 0.7rem;
     overflow-x: auto;
-    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 0.78rem;
-    line-height: 1.5;
+    font-family: var(--mono);
+    font-size: var(--text-code);
+    line-height: var(--text-code-lh);
     white-space: pre;
     tab-size: 4;
   }
@@ -168,11 +168,11 @@
     color: var(--fg-muted);
   }
   .md-list {
-    margin: 0.3em 0 0.6em;
+    margin: 0.3em 0 0.8em;
     padding-left: 1.4em;
   }
   .md-list li {
-    margin: 0.15em 0;
+    margin: 0.25em 0;
   }
   .md-list :global(.md-list) {
     margin: 0.1em 0 0.2em;

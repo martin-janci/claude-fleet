@@ -14,7 +14,12 @@
   // Work graph M4: solid is a confirmed link; a small ring marks one that
   // detection made by itself (auto); `suggested` renders a dashed chip with
   // `?` — a guess nobody has decided. The tooltip always says why.
+  //
+  // Redesign 6.8: a suggestion the decision model made (J1, rule R12) is
+  // `proposed`: the `?` becomes the AI mark ✦ in the accent, and the
+  // tooltip leads with "Proposed by Jev".
   import { describeWorkKey, type WorkKey } from './work_keys';
+  import { proposedByLabel } from './ai_proposal';
   import {
     trackers,
     trackerForKey,
@@ -31,6 +36,7 @@
     workKey,
     testid = 'work-chip',
     suggested = false,
+    proposed = false,
     onclick,
     now = () => Math.floor(Date.now() / 1000),
   }: {
@@ -38,6 +44,8 @@
     testid?: string;
     /** A detected suggestion, not a link (dashed, `?`). */
     suggested?: boolean;
+    /** The suggestion is the decision model's (J1, rule R12): ✦, not `?`. */
+    proposed?: boolean;
     /** Click handler (opens the row's work popover). */
     onclick?: (e: MouseEvent) => void;
     /** Unix seconds; injectable for tests. */
@@ -57,7 +65,10 @@
   /** The chip is drawing a status dot: exactly the condition the dot itself
    *  renders under, so the tooltip and the dot can never disagree. */
   const ownStatus = $derived(!!workKey.status && !workKey.status.unavailable);
-  const unbound = $derived(!suggested && !workKey.trackerBacked && ticketShaped && !tracker);
+  // A ticket key fleet itself issued (`FLT-12`) needs no tracker.
+  const unbound = $derived(
+    !suggested && !workKey.trackerBacked && ticketShaped && !tracker && !workKey.display,
+  );
   // Work graph M6: which tracker, once there is more than one kind.
   const prov = $derived(
     tracker && showProviderBadges($trackers) ? providerInfo(tracker.provider) : null,
@@ -75,9 +86,10 @@
     // add instead of pretending there is none.
     if (unbound) {
       t += ownStatus
-        ? ` · the dot is fleet's own status; connect its tracker in Settings → Work to see ${workKey.key}'s too`
-        : ` · connect its tracker in Settings → Work to see ${workKey.key}'s status`;
+        ? ` · the dot is fleet's own status; connect its tracker in Settings → Trackers to see ${workKey.key}'s too`
+        : ` · connect its tracker in Settings → Trackers to see ${workKey.key}'s status`;
     }
+    if (suggested && proposed) t = `${proposedByLabel('jev')} · ${t}`;
     if (suggested) t += ' · suggestion: Confirm (y) or Not this (n)';
     return t;
   });
@@ -92,6 +104,7 @@
   class:clickable={!!onclick}
   data-testid={testid}
   data-state={suggested ? 'suggested' : workKey.auto ? 'auto' : 'confirmed'}
+  data-proposed={suggested && proposed ? 'jev' : undefined}
   {title}
   {onclick}
 >
@@ -103,7 +116,7 @@
     ></span>
   {/if}
   {#if prov}<span class="prov" data-testid="{testid}-provider" aria-label={prov.label}>{prov.icon}</span>{/if}
-  {displayKey(workKey.key)}{#if suggested}<span class="q" aria-label="suggested">?</span>{/if}
+  {displayKey(workKey.key, workKey.display)}{#if suggested && proposed}<span class="ai" data-testid="{testid}-proposed" aria-label={proposedByLabel('jev')}>&#x2726;</span>{:else if suggested}<span class="q" aria-label="suggested">?</span>{/if}
   {#if workKey.auto && !suggested}<span class="auto" data-testid="{testid}-auto" aria-label="linked automatically"></span>{/if}
   {#if stale}<span class="stale" data-testid="{testid}-stale" aria-label="stale">◷</span>{/if}
 </span>
@@ -114,11 +127,11 @@
     display: inline-flex;
     align-items: center;
     gap: 0.25rem;
-    font-size: 0.65rem;
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: var(--text-2xs);
+    font-family: var(--font-mono);
     padding: 0 0.3rem;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: var(--fg-muted);
     white-space: nowrap;
   }
@@ -140,6 +153,10 @@
     margin-left: -0.15rem;
     font-weight: 600;
   }
+  .ai {
+    margin-left: -0.1rem;
+    color: var(--accent);
+  }
   .auto {
     width: 0.3rem;
     height: 0.3rem;
@@ -158,17 +175,17 @@
     background: var(--fg-muted);
   }
   .dot-progress {
-    background: var(--accent, #3b82f6);
+    background: var(--accent);
   }
   .dot-done {
-    background: var(--ok, #22c55e);
+    background: var(--status-done);
   }
   .stale {
-    font-size: 0.6rem;
+    font-size: var(--text-2xs);
     opacity: 0.8;
   }
   .prov {
-    font-size: 0.58rem;
+    font-size: var(--text-2xs);
     font-weight: 600;
     opacity: 0.7;
     margin-right: 0.15rem;

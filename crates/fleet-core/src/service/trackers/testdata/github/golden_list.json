@@ -10,14 +10,21 @@
       "acme/api"
     ],
     "description": "Login fails after the token refresh.\r\n\r\nSteps: …",
+    "estimate": null,
+    "estimate_unit": null,
     "external_id": "I_kwDOAcme0001",
     "hierarchy_level": null,
     "iteration": null,
     "iteration_active": false,
     "key": "acme/api#42",
     "kind": "Bug",
+    "labels": [
+      "bug",
+      "auth"
+    ],
     "parent_external_id": null,
     "parent_key": null,
+    "priority": null,
     "status": {
       "category": "in_progress",
       "name": "Open · linked pull request",
@@ -25,7 +32,10 @@
     },
     "title": "Login fails after token refresh",
     "updated": 1789983000,
-    "url": "https://github.com/Acme/api/issues/42"
+    "url": "https://github.com/Acme/api/issues/42",
+    "versions": [
+      "v0.3"
+    ]
   },
   {
     "aliases": [],
@@ -37,14 +47,18 @@
       "acme/api"
     ],
     "description": null,
+    "estimate": null,
+    "estimate_unit": null,
     "external_id": "I_kwDOAcme0002",
     "hierarchy_level": null,
     "iteration": null,
     "iteration_active": false,
     "key": "acme/api#43",
     "kind": "Issue",
+    "labels": [],
     "parent_external_id": null,
     "parent_key": null,
+    "priority": null,
     "status": {
       "category": "in_progress",
       "name": "Open · linked pull request",
@@ -52,7 +66,8 @@
     },
     "title": "Rate-limit the export endpoint",
     "updated": 1789977600,
-    "url": "https://github.com/acme/api/issues/43"
+    "url": "https://github.com/acme/api/issues/43",
+    "versions": []
   },
   {
     "aliases": [],
@@ -64,14 +79,18 @@
       "acme/api"
     ],
     "description": null,
+    "estimate": null,
+    "estimate_unit": null,
     "external_id": "I_kwDOAcme0006",
     "hierarchy_level": null,
     "iteration": null,
     "iteration_active": false,
     "key": "acme/api#44",
     "kind": "Issue",
+    "labels": [],
     "parent_external_id": "I_kwDOAcme0001",
     "parent_key": "acme/api#42",
+    "priority": null,
     "status": {
       "category": "todo",
       "name": "Open",
@@ -79,7 +98,8 @@
     },
     "title": "Add a regression test for #42",
     "updated": 1789905600,
-    "url": "https://github.com/acme/api/issues/44"
+    "url": "https://github.com/acme/api/issues/44",
+    "versions": []
   },
   {
     "aliases": [],
@@ -91,14 +111,18 @@
       "acme/web"
     ],
     "description": null,
+    "estimate": null,
+    "estimate_unit": null,
     "external_id": "I_kwDOAcme0003",
     "hierarchy_level": null,
     "iteration": null,
     "iteration_active": false,
     "key": "acme/web#7",
     "kind": "Issue",
+    "labels": [],
     "parent_external_id": null,
     "parent_key": null,
+    "priority": null,
     "status": {
       "category": "done",
       "name": "Closed",
@@ -106,7 +130,8 @@
     },
     "title": "Dark mode toggle",
     "updated": 1789812000,
-    "url": "https://github.com/acme/web/issues/7"
+    "url": "https://github.com/acme/web/issues/7",
+    "versions": []
   },
   {
     "aliases": [],
@@ -116,14 +141,18 @@
       "acme/web"
     ],
     "description": null,
+    "estimate": null,
+    "estimate_unit": null,
     "external_id": "I_kwDOAcme0004",
     "hierarchy_level": null,
     "iteration": null,
     "iteration_active": false,
     "key": "acme/web#8",
     "kind": "Issue",
+    "labels": [],
     "parent_external_id": null,
     "parent_key": null,
+    "priority": null,
     "status": {
       "category": "done",
       "name": "Closed as not planned",
@@ -131,7 +160,8 @@
     },
     "title": "IE11 support",
     "updated": 1789725600,
-    "url": "https://github.com/acme/web/issues/8"
+    "url": "https://github.com/acme/web/issues/8",
+    "versions": []
   },
   {
     "aliases": [],
@@ -143,14 +173,18 @@
       "acme/web"
     ],
     "description": null,
+    "estimate": null,
+    "estimate_unit": null,
     "external_id": "I_kwDOAcme0005",
     "hierarchy_level": null,
     "iteration": null,
     "iteration_active": false,
     "key": "acme/web#9",
     "kind": "Issue",
+    "labels": [],
     "parent_external_id": null,
     "parent_key": null,
+    "priority": null,
     "status": {
       "category": "done",
       "name": "Closed as duplicate",
@@ -158,6 +192,7 @@
     },
     "title": "Dark theme",
     "updated": 1789722000,
-    "url": "https://github.com/acme/web/issues/9"
+    "url": "https://github.com/acme/web/issues/9",
+    "versions": []
   }
 ]

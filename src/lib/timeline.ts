@@ -46,6 +46,8 @@ const OPS_KINDS = new Set([
   'recreated',
   'gc_killed',
   'playbook_applied',
+  // PR shepherd (`service::pr_shepherd`): `<condition>:<outcome>`.
+  'pr_shepherd',
   'mcp_call',
   'message_sent',
   // Fix round 1 (task-13-14): the sender's notice that a message it sent
@@ -113,7 +115,9 @@ export function kindLabel(kind: string): string {
 export function shortDetail(detail: string | null, max = 120): string {
   if (!detail) return '';
   const one = detail.replace(/\s+/g, ' ').trim();
-  return one.length > max ? one.slice(0, max - 1) + '…' : one;
+  // By code point: a UTF-16 cut splits an emoji into a lone surrogate.
+  const chars = one.length > max ? Array.from(one) : null;
+  return chars && chars.length > max ? chars.slice(0, max - 1).join('') + '…' : one;
 }
 
 /** Clock time for today, date + time otherwise. */
@@ -246,4 +250,22 @@ export function lastWaitEnd(events: SessionEvent[]): string | null {
     return typeof d.reason === 'string' ? d.reason : null;
   }
   return null;
+}
+
+/** The kinds that close or reopen a turn's reading for J8. */
+const PANE_READ_KINDS = new Set(['pane_unreadable', 'turn_done', 'conversation_started']);
+
+/**
+ * J8 (redesign step 5.11): the `pane_unreadable` entry the turn-outcome
+ * reader left when no pane rule could read the screen at the end of the
+ * session's LAST turn, or null. A later turn's end, or a new conversation,
+ * takes it back (newest by id, whatever order `events` comes in).
+ */
+export function paneUnreadable(events: readonly SessionEvent[]): SessionEvent | null {
+  let newest: SessionEvent | null = null;
+  for (const e of events) {
+    if (!PANE_READ_KINDS.has(e.kind)) continue;
+    if (!newest || e.id > newest.id) newest = e;
+  }
+  return newest?.kind === 'pane_unreadable' ? newest : null;
 }

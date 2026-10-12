@@ -1,25 +1,39 @@
 <script lang="ts">
-  import { onMount, onDestroy, untrack } from 'svelte';
+  import Icon from './kit/Icon.svelte';
+  import { onMount, onDestroy, tick, untrack } from 'svelte';
   import { listHostWorktrees, projects, type ProjectTreeRow, type WorktreeRow } from './projects';
   import { extractWorkKey, keyFromTicketUrl, workKeyFor, worktreeBranchById } from './work_keys';
   import { endedWorkLinks, pastWorkSummary, type WorkLink } from './work';
   import ResumeDialog from './ResumeDialog.svelte';
   import { selectSessionExplicitly } from './selection';
-  import { newSessionAbortable, sessions, type SessionRow } from './sessions';
+  import { newBgSession, newSessionAbortable, sessions, type SessionRow } from './sessions';
   import { defaultHost, hosts, isPickableHost } from './hosts';
   import { readPref, writePref } from './prefs';
-  import { MODEL_OPTIONS, LAUNCH_EFFORT_OPTIONS } from './conversation';
+  import { MODEL_OPTIONS, LAUNCH_EFFORT_OPTIONS, CODEX_MODEL_OPTIONS, CODEX_EFFORT_OPTIONS } from './conversation';
   import { slugifyBranch, finalizeBranchSlug } from './branch-slug';
   import { generateName, nameWords, tmuxNameSuffix } from './names';
   import Modal from './Modal.svelte';
   import PickerList from './PickerList.svelte';
   import HostChips from './HostChips.svelte';
   import { refreshAccountUsage } from './account_usage_store';
+  import { accountByUuid, accountLabel } from './accounts';
+  import {
+    checkAccountHeadroom,
+    freestLogin,
+    loginLabel,
+    usedText,
+    type Headroom,
+    type HostLogin,
+  } from './account_limits';
   import { push, pushError } from './toasts';
+  import { errorDetail, errorSentence } from './error_copy';
+  import type { IpcError } from './result';
   import type { PickerItem } from './PickerList.svelte';
   import {
     fleetSettings,
     loadFleetSettings,
+    settingBool,
+    SETTING_KEYS,
     settingPathMap,
     settingLayout,
     projectDir,
@@ -28,8 +42,26 @@
   } from './fleet_settings';
   import { hubStatus, ownsTheFleet, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
-  import { startWork, ticketBriefPreview, type TicketRow } from './trackers';
+  import { startWork, ticketBriefPreview, ticketRef, type TicketRow } from './trackers';
   import { startWorkMulti, siblingCandidates, multiStartNote, multiStartToast, shownSiblings } from './multi_start';
+  import ProposedBy from './ProposedBy.svelte';
+  import StartPulse from './StartPulse.svelte';
+  import { creatingStart } from './session_starting';
+  import { correctionLine, preselect, type ProposalLike } from './ai_proposal';
+  import { HOST_PLACEMENT_FLOOR, hostProposal, proposeHostPlacement, recordHostPlacement } from './host_placement';
+  import {
+    RESUME_OR_NEW_FLOOR,
+    START_FRESH,
+    followResumeOrNew,
+    proposeResumeOrNew,
+    resumeChoice,
+    resumeProposal,
+    type ResumeOrNew,
+  } from './resume_or_new';
+  import DraftField from './DraftField.svelte';
+  import { draftBrief, draftSource, previewStartWork, siblingProposal, type BriefDraft } from './start_preview';
+  import { openNewSessionPicker } from './switcher_request';
+  import { agentChoices, keepAgent, type PickerAgent } from './agent_picker';
 
   let {
     project,
@@ -37,7 +69,10 @@
     onCancel,
     initialName,
     initialHost,
+    initialKind,
     ticket,
+    autostart = false,
+    proposal = null,
     clock = () => Math.floor(Date.now() / 1000),
     locale,
     timeZone,
@@ -50,10 +85,19 @@
     /** Preselect this host (e.g. where Add project just put the project);
      *  wins over the remembered choices while it is pickable. */
     initialHost?: string;
+    /** Preselect Work or Shell (the Hosts view's "Open a shell", G4.5);
+     *  wins over the project's remembered kind. */
+    initialKind?: 'work' | 'shell';
     /** Start work on this ticket (work graph M3): the dialog offers "Brief
      *  Claude with the ticket" with an editable preview, and creating goes
      *  through `start_work`, which links the session `started`. */
     ticket?: TicketRow;
+    /** Start at once with the remembered choices (the picker's ⌘↵); the
+     *  dialog stays open only if something needs a person. */
+    autostart?: boolean;
+    /** What chose `project` (redesign 3.12, K1): shown as the shared chip
+     *  in the dialog; Change re-opens the picker for another one. */
+    proposal?: ProposalLike | null;
     /** Unix seconds for the host chips' usage wording; injectable for tests. */
     clock?: () => number;
     locale?: string;
@@ -120,11 +164,90 @@
     ),
   );
   $effect(() => {
+    // Jev's proposed host is not a pick: it is remembered once the person
+    // starts on it (`answerHostProposal`), not merely for being shown.
+    if (hostProposed?.value === chosenHost) return;
     writePref('last-host', chosenHost);
   });
 
+  // Jev N5 host placement (redesign step 4.11): with no host
+  // the project's rule keeps (the one the dialog was opened on, or the one
+  // remembered for this project), the decision model may propose one of the
+  // online hosts under their limit. Off by default; a hub client is refused
+  // and keeps today's default. A person's pick always wins, and the proposal
+  // only ever lands while nobody has picked yet.
+  const hostByRule = untrack(() => [initialHost, memory?.host].some(usableHost));
+  let hostPicked = false;
+  let hostProposed = $state<ProposalLike | null>(null);
+  // Whether a proposal was shown: the start then answers it.
+  let hostProposalShown = false;
+  let hostBeforeProposal: string | null = null;
+  onMount(() => {
+    if (hostByRule || autostart) return;
+    void proposeHostPlacement(project.project.id).then((r) => {
+      if (destroyed || hostPicked || !r.ok || !r.value) return;
+      const p = hostProposal(r.value);
+      const alias = preselect('host', p, HOST_PLACEMENT_FLOOR);
+      if (!alias || !usableHost(alias)) return;
+      hostBeforeProposal = chosenHost;
+      chosenHost = alias;
+      hostProposed = p;
+      hostProposalShown = true;
+    });
+  });
+  // The corrected state (G4.9): the person moved off Jev's host. The start
+  // records it (`answerHostProposal`), so the line says so.
+  let hostCorrection = $state<{ from: string; to: string } | null>(null);
+  function correctHost(to: string) {
+    const from = hostProposed?.value ?? hostCorrection?.from ?? null;
+    hostCorrection = hostProposalShown && from && from !== to ? { from, to } : null;
+  }
+  function pickHost(alias: string) {
+    correctHost(alias);
+    hostPicked = true;
+    hostProposed = null;
+    chosenHost = alias;
+  }
+  function changeProposedHost() {
+    if (hostBeforeProposal) chosenHost = hostBeforeProposal;
+    correctHost(chosenHost);
+    hostPicked = true;
+    hostProposed = null;
+  }
+  /** Jev N5's follow-up: the host a person started on answers the proposal
+   *  they were shown (best effort; local-only, off by default). */
+  function answerHostProposal(host: string) {
+    writePref('last-host', host);
+    if (hostProposalShown) void recordHostPlacement(project.project.id, host);
+    // Starting a session here is starting fresh: the N2 proposal's answer.
+    answerResumeProposal(START_FRESH);
+  }
+
   // "work" runs Claude Code in the pane; "shell" runs a plain login shell.
-  let chosenKind = $state<'work' | 'shell'>(untrack(() => memory?.kind ?? 'work'));
+  let chosenKind = $state<'work' | 'shell'>(untrack(() => initialKind ?? memory?.kind ?? 'work'));
+  // Which agent a "work" session runs (redesign 12.4): Claude Code, or an
+  // agent the chosen host has on its PATH. A ticket's start and a
+  // background run are Claude Code's own paths, so they keep it.
+  let chosenAgent = $state<PickerAgent>('claude');
+  const agentOptions = $derived(
+    agentChoices(
+      chosenHost,
+      $hosts.find((h) => h.alias === chosenHost),
+    ).map((c) =>
+      c.agent !== 'claude' && c.enabled && ticket
+        ? { ...c, enabled: false, reason: `A ticket starts with Claude Code`, tag: null }
+        : c,
+    ),
+  );
+  $effect(() => {
+    const next = keepAgent(untrack(() => chosenAgent), agentOptions);
+    untrack(() => {
+      if (next !== chosenAgent) chosenAgent = next;
+    });
+  });
+  /** The session runs Claude Code: its model, effort, profile, limit check,
+   *  background run and ticket brief apply. */
+  const runsClaude = $derived(chosenKind === 'work' && chosenAgent === 'claude');
   // Optional command run on start for a shell session (empty = bare shell).
   let startCommand = $state<string>('');
   // `claude --model` / `--effort` for a Claude session; '' = the host's
@@ -138,6 +261,129 @@
     writePref('newsession.model', chosenModel);
     writePref('newsession.effort', chosenEffort);
   });
+  /** The session runs Codex: `codex -m` / `model_reasoning_effort` take
+   *  Codex's own lists, remembered apart from Claude's. */
+  const runsCodex = $derived(chosenKind === 'work' && chosenAgent === 'codex');
+  const isCodexModel = (v: unknown): v is string =>
+    typeof v === 'string' && (v === '' || CODEX_MODEL_OPTIONS.some((o) => o.value === v));
+  const isCodexEffort = (v: unknown): v is string =>
+    typeof v === 'string' && (v === '' || CODEX_EFFORT_OPTIONS.some((o) => o.value === v));
+  let codexModel = $state<string>(readPref('newsession.codex.model', '', isCodexModel));
+  let codexEffort = $state<string>(readPref('newsession.codex.effort', '', isCodexEffort));
+  $effect(() => {
+    writePref('newsession.codex.model', codexModel);
+    writePref('newsession.codex.effort', codexEffort);
+  });
+  // Credential profile (`~/.claude-profiles/<name>` on the host, its own
+  // `/login`; docs/accounts.md); '' = the host's login. Deliberately not
+  // remembered: which account a session bills is chosen each time.
+  let chosenProfile = $state<string>('');
+  // The chosen host's known profiles, offered as suggestions; a new name
+  // is still accepted (the session asks for its /login).
+  const hostProfiles = $derived($hosts.find((h) => h.alias === chosenHost)?.claude_profiles ?? []);
+  // Limit handling (redesign step 4.4): a start on an account past
+  // `accounts.pause_at` asks first and offers the login with headroom.
+  // Cleared when the host or the profile changes, so an answer never
+  // carries over to a different login.
+  let limitAsk = $state<Headroom | null>(null);
+  let limitConfirmed = $state(false);
+  $effect(() => {
+    void chosenHost;
+    void chosenProfile;
+    untrack(() => {
+      limitAsk = null;
+      limitConfirmed = false;
+    });
+  });
+  const accountName = (uuid: string) => accountLabel($accountByUuid.get(uuid));
+  function useLogin(l: HostLogin) {
+    chosenProfile = l.profile ?? '';
+    // The effect above clears the flags on the profile change; confirm after it.
+    void tick().then(() => {
+      limitConfirmed = true;
+      void submit();
+    });
+  }
+  function startAnyway() {
+    limitConfirmed = true;
+    limitAsk = null;
+    void submit();
+  }
+  // Redesign step 4.5: the login is picked from the host's
+  // logins with their live usage, defaulting to the one with the most
+  // headroom until the person picks; "Other profile…" brings back the free
+  // name field (a new profile still asks for its /login in the pane).
+  const OTHER_PROFILE = '\u0000other';
+  let hostLogins = $state<HostLogin[] | null>(null);
+  let pickedLogin = false;
+  let otherProfile = $state(false);
+  let loginsHost: string | null = null;
+  $effect(() => {
+    const host = chosenHost;
+    untrack(() => {
+      hostLogins = null;
+      pickedLogin = false;
+      otherProfile = false;
+      // A login belongs to its host: a host change drops the last one, so
+      // Create never sends a profile the select no longer shows (review r05
+      // A4). The first host keeps a prefilled profile.
+      if (loginsHost !== null && loginsHost !== host) chosenProfile = '';
+      loginsHost = host;
+    });
+    void checkAccountHeadroom(host, null).then((h) => {
+      if (chosenHost !== host) return;
+      const logins = h.ok && Array.isArray(h.value?.logins) ? h.value.logins : [];
+      hostLogins = logins;
+      const best = pickedLogin ? null : freestLogin(logins);
+      if (best) chosenProfile = best.profile ?? '';
+    });
+  });
+  // A name typed while the headroom check is still out is a pick too: the
+  // check's default must not overwrite it, and the field stays (review r05).
+  function onTypeProfile() {
+    pickedLogin = true;
+    otherProfile = true;
+  }
+  // The picked login's account, so the host line and warning describe the
+  // account the session will run on (review r05 A8); null keeps the host's.
+  const chosenLoginAccount = $derived(hostLogins?.find((l) => (l.profile ?? '') === chosenProfile)?.account_uuid ?? null);
+  function onPickLogin(v: string) {
+    pickedLogin = true;
+    if (v === OTHER_PROFILE) {
+      otherProfile = true;
+      chosenProfile = '';
+    } else {
+      chosenProfile = v;
+    }
+  }
+  // "Run: in background" (step 4.5): a supervised background session, what
+  // the sidebar's ⚡ dialog launches, which stays as it was.
+  let runBackground = $state(false);
+  let bgPrompt = $state('');
+  const bgSessionBlocked = $derived(hubActionBlocked('new_bg_session', $hubStatus, $hubConnection));
+  const asBackground = $derived(runBackground && runsClaude && !ticket);
+  async function submitBackground() {
+    if (bgSessionBlocked !== null) return;
+    if (!bgPrompt.trim()) {
+      error = 'A background session needs its first prompt';
+      return;
+    }
+    busy = true;
+    error = null;
+    const bgName = friendlyName.trim() || name.trim() || nameWords(generateName(takenSlugs));
+    const r = await newBgSession(chosenHost, bgName, bgPrompt.trim());
+    busy = false;
+    if (!r.ok) {
+      if (destroyed) pushError(r.error, 'Background session failed');
+      else error = r.error.message;
+      return;
+    }
+    push({ kind: 'info', message: `Started ${bgName} in the background on ${chosenHost}` });
+    onCancel();
+  }
+  const profileInvalid = $derived(
+    chosenProfile.trim() !== '' && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(chosenProfile.trim()),
+  );
 
   // Inverse of slugify-ish: take a worktree/branch name and produce a
   // sentence-cased label so the friendly-name field is pre-filled with
@@ -196,7 +442,9 @@
     status: 'loading' | 'ready' | 'error' | 'unlistable';
     rows: WorktreeRow[];
     cloned: boolean;
-    error?: string;
+    // Review r13 D19: the code and the backend's words, shown as one plain
+    // sentence with the original under Details.
+    error?: Pick<IpcError, 'code' | 'message'>;
   };
   // Error codes that mean the HUB could not answer the scan at all: it is
   // older than this app and serves no such tool, its wire contract is out of
@@ -233,8 +481,11 @@
   );
   // A slow scan of the previous host must not land after a newer one.
   let scanSeq = 0;
+  // "Scan again" bumps this; the scan effect reads it, so it re-runs.
+  let rescans = $state(0);
   $effect(() => {
     const host = chosenHost;
+    void rescans;
     if (host === 'local') {
       // Only the local branch needs the live project tree; reading it here
       // instead of above the branch keeps this effect from tracking (and
@@ -280,7 +531,7 @@
       if (!r.ok) {
         hostWorktrees = HUB_CANNOT_SCAN.includes(r.error.code)
           ? { status: 'unlistable', rows: [], cloned: true }
-          : { status: 'error', rows: [], cloned: true, error: r.error.message };
+          : { status: 'error', rows: [], cloned: true, error: r.error };
         return;
       }
       if (!r.value || r.value.host_alias !== host) {
@@ -292,7 +543,7 @@
           status: 'error',
           rows: [],
           cloned: true,
-          error: `list_host_worktrees replied unexpectedly for ${host}`,
+          error: { code: 'E_PARSE', message: `the worktree scan answered for another host than ${host}` },
         };
         return;
       }
@@ -418,17 +669,57 @@
   // answer and the note stays the plain one.
   let pastOfKey = $state<{ key: string; links: WorkLink[] } | null>(null);
   let resumeOpen = $state(false);
+  // Gap plan G7.10 (Jev N2): which to do with that past work — resume one
+  // past session or start fresh. A rule answers for one recent past
+  // session; Jev only at assist (off by default). Asked once the key's past
+  // work is known; with no proposal the notice stays the plain one.
+  let resumeAsk = $state<{ key: string; p: ResumeOrNew } | null>(null);
+  /** The key whose proposal the person set aside ("Start fresh instead"). */
+  let resumeDismissed = $state<string | null>(null);
+  /** The past session the resume flow opens on (the proposal's), or none. */
+  let resumeLink = $state<{ link: number; session: number | null } | null>(null);
   $effect(() => {
     const key = plannedKey;
     if (!key || duplicateOf) return;
     void endedWorkLinks(key).then((r) => {
       if (plannedKey !== key) return;
       pastOfKey = r.ok && Array.isArray(r.value) && r.value.length > 0 ? { key, links: r.value } : null;
+      if (!pastOfKey || resumeAsk?.key === key) return;
+      void proposeResumeOrNew(key).then((p) => {
+        if (plannedKey === key && p?.ok && p.value) resumeAsk = { key, p: p.value };
+      });
     });
   });
   const pastWork = $derived(
     pastOfKey && pastOfKey.key === plannedKey && !duplicateOf ? pastOfKey.links : null,
   );
+  /** The proposal the notice shows, as ProposedBy reads it; null below the
+   *  floor, on unsure, once set aside, or for another key. */
+  const resumeShown = $derived.by(() => {
+    if (!pastWork || !resumeAsk || resumeAsk.key !== plannedKey || resumeDismissed === plannedKey) return null;
+    const p = resumeProposal(resumeAsk.p);
+    return preselect('resume', p, RESUME_OR_NEW_FLOOR) != null ? p : null;
+  });
+  const resumeShownName = $derived(resumeShown ? (resumeAsk?.p.name ?? plannedKey) : null);
+  /** Tell the hub what the person picked over a Jev proposal they saw (a
+   *  rule's has nothing to mark). Best effort. */
+  function answerResumeProposal(chosen: string) {
+    if (!plannedKey || resumeShown?.source !== 'jev') return;
+    void followResumeOrNew(plannedKey, chosen);
+  }
+  function openResume(proposed: boolean) {
+    const p = resumeAsk?.p;
+    resumeLink = proposed && p?.link_id != null ? { link: p.link_id, session: p.session_id ?? null } : null;
+    resumeOpen = true;
+  }
+  function startFreshInstead() {
+    answerResumeProposal(START_FRESH);
+    resumeDismissed = plannedKey;
+  }
+  function onResumed(link: number | null) {
+    if (link != null) answerResumeProposal(resumeChoice(link));
+    onCancel();
+  }
   function openDuplicate() {
     if (!duplicateOf) return;
     selectSessionExplicitly(duplicateOf);
@@ -495,6 +786,11 @@
       const uuids = new Set(
         $hosts.filter((h) => !h.hidden && h.account_uuid).map((h) => h.account_uuid as string),
       );
+      // The profiles' accounts too: the Account select shows their usage.
+      for (const h of $hosts) {
+        if (h.hidden) continue;
+        for (const p of h.claude_profiles ?? []) if (p.account_uuid) uuids.add(p.account_uuid);
+      }
       for (const uuid of uuids) void refreshAccountUsage(uuid);
     }
   });
@@ -503,7 +799,9 @@
       chosenHost === 'local' ? project.project.base_path : projectDir(remoteRoot, projectsLayout, owner, repo);
     if (inNewMode) {
       const slug = finalizeBranchSlug(newWorktreeName);
-      return slug ? `${root}/${worktreeDir}/${slug}` : root;
+      // The branch keeps its `/`; the directory is flat (`feat/x` →
+      // `feat-x`), as `projects::worktree_dir_name` creates it.
+      return slug ? `${root}/${worktreeDir}/${slug.replaceAll('/', '-')}` : root;
     }
     const wt = chosenWorktree;
     if (!wt || wt.name === 'main') return root;
@@ -525,7 +823,8 @@
   ]);
   const worktreeStatus = $derived.by((): string | null => {
     if (hostWorktrees.status === 'loading') return `Scanning ${chosenHost}…`;
-    if (hostWorktrees.status === 'error') return `Couldn't list worktrees on ${chosenHost}: ${hostWorktrees.error}`;
+    // The error state has its own block (Details, Scan again) below.
+    if (hostWorktrees.status === 'error') return null;
     if (hostWorktrees.status === 'unlistable') return null;
     if (!hostWorktrees.cloned) return `Not cloned on ${chosenHost} yet — it is cloned on the first session.`;
     return null;
@@ -572,6 +871,13 @@
 
   function onPickKind(kind: 'work' | 'shell') {
     chosenKind = kind;
+    chosenAgent = 'claude';
+    nameOverride = null;
+  }
+
+  function onPickAgent(agent: PickerAgent) {
+    chosenKind = 'work';
+    chosenAgent = agent;
     nameOverride = null;
   }
 
@@ -683,6 +989,56 @@
   }
   const startBlocked = $derived(hubActionBlocked('start_work', $hubStatus, $hubConnection));
 
+  // Redesign 6.10: "Draft with Claude" asks the chosen host for a brief
+  // written from the ticket and the task's earlier work. The draft is the
+  // field's text, the person's to edit; only Start sends it. Clear goes back
+  // to the ticket brief.
+  let draftMeta = $state<BriefDraft | null>(null);
+  let drafting = $state(false);
+  let draftError = $state<string | null>(null);
+  let draftSeq = 0;
+  $effect(() => {
+    void ticketKey;
+    draftSeq++;
+    draftMeta = null;
+    drafting = false;
+    draftError = null;
+  });
+  async function draftTicketBrief(t: TicketRow) {
+    const mine = ++draftSeq;
+    const before = { text: briefDraft, edited: briefEdited };
+    briefDraft = briefText;
+    briefEdited = true;
+    drafting = true;
+    draftError = null;
+    const r = await draftBrief({
+      ...ticketRef(t),
+      project_id: project.project.id,
+      host_alias: chosenHost,
+      worktree: inNewMode ? newWorktreeName.trim() : (chosenWorktree?.name ?? undefined),
+    });
+    if (mine !== draftSeq) return;
+    drafting = false;
+    if (!r.ok) {
+      // No draft: the field is as it was, the person's edit or the template.
+      if (!draftMeta) {
+        briefDraft = before.text;
+        briefEdited = before.edited;
+      }
+      draftError = r.error.message;
+      return;
+    }
+    briefDraft = r.value.brief;
+    draftMeta = r.value.draft;
+  }
+  function clearDraft() {
+    draftSeq++;
+    draftMeta = null;
+    drafting = false;
+    briefEdited = false;
+    briefDraft = '';
+  }
+
   // ── Multi-repo start (work graph M9.6) ──
   // One ticket, one sibling session per repository, all on the same branch
   // name (D11). Offered: the projects this key ran in before.
@@ -706,8 +1062,40 @@
     ticketKey ? siblingCandidates(ticketKey, projectId, ticketPast, $sessions, $projects) : [],
   );
   function toggleAlso(id: number, on: boolean) {
+    alsoTouched = true;
     alsoIn = on ? [...alsoIn.filter((x) => x !== id), id] : alsoIn.filter((x) => x !== id);
   }
+
+  // Redesign 3.12 (N3): the start preview may carry Jev's
+  // proposed sibling; it pre-ticks only while the person has not touched
+  // the boxes, and the ProposedBy chip says why. Asked once per ticket,
+  // project and host.
+  let siblingAsk = $state<ProposalLike | null>(null);
+  let alsoTouched = $state(false);
+  $effect(() => {
+    const id = ticket?.id;
+    const host = chosenHost;
+    const pid = projectId;
+    siblingAsk = null;
+    alsoTouched = false;
+    if (id == null || !host) return;
+    void previewStartWork({ item_id: id, project_id: pid, host_alias: host, with_brief: true }).then((r) => {
+      // A hub with nothing to preview answers no preview at all; an answer
+      // for a ticket, host or project left behind is not this one's.
+      if (ticket?.id !== id || chosenHost !== host || projectId !== pid || !r.ok || !r.value) return;
+      siblingAsk = siblingProposal(r.value);
+    });
+  });
+  const proposedSibling = $derived.by(() => {
+    const v = preselect('sibling', siblingAsk);
+    const id = v == null ? null : Number(v);
+    return id != null && siblings.some((c) => c.id === id) ? id : null;
+  });
+  $effect(() => {
+    const id = proposedSibling;
+    if (id == null || untrack(() => alsoTouched || alsoIn.includes(id))) return;
+    alsoIn = [...untrack(() => alsoIn), id];
+  });
   const multiBlocked = $derived(hubActionBlocked('start_work_multi', $hubStatus, $hubConnection));
 
   async function submitMulti(t: TicketRow, host: string, extra: number[]) {
@@ -715,7 +1103,7 @@
     busy = true;
     error = null;
     const args = {
-      ...(t.id != null && t.tracker_id != null ? { item_id: t.id } : { reference: t.key ?? '' }),
+      ...ticketRef(t),
       project_ids: [projectId, ...extra],
       host_alias: host,
       name: friendlyName.trim() || undefined,
@@ -766,13 +1154,16 @@
     const extra = shownSiblings(alsoIn, siblings);
     if (extra.length > 0) {
       await submitMulti(t, submittedHost, extra);
-      if (!error) remember(submittedHost, submittedWorktreeId);
+      if (!error) {
+        remember(submittedHost, submittedWorktreeId);
+        answerHostProposal(submittedHost);
+      }
       return;
     }
     busy = true;
     error = null;
     const r = await startWork({
-      ...(t.id != null && t.tracker_id != null ? { item_id: t.id } : { reference: t.key ?? '' }),
+      ...ticketRef(t),
       project_id: project.project.id,
       host_alias: submittedHost,
       name: friendlyName.trim() || undefined,
@@ -799,6 +1190,7 @@
       return;
     }
     remember(submittedHost, submittedWorktreeId);
+    answerHostProposal(submittedHost);
     onCreate(r.value);
   }
 
@@ -812,6 +1204,10 @@
     // any field (`onKeydown` below) calls `submit()` directly — the handler
     // must refuse too, or a blocked hub client could still route
     // `new_session` from the keyboard.
+    if (asBackground) {
+      await submitBackground();
+      return;
+    }
     if (newSessionBlocked) return;
     if (inNewMode) {
       // Strip any trailing dash the live slugifier left in place so the
@@ -830,6 +1226,17 @@
     // current when the response lands.
     const submittedHost = chosenHost;
     const submittedWorktreeId = inNewMode ? null : chosenWorktreeId;
+    if (runsClaude && !limitConfirmed) {
+      busy = true;
+      const h = await checkAccountHeadroom(submittedHost, chosenProfile.trim() || null);
+      busy = false;
+      // No answer (a hub client, an unknown host): start as before.
+      if (h.ok && h.value?.over) {
+        limitAsk = h.value;
+        return;
+      }
+    }
+    limitAsk = null;
     busy = true;
     error = null;
     createController = new AbortController();
@@ -847,8 +1254,12 @@
         start_command:
           chosenKind === 'shell' ? startCommand.trim() || null : null,
         friendly_name: friendlyName.trim() || null,
-        model: chosenKind === 'work' && chosenModel ? chosenModel : null,
-        effort: chosenKind === 'work' && chosenEffort ? chosenEffort : null,
+        model: runsClaude && chosenModel ? chosenModel : runsCodex && codexModel ? codexModel : null,
+        effort: runsClaude && chosenEffort ? chosenEffort : runsCodex && codexEffort ? codexEffort : null,
+        profile: runsClaude && chosenProfile.trim() ? chosenProfile.trim() : null,
+        agent: chosenKind === 'work' && chosenAgent !== 'claude' ? chosenAgent : null,
+        // Step 4.4: asked and confirmed here, so a hub does not refuse it.
+        ...(limitConfirmed ? { over_limit_ok: true } : {}),
       },
       createController.signal,
     );
@@ -872,8 +1283,29 @@
       return;
     }
     remember(submittedHost, submittedWorktreeId);
+    answerHostProposal(submittedHost);
     onCreate(r.value);
   }
+
+  // The picker's ⌘↵ (project picker spec v2): once this host's worktree
+  // list has settled, look ONCE and, if nothing needs a person, submit with
+  // what the dialog remembered. The first look is final: a blocked hub, a
+  // new worktree without a name, or a scan that failed (`error` /
+  // `unlistable` — its empty list would otherwise silently create a
+  // generated worktree) leaves the dialog open as if the person had not
+  // pressed ⌘↵, and a later reconnect or edit never fires a submit.
+  // A ticket start has its own path (`submitTicket`, with a preview the
+  // person confirms); the picker never passes a ticket.
+  let autostarted = false;
+  $effect(() => {
+    if (!autostart || autostarted || busy) return;
+    if (hostWorktrees.status === 'loading') return;
+    autostarted = true;
+    if (ticket) return;
+    if (hostWorktrees.status !== 'ready') return;
+    if (newSessionBlocked || (inNewMode && !newWorktreeName.trim())) return;
+    void submit();
+  });
 
   function cancelCreate() {
     createController?.abort();
@@ -904,12 +1336,23 @@
       }
     }
   }
+  /** Writing help's "Draft agent briefs" (G4.6), off by default. */
+  const draftsBriefs = $derived(settingBool($fleetSettings, SETTING_KEYS.workDraftBriefs));
 </script>
 
 <Modal label="New session" onclose={onCancel} width="520px">
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="dialog" onkeydown={onKeydown}>
   <h3>New session — {owner}/{repo}</h3>
+    <ProposedBy
+      {proposal}
+      field="project"
+      testid="new-session-proposed"
+      onchange={() => {
+        onCancel();
+        openNewSessionPicker(initialHost, ticket);
+      }}
+    />
 
   <div class="fields">
     <label for="friendly-name">Name</label>
@@ -930,7 +1373,7 @@
         onclick={reroll}
         title="Roll a new name (Ctrl/⌘+R)"
         aria-label="Roll a new name"
-      >🎲</button>
+      ><Icon name="dice" size={14} /></button>
     </div>
     {#if plannedKey}
       <p class="work-note" data-testid="work-note">
@@ -943,10 +1386,17 @@
               >Open it</button
             >
           </span>
+        {:else if pastWork && resumeShown && resumeShown.value !== START_FRESH}
+          <span class="dup" data-testid="work-past">
+            — has previous work:
+            <button type="button" class="linkish" data-testid="resume-proposed" onclick={() => openResume(true)}
+              >Resume {resumeShownName}</button
+            >
+          </span>
         {:else if pastWork}
           <span class="dup" data-testid="work-past">
             — has previous work ({pastWorkSummary(pastWork, now * 1000)}).
-            <button type="button" class="linkish" data-testid="resume-past" onclick={() => (resumeOpen = true)}
+            <button type="button" class="linkish" data-testid="resume-past" onclick={() => openResume(false)}
               >Resume</button
             >
           </span>
@@ -954,6 +1404,27 @@
           <span class="muted">— sessions on this branch group under it (sidebar: by work)</span>
         {/if}
       </p>
+      {#if pastWork && !duplicateOf && resumeShown}
+        {#if resumeShown.value === START_FRESH}
+          <ProposedBy
+            proposal={{ ...resumeShown, reason: 'start fresh' }}
+            field="resume"
+            floor={RESUME_OR_NEW_FLOOR}
+            changeLabel="Resume instead"
+            onchange={() => openResume(false)}
+            testid="resume-proposed-by"
+          />
+        {:else}
+          <ProposedBy
+            proposal={resumeShown}
+            field="resume"
+            floor={RESUME_OR_NEW_FLOOR}
+            changeLabel="Start fresh instead"
+            onchange={startFreshInstead}
+            testid="resume-proposed-by"
+          />
+        {/if}
+      {/if}
     {/if}
     {#if ticket}
       <div class="ticket-box" data-testid="ticket-box">
@@ -967,15 +1438,43 @@
             Brief Claude with the ticket
           </label>
           {#if briefOn}
-            <textarea
-              class="brief"
-              data-testid="ticket-brief"
-              rows="6"
-              value={briefText}
-              oninput={(e) => onBriefInput((e.target as HTMLTextAreaElement).value)}
-            ></textarea>
+            {#if draftMeta || drafting}
+              <DraftField
+                label="Brief for Claude"
+                bind:value={briefDraft}
+                model={draftMeta?.model}
+                host={draftMeta?.host_alias}
+                from={draftMeta ? draftSource(draftMeta) : null}
+                busy={drafting}
+                rows={8}
+                onregenerate={() => void draftTicketBrief(ticket)}
+                onclear={clearDraft}
+                testid="ticket-brief-draft"
+              />
+            {:else}
+              <textarea
+                class="brief"
+                aria-label="Brief for Claude"
+                data-testid="ticket-brief"
+                rows="6"
+                value={briefText}
+                oninput={(e) => onBriefInput((e.target as HTMLTextAreaElement).value)}
+              ></textarea>
+              {#if draftsBriefs}<button
+                type="button"
+                class="btn btn--quiet draft-ask"
+                data-testid="ticket-brief-draft-ask"
+                disabled={startBlocked != null || !chosenHost}
+                title="Write the brief from the ticket and earlier sessions on it, with a model call on {chosenHost || 'the host'}"
+                onclick={() => void draftTicketBrief(ticket)}>Draft with Claude</button
+              >{/if}
+            {/if}
+            {#if draftError}
+              <p class="draft-error small" role="alert" data-testid="ticket-brief-draft-error">{draftError}</p>
+            {/if}
             <p class="muted small">
-              Delivered with the first prompt (never typed into the pane). The description is
+              Delivered with the first prompt (never typed into the pane), with the ticket's
+              latest comments and attachment links read from its tracker. The description is
               the ticket author's text and stays fenced as untrusted.
             </p>
           {/if}
@@ -983,7 +1482,7 @@
             <fieldset class="also-in" data-testid="ticket-also-in">
               <legend>Also start in <span class="muted small">(one session each, same branch)</span></legend>
               {#each siblings as c (c.id)}
-                <label>
+                <label class:ai-pre={c.id === proposedSibling && alsoIn.includes(c.id) && !alsoTouched}>
                   <input
                     type="checkbox"
                     data-testid="ticket-also-in-{c.id}"
@@ -992,6 +1491,15 @@
                   />
                   {c.label}
                 </label>
+                {#if c.id === proposedSibling && alsoIn.includes(c.id)}
+                  <ProposedBy
+                    proposal={siblingAsk}
+                    field="sibling"
+                    changeLabel="Untick"
+                    testid="ticket-also-in-proposed"
+                    onchange={() => toggleAlso(c.id, false)}
+                  />
+                {/if}
               {/each}
             </fieldset>
           {/if}
@@ -999,30 +1507,74 @@
       </div>
     {/if}
     {#if resumeOpen && plannedKey}
-      <ResumeDialog workKey={plannedKey} onclose={() => (resumeOpen = false)} onresumed={onCancel} />
+      <ResumeDialog
+        workKey={plannedKey}
+        linkId={resumeLink?.link ?? null}
+        sessionId={resumeLink?.session ?? null}
+        onclose={() => (resumeOpen = false)}
+        onresumed={onResumed}
+      />
     {/if}
 
-    <label for="kind-picker">Type</label>
-    <div class="kind-row" id="kind-picker" role="group">
-      <button
-        class="kind-pick"
-        class:active={chosenKind === 'work'}
-        data-testid="kind-work"
-        onclick={() => onPickKind('work')}
-      >
-        Claude
-      </button>
-      <button
-        class="kind-pick"
-        class:active={chosenKind === 'shell'}
-        data-testid="kind-shell"
-        onclick={() => onPickKind('shell')}
-      >
-        Shell
-      </button>
-    </div>
+      <!-- A group, not a labelable control: it is named by aria-labelledby. -->
+      <span class="field-label" id="kind-picker-label">Agent</span>
+      <div class="kind-row" id="kind-picker" role="group" aria-labelledby="kind-picker-label" data-testid="agent-picker">
+        <button
+          class="kind-pick"
+          class:active={runsClaude}
+          aria-pressed={runsClaude}
+          data-testid="kind-work"
+          onclick={() => onPickKind('work')}
+        >
+          Claude Code
+        </button>
+        <button
+          class="kind-pick"
+          class:active={chosenKind === 'shell'}
+          aria-pressed={chosenKind === 'shell'}
+          data-testid="kind-shell"
+          onclick={() => onPickKind('shell')}
+        >
+          Shell
+        </button>
+        {#each agentOptions.filter((c) => c.agent !== 'claude') as c (c.agent)}
+          {@const on = chosenKind === 'work' && chosenAgent === c.agent}
+          <button
+            class="kind-pick"
+            class:active={on}
+            aria-pressed={on}
+            data-testid={`agent-${c.agent}`}
+            disabled={!c.enabled}
+            title={c.reason ?? undefined}
+            onclick={() => onPickAgent(c.agent)}
+          >
+            {c.label}{#if c.tag}{" "}<span class="soon">{c.tag}</span>{/if}
+          </button>
+        {/each}
+      </div>
 
-    {#if chosenKind === 'work' && !ticket}
+    {#if runsCodex}
+      <div class="launch-row">
+        <div class="launch-field">
+          <label for="launch-model">Model</label>
+          <select id="launch-model" data-testid="launch-model" bind:value={codexModel}>
+            <option value="">Codex default</option>
+            {#each CODEX_MODEL_OPTIONS as o (o.value)}
+              <option value={o.value}>{o.label}</option>
+            {/each}
+          </select>
+        </div>
+        <div class="launch-field">
+          <label for="launch-effort">Effort</label>
+          <select id="launch-effort" data-testid="launch-effort" bind:value={codexEffort}>
+            <option value="">Codex default</option>
+            {#each CODEX_EFFORT_OPTIONS as o (o.value)}
+              <option value={o.value}>{o.label}</option>
+            {/each}
+          </select>
+        </div>
+      </div>
+    {:else if runsClaude && !ticket && !asBackground}
       <div class="launch-row">
         <div class="launch-field">
           <label for="launch-model">Model</label>
@@ -1042,7 +1594,75 @@
             {/each}
           </select>
         </div>
+        {#if hostLogins && hostLogins.length > 0 && !otherProfile}
+          <div class="launch-field">
+            <label for="launch-account">Account</label>
+            <select
+              id="launch-account"
+              data-testid="launch-account"
+              value={chosenProfile}
+              onchange={(e) => onPickLogin(e.currentTarget.value)}
+            >
+              {#each hostLogins as l (l.profile ?? '')}
+                <option value={l.profile ?? ''}>{loginLabel(l, accountName)} · {usedText(l)}</option>
+              {/each}
+              <option value={OTHER_PROFILE}>Other profile…</option>
+            </select>
+          </div>
+        {:else}
+          <div class="launch-field">
+            <label for="launch-profile">Login profile</label>
+            <input
+              id="launch-profile"
+              data-testid="launch-profile"
+              bind:value={chosenProfile}
+              oninput={onTypeProfile}
+              placeholder="Host login"
+              list="launch-profile-options"
+              maxlength="32"
+              aria-invalid={profileInvalid}
+              title="A name such as work: the session runs under ~/.claude-profiles/<name> on the host, with its own /login. A new profile asks you to log in, in the session."
+            />
+            <datalist id="launch-profile-options">
+              {#each hostProfiles as p (p.name)}
+                <option value={p.name}>{p.email ?? (p.account_uuid ? p.name : 'not logged in')}</option>
+              {/each}
+            </datalist>
+          </div>
+        {/if}
       </div>
+    {/if}
+
+    {#if runsClaude && !ticket}
+      <span class="field-label" id="run-picker-label">Run</span>
+      <div class="kind-row" id="run-picker" role="group" aria-labelledby="run-picker-label">
+        <button
+          class="kind-pick"
+          class:active={!runBackground}
+          aria-pressed={!runBackground}
+          data-testid="run-pane"
+          onclick={() => (runBackground = false)}
+        >
+          In a pane
+        </button>
+        <button
+          class="kind-pick"
+          class:active={runBackground}
+          aria-pressed={runBackground}
+          data-testid="run-background"
+          onclick={() => (runBackground = true)}
+          title="A supervised background session on the host, outside this project's worktree"
+        >
+          In background
+        </button>
+      </div>
+      {#if runBackground}
+        <label for="bg-prompt">First prompt</label>
+        <textarea id="bg-prompt" data-testid="bg-prompt" rows="3" bind:value={bgPrompt} placeholder="What should Claude work on?"></textarea>
+        <p class="work-note" data-testid="bg-note">
+          Runs supervised on {chosenHost} in its home folder, with no pane; it shows in the list when it starts.
+        </p>
+      {/if}
     {/if}
 
     {#if chosenKind === 'shell'}
@@ -1062,15 +1682,43 @@
       {now}
       {locale}
       {timeZone}
+      selectedAccount={chosenLoginAccount}
+      proposedHost={hostProposed?.value ?? null}
       onpick={(alias) => {
-        chosenHost = alias;
+        pickHost(alias);
         nameOverride = null;
       }}
     />
+    {#if hostProposed && hostProposed.value === chosenHost}
+      <ProposedBy
+        proposal={hostProposed}
+        field="host"
+        floor={HOST_PLACEMENT_FLOOR}
+        testid="new-session-host-proposed"
+        onchange={changeProposedHost}
+      />
+    {:else if hostCorrection}
+      <p class="correction" data-testid="new-session-host-corrected">
+        {correctionLine(hostCorrection.from, hostCorrection.to, 'when you start')}
+      </p>
+    {/if}
 
-    <label for="wt-picker">Worktree</label>
-    {#if worktreeStatus}
-      <p class="wt-status" data-testid="wt-status" class:err={hostWorktrees.status === 'error'}>{worktreeStatus}</p>
+    <!-- Not a <label>: the picker is a listbox, which a label cannot name
+         (it names itself with ariaLabel). -->
+    <span class="field-label" aria-hidden="true">Worktree</span>
+    {#if hostWorktrees.status === 'error' && hostWorktrees.error}
+      <div class="wt-status err" role="alert" data-testid="wt-status">
+        <span data-testid="wt-status-text"
+          >Couldn't list the worktrees on {chosenHost}. {errorSentence(hostWorktrees.error)}</span
+        >
+        <button type="button" class="wt-rescan" data-testid="wt-scan-again" onclick={() => rescans++}>Scan again</button>
+        <details class="wt-details">
+          <summary>Details</summary>
+          <code data-testid="wt-status-details">{errorDetail(hostWorktrees.error)}</code>
+        </details>
+      </div>
+    {:else if worktreeStatus}
+      <p class="wt-status" data-testid="wt-status">{worktreeStatus}</p>
     {/if}
     {#if remoteWorktreesUnlistable}
       <p class="wt-status" data-testid="wt-remote-unknown">{remoteWorktreesUnlistable}</p>
@@ -1118,10 +1766,33 @@
     {#if error}
       <p class="err">{error}</p>
     {/if}
+    {#if busy && $creatingStart}
+      <!-- Redesign step 5.13: the backend reports the create's worktree,
+           tmux and agent steps (`start:progress`) while it is in flight; the
+           dialog then closes into the same Pulse in the new session's
+           conversation, which waits on the agent's first status. -->
+      {@const c = $creatingStart}
+      <StartPulse start={c} title="Starting {c.name || 'a session'} on {c.host_alias}" />
+    {/if}
   </div>
 
   <div class="actions">
     <span class="hint">↵ create · Ctrl/⌘R re-roll</span>
+    {#if limitAsk && limitAsk.chosen}
+      <div class="limit-ask" role="alert" data-testid="limit-ask">
+        <span
+          >{accountName(limitAsk.chosen.account_uuid)} is at {Math.round(limitAsk.chosen.used_pct ?? 0)}% of its
+          limit (this asks from {limitAsk.pause_at_pct}%).</span
+        >
+        {#if limitAsk.suggestion}
+          {@const s = limitAsk.suggestion}
+          <button class="primary" data-testid="limit-use-suggestion" onclick={() => useLogin(s)}
+            >Use {loginLabel(s, accountName)} · {usedText(s)}</button
+          >
+        {/if}
+        <button data-testid="limit-start-anyway" onclick={startAnyway}>Start anyway</button>
+      </div>
+    {/if}
     <button onclick={onCancel} disabled={busy}>Cancel</button>
     {#if hubCreateNote}
       <span class="hub-create-note" data-testid="hub-create-note" title={hubCreateNote}>{hubCreateNote}</span>
@@ -1133,15 +1804,36 @@
         onclick={submit}
         data-testid="create-btn"
         disabled={(inNewMode && !newWorktreeName.trim()) ||
-          (ticket && chosenKind === 'work' ? startBlocked !== null : newSessionBlocked !== null)}
-        title={(ticket && chosenKind === 'work' ? startBlocked : newSessionBlocked) ?? ''}
-      >{ticket && chosenKind === 'work' ? 'Start work' : 'Create'}</button>
+          (chosenKind === 'work' && profileInvalid) ||
+          (asBackground
+            ? bgSessionBlocked !== null || !bgPrompt.trim()
+            : ticket && chosenKind === 'work'
+              ? startBlocked !== null
+              : newSessionBlocked !== null)}
+        title={(asBackground ? bgSessionBlocked : ticket && chosenKind === 'work' ? startBlocked : newSessionBlocked) ?? ''}
+      >{asBackground ? 'Start in background' : ticket && chosenKind === 'work' ? 'Start work' : 'Create'}</button>
     {/if}
   </div>
 </div>
 </Modal>
 
 <style>
+  .soon {
+    font-size: var(--text-2xs);
+    color: var(--fg-muted);
+  }
+  .limit-ask {
+    flex: 1 1 100%;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.4rem 0.5rem;
+    border: 1px solid color-mix(in srgb, var(--usage-warn) 45%, transparent);
+    border-radius: var(--radius-sm);
+    color: var(--fg);
+    font-size: var(--text-2xs);
+  }
   /* The dialog owns its height budget: the field stack scrolls, the
      Create/Cancel row is pinned, so no number of worktrees or hosts can push
      the buttons off-screen. Modal's body caps at 85vh and adds 1rem padding
@@ -1153,7 +1845,7 @@
     max-height: calc(85vh - 2rem);
     min-height: 0;
   }
-  .dialog h3 { margin: 0 0 0.3rem 0; font-size: 0.95rem; flex: 0 0 auto; }
+  .dialog h3 { margin: 0 0 0.3rem 0; font-size: var(--text-sm); flex: 0 0 auto; }
   .fields {
     display: flex;
     flex-direction: column;
@@ -1168,20 +1860,20 @@
      scrolls instead of squeezing them toward zero. :global so it reaches
      PickerList's root too. */
   .fields > :global(*) { flex-shrink: 0; }
-  label { font-size: 0.7rem; color: var(--fg-muted); text-transform: uppercase; }
+  label, .field-label { font-size: var(--text-2xs); color: var(--fg-muted); text-transform: uppercase; }
   input {
     font: inherit;
     padding: 0.3rem 0.4rem;
     border: 1px solid var(--border);
     background: var(--bg-pane);
     color: var(--fg);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     min-width: 0;
   }
   .name-row { display: flex; gap: 0.3rem; }
   .work-note {
     margin: 0;
-    font-size: 0.72rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .work-note .dup { color: var(--fg); }
@@ -1196,12 +1888,12 @@
   }
   .name-row input { flex: 1 1 auto; }
   .dice {
-    font-size: 1rem;
+    font-size: var(--text-md);
     line-height: 1;
     padding: 0.2rem 0.45rem;
     border: 1px solid var(--border);
     background: transparent;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
   }
   .dice:hover { border-color: var(--accent); }
@@ -1212,34 +1904,38 @@
     font: inherit;
     padding: 0.3rem 0.4rem;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: var(--bg-pane);
     color: var(--fg);
     min-width: 0;
   }
   .kind-pick {
-    font-size: 0.75rem;
+    font-size: var(--text-2xs);
     padding: 0.2rem 0.7rem;
     border: 1px solid var(--border);
     background: transparent;
     color: var(--fg-muted);
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     cursor: pointer;
   }
   .kind-pick.active { color: var(--fg); border-color: var(--accent); }
   .preview {
     margin: 0;
-    font-size: 0.72rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .preview .k { text-transform: uppercase; font-size: 0.65rem; margin-right: 0.3rem; }
-  .preview code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .err { color: #e64a4a; font-size: 0.8rem; margin: 0; }
-  .wt-status { font-size: 0.72rem; color: var(--fg-muted); margin: 0 0 0.2rem; }
-  .wt-status.err { color: #e64a4a; }
+  .preview .k { text-transform: uppercase; font-size: var(--text-2xs); margin-right: 0.3rem; }
+  .preview code { font-family: var(--font-mono); }
+  .err { color: var(--danger); font-size: var(--text-2xs); margin: 0; }
+  .wt-status { font-size: var(--text-2xs); color: var(--fg-muted); margin: 0 0 0.2rem; }
+  .wt-status.err { color: var(--danger); }
+  .wt-rescan { font: inherit; color: var(--fg); background: none; border: 0; padding: 0; margin-left: 0.4rem; text-decoration: underline; cursor: pointer; }
+  .wt-details { color: var(--fg-muted); }
+  .wt-details summary { cursor: pointer; }
+  .wt-details code { display: block; overflow-wrap: anywhere; }
   .actions {
     display: flex;
     gap: 0.4rem;
@@ -1249,15 +1945,15 @@
     padding-top: 0.2rem;
     border-top: 1px solid var(--border);
   }
-  .actions .hint { margin-right: auto; font-size: 0.68rem; color: var(--fg-muted); }
-  .hub-create-note { font-size: 0.68rem; color: var(--fg-muted); text-align: right; }
+  .actions .hint { margin-right: auto; font-size: var(--text-2xs); color: var(--fg-muted); }
+  .hub-create-note { font-size: var(--text-2xs); color: var(--fg-muted); text-align: right; }
   .actions button {
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     padding: 0.3rem 0.8rem;
     border: 1px solid var(--border);
     background: transparent;
     color: var(--fg);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
   }
   .actions button.primary { border-color: var(--accent); }
@@ -1271,17 +1967,29 @@
     display: flex;
     align-items: center;
     gap: 0.35rem;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .brief {
     font: inherit;
     font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: 0.72rem;
+    font-size: var(--text-2xs);
     width: 100%;
     box-sizing: border-box;
     resize: vertical;
   }
   .small {
-    font-size: 0.7rem;
+    font-size: var(--text-2xs);
+  }
+  .draft-ask {
+    align-self: flex-start;
+  }
+  .draft-error {
+    margin: 0;
+    color: var(--danger);
+  }
+  .correction {
+    margin: 0;
+    font-size: var(--text-xs);
+    color: var(--fg-muted);
   }
 </style>

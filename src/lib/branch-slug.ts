@@ -49,6 +49,9 @@ export function validateBranchName(name: string): string | null {
   if (name.startsWith('-')) return 'Branch names cannot start with -.';
   if (name.startsWith('/') || name.endsWith('/')) return 'Branch names cannot start or end with /.';
   if (name.endsWith('.') || name.endsWith('.lock')) return 'Branch names cannot end with . or .lock.';
+  if (name.split('/').some((seg) => seg.endsWith('.lock'))) {
+    return 'Branch name components cannot end with .lock.';
+  }
   if (name.includes('..') || name.includes('//') || name.includes('@{')) {
     return 'Branch names cannot contain .. // or @{.';
   }
@@ -56,5 +59,26 @@ export function validateBranchName(name: string): string | null {
     return 'Branch name components cannot start with a dot.';
   }
   if (name === '@') return '"@" is not a valid branch name.';
+  return null;
+}
+
+/**
+ * The corrected name the New branch form offers ("Use fix/hub-e2e-windows-2?",
+ * the FormsSession board): a name git would refuse is slugged, and a name a
+ * branch already has gets the first free `-2`, `-3`… Null when the name is
+ * fine as typed, or when nothing usable can be made of it.
+ */
+export function suggestBranchName(name: string, existing: readonly string[]): string | null {
+  const taken = new Set(existing);
+  let base = name;
+  if (validateBranchName(name) !== null) {
+    base = finalizeBranchSlug(name);
+    if (base === '' || validateBranchName(base) !== null) return null;
+  }
+  if (!taken.has(base)) return base === name ? null : base;
+  for (let i = 2; i < 100; i++) {
+    const next = `${base}-${i}`;
+    if (!taken.has(next)) return next;
+  }
   return null;
 }

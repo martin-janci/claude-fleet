@@ -142,10 +142,17 @@ fn slug_or_problem(
 /// version. `only` empty means "keep everything", same as the final
 /// assembly loop's own check.
 fn only_wants(only: &[String], kind: Kind, name: &str) -> bool {
+    only_names(only, kind, &slugify(name))
+}
+
+/// `only` holds `<kind>:<name>` for one asset, or `<kind>:*` for every
+/// asset of a kind (the Import form's "What" boxes, gap plan G2.6).
+fn only_names(only: &[String], kind: Kind, slug: &str) -> bool {
     only.is_empty()
-        || only
-            .iter()
-            .any(|o| *o == format!("{}:{}", kind.as_str(), slugify(name)))
+        || only.iter().any(|o| {
+            o.split_once(':')
+                .is_some_and(|(k, n)| k == kind.as_str() && (n == "*" || n == slug))
+        })
 }
 
 /// Security fix round 1, IMPORTANT 4 follow-up (S1a review, finding 3):
@@ -168,6 +175,7 @@ fn only_wants(only: &[String], kind: Kind, name: &str) -> bool {
 fn normalize_only(only: &[String]) -> Vec<String> {
     only.iter()
         .map(|o| match o.split_once(':') {
+            Some((_, "*")) => o.clone(),
             Some((kind, name)) => format!("{kind}:{}", slugify(name)),
             None => o.clone(),
         })
@@ -293,6 +301,8 @@ fn claude_override(
 
 const KNOWN_SKILL_KEYS: &[&str] = &["name", "description", "allowed-tools"];
 const KNOWN_AGENT_KEYS: &[&str] = &["name", "description", "tools", "model"];
+/// The frontmatter keys a Claude Code slash command maps onto the IR.
+const KNOWN_COMMAND_KEYS: &[&str] = &["description", "argument-hint", "allowed-tools", "model"];
 
 fn import_skill(
     dir: &Path,
@@ -416,6 +426,63 @@ fn import_agent(
     Ok(Asset {
         header: h,
         spec: AssetSpec::Agent { tools, model },
+        body,
+        resources: vec![],
+    })
+}
+
+/// A slash command (`~/.claude/commands/<name>.md`, G2.6): its frontmatter
+/// mapped onto the IR, the rest kept as `targets.claude.extra`.
+fn import_command(
+    file: &Path,
+    original: &str,
+    name: &str,
+    host: &str,
+    warnings: &mut Vec<Problem>,
+) -> Result<Asset, String> {
+    let text = std::fs::read_to_string(file).map_err(|e| e.to_string())?;
+    let (fm, body) = parse_frontmatter(&text);
+    let (allowed_tools, unknown) = split_tools(fm.get("allowed-tools"));
+    let (model, explicit) = match str_of(&fm, "model") {
+        Some(m) => match unmap_tier(&m) {
+            Some(tier) => (Some(tier.to_string()), None),
+            None => (None, Some(m)),
+        },
+        None => (None, None),
+    };
+    let mut extra: BTreeMap<String, Value> = fm
+        .iter()
+        .filter_map(|(k, v)| {
+            k.as_str()
+                .filter(|k| !KNOWN_COMMAND_KEYS.contains(k))
+                .map(|k| (k.to_string(), yaml_to_json(v)))
+        })
+        .collect();
+    if !unknown.is_empty() {
+        extra.insert("tools".into(), serde_json::json!(unknown));
+    }
+    // A command with no description still lists: its first line says it.
+    let description = str_of(&fm, "description")
+        .filter(|d| !d.trim().is_empty())
+        .unwrap_or_else(|| {
+            body.lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .unwrap_or("Slash command")
+                .chars()
+                .take(120)
+                .collect()
+        });
+    let mut h = header(Kind::Command, name, description, host, file, None);
+    apply_install_as(&mut h, Kind::Command, original, name, file, warnings);
+    h.targets = claude_override(extra, explicit);
+    Ok(Asset {
+        header: h,
+        spec: AssetSpec::Command {
+            allowed_tools,
+            argument_hint: str_of(&fm, "argument-hint").filter(|h| !h.trim().is_empty()),
+            model,
+        },
         body,
         resources: vec![],
     })
@@ -786,7 +853,8 @@ fn read_json(p: &Path) -> Value {
 /// pushed, and the total size was unbounded. Now: a top-level entry of
 /// `.claude/skills` is walked with `find -H`, which resolves only that
 /// command-line argument itself, never a symlink found while walking under
-/// it; `.claude/agents` is top-level `*.md` files only, so a link there is
+/// it; `.claude/agents` and `.claude/commands` are top-level `*.md` files
+/// only, so a link there is
 /// followed once and never recursed into either way. `emit` also tracks a
 /// running total and, at 64 MiB, prints `##TRUNCATED` and exits non-zero —
 /// `run_host_script` already turns a non-zero exit into an error, and
@@ -838,6 +906,11 @@ if [ -d .claude/skills ]; then
 fi
 if [ -d .claude/agents ]; then
   for f in .claude/agents/*.md; do
+    if [ -f "$f" ]; then emit "$f"; fi
+  done
+fi
+if [ -d .claude/commands ]; then
+  for f in .claude/commands/*.md; do
     if [ -f "$f" ]; then emit "$f"; fi
   done
 fi
@@ -1094,6 +1167,38 @@ pub fn import_claude_only(
             }
         }
     }
+    let commands_dir = src.claude_dir.join("commands");
+    if commands_dir.is_dir() {
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(&commands_dir)?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .collect();
+        entries.sort();
+        for p in entries {
+            if p.extension().and_then(|e| e.to_str()) != Some("md") || !p.is_file() {
+                continue;
+            }
+            let name = p
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            if !only_wants(only, Kind::Command, &name) {
+                continue;
+            }
+            let Some(slug) =
+                slug_or_problem(&mut slugs, Kind::Command, &name, &p, &mut report.problems)
+            else {
+                continue;
+            };
+            match import_command(&p, &name, &slug, host, &mut report.warnings) {
+                Ok(a) => assets.push(a),
+                Err(message) => report.problems.push(Problem {
+                    path: p.to_string_lossy().to_string(),
+                    message,
+                }),
+            }
+        }
+    }
     let settings_path = src.claude_dir.join("settings.json");
     let mut taken = Vec::new();
     assets.extend(import_hooks(
@@ -1131,11 +1236,7 @@ pub fn import_claude_only(
 
     for a in assets {
         let kind = a.kind();
-        if !only.is_empty()
-            && !only
-                .iter()
-                .any(|k| *k == format!("{}:{}", kind.as_str(), a.header.name))
-        {
+        if !only_names(only, kind, &a.header.name) {
             continue;
         }
         let problems = a.validate();
@@ -1242,6 +1343,107 @@ mod tests {
             },
             repo,
         )
+    }
+
+    #[test]
+    fn import_reads_slash_commands() {
+        let base = std::env::temp_dir().join(format!("fleet-import-cmd-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let cmds = base.join("home/.claude/commands");
+        fs::create_dir_all(&cmds).unwrap();
+        fs::write(
+            cmds.join("ship_it.md"),
+            "---\ndescription: Ship it.\nargument-hint: '[ticket]'\nallowed-tools: Bash, Weird\nmodel: haiku\n---\nShip $ARGUMENTS.\n",
+        )
+        .unwrap();
+        fs::write(cmds.join("plain.md"), "Say hello.\n").unwrap();
+        fs::write(cmds.join("notes.txt"), "not a command").unwrap();
+        let repo = base.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(repo.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        let src = ImportSources {
+            claude_dir: base.join("home/.claude"),
+            claude_json: base.join("home/.claude.json"),
+        };
+        import_claude(&src, &repo, "local", None, false).unwrap();
+        let cat = load_dir(&repo).unwrap();
+        assert!(cat.problems.is_empty(), "{:?}", cat.problems);
+        let ship = cat.find(Kind::Command, "ship-it").unwrap();
+        assert_eq!(ship.header.install_as.as_deref(), Some("ship_it"));
+        assert_eq!(ship.body, "Ship $ARGUMENTS.\n");
+        match &ship.spec {
+            AssetSpec::Command {
+                allowed_tools,
+                argument_hint,
+                model,
+            } => {
+                assert_eq!(allowed_tools, &vec!["bash".to_string()]);
+                assert_eq!(argument_hint.as_deref(), Some("[ticket]"));
+                assert_eq!(model.as_deref(), Some("fast"));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            ship.header.targets["claude"].extra["tools"],
+            serde_json::json!(["Weird"])
+        );
+        // No frontmatter: the first line describes it.
+        let plain = cat.find(Kind::Command, "plain").unwrap();
+        assert_eq!(plain.header.description, "Say hello.");
+        assert_eq!(
+            cat.assets
+                .iter()
+                .filter(|a| a.kind() == Kind::Command)
+                .count(),
+            2
+        );
+        // Only what was asked: `only` names the kind.
+        let _ = fs::remove_dir_all(&repo);
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(repo.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        import_claude_only(
+            &src,
+            &repo,
+            "local",
+            None,
+            false,
+            &["command:plain".to_string()],
+        )
+        .unwrap();
+        let cat = load_dir(&repo).unwrap();
+        assert!(cat.find(Kind::Command, "plain").is_some());
+        assert!(cat.find(Kind::Command, "ship-it").is_none());
+        // A whole kind: `command:*` (the Import form's What boxes).
+        let _ = fs::remove_dir_all(&repo);
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(repo.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        fs::create_dir_all(base.join("home/.claude/agents")).unwrap();
+        fs::write(
+            base.join("home/.claude/agents/pm.md"),
+            "---\nname: pm\ndescription: PM.\n---\np\n",
+        )
+        .unwrap();
+        import_claude_only(
+            &src,
+            &repo,
+            "local",
+            None,
+            false,
+            &["command:*".to_string()],
+        )
+        .unwrap();
+        let cat = load_dir(&repo).unwrap();
+        assert_eq!(
+            cat.assets
+                .iter()
+                .filter(|a| a.kind() == Kind::Command)
+                .count(),
+            2
+        );
+        assert!(cat.find(Kind::Agent, "pm").is_none());
+        // The remote dump reads the same folder.
+        assert!(REMOTE_SOURCES_SCRIPT.contains(".claude/commands/*.md"));
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]

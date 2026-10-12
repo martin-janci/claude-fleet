@@ -79,6 +79,12 @@ pub(crate) const AG_FILES: &[(&str, &str)] = &[
         include_str!("../../../../tools/ag/lib/util.sh"),
     ),
 ];
+/// The `/voice` recorder stand-in (docs/voice.md). In the fingerprint, so a
+/// change re-provisions stale hosts.
+pub const VOICE_ARECORD: &str = include_str!("../../../../tools/voice/arecord");
+/// Where the stand-in (`bin/arecord`) and its `voice.env` live on a host.
+pub const VOICE_DIR: &str = "~/.claude-fleet/voice";
+
 /// Where provisioning stages [`AG_FILES`] before running their installer.
 const AG_STAGE_DIR: &str = "~/.local/share/fleet/ag-src";
 /// Where the installer puts the ag tree, passed to it EXPLICITLY.
@@ -114,10 +120,35 @@ label this session; it defines when to fire and how to look up your `host_alias`
 
 /// SHA-256 over everything provisioning ships that is CONTENT (not a
 /// secret, not a URL): both skills, the managed CLAUDE.md body, the
-/// hook shape, and the ag launcher. Stored per host by
+/// hook shape, the ag launcher and the `/voice` stand-in. Stored per host by
 /// `set_host_provisioned`; a host whose stored value differs is
 /// `provision_stale` (hosts F1: every host ran skills from 15 hub
 /// upgrades ago, and nothing compared).
+/// **What it does NOT cover: the `~/.claude.json` MCP entry**
+/// ([`merge_mcp_entry`]) — so multi-user M1's `X-Fleet-Pane` header arriving
+/// in that entry does not make an older provisioning read `provision_stale`,
+/// contrary to what T2's "Do." block in
+/// `docs/superpowers/plans/2026-09-30-multi-user-m1-private-sessions.md`
+/// assumed. Adding the entry's shape here is one line, and it would be WORSE
+/// than the gap: `provision_stale` is cleared by
+/// [`provision_content_only`] — the unattended sweep
+/// ([`spawn_reprovision_stale`]) and the `--content-only` command the plan
+/// itself tells the operator to run — which deliberately never rewrites
+/// `~/.claude.json` (no token minted, no user file that Claude Code writes
+/// concurrently touched). The mark would therefore be raised and cleared
+/// within one hub start, with the header still missing and the operator told
+/// nothing.
+///
+/// Telling the two apart needs TWO recorded fingerprints — the content a
+/// content-only pass ships, and the full set including the MCP entry — which
+/// is a column and a plumbing change, i.e. a decision for the plan's owner,
+/// not something to invent here. Until then what the operator is told is:
+/// nothing automatic. A host provisioned before the pane header keeps working
+/// and simply proves no pane (`Caller::pane` is `None`), so every rule that
+/// would have needed the proof refuses — fail-closed — and only a FULL
+/// provisioning (`provision_hosts` without `content_only`, `fleet-hub
+/// provision --host <alias>`) adds the header. `provision_content_only`'s
+/// own doc comment says so from the other side.
 pub fn fingerprint() -> &'static str {
     static FP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     FP.get_or_init(|| {
@@ -126,7 +157,7 @@ pub fn fingerprint() -> &'static str {
             .map(|(path, body)| format!("{path}\u{0}{body}\u{0}"))
             .collect();
         crate::mcp::auth::sha256_hex(&format!(
-            "{FLEET_SKILL}\u{0}{FRIENDLY_NAME_SKILL}\u{0}{CLAUDE_MD_BODY}\u{0}{}\u{0}{ag}",
+            "{FLEET_SKILL}\u{0}{FRIENDLY_NAME_SKILL}\u{0}{CLAUDE_MD_BODY}\u{0}{}\u{0}{ag}\u{0}{VOICE_ARECORD}",
             crate::service::hooks_install::hook_shape()
         ))
     })
@@ -139,11 +170,39 @@ fn marker_content() -> String {
     )
 }
 
-/// Prints the git toplevel when `~/.claude/skills` (following a symlink)
-/// sits inside a work tree, else nothing.
+/// Prefixes the probe's answer, so a login banner (`bash -lc` runs the
+/// profile first) is never read as a git toplevel and refused as one.
+const GIT_TOP_PREFIX: &str = "fleet-git-top=";
+
+/// The toplevel [`git_tree_probe_script`] reported, or `""`.
+fn git_top_of(stdout: &str) -> &str {
+    stdout
+        .lines()
+        .rev()
+        .find_map(|l| l.trim_end_matches('\r').strip_prefix(GIT_TOP_PREFIX))
+        .unwrap_or("")
+        .trim()
+}
+
+/// Prints the git toplevel (after [`GIT_TOP_PREFIX`]) when `~/.claude/skills` (following a symlink)
+/// sits inside a work tree AND that tree tracks a file in one of fleet's two
+/// skill dirs, else nothing. A dotfiles checkout that untracks or ignores
+/// them is fine: provisioning then overwrites nothing anyone committed.
 fn git_tree_probe_script() -> String {
+    let dirs = [SKILL_DIR, FRIENDLY_NAME_SKILL_DIR]
+        .iter()
+        .map(|d| {
+            quote(
+                d.strip_prefix(SKILLS_ROOT)
+                    .unwrap_or(d)
+                    .trim_start_matches('/'),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
     format!(
-        "cd {} 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null || true",
+        "cd {} 2>/dev/null && top=$(git rev-parse --show-toplevel 2>/dev/null) \
+         && [ -n \"$(git ls-files -- {dirs} 2>/dev/null)\" ] && echo \"{GIT_TOP_PREFIX}$top\"; true",
         remote_path(SKILLS_ROOT)
     )
 }
@@ -239,7 +298,45 @@ pub async fn provision_one_with(
         base.session_start_context,
     )
     .await?;
+    // 5. The `/voice` recorder stand-in and the URL it streams from.
+    provision_voice(ssh, host, base).await?;
     Ok(())
+}
+
+/// Voice relay F1: install fleet's `arecord` stand-in at
+/// `~/.claude-fleet/voice/bin/arecord` (executable; the pane command puts
+/// that dir first on `claude`'s PATH, `tmux::VOICE_PATH_PREFIX`) and
+/// `voice.env` with the hub URL it streams from. The bearer is not here:
+/// the stand-in reads the hook headers file `provision_hook` wrote.
+async fn provision_voice(ssh: &dyn SshExec, host: &str, base: &HubBase) -> Result<(), IpcError> {
+    let bin = format!("{VOICE_DIR}/bin");
+    let path = format!("{bin}/arecord");
+    write_host_file(ssh, host, &bin, &path, VOICE_ARECORD).await?;
+    let out = crate::ssh::run_shell(
+        ssh,
+        host,
+        &format!("chmod 755 {}", remote_path(&path)),
+        PROVISION_TIMEOUT,
+    )
+    .await?;
+    if !out.status.success() {
+        return Err(IpcError::new(
+            codes::E_PROVISION,
+            format!(
+                "chmod {path} on {host}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        ));
+    }
+    let env = format!("FLEET_VOICE_URL={}\n", quote(&base.url));
+    write_host_file(
+        ssh,
+        host,
+        VOICE_DIR,
+        &format!("{VOICE_DIR}/voice.env"),
+        &env,
+    )
+    .await
 }
 
 /// Steps 0 and 1: refuse to write into somebody else's git checkout unless
@@ -257,15 +354,16 @@ async fn provision_skills(
         let out = ssh
             .run(host, &["bash", "-lc", &script], PROVISION_TIMEOUT)
             .await?;
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
+        git_top_of(&String::from_utf8_lossy(&out.stdout)).to_string()
     };
     if !toplevel.is_empty() && !force_git_tree {
         return Err(IpcError::new(
             codes::E_INVALID,
             format!(
-                "{host}: {SKILLS_ROOT} is inside the git work tree {toplevel}; fleet would overwrite \
-                 tracked files. Untrack {SKILL_DIR} and {FRIENDLY_NAME_SKILL_DIR} there (or add them \
-                 to .gitignore), or set provision.force_git_tree=true to write anyway"
+                "{host}: the git work tree {toplevel} tracks files in {SKILL_DIR} or \
+                 {FRIENDLY_NAME_SKILL_DIR}; fleet would overwrite them. Untrack both dirs there \
+                 (git rm -r --cached, then add them to .gitignore), or set \
+                 provision.force_git_tree=true to write anyway"
             ),
         )
         .with_details(serde_json::json!({ "skills_dir": SKILLS_ROOT, "git_toplevel": toplevel })));
@@ -298,6 +396,12 @@ async fn provision_skills(
 ///
 /// `Ok(Some(warning))` is refreshed but degraded: the `ag` launcher did not
 /// install ([`provision_ag`]); the host is still marked provisioned.
+///
+/// Because it does not rewrite `~/.claude.json`, it cannot add or repair the
+/// MCP entry — including multi-user M1's `X-Fleet-Pane` header
+/// ([`merge_mcp_entry`]) — yet it clears `provision_stale` for the host.
+/// That asymmetry is why [`fingerprint`] does not cover the MCP entry; read
+/// its doc comment before changing either.
 pub async fn provision_content_only(
     store: &Mutex<Store>,
     ssh: &dyn SshExec,
@@ -325,6 +429,7 @@ pub async fn provision_content_only(
         base.session_start_context,
     )
     .await?;
+    provision_voice(ssh, host, base).await?;
     let warning = if install_ag(store) {
         provision_ag(ssh, host).await
     } else {
@@ -349,9 +454,55 @@ fn mark_provisioned(store: &Mutex<Store>, host: &str, warning: Option<&str>, owe
     }
 }
 
-/// Refresh every reachable, non-hidden host whose stored fingerprint is
-/// not this build's, `delay` after start (the first reconcile pass has
-/// refreshed `reachable` by then). Content only: unattended and secret-free.
+/// How often a reprovision started under Pause all looks again.
+const PAUSED_RECHECK: Duration = Duration::from_secs(60);
+
+/// How often the stale-host refresh looks again after its first pass.
+///
+/// It used to be a one-shot a minute after start, so a host that was offline
+/// then — or whose fleet-agent had not said hello yet, or whose refresh
+/// failed once — kept "provisioned with an older fleet" until the next hub
+/// restart, and a paired desktop could only show a disabled button
+/// (mefistos, 2026-10-11). A pass that finds nothing stale costs one store
+/// read.
+pub const REPROVISION_EVERY: Duration = Duration::from_secs(5 * 60);
+
+/// The longest a host whose refresh keeps failing waits between attempts.
+const REPROVISION_BACKOFF_MAX: Duration = Duration::from_secs(6 * 3600);
+
+/// Per host, the refreshes that failed in a row and the unix second before
+/// which the next pass leaves it alone: a host that fails waits
+/// [`REPROVISION_EVERY`], then twice that, up to
+/// [`REPROVISION_BACKOFF_MAX`]. In memory only — a hub restart retries
+/// every stale host at once, which is what an upgrade wants.
+#[derive(Debug, Default)]
+pub struct RetryBook(std::collections::HashMap<String, (u32, i64)>);
+
+impl RetryBook {
+    fn due(&self, host: &str, now: i64) -> bool {
+        self.0.get(host).is_none_or(|&(_, at)| now >= at)
+    }
+
+    fn failed(&mut self, host: &str, now: i64) {
+        let entry = self.0.entry(host.to_string()).or_insert((0, 0));
+        entry.0 = entry.0.saturating_add(1);
+        let wait = REPROVISION_EVERY
+            .as_secs()
+            .saturating_mul(1 << (entry.0 - 1).min(16))
+            .min(REPROVISION_BACKOFF_MAX.as_secs());
+        entry.1 = now.saturating_add(i64::try_from(wait).unwrap_or(i64::MAX));
+    }
+
+    fn succeeded(&mut self, host: &str) {
+        self.0.remove(host);
+    }
+}
+
+/// Keep every reachable, non-hidden host's content at this build's: the
+/// first pass `delay` after start (the first reconcile pass has refreshed
+/// `reachable` by then), then one every [`REPROVISION_EVERY`], so a host
+/// that comes back online, or whose agent reconnects, is refreshed without
+/// anybody asking. Content only: unattended and secret-free.
 pub fn spawn_reprovision_stale(
     store: Arc<Mutex<Store>>,
     ssh: Arc<crate::ssh::SshClient>,
@@ -360,34 +511,82 @@ pub fn spawn_reprovision_stale(
 ) -> tokio::task::JoinHandle<()> {
     crate::rt::spawn(async move {
         tokio::time::sleep(delay).await;
-        let stale: Vec<String> = match store.lock() {
-            Ok(s) => crate::service::hosts::active_hosts(
-                s.list_hosts().unwrap_or_default(),
-                crate::service::hub::local_host_enabled(),
-            )
-            .into_iter()
-            .filter(|h| h.provisioned && h.reachable && h.provision_stale)
-            .map(|h| h.alias)
-            .collect(),
-            Err(_) => return,
-        };
-        for host in stale {
-            match provision_content_only(&store, &*ssh, &host, &base).await {
-                Ok(None) => tracing::info!(host, "[provision] refreshed stale content"),
-                Ok(Some(w)) => tracing::warn!(
+        let mut book = RetryBook::default();
+        loop {
+            // Under Pause all a pass touches nothing and the next look is a
+            // minute away, so the resume is not missed by a whole period.
+            let next = match reprovision_stale_pass(&store, &*ssh, &base, &mut book).await {
+                Some(_) => REPROVISION_EVERY,
+                None => PAUSED_RECHECK,
+            };
+            tokio::time::sleep(next).await;
+        }
+    })
+}
+
+/// One refresh of every stale host that is due; the hosts it tried, or
+/// `None` when Pause all (redesign 8.1) or an unreadable store stopped it.
+///
+/// A refresh that fails is recorded as the host's `provision_warning`
+/// (owed a retry), so Attention names the real reason instead of "an older
+/// fleet", and the next pass after its backoff tries again.
+async fn reprovision_stale_pass(
+    store: &Mutex<Store>,
+    ssh: &dyn SshExec,
+    base: &HubBase,
+    book: &mut RetryBook,
+) -> Option<Vec<String>> {
+    if !crate::service::loops::gate("reprovision", store, Some(PAUSED_RECHECK)) {
+        return None;
+    }
+    let now = crate::store::now_unix();
+    let stale: Vec<String> = match store.lock() {
+        Ok(s) => crate::service::hosts::active_hosts(
+            s.list_hosts().unwrap_or_default(),
+            crate::service::hub::local_host_enabled(),
+        )
+        .into_iter()
+        .filter(|h| h.provisioned && h.reachable && h.provision_stale && book.due(&h.alias, now))
+        .map(|h| h.alias)
+        .collect(),
+        Err(_) => return None,
+    };
+    for host in &stale {
+        match provision_content_only(store, ssh, host, base).await {
+            Ok(None) => {
+                book.succeeded(host);
+                tracing::info!(host, "[provision] refreshed stale content");
+            }
+            Ok(Some(w)) => {
+                // `mark_provisioned` already kept the warning and, when the
+                // step is retryable, left the host stale for a later pass.
+                book.failed(host, now);
+                tracing::warn!(
                     host,
                     warning = %w,
                     "[provision] refreshed stale content with a warning"
-                ),
-                Err(e) => tracing::warn!(
+                );
+            }
+            Err(e) => {
+                book.failed(host, now);
+                if let Ok(s) = store.lock() {
+                    let _ = s.record_host_provision_outcome(
+                        host,
+                        Some(&format!("refreshing its content failed: {}", e.message)),
+                        true,
+                    );
+                }
+                tracing::warn!(
                     host,
                     code = %e.code,
                     error = %e.message,
                     "[provision] stale content not refreshed"
-                ),
+                );
             }
         }
-    })
+    }
+    crate::service::loops::report("reprovision", Ok::<_, String>(()), Some(REPROVISION_EVERY));
+    Some(stale)
 }
 
 const SETTINGS_JSON: &str = "~/.claude/settings.json";
@@ -857,12 +1056,16 @@ fn has_tmux_clipboard_setting(content: &str) -> bool {
     false
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+/// Deserialize too: a paired desktop reads it back from the hub's
+/// `provision_hosts` (one host's content refresh, from its page).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HostProvisionResult {
     pub host: String,
     /// "provisioned" | "skipped" | "failed"
     pub status: String,
+    /// The hub's `ok_json_compact` strips a null, hence the default.
+    #[serde(default)]
     pub detail: Option<String>,
 }
 
@@ -963,11 +1166,26 @@ pub fn reestablish_tunnels(
 
 /// Read a file from a host. `local` → `std::fs`; remote → `cat` over SSH.
 /// Missing file → `Ok(String::new())` (caller treats as empty config).
+///
+/// ONLY a missing file is empty. Every caller merges into what this returns
+/// and writes the result back over the file, so a read that failed — ssh
+/// dropped (exit 255), a root-owned 0600 `~/.claude.json` left by `sudo
+/// claude` — must not read as "empty": that rewrote the user's whole Claude
+/// config as `{mcpServers:{…}}`, and skipped its backup because there was
+/// nothing to back up. Bytes that are not UTF-8 are refused for the same
+/// reason: a lossy decode wrote U+FFFD back over them.
 pub async fn read_host_file(ssh: &dyn SshExec, host: &str, path: &str) -> Result<String, IpcError> {
     if host == "local" {
         crate::service::hub::ensure_local_allowed(host)?;
         let expanded = expand_home_local(path)?;
-        return Ok(std::fs::read_to_string(&expanded).unwrap_or_default());
+        return match std::fs::read(&expanded) {
+            Ok(bytes) => host_text(host, path, bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+            Err(e) => Err(IpcError::new(
+                codes::E_PROVISION,
+                format!("read {path} on {host}: {e}"),
+            )),
+        };
     }
     // Outer `quote` makes the whole script cross the SSH boundary as ONE shell
     // word — ssh space-joins argv, so an unquoted multi-word script would be
@@ -976,7 +1194,38 @@ pub async fn read_host_file(ssh: &dyn SshExec, host: &str, path: &str) -> Result
     let out = ssh
         .run(host, &["bash", "-lc", &script], PROVISION_TIMEOUT)
         .await?;
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(IpcError::new(
+            codes::E_PROVISION,
+            format!(
+                "read {path} on {host} failed ({}): {}",
+                out.status,
+                crate::logging::redact(stderr.trim())
+            ),
+        ));
+    }
+    host_text(host, path, read_payload(&out.stdout).to_vec())
+}
+
+/// A read file's bytes as text, or an error naming it when they are not UTF-8.
+fn host_text(host: &str, path: &str, bytes: Vec<u8>) -> Result<String, IpcError> {
+    String::from_utf8(bytes).map_err(|_| {
+        IpcError::new(
+            codes::E_PROVISION,
+            format!("{path} on {host} is not UTF-8 text; fleet will not rewrite it"),
+        )
+    })
+}
+
+/// The file's bytes from [`remote_read_script`]'s stdout: what follows the
+/// marker line. `bash -lc` runs the login profile first, and whatever it
+/// prints (a banner, an MOTD) lands ahead of the file; taken whole, it was
+/// written back into `~/.tmux.conf` / `~/.claude/CLAUDE.md` and broke the
+/// JSON parse of `~/.claude.json`. Without a marker (a host that answered
+/// some other way) the stdout is taken as it is.
+fn read_payload(stdout: &[u8]) -> &[u8] {
+    crate::service::move_session::carry::payload(stdout).unwrap_or(stdout)
 }
 
 /// Write a file to a host (creating parent dirs). `local` → fs; remote → a
@@ -1097,6 +1346,44 @@ async fn remove_remote_tmp(ssh: &dyn SshExec, host: &str, tmp_path: &str) {
 /// is truncated in place and tightened to 0600.
 pub fn write_private_file(path: &std::path::Path, content: &str) -> std::io::Result<()> {
     use std::io::Write;
+    let mut f = open_private(path)?;
+    f.write_all(content.as_bytes())?;
+    f.flush()?;
+    Ok(())
+}
+
+/// Replace `path` with `content`, 0600, so a reader (or a crash) sees the old
+/// file or the new one and never a truncated one: written to a tmp file
+/// beside it, then renamed over it ([`place_private_file`], with its copy
+/// fallback for a bind-mounted target). [`write_private_file`] truncates in
+/// place, which is fine for a file nobody else reads; `~/.claude/settings.json`
+/// is read by every Claude Code start, and a crash mid-write left it cut off.
+///
+/// A symlinked `path` (settings kept in a dotfiles repo) is replaced at its
+/// target, so the link survives.
+pub fn replace_private_file(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    let target = match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => {
+            std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+        }
+        _ => path.to_path_buf(),
+    };
+    let mut tmp = target.as_os_str().to_owned();
+    tmp.push(format!(".fleet-tmp-{}", std::process::id()));
+    let tmp = std::path::PathBuf::from(tmp);
+    if let Err(e) = write_private_file(&tmp, content) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    place_private_file(&tmp, &target, |f, t| std::fs::rename(f, t))
+}
+
+/// Open `path` for writing, truncated, at mode 0600 BEFORE a byte is
+/// written. `mode()` only applies when the file is created, so a
+/// pre-existing 0644 file (an older build's, a restored backup) is tightened
+/// on the open descriptor first; tightening it after the write left the new
+/// secret world-readable in between.
+fn open_private(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -1104,12 +1391,20 @@ pub fn write_private_file(path: &std::path::Path, content: &str) -> std::io::Res
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    let mut f = opts.open(path)?;
-    f.write_all(content.as_bytes())?;
-    f.flush()?;
-    // `mode()` only applies at creation; tighten a pre-existing file too.
-    set_private_mode(path);
-    Ok(())
+    let f = opts.open(path)?;
+    #[cfg(unix)]
+    if let Err(e) = f.set_permissions(
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+    ) {
+        // As `set_private_mode`: a filesystem that refuses chmod (a drvfs
+        // mount) still gets the write; say so rather than fail it.
+        tracing::warn!(
+            path = %path.display(),
+            error = %e,
+            "[provision] chmod 600 failed; the file may be readable by other users"
+        );
+    }
+    Ok(f)
 }
 
 /// A 0600 temp file holding secret content for the duration of an upload;
@@ -1200,7 +1495,11 @@ fn remote_path(path: &str) -> String {
 
 /// Remote `bash -lc` script body that reads `path` (missing file → empty stdout).
 fn remote_read_script(path: &str) -> String {
-    format!("cat {} 2>/dev/null || true", remote_path(path))
+    format!(
+        "printf '\\n%s\\n' {}; if [ -e {p} ]; then cat {p}; fi",
+        crate::service::move_session::carry::OUT_MARKER,
+        p = remote_path(path)
+    )
 }
 
 /// Remote `bash -lc` script body that creates `dir` then writes `content` to `path`.
@@ -1325,6 +1624,26 @@ pub(crate) fn parse_claude_json(existing: &str) -> Result<serde_json::Value, Ipc
 /// Merge the claude-fleet HTTP MCP server entry into a host's `~/.claude.json`
 /// content, preserving every existing key. Returns the new JSON (pretty).
 /// Errors if `existing` is non-empty and not valid JSON.
+///
+/// Two headers travel with every tool call the host's Claude makes:
+///
+/// - `Authorization`, the host's own bearer token; and
+/// - `X-Fleet-Pane`, the calling tmux pane — multi-user M1's pane proof
+///   (plan revision 6, R6-i). Because it is on the CONNECTION rather than an
+///   argument on a handful of tools, `mcp::authorize` can stamp
+///   `Caller::pane` and every tool can then ask "is this the one row whose
+///   pane the caller can prove it is in".
+///
+/// The pane header is written in the **braced** `${TMUX_PANE:-}` form, not
+/// the bare `$TMUX_PANE` the hooks entry uses
+/// (`service::hooks_install::hook_entry`). The two are not interchangeable:
+/// the hooks entry works only because it also carries
+/// `"allowedEnvVars": ["TMUX_PANE"]`, which is a HOOKS-only mechanism with no
+/// equivalent for an MCP server entry. Claude Code expands `${VAR}` and
+/// `${VAR:-default}` inside an MCP entry's `headers` with no allow-list key,
+/// and the `:-` default makes a host outside tmux send an empty value rather
+/// than an unexpanded literal — both of which `mcp::hooks::pane_header`
+/// refuses, so either way the caller simply proves no pane.
 pub fn merge_mcp_entry(existing: &str, url: &str, token: &str) -> Result<String, IpcError> {
     let mut root = parse_claude_json(existing)?;
     let servers = root
@@ -1343,7 +1662,10 @@ pub fn merge_mcp_entry(existing: &str, url: &str, token: &str) -> Result<String,
         serde_json::json!({
             "type": "http",
             "url": url,
-            "headers": { "Authorization": format!("Bearer {token}") }
+            "headers": {
+                "Authorization": format!("Bearer {token}"),
+                "X-Fleet-Pane": "${TMUX_PANE:-}"
+            }
         }),
     );
     serde_json::to_string_pretty(&root)
@@ -1413,6 +1735,13 @@ mod tests {
             v["mcpServers"]["claude-fleet"]["headers"]["Authorization"],
             "Bearer tok"
         );
+        // Multi-user M1's pane proof, in the braced form — the bare
+        // `$TMUX_PANE` the hooks entry uses would arrive unexpanded here,
+        // since `allowedEnvVars` is a hooks-only mechanism.
+        assert_eq!(
+            v["mcpServers"]["claude-fleet"]["headers"]["X-Fleet-Pane"],
+            "${TMUX_PANE:-}"
+        );
     }
 
     #[test]
@@ -1431,6 +1760,12 @@ mod tests {
         assert_eq!(
             v2["mcpServers"]["claude-fleet"]["headers"]["Authorization"],
             "Bearer tok2"
+        );
+        // A re-merge over an existing file keeps the pane header — a host
+        // re-provisioned for a rotated token must not lose its pane proof.
+        assert_eq!(
+            v2["mcpServers"]["claude-fleet"]["headers"]["X-Fleet-Pane"],
+            "${TMUX_PANE:-}"
         );
         assert_eq!(v2["mcpServers"]["other"]["url"], "u");
     }
@@ -1458,8 +1793,92 @@ mod tests {
     fn remote_read_script_targets_home() {
         assert_eq!(
             remote_read_script("~/.claude.json"),
-            "cat \"$HOME\"/'.claude.json' 2>/dev/null || true"
+            "printf '\\n%s\\n' __CF_OUT__; if [ -e \"$HOME\"/'.claude.json' ]; \
+             then cat \"$HOME\"/'.claude.json'; fi"
         );
+    }
+
+    /// Absent is empty and exits 0; present but unreadable exits non-zero, so
+    /// [`read_host_file`] can tell the two apart.
+    #[cfg(unix)]
+    #[test]
+    fn the_read_script_fails_on_a_file_it_cannot_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = |p: &std::path::Path| {
+            std::process::Command::new("bash")
+                .args(["-c", &remote_read_script(&p.to_string_lossy())])
+                .output()
+                .unwrap()
+        };
+        let absent = run(&dir.path().join("absent"));
+        assert!(absent.status.success());
+        assert_eq!(read_payload(&absent.stdout), b"");
+        // A directory where the file should be: `cat` fails as it would on
+        // EACCES, and that holds for uid 0 too.
+        let dir_in_the_way = dir.path().join("d");
+        std::fs::create_dir(&dir_in_the_way).unwrap();
+        assert!(!run(&dir_in_the_way).status.success());
+    }
+
+    /// A read that failed is an error, never an empty file: every caller
+    /// merges into the answer and writes it back over the user's config.
+    #[tokio::test]
+    async fn a_failed_read_is_not_an_empty_file() {
+        let fake = fresh_host();
+        fake.unreachable("h1");
+        let err = read_host_file(&fake, "h1", CLAUDE_JSON).await.unwrap_err();
+        assert_eq!(err.code, codes::E_PROVISION);
+
+        let fake = fresh_host();
+        fake.on(
+            Match::script(&remote_read_script(CLAUDE_JSON)),
+            Reply::fail(1, "cat: /home/u/.claude.json: Permission denied"),
+        );
+        let err = read_host_file(&fake, "h1", CLAUDE_JSON).await.unwrap_err();
+        assert!(err.message.contains("Permission denied"), "{}", err.message);
+
+        let fake = fresh_host();
+        fake.on(
+            Match::script(&remote_read_script(CLAUDE_JSON)),
+            Reply::ok("\n__CF_OUT__\n"),
+        );
+        assert_eq!(read_host_file(&fake, "h1", CLAUDE_JSON).await.unwrap(), "");
+    }
+
+    #[test]
+    fn bytes_that_are_not_utf8_are_refused_not_mangled() {
+        let err = host_text("h1", CLAUDE_MD_PATH, vec![b'a', 0xff, b'b']).unwrap_err();
+        assert_eq!(err.code, codes::E_PROVISION);
+        assert_eq!(
+            host_text("h1", CLAUDE_MD_PATH, b"ok".to_vec()).unwrap(),
+            "ok"
+        );
+    }
+
+    #[test]
+    fn a_login_banner_is_not_part_of_a_read_file() {
+        assert_eq!(
+            read_payload(b"Welcome\n\n__CF_OUT__\n{\"a\":1}"),
+            b"{\"a\":1}"
+        );
+        assert_eq!(read_payload(b"\n__CF_OUT__\n"), b"");
+        assert_eq!(read_payload(b"{\"a\":1}"), b"{\"a\":1}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_read_script_prints_the_marker_then_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("f");
+        std::fs::write(&f, "x\ny\n").unwrap();
+        let out = std::process::Command::new("bash")
+            .args([
+                "-c",
+                &format!("echo banner; {}", remote_read_script(&f.to_string_lossy())),
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(read_payload(&out.stdout), b"x\ny\n");
     }
 
     #[test]
@@ -1494,6 +1913,25 @@ mod tests {
         let quoted = crate::shell::quote(&s);
         assert!(quoted.starts_with('\'') && quoted.ends_with('\''));
         assert!(quoted.contains("\"$HOME\""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pre_existing_loose_file_is_private_before_the_secret_is_written() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("token");
+        std::fs::write(&p, "old").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let f = open_private(&p).unwrap();
+        assert_eq!(f.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+        drop(f);
+        write_private_file(&p, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "new");
+        assert_eq!(
+            std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     /// The local twin of the remote fallback: when the rename fails the way
@@ -1982,7 +2420,27 @@ mod tests {
             &expected_settings(),
             true,
         ));
+        // 5. the `/voice` recorder stand-in and its config (voice relay F1)
+        steps.extend(voice_steps());
         steps
+    }
+
+    /// What [`provision_voice`] issues on a remote host for [`base`].
+    fn voice_steps() -> Vec<Step> {
+        use Step::*;
+        vec![
+            Script(remote_write_script(
+                "~/.claude-fleet/voice/bin",
+                "~/.claude-fleet/voice/bin/arecord",
+                VOICE_ARECORD,
+            )),
+            Script("chmod 755 \"$HOME\"/'.claude-fleet/voice/bin/arecord'".into()),
+            Script(remote_write_script(
+                "~/.claude-fleet/voice",
+                "~/.claude-fleet/voice/voice.env",
+                "FLEET_VOICE_URL='http://127.0.0.1:4180'\n",
+            )),
+        ]
     }
 
     /// Every argument the remote shell sees must be inert: `bash -lc` gets
@@ -2005,6 +2463,15 @@ mod tests {
                         !body.contains("'~"),
                         "no quoted tilde path may reach the remote: {body}"
                     );
+                    // Paths only: a written file's payload (the voice
+                    // stand-in names `$HOME/.claude/fleet-hook.headers`) is
+                    // data, not a path the remote shell resolves.
+                    let paths = match (body.find(" printf '%s' "), body.rfind("' > ")) {
+                        (Some(start), Some(end)) if start < end => {
+                            format!("{}{}", &body[..start], &body[end + 1..])
+                        }
+                        _ => body.clone(),
+                    };
                     for path in [
                         ".claude/skills",
                         ".claude/CLAUDE.md",
@@ -2013,9 +2480,9 @@ mod tests {
                         ".claude/settings.json",
                         ".claude/fleet-hook.headers",
                     ] {
-                        if body.contains(path) {
+                        if paths.contains(path) {
                             assert!(
-                                body.contains(&format!("\"$HOME\"/'{path}")),
+                                paths.contains(&format!("\"$HOME\"/'{path}")),
                                 "{path} must be \"$HOME\"/'…'-quoted in: {body}"
                             );
                         }
@@ -2041,6 +2508,13 @@ mod tests {
     }
 
     /// hosts F1: the content fingerprint that `provision_stale` compares.
+    ///
+    /// Pins exactly WHICH inputs it hashes, in both directions: the four it
+    /// covers, and — stated as an assertion rather than a sentence — that the
+    /// `~/.claude.json` MCP entry is not among them, so nobody reads
+    /// multi-user M1's pane header into a staleness signal it does not
+    /// produce. [`fingerprint`]'s doc comment says why that gap is where it
+    /// is and what would have to change to close it.
     #[test]
     fn fingerprint_is_stable_and_covers_skills_claude_md_the_hook_shape_and_ag() {
         let fp = fingerprint();
@@ -2051,7 +2525,7 @@ mod tests {
             .map(|(p, b)| format!("{p}\u{0}{b}\u{0}"))
             .collect();
         let expected = crate::mcp::auth::sha256_hex(&format!(
-            "{FLEET_SKILL}\u{0}{FRIENDLY_NAME_SKILL}\u{0}{CLAUDE_MD_BODY}\u{0}{}\u{0}{ag}",
+            "{FLEET_SKILL}\u{0}{FRIENDLY_NAME_SKILL}\u{0}{CLAUDE_MD_BODY}\u{0}{}\u{0}{ag}\u{0}{VOICE_ARECORD}",
             crate::service::hooks_install::hook_shape()
         ));
         assert_eq!(fp, expected);
@@ -2070,6 +2544,36 @@ mod tests {
             fp, without_ag,
             "an ag change must make hosts provision_stale"
         );
+        // And the gap, pinned: the MCP entry is NOT an input. Changing the
+        // entry — as multi-user M1 did, adding `X-Fleet-Pane` — leaves the
+        // fingerprint of a host provisioned before it identical, so that host
+        // does not read `provision_stale` and the operator is not told.
+        // `merge_mcp_entry`'s own output is the witness: with the url and
+        // token held fixed, it is not reachable from `expected` above.
+        let entry = merge_mcp_entry("", "http://127.0.0.1:4180/mcp", "tok").unwrap();
+        assert!(
+            entry.contains("X-Fleet-Pane"),
+            "the entry carries the pane header"
+        );
+        // `AG_FILES` joined the fingerprint on `main`, so the launcher tree
+        // is an input too: the pin has to ask about every input, never a
+        // list that was complete when it was written.
+        let ag_bodies: Vec<&str> = AG_FILES.iter().map(|(_, b)| *b).collect();
+        for covered in [
+            FLEET_SKILL,
+            FRIENDLY_NAME_SKILL,
+            CLAUDE_MD_BODY,
+            &crate::service::hooks_install::hook_shape(),
+        ]
+        .into_iter()
+        .chain(ag_bodies)
+        {
+            assert!(
+                !covered.contains("\"X-Fleet-Pane\": \"${TMUX_PANE:-}\""),
+                "if an input ever carries the MCP entry's pane header, this \
+                 test is stale and so is `fingerprint`'s doc comment"
+            );
+        }
     }
 
     /// F2: every file of tools/ag (except README.md), at any depth, is
@@ -2103,19 +2607,96 @@ mod tests {
         assert_eq!(on_disk, listed, "list every tools/ag file in AG_FILES");
     }
 
-    /// C1: provision.rs `include_str!`s tools/ag, so the hub image's build
-    /// context must carry it or the tagged image build breaks.
+    /// C1: every file a workspace crate embeds from outside `crates/`
+    /// (`include_str!` / `include_bytes!` reaching `../../../../…`) must be in
+    /// the hub image's build context, or the tagged image build breaks while
+    /// every other build — which compiles from the full checkout — stays
+    /// green. It checked only tools/ag until v0.4.10's hub image failed on
+    /// `tools/voice/arecord`, which no `COPY` carried.
     #[test]
-    fn the_hub_image_build_context_ships_tools_ag() {
-        let path =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fleet-hub/Dockerfile");
-        let dockerfile = std::fs::read_to_string(&path).expect("read the hub Dockerfile");
+    fn the_hub_image_build_context_ships_every_embedded_file() {
+        use std::path::{Component, Path, PathBuf};
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let dockerfile_path = repo.join("crates/fleet-hub/Dockerfile");
+        let dockerfile =
+            std::fs::read_to_string(&dockerfile_path).expect("read the hub Dockerfile");
+        // The source of every build-stage `COPY <src> <dst>` (not `--from=`).
+        let copied: Vec<String> = dockerfile
+            .lines()
+            .filter_map(|l| l.trim_start().strip_prefix("COPY "))
+            .filter(|rest| !rest.trim_start().starts_with("--"))
+            .filter_map(|rest| rest.split_whitespace().next())
+            .map(|s| s.trim_end_matches('/').to_string())
+            .collect();
+
+        fn normalize(p: &Path) -> PathBuf {
+            let mut out = PathBuf::new();
+            for c in p.components() {
+                match c {
+                    Component::ParentDir => {
+                        out.pop();
+                    }
+                    Component::CurDir => {}
+                    other => out.push(other),
+                }
+            }
+            out
+        }
+        fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    // Integration tests are never compiled into the image.
+                    if p.file_name().is_some_and(|n| n != "tests" && n != "target") {
+                        rs_files(&p, out);
+                    }
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        rs_files(&repo.join("crates"), &mut files);
+        let mut missing = Vec::new();
+        let mut seen = 0;
+        for file in files {
+            let name = file.file_name().unwrap().to_string_lossy().to_string();
+            // Unit-test files are compiled only under cfg(test), never in the image.
+            if name == "tests.rs" || name.starts_with("tests_") {
+                continue;
+            }
+            let src = std::fs::read_to_string(&file).unwrap();
+            for mac in ["include_str!(\"", "include_bytes!(\""] {
+                for (i, _) in src.match_indices(mac) {
+                    let rest = &src[i + mac.len()..];
+                    let Some(end) = rest.find('"') else { continue };
+                    let target = normalize(&file.parent().unwrap().join(&rest[..end]));
+                    let Ok(rel) = target.strip_prefix(normalize(&repo)) else {
+                        continue;
+                    };
+                    let rel = rel.to_string_lossy().replace('\\', "/");
+                    if rel.starts_with("crates/") {
+                        continue;
+                    }
+                    seen += 1;
+                    let covered = copied
+                        .iter()
+                        .any(|c| rel == *c || rel.starts_with(&format!("{c}/")));
+                    if !covered {
+                        missing.push(format!("{rel} (embedded by {})", file.display()));
+                    }
+                }
+            }
+        }
         assert!(
-            dockerfile
-                .lines()
-                .any(|l| l.trim_start().starts_with("COPY tools/ag ")),
-            "{} must `COPY tools/ag ./tools/ag` (provision.rs embeds it)",
-            path.display()
+            seen > 0,
+            "found no out-of-crate embeds — the scan is broken"
+        );
+        assert!(
+            missing.is_empty(),
+            "{} has no `COPY` for these embedded files:\n  {}",
+            dockerfile_path.display(),
+            missing.join("\n  ")
         );
     }
 
@@ -2203,6 +2784,131 @@ mod tests {
         assert!(warning.contains("exit 5"), "{warning}");
     }
 
+    /// Redesign 8.1: Pause all stops the stale-host refresh before it
+    /// touches a host; it runs once the pause lifts.
+    #[tokio::test]
+    async fn pause_all_stops_the_stale_refresh() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("h1", Some("h1")).unwrap();
+            s.update_host_probe("h1", true, None, None, 1).unwrap();
+            s.upsert_host_token("h1", TOKEN).unwrap();
+            s.set_host_provisioned("h1", true).unwrap();
+            s.conn_for_test()
+                .execute(
+                    "UPDATE hosts SET provision_fingerprint='old' WHERE alias='h1'",
+                    [],
+                )
+                .unwrap();
+            crate::service::settings::set(&s, crate::service::settings::AUTOMATION_PAUSED, "true")
+                .unwrap();
+        }
+        let fake = fresh_host();
+        assert_eq!(
+            reprovision_stale_pass(&store, &fake, &base(), &mut RetryBook::default()).await,
+            None
+        );
+        assert!(fake.calls().is_empty(), "no host touched while paused");
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .get_host_row("h1")
+                .unwrap()
+                .unwrap()
+                .provision_stale
+        );
+        crate::service::settings::set(
+            &store.lock().unwrap(),
+            crate::service::settings::AUTOMATION_PAUSED,
+            "false",
+        )
+        .unwrap();
+        assert_eq!(
+            reprovision_stale_pass(&store, &fake, &base(), &mut RetryBook::default()).await,
+            Some(vec!["h1".to_string()])
+        );
+    }
+
+    /// mefistos, 2026-10-11: a refresh that fails is not forgotten until
+    /// the next hub restart. The reason becomes the host's warning, the
+    /// host waits out its backoff, and a later pass retries and clears both.
+    #[tokio::test]
+    async fn a_failed_stale_refresh_is_recorded_backed_off_and_retried() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("h1", Some("h1")).unwrap();
+            s.update_host_probe("h1", true, None, None, 1).unwrap();
+            s.upsert_host_token("h1", TOKEN).unwrap();
+            s.set_host_provisioned("h1", true).unwrap();
+            s.conn_for_test()
+                .execute(
+                    "UPDATE hosts SET provision_fingerprint='old' WHERE alias='h1'",
+                    [],
+                )
+                .unwrap();
+        }
+        let down = fresh_host();
+        down.on_host(
+            "h1",
+            Match::Any,
+            Reply::SpawnError {
+                message: "agent not connected".into(),
+            },
+        );
+        let mut book = RetryBook::default();
+        assert_eq!(
+            reprovision_stale_pass(&store, &down, &base(), &mut book).await,
+            Some(vec!["h1".to_string()])
+        );
+        let row = store.lock().unwrap().get_host_row("h1").unwrap().unwrap();
+        assert!(row.provision_stale, "still owed the refresh");
+        let warning = row.provision_warning.expect("the reason is kept");
+        assert!(warning.contains("agent not connected"), "{warning}");
+
+        // Backed off: the very next pass leaves it alone.
+        let calls = down.calls().len();
+        assert_eq!(
+            reprovision_stale_pass(&store, &down, &base(), &mut book).await,
+            Some(vec![])
+        );
+        assert_eq!(
+            down.calls().len(),
+            calls,
+            "no host touched while backing off"
+        );
+
+        // Once due, a healthy host is refreshed and both marks clear.
+        book.0.get_mut("h1").unwrap().1 = 0;
+        assert_eq!(
+            reprovision_stale_pass(&store, &fresh_host(), &base(), &mut book).await,
+            Some(vec!["h1".to_string()])
+        );
+        let row = store.lock().unwrap().get_host_row("h1").unwrap().unwrap();
+        assert!(!row.provision_stale);
+        assert_eq!(row.provision_warning, None);
+        assert!(book.0.is_empty());
+    }
+
+    #[test]
+    fn the_refresh_backoff_doubles_up_to_its_cap() {
+        let mut book = RetryBook::default();
+        let every = REPROVISION_EVERY.as_secs() as i64;
+        book.failed("h", 0);
+        assert_eq!(book.0["h"], (1, every));
+        assert!(!book.due("h", every - 1) && book.due("h", every));
+        book.failed("h", 0);
+        assert_eq!(book.0["h"].1, 2 * every);
+        for _ in 0..40 {
+            book.failed("h", 0);
+        }
+        assert_eq!(book.0["h"].1, REPROVISION_BACKOFF_MAX.as_secs() as i64);
+        book.succeeded("h");
+        assert!(book.due("h", 0));
+    }
+
     /// hosts F1: the unattended refresh writes skills and hooks with the
     /// host's existing token, never `~/.claude.json`, and clears the stale
     /// mark.
@@ -2237,6 +2943,12 @@ mod tests {
             FLEET_SKILL
         ))));
         assert!(steps.contains(&Step::Script(remote_read_script(SETTINGS_JSON))));
+        for step in voice_steps() {
+            assert!(
+                steps.contains(&step),
+                "content-only refreshes voice: {step:?}"
+            );
+        }
         assert!(
             !steps.contains(&Step::Script(remote_read_script(CLAUDE_JSON))),
             "content-only never reads or rewrites ~/.claude.json"
@@ -2275,14 +2987,21 @@ mod tests {
         }
     }
 
-    /// hosts F2, decision B-2: a skills dir inside somebody's dotfiles
-    /// checkout is refused unless `provision.force_git_tree`.
+    #[test]
+    fn a_login_banner_is_not_a_git_toplevel() {
+        assert_eq!(git_top_of("Welcome\n"), "");
+        assert_eq!(git_top_of("Welcome\nfleet-git-top=/home/u\n"), "/home/u");
+        assert_eq!(git_top_of(""), "");
+    }
+
+    /// hosts F2, decision B-2: a dotfiles checkout that tracks fleet's skill
+    /// dirs is refused unless `provision.force_git_tree`.
     #[tokio::test]
     async fn a_skills_dir_inside_a_git_work_tree_is_refused_unless_forced() {
         let fake = fresh_host();
         fake.on(
             Match::script(&git_tree_probe_script()),
-            Reply::ok("/home/fake/dotfiles\n"),
+            Reply::ok("Welcome to h1\nfleet-git-top=/home/fake/dotfiles\n"),
         );
         let err = provision_one(&fake, "h1", &base(), TOKEN)
             .await
@@ -2302,11 +3021,108 @@ mod tests {
         let forced = fresh_host();
         forced.on(
             Match::script(&git_tree_probe_script()),
-            Reply::ok("/home/fake/dotfiles\n"),
+            Reply::ok("Welcome to h1\nfleet-git-top=/home/fake/dotfiles\n"),
         );
         provision_one_with(&forced, "h1", &base(), TOKEN, true)
             .await
             .unwrap();
+    }
+
+    /// The probe itself, run by a real bash against a real repo: a skills dir
+    /// inside a checkout passes while fleet's dirs are untracked or ignored,
+    /// and is reported only once the checkout tracks a file in one of them.
+    #[cfg(unix)]
+    #[test]
+    fn the_git_tree_probe_reports_only_a_checkout_that_tracks_fleets_skill_dirs() {
+        let home = tempfile::tempdir().unwrap();
+        let skills = home.path().join(".claude/skills");
+        let probe = || {
+            let out = crate::proc::std_command("bash")
+                .args(["-c", &git_tree_probe_script()])
+                .env("HOME", home.path())
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "the probe always exits 0");
+            git_top_of(&String::from_utf8(out.stdout).unwrap()).to_string()
+        };
+        let git = |args: &[&str]| {
+            let st = crate::proc::std_command("git")
+                .args(args)
+                .current_dir(home.path())
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .status()
+                .unwrap();
+            assert!(st.success(), "git {args:?}");
+        };
+
+        assert_eq!(probe(), "", "no skills dir at all");
+        std::fs::create_dir_all(skills.join("claude-fleet-control")).unwrap();
+        std::fs::write(skills.join("claude-fleet-control/SKILL.md"), "x").unwrap();
+        std::fs::create_dir_all(skills.join("mine")).unwrap();
+        std::fs::write(skills.join("mine/SKILL.md"), "x").unwrap();
+        assert_eq!(probe(), "", "not a git work tree");
+
+        git(&["init", "-q"]);
+        git(&["add", ".claude/skills/mine/SKILL.md"]);
+        assert_eq!(
+            probe(),
+            "",
+            "a checkout tracking only the user's own skills"
+        );
+
+        std::fs::write(
+            home.path().join(".gitignore"),
+            ".claude/skills/claude-fleet-control/\n",
+        )
+        .unwrap();
+        assert_eq!(probe(), "", "fleet's dir ignored");
+
+        git(&["add", "-f", ".claude/skills/claude-fleet-control/SKILL.md"]);
+        let top = std::fs::canonicalize(home.path()).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(probe()).unwrap(),
+            top,
+            "a tracked file in fleet's dir names the toplevel"
+        );
+    }
+
+    /// Voice relay F1: the `arecord` stand-in lands executable under
+    /// `~/.claude-fleet/voice/bin`, and `voice.env` carries only the hub's
+    /// URL (the bearer is the hook headers file's).
+    #[tokio::test]
+    async fn provision_writes_the_voice_stand_in_and_env() {
+        let fake = fresh_host();
+        provision_one_with(&fake, "h-a", &HubBase::loopback(4180), "tok", false)
+            .await
+            .unwrap();
+        let steps: Vec<Step> = fake.calls().iter().map(step_of).collect();
+        let base = HubBase::loopback(4180);
+        let env = format!("FLEET_VOICE_URL={}\n", crate::shell::quote(&base.url));
+        assert_eq!(env, "FLEET_VOICE_URL='http://127.0.0.1:4180'\n");
+        let bin_write = Step::Script(remote_write_script(
+            "~/.claude-fleet/voice/bin",
+            "~/.claude-fleet/voice/bin/arecord",
+            VOICE_ARECORD,
+        ));
+        let chmod = Step::Script("chmod 755 \"$HOME\"/'.claude-fleet/voice/bin/arecord'".into());
+        let env_write = Step::Script(remote_write_script(
+            "~/.claude-fleet/voice",
+            "~/.claude-fleet/voice/voice.env",
+            &env,
+        ));
+        let pos = |want: &Step| {
+            steps
+                .iter()
+                .position(|s| s == want)
+                .unwrap_or_else(|| panic!("missing {want:?}"))
+        };
+        assert!(pos(&bin_write) < pos(&chmod), "chmod after the write");
+        pos(&env_write);
     }
 
     #[tokio::test]

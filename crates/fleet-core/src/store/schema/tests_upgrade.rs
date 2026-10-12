@@ -16,7 +16,37 @@ use std::time::{Duration, Instant};
 /// for a debug build on a CI runner; the measured number is printed.
 const CHAIN_BUDGET: Duration = Duration::from_secs(5);
 
+/// The same chain through `open_with_bus` on a real file. On Linux that adds
+/// ~35 ms to the in-memory chain (174 ms against 140 ms, 4 vCPU, debug), so
+/// it keeps `CHAIN_BUDGET`. On the Windows runner the identical open took
+/// 5.39 s and failed the 5 s budget (the v0.4.6 release run, 2026-10-04): ~30x
+/// Linux, with the migrations themselves unchanged. That is the runner's file
+/// I/O on a fresh temp file (NTFS, real-time scanning), not migration code.
+/// The two in-memory tests still hold the migrations to `CHAIN_BUDGET` on
+/// every platform, so the file test only needs to catch a stall there.
+const FILE_OPEN_BUDGET: Duration = if cfg!(windows) {
+    Duration::from_secs(30)
+} else {
+    CHAIN_BUDGET
+};
+
 const SEED: u64 = 0x5EED_0012_0001;
+
+/// Fail when `took` is over `budget`, but only with `FLEET_SCALE_BUDGETS=1`
+/// (CI sets it), as `work::scale_tests` does: the budgets are wall-clock, so
+/// on a loaded box they fail for the load, not the migrations. Unset, an
+/// over-budget step is printed. Everything else these tests check is exact
+/// and always enforced.
+fn within_budget(what: &str, took: Duration, budget: Duration) {
+    if took < budget {
+        return;
+    }
+    let msg = format!("{what} took {took:?}, over its {budget:?} budget");
+    if std::env::var("FLEET_SCALE_BUDGETS").is_ok_and(|v| v == "1") {
+        panic!("{msg}");
+    }
+    println!("[m12.1] {msg}; not enforced without FLEET_SCALE_BUDGETS=1");
+}
 
 fn store_over(conn: Connection) -> Store {
     Store {
@@ -24,6 +54,7 @@ fn store_over(conn: Connection) -> Store {
         bus: StoreBus::new(Arc::new(NoopEventBus)),
         kills: Default::default(),
         message_notify: Arc::new(tokio::sync::Notify::new()),
+        form_notify: Arc::new(tokio::sync::Notify::new()),
         peer_generations: Default::default(),
         instance: super::super::next_instance(),
     }
@@ -105,10 +136,7 @@ fn the_chain_from_pre_work_graph_to_latest_is_fast_complete_and_sound() {
         pending.first().unwrap().version,
         pending.last().unwrap().version,
     );
-    assert!(
-        elapsed < CHAIN_BUDGET,
-        "the migration chain took {elapsed:?}, over its {CHAIN_BUDGET:?} budget"
-    );
+    within_budget("the migration chain", elapsed, CHAIN_BUDGET);
 
     // Every migration is recorded, and nothing beyond the known list.
     let (_, versions, _) = fingerprint(&store);
@@ -126,6 +154,33 @@ fn the_chain_from_pre_work_graph_to_latest_is_fast_complete_and_sound() {
         );
     }
     // No migration after 044 updates a session row (row_version would bump).
+    //
+    // Multi-user M1 changed what this line means, so the number is quoted
+    // deliberately rather than merely re-asserted. 097's attribution of
+    // pre-M1 rows is `Store::backfill_session_owner`, which runs *after* the
+    // chain and after 095 re-issued the row-version trigger to watch
+    // `owner_person_id` / `visibility` — so an attributed row's
+    // `row_version` DOES move, by exactly one, and should: an open client
+    // holding a cached row has to learn that its visibility changed.
+    //
+    // On THIS database the backfill attributes nothing, and the sum is
+    // therefore unchanged: the backfill's discriminator is
+    // `started_at IS NOT NULL` (the column documented "when fleet created
+    // the session"), and `store::testgen` does not write `started_at` at all
+    // — it is not in its INSERT's column list. Every generated session is a
+    // row fleet did not create, which is exactly the population spec §4.3
+    // leaves `unclaimed`. The backfill's own arithmetic is pinned, with a
+    // `started_at` population to attribute, by
+    // `the_m1_backfill_attributes_the_rows_fleet_started_and_only_those`.
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM sessions WHERE started_at IS NOT NULL"
+        ),
+        0,
+        "the generator writes no started_at; if it starts to, the sum below moves \
+         by one per such row and this test must say so"
+    );
     assert_eq!(
         count(&store, "SELECT SUM(row_version) FROM sessions"),
         m.row_version_sum
@@ -213,9 +268,42 @@ fn the_chain_from_pre_work_graph_to_latest_is_fast_complete_and_sound() {
             "SELECT COUNT(*) FROM session_messages WHERE peer_state IS NOT NULL \
                OR remote_fleet_id IS NOT NULL OR peer_wake <> 0",
         ),
+        (
+            "sessions.owner_person_id",
+            "SELECT COUNT(*) FROM sessions WHERE owner_person_id IS NOT NULL \
+               OR visibility <> 'unclaimed'",
+        ),
     ] {
         assert_eq!(count(&store, sql), 0, "{what} was backfilled");
     }
+
+    // Multi-user M1 (094 + 095): the hub comes out of the upgrade with
+    // exactly one person — its personal owner — and every session fleet
+    // itself started belongs to her and is private. The second half is
+    // vacuously true here (see the `started_at` note above) and is pinned
+    // where it is not, in
+    // `the_m1_backfill_attributes_the_rows_fleet_started_and_only_those`;
+    // what this says about THIS database is the half that matters for rule 7
+    // — the upgrade widened nothing, because `unclaimed` is a per-host count
+    // and nothing else.
+    //
+    // Deliberately NOT an assertion that no row carries `'org'`: 087's
+    // `CHECK` makes that value unrepresentable, which is stronger than any
+    // `SELECT COUNT(*)` (spec §4.3, Q10).
+    let people = store.list_people().unwrap();
+    assert_eq!(people.len(), 1, "096 mints exactly one person");
+    let owner = store.personal_owner_id().unwrap().expect("the owner");
+    assert_eq!(people[0].id, owner);
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM sessions WHERE started_at IS NOT NULL \
+               AND NOT (owner_person_id IS NOT NULL AND visibility = 'private')"
+        ),
+        0,
+        "a row fleet started must come out of the upgrade owned and private"
+    );
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM conversation_owners"), 0);
     for table in [
         "orgs",
         "org_rules",
@@ -288,10 +376,7 @@ fn opening_a_pre_work_graph_file_upgrades_it_within_budget() {
     let store = Store::open_with_bus(&path, Arc::new(NoopEventBus)).expect("open and upgrade");
     let elapsed = started.elapsed();
     println!("M12.1: open_with_bus upgraded the generated state.db in {elapsed:?}");
-    assert!(
-        elapsed < CHAIN_BUDGET,
-        "opening took {elapsed:?}, over {CHAIN_BUDGET:?}"
-    );
+    within_budget("opening", elapsed, FILE_OPEN_BUDGET);
     assert_eq!(store.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
     assert_eq!(
         count(&store, "SELECT COUNT(*) FROM sessions"),
@@ -318,10 +403,10 @@ fn per_migration_times_on_the_generated_database() {
         total += took;
         assert!(preexisting.is_empty());
         println!("M12.1: migration {:03} took {took:?}", m.version);
-        assert!(
-            took < CHAIN_BUDGET,
-            "migration {} alone took {took:?}",
-            m.version
+        within_budget(
+            &format!("migration {} alone", m.version),
+            took,
+            CHAIN_BUDGET,
         );
     }
     store
@@ -451,6 +536,116 @@ fn deleting_an_upgraded_session_journals_its_conversations() {
     integrity_ok(&store);
 }
 
+/// Multi-user M1, 097's backfill, on the realistic upgrade path and with a
+/// population to attribute.
+///
+/// `store::testgen` deliberately rebuilds v0.2.37's schema and writes no
+/// `started_at`, so the chain test above exercises the backfill's *empty*
+/// case. This one stamps `started_at` on a share of the generated rows the
+/// way fleet's own create path does, then upgrades, and pins all four things
+/// the backfill promises:
+///
+/// * a row fleet started becomes the hub's one person's, and `private`;
+/// * a row reconcile found keeps NULL and `unclaimed` — the upgrade widens
+///   nothing (rule 7), and nobody is guessed for it;
+/// * each attributed row's `row_version` moves by exactly one, because 095
+///   re-issued the trigger to watch both columns and a client with a cached
+///   row must learn its visibility changed;
+/// * the durable conversation-owner record is written for every attributed
+///   row that has a `claude_session_id`, and for no other.
+#[test]
+fn the_m1_backfill_attributes_the_rows_fleet_started_and_only_those() {
+    let (conn, m) = testgen::pre_work_graph_db(SEED, Shape::default());
+    let store = store_over(conn);
+    assert_eq!(store.schema_version().unwrap(), PRE_WORK_GRAPH_VERSION);
+    // Every third row, so both populations are large and interleaved.
+    let fleet_started: Vec<i64> = m
+        .sessions
+        .iter()
+        .map(|s| s.id)
+        .filter(|id| id % 3 == 0)
+        .collect();
+    assert!(fleet_started.len() > 50, "{}", fleet_started.len());
+    for id in &fleet_started {
+        store
+            .conn
+            .execute(
+                "UPDATE sessions SET started_at = 10 WHERE id = ?1",
+                rusqlite::params![*id],
+            )
+            .unwrap();
+    }
+    // The baseline is taken AFTER those updates: at v044 the row-version
+    // trigger (042) bumps on any UPDATE at all, so the stamping itself moves
+    // the counter and the number the backfill adds is the only one this test
+    // is about.
+    let before = count(&store, "SELECT SUM(row_version) FROM sessions");
+    let with_conversation = count(
+        &store,
+        "SELECT COUNT(DISTINCT claude_session_id) FROM sessions \
+         WHERE started_at IS NOT NULL AND claude_session_id IS NOT NULL",
+    );
+    assert!(with_conversation > 0);
+
+    store.migrate().expect("upgrade");
+    let owner = store.personal_owner_id().unwrap().expect("096 mints one");
+
+    let attributed = count(
+        &store,
+        "SELECT COUNT(*) FROM sessions WHERE started_at IS NOT NULL \
+           AND visibility = 'private'",
+    );
+    assert_eq!(attributed, fleet_started.len() as i64);
+    assert_eq!(
+        count(
+            &store,
+            &format!(
+                "SELECT COUNT(*) FROM sessions WHERE started_at IS NOT NULL \
+                   AND owner_person_id IS NOT {owner}"
+            )
+        ),
+        0,
+        "every attributed row is the hub's one person's"
+    );
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM sessions WHERE started_at IS NULL \
+               AND (owner_person_id IS NOT NULL OR visibility <> 'unclaimed')"
+        ),
+        0,
+        "a row reconcile found stays unclaimed: nobody is guessed for it"
+    );
+    assert_eq!(
+        count(&store, "SELECT SUM(row_version) FROM sessions"),
+        before + attributed,
+        "one bump per attributed row, and not one more"
+    );
+    assert_eq!(
+        count(&store, "SELECT COUNT(*) FROM conversation_owners"),
+        with_conversation,
+        "the trigger recorded every attributed conversation and no other"
+    );
+    assert_eq!(
+        count(
+            &store,
+            &format!(
+                "SELECT COUNT(*) FROM conversation_owners \
+                 WHERE owner_person_id IS NOT {owner}"
+            )
+        ),
+        0
+    );
+
+    // A second open writes nothing: the backfill matches no row once the
+    // columns are set, so it cannot re-attribute a row somebody has since
+    // decided — and it cannot record a second owner for a conversation.
+    let changes = store.conn.total_changes();
+    store.migrate().expect("second migrate");
+    assert_eq!(store.conn.total_changes(), changes);
+    integrity_ok(&store);
+}
+
 /// The downgrade guard: an older build (this one, facing a database a newer
 /// build recorded a higher version in) refuses to open it, says why and what
 /// to do, and writes nothing.
@@ -491,9 +686,21 @@ fn an_older_build_refuses_a_newer_database() {
     }
     let err = match Store::open_with_bus(&path, Arc::new(NoopEventBus)) {
         Ok(_) => panic!("a newer database opened"),
-        Err(e) => e.to_string(),
+        Err(e) => e,
     };
-    assert!(err.contains("newer release"), "{err}");
+    assert!(err.to_string().contains("newer release"), "{err}");
+    // Openers drop their "delete it if corrupt" advice for this refusal.
+    assert!(crate::store::is_newer_schema_error(&err));
+    assert_eq!(crate::store::open_failure_advice(&err, "delete it"), "");
+    let other = rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+        Some("file is not a database".into()),
+    );
+    assert!(!crate::store::is_newer_schema_error(&other));
+    assert_eq!(
+        crate::store::open_failure_advice(&other, "delete it"),
+        "delete it"
+    );
     // The read-only open (a CLI beside a newer daemon) never migrates, so it
     // is not refused.
     let ro = Store::open_read_only(&path).unwrap();
@@ -523,4 +730,148 @@ fn the_downgrade_guard_admits_fresh_current_and_older_databases() {
     let older = store_over(conn);
     older.migrate().unwrap();
     assert_eq!(older.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+}
+
+/// The last migration v0.5.4 shipped: the redesign's schema starts at 121.
+const V0_5_4_VERSION: i64 = 120;
+
+/// Review r02: a v0.5.4 database, built from the historical files and
+/// holding a row in every table a later migration alters or rebuilds,
+/// upgrades to the latest schema without losing or changing a row, and
+/// ends with the schema a fresh install has.
+#[test]
+fn a_v0_5_4_database_upgrades_without_losing_rows_and_matches_a_fresh_schema() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+    for (version, sql) in migrations_through(V0_5_4_VERSION) {
+        conn.execute_batch(sql)
+            .unwrap_or_else(|e| panic!("historical migration {version}: {e}"));
+    }
+    conn.execute_batch(
+        "INSERT INTO hosts (alias) VALUES ('h1');
+         INSERT INTO people (name, created_at) VALUES ('ada', 1);
+         INSERT INTO sessions (tmux_name, host_alias, created_at, last_activity_at, status, kind)
+           VALUES ('dev-a', 'h1', 1, 1, 'running', 'work'),
+                  ('dev-sh', 'h1', 1, 1, 'running', 'shell');
+         INSERT INTO host_tokens (host_alias, token, created_at) VALUES ('h1', 'tok', 1);
+         INSERT INTO peer_links (role, created_at) VALUES ('dialer', 1);
+         INSERT INTO orchestration_projects (name, goal, mode, state, created_at, updated_at)
+           VALUES ('m', 'g', 'plan', 'draft', 1, 1);
+         INSERT INTO orchestration_grants
+           (orchestration_project_id, plan_version, level, granted_by, created_at, expires_at)
+           VALUES (1, 1, 2, 'ada', 1, 2);
+         INSERT INTO session_grants (session_id, person_id, level, granted_by, granted_at)
+           VALUES (1, 1, 'drive', 1, 1);
+         INSERT INTO session_grants (session_id, person_id, level, granted_by, granted_at, revoked_at)
+           VALUES (2, 1, 'watch', 1, 1, 5);",
+    )
+    .unwrap();
+    let tables = [
+        "sessions",
+        "hosts",
+        "host_tokens",
+        "peer_links",
+        "orchestration_grants",
+        "session_grants",
+    ];
+    let counts: Vec<i64> = tables
+        .iter()
+        .map(|t| {
+            conn.query_row(&format!("SELECT COUNT(*) FROM {t}"), [], |r| r.get(0))
+                .unwrap()
+        })
+        .collect();
+    let row_versions: i64 = conn
+        .query_row("SELECT SUM(row_version) FROM sessions", [], |r| r.get(0))
+        .unwrap();
+    let store = store_over(conn);
+    assert_eq!(store.schema_version().unwrap(), V0_5_4_VERSION);
+
+    store.migrate().expect("migrate the v0.5.4 database");
+
+    assert_eq!(store.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    integrity_ok(&store);
+    for (t, n) in tables.iter().zip(&counts) {
+        assert_eq!(
+            count(&store, &format!("SELECT COUNT(*) FROM {t}")),
+            *n,
+            "{t} row count changed"
+        );
+    }
+    assert_eq!(
+        count(&store, "SELECT SUM(row_version) FROM sessions"),
+        row_versions,
+        "no migration bumps a session's row_version"
+    );
+    // 121: a shell row runs no agent, every other row runs Claude Code.
+    let agents: Vec<(String, String)> = {
+        let mut stmt = store
+            .conn
+            .prepare("SELECT tmux_name, agent FROM sessions ORDER BY id")
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        rows
+    };
+    assert_eq!(
+        agents,
+        [
+            ("dev-a".to_string(), "claude".to_string()),
+            ("dev-sh".to_string(), "shell".to_string())
+        ]
+    );
+    // 125: every existing row counts as viewed, so nothing reads as unseen.
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM sessions WHERE last_viewed_at IS NULL"
+        ),
+        0
+    );
+    // 142: the grants come through under their ids, levels and revocations.
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM session_grants \
+              WHERE (id, level, revoked_at IS NULL) IN (VALUES (1, 'drive', 1), (2, 'watch', 0))"
+        ),
+        2
+    );
+    // The rows are readable through today's code.
+    assert_eq!(store.list_sessions_for_host("h1").unwrap().len(), 2);
+
+    // The upgraded schema is the schema a fresh install creates.
+    let schema = |s: &Store| -> Vec<(String, String, String)> {
+        let mut stmt = s
+            .conn
+            .prepare(
+                "SELECT type, name, sql FROM sqlite_master \
+                  WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY type, name",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| {
+                let sql: String = r.get(2)?;
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    sql.split_whitespace().collect::<Vec<_>>().join(" "),
+                ))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        rows
+    };
+    let fresh = Store::open_in_memory().unwrap();
+    let (upgraded, fresh) = (schema(&store), schema(&fresh));
+    let only_upgraded: Vec<_> = upgraded.iter().filter(|o| !fresh.contains(o)).collect();
+    let only_fresh: Vec<_> = fresh.iter().filter(|o| !upgraded.contains(o)).collect();
+    assert!(
+        only_upgraded.is_empty() && only_fresh.is_empty(),
+        "upgraded and fresh schemas differ:\nupgraded only: {only_upgraded:#?}\nfresh only: {only_fresh:#?}"
+    );
 }

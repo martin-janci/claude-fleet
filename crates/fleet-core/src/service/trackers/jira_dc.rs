@@ -25,8 +25,8 @@ use super::jira_common::{
 };
 use super::{
     map_transport, CallKind, Caps, Fetched, FullDescription, Incremental, ItemRef, Page, RefCtx,
-    StatusSnapshot, TrackerError, TrackerInfo, TrackerProvider, ViewDef, WorkItemSnapshot, WriteOp,
-    NOT_FOUND_OR_NO_PERMISSION,
+    StatusSnapshot, TrackerComment, TrackerError, TrackerInfo, TrackerProvider, ViewDef,
+    WorkItemSnapshot, WriteOp, WriteOutcome, NOT_FOUND_OR_NO_PERMISSION,
 };
 use crate::net::https::{HttpTransport, Request};
 use crate::store::{TrackerConfig, TrackerCredential};
@@ -122,12 +122,18 @@ impl JiraDc {
             "updated",
             "project",
             "description",
+            "fixVersions",
+            "duedate",
+            "priority",
+            "labels",
+            "timeoriginalestimate",
         ]
         .iter()
         .map(|s| s.to_string())
         .collect();
         f.extend(self.config.sprint_field.clone());
         f.extend(self.config.epic_field.clone());
+        f.extend(self.config.points_field.clone());
         f
     }
 
@@ -290,6 +296,13 @@ impl JiraDc {
                 .filter(|s| *s)
                 .map(|_| -1)
         });
+        let (estimate, estimate_unit) = super::jira_common::estimate(
+            self.config
+                .points_field
+                .as_deref()
+                .map_or(&Value::Null, |pf| &f[pf]),
+            &f["timeoriginalestimate"],
+        );
         let (description, description_chars) = adf_excerpt(&f["description"]);
         Some(WorkItemSnapshot {
             url: key.as_ref().map(|k| format!("{}/browse/{k}", self.site)),
@@ -318,6 +331,12 @@ impl JiraDc {
             assignee_id: f["assignee"]["name"].as_str().map(str::to_string),
             iteration,
             iteration_active,
+            versions: super::jira_common::fix_versions(&f["fixVersions"]),
+            due_at: super::jira_common::due_date(&f["duedate"]),
+            priority: super::jira_common::priority(&f["priority"]),
+            labels: super::jira_common::labels(&f["labels"]),
+            estimate,
+            estimate_unit,
             updated: f["updated"].as_str().and_then(super::parse_timestamp),
             description,
             description_chars,
@@ -369,29 +388,170 @@ impl TrackerProvider for JiraDc {
             query_lang: Some("jql".into()),
             hierarchy: true,
             iterations: true,
+            versions: true,
             human_keys: true,
             repo_relative: false,
             multi_container: false,
             incremental: Incremental::Watermark,
             write: true,
             describe: true,
+            comments: true,
+            attachments: false,
         }
     }
 
-    async fn write(&self, op: &WriteOp) -> Result<(), TrackerError> {
-        let WriteOp::PrRemoteLink { key, url, title } = op;
-        if !super::jira_common::is_key(key) {
-            return Err(TrackerError::Invalid(format!("{key:?} is not a Jira key")));
+    async fn write(&self, op: &WriteOp) -> Result<WriteOutcome, TrackerError> {
+        match op {
+            WriteOp::PrRemoteLink { key, url, title } => {
+                if !super::jira_common::is_key(key) {
+                    return Err(TrackerError::Invalid(format!("{key:?} is not a Jira key")));
+                }
+                let cred = self.cred.as_ref().ok_or(TrackerError::Unconfigured)?;
+                let req = Request::post_json(
+                    self.url(&format!("/rest/api/2/issue/{key}/remotelink")),
+                    &super::jira_common::pr_remote_link_body(url, title),
+                )
+                .header("Authorization", cred.authorization().expose());
+                let resp = self.transport.send(req).await.map_err(map_transport)?;
+                // 200 (updated) or 201 (created); the body is not needed.
+                check(&resp, CallKind::Other)?;
+                Ok(WriteOutcome::default())
+            }
+            WriteOp::Comment { key, body, .. } => {
+                if !super::jira_common::is_key(key) {
+                    return Err(TrackerError::Invalid(format!("{key:?} is not a Jira key")));
+                }
+                let key = key.to_ascii_uppercase();
+                let v = self
+                    .call(
+                        Request::post_json(
+                            self.url(&format!("/rest/api/2/issue/{key}/comment")),
+                            &json!({ "body": Value::String(body.clone()) }),
+                        ),
+                        CallKind::Other,
+                    )
+                    .await?;
+                Ok(super::jira_common::posted_comment(&v, &self.site, &key))
+            }
+            WriteOp::CreateItem {
+                container,
+                parent,
+                title,
+                description,
+            } => {
+                // A subtask goes into its parent's project; a task into the
+                // project the person picked.
+                let parent_key = match parent {
+                    Some(p) if super::jira_common::is_key(&p.key) => {
+                        Some(p.key.to_ascii_uppercase())
+                    }
+                    Some(p) => {
+                        return Err(TrackerError::Invalid(format!(
+                            "{:?} is not a Jira key",
+                            p.key
+                        )))
+                    }
+                    None => None,
+                };
+                let project = match (&parent_key, container.as_deref()) {
+                    (Some(k), _) => k.split_once('-').map(|(p, _)| p.to_string()),
+                    (None, Some(c)) if super::jira_common::is_project_key(c) => {
+                        Some(c.to_ascii_uppercase())
+                    }
+                    _ => None,
+                }
+                .ok_or_else(|| TrackerError::Invalid("no Jira project to create it in".into()))?;
+                let meta = self
+                    .call(
+                        Request::get(self.url(&format!(
+                            "/rest/api/2/issue/createmeta/{project}/issuetypes"
+                        ))),
+                        CallKind::Other,
+                    )
+                    .await?;
+                let issue_type = super::jira_common::pick_issue_type(&meta, parent_key.is_some())
+                    .ok_or_else(|| {
+                    TrackerError::Invalid(format!(
+                        "project {project} has no {} issue type",
+                        if parent_key.is_some() {
+                            "sub-task"
+                        } else {
+                            "task"
+                        }
+                    ))
+                })?;
+                let description = if description.trim().is_empty() {
+                    Value::Null
+                } else {
+                    Value::String(description.clone())
+                };
+                let v = self
+                    .call(
+                        Request::post_json(
+                            self.url("/rest/api/2/issue"),
+                            &super::jira_common::create_issue_body(
+                                &project,
+                                &issue_type,
+                                title,
+                                description,
+                                parent_key.as_deref(),
+                            ),
+                        ),
+                        CallKind::Other,
+                    )
+                    .await?;
+                super::jira_common::created_issue(&v, &self.site)
+            }
+            WriteOp::RichComment { key, wiki, .. } => {
+                if !super::jira_common::is_key(key) {
+                    return Err(TrackerError::Invalid(format!("{key:?} is not a Jira key")));
+                }
+                let key = key.to_ascii_uppercase();
+                let v = self
+                    .call(
+                        Request::post_json(
+                            self.url(&format!("/rest/api/2/issue/{key}/comment")),
+                            &json!({ "body": Value::String(wiki.clone()) }),
+                        ),
+                        CallKind::Other,
+                    )
+                    .await?;
+                Ok(super::jira_common::posted_comment(&v, &self.site, &key))
+            }
+            WriteOp::CreateIssue { .. } => {
+                let body = super::create_issue_body(op, false)?;
+                let v = self
+                    .call(
+                        Request::post_json(self.url("/rest/api/2/issue"), &body),
+                        CallKind::Other,
+                    )
+                    .await?;
+                let key = v["key"]
+                    .as_str()
+                    .filter(|k| super::jira_common::is_key(k))
+                    .ok_or_else(|| TrackerError::Invalid("the created issue has no key".into()))?
+                    .to_string();
+                Ok(WriteOutcome {
+                    url: Some(format!("{}/browse/{key}", self.site)),
+                    key: Some(key.clone()),
+                    remote_id: Some(key),
+                })
+            }
+            WriteOp::LinkIssues {
+                link_type,
+                inward,
+                outward,
+            } => {
+                let body = super::link_issues_body(link_type, inward, outward)?;
+                let cred = self.cred.as_ref().ok_or(TrackerError::Unconfigured)?;
+                let req = Request::post_json(self.url("/rest/api/2/issueLink"), &body)
+                    .header("Authorization", cred.authorization().expose());
+                let resp = self.transport.send(req).await.map_err(map_transport)?;
+                // 201 with an empty body.
+                check(&resp, CallKind::Other)?;
+                Ok(WriteOutcome::default())
+            }
         }
-        let cred = self.cred.as_ref().ok_or(TrackerError::Unconfigured)?;
-        let req = Request::post_json(
-            self.url(&format!("/rest/api/2/issue/{key}/remotelink")),
-            &super::jira_common::pr_remote_link_body(url, title),
-        )
-        .header("Authorization", cred.authorization().expose());
-        let resp = self.transport.send(req).await.map_err(map_transport)?;
-        // 200 (updated) or 201 (created); the body is not needed.
-        check(&resp, CallKind::Other)
     }
 
     async fn probe(&self) -> Result<TrackerInfo, TrackerError> {
@@ -429,6 +589,7 @@ impl TrackerProvider for JiraDc {
         };
         let sprint_field = field(SPRINT_FIELD_SCHEMA);
         let epic_field = field(EPIC_LINK_SCHEMA);
+        let points_field = super::jira_common::story_points_field(&fields);
         let sprint_projects = if sprint_field.is_some() {
             match self
                 .search(
@@ -466,6 +627,7 @@ impl TrackerProvider for JiraDc {
                 sprint_projects,
                 sprint_field,
                 epic_field,
+                points_field,
                 ..Default::default()
             },
         })
@@ -670,6 +832,39 @@ impl TrackerProvider for JiraDc {
             &v["fields"]["description"],
             super::DESCRIBE_MAX_CHARS,
         ))
+    }
+
+    async fn comments(
+        &self,
+        r: &ItemRef,
+        limit: usize,
+    ) -> Result<Vec<TrackerComment>, TrackerError> {
+        let Some(key) = self.describe_key(r) else {
+            return Err(TrackerError::Invalid("not a Jira key".into()));
+        };
+        let limit = limit.clamp(1, super::TRACKER_COMMENTS_MAX);
+        let v = self
+            .call(
+                Request::get(self.url(&format!(
+                    "/rest/api/2/issue/{key}/comment?orderBy=-created&maxResults={limit}"
+                ))),
+                CallKind::Other,
+            )
+            .await?;
+        // A numeric id asked for: the key the comments link to is the
+        // issue's own, which the comment answer does not carry.
+        let link_key = if is_key(&key) {
+            key.clone()
+        } else {
+            String::new()
+        };
+        let mut out = super::jira_common::comments_of(&v, &self.site, &link_key);
+        if link_key.is_empty() {
+            for c in &mut out {
+                c.url = None;
+            }
+        }
+        Ok(super::newest_comments(out, limit))
     }
 }
 

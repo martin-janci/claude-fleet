@@ -1,5 +1,6 @@
 import { writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
+import { createListRace } from './row_store';
 
 /**
  * Mirrors `service::account_usage::UsageOutcomeKind` (`#[serde(rename_all =
@@ -56,23 +57,34 @@ export interface AccountUsageSnapshot {
 /** Keyed by `account_uuid`. */
 export const accountUsage = writable<Record<string, AccountUsageSnapshot>>({});
 
+// A snapshot merged while the list is in flight (a refresh, an
+// `account_usage:updated`) is newer than the list (review r07).
+const race = createListRace<string>();
+
 function mergeInto(
   map: Record<string, AccountUsageSnapshot>,
   row: AccountUsageSnapshot,
 ): Record<string, AccountUsageSnapshot> {
   if (!row) return map;
+  race.touch(row.account_uuid);
   return { ...map, [row.account_uuid]: row };
 }
 
 /** Fetch every known account's cached usage snapshot. Never triggers a fetch. */
 export async function loadAccountUsage(): Promise<Result<AccountUsageSnapshot[]>> {
+  const token = race.begin();
   const r = await invokeCmd<AccountUsageSnapshot[]>('list_account_usage');
   // Defensive, like `loadTasks`: a mocked / older backend may answer with
   // nothing.
   if (r.ok && Array.isArray(r.value)) {
-    const map: Record<string, AccountUsageSnapshot> = {};
-    for (const row of r.value) map[row.account_uuid] = row;
-    accountUsage.set(map);
+    const listed = r.value;
+    accountUsage.update((cur) => {
+      const rows = race.mergeList(Object.values(cur), listed, token, (u) => u.account_uuid);
+      if (rows === null) return cur;
+      const map: Record<string, AccountUsageSnapshot> = {};
+      for (const row of rows) map[row.account_uuid] = row;
+      return map;
+    });
   }
   return r;
 }

@@ -3,11 +3,51 @@ import { writable } from 'svelte/store';
 import { invokeCmd, invokeCmdAbortable, type Result } from './result';
 import type { SessionRow } from './sessions';
 
-export type AssetKind = 'skill' | 'agent' | 'hook' | 'mcp_server' | 'plugin_ref';
-export const KIND_ORDER: AssetKind[] = ['skill', 'agent', 'hook', 'mcp_server', 'plugin_ref'];
+export type AssetKind = 'skill' | 'agent' | 'command' | 'hook' | 'mcp_server' | 'plugin_ref';
+export const KIND_ORDER: AssetKind[] = ['skill', 'agent', 'command', 'hook', 'mcp_server', 'plugin_ref'];
 export const KIND_LABEL: Record<AssetKind, string> = {
-  skill: 'Skills', agent: 'Agents', hook: 'Hooks', mcp_server: 'MCP servers', plugin_ref: 'Plugins',
+  skill: 'Skills', agent: 'Agents', command: 'Commands', hook: 'Hooks', mcp_server: 'MCP servers', plugin_ref: 'Plugins',
 };
+/** One of a kind, for a form's Kind select ("Skill", "MCP server"). */
+export const KIND_ONE: Record<AssetKind, string> = {
+  skill: 'Skill', agent: 'Agent', command: 'Command', hook: 'Hook', mcp_server: 'MCP server', plugin_ref: 'Plugin',
+};
+
+/** The harnesses an asset can target (`service/catalog/harness`), as the
+ *  editor's Harness boxes name them (G2.6). A kind a harness cannot render
+ *  is not offered for it. */
+export const HARNESSES: { id: string; label: string; kinds: AssetKind[] }[] = [
+  { id: 'claude', label: 'Claude Code', kinds: ['skill', 'agent', 'command', 'hook', 'mcp_server', 'plugin_ref'] },
+  { id: 'codex', label: 'Codex', kinds: ['skill', 'agent', 'mcp_server'] },
+];
+
+type TargetsMap = Record<string, Record<string, unknown>>;
+
+/** Whether `harness` receives the asset: its `targets.<harness>.enabled`,
+ *  true when absent (`TargetOverride`'s default). */
+export function harnessOn(a: Pick<EditableAsset, 'targets'>, harness: string): boolean {
+  const t = (a.targets as TargetsMap | undefined)?.[harness];
+  return t?.enabled !== false;
+}
+
+/** `targets` with `harness` turned on or off. A target left holding only
+ *  `enabled: true` is dropped, so the YAML stays as it was. */
+export function withHarness(targets: unknown, harness: string, on: boolean): TargetsMap | undefined {
+  const next: TargetsMap = { ...((targets as TargetsMap | undefined) ?? {}) };
+  const t = { ...(next[harness] ?? {}) };
+  if (on) delete t.enabled;
+  else t.enabled = false;
+  const emptyExtra = (k: string, v: unknown) => k === 'extra' && !!v && typeof v === 'object' && Object.keys(v).length === 0;
+  if (Object.entries(t).every(([k, v]) => emptyExtra(k, v))) delete next[harness];
+  else next[harness] = t;
+  return Object.keys(next).length === 0 ? undefined : next;
+}
+
+/** The Import form's What boxes (G2.6): every kind the importer reads, as
+ *  `only` entries (`<kind>:*`). All ticked imports everything (`[]`). */
+export function importOnlyFor(kinds: readonly AssetKind[]): string[] {
+  return kinds.length === KIND_ORDER.length ? [] : kinds.map((k) => `${k}:*`);
+}
 export interface CatalogConfigRow {
   repo_path: string;
   remote_url: string | null;
@@ -15,14 +55,25 @@ export interface CatalogConfigRow {
   last_loaded_at: number | null;
 }
 export interface CatalogSummary { head: string; loaded_at: number; asset_count: number; problem_count: number }
+/** Assets M5 (R4): on a drifted managed copy, which side moved. Absent when
+ *  the copy's manifest entry cannot say (written before M5). */
+export type DriftSide = 'host' | 'catalog';
 export interface AssetInventoryRow {
   host_alias: string; harness: string; kind: string; name: string; state: string;
   catalog_hash: string | null; host_hash: string | null; scanned_at: number;
   managed: boolean;
   /** Present from hubs with migration 087; absent on older ones. */
   secret_like?: boolean; fleet_owned?: boolean;
+  /** Migration 091: the asset's catalog. */
+  catalog_id?: number | null;
+  /** Assets M5 (R4). Absent from an older hub. */
+  drift_side?: DriftSide | null;
 }
-export interface HostState { host_alias: string; harness: string; state: string }
+export interface HostState {
+  host_alias: string; harness: string; state: string;
+  /** Assets M5 (R4). Absent from an older hub. */
+  drift_side?: DriftSide | null;
+}
 export interface Problem { path: string; message: string }
 /** Assets S1b: who may receive an asset. */
 export type AssetScope = 'private' | 'shared';
@@ -32,7 +83,13 @@ export interface AssetSummary {
   install_as?: string;
   /** Optional because an older hub (pre-M1) omits the key. */
   scope?: AssetScope;
+  /** Assets M5 (R11): `personal` or an org catalog's name. A listing spans
+   *  every catalog, so one name can appear twice; an older hub omits the
+   *  key and listed personal only — read it through `catalogOf`. */
+  catalog?: string;
 }
+/** The catalog an asset summary is in (absent = an older hub's personal). */
+export const catalogOf = (a: AssetSummary): string => a.catalog ?? 'personal';
 /** Assets S1a (Task 3/4): `unmanaged` rows grouped per (kind, name) and
  *  classified server-side. Optional because older hubs (pre-migration 087)
  *  omit the key — `identitiesOf` below falls back to grouping client-side. */
@@ -102,6 +159,9 @@ export interface EditableAsset {
    *  `updateAsset` like any other field this UI has no dedicated control
    *  for — declared explicitly here only for the type. */
   scope?: AssetScope;
+  /** Per-harness overrides (`targets.<harness>`); the Harness boxes (G2.6)
+   *  write `enabled`, everything else round-trips untouched. */
+  targets?: Record<string, Record<string, unknown>>;
   body: string;
   resources?: ResourceRef[];
   [key: string]: unknown;
@@ -149,6 +209,22 @@ export async function loadAssets(): Promise<Result<AssetListing>> {
   const r = await invokeCmd<AssetListing>('catalog_list_assets');
   if (r.ok) catalog.set(r.value);
   return r;
+}
+
+/** Fill the `catalog` store once at launch, so the quick switcher (⌘K) lists
+ *  assets before the Assets tab was ever opened — the panel is the only other
+ *  thing that loads it. Silent: a failure (no catalog configured, an ungranted
+ *  hub client's refusal) leaves the store as it was. A hub loaded its own
+ *  catalog at boot, so a hub client only reads the listing; a standalone
+ *  window first loads its configured catalog, as the panel's mount does
+ *  (nothing else has by then). */
+export async function primeCatalog(remote: boolean): Promise<void> {
+  if (!remote) {
+    const c = await loadCatalogConfig();
+    if (!c.ok || !c.value) return;
+    if (!(await loadCatalog(false)).ok) return;
+  }
+  await loadAssets();
 }
 
 export function getAsset(kind: string, name: string): Promise<Result<AssetDetail>> {
@@ -221,9 +297,23 @@ export function identitiesOf(listing: AssetListing): AssetIdentity[] {
 /** Every host alias seen across `ids`, `local` first then alphabetical —
  *  the fixed dot order `HostStrip` renders in. */
 export function hostOrder(ids: AssetIdentity[]): string[] {
-  const all = new Set(ids.flatMap((i) => i.hosts.map((h) => h.host_alias)));
+  return hostOrderOf(ids.flatMap((i) => i.hosts.map((h) => h.host_alias)));
+}
+
+/** The same fixed order over bare aliases (the one implementation:
+ *  `hostOrder` and the Inbox both use it). */
+export function hostOrderOf(aliases: Iterable<string>): string[] {
+  const all = new Set(aliases);
   const rest = [...all].filter((a) => a !== 'local').sort();
   return all.has('local') ? ['local', ...rest] : rest;
+}
+
+const COPIES_DIFFER = 'copies differ on ';
+/** The hosts whose copy of a `needs_person` identity is the odd one out
+ *  (the server words it `copies differ on a, b`); `[]` for any other reason.
+ *  The one parser: `AssetList` and the Inbox's dots both read it. */
+export function oddHosts(i: Pick<AssetIdentity, 'reason'>): string[] {
+  return i.reason?.startsWith(COPIES_DIFFER) ? i.reason.slice(COPIES_DIFFER.length).split(', ') : [];
 }
 
 // ── Sync engine (sub-project 2): plan/apply, secrets, progress. Mirrors
@@ -243,6 +333,10 @@ export interface SyncAction {
   backup: boolean;
   secrets: string[];
   missing_secrets: string[];
+  /** The catalog the asset comes from (absent from an older hub). */
+  catalog?: string | null;
+  /** What the planner found of the host's copy of an `update`/`overwrite`. */
+  host_copy?: 'unchanged' | 'edited' | 'unverified';
 }
 
 export interface HostPlan {
@@ -266,6 +360,8 @@ export interface ActionResult {
   op: ActionOp;
   outcome: string;
   detail: string | null;
+  /** The catalog the planned action came from; absent from a hub before M6. */
+  catalog?: string | null;
 }
 
 export interface HostSyncResult {
@@ -282,6 +378,8 @@ export interface SyncRunSummary {
   started_at: number;
   finished_at: number;
   hosts: HostSyncResult[];
+  /** M4 I3 / M5 R10: SB6's automatic run, not a person's. */
+  auto?: boolean;
 }
 
 export interface SecretRow {
@@ -303,7 +401,7 @@ export interface SyncProgress {
 export const lastSyncRun = writable<SyncRunSummary | null>(null);
 
 /** The latest `sync:progress` event forwarded by `App.svelte`'s row-event
- *  subscription, for `SyncPlanDialog` to render a progress line during an
+ *  subscription, for `SyncPlanView` to render a progress line during an
  *  in-flight apply. */
 export const syncProgress = writable<SyncProgress | null>(null);
 
@@ -345,7 +443,7 @@ export function deleteSecret(name: string, hostAlias?: string): Promise<Result<b
 }
 
 /** Whether applying `plan` would overwrite a host-edited asset or remove a
- *  manifest entry — the cases `SyncPlanDialog` renders its Apply button red
+ *  manifest entry — the cases `SyncPlanView` renders its Apply button red
  *  for. */
 export function isDestructive(plan: SyncPlan): boolean {
   return plan.hosts.some((h) => h.actions.some((a) => a.op === 'overwrite' || a.op === 'remove'));
@@ -359,7 +457,23 @@ export interface Finding { field: string; message: string }
 export interface LintReport { errors: Finding[]; warnings: Finding[] }
 export interface AssetLint { kind: string; name: string; report: LintReport }
 export interface LintAll { assets: AssetLint[]; problems: Problem[]; errors: number; warnings: number }
-export interface RepoStatus { head: string; dirty: number; ahead: number | null; behind: number | null; has_upstream: boolean }
+/** One uncommitted change, per asset (`repo::RepoChange`, G2.6). */
+export interface RepoChange { path: string; status: 'A' | 'M' | 'D' | string }
+export interface RepoStatus {
+  head: string; dirty: number; ahead: number | null; behind: number | null; has_upstream: boolean;
+  /** Absent from an older hub. */
+  changes?: RepoChange[];
+}
+
+/** The commit message the Commit form starts from, by rule from the
+ *  changes (mirrors `repo::commit_message_for`). */
+export function commitMessageFor(changes: readonly RepoChange[]): string {
+  if (changes.length === 0) return 'catalog: commit pending changes';
+  const verb = changes.every((c) => c.status === 'A') ? 'add' : changes.every((c) => c.status === 'D') ? 'remove' : 'update';
+  const named = changes.slice(0, 3).map((c) => c.path);
+  const more = changes.length - named.length;
+  return `catalog: ${verb} ${named.join(', ')}${more > 0 ? ` (+${more})` : ''}`;
+}
 export interface WriteResult { commit: string; lint: LintReport }
 
 /** The neutral tool vocabulary (`service/catalog/model.rs::TOOLS`). An
@@ -381,6 +495,7 @@ export const KIND_FIELDS: Record<AssetKind, string[]> = {
   hook: ['event', 'action'],
   mcp_server: ['transport', 'url', 'command', 'args', 'env'],
   plugin_ref: ['harness', 'marketplace', 'plugin'],
+  command: ['allowed_tools', 'argument_hint', 'model'],
 };
 
 /** The most recently loaded repo status (dirty/ahead/behind/head), refreshed
@@ -447,11 +562,18 @@ export function assetTemplate(kind: string, name: string): Promise<Result<Editab
  *  omitted) to a freshly spawned interactive session in the catalog repo.
  *  Abortable like `applySync` — the wrapper injects a `call_id`. */
 export function spawnAuthorSession(
-  f: { kind?: string; name?: string; instructions: string },
+  f: { kind?: string; name?: string; instructions: string; host?: string },
   signal?: AbortSignal,
 ): Promise<Result<SessionRow>> {
   return invokeCmdAbortable<SessionRow>('catalog_spawn_author_session', {
-    args: { kind: f.kind ?? null, name: f.name ?? null, instructions: f.instructions },
+    args: {
+      kind: f.kind ?? null,
+      name: f.name ?? null,
+      instructions: f.instructions,
+      // G2.6: the Host picker; `local` (the catalog's own checkout) is the
+      // default and is not sent, so an older backend reads the same args.
+      ...(f.host && f.host !== 'local' ? { host_alias: f.host } : {}),
+    },
   }, signal);
 }
 

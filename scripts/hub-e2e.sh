@@ -17,6 +17,9 @@
 # Hub C: --local-host false, plus a fleet-agent dialing it over loopback. The
 #   agent is started with `run` (never `install`: no systemd, nothing written
 #   outside $ROOT), with its own HOME and its own tmux server under $ROOT.
+# Hub I: --local-host false, installs fleet-agent on host `e2ebox` with
+#   `install_agent` (Orbit Fleet 4.9) over scripts/e2e-fake-ssh.sh, which runs
+#   the "remote" commands here under HOME=$ROOT/ihome and never systemd.
 # Hub W (work graph M10.2, only when WBIN is set): a fleet-hub built with the
 #   test-only `e2e` feature, with its own HOME and tmux server under $ROOT, a
 #   fake Jira Cloud (scripts/e2e-fake-jira.py) and a fake Claude
@@ -62,6 +65,10 @@ echo "hub-e2e: log root: $ROOT"
 # never trips on it and cleanup() can always test it safely.
 EV_PID=""
 WEV_PIDS=""
+# The multi-user M1 section's own background jobs (two /events streams, one
+# reconnect and a parked long poll): same reason as EV_PID above, and that
+# section empties it again as soon as each is reaped.
+MU_PIDS=""
 # Whatever happens, leave nothing running: every hub and agent this script
 # started records a pid file under $ROOT, and the agent's tmux server lives
 # under $ROOT/tmux (a short path: a tmux socket path is capped at 108 bytes).
@@ -78,6 +85,8 @@ cleanup() {
   [ -d "${ROOT:?}/tmux" ] && env -u TMUX -u TMUX_PANE TMUX_TMPDIR="${ROOT:?}/tmux" tmux kill-server 2>/dev/null
   # Hub W's own tmux server (the work-graph leg).
   [ -d "${ROOT:?}/wt" ] && env -u TMUX -u TMUX_PANE TMUX_TMPDIR="${ROOT:?}/wt" tmux kill-server 2>/dev/null
+  # The install leg's host (e2ebox).
+  [ -d "${ROOT:?}/itmux" ] && env -u TMUX -u TMUX_PANE TMUX_TMPDIR="${ROOT:?}/itmux" tmux kill-server 2>/dev/null
   # Not pid-filed like the hubs/agent above: kill it directly if a SIGTERM
   # lands between it starting and its own explicit `kill "$EV_PID"`.
   if [ -n "$EV_PID" ]; then
@@ -88,11 +97,16 @@ cleanup() {
     kill "$pid" 2>/dev/null
     wait "$pid" 2>/dev/null
   done
+  for pid in $MU_PIDS; do
+    kill "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+  done
   # Hub A manages this machine's own (non-isolated) tmux server directly, so a
   # session it created there can outlive a run that is interrupted before its
   # own kill_session step runs. Sweep this run's session names, if any are
   # still around, on that default server too.
-  for n in "${NAME:-}" "${NAME2:-}" "${NAME3:-}" "${NAME4:-}" "${NAME5:-}"; do
+  for n in "${NAME:-}" "${NAME2:-}" "${NAME3:-}" "${NAME4:-}" "${NAME5:-}" \
+           "${NAME6:-}" "${NAME7:-}"; do
     [ -n "$n" ] && tmux has-session -t "$n" 2>/dev/null && tmux kill-session -t "$n" 2>/dev/null
   done
   return 0
@@ -131,6 +145,15 @@ start_hub() { # name port extra-args...
   return 1
 }
 stop_hub() { local pid; pid=$(cat "$ROOT/$1.pid"); kill -TERM "$pid"; wait "$pid"; STOP_RC=$?; rm -f "$ROOT/$1.pid"; }
+# with_timeout SECS CMD...: CMD, killed after SECS. macOS has no timeout(1)
+# (coreutils), so without it or Homebrew's gtimeout, perl's alarm stands in:
+# it survives the exec, and the SIGALRM ends CMD (exit 142).
+with_timeout() {
+  if command -v timeout >/dev/null; then timeout "$@"
+  elif command -v gtimeout >/dev/null; then gtimeout "$@"
+  else perl -e 'alarm shift; exec @ARGV or die "exec $ARGV[0]: $!\n"' "$@"
+  fi
+}
 # until TRIES CONDITION: poll every 0.2 s, at most TRIES times.
 until_ok() { local n=$1 _; for _ in $(seq "$n"); do eval "$2" && return 0; sleep 0.2; done; return 1; }
 
@@ -248,7 +271,7 @@ else
   # by the same three names a successful run would have used (never
   # "session id parsed from new_shell_session" here -- that name belongs to
   # the nested SID branch above, a different failure that this path never
-  # reaches), so the tally still adds up to the documented 117 checks.
+  # reaches), so the tally still adds up.
   bad "new_shell_session on local creates a tmux session" "skipped: no fixture project id (see 'list_projects finds the fixture repository' above)"
   bad "capture_session sees the marker" "skipped: no fixture project id"
   bad "kill_session removes the tmux session" "skipped: no fixture project id"
@@ -261,9 +284,21 @@ echo "== Client access (pairing, /events, a client token's reach)"
 # so every redemption below is spaced by that budget. Kept as one named
 # constant so a change to it is a one-line edit here too.
 PAIR_INTERVAL=7
-redeem() { # code -> the /pair response body
-  curl -s -m 10 -X POST "http://127.0.0.1:$PA/pair" \
-    -H "Host: $PUB" -H 'Content-Type: application/json' -d "{\"code\":\"$1\"}"
+redeem() { # code [peer address] -> the /pair response body
+  # With an address, the attempt is bucketed under IT rather than under the
+  # loopback peer: `mcp/pairing.rs::limiter_key` believes the last
+  # `X-Forwarded-For` hop from a trusted front end, and loopback is one. That
+  # is how the multi-user M1 section below pairs two people back to back
+  # without spending a PAIR_INTERVAL between them. Two branches rather than an
+  # array: `"${a[@]}"` on an empty array trips `set -u` on bash 3.2 (macOS).
+  if [ -n "${2:-}" ]; then
+    curl -s -m 10 -X POST "http://127.0.0.1:$PA/pair" \
+      -H "Host: $PUB" -H "X-Forwarded-For: $2" \
+      -H 'Content-Type: application/json' -d "{\"code\":\"$1\"}"
+  else
+    curl -s -m 10 -X POST "http://127.0.0.1:$PA/pair" \
+      -H "Host: $PUB" -H 'Content-Type: application/json' -d "{\"code\":\"$1\"}"
+  fi
 }
 pair_code() { # tool-response -> the 8-character code out of the escaped JSON
   echo "$1" | grep -oE '\\"code\\": ?\\"[0-9A-Z]{8}\\"' | grep -oE '[0-9A-Z]{8}' | head -1
@@ -333,6 +368,11 @@ pp_c=$(tool "$PA" "$PUB" "$CTOK" setting_proposals '{}')
 check "the device proposes instead, and sees its proposal with can_write false" 'echo "$sp_c" | grep -q "\"isError\":false" && echo "$pp_c" | grep -q "can_write.*false" && echo "$pp_c" | grep -q "work.recent_days"' "${sp_c:0:300} / ${pp_c:0:300}"
 pp_m=$(tool "$PA" "$PUB" "$TOKA" setting_proposals '{}')
 check "the review tools are the device's: the master uses fleet-hub settings" 'echo "$pp_m" | grep -q E_FORBIDDEN' "${pp_m:0:300}"
+# Once the operator vouches for it, the same device writes.
+tr_c=$("$BIN" client trust "e2e phone" --data-dir "$ROOT/a" --port "$PA" 2>&1); rc=$?
+ss_t=$(tool "$PA" "$PUB" "$CTOK" set_setting '{"key":"work.recent_days","value":11}')
+gs_t=$(tool "$PA" "$PUB" "$CTOK" get_settings '{}')
+check "a device the operator trusts writes a setting, and reads it back" '[ $rc -eq 0 ] && echo "$ss_t" | grep -q "\"isError\":false" && echo "$gs_t" | grep -qE "work\.recent_days[^0-9a-z]+11[^0-9]"' "${tr_c:0:200} / ${ss_t:0:300} / ${gs_t:0:300}"
 
 # --- GET /events -------------------------------------------------------------
 # One request, captured once: a second one inside AUTH_FAIL_INTERVAL would be
@@ -390,6 +430,263 @@ check "the other client still works" '[ "$(code -X POST "http://127.0.0.1:$PA/mc
 tbl2=$("$BIN" client list --include-revoked --data-dir "$ROOT/a" --port "$PA" 2>&1)
 check "a revoked client stays listed for the audit trail" 'echo "$tbl2" | grep -q "e2e phone"' "$tbl2"
 check "and is gone from the live list" '! "$BIN" client list --data-dir "$ROOT/a" --port "$PA" 2>&1 | grep -q "e2e phone"' "$("$BIN" client list --data-dir "$ROOT/a" --port "$PA" 2>&1)"
+
+# --- multi-user M1: two people on one hub (T15) -------------------------------
+# The acceptance run for migrations 096_people / 097_session_owner /
+# 098_session_grants / 099_tasks_detach against a real daemon. The authorities
+# are docs/superpowers/specs/2026-09-30-multi-user-gap-analysis.md -- §4.3 for
+# ownership, the two `visibility` values, the seven grant invariants and the
+# `own` TIER's membership, §4.4 for the shared-host rule -- and the task list
+# docs/superpowers/plans/2026-09-30-multi-user-m1-private-sessions.md (T15).
+#
+# It lives in THIS block, not the hub-W one: W is gated on $WBIN (an
+# `--features e2e` build), on `jq` and on the fake tracker, and skips outside
+# CI, while privacy is the thing that must be proven on every local run.
+# Everything below therefore uses this block's own idioms -- `redeem` /
+# `pair_code`, which read the escaped JSON with grep, and never `jq`.
+#
+# Hub A has exactly ONE person right now: migration 096 mints this hub's
+# personal owner, and nothing here has added another. The two pairings below
+# make three, which is what every withholding rule keys on
+# (`Store::sole_enabled_person` -- `None` for a hub with two or more, never a
+# fall-back to the owner). So the one-person reads are taken FIRST, as the
+# positive control for the withholding ones.
+echo "-- multi-user M1 (two people, private sessions, one shared session)"
+MU_A=m1ada          # the owner, in the hub's `people` table
+MU_B=m1bo           # the other person
+NAME6="hube2eU$RANDOM"   # a tmux session fleet did NOT start -> `unclaimed`
+NAME7="hube2eP$RANDOM"   # the session ada starts, private to her
+MU_FR="m1label$RANDOM"   # her friendly name, and §4.3 content
+MU_TAG="m1tag$RANDOM"    # her tag, and §4.3 content
+MU_FR2="m1relabel$RANDOM"
+MU_FR3="m1after$RANDOM"
+MU_WT="m1wt$RANDOM"      # her branch, and §4.3 content ("what the work is")
+
+# `redeem` with an address per person: `POST /pair` allows one attempt per
+# address per ATTEMPT_INTERVAL, and from a loopback peer the hub believes the
+# last `X-Forwarded-For` hop (`mcp/pairing.rs::limiter_key`), so each
+# simulated person redeems out of its own bucket and no PAIR_INTERVAL wait is
+# needed between them.
+pair_token() { echo "$1" | grep -oE '"token":"[0-9a-f]{64}"' | grep -oE '[0-9a-f]{64}'; }
+pair_as() { # display-name person address -> that person's device token
+  local pc_ code_
+  pc_=$(tool "$PA" "$PUB" "$TOKA" pair_client "{\"name\":\"$1\",\"mode\":\"full\",\"person\":\"$2\"}")
+  code_=$(pair_code "$pc_")
+  [ ${#code_} -eq 8 ] || return 1
+  pair_token "$(redeem "$code_" "$3")"
+}
+# `await`, above, is bound to $SSE; these streams are their own files.
+awaitf() { local _; for _ in $(seq 160); do grep -q "$1" "$2" 2>/dev/null && return 0; sleep 0.25; done; return 1; }
+# The escaped-JSON reader the id/repo greps above use, for a numeric field.
+mu_num() { echo "$2" | grep -oE "\\\\\"$1\\\\\": ?[0-9]+" | grep -oE '[0-9]+$' | head -1; }
+
+# (1) An `unclaimed` row, and the count on a one-person hub ------------------
+# A tmux session nobody started through fleet: reconcile inserts it with
+# `owner_person_id = NULL` / `visibility = 'unclaimed'` (store/reconcile.rs --
+# a reconcile pass names no owner), which is the population §4.3's holding
+# state exists for.
+# A forced listing runs no pass of its own while another one (the hub's tick,
+# an earlier listing's catch-up) holds the gate: it reads the rows that pass
+# leaves, which may predate $NAME6. So force a pass until one has seen it,
+# bounded: a hub that never reconciles it still fails the check below.
+tmux new-session -d -s "$NAME6" 2>/dev/null
+unc1_seen() {
+  tool "$PA" "$PUB" "$TOKA" list_sessions '{"force":true}' >/dev/null
+  unc1=$("$BIN" session unclaimed --host local --data-dir "$ROOT/a" --port "$PA" 2>&1)
+  echo "$unc1" | grep -q "$NAME6"
+}
+until_ok 50 unc1_seen
+check "a tmux session fleet did not start is reconciled as an unclaimed row" 'echo "$unc1" | grep -q "$NAME6"' "$unc1"
+lh_m=$(tool "$PA" "$PUB" "$TOKA" list_hosts '{}')
+check "on a hub with one person that person is served the per-host unclaimed count" 'echo "$lh_m" | grep -qE "\\\\\"unclaimed_sessions\\\\\": ?[0-9]+"' "${lh_m:0:400}"
+
+# (2) Two devices, two people (acceptance 1) ---------------------------------
+TKADA=$(pair_as "m1 laptop (ada)" "$MU_A" 10.88.0.1)
+TKBO=$(pair_as "m1 laptop (bo)" "$MU_B" 10.88.0.2)
+plist=$("$BIN" person list --data-dir "$ROOT/a" --port "$PA" 2>&1)
+gr_a=$(tool "$PA" "$PUB" "${TKADA:-x}" my_grants '{}')
+gr_b=$(tool "$PA" "$PUB" "${TKBO:-x}" my_grants '{}')
+PID_ADA=$(mu_num person_id "$gr_a"); PID_BO=$(mu_num person_id "$gr_b")
+check "two devices pair as two different people the hub now knows by name" '[ ${#TKADA} -eq 64 ] && [ ${#TKBO} -eq 64 ] && echo "$plist" | grep -q "$MU_A" && echo "$plist" | grep -q "$MU_B" && [ -n "$PID_ADA" ] && [ -n "$PID_BO" ] && [ "$PID_ADA" != "$PID_BO" ]' "ada=${TKADA:0:8} bo=${TKBO:0:8} ids=$PID_ADA/$PID_BO | $plist"
+
+# (3) The unclaimed count is withheld now (acceptance 10) --------------------
+# `None`, not `Some(0)`: `0` is a claim about the host and a caller who may
+# not know is not entitled to it, so the assertion is that no NUMBER is
+# served -- the key itself is always on the wire, as `null` (store/rows.rs).
+# Org administration phase D: the hub's owner administers its hosts, so the
+# master (resolved to that owner) is still served the count; Ada and Bo,
+# neither the owner nor an admin, are not (`org_admin::unclaimed_reach`).
+lh_a=$(tool "$PA" "$PUB" "${TKADA:-x}" list_hosts '{}')
+lh_b=$(tool "$PA" "$PUB" "${TKBO:-x}" list_hosts '{}')
+lh_m2=$(tool "$PA" "$PUB" "$TOKA" list_hosts '{}')
+check "with two people on the hub the unclaimed count is absent from list_hosts for both of them" '! echo "$lh_a" | grep -qE "\\\\\"unclaimed_sessions\\\\\": ?[0-9]+" && ! echo "$lh_b" | grep -qE "\\\\\"unclaimed_sessions\\\\\": ?[0-9]+" && echo "$lh_a" | grep -qE "\\\\\"alias\\\\\": ?\\\\\"local\\\\\""' "${lh_a:0:300} | ${lh_b:0:300}"
+check "but the hub's owner, through the master, still administers its hosts and is served it" 'echo "$lh_m2" | grep -qE "\\\\\"unclaimed_sessions\\\\\": ?[0-9]+"' "${lh_m2:0:300}"
+unc2=$("$BIN" session unclaimed --data-dir "$ROOT/a" --port "$PA" 2>&1)
+check "and fleet-hub session unclaimed prints the count to the operator instead" 'echo "$unc2" | grep -qE "^local: [0-9]+$"' "$unc2"
+
+# (4) Ada starts a session (acceptance 2) ------------------------------------
+if [ -n "$PID_" ] && [ ${#TKADA} -eq 64 ] && [ ${#TKBO} -eq 64 ]; then
+  mkm=$(tool "$PA" "$PUB" "$TKADA" new_shell_session "{\"host_alias\":\"local\",\"project_id\":${PID_},\"name\":\"$NAME7\",\"new_worktree\":\"$MU_WT\",\"base_branch\":\"main\"}")
+  SIDM=$(mu_num id "$mkm"); WIDM=$(mu_num worktree_id "$mkm")
+  check "a session a person starts is private and owned by them, never by the hub" 'tmux has-session -t "$NAME7" 2>/dev/null && echo "$mkm" | grep -qE "\\\\\"visibility\\\\\": ?\\\\\"private\\\\\"" && echo "$mkm" | grep -qE "\\\\\"owner_person_id\\\\\": ?$PID_ADA([^0-9]|$)" && [ -n "$WIDM" ]' "$(echo "$mkm" | tail -c 500)"
+  tool "$PA" "$PUB" "$TKADA" set_friendly_name "{\"session_id\":${SIDM:-0},\"friendly_name\":\"$MU_FR\"}" >/dev/null
+  tool "$PA" "$PUB" "$TKADA" set_session_tags "{\"session_id\":${SIDM:-0},\"tags\":[\"$MU_TAG\"]}" >/dev/null
+else
+  bad "a session a person starts is private and owned by them, never by the hub" "skipped: no fixture project id, or a pairing failed (see above)"
+fi
+
+if [ -n "${SIDM:-}" ] && [ ${#TKBO} -eq 64 ]; then
+  # (5) Bo's listing names nothing about it (acceptance 3) -------------------
+  # Not "the id is missing": §4.3's table says a session's METADATA is
+  # content, so the tmux name (a branch or a ticket key), the friendly label
+  # and the tags must all be absent too.
+  ls_b=$(tool "$PA" "$PUB" "$TKBO" list_sessions '{}')
+  check "another person's list_sessions does not contain the session and names nothing about it" 'echo "$ls_b" | grep -q "\"isError\":false" && ! echo "$ls_b" | grep -q "$NAME7" && ! echo "$ls_b" | grep -q "$MU_FR" && ! echo "$ls_b" | grep -q "$MU_TAG" && ! echo "$ls_b" | grep -q "$MU_WT" && ! echo "$ls_b" | grep -qE "\\\\\"id\\\\\": ?$SIDM([^0-9]|$)"' "${ls_b:0:600}"
+
+  # (6) Shared at watch, and only watch (acceptance 4, 5) -------------------
+  sh1=$(tool "$PA" "$PUB" "$TKADA" session_share "{\"session_id\":$SIDM,\"person\":\"$MU_B\",\"level\":\"watch\"}")
+  check "the owner shares the session with the other person at watch" 'echo "$sh1" | grep -q "\"isError\":false"' "${sh1:0:400}"
+  ls_b2=$(tool "$PA" "$PUB" "$TKBO" list_sessions '{}')
+  check "the watcher now sees the shared session in list_sessions" 'echo "$ls_b2" | grep -q "$NAME7"' "${ls_b2:0:500}"
+  tmux send-keys -t "$NAME7" "echo m1-watch-marker" Enter; sleep 1
+  cap_b=$(tool "$PA" "$PUB" "$TKBO" capture_session "{\"session_id\":$SIDM}")
+  check "the watcher may read its pane: capture_session succeeds" 'echo "$cap_b" | grep -q m1-watch-marker' "${cap_b:0:400}"
+  sp_b=$(tool "$PA" "$PUB" "$TKBO" send_prompt "{\"session_id\":$SIDM,\"prompt\":\"hello from bo\"}")
+  check "but a watcher is refused send_prompt: a pane write needs drive" 'echo "$sp_b" | grep -q E_FORBIDDEN && echo "$sp_b" | grep -q "needs drive"' "${sp_b:0:400}"
+
+  # (7) The grant set the client derives access from (acceptance 6, R6-j) ---
+  gb=$(tool "$PA" "$PUB" "$TKBO" my_grants '{}')
+  MU_N=$(echo "$gb" | grep -oE '\\"session_id\\"' | wc -l | tr -d ' ')
+  check "the watcher's my_grants names that session at watch and nothing else" 'echo "$gb" | grep -qE "\\\\\"session_id\\\\\": ?$SIDM,[^}]*\\\\\"level\\\\\": ?\\\\\"watch\\\\\"" && [ "$MU_N" = 1 ]' "grants=$MU_N ${gb:0:400}"
+
+  # (8) The `own` tier: §4.3 invariant 5's list, which is its own authority --
+  # Every refusal must be the TIER's -- `E_FORBIDDEN` plus
+  # `Reach::Own::needed()`'s words -- and not an argument-validation or
+  # central-guard refusal that happens to share the code. All of these are
+  # `Access::Client`, so the central gate passes them through.
+  mu_own() { # tool args
+    MU_OUT=$(tool "$PA" "$PUB" "$TKBO" "$1" "$2")
+    check "a watcher is refused $1: the spec's own tier, which no grant reaches" 'echo "$MU_OUT" | grep -q E_FORBIDDEN && echo "$MU_OUT" | grep -q "ownership (no grant confers it)"' "${MU_OUT:0:300}"
+  }
+  mu_own kill_session        "{\"session_id\":$SIDM}"
+  mu_own safe_kill_session   "{\"session_id\":$SIDM}"
+  mu_own restart_session     "{\"session_id\":$SIDM}"
+  mu_own recreate_session    "{\"session_id\":$SIDM}"
+  mu_own move_session        "{\"session_id\":$SIDM,\"target_host_alias\":\"local\",\"dry_run\":true}"
+  mu_own spawn_review        "{\"source_session_id\":$SIDM,\"prompt\":\"review this\"}"
+  mu_own rewind_conversation "{\"session_id\":$SIDM,\"mode\":\"fork\"}"
+  mu_own rename_session      "{\"session_id\":$SIDM,\"new_name\":\"${NAME7}x\"}"
+  mu_own set_session_tags    "{\"session_id\":$SIDM,\"tags\":[\"$MU_TAG-bo\"]}"
+  # acceptance 7 -- a grantee cannot grant on (§4.3 invariant 2), enforced at
+  # the same tier as the rest.
+  mu_own session_share       "{\"session_id\":$SIDM,\"person\":\"$MU_A\",\"level\":\"watch\"}"
+  mu_own session_unshare     "{\"session_id\":$SIDM,\"person\":\"$MU_A\"}"
+  mu_own session_narrow      "{\"session_id\":$SIDM,\"person\":\"$MU_A\"}"
+  check "and the session the watcher could not kill is still running" 'tmux has-session -t "$NAME7" 2>/dev/null' "the tmux session is gone"
+  # `delete_worktree` is session-addressed WITHOUT naming a session, so its
+  # refusal is the worktree's and has its own words.
+  if [ -n "${WIDM:-}" ]; then
+    dw_b=$(tool "$PA" "$PUB" "$TKBO" delete_worktree "{\"worktree_id\":$WIDM}")
+    check "a watcher is refused delete_worktree: removing the checkout destroys the work in it" 'echo "$dw_b" | grep -q E_FORBIDDEN && echo "$dw_b" | grep -q "needs \`own\`, which no grant reaches"' "${dw_b:0:400}"
+  else
+    bad "a watcher is refused delete_worktree: removing the checkout destroys the work in it" "skipped: no worktree_id on the new session row"
+  fi
+  # `restore_host_sessions` batches `recreate_session`, so §4.3 names both
+  # ("gating one and not the other gates nothing"). It answers per ITEM: an
+  # id the caller named reads exactly like one that names no session, so the
+  # owner's own dry run is the control that the difference is the fence.
+  rs_b=$(tool "$PA" "$PUB" "$TKBO" restore_host_sessions "{\"host_alias\":\"local\",\"dry_run\":true,\"session_ids\":[$SIDM]}")
+  rs_a=$(tool "$PA" "$PUB" "$TKADA" restore_host_sessions "{\"host_alias\":\"local\",\"dry_run\":true,\"session_ids\":[$SIDM]}")
+  check "a watcher's restore_host_sessions dry run answers as an id that names nothing, while the owner's names the session" 'echo "$rs_b" | grep -q "not found on this host" && ! echo "$rs_b" | grep -q "$NAME7" && ! echo "$rs_b" | grep -q "$MU_FR" && echo "$rs_a" | grep -q "$NAME7" && ! echo "$rs_a" | grep -q "not found on this host"' "bo=${rs_b:0:300} | ada=${rs_a:0:300}"
+  # The batch form of a kill: `work_link { tidy_apply }` takes the same
+  # `Reach::Own` per item, and a refused item carries the gate's sentence.
+  ta_b=$(tool "$PA" "$PUB" "$TKBO" work_link "{\"action\":\"tidy_apply\",\"items\":[{\"session_id\":$SIDM,\"action\":\"kill\"}]}")
+  check "nor may a watcher kill it through work_link tidy_apply, the batch form of the same operation" 'echo "$ta_b" | grep -q "ownership (no grant confers it)" && tmux has-session -t "$NAME7" 2>/dev/null' "${ta_b:0:400}"
+
+  # (9) A grant moves downward only (acceptance 6b, 9) ----------------------
+  un1=$(tool "$PA" "$PUB" "$TKADA" session_unshare "{\"session_id\":$SIDM,\"person\":\"$MU_B\"}")
+  gb2=$(tool "$PA" "$PUB" "$TKBO" my_grants '{}')
+  check "after the revoke the watcher's my_grants names that session no longer" 'echo "$un1" | grep -q "\"isError\":false" && ! echo "$gb2" | grep -qE "\\\\\"session_id\\\\\": ?$SIDM([^0-9]|$)"' "${un1:0:200} | ${gb2:0:400}"
+  sh2=$(tool "$PA" "$PUB" "$TKADA" session_share "{\"session_id\":$SIDM,\"person\":\"$MU_B\",\"level\":\"drive\"}")
+  gb3=$(tool "$PA" "$PUB" "$TKBO" my_grants '{}')
+  spd=$(tool "$PA" "$PUB" "$TKBO" send_prompt "{\"session_id\":$SIDM,\"prompt\":\"\",\"keys\":\"Escape\"}")
+  check "re-shared at drive, the grantee's pane write is no longer refused" 'echo "$sh2" | grep -q "\"isError\":false" && echo "$gb3" | grep -qE "\\\\\"session_id\\\\\": ?$SIDM,[^}]*\\\\\"level\\\\\": ?\\\\\"drive\\\\\"" && ! echo "$spd" | grep -q E_FORBIDDEN' "${sh2:0:200} | ${gb3:0:300} | ${spd:0:300}"
+  na1=$(tool "$PA" "$PUB" "$TKADA" session_narrow "{\"session_id\":$SIDM,\"person\":\"$MU_B\"}")
+  gb4=$(tool "$PA" "$PUB" "$TKBO" my_grants '{}')
+  spw=$(tool "$PA" "$PUB" "$TKBO" send_prompt "{\"session_id\":$SIDM,\"prompt\":\"\",\"keys\":\"Escape\"}")
+  check "session_narrow lowers drive to watch, and the key press is refused again: a key needs answer" 'echo "$na1" | grep -q "\"isError\":false" && echo "$gb4" | grep -qE "\\\\\"session_id\\\\\": ?$SIDM,[^}]*\\\\\"level\\\\\": ?\\\\\"watch\\\\\"" && echo "$spw" | grep -q E_FORBIDDEN && echo "$spw" | grep -q "needs answer"' "${na1:0:200} | ${gb4:0:300} | ${spw:0:300}"
+  up1=$(tool "$PA" "$PUB" "$TKADA" session_share "{\"session_id\":$SIDM,\"person\":\"$MU_B\",\"level\":\"drive\"}")
+  na2=$(tool "$PA" "$PUB" "$TKADA" session_narrow "{\"session_id\":$SIDM,\"person\":\"$MU_B\"}")
+  gb5=$(tool "$PA" "$PUB" "$TKBO" my_grants '{}')
+  check "and no call raises it back: re-granting is E_EXISTS and a second narrow still reads watch" 'echo "$up1" | grep -q E_EXISTS && echo "$up1" | grep -q "re-granting never raises a level" && echo "$gb5" | grep -qE "\\\\\"session_id\\\\\": ?$SIDM,[^}]*\\\\\"level\\\\\": ?\\\\\"watch\\\\\"" && ! echo "$gb5" | grep -q "drive"' "${up1:0:300} | ${na2:0:200} | ${gb5:0:300}"
+
+  # (10) The live stream and a long poll across the revoke (acceptance 11, 12)
+  # Ada's stream is the control: the revoke does not move HER scope, so hers
+  # stays up and carries the touch that bo's must not.
+  SSEADA="$ROOT/events-m1-ada.sse"; SSEBO="$ROOT/events-m1-bo.sse"; SSEBO2="$ROOT/events-m1-bo-resumed.sse"
+  curl -sN -m 120 "http://127.0.0.1:$PA/events?kinds=session" -H "Host: $PUB" -H "Authorization: Bearer $TKADA" >"$SSEADA" 2>/dev/null &
+  EVADA=$!; MU_PIDS="$MU_PIDS $EVADA"
+  curl -sN -m 120 "http://127.0.0.1:$PA/events?kinds=session" -H "Host: $PUB" -H "Authorization: Bearer $TKBO" >"$SSEBO" 2>/dev/null &
+  EVBO=$!; MU_PIDS="$MU_PIDS $EVBO"
+  awaitf "^event: ready" "$SSEADA"; awaitf "^event: ready" "$SSEBO"
+  tool "$PA" "$PUB" "$TKADA" set_friendly_name "{\"session_id\":$SIDM,\"friendly_name\":\"$MU_FR2\"}" >/dev/null
+  awaitf "$NAME7" "$SSEBO"
+  check "while the grant stands the watcher's /events stream carries the session" 'grep -q "^event: session:updated" "$SSEBO" && grep -q "$NAME7" "$SSEBO"' "$(tail -5 "$SSEBO" 2>/dev/null)"
+  LEID=$(grep '^id: ' "$SSEBO" | tail -1 | sed 's/^id: //')
+  # The long poll, parked before the revoke: `turn_gt` a turn no session will
+  # ever reach, so it can only end on the timeout or on the re-check.
+  MUW="$ROOT/m1-bo-wait.json"
+  ( t0=$(date +%s)
+    o=$(tool "$PA" "$PUB" "$TKBO" wait_for_session "{\"session_id\":$SIDM,\"until\":\"turn_gt\",\"turn\":999999999,\"timeout_s\":60}")
+    printf '%s\nMU_ELAPSED=%s\n' "$o" "$(( $(date +%s) - t0 ))" >"$MUW" ) &
+  MUWPID=$!; MU_PIDS="$MU_PIDS $MUWPID"
+  sleep 3
+  un2=$(tool "$PA" "$PUB" "$TKADA" session_unshare "{\"session_id\":$SIDM,\"person\":\"$MU_B\"}")
+  wait "$MUWPID" 2>/dev/null
+  MU_EL=$(sed -n 's/^MU_ELAPSED=//p' "$MUW" 2>/dev/null)
+  check "a long poll the watcher started before the revoke returns E_NOTFOUND after it, not the session" '[ -n "$MU_EL" ] && [ "$MU_EL" -ge 3 ] && [ "$MU_EL" -lt 55 ] && grep -q E_NOTFOUND "$MUW" && ! grep -q satisfied "$MUW"' "elapsed=${MU_EL:-?} $(head -c 400 "$MUW" 2>/dev/null)"
+  check "and the watcher's open /events stream ends when the grant is revoked" 'echo "$un2" | grep -q "\"isError\":false" && until_ok 120 "! kill -0 $EVBO 2>/dev/null"' "${un2:0:200} / still streaming"
+  wait "$EVBO" 2>/dev/null
+  # The resume half, which a stream-only assertion would miss (T9d): the ring
+  # is replayed to the hub's own reader and to nobody else, so a client's
+  # `Last-Event-ID` is answered `resumed: false` -- re-list -- and the gap is
+  # never handed over under the scope it was minted in.
+  if [ -n "$LEID" ]; then
+    curl -sN -m 60 "http://127.0.0.1:$PA/events?kinds=session" -H "Host: $PUB" \
+      -H "Authorization: Bearer $TKBO" -H "Last-Event-ID: $LEID" >"$SSEBO2" 2>/dev/null &
+    EVBO2=$!; MU_PIDS="$MU_PIDS $EVBO2"
+    awaitf "^event: ready" "$SSEBO2"
+    tool "$PA" "$PUB" "$TKADA" set_friendly_name "{\"session_id\":$SIDM,\"friendly_name\":\"$MU_FR3\"}" >/dev/null
+    awaitf "$MU_FR3" "$SSEADA"
+    check "the revoked watcher's resumed reconnect is answered resumed:false and never carries the session" 'grep -A1 "^event: ready" "$SSEBO2" | grep -q "\"resumed\":false" && ! grep -q "$NAME7" "$SSEBO2" && ! grep -q "$MU_FR3" "$SSEBO2" && grep -q "$MU_FR3" "$SSEADA"' "bo: $(head -c 400 "$SSEBO2" 2>/dev/null) | ada: $(grep -c "$MU_FR3" "$SSEADA" 2>/dev/null)"
+    kill "$EVBO2" 2>/dev/null; wait "$EVBO2" 2>/dev/null
+  else
+    bad "the revoked watcher's resumed reconnect is answered resumed:false and never carries the session" "skipped: no Last-Event-ID was minted on the watcher's first stream"
+  fi
+  kill "$EVADA" 2>/dev/null; wait "$EVADA" 2>/dev/null
+  MU_PIDS=""
+
+  # The owner, unlike the watcher, may dispose of her own session.
+  km=$(tool "$PA" "$PUB" "$TKADA" kill_session "{\"session_id\":$SIDM}")
+  check "the owner, who was refused nothing, kills her own session" '! tmux has-session -t "$NAME7" 2>/dev/null' "${km:0:400}"
+else
+  for s in \
+    "another person's list_sessions does not contain the session and names nothing about it" \
+    "the owner shares the session with the other person at watch" \
+    "the watcher now sees the shared session in list_sessions" \
+    "the watcher may read its pane: capture_session succeeds" \
+    "but a watcher is refused send_prompt: a pane write needs drive" \
+    "the watcher's my_grants names that session at watch and nothing else" \
+    "a watcher's restore_host_sessions dry run answers as an id that names nothing, while the owner's names the session" \
+    "after the revoke the watcher's my_grants names that session no longer" \
+    "session_narrow lowers drive to watch, and the key press is refused again: a key needs answer" \
+    "a long poll the watcher started before the revoke returns E_NOTFOUND after it, not the session" \
+    "and the watcher's open /events stream ends when the grant is revoked" \
+    "the revoked watcher's resumed reconnect is answered resumed:false and never carries the session"; do
+    bad "$s" "skipped: ada's session was never created (see the check above)"
+  done
+fi
+tmux kill-session -t "$NAME6" 2>/dev/null
 
 stop_hub a
 check "SIGTERM exits 0" '[ "$STOP_RC" = 0 ]' "exit $STOP_RC"
@@ -466,6 +763,61 @@ out=$("$BIN" guides approve "$GID" --data-dir "$ROOT/c" 2>&1)
 check "fleet-hub guides approve puts it on the pages" 'echo "$out" | grep -q "approved #$GID"' "$out"
 gl=$(tool "$PC" "$PUB" "$ATOK" guide '{"action":"list"}')
 check "the host's session sees the live guide, and may not decide" '[ "$(gtext "$gl" | jq -r ".guides[0].id")" = guide.e2e ] && [ "$(gtext "$gl" | jq -r .can_write)" = false ]' "${gl:0:300}"
+gv2=$(tool "$PC" "$PUB" "$ATOK" guide "{\"action\":\"validate\",\"spec\":$GSPEC}")
+check "guide validate passes a good spec" '[ "$(gtext "$gv2" | jq -r .ok)" = true ]' "${gv2:0:300}"
+
+# The person's half, the path the desktop's Guides page takes: a paired
+# device decides and removes once the operator trusts it; a readonly one is
+# refused the tool outright (`guide` is not a readonly tool in mcp/guard.rs).
+# Each device redeems from its own X-Forwarded-For address, so the /pair
+# limiter needs no PAIR_INTERVAL between them (see `redeem`, hub A).
+pair_on_c() { # name mode address -> that device's token
+  local code_
+  code_=$(pair_code "$(tool "$PC" "$PUB" "$TOKC" pair_client "{\"name\":\"$1\",\"mode\":\"$2\"}")")
+  [ ${#code_} -eq 8 ] || return 1
+  pair_token "$(curl -s -m 10 -X POST "http://127.0.0.1:$PC/pair" -H "Host: $PUB" -H "X-Forwarded-For: $3" \
+    -H 'Content-Type: application/json' -d "{\"code\":\"$code_\"}")"
+}
+gcli() { "$BIN" guides "$@" --data-dir "$ROOT/c" 2>&1; }
+live_ids() { "$BIN" guides list --json --data-dir "$ROOT/c" | jq -r '[.guides[].id] | join(",")'; }
+GDESK=$(pair_on_c e2e-guide-desk full 10.77.0.1)
+GKIOSK=$(pair_on_c e2e-guide-kiosk readonly 10.77.0.2)
+check "a full and a readonly device pair on hub C" '[ ${#GDESK} -eq 64 ] && [ ${#GKIOSK} -eq 64 ]' "desk=${GDESK:0:8} kiosk=${GKIOSK:0:8}"
+GDESK=${GDESK:-x}; GKIOSK=${GKIOSK:-x}
+gp2=$(tool "$PC" "$PUB" "$ATOK" guide "{\"action\":\"propose\",\"spec\":${GSPEC/guide.e2e/guide.e2e2},\"why\":\"e2e\"}")
+GID2=$(gtext "$gp2" | jq -r .id)
+gd_u=$(tool "$PC" "$PUB" "$GDESK" guide "{\"action\":\"decide\",\"id\":${GID2:-0},\"approve\":true}")
+gl_u=$(tool "$PC" "$PUB" "$GDESK" guide '{"action":"list"}')
+check "an untrusted device may not decide, is told to be trusted, and lists with can_write false" 'echo "$gd_u" | grep -q E_FORBIDDEN && echo "$gd_u" | grep -q "client trust e2e-guide-desk" && [ "$(gtext "$gl_u" | jq -r .can_write)" = false ]' "${gd_u:0:300} / ${gl_u:0:300}"
+out=$("$BIN" client trust e2e-guide-desk --data-dir "$ROOT/c" --port "$PC" 2>&1); rc=$?
+check "fleet-hub client trust vouches for the device" '[ $rc -eq 0 ] && echo "$out" | grep -q "trusted e2e-guide-desk"' "$out"
+gl_t=$(tool "$PC" "$PUB" "$GDESK" guide '{"action":"list"}')
+check "the trusted device lists with can_write true and sees the proposal" '[ "$(gtext "$gl_t" | jq -r .can_write)" = true ] && [ "$(gtext "$gl_t" | jq "[.proposals[] | select(.id == ${GID2:-0})] | length")" = 1 ]' "${gl_t:0:300}"
+gi_s=$(tool "$PC" "$PUB" "$GDESK" guide '{"action":"validate"}')
+gi_i=$(tool "$PC" "$PUB" "$GDESK" guide '{"action":"decide","approve":true}')
+gi_a=$(tool "$PC" "$PUB" "$GDESK" guide "{\"action\":\"decide\",\"id\":${GID2:-0}}")
+gi_p=$(tool "$PC" "$PUB" "$GDESK" guide '{"action":"remove"}')
+check "a missing spec, id, approve or page_id is E_INVALID, naming the field" 'echo "$gi_s" | grep -q "E_INVALID.*spec is required" && echo "$gi_i" | grep -q "E_INVALID.*id is required" && echo "$gi_a" | grep -q "E_INVALID.*approve is required" && echo "$gi_p" | grep -q "E_INVALID.*page_id is required"' "${gi_s:0:200} / ${gi_i:0:200} / ${gi_a:0:200} / ${gi_p:0:200}"
+check "and none of them decided anything" '[ "$(live_ids)" = guide.e2e ]' "live: $(live_ids)"
+gd_t=$(tool "$PC" "$PUB" "$GDESK" guide "{\"action\":\"decide\",\"id\":${GID2:-0},\"approve\":true}")
+check "the trusted device approves over the wire: the guide goes live" '[ "$(gtext "$gd_t" | jq "[.guides[] | select(.id == \"guide.e2e2\")] | length")" = 1 ] && live_ids | grep -q "guide.e2e2"' "${gd_t:0:300} / live: $(live_ids)"
+gk_l=$(tool "$PC" "$PUB" "$GKIOSK" guide '{"action":"list"}')
+gk_d=$(tool "$PC" "$PUB" "$GKIOSK" guide "{\"action\":\"decide\",\"id\":${GID2:-0},\"approve\":false}")
+gk_r=$(tool "$PC" "$PUB" "$GKIOSK" guide '{"action":"remove","page_id":"guide.e2e2"}')
+check "a readonly device is refused the guide tool, list included" '[ "$(printf "%s\n" "$gk_l" "$gk_d" "$gk_r" | grep -c "E_FORBIDDEN.*readonly token")" = 3 ]' "${gk_l:0:200} / ${gk_d:0:200} / ${gk_r:0:200}"
+check "and the guide it tried to remove is still live" 'live_ids | grep -q "guide.e2e2"' "live: $(live_ids)"
+gr_t=$(tool "$PC" "$PUB" "$GDESK" guide '{"action":"remove","page_id":"guide.e2e2"}')
+check "the trusted device removes it over the wire" '[ "$(gtext "$gr_t" | jq "[.guides[] | select(.id == \"guide.e2e2\")] | length")" = 0 ] && [ "$(live_ids)" = guide.e2e ]' "${gr_t:0:300} / live: $(live_ids)"
+
+# The operator's other verbs: show and reject a proposal, remove a live guide.
+gp3=$(tool "$PC" "$PUB" "$ATOK" guide "{\"action\":\"propose\",\"spec\":${GSPEC/guide.e2e/guide.e2e3},\"why\":\"e2e\"}")
+GID3=$(gtext "$gp3" | jq -r .id)
+out=$(gcli show "${GID3:-0}")
+check "fleet-hub guides show prints the proposal's steps and the settings it touches" 'echo "$out" | grep -q "(guide.e2e3)" && echo "$out" | grep -q "^1. Why" && echo "$out" | grep -q "change: gc.enabled"' "$out"
+out=$(gcli reject "${GID3:-0}")
+check "fleet-hub guides reject drops it: not live, no longer waiting" 'echo "$out" | grep -q "rejected #$GID3" && ! live_ids | grep -q guide.e2e3 && "$BIN" guides list --json --data-dir "$ROOT/c" | jq -e ".proposals == []" >/dev/null' "$out"
+out=$(gcli remove guide.e2e)
+check "fleet-hub guides remove takes the live guide off the pages" 'echo "$out" | grep -q "removed guide.e2e" && [ -z "$(live_ids)" ]' "$out / live: $(live_ids)"
 
 start_agent agent1 "$ATOK"
 until_ok 50 connected
@@ -487,13 +839,55 @@ check "probe_host over the agent: reachable, tmux version read" 'echo "$pr" | gr
 # the agent: the reconcile that finds it, send-keys, capture-pane, kill-session.
 aenv tmux new-session -d -s agt1 -c "$AHOME" "echo agent-e2e-marker; exec bash --noprofile --norc"
 aenv tmux new-session -d -s agt2 -c "$AHOME" "exec bash --noprofile --norc"
-ls_a=$(tool "$PC" "$PUB" "$TOKC" list_sessions "{\"host_alias\":\"$AH\",\"force\":true}")
+# `force` does not duplicate a reconcile pass already in flight: it answers
+# that pass's rows, which predate these sessions when the background tick
+# started first (reconcile.rs::refresh_sessions). So poll until a pass has
+# seen them; one call flaked whenever the tick lined up with it.
+list_agent() { ls_a=$(tool "$PC" "$PUB" "$TOKC" list_sessions "{\"host_alias\":\"$AH\",\"force\":true}"); }
+until_ok 50 'list_agent; echo "$ls_a" | grep -q agt1 && echo "$ls_a" | grep -q agt2'
 check "list_sessions finds the host's tmux sessions over the agent" 'echo "$ls_a" | grep -q agt1 && echo "$ls_a" | grep -q agt2' "${ls_a:0:400}"
 sid_of() { echo "$ls_a" | grep -oE "\\\\\"id\\\\\":[0-9]+,[^}]*\\\\\"tmux_name\\\\\":\\\\\"$1\\\\\"" | grep -oE '^\\"id\\":[0-9]+' | grep -oE '[0-9]+'; }
 S1=$(sid_of agt1); S2=$(sid_of agt2)
 check "session ids parsed" '[ -n "$S1" ] && [ -n "$S2" ]' "${ls_a:0:400}"
 cap=$(tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S1:-0}}")
 check "capture_session reads the pane over the agent" 'echo "$cap" | grep -q agent-e2e-marker' "${cap:0:400}"
+
+echo "== Chat forms (ask)"
+PANE1=$(aenv tmux display-message -p -t agt1 '#{pane_id}')
+ask_rpc() {  # like rpc, with the pane header an agent's MCP entry sends
+  curl -s -m 70 -X POST "http://127.0.0.1:$PC/mcp" -H "Host: $PUB" -H "Authorization: Bearer $ATOK" \
+    -H "X-Fleet-Pane: $PANE1" -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"ask\",\"arguments\":$1}}"
+}
+FORM='{"spec":"fleet.form/1","title":"E2E","steps":[{"title":"One","fields":[{"name":"color","type":"select","label":"Color","required":true,"options":[["red","Red"],["blue","Blue"]]},{"name":"pw","type":"secret","label":"Password"}]}]}'
+ASK_OUT="$ROOT/ask.out"
+( ask_rpc "{\"form\":$FORM,\"timeout_s\":60}" > "$ASK_OUT" ) &
+ASK_PID=$!; MU_PIDS="$MU_PIDS $ASK_PID"
+FID=""
+for _ in $(seq 1 50); do
+  FID=$(tool "$PC" "$PUB" "$TOKC" ask '{"list":{"state":"pending"}}' | grep -o 'f_[0-9A-Za-z]\{16\}' | head -1)
+  [ -n "$FID" ] && break
+  python3 -c 'import time; time.sleep(0.2)'
+done
+check "an agent's ask opens a pending form" '[ -n "$FID" ]' "no pending form listed"
+if [ -z "$FID" ]; then
+  kill "$ASK_PID" 2>/dev/null; wait "$ASK_PID" 2>/dev/null
+  for n in "a host token cannot answer a form" "the master answers it" "the agent's call returns the answers" \
+           "the secret is not in the agent's result" "the secret file is on the host, 0600"; do
+    bad "$n" "skipped: no pending form was listed ($(head -c 300 "$ASK_OUT" 2>/dev/null))"
+  done
+else
+deny=$(ask_rpc "{\"answer\":\"$FID\",\"values\":{\"color\":\"red\"}}")
+check "a host token cannot answer a form" 'echo "$deny" | grep -q E_FORBIDDEN' "$deny"
+ans=$(tool "$PC" "$PUB" "$TOKC" ask "{\"answer\":\"$FID\",\"values\":{\"color\":\"blue\",\"pw\":\"e2e-secret\"}}")
+check "the master answers it" 'echo "$ans" | grep -qE "\\\\\"state\\\\\": ?\\\\\"answered\\\\\""' "$ans"
+wait "$ASK_PID"
+check "the agent's call returns the answers" 'grep -q "blue" "$ASK_OUT" && grep -qE "\\\\\"status\\\\\": ?\\\\\"answered\\\\\"" "$ASK_OUT"' "$(cat "$ASK_OUT")"
+check "the secret is not in the agent's result" '! grep -q "e2e-secret" "$ASK_OUT"' "$(cat "$ASK_OUT")"
+SECRET="$AHOME/.cache/claude-fleet/forms/$FID/pw"
+check "the secret file is on the host, 0600" '[ "$(filemode "$SECRET")" = 600 ] && [ "$(cat "$SECRET")" = e2e-secret ]' "$(ls -l "$SECRET" 2>&1)"
+fi
+
 tool "$PC" "$PUB" "$TOKC" send_prompt "{\"session_id\":${S1:-0},\"prompt\":\"echo sum-\$((40+2))\"}" >/dev/null
 until_ok 50 'tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S1:-0}}" | grep -q "sum-42"'
 check "send_prompt types into the pane over the agent (the shell ran it)" 'tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S1:-0}}" | grep -q "sum-42"' "$(tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S1:-0}}" | head -c 400)"
@@ -543,7 +937,7 @@ bindcode=$(curl -s -o /dev/null -w '%{http_code}' -m 10 -X POST "http://127.0.0.
   -d "{\"hook_event_name\":\"SessionStart\",\"source\":\"startup\",\"session_id\":\"$CONV\"}")
 check "a real SessionStart hook over the agent binds the pane's session id" '[ "$bindcode" = 204 ]' "http $bindcode pane=$PANE2"
 aenv tmux new-session -d -s agt3 -c "$AHOME" "exec bash --noprofile --norc"
-ls_a=$(tool "$PC" "$PUB" "$TOKC" list_sessions "{\"host_alias\":\"$AH\",\"force\":true}")
+until_ok 50 'list_agent; echo "$ls_a" | grep -q agt3'
 S3=$(sid_of agt3)
 check "a sender session id was parsed for the delivery check" '[ -n "$S3" ]' "${ls_a:0:400}"
 
@@ -604,8 +998,75 @@ ms=$(( ($(date +%s%N) - t0) / 1000000 ))
 check "a call for the host fails with E_AGENT_OFFLINE" 'echo "$c4" | grep -q E_AGENT_OFFLINE' "${c4:0:400}"
 check "and fails at once, not after a timeout (<5 s)" '[ "$ms" -lt 5000 ]' "took ${ms} ms"
 check "the tmux session survives the agent stopping" 'aenv tmux has-session -t agt2 2>/dev/null' "agt2 is gone"
+
+echo "== Contract 11 on the wire (hub C: the revision, and a Blocked reason)"
+# Redesign 2.6: what a revision-11 client reads. The ready frame names the
+# revision; agt2 (S2) is a Claude-shaped row (two real hooks above) on a host
+# whose agent just stopped, so once a probe finds the host down the row
+# carries `needs_attention { reason: host_down, state: blocked }` on the
+# wire, from the same facts /events follows.
+ready11=$(curl -sN -m 4 "http://127.0.0.1:$PC/events?kinds=session" -H "Host: $PUB" -H "Authorization: Bearer $TOKC" 2>/dev/null | sed -n '/^event: ready/{n;p;q;}')
+C11=$(printf '%s' "$ready11" | grep -oE '"contract": ?[0-9]+' | grep -oE '[0-9]+$')
+check "the /events ready frame names contract 11 or later" '[ -n "$C11" ] && [ "$C11" -ge 11 ]' "${ready11:0:300}"
+s2_row() { gtext "$(tool "$PC" "$PUB" "$TOKC" list_sessions "{\"host_alias\":\"$AH\",\"summary\":false}")" | jq -c --argjson id "${S2:-0}" '.[] | select(.id == $id)' 2>/dev/null; }
+tool "$PC" "$PUB" "$TOKC" probe_host "{\"alias\":\"$AH\"}" >/dev/null
+until_ok 75 '[ "$(s2_row | jq -r ".needs_attention.state // empty")" = blocked ]'
+row=$(s2_row)
+check "a session on the down host reads Blocked: host_down, state blocked" '[ "$(echo "$row" | jq -r .needs_attention.reason)" = host_down ] && [ "$(echo "$row" | jq -r .needs_attention.state)" = blocked ]' "${row:0:500}"
+check "and the row names its agent" '[ "$(echo "$row" | jq -r .agent)" = claude ]' "${row:0:500}"
 stop_hub c
 check "hub C SIGTERM exits 0" '[ "$STOP_RC" = 0 ]' "exit $STOP_RC"
+
+echo "== Agent install (install_agent over SSH, then the host on its agent)"
+# Hub I installs fleet-agent on host `e2ebox` the way the add-host wizard's
+# job does on a real one: the host fetches a release (a file:// directory
+# built here from $ABIN, with its SHA256SUMS), the token goes in on stdin,
+# the agent starts, the host moves onto it and the agent dials in. The "SSH"
+# is scripts/e2e-fake-ssh.sh: the remote commands run on this machine with
+# HOME=$IHOME, and FLEET_AGENT_NO_SYSTEMD keeps it to `fleet-agent run`.
+# The hub serves fleet-agent releases for Linux only (x86_64, aarch64), and
+# this leg packs $ABIN as one, so off Linux (a macOS dev box) it cannot pass:
+# it is skipped there. CI runs it on every PR (hub-headless, ubuntu).
+if [ "$(uname -s)" != Linux ]; then
+  echo "SKIP  the agent install scenarios: fleet-agent releases are Linux-only ($(uname -s) here)"
+else
+  IHOME="$ROOT/ihome"; mkdir -p "$IHOME" "$ROOT/itmux"; chmod 700 "$ROOT/itmux"
+  case "$(uname -m)" in aarch64|arm64) IT=aarch64-unknown-linux-gnu ;; *) IT=x86_64-unknown-linux-gnu ;; esac
+  IV=$("$ABIN" --version | awk '{print $2}')
+  mkdir -p "$ROOT/dist/fleet-agent-$IV-$IT"
+  cp "$ABIN" "$ROOT/dist/fleet-agent-$IV-$IT/fleet-agent"
+  ( cd "$ROOT/dist" && tar czf "fleet-agent-$IV-$IT.tar.gz" "fleet-agent-$IV-$IT" \
+      && sha256sum "fleet-agent-$IV-$IT.tar.gz" >SHA256SUMS )
+  PI=$(free_port)
+  TOKI=$("$BIN" init --data-dir "$ROOT/i" --public-url "https://$PUB" --port "$PI" 2>&1 | grep -E '^[0-9a-f]{64}$')
+  CLAUDE_FLEET_SSH="$(cd "$(dirname "$0")" && pwd)/e2e-fake-ssh.sh" E2E_SSH_HOME="$IHOME" E2E_SSH_TMUX="$ROOT/itmux" \
+    FLEET_AGENT_DIST="file://$ROOT/dist" start_hub i "$PI" --public-url "https://$PUB" || bad "hub I starts" "$(tail -5 "$ROOT/i.log")"
+  # A field of a tool's JSON answer, however many times its quotes are escaped.
+  jfield() { echo "$1" | grep -qE "$2[^a-z0-9]{1,12}$3"; }
+  ib=$(tool "$PI" "$PUB" "$TOKI" add_host '{"alias":"e2ebox","ssh_alias":"e2ebox"}')
+  check "add_host reaches e2ebox over the stand-in SSH" 'jfield "$ib" reachable true' "${ib:0:400}"
+  ij=$(tool "$PI" "$PUB" "$TOKI" install_agent "{\"alias\":\"e2ebox\",\"hub_url\":\"http://127.0.0.1:$PI\",\"version\":\"$IV\"}")
+  check "install_agent starts a job" 'jfield "$ij" state running' "${ij:0:400}"
+  until_ok 750 'il=$(tool "$PI" "$PUB" "$TOKI" agent_installs "{}"); jfield "$il" state "(done|failed)"'
+  [ -f "$IHOME/.config/fleet-agent/agent.pid" ] && cp "$IHOME/.config/fleet-agent/agent.pid" "$ROOT/iagent.pid"
+  check "the install job ends done: downloaded, checked, started, connected" 'jfield "$il" state done' "${il:0:600} / $(tail -5 "$IHOME/.config/fleet-agent/agent.log" 2>/dev/null)"
+  check "the agent runs from the release the host fetched" '[ -x "$IHOME/.local/bin/fleet-agent" ]' "$(ls -la "$IHOME/.local/bin" 2>&1)"
+  check "the token file on the host is private" '[ "$(filemode "$IHOME/.config/fleet-agent/token")" = 600 ]' "$(filemode "$IHOME/.config/fleet-agent/token")"
+  ist=$(tool "$PI" "$PUB" "$TOKI" agent_status '{}')
+  check "e2ebox is an agent host with its agent connected" 'jfield "$ist" alias e2ebox && jfield "$ist" connected true' "${ist:0:400}"
+  ij2=$(tool "$PI" "$PUB" "$TOKI" install_agent '{"alias":"e2ebox","hub_url":"http://127.0.0.1:1"}')
+  check "installing again on an agent host is refused" 'echo "$ij2" | grep -q "already an agent host"' "${ij2:0:400}"
+  # Not this shell's child (nohup started it on the "host"): no `wait`.
+  ipid=$(cat "$ROOT/iagent.pid" 2>/dev/null || true)
+  if [ -n "$ipid" ]; then
+    kill -TERM "$ipid" 2>/dev/null
+    until_ok 75 '! kill -0 "$ipid" 2>/dev/null' || kill -KILL "$ipid" 2>/dev/null
+    rm -f "$ROOT/iagent.pid"
+  fi
+  stop_hub i
+  check "hub I SIGTERM exits 0" '[ "$STOP_RC" = 0 ]' "exit $STOP_RC"
+  env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$ROOT/itmux" tmux kill-server 2>/dev/null
+fi
 
 echo "== Two hubs linked (federation)"
 # Hub D dials, hub E listens. Both manage this machine's real (non-isolated)
@@ -662,6 +1123,15 @@ out=$("$BIN" peer add --data-dir "$ROOT/d" --insecure "http://127.0.0.1:$PE" "$C
 check "peer add links hub D to hub E" '[ $rc -eq 0 ] && ! echo "$out" | grep -qE "[0-9a-f]{64}"' "$(redact "$out")"
 until_ok 75 '"$BIN" peer list --data-dir "$ROOT/d" | grep -q connected'
 check "the link connects within the supervisor rescan" '"$BIN" peer list --data-dir "$ROOT/d" | grep -q connected' "$(redact "$("$BIN" peer list --data-dir "$ROOT/d")")"
+# Orbit Fleet 11.5: the same link through the tools a person's device uses.
+# `link_peer` is the CLI's `peer add` (one implementation, service/peer/link.rs)
+# without `--insecure`: it dials https only, so on this loopback test it must
+# refuse the plain URL and write nothing; the link itself is linked above.
+# `list_peer_links` shows the link connected, never its token.
+lp=$(tool "$PD" "$PUB" "$TOKD" link_peer "{\"url\":\"http://127.0.0.1:$PE\",\"code\":\"ABCDEFGH\"}")
+check "link_peer refuses a plain-http hub (https only), naming why" 'echo "$lp" | grep -q E_INVALID && echo "$lp" | grep -q "https"' "$(redact "${lp:0:400}")"
+pls=$(gtext "$(tool "$PD" "$PUB" "$TOKD" list_peer_links '{}')")
+check "list_peer_links: one connected link to hub E's fleet, and no token" '[ "$(echo "$pls" | jq "[.[] | select(.revoked_at == null)] | length")" = 1 ] && echo "$pls" | grep -q connected && echo "$pls" | grep -q "$FE" && ! echo "$pls" | grep -qE "[0-9a-f]{64}"' "$(redact "${pls:0:400}")"
 
 t0=$(date +%s)
 sm=$(tool "$PD" "$PUB" "$TOKD" send_message "{\"from_session_id\":$SD,\"to_session_id\":0,\"to_addr\":\"$FE/session/local/$NAME5\",\"body\":\"federated ping\"}")
@@ -709,18 +1179,46 @@ pl=$("$BIN" peer list --data-dir "$ROOT/d")
 check "the re-paired link is one connected row" '[ "$(echo "$pl" | grep -c dialer)" = 1 ] && echo "$pl" | grep dialer | grep -q connected' "$(redact "$pl")"
 
 # A peer token reaches peer_exchange only.
+# Redeemed from its own X-Forwarded-For address (see `redeem`, hub A): the
+# re-pair's `peer add` above redeemed from loopback seconds ago, and a second
+# loopback attempt inside the /pair limiter's interval is refused, leaving
+# PTOK empty and both checks below failing on timing alone.
 CODE2=$("$BIN" pair --data-dir "$ROOT/e" --name probe --mode peer 2>&1 | grep -oE 'pair#[0-9A-Za-z]{8}' | head -1 | sed 's/^pair#//')
-PTOK=$(curl -s -m 10 -X POST "http://127.0.0.1:$PE/pair" -H "Host: $PUB" -H 'Content-Type: application/json' -d "{\"code\":\"$CODE2\"}" | grep -oE '"token": ?"[0-9a-f]+' | grep -oE '[0-9a-f]{64}')
+PTOK=$(curl -s -m 10 -X POST "http://127.0.0.1:$PE/pair" -H "Host: $PUB" -H "X-Forwarded-For: 10.66.0.1" -H 'Content-Type: application/json' -d "{\"code\":\"$CODE2\"}" | grep -oE '"token": ?"[0-9a-f]+' | grep -oE '[0-9a-f]{64}')
+check "the probe peer pairs on hub E" '[ ${#PTOK} -eq 64 ]' "PTOK='${PTOK:0:16}'"
 ls_p=$(tool "$PE" "$PUB" "$PTOK" list_sessions '{}')
 check "a peer token is refused list_sessions" 'echo "$ls_p" | grep -q E_FORBIDDEN' "${ls_p:0:300}"
 check "and /events" '[ "$(code -H "Host: $PUB" -H "Authorization: Bearer $PTOK" "http://127.0.0.1:$PE/events")" = 403 ]' "not 403"
 
 stop_hub e
 tool "$PD" "$PUB" "$TOKD" send_message "{\"from_session_id\":$SD,\"to_session_id\":0,\"to_addr\":\"$FE/session/local/$NAME5\",\"body\":\"never\"}" >/dev/null
-out=$("$BIN" peer remove --data-dir "$ROOT/d" "$FE" 2>&1)
-check "peer remove fails the waiting message back" 'echo "$out" | grep -q "1 waiting message"' "$(redact "$out")"
+# Unlinked through the tool (11.5), not the CLI's `peer remove`: a peer
+# token may not, the master may, by the id list_peer_links answers.
+LID=$(gtext "$(tool "$PD" "$PUB" "$TOKD" list_peer_links '{}')" | jq -r '[.[] | select(.revoked_at == null and .role == "dialer")][0].id // empty')
+check "the live link's id is listed" '[ -n "$LID" ]' "$(redact "$(tool "$PD" "$PUB" "$TOKD" list_peer_links '{}' | head -c 400)")"
+up=$(tool "$PD" "$PUB" "$TOKD" unlink_peer "{\"id\":${LID:-0}}")
+check "unlink_peer fails the waiting message back" '[ "$(gtext "$up" | jq -r .failed_messages)" = 1 ]' "$(redact "${up:0:400}")"
+up2=$(tool "$PD" "$PUB" "$TOKD" unlink_peer "{\"id\":${LID:-0}}")
+check "and the link is gone: a second unlink_peer is E_NOTFOUND" 'echo "$up2" | grep -q E_NOTFOUND' "$(redact "${up2:0:400}")"
 hist=$(tool "$PD" "$PUB" "$TOKD" session_history "{\"session_id\":$SD}")
 check "the sender's timeline says message_undeliverable" 'echo "$hist" | grep -q message_undeliverable' "${hist:0:400}"
+
+echo "== Contract 11 on the wire (hub D: agent, origin, last_viewed_at, proposals)"
+# Redesign 2.6: SD is a shell session the master started, so its row says
+# which agent runs in it (`shell`) and who started it (`person`). Viewing it
+# stamps `last_viewed_at`. A decision proposal is written beside the running
+# hub (WAL) as the decision model's assist answer would be, and the row
+# carries it in `proposals`.
+sd_row() { gtext "$(tool "$PD" "$PUB" "$TOKD" list_sessions '{"summary":false}')" | jq -c --argjson id "${SD:-0}" '.[] | select(.id == $id)' 2>/dev/null; }
+row=$(sd_row)
+check "a session row carries agent and origin" '[ "$(echo "$row" | jq -r .agent)" = shell ] && [ "$(echo "$row" | jq -r .origin)" = person ]' "${row:0:500}"
+check "and no last_viewed_at or proposals before anything stamps them" '[ "$(echo "$row" | jq -r ".last_viewed_at // empty")" = "" ] && [ "$(echo "$row" | jq -r ".proposals // [] | length")" = 0 ]' "${row:0:500}"
+tv=$(tool "$PD" "$PUB" "$TOKD" touch_session_viewed "{\"session_id\":${SD:-0}}")
+row=$(sd_row)
+check "touch_session_viewed stamps last_viewed_at on the wire" '[ "$(echo "$row" | jq -r ".last_viewed_at // 0")" -ge "$t0" ]' "${tv:0:300} / ${row:0:500}"
+python3 -c 'import sqlite3,sys,time; c=sqlite3.connect(sys.argv[1]); c.execute("INSERT INTO decision_runs (at, feature, subject_kind, subject_id, mode, provider, question_version, answer, confidence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (int(time.time()), "work_link", "session", sys.argv[2], "assist", "jev", "e2e.v1", "PD-1", 0.9)); c.commit(); c.close()' "$ROOT/d/state.db" "${SD:-0}"
+row=$(sd_row)
+check "a live assist answer about it rides on the row as a proposal" '[ "$(echo "$row" | jq -r ".proposals[0].feature")" = work_link ] && [ "$(echo "$row" | jq -r ".proposals[0].value")" = PD-1 ] && [ "$(echo "$row" | jq -r ".proposals[0].confidence_pct")" = 90 ]' "${row:0:600}"
 stop_hub d
 
 echo "== Work graph (hub W: a fake Jira Cloud, a fake Claude, real tmux and git)"
@@ -752,7 +1250,7 @@ echo "== Work graph (hub W: a fake Jira Cloud, a fake Claude, real tmux and git)
 #     is born (that needs a real Claude on the operator host).
 # Hub W runs with its own HOME and its own tmux server under $ROOT, like the
 # agent leg, so nothing here touches this account's ~/.claude or its tmux.
-out=$(FLEET_E2E_TRACKER_PORT=1 timeout 20 "$BIN" serve --data-dir "$ROOT/refuse" --port "$(free_port)" 2>&1); rc=$?
+out=$(FLEET_E2E_TRACKER_PORT=1 with_timeout 20 "$BIN" serve --data-dir "$ROOT/refuse" --port "$(free_port)" 2>&1); rc=$?
 check "a hub built without the e2e feature refuses the fake-tracker override" '[ $rc -ne 0 ] && echo "$out" | grep -q "FLEET_E2E_TRACKER_PORT is set" && [ ! -e "$ROOT/refuse/state.db" ]' "rc=$rc $out"
 if [ -z "$WBIN" ] && [ "${CI:-}" = true ]; then
   # CI builds the e2e hub and passes it (ci.yml, hub-headless). A missing WBIN
@@ -958,14 +1456,15 @@ else
   check "and not the session still on open work" '[ "$(jt "$td" "[.. | objects | select(.session_id? == ${SST:-0})] | length")" = 0 ]' "${td:0:800}"
   ITEMS="[{\"session_id\":${SCL:-0},\"action\":\"safe_kill\"},{\"session_id\":${SDI:-0},\"action\":\"safe_kill\"},{\"session_id\":${SST:-0},\"action\":\"safe_kill\"}]"
   # The documented hub behaviour (docs/hub.md): with mcp.confirm_destructive
-  # on, a kill needs a confirmation this hub has no approver for.
+  # on, a kill waits in the hub's queue for the owner's paired device
+  # (redesign 9.2: mcp_confirms / answer_mcp_confirm). Nobody answers it here.
   wdb "INSERT OR REPLACE INTO settings (key, value) VALUES ('mcp.confirm_destructive', 'true');"
   g1=$(wcall "$TOKW" work_link "{\"action\":\"tidy_apply\",\"items\":$ITEMS}")
   NONCE=$(printf '%s' "$g1" | grep -oE 'confirm_nonce[^0-9a-zA-Z]+[0-9a-zA-Z-]+' | head -1 | sed -E 's/.*[^0-9a-zA-Z-]//')
   check "with confirm_destructive on, tidy_apply asks for a confirmation (a nonce)" 'echo "$g1" | grep -q E_CONFIRM_REQUIRED && [ -n "$NONCE" ]' "${g1:0:600}"
   g2=$(wcall "$TOKW" work_link "{\"action\":\"tidy_apply\",\"items\":$ITEMS,\"confirm_nonce\":\"$NONCE\"}")
-  check "the nonce is never approved on a hub: still refused, nothing killed" 'echo "$g2" | grep -q E_CONFIRM_REQUIRED && wtmux has-session -t "=$TCL" 2>/dev/null' "${g2:0:600}"
-  check "and the hub logs that it has no approver" 'grep -q "no approver" "$ROOT/w.log"' "$(grep -i approv "$ROOT/w.log" | tail -3)"
+  check "an unanswered nonce is not approved: still refused, nothing killed" 'echo "$g2" | grep -q E_CONFIRM_REQUIRED && wtmux has-session -t "=$TCL" 2>/dev/null' "${g2:0:600}"
+  check "and the hub logs that it waits for the owner's device" 'grep -q "waiting for the owner'"'"'s device" "$ROOT/w.log"' "$(grep -i confirm "$ROOT/w.log" | tail -3)"
   wdb "UPDATE settings SET value = 'false' WHERE key = 'mcp.confirm_destructive';"
   ap=$(wcall "$TOKW" work_link "{\"action\":\"tidy_apply\",\"items\":$ITEMS}")
   check "tidy_apply kills the clean session outright" '[ "$(jt "$ap" "[.results[] | select(.session_id == ${SCL:-0})][0].outcome")" = killed ]' "${ap:0:800}"
@@ -983,7 +1482,14 @@ else
   bt=$(wcall "$HTOKB" work '{"action":"tickets"}')
   check "Beta's host token reads no tickets" '[ "$(jt "$bt" "[.. | objects | .key? // empty] | length")" = 0 ] && ! echo "$bt" | grep -q "E2E-"' "${bt:0:400}"
   bl=$(wcall "$HTOKB" list_sessions '{"host_alias":"local","summary":false}')
-  check "it sees local's sessions (isolation is off) but none of their work" '[ "$(jt "$bl" "[.. | objects | select(has(\"tmux_name\"))] | length")" -ge 1 ] && [ "$(jt "$bl" "[.. | objects | select(has(\"tmux_name\") and (.work != null or .work_suggested != null or (.work_rejected // [] | length) > 0))] | length")" = 0 ]' "${bl:0:600}"
+  # Multi-user M1 NARROWED this. Before it, `isolate_sessions` off meant a
+  # host token of the same org read another host's session ROWS (work
+  # redacted); now a session is private to the person who owns it and a
+  # per-host token is a machine that owns nothing, so it reads none of them.
+  # The claim is still two-sided: the call must SUCCEED and answer an empty
+  # page, not refuse — an error here would pass an "it sees nothing" test
+  # while telling us nothing about the fence.
+  check "it sees NONE of local's sessions: M1 makes them private to their owner, and a per-host token owns nothing" '! echo "$bl" | grep -q "\"isError\":true" && [ "$(jt "$bl" "[.. | objects | select(has(\"tmux_name\"))] | length")" = 0 ] && [ "$(jt "$bl" "[.. | objects | select(.work != null or .work_suggested != null)] | length")" = 0 ]' "${bl:0:600}"
   bc=$(wcall "$HTOKB" work "{\"action\":\"context\",\"key\":\"${HKEY:-E2E-2}\"}")
   check "the handover context is not its to read" '! echo "$bc" | grep -q E2E-HANDOVER-NOTE && ! echo "$bc" | grep -qE "Fix the login redirect|Add CSV export"' "${bc:0:400}"
   bs=$(wcall "$HTOKB" work_link '{"action":"start","key":"E2E-2","host_alias":"local"}')
@@ -999,13 +1505,18 @@ else
   wcall "$TOKW" work_link "{\"action\":\"link\",\"session_id\":${SWEB:-0},\"key\":\"E2E-2\"}" >/dev/null
   # And a work:* frame of its own: re-setting the credential re-emits the tracker.
   wcall "$TOKW" work_admin "{\"action\":\"set_credential\",\"tracker_id\":${TID:-0},\"auth_kind\":\"basic\",\"username\":\"erin@example.invalid\",\"secret\":\"e2e-secret-token\"}" >/dev/null
-  until_ok 50 'grep -q "^event: work:tracker" "$SSEM" && grep -q "^event: session:updated" "$SSEB"'
+  # Only the master's frame is waited for. Beta's stream no longer receives a
+  # `session:updated` for local's private rows (M1), so waiting on one here
+  # spent all 50 attempts before failing the check below for the wrong reason.
+  until_ok 50 'grep -q "^event: work:tracker" "$SSEM"'
   sleep 1
   check "the master's stream carries the link (with its key) and the work:tracker frame" 'grep "^data:" "$SSEM" | grep -q "E2E-2" && grep -q "^event: work:tracker" "$SSEM"' "$(grep "^event:" "$SSEM" | sort | uniq -c)"
-  # The boundary docs/hub.md draws: no work field and no work:* frame. With
-  # isolate_sessions off a session's own fields stay readable (its name
-  # carries the key, and so does the timeline's audit line of the link).
-  check "Beta's stream gets the session frames, with no work in them and no work frame" 'grep -q "^event: session:updated" "$SSEB" && ! grep -q "^event: work" "$SSEB" && ! grep "^data:" "$SSEB" | grep -qE "\"work(_suggested)?\":\{|\"key\":\"E2E-|e2e-secret"' "$(grep "^event:" "$SSEB" | sort | uniq -c)"
+  # The boundary docs/hub.md draws, as M1 leaves it: no work field and no
+  # work:* frame — and no session frame either, because the rows those frames
+  # would describe are private to their owner and this caller is a per-host
+  # token. `event: ready` is the positive control: the stream is open and
+  # subscribed, so "no session frame" is a fence rather than a dead socket.
+  check "Beta's stream is open and carries neither local's private sessions nor any work frame" 'grep -q "^event: ready" "$SSEB" && ! grep -q "^event: work" "$SSEB" && ! grep -q "^event: session:" "$SSEB" && ! grep "^data:" "$SSEB" | grep -qE "\"work(_suggested)?\":\{|\"key\":\"E2E-|e2e-secret"' "$(grep "^event:" "$SSEB" | sort | uniq -c)"
   kill $EVM $EVB 2>/dev/null; wait $EVM $EVB 2>/dev/null; WEV_PIDS=""
 
   # --- 8. name work with no ticket (M11.1) ---------------------------------
@@ -1091,19 +1602,121 @@ else
   rw=$(wcall "$TOKRO" work_link "{\"action\":\"place\",\"task_id\":\"item:${LID:-0}\",\"group\":\"RO\",\"expected_version\":1}")
   check "a readonly client reads the tree and may not place" '[ -n "$(jt "$ro" .total)" ] && echo "$rw" | grep -qE "E_FORBIDDEN|readonly|read-only"' "${ro:0:300} | ${rw:0:300}"
 
-  # --- operator confirm (M9.7): no approver on a hub -------------------------
+  # --- operator confirm (M9.7): waits for the owner on a hub (9.2) ----------
   echo "-- operator"
   opc=$(wcall "$TOKW" pair_client '{"name":"ux-agent","mode":"full"}')
   OPCODE=$(jt "$opc" .code)
   OPTOK=$(curl -s -m 10 -X POST "http://127.0.0.1:$PW/pair" -H "Host: $PUB" -H 'Content-Type: application/json' -d "{\"code\":\"$OPCODE\"}" | jq -r .token 2>/dev/null)
   n_before=$(wtmux ls 2>/dev/null | wc -l | tr -d ' ')
   op=$(wcall "$OPTOK" work_link "{\"action\":\"start\",\"key\":\"E2E-2\",\"project_id\":${PWEB:-0},\"host_alias\":\"local\"}")
-  check "the operator's start is refused on a hub: no approver" 'echo "$op" | grep -q E_FORBIDDEN && echo "$op" | grep -q "no approver"' "${op:0:400}"
+  check "the operator's start waits for the owner's approval on a hub" 'echo "$op" | grep -q E_CONFIRM_REQUIRED' "${op:0:400}"
   check "and no session was started" '[ "$(wtmux ls 2>/dev/null | wc -l | tr -d " ")" = "$n_before" ]' "$(wtmux ls 2>&1)"
   opt=$(wcall "$OPTOK" work_link "{\"action\":\"tidy_apply\",\"items\":[{\"session_id\":${SDI:-0},\"action\":\"safe_kill\"}]}")
-  check "nor may the operator's tidy kill anything" 'echo "$opt" | grep -q E_FORBIDDEN && wtmux has-session -t "=$TDI" 2>/dev/null' "${opt:0:400}"
+  check "and the operator's tidy kill waits too: nothing is killed" 'echo "$opt" | grep -q E_CONFIRM_REQUIRED && wtmux has-session -t "=$TDI" 2>/dev/null' "${opt:0:400}"
   stop_hub w
   check "hub W SIGTERM exits 0" '[ "$STOP_RC" = 0 ]' "exit $STOP_RC"
+fi
+
+echo "== Updates (hub U: a channel signed by an e2e key, a fake GitHub)"
+# Update design S4b, section U: a paired client asks /update/check and is told
+# update_available, update_required or client_too_new from a channel the hub
+# fetched and verified itself. REAL: the hub binary, its refresh tick, its
+# signature checks and decide(). SIMULATED: GitHub (scripts/hub-e2e.sh's
+# python below on 127.0.0.1, reached only through the e2e build's
+# FLEET_E2E_UPDATE_PORT, which keeps the https:// URLs and the GitHub host
+# fence) and the release key (a throwaway minisign key the e2e build trusts
+# through FLEET_UPDATE_E2E_KEYS).
+if [ -z "$WBIN" ] || ! command -v minisign >/dev/null 2>&1; then
+  if [ "${CI:-}" = true ]; then
+    bad "the update leg has WBIN and minisign in CI" "WBIN='$WBIN' minisign=$(command -v minisign || echo missing)"
+  else
+    echo "SKIP  the update scenarios: they need WBIN (an e2e fleet-hub) and minisign"
+  fi
+else
+  U="$ROOT/u"; mkdir -p "$U/www"
+  minisign -G -W -f -p "$U/k.pub" -s "$U/k.key" >/dev/null
+  UKEY=$(sed -n 2p "$U/k.pub")
+  HUBC=$("$WBIN" compat | python3 -c 'import json,sys; print(json.load(sys.stdin)["contract"]["hub_serves"])')
+  python3 - "$U/www" "$HUBC" <<'PY'
+import hashlib, json, os, sys, time
+www, c = sys.argv[1], int(sys.argv[2])
+iso = lambda t: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+now = int(time.time())
+base = "https://github.com/martin-janci/claude-fleet/releases/download/v99.0.0/"
+m = {"schema": 1,
+     "release": {"version": "99.0.0", "track": "stable", "commit": "e2e", "build_id": "e2e",
+                 "published_at": iso(now), "assets_base": base},
+     "compatibility": {"contract": {"hub_serves": c, "desktop_accepts": [c, c]},
+                       "agent_proto": {"hub_accepts": [1, 1], "agent_speaks": 1}, "update_proto": 1},
+     "components": {"desktop": {"version": "99.0.0", "artifacts": [
+         {"kind": "tauri", "platform": "linux-x86_64", "variant": "appimage",
+          "name": "claude-fleet_99.0.0_amd64.AppImage", "sha256": "ab" * 32, "size": 1,
+          "tauri_signature": "c2ln"}]}}}
+mpath = os.path.join(www, "martin-janci/claude-fleet/releases/download/v99.0.0")
+os.makedirs(mpath, exist_ok=True)
+body = json.dumps(m)
+open(os.path.join(mpath, "release-manifest.json"), "w").write(body)
+ch = {"schema": 1, "track": "stable", "sequence": 1, "generated_at": iso(now),
+      "expires_at": iso(now + 86400), "current": "99.0.0", "recommended": "99.0.0",
+      "releases": [{"version": "99.0.0", "manifest": base + "release-manifest.json",
+                    "manifest_sha256": hashlib.sha256(body.encode()).hexdigest()}]}
+cpath = os.path.join(www, "martin-janci/claude-fleet/update-channels")
+os.makedirs(cpath, exist_ok=True)
+open(os.path.join(cpath, "stable.json"), "w").write(json.dumps(ch))
+PY
+  for f in "$U"/www/martin-janci/claude-fleet/update-channels/stable.json \
+           "$U"/www/martin-janci/claude-fleet/releases/download/v99.0.0/release-manifest.json; do
+    minisign -S -s "$U/k.key" -m "$f" -x "$f.minisig" </dev/null >/dev/null
+  done
+  PG=$(free_port)
+  # The fake GitHub: any host, files by path (the e2e transport keeps the
+  # host fence and sends only allowed hosts here).
+  (cd "$U/www" && exec python3 -m http.server "$PG" --bind 127.0.0.1) >"$ROOT/ugh.log" 2>&1 &
+  echo $! >"$ROOT/ugh.pid"
+  PU=$(free_port)
+  TOKU=$("$WBIN" init --data-dir "$ROOT/hu" --public-url "https://$PUB" --port "$PU" --local-host false 2>&1 | grep -E '^[0-9a-f]{64}$')
+  FLEET_UPDATE_E2E_KEYS="$UKEY" FLEET_E2E_UPDATE_PORT="$PG" \
+    "$WBIN" serve --data-dir "$ROOT/hu" --port "$PU" --public-url "https://$PUB" --local-host false >"$ROOT/hu.log" 2>&1 &
+  echo $! >"$ROOT/hu.pid"
+  until_ok 50 '[ "$(code "http://127.0.0.1:$PU/healthz")" = 200 ]' || bad "hub U starts" "$(tail -5 "$ROOT/hu.log")"
+  # update_status's channel sequence, out of the tool result's JSON text.
+  useq() { tool "$PU" "$PUB" "$1" update_status '{}' | python3 -c 'import json,sys
+try:
+    r = json.loads(sys.stdin.read()); t = json.loads(r["result"]["content"][0]["text"])
+    print((t.get("channel") or {}).get("sequence", ""))
+except Exception:
+    print("")'; }
+  useq_is_1() { [ "$(useq "$TOKU")" = 1 ]; }
+  check "hub U fetched and verified the e2e channel" 'until_ok 75 useq_is_1' "seq='$(useq "$TOKU")' $(grep -i update "$ROOT/hu.log" | tail -3)"
+  upc=$(tool "$PU" "$PUB" "$TOKU" pair_client '{"name":"e2e updater desk","mode":"full"}')
+  UCODE=$(pair_code "$upc")
+  UTOK=$(curl -s -m 10 -X POST "http://127.0.0.1:$PU/pair" -H "Host: $PUB" -H 'Content-Type: application/json' -d "{\"code\":\"$UCODE\"}" | grep -oE '"token":"[0-9a-f]{64}"' | grep -oE '[0-9a-f]{64}')
+  check "a desktop pairs with hub U" '[ ${#UTOK} -eq 64 ]' "${upc:0:300}"
+  ucheck() { # installed-version contract-min contract-max
+    curl -s -m 10 -X POST "http://127.0.0.1:$PU/update/check" -H "Host: $PUB" \
+      -H "Authorization: Bearer $UTOK" -H 'Content-Type: application/json' \
+      -d "{\"update_proto\":1,\"component\":\"desktop\",\"platform\":{\"os\":\"linux\",\"arch\":\"x86_64\",\"variant\":\"appimage\"},\"installed\":{\"version\":\"$1\"},\"speaks\":{\"contract_accepts\":[$2,$3]}}"
+  }
+  a=$(ucheck 0.0.1 "$HUBC" "$HUBC")
+  check "an older desktop is told update_available, with the signed evidence" 'echo "$a" | grep -q "\"status\":\"update_available\"" && echo "$a" | grep -q "\"version\":\"99.0.0\"" && echo "$a" | grep -q "\"manifest_sig\""' "${a:0:500}"
+  r=$(ucheck 0.0.1 0 $((HUBC - 1)))
+  check "a desktop that speaks no contract the hub serves is told update_required" 'echo "$r" | grep -q "\"status\":\"update_required\""' "${r:0:500}"
+  n=$(ucheck 100.0.0 $((HUBC + 1)) $((HUBC + 2)))
+  check "a desktop newer than its hub is told client_too_new" 'echo "$n" | grep -q "\"status\":\"client_too_new\""' "${n:0:500}"
+  # The update route is outside the contract gate and inside authorize.
+  check "/update/check without a token -> 401" '[ "$(code -X POST "http://127.0.0.1:$PU/update/check" -H "Host: $PUB" -H "Content-Type: application/json" -d "{}")" = 401 ]' ""
+  # A hub without the e2e keys trusts none of it: nothing is offered.
+  kill -TERM "$(cat "$ROOT/hu.pid")"; wait "$(cat "$ROOT/hu.pid")" 2>/dev/null; rm -f "$ROOT/hu.pid"
+  rm -rf "$ROOT/hu2"
+  TOKU2=$("$WBIN" init --data-dir "$ROOT/hu2" --public-url "https://$PUB" --port "$PU" --local-host false 2>&1 | grep -E '^[0-9a-f]{64}$')
+  FLEET_E2E_UPDATE_PORT="$PG" "$WBIN" serve --data-dir "$ROOT/hu2" --port "$PU" --public-url "https://$PUB" --local-host false >"$ROOT/hu2.log" 2>&1 &
+  echo $! >"$ROOT/hu2.pid"
+  until_ok 50 '[ "$(code "http://127.0.0.1:$PU/healthz")" = 200 ]' || bad "hub U2 starts" "$(tail -5 "$ROOT/hu2.log")"
+  sleep 2
+  check "a hub that does not trust the key caches no channel" '[ -z "$(useq "$TOKU2")" ]' "seq='$(useq "$TOKU2")'"
+  for f in hu2 ugh; do
+    [ -f "$ROOT/$f.pid" ] && { kill -TERM "$(cat "$ROOT/$f.pid")" 2>/dev/null; wait "$(cat "$ROOT/$f.pid")" 2>/dev/null; rm -f "$ROOT/$f.pid"; }
+  done
 fi
 
 echo "== ssh-key in an isolated HOME"

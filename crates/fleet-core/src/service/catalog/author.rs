@@ -113,6 +113,16 @@ pub fn template(kind: Kind, name: &str) -> Asset {
             body: String::new(),
             resources: Vec::new(),
         },
+        Kind::Command => Asset {
+            header: header("Describe what this command does."),
+            spec: AssetSpec::Command {
+                allowed_tools: Vec::new(),
+                argument_hint: None,
+                model: None,
+            },
+            body: "Do this with $ARGUMENTS.\n".to_string(),
+            resources: Vec::new(),
+        },
     }
 }
 
@@ -127,6 +137,7 @@ pub fn layer_template(name: &str, axis: Axis) -> Layer {
         members: Vec::new(),
         exclude: Vec::new(),
         overrides: Default::default(),
+        orgs: Vec::new(),
     }
 }
 
@@ -1098,6 +1109,22 @@ pub fn repo_status_in(
 ) -> Result<RepoStatus, IpcError> {
     let root = target.root(store)?;
     repo::git_status(&root)
+}
+
+/// How many commits the History tab lists (Assets M5).
+pub const HISTORY_LIMIT: usize = 50;
+
+/// The Inspector's History (Assets M5, R19): the newest [`HISTORY_LIMIT`]
+/// commits that touched an asset in `target`'s checkout. Read only; the
+/// name is checked before git runs.
+pub fn asset_history_in(
+    target: CatalogTarget<'_>,
+    args: AssetRef,
+    store: &Mutex<Store>,
+) -> Result<Vec<repo::CommitEntry>, IpcError> {
+    check_name(&args.name)?;
+    let root = target.root(store)?;
+    repo::asset_log(&root, args.kind, &args.name, HISTORY_LIMIT)
 }
 
 pub fn lint_asset(args: AssetRef, store: &Mutex<Store>) -> Result<LintReport, IpcError> {

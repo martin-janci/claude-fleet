@@ -10,6 +10,7 @@ use fleet_core::ipc_error::IpcError;
 use fleet_core::service::hosts;
 use fleet_core::service::onboarding::{self, LocalPrereqs, TunnelStatusRow};
 use fleet_core::service::tunnel::TunnelSupervisor;
+use fleet_core::service::view_scope::ViewScope;
 use fleet_core::store::Store;
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -23,14 +24,15 @@ pub async fn check_local_prereqs(
     Ok(onboarding::local_prereqs(&store).await)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn tunnel_status(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
     tunnels: State<'_, Arc<TunnelSupervisor>>,
 ) -> Result<Vec<TunnelStatusRow>, IpcError> {
     backend.refuse_local_only("tunnel_status")?;
-    let hosts = hosts::list_hosts(&store)?;
+    // Local-only (`refuse_local_only` above), so the hub's own reader.
+    let hosts = hosts::list_hosts(&store, &ViewScope::internal())?;
     let alive = tunnels.health();
     Ok(onboarding::map_tunnel_states(&hosts, &alive))
 }

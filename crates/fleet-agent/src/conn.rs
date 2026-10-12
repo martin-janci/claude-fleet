@@ -231,7 +231,12 @@ impl Dialer {
                 body: resp
                     .body()
                     .as_deref()
-                    .map(|b| String::from_utf8_lossy(b).trim().to_string())
+                    .map(|b| {
+                        fleet_proto::sanitize_for_log(
+                            String::from_utf8_lossy(b).trim(),
+                            REFUSAL_BODY_LOG_MAX,
+                        )
+                    })
                     .unwrap_or_default(),
             }),
             Err(e) => Err(DialError::Failed(format!("{}: {e}", ep.url()))),
@@ -466,6 +471,9 @@ pub struct Served {
 /// What the writer task sends.
 enum Out {
     Frame(String),
+    /// A frame of a chunked answer: always the bulk lane, the final `result`
+    /// included, so no piece overtakes another.
+    Bulk(String),
     /// Close the socket with this code and reason, and stop.
     Close(CloseCode, String),
 }
@@ -520,6 +528,9 @@ where
     // `SessionEnd::VersionRefused`, which `run_with` backs off on at the
     // maximum interval instead of dialling this hub again right away.
     let mut welcomed = false;
+    // The hub's `welcome.proto`, and the pieces of chunked uploads (proto 2)
+    // until their final `upload`.
+    let mut link = Link::default();
     // Reports drained from the ring that did not fit the last frame. Consumed
     // before the ring on the next beat, so order is preserved: a `report`
     // frame is bounded by `REPORT_FRAME_BYTES`, not by `FRAME_BATCH_MAX`
@@ -546,12 +557,20 @@ where
                     // a plain function cannot do.
                     Message::Text(text) => match decode_hub_frame_lenient(&text) {
                         Ok(Decoded::Frame(HubFrame::Welcome { hub_version, proto })) => {
-                            if let Some(reason) =
-                                judge_proto(proto).refusal_reason("fleet-agent", "the hub")
+                            // A hub AHEAD of this agent is not refused: it
+                            // already judged our `hello.proto` and admitted
+                            // it, so it speaks ours on this connection. Only
+                            // a hub too old for us (below our window) ends
+                            // it. Refusing ahead locked every proto-1 agent
+                            // out of the first proto-2 hub, with no way back
+                            // but a hand install on each host.
+                            if let Some(reason) = judge_proto(proto.min(fleet_proto::PROTO_VERSION))
+                                .refusal_reason("fleet-agent", "the hub")
                             {
                                 break SessionEnd::VersionRefused(reason);
                             }
                             welcomed = true;
+                            link.hub_proto = proto.min(fleet_proto::PROTO_VERSION);
                             let hub_version = sanitized_hub_version(&hub_version);
                             tracing::info!(
                                 hub_version, proto, "[agent] hub protocol compatible"
@@ -565,7 +584,9 @@ where
                         Ok(_) if !welcomed => {
                             break SessionEnd::VersionRefused(no_welcome_reason());
                         }
-                        Ok(Decoded::Frame(frame)) => handle(frame, agent, &out, &inflight),
+                        Ok(Decoded::Frame(frame)) => {
+                            handle(frame, agent, &out, &inflight, &mut link)
+                        }
                         Ok(Decoded::Unknown { kind }) => {
                             match unknown_kinds.record(&kind) {
                                 fleet_proto::UnknownKindAction::LogOnce(kind) => {
@@ -721,6 +742,12 @@ fn close_end(frame: Option<CloseFrame>) -> SessionEnd {
 /// The most a WebSocket close frame's reason may carry, per RFC 6455.
 const CLOSE_REASON_MAX: usize = 123;
 
+/// The most of a refused dial's HTTP body kept for the log line and the
+/// systemd `STATUS=`. The body is whatever the hub (or a proxy in front of
+/// it) answered the upgrade with, so it gets the close reason's treatment:
+/// bounded, and no control or bidi characters to forge journal lines with.
+const REFUSAL_BODY_LOG_MAX: usize = 256;
+
 /// The most of the hub's `hub_version` [`sanitize_for_log`] keeps for the
 /// "hub protocol compatible" log line. Generous next to a real build string
 /// (e.g. `"0.2.24"`), bounded all the same because it is the hub's own text.
@@ -755,37 +782,91 @@ fn no_welcome_timeout_reason() -> String {
     )
 }
 
+/// A frame at or under this many bytes rides the small lane of the writer
+/// ([`Lanes`]): pongs, reports, an exec's ordinary result.
+pub(crate) const SMALL_FRAME_BYTES: usize = 64 * 1024;
+
+/// The writer's two lanes. Every frame used to go out in the order it was
+/// queued, through one writer: a pong, or a probe's few-KB result, queued
+/// behind a transcript read of tens of MB waited for all of it to cross a
+/// slow uplink — long enough, at two missed 30 s heartbeats, for the hub to
+/// drop a healthy link. Small frames now go first; big ones keep their own
+/// order. Reordering is safe: the hub pairs a `result` with its request by
+/// `id`, and a `pong` and a `report` answer nothing in sequence. A frame
+/// already being written still finishes — splitting one needs the chunked
+/// protocol (device-communication analysis, phase 4 item 13).
+#[derive(Default)]
+pub(crate) struct Lanes {
+    small: VecDeque<String>,
+    bulk: VecDeque<String>,
+    close: Option<(CloseCode, String)>,
+}
+
+impl Lanes {
+    fn push(&mut self, out: Out) {
+        match out {
+            Out::Frame(text) if text.len() <= SMALL_FRAME_BYTES => self.small.push_back(text),
+            Out::Frame(text) | Out::Bulk(text) => self.bulk.push_back(text),
+            // Kept for last: the frames queued before it still go out.
+            Out::Close(code, reason) => self.close = Some((code, reason)),
+        }
+    }
+
+    /// The next frame to write: small first.
+    fn pop(&mut self) -> Option<String> {
+        self.small.pop_front().or_else(|| self.bulk.pop_front())
+    }
+}
+
 async fn write_loop<S>(
     mut sink: SplitSink<WebSocketStream<S>, Message>,
     mut rx: mpsc::UnboundedReceiver<Out>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    while let Some(out) = rx.recv().await {
-        match out {
-            Out::Frame(text) => {
-                if sink.send(Message::Text(text.into())).await.is_err() {
-                    return;
-                }
-            }
-            Out::Close(code, reason) => {
-                // A close reason is at most `CLOSE_REASON_MAX` bytes on the
-                // wire.
-                let mut reason = reason;
-                while reason.len() > CLOSE_REASON_MAX {
-                    reason.pop();
-                }
-                let frame = CloseFrame {
-                    code,
-                    reason: reason.into(),
-                };
-                let _ = sink.send(Message::Close(Some(frame))).await;
-                let _ = sink.close().await;
+    let mut lanes = Lanes::default();
+    loop {
+        // Everything queued meanwhile is sorted before the next write.
+        while let Ok(out) = rx.try_recv() {
+            lanes.push(out);
+        }
+        if let Some(text) = lanes.pop() {
+            if sink.send(Message::Text(text.into())).await.is_err() {
                 return;
             }
+            continue;
+        }
+        if let Some((code, reason)) = lanes.close.take() {
+            // A close reason is at most `CLOSE_REASON_MAX` bytes on the
+            // wire.
+            let mut reason = reason;
+            while reason.len() > CLOSE_REASON_MAX {
+                reason.pop();
+            }
+            let frame = CloseFrame {
+                code,
+                reason: reason.into(),
+            };
+            let _ = sink.send(Message::Close(Some(frame))).await;
+            let _ = sink.close().await;
+            return;
+        }
+        match rx.recv().await {
+            Some(out) => lanes.push(out),
+            None => break,
         }
     }
     let _ = sink.close().await;
+}
+
+/// What one connection knows about its hub beyond the frames themselves.
+#[derive(Default)]
+struct Link {
+    /// The hub's `welcome.proto`: answers are chunked only toward a hub at
+    /// [`fleet_proto::CHUNKED_PROTO`].
+    hub_proto: u32,
+    /// Pieces of chunked uploads, until their final `upload`.
+    assembly: fleet_proto::Assembly,
 }
 
 /// Act on one hub frame. Nothing here waits: work is spawned, and answers go
@@ -795,8 +876,22 @@ fn handle(
     agent: &Arc<Agent>,
     out: &mpsc::UnboundedSender<Out>,
     inflight: &InFlight,
+    link: &mut Link,
 ) {
+    let hub_proto = link.hub_proto;
     match frame {
+        HubFrame::UploadChunk { id, bytes_b64 } => {
+            // A chunk that cannot be kept fails its upload: the final frame
+            // counts the chunks, and a short count writes nothing.
+            let kept = decode_b64(&bytes_b64).and_then(|bytes| {
+                link.assembly
+                    .push(&id, &bytes, &[], fleet_proto::MAX_PAYLOAD_BYTES)
+            });
+            if let Err(e) = kept {
+                let id = fleet_proto::sanitize_for_log(&id, DUPLICATE_ID_LOG_MAX);
+                tracing::warn!(id, error = %e, "[agent] dropping an upload chunk");
+            }
+        }
         HubFrame::Ping { id } => {
             let pong = encode_agent_frame(&AgentFrame::Pong { id }).expect("a pong is small");
             let _ = out.send(Out::Frame(pong));
@@ -835,7 +930,7 @@ fn handle(
                     stderr: b"the agent is stopping".to_vec(),
                     truncated: false,
                 };
-                let _ = out.send(Out::Frame(result_frame(id, refused, cap_bytes)));
+                send_result(out, id, refused, cap_bytes, hub_proto);
                 return;
             }
             // Counted before the task is spawned, so a `stop` that races it
@@ -883,7 +978,7 @@ fn handle(
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .remove(&id);
-                let _ = out.send(Out::Frame(result_frame(id, outcome, cap_bytes)));
+                send_result(&out, id, outcome, cap_bytes, hub_proto);
             });
         }
         HubFrame::Upload {
@@ -891,18 +986,37 @@ fn handle(
             path,
             mode,
             bytes_b64,
+            chunks,
         } => {
+            // Taken before the duplicate check, so a replayed id's chunks do
+            // not stay behind.
+            let before = link.assembly.finish(&id, chunks);
             if !agent.first_sight(&id) {
                 refuse_duplicate(&id);
                 return;
             }
+            let prefix = match before {
+                Ok(pieces) => pieces.map(|p| p.first).unwrap_or_default(),
+                Err(e) => {
+                    let failed = exec::ExecOutcome {
+                        exit_code: 1,
+                        stdout: Vec::new(),
+                        stderr: format!("{path}: {e}; nothing was written").into_bytes(),
+                        truncated: false,
+                    };
+                    send_result(out, id, failed, Some(0), hub_proto);
+                    return;
+                }
+            };
             let (agent, out) = (Arc::clone(agent), out.clone());
             tokio::spawn(async move {
                 let _permit = Arc::clone(&agent.slots).acquire_owned().await;
                 let home = agent.home.clone().unwrap_or_default();
                 let written = tokio::task::spawn_blocking(move || {
                     let target = exec::resolve_path(&home, &path);
-                    let bytes = decode_b64(&bytes_b64).map_err(|e| format!("{path}: {e}"))?;
+                    let last = decode_b64(&bytes_b64).map_err(|e| format!("{path}: {e}"))?;
+                    let mut bytes = prefix;
+                    bytes.extend_from_slice(&last);
                     exec::write_upload(&target, mode, &bytes)
                         .map_err(|e| format!("{}: {e}", target.display()))
                 })
@@ -924,7 +1038,7 @@ fn handle(
                 };
                 // An upload's answer is empty or one error line; the hub
                 // judges it against its floor, which a smallest cap fits.
-                let _ = out.send(Out::Frame(result_frame(id, outcome, Some(0))));
+                send_result(&out, id, outcome, Some(0), hub_proto);
             });
         }
     }
@@ -944,6 +1058,53 @@ fn refuse_duplicate(id: &str) {
     tracing::warn!(id, "[agent] refusing a request id already seen");
 }
 
+/// Queue a request's answer: in [`fleet_proto::CHUNK_BYTES`] pieces toward a
+/// hub that speaks them, so a pong or a probe's answer behind it is not held
+/// up by the whole of it (the writer's small lane overtakes the pieces).
+fn send_result(
+    out: &mpsc::UnboundedSender<Out>,
+    id: String,
+    outcome: exec::ExecOutcome,
+    cap_bytes: Option<u64>,
+    hub_proto: u32,
+) {
+    let texts = result_texts(id, outcome, cap_bytes, hub_proto);
+    let chunked = texts.len() > 1;
+    for text in texts {
+        let _ = out.send(if chunked {
+            Out::Bulk(text)
+        } else {
+            Out::Frame(text)
+        });
+    }
+}
+
+/// The encoded frames of one answer ([`send_result`]): one `result` within
+/// the hub's budget, or — toward a proto-2 hub, for an answer over one
+/// chunk — its chunks and a final `result`.
+fn result_texts(
+    id: String,
+    outcome: exec::ExecOutcome,
+    cap_bytes: Option<u64>,
+    hub_proto: u32,
+) -> Vec<String> {
+    let frames = fleet_proto::result_frames(
+        &id,
+        outcome.exit_code,
+        &outcome.stdout,
+        &outcome.stderr,
+        outcome.truncated,
+        hub_proto,
+    );
+    if frames.len() == 1 {
+        return vec![result_frame(id, outcome, cap_bytes)];
+    }
+    frames
+        .iter()
+        .map(|f| encode_agent_frame(f).expect("a chunk is a small frame"))
+        .collect()
+}
+
 /// Encode a `result` that fits the budget the hub will decode it against.
 /// `execute` already truncated to the matching limits, so the fallback only
 /// fires for an absurd id.
@@ -954,9 +1115,11 @@ fn result_frame(id: String, outcome: exec::ExecOutcome, cap_bytes: Option<u64>) 
         stdout_b64: encode_b64(&outcome.stdout),
         stderr_b64: encode_b64(&outcome.stderr),
         truncated: outcome.truncated,
+        chunks: 0,
     };
     encode_agent_frame_within(&frame, result_budget(cap_bytes)).unwrap_or_else(|e| {
         let fallback = AgentFrame::Result {
+            chunks: 0,
             id,
             exit_code: -1,
             stdout_b64: String::new(),
@@ -996,22 +1159,53 @@ fn backoff() -> Backoff {
 /// file: this is how "is it connected" is answered.
 pub struct Notifier {
     socket: Option<PathBuf>,
+    /// The same line, kept for the in-process updater
+    /// ([`crate::self_update`]), which has no `systemctl show` to read it.
+    link: Arc<LinkStatus>,
+}
+
+/// What the connection loop says about itself, for whoever runs in the same
+/// process: the last status line, and a wake-up when the hub refused this
+/// agent's protocol (an update is the only way forward).
+#[derive(Default)]
+pub struct LinkStatus {
+    line: std::sync::Mutex<String>,
+    pub refused: tokio::sync::Notify,
+}
+
+impl LinkStatus {
+    /// Connected, as `fleet-agent status` reads it: the line starts [`CONNECTED`].
+    pub fn connected(&self) -> bool {
+        self.line().starts_with(CONNECTED)
+    }
+
+    pub fn line(&self) -> String {
+        self.line.lock().map(|l| l.clone()).unwrap_or_default()
+    }
 }
 
 impl Notifier {
     /// The socket systemd named in `$NOTIFY_SOCKET`, if any.
     pub fn from_env() -> Self {
-        Self {
-            socket: std::env::var_os("NOTIFY_SOCKET").map(PathBuf::from),
-        }
+        Self::at(std::env::var_os("NOTIFY_SOCKET").map(PathBuf::from))
     }
 
     pub fn at(socket: Option<PathBuf>) -> Self {
-        Self { socket }
+        Self {
+            socket,
+            link: Arc::default(),
+        }
+    }
+
+    pub fn link(&self) -> Arc<LinkStatus> {
+        Arc::clone(&self.link)
     }
 
     /// Best effort: a failed report must never stop the agent.
     pub fn status(&self, text: &str) {
+        if let Ok(mut l) = self.link.line.lock() {
+            *l = text.to_string();
+        }
         #[cfg(unix)]
         if let Some(socket) = &self.socket {
             let _ = send_notify(
@@ -1113,6 +1307,7 @@ where
             // once the fix lands.
             backoff.force_max();
             tracing::error!(hub = %url, "[agent] {why}");
+            notifier.link.refused.notify_one();
         }
         let delay = backoff.next(jitter());
         if !version_refused {
@@ -1128,7 +1323,15 @@ where
 
 /// `fleet-agent run`: serve `config`'s hub until SIGTERM or SIGINT, then kill
 /// whatever is still running and return.
-pub async fn run(config: crate::config::Config) -> Result<(), String> {
+pub async fn run(
+    config: crate::config::Config,
+    self_update: Option<crate::self_update::SelfUpdate>,
+) -> Result<(), String> {
+    let notifier = Notifier::from_env();
+    if let Some(u) = self_update {
+        let (config, link) = (config.clone(), notifier.link());
+        tokio::spawn(async move { u.run(&config, link).await });
+    }
     let endpoint = Endpoint::parse(&config.hub, config.insecure)?;
     let dialer = Dialer::new(endpoint, config.token, config.ca_file.as_deref())?;
     let agent = Agent::with_report_errors(
@@ -1136,7 +1339,6 @@ pub async fn run(config: crate::config::Config) -> Result<(), String> {
         exec::MAX_CONCURRENT,
         config.report_errors,
     );
-    let notifier = Notifier::from_env();
     let stop = shutdown_signal()?;
     tokio::select! {
         never = run_with(&dialer, &agent, &notifier, Beats::heartbeat, tokio::time::sleep) => match never {},
@@ -1181,6 +1383,33 @@ fn shutdown_signal() -> Result<impl std::future::Future<Output = ()>, String> {
 
 #[cfg(test)]
 mod tests {
+    /// A pong queued behind a big result goes out first; big frames keep
+    /// their order; a close waits for what was queued before it.
+    #[test]
+    fn small_frames_overtake_bulk_ones_and_a_close_goes_last() {
+        let mut lanes = Lanes::default();
+        let big = |c: char| c.to_string().repeat(SMALL_FRAME_BYTES + 1);
+        lanes.push(Out::Frame(big('a')));
+        lanes.push(Out::Frame(big('b')));
+        lanes.push(Out::Close(CloseCode::Normal, "bye".into()));
+        lanes.push(Out::Frame("pong".into()));
+        assert_eq!(lanes.pop().as_deref(), Some("pong"));
+        assert_eq!(lanes.pop(), Some(big('a')));
+        assert_eq!(lanes.pop(), Some(big('b')));
+        assert_eq!(lanes.pop(), None);
+        assert!(lanes.close.is_some(), "the close is kept for last");
+
+        // A chunked answer's final `result` is small, and still never
+        // overtakes its own chunks.
+        let mut lanes = Lanes::default();
+        lanes.push(Out::Bulk(big('c')));
+        lanes.push(Out::Bulk("final".into()));
+        lanes.push(Out::Frame("pong".into()));
+        assert_eq!(lanes.pop().as_deref(), Some("pong"));
+        assert_eq!(lanes.pop(), Some(big('c')));
+        assert_eq!(lanes.pop().as_deref(), Some("final"));
+    }
+
     use super::*;
     use crate::test_util::{alive, wait_for_pid};
     use fleet_proto::{
@@ -1323,6 +1552,7 @@ mod tests {
                         stdout_b64,
                         stderr_b64,
                         truncated,
+                        ..
                     },
                     len,
                 ) if got == id => {
@@ -1610,6 +1840,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_refused_dial_neutralises_and_bounds_the_hub_s_body() {
+        let fake = FakeHub::new().await;
+        let dialer = fake.dialer();
+        let dial = tokio::spawn(async move { dialer.dial().await });
+        let hostile = format!(
+            "bad\r\nfleet-agent[1]: connected\x1b[31m{}",
+            "x".repeat(4000)
+        );
+        fake.refuse(401, &hostile).await;
+        match dial.await.unwrap() {
+            Err(DialError::Refused { status, body }) => {
+                assert_eq!(status, 401);
+                assert!(body.len() <= REFUSAL_BODY_LOG_MAX, "{}", body.len());
+                assert!(!body.chars().any(char::is_control), "{body:?}");
+                assert!(body.starts_with("bad"));
+            }
+            other => panic!("expected a refusal, got {:?}", other.map(|_| ())),
+        }
+    }
+
+    #[tokio::test]
     async fn the_hello_names_this_agent() {
         let fake = FakeHub::new().await;
         let dialer = fake.dialer();
@@ -1831,6 +2082,7 @@ mod tests {
         send(
             &mut p.hub,
             &HubFrame::Upload {
+                chunks: 0,
                 id: "u1".into(),
                 path: path.to_str().unwrap().into(),
                 mode: 0o600,
@@ -1859,6 +2111,7 @@ mod tests {
         send(
             &mut p.hub,
             &HubFrame::Upload {
+                chunks: 0,
                 id: "big".into(),
                 path: path.to_str().unwrap().into(),
                 mode: 0o600,
@@ -1877,6 +2130,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f");
         let upload = |body: &[u8]| HubFrame::Upload {
+            chunks: 0,
             id: "up".into(),
             path: path.to_str().unwrap().into(),
             mode: 0o600,
@@ -1901,6 +2155,7 @@ mod tests {
         send(
             &mut p.hub,
             &HubFrame::Upload {
+                chunks: 0,
                 id: "u2".into(),
                 path: "/proc/fleet-agent-cannot-write-here/x".into(),
                 mode: 0o644,
@@ -2215,6 +2470,30 @@ mod tests {
             }
             other => panic!("expected VersionRefused, got {other:?}"),
         }
+    }
+
+    /// A hub AHEAD of this agent's protocol is accepted: the hub already
+    /// admitted our `hello.proto`, so the connection speaks ours.
+    #[tokio::test]
+    async fn a_hub_ahead_of_the_agent_is_accepted_at_the_agents_proto() {
+        let mut p = pair_before_welcome(quiet_agent(None, crate::exec::MAX_CONCURRENT)).await;
+        p.hub
+            .send(Message::Text(
+                encode_hub_frame(&HubFrame::Welcome {
+                    hub_version: "9.0.0".into(),
+                    proto: fleet_proto::PROTO_VERSION + 5,
+                })
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        // The agent keeps serving: no refusal ends the session.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !p.served.is_finished(),
+            "the agent refused a hub ahead of it"
+        );
     }
 
     /// A close reason is hub-controlled text that goes straight into

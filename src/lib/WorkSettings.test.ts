@@ -1,4 +1,4 @@
-// Settings → General → Work since declarative pages P4: the introduction and
+// Settings → Work & trackers (General → Work until step 7.1) since declarative pages P4: the introduction and
 // a link to the usage counts, the generated `usage.work` data page (its own
 // tests are in pages/PageView.test.ts). Trackers moved to the generated Trackers page
 // (pages/TrackerPage.test.ts, pages/FlowView.test.ts, TrackerExtras.test.ts,
@@ -35,7 +35,7 @@ function route() {
 
 beforeEach(() => hubStatus.set({ ...STANDALONE }));
 
-describe('Settings → General → Work', () => {
+describe('Settings → Work & trackers', () => {
   it('points at the generated pages, and links to the usage page without reading anything itself (M13.2)', async () => {
     const inv = route();
     const onopen = vi.fn();
@@ -44,6 +44,14 @@ describe('Settings → General → Work', () => {
     await fireEvent.click(screen.getByTestId('work-usage-link'));
     expect(onopen).toHaveBeenCalledWith('usage.work');
     expect(inv).not.toHaveBeenCalled();
+  });
+
+  it('opens the placement rules from Settings, as the Work view’s ⚙ does (parity P4)', async () => {
+    const inv = route();
+    render(WorkSettings, { onopen: vi.fn() });
+    await fireEvent.click(screen.getByTestId('work-rules-open'));
+    expect(await screen.findByRole('dialog', { name: /placement rules/i })).toBeInTheDocument();
+    expect(inv).toHaveBeenCalledWith('work_rules', { args: {} });
   });
 
   it('paired with a hub: no usage link (M13.2: work_admin is the hub master’s)', async () => {

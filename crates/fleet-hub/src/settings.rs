@@ -61,6 +61,13 @@ fn shown(v: &str) -> &str {
     }
 }
 
+/// A proposal's `why` as one console line. The text is the proposer's (an
+/// agent or a paired device), so a newline in it could print a forged
+/// proposal line under it and an escape sequence would reach the terminal.
+fn why_line(why: &str) -> String {
+    format!("      why: {}", fleet_core::mcp::guard::scrub_line(why))
+}
+
 pub fn run(
     cmd: SettingsCmd,
     opts: &HubOptions,
@@ -85,7 +92,7 @@ pub fn run(
                         shown(&p.row.value)
                     ));
                     if let Some(why) = &p.row.why {
-                        out::line(&format!("      why: {why}"));
+                        out::line(&why_line(why));
                     }
                 }
                 out::line("Apply with `fleet-hub settings apply <id>…`, or `reject <id>…`.");
@@ -154,6 +161,13 @@ mod tests {
     struct T {
         #[command(subcommand)]
         cmd: SettingsCmd,
+    }
+
+    #[test]
+    fn a_why_prints_as_one_line_without_escapes() {
+        let line = why_line("ok\n#7  decide.jev.enabled: true → false  (person)\u{1b}[1A");
+        assert_eq!(line.lines().count(), 1, "{line:?}");
+        assert!(!line.chars().any(char::is_control), "{line:?}");
     }
 
     #[test]

@@ -37,6 +37,7 @@ fn config() -> TrackerConfig {
         sprint_projects: vec!["PLAT".into()],
         sprint_field: Some("customfield_10100".into()),
         epic_field: Some("customfield_10101".into()),
+        points_field: Some("customfield_10106".into()),
         ..Default::default()
     }
 }
@@ -189,6 +190,9 @@ impl Harness for DcHarness {
     fn describe_ref(&self) -> &'static str {
         "OPS-1"
     }
+    fn version(&self) -> Option<(&'static str, &'static str)> {
+        Some(("40002", "2026.11"))
+    }
 
     fn script_probe(&self, f: &FakeTransport) {
         f.once(Method::Get, "/rest/api/2/myself", ok("myself.json"))
@@ -301,6 +305,7 @@ async fn the_probe_finds_the_epic_link_and_sprint_fields_by_schema() {
         "not the decoy"
     );
     assert_eq!(c.epic_field.as_deref(), Some("customfield_10101"));
+    assert_eq!(c.points_field.as_deref(), Some("customfield_10106"));
     assert_eq!(c.sprint_projects, vec!["PLAT"]);
     assert_eq!(c.tz.as_deref(), Some("Europe/Bratislava"));
     let views: Vec<String> = d
@@ -883,4 +888,84 @@ async fn the_admin_settings_reach_the_real_transport() {
         .await
         .unwrap_err();
     assert!(matches!(e, TransportError::Refused(_)), "{e}");
+}
+
+#[test]
+fn data_center_reads_priority_labels_and_story_points() {
+    let f = FakeTransport::new();
+    let j = dc(&f);
+    for want in [
+        "priority",
+        "labels",
+        "timeoriginalestimate",
+        "customfield_10106",
+    ] {
+        assert!(j.fields().iter().any(|x| x == want), "{want}");
+    }
+    let page = fixture("jira_dc", "search_mine_p1.json");
+    let epic = j.snapshot(&page["issues"][0]).unwrap();
+    assert_eq!(epic.priority.as_deref(), Some("urgent"), "Blocker");
+    assert_eq!(epic.estimate, None);
+    let story = j.snapshot(&page["issues"][1]).unwrap();
+    assert_eq!(story.priority.as_deref(), Some("low"), "Minor");
+    assert_eq!(story.labels, vec!["export"]);
+    assert_eq!(
+        (story.estimate.map(|e| e.0), story.estimate_unit.as_deref()),
+        (Some(3.0), Some("points"))
+    );
+}
+
+#[test]
+fn data_center_reads_the_due_date_too() {
+    let f = FakeTransport::new();
+    let j = dc(&f);
+    assert!(j.fields().iter().any(|x| x == "duedate"));
+    let issue = json!({ "id": "10101", "key": "ABC-101",
+        "fields": { "summary": "S", "duedate": "2026-10-16",
+                    "status": { "name": "To Do", "statusCategory": { "key": "new" } } } });
+    assert_eq!(
+        j.snapshot(&issue).unwrap().due_at.as_deref(),
+        Some("2026-10-16")
+    );
+}
+
+#[tokio::test]
+async fn data_center_gets_the_support_agents_writes_as_wiki_text() {
+    let f = FakeTransport::new();
+    f.once(
+        Method::Post,
+        "/rest/api/2/issue/L2S-7/comment",
+        Ok(Response::json(201, &serde_json::json!({ "id": "5" }))),
+    );
+    f.once(
+        Method::Post,
+        "/rest/api/2/issue",
+        Ok(Response::json(201, &serde_json::json!({ "key": "PD-3" }))),
+    );
+    let d = dc(&f);
+    let created = d
+        .write(&WriteOp::CreateIssue {
+            project: "PD".into(),
+            issue_type: "Bug".into(),
+            summary: "NPE".into(),
+            adf: serde_json::json!({ "type": "doc" }),
+            wiki: "h2. Problem".into(),
+            labels: vec![],
+        })
+        .await
+        .unwrap();
+    assert_eq!(created.remote_id.as_deref(), Some("PD-3"));
+    d.write(&WriteOp::RichComment {
+        key: "L2S-7".into(),
+        adf: serde_json::json!({ "type": "doc" }),
+        wiki: "h3. Investigation".into(),
+    })
+    .await
+    .unwrap();
+    let sent = f.requests();
+    assert_eq!(
+        sent[0].json_body().unwrap()["fields"]["description"],
+        "h2. Problem"
+    );
+    assert_eq!(sent[1].json_body().unwrap()["body"], "h3. Investigation");
 }

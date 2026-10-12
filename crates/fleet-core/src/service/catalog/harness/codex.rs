@@ -373,7 +373,7 @@ impl Harness for Codex {
                     bytes: text.into_bytes(),
                 });
             }
-            AssetSpec::Hook { .. } | AssetSpec::PluginRef { .. } => {
+            AssetSpec::Hook { .. } | AssetSpec::PluginRef { .. } | AssetSpec::Command { .. } => {
                 return Err(unsupported());
             }
         }

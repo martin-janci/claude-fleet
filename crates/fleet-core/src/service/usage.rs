@@ -30,7 +30,6 @@
 
 use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
-use crate::service::orgs::OrgScope;
 use crate::service::settings;
 use crate::shell::quote;
 use crate::ssh::{SshClient, SshExec};
@@ -656,7 +655,7 @@ pub fn plan_delta(
     let today = now.div_euclid(SECS_PER_DAY);
     let from_zero = read.mode != ReadMode::Cont;
     let fresh = from_zero || read.start < rule.until;
-    let mut by_day: BTreeMap<(i64, bool), UsageTotals> = BTreeMap::new();
+    let mut by_day: BTreeMap<(i64, bool, Option<String>), UsageTotals> = BTreeMap::new();
     for dm in &read.by_day {
         let mut t = dm.totals;
         t.cost_micros = dm
@@ -667,14 +666,18 @@ pub fn plan_delta(
             .unwrap_or(0);
         let day = dm.day.as_deref().and_then(day_number).unwrap_or(today);
         let backfill = fresh && rule.is_history(day, now);
-        by_day.entry((day, backfill)).or_default().add(&t);
+        by_day
+            .entry((day, backfill, dm.model.clone()))
+            .or_default()
+            .add(&t);
     }
     let by_day = by_day
         .into_iter()
-        .map(|((day, backfill), totals)| DayDelta {
+        .map(|((day, backfill, model), totals)| DayDelta {
             day,
             totals,
             backfill,
+            model,
         })
         .collect();
     UsageDelta {
@@ -914,8 +917,11 @@ pub async fn maybe_collect(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> O
         }
         *last = Some(std::time::Instant::now());
     }
+    let next = Some(std::time::Duration::from_secs(interval));
     let exec: &dyn SshExec = ssh.as_ref();
-    Some(collect_all(store, exec, now_unix()).await)
+    let n = collect_all(store, exec, now_unix()).await;
+    crate::service::loops::report("usage", Ok::<_, String>(()), next);
+    Some(n)
 }
 
 fn now_unix() -> i64 {
@@ -1101,21 +1107,52 @@ pub fn report(
     since_secs: Option<u64>,
     now: i64,
 ) -> Result<UsageReport, IpcError> {
-    report_on(s, host, since_secs, now, &OrgScope::All)
+    report_on(
+        s,
+        host,
+        since_secs,
+        now,
+        &crate::service::view_scope::ViewScope::internal(),
+    )
 }
 
-/// [`report`] over only what `scope` sees: the sessions it may list and the
+/// [`report`] over only what `view` sees: the sessions it may list and the
 /// daily roll-up of the hosts in its orgs (an org-bound client, work graph
 /// M14 — the same fence as `fleet_health`'s [`health::HealthView::Org`]).
 ///
+/// Multi-user M1 (T7): the whole [`ViewScope`], not only its org half.
+/// `SessionUsage` is `{ session_id, host_alias, tmux_name, friendly_name,
+/// model, totals }` — spec §4.3 content for every row with any spend — and
+/// the org half is `OrgScope::All` for the master and for every paired client
+/// bound to no org alike, so this report used to hand a second person's phone
+/// the name and per-session spend of every private session in the fleet.
+///
 /// [`health::HealthView::Org`]: crate::service::health::HealthView::Org
+/// [`ViewScope`]: crate::service::view_scope::ViewScope
 pub fn report_on(
     s: &Store,
     host: Option<&str>,
     since_secs: Option<u64>,
     now: i64,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
 ) -> Result<UsageReport, IpcError> {
+    let scope = &view.org;
+    // This is the org boundary, not a privacy fence: which HOSTS' daily roll-up this caller
+    // reads. The per-session rows below take `view.sees_session_row` as well, which is the
+    // person half.
+    //
+    // **Open, and recorded as an owner decision** (multi-user M1, T9d; the
+    // table row is in `scope_guard_tests::OPEN_QUESTIONS`). For a person's
+    // own device `is_all()` is true, so `visible` is `None`, `sees_host` is
+    // true for every host, and `by_day` below is the WHOLE fleet's per-host
+    // daily spend — an aggregate over other people's private sessions. The
+    // per-session `sessions` / `by_host` halves are person-fenced; this one
+    // is not. Spec §4.3's positive list gives an out-of-scope caller "a
+    // count" for an `unclaimed` row and "nothing at all" for somebody else's
+    // private one, and says nothing about a cost aggregate — so this is the
+    // owner's call, not a settled violation. The person branch of the same
+    // roll-up already exists if the answer is "fence it":
+    // `health::HealthView::Person`'s `person_usage_by_day`.
     let visible: Option<std::collections::BTreeSet<String>> = (!scope.is_all()).then(|| {
         crate::service::health::hosts_in_scope(s, scope)
             .into_iter()
@@ -1128,7 +1165,11 @@ pub fn report_on(
         .list_all_sessions()?
         .into_iter()
         .filter(|r| host.is_none_or(|h| r.host_alias == h))
-        .filter(|r| scope.sees_row(r))
+        // Org half; `view.sees_session_row` on the next line is the person
+        // half.
+        .filter(|r| scope.sees_row_org_only(r))
+        // And whose row it is (multi-user M1, T7).
+        .filter(|r| view.sees_session_row(r).is_visible())
         .filter(|r| !r.usage.totals().is_zero())
         .filter(|r| since.is_none_or(|t| r.usage.usage_updated_at.is_some_and(|u| u >= t)))
         .collect();

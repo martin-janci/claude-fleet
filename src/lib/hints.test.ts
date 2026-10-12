@@ -33,7 +33,7 @@ describe('pickActiveHint', () => {
 });
 
 describe('HINTS', () => {
-  it('has a hint for the agent FAB, or nobody finds the button', () => {
+  it('has a hint for the agent (the rail\'s Control item), or nobody finds it', () => {
     const h = HINTS.find((x) => x.id === 'agent-fab');
     expect(h).toBeTruthy();
     expect(h!.text.length).toBeGreaterThan(0);

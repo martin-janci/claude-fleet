@@ -1,9 +1,11 @@
 <script lang="ts">
-  import { onDestroy, tick } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
+  import { get } from 'svelte/store';
   import { invoke } from '@tauri-apps/api/core';
   import { unarchiveSession } from './tidy';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { selectedSession } from './selection';
+  import PaneUnreadableNotice from './PaneUnreadableNotice.svelte';
   import { hostByAlias } from './hosts';
   import { Screen, rowToRuns, runsKey, runStyleCss, type Run, type RowShift } from './ansi';
   import { pointInRect, dropPoint } from './geometry';
@@ -12,15 +14,59 @@
   import { hintAnchor } from './hints';
   import { toIpcError } from './result';
   import { push, pushError } from './toasts';
-  import { repairSession, hasNoPane, showFriendlyNames } from './sessions';
+  import { repairSession, hasNoPane, showFriendlyNames, sessionsAnswered, sessionAgent } from './sessions';
+  import { splashShown } from './startup';
+  import Loader from './Loader.svelte';
   import { displayName } from './attention';
   import { keyToBytes, detectMac } from './terminal_keys';
   import { createDrainLoop } from './terminal_drain';
   import { createTerminalClipboard, pathsToPasteText } from './terminal_clipboard';
   import { createMouseController } from './terminal_mouse';
   import TransferChip from './TransferChip.svelte';
+  import MicToggle from './MicToggle.svelte';
+  import { voiceState, releaseVoice, followSession, abandonFollow } from './voice';
   import { fitCells } from './terminal_size';
-  import { ownsTheFleet } from './hub';
+  import { hubStatus, ownsTheFleet } from './hub';
+  import { accessOf, noAttachReason } from './access';
+  import { sessionBlocked } from './share';
+  import { matchShortcut } from './shortcuts';
+  import {
+    shellTerminals,
+    shellTerminalName,
+    terminalPtyId,
+    nextTerminalTab,
+    terminalPane,
+    terminalRequest,
+    terminalOpensOn,
+    shellActivity,
+    SHELL_ACTIVITY_POLL_MS,
+    type ShellActivity,
+    type ShellTerminalsResult,
+  } from './terminals';
+  import TerminalStrip from './TerminalStrip.svelte';
+  import ContextHelp from './ContextHelp.svelte';
+  import { askContextHelp, helpModel, screenHistory } from './context_help';
+  import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
+  import { AGENT_LABELS } from './row_groups';
+  import { agentTabLabel, agentTabName } from './prefs';
+  import Self from './TerminalView.svelte';
+  import HostOffline from './states/HostOffline.svelte';
+  import { errorText } from './error_copy';
+  import { openTerminalWindow, popoutTitle, parsePopoutLabel, popBackIn } from './terminal_popout';
+  import SendKeys from './SendKeys.svelte';
+
+  /** Shell terminals (step 5.3). App mounts this pane with no `shell`: it is
+   *  the session's terminal area, with the Agent | Shell N strip in the new
+   *  layout, and its grid shows the tab picked there. Split mounts a second
+   *  copy beside it with `shell` set, which shows that one terminal and
+   *  nothing else (no strip, no microphone).
+   *
+   *  A pop-out window (step 5.4) mounts it with `popout` set to the window's
+   *  label: the same single terminal (the agent's when `shell` is absent),
+   *  attached under that label as its pty id, so it is a second attach
+   *  beside the main window's and never replaces it. */
+  let { shell = undefined, popout = undefined }: { shell?: number; popout?: string } = $props();
+  const isRoot = $derived(shell === undefined && popout === undefined);
 
   // ─────────────────────────────────────────────────────────────────────
   // Terminal pane — minimal ANSI renderer.
@@ -67,15 +113,348 @@
     // `screen` too: a half-open pane (a PTY whose Screen was torn down under
     // it) must never satisfy the guard, or selecting that session again would
     // skip the reopen and leave a blank grid that still swallows keystrokes.
+    // Read before the short-circuit below: the open effects must re-run
+    // when the picked terminal changes, even on a run that stopped at
+    // `screen` (which is not reactive).
+    const want = myShell;
     return (
-      !!sess && screen !== null && sess.tmux_name === currentSession && sess.host_alias === currentHost
+      !!sess &&
+      screen !== null &&
+      sess.tmux_name === currentSession &&
+      sess.host_alias === currentHost &&
+      currentShell === want
     );
   }
+
+  // ── Sharing never confers a terminal (multi-user M1, spec §4.3 inv. 4) ──
+  //
+  // `pty_open` spawns THIS machine's `ssh … tmux attach`. The hub is not in
+  // that path, so it cannot refuse the attach and cannot revoke it once it is
+  // up — which is exactly why a session reached through a grant must not
+  // attach at all. The gate is therefore here, on the client, and it is three
+  // things, because one of them alone leaks:
+  //
+  //   (a) `App.svelte` never MOUNTS this component for a row the client does
+  //       not own — so in normal use the PTY is never even asked for;
+  //   (b) an early return in `openTerm`, below, BEFORE its `repair_session`
+  //       probe (which respawns tmux and re-adds worktrees — not a thing to
+  //       run on a session you may only watch);
+  //   (c) the `$effect` below, which closes a LIVE pty the moment the derived
+  //       answer stops being `own` — a revoke otherwise leaves a read/write
+  //       channel into the owner's pane that nothing can reach, until a
+  //       30 s-throttled focus re-list happens to notice.
+  //
+  // Read through `$accessOf` (not `sessionAccess`) on purpose: the answer has
+  // THREE inputs — the row, this client's person id and its grant set — and a
+  // revoke moves only the last of them. A derivation that read the row alone
+  // would never fire, because a revoke changes no column on it.
+  const termAccess = $derived($accessOf($selectedSession));
+  const termOwned = $derived(termAccess === 'own');
+  const termNoAttachWhy = $derived(noAttachReason(termAccess, $hubStatus));
+
+  // ── Shell terminals (step 5.3) ──────────────────────────────────────
+  // The strip of the session's terminals, beside the agent's own pane.
+  const showStrip = $derived(
+    isRoot && termOwned && !!$selectedSession && !hasNoPane($selectedSession),
+  );
+  /** The session's open terminals, by number. */
+  let shells: number[] = $state([]);
+  /** What runs in each of them (M15 G4.4), from the same list. */
+  let activity: Record<number, ShellActivity> = $state({});
+  /** The picked tab: `null` is the agent. */
+  let activeShell: number | null = $state(null);
+  /** Agent on the left, the picked terminal on the right. */
+  let split = $state(false);
+  let stripBusy = $state(false);
+  /** What THIS pane's grid attaches to: `null` is the agent. */
+  const myShell: number | null = $derived(
+    !isRoot ? (shell ?? null) : showStrip && !split ? activeShell : null,
+  );
+  const sideShell: number | null = $derived(showStrip && split ? activeShell : null);
+  /** The session the terminal list belongs to, so a reply for the previous
+   *  selection is dropped. */
+  let stripFor: number | null = null;
+  /** Opening or closing a terminal is `own`, as the attach itself is. */
+  const stripBlocked = $derived($sessionBlocked($selectedSession, 'shell_terminals'));
+
+  /** The list for this selection has come back: until then an empty
+   *  `shells` means "not known yet", not "none". */
+  let listed = false;
+  /** The terminal last picked, which the bar's Terminals tab goes back to. */
+  let lastShell: number | null = null;
+  /** The Terminals tab was pressed before the list came back. */
+  let wantShells = false;
+
+  function takeTerminals(r: ShellTerminalsResult | null) {
+    if (!r || r.session_id !== stripFor) return;
+    shells = r.terminals.map((t) => t.n);
+    activity = Object.fromEntries(r.terminals.map((t) => [t.n, shellActivity(t.command)]));
+    listed = true;
+    if (activeShell != null && !shells.includes(activeShell)) activeShell = null;
+    if (activeShell == null) split = false;
+    if (wantShells) {
+      wantShells = false;
+      showShells();
+    }
+  }
+
+  $effect(() => {
+    const id = showStrip ? ($selectedSession?.id ?? null) : null;
+    if (id === stripFor) return;
+    stripFor = id;
+    shells = [];
+    activity = {};
+    activeShell = null;
+    split = false;
+    listed = false;
+    lastShell = null;
+    wantShells = false;
+    if (id == null) return;
+    void shellTerminals(id).then((r) => {
+      if (r.ok && r.value) takeTerminals(r.value);
+    });
+  });
+
+  // What runs in each shell changes without an event (a command starts or
+  // ends), so the list is asked again while the strip shows terminals and
+  // the window is on screen. Never while a new/close is out: its own reply
+  // carries the list.
+  $effect(() => {
+    if (!showStrip || shells.length === 0) return;
+    const t = setInterval(() => {
+      const id = stripFor;
+      if (id == null || stripBusy || (typeof document !== 'undefined' && document.hidden)) return;
+      void shellTerminals(id).then((r) => {
+        if (r.ok && r.value && !stripBusy) takeTerminals(r.value);
+      });
+    }, SHELL_ACTIVITY_POLL_MS);
+    return () => clearInterval(t);
+  });
+
+  async function newTerminal() {
+    const id = stripFor;
+    if (id == null || stripBusy || stripBlocked !== null) return;
+    stripBusy = true;
+    try {
+      const r = await shellTerminals(id, 'open', undefined, get(terminalOpensOn));
+      if (!r.ok) {
+        pushError(r.error, 'New terminal failed');
+        return;
+      }
+      takeTerminals(r.value);
+      if (r.value?.session_id === stripFor && r.value.opened != null) selectTab(r.value.opened);
+    } finally {
+      stripBusy = false;
+    }
+  }
+
+  /** Close one terminal. The pane lets go of it first, so its attach is
+   *  closed rather than seeing the tmux session vanish and reconnecting. */
+  async function closeTerminal(n: number) {
+    const id = stripFor;
+    if (id == null || stripBusy || stripBlocked !== null) return;
+    if (activeShell === n) {
+      activeShell = null;
+      split = false;
+    }
+    stripBusy = true;
+    try {
+      await tick();
+      const r = await shellTerminals(id, 'close', n);
+      if (!r.ok) {
+        pushError(r.error, 'Closing the terminal failed');
+        return;
+      }
+      takeTerminals(r.value);
+    } finally {
+      stripBusy = false;
+    }
+  }
+
+  function selectTab(n: number | null) {
+    activeShell = n;
+    if (n == null) split = false;
+    else lastShell = n;
+  }
+
+  /** The session bar's Terminals tab: the terminal last picked, else the
+   *  first one, else a new one. */
+  function showShells() {
+    if (stripFor == null || activeShell != null) return;
+    if (!listed) {
+      wantShells = true;
+      return;
+    }
+    const pick = lastShell != null && shells.includes(lastShell) ? lastShell : ([...shells].sort((a, b) => a - b)[0] ?? null);
+    if (pick != null) selectTab(pick);
+    else void newTerminal();
+  }
+
+  // The bar publishes its clicks, the pane carries them out. A request made
+  // before this pane mounted is not replayed.
+  let seenRequest = get(terminalRequest)?.seq ?? 0;
+  $effect(() => {
+    const req = $terminalRequest;
+    if (!isRoot || !req || req.seq <= seenRequest) return;
+    seenRequest = req.seq;
+    untrack(() => {
+      if (req.to === 'agent') selectTab(null);
+      else if (req.n != null && listed && shells.includes(req.n)) selectTab(req.n);
+      else {
+        // Before the list: the terminal it names is the one showShells
+        // goes back to once the list is in.
+        if (req.n != null) lastShell = req.n;
+        showShells();
+      }
+    });
+  });
+
+  // What the bar's Terminals tab reads: the count, and whether it is current.
+  $effect(() => {
+    if (!isRoot) return;
+    terminalPane.set({
+      sessionId: showStrip ? ($selectedSession?.id ?? null) : null,
+      shells: [...shells],
+      active: showStrip ? activeShell : null,
+    });
+  });
+  onDestroy(() => {
+    if (isRoot) terminalPane.set({ sessionId: null, shells: [], active: null });
+  });
+
+  // ── Context help on the picked shell (`context_help.ts`) ─────────────
+  // Haiku answers about the shell's prompt line, with the shell's own tmux
+  // scrollback (read on the host) as its history; what this window shows
+  // stands in when that cannot be read. Its proposal is typed onto the
+  // prompt line — Ctrl+U first, so it replaces what was typed — and never
+  // followed by Enter.
+  let helpOpen = $state(false);
+  /** Writing help's "Context help" toggle, off by default. */
+  const helpOn = $derived(settingBool($fleetSettings, SETTING_KEYS.workContextHelp));
+  $effect(() => {
+    void activeShell;
+    helpOpen = false;
+  });
+  /** The picked shell's screen as this window holds it: only when this pane
+   *  shows it (not split, where the side pane holds its own screen). */
+  function shellScreen(): { text: string; line: string } {
+    void renderVersion;
+    if (!screen || split || activeShell == null) return { text: '', line: '' };
+    const s = screen;
+    const text = s.selectionText({ row: 0, col: 0 }, { row: s.rows - 1, col: s.cols - 1 });
+    const line = s.selectionText({ row: s.cursorRow, col: 0 }, { row: s.cursorRow, col: s.cols - 1 });
+    return { text, line };
+  }
+  const helpInsertBlocked = $derived(
+    activeShell != null && activity[activeShell]?.state === 'running'
+      ? `${activity[activeShell]?.command} is running in this shell: copy the command instead`
+      : null,
+  );
+  function askShellHelp(question: string) {
+    const sel = $selectedSession;
+    const n = activeShell;
+    if (!sel || n == null) {
+      return Promise.resolve({ ok: false as const, error: { code: 'E_INVALID', message: 'No shell is picked' } });
+    }
+    const { text, line } = shellScreen();
+    return askContextHelp(
+      { host_alias: sel.host_alias, session_name: sel.tmux_name, profile: sel.claude_profile },
+      { surface: 'shell', terminal: n, line, history: screenHistory(text) },
+      question,
+      helpModel($fleetSettings),
+    );
+  }
+  function insertShellCommand(command: string) {
+    if (activeShell == null) return;
+    void invoke('pty_write', { args: { id: terminalPtyId(activeShell), data: `\x15${command}` } }).catch((e) => {
+      pushError(toIpcError(e), 'Insert failed');
+    });
+  }
+
+  /** Clear the picked terminal's screen: Ctrl+L to its shell. */
+  function clearTerminal() {
+    if (activeShell == null) return;
+    void invoke('pty_write', { args: { id: terminalPtyId(activeShell), data: '\x0c' } }).catch((e) => {
+      pushError(toIpcError(e), 'Clear failed');
+    });
+  }
+
+  /** Pop the picked tab out into its own window (step 5.4), or bring its
+   *  window forward. The tab stays here too: the window is a second view. */
+  async function popOutTerminal() {
+    const sel = $selectedSession;
+    if (!sel) return;
+    const n = activeShell;
+    const r = await openTerminalWindow(sel.id, n, popoutTitle(displayName(sel, $showFriendlyNames), n));
+    if (!r.ok) pushError(r.error, 'Pop out failed');
+  }
+
+  // ── A pop-out window's own bar (Agent board, M15 G4.4) ────────────────
+  /** The window this pane fills, when it is a pop-out. */
+  const popoutTarget = $derived(popout === undefined ? null : parsePopoutLabel(popout));
+  let sendKeysOpen = $state(false);
+
+  /** Send keys…: bytes to this terminal, as if typed. */
+  function sendKeys(bytes: string) {
+    if (!bytes) return;
+    writePty(bytes);
+  }
+
+  /** Clear view: blank this window's copy of the screen. Nothing reaches the
+   *  terminal (no Ctrl+L, no /clear); what the program repaints shows again. */
+  function clearView() {
+    if (!screen) return;
+    screen.clearView();
+    clearSelection();
+    renderVersion++;
+  }
+
+  /** Pop back in: the main window shows this terminal, this window closes. */
+  async function popBack() {
+    const t = popoutTarget;
+    if (!t) return;
+    const r = await popBackIn(t);
+    if (!r.ok) pushError(r.error, 'Pop back in failed');
+  }
+
+  /** ⌥⌘T (Ctrl+Alt+T) opens a terminal, ⌘` (Ctrl+Alt+`) goes to the next tab.
+   *  Captured before the grid sees them, so neither reaches the pty. */
+  function onTerminalChord(e: KeyboardEvent) {
+    if (!showStrip) return;
+    const id = matchShortcut('global', e, isMac);
+    if (id === 'new-terminal') {
+      e.preventDefault();
+      e.stopPropagation();
+      void newTerminal();
+    } else if (id === 'next-terminal') {
+      e.preventDefault();
+      e.stopPropagation();
+      selectTab(nextTerminalTab(activeShell, shells));
+    }
+  }
+
+  $effect(() => {
+    // Reading the derived subscribes this effect to all three of its sources.
+    if (termOwned) return;
+    // Harmless when nothing is attached: closeTerm no-ops unless there is
+    // something to tear down. When there IS, it bumps the open generation
+    // first, so an open suspended mid-`await` stands down too.
+    void closeTerm();
+  });
+
+  /** The id this pane's PTY lives under in the backend's PTY map
+   *  (`pty.rs`): `agent` for the agent's terminal, `sh<N>` for shell
+   *  terminal N (step 5.3), so opening one never replaces another. Set by
+   *  each open, so a close always names the PTY that open made. */
+  let PTY_ID = 'agent';
+  /** The shell terminal attached now (`null`: the agent), with
+   *  `currentSession` / `currentHost`. */
+  let currentShell: number | null = $state(null);
 
   /** Forward bytes to the PTY. A rejection (PTY gone, host dropped) used to be
    *  swallowed; now it surfaces once — the toast store dedupes repeats. */
   function writePty(data: string) {
-    void invoke('pty_write', { args: { data } }).catch((e) => {
+    void invoke('pty_write', { args: { id: PTY_ID, data } }).catch((e) => {
       pushError(toIpcError(e), 'Terminal input failed');
     });
   }
@@ -117,6 +496,10 @@
   /** Context-menu position (client px) or null when hidden. */
   let ctxMenu: { x: number; y: number } | null = $state(null);
   let ptyOpen = false;
+  // The generation `pty_open` returned for the attach on screen. Every drain
+  // names it, so a drain issued for the previous attach and reordered after
+  // a new open drains nothing instead of eating its first output (review r06).
+  let ptyGeneration: number | null = null;
   let lastCols = $state(0);
   let lastRows = $state(0);
   /** Bytes drained since this attach. The header shows this and nothing
@@ -292,6 +675,13 @@
   }
 
   async function handleDrop(paths: string[]) {
+    // `upload_to_session` scps arbitrary files onto the owner's host over this
+    // machine's own SSH, with no hub in the path — the same unrevocable
+    // channel the attach is, so the same rule: a grant never confers it.
+    // (`ptyOpen` already implies it today, since the grid is not rendered
+    // without an attach; stated anyway, because the one place a drop can race
+    // is a revoke that has not yet closed the PTY.)
+    if (!termOwned) return;
     if (!ptyOpen || !currentSession || !currentHost || paths.length === 0) return;
     // An scp of a large file takes many seconds. Pin the upload to the attach
     // that started it: pasting on arrival regardless typed host A's paths into
@@ -331,6 +721,8 @@
     const sess = $selectedSession;
     if (!sess) {
       void closeTerm();
+      // Nothing attached: the microphone has no session to serve.
+      if (isRoot && get(voiceState).state !== 'off') void releaseVoice();
       return;
     }
     if (isAttachedTo(sess)) return;
@@ -369,7 +761,10 @@
       .then((fn) => {
         if (disposed) fn();
         else unlisten = fn;
-      });
+      })
+      // Subscribing can reject (the webview torn down mid-subscribe, no Tauri
+      // at all); that must not surface as an unhandled rejection.
+      .catch(() => {});
     return () => {
       disposed = true;
       unlisten?.();
@@ -403,8 +798,12 @@
 
   /** Has the open that captured `gen` been superseded — by a close, a destroy,
    *  a newer open, or the selection moving on? */
-  function openIsStale(gen: number, target: { tmux_name: string; host_alias: string }): boolean {
+  function openIsStale(
+    gen: number,
+    target: { tmux_name: string; host_alias: string; shell?: number | null },
+  ): boolean {
     if (destroyed || gen !== openGeneration) return true;
+    if (target.shell !== undefined && target.shell !== myShell) return true;
     const sel = $selectedSession;
     return !sel || sel.tmux_name !== target.tmux_name || sel.host_alias !== target.host_alias;
   }
@@ -416,8 +815,15 @@
     }
     const sess = $selectedSession;
     if (!sess) return;
+    // Before `container`, before the workspace probe, before any state write:
+    // a session this client does not own gets no PTY and no `repair_session`
+    // either. Normally unreachable (App does not mount us for such a row),
+    // but the window between a revoke landing and the unmount is real, and
+    // the two open-effects below re-run inside it.
+    if (!termOwned) return;
     if (!container) return;
-    const target = { tmux_name: sess.tmux_name, host_alias: sess.host_alias };
+    const shellN = myShell;
+    const target = { tmux_name: sess.tmux_name, host_alias: sess.host_alias, shell: shellN };
     opening = true;
     // A fresh attach may render fine: let it report a parser failure again.
     reportedTerminalError = false;
@@ -441,6 +847,8 @@
       // destroys from here on bumps it again and this open stands down.
       gen = ++openGeneration;
       if (standDown()) return;
+      // From here on every pty call names this open's terminal.
+      PTY_ID = popout ?? terminalPtyId(shellN);
       openError = null;
       disconnected = false;
       await tick();
@@ -486,7 +894,7 @@
       // ask for — attempting it anyway put an E_LOCAL_ONLY toast on every
       // attach of a project-backed session. Repair workspace is unaffected:
       // it passes `explicit: true` and routes.
-      if (sess.project_id != null && !hasNoPane(sess) && ownsTheFleet()) {
+      if (shellN == null && sess.project_id != null && !hasNoPane(sess) && ownsTheFleet()) {
         const rep = await repairSession(sess.id);
         if (standDown()) return;
         if (rep.ok) {
@@ -507,10 +915,23 @@
         }
       }
 
+      // A shell terminal is (re)made before the attach: `open` is a no-op
+      // for one that is up, and brings back one a host reboot took.
+      if (shellN != null) {
+        const made = await shellTerminals(sess.id, 'open', shellN);
+        if (standDown()) return;
+        if (!made.ok) {
+          openError = `Couldn't open the terminal: ${errorText(made.error)}`;
+          return;
+        }
+      }
+
+      let opened: unknown;
       try {
-        await invoke('pty_open', {
+        opened = await invoke('pty_open', {
           args: {
-            session_name: sess.tmux_name,
+            id: PTY_ID,
+            session_name: shellN == null ? sess.tmux_name : shellTerminalName(sess.tmux_name, shellN),
             host_alias: sess.host_alias,
             cols: dim.cols,
             rows: dim.rows,
@@ -527,16 +948,17 @@
           // unreachable.
           scheduleAutoReconnect(target.tmux_name, target.host_alias);
         } else {
-          openError = `PTY error: ${toIpcError(e).message}`;
+          openError = `Couldn't attach to the session: ${errorText(toIpcError(e))}`;
+          abandonFollow(sess.id);
         }
         return;
       }
       if (standDown()) {
         // The attach landed after the pane let go of it. Nobody will drain it
-        // and the backend keeps exactly one PTY, so close it — no newer open
+        // and the backend keeps one PTY per id, so close it — no newer open
         // can have taken over, they are serialized by `opening`.
         try {
-          await invoke('pty_close');
+          await invoke('pty_close', { args: { id: PTY_ID } });
         } catch {
           /* nothing to undo */
         }
@@ -544,12 +966,23 @@
       }
       currentSession = sess.tmux_name;
       currentHost = sess.host_alias;
+      currentShell = shellN;
       ptyOpen = true;
+      ptyGeneration = typeof opened === 'number' ? opened : null;
       attachedAt = Date.now();
-      // Work graph M7: a person attaching is a touch — it un-archives the
-      // session and keeps tidy-up off it for an hour. Not an automatic
-      // reconnect. Best-effort: an older hub without the action refuses it.
-      if (!isAutoReconnect) void unarchiveSession(sess.id).catch(() => {});
+      if (shellN == null) {
+        // The microphone claim follows the attached session (closeTerm runs
+        // on every switch, so release lives on the deselect / destroy
+        // paths). A shell terminal never takes it: the voice is the agent's,
+        // and the main window's, not a pop-out's.
+        if (popout === undefined) {
+          followSession(sess.id, get(hostByAlias).get(sess.host_alias)?.transport ?? 'ssh');
+        }
+        // Work graph M7: a person attaching is a touch — it un-archives the
+        // session and keeps tidy-up off it for an hour. Not an automatic
+        // reconnect. Best-effort: an older hub without the action refuses it.
+        if (!isAutoReconnect) void unarchiveSession(sess.id).catch(() => {});
+      }
 
       // Start the adaptive drain loop. 30 ms (~33 Hz) is the floor when output
       // is flowing; it backs off to DRAIN_MAX_MS when the terminal is idle.
@@ -561,7 +994,7 @@
       postAttachTimer = setTimeout(() => {
         postAttachTimer = null;
         if (!ptyOpen) return;
-        void invoke('pty_resize', { args: { cols: lastCols, rows: lastRows } }).catch(() => {});
+        void invoke('pty_resize', { args: { id: PTY_ID, cols: lastCols, rows: lastRows } }).catch(() => {});
       }, 150);
     } finally {
       opening = false;
@@ -581,7 +1014,10 @@
         sel &&
         !destroyed &&
         !isAttachedTo(sel) &&
-        (bailed || sel.tmux_name !== target.tmux_name || sel.host_alias !== target.host_alias)
+        (bailed ||
+          sel.tmux_name !== target.tmux_name ||
+          sel.host_alias !== target.host_alias ||
+          target.shell !== myShell)
       ) {
         void openTerm();
       }
@@ -620,7 +1056,7 @@
     renderVersion++;
     lastResizeAt = Date.now();
     if (ptyOpen) {
-      void invoke('pty_resize', { args: { cols: next.cols, rows: next.rows } }).catch(() => {});
+      void invoke('pty_resize', { args: { id: PTY_ID, cols: next.cols, rows: next.rows } }).catch(() => {});
     }
   }
 
@@ -654,9 +1090,12 @@
     // resolved bytes belong to the old PTY — discard them rather than write
     // stale output into the new screen.
     const drainingInto = screen;
+    const generation = ptyGeneration;
     let result: PtyDrainResult;
     try {
-      result = await invoke<PtyDrainResult>('pty_drain');
+      result = await invoke<PtyDrainResult>('pty_drain', {
+        args: generation === null ? { id: PTY_ID } : { id: PTY_ID, generation },
+      });
     } catch {
       return false;
     }
@@ -808,14 +1247,16 @@
     renderVersion++;
     if (ptyOpen) {
       ptyOpen = false;
+      ptyGeneration = null;
       try {
-        await invoke('pty_close');
+        await invoke('pty_close', { args: { id: PTY_ID } });
       } catch {
         /* nothing to undo */
       }
     }
     currentSession = null;
     currentHost = null;
+    currentShell = null;
   }
 
   /** macOS: Cmd+C/V/A are the clipboard chords and Option is the ESC-prefix
@@ -837,12 +1278,12 @@
       return;
     }
     if (e.key === 'Escape' && ctxMenu) { ctxMenu = null; return; }
-    const k = e.key.toLowerCase();
-    const cmdChord = e.metaKey && !e.altKey && !e.ctrlKey;
-    const ctrlShiftChord = !isMac && e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey;
+    // The chords are the registry's `terminal` rows (step 0.1): ⌘ on every
+    // platform, Ctrl+Shift off the Mac.
+    const chord = matchShortcut('terminal', e, isMac);
     // Paste from the native clipboard (bracketed-paste framing in sendPaste).
     // Plain Ctrl+V is intentionally NOT intercepted so ^V reaches the app.
-    if ((cmdChord || ctrlShiftChord) && k === 'v') {
+    if (chord === 'terminal.paste') {
       e.preventDefault();
       void paste();
       return;
@@ -850,17 +1291,17 @@
     // Copy the selection. Cmd+C with no selection falls through to the
     // browser; Ctrl+Shift+C with no selection is swallowed (it is the copy
     // chord, not SIGINT — plain Ctrl+C still sends ^C via keyToBytes).
-    if ((cmdChord || ctrlShiftChord) && k === 'c') {
+    if (chord === 'terminal.copy') {
       if (selAnchor && selFocus) {
         e.preventDefault();
         void copySelection();
-      } else if (ctrlShiftChord) {
+      } else if (e.ctrlKey) {
         e.preventDefault();
       }
       return;
     }
     // Cmd+A (Ctrl+Shift+A elsewhere) → select the whole viewport.
-    if ((cmdChord || ctrlShiftChord) && k === 'a') {
+    if (chord === 'terminal.select-all') {
       e.preventDefault();
       selAnchor = { row: 0, col: 0 };
       selFocus = { row: lastRows - 1, col: lastCols - 1 };
@@ -978,6 +1419,7 @@
     destroyed = true;
     openGeneration += 1;
     void closeTerm();
+    if (isRoot && get(voiceState).state !== 'off') void releaseVoice();
     mouse.dispose();
   });
 
@@ -1117,7 +1559,94 @@
   );
 </script>
 
-{#if $selectedSession}
+<svelte:window onkeydowncapture={onTerminalChord} />
+
+{#if $selectedSession && !termOwned}
+  <!-- The last line of the gate: App does not mount this component for a row
+       the client does not own, so reaching here means the answer changed under
+       a mounted pane (a revoke) — or that a future caller mounted us without
+       the check. Either way there is no grid, no IME proxy, no drop target and
+       no `pty_*` call: the markup that could reach the PTY is simply not
+       rendered. `WatchView` is what a watcher actually sees; this is the
+       explanation for the gap. -->
+  <div class="no-attach" data-testid="terminal-no-attach">
+    <p class="no-attach-head">No terminal for this session.</p>
+    {#if termNoAttachWhy}
+      <p class="no-attach-why">{termNoAttachWhy}</p>
+    {/if}
+  </div>
+{:else if $selectedSession}
+  <div class="term-root" class:nested={!isRoot}>
+  {#if popoutTarget}
+    {@const what = myShell == null ? agentTabLabel(AGENT_LABELS[sessionAgent($selectedSession)], $agentTabName) : `Shell ${myShell}`}
+    <div class="popout-bar" data-testid="popout-bar">
+      <span class="popout-name">{what} · popped out</span>
+      <span class="popout-gap"></span>
+      <button
+        type="button"
+        class="popout-act"
+        aria-haspopup="dialog"
+        aria-expanded={sendKeysOpen}
+        onclick={() => (sendKeysOpen = !sendKeysOpen)}
+        data-testid="popout-send-keys">Send keys…</button
+      >
+      <button
+        type="button"
+        class="popout-act"
+        title="Clears this view only. /clear is never sent for you."
+        onclick={clearView}
+        data-testid="popout-clear-view">Clear view</button
+      >
+      <button
+        type="button"
+        class="popout-act"
+        title="Show this terminal in the main window again and close this one. It keeps running."
+        onclick={() => void popBack()}
+        data-testid="popout-pop-back-in">Pop back in</button
+      >
+      {#if sendKeysOpen}
+        <SendKeys target={what} onsend={sendKeys} onclose={() => (sendKeysOpen = false)} />
+      {/if}
+    </div>
+  {/if}
+  {#if showStrip}
+    <TerminalStrip
+      agentLabel={agentTabLabel(AGENT_LABELS[sessionAgent($selectedSession)], $agentTabName)}
+      {shells}
+      active={activeShell}
+      {split}
+      busy={stripBusy}
+      onselect={selectTab}
+      onnew={() => void newTerminal()}
+      onclose={(n) => void closeTerminal(n)}
+      onsplit={() => (split = !split)}
+      onclear={clearTerminal}
+      onpopout={() => void popOutTerminal()}
+      host={$selectedSession.host_alias}
+      opensOn={$terminalOpensOn}
+      onopenson={(at) => terminalOpensOn.set(at)}
+      {activity}
+      onhelp={helpOn && activeShell != null ? () => (helpOpen = !helpOpen) : undefined}
+      helpModel={helpModel($fleetSettings)}
+      {helpOpen}
+    />
+    {#if helpOn && helpOpen && activeShell != null}
+      <div class="shell-help">
+        <ContextHelp
+          model={helpModel($fleetSettings)}
+          line={shellScreen().line}
+          what="shell {activeShell}’s history"
+          ask={askShellHelp}
+          insertLabel="Put on the prompt line"
+          insertBlocked={helpInsertBlocked}
+          testid="terminal-help-panel"
+          oninsert={insertShellCommand}
+          onclose={() => (helpOpen = false)}
+        />
+      </div>
+    {/if}
+  {/if}
+  <div class="term-panes">
   <div class="wrap">
     {#if autoReconnecting}
       <div class="reconnect-banner" data-testid="terminal-autoreconnect-banner">
@@ -1129,16 +1658,26 @@
         <button onclick={reconnect}>Reconnect</button>
       </div>
     {/if}
+    {#if myShell == null}
+      <!-- J8 (5.11): the rules could not read the agent's screen. -->
+      <PaneUnreadableNotice session={$selectedSession} />
+    {/if}
     <div class="header" data-testid="terminal-header" use:hintAnchor={{ id: 'terminal-header' }}>
       <!-- One name policy: the header names the session the same way the
            sidebar row directly beside it does (attention.ts displayName).
            It used to render the tmux name unconditionally, so with the
            default settings the two disagreed about what you were looking
            at. The tmux name stays reachable in the tooltip. -->
-      <span class="name" title={$selectedSession.tmux_name}
+      <span class="name" title={myShell == null ? $selectedSession.tmux_name : shellTerminalName($selectedSession.tmux_name, myShell)}
         >{displayName($selectedSession, $showFriendlyNames)}</span
       >
+      {#if myShell != null}
+        <span class="shell-tag" data-testid="terminal-shell-tag">Shell {myShell}</span>
+      {/if}
       <TransferChip session={$selectedSession} />
+      {#if myShell == null}
+        <MicToggle session={$selectedSession} transport={selectedSessionHostTransport} />
+      {/if}
       <span class="size" data-testid="terminal-size">
         {#if lastCols > 0}{lastCols}×{lastRows}{:else}measuring…{/if}
       </span>
@@ -1258,7 +1797,7 @@
       <div class="ctx-menu" style="left:{ctxMenu.x}px; top:{ctxMenu.y}px" data-testid="terminal-ctx-menu">
         <button onclick={ctxCopy} disabled={!selAnchor || !selFocus}>Copy</button>
         <button onclick={ctxPaste}>Paste</button>
-        <button onclick={ctxSelectAll}>Select All</button>
+        <button onclick={ctxSelectAll}>Select all</button>
       </div>
     {/if}
     {#if openError}
@@ -1272,13 +1811,43 @@
           through a host that can reach it — or move the session somewhere you can attach.
           ({openError})
         </div>
+      {:else if $selectedSession && $hostByAlias.get($selectedSession.host_alias)?.reachable === false}
+        <!-- Review r13 (step 3.14): an offline host is said in the pane with
+             the states kit, not as ssh's own words. -->
+        {@const offline = $hostByAlias.get($selectedSession.host_alias)}
+        <HostOffline
+          alias={$selectedSession.host_alias}
+          lastSeen={offline?.last_reachable_at ?? offline?.health_at ?? null}
+          reason={offline?.last_probe_error ?? null}
+          code={offline?.last_probe_error_code ?? null}
+          ontry={() => void openTerm()} />
       {:else}
-        <div class="err">{openError}</div>
+        <div class="err" data-testid="terminal-open-error">{openError}</div>
       {/if}
     {/if}
   </div>
+  {#if sideShell != null}
+    <div class="side" data-testid="terminal-split">
+      {#key sideShell}
+        <Self shell={sideShell} />
+      {/key}
+    </div>
+  {/if}
+  </div>
+  </div>
 {:else}
   <div class="empty" data-testid="terminal-empty">
+    {#if !$sessionsAnswered}
+      <!-- Redesign step 3.13: the first fleet overview. Until the first
+           session list answers, the pane says the fleet is arriving rather
+           than asking for a pick from a list that is not there yet. -->
+      <!-- Under the startup splash (step 3.15) the splash is this screen's
+           one loader; the swarm takes over if the splash steps aside. -->
+      {#if !$splashShown}
+        <Loader name="particle-swarm" size={160} testid="fleet-arriving" />
+      {/if}
+      <p class="empty-msg">Hosts and sessions arriving…</p>
+    {:else}
     <!-- Stroke-only terminal-window icon: traffic lights + chevron prompt with
          a cursor underscore. currentColor lets it ride the theme's muted fg. -->
     <svg
@@ -1300,10 +1869,78 @@
       <line x1="27" y1="44" x2="42" y2="44" />
     </svg>
     <p class="empty-msg">Select a session to attach a terminal.</p>
+    {/if}
   </div>
 {/if}
 
 <style>
+  .term-root {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    width: 100%;
+    min-height: 0;
+  }
+  .popout-bar {
+    position: relative;
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.25rem 0.5rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-pane);
+    font-size: var(--text-2xs);
+  }
+  .popout-name {
+    color: var(--fg-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .popout-gap {
+    flex: 1 1 auto;
+  }
+  .popout-act {
+    font: inherit;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--fg-muted);
+    border-radius: var(--radius-sm);
+    padding: 0.15rem 0.5rem;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .popout-act:hover {
+    color: var(--fg);
+  }
+  .shell-help {
+    flex: none;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .term-panes {
+    flex: 1 1 auto;
+    display: flex;
+    min-height: 0;
+    min-width: 0;
+  }
+  .term-panes > .wrap {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+  .side {
+    flex: 1 1 0;
+    min-width: 0;
+    border-left: 1px solid var(--border);
+  }
+  .shell-tag {
+    font-size: var(--text-2xs);
+    color: var(--fg-muted);
+    padding: 0.05rem 0.4rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+  }
   .wrap {
     position: relative;
     display: flex;
@@ -1311,6 +1948,29 @@
     height: 100%;
     width: 100%;
     min-height: 0;
+  }
+  .no-attach {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    justify-content: center;
+    align-items: center;
+    height: 100%;
+    width: 100%;
+    padding: 1.5rem;
+    box-sizing: border-box;
+    text-align: center;
+    color: var(--fg-muted);
+    font-size: var(--text-xs);
+  }
+  .no-attach-head {
+    margin: 0;
+    font-weight: 600;
+  }
+  .no-attach-why {
+    margin: 0;
+    max-width: 46rem;
+    line-height: 1.5;
   }
   .reconnect-banner {
     position: absolute;
@@ -1321,20 +1981,20 @@
     color: rgb(220, 130, 130);
     padding: 0.35rem 0.7rem;
     border: 1px solid rgba(220, 130, 130, 0.3);
-    border-radius: 5px;
-    font-size: 0.8rem;
+    border-radius: var(--radius-sm);
+    font-size: var(--text-2xs);
     z-index: 5;
     display: flex;
     gap: 0.5rem;
     align-items: center;
   }
   .reconnect-banner button {
-    font-size: 0.75rem;
+    font-size: var(--text-2xs);
     padding: 0.15rem 0.5rem;
     background: transparent;
     border: 1px solid currentColor;
     color: inherit;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
   }
   .header {
@@ -1345,37 +2005,37 @@
     padding: 0.4rem 0.6rem;
     border-bottom: 1px solid var(--border);
     background: var(--bg-pane);
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
   }
   .name {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
     color: var(--fg);
     font-weight: 600;
   }
   .size {
     margin-left: auto;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.7rem;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     padding: 0.1rem 0.4rem;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
   }
   .counters {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.7rem;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     padding: 0.1rem 0.4rem;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
   }
   .reconnect {
-    font-size: 0.75rem;
+    font-size: var(--text-2xs);
     padding: 0.2rem 0.5rem;
     border: 1px solid var(--border);
     background: transparent;
     color: var(--fg-muted);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
   }
   .reconnect:hover { color: var(--fg); border-color: var(--accent); }
@@ -1390,13 +2050,13 @@
     min-width: 0;
     user-select: none;
     -webkit-user-select: none;
-    background: #0a0a0a;
-    color: #e8e8e8;
+    background: var(--term-bg);
+    color: var(--term-fg);
     overflow: hidden;
     padding: 4px;
     box-sizing: border-box;
     font-family: Menlo, ui-monospace, SFMono-Regular, monospace;
-    font-size: 13px;
+    font-size: var(--text-sm);
     line-height: 16px;
     /* Show focus ring subtly so the user knows where keyboard input lands. */
     outline: none;
@@ -1404,7 +2064,7 @@
   /* Keyboard focus only: the proxy is a text control, and a UA matches
      :focus-visible on those even for a plain mouse click. */
   .grid.kb-focus {
-    box-shadow: inset 0 0 0 1px var(--accent, #4f8fff);
+    box-shadow: inset 0 0 0 var(--ring-w) var(--ring);
   }
   /* Invisible, but NOT display:none / visibility:hidden and not off-screen —
      WebKit only opens an input-method session on an element it considers
@@ -1461,7 +2121,7 @@
   }
   .selection {
     position: absolute;
-    background: rgba(120, 170, 255, 0.35);
+    background: color-mix(in srgb, var(--accent) 35%, transparent);
     pointer-events: none;
     z-index: 1;
   }
@@ -1473,7 +2133,7 @@
      fill for a hollow outline, the standard "input is elsewhere" cue. */
   .cursor {
     position: absolute;
-    background: #e8e8e8;
+    background: var(--term-fg);
     opacity: 0.55;
     pointer-events: none;
     z-index: 1;
@@ -1481,24 +2141,30 @@
   }
   .cursor.underline {
     background: none;
-    border-bottom: 2px solid #e8e8e8;
+    border-bottom: 2px solid var(--term-fg);
     opacity: 0.9;
   }
   .cursor.bar {
     background: none;
-    border-left: 2px solid #e8e8e8;
+    border-left: 2px solid var(--term-fg);
     opacity: 0.9;
   }
   .cursor.unfocused {
     background: none;
-    border: 1px solid #e8e8e8;
+    border: 1px solid var(--term-fg);
     opacity: 0.6;
   }
   .cursor.blink {
-    animation: cf-cursor-blink 1.1s steps(1, end) infinite;
+    animation: cf-cursor-blink var(--loop-fast) steps(1, end) infinite;
   }
   @keyframes cf-cursor-blink {
     50% { opacity: 0; }
+  }
+  /* Review r12: Reduced and Off motion (motion.ts sets data-motion, the OS
+     preference included) hold the caret solid instead of blinking. */
+  :global(:root[data-motion='reduced']) .cursor.blink,
+  :global(:root[data-motion='off']) .cursor.blink {
+    animation: none;
   }
   .drop-overlay {
     position: absolute;
@@ -1507,10 +2173,10 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: rgba(20, 30, 50, 0.55);
-    border: 2px dashed var(--accent, #4f8fff);
-    color: #e8e8e8;
-    font-size: 0.95rem;
+    background: color-mix(in srgb, var(--term-bg) 55%, transparent);
+    border: 2px dashed var(--accent);
+    color: var(--term-fg);
+    font-size: var(--text-sm);
     pointer-events: none;
   }
   .measure {
@@ -1542,15 +2208,15 @@
   }
   .empty-msg {
     margin: 0;
-    font-size: 0.95rem;
+    font-size: var(--text-sm);
     letter-spacing: 0.01em;
   }
   .err {
     flex: 0 0 auto;
-    color: #e64a4a;
-    font-size: 0.8rem;
+    color: var(--danger);
+    font-size: var(--text-2xs);
     padding: 0.3rem 0.6rem;
-    border-top: 1px solid #e64a4a;
+    border-top: 1px solid var(--danger);
   }
   .ctx-backdrop {
     position: fixed;
@@ -1558,15 +2224,17 @@
     /* Below the app's modals (z-index 20); above terminal content. */
     z-index: 18;
   }
+  /* The menu is app chrome, not terminal: it follows the theme like every
+     other menu (SessionRowMenu), while the grid under it stays dark. */
   .ctx-menu {
     position: fixed;
     z-index: 19;
     min-width: 150px;
-    background: #1c1c1c;
-    border: 1px solid #3a3a3a;
-    border-radius: 6px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
     padding: 4px;
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--shadow-pop);
     display: flex;
     flex-direction: column;
   }
@@ -1574,12 +2242,16 @@
     text-align: left;
     background: none;
     border: none;
-    color: #e8e8e8;
+    color: var(--fg);
     padding: 6px 10px;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     font: inherit;
     cursor: pointer;
   }
-  .ctx-menu button:hover:not(:disabled) { background: #2d6cdf; }
-  .ctx-menu button:disabled { color: #666; cursor: default; }
+  .ctx-menu button:hover:not(:disabled) { background: var(--accent-soft); }
+  .ctx-menu button:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+    outline-offset: calc(-1 * var(--ring-w));
+  }
+  .ctx-menu button:disabled { color: var(--fg-muted); cursor: default; }
 </style>

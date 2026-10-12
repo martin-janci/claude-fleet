@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { tick, untrack } from 'svelte';
+  import Icon from './kit/Icon.svelte';
+  import { tick, untrack, type Snippet } from 'svelte';
   import { get } from 'svelte/store';
   import { projects, refreshProjects, type ProjectTreeRow } from './projects';
   import {
@@ -13,22 +14,62 @@
     sidebarGroupBy,
     sameSession,
     hasNoPane,
+    sessionAgent,
     type SessionRow,
   } from './sessions';
   import { describePurge, purgeHostsForProject } from './purge';
-  import { sessionMatchesSearch } from './search';
+  import { localMidnight } from './today';
+  import { capRows, groupCountText, groupMoreText, groupRows, isFlatGroupBy } from './row_groups';
+  import { startingSessions } from './session_starting';
+  import { tablistKeys } from './tablist_keys';
+  import {
+    agentFilter,
+    agentFilterLabel,
+    inScopeTab,
+    isSharedAccess,
+    scopeTab,
+    scopeTabCounts,
+    SCOPE_TAB_LABELS,
+    SCOPE_TABS,
+  } from './session_scope';
+  import {
+    inboxGroupBy,
+    inboxRows,
+    inboxSections,
+    notWaiting,
+    notWaitingSaid,
+    notWaitingText,
+    proposedRows,
+    proposedText,
+    sayNotWaiting,
+  } from './inbox';
+  import RoutineFailures from './automation/RoutineFailures.svelte';
+  import MissionWaits from './MissionWaits.svelte';
+  import AgentActions from './automation/AgentActions.svelte';
+  import { loadAgents, pendingAgentCount } from './agents';
+  import ProposedBy from './ProposedBy.svelte';
+  import { failingCount, loadFailing, loadNextRoutine, nextRoutine, nextRoutineLine } from './routines';
+  import { loadWaitingMissions, waitingMissionCount } from './mission_waits';
+  import { matchesAllWords, sessionMatchesSearch } from './search';
   import { sessionFocus } from './session_focus';
   import { type ProjectRow } from './projects';
   import { selectedSession, selectSession, selectSessionExplicitly, revealSeq } from './selection';
-  import { forgetSessionUi } from './session_ui';
   import { applySessionRename, renameKeyHandler } from './session_rename';
   import { readPref, writePref } from './prefs';
-  import { theme, cycleTheme } from './theme';
-  import NewSessionDialog from './NewSessionDialog.svelte';
+  import { accessOf, backendMode, myGrantInfo } from './access';
+  import { sharedRowLine, sharerName } from './shared_view';
   import AddProjectDialog from './AddProjectDialog.svelte';
-  import SettingsDialog from './SettingsDialog.svelte';
-  import OnboardingCard from './OnboardingCard.svelte';
-  import { hostFilter, effectiveHostFilter } from './hosts';
+  import { hostFilter, effectiveHostFilter, hosts, hostByAlias, hideHost } from './hosts';
+  import { bootstrapError } from './bootstrap_state';
+  import { errorText } from './error_copy';
+  import EmptyState from './states/EmptyState.svelte';
+  import HostOffline from './states/HostOffline.svelte';
+  import LoadError from './states/LoadError.svelte';
+  import { openSettingsAt } from './app_views';
+  import { openToday } from './control';
+  import type { IpcError } from './result';
+  import { bulkTargets, sessionBlocked } from './share';
+  import { moveToAccount } from './account_limits';
   import {
     effectiveScope,
     scopeFilter,
@@ -38,17 +79,23 @@
     orgColorById,
     orgColorOf,
     projectOwners,
+    orgs as orgList,
     UNASSIGNED,
   } from './orgs';
   import { facetSentence, sessionFacets } from './filter_facets';
-  import { onboardingDismissed } from './onboarding';
   import {
     hostsViewOpen,
-    newSessionHostRequest,
+    addProjectRequest,
     requestHostsView,
-    settingsOpen,
   } from './app_views';
   import { hintAnchor } from './hints';
+  import { openNewSessionPicker } from './switcher_request';
+  import { requestNewSession } from './new_session_request';
+  import { foldedIds, lostFolds } from './lost_fold';
+  import LostFoldRow from './LostFoldRow.svelte';
+  import { setProjectPick } from './project_picks';
+  import { detectMac, isEditable } from './terminal_keys';
+  import { matchShortcut } from './shortcuts';
   import {
     buildSessionsByProject,
     buildOutsideFleet,
@@ -80,18 +127,27 @@
     workFilters,
   } from './work_filters';
   import {
+    attentionState,
+    bucketState,
     ciStatusColor,
     ciStatusLabel,
     countNeedsYou,
+    countsTowardBadge,
     needsYou,
     severity,
     worstSeverityByProject,
+    type TriageBucket,
   } from './attention';
   import { attentionIdleMinutes } from './notify';
+  import { attentionFacts } from './attention_facts';
+  import { snapshotRows } from './motion_catalog';
   import { push, pushError } from './toasts';
+  import { pushRestartError } from './restart';
   import { hubStatus, hubBlock, hubActionBlocked } from './hub';
   import { hubConnection, connectionBanner } from './hub_connection';
   import ConfirmDialog from './ConfirmDialog.svelte';
+  import KillDialog from './KillDialog.svelte';
+  import { announceArchive, archiveBlocked, archiveSessions } from './kill_check';
   import BulkPromptDialog from './BulkPromptDialog.svelte';
   import NameWorkDialog from './NameWorkDialog.svelte';
   import SidebarFilters from './SidebarFilters.svelte';
@@ -124,6 +180,8 @@
   let { onCollapse }: { onCollapse?: () => void } = $props();
 
   let loadError: string | null = $state(null);
+  /** The last refresh's failure, kept whole for the list's error state. */
+  let refreshError: IpcError | null = $state(null);
   let loading = $state(false);
   // Recency filter persists across app restarts. Default to "all" the first
   // time the user opens the app; otherwise honor whatever pill they last
@@ -203,7 +261,7 @@
     const t = setInterval(() => (nowSec = Math.floor(Date.now() / 1000)), 30_000);
     return () => clearInterval(t);
   });
-  const attentionOpts = $derived({ idleSecs: $attentionIdleMinutes * 60, now: nowSec });
+  const attentionOpts = $derived({ idleSecs: $attentionIdleMinutes * 60, now: nowSec, facts: $attentionFacts });
   // The org scope (work graph M5): a view filter composed into every
   // builder below through `rowMatches`. `null` while no scope is chosen or
   // the selector is hidden (fewer than two scopes).
@@ -265,9 +323,7 @@
   }
   /** A past-only group matches a search by its key or a link's name. */
   function pastGroupMatchesSearch(key: string, links: WorkLink[], q: string): boolean {
-    if (!q) return true;
-    const needle = q.toLowerCase();
-    return key.toLowerCase().includes(needle) || links.some((l) => (l.snap_name ?? '').toLowerCase().includes(needle));
+    return matchesAllWords([key, ...links.map((l) => l.snap_name)], q);
   }
   /** The triage predicate (needs-you, recency, then `work` — the work
    *  filters), with no focus: the list's own, and the archived count's with
@@ -278,14 +334,52 @@
     // used to weigh only a project's newest session, and only in the tree).
     const r = recency;
     const recent: SessionPredicate = r === 'all' ? null : (s) => withinRecency(s.last_activity_at, r, opts.now);
-    return bothPredicates(bothPredicates(needsYouOnly ? (s) => needsYou(s, opts) : null, recent), work);
+    // "Agent: any" (Sessions board): only the rows that run the chosen agent.
+    const ag = $agentFilter;
+    const agent: SessionPredicate = ag === 'any' ? null : (s) => sessionAgent(s) === ag;
+    return bothPredicates(
+      bothPredicates(bothPredicates(needsYouOnly ? (s) => needsYou(s, opts) : null, recent), agent),
+      work,
+    );
   }
-  const rowPredicate = $derived.by((): SessionPredicate => {
+  const rowBase = $derived.by((): SessionPredicate => {
     if (focus) {
       const id = focus.id;
       return (s) => s.id === id;
     }
-    return triagePredicate(workPredicate);
+    // A mass loss's rows live in their fold row (redesign 1.1), not the tree.
+    const folded = foldedIdSet;
+    const unfolded: SessionPredicate = folded.size === 0 ? null : (s) => !folded.has(s.id);
+    return bothPredicates(unfolded, triagePredicate(workPredicate));
+  });
+  // ── Shared with me (redesign step 5.8) ──
+  // The sessions someone shared with this person (at any level) leave the
+  // tree and the groups for one group of their own, except in focus. An
+  // unknown access (null) is not a share and stays put.
+  const splitShared = $derived(!focus);
+  function isSharedWithMe(s: SessionRow): boolean {
+    return isSharedAccess($accessOf(s));
+  }
+  // ── All / Mine / Shared with me (Sessions board) ──
+  // Counted over what All would show; the tabs show on a fleet with people
+  // (a window onto a hub) or once something is shared, since a standalone
+  // desktop owns every row and the tabs would only repeat All.
+  const tabCounts = $derived.by(() => {
+    const q = viewSearch;
+    const pool = $sessions.filter(
+      (s) => s.kind !== 'external' && sessionVisible(s, viewHost, viewBg, rowBase, viewScope) && sessionMatchesSearch(s, q, projectLabelOf(s.project_id)),
+    );
+    return scopeTabCounts(pool, $accessOf);
+  });
+  const tabsShown = $derived(!focus && (backendMode($hubStatus) !== 'local' || tabCounts.shared > 0));
+  const tab = $derived(tabsShown ? $scopeTab : 'all');
+  const rowPredicate = $derived.by((): SessionPredicate => {
+    if (!splitShared) return rowBase;
+    // Shared with me: the tree and the groups hold nothing; the shared
+    // group below is the list.
+    if (tab === 'shared') return () => false;
+    const mine = tab === 'mine';
+    return bothPredicates((s) => (mine ? inScopeTab('mine', $accessOf(s)) : !isSharedWithMe(s)), rowBase);
   });
 
   // What narrows the list, for the empty state (the chrome shows the same
@@ -356,6 +450,7 @@
           scopeLabel:
             $effectiveScope === UNASSIGNED ? 'Unassigned' : $scopes.find((x) => x.id === $effectiveScope)?.label,
           host: $effectiveHostFilter,
+          agent: $agentFilter === 'any' ? undefined : agentFilterLabel($agentFilter),
           recency,
           search: searchQuery,
           needsYou: needsYouOnly,
@@ -367,6 +462,7 @@
   function clearListFilters() {
     hostFilter.set('all');
     scopeFilter.set('all');
+    agentFilter.set('any');
     recency = 'all';
     search = '';
     searchQuery = '';
@@ -380,6 +476,8 @@
   let selectMode = $state(false);
   let selectedIds: Set<number> = $state(new Set());
   let bulkKillOpen = $state(false);
+  /** Which bulk press opened the Kill dialog: Kill or Clean up (step 1.7). */
+  let bulkKillMode = $state<'kill' | 'cleanup'>('kill');
   let bulkPromptOpen = $state(false);
   const selectedRows = $derived($sessions.filter((s) => selectedIds.has(s.id)));
 
@@ -421,9 +519,107 @@
     }
   });
 
+  /**
+   * The per-host unclaimed counts (multi-user M1, rule 6) — a COUNT, with no
+   * rows and no expand, which is the whole point: an unclaimed session is one
+   * fleet did not start, and spec §4.3 says the only thing anyone out of its
+   * scope may learn about it is a number. Rendering rows here would be exactly
+   * the metadata leak the number exists instead of.
+   *
+   * Deliberately NOT from `hosts_view.ts::sessionCounts`, which derives every
+   * other host badge from the rows this client holds — there are no rows to
+   * derive this from, by design. It comes from `HostRow.unclaimed_sessions`,
+   * straight off the host row.
+   *
+   * A host is skipped when its count is absent or `null` — which is the NORMAL
+   * case on a hub with more than one person (R5-d): the backend serves `null`
+   * rather than a number there, because a zero is itself a claim about the host
+   * that would let a second person infer one. Nothing is rendered for it: not
+   * "0", not a dash. A genuine `0` is skipped too — true, but it describes
+   * nothing, and `fleet-hub session unclaimed` is where a human reads the
+   * counts anyway. The sidebar's host filter applies, like every other list
+   * here.
+   */
+  const unclaimedByHost = $derived(
+    $hosts
+      .filter(
+        (h) =>
+          !h.hidden &&
+          typeof h.unclaimed_sessions === 'number' &&
+          h.unclaimed_sessions > 0 &&
+          (viewHost === 'all' || viewHost === h.alias),
+      )
+      .map((h) => ({ alias: h.alias, count: h.unclaimed_sessions as number })),
+  );
+  const unclaimedTotal = $derived(unclaimedByHost.reduce((n, h) => n + h.count, 0));
+
+  /**
+   * The bulk fan-outs, narrowed to the rows this client may actually act on
+   * (multi-user M1). Select mode already excludes outside-fleet rows as
+   * read-only; a session shared with this person at `watch` — or at `drive`,
+   * for Kill, which spec §4.3 puts in the owner-only tier — is the same kind
+   * of row, and both filter through the SAME predicate as every single-row
+   * button, so there is one rule and not a second copy of the level table.
+   *
+   * Narrowed here rather than in `toggleSelected`, because the two actions
+   * need different levels: a `drive` row is a legitimate bulk-prompt target
+   * and an illegitimate bulk-kill one, and a selection that refused it
+   * outright would take the first away to prevent the second.
+   */
+  const bulkKillTargets = $derived(bulkTargets(selectedRows, 'kill_session', $sessionBlocked));
+  const bulkPromptTargets = $derived(bulkTargets(selectedRows, 'send_prompt', $sessionBlocked));
+
+  /** Clean up was accepted. A direct remove already dropped the row, so
+   *  the pane stops attaching to it; a Safe remove finishes later through
+   *  the agent and keeps it until then. */
+  function cleanedUp(removed: SessionRow[]) {
+    pendingKill = null;
+    const cur = $selectedSession;
+    if (cur && removed.some((r) => sameSession(cur, r))) selectSession(null);
+  }
+
+  /** Bulk Archive (step 1.7): the selected sessions with work go to their
+   *  work's Done, with Undo. Nothing is killed. */
+  async function bulkArchive() {
+    const rows = bulkTargets(selectedRows, 'tidy_apply', $sessionBlocked);
+    const r = await archiveSessions(rows);
+    if (!r.ok) {
+      pushError(r.error, 'Archive failed');
+      return;
+    }
+    clearSelected();
+    announceArchive(r.value);
+  }
+  const bulkArchiveBlocked = $derived(archiveBlocked(selectedRows));
+  /** Bulk Switch account (step 4.4): each selected row this person may
+   *  restart and whose account is past `accounts.pause_at` resumes under the
+   *  login on its host with the most headroom; the rest stay as they are. */
+  const bulkMoveTargets = $derived(bulkTargets(selectedRows, 'restart_session', $sessionBlocked));
+  const bulkMoveAccountBlocked = $derived(
+    hubActionBlocked('restart_session', $hubStatus, $hubConnection) ??
+      (selectedRows.length > 0 && bulkMoveTargets.length === 0 ? 'None of the selected sessions is yours to restart.' : null),
+  );
+  async function bulkMoveAccount(accountUuid: string | null) {
+    const r = await moveToAccount(bulkMoveTargets, accountUuid, restartSession);
+    clearSelected();
+    const parts = [
+      r.moved > 0 ? `Switched ${r.moved} session${r.moved === 1 ? '' : 's'}` : 'Nothing switched',
+      r.stayed > 0 ? `${r.stayed} ${accountUuid === null ? 'still under the line' : 'already there'}` : '',
+      r.nowhere > 0 ? `${r.nowhere} with ${accountUuid === null ? 'no other login that has room' : 'no login on that account'}` : '',
+      r.failed > 0 ? `${r.failed} failed` : '',
+    ].filter(Boolean);
+    push({ message: parts.join(' · '), kind: r.failed > 0 ? 'error' : r.moved > 0 ? 'success' : 'info' });
+  }
+  /** Clean up's targets: the rows this person may Safe remove (`own`). */
+  const bulkCleanUpTargets = $derived(bulkTargets(selectedRows, 'safe_kill_session', $sessionBlocked));
+  const bulkCleanUpBlocked = $derived(
+    hubActionBlocked('safe_kill_session', $hubStatus, $hubConnection) ??
+      (selectedRows.length > 0 && bulkCleanUpTargets.length === 0 ? 'None of the selected sessions is yours to clean up.' : null),
+  );
+
   async function confirmBulkKill() {
     bulkKillOpen = false;
-    const targets = selectedRows;
+    const targets = bulkKillTargets;
     clearSelected();
     const results = await Promise.allSettled(
       targets.map(async (sess) => {
@@ -432,7 +628,6 @@
           pushError(r.error, `Kill ${sess.tmux_name} failed`);
           return;
         }
-        forgetSessionUi(sess.host_alias, sess.tmux_name);
         const cur = $selectedSession;
         if (cur && sameSession(cur, sess)) selectSession(null);
       }),
@@ -539,27 +734,38 @@
   async function onRefresh() {
     loading = true;
     loadError = null;
+    refreshError = null;
     const pr = await refreshProjects();
     // Explicit user refresh: bypass the backend's freshness window.
     const sr = await loadSessions({ force: true });
     loading = false;
+    // Review r13: the line under the toolbar is a sentence; the toast keeps
+    // the code under Details.
     if (!pr.ok) {
-      loadError = pr.error.message;
+      loadError = `Couldn't refresh projects: ${errorText(pr.error)}`;
+      refreshError = pr.error;
       pushError(pr.error, 'Refresh projects failed');
     } else if (!sr.ok) {
-      loadError = sr.error.message;
+      loadError = `Couldn't refresh sessions: ${errorText(sr.error)}`;
+      refreshError = sr.error;
       pushError(sr.error, 'Refresh sessions failed');
+    } else {
+      bootstrapError.set(null);
     }
   }
 
+  // A session's project as `owner/repo`, so one query can name both.
+  const projectLabels = $derived(new Map($projects.map((p) => [p.project.id, `${p.project.owner}/${p.project.repo}`])));
+  function projectLabelOf(id: number | null): string | null {
+    return id == null ? null : (projectLabels.get(id) ?? null);
+  }
   /** A project matches a search by owner / repo, or through one of `rows`
    *  (its sessions in the list). */
   function matchesSearch(p: ProjectTreeRow, q: string, rows: SessionRow[]): boolean {
     if (!q) return true;
-    const needle = q.toLowerCase();
-    if (p.project.owner.toLowerCase().includes(needle)) return true;
-    if (p.project.repo.toLowerCase().includes(needle)) return true;
-    return rows.some((s) => sessionMatchesSearch(s, needle));
+    const label = `${p.project.owner}/${p.project.repo}`;
+    if (matchesAllWords([label], q)) return true;
+    return rows.some((s) => sessionMatchesSearch(s, q, label));
   }
 
   // Sessions under the host / bg filters only (no triage predicate): the
@@ -571,8 +777,24 @@
   // countNeedsYou() classifies each row, and classify() files an external
   // (Outside fleet) row as working/idle, so a read-only row never inflates
   // the pill (spec §5).
-  const needsYouTotal = $derived(countNeedsYou(hostVisibleSessions, attentionOpts));
-  const severityByProject = $derived(worstSeverityByProject(hostVisibleSessions));
+  // Redesign 1.1: a mass loss (a host reboot, a tmux server restart) folds
+  // into one "12 stopped on trn · Restore" row per host, and its rows leave
+  // the badge and the project sort: nobody can answer a stopped pane until it
+  // is restored, so counting them would bury the sessions that do need you.
+  const lostFoldList = $derived(focus ? [] : lostFolds(hostVisibleSessions));
+  const foldedIdSet = $derived(foldedIds(lostFoldList));
+  const countedSessions = $derived(
+    foldedIdSet.size === 0 ? hostVisibleSessions : hostVisibleSessions.filter((s) => !foldedIdSet.has(s.id)),
+  );
+  let openFolds = $state<Set<string>>(new Set());
+  function toggleFold(host: string) {
+    const next = new Set(openFolds);
+    if (next.has(host)) next.delete(host);
+    else next.add(host);
+    openFolds = next;
+  }
+  const needsYouTotal = $derived(countNeedsYou(countedSessions, attentionOpts));
+  const severityByProject = $derived(worstSeverityByProject(countedSessions));
 
   // Only show projects that either match the filter directly OR have at least
   // one active session. Without sessions the sidebar would be flooded with
@@ -619,9 +841,8 @@
   const workKeyed = $derived(workIndex?.keyed ?? null);
   function workGroupMatchesSearch(g: WorkGroup, q: string): boolean {
     if (!q) return true;
-    const needle = q.toLowerCase();
-    if (g.key.toLowerCase().includes(needle)) return true;
-    return g.sessions.some((s) => sessionMatchesSearch(s, needle));
+    if (matchesAllWords([g.key], q)) return true;
+    return g.sessions.some((s) => sessionMatchesSearch(s, q, projectLabelOf(s.project_id)));
   }
   const workGroups = $derived(
     workIndex
@@ -675,9 +896,26 @@
   // running; one click brings them back); reopened work carries a badge.
   const reopenedKeys = $derived(reopenedByKey($reopenedWork));
   let unarchiving: Set<number> = $state(new Set());
-  async function unarchive(id: number, e?: Event) {
+  /**
+   * Why this client may not un-archive `sess` (multi-user M1, F2b). The Done
+   * section's `archived · show` chip was the one work control in this file
+   * gated by neither half: `unarchive_session_work` is `drive` in
+   * `share.ts::SESSION_TIER` and ROUTES, so both halves apply. Asked per ROW
+   * — the chip is drawn once per archived session, and a group can hold rows
+   * of more than one owner.
+   */
+  function unarchiveBlocked(sess: SessionRow): string | null {
+    return (
+      hubActionBlocked('unarchive_session_work', $hubStatus, $hubConnection) ??
+      $sessionBlocked(sess, 'unarchive_session_work')
+    );
+  }
+  async function unarchive(sess: SessionRow, e?: Event) {
     e?.stopPropagation();
-    if (unarchiving.has(id)) return;
+    const id = sess.id;
+    // Re-asked at the call, not only on the chip: a revoke can arrive while
+    // the group is on screen.
+    if (unarchiving.has(id) || unarchiveBlocked(sess) !== null) return;
     unarchiving = new Set([...unarchiving, id]);
     const r = await unarchiveSession(id);
     unarchiving = new Set([...unarchiving].filter((x) => x !== id));
@@ -732,16 +970,116 @@
   // `external` rows never land here — they have their own read-only
   // "Outside fleet" section below.
   function orphansOf(pred: SessionPredicate): SessionRow[] {
-    const q = viewSearch.toLowerCase();
+    const q = viewSearch;
     return $sessions.filter(
       (s) =>
         s.project_id === null &&
         s.kind !== 'external' &&
         sessionVisible(s, viewHost, viewBg, pred, viewScope) &&
-        sessionMatchesSearch(s, q),
+        sessionMatchesSearch(s, q, projectLabelOf(s.project_id)),
     );
   }
   const orphanSessions = $derived(orphansOf(treePredicate));
+  const sharedWithMe = $derived.by((): SessionRow[] => {
+    if (!splitShared || tab === 'mine') return [];
+    const q = viewSearch;
+    const base = rowBase;
+    return $sessions.filter(
+      (s) =>
+        s.kind !== 'external' &&
+        isSharedWithMe(s) &&
+        sessionVisible(s, viewHost, viewBg, base, viewScope) &&
+        sessionMatchesSearch(s, q, projectLabelOf(s.project_id)),
+    );
+  });
+  let sharedOpen = $state(true);
+
+  // ── Flat groups (redesign step 3.6): state, host or agent ──
+  // The same rows the project tree and "Other sessions" would show, in the
+  // same order, regrouped. Collapsed groups are remembered by key.
+  const flatBy = $derived(isFlatGroupBy($sidebarGroupBy) ? $sidebarGroupBy : null);
+  const flatGroups = $derived(
+    flatBy
+      ? groupRows(
+          [...filtered.flatMap((r) => sessionsForProject(r.project.id)), ...orphanSessions],
+          flatBy,
+          attentionOpts,
+          $startingSessions,
+          { scopeOf: $scopeOf, scopes: $scopes },
+        )
+      : [],
+  );
+  let collapsedFlat: Set<string> = $state(new Set());
+  // "4 more running ›" (Sessions board): the Working group shows its first
+  // rows; the line opens the rest. The selected row always shows.
+  let expandedFlat: Set<string> = $state(new Set());
+  const keepIds = $derived(new Set($selectedSession ? [$selectedSession.id] : []));
+  // G7.9: the Done group holds today's finished turns ("Done 6 today");
+  // older ones sit behind "N earlier ›".
+  const doneSince = $derived(localMidnight(nowSec * 1000));
+
+  // ── Inbox (redesign step 3.3) ──
+  // The rows the list would show under the same filters, narrowed to what
+  // raises the badge (`inbox.ts`); the rest is counted in one line.
+  const inboxPool = $derived(
+    $sidebarView === 'inbox'
+      ? [...filtered.flatMap((r) => sessionsForProject(r.project.id)), ...orphanSessions, ...sharedWithMe]
+      : [],
+  );
+  const inboxList = $derived(inboxRows(inboxPool, attentionOpts));
+  const inboxNeeding = $derived(inboxList.length + $failingCount + $waitingMissionCount + $pendingAgentCount);
+  // G1.6: Jev's "probably waiting" rows, listed apart and never counted.
+  const inboxProposed = $derived(proposedRows(inboxPool, attentionOpts, $notWaitingSaid));
+  // G3.1: the model's sections ("Group: state"), each carrying the model's
+  // other rows: missions and Jev's proposals in Needs you, failed routines
+  // in Failed. Their counts add up to the badge.
+  const inboxSectionList = $derived(
+    inboxSections(inboxPool, attentionOpts, $inboxGroupBy, {
+      missions: $waitingMissionCount,
+      failingRoutines: $failingCount,
+      proposed: inboxProposed.length,
+      agentActions: $pendingAgentCount,
+    }),
+  );
+  // Opening the Inbox reads the failed routines and the waiting missions
+  // once more, so they are current as it shows (`trackFailingRoutines` and
+  // `trackWaitingMissions` keep them fresh after).
+  $effect(() => {
+    if ($sidebarView === 'inbox')
+      untrack(() => {
+        void loadFailing();
+        void loadWaitingMissions();
+        void loadNextRoutine();
+        void loadAgents();
+      });
+  });
+  // The footer's row count (UX audit L4): what this list holds right now.
+  const listCountText = $derived.by(() => {
+    if ($sidebarView === 'work') return '';
+    const n = $sidebarView === 'inbox' ? inboxList.length : visibleIds.size + sharedWithMe.length;
+    return `${n} ${$sidebarView === 'inbox' ? 'waiting' : n === 1 ? 'session' : 'sessions'}`;
+  });
+  // Redesign step 7.4: a row whose state moves it to another group is a new
+  // element there; snapshot every row's place before the groups re-render so
+  // the new one slides from where the old one was (motion_catalog.slideIn).
+  $effect.pre(() => {
+    void [flatGroups, workGroups, inboxList, orphanSessions];
+    untrack(() => snapshotRows(sidebarEl));
+  });
+  // A folded mass loss is its own Restore line below, not "12 paused" here.
+  const inboxRestText = $derived(
+    notWaitingText(notWaiting(inboxPool.filter((s) => !foldedIdSet.has(s.id)), attentionOpts)),
+  );
+  // G7.15 (States board, "Inbox empty · calm, not a void"): what is still
+  // to come, after what is not waiting.
+  const inboxCalmBody = $derived(
+    [
+      inboxRestText ? `Not waiting · ${inboxRestText}.` : '',
+      $nextRoutine ? (nextRoutineLine($nextRoutine, Math.floor(Date.now() / 1000)) ?? '') : '',
+    ]
+      .filter(Boolean)
+      .join(' ') || null,
+  );
 
   // Interactive Claude sessions running entirely outside fleet (Claude
   // Desktop, a bare terminal). Read-only; the host filter applies but the
@@ -750,31 +1088,14 @@
     focus
       ? []
       : buildOutsideFleet($sessions, $effectiveHostFilter, scopeSel).filter(
-          (s) => (!rowPredicate || rowPredicate(s)) && sessionMatchesSearch(s, viewSearch.toLowerCase()),
+          (s) => (!rowPredicate || rowPredicate(s)) && sessionMatchesSearch(s, viewSearch, projectLabelOf(s.project_id)),
         ),
   );
 
-  // Picker for the footer "+ New session" — shows ALL projects regardless
-  // of the recency filter or search query. The filter is for the live-
-  // sessions tree; when starting a new session the user shouldn't be
-  // restricted to projects with recent activity.
-  const allProjectsSorted = $derived(
-    // System projects are filtered out: `fleet/operator` is the UX agent's
-    // own working directory, not a repository, and starting an ordinary
-    // session in it is never what "+ New session" means. The tree above
-    // still shows it while the agent is running. See `ProjectRow.system`.
-    [...$projects.filter((p) => !p.project.system)].sort((a, b) => {
-      const aLabel = (a.project.owner + '/' + a.project.repo).toLowerCase();
-      const bLabel = (b.project.owner + '/' + b.project.repo).toLowerCase();
-      return aLabel.localeCompare(bLabel);
-    }),
-  );
-
-  let dialogProject: ProjectTreeRow | null = $state(null);
-  let showProjectPicker = $state(false);
   let showAddProject = $state(false);
-  /** Host to preselect in NewSessionDialog: where Add project put the project. */
-  let dialogHost: string | undefined = $state(undefined);
+  /** Clone URL the switcher's Add row hands over, prefilled in the dialog. */
+  let initialCloneUrl: string | undefined = $state(undefined);
+  const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
 
   // Add project ROUTES to the hub now (the clone runs on the host through the
   // hub's transport), so it is gated on the live link like every other routed
@@ -789,76 +1110,66 @@
   // list). An empty tree then reads as "you have no projects" instead of
   // "this couldn't load" — so borrow the connection banner's own sentence for
   // this state rather than inventing a second wording.
+  // Review r13: why the list cannot be trusted to be empty. A hub that is
+  // configured but unusable (its banner says why) or a failed startup load
+  // reads as a failure, never as "No projects yet" or "Nothing needs you".
+  const listUnavailable = $derived(
+    $hubStatus.unavailable !== null ? 'hub' : ($bootstrapError ?? refreshError) !== null ? 'load' : null,
+  );
+
   const hubSkewEmptyMessage = $derived(
     $hubConnection.state === 'hub_too_old' || $hubConnection.state === 'hub_too_new'
       ? connectionBanner($hubConnection, $hubStatus.url)
       : null,
   );
 
-  /** Host the open project picker preselects (the Hosts view's `n`). */
-  let pickerHost: string | undefined = $state(undefined);
-
-  // Onboarding card actions — open the same flows as existing UI. Hosts are
-  // managed in the Hosts view, not Settings.
+  // The empty list's actions (review r13): the Hosts view to add one, and
+  // New session.
   const openAddHost = () => requestHostsView();
-  const openNewSession = () => {
-    pickerHost = undefined;
-    showProjectPicker = true;
-  };
-
-  function toggleProjectPicker() {
-    pickerHost = undefined;
-    showProjectPicker = !showProjectPicker;
+  // G7.15 (States board, "Search with no results"): the way out carries the
+  // query, so the new session is named what was searched for.
+  const searchedFor = $derived(viewSearch.trim());
+  const openNewSessionFromSearch = () =>
+    openNewSessionPicker(undefined, undefined, undefined, searchedFor || undefined);
+  // G7.15 (States board, "First run"): this machine is a host too. Its
+  // `local` row is there but hidden (a desktop seeds one); a process with
+  // no local host (a Windows desktop, a hub client) has none to offer.
+  const hiddenLocal = $derived($hosts.find((h) => h.alias === 'local' && h.hidden) ?? null);
+  const visibleHostCount = $derived($hosts.filter((h) => !h.hidden).length);
+  const thisMachine = isMac ? 'this Mac' : 'this computer';
+  async function useThisMachine() {
+    const r = await hideHost('local', false);
+    if (!r.ok) pushError(r.error, `Could not use ${thisMachine}`);
   }
 
-  // "New session on <host>" from the Hosts view: the same project picker,
-  // then NewSessionDialog with that host preselected.
-  $effect(() => {
-    const host = $newSessionHostRequest;
-    if (host === null) return;
-    newSessionHostRequest.set(null);
-    pickerHost = host;
-    showProjectPicker = true;
-    // Keyboard flow from the Hosts view: land on the first project.
-    void tick().then(() => {
-      const first =
-        sidebarEl?.querySelector<HTMLElement>('.picker .picker-item:not(.add-project)') ??
-        sidebarEl?.querySelector<HTMLElement>('.picker .picker-item');
-      first?.focus();
-    });
-  });
-
+  // A project row's own `+`: straight to New session for that project.
+  // (The switcher's New session mode is the one place a project is picked.)
+  // The dialog is App's one mount, reached through `newSessionRequest`
+  // (redesign 1.9): the Sidebar no longer mounts a second copy.
   function openNew(p: ProjectTreeRow, e?: Event) {
     e?.stopPropagation();
-    // A row's own `+` has no host intent; the picker may carry one.
-    dialogHost = e ? undefined : pickerHost;
-    pickerHost = undefined;
-    dialogProject = p;
-    showProjectPicker = false;
+    requestNewSession({ project: p });
   }
 
-  function openAddProject() {
-    pickerHost = undefined;
-    showProjectPicker = false;
+  // The switcher's Add row asks for the Add project dialog (App-level stores
+  // cannot reach this component's state directly).
+  $effect(() => {
+    const req = $addProjectRequest;
+    if (req === null) return;
+    addProjectRequest.set(null);
+    initialCloneUrl = req.cloneUrl;
     showAddProject = true;
-  }
+  });
 
   // The user added a project in order to start a session in it: go straight
   // to NewSessionDialog on the new row (already merged into `projects`).
   function onProjectAdded(row: ProjectTreeRow, host: string) {
+    // Adding a project is the person saying it matters: keep it in the picker
+    // (quietly: they asked to add a project, not to save a picker choice).
+    void setProjectPick(row.project.owner, row.project.repo, { vis: 'keep' }, { quiet: true });
     showAddProject = false;
-    dialogHost = host;
-    dialogProject = row;
-  }
-
-  function onCreated(s: SessionRow) {
-    dialogProject = null;
-    // Auto-focus the just-created session in the center/terminal panes.
-    selectSessionExplicitly(s);
-  }
-
-  function onCancel() {
-    dialogProject = null;
+    // Preselect the host Add project put it on.
+    requestNewSession({ project: row, initialHost: host });
   }
 
   function toggleCollapse(projectId: number) {
@@ -894,7 +1205,7 @@
 
   /** True only when the key event started on the row element itself.
    *
-   *  The row is a tabbable `role="button"` that CONTAINS real buttons (the
+   *  The row is a tabbable treeitem that CONTAINS real buttons (the
    *  action cluster, revealed by `:focus-within`). `keydown` bubbles from a
    *  focused descendant up to the row, and activating a `<button>` is the
    *  DEFAULT ACTION of that keydown — so an ancestor calling
@@ -907,10 +1218,63 @@
 
   function onKeySession(e: KeyboardEvent, sess: SessionRow) {
     if (!fromRowItself(e)) return;
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      onSelectSession(sess);
+    // The list keys (redesign step 3.8), from the shortcut registry.
+    const key = matchShortcut('session-list', e, isMac);
+    if (!key) return;
+    e.preventDefault();
+    if (key === 'session-list.open') onSelectSession(sess);
+    else if (key === 'session-list.down') focusRowAt(rowIndexOf(sess) + 1);
+    else if (key === 'session-list.up') focusRowAt(rowIndexOf(sess) - 1);
+    else if (key === 'session-list.pick') {
+      if (!selectMode) selectMode = true;
+      toggleSelected(sess);
     }
+  }
+
+  // ── List keys from anywhere (redesign step 3.8) ──
+  // The rows as drawn, top to bottom, whatever the grouping: what j/k walk,
+  // what ⌘1–9 count and what "next needs you" searches.
+  function shownRows(): HTMLElement[] {
+    return Array.from(sidebarEl?.querySelectorAll<HTMLElement>('[data-testid="sess-row"]') ?? []);
+  }
+  function rowIndexOf(sess: SessionRow): number {
+    return shownRows().findIndex((el) => el.dataset.sessionId === String(sess.id));
+  }
+  function focusRowAt(i: number) {
+    const rows = shownRows();
+    if (i < 0 || i >= rows.length) return;
+    rows[i].focus();
+    rows[i].scrollIntoView?.({ block: 'nearest' });
+  }
+  function openRow(el: HTMLElement | undefined) {
+    const sess = el && $sessions.find((s) => String(s.id) === el.dataset.sessionId);
+    if (!el || !sess) return;
+    if ($selectedSession?.id !== sess.id) selectSessionExplicitly(sess);
+    el.focus();
+    el.scrollIntoView?.({ block: 'nearest' });
+  }
+  /** The next row after the open one (wrapping) whose state raises the
+   *  Needs you badge: Needs you, Failed or Blocked (step 0.4). */
+  function nextNeedingYou(): HTMLElement | undefined {
+    const rows = shownRows();
+    const cur = rows.findIndex((el) => el.dataset.sessionId === String($selectedSession?.id));
+    for (let step = 1; step <= rows.length; step++) {
+      const el = rows[(cur + step + rows.length) % rows.length];
+      const bucket = el.dataset.bucket as TriageBucket | undefined;
+      if (bucket && countsTowardBadge(bucketState(bucket))) return el;
+    }
+    return undefined;
+  }
+  function onWindowKeydown(e: KeyboardEvent) {
+    if (e.defaultPrevented) return;
+    const id = matchShortcut('global', e, isMac);
+    if (id !== 'next-needs-you' && id !== 'jump-n') return;
+    const target = e.target as HTMLElement | null;
+    // A modal owns the keyboard, and a field keeps its keys.
+    if (target?.closest?.('dialog') || isEditable(target)) return;
+    e.preventDefault();
+    if (id === 'next-needs-you') openRow(nextNeedingYou());
+    else openRow(shownRows()[Number(e.key) - 1]);
   }
 
   /** Same guard for the project row, which holds + New session and Purge. */
@@ -983,16 +1347,17 @@
   async function confirmKill() {
     if (!pendingKill) return;
     const sess = pendingKill;
+    // Re-asked at the call (multi-user M1, F2b): the confirm dialog stays open,
+    // so a grant can be narrowed between `askKill` and this click. The row's
+    // own Kill button is disabled by `SessionRowItem`'s `killBlocked`, but the
+    // dialog in front of it is not that button.
+    if ($sessionBlocked(sess, 'kill_session') !== null) return;
     pendingKill = null;
     const r = await killSession(sess.host_alias, sess.tmux_name);
     if (!r.ok) {
       pushError(r.error, 'Kill failed');
       return;
     }
-    // Drop persisted layout for the now-dead session — otherwise localStorage
-    // grows unbounded over time. (User can still get a fresh layout if they
-    // make a session with the same name later; that's intentional.)
-    forgetSessionUi(sess.host_alias, sess.tmux_name);
     // If we just killed the selected session, drop the selection so the
     // terminal pane shows the empty state instead of trying to attach.
     const cur = $selectedSession;
@@ -1028,8 +1393,15 @@
     if (!pendingRestart) return;
     const sess = pendingRestart;
     pendingRestart = null;
-    const r = await restartSession(sess.host_alias, sess.tmux_name);
-    if (!r.ok) pushError(r.error, 'Restart failed');
+    await restartRow(sess, false);
+  }
+
+  // `force` only from the "Restart anyway" `pushRestartError` offers for the
+  // registered fleet controller; it passes the same gate again.
+  async function restartRow(sess: SessionRow, force: boolean) {
+    if ($sessionBlocked(sess, 'restart_session') !== null) return;
+    const r = await restartSession(sess.host_alias, sess.tmux_name, undefined, {}, { force });
+    if (!r.ok) pushRestartError(r.error, sess.host_alias, sess.tmux_name, () => void restartRow(sess, true));
   }
 
   function cancelRecreate() {
@@ -1039,6 +1411,7 @@
   async function confirmRecreate() {
     if (!pendingRecreate) return;
     const sess = pendingRecreate;
+    if ($sessionBlocked(sess, 'recreate_session') !== null) return;
     pendingRecreate = null;
     const r = await recreateSession(sess.id);
     if (!r.ok) {
@@ -1072,6 +1445,10 @@
   let nameWorkFor: { id: number; label: string }[] | null = $state(null);
   function openNameWork(list: readonly SessionRow[], e: Event) {
     e.stopPropagation();
+    // Empty means every session in the group was narrowed away by the access
+    // gate (multi-user M1): there is nothing to name, and a dialog with no
+    // target would submit a write that the hub then refuses.
+    if (list.length === 0) return;
     nameWorkFor = list.map((s) => ({ id: s.id, label: s.friendly_name || s.tmux_name }));
   }
 
@@ -1117,10 +1494,47 @@
   }
 </script>
 
+<svelte:window onkeydown={onWindowKeydown} />
+
 <div class="sidebar" data-testid="sidebar-tree" bind:this={sidebarEl}>
-  {#snippet sessionRow(sess: SessionRow, readOnly = false, inWorkGroup = false)}
+  <!-- Review r13: what an empty Sessions list or Inbox says. A list that
+       could not load says so, with Retry; a calm Inbox says what is going
+       on instead (States board "Inbox empty · calm"). -->
+  {#snippet listState(where: 'sessions' | 'inbox')}
+    {#if listUnavailable === 'hub'}
+      <EmptyState
+        kind="none"
+        testid="{where}-unavailable"
+        title="Not connected to the hub"
+        body="Sessions show here once this app can use its hub; the banner above says what is wrong."
+        actions={[{ label: 'Hub settings', onclick: () => openSettingsAt('hub'), testid: `${where}-unavailable-settings` }]}
+      />
+    {:else if listUnavailable === 'load'}
+      <LoadError
+        title="Couldn't load sessions"
+        error={($bootstrapError ?? refreshError)!}
+        onretry={() => void onRefresh()}
+        retrying={loading}
+        testid="{where}-load-error"
+      />
+    {:else if where === 'inbox'}
+      <EmptyState
+        kind="calm"
+        testid="inbox-calm"
+        title="Nothing needs you right now."
+        body={inboxCalmBody}
+        actions={[
+          { label: 'See running', onclick: () => sidebarView.set('sessions'), testid: 'inbox-calm-running' },
+          { label: 'Today', onclick: openToday, testid: 'inbox-calm-today' },
+        ]}
+      />
+    {/if}
+  {/snippet}
+
+  {#snippet sessionRow(sess: SessionRow, readOnly = false, inWorkGroup = false, trailing: Snippet | undefined = undefined)}
     <SessionRowItem
       {sess}
+      {trailing}
       workKey={inWorkGroup || readOnly ? null : workKeyFor(sess, branchById)}
       workOf={readOnly ? null : workKeyFor(sess, branchById)}
       {selectMode}
@@ -1146,10 +1560,32 @@
       orgColor={orgColorOf(sess, $orgColorById)}
     />
   {/snippet}
+  {#snippet foldSessionRow(sess: SessionRow)}
+    {@render sessionRow(sess)}
+  {/snippet}
 
   <!-- The shared chrome (Refresh, Needs you, bulk actions, Settings,
        Attention) stays in both views; only the list below swaps. -->
+  {#snippet headActions()}
+    <button
+      class="btn btn--quiet btn--icon"
+      title="Launch a supervised Claude background session"
+      aria-label="New background session"
+      onclick={() => (showBgModal = true)}
+      data-testid="new-bg-session-btn"
+      use:hintAnchor={{ id: 'bg-session', when: $sessions.some((s) => !hasNoPane(s)) && !$sessions.some((s) => s.kind === 'bg') }}
+    ><Icon name="bolt" size={14} /></button>
+    <button
+      class="btn btn--quiet is-bounded new-btn"
+      onclick={() => openNewSessionPicker()}
+      data-testid="new-session-head"
+      title={isMac ? 'New session (⌘N)' : 'New session (Ctrl+Shift+N)'}
+      aria-keyshortcuts={isMac ? 'Meta+N' : 'Control+Shift+N'}
+    >+ New…{#if isMac}<kbd class="of-kbd">⌘N</kbd>{/if}</button>
+  {/snippet}
+
   <SidebarFilters
+    {headActions}
     listView={$sidebarView}
     bind:search
     bind:recency
@@ -1158,27 +1594,121 @@
     {loadError}
     {onRefresh}
     {onCollapse}
-    showSettings={$settingsOpen}
-    onOpenSettings={() => settingsOpen.set(true)}
     needsYouCount={needsYouTotal}
     {selectMode}
     {toggleSelectMode}
     selectedCount={selectedIds.size}
     onBulkSend={() => (bulkPromptOpen = true)}
-    onBulkKill={() => (bulkKillOpen = true)}
+    onBulkKill={() => ((bulkKillMode = 'kill'), (bulkKillOpen = true))}
+    onBulkCleanUp={() => ((bulkKillMode = 'cleanup'), (bulkKillOpen = true))}
+    onBulkArchive={() => void bulkArchive()}
+    onBulkMoveAccount={(a) => void bulkMoveAccount(a)}
+    {bulkMoveAccountBlocked}
+    {bulkArchiveBlocked}
+    {bulkCleanUpBlocked}
     {clearSelected}
   />
 
   {#if $sidebarView === 'work'}
   <WorkTree />
-  {:else}
-  <div class="scroller">
-    {#if !$onboardingDismissed}
-      <OnboardingCard onaddhost={openAddHost} onnewsession={openNewSession} />
+  {:else if $sidebarView === 'inbox'}
+  <!-- The Inbox (redesign step 3.3): only what raises the badge, worst
+       first, then one line for everything else and the way to it. -->
+  <div class="scroller inbox" data-testid="inbox">
+    <div class="section-header inbox-head" data-testid="inbox-head">
+      {listUnavailable && inboxNeeding === 0
+        ? 'Inbox'
+        : inboxNeeding === 0
+          ? 'Nothing needs you'
+          : `${inboxNeeding} need${inboxNeeding === 1 ? 's' : ''} you`}
+      <!-- One queue has no section header: "+1 proposed" sits here. -->
+      {#if $inboxGroupBy === 'none' && inboxProposed.length > 0}<span class="muted" data-testid="inbox-proposed-count"
+          >{proposedText(inboxProposed.length)}</span
+        >{/if}
+    </div>
+    {#if inboxNeeding === 0}
+      {@render listState('inbox')}
     {/if}
+    {#each inboxSectionList as sec (sec.key)}
+      <div class="inbox-section" data-testid="inbox-section" data-key={sec.key}>
+        {#if sec.label}
+          <div class="section-header inbox-sec" class:failed={sec.key === 'failed'} data-testid="inbox-section-head">
+            {sec.label}<span class="count" data-testid="inbox-section-count">{sec.count}</span>
+            {#if sec.proposed && inboxProposed.length > 0}<span class="muted" data-testid="inbox-proposed-count"
+                >{proposedText(inboxProposed.length)}</span
+              >{/if}
+          </div>
+        {/if}
+        <div class="tree" role="tree" aria-label={sec.label ?? 'Needs you'}>
+          {#each sec.rows as sess (sess.id)}
+            {@render sessionRow(sess)}
+          {/each}
+        </div>
+        <!-- Redesign 8.6: routines whose newest run failed, with Fix, Retry, Pause. -->
+        {#if sec.routines}<RoutineFailures />{/if}
+        <!-- G1.6: missions waiting on a person (a grant to sign, a question). -->
+        {#if sec.missions}<MissionWaits />{/if}
+        {#if sec.agents}<AgentActions />{/if}
+        {#if sec.proposed && inboxProposed.length > 0}
+          <!-- G1.6/G3.1: Jev's "probably waiting", at the foot of Needs you,
+               never in its count; "Not waiting" sets the reading aside. -->
+          <div class="tree" role="tree" aria-label="Probably waiting" data-testid="inbox-proposed">
+            {#each inboxProposed as sess (sess.id)}
+              {@render sessionRow(sess)}
+              <div class="proposed-line">
+                <ProposedBy
+                  proposal={{ value: 'waiting', source: 'jev', reason: 'last turn ended with a question' }}
+                  field="probably_waiting"
+                  stated
+                  changeLabel="Not waiting"
+                  onchange={() => sayNotWaiting(sess)}
+                  testid="inbox-proposed-by"
+                />
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {/each}
+    <div class="inbox-rest" data-testid="inbox-rest">
+      {#if inboxRestText && !(inboxNeeding === 0 && !listUnavailable)}<span class="muted">Not waiting · {inboxRestText}</span>{/if}
+      <button
+        type="button"
+        class="btn btn--quiet"
+        data-testid="inbox-all-sessions"
+        onclick={() => sidebarView.set('sessions')}>All sessions →</button
+      >
+    </div>
+    <!-- G3.1: a mass loss is the Sessions list's one Restore line here too. -->
+    {#each lostFoldList as fold (fold.host)}
+      <LostFoldRow {fold} open={openFolds.has(fold.host)} ontoggle={() => toggleFold(fold.host)} row={foldSessionRow} />
+    {/each}
+  </div>
+  {:else}
+  {#if tabsShown}
+    <!-- All / Mine / Shared with me (Sessions board), above the list. -->
+    <div class="scope-tabs" role="tablist" aria-label="Whose sessions" data-testid="scope-tabs" use:tablistKeys>
+      {#each SCOPE_TABS as t (t)}
+        <button
+          type="button"
+          role="tab"
+          class="scope-tab"
+          class:on={tab === t}
+          aria-selected={tab === t}
+          tabindex={tab === t ? 0 : -1}
+          data-testid="scope-tab-{t}"
+          onclick={() => scopeTab.set(t)}
+          >{SCOPE_TAB_LABELS[t]}{#if t !== 'mine' && tabCounts[t] > 0}<span class="count">{tabCounts[t]}</span>{/if}</button
+        >
+      {/each}
+    </div>
+  {/if}
+  <div class="scroller">
     {#snippet pastRow(key: string, l: WorkLink)}
       <div
         class="past-row"
+        role="treeitem"
+        aria-selected="false"
         data-testid="past-work-row"
         title="Ended {l.ended_at ? timeAgo(l.ended_at, nowSec * 1000) : ''}{l.snap_worktree ? ` · worktree ${l.snap_worktree}` : ''}"
       >
@@ -1194,7 +1724,7 @@
       </div>
     {/snippet}
     {#if workGroups.length > 0 || pastOnlyGroups.length > 0}
-      <ul class="tree work-tree" data-testid="work-groups">
+      <ul class="tree work-tree" data-testid="work-groups" role="tree" aria-label="Work">
         {#each workGroups as g (g.key)}
           {@const isCollapsed = collapsedWork.has(g.key)}
           {@const pr = workGroupPrSummary(g.sessions)}
@@ -1207,7 +1737,7 @@
             { org_id: g.sessions[0]?.work?.org_id ?? g.sessions[0]?.org_id ?? null },
             $orgColorById,
           )}
-          <li class="proj">
+          <li class="proj" role="none">
             <div
               class="proj-row work-row"
               class:work-done={ticket?.status?.category === 'done'}
@@ -1215,8 +1745,10 @@
               data-org-color={groupColor ?? undefined}
               style:box-shadow={groupColor ? `inset 3px 0 0 ${groupColor}` : undefined}
               title="Sessions whose tag, branch or worktree names {g.key}"
-              role="button"
+              role="treeitem"
+              aria-selected="false"
               tabindex="0"
+              aria-expanded={!isCollapsed}
               onclick={() => toggleWorkCollapse(g.key)}
               onkeydown={(e) => {
                 if (!fromRowItself(e)) return;
@@ -1257,16 +1789,19 @@
             </div>
 
             {#if !isCollapsed}
+              {@const past = needsYouOnly || focus ? [] : ($pastWork.get(g.key) ?? []).filter((l) => pastVisible(g.key, l))}
+              <div role="group">
               {#each split.live as sess (sess.id)}
                 {@render sessionRow(sess, false, true)}
               {/each}
-              {@const past = needsYouOnly || focus ? [] : ($pastWork.get(g.key) ?? []).filter((l) => pastVisible(g.key, l))}
               {#if past.length + split.archived.length > 0}
                 <div
                   class="done-row"
                   data-testid="work-done"
-                  role="button"
+                  role="treeitem"
+                  aria-selected="false"
                   tabindex="0"
+                  aria-expanded={openDone.has(g.key)}
                   onclick={() => (openDone = toggleIn(openDone, g.key))}
                   onkeydown={(e) => {
                     if (e.key === 'Enter' || e.key === ' ') openDone = toggleIn(openDone, g.key);
@@ -1277,32 +1812,39 @@
                 </div>
                 {#if openDone.has(g.key)}
                   {#each split.archived as sess (sess.id)}
-                    <div class="archived-wrap" data-testid="archived-session">
-                      {@render sessionRow(sess, false, true)}
+                    <!-- The chip sits inside the row, so the treeitem owns it. -->
+                    {#snippet archivedChip()}
                       <button
                         class="archived-chip"
                         data-testid="archived-chip"
-                        disabled={unarchiving.has(sess.id)}
-                        title="Archived: collapsed here, tmux still running. Click to bring it back (a prompt or an attach does too)"
-                        onclick={(e) => void unarchive(sess.id, e)}>archived · show</button
+                        disabled={unarchiving.has(sess.id) || unarchiveBlocked(sess) !== null}
+                        title={unarchiveBlocked(sess) ??
+                          'Archived: collapsed here, tmux still running. Click to bring it back (a prompt or an attach does too)'}
+                        onclick={(e) => void unarchive(sess, e)}>archived · show</button
                       >
+                    {/snippet}
+                    <div class="archived-wrap" data-testid="archived-session" role="none">
+                      {@render sessionRow(sess, false, true, archivedChip)}
                     </div>
                   {/each}
                   {#each past as l (l.id)}{@render pastRow(g.key, l)}{/each}
                 {/if}
               {/if}
+              </div>
             {/if}
           </li>
         {/each}
         {#each pastOnlyGroups as pg (pg.key)}
           {@const isOpen = openPast.has(pg.key)}
-          <li class="proj past-only" data-testid="past-work-group">
+          <li class="proj past-only" data-testid="past-work-group" role="none">
             <div
               class="proj-row work-row"
               data-testid="past-work-header"
               title="Past work on {pg.key}: no session is running it"
-              role="button"
+              role="treeitem"
+              aria-selected="false"
               tabindex="0"
+              aria-expanded={isOpen}
               onclick={() => (openPast = toggleIn(openPast, pg.key))}
               onkeydown={(e) => {
                 if (!fromRowItself(e)) return;
@@ -1321,24 +1863,85 @@
               <ResumeButton workKey={pg.key} link={pg.links[0]} />
             </div>
             {#if isOpen}
-              {#each pg.links as l (l.id)}{@render pastRow(pg.key, l)}{/each}
+              <div role="group">
+                {#each pg.links as l (l.id)}{@render pastRow(pg.key, l)}{/each}
+              </div>
             {/if}
           </li>
         {/each}
       </ul>
     {/if}
-    {#if filtered.length > 0}
-      <ul class="tree">
+    {#if flatBy && flatGroups.length > 0}
+      <ul class="tree flat-groups" data-testid="flat-groups" data-group-by={flatBy} role="tree" aria-label="Sessions by {flatBy}">
+        {#each flatGroups as g (g.key)}
+          {@const isCollapsed = collapsedFlat.has(g.key)}
+          <li class="proj" role="none">
+            <div
+              class="proj-row"
+              data-testid="flat-group"
+              data-group={g.key}
+              role="treeitem"
+              aria-selected="false"
+              tabindex="0"
+              aria-expanded={!isCollapsed}
+              onclick={() => (collapsedFlat = toggleIn(collapsedFlat, g.key))}
+              onkeydown={(e) => {
+                if (!fromRowItself(e)) return;
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  collapsedFlat = toggleIn(collapsedFlat, g.key);
+                }
+              }}
+            >
+              <span class="caret" class:collapsed={isCollapsed}>▾</span>
+              <span class="label">{g.label}</span>
+              <span class="count">{groupCountText(g, doneSince)}</span>
+            </div>
+            {#if !isCollapsed}
+              {@const offlineHost = flatBy === 'host' ? $hostByAlias.get(g.key) : undefined}
+              {#if offlineHost && offlineHost.reachable === false}
+                <!-- Review r13 (step 3.14): an unreachable host is said inside
+                     its own group, with what it means for its sessions. -->
+                <HostOffline
+                  alias={offlineHost.alias}
+                  lastSeen={offlineHost.health_at ?? null}
+                  sessions={g.rows.length}
+                  ontry={() => void onRefresh()}
+                  trying={loading} />
+              {/if}
+              {@const capped = capRows(g, expandedFlat, keepIds, undefined, doneSince)}
+              <div role="group">
+                {#each capped.shown as sess (sess.id)}
+                  {@render sessionRow(sess)}
+                {/each}
+                {#if capped.hidden > 0}
+                  <button
+                    type="button"
+                    class="btn btn--quiet group-more"
+                    data-testid="group-more"
+                    onclick={() => (expandedFlat = toggleIn(expandedFlat, g.key))}
+                    >{groupMoreText(g, capped.hidden)} ›</button
+                  >
+                {/if}
+              </div>
+            {/if}
+          </li>
+        {/each}
+      </ul>
+    {:else if !flatBy && filtered.length > 0}
+      <ul class="tree" role="tree" aria-label="Projects">
         {#each filtered as row (row.project.id)}
           {@const projectSessions = filteredSessionsByProject.get(row.project.id) ?? []}
           {@const isCollapsed = collapsed.has(row.project.id)}
-          <li class="proj">
+          <li class="proj" role="none">
             <div
               class="proj-row"
               data-testid="proj-row"
               title={row.project.base_path}
-              role="button"
+              role="treeitem"
+              aria-selected="false"
               tabindex="0"
+              aria-expanded={!isCollapsed}
               onclick={() => toggleCollapse(row.project.id)}
               onkeydown={(e) => onKeyProject(e, row.project.id)}
             >
@@ -1350,14 +1953,29 @@
               </span>
               <span class="count">{projectSessions.length}</span>
               {#if $sidebarGroupBy === 'work' && projectSessions.length > 0}
+                <!-- Narrowed to the sessions this client may actually write a
+                     work link to (multi-user M1), the same way `bulkKillTargets`
+                     narrows select mode: `name_session_work` is `drive` in
+                     `share.ts::SESSION_TIER`, and `SessionRowItem`'s per-session
+                     "Rename…" has composed both halves since F2 while this group
+                     header asked only the hub's — the same control, two surfaces,
+                     two answers. When nothing in the group qualifies the button
+                     says why, in `share.ts`' own words rather than a new
+                     sentence. -->
+                {@const nameTargets = bulkTargets(projectSessions, 'name_session_work', $sessionBlocked)}
+                {@const groupNameBlocked =
+                  nameWorkBlocked ??
+                  (nameTargets.length === 0
+                    ? $sessionBlocked(projectSessions[0], 'name_session_work')
+                    : null)}
                 <button
                   class="icon-btn small"
                   data-testid="name-work-group"
-                  disabled={nameWorkBlocked !== null}
-                  title={nameWorkBlocked ??
-                    `Name this work… (${projectSessions.length} session${projectSessions.length === 1 ? '' : 's'} with no work)`}
+                  disabled={groupNameBlocked !== null}
+                  title={groupNameBlocked ??
+                    `Name this work… (${nameTargets.length} session${nameTargets.length === 1 ? '' : 's'} with no work)`}
                   aria-label="Name this work"
-                  onclick={(e) => openNameWork(projectSessions, e)}
+                  onclick={(e) => openNameWork(nameTargets, e)}
                 >#</button>
               {/if}
               <button
@@ -1375,27 +1993,61 @@
                 onclick={(e) => { e.stopPropagation(); pendingPurge = row.project; }}
                 data-testid="purge-project"
                 aria-label="Purge project"
-              >🗑️</button>
+              ><Icon name="trash" size={12} /></button>
             </div>
 
             {#if !isCollapsed}
-              {#each projectSessions as sess (sess.id)}
-                {@render sessionRow(sess)}
-              {/each}
+              <div role="group">
+                {#each projectSessions as sess (sess.id)}
+                  {@render sessionRow(sess)}
+                {/each}
+              </div>
             {/if}
           </li>
         {/each}
       </ul>
-    {:else if !loadError && orphanSessions.length === 0 && workGroups.length === 0 && pastOnlyGroups.length === 0}
+    {:else if listUnavailable && orphanSessions.length === 0 && sharedWithMe.length === 0 && workGroups.length === 0 && pastOnlyGroups.length === 0}
+      {@render listState('sessions')}
+    {:else if !loadError && orphanSessions.length === 0 && sharedWithMe.length === 0 && workGroups.length === 0 && pastOnlyGroups.length === 0}
       {#if !hubSkewEmptyMessage && listFacets.length > 0 && $projects.length > 0}
         <!-- Filters hide every row: say which, and offer the way back,
-             instead of "no sessions" over a fleet that has some. -->
-        <div class="empty filtered-empty" data-testid="sidebar-empty">
-          <p>No sessions match <strong>{facetSentence(listFacets)}</strong>.</p>
-          <button type="button" class="btn btn--quiet is-bounded" data-testid="sidebar-empty-clear" onclick={clearListFilters}
-            >Clear filters</button
-          >
-        </div>
+             instead of "no sessions" over a fleet that has some, as the states
+             kit's no-results (review r13, States board "Search with no
+             results"). -->
+        
+          <EmptyState
+            kind="none"
+            testid="sidebar-empty"
+            title="No sessions match {facetSentence(listFacets)}."
+            actions={[
+              { label: 'Clear filters', onclick: clearListFilters, primary: true, testid: 'sidebar-empty-clear' },
+              ...(archivedHidden > 0
+                ? [{ label: `Include archived (${archivedHidden})`, onclick: () => setShowArchived(true), testid: 'sidebar-empty-archived' }]
+                : []),
+              {
+                label: searchedFor ? `Start new session “${searchedFor}”…` : 'Start a new session',
+                onclick: openNewSessionFromSearch,
+                testid: 'sidebar-empty-new',
+              },
+            ]}
+          />
+        
+      {:else if !hubSkewEmptyMessage && visibleHostCount === 0}
+        <!-- Review r13, States board "First run": one host to start with;
+             G7.15: this machine counts, when it can be one. -->
+        <EmptyState
+          kind="first"
+          testid="sidebar-empty"
+          title="Start with one host"
+          body={`Fleet runs Claude Code or Codex in tmux on machines you can reach over SSH.${hiddenLocal ? ` ${thisMachine[0].toUpperCase()}${thisMachine.slice(1)} counts.` : ''} Add one, or pair this app with a hub that already has them.`}
+          actions={[
+            ...(hiddenLocal
+              ? [{ label: `Use ${thisMachine}`, onclick: () => void useThisMachine(), primary: true, testid: 'sidebar-empty-use-local' }]
+              : []),
+            { label: hiddenLocal ? 'Add a remote host…' : 'Add a host…', onclick: openAddHost, primary: !hiddenLocal, testid: 'sidebar-empty-add-host' },
+            { label: 'Pair with a hub', onclick: () => openSettingsAt('hub'), testid: 'sidebar-empty-pair' },
+          ]}
+        />
       {:else}
         <p class="empty" data-testid="sidebar-empty">
           {hubSkewEmptyMessage ??
@@ -1406,12 +2058,46 @@
       {/if}
     {/if}
 
-    {#if orphanSessions.length > 0}
+    {#if !flatBy && orphanSessions.length > 0}
       <div class="orphan-section" data-testid="orphan-sessions">
         <div class="section-header">Other sessions ({orphanSessions.length})</div>
-        {#each orphanSessions as sess (sess.id)}
-          {@render sessionRow(sess)}
-        {/each}
+        <div class="tree" role="tree" aria-label="Other sessions">
+          {#each orphanSessions as sess (sess.id)}
+            {@render sessionRow(sess)}
+          {/each}
+        </div>
+      </div>
+    {/if}
+
+    {#if sharedWithMe.length > 0}
+      <div class="orphan-section" data-testid="shared-with-me">
+        <button
+          class="section-header section-toggle"
+          data-testid="shared-with-me-toggle"
+          aria-expanded={sharedOpen}
+          onclick={() => (sharedOpen = !sharedOpen)}
+        >
+          <span class="caret" class:collapsed={!sharedOpen}>▾</span>
+          Shared with me ({sharedWithMe.length})
+        </button>
+        {#if sharedOpen || tab === 'shared'}
+          <div class="tree" role="tree" aria-label="Shared with me">
+            {#each sharedWithMe as sess (sess.id)}
+              {@const level = $accessOf(sess)}
+              {#snippet sharedBy()}
+                {#if isSharedAccess(level)}
+                  {@const info = $myGrantInfo.get(sess.id)}
+                  <!-- Gap plan G4.2, the Watch board's Inbox row: "Martin ·
+                       Read · waiting for Martin", "Martin · via 32bit · Steer". -->
+                  <div class="shared-by" data-testid="shared-by"
+                    >{sharedRowLine(level, info, sharerName(sess, info, $orgList), attentionState(sess, attentionOpts))}</div
+                  >
+                {/if}
+              {/snippet}
+              {@render sessionRow(sess, false, false, sharedBy)}
+            {/each}
+          </div>
+        {/if}
       </div>
     {/if}
 
@@ -1431,6 +2117,10 @@
       </div>
     {/if}
 
+    {#each lostFoldList as fold (fold.host)}
+      <LostFoldRow {fold} open={openFolds.has(fold.host)} ontoggle={() => toggleFold(fold.host)} row={foldSessionRow} />
+    {/each}
+
     {#if outsideFleet.length > 0}
       <div class="orphan-section" data-testid="outside-fleet-section">
         <button
@@ -1443,111 +2133,111 @@
           Outside fleet ({outsideFleet.length})
         </button>
         {#if outsideOpen}
-          {#each outsideFleet as sess (sess.id)}
-            {@render sessionRow(sess, true)}
-          {/each}
+          <div class="tree" role="tree" aria-label="Outside fleet">
+            {#each outsideFleet as sess (sess.id)}
+              {@render sessionRow(sess, true)}
+            {/each}
+          </div>
         {/if}
+      </div>
+    {/if}
+
+    {#if unclaimedTotal > 0}
+      <!-- A count, and nothing else. No caret, no toggle, no rows: there is
+           deliberately no way to expand this, because there is nothing behind
+           it — fleet serves a number for an unclaimed session and no metadata
+           at all (multi-user M1, rule 6). Claiming one is done from the
+           session's own pane, or with `fleet-hub session claim`; a button here
+           would need a session id this surface does not have, and spec §4.3
+           forbids it outright. -->
+      <div class="orphan-section" data-testid="unclaimed-section">
+        <div class="section-header unclaimed-header" data-testid="unclaimed-count">
+          Unclaimed ({unclaimedTotal})
+        </div>
+        <p class="unclaimed-note" data-testid="unclaimed-hosts">
+          {#each unclaimedByHost as h, i (h.alias)}{i > 0 ? ' · ' : ''}{h.alias}
+            {h.count}{/each}
+        </p>
+        <p class="unclaimed-note">
+          tmux sessions fleet did not start and nobody has claimed. Nothing else
+          about them is shown — claim one from its own pane, or with
+          <code>fleet-hub session claim</code>.
+        </p>
       </div>
     {/if}
   </div>
   {/if}
 
+  <!-- UX audit L4: + New moved to the list's header; the footer names the
+       list's keys and how many rows it holds. -->
   <footer class="sidebar-footer" data-testid="sidebar-chrome-bottom">
     <div class="footer-row">
-      <button
-        class="new-btn"
-        onclick={toggleProjectPicker}
-        data-testid="new-session-footer"
+      <span class="keys" data-testid="sidebar-keys"
+        ><kbd class="of-kbd">j</kbd><kbd class="of-kbd">k</kbd> move <kbd class="of-kbd">↵</kbd> open
+        <kbd class="of-kbd">x</kbd> select</span
       >
-        + New session
-      </button>
-      <button
-        class="icon-btn"
-        title="Launch a supervised Claude background session"
-        onclick={() => (showBgModal = true)}
-        data-testid="new-bg-session-btn"
-        use:hintAnchor={{ id: 'bg-session', when: $sessions.some((s) => !hasNoPane(s)) && !$sessions.some((s) => s.kind === 'bg') }}
-      >⚡</button>
+      <span class="spacer"></span>
+      <span class="list-count" data-testid="sidebar-count">{listCountText}</span>
     </div>
-    <button
-      class="theme-toggle"
-      onclick={cycleTheme}
-      title="Theme: {$theme} (click to cycle auto/light/dark)"
-      data-testid="theme-toggle"
-    >
-      theme: {$theme}
-    </button>
-    {#if showProjectPicker}
-      <div class="picker" role="listbox" aria-label="Pick project for new session">
-        <button
-          class="picker-item add-project"
-          disabled={addProjectBlocked !== null}
-          title={addProjectBlocked ?? ''}
-          onclick={openAddProject}
-          data-testid="add-project-row"
-        >
-          ＋ Add project…
-        </button>
-        {#each allProjectsSorted as row (row.project.id)}
-          <button class="picker-item" onclick={() => openNew(row)}>
-            {#if collidingRepos.has(row.project.repo)}<span class="owner"
-                >{row.project.owner}/</span
-              >{/if}{row.project.repo}
-          </button>
-        {/each}
-        {#if allProjectsSorted.length === 0}
-          <p class="empty pad">No projects yet. Add one, or refresh.</p>
-        {/if}
-      </div>
-    {/if}
   </footer>
 </div>
 
-<!-- The project picker is a popover, not a modal; the modals below handle
-     their own Escape through <dialog>'s cancel event. -->
-<svelte:window onkeydown={(e) => {
-  if (e.key === 'Escape' && showProjectPicker) showProjectPicker = false;
-}} />
-
 {#if showAddProject}
-  <AddProjectDialog onCreated={onProjectAdded} onCancel={() => (showAddProject = false)} />
+  <AddProjectDialog
+    onCreated={onProjectAdded}
+    onCancel={() => (showAddProject = false)}
+    {initialCloneUrl}
+    blocked={addProjectBlocked}
+  />
 {/if}
 
-{#if dialogProject}
-  <NewSessionDialog project={dialogProject} initialHost={dialogHost} onCreate={onCreated} {onCancel} />
-{/if}
 
 {#if pendingKill}
-  <ConfirmDialog
-    title="Kill session?"
-    confirmLabel="Kill"
-    danger
-    onconfirm={confirmKill}
+  <KillDialog
+    targets={[pendingKill]}
+    onkill={confirmKill}
+    oncleaned={cleanedUp}
     oncancel={cancelKill}
     confirmTestId="confirm-kill"
-  >
-    This will kill the tmux session <code>{pendingKill.tmux_name}</code> on
-    <code>{pendingKill.host_alias}</code> and lose any running claude state inside it. Continue?
-  </ConfirmDialog>
+  />
 {/if}
 
 {#if bulkKillOpen}
-  <ConfirmDialog
-    title="Kill {selectedRows.length} session{selectedRows.length === 1 ? '' : 's'}?"
-    confirmLabel="Kill all"
-    danger
-    onconfirm={confirmBulkKill}
+  <KillDialog
+    targets={bulkKillMode === 'cleanup' ? bulkCleanUpTargets : bulkKillTargets}
+    mode={bulkKillMode}
+    onkill={confirmBulkKill}
+    oncleaned={(removed) => {
+      bulkKillOpen = false;
+      clearSelected();
+      cleanedUp(removed);
+    }}
     oncancel={() => (bulkKillOpen = false)}
     confirmTestId="confirm-bulk-kill"
   >
-    This will kill
-    {#each selectedRows as r, i (r.id)}{i > 0 ? ', ' : ''}<code>{r.tmux_name}</code> on <code>{r.host_alias}</code>{/each}
-    and lose any running claude state inside them. Continue?
-  </ConfirmDialog>
+    {#snippet notes()}
+      {#if bulkKillTargets.length === 0}
+        <span data-testid="bulk-kill-none"
+          >None of the selected sessions is yours to kill — a session shared with you
+          can be watched or driven, never killed.</span
+        >
+      {:else if bulkKillTargets.length < selectedRows.length}
+        <!-- Said out loud rather than silently dropped: the count in the title
+             no longer matches the selection, and the reason is a rule. -->
+        <span data-testid="bulk-kill-skipped"
+          >{selectedRows.length - bulkKillTargets.length} selected session{selectedRows.length -
+            bulkKillTargets.length ===
+          1
+            ? ' is'
+            : 's are'} not yours to kill and will be left alone.</span
+        >
+      {/if}
+    {/snippet}
+  </KillDialog>
 {/if}
 
 {#if bulkPromptOpen}
-  <BulkPromptDialog targets={selectedRows} onClose={() => (bulkPromptOpen = false)} />
+  <BulkPromptDialog targets={bulkPromptTargets} onClose={() => (bulkPromptOpen = false)} />
 {/if}
 
 {#if pendingRestart}
@@ -1578,10 +2268,6 @@
     <code>{pendingRecreate.host_alias}</code> and the running claude state inside it,
     then starts a fresh session in the same worktree. Continue?
   </ConfirmDialog>
-{/if}
-
-{#if $settingsOpen}
-  <SettingsDialog onClose={() => settingsOpen.set(false)} />
 {/if}
 
 {#if nameWorkFor}
@@ -1638,11 +2324,11 @@
     border: 1px solid var(--border);
     color: var(--fg-muted);
     padding: 0.25rem 0.5rem;
-    border-radius: 5px;
-    font-size: 0.9rem;
+    border-radius: var(--radius-sm);
+    font-size: var(--text-sm);
     line-height: 1;
     cursor: pointer;
-    min-width: 1.6rem;
+    min-width: var(--control-h);
   }
   .icon-btn:hover:not(:disabled) {
     color: var(--fg);
@@ -1652,8 +2338,8 @@
   .icon-btn:disabled { opacity: 0.6; cursor: progress; }
   .icon-btn.small {
     padding: 0.1rem 0.35rem;
-    font-size: 0.85rem;
-    min-width: 1.4rem;
+    font-size: var(--text-xs);
+    min-width: var(--control-h);
     border-color: transparent;
   }
   .icon-btn.small:hover { border-color: var(--border); }
@@ -1673,9 +2359,9 @@
     align-items: center;
     gap: 0.35rem;
     font-weight: 500;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     padding: 0.3rem 0.4rem;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
     user-select: none;
   }
@@ -1688,10 +2374,10 @@
   }
   .caret {
     color: var(--fg-muted);
-    font-size: 0.65rem;
+    font-size: var(--text-2xs);
     width: 0.7rem;
     text-align: center;
-    transition: transform 0.1s ease;
+    transition: transform var(--dur-fast) ease;
     display: inline-block;
   }
   .caret.collapsed { transform: rotate(-90deg); }
@@ -1722,15 +2408,15 @@
     vertical-align: middle;
   }
   .work-dot.dot-progress {
-    background: var(--accent, #3b82f6);
+    background: var(--accent);
   }
   .work-dot.dot-done {
-    background: var(--ok, #22c55e);
+    background: var(--status-done);
   }
   .work-title {
     margin-left: 0.4rem;
     color: var(--fg-muted);
-    font-size: 0.75rem;
+    font-size: var(--text-2xs);
     overflow: hidden;
     text-overflow: ellipsis;
   }
@@ -1739,7 +2425,7 @@
     align-items: center;
     gap: 0.3rem;
     padding: 0.1rem 0.5rem 0.1rem 1.6rem;
-    font-size: 0.72rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     cursor: pointer;
   }
@@ -1749,8 +2435,8 @@
     opacity: 0.6;
   }
   .work-reopened {
-    font-size: 0.68rem;
-    color: var(--accent, #3b82f6);
+    font-size: var(--text-2xs);
+    color: var(--accent);
     white-space: nowrap;
   }
   .archived-wrap {
@@ -1761,10 +2447,10 @@
     position: absolute;
     right: 0.5rem;
     top: 0.15rem;
-    font-size: 0.62rem;
+    font-size: var(--text-2xs);
     padding: 0 0.3rem;
     border: 1px solid var(--border);
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     background: var(--bg);
     color: var(--fg-muted);
     cursor: pointer;
@@ -1775,7 +2461,7 @@
     align-items: center;
     gap: 0.4rem;
     padding: 0.15rem 0.5rem 0.15rem 1.6rem;
-    font-size: 0.75rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     opacity: 0.85;
   }
@@ -1793,33 +2479,33 @@
     text-overflow: ellipsis;
   }
   .past-note {
-    font-size: 0.7rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     white-space: nowrap;
   }
   .past-purged {
-    font-size: 0.65rem;
-    color: var(--danger, #e5534b);
+    font-size: var(--text-2xs);
+    color: var(--danger);
   }
   .purge-work {
     margin: 0.5rem 0 0;
   }
   .work-pr {
-    font-size: 0.7rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     white-space: nowrap;
   }
   .count {
-    font-size: 0.7rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     padding: 0.05rem 0.4rem;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     background: color-mix(in srgb, var(--fg) 10%, transparent);
     min-width: 1.4rem;
     text-align: center;
   }
 
-  .empty { color: var(--fg-muted); font-size: 0.85rem; padding: 0.5rem 0.4rem; }
+  .empty { color: var(--fg-muted); font-size: var(--text-xs); padding: 0.5rem 0.4rem; }
   .archived-row {
     display: flex;
     align-items: center;
@@ -1831,18 +2517,78 @@
     font-size: var(--control-font);
   }
   .archived-row span { flex: 1; }
-  .filtered-empty { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
-  .filtered-empty p { margin: 0; }
-  .filtered-empty strong { color: var(--fg); font-weight: 500; }
-  .pad { padding: 0.5rem 0.6rem; }
 
+  .scope-tabs {
+    display: flex;
+    gap: 14px;
+    padding: 0 12px;
+    border-bottom: 1px solid var(--border);
+    flex: none;
+  }
+  .scope-tab {
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    padding: 6px 0;
+    font: inherit;
+    font-size: var(--text-xs);
+    color: var(--fg-muted);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .scope-tab.on {
+    color: var(--fg);
+    border-bottom-color: var(--accent);
+    font-weight: 500;
+  }
+  .shared-by {
+    font-size: var(--text-xs);
+    line-height: 16px;
+    color: var(--fg-muted);
+    padding: 0 0 4px 28px;
+  }
+  .group-more {
+    font-size: var(--text-xs);
+    color: var(--fg-muted);
+    margin: 0 0 2px 22px;
+  }
   .orphan-section {
     border-top: 1px solid var(--border);
     padding-top: 0.35rem;
     margin-top: 0.35rem;
   }
+  /* The unclaimed count (multi-user M1): a label, not a toggle — there is no
+     caret because there is nothing to open. */
+  .unclaimed-header {
+    cursor: default;
+  }
+  .unclaimed-note {
+    margin: 0 0 0.25rem;
+    padding: 0 0.4rem;
+    font-size: var(--text-2xs);
+    line-height: 1.4;
+    color: var(--fg-muted);
+  }
+  .inbox-rest {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.5rem 0.6rem;
+    font-size: var(--text-2xs);
+  }
+  .inbox-rest .muted { color: var(--fg-muted); }
+  .inbox-head .muted { color: var(--fg-muted); font-weight: 400; margin-left: 6px; }
+  /* G3.1: a state section's header, "Needs you 4 +1 proposed" (Main board). */
+  .inbox-sec { display: flex; align-items: center; gap: 6px; color: var(--status-waiting); }
+  .inbox-sec.failed { color: var(--status-failed); }
+  .inbox-sec .count { font-weight: 500; padding: 0 5px; border-radius: var(--radius-sm); background: var(--bg-hover); color: var(--fg-2); text-transform: none; }
+  .inbox-sec .muted { color: var(--fg-muted); font-weight: 400; text-transform: none; letter-spacing: 0; }
+  .proposed-line { display: flex; gap: 8px; align-items: center; justify-content: space-between; padding: 0 12px 6px 28px; font-size: var(--text-xs); }
   .section-header {
-    font-size: 0.65rem;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--fg-muted);
@@ -1860,10 +2606,10 @@
   }
   .section-toggle .caret {
     color: var(--fg-muted);
-    font-size: 0.65rem;
+    font-size: var(--text-2xs);
     width: 0.7rem;
     text-align: center;
-    transition: transform 0.1s ease;
+    transition: transform var(--dur-fast) ease;
     display: inline-block;
   }
   .section-toggle .caret.collapsed { transform: rotate(-90deg); }
@@ -1884,22 +2630,23 @@
     align-items: center;
   }
   .new-btn {
-    flex: 1;
-    text-align: left;
-    font-size: 0.85rem;
-    padding: 0.4rem 0.6rem;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--fg);
-    border-radius: 5px;
-    cursor: pointer;
+    gap: 6px;
+    white-space: nowrap;
   }
-  .new-btn:hover { border-color: var(--accent); background: var(--bg-pane); }
+  .keys,
+  .list-count {
+    font-size: var(--text-2xs);
+    color: var(--fg-muted);
+    white-space: nowrap;
+  }
+  .keys kbd { margin-right: 2px; }
+  .list-count { font-variant-numeric: tabular-nums; }
+  .spacer { flex: 1; }
 
   .purge-btn {
     opacity: 0;
-    transition: opacity 0.15s;
-    color: var(--color-error, #f44336);
+    transition: opacity var(--dur-base);
+    color: var(--danger);
   }
   /* UX-04: `.icon-btn:disabled { opacity: 0.6 }` outranks `opacity: 0` here,
      so before this rule the purge button was INVISIBLE exactly when it
@@ -1926,44 +2673,4 @@
     cursor: not-allowed;
   }
   .purge-btn:hover:not(:disabled) { opacity: 1 !important; }
-  .theme-toggle {
-    width: 100%;
-    text-align: left;
-    font-size: 0.75rem;
-    padding: 0.25rem 0.5rem;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--fg-muted);
-    border-radius: 4px;
-    cursor: pointer;
-  }
-  .theme-toggle:hover { color: var(--fg); border-color: var(--accent); }
-
-  .picker {
-    position: absolute;
-    bottom: 100%;
-    left: 0;
-    right: 0;
-    margin-bottom: 0.3rem;
-    border: 1px solid var(--border);
-    background: var(--bg);
-    border-radius: 5px;
-    box-shadow: 0 4px 16px rgba(0,0,0,0.3);
-    max-height: 240px;
-    overflow: auto;
-    z-index: 5;
-  }
-  .picker-item {
-    display: block;
-    width: 100%;
-    text-align: left;
-    border: none;
-    background: transparent;
-    color: var(--fg);
-    font-size: 0.85rem;
-    padding: 0.4rem 0.6rem;
-    cursor: pointer;
-  }
-  .picker-item:hover { background: var(--bg-pane); }
-  .picker-item.add-project { color: var(--accent); border-bottom: 1px solid var(--border); }
 </style>

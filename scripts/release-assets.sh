@@ -27,6 +27,7 @@
 #   release-assets.sh legs                     # every leg id, one per line
 #   release-assets.sh assets <version> [leg]   # expected asset names (all, or one leg's)
 #   release-assets.sh matrix <kind>            # GitHub Actions matrix JSON for a kind
+#   release-assets.sh has-desktop <version>    # `true` / `false`: does it build the desktop legs
 #   release-assets.sh runner <leg>             # the runner label for one leg
 #   release-assets.sh --help
 #
@@ -54,6 +55,13 @@ self="$(basename "$0")"
 # see docs/windows.md), with Microsoft's ConPTY bundled beside the exe
 # (--config src-tauri/tauri.conpty.conf.json; scripts/fetch-conpty.sh). It is unsigned: there is no Authenticode certificate
 # yet, so SmartScreen warns on first run.
+#
+# NIGHTLIES (update-channel design S2b, nightly.yml). A `-dev.N.g<sha>`
+# version is a per-push nightly: the hub image and the tarballs, no desktop
+# legs (a macOS leg costs ~25 runner-minutes). Once a day nightly.yml cuts
+# `-dev.N.desktop.g<sha>`, which builds every leg. The rule lives here, in
+# `assets` and `has-desktop`, so release.yml, verify-release.sh and the drift
+# check all read the same answer from the version string itself.
 #
 # `since` is the first version a leg ships in, empty for "always". `assets`
 # leaves the leg out for an older version, so adding a leg does not turn every
@@ -91,6 +99,15 @@ check_version() {
   if ! echo "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
     die "not a semver version: '$1' (expected X.Y.Z, optionally -rc.1)"
   fi
+}
+
+# A per-push nightly: `-dev.` without `.desktop.` (see the table's header).
+skips_desktop() {
+  case "$1" in
+    *-dev.*.desktop.*) return 1 ;;
+    *-dev.*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # Whether version $1 is $2 or later. `sort -V` orders 0.4.0-rc.1 after
@@ -135,6 +152,9 @@ cmd_assets() {
     if [ -n "$since" ] && ! version_at_least "$version" "$since"; then
       continue
     fi
+    if [ "$kind" = desktop ] && skips_desktop "$version"; then
+      continue
+    fi
     for a in $assets; do
       # Only {v} is substituted, and only by a version that passed
       # check_version above.
@@ -175,8 +195,14 @@ cmd_matrix() {
   [ "$found" -eq 1 ] || die "matrix kind '$want' matched no leg"
 }
 
+cmd_has_desktop() {
+  check_version "$1"
+  if skips_desktop "$1"; then echo false; else echo true; fi
+}
+
 case "${1:-}" in
   --help | -h | help) usage ;;
+  has-desktop) shift; [ $# -eq 1 ] || die "usage: $self has-desktop <version>" 2; cmd_has_desktop "$1" ;;
   legs) cmd_legs ;;
   runner) shift; [ $# -eq 1 ] || die "usage: $self runner <leg>" 2; cmd_runner "$1" ;;
   assets) shift; [ $# -ge 1 ] && [ $# -le 2 ] || die "usage: $self assets <version> [leg]" 2; cmd_assets "$@" ;;

@@ -5,6 +5,9 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import SecretsPanel from './SecretsPanel.svelte';
 import { hosts } from './hosts';
+import { expectAccessible } from './a11y_check';
+import { get } from 'svelte/store';
+import { clearToasts, toasts } from './toasts';
 
 const invoke = mockedInvoke as ReturnType<typeof vi.fn>;
 
@@ -89,5 +92,82 @@ describe('SecretsPanel', () => {
     await fireEvent.click(screen.getByTestId('secrets-add-name-submit'));
 
     expect(screen.getByTestId('secret-row-ANTHROPIC_KEY')).toBeTruthy();
+  });
+});
+
+describe('SecretsPanel accessibility (7.2)', () => {
+  it('passes the axe and audit checks', async () => {
+    byCmd({ catalog_list_secrets: [{ name: 'GH_TOKEN', host_alias: null, updated_at: 1 }] });
+    const { container } = render(SecretsPanel, { names: ['NPM_TOKEN'], onclose: () => {} });
+    await screen.findByTestId('secret-row-GH_TOKEN');
+    await expectAccessible(container);
+  });
+});
+
+// G2.6: one secret written to several hosts in one form; the value is
+// cleared once written and never shown.
+describe('SecretsPanel: Add a secret', () => {
+  it('writes the value everywhere chosen, then forgets it', async () => {
+    const calls: unknown[] = [];
+    invoke.mockImplementation(async (cmd: string, a: { args?: unknown }) => {
+      if (cmd === 'catalog_list_secrets') return [];
+      if (cmd === 'catalog_set_secret') {
+        calls.push(a.args);
+        return null;
+      }
+      throw { code: 'E_TEST', message: `unexpected ${cmd}` };
+    });
+    render(SecretsPanel, { names: [], onclose: () => {} });
+    await fireEvent.input(screen.getByTestId('secrets-add-secret-name'), { target: { value: 'fleet_token' } });
+    const value = screen.getByTestId('secrets-add-secret-value') as HTMLInputElement;
+    expect(value.type).toBe('password');
+    await fireEvent.input(value, { target: { value: 's3cret' } });
+    await fireEvent.click(screen.getByTestId('secrets-add-global'));
+    await fireEvent.change(screen.getByTestId('secrets-add-host-mefistos'), { target: { value: 'write' } });
+    await fireEvent.change(screen.getByTestId('secrets-add-host-local'), { target: { value: 'write' } });
+    await fireEvent.click(screen.getByTestId('secrets-add-secret'));
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(calls).toEqual([
+      { name: 'FLEET_TOKEN', host_alias: 'local', value: 's3cret' },
+      { name: 'FLEET_TOKEN', host_alias: 'mefistos', value: 's3cret' },
+    ]);
+    await waitFor(() => expect(value.value).toBe(''));
+    expect(document.body.textContent).not.toContain('s3cret');
+  });
+
+  it('needs somewhere to write it', async () => {
+    byCmd({ catalog_list_secrets: [] });
+    render(SecretsPanel, { names: [], onclose: () => {} });
+    await fireEvent.input(screen.getByTestId('secrets-add-secret-name'), { target: { value: 'X' } });
+    await fireEvent.input(screen.getByTestId('secrets-add-secret-value'), { target: { value: 'v' } });
+    expect((screen.getByTestId('secrets-add-secret') as HTMLButtonElement).disabled).toBe(false);
+    await fireEvent.click(screen.getByTestId('secrets-add-global'));
+    expect((screen.getByTestId('secrets-add-secret') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  describe('the saved toast (G7.4)', () => {
+    beforeEach(() => clearToasts());
+
+    it('a value set where there was none offers Undo, which deletes it there', async () => {
+      byCmd({ catalog_list_secrets: [], catalog_set_secret: null, catalog_delete_secret: true });
+      render(SecretsPanel, { names: ['GH_TOKEN'], onclose: () => {} });
+      await screen.findByTestId('secret-row-GH_TOKEN');
+      await fireEvent.input(screen.getByTestId('secret-value-GH_TOKEN'), { target: { value: 'shh' } });
+      await fireEvent.click(screen.getByTestId('secret-set-GH_TOKEN'));
+      await waitFor(() => expect(get(toasts).at(-1)?.message).toBe('GH_TOKEN set for every host.'));
+      get(toasts).at(-1)!.action!.run();
+      await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_delete_secret', { args: { name: 'GH_TOKEN', host_alias: null } }));
+    });
+
+    it('a value that replaced another has no Undo: the old one was never read', async () => {
+      byCmd({ catalog_list_secrets: [{ name: 'GH_TOKEN', host_alias: null, updated_at: 1 }], catalog_set_secret: null });
+      render(SecretsPanel, { names: ['GH_TOKEN'], onclose: () => {} });
+      await screen.findByTestId('secret-row-GH_TOKEN');
+      await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_list_secrets', undefined));
+      await fireEvent.input(screen.getByTestId('secret-value-GH_TOKEN'), { target: { value: 'shh' } });
+      await fireEvent.click(screen.getByTestId('secret-set-GH_TOKEN'));
+      await waitFor(() => expect(get(toasts).at(-1)?.message).toBe('GH_TOKEN set for every host.'));
+      expect(get(toasts).at(-1)!.action).toBeNull();
+    });
   });
 });

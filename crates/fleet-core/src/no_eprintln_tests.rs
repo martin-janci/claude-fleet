@@ -94,16 +94,16 @@ fn is_close_at(line: &str, indent: &str) -> bool {
 
 /// What one file's scan found.
 #[derive(Debug, Default, PartialEq)]
-struct Scan {
+pub(crate) struct Scan {
     /// 1-based line numbers of production print calls.
-    hits: Vec<usize>,
+    pub(crate) hits: Vec<usize>,
     /// Test-only module files it declares (`#[cfg(test)] mod name;`).
-    test_mods: Vec<String>,
+    pub(crate) test_mods: Vec<String>,
     /// Test-only module files it declares with an explicit
     /// `#[path = "file.rs"]`, relative to the declaring file's directory.
-    test_paths: Vec<String>,
+    pub(crate) test_paths: Vec<String>,
     /// 1-based lines of inline test modules whose closing brace was not found.
-    unterminated: Vec<usize>,
+    pub(crate) unterminated: Vec<usize>,
 }
 
 fn scan(text: &str) -> Scan {
@@ -112,7 +112,7 @@ fn scan(text: &str) -> Scan {
 
 /// [`scan`] for any production-code predicate: `hit` sees each trimmed,
 /// non-comment line outside test-only modules.
-fn scan_with(text: &str, hit: fn(&str) -> bool) -> Scan {
+pub(crate) fn scan_with(text: &str, hit: fn(&str) -> bool) -> Scan {
     let lines: Vec<&str> = text.lines().collect();
     let mut out = Scan::default();
     let mut i = 0;
@@ -213,13 +213,14 @@ fn calls_command_new(line: &str) -> bool {
 
 /// Every child the desktop can start goes through `crate::proc`, which on
 /// Windows keeps a console program (`ssh.exe`, `git.exe`) from flashing a
-/// console window for every spawn. The core and the desktop are scanned; the
-/// hub is a Linux daemon and keeps its own spawns.
+/// console window for every spawn. The core, the desktop and the hub are
+/// scanned: the hub is a Linux daemon, but one spelling of a spawn keeps the
+/// rule checkable everywhere and costs it nothing.
 #[test]
 fn production_code_spawns_through_proc() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let proc_rs = manifest.join("src").join("proc.rs");
-    let (offenders, unterminated) = production_hits(calls_command_new, &proc_rs, false);
+    let (offenders, unterminated) = production_hits(calls_command_new, &proc_rs, true);
     assert_scanned(&unterminated);
     assert!(
         offenders.is_empty(),
@@ -335,7 +336,7 @@ fn a_path_attribute_names_the_test_modules_file() {
     assert!(!calls_command_new("let c = crate::proc::command(\"x\");"));
 }
 
-fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+pub(crate) fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).expect("read src dir") {
         let path = entry.expect("dir entry").path();
         if path.is_dir() {

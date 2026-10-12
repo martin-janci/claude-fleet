@@ -51,6 +51,32 @@ them to its owner widens nothing; it can never pull a file from another
 host. `download:changed` is in `HOST_BOUND_HIDDEN_KINDS`: a scoped stream
 never receives it, and a scoped client re-reads `list_downloads`.
 
+**Multi-user M1 narrowed the first two rows of that table, and the table
+above is the pre-M1 shape kept for the record.** A download is a file read
+off the session's host at an unconstrained absolute path (`parse_stat`
+accepts anything starting with `/`), which is a subset of what a terminal
+gives, and the privacy spec's §4.3 invariant 5 says no grant ever confers
+one. So all three person-facing surfaces — `send_file`, `list_downloads`
+and `remove_download`, plus `GET /downloads/<id>` — sit at the **`own`
+tier**: `service::downloads::visible` asks `ViewScope::may_own` on the
+session each row came out of. Concretely, against the table above:
+
+- *master, unbound client*: **not** "any visible session / every row" —
+  only the sessions that person OWNS and the rows those produced. A `watch`
+  or a `drive` grantee is refused too, and the master has no override
+  (privacy holds against the admin).
+- the per-host row is unchanged in spirit and tighter in fact: its own host
+  AND either an unclaimed row or the one pane the request proves (§4.4
+  clauses 1 and 2), rather than the whole host.
+- a row whose `sessions` row is gone falls back to `DownloadRow.org_id`
+  alone — there is no person left to ask — which is bounded by `send_file`
+  being the `own` tier too: no grantee ever created one.
+
+The per-caller pins are `service::downloads`'
+`only_the_owner_reaches_a_private_sessions_download` and the session
+isolation matrix (`mcp::tools::tests_sessions_isolation`), which carries a
+row for `send_file` and two for `list_downloads`.
+
 ## Wire (contract revision 7)
 
 ### `send_file` (Access::Client, write)

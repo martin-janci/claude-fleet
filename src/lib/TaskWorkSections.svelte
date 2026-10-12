@@ -1,25 +1,32 @@
 <script lang="ts">
   // The task page's shared-work sections (design 2026-09-29 §4): the brief
-  // (a native task's notes), subtasks (+ add, Start), agent proposals
+  // (a native task's notes), subtasks (+ add, and the Start split button), agent proposals
   // (accept / reject; rejected behind a toggle), delegated jobs with their
   // result, and agent steps per session — "per the agent", never a status.
   // `part` splits them around the page's Sessions list: the work above it,
   // the steps below. All text renders as text.
-  import { createWorkTask, decideWorkProposal } from './work';
-  import { startWork } from './trackers';
-  import { selectSessionExplicitly } from './selection';
-  import { hubStatus, hubActionBlocked } from './hub';
-  import { hubConnection } from './hub_connection';
-  import { openTask, readErrorText, type TaskDetail } from './work_view';
+  import { createWorkTask, decideWorkProposal, mergeWorkProposal } from './work';
+  import { duplicateProposal, openTask, readErrorText, type TaskDetail } from './work_view';
+  import ProposedBy from './ProposedBy.svelte';
+  import WorkButton from './WorkButton.svelte';
+  import TaskBrief from './TaskBrief.svelte';
   import type { Result } from './result';
+  import { subtaskMark, subtaskProgress } from './task_detail';
 
   let { detail, part = 'all' }: { detail: TaskDetail; part?: 'all' | 'work' | 'steps' } = $props();
 
-  const startBlocked = $derived(hubActionBlocked('start_work', $hubStatus, $hubConnection));
   const showWork = $derived(part !== 'steps');
   const showSteps = $derived(part !== 'work');
-  // A subtask's parent is never itself a subtask; a bare key has no item.
-  const canAddSubtask = $derived(detail.task.item_id != null && !detail.task.parent_task_id);
+  // Local work goes three levels deep (epic → task → subtask); a ticket
+  // takes subtasks at any depth (its tracker owns that); a bare key has no
+  // item. An older hub sends no `level`: then a subtask takes none, as before.
+  const LOCAL_DEPTH_MAX = 3;
+  const canAddSubtask = $derived(
+    detail.task.item_id != null &&
+      (detail.task.kind !== 'local'
+        ? !detail.task.parent_task_id
+        : (detail.task.level ?? (detail.task.parent_task_id ? LOCAL_DEPTH_MAX : 1)) < LOCAL_DEPTH_MAX),
+  );
 
   let adding = $state(false);
   let newTitle = $state('');
@@ -47,31 +54,21 @@
     newTitle = '';
     adding = false;
   }
-
-  async function startSubtask(itemId: number, projectId: number | null | undefined) {
-    const r = await run(startWork({ item_id: itemId, ...(projectId != null ? { project_id: projectId } : {}) }));
-    if (r.ok) selectSessionExplicitly(r.value);
-  }
 </script>
 
 <div class="tws">
   {#if err}<p class="err" role="alert" data-testid="task-sections-error">{err}</p>{/if}
 
   {#if showWork}
-    {#if detail.notes}
-      <section>
-        <h4>Brief</h4>
-        <p class="text" data-testid="task-notes">{detail.notes}</p>
-      </section>
-    {/if}
+    <TaskBrief task={detail.task} notes={detail.notes} />
 
     <section data-testid="task-subtasks">
-      <h4>
-        Subtasks <span class="n">{detail.subtasks?.length ?? 0}</span>
+      <h3>
+        Subtasks <span class="n" data-testid="task-subtask-progress">{subtaskProgress(detail.subtasks) ?? 0}</span>
         {#if canAddSubtask}
           <button class="btn btn--quiet" type="button" data-testid="task-add-subtask" onclick={() => (adding = true)}>+ Add subtask</button>
         {/if}
-      </h4>
+      </h3>
       {#if adding}
         <input
           class="add"
@@ -86,8 +83,9 @@
         />
       {/if}
       {#each detail.subtasks ?? [] as s (s.item_id)}
+        {@const mark = subtaskMark(s.status)}
         <div class="row" data-testid="task-subtask">
-          <span class="dot dot--{s.status ?? 'todo'}" aria-hidden="true"></span>
+          <span class="mark mark--{s.status ?? 'todo'}" role="img" aria-label={mark.label} data-testid="task-subtask-mark">{mark.glyph}</span>
           <button class="link" type="button" onclick={() => openTask(s.task_id)}>{s.title}</button>
           {#if s.key}<span class="key">{s.key}</span>{/if}
           {#if s.origin === 'agent'}<span class="chip agent">delegated job</span>{:else if s.origin === 'proposed'}<span class="chip prop"
@@ -95,14 +93,8 @@
             >{/if}
           <span class="spacer"></span>
           {#if s.status === 'todo' && s.live_sessions === 0}
-            <button
-              class="btn"
-              type="button"
-              data-testid="task-subtask-start"
-              disabled={busy || startBlocked !== null}
-              title={startBlocked ?? 'Start a session for this subtask'}
-              onclick={() => void startSubtask(s.item_id, s.project_id)}>Start</button
-            >
+            <!-- Redesign 6.6: the same split button as a task row. -->
+            <WorkButton task={{ ...s, sessions: [] }} />
           {:else}
             <span class="muted">{s.live_sessions > 0 ? `${s.live_sessions} live` : (s.job_state ?? s.status ?? '')}</span>
           {/if}
@@ -114,13 +106,58 @@
 
     {#if (detail.proposals?.length ?? 0) > 0 || (detail.rejected_proposals?.length ?? 0) > 0}
       <section data-testid="task-proposals">
-        <h4>Proposals <span class="n">{detail.proposals?.length ?? 0}</span><span class="hint">agents propose, you decide</span></h4>
+        <h3>Proposals <span class="n">{detail.proposals?.length ?? 0}</span><span class="hint">agents propose, you decide</span></h3>
         {#each detail.proposals ?? [] as p (p.item_id)}
           <div class="prop-card" data-testid="task-proposal">
             <div><strong>{p.title}</strong> {#if p.key}<span class="key">{p.key}</span>{/if}</div>
             {#if p.why}<p class="text">{p.why}</p>{/if}
             {#if p.notes}<p class="text muted">{p.notes}</p>{/if}
             {#if p.proposed_by}<p class="muted small">Proposed by {p.proposed_by}</p>{/if}
+            {#if p.duplicate}
+              <!-- Redesign 6.9 (K4): Jev's "may duplicate". Merge moves
+                   what hangs on the proposal (its sessions' links, its
+                   subtasks) to the existing task and closes the proposal;
+                   Keep both accepts it. A person decides either way. -->
+              <div class="dup" data-testid="task-proposal-duplicate">
+                <span
+                  >May duplicate <button
+                    type="button"
+                    class="link"
+                    data-testid="task-proposal-duplicate-open"
+                    onclick={() => p.duplicate && openTask(p.duplicate.task_id)}
+                    >{p.duplicate.key ?? p.duplicate.title}</button
+                  ></span
+                >
+                <ProposedBy
+                  proposal={duplicateProposal(p)}
+                  field="duplicate"
+                  testid="task-proposal-duplicate-by"
+                />
+              </div>
+              <div class="acts">
+                <button
+                  class="btn"
+                  type="button"
+                  data-testid="task-proposal-merge"
+                  title="Move its sessions and subtasks to the existing task, then close this proposal"
+                  disabled={busy}
+                  onclick={() =>
+                    void run(
+                      p.duplicate
+                        ? mergeWorkProposal(p.item_id, p.duplicate.item_id)
+                        : decideWorkProposal(p.item_id, false),
+                    )}>Merge</button
+                >
+                <button
+                  class="btn"
+                  type="button"
+                  data-testid="task-proposal-keep-both"
+                  title="Accept this proposal as a task of its own"
+                  disabled={busy}
+                  onclick={() => void run(decideWorkProposal(p.item_id, true))}>Keep both</button
+                >
+              </div>
+            {:else}
             <div class="acts">
               <button
                 class="btn btn--primary"
@@ -137,6 +174,7 @@
                 onclick={() => void run(decideWorkProposal(p.item_id, false))}>Reject</button
               >
             </div>
+            {/if}
           </div>
         {/each}
         {#if (detail.rejected_proposals?.length ?? 0) > 0}
@@ -159,7 +197,7 @@
 
     {#if (detail.jobs?.length ?? 0) > 0 || detail.job_result}
       <section data-testid="task-jobs">
-        <h4>Delegated jobs <span class="n">{detail.jobs?.length ?? 0}</span></h4>
+        <h3>Delegated jobs <span class="n">{detail.jobs?.length ?? 0}</span></h3>
         {#if detail.job_result}
           <p class="text result" data-testid="task-own-job-result">{detail.job_result}</p>
         {/if}
@@ -179,7 +217,7 @@
 
   {#if showSteps}
     <section data-testid="task-steps">
-      <h4>Agent steps <span class="hint">from Claude Code tasks · per the agent, not proof of done</span></h4>
+      <h3>Agent steps <span class="hint">from Claude Code tasks · per the agent, not proof of done</span></h3>
       {#each detail.steps ?? [] as g, i (g.claude_session_id)}
         {@const steps = g.steps ?? []}
         <details open={i === 0}>
@@ -207,17 +245,17 @@
     gap: 12px;
     margin: 0.6rem 0;
   }
-  h4 {
+  h3 {
     display: flex;
     gap: 6px;
     align-items: center;
     margin: 0 0 6px;
-    font-size: 0.72rem;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--fg-muted);
   }
-  h4 .btn {
+  h3 .btn {
     margin-left: auto;
     text-transform: none;
     letter-spacing: 0;
@@ -260,26 +298,26 @@
   }
   .key {
     font-family: var(--mono);
-    font-size: 0.75rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .chip {
-    font-size: 0.7rem;
-    border-radius: 999px;
+    font-size: var(--text-2xs);
+    border-radius: var(--radius-pill);
     padding: 0 6px;
     white-space: nowrap;
   }
   .prop {
-    background: color-mix(in srgb, var(--usage-warn, #b45309) 14%, transparent);
-    color: var(--usage-warn, #b45309);
+    background: var(--accent-soft);
+    color: var(--fg);
   }
   .agent {
-    background: color-mix(in srgb, #7c3aed 12%, transparent);
-    color: #7c3aed;
+    background: var(--chip-bg);
+    color: var(--fg-2);
   }
   .prop-card {
     border: 1px dashed var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     padding: 8px 10px;
     display: grid;
     gap: 4px;
@@ -289,38 +327,51 @@
     display: flex;
     gap: 6px;
   }
+  .dup {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--text-xs);
+    color: var(--fg-2);
+  }
+  .dup .link {
+    background: none;
+    border: 0;
+    padding: 0;
+    color: var(--accent);
+    cursor: pointer;
+    font: inherit;
+  }
   .job {
     padding: 4px 0;
   }
   .result {
-    border-left: 2px solid #7c3aed;
+    border-left: 2px solid var(--control-border);
     padding-left: 8px;
   }
   .state--done {
-    color: var(--usage-ok, #2e7d32);
+    color: var(--usage-ok);
   }
   .state--failed,
   .state--cancelled {
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
   }
-  .dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    border: 1.5px solid var(--fg-muted);
+  .mark {
     flex: none;
+    width: 1em;
+    text-align: center;
+    color: var(--fg-muted);
   }
-  .dot--in_progress {
-    background: var(--accent);
-    border-color: var(--accent);
+  .mark--in_progress {
+    color: var(--accent);
   }
-  .dot--done {
-    background: var(--usage-ok, #2e7d32);
-    border-color: var(--usage-ok, #2e7d32);
+  .mark--done {
+    color: var(--usage-ok);
   }
   details {
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     padding: 4px 8px;
     margin-bottom: 4px;
   }
@@ -343,7 +394,7 @@
     flex: none;
   }
   .step--completed .m {
-    color: var(--usage-ok, #2e7d32);
+    color: var(--usage-ok);
   }
   .step--in_progress .m {
     color: var(--accent);
@@ -353,10 +404,10 @@
     margin: 0;
   }
   .small {
-    font-size: 0.75rem;
+    font-size: var(--text-2xs);
   }
   .err {
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
     margin: 0;
   }
   .add {

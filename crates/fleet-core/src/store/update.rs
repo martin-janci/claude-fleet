@@ -5,7 +5,7 @@
 //! §7.4.
 
 use super::Store;
-use crate::events::{EventBus as _, RowChange, UpdateChanged};
+use crate::events::{EventBus as _, RowChange, UpdateChanged, UpdateDecision};
 use crate::ipc_error::IpcError;
 use rusqlite::OptionalExtension;
 
@@ -109,6 +109,15 @@ impl Store {
         self.bus.emit(&RowChange::UpdateChanged(UpdateChanged {
             what: what.into(),
             target: target.map(String::from),
+        }));
+    }
+
+    /// Emit `update:decision` for one target (update design §6.4).
+    pub fn emit_update_decision(&self, target: &str, status: &str, version: Option<&str>) {
+        self.bus.emit(&RowChange::UpdateDecision(UpdateDecision {
+            target: target.into(),
+            status: status.into(),
+            version: version.map(String::from),
         }));
     }
 
@@ -399,7 +408,298 @@ impl Store {
                 [&d.key],
             )?;
         }
+        // An amendment (`<version>/<component>`) goes with its release.
+        for d in self.update_docs("amendment")? {
+            let version = d.key.split('/').next().unwrap_or_default();
+            if !keep.iter().any(|k| k == version) {
+                n += self.conn.execute(
+                    "DELETE FROM update_docs WHERE kind = 'amendment' AND key = ?1",
+                    [&d.key],
+                )?;
+            }
+        }
         Ok(n)
+    }
+}
+
+/// A staged rollout (migration 151, update design S9): `version` of
+/// `component` opens to `waves[wave]` percent of its targets.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct UpdateRolloutRow {
+    pub id: i64,
+    pub component: String,
+    pub version: String,
+    /// Cumulative percents, the last one 100.
+    pub waves: Vec<u8>,
+    pub wave: u32,
+    pub wave_started_at: i64,
+    pub paused_at: Option<i64>,
+    pub paused_reason: Option<String>,
+    pub halt_failure_ratio: f64,
+    pub created_at: i64,
+    pub ended_at: Option<i64>,
+    /// `completed` | `aborted`, once ended.
+    pub outcome: Option<String>,
+}
+
+const ROLLOUT_COLUMNS: &str = "id, component, version, waves, wave, wave_started_at, paused_at, \
+    paused_reason, halt_failure_ratio, created_at, ended_at, outcome";
+
+fn rollout_row(r: &rusqlite::Row) -> rusqlite::Result<UpdateRolloutRow> {
+    let waves: String = r.get(3)?;
+    Ok(UpdateRolloutRow {
+        id: r.get(0)?,
+        component: r.get(1)?,
+        version: r.get(2)?,
+        waves: serde_json::from_str(&waves).unwrap_or_else(|_| vec![100]),
+        wave: r.get(4)?,
+        wave_started_at: r.get(5)?,
+        paused_at: r.get(6)?,
+        paused_reason: r.get(7)?,
+        halt_failure_ratio: r.get(8)?,
+        created_at: r.get(9)?,
+        ended_at: r.get(10)?,
+        outcome: r.get(11)?,
+    })
+}
+
+impl Store {
+    /// Start a rollout; `E_CONFLICT` while `component` has an active one.
+    pub fn insert_update_rollout(
+        &self,
+        component: &str,
+        version: &str,
+        waves: &[u8],
+        halt_failure_ratio: f64,
+        now: i64,
+    ) -> Result<UpdateRolloutRow, IpcError> {
+        if let Some(active) = self.update_rollout_active(component)? {
+            return Err(IpcError::new(
+                crate::ipc_error::codes::E_CONFLICT,
+                format!(
+                    "{component} already has an active rollout of {} (id {}); abort it first",
+                    active.version, active.id
+                ),
+            ));
+        }
+        let waves_json = serde_json::to_string(waves).unwrap_or_else(|_| "[100]".into());
+        self.conn.execute(
+            "INSERT INTO update_rollouts (component, version, waves, wave, wave_started_at, \
+               halt_failure_ratio, created_at) VALUES (?1, ?2, ?3, 0, ?4, ?5, ?4)",
+            rusqlite::params![component, version, waves_json, now, halt_failure_ratio],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        self.emit_update_changed("rollout", None);
+        self.update_rollout(id)?
+            .ok_or_else(|| IpcError::new(crate::ipc_error::codes::E_INTERNAL, "rollout vanished"))
+    }
+
+    pub fn update_rollout(&self, id: i64) -> Result<Option<UpdateRolloutRow>, IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!("SELECT {ROLLOUT_COLUMNS} FROM update_rollouts WHERE id = ?1"),
+                [id],
+                rollout_row,
+            )
+            .optional()?)
+    }
+
+    /// The component's active rollout, if any.
+    pub fn update_rollout_active(
+        &self,
+        component: &str,
+    ) -> Result<Option<UpdateRolloutRow>, IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {ROLLOUT_COLUMNS} FROM update_rollouts \
+                     WHERE component = ?1 AND ended_at IS NULL"
+                ),
+                [component],
+                rollout_row,
+            )
+            .optional()?)
+    }
+
+    /// Every active rollout, then the newest `ended` ended ones.
+    pub fn update_rollouts(&self, ended: u32) -> Result<Vec<UpdateRolloutRow>, IpcError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ROLLOUT_COLUMNS} FROM update_rollouts WHERE ended_at IS NULL ORDER BY component"
+        ))?;
+        let mut out: Vec<UpdateRolloutRow> =
+            stmt.query_map([], rollout_row)?.collect::<Result<_, _>>()?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ROLLOUT_COLUMNS} FROM update_rollouts WHERE ended_at IS NOT NULL \
+             ORDER BY ended_at DESC, id DESC LIMIT ?1"
+        ))?;
+        out.extend(
+            stmt.query_map([ended], rollout_row)?
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        Ok(out)
+    }
+
+    /// Pause (`Some((now, reason))`) or resume (`None`) an active rollout.
+    /// Resuming restarts the wave's clock. `false` when it is not active.
+    pub fn set_update_rollout_paused(
+        &self,
+        id: i64,
+        paused: Option<(i64, &str)>,
+        now: i64,
+    ) -> Result<bool, IpcError> {
+        let n = match paused {
+            Some((at, reason)) => self.conn.execute(
+                "UPDATE update_rollouts SET paused_at = ?2, paused_reason = ?3 \
+                 WHERE id = ?1 AND ended_at IS NULL",
+                rusqlite::params![id, at, reason],
+            )?,
+            None => self.conn.execute(
+                "UPDATE update_rollouts SET paused_at = NULL, paused_reason = NULL, \
+                   wave_started_at = ?2 WHERE id = ?1 AND ended_at IS NULL",
+                rusqlite::params![id, now],
+            )?,
+        };
+        if n > 0 {
+            self.emit_update_changed("rollout", None);
+        }
+        Ok(n > 0)
+    }
+
+    /// Open the next wave.
+    pub fn advance_update_rollout(&self, id: i64, wave: u32, now: i64) -> Result<bool, IpcError> {
+        let n = self.conn.execute(
+            "UPDATE update_rollouts SET wave = ?2, wave_started_at = ?3 \
+             WHERE id = ?1 AND ended_at IS NULL",
+            rusqlite::params![id, wave, now],
+        )?;
+        if n > 0 {
+            self.emit_update_changed("rollout", None);
+        }
+        Ok(n > 0)
+    }
+
+    /// End an active rollout with `outcome` (`completed` | `aborted`).
+    pub fn end_update_rollout(&self, id: i64, outcome: &str, now: i64) -> Result<bool, IpcError> {
+        let n = self.conn.execute(
+            "UPDATE update_rollouts SET ended_at = ?2, outcome = ?3 \
+             WHERE id = ?1 AND ended_at IS NULL",
+            rusqlite::params![id, now, outcome],
+        )?;
+        if n > 0 {
+            self.emit_update_changed("rollout", None);
+        }
+        Ok(n > 0)
+    }
+}
+
+/// One org's override of the fleet's update policy for one component
+/// (migration 152, update design S9). `None` keeps the fleet's value.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UpdateOrgPolicyRow {
+    pub org_id: i64,
+    pub component: String,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub minimum: Option<String>,
+    /// `HH:MM-HH:MM` in UTC; `""` = any time.
+    #[serde(default)]
+    pub window: Option<String>,
+    #[serde(default)]
+    pub pin_version: Option<String>,
+    #[serde(default)]
+    pub pin_mandatory: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    pub set_by: String,
+    pub set_at: i64,
+}
+
+const ORG_POLICY_COLUMNS: &str = "org_id, component, mode, minimum, update_window, pin_version, \
+    pin_mandatory, reason, set_by, set_at";
+
+fn org_policy_row(r: &rusqlite::Row) -> rusqlite::Result<UpdateOrgPolicyRow> {
+    Ok(UpdateOrgPolicyRow {
+        org_id: r.get(0)?,
+        component: r.get(1)?,
+        mode: r.get(2)?,
+        minimum: r.get(3)?,
+        window: r.get(4)?,
+        pin_version: r.get(5)?,
+        pin_mandatory: r.get::<_, i64>(6)? != 0,
+        reason: r.get(7)?,
+        set_by: r.get(8)?,
+        set_at: r.get(9)?,
+    })
+}
+
+impl Store {
+    /// Insert or replace one org's policy for one component.
+    pub fn set_update_org_policy(&self, row: &UpdateOrgPolicyRow) -> Result<(), IpcError> {
+        self.conn.execute(
+            &format!(
+                "INSERT INTO update_org_policy ({ORG_POLICY_COLUMNS}) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+                 ON CONFLICT(org_id, component) DO UPDATE SET mode = excluded.mode, \
+                   minimum = excluded.minimum, update_window = excluded.update_window, \
+                   pin_version = excluded.pin_version, pin_mandatory = excluded.pin_mandatory, \
+                   reason = excluded.reason, set_by = excluded.set_by, set_at = excluded.set_at"
+            ),
+            rusqlite::params![
+                row.org_id,
+                row.component,
+                row.mode,
+                row.minimum,
+                row.window,
+                row.pin_version,
+                i64::from(row.pin_mandatory),
+                row.reason,
+                row.set_by,
+                row.set_at
+            ],
+        )?;
+        self.emit_update_changed("policy", None);
+        Ok(())
+    }
+
+    /// `true` when a row was removed.
+    pub fn clear_update_org_policy(&self, org_id: i64, component: &str) -> Result<bool, IpcError> {
+        let n = self.conn.execute(
+            "DELETE FROM update_org_policy WHERE org_id = ?1 AND component = ?2",
+            rusqlite::params![org_id, component],
+        )?;
+        if n > 0 {
+            self.emit_update_changed("policy", None);
+        }
+        Ok(n > 0)
+    }
+
+    pub fn update_org_policy(
+        &self,
+        org_id: i64,
+        component: &str,
+    ) -> Result<Option<UpdateOrgPolicyRow>, IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {ORG_POLICY_COLUMNS} FROM update_org_policy \
+                     WHERE org_id = ?1 AND component = ?2"
+                ),
+                rusqlite::params![org_id, component],
+                org_policy_row,
+            )
+            .optional()?)
+    }
+
+    pub fn update_org_policies(&self) -> Result<Vec<UpdateOrgPolicyRow>, IpcError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ORG_POLICY_COLUMNS} FROM update_org_policy ORDER BY org_id, component"
+        ))?;
+        let rows = stmt.query_map([], org_policy_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 }
 

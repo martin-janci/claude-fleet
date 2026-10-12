@@ -37,7 +37,7 @@
     display: flex;
     align-items: center;
     gap: 0.4rem;
-    font-size: 0.75rem;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--fg-muted);
@@ -46,7 +46,7 @@
   summary::before {
     content: '▸';
     display: inline-block;
-    transition: transform 0.12s ease;
+    transition: transform var(--dur-fast) ease;
   }
   details[open] > summary::before {
     transform: rotate(90deg);

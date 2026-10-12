@@ -1,4 +1,6 @@
 <script lang="ts">
+  import Icon from './lib/kit/Icon.svelte';
+  import StatusBar from './lib/kit/StatusBar.svelte';
   import { applyWorkEvents, loadTrackers, sessionsMentioning } from './lib/trackers';
   import { loadOrgs, cycleScope } from './lib/orgs';
   import type { WorkEvent } from './lib/trackers';
@@ -7,81 +9,111 @@
   import Resizer from './lib/Resizer.svelte';
   import { healthCheck, type Health } from './lib/ipc';
   import { appVersion, loadAppVersion, versionLine } from './lib/app_version';
+  import { startLimitToasts } from './lib/limit_toast';
   import { setContextRedPct } from './lib/attention';
   import { trackersHealth, trackersSummary } from './lib/tracker_health';
   import Sidebar from './lib/Sidebar.svelte';
+  import FirstRun from './lib/FirstRun.svelte';
+  import SettingsDialog from './lib/SettingsDialog.svelte';
+  import Lazy from './lib/Lazy.svelte';
+  import { lazyViews, preloadLazyViews } from './lib/lazy_views';
+  import { windowHidden } from './lib/window_hidden';
   import Details from './lib/Details.svelte';
-  import { todayOpen } from './lib/today';
+  import SessionTabs, { type SessionTab } from './lib/SessionTabs.svelte';
+  import { openInEditorIfAllowed } from './lib/editor';
   import {
     bumpWorkChanged,
     cycleWorkOrg,
     noteWorkChanged,
     noteWorkEvents,
     sessionEventsTouchWork,
+    selectedTaskId,
     sidebarView,
+    taskDetailOpen,
     toggleSidebarView,
   } from './lib/work_view';
   import type { SessionEvent } from './lib/sessions';
   import { composerInsert } from './lib/conversation';
   import { tidyRequest } from './lib/tidy';
   import TerminalView from './lib/TerminalView.svelte';
+  import { terminalPane, requestTerminalTab } from './lib/terminals';
+  import { listenForPopBackIn, type PopBackIn } from './lib/terminal_popout';
+  import WatchView from './lib/WatchView.svelte';
   import FilesPanel from './lib/FilesPanel.svelte';
-  import HostsView from './lib/HostsView.svelte';
   import ConversationPanel from './lib/ConversationPanel.svelte';
-  import AssetsPanel from './lib/AssetsPanel.svelte';
+  import { toolkitTab } from './lib/toolkit_skills';
+  import AppRail from './lib/AppRail.svelte';
+  import { toggleControl, toggleToday } from './lib/control';
+  import type { RailId } from './lib/rail';
+  import { workspaceLanding } from './lib/workspace';
   import { loadProjects, applyProjectEvents } from './lib/projects';
-  import { loadSessions, applySessionEvents, sessions, hasNoPane, showFriendlyNames, sidebarGroupBy } from './lib/sessions';
+  import { loadSessions, applySessionEvents, applyStartProgress, sessions, sessionsAnswered, hasNoPane, showFriendlyNames, sidebarGroupBy } from './lib/sessions';
+  import { bootstrapError as bootstrapFailure } from './lib/bootstrap_state';
+  import { errorText } from './lib/error_copy';
   import { loadHosts, applyHostEvents, hosts } from './lib/hosts';
   import { viewHostSessions } from './lib/host_actions';
   import { loadAccounts, applyAccountEvents, accounts } from './lib/accounts';
   import { loadTasks, applyTaskEvents } from './lib/tasks';
   import { loadAccountUsage, applyAccountUsageEvents, accountUsage } from './lib/account_usage_store';
   import EmbedSlot from './lib/pages/EmbedSlot.svelte';
-  import { mergeInventoryRow, clearInventoryFor, loadAssets, syncProgress, repoStatus } from './lib/assets';
+  import { mergeInventoryRow, clearInventoryFor, loadAssets, primeCatalog, syncProgress, repoStatus } from './lib/assets';
   import { subscribeToRowEvents } from './lib/events';
+  import { startVoiceEvents } from './lib/voice';
+  import { accessOf, loadMyGrants } from './lib/access';
+  import { loadAccessRequests, onGrantFrames } from './lib/access_requests';
   import TransferSheet from './lib/TransferSheet.svelte';
+  import ShareSheet from './lib/ShareSheet.svelte';
   import { applyMoveProgress, recheckWaitingRuns } from './lib/moves';
   import { dispatchTimelineEvents, dispatchConversationsChanged } from './lib/live_events';
   import Toasts from './lib/Toasts.svelte';
   import QuickSwitcher from './lib/QuickSwitcher.svelte';
+  import ShortcutSheet from './lib/ShortcutSheet.svelte';
   import NewSessionDialog from './lib/NewSessionDialog.svelte';
   import { newSessionRequest, clearNewSessionRequest } from './lib/new_session_request';
   import { push, pushError } from './lib/toasts';
   import DownloadsSheet from './lib/DownloadsSheet.svelte';
-  import { downloads, unseen, loadDownloads, noteDownloadsChanged } from './lib/downloads';
+  import { downloads, downloadsOpen, unseen, loadDownloads, noteDownloadsChanged } from './lib/downloads';
+  import { loadLocalWorkspaces, noteLocalWorkspacesChanged } from './lib/local_workspaces';
   import type { Result } from './lib/result';
   import type { UnlistenFn } from '@tauri-apps/api/event';
   import { selectedSession, restoreLastSession, selectSessionExplicitly, onSessionOpened } from './lib/selection';
   import {
+    addProjectRequest,
     appChord,
-    hostsChordLabel,
-    hostsViewOpen,
+    assetsViewRequest,
     hostsViewRequest,
     onHostsCloseRequested,
     openPathRequest,
     requestNewSessionOnHost,
-    sessionViewChordLabel,
     settingsOpen,
     openSettingsAt,
+    shortcutSheetOpen,
   } from './lib/app_views';
   import { detectMac, isEditable } from './lib/terminal_keys';
-  import { loadSessionUi, saveSessionUi, DEFAULT_UI } from './lib/session_ui';
   import { readPref, writePref, sessionView } from './lib/prefs';
+  import { sessionActionRequest } from './lib/session_actions';
   import { resolveSessionView, otherSessionView, type SessionView } from './lib/session_view';
   import WelcomeDialog from './lib/WelcomeDialog.svelte';
   import HintLayer from './lib/HintLayer.svelte';
   import McpConfirmDialog from './lib/McpConfirmDialog.svelte';
-  import AgentFab from './lib/AgentFab.svelte';
-  import AgentPanel from './lib/AgentPanel.svelte';
-  import { agentPanelOpen, closeAgent, toggleAgent } from './lib/operator';
   import type { AgentContextInput } from './lib/agent_context';
   import { onboardingWelcomed, onboardingDismissed } from './lib/onboarding';
   import { loadComposerPresets, refreshComposerPresetsIfIdle } from './lib/composer_presets';
   import { hubStatus, loadHubStatus } from './lib/hub';
   import HubUnavailableBanner from './lib/HubUnavailableBanner.svelte';
-  import { startHubConnection, setGapHandler } from './lib/hub_connection';
+  import { startHubConnection, setGapHandler, hubConnection } from './lib/hub_connection';
+  import StatusBarMark from './lib/StatusBarMark.svelte';
+  import ShellHeader from './lib/ShellHeader.svelte';
+  import StartupSplash from './lib/StartupSplash.svelte';
+  import UpdateReveal from './lib/UpdateReveal.svelte';
+  import { markStartup, startCatchUp, takeUpdateReveal, trackActivity } from './lib/startup';
+  import { loadProjectPicks } from './lib/project_picks';
   import HubConnectionBanner from './lib/HubConnectionBanner.svelte';
-  import { get } from 'svelte/store';
+  import UpdateBanner from './lib/UpdateBanner.svelte';
+  import { startUpdateChecks } from './lib/updates';
+  import { derived, get } from 'svelte/store';
+  import { destination, goTo, leave } from './lib/destination';
+  import { clampListWidth, listWidthDefault } from './lib/layout_tokens';
 
   const isNumber = (v: unknown): v is number => typeof v === 'number';
   const isBool = (v: unknown): v is boolean => typeof v === 'boolean';
@@ -89,7 +121,7 @@
   // Sidebar width is global. Sidebar collapsed state is also global — unlike
   // the center pane (which the user wants per-session), the sidebar is the
   // project tree itself and doesn't make sense to differ between sessions.
-  let sidebarPx = $state(readPref('layout.sidebar', 280, isNumber));
+  let sidebarPx = $state(readPref('layout.sidebar', listWidthDefault(), isNumber));
   let sidebarCollapsed = $state(readPref('layout.sidebar-collapsed', false, isBool));
   // sidebarPx changes on every resize-drag frame; debounce the localStorage
   // write so a drag persists once (on settle) instead of per frame.
@@ -102,60 +134,6 @@
   });
   $effect(() => {
     writePref('layout.sidebar-collapsed', sidebarCollapsed);
-  });
-
-  // Center pane WIDTH is per-session — the user said "Kazda session ma mat
-  // aj vlastnu pamat UI, nastavenia rozdelenia". When the user picks a
-  // session we hydrate centerPx from localStorage; when they resize we
-  // persist it back under that session's key (below).
-  let centerPx = $state(DEFAULT_UI.centerPx);
-  // Center COLLAPSED state is GLOBAL (like the sidebar) — the user wants the
-  // pane to remember collapsed/expanded across restarts regardless of which
-  // session is open, so it lives in prefs.ts, not the per-session record.
-  let centerCollapsed = $state(readPref('layout.center-collapsed', false, isBool));
-  $effect(() => {
-    writePref('layout.center-collapsed', centerCollapsed);
-  });
-
-  // When the selected session changes, swap in its persisted layout. The
-  // save-effect below is gated on a per-session token (`hydratedKey`) rather
-  // than a boolean+microtask: a boolean races across rapid session switches
-  // and can save one session's centerPx under another's key.
-  let hydratedKey: string | null = null;
-  const sessionKey = (s: { host_alias: string; tmux_name: string }) =>
-    `${s.host_alias}/${s.tmux_name}`;
-  // `$selectedSession` is derived from the sessions store, so its object
-  // identity changes on every `session:updated` (each reconcile tick). Key
-  // the layout effects on the stable host/name string so they don't re-run
-  // — and re-arm the save timer — for updates that don't change which
-  // session is open; the row itself is read untracked inside.
-  const selectedKey = $derived($selectedSession ? sessionKey($selectedSession) : null);
-  $effect(() => {
-    const key = selectedKey;
-    if (!key) return;
-    if (key === hydratedKey) return;
-    const sess = untrack(() => $selectedSession);
-    if (!sess) return;
-    const ui = loadSessionUi(sess.host_alias, sess.tmux_name);
-    centerPx = ui.centerPx;
-    hydratedKey = key;
-  });
-
-  // centerPx changes per resize-drag frame too — debounce its persistence.
-  let centerSaveTimer: ReturnType<typeof setTimeout> | undefined;
-  $effect(() => {
-    const key = selectedKey;
-    const px = centerPx;
-    if (!key) return;
-    // Only persist once centerPx has actually been hydrated FOR this session
-    // — otherwise we'd write the previous session's value under this key.
-    if (key !== hydratedKey) return;
-    const sess = untrack(() => $selectedSession);
-    if (!sess) return;
-    const { host_alias, tmux_name } = sess;
-    clearTimeout(centerSaveTimer);
-    centerSaveTimer = setTimeout(() => saveSessionUi(host_alias, tmux_name, { centerPx: px }), 200);
-    return () => clearTimeout(centerSaveTimer);
   });
 
   let health = $state<Health | null>(null);
@@ -172,14 +150,47 @@
   );
   const trackersLine = $derived(trackersSummary($trackersHealth));
   let healthError = $state<string | null>(null);
+  /** Review r13: the health failure in a sentence; the code stays under Details. */
+  let healthText = $state<string | null>(null);
   // Bootstrap (initial list_* fetches) failures. These used to be swallowed,
   // so a broken DB showed an innocent "No projects yet". Now they surface as
   // a sticky error toast (with the E_* code) plus this footer banner.
   let bootstrapError = $state<string | null>(null);
+  /** Review r13: which lists failed, in words ("sessions, hosts"). */
+  let bootstrapWhat = $state<string | null>(null);
+  let bootstrapRetrying = $state(false);
+
+  /** Review r13: Retry on the footer's failed-startup line re-reads the
+   *  lists that failed; the line goes when they all answer. */
+  async function retryBootstrap() {
+    bootstrapRetrying = true;
+    const [pr, sr, hr, ar] = await Promise.all([loadProjects(), loadSessions({ force: true }), loadHosts(), loadAccounts()]);
+    bootstrapRetrying = false;
+    noteBootstrap(pr, sr, hr, ar);
+  }
+
+  function noteBootstrap(pr: Result<unknown>, sr: Result<unknown>, hr: Result<unknown>, ar: Result<unknown>) {
+    const lists: [string, Result<unknown>][] = [['projects', pr], ['sessions', sr], ['hosts', hr], ['accounts', ar]];
+    const failed = lists.filter(([, r]) => !r.ok);
+    bootstrapWhat = failed.length > 0 ? failed.map(([what]) => what).join(', ') : null;
+    if (failed.length === 0) bootstrapError = null;
+    // The Sessions list and the Inbox read this, so a failed load is never
+    // shown as "No projects yet" or "Nothing needs you".
+    // A skewed hub (`E_HUB_CONTRACT`) has its own sentence in the list,
+    // from the connection banner.
+    const listFailure = !sr.ok ? sr.error : !pr.ok ? pr.error : null;
+    bootstrapFailure.set(listFailure && listFailure.code !== 'E_HUB_CONTRACT' ? listFailure : null);
+  }
   let unlistenEvents: UnlistenFn | null = null;
+  let unlistenVoice: UnlistenFn | null = null;
+  let unlistenPopBackIn: UnlistenFn | null = null;
+  let appDestroyed = false;
   let showWelcome = $state(false);
+  // Redesign step 3.15: the version to reveal once after an update.
+  let revealVersion = $state<string | null>(null);
+  let stopActivity: (() => void) | null = null;
+  let stopCatchUp: (() => void) | null = null;
   // File downloads: the footer button and its sheet.
-  let showDownloads = $state(false);
   const unseenDownloads = $derived(unseen($downloads));
 
   function reportBootstrap(what: string, r: Result<unknown>): string | null {
@@ -198,7 +209,13 @@
   let trackerRefresh: ReturnType<typeof setInterval> | null = null;
   onDestroy(() => {
     if (trackerRefresh) clearInterval(trackerRefresh);
+    stopActivity?.();
+    stopCatchUp?.();
+    stopUpdateChecks?.();
+    stopLimitToasts?.();
   });
+  let stopUpdateChecks: (() => void) | null = null;
+  let stopLimitToasts: (() => void) | null = null;
 
   // `work:*` frames: trackers and their first sync. When a tracker finishes
   // its FIRST sync, the sessions whose keys it owns just got titles and
@@ -233,6 +250,9 @@
   }
 
   onMount(async () => {
+    // Before anything is awaited: whether this launch is warm (no splash)
+    // is decided from the stamp the last run left.
+    stopActivity = trackActivity();
     // FIRST, and awaited: the rest of this function branches on it. A hub
     // client must not poll account usage (the backend refuses it, so it would
     // be an error toast on every launch for a panel that does not apply), and
@@ -242,14 +262,27 @@
     // bug report, and `versionLine` says less rather than guessing when it
     // is missing. Before the `unavailable` return below, so a window that
     // reaches no hub at all can still say which app it is.
-    void loadAppVersion();
+    void loadAppVersion().then(() => (revealVersion = takeUpdateReveal(get(appVersion))));
     // A hub is configured but this launch could not use it. The backend owns
     // nothing and refuses every fleet command, so each load below would only
     // add an error toast under the banner that already explains all of them.
     // The window shows that banner and the way to Settings, and nothing else.
-    if (get(hubStatus).unavailable) return;
+    if (get(hubStatus).unavailable) {
+      markStartup('done');
+      // Review r13: no list will arrive, so nothing waits on one (⌘K's
+      // "still arriving", the first-load loaders).
+      sessionsAnswered.set(true);
+      return;
+    }
     // Only a hub client has a live link to lose; see HubConnectionBanner.
     if (get(hubStatus).remote) void startHubConnection();
+    // This app's own update (S7): asked once start-up has settled, then on
+    // the decision's interval. Paired, the hub decides; standalone, the
+    // published channel.
+    stopUpdateChecks = startUpdateChecks();
+    // The Toasts board's limit-hit toast: once, when a reading turns an
+    // account's usage into a limit.
+    stopLimitToasts = startLimitToasts();
     const hr0 = await healthCheck();
     // `health_check` routes to the hub's `fleet_health` in remote mode, so
     // it hits the same skewed-contract gate as every list load below — and
@@ -269,11 +302,13 @@
       healthFailure = `health: ${hr0.error.code}`;
     } else {
       healthError = `${hr0.error.code}: ${hr0.error.message}`;
+      healthText = errorText(hr0.error);
       push({ kind: 'error', code: hr0.error.code, message: `Health check failed: ${hr0.error.message}` });
     }
     // Subscribed BEFORE the first list: a `session:updated` that lands while
     // the list is in flight would otherwise be emitted to no listener and
     // lost until the row changes again.
+    unlistenVoice = await startVoiceEvents();
     unlistenEvents = await subscribeToRowEvents({
       onSessionEvents: onSessionEvents,
       onHostEvents: applyHostEvents,
@@ -288,18 +323,53 @@
       onCatalogLoaded: () => { void loadAssets(); void repoStatus(); },
       onSyncProgress: (p) => syncProgress.set(p),
       onMoveProgress: applyMoveProgress,
+      onStartProgress: applyStartProgress,
       onWorkEvents: onWorkEvents,
       // `work:changed` (M14): the Work view re-reads.
       onWorkChanged: noteWorkChanged,
       // File downloads: ids only, so the list is re-read.
       onDownloadsChanged: noteDownloadsChanged,
+      // Local workspace sync: ids only, so the list is re-read.
+      onLocalWorkspacesChanged: noteLocalWorkspacesChanged,
+      // `grant:changed` (M1): a share or a revoke moves no column on any row,
+      // so this is the only thing that tells a client its own grant set
+      // changed. It patches `access.ts`, and everything derived from it — the
+      // terminal gate included — re-evaluates without a re-list. A revoke
+      // closing an attached PTY depends on this frame arriving.
+      onGrantChanged: onGrantFrames,
     });
+    markStartup('backend');
     const [pr, sr, hr, ar] = await Promise.all([
       loadProjects(),
-      loadSessions(),
-      loadHosts(),
+      // Each marks its startup stage as it lands (step 3.15).
+      loadSessions().then((r) => {
+        markStartup('sessions');
+        return r;
+      }),
+      loadHosts().then((r) => {
+        markStartup('hosts');
+        return r;
+      }),
       loadAccounts(),
+      // This client's own person id and grant set (multi-user M1). Awaited
+      // with the lists because `restoreLastSession()` below selects a row and
+      // the terminal gate reads the answer the moment it does — a paired
+      // desktop that learned its identity a beat later would flash "no
+      // terminal" over the owner's own session.
+      //
+      // Deliberately NOT in the `failures` list: a standalone desktop needs no
+      // answer at all (it owns the fleet, so every row it holds is its own),
+      // and a backend older than the command has none to give — turning either
+      // into a startup error would report a problem that changes nothing.
+      loadMyGrants(),
     ]);
+    // Gap plan G4.2: the open asks on this person's sessions. Best-effort,
+    // like `loadMyGrants`: a hub older than the feature has none to give.
+    void loadAccessRequests();
+    // The picker's pins and groups. Outside the `Promise.all` on purpose: a
+    // hub older than the feature has no answer, and that is not a startup
+    // failure (the picker then runs on its rules alone).
+    void loadProjectPicks();
     const failures = [
       healthFailure,
       reportBootstrap('projects', pr),
@@ -308,6 +378,9 @@
       reportBootstrap('accounts', ar),
     ].filter((f): f is string => f !== null);
     if (failures.length > 0) bootstrapError = `startup load failed — ${failures.join(', ')}`;
+    noteBootstrap(pr, sr, hr, ar);
+    markStartup('done');
+    stopCatchUp = startCatchUp(get(hosts));
     // Sessions are loaded now — re-open the one the user last had selected.
     // Only when the list actually arrived: on a failed fetch the store is
     // empty, and restoreLastSession() would take that as "the session is
@@ -327,6 +400,9 @@
     // Trackers (work graph M3): their state badges, chip staleness and the
     // quick switcher's tickets. A hub older than M3 has no answer.
     void loadTrackers();
+    // The asset catalog, for the quick switcher's asset rows: only the Assets
+    // panel filled it, so ⌘K listed none on a fresh launch. Silent.
+    void primeCatalog(get(hubStatus).remote);
     // A hub reconnect the hub could not replay: the backend re-lists rows
     // itself; projects/worktrees and trackers/work have list shapes their
     // events cannot carry, so this window re-fetches them here. The chips
@@ -335,11 +411,20 @@
     // File downloads: the footer's count (a hub older than revision 7 is
     // refused before this, so a failure is just an empty list).
     void loadDownloads();
+    // Local workspace links live in this machine's database (empty when
+    // paired with a hub), so no gap can make them stale.
+    void loadLocalWorkspaces();
     setGapHandler(() => {
       void loadDownloads();
       void loadProjects();
       void loadTrackers();
       void refreshComposerPresetsIfIdle();
+      // A gap the hub could not replay can have swallowed a `grant:changed`,
+      // and a grant set that quietly lost an entry is a shared session that
+      // has vanished from reach (or, worse, a revoked one still reachable).
+      // Re-read it rather than trusting the patched copy.
+      void loadMyGrants();
+      void loadAccessRequests();
     });
     // The composer's chip row. Fleet state since it moved off `localStorage`
     // (so the phone and this window share one list), and never on the
@@ -354,6 +439,8 @@
     // pushes only real changes), so the chips' "synced … ago" and stale
     // clock read a copy refreshed here.
     trackerRefresh = setInterval(() => {
+      // Only feeds what is on screen (review r16 D7).
+      if (windowHidden()) return;
       void loadTrackers();
       void loadOrgs();
     }, 120_000);
@@ -365,6 +452,9 @@
     // `E_LOCAL_ONLY`. Calling it anyway would put an error toast on every
     // launch about a panel that simply does not apply here.
     if (!get(hubStatus).remote) void loadAccountUsage();
+    // The lazy views load once launch has drawn, so a first open does not
+    // wait on its chunk.
+    setTimeout(() => void preloadLazyViews(), 2_000);
   });
 
   // Catch-up net for missed Tauri events (e.g. sleep/wake, dropped events).
@@ -429,12 +519,41 @@
     window.addEventListener('dragover', swallowDrag);
     window.addEventListener('drop', swallowDrag);
     window.addEventListener('fleet:outcome-unknown', onOutcomeUnknown);
+    // A pop-out's Pop back in (Agent board, M15 G4.4): show its session on
+    // the same terminal here; the pop-out closes itself.
+    void listenForPopBackIn(onPopBackIn)
+      .then((off) => {
+        if (appDestroyed) off?.();
+        else unlistenPopBackIn = off ?? null;
+      })
+      .catch(() => {});
   });
+
+  async function onPopBackIn(req: PopBackIn) {
+    const row = get(sessions).find((s) => s.id === req.sessionId);
+    if (!row) return;
+    selectSessionExplicitly(row);
+    // The view guards read the new selection's derived facts.
+    await tick();
+    showSession();
+    setSessionView('terminal');
+    if (req.shell == null) requestTerminalTab('agent');
+    else requestTerminalTab('shells', req.shell);
+  }
 
   // Opening a session from anywhere (sidebar, quick switcher, a Hosts-view
   // session row, a fresh create) means "go to it": leave the Hosts view so
   // the terminal shows that session.
-  const unsubOpened = onSessionOpened(() => closeHosts());
+  const unsubOpened = onSessionOpened(() => {
+    closeHosts();
+    leave('board');
+    leave('accounts');
+    leave('control');
+    // Automation is a fleet page like Control: an opened session replaces
+    // it (review r07).
+    leave('automation');
+    leave('dashboard');
+  });
   // "View sessions" (host_actions.ts, called from anywhere: the `s` key,
   // HostDetail's header button) can't reach `closeHosts` directly — it asks
   // through this signal instead, same shape as `onSessionOpened` above.
@@ -456,59 +575,113 @@
     unsubOpened();
     unsubHostsClose();
     unlistenEvents?.();
+    unlistenVoice?.();
+    appDestroyed = true;
+    unlistenPopBackIn?.();
     setGapHandler(null);
   });
 
   function onResizeSidebar(delta: number) {
-    sidebarPx = Math.max(180, Math.min(640, sidebarPx + delta));
+    sidebarPx = clampListWidth(sidebarPx + delta);
   }
-  function onResizeCenter(delta: number) {
-    centerPx = Math.max(220, Math.min(800, centerPx + delta));
-  }
-
   function toggleSidebar() {
     sidebarCollapsed = !sidebarCollapsed;
   }
-  function toggleCenter() {
-    centerCollapsed = !centerCollapsed;
-  }
 
-  // Files mode swaps the center + terminal region for the worktree file
-  // viewer. The Files tab needs a selected session (the worktree to browse);
+  // Which view owns the right column: the Session tab or one overlay over it
+  // (redesign step 3.1, `lib/destination.ts`). The store outlives a mount,
+  // so a fresh App starts on the Session tab as the old per-mount flags did.
+  destination.set('session');
+  // A row's ⋯ menu asks Details to run an action (step 3.10): Details must be
+  // showing to take it, as the inspector, or the Details tab when the
+  // inspector has no room.
+  const unsubRowAction = sessionActionRequest.subscribe((r) => {
+    if (!r) return;
+    if (inspectorRoom) inspectorOpen = true;
+    else if (!detailsMain) goTo('details');
+  });
+  onDestroy(unsubRowAction);
+  // Settings is a page: going anywhere else (a chord, the switcher, a link)
+  // or opening another session leaves it, as the rail does.
+  let lastPlace = `${get(destination)}|${get(selectedSession)?.id ?? ''}`;
+  const unsubLeaveSettings = derived([destination, selectedSession], ([d, s]) => `${d}|${s?.id ?? ''}`).subscribe(
+    (place) => {
+      if (place !== lastPlace && get(settingsOpen)) settingsOpen.set(false);
+      lastPlace = place;
+    },
+  );
+  onDestroy(unsubLeaveSettings);
+  // The Files tab shows the worktree file viewer over the terminal. It needs a selected session (the worktree to browse);
   // deselecting one drops back to the terminal automatically.
-  let filesMode = $state(false);
   // Primitive projections of the selection: `$selectedSession` changes
   // identity on every `session:updated`, but these only change (and re-run
   // the effects below) when the fact they carry does.
   const selId = $derived($selectedSession?.id ?? null);
   const selNoPane = $derived(!!$selectedSession && hasNoPane($selectedSession));
   const selHasClaudeId = $derived(!!$selectedSession?.claude_session_id);
+  // Multi-user M1: what this client may do with the selected row — `own`,
+  // `drive`, `watch`, or `null` when it cannot tell (an unreachable hub, or
+  // one that has not said who this device is). DERIVED, never a field on the
+  // row: see `lib/access.ts` for why the row could not carry it. Read through
+  // `$accessOf` so a `grant:changed` re-evaluates it with no re-list.
+  const selAccess = $derived($accessOf($selectedSession));
+  // Sharing never confers a terminal (spec §4.3 invariant 4): `pty_open` is
+  // this machine's own `ssh … tmux attach`, which the hub cannot revoke. So a
+  // row the client does not own gets the read-only snapshot instead, and
+  // TerminalView is never mounted for it at all.
+  const selOwned = $derived(selAccess === 'own');
+  const selWatchOnly = $derived(!!$selectedSession && !selNoPane && !selOwned);
+  // The picker's choices live on the hub when paired: re-read them when the
+  // connection comes (back).
+  let lastHubState: string | null = null;
   $effect(() => {
-    if (selId === null || selNoPane) filesMode = false;
+    const st = $hubConnection.state;
+    if (lastHubState !== null && st !== lastHubState) void loadProjectPicks();
+    lastHubState = st;
+  });
+  $effect(() => {
+    if (selId === null || selNoPane) untrack(() => leave('files'));
   });
 
-  // Hosts mode reuses the Files-mode mechanism: the center pane collapses and
-  // an opaque overlay covers the terminal, which stays mounted so its PTY
-  // survives the round trip. Hosts is fleet-scoped, so unlike Files it never
-  // needs a selected session. Files and Hosts are mutually exclusive.
+  // Hosts is an opaque overlay over the terminal, which stays mounted so its
+  // PTY survives the round trip. Hosts is fleet-scoped, so unlike Files it
+  // never needs a selected session.
   const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
-  const hostsChord = hostsChordLabel(isMac);
-  const sessionViewChord = sessionViewChordLabel(isMac);
-  let hostsMode = $state(false);
   let hostsPreselect = $state<string | null>(null);
   // Assets mode shows the asset catalog. Like Hosts it is fleet-scoped (no
   // selected session needed) and renders as an opaque overlay over the
   // terminal, which stays mounted so its PTY survives the round trip.
-  let assetsMode = $state(false);
 
   // Conversation and Terminal are two views of one session under a single
   // Session tab, so neither is "no mode set": which one shows is the stored
   // preference, narrowed by what this row can actually offer. Conversation
   // reuses the Files overlay for a tmux row, so the PTY stays mounted
-  // underneath. Unlike Files/Hosts the Session tab keeps the center
-  // (Details) pane — both its views are views *of* the session.
-  const sessionTabActive = $derived(!filesMode && !assetsMode && !hostsMode);
-  const effectiveView = $derived(resolveSessionView($sessionView, selNoPane, selHasClaudeId));
+  // underneath. The board covers the Session tab without leaving it.
+  const sessionTabActive = $derived($destination === 'session' || $destination === 'board');
+  // The fleet pages and Files take the whole right column; the inspector
+  // gives way to them.
+  const wideMode = $derived(
+    $destination === 'files' ||
+      $destination === 'hosts' ||
+      $destination === 'assets' ||
+      $destination === 'accounts' ||
+      $destination === 'control' ||
+      $destination === 'automation' ||
+      $destination === 'dashboard',
+  );
+  // What covers the session's own view (the terminal or the conversation):
+  // a fleet page, which needs no selected session.
+  const fleetPageShown = $derived(
+    $destination === 'hosts' ||
+      $destination === 'assets' ||
+      $destination === 'accounts' ||
+      $destination === 'control' ||
+      $destination === 'automation' ||
+      $destination === 'dashboard',
+  );
+  const effectiveView = $derived(
+    resolveSessionView($sessionView, selNoPane, selHasClaudeId, selOwned),
+  );
   const conversationMode = $derived(sessionTabActive && effectiveView === 'conversation');
   // Bumped to remount the view when a request names a host while it is open.
   let hostsViewKey = $state(0);
@@ -516,13 +689,14 @@
   let lastViewedHost: string | null = null;
   /** What had focus when Hosts opened (normally the terminal). */
   let hostsReturnFocus: HTMLElement | null = null;
+  // Leaving Hosts any way other than closeHosts() drops the focus to restore.
   $effect(() => {
-    hostsViewOpen.set(hostsMode);
+    if ($destination !== 'hosts') hostsReturnFocus = null;
   });
 
   function openHosts(host: string | null = null) {
     const preselect = host ?? $selectedSession?.host_alias ?? lastViewedHost ?? null;
-    if (hostsMode) {
+    if ($destination === 'hosts') {
       // Already open: only a request naming a host changes anything.
       if (host !== null) {
         hostsPreselect = host;
@@ -533,15 +707,13 @@
     const active = document.activeElement;
     hostsReturnFocus = active instanceof HTMLElement && active !== document.body ? active : null;
     hostsPreselect = preselect;
-    filesMode = false;
-    assetsMode = false;
-    hostsMode = true;
+    goTo('hosts');
   }
 
   function closeHosts(restoreFocus = true) {
-    if (!hostsMode) return;
-    hostsMode = false;
+    if ($destination !== 'hosts') return;
     const el = hostsReturnFocus;
+    leave('hosts');
     hostsReturnFocus = null;
     if (restoreFocus && el) {
       void tick().then(() => {
@@ -551,7 +723,7 @@
   }
 
   function toggleHosts() {
-    if (hostsMode) closeHosts();
+    if ($destination === 'hosts') closeHosts();
     else openHosts();
   }
 
@@ -561,6 +733,13 @@
     if (!req) return;
     hostsViewRequest.set(null);
     untrack(() => openHosts(req.host));
+  });
+
+  // The quick switcher's asset and command rows (Assets M6, R19): open the
+  // Assets overlay. The request is left set: AssetsPanel takes it, also when
+  // it mounts only because of this.
+  $effect(() => {
+    if ($assetsViewRequest) untrack(showAssets);
   });
 
   // A path clicked in the Conversation tab: show Files for that session
@@ -576,21 +755,68 @@
   });
 
   function showSession() {
-    filesMode = false;
-    assetsMode = false;
+    // Hosts first: closing it is what restores the focus it took.
     closeHosts();
+    goTo('session');
   }
   function showFiles() {
     if (!$selectedSession) return;
-    closeHosts(false);
-    assetsMode = false;
-    filesMode = true;
+    goTo('files');
   }
+  // Every Assets entry point (the session header, the sidebar, the quick
+  // switcher) opens Toolkit's Assets tab (step 3.16).
   function showAssets() {
-    closeHosts(false);
-    filesMode = false;
-    assetsMode = true;
+    toolkitTab.set('assets');
+    goTo('assets');
   }
+  // The rail's Toolkit reopens the tab it showed last.
+  function showToolkit() {
+    closeHosts();
+    goTo('assets');
+  }
+  function showAccounts() {
+    // Hosts first, as for the Session tab: closing it restores its focus.
+    closeHosts();
+    goTo('accounts');
+  }
+  // The rail (step 3.2). Inbox (3.3), Sessions and Work pick
+  // the sidebar's list, as ⌘⇧W does, and bring back the Session tab from a
+  // fleet page (Accounts, Hosts, Assets); over a session (Files, the board)
+  // they leave the right column alone.
+  function onRailSelect(id: RailId) {
+    if (id !== 'settings') settingsOpen.set(false);
+    if (id === 'inbox' || id === 'sessions' || id === 'work') {
+      sidebarCollapsed = false;
+      sidebarView.set(id);
+      if (fleetPageShown) showSession();
+    } else if (id === 'control') {
+      closeHosts();
+      goTo('control');
+    } else if (id === 'dashboards') {
+      closeHosts();
+      goTo('dashboard');
+    } else if (id === 'automation') {
+      closeHosts();
+      goTo('automation');
+    } else if (id === 'accounts') showAccounts();
+    else if (id === 'toolkit') showToolkit();
+    else if (id === 'settings') settingsOpen.set(true);
+  }
+  // A workspace switch (the rail's tile or ⌘K) lands where that workspace
+  // starts, as a click on that rail item would; the request is taken once.
+  $effect(() => {
+    const l = $workspaceLanding;
+    if (!l) return;
+    untrack(() => {
+      workspaceLanding.set(null);
+      onRailSelect(l.rail);
+    });
+  });
+  // The task board (sprints design 2026-09-28 §6c) is an overlay over the
+  // terminal like Assets, opened from the Work view's Board button
+  // (`workBoardOpen`, a view of the same destination store); it keeps the
+  // center pane, where a card opens its task. Opening it leaves the other
+  // overlays, and each of them closes it.
   /**
    * Pick a sub-view. A row that cannot show it is left alone. The pref is
    * written only when the row can genuinely offer both views: on a row that
@@ -598,10 +824,17 @@
    * a click is a no-op that must not silently overwrite the preference a
    * different row is relying on. showSession() still runs unconditionally —
    * the click should always leave whatever overlay was open.
+   *
+   * A row this client may only WATCH (multi-user M1) forces neither view even
+   * with no `claude_session_id`: the terminal slot holds the read-only pane
+   * snapshot, which needs no transcript, so `resolveSessionView` returns the
+   * preference for both. By this comment's own rule the pref must therefore be
+   * writable — otherwise the slot a watcher came for is only reachable when
+   * the preference already happened to be `terminal`, and the toggle is inert.
    */
   function setSessionView(v: SessionView) {
-    if (resolveSessionView(v, selNoPane, selHasClaudeId) !== v) return;
-    if (!selNoPane && selHasClaudeId) sessionView.set(v);
+    if (resolveSessionView(v, selNoPane, selHasClaudeId, selOwned) !== v) return;
+    if (!selNoPane && (selHasClaudeId || selWatchOnly)) sessionView.set(v);
     showSession();
   }
   /**
@@ -611,13 +844,91 @@
    * tab is already showing.
    */
   function flipSessionView() {
-    if (!sessionTabActive) {
+    if ($destination !== 'session') {
       showSession();
       return;
     }
     setSessionView(otherSessionView(effectiveView));
   }
   const NO_PANE_TITLE = 'Runs outside tmux — no terminal';
+
+  // ── The session tabs and inspector (step 3.5) ──
+  // The inspector is the session's Details beside it, 280 to 320 px, on
+  // ⌥⌘B / Ctrl+Alt+B. What fills a whole column (Today, a task,
+  // the empty state, the Details tab) shows in the right column instead, so
+  // it is never squeezed into the inspector, and Details mounts once.
+  let inspectorOpen = $state(readPref('layout.inspector', true, isBool));
+  $effect(() => {
+    writePref('layout.inspector', inspectorOpen);
+  });
+  const taskShowing = $derived($sidebarView === 'work' && !!$selectedTaskId && $taskDetailOpen);
+  const boardShown = $derived($destination === 'board');
+  // The list column and the session header belong to Inbox, Sessions and
+  // Work (the Main, Sessions and Work boards). Control and Accounts take the
+  // whole width; Automation and Toolkit bring their own navigation. The
+  // Sidebar stays mounted under a fleet page, hidden, so its chords and
+  // state survive the round trip.
+  // Settings is a page of its own too (UX audit 2026-10-09, S1): its nav
+  // takes the list column's place.
+  const listHidden = $derived(fleetPageShown || $settingsOpen);
+  // A task in the Work view is not a session: no session tabs over it.
+  const sessionChrome = $derived(
+    !!$selectedSession && !fleetPageShown && !$settingsOpen && !(taskShowing && !boardShown),
+  );
+  const detailsMain = $derived(
+    !wideMode && !boardShown && ($destination === 'details' || taskShowing || !$selectedSession),
+  );
+  // Review r08: a board card's task opens in the inspector column beside the
+  // board, whatever the inspector pref.
+  const boardTask = $derived(boardShown && taskShowing);
+  const inspectorRoom = $derived(boardTask || (!!$selectedSession && !wideMode && !boardShown && !detailsMain));
+  const inspectorShown = $derived(!$settingsOpen && (boardTask || (inspectorRoom && inspectorOpen)));
+  // Step 5.3: the pane's shells, for the Terminals tab. It is current while
+  // the pane shows one of them (alone or split beside the agent).
+  const selTerminals = $derived(
+    $terminalPane.sessionId != null && $terminalPane.sessionId === $selectedSession?.id ? $terminalPane : null,
+  );
+  const terminalsShown = $derived(selTerminals?.active != null);
+  const currentTab: SessionTab | null = $derived(
+    $destination === 'details'
+      ? 'details'
+      : $destination === 'files'
+        ? 'files'
+        : $destination === 'session'
+          ? effectiveView === 'conversation'
+            ? 'conversation'
+            : terminalsShown
+              ? 'terminals'
+              : 'agent'
+          : null,
+  );
+  const tabDisabled = $derived<Partial<Record<SessionTab, string>>>({
+    ...(!selHasClaudeId && !selNoPane ? { conversation: 'No Claude session id yet' } : {}),
+    ...(selNoPane ? { agent: NO_PANE_TITLE, files: NO_PANE_TITLE, terminals: NO_PANE_TITLE } : {}),
+    ...(!selNoPane && !selTerminals ? { terminals: 'Terminals open only on a session that is yours' } : {}),
+  });
+  const selName = $derived(
+    $selectedSession
+      ? ($showFriendlyNames && $selectedSession.friendly_name) || $selectedSession.tmux_name
+      : '',
+  );
+  function onSessionTab(tab: SessionTab) {
+    if (tab === 'conversation') setSessionView('conversation');
+    else if (tab === 'agent') {
+      setSessionView('terminal');
+      requestTerminalTab('agent');
+    } else if (tab === 'terminals') {
+      setSessionView('terminal');
+      requestTerminalTab('shells');
+    } else if (tab === 'files') showFiles();
+    else {
+      closeHosts();
+      goTo('details');
+    }
+  }
+  function toggleInspector() {
+    inspectorOpen = !inspectorOpen;
+  }
 
   // Footer usage segment: whether to look at usage, not the numbers. A coarse
   // clock is enough for "3m" ages and staleness.
@@ -631,7 +942,7 @@
   // no plumbing in App.svelte today (no per-session/current-branch state to
   // read), so it is left null here rather than adding new state for it.
   const agentContextInput: AgentContextInput = $derived({
-    view: hostsMode ? 'hosts' : 'terminal',
+    view: $destination === 'hosts' ? 'hosts' : 'terminal',
     session: $selectedSession,
     hostAlias: $selectedSession?.host_alias ?? hostsPreselect,
     branch: null,
@@ -647,25 +958,35 @@
     viewHostSessions(alias);
   }
   function onHostsNewSession(alias: string) {
-    sidebarCollapsed = false;
     requestNewSessionOnHost(alias);
   }
 
   // The Tidy-up sheet lives in the sidebar: a request for it (the Today
-  // view's Stale section) brings a collapsed sidebar back so it can open.
+  // view's Stale section) brings a collapsed sidebar back so it can open,
+  // and leaves a fleet page, which hides the list.
   $effect(() => {
-    if ($tidyRequest) sidebarCollapsed = false;
+    if ($tidyRequest) untrack(revealList);
   });
 
+  // The Add project dialog is mounted by the Sidebar, which is unmounted while
+  // the rail is collapsed: a request from the switcher's Add row brings it
+  // back, and the mounted Sidebar then consumes the request.
+  $effect(() => {
+    if ($addProjectRequest) untrack(revealList);
+  });
+  function revealList() {
+    sidebarCollapsed = false;
+    if (fleetPageShown) showSession();
+  }
+
   // "Insert into composer" (work graph M9.2) shows where the text went: the
-  // selected session's conversation, over Today if it was open.
+  // selected session's conversation.
   let lastInsertSeq = 0;
   $effect(() => {
     const ins = $composerInsert;
     if (!ins || ins.seq === lastInsertSeq) return;
     lastInsertSeq = ins.seq;
     if ($selectedSession?.id !== ins.sessionId) return;
-    todayOpen.set(false);
     setSessionView('conversation');
   });
 
@@ -680,10 +1001,13 @@
     if (chord === 'hosts') toggleHosts();
     else if (chord === 'session-view') flipSessionView();
     else if (chord === 'settings') settingsOpen.set(true);
-    else if (chord === 'agent') void toggleAgent();
+    // ⌘E opens Control (step 9.1).
+    else if (chord === 'agent') toggleControl('chat');
     // The Work view has its own org filter: the chord cycles that one there.
     else if (chord === 'scope') (get(sidebarView) === 'work' ? cycleWorkOrg : cycleScope)();
-    else if (chord === 'today') todayOpen.update((v) => !v);
+    else if (chord === 'today') toggleToday();
+    else if (chord === 'inspector') toggleInspector();
+    else if (chord === 'open-in-editor') void openInEditorIfAllowed($selectedSession, selAccess);
     else if (chord === 'work-view') {
       sidebarCollapsed = false;
       toggleSidebarView();
@@ -693,41 +1017,56 @@
   function onKeydown(e: KeyboardEvent) {
     if (e.key !== 'Escape') return;
     const target = e.target as HTMLElement | null;
-    // The agent panel is a fixed sheet over every view, so it takes Esc
-    // before Files / Assets / Hosts do. AgentPanel handles the key itself
-    // when focus is inside it (including in its composer, where the rule
-    // below would otherwise leave the person stuck); this branch is for an
-    // Esc with focus left on the page behind it. A modal <dialog> above the
-    // sheet still owns its own Esc, and an editable outside the panel keeps
-    // Esc for itself, exactly as Files and Assets do.
-    if ($agentPanelOpen && !e.defaultPrevented) {
-      if (target?.closest?.('dialog')) return;
-      if (!isEditable(target)) {
-        closeAgent();
-        return;
-      }
+    // Settings, the same rule as the fleet pages: Esc goes back to what was
+    // open under it, not while typing in a field or inside a dialog.
+    if ($settingsOpen) {
+      if (e.defaultPrevented || isEditable(target) || target?.closest?.('dialog')) return;
+      settingsOpen.set(false);
+      return;
     }
     // Esc leaves files mode (the terminal is covered while it's open, so Esc
     // can't be meant for the terminal here) — but not while the user is
     // typing in a field such as the file filter, where Esc belongs to that
     // input and exiting the whole panel would be surprising.
-    if (filesMode) {
+    if ($destination === 'files') {
       if (isEditable(target)) return;
-      filesMode = false;
+      leave('files');
       return;
     }
     // Assets is an overlay with no Esc handling of its own; the same rule as
     // Files applies (not while typing in the catalog's filter field).
-    if (assetsMode) {
+    if ($destination === 'assets') {
       if (isEditable(target) || target?.closest?.('dialog')) return;
-      assetsMode = false;
+      leave('assets');
+      return;
+    }
+    // Accounts, the same rule as Assets.
+    if ($destination === 'accounts') {
+      if (isEditable(target) || target?.closest?.('dialog')) return;
+      leave('accounts');
+      return;
+    }
+    // Control, the same rule (its composer keeps Esc while you type).
+    if ($destination === 'control') {
+      if (isEditable(target) || target?.closest?.('dialog')) return;
+      leave('control');
+      return;
+    }
+    if ($destination === 'automation') {
+      if (isEditable(target) || target?.closest?.('dialog')) return;
+      leave('automation');
+      return;
+    }
+    if ($destination === 'dashboard') {
+      if (isEditable(target) || target?.closest?.('dialog')) return;
+      leave('dashboard');
       return;
     }
     // Inside the Hosts view, HostsView owns Esc (back to the list, clear the
     // filter, close from the list). This catches only an Esc with focus lost
     // to the page or left on the right column's chrome; a dialog, an input
     // or the sidebar keep their own Esc.
-    if (hostsMode && !e.defaultPrevented) {
+    if ($destination === 'hosts' && !e.defaultPrevented) {
       if (isEditable(target) || target?.closest?.('dialog')) return;
       if (target?.closest?.('[data-testid="hosts-view"]')) return;
       const onPage = !target || target === document.body || target === document.documentElement;
@@ -735,38 +1074,42 @@
     }
   }
 
-  // Build the grid template based on which panes are collapsed. We keep a
-  // constant 5-column layout (panel, resizer, panel, resizer, panel) so the
-  // grid placement of each named child stays stable across toggles. Setting
-  // a slot to `0px` effectively hides it while preserving column count.
+  // The grid: the rail, the sidebar and its resizer, the right column and
+  // the inspector (steps 3.2, 3.5). Setting a slot to `0px` hides it while
+  // keeping each child's grid placement stable.
   const gridTemplate = $derived.by(() => {
-    const sb = sidebarCollapsed ? '20px' : `${sidebarPx}px`;
-    const sbResizer = sidebarCollapsed ? '0px' : '4px';
-    // In files mode the center pane collapses to zero — the file viewer
-    // takes the whole region right of the sidebar.
-    const wide = filesMode || hostsMode || assetsMode;
-    const center = wide ? '0px' : centerCollapsed ? '20px' : `${centerPx}px`;
-    const centerResizer = wide || centerCollapsed ? '0px' : '4px';
-    return `${sb} ${sbResizer} ${center} ${centerResizer} 1fr`;
+    const sb = listHidden ? '0px' : sidebarCollapsed ? '20px' : `${sidebarPx}px`;
+    const sbResizer = listHidden || sidebarCollapsed ? '0px' : '4px';
+    const insp = inspectorShown ? 'minmax(var(--inspector-min), var(--inspector-max))' : '0px';
+    return `var(--rail-w) ${sb} ${sbResizer} 1fr ${insp}`;
   });
 </script>
 
 <HintLayer />
 <Toasts />
 <TransferSheet />
+<!-- One Share sheet for the whole app, opened by id from `shareSheetFor`
+     (multi-user M1) — the same shape as the Transfer sheet above, and for the
+     same reason: the row, the details panel and anything else that wants to
+     share a session should not each own a dialog. -->
+<ShareSheet />
 <McpConfirmDialog />
-<AgentFab />
-<AgentPanel contextInput={agentContextInput} />
-<!-- Cmd/Ctrl+K / Cmd/Ctrl+P. Its "new session" rows publish a request that
-     mounts the dialog here (the Sidebar keeps its own instance for its
-     footer button until it adopts the store post-#46). -->
+<!-- Cmd/Ctrl+K / Cmd/Ctrl+P, and the one place a project is picked for a new
+     session (the sidebar's "+ New session" and the Hosts view's `n` open it
+     in New session mode). Its rows publish a request that mounts the dialog
+     here. Since redesign 1.9 this is the only mount: a project row's `+` and
+     Add project publish the same request. -->
 <QuickSwitcher />
+<ShortcutSheet />
 {#if $newSessionRequest}
   <NewSessionDialog
     project={$newSessionRequest.project}
     initialName={$newSessionRequest.initialName}
     initialHost={$newSessionRequest.initialHost}
+    initialKind={$newSessionRequest.initialKind}
     ticket={$newSessionRequest.ticket}
+    autostart={$newSessionRequest.autostart}
+    proposal={$newSessionRequest.proposal}
     onCreate={(s) => {
       clearNewSessionRequest();
       selectSessionExplicitly(s);
@@ -791,17 +1134,32 @@
   />
 {/if}
 
+<!-- Redesign 3.17: the Main board's header, above everything else. -->
+<ShellHeader mac={isMac} />
+<!-- Redesign 10.5: the first-run tour and Get started float above the
+     layout. Both used to be mounted by the Sidebar,
+     which a fleet page hides and a collapsed rail unmounts. -->
+<FirstRun mac={isMac} />
+<StartupSplash onhubsettings={() => settingsOpen.set(true)} />
+{#if revealVersion}
+  <UpdateReveal version={revealVersion} onclose={() => (revealVersion = null)} />
+{/if}
 {#if $hubStatus.remote}
   <HubConnectionBanner hubUrl={$hubStatus.url} />
 {/if}
+<UpdateBanner />
 {#if $hubStatus.unavailable}
   <HubUnavailableBanner
     reason={$hubStatus.unavailable}
     hubUrl={$hubStatus.configured_url}
     onsettings={() => settingsOpen.set(true)} />
 {/if}
-<main class="layout" style="grid-template-columns: {gridTemplate};">
-  {#if sidebarCollapsed}
+<main class="layout" class:list-off={listHidden} style="grid-template-columns: {gridTemplate};">
+  <AppRail {isMac} onselect={onRailSelect} />
+  {#if sidebarCollapsed && listHidden}
+    <div></div>
+    <div></div>
+  {:else if sidebarCollapsed}
     <button
       class="strip-expand"
       onclick={toggleSidebar}
@@ -820,120 +1178,21 @@
     <Resizer id="sidebar" onresize={onResizeSidebar} />
   {/if}
 
-  {#if filesMode || hostsMode}
-    <!-- Center collapsed to 0 in files/hosts mode — two empty grid cells. -->
-    <div></div>
-    <div></div>
-  {:else if centerCollapsed}
-    <button
-      class="strip-expand left-edge"
-      onclick={toggleCenter}
-      title="Show details"
-      aria-label="Show details pane"
-      data-testid="center-expand"
-    >›</button>
-    <div></div>
-  {:else}
-    <Pane id="center">
-      {#snippet children()}
-        <div class="center-wrap">
-          <button
-            class="center-collapse"
-            onclick={toggleCenter}
-            title="Hide details (more room for terminal)"
-            aria-label="Hide details pane"
-            data-testid="center-collapse"
-          >‹</button>
-          <Details />
-        </div>
-      {/snippet}
-    </Pane>
-    <Resizer id="center" onresize={onResizeCenter} />
-  {/if}
-
   <div class="right-col" data-testid="pane-terminal">
-    <div class="view-tabs" role="tablist">
-      <button
-        class="view-tab"
-        class:active={sessionTabActive}
-        role="tab"
-        aria-selected={sessionTabActive}
-        title={!$selectedSession ? 'No session selected' : 'The running session — its conversation and its terminal'}
-        onclick={showSession}
-        data-testid="tab-session">Session</button
-      >
-      <button
-        class="view-tab"
-        class:active={filesMode}
-        role="tab"
-        aria-selected={filesMode}
-        disabled={!$selectedSession || selNoPane}
-        title={!$selectedSession
-          ? 'Select a session first'
-          : selNoPane
-            ? NO_PANE_TITLE
-            : 'Browse the session worktree'}
-        onclick={showFiles}
-        data-testid="tab-files">Files</button
-      >
-      <!-- Fleet-scoped like Hosts: never disabled, no selected session needed. -->
-      <button
-        class="view-tab"
-        class:active={assetsMode && !hostsMode}
-        role="tab"
-        aria-selected={assetsMode && !hostsMode}
-        title="The asset catalog and its per-host drift state"
-        onclick={showAssets}
-        data-testid="tab-assets">Assets</button
-      >
-      <!-- Always present so Hosts keeps its place; the segment inside it
-           appears only while the Session tab owns the panel. Not a nested
-           tablist — two tablists in one strip would have a screen reader
-           announce two independent tab positions for one place. -->
-      <div class="tab-tail">
-        {#if sessionTabActive && $selectedSession}
-          <div class="subtabs" role="radiogroup" aria-label="Session view">
-            <button
-              class="subtab"
-              class:active={effectiveView === 'conversation'}
-              role="radio"
-              aria-checked={effectiveView === 'conversation'}
-              aria-keyshortcuts={isMac ? 'Meta+J' : 'Control+Shift+J'}
-              disabled={!selHasClaudeId && !selNoPane}
-              title={!selHasClaudeId
-                ? selNoPane
-                  ? 'No transcript yet — nothing to show'
-                  : 'No Claude session id yet'
-                : `Claude conversation from the transcript (${sessionViewChord})`}
-              onclick={() => setSessionView('conversation')}
-              data-testid="subtab-conversation">Conversation</button
-            >
-            <button
-              class="subtab"
-              class:active={effectiveView === 'terminal'}
-              role="radio"
-              aria-checked={effectiveView === 'terminal'}
-              aria-keyshortcuts={isMac ? 'Meta+J' : 'Control+Shift+J'}
-              disabled={selNoPane}
-              title={selNoPane ? NO_PANE_TITLE : `The tmux pane (${sessionViewChord})`}
-              onclick={() => setSessionView('terminal')}
-              data-testid="subtab-terminal">Terminal</button
-            >
-          </div>
-        {/if}
-      </div>
-      <!-- Fleet-scoped, so set apart on the right and never disabled. -->
-      <button
-        class="view-tab hosts-tab"
-        class:active={hostsMode}
-        role="tab"
-        aria-selected={hostsMode}
-        aria-keyshortcuts={isMac ? 'Meta+I' : 'Control+Shift+H'}
-        title="Every host, grouped by Claude account ({hostsChord})"
-        onclick={toggleHosts}
-        data-testid="tab-hosts">Hosts <kbd>{hostsChord}</kbd></button
-      >
-    </div>
+    {#if sessionChrome}
+      <SessionTabs
+        session={$selectedSession}
+        name={selName}
+        current={currentTab}
+        terminalCount={selTerminals?.shells.length ?? 0}
+        disabled={tabDisabled}
+        {inspectorOpen}
+        inspectorAvailable={inspectorRoom}
+        {isMac}
+        onselect={onSessionTab}
+        oninspector={toggleInspector}
+      />
+    {/if}
     <div class="right-body">
       {#if $selectedSession && selNoPane}
         <!-- Rows with no pane (bg agents, external Claude sessions) have no
@@ -943,57 +1202,152 @@
              normal session reconnects its PTY. The Conversation is the only
              view these rows have. -->
         <div class="view-slot">
-          <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode} />
+          <ConversationPanel session={$selectedSession} visible={!fleetPageShown} />
         </div>
       {:else}
         <!-- TerminalView stays mounted underneath so the PTY and its ANSI
              buffer survive a Files-mode round trip — flipping back is instant
              and never re-fits or reconnects the terminal. -->
         <div class="view-slot">
-          <TerminalView />
+          {#if selWatchOnly && $selectedSession}
+            <!-- The third view state (multi-user M1): a session reached
+                 through a GRANT. TerminalView is not mounted — not hidden,
+                 not disabled, not mounted — because mounting it is what
+                 attaches: `openTerm` fires off the selection and calls
+                 `pty_open` with no gesture, and that attach is this machine's
+                 own SSH, which the hub can neither refuse nor revoke. The
+                 read-only snapshot takes its place.
+
+                 Expressed as a nested branch rather than a third top-level
+                 one so the Files and Conversation overlays below stay shared:
+                 a duplicated copy of them would be a second place to keep in
+                 step. They are NOT ungated, though — the earlier claim that
+                 "both are routed reads the hub authorises per call" was wrong
+                 about one path. FilesPanel's writes are `local_only`, so a
+                 paired desktop is refused them by the hub. ConversationPanel
+                 reads are routed, but its composer is not only routed: the
+                 outbox uploads the attachment tray with `upload_attachments`
+                 (`same_in_both` — this machine's own scp onto the owner's
+                 host, no hub in the path) BEFORE the routed `send_prompt`. So
+                 the composer gates itself on this client's access to the row,
+                 inside ConversationPanel, which is where its controls are.
+                 The guarantee the plan asks for here — "the component is
+                 never mounted for a granted session" — is about TerminalView
+                 and is the same either way. -->
+            <WatchView
+              session={$selectedSession}
+              access={selAccess}
+              visible={!fleetPageShown && $destination !== 'files' && !conversationMode}
+            />
+          {:else}
+            <TerminalView />
+          {/if}
         </div>
-        {#if filesMode && $selectedSession}
+        {#if $destination === 'files' && $selectedSession}
           <div class="view-slot overlay">
             <FilesPanel session={$selectedSession} />
           </div>
         {/if}
         {#if conversationMode && $selectedSession}
           <div class="view-slot overlay">
-            <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode} onOpenTerminal={() => setSessionView('terminal')} />
+            <ConversationPanel session={$selectedSession} visible={!fleetPageShown} onOpenTerminal={() => setSessionView('terminal')} />
           </div>
         {/if}
       {/if}
-      {#if hostsMode}
+      {#if $destination === 'hosts'}
         <div class="view-slot overlay" data-testid="hosts-overlay">
           {#key hostsViewKey}
-            <HostsView
+            <Lazy
+              load={lazyViews.hosts}
               preselect={hostsPreselect}
               onClose={() => closeHosts()}
               onFilterSidebar={onHostsFilterSidebar}
               onNewSession={onHostsNewSession}
-              onSelectionChange={(alias) => (lastViewedHost = alias)}
+              onSelectionChange={(alias: string) => (lastViewedHost = alias)}
             />
           {/key}
         </div>
       {/if}
-      {#if assetsMode}
+      {#if $destination === 'assets'}
         <div class="view-slot overlay" data-testid="assets-overlay">
-          <AssetsPanel visible={assetsMode} />
+          <Lazy load={lazyViews.toolkit} visible />
+        </div>
+      {/if}
+      {#if $destination === 'accounts'}
+        <div class="view-slot overlay" data-testid="accounts-overlay">
+          <Lazy load={lazyViews.accounts} />
+        </div>
+      {/if}
+      {#if $destination === 'control'}
+        <div class="view-slot overlay" data-testid="control-overlay">
+          <Lazy load={lazyViews.control} {isMac} contextInput={agentContextInput} />
+        </div>
+      {/if}
+      {#if $destination === 'automation'}
+        <div class="view-slot overlay" data-testid="automation-overlay">
+          <Lazy load={lazyViews.automation} />
+        </div>
+      {/if}
+      {#if $destination === 'dashboard'}
+        <div class="view-slot overlay" data-testid="dashboard-overlay">
+          <Lazy load={lazyViews.dashboard} />
+        </div>
+      {/if}
+      {#if boardShown}
+        <!-- The board is a Work view (step 3.10): its Work tab opens it, the
+             other tabs leave it, and it has no close of its own. It still
+             sits over the mounted terminal. -->
+        <div class="view-slot overlay" data-testid="board-view">
+          <Lazy load={lazyViews.board} />
+        </div>
+      {/if}
+      {#if detailsMain}
+        <!-- The Details tab, and what fills a column (Today, a
+             task, the empty state): over the mounted terminal like the rest. -->
+        <div class="view-slot overlay" data-testid="details-view">
+          <Details />
+        </div>
+      {/if}
+      {#if $settingsOpen}
+        <!-- Settings over whatever was open; leaving it shows that again. -->
+        <div class="view-slot overlay" data-testid="settings-view">
+          <SettingsDialog onClose={() => settingsOpen.set(false)} />
         </div>
       {/if}
     </div>
   </div>
+  <!-- The inspector (step 3.5), or its 0-width slot. -->
+  {#if inspectorShown}
+    <aside class="inspector" data-testid="inspector" aria-label="Inspector">
+      <Details variant="inspector" />
+    </aside>
+  {:else}
+    <div></div>
+  {/if}
 </main>
 
-{#if showDownloads}
-  <DownloadsSheet onclose={() => (showDownloads = false)} />
+{#if $downloadsOpen}
+  <DownloadsSheet onclose={() => downloadsOpen.set(false)} />
 {/if}
 
-<footer class="status">
+<StatusBar testid="status-bar">
+  <StatusBarMark />
+  <!-- Review r13 (step 1.3): a sentence and the next step; the codes stay
+       under Details. -->
   {#if healthError}
-    <span class="err" data-testid="health-error">ipc error: {healthError}</span>
+    <span class="err" data-testid="health-error"
+      >Couldn't check the backend: {healthText}. <details class="status-details"
+        ><summary>Details</summary>{healthError}</details
+      ></span
+    >
   {:else if bootstrapError}
-    <span class="err" data-testid="bootstrap-error">{bootstrapError}</span>
+    <span class="err" data-testid="bootstrap-error"
+      >Couldn't load {bootstrapWhat ?? 'the fleet'}.
+      <button type="button" class="status-retry" data-testid="bootstrap-retry" disabled={bootstrapRetrying} onclick={() => void retryBootstrap()}
+        >{bootstrapRetrying ? 'Trying…' : 'Retry'}</button
+      >
+      <details class="status-details"><summary>Details</summary>{bootstrapError}</details></span
+    >
   {:else if health}
     <!-- In remote mode these are the HUB's version, database and schema, not
          this app's — `health_check` routes to the hub's `fleet_health`. The
@@ -1006,8 +1360,8 @@
       class="hub-badge"
       data-testid="footer-downloads"
       title="Files sessions sent to your devices"
-      onclick={() => (showDownloads = true)}
-      >⤓ Downloads{unseenDownloads > 0 ? ` (${unseenDownloads})` : ''}</button
+      onclick={() => downloadsOpen.set(true)}
+      >⤓ Downloads…{unseenDownloads > 0 ? ` (${unseenDownloads})` : ''}</button
     >
     {#if trackersLine}
       <!-- Work graph M12.4: the tracker roll-up, re-read by TrackerAttention. -->
@@ -1046,7 +1400,7 @@
       type="button"
       class="hub-badge"
       data-testid="hub-badge"
-      title="This window is a client of {$hubStatus.url}. Settings → Hub to disconnect."
+      title="This window is a client of {$hubStatus.url}. Settings → Hub &amp; sync to disconnect."
       onclick={() => settingsOpen.set(true)}
       >hub: {$hubStatus.url}{$hubStatus.client_name ? ` (as ${$hubStatus.client_name})` : ''}</button
     >
@@ -1055,52 +1409,67 @@
            sending a fleet-wide credential in the clear, and a decision
            nobody is ever reminded of stops being a decision. -->
       <span class="err hub-warning" data-testid="hub-warning" title={$hubStatus.warning}
-        >⚠ {$hubStatus.warning}</span
+        ><Icon name="warning" size={12} /> {$hubStatus.warning}</span
       >
     {/if}
   {/if}
-  <!-- The usage segment is the embed page `embed.status_footer`. -->
-  <EmbedSlot
-    slot="status_footer"
-    ctx={{
-      now: nowSec,
-      hosts: $hosts,
-      accounts: $accounts,
-      snapshots: $accountUsage,
-      onopenhost: (host) => openHosts(host),
-    }}
-  />
-</footer>
+  <!-- The usage segment is the embed page `embed.status_footer`. Wrapped:
+       a direct child's `slot=` would read as a named slot of StatusBar. -->
+  <span class="footer-embed"
+    ><EmbedSlot
+      slot="status_footer"
+      ctx={{
+        now: nowSec,
+        hosts: $hosts,
+        accounts: $accounts,
+        snapshots: $accountUsage,
+        onopenhost: (host) => openHosts(host),
+      }}
+    /></span
+  >
+  <!-- The manual's StatusBar ends on the shortcuts sheet (3.17). -->
+  {#snippet end()}
+    <button
+      type="button"
+      class="hub-badge"
+      data-testid="footer-shortcuts"
+      title="Keyboard shortcuts  ?"
+      onclick={() => shortcutSheetOpen.set(true)}>? Shortcuts…</button
+    >
+  {/snippet}
+</StatusBar>
 
 <style>
   .layout {
     display: grid;
-    /* The footer is fixed at the bottom; this is the rest. Read off the same
-       token the footer sizes itself from — hardcoding 24px here left the page
-       1px taller than the viewport, because the footer's border was not in it. */
-    height: calc(100vh - var(--status-h));
+    /* The footer is fixed at the bottom and the header (3.17) occupies
+       --header-h above the grid; this is the rest. Read off the same tokens
+       the footer and header size themselves from — hardcoding 24px here left
+       the page 1px taller than the viewport, because the footer's border was
+       not in it. */
+    height: calc(100vh - var(--status-h) - var(--header-h));
     width: 100vw;
     background: var(--bg);
   }
-  .status {
-    /* border-box: --status-h is the occupied height, border included. */
-    box-sizing: border-box;
-    height: var(--status-h);
-    line-height: calc(var(--status-h) - 1px);
-    padding: 0 0.75rem;
-    background: var(--bg-pane);
-    border-top: 1px solid var(--border);
-    font-size: 0.75rem;
-    color: var(--fg-muted);
-    display: flex;
-    align-items: center;
-    gap: 1rem;
+  /* The footer is the kit's StatusBar (manual: StatusBar, --status-h
+     border included). */
+  .err { color: var(--danger); }
+  .footer-embed { display: contents; }
+  .status-details { display: inline; }
+  .status-details summary { display: inline; cursor: pointer; }
+  .status-retry {
+    font: inherit;
+    padding: 0 var(--space-1);
+    border: 1px solid currentColor;
+    border-radius: var(--radius-xs);
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
   }
-  .status .err { color: #e64a4a; }
   .hub-badge {
     background: transparent;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     padding: 0 0.4rem;
     font: inherit;
     color: var(--fg-muted);
@@ -1118,16 +1487,14 @@
     max-width: 40vw;
   }
 
-  /* Collapsed-pane strip: a thin always-visible vertical button. Same
-     visual language for both sidebar and center collapse so the user
-     learns one interaction. */
+  /* Collapsed-sidebar strip: a thin always-visible vertical button. */
   .strip-expand {
     background: var(--bg-pane);
     border: none;
     border-right: 1px solid var(--border);
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 1rem;
+    font-size: var(--text-md);
     line-height: 1;
     padding: 0;
     writing-mode: vertical-rl;
@@ -1137,39 +1504,19 @@
     color: var(--fg);
     background: color-mix(in srgb, var(--accent) 12%, var(--bg-pane));
   }
-  /* When the center pane is collapsed, its strip sits between the sidebar
-     and the terminal — flip the border to its LEFT edge so the strip looks
-     attached to the terminal side. */
-  .strip-expand.left-edge {
-    border-right: none;
-    border-left: 1px solid var(--border);
-  }
-
-  .center-wrap {
-    position: relative;
-    height: 100%;
+  .inspector {
+    min-width: 0;
+    min-height: 0;
     overflow: auto;
-    padding-right: 1rem;
+    border-left: 1px solid var(--border);
+    background: var(--bg-pane);
   }
-  .center-collapse {
-    position: absolute;
-    top: 0.4rem;
-    right: 0.2rem;
-    width: 1.4rem;
-    height: 1.4rem;
-    padding: 0;
-    background: transparent;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    color: var(--fg-muted);
-    cursor: pointer;
-    font-size: 0.9rem;
-    line-height: 1;
-    z-index: 2;
+  /* A fleet page's 0px list column: the Sidebar stays mounted but neither
+     shows its border nor takes focus. */
+  .layout.list-off > :global([data-testid='pane-sidebar']),
+  .layout.list-off > :global([data-testid='resizer-sidebar']) {
+    visibility: hidden;
   }
-  .center-collapse:hover { color: var(--fg); border-color: var(--accent); }
-
-  /* Right column: a thin Terminal/Files tab strip above the body. */
   .right-col {
     display: flex;
     flex-direction: column;
@@ -1177,86 +1524,6 @@
     height: 100%;
     overflow: hidden;
   }
-  .view-tabs {
-    display: flex;
-    flex: 0 0 auto;
-    gap: 1px;
-    padding: 0.2rem 0.35rem 0;
-    background: var(--bg-pane);
-    border-bottom: 1px solid var(--border);
-  }
-  .view-tab {
-    background: transparent;
-    border: 1px solid transparent;
-    border-bottom: none;
-    border-radius: 5px 5px 0 0;
-    color: var(--fg-muted);
-    cursor: pointer;
-    font-size: 0.74rem;
-    padding: 0.25rem 0.8rem;
-  }
-  .view-tab:hover:not(:disabled) { color: var(--fg); }
-  .view-tab.active {
-    background: var(--bg);
-    border-color: var(--border);
-    color: var(--fg);
-    /* Sit on top of the strip's bottom border. */
-    margin-bottom: -1px;
-    padding-bottom: calc(0.25rem + 1px);
-  }
-  .view-tab:disabled { opacity: 0.4; cursor: not-allowed; }
-  /* Claims the free space so Hosts stays pinned right whether or not the
-     segment is showing. */
-  .tab-tail {
-    margin-left: auto;
-    display: flex;
-    align-items: center;
-  }
-  /* A pill, deliberately unlike the tabs above it: this is a switch within
-     the active tab, not a sibling of it. */
-  .subtabs {
-    display: flex;
-    gap: 1px;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    padding: 1px;
-    margin-bottom: 0.2rem;
-  }
-  .subtab {
-    background: transparent;
-    border: none;
-    border-radius: 999px;
-    color: var(--fg-muted);
-    cursor: pointer;
-    font-size: 0.7rem;
-    padding: 0.1rem 0.6rem;
-  }
-  .subtab:hover:not(:disabled) { color: var(--fg); }
-  .subtab.active {
-    background: var(--bg);
-    color: var(--fg);
-  }
-  .subtab:disabled { opacity: 0.4; cursor: not-allowed; }
-  .hosts-tab {
-    margin-left: 0.75rem;
-    position: relative;
-  }
-  /* A thin rule sets the fleet-scoped tab apart from the session tabs. */
-  .hosts-tab::before {
-    content: '';
-    position: absolute;
-    left: -0.5rem;
-    top: 0.3rem;
-    bottom: 0.3rem;
-    border-left: 1px solid var(--border);
-  }
-  .hosts-tab kbd {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.65rem;
-    color: var(--fg-muted);
-    margin-left: 0.25rem;
-  }
-
   .right-body {
     position: relative;
     flex: 1 1 auto;
@@ -1267,6 +1534,10 @@
   .view-slot {
     position: absolute;
     inset: 0;
+    /* Each slot is its own stacking context, so a z-index inside one (the
+       terminal's "Connection lost" banner) stays under the overlays above
+       it instead of floating over the Details tab. */
+    isolation: isolate;
   }
   .view-slot.overlay {
     z-index: 2;

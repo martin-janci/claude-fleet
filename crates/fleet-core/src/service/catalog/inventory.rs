@@ -5,7 +5,7 @@ use super::harness::{json_get, ConfigMerge, Harness, HostSnapshot, MergeMode};
 use super::harness_set::{gated_catalog, harness_gate, HarnessFacts};
 use super::model::{sha256_hex, Kind};
 use super::repo::Catalog;
-use super::sync::manifest::Manifest;
+use super::sync::manifest::{HostCopy, Manifest};
 use crate::ipc_error::codes;
 use crate::shell::quote;
 use crate::ssh::SshClient;
@@ -457,10 +457,32 @@ pub fn compute_states(
         } else {
             None
         };
+        // Assets M5 (R4): which side moved — only for a drifted copy fleet
+        // manages, read from what its manifest entry recorded against the
+        // substituted render (Task 1's `host_copy_for`, the same reading
+        // the planner's rule 4 makes), so a location the render adds that
+        // already holds someone else's content reads as an edit. An entry
+        // that cannot vouch for its copy (`Unverified`: written before M5,
+        // or a `Subset` merge) claims no side — never `catalog`, which is
+        // what lets SB6 consider the copy.
+        let drift_side = (state == AssetState::Drifted)
+            .then(|| {
+                manifest
+                    .assets
+                    .get(&Manifest::key(asset.kind(), &asset.header.name))
+            })
+            .flatten()
+            .and_then(|entry| match entry.host_copy_for(snap, plan) {
+                HostCopy::Edited => Some("host"),
+                HostCopy::Unchanged => Some("catalog"),
+                HostCopy::Unverified => None,
+            })
+            .map(String::from);
         rows.push(AssetInventoryRow {
             state: state.as_str().into(),
             catalog_hash: Some(catalog_hash),
             host_hash,
+            drift_side,
             ..base
         });
     }
@@ -544,6 +566,7 @@ pub fn compute_states(
                 secret_like: a.secret_like,
                 fleet_owned: a.fleet_owned,
                 catalog_id: None,
+                drift_side: None,
             });
         }
     }
@@ -559,6 +582,112 @@ mod tests {
     use crate::service::catalog::model::Asset;
     use crate::service::catalog::repo::Catalog;
     use serde_json::json;
+
+    /// Assets M5 (R4): a drifted managed row says which side moved.
+    #[test]
+    fn a_drifted_managed_row_says_which_side_moved() {
+        let skill = |desc: &str| {
+            let mut a = Asset::from_yaml(
+                None,
+                &format!("kind: skill\nname: s\ndescription: {desc}\n"),
+            )
+            .unwrap();
+            a.body = "body\n".into();
+            a
+        };
+        let old = Claude.render(&skill("d")).unwrap();
+        let mut manifest = Manifest {
+            version: 1,
+            ..Default::default()
+        };
+        manifest.assets.insert(
+            "skill/s".into(),
+            Manifest::entry_for(&old.hash(), &old, 0, "personal"),
+        );
+        let mut snap = HostSnapshot::default();
+        for f in &old.files {
+            snap.files.insert(f.path.clone(), sha256_hex(&f.bytes));
+        }
+        let moved = Catalog {
+            assets: vec![skill("d2")],
+            ..Default::default()
+        };
+        let side = |catalog: &Catalog, snap: &HostSnapshot, manifest: &Manifest| {
+            let rows = compute_states(catalog, &Claude, "oci", snap, manifest, &empty(), 1);
+            let r = rows.into_iter().find(|r| r.name == "s").unwrap();
+            (r.state, r.drift_side)
+        };
+        assert_eq!(
+            side(&moved, &snap, &manifest),
+            ("drifted".to_string(), Some("catalog".to_string()))
+        );
+        let mut edited = snap.clone();
+        edited
+            .files
+            .insert(old.files[0].path.clone(), sha256_hex(b"edited"));
+        assert_eq!(
+            side(&moved, &edited, &manifest),
+            ("drifted".to_string(), Some("host".to_string()))
+        );
+        let mut pre_m5 = manifest.clone();
+        pre_m5
+            .assets
+            .get_mut("skill/s")
+            .unwrap()
+            .file_hashes
+            .clear();
+        assert_eq!(side(&moved, &snap, &pre_m5), ("drifted".to_string(), None));
+        let same = Catalog {
+            assets: vec![skill("d")],
+            ..Default::default()
+        };
+        assert_eq!(side(&same, &snap, &manifest), ("in_sync".to_string(), None));
+    }
+
+    /// Assets M5 (R4, Task 1's render-aware read): a location the render
+    /// writes that the manifest entry never recorded, holding something
+    /// fleet did not write, is a host-side edit — even though every
+    /// location the entry does record is untouched. Read against the
+    /// recorded locations alone it would claim `catalog`, and SB6 would be
+    /// pointed at a copy a person owns.
+    #[test]
+    fn a_foreign_file_at_a_newly_rendered_location_is_host_side_drift() {
+        let mut a = Asset::from_yaml(None, "kind: skill\nname: s\ndescription: d\n").unwrap();
+        a.body = "body\n".into();
+        let plan = Claude.render(&a).unwrap();
+        // The entry recorded a copy at an older location, untouched since.
+        let mut recorded = plan.clone();
+        for f in &mut recorded.files {
+            f.path = format!("old/{}", f.path);
+        }
+        let mut manifest = Manifest {
+            version: 1,
+            ..Default::default()
+        };
+        manifest.assets.insert(
+            "skill/s".into(),
+            Manifest::entry_for(&recorded.hash(), &recorded, 0, "personal"),
+        );
+        let mut snap = HostSnapshot::default();
+        for f in &recorded.files {
+            snap.files.insert(f.path.clone(), sha256_hex(&f.bytes));
+        }
+        // ...and the new location holds a person's own file.
+        snap.files
+            .insert(plan.files[0].path.clone(), sha256_hex(b"theirs"));
+        let entry = &manifest.assets["skill/s"];
+        assert_eq!(entry.host_copy(&snap), HostCopy::Unchanged);
+        let catalog = Catalog {
+            assets: vec![a],
+            ..Default::default()
+        };
+        let rows = compute_states(&catalog, &Claude, "oci", &snap, &manifest, &empty(), 1);
+        let r = rows.into_iter().find(|r| r.name == "s").unwrap();
+        assert_eq!(
+            (r.state.as_str(), r.drift_side.as_deref()),
+            ("drifted", Some("host"))
+        );
+    }
 
     /// No secrets: the default for every test that does not exercise
     /// `${NAME}` substitution.

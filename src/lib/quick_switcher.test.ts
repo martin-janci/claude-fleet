@@ -9,6 +9,8 @@ import {
   isSwitcherChord,
   chordLabel,
   RECENT_MAX,
+  assetEntries,
+  commandEntries,
 } from './quick_switcher';
 import type { SessionRow } from './sessions';
 import type { ProjectTreeRow } from './projects';
@@ -436,5 +438,86 @@ describe('ticket rows across providers (work graph M6)', () => {
     const e = _lookupEntry('acme/api#42', new Set());
     expect(e?.label).toBe('Look up acme/api#42');
     expect(e?.lookup).toBe('acme/api#42');
+  });
+});
+
+describe('asset and command entries', () => {
+  const listing = { head: null, loaded_at: null, unmanaged: [], problems: [], assets: [
+    { kind: 'skill', name: 'infra-status', version: '1', description: 'Check the infra', tags: [], hosts: [], catalog: 'personal' },
+    { kind: 'skill', name: 'ppt-implement', version: '1', description: '', tags: [], hosts: [], catalog: 'papayapos' },
+  ] } as never;
+  it('one row per asset, keyed like the workspace selection', () => {
+    const e = assetEntries(listing);
+    expect(e.map((x) => x.key)).toEqual(['asset:personal:skill/infra-status', 'asset:papayapos:skill/ppt-implement']);
+    expect(e[0]).toMatchObject({ kind: 'asset', label: 'skill/infra-status', meta: 'Assets', description: 'personal · Check the infra', asset: { key: 'asset:personal:skill/infra-status' } });
+    expect(e[1].description).toBe('papayapos');
+  });
+  it('no listing, no asset rows', () => {
+    expect(assetEntries(null)).toEqual([]);
+  });
+  it('three commands', () => {
+    const c = commandEntries();
+    expect(c.map((x) => x.label)).toEqual(['Rescan assets', 'Sync fleet', 'Propose cards']);
+    expect(c.map((x) => x.key)).toEqual(['command:rescan', 'command:sync', 'command:propose']);
+    expect(c.map((x) => x.command)).toEqual(['rescan', 'sync', 'propose']);
+  });
+  it('an asset name match ranks after sessions, a command after assets', () => {
+    const entries = [...buildEntries([sess({ id: 1, friendly_name: 'infra work' })], [], []), ...assetEntries(listing), ...commandEntries()];
+    const ranked = rankEntries(entries, 'infra', []);
+    expect(ranked.map((r) => r.kind)).toEqual(['session', 'asset']);
+    expect(rankEntries(entries, 'sync', []).map((r) => r.label)).toContain('Sync fleet');
+  });
+  it('on an empty query the order is sessions, hosts, projects, assets, commands', () => {
+    const entries = [
+      ...commandEntries(),
+      ...assetEntries(listing),
+      ...buildEntries([sess({ id: 1 })], projects, [host('mef')]),
+    ];
+    const kinds = rankEntries(entries, '', []).map((r) => r.kind);
+    expect(kinds).toEqual(['session', 'host', 'project', 'project', 'asset', 'asset', 'command', 'command', 'command']);
+  });
+  it('an asset outranks nothing above it: a stronger asset match stays below a weaker host or project', () => {
+    const entries = [...assetEntries(listing), ...buildEntries([], projects, [host('xinfrax')])];
+    const kinds = rankEntries(entries, 'infra', []).map((r) => r.kind);
+    expect(kinds).toEqual(['host', 'asset']);
+  });
+});
+
+// ---- the New session picker (project picker spec v2) -------------------------
+
+import { isNewSessionChord, switcherEmptyText, workBlock } from './quick_switcher';
+
+describe('isNewSessionChord', () => {
+  const k = (o: Partial<KeyboardEvent>) => ({ key: 'n', metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, ...o });
+  it('⌘N on macOS, Ctrl+Shift+N elsewhere; nothing else', () => {
+    expect(isNewSessionChord(k({ metaKey: true }), true)).toBe(true);
+    expect(isNewSessionChord(k({ metaKey: true, shiftKey: true }), true)).toBe(false);
+    expect(isNewSessionChord(k({ metaKey: true, altKey: true }), true)).toBe(false);
+    expect(isNewSessionChord(k({ ctrlKey: true }), true)).toBe(false);
+    expect(isNewSessionChord(k({ ctrlKey: true, shiftKey: true, key: 'N' }), false)).toBe(true);
+    expect(isNewSessionChord(k({ ctrlKey: true }), false)).toBe(false); // readline's Ctrl+N stays the terminal's
+    expect(isNewSessionChord(k({ metaKey: true }), false)).toBe(false);
+    expect(isNewSessionChord(k({ ctrlKey: true, shiftKey: true, key: 'm' }), false)).toBe(false);
+  });
+});
+
+describe('workBlock', () => {
+  const t = (key: string, section: string, live: number[] = []) => ({ ticket: { key, live_session_ids: live } as never, section });
+  it('My work tickets with no live session, at most 3', () => {
+    const out = workBlock([t('A-1', 'My work'), t('A-2', 'My work', [5]), t('A-3', 'Recent'), t('A-4', 'My work'), t('A-5', 'My work'), t('A-6', 'My work')]);
+    expect(out.map((x) => (x.ticket as { key: string }).key)).toEqual(['A-1', 'A-4', 'A-5']);
+  });
+  it('a ticket with no live_session_ids field counts as free; the cap is a parameter', () => {
+    const free = { ticket: { key: 'B-1' } as never, section: 'My work' };
+    expect(workBlock([free, t('B-2', 'My work')], 1).map((x) => (x.ticket as { key: string }).key)).toEqual(['B-1']);
+  });
+});
+
+describe('switcherEmptyText', () => {
+  it('says what was searched', () => {
+    expect(switcherEmptyText({ mode: 'hosts', rest: 'mef' }, true, 'Ctrl')).toBe('No host matches “mef”.');
+    expect(switcherEmptyText({ mode: 'work', rest: 'x' }, true, 'Ctrl')).toBe('No task or ticket matches “x”.');
+    expect(switcherEmptyText({ mode: 'all', rest: 'x' }, false, '⌘')).toContain('⌘↵ creates a session');
+    expect(switcherEmptyText({ mode: 'all', rest: '' }, false, '⌘')).toBe('No sessions yet.');
   });
 });

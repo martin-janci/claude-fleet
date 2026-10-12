@@ -3,7 +3,8 @@
 // algorithmic shape first (every per-row callback runs once per row, never
 // per row × group) and a generous wall-clock budget second, printing the
 // measured p50 / p95 so a slow CI runner's numbers are in the log.
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterAll, beforeAll } from 'vitest';
+import { get } from 'svelte/store';
 import type { SessionRow, SessionWork } from './sessions';
 import type { TrackerRow } from './trackers';
 import {
@@ -21,6 +22,14 @@ import {
   type WorkFilters,
 } from './work_filters';
 import { scopeOfSession } from './orgs';
+import {
+  accessOf,
+  resetAccessForTests,
+  sessionAccess,
+  setMyGrants,
+  type SessionAccess,
+} from './access';
+import { hubStatus, STANDALONE } from './hub';
 import { scopeToday, standupText, type Today, type TodayGroup, type TodaySession } from './today';
 
 const SESSIONS = 2_000;
@@ -28,6 +37,13 @@ const HOSTS = 20;
 const ORGS = 3;
 const KEYS = 800;
 const RUNS = 15;
+/** People on the fleet (multi-user M1). Five is enough to make the owner
+ *  comparison miss four times out of five, which is what the derivation's
+ *  cost is being measured against. */
+const PEOPLE = 5;
+/** How many of the fleet's sessions are shared with the measuring person.
+ *  The budget has to measure a `Map` LOOKUP, not an empty map's fast path. */
+const GRANTS = 500;
 
 /** mulberry32: a tiny seeded PRNG, so every run builds the same fleet. */
 function rng(seed: number): () => number {
@@ -136,6 +152,15 @@ function row(i: number, r: () => number): SessionRow {
     work,
     work_suggested,
     org_id: org === 0 ? null : org,
+    // Multi-user M1. Derived from `i`, deliberately NOT from the rng: taking a
+    // draw here would shift every later value and move the counts the other
+    // tests in this file assert against the fixture.
+    //
+    // One row in 37 is `unclaimed` — a tmux session fleet did not start — and
+    // an unclaimed row has no owner, which is also the shape that makes the
+    // derivation's `owner_person_id != null` guard matter.
+    visibility: i % 37 === 0 ? 'unclaimed' : 'private',
+    owner_person_id: i % 37 === 0 ? null : (i % PEOPLE) + 1,
   } as SessionRow;
 }
 
@@ -273,6 +298,73 @@ describe('work graph at scale (M12.2)', () => {
       rows.map((s) => sessionWorkRow(s, ctx, scopeOf));
     });
     expect(build.p95).toBeLessThan(150);
+  });
+
+  // Multi-user M1 (F2): `sessionAccess` is now on the render path for every
+  // row the sidebar draws — each one asks it whether its action buttons are
+  // enabled, and `SessionRowItem` asks it again for the privacy badge. So it
+  // gets the same treatment as every other per-row function here: the shape
+  // first (O(1) per row — two field reads and one `Map` lookup, and in
+  // particular NOT a scan of the grant set), and a budget second.
+  describe('the per-row access derivation at scale (multi-user M1)', () => {
+    /** The measuring person owns one fifth of the fleet and is granted `watch`
+     *  or `drive` on GRANTS of the rest, so the map is big enough that its
+     *  lookup is what the clock is measuring. */
+    const me = 1;
+    const granted = rows
+      .filter((s) => s.owner_person_id !== me)
+      .slice(0, GRANTS)
+      .map((s, i) => ({ session_id: s.id, level: i % 2 === 0 ? 'watch' : 'drive' }));
+
+    beforeAll(() => {
+      // A PAIRED desktop: standalone short-circuits to `own` on the backend
+      // mode alone (rule 1) and would measure nothing at all.
+      hubStatus.set({ ...STANDALONE, remote: true, url: 'https://fleet.example.com' });
+      setMyGrants(me, granted);
+    });
+    afterAll(() => {
+      hubStatus.set({ ...STANDALONE });
+      resetAccessForTests();
+    });
+
+    it('answers every row from two field reads and one map lookup', () => {
+      const grantLevel = new Map(granted.map((g) => [g.session_id, g.level]));
+      const of = get(accessOf);
+      const want = (s: SessionRow): SessionAccess => {
+        if (s.owner_person_id === me) return 'own';
+        return (grantLevel.get(s.id) as 'watch' | 'drive' | undefined) ?? null;
+      };
+      // Correctness at scale, including the two traps: an `unclaimed` row
+      // (`owner_person_id` null) is NOT owned on a paired desktop, and a row
+      // owned by somebody else with no grant answers `null` rather than a
+      // level.
+      for (const s of rows) expect(of(s)).toBe(want(s));
+      expect(rows.some((s) => of(s) === 'own')).toBe(true);
+      expect(rows.some((s) => of(s) === 'watch')).toBe(true);
+      expect(rows.some((s) => of(s) === 'drive')).toBe(true);
+      expect(rows.filter((s) => of(s) === null).length).toBeGreaterThan(SESSIONS / 2);
+      // The map is actually populated: an empty one would make the budget
+      // below measure the wrong thing.
+      expect(grantLevel.size).toBe(GRANTS);
+
+      // The RENDER path: a component reads `$accessOf` once and applies it per
+      // row, so the three store reads happen once for the whole list.
+      const applied = measure(`accessOf, ${SESSIONS} rows / ${GRANTS} grants`, () => {
+        const f = get(accessOf);
+        for (const s of rows) f(s);
+      });
+      expect(applied.p95).toBeLessThan(100);
+
+      // The bare function with its `get()` defaults, for contrast: it subscribes
+      // and unsubscribes to three stores PER CALL, which is the constant the
+      // derived store exists to pay once. Measured so the gap is on the record
+      // rather than rediscovered by whoever next calls it in a loop — the budget
+      // is deliberately loose, because what matters is that it is still linear.
+      const bare = measure(`sessionAccess (get() per row), ${SESSIONS} rows`, () => {
+        for (const s of rows) sessionAccess(s);
+      });
+      expect(bare.p95).toBeLessThan(400);
+    });
   });
 
   it('the Today view model over a full digest is linear', () => {

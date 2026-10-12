@@ -17,6 +17,173 @@ pub fn exact_session(name: &str) -> String {
     format!("={name}")
 }
 
+/// The most shell terminals one session keeps (redesign step 5.3).
+pub const MAX_SHELL_TERMINALS: u32 = 9;
+
+/// The tmux session that holds shell terminal `n` of `session` (redesign
+/// step 5.3): `<session>--sh<n>`. A terminal is a tmux session of its own,
+/// never a window or pane of the agent's session, so `exact_pane(session)`
+/// always lands on the agent and never on a shell.
+pub fn shell_terminal_name(session: &str, n: u32) -> String {
+    format!("{session}--sh{n}")
+}
+
+/// `Some((session, n))` when `name` is a shell terminal's tmux session
+/// ([`shell_terminal_name`]): the suffix `--sh` and a number 1..=99 with no
+/// leading zero, after a non-empty session name. PURE.
+pub fn parse_shell_terminal_name(name: &str) -> Option<(&str, u32)> {
+    let at = name.rfind("--sh")?;
+    let (session, digits) = (&name[..at], &name[at + 4..]);
+    if session.is_empty()
+        || digits.is_empty()
+        || digits.len() > 2
+        || digits.starts_with('0')
+        || !digits.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    Some((session, digits.parse().ok()?))
+}
+
+/// Whether `name` is a shell terminal, which reconcile, discover and every
+/// session list leave out: a terminal belongs to its session and is never a
+/// session row of its own (no ghost, no Lost and found entry).
+pub fn is_shell_terminal_name(name: &str) -> bool {
+    parse_shell_terminal_name(name).is_some()
+}
+
+/// The tmux session name prefix of an Add account login pane (M15 step
+/// G2.9, `service::add_account::login_session_name`).
+pub const LOGIN_SESSION_PREFIX: &str = "fleet-login--";
+
+/// Whether `name` is an Add account login pane: fleet's own, never a
+/// session, so every list leaves it out as it does a shell terminal.
+pub fn is_login_session_name(name: &str) -> bool {
+    name.strip_prefix(LOGIN_SESSION_PREFIX)
+        .is_some_and(|p| crate::validate::claude_profile(p).is_ok())
+}
+
+/// Every tmux session name on the server, one per line; nothing when no
+/// server runs. [`shell_terminals_in`] picks a session's terminals out.
+pub const LIST_SESSION_NAMES_SCRIPT: &str =
+    "tmux list-sessions -F '#{session_name}' 2>/dev/null; true";
+
+/// The terminal numbers of `session` in [`LIST_SESSION_NAMES_SCRIPT`]'s
+/// output, ascending. PURE.
+pub fn shell_terminals_in(session: &str, names: &str) -> Vec<u32> {
+    let mut out: Vec<u32> = names
+        .lines()
+        .filter_map(|l| parse_shell_terminal_name(l.trim()))
+        .filter(|(s, _)| *s == session)
+        .map(|(_, n)| n)
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Every tmux session on the server with what runs in the front of its
+/// active pane (`pane_current_command`: the shell when it is idle, `node`
+/// while `pnpm dev` runs), one `<command>|<name>` per line; nothing when no
+/// server runs. [`shell_terminal_commands_in`] picks a session's terminals
+/// out. The command goes first because a session name is the part that
+/// must survive whole.
+pub const LIST_SESSION_COMMANDS_SCRIPT: &str =
+    "tmux list-sessions -F '#{pane_current_command}|#{session_name}' 2>/dev/null; true";
+
+/// The terminals of `session` in [`LIST_SESSION_COMMANDS_SCRIPT`]'s output,
+/// ascending, each with what runs in it (`None` when tmux printed nothing).
+/// A `|` in the command or the name is resolved by trying each split until
+/// the rest names one of `session`'s terminals. PURE.
+pub fn shell_terminal_commands_in(session: &str, lines: &str) -> Vec<(u32, Option<String>)> {
+    let mut out: Vec<(u32, Option<String>)> = lines
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_end_matches('\r');
+            line.match_indices('|').find_map(|(at, _)| {
+                let (s, n) = parse_shell_terminal_name(&line[at + 1..])?;
+                (s == session).then(|| {
+                    let cmd = line[..at].trim();
+                    (n, (!cmd.is_empty()).then(|| cmd.to_string()))
+                })
+            })
+        })
+        .collect();
+    out.sort_by_key(|(n, _)| *n);
+    out.dedup_by_key(|(n, _)| *n);
+    out
+}
+
+/// Exit code [`open_shell_terminal_script`] ends with when the agent's own
+/// tmux session is gone: a terminal is only ever opened beside a live one.
+pub const SHELL_TERMINAL_NO_SESSION: i32 = 3;
+
+/// Open terminal `n` of `session` unless it is already open: a tmux session
+/// of its own, started in the agent pane's current directory (`$HOME` when
+/// that is gone, or when `home` asks for it — the strip's "New terminal opens
+/// on" picker), running the same respawning login shell a shell session
+/// does, so `exit` in it gives a fresh prompt rather than closing it.
+pub fn open_shell_terminal_script(session: &str, n: u32, home: bool) -> String {
+    let sh = shell_terminal_name(session, n);
+    let cwd = if home {
+        "cwd=\"$HOME\"; ".to_string()
+    } else {
+        format!(
+            "cwd=$(tmux display-message -p -t {pane} '#{{pane_current_path}}' 2>/dev/null); \
+             [ -d \"$cwd\" ] || cwd=\"$HOME\"; ",
+            pane = quote(&exact_pane(session)),
+        )
+    };
+    format!(
+        "tmux has-session -t {agent} 2>/dev/null || exit {gone}; {cwd}\
+         tmux has-session -t {exact} 2>/dev/null || tmux new-session -d -s {name} -c \"$cwd\" \
+         -e COLORTERM=truecolor -e TERM=xterm-256color -e \"LANG=${{LANG:-en_US.UTF-8}}\" \
+         -e \"PATH=$PATH\" {cmd}",
+        agent = quote(&exact_session(session)),
+        gone = SHELL_TERMINAL_NO_SESSION,
+        exact = quote(&exact_session(&sh)),
+        name = quote(&sh),
+        cmd = quote(&shell_pane_command(None)),
+    )
+}
+
+/// Close terminal `n` of `session`. One already gone is not an error.
+pub fn close_shell_terminal_script(session: &str, n: u32) -> String {
+    format!(
+        "tmux kill-session -t {} 2>/dev/null; true",
+        quote(&exact_session(&shell_terminal_name(session, n)))
+    )
+}
+
+/// The `case` pattern matching every terminal of `session`: the name is
+/// quoted, so it matches literally, and the suffix is `--sh` and 1..=99.
+fn shell_terminal_case(session: &str) -> String {
+    let q = quote(session);
+    format!("{q}--sh[1-9]|{q}--sh[1-9][0-9]")
+}
+
+/// Close every terminal of `session`: a killed session takes its terminals
+/// with it.
+pub fn close_all_shell_terminals_script(session: &str) -> String {
+    format!(
+        "tmux list-sessions -F '#{{session_name}}' 2>/dev/null | while IFS= read -r s; do \
+         case \"$s\" in {pat}) tmux kill-session -t \"=$s\";; esac; done; true",
+        pat = shell_terminal_case(session),
+    )
+}
+
+/// Rename every terminal of `old` to the same terminal of `new`: a renamed
+/// session keeps its terminals.
+pub fn rename_shell_terminals_script(old: &str, new: &str) -> String {
+    format!(
+        "tmux list-sessions -F '#{{session_name}}' 2>/dev/null | while IFS= read -r s; do \
+         case \"$s\" in {pat}) tmux rename-session -t \"=$s\" {new}\"${{s#{old}}}\";; esac; done; true",
+        pat = shell_terminal_case(old),
+        new = quote(new),
+        old = quote(old),
+    )
+}
+
 /// The same, for commands taking a *pane* target (`capture-pane`,
 /// `respawn-pane`). tmux only accepts `=` in the session part of a pane
 /// target, so the trailing `:` (current window, active pane) is required:
@@ -53,6 +220,18 @@ pub trait TmuxExec: Send + Sync {
     ) -> Result<(), IpcError> {
         let _ = cwd;
         self.restart_session(name, pane_cmd).await
+    }
+    /// Run one shell script against this host's tmux server: `bash -c`
+    /// locally, the same transport as every other call remotely. Used by
+    /// shell terminals (step 5.3), whose open / close / list are scripts of
+    /// their own ([`open_shell_terminal_script`] and friends). The default
+    /// refuses, so a test double never runs anything it was not built for.
+    async fn run_script(&self, script: &str) -> Result<std::process::Output, IpcError> {
+        let _ = script;
+        Err(IpcError::new(
+            codes::E_TMUX,
+            "this tmux executor runs no scripts",
+        ))
     }
     async fn capture_pane(&self, name: &str) -> Result<String, IpcError>;
     /// Capture the pane plus `lines` rows of scrollback history.
@@ -113,6 +292,22 @@ pub trait TmuxExec: Send + Sync {
         None
     }
 
+    /// How long an empty command takes to come back from the host, in ms:
+    /// the "SSH · 18 ms" on the Hosts page (Orbit Fleet 4.6). `None` = not
+    /// a remote host, or it did not answer. Only `RemoteTmux` overrides it.
+    async fn round_trip_ms(&self) -> Option<i64> {
+        None
+    }
+
+    /// The host's Claude login profiles (`~/.claude-profiles/<name>`,
+    /// docs/accounts.md), each with the account its `.claude.json` is
+    /// logged into. `None` = could not tell (or an executor that does not
+    /// implement it): the stored list is then left alone. `Some(vec![])` =
+    /// the host has none. `LocalTmux` and `RemoteTmux` override it.
+    async fn read_profiles(&self) -> Option<Vec<HostProfile>> {
+        None
+    }
+
     /// Everything a reconcile pass needs from the host. The default composes
     /// the per-call methods (local tmux, test fakes); `RemoteTmux` overrides
     /// it with one script so a pass costs one round trip, not 5 + N.
@@ -136,6 +331,11 @@ pub trait TmuxExec: Send + Sync {
         } else {
             None
         };
+        let profiles = if sessions.is_ok() {
+            self.read_profiles().await
+        } else {
+            None
+        };
         let mut pane_tails = std::collections::HashMap::new();
         if let Ok(live) = &sessions {
             for s in live {
@@ -151,6 +351,7 @@ pub trait TmuxExec: Send + Sync {
             pane_tails,
             versions,
             health,
+            profiles,
         }
     }
 }
@@ -209,10 +410,111 @@ pub struct ProbeSnapshot {
     pub versions: Option<HostVersions>,
     /// The health section (every pass), when the host answered it.
     pub health: Option<HostHealthSample>,
+    /// The host's login profiles ([`TmuxExec::read_profiles`]); `None` =
+    /// could not tell.
+    pub profiles: Option<Vec<HostProfile>>,
+}
+
+/// One Claude login profile on a host: `~/.claude-profiles/<name>` and the
+/// account its `.claude.json` is logged into (`None`: not logged in yet, or
+/// unreadable).
+#[derive(Debug, Clone)]
+pub struct HostProfile {
+    pub name: String,
+    pub account: Option<crate::service::hosts::OauthAccount>,
+}
+
+/// Shell section listing the host's login profiles: one
+/// `@@P\t<name>\t<oauthAccount json>` line per `~/.claude-profiles/<name>`
+/// directory whose name is a valid profile name (anything else is skipped,
+/// never echoed into a line a parser splits on tabs). The account is read
+/// by the same script as the host's own, with `CLAUDE_CONFIG_DIR` pointed
+/// at the profile, and squeezed onto one line. An API-key profile (M15 step
+/// G2.9: `.fleet-api-key` beside a `.fleet-account.json` that
+/// `service::add_account` wrote) has no `/login`; its line carries that
+/// file instead, so it is an account like any other. The key file is only
+/// tested for, never read.
+pub(crate) fn profiles_script() -> String {
+    format!(
+        "for d in \"$HOME\"/.claude-profiles/*/; do [ -d \"$d\" ] || continue; n=$(basename \"$d\"); \
+         case \"$n\" in ''|[!A-Za-z0-9]*|*[!A-Za-z0-9_-]*) continue;; esac; \
+         if [ -r \"$d.fleet-api-key\" ] && [ -r \"$d.fleet-account.json\" ]; then a=$(head -c 4096 \"$d.fleet-account.json\" | tr -d '\\n'); \
+         else a=$(CLAUDE_CONFIG_DIR=\"${{d%/}}\"; {} | tr -d '\\n'); fi; \
+         printf '@@P\\t%s\\t%s\\n' \"$n\" \"$a\"; done",
+        crate::service::hosts::OAUTH_ACCOUNT_SCRIPT
+    )
+}
+
+/// Parse [`profiles_script`] output (or the `profiles` probe section).
+/// Lines that are not `@@P` lines, and names that do not validate, are
+/// dropped.
+pub(crate) fn parse_profiles(body: &str) -> Vec<HostProfile> {
+    let mut out: Vec<HostProfile> = body
+        .lines()
+        .filter_map(|l| l.strip_prefix("@@P\t"))
+        .filter_map(|rest| {
+            let (name, json) = rest.split_once('\t').unwrap_or((rest, ""));
+            crate::validate::claude_profile(name).ok()?;
+            Some(HostProfile {
+                name: name.to_string(),
+                account: crate::service::hosts::parse_oauth_account(json),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out.dedup_by(|a, b| a.name == b.name);
+    out
+}
+
+/// `local`'s login profiles, read from `<home>/.claude-profiles` directly
+/// (blocking fs reads: call off the async worker). `None` when the
+/// directory exists but cannot be listed; a missing directory is no
+/// profiles.
+pub(crate) fn read_local_profiles(home: &std::path::Path) -> Option<Vec<HostProfile>> {
+    let dir = home.join(".claude-profiles");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(Vec::new()),
+        Err(_) => return None,
+    };
+    let mut out: Vec<HostProfile> = entries
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| {
+            let name = e.file_name().to_str()?.to_string();
+            crate::validate::claude_profile(&name).ok()?;
+            let account = match api_key_account_in(&e.path()) {
+                Some(a) => Some(a),
+                None => match crate::service::hosts::probe_local_account_in(&e.path()) {
+                    crate::service::hosts::LocalAccountProbe::LoggedIn(a) => Some(a),
+                    _ => None,
+                },
+            };
+            Some(HostProfile { name, account })
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Some(out)
+}
+
+/// The account of an API-key profile at `dir`, as [`profiles_script`]
+/// reads it on a remote host: `.fleet-account.json` when `.fleet-api-key`
+/// is beside it. The key file is only tested for, never read.
+fn api_key_account_in(dir: &std::path::Path) -> Option<crate::service::hosts::OauthAccount> {
+    if !dir
+        .join(crate::service::add_account::API_KEY_FILE)
+        .is_file()
+    {
+        return None;
+    }
+    let raw = std::fs::read(dir.join(crate::service::add_account::API_ACCOUNT_FILE)).ok()?;
+    let line = String::from_utf8_lossy(&raw[..raw.len().min(4096)]).replace('\n', "");
+    crate::service::hosts::parse_oauth_account(&line)
 }
 
 /// Shell script listing the most recently modified Claude transcripts under
-/// `$HOME/.claude/projects/*/*.jsonl` (a `*/subagents/*` path is skipped),
+/// `$CLAUDE_CONFIG_DIR/projects/*/*.jsonl` (`$HOME/.claude` when unset; a
+/// `*/subagents/*` path is skipped),
 /// newest first, up to `limit` (clamped to `1..=500` here — `limit` is
 /// then a bare integer in the script, so it needs no shell quoting). For
 /// each transcript kept it prints `@@F\t<mtime>\t<claude session id>`
@@ -226,15 +528,18 @@ pub struct ProbeSnapshot {
 /// `/proc/uptime` is readable (Linux), else `bootraw=<kern.boottime output>`
 /// (macOS, via `sysctl`) — the same parser turns either into a boot epoch.
 ///
-/// `date -r FILE +%s` behaves the same on GNU and BSD coreutils (unlike
-/// `stat`, deliberately avoided — its flags differ across the two), so this
-/// runs unmodified on both the Linux and macOS hosts fleet targets.
+/// The mtime is GNU `stat -c %Y`, else BSD `stat -f %m`, else `date -r FILE
+/// +%s` (review r18: `date -r FILE` alone is not portable — an older BSD
+/// `date -r` takes seconds, not a file); a file none of them can date is
+/// skipped rather than sorted on garbage. Runs unmodified on the Linux and
+/// macOS hosts fleet targets.
 pub fn discover_transcripts_script(limit: usize) -> String {
     let limit = limit.clamp(1, 500);
     format!(
         "now=$(date +%s)\n\
 if [ -r /proc/uptime ]; then printf 'bootsec=%s\\n' \"$(( now - $(cut -d. -f1 /proc/uptime) ))\"; else printf 'bootraw=%s\\n' \"$(sysctl -n kern.boottime 2>/dev/null)\"; fi\n\
-for f in \"$HOME\"/.claude/projects/*/*.jsonl; do [ -f \"$f\" ] || continue; case \"$f\" in */subagents/*) continue;; esac; printf '%s\\t%s\\n' \"$(date -r \"$f\" +%s)\" \"$f\"; done | sort -rn | head -n {limit} | while IFS=\"$(printf '\\t')\" read -r m f; do\n\
+d=\"${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}\"\n\
+for f in \"$d\"/projects/*/*.jsonl; do [ -f \"$f\" ] || continue; case \"$f\" in */subagents/*) continue;; esac; m=$(stat -c %Y -- \"$f\" 2>/dev/null || stat -f %m -- \"$f\" 2>/dev/null || date -r \"$f\" +%s 2>/dev/null); case \"$m\" in ''|*[!0-9]*) continue;; esac; printf '%s\\t%s\\n' \"$m\" \"$f\"; done | sort -rn | head -n {limit} | while IFS=\"$(printf '\\t')\" read -r m f; do\n\
   printf '@@F\\t%s\\t%s\\n' \"$m\" \"$(basename \"$f\" .jsonl)\"\n\
   printf '@@L\\t%s\\n' \"$(tail -c 4194304 \"$f\" | grep -a '\"cwd\"' | tail -n 1 | cut -c1-8192)\"\n\
 done"
@@ -328,20 +633,70 @@ pub struct HostHealthSample {
     pub load_1m: Option<f64>,
     pub mem_avail_kb: Option<i64>,
     pub uptime_secs: Option<i64>,
+    /// Online CPUs (`getconf _NPROCESSORS_ONLN`, else `hw.ncpu`).
+    pub cpu_count: Option<i64>,
+    /// Physical memory in kB (`MemTotal`, else `hw.memsize` / 1024).
+    pub mem_total_kb: Option<i64>,
+    /// Boot time, unix seconds, as the host states it (`btime` in
+    /// `/proc/stat`, else `kern.boottime`). Steady between passes, unlike
+    /// now − uptime, so a change means the host rebooted.
+    pub boot_at: Option<i64>,
+    /// Round trip of an empty command to the host, in ms (Orbit Fleet 4.6).
+    /// Not read by the script: the probe times [`TmuxExec::round_trip_ms`]
+    /// and fills it in. `None` for `local` and whenever it was not timed.
+    pub latency_ms: Option<i64>,
+    /// Which [`AUTH_OVERRIDE_VARS`] are set, by NAME only, in the probing
+    /// shell or the tmux server's global environment (which every new pane
+    /// inherits). Any of them outranks the host's `/login`, so a session
+    /// started there bills that credential rather than the account fleet
+    /// shows. `None`: the host could not tell (an older agent, a failed
+    /// line); `Some(empty)`: none set.
+    pub auth_overrides: Option<Vec<String>>,
+    /// Which of [`crate::service::host_check::AGENT_BINARIES`] are on the
+    /// probing shell's `PATH`, in that order (Orbit Fleet 12.4: the New
+    /// session picker enables an agent only where it can run). `None`: the
+    /// host could not tell; `Some(empty)`: none found.
+    pub agents_on_path: Option<Vec<String>>,
 }
+
+/// The variables that outrank a Claude Code `/login` subscription
+/// credential (code.claude.com/docs/en/authentication, "Authentication
+/// precedence"), in that order. Only their names ever leave the host.
+pub const AUTH_OVERRIDE_VARS: [&str; 7] = [
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_PROFILE",
+];
 
 /// `df -Pk` of `$HOME` and `${TMPDIR:-/tmp}` (POSIX output, one line each,
 /// header dropped), the load average (`/proc/loadavg` on Linux, `sysctl -n
 /// vm.loadavg` on macOS — `{ 1.62 1.80 1.91 }`), available memory in kB
 /// (`MemAvailable` on Linux; empty on macOS, whose `vm_stat` has no single
 /// equivalent), and the uptime in seconds (`/proc/uptime`, else derived
-/// from `kern.boottime`). Every command is `2>/dev/null` with an empty
+/// from `kern.boottime`, `{ sec = N, usec = M } <date>`; the sed anchors on
+/// `{ sec = ` because `usec = ` also contains `sec = `), then the online CPU
+/// count, total memory in kB and the boot epoch (Orbit Fleet 4.6: `cpus=`,
+/// `memtotal=`, `bootat=`, Linux first, macOS `sysctl` second). Every command is `2>/dev/null` with an empty
 /// value on failure, so a missing tool degrades one field, never the probe.
+/// `authenv=` lists which [`AUTH_OVERRIDE_VARS`] hold a non-empty value in
+/// this shell or in `tmux show-environment -g`: `grep` matches whole lines
+/// inside the pipe and `cut` keeps only the name, so no value is printed.
+/// `agents=` lists which agent CLIs `command -v` finds (Orbit Fleet 12.4;
+/// the names are [`crate::service::host_check::AGENT_BINARIES`]).
 pub const HOST_HEALTH_SCRIPT: &str = "printf 'dfhome=%s\\n' \"$(df -Pk \"$HOME\" 2>/dev/null | tail -n 1)\"; \
 printf 'dftmp=%s\\n' \"$(df -Pk \"${TMPDIR:-/tmp}\" 2>/dev/null | tail -n 1)\"; \
 printf 'load=%s\\n' \"$(cat /proc/loadavg 2>/dev/null || sysctl -n vm.loadavg 2>/dev/null)\"; \
 printf 'memkb=%s\\n' \"$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null)\"; \
-printf 'uptime=%s\\n' \"$(cut -d. -f1 /proc/uptime 2>/dev/null || { b=$(sysctl -n kern.boottime 2>/dev/null | sed 's/.*sec = \\([0-9]*\\).*/\\1/'); [ -n \"$b\" ] && echo $(( $(date +%s) - b )); })\"";
+printf 'uptime=%s\\n' \"$(cut -d. -f1 /proc/uptime 2>/dev/null || { b=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*{ sec = \\([0-9]*\\),.*/\\1/p'); [ -n \"$b\" ] && echo $(( $(date +%s) - b )); })\"; \
+printf 'cpus=%s\\n' \"$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null)\"; \
+printf 'memtotal=%s\\n' \"$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || { m=$(sysctl -n hw.memsize 2>/dev/null); [ -n \"$m\" ] && echo $(( m / 1024 )); })\"; \
+printf 'bootat=%s\\n' \"$(awk '/^btime / {print $2}' /proc/stat 2>/dev/null || sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*{ sec = \\([0-9]*\\),.*/\\1/p')\"; \
+printf 'authenv=%s\\n' \"$({ env; tmux show-environment -g 2>/dev/null; } | grep -E '^(CLAUDE_CODE_USE_BEDROCK|CLAUDE_CODE_USE_VERTEX|CLAUDE_CODE_USE_FOUNDRY|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_PROFILE)=.' | cut -d= -f1 | sort -u | tr '\\n' ' ')\"; \
+printf 'agents=%s\\n' \"$(for a in claude codex agy gemini; do command -v \"$a\" >/dev/null 2>&1 && printf '%s ' \"$a\"; done)\"";
 
 /// Second field of a `df -Pk` data line is total kB, fourth is available kB.
 fn df_kb(line: &str) -> (Option<i64>, Option<i64>) {
@@ -370,6 +725,32 @@ pub fn parse_host_health(stdout: &str) -> HostHealthSample {
             h.mem_avail_kb = v.trim().parse().ok();
         } else if let Some(v) = line.strip_prefix("uptime=") {
             h.uptime_secs = v.trim().parse().ok();
+        } else if let Some(v) = line.strip_prefix("cpus=") {
+            h.cpu_count = v.trim().parse().ok().filter(|n: &i64| *n > 0);
+        } else if let Some(v) = line.strip_prefix("memtotal=") {
+            h.mem_total_kb = v.trim().parse().ok().filter(|n: &i64| *n > 0);
+        } else if let Some(v) = line.strip_prefix("bootat=") {
+            h.boot_at = v.trim().parse().ok().filter(|n: &i64| *n > 0);
+        } else if let Some(v) = line.strip_prefix("authenv=") {
+            // In precedence order, and only names fleet asked about.
+            let set: Vec<&str> = v.split_whitespace().collect();
+            h.auth_overrides = Some(
+                AUTH_OVERRIDE_VARS
+                    .iter()
+                    .filter(|n| set.contains(n))
+                    .map(|n| n.to_string())
+                    .collect(),
+            );
+        } else if let Some(v) = line.strip_prefix("agents=") {
+            // In the checklist's order, and only names fleet asked about.
+            let found: Vec<&str> = v.split_whitespace().collect();
+            h.agents_on_path = Some(
+                crate::service::host_check::AGENT_BINARIES
+                    .iter()
+                    .filter(|a| found.contains(a))
+                    .map(|a| a.to_string())
+                    .collect(),
+            );
         }
     }
     h
@@ -446,6 +827,14 @@ impl TmuxExec for LocalTmux {
     async fn kill_session(&self, name: &str) -> Result<(), IpcError> {
         local_allowed()?;
         kill_session(name).await
+    }
+    async fn run_script(&self, script: &str) -> Result<std::process::Output, IpcError> {
+        local_allowed()?;
+        crate::proc::command("bash")
+            .args(["-c", script])
+            .output()
+            .await
+            .map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn bash: {e}")))
     }
     async fn rename_session(&self, old: &str, new: &str) -> Result<(), IpcError> {
         local_allowed()?;
@@ -561,6 +950,14 @@ impl TmuxExec for LocalTmux {
             .filter(|o| o.status.success())?;
         Some(parse_host_health(&String::from_utf8_lossy(&out.stdout)))
     }
+    async fn read_profiles(&self) -> Option<Vec<HostProfile>> {
+        local_allowed().ok()?;
+        let home = crate::service::hosts::local_home_dir();
+        tokio::task::spawn_blocking(move || read_local_profiles(&home))
+            .await
+            .ok()
+            .flatten()
+    }
 }
 
 /// tmux over an `SshExec`. Generic (defaulting to the production client) so
@@ -649,10 +1046,12 @@ pub fn probe_snapshot_script(tail_lines: u32, want_versions: bool) -> String {
          printf '%s\\n' '---FLEET:health'; {HOST_HEALTH_SCRIPT}; \
          printf '%s\\n' '---FLEET:sessions'; out=$(tmux list-sessions -F '{SESSIONS_FORMAT}' 2>&1); rc=$?; printf 'rc=%s\\n' \"$rc\"; printf '%s\\n' \"$out\" | sed 's/^---FLEET/ &/'; \
          printf '%s\\n' '---FLEET:account'; {}; \
+         printf '%s\\n' '---FLEET:profiles'; {}; \
          printf '%s\\n' '---FLEET:panes'; \
-         tmux list-sessions -F '#{{session_name}}' 2>/dev/null | while IFS= read -r s; do printf '%s\\n' \"---FLEET:pane $s\"; tmux capture-pane -t \"=$s:\" -S {start} -p 2>/dev/null | sed 's/^---FLEET/ &/'; done; \
+         tmux list-sessions -F '#{{session_name}}' 2>/dev/null | while IFS= read -r s; do case \"$s\" in *--sh[1-9]|*--sh[1-9][0-9]) continue;; esac; printf '%s\\n' \"---FLEET:pane $s\"; tmux capture-pane -t \"=$s:\" -S {start} -p 2>/dev/null | sed 's/^---FLEET/ &/'; done; \
          printf '%s\\n' '---FLEET:end'",
-        crate::service::hosts::OAUTH_ACCOUNT_SCRIPT
+        crate::service::hosts::OAUTH_ACCOUNT_SCRIPT,
+        profiles_script()
     )
 }
 
@@ -734,6 +1133,7 @@ pub fn parse_probe_snapshot(stdout: &str) -> Result<ProbeSnapshot, IpcError> {
         section("account").and_then(|b| crate::service::hosts::parse_oauth_account(b.trim()));
     let versions = section("versions").map(parse_host_versions);
     let health = section("health").map(parse_host_health);
+    let profiles = section("profiles").map(parse_profiles);
     let mut pane_tails = std::collections::HashMap::new();
     for (name, body) in &sections {
         if let Some(pane) = name.strip_prefix("pane ") {
@@ -747,11 +1147,25 @@ pub fn parse_probe_snapshot(stdout: &str) -> Result<ProbeSnapshot, IpcError> {
         pane_tails,
         versions,
         health,
+        profiles,
     })
 }
 
 #[async_trait]
 impl<C: SshExec> TmuxExec for RemoteTmux<C> {
+    async fn round_trip_ms(&self) -> Option<i64> {
+        // `true` straight on the ssh command line, not through
+        // `remote_sh`'s `bash -lc`: a login shell's profile would be timed
+        // as network.
+        let budget = std::time::Duration::from_secs(5);
+        let start = std::time::Instant::now();
+        self.client
+            .run_bounded_capped(&self.host, &["true"], budget, budget, 1024)
+            .await
+            .ok()
+            .filter(|o| o.status.success())?;
+        Some(i64::try_from(start.elapsed().as_millis()).unwrap_or(i64::MAX))
+    }
     async fn list_sessions(&self) -> Result<Vec<TmuxSession>, IpcError> {
         let script = format!("tmux list-sessions -F '{SESSIONS_FORMAT}' 2>&1");
         let output = self.remote_sh(&script).await?;
@@ -798,6 +1212,10 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
         }
     }
 
+    async fn run_script(&self, script: &str) -> Result<std::process::Output, IpcError> {
+        self.remote_sh(script).await
+    }
+
     async fn kill_session(&self, name: &str) -> Result<(), IpcError> {
         let script = format!("tmux kill-session -t {}", quote(&exact_session(name)));
         let output = self.remote_sh(&script).await?;
@@ -819,10 +1237,10 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
                 "new session name must not be empty",
             ));
         }
-        if trimmed.contains(|c: char| c.is_whitespace() || c == '.' || c == ':') {
+        if trimmed.contains(|c: char| c.is_whitespace() || c == '.' || c == ':' || c == '#') {
             return Err(IpcError::new(
                 codes::E_TMUX,
-                "tmux session name must not contain whitespace, `.`, or `:`",
+                "tmux session name must not contain whitespace, `.`, `:` or `#`",
             ));
         }
         if trimmed == old {
@@ -966,6 +1384,14 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             .filter(|o| o.status.success())?;
         Some(parse_host_health(&String::from_utf8_lossy(&out.stdout)))
     }
+    async fn read_profiles(&self) -> Option<Vec<HostProfile>> {
+        let out = self
+            .remote_sh(&profiles_script())
+            .await
+            .ok()
+            .filter(|o| o.status.success())?;
+        Some(parse_profiles(&String::from_utf8_lossy(&out.stdout)))
+    }
     async fn probe_snapshot(&self, tail_lines: u32, want_versions: bool) -> ProbeSnapshot {
         let script = probe_snapshot_script(tail_lines, want_versions);
         match self.remote_sh(&script).await {
@@ -976,6 +1402,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
                 pane_tails: Default::default(),
                 versions: None,
                 health: None,
+                profiles: None,
             },
             Ok(out) => {
                 let text = String::from_utf8_lossy(&out.stdout);
@@ -995,6 +1422,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
                             pane_tails: Default::default(),
                             versions: None,
                             health: None,
+                            profiles: None,
                         }
                     }
                 }
@@ -1010,7 +1438,23 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
 pub enum NamedKey {
     Enter,
     Escape,
+    /// Moves a multi-select question's cursor to its next option, and from
+    /// the last one onto the dialog's `Submit` row (where a further `Tab` does
+    /// nothing), so a client can reach Submit without knowing the cursor.
+    Tab,
     CtrlC,
+    /// The four arrows: a select dialog's cursor, the REPL's history and
+    /// its line editing. The phone's key bar (redesign 14.14).
+    Up,
+    Down,
+    Left,
+    Right,
+    /// Shift-Tab (tmux `BTab`): Claude Code's mode switch.
+    BackTab,
+    /// Ctrl plus a letter from [`CtrlKey`]'s closed list: the REPL's own
+    /// shortcuts (C-r history, C-o transcript, C-l clear, C-u / C-k / C-w
+    /// line editing, …). `C-c` stays [`NamedKey::CtrlC`].
+    Ctrl(CtrlKey),
     /// One of `1`..`9` — the keystroke that answers a numbered permission /
     /// question dialog. Typing the ordinal as *text* would not do: the text
     /// path pastes through `paste-buffer -p`, and the REPL has bracketed
@@ -1018,6 +1462,11 @@ pub enum NamedKey {
     /// `ESC [ 2 0 0 ~ 3 ESC [ 2 0 1 ~` — the first key the dialog sees is
     /// ESC, which cancels it. `send-keys 3` delivers one raw `3`.
     Digit(DigitKey),
+    /// Meta (Alt) plus a letter or one of a few editing keys, from
+    /// [`MetaKey`]'s closed list: the REPL's word motions (M-b / M-f),
+    /// M-Enter for a newline without sending, and the phone's Alt key
+    /// (gap plan G7.3).
+    Meta(MetaKey),
 }
 
 /// An ordinal a dialog can be answered with: `1`..`9`, and nothing else.
@@ -1031,6 +1480,60 @@ pub enum NamedKey {
 pub struct DigitKey(u8);
 
 const DIGIT_NAMES: [&str; 9] = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
+
+/// A Ctrl+letter a pane may be sent: every letter but the ones that are
+/// another key under a second name or that stop the pane rather than the
+/// REPL. Left out: `C-c` (it is [`NamedKey::CtrlC`]), `C-i` / `C-j` / `C-m`
+/// (Tab and Enter under other names, which would side-step the rules those
+/// keys carry), `C-s` / `C-q` (XON/XOFF: `C-s` can freeze a terminal until a
+/// `C-q` nobody knows to send) and `C-z` (suspends the foreground process,
+/// Claude Code with it, to a shell prompt). Private field, so
+/// [`new`](Self::new) is the only way in and every value is in the table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CtrlKey(usize);
+
+/// The tmux names of the Ctrl keys [`CtrlKey`] admits, in alphabet order.
+pub const CTRL_NAMES: [&str; 19] = [
+    "C-a", "C-b", "C-d", "C-e", "C-f", "C-g", "C-h", "C-k", "C-l", "C-n", "C-o", "C-p", "C-r",
+    "C-t", "C-u", "C-v", "C-w", "C-x", "C-y",
+];
+
+/// A Meta (Alt) chord a pane may be sent: `M-a`..`M-z`, `M-Enter` (a
+/// newline in the prompt without sending it), `M-BSpace` (delete the word
+/// before the cursor) and `M-Left` / `M-Right` (move by word). Lower-case
+/// letters only: tmux reads `M-A` as Meta-Shift-a, another key. Private
+/// field, so [`new`](Self::new) is the only way in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MetaKey(usize);
+
+/// The tmux names of the Meta chords [`MetaKey`] admits.
+pub const META_NAMES: [&str; 30] = [
+    "M-a", "M-b", "M-c", "M-d", "M-e", "M-f", "M-g", "M-h", "M-i", "M-j", "M-k", "M-l", "M-m",
+    "M-n", "M-o", "M-p", "M-q", "M-r", "M-s", "M-t", "M-u", "M-v", "M-w", "M-x", "M-y", "M-z",
+    "M-Enter", "M-BSpace", "M-Left", "M-Right",
+];
+
+impl MetaKey {
+    /// `Some` for a name in [`META_NAMES`], exactly as spelled there.
+    pub fn new(name: &str) -> Option<Self> {
+        META_NAMES.iter().position(|n| *n == name).map(Self)
+    }
+
+    pub fn tmux_name(self) -> &'static str {
+        META_NAMES[self.0]
+    }
+}
+
+impl CtrlKey {
+    /// `Some` for a name in [`CTRL_NAMES`], exactly as spelled there.
+    pub fn new(name: &str) -> Option<Self> {
+        CTRL_NAMES.iter().position(|n| *n == name).map(Self)
+    }
+
+    pub fn tmux_name(self) -> &'static str {
+        CTRL_NAMES[self.0]
+    }
+}
 
 impl DigitKey {
     /// `Some` for `1..=9`, `None` for anything else.
@@ -1048,13 +1551,36 @@ impl NamedKey {
     /// Every accepted value, in the words a refusal shows the caller. Both
     /// `send_prompt` paths (the service function and the MCP tool) print
     /// this, so the message can never fall behind [`parse`](Self::parse).
-    pub const VOCABULARY: &'static str = "Enter, Escape, C-c or a digit 1-9";
+    pub const VOCABULARY: &'static str = "Enter, Escape, Tab, BTab, Up, Down, Left, Right, C-c, \
+         C-a/b/d/e/f/g/h/k/l/n/o/p/r/t/u/v/w/x/y, M-a..M-z, M-Enter, M-BSpace, M-Left, \
+         M-Right or a digit 1-9";
+
+    /// Every key name [`parse`](Self::parse) accepts, digits included: what
+    /// the `keys` argument's schema enumerates, so a client can tell a hub
+    /// that takes the arrows and Ctrl keys from one that does not.
+    pub fn all_names() -> Vec<&'static str> {
+        let mut v = vec![
+            "Enter", "Escape", "Tab", "BTab", "Up", "Down", "Left", "Right", "C-c",
+        ];
+        v.extend(CTRL_NAMES);
+        v.extend(META_NAMES);
+        v.extend(DIGIT_NAMES);
+        v
+    }
 
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "Enter" => Some(Self::Enter),
             "Escape" => Some(Self::Escape),
+            "Tab" => Some(Self::Tab),
             "C-c" => Some(Self::CtrlC),
+            "Up" => Some(Self::Up),
+            "Down" => Some(Self::Down),
+            "Left" => Some(Self::Left),
+            "Right" => Some(Self::Right),
+            "BTab" => Some(Self::BackTab),
+            _ if s.starts_with("C-") => CtrlKey::new(s).map(Self::Ctrl),
+            _ if s.starts_with("M-") => MetaKey::new(s).map(Self::Meta),
             // Exactly one ASCII digit. `str::parse::<u8>` would accept
             // "+1", " 1" and "007"; a dialog answer must be the literal
             // keystroke or nothing.
@@ -1068,7 +1594,15 @@ impl NamedKey {
         match self {
             Self::Enter => "Enter",
             Self::Escape => "Escape",
+            Self::Tab => "Tab",
             Self::CtrlC => "C-c",
+            Self::Up => "Up",
+            Self::Down => "Down",
+            Self::Left => "Left",
+            Self::Right => "Right",
+            Self::BackTab => "BTab",
+            Self::Ctrl(k) => k.tmux_name(),
+            Self::Meta(k) => k.tmux_name(),
             // Sound by construction: `DigitKey`'s field is private and
             // `DigitKey::new` admits only 1..=9.
             Self::Digit(d) => DIGIT_NAMES[(d.get() - 1) as usize],
@@ -1137,6 +1671,14 @@ pub async fn list_local_sessions() -> Result<Vec<TmuxSession>, IpcError> {
     }
 }
 
+/// True for a tmux error that means the target session is already gone:
+/// "can't find session: NAME", or no tmux server on the host at all (tmux
+/// exits with its last session). A kill that gets this has nothing left to
+/// kill, so it is done, not failed.
+pub fn session_already_gone(stderr: &str) -> bool {
+    stderr.to_lowercase().contains("can't find session") || is_no_server_running(stderr)
+}
+
 /// True for any tmux stderr that means "no server is running on this socket"
 /// — i.e. an empty `list_local_sessions()` return rather than an error.
 ///
@@ -1190,13 +1732,23 @@ fn parse_sessions(input: &str) -> Vec<TmuxSession> {
 /// then delete, every row on the host; an `E_TMUX` makes the reconcile count
 /// the host unreachable for this pass instead. Blank output and "no server
 /// running" still mean zero sessions.
+#[cfg(test)]
+pub(crate) fn parse_sessions_for_test(input: &str) -> Result<Vec<TmuxSession>, IpcError> {
+    parse_sessions_checked(input)
+}
+
 fn parse_sessions_checked(input: &str) -> Result<Vec<TmuxSession>, IpcError> {
-    let sessions = parse_sessions(input);
+    let mut sessions = parse_sessions(input);
     let mut lines = input.lines().map(str::trim).filter(|l| !l.is_empty());
     let Some(first) = lines.next() else {
         return Ok(sessions);
     };
     if !sessions.is_empty() || is_no_server_running(input) {
+        // Shell terminals (step 5.3) leave AFTER the "nothing parsed"
+        // check: a host running only terminals parsed fine, it just has no
+        // session for the list.
+        // Add account's login panes (M15 G2.9) leave with them.
+        sessions.retain(|s| !is_shell_terminal_name(&s.name) && !is_login_session_name(&s.name));
         return Ok(sessions);
     }
     let sample: String = first.chars().take(80).collect();
@@ -1227,6 +1779,30 @@ pub(crate) fn scrollback_start(lines: u32) -> String {
 /// `--effort`), so the chain below is identical whichever one runs.
 pub(crate) const CL_FALLBACK: &str = r#"if ! command -v cl >/dev/null 2>&1; then if [ -x "$HOME/.local/share/ag/ag" ]; then cl() { "$HOME/.local/share/ag/ag" claude --yolo "$@"; }; else cl() { claude --dangerously-skip-permissions "$@"; }; fi; fi;"#;
 
+/// Exports an API-key profile's key (M15 step G2.9,
+/// `service::add_account`): when `$CLAUDE_CONFIG_DIR` holds
+/// `.fleet-api-key`, its one line becomes `ANTHROPIC_API_KEY` for the
+/// `claude` that follows (rung 3 of docs/accounts.md, ahead of any
+/// `/login`). Read with the shell's own `read`, so the key is never in an
+/// argv, a tmux environment or the pane command; a profile without the file
+/// is untouched. Follows the `export CLAUDE_CONFIG_DIR=…;` it needs.
+pub const PROFILE_API_KEY: &str = r#"if [ -r "$CLAUDE_CONFIG_DIR/.fleet-api-key" ]; then IFS= read -r ANTHROPIC_API_KEY < "$CLAUDE_CONFIG_DIR/.fleet-api-key"; export ANTHROPIC_API_KEY; fi; "#;
+
+/// Makes `$CLAUDE_CONFIG_DIR` a credential profile that shares everything
+/// with `~/.claude` except the login (docs/accounts.md). Each visible entry
+/// of `~/.claude` (`projects/`, `settings.json` with fleet's hooks, skills,
+/// …) is symlinked in unless the profile already has its own; the dotfiles
+/// are not, so `.credentials.json` and the profile's `.claude.json` (its
+/// `/login` account) stay the profile's own. Fleet reads transcripts from
+/// `~/.claude/projects` and a resumed session must find its transcript
+/// under any profile, so `projects/` is created first. Idempotent: run on
+/// every launch, it also links an entry `~/.claude` gained since. Run by
+/// `/bin/sh`, so a zsh pane shell's no-match glob error cannot abort it.
+pub const PROFILE_LINKS: &str = r#"umask 077; mkdir -p "$HOME/.claude/projects" "$CLAUDE_CONFIG_DIR" || exit 0; for f in "$HOME"/.claude/*; do [ -e "$f" ] || continue; b="${f##*/}"; [ -e "$CLAUDE_CONFIG_DIR/$b" ] || [ -L "$CLAUDE_CONFIG_DIR/$b" ] || ln -s "$f" "$CLAUDE_CONFIG_DIR/$b"; done"#;
+
+/// Puts fleet's `/voice` recorder ahead of any real `arecord` (docs/voice.md).
+pub(crate) const VOICE_PATH_PREFIX: &str = "PATH=\"$HOME/.claude-fleet/voice/bin:$PATH\"; ";
+
 /// The pane command for a Claude ("work"/"review") session. With a known
 /// session id: resume it, else create it under that id, else a bare `cl` — an
 /// idempotent create-or-resume. Without an id (legacy rows): today's
@@ -1239,11 +1815,12 @@ pub(crate) const CL_FALLBACK: &str = r#"if ! command -v cl >/dev/null 2>&1; then
 /// (authoritative) instead of inferring it from the cwd, which is ambiguous
 /// once two sessions share a directory.
 ///
-/// The command starts with [`CL_FALLBACK`]: the user's own `cl` wins when it
-/// is on PATH, otherwise fleet's provisioned `ag` launcher, else an inline
-/// `claude --dangerously-skip-permissions`, stands in. Without it a host
-/// whose `cl` lives only in interactive shells printed "command not found:
-/// cl" and dropped straight to the login shell.
+/// The command starts with [`VOICE_PATH_PREFIX`] (fleet's `/voice`
+/// recorder first on PATH), then [`CL_FALLBACK`]: the user's own `cl` wins
+/// when it is on PATH, otherwise fleet's provisioned `ag` launcher, else an
+/// inline `claude --dangerously-skip-permissions`, stands in. Without it a
+/// host whose `cl` lives only in interactive shells printed "command not
+/// found: cl" and dropped straight to the login shell.
 pub fn pane_command_for(claude_session_id: Option<&str>, tmux_name: &str) -> String {
     pane_command_with(claude_session_id, tmux_name, &ClaudeLaunch::default())
 }
@@ -1255,16 +1832,36 @@ pub fn pane_command_for(claude_session_id: Option<&str>, tmux_name: &str) -> Str
 pub struct ClaudeLaunch {
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// The credential profile the session runs under: `CLAUDE_CONFIG_DIR`
+    /// is `~/.claude-profiles/<profile>` ([`PROFILE_LINKS`]). `None` = the
+    /// host's own login. Must have passed `validate::claude_profile`.
+    pub profile: Option<String>,
 }
 
 impl ClaudeLaunch {
     /// Stored launch options, each kept only when it still validates: a
     /// value read back from the DB never reaches the shell unchecked (an
     /// invalid one degrades to the host's default, like a bad claude id).
-    pub fn checked(model: Option<String>, effort: Option<String>) -> Self {
+    pub fn checked(model: Option<String>, effort: Option<String>, profile: Option<String>) -> Self {
         Self {
             model: model.filter(|m| crate::validate::claude_model(m).is_ok()),
             effort: effort.filter(|e| crate::validate::effort_level(e).is_ok()),
+            profile: profile.filter(|p| crate::validate::claude_profile(p).is_ok()),
+        }
+    }
+
+    /// `export CLAUDE_CONFIG_DIR=…; <PROFILE_LINKS>` for a session with a
+    /// profile; empty otherwise. Exported, not `-e` on the tmux session, so
+    /// a restart (`respawn-pane`, which takes no environment), a repair or
+    /// a move rebuilds it from the stored profile like `--model`.
+    fn profile_prefix(&self) -> String {
+        match self.profile.as_deref() {
+            Some(p) => format!(
+                "export CLAUDE_CONFIG_DIR=\"$HOME/.claude-profiles/\"{}; /bin/sh -c {} 2>/dev/null; {PROFILE_API_KEY}",
+                crate::shell::quote(p),
+                crate::shell::quote(PROFILE_LINKS),
+            ),
+            None => String::new(),
         }
     }
 
@@ -1294,11 +1891,17 @@ pub fn pane_command_with(
         crate::shell::quote(tmux_name),
         launch.flags()
     );
+    let profile = launch.profile_prefix();
     match claude_session_id {
-        Some(id) => format!(
-            "{CL_FALLBACK} cl --resume '{id}' {name} 2>/dev/null || cl --session-id '{id}' {name} || cl {name}; {tail}"
+        Some(id) => {
+            let id = crate::shell::quote(id);
+            format!(
+                "{VOICE_PATH_PREFIX}{profile}{CL_FALLBACK} cl --resume {id} {name} 2>/dev/null || cl --session-id {id} {name} || cl {name}; {tail}"
+            )
+        }
+        None => format!(
+            "{VOICE_PATH_PREFIX}{profile}{CL_FALLBACK} cl --continue {name} || cl {name}; {tail}"
         ),
-        None => format!("{CL_FALLBACK} cl --continue {name} || cl {name}; {tail}"),
     }
 }
 
@@ -1372,10 +1975,10 @@ pub async fn rename_session(old: &str, new: &str) -> Result<(), IpcError> {
             "new session name must not be empty",
         ));
     }
-    if trimmed.contains(|c: char| c.is_whitespace() || c == '.' || c == ':') {
+    if trimmed.contains(|c: char| c.is_whitespace() || c == '.' || c == ':' || c == '#') {
         return Err(IpcError::new(
             codes::E_TMUX,
-            "tmux session name must not contain whitespace, `.`, or `:`",
+            "tmux session name must not contain whitespace, `.`, `:` or `#`",
         ));
     }
     if trimmed == old {
@@ -1825,6 +2428,13 @@ mod tests {
     #[test]
     fn does_not_swallow_unrelated_errors() {
         assert!(!is_no_server_running("can't find session: dev-foo"));
+        assert!(session_already_gone("can't find session: dev-foo"));
+        assert!(session_already_gone(
+            "no server running on /tmp/tmux-1000/default"
+        ));
+        assert!(!session_already_gone(
+            "ssh: connect to host x port 22: Connection refused"
+        ));
         assert!(!is_no_server_running("ambiguous option"));
         assert!(!is_no_server_running(""));
     }
@@ -1874,6 +2484,23 @@ mod tests {
         assert!(rename_session("a", "has space").await.is_err());
         assert!(rename_session("a", "has.dot").await.is_err());
         assert!(rename_session("a", "has:colon").await.is_err());
+    }
+
+    #[test]
+    fn pane_command_quotes_a_session_id_through_shq() {
+        // An id is a UUID in practice, but the command must not depend on
+        // that: a quote in it stays inside one shell word.
+        let cmd = pane_command_for(Some("a'b"), "dev-x");
+        let q = crate::shell::quote("a'b");
+        assert!(
+            cmd.contains(&format!("cl --resume {q} --name 'dev-x'")),
+            "got: {cmd}"
+        );
+        assert!(
+            cmd.contains(&format!("cl --session-id {q} --name 'dev-x'")),
+            "got: {cmd}"
+        );
+        assert!(!cmd.contains("'a'b'"), "hand-quoted id: {cmd}");
     }
 
     #[test]
@@ -2129,6 +2756,7 @@ mod tests {
         let launch = ClaudeLaunch {
             model: Some("sonnet[1m]".into()),
             effort: Some("high".into()),
+            profile: None,
         };
         for shell in available_shells() {
             let argv =
@@ -2143,6 +2771,161 @@ mod tests {
         }
     }
 
+    /// A profile session runs `cl` with `CLAUDE_CONFIG_DIR` at
+    /// `~/.claude-profiles/<name>`, which shares `~/.claude`'s visible
+    /// entries (transcripts, settings with fleet's hooks) but never its
+    /// login, and keeps whatever the profile already has of its own.
+    #[cfg(unix)]
+    #[test]
+    fn a_profile_session_runs_under_its_config_dir_and_shares_all_but_the_login() {
+        use super::fake_exec::{write_exec, PROBE_GUARD};
+        let id = "550e8400-e29b-41d4-a716-446655440000";
+        let launch = ClaudeLaunch {
+            profile: Some("work".into()),
+            ..ClaudeLaunch::default()
+        };
+        let cmd = pane_command_with(Some(id), "dev-x", &launch);
+        for shell in available_shells() {
+            let home = tempfile::tempdir().unwrap();
+            let h = home.path();
+            let log = h.join("cl.log");
+            write_exec(
+                h,
+                "cl",
+                &format!(
+                    "#!/bin/sh\n{PROBE_GUARD}printf '%s %s\\n' \"$CLAUDE_CONFIG_DIR\" \"$*\" >> '{}'\nexit 0\n",
+                    log.display()
+                ),
+            );
+            write_exec(
+                h,
+                "fake-shell",
+                &format!("#!/bin/sh\n{PROBE_GUARD}exit 0\n"),
+            );
+            let claude = h.join(".claude");
+            std::fs::create_dir_all(claude.join("skills")).unwrap();
+            std::fs::write(claude.join("settings.json"), "{\"hooks\":{}}").unwrap();
+            std::fs::write(claude.join(".credentials.json"), "host-login").unwrap();
+            std::fs::write(claude.join("CLAUDE.md"), "shared").unwrap();
+            let profile = h.join(".claude-profiles/work");
+            std::fs::create_dir_all(&profile).unwrap();
+            std::fs::write(profile.join("CLAUDE.md"), "the profile's own").unwrap();
+            let out = std::process::Command::new(shell)
+                .arg("-c")
+                .arg(&cmd)
+                .env_clear()
+                .env("PATH", format!("{}:/usr/bin:/bin", h.display()))
+                .env("HOME", h)
+                .env("SHELL", h.join("fake-shell"))
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{shell}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let logged = std::fs::read_to_string(&log).unwrap();
+            assert_eq!(
+                logged.trim(),
+                format!(
+                    "{}/.claude-profiles/work --resume {id} --name dev-x",
+                    h.display()
+                ),
+                "{shell}"
+            );
+            for shared in ["projects", "settings.json", "skills"] {
+                let link = std::fs::read_link(profile.join(shared))
+                    .unwrap_or_else(|e| panic!("{shell}: {shared} not linked: {e}"));
+                assert_eq!(link, claude.join(shared), "{shell}");
+            }
+            assert!(claude.join("projects").is_dir(), "{shell}");
+            assert!(!profile.join(".credentials.json").exists(), "{shell}");
+            assert_eq!(
+                std::fs::read_to_string(profile.join("CLAUDE.md")).unwrap(),
+                "the profile's own",
+                "{shell}"
+            );
+        }
+    }
+
+    /// The profiles section lists each valid `~/.claude-profiles/<name>`
+    /// with its login, skips a name that is not a profile name, and reports
+    /// a profile with no login yet as such.
+    #[cfg(unix)]
+    #[test]
+    fn the_profiles_script_lists_each_profile_and_its_login() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path().join(".claude-profiles");
+        std::fs::create_dir_all(p.join("work")).unwrap();
+        std::fs::write(
+            p.join("work/.claude.json"),
+            r#"{"oauthAccount":{"accountUuid":"acc-w","emailAddress":"w@x.com"},"other":1}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(p.join("fresh")).unwrap();
+        std::fs::create_dir_all(p.join("bad name")).unwrap();
+        std::fs::create_dir_all(p.join("-dash")).unwrap();
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(profiles_script())
+            .env("HOME", home.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let got = parse_profiles(&String::from_utf8_lossy(&out.stdout));
+        let names: Vec<&str> = got.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["fresh", "work"]);
+        assert!(got[0].account.is_none());
+        let w = got[1].account.as_ref().unwrap();
+        assert_eq!(w.uuid.as_deref(), Some("acc-w"));
+        assert_eq!(w.email.as_deref(), Some("w@x.com"));
+
+        let local = read_local_profiles(home.path()).unwrap();
+        let names: Vec<&str> = local.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["fresh", "work"]);
+        assert_eq!(
+            local[1].account.as_ref().unwrap().uuid.as_deref(),
+            Some("acc-w")
+        );
+        assert_eq!(
+            read_local_profiles(&home.path().join("nowhere"))
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_probe_reports_its_profiles_section() {
+        let text = "---FLEET:sessions\nrc=0\n---FLEET:profiles\n@@P\twork\t{\"accountUuid\":\"a\"}\n@@P\tx y\t\n---FLEET:end\n";
+        let snap = parse_probe_snapshot(text).unwrap();
+        let profiles = snap.profiles.unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].name, "work");
+        let old = parse_probe_snapshot("---FLEET:sessions\nrc=0\n---FLEET:end\n").unwrap();
+        assert!(
+            old.profiles.is_none(),
+            "no section = could not tell, never 'none'"
+        );
+        assert!(probe_snapshot_script(10, false).contains("---FLEET:profiles"));
+    }
+
+    #[test]
+    fn a_session_without_a_profile_leaves_the_config_dir_alone() {
+        let cmd = pane_command_with(None, "dev-x", &ClaudeLaunch::default());
+        assert!(!cmd.contains("CLAUDE_CONFIG_DIR"), "{cmd}");
+        let bad = ClaudeLaunch::checked(None, None, Some("../../etc".into()));
+        assert_eq!(
+            bad.profile, None,
+            "a stored profile that no longer validates is dropped"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn pane_command_prefers_the_users_cl_when_present() {
@@ -2153,6 +2936,27 @@ mod tests {
                 argv,
                 vec![format!("cl --resume {id} --name dev-x")],
                 "{shell}"
+            );
+        }
+    }
+
+    /// Voice relay F1: fleet's `arecord` stand-in comes ahead of any real one
+    /// on `claude`'s PATH, whichever branch of the chain runs.
+    #[test]
+    fn pane_command_puts_the_voice_bin_first_on_path() {
+        assert_eq!(
+            VOICE_PATH_PREFIX,
+            "PATH=\"$HOME/.claude-fleet/voice/bin:$PATH\"; "
+        );
+        for cmd in [
+            pane_command_for(None, "s"),
+            pane_command_for(Some("550e8400-e29b-41d4-a716-446655440000"), "s"),
+        ] {
+            assert!(cmd.starts_with(VOICE_PATH_PREFIX), "got: {cmd}");
+            assert_eq!(
+                cmd[VOICE_PATH_PREFIX.len()..].find(CL_FALLBACK),
+                Some(0),
+                "the fallback follows the prefix: {cmd}"
             );
         }
     }
@@ -2329,6 +3133,38 @@ mod tests {
         assert_eq!(ids, vec![uuid1], "raw:\n{stdout}");
     }
 
+    /// Review r18: a host whose Claude keeps its state under
+    /// `CLAUDE_CONFIG_DIR` has its transcripts found there. Unix only, as
+    /// the other script tests here: the script runs on a host's bash, and
+    /// Windows runners' `bash` is the WSL stub.
+    #[cfg(unix)]
+    #[test]
+    fn discover_transcripts_script_honours_claude_config_dir() {
+        let home = tempfile::tempdir().unwrap();
+        let conf = tempfile::tempdir().unwrap();
+        let proj = conf.path().join("projects").join("-w-c");
+        std::fs::create_dir_all(&proj).unwrap();
+        let id = "33333333-3333-4333-8333-333333333333";
+        std::fs::write(
+            proj.join(format!("{id}.jsonl")),
+            "{\"cwd\":\"/w/c\",\"gitBranch\":\"main\"}\n",
+        )
+        .unwrap();
+        let out = std::process::Command::new("bash")
+            .args(["-c", &discover_transcripts_script(10)])
+            .env("HOME", home.path())
+            .env("CLAUDE_CONFIG_DIR", conf.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let (_boot, probes) = crate::service::sessions::parse_discover_output(&stdout);
+        assert_eq!(probes.len(), 1, "raw:\n{stdout}");
+        assert_eq!(probes[0].claude_session_id, id);
+        assert!(probes[0].mtime > 0, "dated: {stdout}");
+        assert_eq!(probes[0].cwd.as_deref(), Some("/w/c"));
+    }
+
     #[test]
     fn parse_host_identity_reads_both_fields() {
         let id = parse_host_identity("boot=abc-123\ntmuxrc=0\ntmuxout=4242\n").unwrap();
@@ -2355,8 +3191,15 @@ mod tests {
                      dftmp=tmpfs 8000000 2100000 5900000 27% /tmp\n\
                      load=5.25 4.10 3.90 1/900 12345\n\
                      memkb=1234567\n\
-                     uptime=12441600\n";
+                     uptime=12441600\n\
+                     cpus=16\n\
+                     memtotal=65842312\n\
+                     bootat=1778000000\n";
         let h = parse_host_health(linux);
+        assert_eq!(h.cpu_count, Some(16));
+        assert_eq!(h.mem_total_kb, Some(65_842_312));
+        assert_eq!(h.boot_at, Some(1_778_000_000));
+        assert_eq!(h.latency_ms, None, "the script never reports latency");
         assert_eq!(h.disk_home_total_kb, Some(157_286_400));
         assert_eq!(h.disk_home_free_kb, Some(3_600_000));
         assert_eq!(h.disk_tmp_free_kb, Some(5_900_000));
@@ -2367,13 +3210,196 @@ mod tests {
                    dftmp=\n\
                    load={ 1.62 1.80 1.91 }\n\
                    memkb=\n\
-                   uptime=86400\n";
+                   uptime=86400\n\
+                   cpus=10\n\
+                   memtotal=\n\
+                   bootat=0\n";
         let h = parse_host_health(mac);
+        assert_eq!(h.cpu_count, Some(10));
+        assert_eq!(h.mem_total_kb, None);
+        assert_eq!(h.boot_at, None, "a zero epoch is no answer");
         assert_eq!(h.disk_home_free_kb, Some(45_000_000));
         assert_eq!(h.disk_tmp_free_kb, None);
         assert_eq!(h.load_1m, Some(1.62));
         assert_eq!(h.mem_avail_kb, None);
         assert_eq!(parse_host_health(""), HostHealthSample::default());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_macos_uptime_fallback_reads_the_seconds_not_the_microseconds() {
+        // Run the real script with the Linux path forced off (`cut` fails,
+        // as it does when /proc/uptime is absent) and a `sysctl` printing
+        // macOS's actual `kern.boottime` shape. Its `usec = ` also contains
+        // `sec = `, so a greedy match took the microseconds as the boot
+        // epoch and reported ~56 years of uptime. `date` is pinned so the
+        // uptime is exact.
+        use std::os::unix::fs::PermissionsExt;
+        let bin = tempfile::tempdir().unwrap();
+        for (tool, body) in [
+            (
+                "sysctl",
+                "#!/bin/sh\n[ \"$2\" = kern.boottime ] || exit 1\n\
+                 echo '{ sec = 1790420987, usec = 963287 } Sat Sep 26 13:09:47 2026'\n",
+            ),
+            ("cut", "#!/bin/sh\nexit 1\n"),
+            ("date", "#!/bin/sh\necho 1790421987\n"),
+        ] {
+            let p = bin.path().join(tool);
+            std::fs::write(&p, body).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = format!(
+            "{}:{}",
+            bin.path().display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let out = std::process::Command::new("sh")
+            .args(["-c", HOST_HEALTH_SCRIPT])
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert_eq!(
+            parse_host_health(&stdout).uptime_secs,
+            Some(1000),
+            "{stdout}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_health_script_reads_cpus_memory_and_boot_time_on_linux() {
+        let out = std::process::Command::new("sh")
+            .args(["-c", HOST_HEALTH_SCRIPT])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let h = parse_host_health(&stdout);
+        assert!(h.cpu_count.is_some_and(|n| n >= 1), "{stdout}");
+        assert!(h.mem_total_kb.is_some_and(|n| n > 0), "{stdout}");
+        // A boot in the past, and after 2001.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert!(
+            h.boot_at.is_some_and(|b| b > 1_000_000_000 && b <= now),
+            "{stdout}"
+        );
+    }
+
+    #[test]
+    fn parse_host_health_reads_the_agents_on_path_in_checklist_order() {
+        let h = parse_host_health("agents=codex claude vim gemini \n");
+        assert_eq!(
+            h.agents_on_path,
+            Some(vec![
+                "claude".to_string(),
+                "codex".to_string(),
+                "gemini".to_string()
+            ]),
+            "known names only, in AGENT_BINARIES order"
+        );
+        assert_eq!(parse_host_health("agents=\n").agents_on_path, Some(vec![]));
+        // An older agent's sample has no line at all: unknown, not none.
+        assert_eq!(parse_host_health("uptime=5\n").agents_on_path, None);
+        // The script asks about exactly the checklist's agents.
+        let asked = format!(
+            "for a in {}; do",
+            crate::service::host_check::AGENT_BINARIES.join(" ")
+        );
+        assert!(HOST_HEALTH_SCRIPT.contains(&asked), "{HOST_HEALTH_SCRIPT}");
+    }
+
+    /// The real script, with a fake `codex` and `agy` first on PATH and
+    /// nothing else of the four reachable: it reports exactly those two.
+    #[cfg(unix)]
+    #[test]
+    fn the_health_script_finds_the_agents_on_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = tempfile::tempdir().unwrap();
+        for tool in ["codex", "agy"] {
+            let p = bin.path().join(tool);
+            std::fs::write(&p, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // Only the fake dir and the system tool dirs: a developer's own
+        // `claude` in ~/.local/bin must not leak into the answer.
+        let path = format!("{}:/usr/bin:/bin", bin.path().display());
+        let out = std::process::Command::new("/bin/sh")
+            .args(["-c", HOST_HEALTH_SCRIPT])
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let found = parse_host_health(&stdout)
+            .agents_on_path
+            .unwrap_or_default();
+        assert!(
+            found.contains(&"codex".to_string()) && found.contains(&"agy".to_string()),
+            "{stdout}"
+        );
+        assert!(!found.iter().any(|a| a == "gemini"), "{stdout}");
+    }
+
+    #[test]
+    fn parse_host_health_reads_auth_overrides_in_precedence_order() {
+        let h = parse_host_health(
+            "authenv=ANTHROPIC_API_KEY CLAUDE_CODE_USE_BEDROCK SOMETHING_ELSE \n",
+        );
+        assert_eq!(
+            h.auth_overrides,
+            Some(vec![
+                "CLAUDE_CODE_USE_BEDROCK".to_string(),
+                "ANTHROPIC_API_KEY".to_string()
+            ])
+        );
+        assert_eq!(parse_host_health("authenv=\n").auth_overrides, Some(vec![]));
+        // An older agent's sample has no line at all: unknown, not clean.
+        assert_eq!(parse_host_health("uptime=5\n").auth_overrides, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_health_script_names_auth_overrides_without_printing_their_values() {
+        // `tmux` is replaced so the machine's own server cannot add names;
+        // its global environment carries one more override.
+        use std::os::unix::fs::PermissionsExt;
+        let bin = tempfile::tempdir().unwrap();
+        let tmux = bin.path().join("tmux");
+        std::fs::write(
+            &tmux,
+            "#!/bin/sh\nprintf 'CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-from-tmux\\n-ANTHROPIC_PROFILE\\n'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!(
+            "{}:{}",
+            bin.path().display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", HOST_HEALTH_SCRIPT]).env("PATH", path);
+        for v in AUTH_OVERRIDE_VARS {
+            cmd.env_remove(v);
+        }
+        let out = cmd
+            .env("ANTHROPIC_API_KEY", "sk-ant-api-secret-value")
+            .env("ANTHROPIC_AUTH_TOKEN", "")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(!stdout.contains("secret-value"), "{stdout}");
+        assert!(!stdout.contains("from-tmux"), "{stdout}");
+        assert_eq!(
+            parse_host_health(&stdout).auth_overrides,
+            Some(vec![
+                "ANTHROPIC_API_KEY".to_string(),
+                "CLAUDE_CODE_OAUTH_TOKEN".to_string()
+            ]),
+            "{stdout}"
+        );
     }
 
     #[test]
@@ -2716,8 +3742,65 @@ mod tests {
         // The refusal message both `send_prompt` paths print comes from this
         // one constant, so a key the parser accepts can never go unnamed.
         let v = NamedKey::VOCABULARY;
-        for accepted in ["Enter", "Escape", "C-c", "1-9"] {
+        for accepted in [
+            "Enter", "Escape", "Tab", "C-c", "1-9", "BTab", "Up", "Down", "Left", "Right",
+        ] {
             assert!(v.contains(accepted), "{v:?} must mention {accepted}");
+        }
+        for name in CTRL_NAMES {
+            let letter = name.strip_prefix("C-").expect("a Ctrl name");
+            assert!(v.contains(letter), "{v:?} must mention {name}");
+        }
+    }
+
+    #[test]
+    fn every_listed_key_parses_and_names_itself() {
+        // `all_names` is what the schema enumerates; each must round-trip,
+        // or a client would be told a key the hub then refuses.
+        for name in NamedKey::all_names() {
+            let key = NamedKey::parse(name).unwrap_or_else(|| panic!("{name} must parse"));
+            assert_eq!(key.tmux_name(), name);
+            assert_eq!(
+                send_named_key("s", key),
+                format!(
+                    "tmux send-keys -t {} {name}",
+                    crate::shell::quote(&exact_pane("s"))
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_keys_outside_the_list_are_refused() {
+        // Tab and Enter under other names, flow control, suspend; and
+        // anything that is not exactly a listed name.
+        for refused in [
+            "C-i", "C-j", "C-m", "C-s", "C-q", "C-z", "C-A", "C-", "C-ab", "C-1", "C-\\", "S-Up",
+            "up", "Home", "C-a ", " C-a", "M-A", "M-", "M-1", "M-Up", "M-Tab", "M-aa", "m-x",
+            "M-C-a",
+        ] {
+            assert_eq!(
+                NamedKey::parse(refused),
+                None,
+                "{refused:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn meta_chords_are_the_listed_ones() {
+        // The phone's Alt key (G7.3): every letter, and the four editing
+        // chords; the vocabulary names them.
+        assert_eq!(NamedKey::parse("M-x").map(NamedKey::tmux_name), Some("M-x"));
+        assert_eq!(
+            NamedKey::parse("M-Enter").map(NamedKey::tmux_name),
+            Some("M-Enter")
+        );
+        for name in META_NAMES {
+            assert!(NamedKey::parse(name).is_some(), "{name} parses");
+        }
+        for word in ["M-a..M-z", "M-Enter", "M-BSpace", "M-Left", "M-Right"] {
+            assert!(NamedKey::VOCABULARY.contains(word), "{word} is named");
         }
     }
 

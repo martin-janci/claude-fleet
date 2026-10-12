@@ -10,7 +10,7 @@
 //!
 //! The `settings_docs_are_current` test enforces all three. Regenerate after
 //! changing any spec with:
-//!   REGEN_SETTINGS_DOCS=1 cargo test -p fleet-core settings_docs_are_current
+//!   REGEN_SETTINGS_DOCS=1 cargo fleet-test -- settings_docs_are_current
 //!
 //! Entirely `#[cfg(test)]`, like `mcp::doc_gen`.
 
@@ -63,6 +63,7 @@ pub(crate) fn range_text(spec: &Spec) -> String {
         Kind::IdSet => "JSON array of ids".to_string(),
         Kind::PriceMap => "JSON map: model → USD per million tokens".to_string(),
         Kind::Text { max } => format!("text, up to {max} characters"),
+        Kind::TimeRange => "a daily time range `HH:MM-HH:MM`, or empty for none".to_string(),
     };
     match spec.zero {
         Some(zero) => format!("{base}, `0` = {zero}"),
@@ -91,13 +92,16 @@ fn what_it_does(spec: &Spec) -> String {
 }
 
 fn render_rows<'a>(specs: impl Iterator<Item = &'a Spec>) -> String {
-    let mut out = String::from("| Setting | Default | Range | What it does |\n|---|---|---|---|\n");
+    let mut out = String::from(
+        "| Setting | Default | Range | Scope | What it does |\n|---|---|---|---|---|\n",
+    );
     for spec in specs {
         out.push_str(&format!(
-            "| `{}` | `{}` | {} | {} |\n",
+            "| `{}` | `{}` | {} | {} | {} |\n",
             spec.key,
             spec.default,
             range_text(spec),
+            spec.scope().word(),
             what_it_does(spec)
         ));
     }
@@ -107,7 +111,7 @@ fn render_rows<'a>(specs: impl Iterator<Item = &'a Spec>) -> String {
 /// One prefix's table, with its markers, as spliced into a guide.
 pub(crate) fn render_table(prefix: &str) -> String {
     format!(
-        "{}\n<!-- Generated from service/settings.rs: REGEN_SETTINGS_DOCS=1 cargo test -p fleet-core settings_docs_are_current -->\n{}{}",
+        "{}\n<!-- Generated from service/settings.rs: REGEN_SETTINGS_DOCS=1 cargo fleet-test -- settings_docs_are_current -->\n{}{}",
         begin_marker(prefix),
         render_rows(SPECS.iter().filter(|s| s.key.starts_with(prefix))),
         end_marker(prefix)
@@ -141,13 +145,17 @@ fn group_title(prefix: &str) -> &str {
 pub(crate) fn render_reference() -> String {
     let mut out = String::from(
         "<!-- GENERATED FILE — do not edit by hand.\n     \
-Regenerate with: REGEN_SETTINGS_DOCS=1 cargo test -p fleet-core settings_docs_are_current -->\n\n\
+Regenerate with: REGEN_SETTINGS_DOCS=1 cargo fleet-test -- settings_docs_are_current -->\n\n\
 # Settings reference\n\n\
 Every operator setting fleet stores, generated from the registry in \
 `crates/fleet-core/src/service/settings.rs`. Change one in Settings on the \
 desktop, or over the control API with the master token (`set_setting`); \
 `get_settings { describe: true }` returns this same metadata with each \
-setting's current value.\n",
+setting's current value.\n\n\
+Scope says where a value lives: *fleet* is one value for the whole fleet, \
+kept on the hub when the desktop is paired with one; *fleet, per org* is \
+the same, and an org may set its own value that its sessions read instead; \
+*per process* is the running app's or hub's own.\n",
     );
     let mut prefixes: Vec<&str> = Vec::new();
     for spec in SPECS {
@@ -220,7 +228,7 @@ mod tests {
         assert!(
             stale.is_empty(),
             "\n\n{} out of date with service/settings.rs. Regenerate with:\n  \
-REGEN_SETTINGS_DOCS=1 cargo test -p fleet-core settings_docs_are_current\n",
+REGEN_SETTINGS_DOCS=1 cargo fleet-test -- settings_docs_are_current\n",
             stale.join(", ")
         );
     }

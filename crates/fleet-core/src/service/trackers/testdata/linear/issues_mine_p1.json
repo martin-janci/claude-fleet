@@ -26,6 +26,10 @@
             "name": "Dana Dev"
           },
           "parent": null,
+          "projectMilestone": { "name": "Beta" },
+          "priority": 1,
+          "estimate": 3,
+          "labels": { "nodes": [ { "name": "auth" }, { "name": "customer" } ] },
           "cycle": {
             "number": 12,
             "name": null,
@@ -52,6 +56,9 @@
             "name": "Dana Dev"
           },
           "parent": null,
+          "priority": 0,
+          "estimate": null,
+          "labels": { "nodes": [] },
           "cycle": null
         },
         {

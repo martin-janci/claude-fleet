@@ -425,7 +425,7 @@ async fn a_hub_session_update_is_the_frontend_event_a_local_one_would_be() {
 
 #[tokio::test]
 async fn a_hub_kill_is_the_frontend_event_a_local_one_would_be() {
-    let change = RowChange::SessionKilled(12);
+    let change = RowChange::SessionKilled(12.into());
     let seen = one_connection(vec![frame_for(&change)]).await;
     assert_eq!(seen.events(), vec![(change.name(), change.payload())]);
     // And the payload really is the `{id}` shape `src/lib/events.ts` types as
@@ -444,7 +444,7 @@ async fn every_variant_this_test_can_build_crosses_unchanged() {
     let changes = vec![
         RowChange::SessionCreated(sample_session()),
         RowChange::SessionUpdated(sample_session()),
-        RowChange::SessionKilled(7),
+        RowChange::SessionKilled(7.into()),
         RowChange::HostAdded(sample_host()),
         RowChange::HostProbed(sample_host()),
         RowChange::HostRemoved("trn".into()),
@@ -584,10 +584,16 @@ async fn every_event_name_the_frontend_listens_for_crosses_the_bridge() {
         "host_alias": "trn", "harness": "claude",
         // `move:progress` is read field by field rather than merged on a key.
         "to_host": "trn", "step": "git", "state": "done", "index": 4,
+        // `start:progress` (step 5.13) is keyed by the start token.
+        "token": "st-1",
         // `work:changed` (work graph M14) and `update:changed` say what changed.
         "what": "rule",
         // `settings:changed` (declarative pages P3) names the key.
-        "key": "gc.enabled"
+        "key": "gc.enabled",
+        // `grant:changed` (multi-user M1) names the session and the person.
+        "person_id": 1,
+        // `update:decision` (update design §6.4) names the target and its status.
+        "target": "client:1", "status": "update_available"
     });
     let body: Vec<String> = fleet_core::events::EVENT_NAMES
         .iter()
@@ -647,7 +653,7 @@ fn a_name_off_the_wire_is_replaced_by_the_one_the_frontend_listens_for() {
 
 #[tokio::test]
 async fn an_unknown_event_name_is_ignored() {
-    let known = RowChange::SessionKilled(1);
+    let known = RowChange::SessionKilled(1.into());
     let seen = one_connection(vec![
         frame("session:teleported", &json!({ "id": 1 })),
         frame("", &json!({})),
@@ -664,7 +670,7 @@ async fn an_unknown_event_name_is_ignored() {
 
 #[tokio::test]
 async fn the_ready_frame_is_not_forwarded_to_the_frontend() {
-    let known = RowChange::SessionKilled(1);
+    let known = RowChange::SessionKilled(1.into());
     let seen = one_connection(vec![
         frame(
             READY_FRAME,
@@ -682,7 +688,7 @@ async fn the_ready_frame_is_not_forwarded_to_the_frontend() {
 
 #[tokio::test]
 async fn a_payload_that_is_not_json_is_dropped_without_ending_the_stream() {
-    let after = RowChange::SessionKilled(2);
+    let after = RowChange::SessionKilled(2.into());
     let seen = one_connection(vec![
         "event: session:updated\ndata: {this is not json\n\n".to_string(),
         frame_for(&after),
@@ -702,7 +708,7 @@ async fn a_payload_that_is_not_json_is_dropped_without_ending_the_stream() {
 /// the name.
 #[tokio::test]
 async fn a_payload_the_frontend_store_cannot_apply_is_dropped_not_emitted() {
-    let good = RowChange::SessionKilled(9);
+    let good = RowChange::SessionKilled(9.into());
     let bad = [
         ("session:killed", "null"),
         ("session:updated", "42"),
@@ -800,8 +806,8 @@ async fn a_frame_split_across_reads_still_produces_one_event() {
 
 #[tokio::test]
 async fn a_dropped_stream_reconnects_with_backoff_and_re_lists_once_per_connection() {
-    let first = RowChange::SessionKilled(1);
-    let second = RowChange::SessionKilled(2);
+    let first = RowChange::SessionKilled(1.into());
+    let second = RowChange::SessionKilled(2.into());
     // `ready()` first on both connections: a real hub always sends it before
     // anything else, and issue #148's contract check gates the resync on it.
     let (seen, resync, delay, opens) = drive(vec![
@@ -833,8 +839,8 @@ async fn a_dropped_stream_reconnects_with_backoff_and_re_lists_once_per_connecti
 
 #[tokio::test]
 async fn a_lagged_frame_ends_the_stream_and_triggers_a_refetch() {
-    let before = RowChange::SessionKilled(1);
-    let after = RowChange::SessionKilled(2);
+    let before = RowChange::SessionKilled(1.into());
+    let after = RowChange::SessionKilled(2.into());
     // `ready()` first on both connections, as a real hub always sends it —
     // issue #148's contract check gates the resync on it.
     let (seen, resync, _, opens) = drive(vec![
@@ -928,7 +934,10 @@ async fn a_row_event_is_what_calls_a_connection_working() {
     let (_, _, delay, _) = drive(vec![
         Connection::Delivers(vec![]),
         Connection::Delivers(vec![]),
-        Connection::Delivers(vec![ready(), frame_for(&RowChange::SessionKilled(1))]),
+        Connection::Delivers(vec![
+            ready(),
+            frame_for(&RowChange::SessionKilled(1.into())),
+        ]),
         Connection::Delivers(vec![]),
     ])
     .await;
@@ -981,7 +990,7 @@ async fn a_ready_frame_with_no_contract_field_is_revision_zero_and_too_old() {
     use crate::backend::connection::HubConnection as C;
     let (sink, states, resync) = drive_watched(vec![Connection::Delivers(vec![
         ready_with_no_contract_field(),
-        frame_for(&RowChange::SessionKilled(1)),
+        frame_for(&RowChange::SessionKilled(1.into())),
     ])])
     .await;
     match states.first() {
@@ -1012,7 +1021,7 @@ async fn a_ready_frame_with_no_contract_field_is_revision_zero_and_too_old() {
 #[tokio::test]
 async fn a_hub_below_the_minimum_contract_is_too_old_and_suppresses_everything() {
     use crate::backend::connection::HubConnection as C;
-    let killed = RowChange::SessionKilled(1);
+    let killed = RowChange::SessionKilled(1.into());
     let too_old = crate::backend::contract::MIN_HUB_CONTRACT - 1;
     let (sink, states, resync) = drive_watched(vec![Connection::Delivers(vec![
         ready_with_contract(too_old),
@@ -1058,7 +1067,7 @@ async fn a_ready_frame_naming_an_in_range_contract_is_accepted() {
 #[tokio::test]
 async fn a_hub_above_the_maximum_contract_is_too_new_and_suppresses_everything() {
     use crate::backend::connection::HubConnection as C;
-    let killed = RowChange::SessionKilled(1);
+    let killed = RowChange::SessionKilled(1.into());
     let too_new = crate::backend::contract::MAX_HUB_CONTRACT + 1;
     let (sink, states, resync) = drive_watched(vec![Connection::Delivers(vec![
         ready_with_contract(too_new),
@@ -1113,7 +1122,7 @@ async fn a_too_new_hub_does_not_reset_the_backoff() {
 #[tokio::test]
 async fn recovery_when_a_later_reconnect_is_back_in_range() {
     use crate::backend::connection::HubConnection as C;
-    let killed = RowChange::SessionKilled(9);
+    let killed = RowChange::SessionKilled(9.into());
     let too_new = crate::backend::contract::MAX_HUB_CONTRACT + 1;
     let (sink, states, resync) = drive_watched(vec![
         Connection::Delivers(vec![ready_with_contract(too_new)]),
@@ -1216,8 +1225,8 @@ async fn the_backfill_runs_with_the_contract_verdict_already_cleared() {
 #[tokio::test]
 async fn a_row_frame_ahead_of_ready_is_dropped_and_does_not_trigger_a_resync() {
     use crate::backend::connection::HubConnection as C;
-    let early = RowChange::SessionKilled(1);
-    let later = RowChange::SessionKilled(2);
+    let early = RowChange::SessionKilled(1.into());
+    let later = RowChange::SessionKilled(2.into());
     let (sink, states, resync) = drive_watched(vec![Connection::Delivers(vec![
         frame_for(&early),
         ready(),
@@ -1248,7 +1257,7 @@ async fn a_row_frame_ahead_of_ready_is_dropped_and_does_not_trigger_a_resync() {
 #[tokio::test]
 async fn a_connection_that_never_sends_ready_never_reports_connected() {
     use crate::backend::connection::HubConnection as C;
-    let row = RowChange::SessionKilled(7);
+    let row = RowChange::SessionKilled(7.into());
     let (sink, states, resync) =
         drive_watched(vec![Connection::Delivers(vec![frame_for(&row)])]).await;
     assert!(
@@ -1284,7 +1293,7 @@ async fn a_connection_that_ends_lagged_does_not_reset_the_backoff() {
         Connection::Delivers(vec![ready(), lagged.clone()]),
         Connection::Delivers(vec![
             ready(),
-            frame_for(&RowChange::SessionKilled(1)),
+            frame_for(&RowChange::SessionKilled(1.into())),
             lagged,
         ]),
     ])
@@ -1305,7 +1314,7 @@ async fn a_connection_that_ends_lagged_does_not_reset_the_backoff() {
 /// signal.
 #[tokio::test(start_paused = true)]
 async fn a_stream_that_goes_silent_is_abandoned_and_reconnected() {
-    let after = RowChange::SessionKilled(2);
+    let after = RowChange::SessionKilled(2.into());
     // `ready()` first on the second connection too, as a real hub always
     // sends it — issue #148's contract check gates the resync on it.
     let (seen, resync, _, opens) = drive_bounded(vec![
@@ -1370,7 +1379,7 @@ async fn an_open_stream_reports_connected_and_a_dropped_one_reconnecting() {
     use crate::backend::connection::HubConnection as C;
     let states = drive_reporting(vec![Connection::Delivers(vec![
         ready(),
-        frame_for(&RowChange::SessionKilled(1)),
+        frame_for(&RowChange::SessionKilled(1.into())),
     ])])
     .await;
     assert_eq!(states[0], C::Connected, "{states:?}");
@@ -1403,6 +1412,7 @@ async fn a_hub_that_refuses_is_offline_with_a_growing_attempt_and_its_reason() {
                 attempt,
                 retry_in_secs,
                 reason,
+                ..
             } => Some((*attempt, *retry_in_secs, reason.clone())),
             _ => None,
         })
@@ -1438,7 +1448,10 @@ async fn a_stream_that_worked_starts_the_attempt_count_over() {
     let states = drive_reporting(vec![
         Connection::Fails("refused"),
         Connection::Fails("refused"),
-        Connection::Delivers(vec![ready(), frame_for(&RowChange::SessionKilled(1))]),
+        Connection::Delivers(vec![
+            ready(),
+            frame_for(&RowChange::SessionKilled(1.into())),
+        ]),
     ])
     .await;
     let attempts: Vec<u32> = states
@@ -1489,7 +1502,7 @@ async fn cancelling_ends_the_bridge_without_reconnecting() {
     cancel.cancel();
     let stream = ScriptedStream::new(
         vec![Connection::Delivers(vec![frame_for(
-            &RowChange::SessionKilled(1),
+            &RowChange::SessionKilled(1.into()),
         )])],
         cancel.clone(),
     );
@@ -2006,7 +2019,7 @@ async fn a_resync_against_an_unreachable_hub_emits_nothing_rather_than_clearing_
 /// re-listed sessions, hosts, tasks and accounts (63 `session:updated`).
 #[tokio::test]
 async fn a_reconnect_sends_the_last_frame_id_and_a_resumed_ready_skips_the_re_list() {
-    let killed = RowChange::SessionKilled(1);
+    let killed = RowChange::SessionKilled(1.into());
     let cancel = CancellationToken::new();
     let stream = ScriptedStream::new(
         vec![
@@ -2067,4 +2080,105 @@ async fn a_resync_ends_by_telling_the_window_to_refetch_projects_and_work() {
          the window re-fetches them with its own loaders on this signal, after \
          every row; only the Work view's own reload (M14.1d) follows it"
     );
+}
+
+// --- Retry now (the banner's button, redesign step 10.6) ---------------------
+
+/// Never returns: only a wake or the cancel token ends the wait.
+struct StuckDelay;
+
+#[async_trait::async_trait]
+impl Delay for StuckDelay {
+    async fn sleep(&self, _how_long: Duration) {
+        std::future::pending::<()>().await
+    }
+}
+
+#[tokio::test]
+async fn retry_now_ends_the_backoff_wait_and_tries_at_once() {
+    let cancel = CancellationToken::new();
+    let stream = ScriptedStream::new(
+        vec![Connection::Fails("refused"), Connection::Fails("refused")],
+        cancel.clone(),
+    );
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let bridge = EventBridge::new(
+        stream.clone(),
+        Arc::new(Recorder::default()),
+        Arc::new(CountingResync::default()),
+        Arc::new(StuckDelay),
+        cancel.clone(),
+    )
+    .waking_on(Arc::clone(&wake));
+    let run = tokio::spawn(async move { bridge.run().await });
+
+    // The first open fails and the bridge waits: a backoff that never ends
+    // on its own, so nothing opens again until the button is pressed.
+    while stream.opens() < 1 {
+        tokio::task::yield_now().await;
+    }
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(stream.opens(), 1, "nothing retries before Retry now");
+
+    // A wake reaches only a bridge that is waiting, so press until it lands.
+    while stream.opens() < 2 {
+        wake.notify_waiters();
+        tokio::task::yield_now().await;
+    }
+    // The script is spent: the next open cancels the bridge and run() ends.
+    while !run.is_finished() {
+        wake.notify_waiters();
+        tokio::task::yield_now().await;
+    }
+    run.await.expect("the bridge ends");
+    assert_eq!(stream.opens(), 2);
+}
+
+#[tokio::test]
+async fn a_bridge_without_a_wake_waits_its_backoff() {
+    let cancel = CancellationToken::new();
+    let stream = ScriptedStream::new(vec![Connection::Fails("refused")], cancel.clone());
+    let delay = Arc::new(FakeDelay::default());
+    EventBridge::new(
+        stream.clone(),
+        Arc::new(Recorder::default()),
+        Arc::new(CountingResync::default()),
+        delay.clone(),
+        cancel,
+    )
+    .run()
+    .await;
+    assert_eq!(delay.waits().len(), 1, "it waited the backoff as before");
+}
+
+/// Review r01 F13: the call breaker (`remote.rs` `offline_error`) arms from
+/// the second failed connect in a row. A stream that ended is not a refused
+/// connect, so the first failed reconnect after it still reports
+/// `refused: 1` — even though the banner's `attempt`, which counts the
+/// reconnect too, already reads 2 — and the breaker stays open.
+#[tokio::test]
+async fn one_failed_connect_after_a_stream_ended_does_not_arm_the_breaker() {
+    use crate::backend::connection::HubConnection as C;
+    let states = drive_reporting(vec![
+        Connection::Delivers(vec![
+            ready(),
+            frame_for(&RowChange::SessionKilled(1.into())),
+        ]),
+        Connection::Fails("connect hub.example.com:443: connection refused"),
+        Connection::Fails("connect hub.example.com:443: connection refused"),
+    ])
+    .await;
+    let offline: Vec<(u32, u32)> = states
+        .iter()
+        .filter_map(|s| match s {
+            C::Offline {
+                attempt, refused, ..
+            } => Some((*attempt, *refused)),
+            _ => None,
+        })
+        .take(2)
+        .collect();
+    assert_eq!(offline, [(2, 1), (3, 2)], "{states:?}");
 }

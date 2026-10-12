@@ -7,6 +7,8 @@ pub mod backend;
 mod bootstrap;
 mod commands;
 mod pty;
+mod self_update;
+mod voice;
 
 pub use app_events::AppHandleEventBus;
 
@@ -92,6 +94,11 @@ pub fn run() {
     let reg_for_setup = std::sync::Arc::clone(&reg);
     let tunnels = std::sync::Arc::new(fleet_core::service::tunnel::TunnelSupervisor::new());
     let tunnels_for_exit = std::sync::Arc::clone(&tunnels);
+    // The scrcpy windows this machine runs; killed on quit so none outlives
+    // the app (or keeps a device's claim renewing).
+    let mirrors = std::sync::Arc::new(fleet_core::service::device_mirror::Mirrors::new());
+    let mirrors_for_exit = std::sync::Arc::clone(&mirrors);
+    let mirrors_for_setup = std::sync::Arc::clone(&mirrors);
     let tunnels_for_setup = std::sync::Arc::clone(&tunnels);
     // Cancelled on window destroy, so the hub event bridge's socket does not
     // keep a background task alive after quit. Standalone mode never starts
@@ -109,6 +116,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
             use tauri::Manager;
             // Core tasks (ticks, MCP server, hook side-jobs) spawn through
@@ -119,6 +127,9 @@ pub fn run() {
             tauri::async_runtime::block_on(async {
                 fleet_core::rt::install(tokio::runtime::Handle::current());
             });
+            // The tray and menu-bar icon (redesign 3.17), idle until the
+            // frontend says otherwise.
+            commands::tray::install(app);
             let handle = app.handle().clone();
             // Built concretely and then coerced, rather than built as the
             // trait object: the hub event bridge needs the concrete type. Both
@@ -136,15 +147,25 @@ pub fn run() {
             // The data dir was resolved once, before logging started; IPC
             // handlers read it from managed state instead of re-resolving.
             app.manage(commands::diagnostics::AppDataDir(data_dir.clone()));
+            // Every request to a hub names this build (update design §6.3).
+            if let Err(e) = fleet_core::http_client::set_client_header(self_update::client_header()) {
+                tracing::warn!(error = %e, "X-Fleet-Client not set");
+            }
+            app.manage(self_update::SelfUpdate::default());
             let db_path = data_dir.join("state.db");
             let store = Store::open_with_bus(&db_path, bus).unwrap_or_else(|e| {
                 // Still a hard fail (the app can't run without its DB), but
                 // with an actionable message instead of a bare "open store".
-                panic!(
-                    "failed to open the claude-fleet database at {}: {e}\n\
-                     If the file is corrupt, deleting it resets all local \
+                // No "delete it" advice for a database a newer release
+                // migrated: it is intact, and its message says what to do.
+                let advice = fleet_core::store::open_failure_advice(
+                    &e,
+                    "\nIf the file is corrupt, deleting it resets all local \
                      state — hosts, projects and sessions are re-discovered \
                      on the next launch.",
+                );
+                panic!(
+                    "failed to open the claude-fleet database at {}: {e}{advice}",
                     db_path.display()
                 )
             });
@@ -246,6 +267,7 @@ pub fn run() {
                 }
             }
             app.manage(std::sync::Arc::clone(&store));
+            app.manage(std::sync::Arc::clone(&mirrors_for_setup));
             app.manage(Mutex::new(fleet_core::mcp::McpRuntime::default()));
             app.manage(std::sync::Arc::clone(&bus_for_usage));
             // One in-memory usage cache for the app's lifetime,
@@ -255,6 +277,14 @@ pub fn run() {
                 fleet_core::service::account_usage::UsageCache::new(),
             ));
             app.manage(std::sync::Arc::clone(&usage_cache));
+            // Local workspace sync: managed in both modes (its commands are
+            // refused in hub-client mode); its tick starts with the other
+            // fleet-owning tasks below.
+            let local_sync = fleet_core::service::local_sync::LocalSync::new(
+                std::sync::Arc::clone(&store),
+                std::sync::Arc::clone(&ssh_client_for_setup) as std::sync::Arc<dyn fleet_core::ssh::SshExec>,
+            );
+            app.manage(std::sync::Arc::clone(&local_sync));
             // Standalone, a window onto a `fleet-hub`, or configured for a hub
             // this launch cannot use? Decided once, here, from
             // `hub.remote_url` plus the client token kept outside the
@@ -332,6 +362,7 @@ pub fn run() {
                     tunnels: std::sync::Arc::clone(&tunnels_for_setup),
                     guards: guards.clone(),
                     usage_cache: std::sync::Arc::clone(&usage_cache),
+                    local_sync,
                     bus: bus_for_usage,
                     frontend: std::sync::Arc::clone(&frontend_bus),
                     remote: backend.remote().cloned(),
@@ -346,6 +377,7 @@ pub fn run() {
         .manage(reg)
         .manage(tunnels)
         .manage(upload_allow)
+        .manage(voice::VoiceState::default())
         // Drag-drop reaches a `WebviewWindow` as a window event (and, for a
         // standalone webview, as a webview event) — record dropped paths from
         // both so `upload_to_session` can verify them.
@@ -358,23 +390,45 @@ pub fn run() {
             commands::health::health_check,
             commands::diagnostics::collect_diagnostics,
             commands::diagnostics::open_log_folder,
+            commands::tray::set_tray_state,
             commands::projects::list_projects,
             commands::projects::refresh_projects,
             commands::projects::add_project,
             commands::projects::list_github_repos,
+            commands::projects::project_picks,
+            commands::projects::set_project_pick,
+            commands::local_workspaces::list_local_workspaces,
+            commands::local_workspaces::enable_local_workspace,
+            commands::local_workspaces::pause_local_workspace,
+            commands::local_workspaces::resume_local_workspace,
+            commands::local_workspaces::sync_local_workspace_now,
+            commands::local_workspaces::disconnect_local_workspace,
+            commands::local_workspaces::set_local_workspace_excludes,
+            commands::local_workspaces::resolve_local_workspace_conflict,
+            commands::local_workspaces::open_local_workspace,
+            commands::local_workspaces::local_workspace_changes,
+            commands::local_workspaces::local_workspace_diff,
+            commands::local_workspaces::commit_local_workspace,
+            commands::local_workspaces::discard_local_workspace_changes,
+            commands::local_workspaces::dismiss_local_workspace_activity,
+            commands::local_workspaces::compare_local_conflict,
+            commands::local_workspaces::keep_both_local_conflict,
+            commands::local_workspaces::ask_ai_about_local_changes,
+            commands::local_workspaces::set_local_workspace_driver,
             commands::sessions::list_sessions,
-            commands::sessions::related_sessions,
             commands::sessions::new_session,
             commands::sessions::kill_session,
+            commands::sessions::shell_terminals,
             commands::sessions::safe_kill_session,
             commands::sessions::inspect_safe_kill,
             commands::sessions::discard_kill_session,
-            commands::worktrees::list_worktrees,
             commands::worktrees::list_host_worktrees,
-            commands::worktrees::delete_worktree,
             commands::sessions::repair_session,
             commands::sessions::rename_session,
             commands::sessions::set_session_friendly_name,
+            commands::sessions::set_session_tags,
+            commands::sessions::decide_related_session,
+            commands::sessions::touch_session_viewed,
             commands::work::session_work_links,
             commands::work::link_session_work,
             commands::work::reject_session_work,
@@ -382,24 +436,25 @@ pub fn run() {
             commands::work::confirm_session_work,
             commands::work::work_tidy,
             commands::work::work_reopened,
-            commands::work::archive_session_work,
             commands::work::unarchive_session_work,
-            commands::work::snooze_tidy,
-            commands::work::never_tidy,
             commands::work::tidy_apply,
             commands::work::dismiss_reopened,
             commands::work::set_work_project_trust,
             commands::work::work_resume_plan,
+            commands::work::resume_or_new_propose,
+            commands::work::resume_or_new_follow,
             commands::work::resume_work,
             commands::work::work_purge_impact,
             commands::work::work_today,
             commands::work::work_ticket_card,
             commands::work::request_work_handover,
             commands::work::summarize_past_work,
-            commands::work::list_local_work_items,
             commands::work::name_session_work,
             commands::work::rename_work_item,
             commands::work::create_work_task,
+            commands::work::set_work_status,
+            commands::work::edit_work_item,
+            commands::work::set_work_parent,
             commands::work::accept_work_proposal,
             commands::work::reject_work_proposal,
             commands::work_view::work_tree,
@@ -411,6 +466,7 @@ pub fn run() {
             commands::work_view::work_views,
             commands::work_view::work_org_impact,
             commands::work_view::set_primary_work,
+            commands::work_view::switch_session_work,
             commands::work_view::reconsider_work_link,
             commands::work_view::ack_work_link,
             commands::work_view::decide_work_batch,
@@ -420,21 +476,63 @@ pub fn run() {
             commands::work_view::delete_work_rule,
             commands::work_view::save_work_view,
             commands::work_view::delete_work_view,
+            commands::work_view::comment_on_work,
+            commands::work_view::delete_work_comment,
+            commands::work_view::attach_to_work,
+            commands::work_view::delete_work_attachment,
+            commands::work_view::work_attachment,
+            commands::work_view::work_tracker_comments,
+            commands::work_view::promote_work_item,
+            commands::work_view::work_buckets,
+            commands::work_view::work_stats,
+            commands::work_view::work_bucket,
+            commands::work_view::add_work_to_bucket,
+            commands::work_view::remove_work_from_bucket,
+            commands::work_view::work_bucket_admin,
+            commands::missions::work_missions,
+            commands::missions::work_mission,
+            commands::missions::save_mission,
+            commands::missions::set_mission_state,
+            commands::missions::set_mission_repo,
+            commands::missions::set_mission_item,
+            commands::missions::import_mission_plan,
+            commands::missions::delete_mission,
+            commands::missions::set_work_dep,
+            commands::missions::set_work_hold,
+            commands::missions::accept_work_proposals,
+            commands::missions::undo_work_accept,
+            commands::missions::set_work_done_when,
+            commands::missions::verify_work_item,
+            commands::missions::start_mission_wave,
+            commands::missions::retry_work_item,
+            commands::missions::plan_mission,
+            commands::missions::decide_mission_card,
+            commands::missions::grant_mission,
+            commands::missions::revoke_mission_grant,
+            commands::missions::pause_all_missions,
+            commands::missions::mission_release_note,
+            commands::missions::today_brief,
+            commands::missions::mission_triage,
             commands::trackers::add_tracker,
             commands::trackers::update_tracker,
             commands::trackers::set_tracker_credential,
             commands::trackers::test_tracker,
             commands::trackers::remove_tracker,
             commands::trackers::tracker_sync_metrics,
+            commands::trackers::ticket_prefixes,
+            commands::trackers::set_ticket_prefix,
             commands::trackers::status_map_proposals,
             commands::trackers::decide_status_map_proposal,
             commands::trackers::work_retention_status,
             commands::trackers::work_retention_sweep,
             commands::trackers::list_trackers,
             commands::trackers::work_tickets,
+            commands::search::search,
             commands::trackers::work_lookup,
             commands::trackers::start_work_multi,
             commands::trackers::start_work,
+            commands::trackers::abandon_start,
+            commands::trackers::preview_start_work,
             commands::orgs::add_org,
             commands::orgs::update_org,
             commands::orgs::remove_org,
@@ -442,31 +540,73 @@ pub fn run() {
             commands::orgs::remove_org_rule,
             commands::orgs::assign_host_org,
             commands::orgs::assign_tracker_org,
-            commands::orgs::work_scopes,
+            commands::orgs::set_org_setting,
+            commands::orgs::set_org_member,
+            commands::orgs::remove_org_member,
+            commands::orgs::org_member_grants,
+            commands::orgs::org_rule_preview,
+            commands::orgs::add_org_project,
+            commands::orgs::remove_org_project,
+            commands::orgs::revoke_org_share,
+            commands::orgs::narrow_org_share,
+            commands::orgs::revoke_org_member_grants,
             commands::orgs::list_orgs,
             commands::orgs::org_suggestions,
+            commands::org_devices::list_devices,
+            commands::org_devices::pair_device,
+            commands::org_devices::revoke_device,
+            commands::org_devices::set_device_trust,
+            commands::org_devices::update_device,
+            commands::org_devices::bind_device_org,
+            commands::org_devices::set_device_person,
+            commands::org_devices::grant_device_catalog,
+            commands::org_devices::list_people,
+            commands::org_devices::add_person,
+            commands::org_devices::rename_person,
+            commands::org_devices::disable_person,
             commands::sessions::session_history,
             commands::sessions::session_conversations,
             commands::sessions::session_conversation,
             commands::sessions::session_tool_detail,
             commands::sessions::session_activity,
+            commands::sessions::capture_session,
+            commands::sessions::session_summary_since,
+            commands::sessions::session_share,
+            commands::sessions::session_unshare,
+            commands::sessions::session_narrow,
+            commands::sessions::session_access,
+            commands::sessions::my_grants,
+            commands::sessions::session_ask_access,
+            commands::sessions::access_requests,
             commands::sessions::restart_session,
             commands::sessions::rewind_conversation,
             commands::sessions::send_prompt,
             commands::sessions::spawn_review,
+            commands::sessions::queue_prompt,
+            commands::sessions::queued_prompts,
+            commands::sessions::cancel_queued_prompt,
             commands::sessions::recreate_session,
             commands::sessions::restore_host_sessions,
+            commands::sessions::restore_all_lost_sessions,
+            commands::sessions::repair_workspaces_now,
             commands::sessions::discover_lost_sessions,
             commands::move_session::move_session,
             commands::resolve_move::resolve_move,
             commands::sessions::dismiss_ghost_session,
+            commands::sessions::adopt_session,
+            commands::sessions::lost_target,
+            commands::sessions::place_transcript,
             commands::sessions::dismiss_agent_session,
             commands::sessions::new_bg_session,
             commands::sessions::purge_project,
             commands::quick_replies::quick_replies,
             commands::quick_replies::set_quick_replies,
             commands::downloads::list_downloads,
+            commands::library::list_library,
+            commands::library::add_library_items,
+            commands::library::remove_library_item,
             commands::downloads::send_file,
+            commands::downloads::pause_download,
             commands::downloads::remove_download,
             commands::downloads::save_download,
             commands::pages::get_fleet_settings,
@@ -482,14 +622,52 @@ pub fn run() {
             commands::pages::list_guides,
             commands::pages::decide_guide,
             commands::pages::remove_guide,
+            commands::forms::list_forms,
+            commands::forms::get_form,
+            commands::forms::answer_form,
+            commands::forms::decline_form,
+            commands::federation::list_peer_links,
+            commands::federation::link_peer_hub,
+            commands::federation::unlink_peer_hub,
+            commands::updates::list_update_targets,
+            commands::updates::update_check,
+            commands::updates::update_install,
+            commands::debug_devices::list_debug_devices,
+            commands::debug_devices::scan_debug_devices,
+            commands::debug_devices::update_debug_device,
+            commands::debug_devices::release_debug_device,
+            commands::debug_devices::forget_debug_device,
+            commands::debug_devices::boot_debug_device,
+            commands::debug_devices::shutdown_debug_device,
+            commands::debug_devices::claim_debug_device,
+            commands::debug_devices::install_debug_device,
+            commands::debug_devices::debug_device_logs,
+            commands::debug_devices::debug_device_screenshot,
+            commands::device_mirror::start_device_mirror,
+            commands::device_mirror::stop_device_mirror,
+            commands::device_mirror::list_device_mirrors,
+            commands::prs::list_pull_requests,
+            commands::start_rules::start_rules,
+            commands::wizard_state::wizard_state,
+            commands::dashboards::dashboards,
+            commands::api_tokens::api_tokens,
+            commands::add_account::add_account,
+            commands::presence::session_presence,
             commands::pages::setting_history,
             commands::pages::set_fleet_setting,
+            commands::runs::list_runs,
+            commands::agents::agents_status,
+            commands::agents::agents_decide,
+            commands::routines::routines,
             commands::tasks::list_tasks,
             commands::tasks::cancel_task,
             commands::files::repo_changes,
             commands::files::repo_tree,
             commands::files::repo_file,
             commands::files::repo_diff,
+            commands::files::repo_blame,
+            commands::files::repo_branch_diff,
+            commands::files::repo_range_diff,
             commands::upload::upload_to_session,
             commands::upload::pick_attachments,
             commands::upload::attachment_preview,
@@ -503,9 +681,11 @@ pub fn run() {
             commands::mutate::repo_checkout_commit,
             commands::mutate::repo_create_branch,
             commands::mutate::repo_delete_branch,
+            commands::mutate::repo_delete_merged_branches,
             commands::mutate::repo_stage,
             commands::mutate::repo_unstage,
             commands::mutate::repo_commit_create,
+            commands::mutate::draft_commit_message,
             commands::mutate::repo_fetch,
             commands::mutate::repo_pull,
             commands::mutate::repo_push,
@@ -514,6 +694,13 @@ pub fn run() {
             commands::hosts::list_accounts,
             commands::hosts::add_host,
             commands::hosts::probe_host,
+            commands::hosts::check_host,
+            commands::hosts::list_host_setups,
+            commands::hosts::save_host_setup,
+            commands::hosts::discard_host_setup,
+            commands::hosts::run_host_setup_check,
+            commands::hosts::install_agent,
+            commands::hosts::agent_installs,
             commands::hosts::probe_ssh_alias,
             commands::hosts::remove_host,
             commands::hosts::merge_host,
@@ -521,6 +708,11 @@ pub fn run() {
             commands::hosts::set_account_nickname,
             commands::account_usage::list_account_usage,
             commands::account_usage::refresh_account_usage,
+            commands::account_usage::account_usage_history,
+            commands::account_usage::account_spend,
+            commands::account_usage::check_account_headroom,
+            commands::account_usage::propose_host_placement,
+            commands::account_usage::record_host_placement,
             commands::mcp::mcp_status,
             commands::mcp::mcp_configure,
             commands::mcp::install_fleet_hook,
@@ -530,12 +722,17 @@ pub fn run() {
             commands::mcp::rotate_host_token,
             commands::mcp::mcp_confirm,
             commands::mcp::mcp_pending_confirms,
+            commands::mcp::control_handoffs,
             commands::operator::ensure_operator,
             commands::operator::operator_status,
+            commands::operator::control_route_propose,
+            commands::operator::control_route_follow,
             commands::hub::hub_status,
             commands::hub::hub_pair,
             commands::hub::hub_disconnect,
             commands::hub::hub_connection,
+            commands::hub::hub_retry_now,
+            commands::hub::offline_local_sessions,
             commands::hub::hub_stranded_token,
             commands::hub::report_client_error,
             commands::onboarding::check_local_prereqs,
@@ -572,6 +769,24 @@ pub fn run() {
             commands::assets::catalog_commit_pending,
             commands::assets::catalog_push,
             commands::assets::catalog_repo_status,
+            commands::assets::catalog_repo_status_in,
+            commands::assets::catalog_list_catalogs,
+            commands::assets::catalog_list_changesets,
+            commands::assets::catalog_get_changeset,
+            commands::assets::catalog_apply_changeset,
+            commands::assets::catalog_undo_changeset,
+            commands::assets::catalog_dismiss_changeset,
+            commands::assets::catalog_reject_changeset_items,
+            commands::assets::catalog_propose_changesets,
+            commands::assets::catalog_propose_layer_change,
+            commands::assets::catalog_add_catalog,
+            commands::assets::catalog_remove_catalog,
+            commands::assets::catalog_admit_catalog,
+            commands::assets::catalog_unadmit_catalog,
+            commands::assets::catalog_list_layers_in,
+            commands::assets::catalog_host_provenance,
+            commands::assets::catalog_drift_diff,
+            commands::assets::catalog_asset_history,
             commands::assets::catalog_template,
             commands::assets::catalog_spawn_author_session,
             pty::pty_open,
@@ -579,27 +794,50 @@ pub fn run() {
             pty::pty_resize,
             pty::pty_close,
             pty::pty_drain,
+            commands::editor::open_session_in_editor,
+            commands::windows::open_terminal_window,
+            commands::context_help::context_help,
+            commands::context_help::session_context_help,
+            commands::voice::voice_claim,
+            commands::voice::voice_release,
             cancel_command,
         ])
         .on_window_event(move |window, event| {
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
                 upload_allow_for_window.allow(paths);
             }
-            // On exit: close ssh masters AND any open PTY, so we don't leak
-            // background ssh processes or an orphaned `tmux attach` / `ssh
-            // -tt` child after quit.
+            // The main window going away is the app's exit: close ssh
+            // masters AND any open PTY, so we don't leak background ssh
+            // processes or an orphaned `tmux attach` / `ssh -tt` child after
+            // quit. A pop-out terminal (step 5.4) going away closes its own
+            // PTY and nothing else: the app, its ssh masters and the main
+            // window's terminals carry on. Any other window does neither.
             if let tauri::WindowEvent::Destroyed = event {
+                use commands::windows::OnDestroyed;
                 use tauri::Manager;
-                ssh_client_for_exit.shutdown_all();
-                tunnels_for_exit.stop_all();
-                shutdown_for_exit.cancel();
-                if let Some(runtime) = window.try_state::<Mutex<fleet_core::mcp::McpRuntime>>() {
-                    if let Ok(mut rt) = runtime.lock() {
-                        rt.stop();
+                match commands::windows::on_destroyed(window.label()) {
+                    OnDestroyed::ClosePty => {
+                        if let Some(pty) = window.try_state::<Mutex<PtyState>>() {
+                            pty::close_pty(pty.inner(), window.label());
+                        }
                     }
-                }
-                if let Some(pty) = window.try_state::<Mutex<PtyState>>() {
-                    pty::close_pty(pty.inner());
+                    OnDestroyed::ShutDown => {
+                        ssh_client_for_exit.shutdown_all();
+                        tunnels_for_exit.stop_all();
+                        mirrors_for_exit.kill_all();
+                        shutdown_for_exit.cancel();
+                        if let Some(runtime) =
+                            window.try_state::<Mutex<fleet_core::mcp::McpRuntime>>()
+                        {
+                            if let Ok(mut rt) = runtime.lock() {
+                                rt.stop();
+                            }
+                        }
+                        if let Some(pty) = window.try_state::<Mutex<PtyState>>() {
+                            pty::close_all_ptys(pty.inner());
+                        }
+                    }
+                    OnDestroyed::Nothing => {}
                 }
             }
         })

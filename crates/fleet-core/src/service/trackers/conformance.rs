@@ -25,8 +25,8 @@
 //!
 //! **Snapshot golden.** Scenario 2 compares the normalised listing with
 //! `testdata/<provider>/golden_list.json`, so a provider API change shows
-//! up as a diff in review. `REGEN_TRACKER_GOLDENS=1 cargo test -p
-//! fleet-core conformance` rewrites them.
+//! up as a diff in review. `REGEN_TRACKER_GOLDENS=1 cargo
+//! fleet-test -- conformance` rewrites them.
 //!
 //! No scenario reaches a real tracker: every harness answers from a
 //! [`FakeTransport`].
@@ -130,6 +130,13 @@ pub trait Harness: Send + Sync {
     fn describe_ref(&self) -> &'static str {
         "NONE-0"
     }
+    /// Scenario 13: `(external_id, version)` — an item of the listing and
+    /// one version it must report (design 2026-09-28 §4). `None`, the
+    /// default, is right only for an adapter whose `caps.versions` is
+    /// false: it must report no version on any item.
+    fn version(&self) -> Option<(&'static str, &'static str)> {
+        None
+    }
 }
 
 fn fixture_dir(name: &str) -> String {
@@ -167,6 +174,11 @@ pub fn snapshot_json(s: &WorkItemSnapshot) -> Value {
         "assignee_id": s.assignee_id,
         "iteration": s.iteration,
         "iteration_active": s.iteration_active,
+        "versions": s.versions,
+        "priority": s.priority,
+        "labels": s.labels,
+        "estimate": s.estimate.map(|e| e.0),
+        "estimate_unit": s.estimate_unit,
         "updated": s.updated,
         "description": s.description,
     })
@@ -565,8 +577,9 @@ pub async fn no_secret<H: Harness>(h: &H) {
     }
 }
 
-/// Row 11 (work graph M13.4e, decision D3): the only write is the PR remote
-/// link. A provider without `caps.write` refuses it without sending a byte.
+/// Row 11 (work graph M13.4e, decision D3): the PR remote link is Jira's
+/// write. A provider that does not take it (every other one, whatever its
+/// `caps.write` says for comments) refuses it without sending a byte.
 /// One with it sends exactly one request, to the issue's remote links, with
 /// the `globalId` Jira upserts by (so a repeat changes nothing) and no
 /// secret in the body; maps 429 to a rate limit with its `Retry-After` and
@@ -591,10 +604,10 @@ pub async fn write<H: Harness>(h: &H) {
     );
     let p = h.provider(&f);
     let got = p.write(&op(&key)).await;
-    if !p.caps().write {
+    if !p.caps().write || !matches!(h.name(), "jira" | "jira_dc") {
         assert!(
             matches!(got, Err(TrackerError::Refused(_))),
-            "{}: a read-only provider refuses every write: {got:?}",
+            "{}: a provider without the PR link refuses it: {got:?}",
             h.name()
         );
         assert!(f.requests().is_empty(), "{}: nothing sent", h.name());
@@ -668,6 +681,47 @@ pub async fn write<H: Harness>(h: &H) {
         "{}: a bad key sent nothing",
         h.name()
     );
+}
+
+/// Scenario 13 (design 2026-09-28 §4): a provider with `caps.versions`
+/// reports the release-like containers an item is planned into, and
+/// declares one through [`Harness::version`]; a provider without it reports
+/// none, so a native release simply has nothing to adopt from it.
+pub async fn versions<H: Harness>(h: &H) {
+    let items = listing(h).await;
+    let p = h.provider(&FakeTransport::new());
+    match (p.caps().versions, h.version()) {
+        (true, Some((id, version))) => {
+            let item = items
+                .iter()
+                .find(|i| i.external_id == id)
+                .unwrap_or_else(|| panic!("{}: {id} is not in the listing", h.name()));
+            assert!(
+                item.versions.iter().any(|v| v == version),
+                "{}: {id} reports {:?}, not {version:?}",
+                h.name(),
+                item.versions
+            );
+        }
+        (true, None) => panic!(
+            "{}: caps.versions is set, so the harness declares an item's version",
+            h.name()
+        ),
+        (false, Some(_)) => panic!(
+            "{}: a version is declared but caps.versions is not set",
+            h.name()
+        ),
+        (false, None) => {
+            for i in &items {
+                assert!(
+                    i.versions.is_empty(),
+                    "{}: {} reports versions without the capability",
+                    h.name(),
+                    i.external_id
+                );
+            }
+        }
+    }
 }
 
 /// Scenario 12 (work graph M6.0's describe capability): the REAL adapter's
@@ -778,6 +832,10 @@ macro_rules! conformance_suite {
             #[tokio::test]
             async fn c12_describe() {
                 c::describe(&$harness).await
+            }
+            #[tokio::test]
+            async fn c13_versions() {
+                c::versions(&$harness).await
             }
         }
     };

@@ -11,8 +11,10 @@ COPY src-tauri/Cargo.toml ./src-tauri/Cargo.toml
 # succeeds without building the desktop crate.
 RUN mkdir -p src-tauri/src && echo '' > src-tauri/src/lib.rs
 COPY skills ./skills
-# provision.rs embeds the ag launcher (include_str!).
+# provision.rs embeds the ag launcher and the voice recorder stand-in
+# (include_str!); provision.rs's test checks every such embed has a COPY.
 COPY tools/ag ./tools/ag
+COPY tools/voice ./tools/voice
 COPY src/lib/names.json ./src/lib/names.json
 # The context has no .git, so build.rs takes the build identity from these
 # (hub-image.yml passes them; a local `docker build` gets unknown / local).

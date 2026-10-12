@@ -57,13 +57,28 @@ pub(crate) fn maybe_start_mcp(
         if r.is_ok() {
             // The guard is dropped when the first closure returns, before
             // `reestablish_tunnels` locks the store again.
-            let tunnels_up = fleet_core::ipc_error::lock(store)
-                .and_then(|s| fleet_core::service::hub::HubBase::read(&s))
-                .and_then(|base| {
-                    fleet_core::service::provision::reestablish_tunnels(store, tunnels, &base)
-                });
+            let base = fleet_core::ipc_error::lock(store)
+                .and_then(|s| fleet_core::service::hub::HubBase::read(&s));
+            let tunnels_up = match &base {
+                Ok(base) => {
+                    fleet_core::service::provision::reestablish_tunnels(store, tunnels, base)
+                        .map_err(|e| e.to_string())
+                }
+                Err(e) => Err(e.to_string()),
+            };
             if let Err(e) = tunnels_up {
                 tracing::warn!("control API: reestablish_tunnels failed: {e}");
+            }
+            // The same stale-host refresh a hub runs (`fleet-hub serve`):
+            // a standalone app owns its fleet, so it keeps the hosts' skills
+            // and hooks at this build's without a button press.
+            if let Ok(base) = base {
+                fleet_core::service::provision::spawn_reprovision_stale(
+                    std::sync::Arc::clone(store),
+                    std::sync::Arc::clone(ssh),
+                    base,
+                    std::time::Duration::from_secs(60),
+                );
             }
         }
         r

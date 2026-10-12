@@ -1,0 +1,1158 @@
+//! `fleet.ui/1`: a block an agent writes in its reply that the Conversation
+//! view draws as a card (`docs/chat-blocks.md`). The desktop reads blocks
+//! out of the transcript in `src/lib/rich_blocks.ts`; this module is the
+//! same check in Rust, for what fleet itself keeps or relays (a pinned
+//! dashboard, `service::dashboards`, is checked with it), and the model `docs/chat-block.schema.json` is generated from
+//! (`REGEN_FORM_DOCS=1`). Both checks run
+//! `docs/chat-block-examples/blocks.json` and must report the same
+//! problems, word for word.
+//!
+//! Unknown keys are ignored (a newer writer may add one); every string is
+//! capped; a block is at most [`MAX_BLOCK_BYTES`].
+
+use super::forms::FormSpec;
+use rmcp::schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+
+pub const UI_SPEC: &str = "fleet.ui/1";
+/// The largest block JSON drawn as a card (`UI_MAX_BYTES` in rich_blocks.ts).
+pub const MAX_BLOCK_BYTES: usize = 32 * 1024;
+const MAX_PROBLEMS: usize = 20;
+const KEY_MAX: usize = 64;
+
+pub const KINDS: &[&str] = &[
+    "report",
+    "steps",
+    "guide",
+    "callout",
+    "facts",
+    "choices",
+    "form",
+    "progress",
+    "results",
+    "error",
+    "setting",
+    "wizard",
+    "dashboard",
+];
+/// The app's wizards a `wizard` block may open in the chat (redesign 10.12):
+/// the ones in `src/lib/forms/wizards/` whose last button runs in the chat
+/// (`CHAT_WIZARD_IDS` in wizards.ts). `link_hub` stays in Settings › Hub.
+pub const CHAT_WIZARDS: &[&str] = &[
+    "add_host",
+    "add_project",
+    "get_started",
+    "new_session",
+    "pair_device",
+];
+const TONES: &[&str] = &["info", "tip", "success", "warning", "danger"];
+pub const PROGRESS_STATES: &[&str] = &["running", "waiting", "done", "failed"];
+pub const PROGRESS_STEP_STATES: &[&str] = &["pending", "running", "done", "failed", "skipped"];
+/// What an error's next step may do itself instead of filling the composer
+/// (G7.4): open a login on a host, open a host, open the accounts. The app
+/// runs it; the block names only which one and the host.
+pub const NEXT_ACTIONS: &[&str] = &["login", "open_host", "open_accounts"];
+/// The next-step actions that name a `host`.
+const NEXT_ACTIONS_ON_HOST: &[&str] = &["login", "open_host"];
+/// The page data sources' column types (`ColType` in pages.ts).
+pub const RESULT_TYPES: &[&str] = &["text", "int", "tokens", "usd_micros", "day", "time"];
+pub const RESULT_CHARTS: &[&str] = &["line", "bar", "sparkline"];
+const RESULT_ITEM_TYPES: &[&str] = &["stat", "chart", "table"];
+/// What a `dashboard` block's widgets are (persona design, step 5): the
+/// widgets of `src/lib/dashboards.ts`, drawn from `work { stats }`.
+pub const DASH_WIDGET_KINDS: &[&str] = &["stat", "groups", "buckets"];
+/// The Work view's stages (`WORK_STAGES` in work_view.ts).
+pub const WORK_STAGES: &[&str] = &["backlog", "in_progress", "in_review", "blocked", "done"];
+pub const DASH_STAT_VALUES: &[&str] = &[
+    "total",
+    "open",
+    "needs_you",
+    "pct_done",
+    "cost",
+    "backlog",
+    "in_progress",
+    "in_review",
+    "blocked",
+    "done",
+];
+pub const DASH_GROUP_SHOWS: &[&str] = &["stages", "done"];
+/// A sprint's or a release's states (`store/work_buckets.rs`).
+pub const DASH_BUCKET_STATES: &[&str] = &["planned", "active", "closed", "released"];
+/// `filters.status`, `filters.has` and `filters.group_by` of the Work view.
+const WORK_STATUS_FILTERS: &[&str] = &["any", "open", "todo", "in_progress", "done"];
+const WORK_HAS_FILTERS: &[&str] = &["any", "active", "past_only", "none", "suggested"];
+const WORK_GROUP_BY: &[&str] = &[
+    "group", "org", "person", "mission", "account", "repo", "sprint", "release", "epic",
+];
+/// The filters a widget's query may name as text.
+const DASH_TEXT_FILTERS: &[&str] = &[
+    "query",
+    "assignee",
+    "status_name",
+    "iteration",
+    "epic",
+    "item_type",
+];
+const FIELD_TYPES_SHOWN: &[&str] = &[
+    "text",
+    "textarea",
+    "number",
+    "bool",
+    "select",
+    "multiselect",
+];
+
+// ── The model (for the schema) ─────────────────────────────────────────────
+
+/// One `fleet.ui/1` block.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ChatBlock {
+    /// Always "fleet.ui/1".
+    pub spec: String,
+    #[serde(flatten)]
+    pub block: BlockKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BlockKind {
+    /// A run's result, read the way a run's report is read.
+    Report {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default)]
+        summary: String,
+        /// done, partial, blocked or failed; anything else reads as partial.
+        #[serde(default)]
+        outcome: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tests_run: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        warnings: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        blockers: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        followups: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        confidence: Option<Value>,
+    },
+    /// A tutorial the person ticks off.
+    Steps {
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        intro: Option<String>,
+        steps: Vec<TutorialStep>,
+    },
+    /// Reference material in folding sections, or with `page` a guide
+    /// fleet already has (a `fleet.page/1` page of layout `guide`), drawn
+    /// as Settings draws it; the other keys are then ignored.
+    Guide {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        page: Option<String>,
+        /// Required without `page`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        intro: Option<String>,
+        /// Required without `page`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        sections: Vec<GuideSection>,
+    },
+    Callout {
+        /// info (default), tip, success, warning or danger.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tone: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        body: String,
+    },
+    Facts {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        items: Vec<(String, FactValue)>,
+    },
+    /// Buttons that fill the composer.
+    Choices {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        question: Option<String>,
+        options: Vec<Choice>,
+    },
+    /// A `fleet.form/1` whose answers fill the composer. No `secret` fields.
+    Form { form: FormSpec },
+    /// A long job's state. Blocks with the same `id` in one conversation are
+    /// one card that updates in place.
+    Progress {
+        id: String,
+        title: String,
+        /// running (default), waiting (on a person), done or failed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        done: Option<u64>,
+        /// Absent when the size is not known yet.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        total: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unit: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steps: Option<Vec<ProgressStep>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        /// When the job started, unix seconds: the card counts the time
+        /// since ("4 min 12 s") while it runs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at: Option<u64>,
+    },
+    /// Numbers, a chart and a table, drawn with the page widgets.
+    Results {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
+        items: Vec<ResultItem>,
+    },
+    /// What failed, its code, and what the person can do next.
+    Error {
+        code: String,
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+        /// A log excerpt, drawn as code under a fold.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        next: Vec<NextStep>,
+    },
+    /// A settings change waiting for a person: the id `set_setting` with
+    /// `propose: true` answered. The card reads the key and both values
+    /// from the proposal itself, never from the block, and applies it only
+    /// after a confirm.
+    Setting {
+        proposal: u64,
+        /// What the change does, in words.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    /// One of the app's own wizards, opened in the chat as a form (redesign
+    /// 10.12): the spec is the app's (`src/lib/forms/wizards/<id>.json`),
+    /// never the block's, and nothing runs until the person presses its last
+    /// step's button.
+    Wizard {
+        wizard: ChatWizard,
+        /// Why the agent opens it, in one sentence.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        why: Option<String>,
+        /// Answers read from the person's own words ("Set up a new project
+        /// for acme/pos on mercury"), by field name: written in as drafted
+        /// defaults the person checks (G7.4). A name the wizard does not
+        /// have, a secret, or a value its field refuses is dropped.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        values: Option<Map<String, Value>>,
+    },
+    /// A dashboard the agent proposes (persona design, step 5): widgets over
+    /// `work { stats }`, which the app reads and draws itself under the
+    /// person's access. The block names filters and what to show, never a
+    /// number. The person pins it; a block with the id of a pinned
+    /// dashboard is offered as its replacement.
+    Dashboard {
+        /// Letters, digits and `. _ : -`; the same id again is a new version.
+        id: String,
+        title: String,
+        /// One line under the title: what it answers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        intro: Option<String>,
+        /// Why the agent proposes it, in one sentence.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        why: Option<String>,
+        widgets: Vec<DashWidget>,
+    },
+}
+
+/// One widget of a `dashboard` block.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DashWidget {
+    /// One number of the query's answer.
+    Stat {
+        title: String,
+        #[serde(default)]
+        query: DashQuery,
+        /// total, open, needs_you, pct_done, cost, or a stage's count.
+        value: String,
+        /// Drawn in the warning colour when above zero.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        warn: Option<bool>,
+    },
+    /// One row per group of `query.group_by`: a bar split by stage, or the
+    /// done share.
+    Groups {
+        title: String,
+        query: DashQuery,
+        /// stages (default) or done.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        show: Option<String>,
+        /// At most this many groups, 1–20 (default 10).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+        /// Leave the "No …" group out.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hide_none: Option<bool>,
+    },
+    /// Sprints or releases (`query.group_by`) with their health.
+    Buckets {
+        title: String,
+        query: DashQuery,
+        /// Only buckets in these states: planned, active, closed, released.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        states: Option<Vec<String>>,
+    },
+}
+
+/// A widget's filters: the Work view's (`work { tree }`'s `filters`), less
+/// the ones that only page or order it. Any other key is refused, so a
+/// misspelt filter never counts the wrong tasks.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct DashQuery {
+    /// An org id, or "none".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org: Option<Value>,
+    /// any, open, todo, in_progress or done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Assigned to the person in its tracker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mine: Option<bool>,
+    /// any, active, past_only, none or suggested: its sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has: Option<String>,
+    /// Only tasks with something to review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<bool>,
+    /// Words of the key or title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    /// One tracker column, by its own name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_name: Option<String>,
+    /// group, org, person, mission, account, repo, sprint, release or epic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_by: Option<String>,
+    /// Any of these stages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stages: Option<Vec<String>>,
+    /// The sprint: current, none or its name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iteration: Option<String>,
+    /// Under one epic: its key or item:<id>.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epic: Option<String>,
+    /// The tracker's type name (Story, Bug …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_type: Option<String>,
+}
+
+/// A wizard a `wizard` block opens ([`CHAT_WIZARDS`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(rename_all = "snake_case")]
+pub enum ChatWizard {
+    AddHost,
+    AddProject,
+    GetStarted,
+    NewSession,
+    PairDevice,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct TutorialStep {
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct GuideSection {
+    pub title: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(untagged)]
+pub enum FactValue {
+    Text(String),
+    Number(f64),
+    Bool(bool),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct Choice {
+    pub label: String,
+    /// What a click puts in the composer, as the person's instruction.
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+    /// The option you would pick. At most one per block; Control's chat
+    /// sends it after `control.auto_continue_minutes` when nobody answers
+    /// (`src/lib/auto_continue.ts`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recommended: bool,
+}
+
+/// An error's next step: a choice that fills the composer, or, with an
+/// `action`, one the app runs itself ([`NEXT_ACTIONS`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct NextStep {
+    pub label: String,
+    /// What a click puts in the composer, as the person's instruction; with
+    /// an `action`, what it fills where the action cannot run.
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+    /// login, open_host or open_accounts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    /// The host a `login` or `open_host` acts on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ProgressStep {
+    pub title: String,
+    /// pending (default), running, done, failed or skipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    /// One line under the step while it runs: "attempt 2 of 10".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ResultAxis {
+    pub label: String,
+    /// text, int, tokens, usd_micros, day or time; as a page column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ty: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(untagged)]
+pub enum StatValue {
+    Number(f64),
+    Text(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(untagged)]
+pub enum PointX {
+    Text(String),
+    Number(f64),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResultItem {
+    Stat {
+        label: String,
+        value: StatValue,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ty: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
+    },
+    /// One series: line, bar or sparkline.
+    Chart {
+        chart: String,
+        title: String,
+        x: ResultAxis,
+        y: ResultAxis,
+        points: Vec<(PointX, f64)>,
+    },
+    Table {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        columns: Vec<ResultAxis>,
+        /// One cell per column: text, a number, a bool or null.
+        rows: Vec<Vec<Value>>,
+    },
+}
+
+// ── The check ──────────────────────────────────────────────────────────────
+
+/// A block from its JSON text: the size first, then [`check`].
+pub fn check_text(raw: &str) -> Result<(), Vec<String>> {
+    if raw.len() > MAX_BLOCK_BYTES {
+        return Err(vec![format!(
+            "is larger than {} KiB",
+            MAX_BLOCK_BYTES / 1024
+        )]);
+    }
+    match serde_json::from_str::<Value>(raw) {
+        Ok(v) => check(&v),
+        Err(_) => Err(vec!["is not valid JSON".into()]),
+    }
+}
+
+/// Every problem with a block (at most 20), worded and ordered as
+/// `rich_blocks.ts` words them. A block that passes deserialises into
+/// [`ChatBlock`] except for a `report`, which is read as loosely as a run's
+/// report (a single string for a list, say).
+pub fn check(v: &Value) -> Result<(), Vec<String>> {
+    let Some(o) = v.as_object() else {
+        return Err(vec!["must be a JSON object".into()]);
+    };
+    let mut p = Problems::default();
+    if o.get("spec").and_then(Value::as_str) != Some(UI_SPEC) {
+        p.add("", format!("`spec` must be \"{UI_SPEC}\""));
+    }
+    let kind = o
+        .get("kind")
+        .and_then(Value::as_str)
+        .filter(|k| KINDS.contains(k));
+    let Some(kind) = kind else {
+        p.add("", format!("`kind` must be one of {}", KINDS.join(", ")));
+        return Err(p.0);
+    };
+    match kind {
+        "report" => {
+            p.str(o, "title", "", false, 120);
+        }
+        "steps" => {
+            p.str(o, "title", "", true, 120);
+            p.str(o, "intro", "", false, 2000);
+            let steps = p.arr(o, "steps", "", 1, 30);
+            p.each(&steps, "step", |p, s, at| {
+                p.str(s, "title", at, true, 200);
+                p.str(s, "body", at, false, 4000);
+                p.str(s, "code", at, false, 8000);
+                p.str(s, "lang", at, false, 20);
+            });
+        }
+        "guide" if !matches!(o.get("page"), None | Some(Value::Null)) => {
+            p.key(o, "page", "");
+        }
+        "guide" => {
+            p.str(o, "title", "", true, 120);
+            p.str(o, "intro", "", false, 2000);
+            let sections = p.arr(o, "sections", "", 1, 20);
+            p.each(&sections, "section", |p, s, at| {
+                p.str(s, "title", at, true, 200);
+                p.str(s, "body", at, true, 8000);
+            });
+        }
+        "callout" => {
+            match o.get("tone") {
+                None | Some(Value::Null) => {}
+                Some(Value::String(t)) if TONES.contains(&t.as_str()) => {}
+                Some(_) => p.add("", format!("`tone` must be one of {}", TONES.join(", "))),
+            }
+            p.str(o, "title", "", false, 120);
+            p.str(o, "body", "", true, 4000);
+        }
+        "facts" => {
+            let items = p.arr(o, "items", "", 1, 40);
+            for (k, x) in items.iter().enumerate() {
+                let pair = x.as_array().filter(|a| {
+                    a.len() == 2
+                        && a[0].is_string()
+                        && (a[1].is_string() || a[1].is_number() || a[1].is_boolean())
+                });
+                if pair.is_none() {
+                    p.add(&format!("item {}", k + 1), "must be [label, value]");
+                }
+            }
+            p.str(o, "title", "", false, 120);
+        }
+        "choices" => {
+            let options = p.arr(o, "options", "", 1, 8);
+            p.each(&options, "option", choice);
+            let picked = options
+                .iter()
+                .filter(|x| x.get("recommended") == Some(&Value::Bool(true)))
+                .count();
+            if picked > 1 {
+                p.add("", "only one option may be `recommended`");
+            }
+            p.str(o, "title", "", false, 120);
+            p.str(o, "question", "", false, 500);
+        }
+        "form" => form(&mut p, o.get("form")),
+        "progress" => {
+            p.key(o, "id", "");
+            p.str(o, "title", "", true, 120);
+            p.one_of(o, "state", "", PROGRESS_STATES, false);
+            let done = p.num(o, "done", "", 0);
+            let total = p.num(o, "total", "", 1);
+            if let (Some(d), Some(t)) = (done, total) {
+                if d > t {
+                    p.add("", "`done` is more than `total`");
+                }
+            }
+            if let Some(steps) = p.opt_arr(o, "steps", "", 1, 20) {
+                p.each(&steps, "step", |p, s, at| {
+                    p.str(s, "title", at, true, 200);
+                    p.one_of(s, "state", at, PROGRESS_STEP_STATES, false);
+                    p.str(s, "detail", at, false, 120);
+                });
+            }
+            p.str(o, "unit", "", false, 20);
+            p.str(o, "note", "", false, 2000);
+            p.num(o, "started_at", "", 0);
+        }
+        "results" => {
+            p.str(o, "title", "", false, 120);
+            p.str(o, "summary", "", false, 2000);
+            let items = p.arr(o, "items", "", 1, 12);
+            p.each(&items, "item", result_item);
+        }
+        "error" => {
+            p.key(o, "code", "");
+            p.str(o, "title", "", true, 120);
+            let next = p.opt_arr(o, "next", "", 1, 4).unwrap_or_default();
+            p.each(&next, "next", next_step);
+            p.str(o, "body", "", false, 4000);
+            p.str(o, "detail", "", false, 8000);
+        }
+        "setting" => {
+            if matches!(o.get("proposal"), None | Some(Value::Null)) {
+                p.add("", "`proposal` is required");
+            } else {
+                p.num(o, "proposal", "", 1);
+            }
+            p.str(o, "note", "", false, 500);
+        }
+        "wizard" => {
+            p.one_of(o, "wizard", "", CHAT_WIZARDS, true);
+            p.str(o, "why", "", false, 500);
+            drafted_values(&mut p, o.get("values"));
+        }
+        "dashboard" => {
+            p.key(o, "id", "");
+            p.str(o, "title", "", true, 80);
+            p.str(o, "intro", "", false, 300);
+            p.str(o, "why", "", false, 500);
+            let widgets = p.arr(o, "widgets", "", 1, 12);
+            p.each(&widgets, "widget", dash_widget);
+        }
+        _ => unreachable!("kind is one of KINDS"),
+    }
+    if p.0.is_empty() {
+        Ok(())
+    } else {
+        Err(p.0)
+    }
+}
+
+/// A dashboard widget (`dashWidget` in rich_blocks.ts).
+fn dash_widget(p: &mut Problems, o: &Map<String, Value>, at: &str) {
+    p.one_of(o, "kind", at, DASH_WIDGET_KINDS, true);
+    p.str(o, "title", at, true, 80);
+    let group_by = dash_query(p, o.get("query"), at);
+    match o.get("kind").and_then(Value::as_str) {
+        Some("stat") => {
+            p.one_of(o, "value", at, DASH_STAT_VALUES, true);
+            p.bool(o, "warn", at);
+        }
+        Some("groups") => {
+            if group_by.is_none() {
+                p.add(at, "a groups widget needs `query.group_by`");
+            }
+            p.one_of(o, "show", at, DASH_GROUP_SHOWS, false);
+            if p.num(o, "limit", at, 1).is_some_and(|l| l > 20.0) {
+                p.add(at, "`limit` must be at most 20");
+            }
+            p.bool(o, "hide_none", at);
+        }
+        Some("buckets") => {
+            if !matches!(group_by.as_deref(), Some("sprint" | "release")) {
+                p.add(
+                    at,
+                    "a buckets widget needs `query.group_by` sprint or release",
+                );
+            }
+            if let Some(states) = p.opt_arr(o, "states", at, 1, DASH_BUCKET_STATES.len()) {
+                p.one_of_each(&states, &format!("{at} › state"), DASH_BUCKET_STATES);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A widget's query (`dashQuery` in rich_blocks.ts), keys in sorted order;
+/// its `group_by` when that is a text.
+fn dash_query(p: &mut Problems, v: Option<&Value>, at: &str) -> Option<String> {
+    let o = match v {
+        None | Some(Value::Null) => return None,
+        Some(Value::Object(o)) => o,
+        Some(_) => {
+            p.add(at, "`query` must be an object");
+            return None;
+        }
+    };
+    let where_ = format!("{at} › query");
+    let mut keys: Vec<&String> = o.keys().collect();
+    keys.sort();
+    for k in keys {
+        match k.as_str() {
+            "org" => {
+                let ok = match &o[k] {
+                    Value::String(s) => s == "none",
+                    Value::Number(n) => n.as_f64().is_some_and(|x| x.fract() == 0.0 && x >= 1.0),
+                    _ => false,
+                };
+                if !ok {
+                    p.add(&where_, "`org` must be an org id or none");
+                }
+            }
+            "status" => p.one_of(o, k, &where_, WORK_STATUS_FILTERS, true),
+            "has" => p.one_of(o, k, &where_, WORK_HAS_FILTERS, true),
+            "group_by" => p.one_of(o, k, &where_, WORK_GROUP_BY, true),
+            "mine" | "review" => p.bool(o, k, &where_),
+            "stages" => {
+                let list = p.arr(o, k, &where_, 1, WORK_STAGES.len());
+                p.one_of_each(&list, &format!("{where_} › stage"), WORK_STAGES);
+            }
+            t if DASH_TEXT_FILTERS.contains(&t) => {
+                p.str(o, k, &where_, true, 200);
+            }
+            other => p.add(&where_, format!("`{other}` is not a filter")),
+        }
+    }
+    o.get("group_by")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn choice(p: &mut Problems, o: &Map<String, Value>, at: &str) {
+    p.str(o, "label", at, true, 80);
+    p.str(o, "prompt", at, true, 4000);
+    p.str(o, "hint", at, false, 200);
+    if !matches!(
+        o.get("recommended"),
+        None | Some(Value::Null | Value::Bool(_))
+    ) {
+        p.add(at, "`recommended` must be true or false");
+    }
+}
+
+/// The most drafted answers a `wizard` block carries.
+const MAX_DRAFTED: usize = 20;
+
+fn drafted_values(p: &mut Problems, v: Option<&Value>) {
+    let o = match v {
+        None | Some(Value::Null) => return,
+        Some(Value::Object(o)) => o,
+        Some(_) => {
+            p.add("", "`values` must be an object of answers by field name");
+            return;
+        }
+    };
+    if o.len() > MAX_DRAFTED {
+        p.add("", format!("`values` has more than {MAX_DRAFTED} answers"));
+    }
+    for (k, x) in o {
+        let at = format!("values › {k}");
+        let named = k.len() <= 40
+            && k.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+            && k.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+        if !named {
+            p.add(&at, "must be a field name: lowercase letters, digits and _");
+        }
+        match x {
+            Value::String(t) if t.chars().count() > 500 => {
+                p.add(&at, "is longer than 500 characters")
+            }
+            Value::String(_) | Value::Bool(_) => {}
+            Value::Number(n) if n.as_f64().is_some_and(f64::is_finite) => {}
+            _ => p.add(&at, "must be text, a number or true/false"),
+        }
+    }
+}
+
+fn next_step(p: &mut Problems, o: &Map<String, Value>, at: &str) {
+    choice(p, o, at);
+    p.one_of(o, "action", at, NEXT_ACTIONS, false);
+    let on_host = o
+        .get("action")
+        .and_then(Value::as_str)
+        .is_some_and(|a| NEXT_ACTIONS_ON_HOST.contains(&a));
+    if on_host {
+        p.key(o, "host", at);
+    }
+}
+
+fn axis(p: &mut Problems, v: Option<&Value>, at: &str) {
+    let Some(o) = v.and_then(Value::as_object) else {
+        p.add(at, "must be an object");
+        return;
+    };
+    p.str(o, "label", at, true, 80);
+    p.one_of(o, "ty", at, RESULT_TYPES, false);
+}
+
+fn finite(v: &Value) -> bool {
+    v.as_f64().is_some_and(f64::is_finite)
+}
+
+fn result_item(p: &mut Problems, o: &Map<String, Value>, at: &str) {
+    match o.get("type").and_then(Value::as_str) {
+        Some("stat") => {
+            p.str(o, "label", at, true, 80);
+            let ok = match o.get("value") {
+                Some(Value::Number(_)) => true,
+                Some(Value::String(s)) => s.chars().count() <= 80,
+                _ => false,
+            };
+            if !ok {
+                p.add(
+                    at,
+                    "`value` must be a number or text of at most 80 characters",
+                );
+            }
+            p.one_of(o, "ty", at, RESULT_TYPES, false);
+            p.str(o, "hint", at, false, 200);
+        }
+        Some("chart") => {
+            p.one_of(o, "chart", at, RESULT_CHARTS, true);
+            p.str(o, "title", at, true, 120);
+            axis(p, o.get("x"), &format!("{at} › x"));
+            axis(p, o.get("y"), &format!("{at} › y"));
+            let points = p.arr(o, "points", at, 1, 200);
+            for (k, pt) in points.iter().enumerate() {
+                let ok = pt.as_array().is_some_and(|a| {
+                    a.len() == 2 && (a[0].is_string() || finite(&a[0])) && finite(&a[1])
+                });
+                if !ok {
+                    p.add(&format!("{at} › point {}", k + 1), "must be [x, number]");
+                }
+            }
+        }
+        Some("table") => {
+            p.str(o, "title", at, false, 120);
+            let columns = p.arr(o, "columns", at, 1, 12);
+            for (k, c) in columns.iter().enumerate() {
+                axis(p, Some(c), &format!("{at} › column {}", k + 1));
+            }
+            let rows = p.arr(o, "rows", at, 0, 200);
+            for (k, r) in rows.iter().enumerate() {
+                let rat = format!("{at} › row {}", k + 1);
+                let Some(cells) = r.as_array() else {
+                    p.add(&rat, "must be a list");
+                    continue;
+                };
+                if cells.len() != columns.len() {
+                    p.add(
+                        &rat,
+                        format!("has {} cells for {} columns", cells.len(), columns.len()),
+                    );
+                }
+                for (j, c) in cells.iter().enumerate() {
+                    if !(c.is_null() || c.is_string() || c.is_boolean() || c.is_number()) {
+                        p.add(
+                            &rat,
+                            format!("cell {} must be text, a number, a bool or null", j + 1),
+                        );
+                    }
+                }
+            }
+        }
+        _ => p.add(
+            at,
+            format!("`type` must be one of {}", RESULT_ITEM_TYPES.join(", ")),
+        ),
+    }
+}
+
+/// Enough of `fleet.form/1` for the card to draw it (`checkForm` in
+/// rich_blocks.ts): looser than [`super::forms::parse`], which is for `ask`.
+/// A secret is refused: its answer would land in the transcript.
+fn form(p: &mut Problems, v: Option<&Value>) {
+    let where_ = "form";
+    let Some(o) = v.and_then(Value::as_object) else {
+        p.add(where_, "must be a fleet.form/1 object");
+        return;
+    };
+    if o.get("spec").and_then(Value::as_str) != Some("fleet.form/1") {
+        p.add(where_, "`spec` must be \"fleet.form/1\"");
+    }
+    p.str(o, "title", where_, true, 120);
+    p.str(o, "intro", where_, false, 500);
+    p.str(o, "submit", where_, false, 40);
+    let mut names = std::collections::BTreeSet::new();
+    let mut fields = 0usize;
+    let steps = p.arr(o, "steps", where_, 1, 12);
+    p.each(&steps, "form › step", |p, s, at| {
+        p.str(s, "title", at, true, 120);
+        p.str(s, "intro", at, false, 500);
+        // A review step (forms.rs `StepKind::Review`) has no fields.
+        let review = s.get("kind").and_then(Value::as_str) == Some("review");
+        let fs = if review && !s.contains_key("fields") {
+            vec![]
+        } else {
+            p.arr(s, "fields", at, usize::from(!review), 40)
+        };
+        p.each(&fs, &format!("{at} › field"), |p, f, fat| {
+            fields += 1;
+            if let Some(name) = p.str(f, "name", fat, true, 40) {
+                if !valid_name(name) {
+                    p.add(
+                        fat,
+                        format!("name \"{name}\" must be lowercase letters, digits and _"),
+                    );
+                }
+                if !names.insert(name.to_string()) {
+                    p.add(fat, format!("name \"{name}\" appears twice"));
+                }
+            }
+            p.str(f, "label", fat, true, 200);
+            p.str(f, "help", fat, false, 500);
+            p.str(f, "placeholder", fat, false, 200);
+            let ty = f.get("type");
+            match ty.and_then(Value::as_str) {
+                Some("secret") => p.add(
+                    fat,
+                    "a secret field is only for `ask`: its answer would land in the transcript",
+                ),
+                Some(t) if FIELD_TYPES_SHOWN.contains(&t) => {}
+                _ => p.add(fat, format!("type {} is not a field type", js(ty))),
+            }
+            if matches!(
+                ty.and_then(Value::as_str),
+                Some("select") | Some("multiselect")
+            ) {
+                let opts = p.arr(f, "options", fat, 1, 50);
+                for (k, opt) in opts.iter().enumerate() {
+                    // `[value, label]`, or `{value, label, …}` (forms.rs `FormOption`).
+                    let ok = opt
+                        .as_array()
+                        .is_some_and(|a| a.len() == 2 && a[0].is_string() && a[1].is_string())
+                        || opt.as_object().is_some_and(|o| {
+                            o.get("value").is_some_and(Value::is_string)
+                                && o.get("label").is_some_and(Value::is_string)
+                        });
+                    if !ok {
+                        p.add(
+                            &format!("{fat} › option {}", k + 1),
+                            "must be [value, label]",
+                        );
+                    }
+                }
+            }
+            for k in ["min", "max", "max_len"] {
+                if f.get(k).is_some_and(|x| !finite(x)) {
+                    p.add(fat, format!("`{k}` must be a number"));
+                }
+            }
+        });
+    });
+    if fields > 40 {
+        p.add(where_, "has more than 40 fields");
+    }
+}
+
+/// `[a-z][a-z0-9_]{0,39}`.
+fn valid_name(n: &str) -> bool {
+    let mut cs = n.chars();
+    cs.next().is_some_and(|c| c.is_ascii_lowercase())
+        && n.len() <= 40
+        && cs.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// A value as `JSON.stringify` writes it in a problem.
+fn js(v: Option<&Value>) -> String {
+    v.map_or_else(|| "undefined".into(), Value::to_string)
+}
+
+#[derive(Default)]
+struct Problems(Vec<String>);
+
+impl Problems {
+    fn add(&mut self, at: &str, what: impl AsRef<str>) {
+        if self.0.len() < MAX_PROBLEMS {
+            let what = what.as_ref();
+            self.0.push(if at.is_empty() {
+                what.to_string()
+            } else {
+                format!("{at}: {what}")
+            });
+        }
+    }
+
+    fn str<'a>(
+        &mut self,
+        o: &'a Map<String, Value>,
+        key: &str,
+        at: &str,
+        required: bool,
+        max: usize,
+    ) -> Option<&'a str> {
+        match o.get(key) {
+            None | Some(Value::Null) => {
+                if required {
+                    self.add(at, format!("`{key}` is required"));
+                }
+                None
+            }
+            Some(Value::String(s)) => {
+                if required && s.trim().is_empty() {
+                    self.add(at, format!("`{key}` is empty"));
+                }
+                if s.chars().count() > max {
+                    self.add(at, format!("`{key}` is longer than {max} characters"));
+                }
+                Some(s)
+            }
+            Some(_) => {
+                self.add(at, format!("`{key}` must be text"));
+                None
+            }
+        }
+    }
+
+    fn arr(
+        &mut self,
+        o: &Map<String, Value>,
+        key: &str,
+        at: &str,
+        min: usize,
+        max: usize,
+    ) -> Vec<Value> {
+        let Some(v) = o.get(key).and_then(Value::as_array) else {
+            self.add(at, format!("`{key}` must be a list"));
+            return vec![];
+        };
+        if v.len() < min {
+            let entries = if min == 1 { "entry" } else { "entries" };
+            self.add(at, format!("`{key}` needs at least {min} {entries}"));
+        }
+        if v.len() > max {
+            self.add(at, format!("`{key}` has more than {max} entries"));
+        }
+        v.iter().take(max).cloned().collect()
+    }
+
+    /// Only when the key is there: an optional list.
+    fn opt_arr(
+        &mut self,
+        o: &Map<String, Value>,
+        key: &str,
+        at: &str,
+        min: usize,
+        max: usize,
+    ) -> Option<Vec<Value>> {
+        match o.get(key) {
+            None | Some(Value::Null) => None,
+            Some(_) => Some(self.arr(o, key, at, min, max)),
+        }
+    }
+
+    fn each(
+        &mut self,
+        items: &[Value],
+        at: &str,
+        mut f: impl FnMut(&mut Self, &Map<String, Value>, &str),
+    ) {
+        for (k, x) in items.iter().enumerate() {
+            let at = format!("{at} {}", k + 1);
+            match x.as_object() {
+                Some(o) => f(self, o, &at),
+                None => self.add(&at, "must be an object"),
+            }
+        }
+    }
+
+    /// A whole number of at least `min`, when present.
+    fn num(&mut self, o: &Map<String, Value>, key: &str, at: &str, min: i64) -> Option<f64> {
+        match o.get(key) {
+            None | Some(Value::Null) => None,
+            Some(Value::Number(n)) => {
+                let x = n.as_f64().unwrap_or(f64::NAN);
+                if x.fract() != 0.0 {
+                    self.add(at, format!("`{key}` must be a whole number"));
+                } else if x < min as f64 {
+                    self.add(at, format!("`{key}` must be at least {min}"));
+                }
+                Some(x)
+            }
+            Some(_) => {
+                self.add(at, format!("`{key}` must be a number"));
+                None
+            }
+        }
+    }
+
+    /// One of `allowed`. Absent is a problem only when `required` (the key
+    /// has no default).
+    fn one_of(
+        &mut self,
+        o: &Map<String, Value>,
+        key: &str,
+        at: &str,
+        allowed: &[&str],
+        required: bool,
+    ) {
+        match o.get(key) {
+            None | Some(Value::Null) if required => self.add(at, format!("`{key}` is required")),
+            None | Some(Value::Null) => {}
+            Some(Value::String(s)) if allowed.contains(&s.as_str()) => {}
+            Some(_) => self.add(at, format!("`{key}` must be one of {}", allowed.join(", "))),
+        }
+    }
+
+    /// true or false, when present.
+    fn bool(&mut self, o: &Map<String, Value>, key: &str, at: &str) {
+        if !matches!(o.get(key), None | Some(Value::Null) | Some(Value::Bool(_))) {
+            self.add(at, format!("`{key}` must be true or false"));
+        }
+    }
+
+    /// Each entry of a list one of `allowed`; a problem names it
+    /// `{at} {k}` ("widget 1 › query › stage 2").
+    fn one_of_each(&mut self, list: &[Value], at: &str, allowed: &[&str]) {
+        for (k, x) in list.iter().enumerate() {
+            if !x.as_str().is_some_and(|s| allowed.contains(&s)) {
+                self.add(
+                    &format!("{at} {}", k + 1),
+                    format!("must be one of {}", allowed.join(", ")),
+                );
+            }
+        }
+    }
+
+    /// A progress `id`, an error `code` or a guide's `page`: a key, never
+    /// prose.
+    fn key(&mut self, o: &Map<String, Value>, name: &str, at: &str) {
+        if let Some(v) = self.str(o, name, at, true, KEY_MAX) {
+            let ok = v
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '-'));
+            if !v.is_empty() && !ok {
+                self.add(at, format!("`{name}` must be letters, digits and . _ : -"));
+            }
+        }
+    }
+}

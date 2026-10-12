@@ -71,7 +71,7 @@ export type Item =
   | { type: 'table'; source: SourceRef; columns?: string[]; copy?: boolean }
   | { type: 'chart'; source: SourceRef; chart: 'line' | 'bar' | 'stacked_bar' | 'sparkline'; title?: string }
   | { type: 'account_usage'; source: SourceRef; view: UsageView }
-  | { type: 'notice'; tone: 'info' | 'warn' | 'danger'; text: string }
+  | { type: 'notice'; tone: 'info' | 'warn' | 'danger' | 'later'; text: string }
   | { type: 'custom'; component: CustomComponent }
   | { type: 'action'; action: string }
   | { type: 'link'; page: string; label?: string };
@@ -81,6 +81,10 @@ export interface Section {
   intro?: string;
   collapsible?: boolean;
   advanced?: boolean;
+  /** A record's `count` / `money` fields shown as tiles. */
+  tiles?: boolean;
+  /** Choice-set settings over the same options shown as one grid. */
+  matrix?: boolean;
   when?: Condition;
   items: Item[];
 }
@@ -100,6 +104,27 @@ export interface Filter {
   default?: number;
 }
 
+/** A master_detail page's records drawn as a graph (`model.rs` `GraphView`). */
+export interface GraphView {
+  center: string;
+  /** The resource's choice field each line follows. */
+  state: string;
+  /** Its values drawn as up (solid); any other is down (dashed). */
+  up: string[];
+  facts: string[];
+}
+
+/** A master_detail page's records shown as one table (`model.rs`
+ *  `TableView`, M15 G4.7). */
+export interface TableView {
+  title: string;
+  columns: string[];
+  filters?: string[];
+  group_by?: string;
+  /** A field shown under the record's title in its column (M15 G7.14). */
+  subtitle?: string;
+}
+
 export interface Page {
   spec: string;
   id: string;
@@ -111,6 +136,10 @@ export interface Page {
   resource?: string;
   /** A `master_detail` page's items about the whole list. */
   list_items?: Item[];
+  /** A `master_detail` page's records also drawn as a graph. */
+  graph?: GraphView;
+  /** A `master_detail` page's records also shown as a table. */
+  table?: TableView;
   /** A `review_apply` page's proposals: settings (`pages/review.ts`) or
    *  guides (`pages/guides.ts`). */
   review?: 'settings' | 'guides';
@@ -189,7 +218,8 @@ export type KindDesc =
   | { type: 'path_map' }
   | { type: 'id_set' }
   | { type: 'price_map' }
-  | { type: 'text'; max: number };
+  | { type: 'text'; max: number }
+  | { type: 'time_range' };
 
 export type Unit =
   | 'none'
@@ -202,7 +232,8 @@ export type Unit =
   | 'kib'
   | 'mib'
   | 'tokens'
-  | 'count';
+  | 'count'
+  | 'usd';
 
 export interface Descriptor {
   key: string;
@@ -220,6 +251,46 @@ export interface Descriptor {
   ai: 'suggest' | 'fill' | 'never';
   owned_by?: string;
   option_labels?: [string, string][];
+  /** An org may set its own value. */
+  per_org?: boolean;
+  /** Where the value lives (G1.5): one fleet value, one an org may
+   *  override, or the running process's own. Absent from an older hub. */
+  scope?: 'fleet' | 'org' | 'process';
+  /** The orgs that set their own value, by name. Absent when none did. */
+  org_values?: { org_id: number; org: string; value: string }[];
+}
+
+/** A settings row's scope pill (G1.5) and the words beside it. */
+export interface ScopeWords {
+  /** "hub", "this device", "org Acme" or "2 orgs". */
+  pill: string;
+  /** "overrides the hub", when an org's own value takes over; else empty. */
+  note: string;
+  /** Longer form for a tooltip. */
+  title: string;
+}
+
+/** Where `d`'s value lives, as its row says it. `remote`: this desktop is
+ *  paired with a hub, so the fleet's values are the hub's. */
+export function scopeWords(d: Descriptor, remote: boolean): ScopeWords {
+  const home = remote ? 'hub' : 'this device';
+  const title =
+    d.scope === 'process'
+      ? remote
+        ? 'The hub’s own value: each app and hub keeps its own.'
+        : 'This app’s own value.'
+      : remote
+        ? 'One value for the whole fleet, kept on the hub.'
+        : 'One value for the whole fleet, kept in this app.';
+  const orgs = d.org_values ?? [];
+  if (orgs.length === 0) return { pill: home, note: '', title };
+  const over = `overrides the ${remote ? 'hub' : 'fleet'}`;
+  const list = orgs.map((o) => `${o.org}: ${o.value === '' ? '(empty)' : o.value}`).join(', ');
+  return {
+    pill: orgs.length === 1 ? `org ${orgs[0].org}` : `${orgs.length} orgs`,
+    note: orgs.length === 1 ? over : over.replace('overrides', 'override'),
+    title: `Their sessions read their own value (${list}); the rest read this one.`,
+  };
 }
 
 // ── stores ──
@@ -239,7 +310,9 @@ export async function loadDescriptors(): Promise<Result<Descriptor[]>> {
   return r;
 }
 
-export function fetchSource(ref: SourceRef): Promise<Result<unknown>> {
+export function fetchSource(ref: SourceRef, spec?: SourceSpec): Promise<Result<unknown>> {
+  // A live source has its own command, which routes to the hub (11.9b).
+  if (spec?.live) return invokeCmd<unknown>(spec.live.command);
   return invokeCmd<unknown>('fetch_page_source', { id: ref.id, params: ref.params ?? null });
 }
 
@@ -324,6 +397,7 @@ export const UNIT_WORDS: Record<Unit, string> = {
   mib: 'MiB',
   tokens: 'tokens',
   count: '',
+  usd: 'USD',
 };
 
 /** "1–365 days", "0 = never", bounds in the shown unit, for the help line. */

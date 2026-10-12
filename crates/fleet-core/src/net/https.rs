@@ -74,11 +74,17 @@ impl Request {
     }
 
     pub fn post_json(url: impl Into<String>, body: &serde_json::Value) -> Self {
+        Request::post_json_bytes(url, body.to_string().into_bytes())
+    }
+
+    /// [`Self::post_json`] for a body already written: one whose key order
+    /// matters (a `serde_json::Value` sorts its objects).
+    pub fn post_json_bytes(url: impl Into<String>, body: Vec<u8>) -> Self {
         let mut r = Request::get(url);
         r.method = Method::Post;
         r.headers
             .push(("Content-Type".into(), "application/json".into()));
-        r.body = Some(body.to_string().into_bytes());
+        r.body = Some(body);
         r
     }
 
@@ -227,6 +233,13 @@ pub trait HttpTransport: Send + Sync {
 /// Which hosts a [`DirectTransport`] may connect to.
 pub type HostPolicy = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
+/// The IPv6 cloud metadata endpoints: AWS IMDS (`fd00:ec2::254`, Nitro) and
+/// GCP (`fd20:ce::254`). Their IPv4 twin is link-local and refused as such.
+const CLOUD_METADATA_V6: [std::net::Ipv6Addr; 2] = [
+    std::net::Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254),
+    std::net::Ipv6Addr::new(0xfd20, 0xce, 0, 0, 0, 0, 0, 0x254),
+];
+
 /// Why an address a host name resolved to is refused (work graph M6.5: an
 /// admin-configured site must not reach this machine or a cloud metadata
 /// service). IPv4-mapped IPv6 is judged as the IPv4 it carries.
@@ -259,6 +272,11 @@ pub fn refused_address(ip: std::net::IpAddr) -> Option<&'static str> {
                 Some("link-local")
             } else if v6.is_multicast() {
                 Some("multicast")
+            } else if CLOUD_METADATA_V6.contains(&v6) {
+                // Unique-local, not link-local, so the rule above misses
+                // them; private ranges in general stay reachable (a Jira
+                // Data Center on a ULA), so only these exact addresses.
+                Some("cloud metadata service")
             } else {
                 None
             }
@@ -294,6 +312,12 @@ impl DirectTransport {
     /// is the admin's explicit opt-in to loopback / link-local targets.
     pub fn with_address_guard(mut self, allow_private: bool) -> Self {
         self.addr_guard = Some(allow_private);
+        self
+    }
+
+    /// Buffer bodies up to `max` bytes instead of [`DEFAULT_MAX_BODY`].
+    pub fn with_max_body(mut self, max: u64) -> Self {
+        self.max_body = max;
         self
     }
 
@@ -812,6 +836,8 @@ mod tests {
             "::ffff:169.254.169.254",
             "255.255.255.255",
             "224.0.0.1",
+            "fd00:ec2::254",
+            "fd20:ce::254",
         ] {
             assert!(
                 refused_address(ip.parse::<IpAddr>().unwrap()).is_some(),
@@ -824,6 +850,7 @@ mod tests {
             "172.16.0.1",
             "93.184.216.34",
             "2606:4700::1",
+            "fd00::1",
         ] {
             assert_eq!(refused_address(ip.parse::<IpAddr>().unwrap()), None, "{ip}");
         }

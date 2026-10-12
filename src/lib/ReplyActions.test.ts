@@ -81,6 +81,53 @@ async function confirmRetry(index = 1) {
   await settle();
 }
 
+// Multi-user M1: `rewind_conversation` is the `own` tier (spec §4.3), so Fork,
+// Rewind and Retry are the owner's alone — a `drive` grantee is barred as well
+// as a watcher. This component is handed only an id, a host and a tmux name, so
+// it cannot ask `share.ts` itself; the row's owner computes the reason and
+// passes it in, and these tests pin that it is actually applied to all three.
+describe('ReplyActions access gate', () => {
+  const WHY = 'Only the session’s owner can do this.';
+
+  it('disables fork, rewind and retry when the client may not rewind', async () => {
+    render(ReplyActions, { props: { ...base, index: 1, accessBlocked: WHY } });
+    for (const id of ['reply-fork', 'reply-rewind', 'reply-retry']) {
+      const b = screen.getByTestId(id) as HTMLButtonElement;
+      expect(b.disabled, id).toBe(true);
+      expect(b.getAttribute('title'), id).toBe(WHY);
+    }
+  });
+
+  it('does not rewind, fork or open a confirmation even if the click lands', async () => {
+    const forked: (string | null)[] = [];
+    render(ReplyActions, {
+      props: { ...base, index: 1, accessBlocked: WHY, onFork: (a: string | null) => forked.push(a) },
+    });
+    await fireEvent.click(screen.getByTestId('reply-rewind'));
+    await settle();
+    expect(screen.queryByTestId('confirm-ok')).toBeNull();
+    await fireEvent.click(screen.getByTestId('reply-retry'));
+    await settle();
+    expect(screen.queryByTestId('confirm-ok')).toBeNull();
+    await fireEvent.click(screen.getByTestId('reply-fork'));
+    await settle();
+    expect(forked).toEqual([]);
+    expect(mockedRewind).not.toHaveBeenCalled();
+  });
+
+  it('leaves the clipboard pair alone: reading a reply is not a rewind', async () => {
+    render(ReplyActions, { props: { ...base, index: 1, accessBlocked: WHY } });
+    expect((screen.getByTestId('reply-quote') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('changes nothing with no reason to apply (the owner, and standalone)', async () => {
+    render(ReplyActions, { props: { ...base, index: 1 } });
+    for (const id of ['reply-fork', 'reply-rewind', 'reply-retry']) {
+      expect((screen.getByTestId(id) as HTMLButtonElement).disabled, id).toBe(false);
+    }
+  });
+});
+
 describe('ReplyActions', () => {
   it('retry rewinds and then sends the same prompt, through the outbox', async () => {
     mockedRewind.mockResolvedValue({ ok: true, value: { id: 7 } });

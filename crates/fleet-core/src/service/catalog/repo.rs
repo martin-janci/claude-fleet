@@ -155,6 +155,9 @@ struct CatalogFile {
     schema_version: u64,
 }
 
+/// The git verbs that reach the catalog's remote.
+const NETWORK_VERBS: [&str; 5] = ["clone", "fetch", "pull", "push", "ls-remote"];
+
 /// Run git and hand back the raw `Output`, exit status included. Only
 /// callers that give a non-zero status its own meaning (`has_staged`) use
 /// this directly; everything else goes through `git`, which turns a non-zero
@@ -166,7 +169,26 @@ fn git_output(dir: &Path, args: &[&str]) -> Result<std::process::Output, IpcErro
     // `layers/a.yaml` (Assets M4, Task 6 review round 3).
     cmd.args(args)
         .current_dir(dir)
-        .env("GIT_LITERAL_PATHSPECS", "1");
+        .env("GIT_LITERAL_PATHSPECS", "1")
+        // Nobody is at a terminal to answer a credential prompt: on a hub or
+        // a desktop launched from the dock, git asking for a password would
+        // wait forever while holding the authoring lock. Fail instead.
+        .env("GIT_TERMINAL_PROMPT", "0");
+    // The verbs that talk to the remote run on the caller's thread while the
+    // authoring lock is held: a remote that stops answering must end them,
+    // not hold every later authoring action and card apply behind it
+    // (review r06). ssh gives up on a dead host and never asks; https gives
+    // up on a transfer that stalls. A person's own GIT_SSH_COMMAND wins.
+    if args.first().is_some_and(|v| NETWORK_VERBS.contains(v)) {
+        if std::env::var_os("GIT_SSH_COMMAND").is_none() {
+            cmd.env(
+                "GIT_SSH_COMMAND",
+                "ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=2",
+            );
+        }
+        cmd.env("GIT_HTTP_LOW_SPEED_LIMIT", "1000")
+            .env("GIT_HTTP_LOW_SPEED_TIME", "30");
+    }
     // Tests must not depend on (or be broken by) the host's own global git
     // config or identity environment: isolate every git invocation the
     // production code makes from both. This has no effect on release builds
@@ -305,8 +327,17 @@ pub fn ensure_repo(path: &Path, remote: Option<&str>) -> Result<(), IpcError> {
                     std::io::Error::new(e.kind(), format!("creating {}: {e}", parent.display()));
                 unreadable(path, &e)
             })?;
+            // A URL that begins with `-` would be parsed by git as an option
+            // (`--upload-pack=<cmd>` runs a command); refused outright, and
+            // `--` ends option parsing for anything that slips past.
+            if url.trim_start().starts_with('-') {
+                return Err(IpcError::new(
+                    E_CATALOG_GIT,
+                    format!("{url:?} is not a repository URL"),
+                ));
+            }
             let target = path.to_string_lossy().to_string();
-            git(parent, &["clone", "-q", url, &target])?;
+            git(parent, &["clone", "-q", "--", url, &target])?;
             Ok(())
         }
         None => Err(IpcError::new(
@@ -352,6 +383,101 @@ pub struct RepoStatus {
     pub ahead: Option<u64>,
     pub behind: Option<u64>,
     pub has_upstream: bool,
+    /// What the uncommitted changes touch, one row per asset (gap plan
+    /// G2.6, "Commit 3 asset changes"). Absent from an older hub.
+    #[serde(default)]
+    pub changes: Vec<RepoChange>,
+}
+
+/// One uncommitted change, grouped to the asset it belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoChange {
+    /// `skills/release-notes`, `hooks/stop`, or the file for anything that
+    /// is not an asset (`catalog.yaml`, a layer file).
+    pub path: String,
+    /// `A` added, `M` modified, `D` deleted.
+    pub status: String,
+}
+
+/// PURE: `git status --porcelain` lines grouped per asset. A folder kind
+/// groups by its folder, a single-file kind by its file stem; a path that
+/// is not under a kind directory stays as it is. An asset with any added
+/// file and nothing else is `A`, one whose every file went is `D`, the rest
+/// `M`.
+pub fn changes_of(porcelain: &str) -> Vec<RepoChange> {
+    let mut out: Vec<(String, std::collections::BTreeSet<char>)> = Vec::new();
+    for line in porcelain.lines() {
+        // `XY path`; `git()` trims the output, so the first line may have
+        // lost X's leading space: split at the first space instead.
+        let Some((xy, rest)) = line.trim_start().split_once(' ') else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let path = rest.rsplit(" -> ").next().unwrap_or(rest).trim_matches('"');
+        if path.is_empty() {
+            continue;
+        }
+        let code = if xy.starts_with("??") || xy.contains('A') {
+            'A'
+        } else if xy.contains('D') {
+            'D'
+        } else {
+            'M'
+        };
+        let mut parts = path.splitn(3, '/');
+        let key = match (parts.next(), parts.next(), parts.next()) {
+            (Some(dir), Some(name), rest) => match Kind::from_dir(dir) {
+                Some(k) if k.is_folder() && rest.is_some() => format!("{dir}/{name}"),
+                Some(k) if !k.is_folder() && rest.is_none() => {
+                    format!("{dir}/{}", name.strip_suffix(".yaml").unwrap_or(name))
+                }
+                _ => path.to_string(),
+            },
+            _ => path.to_string(),
+        };
+        match out.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, codes)) => {
+                codes.insert(code);
+            }
+            None => out.push((key, std::collections::BTreeSet::from([code]))),
+        }
+    }
+    out.into_iter()
+        .map(|(path, codes)| {
+            let status = if codes.len() == 1 {
+                codes.into_iter().next().unwrap_or('M')
+            } else {
+                'M'
+            };
+            RepoChange {
+                path,
+                status: status.to_string(),
+            }
+        })
+        .collect()
+}
+
+/// PURE: the commit message the Commit form starts from, written from the
+/// changes by rule (no model): `catalog: update skills/a, hooks/b (+2)`.
+pub fn commit_message_for(changes: &[RepoChange]) -> String {
+    if changes.is_empty() {
+        return "catalog: commit pending changes".to_string();
+    }
+    let verb = if changes.iter().all(|c| c.status == "A") {
+        "add"
+    } else if changes.iter().all(|c| c.status == "D") {
+        "remove"
+    } else {
+        "update"
+    };
+    let named: Vec<&str> = changes.iter().take(3).map(|c| c.path.as_str()).collect();
+    let more = changes.len().saturating_sub(named.len());
+    let tail = if more > 0 {
+        format!(" (+{more})")
+    } else {
+        String::new()
+    };
+    format!("catalog: {verb} {}{tail}", named.join(", "))
 }
 
 /// Backs `author::repo_status` (the toolbar's dirty / ahead / behind badge).
@@ -359,6 +485,16 @@ pub fn git_status(root: &Path) -> Result<RepoStatus, IpcError> {
     let head_sha = head(root)?;
     let porcelain = git(root, &["status", "--porcelain"])?;
     let dirty = porcelain.lines().filter(|l| !l.is_empty()).count();
+    // Every untracked file, not just its new folder, so a new single-file
+    // asset (`hooks/x.yaml` in a new `hooks/`) groups by its own name.
+    let changes = if dirty == 0 {
+        Vec::new()
+    } else {
+        changes_of(&git(
+            root,
+            &["status", "--porcelain", "--untracked-files=all"],
+        )?)
+    };
     let has_upstream = git(root, &["rev-parse", "--abbrev-ref", "@{u}"]).is_ok();
     let (behind, ahead) = if has_upstream {
         let out = git(
@@ -378,6 +514,7 @@ pub fn git_status(root: &Path) -> Result<RepoStatus, IpcError> {
         ahead,
         behind,
         has_upstream,
+        changes,
     })
 }
 
@@ -578,6 +715,66 @@ pub fn asset_rel_path(kind: Kind, name: &str) -> String {
     } else {
         format!("{}/{name}.yaml", kind.dir())
     }
+}
+
+/// One commit that touched an asset (Assets M5, the Inspector's History).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitEntry {
+    pub sha: String,
+    /// Committer time, Unix seconds.
+    pub at: i64,
+    pub author: String,
+    pub subject: String,
+}
+
+/// The newest `limit` commits that touched `kind/name` — its folder or its
+/// file ([`asset_rel_path`], a literal pathspec) — newest first. Only a
+/// repository with no commit yet has none: a missing, non-git or broken
+/// checkout is `E_CATALOG_GIT`, as [`git_status`] answers it.
+/// `--no-show-signature` keeps a user's `log.showSignature` from
+/// interleaving lines the parser would drop.
+pub fn asset_log(
+    root: &Path,
+    kind: Kind,
+    name: &str,
+    limit: usize,
+) -> Result<Vec<CommitEntry>, IpcError> {
+    // A missing directory fails to spawn; a non-git or broken one fails here.
+    git(root, &["rev-parse", "--git-dir"])?;
+    let head = git_output(root, &["rev-parse", "--verify", "-q", "HEAD"])?;
+    if !head.status.success() {
+        // `-q`: exit 1 and silence for an unborn HEAD; anything else is a
+        // real failure, reported the way `git` reports one.
+        if head.status.code() == Some(1) && head.stderr.is_empty() {
+            return Ok(Vec::new());
+        }
+        git(root, &["rev-parse", "--verify", "HEAD"])?;
+    }
+    let rel = asset_rel_path(kind, name);
+    let n = format!("-n{}", limit.max(1));
+    let out = git(
+        root,
+        &[
+            "log",
+            "--no-show-signature",
+            &n,
+            "--format=%H%x1f%ct%x1f%an%x1f%s",
+            "--",
+            &rel,
+        ],
+    )?;
+    Ok(out
+        .lines()
+        .filter_map(|line| {
+            let mut p = line.splitn(4, '\u{1f}');
+            Some(CommitEntry {
+                sha: p.next()?.to_string(),
+                at: p.next()?.parse().ok()?,
+                author: p.next()?.to_string(),
+                subject: p.next().unwrap_or("").to_string(),
+            })
+        })
+        .collect())
 }
 
 fn check_rev(rev: &str) -> Result<(), IpcError> {
@@ -959,7 +1156,7 @@ pub fn asset_path(root: &Path, kind: Kind, name: &str) -> PathBuf {
 fn body_file(kind: Kind) -> &'static str {
     match kind {
         Kind::Skill => "body.md",
-        Kind::Agent => "prompt.md",
+        Kind::Agent | Kind::Command => "prompt.md",
         _ => "",
     }
 }
@@ -997,12 +1194,33 @@ fn rel(root: &Path, p: &Path) -> String {
     }
 }
 
-fn read_resources(dir: &Path) -> std::io::Result<Vec<Resource>> {
-    let mut out = Vec::new();
-    let res = dir.join("resources");
-    if !res.is_dir() {
-        return Ok(out);
+/// Refuse `p` when it is a symlink. An asset's own files (`asset.yaml`, its
+/// body, `resources/`) come from a catalog repo that other people push to,
+/// and a committed symlink is checked out as one: `SKILL.md ->
+/// ~/.ssh/id_ed25519` would otherwise be read on the hub and shipped as the
+/// skill's body to every host. A symlinked asset FOLDER stays allowed (a
+/// local catalog may link one in); what is inside it is read as files.
+fn refuse_symlink(p: &Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(p) {
+        Ok(m) if m.file_type().is_symlink() => Err(format!(
+            "{} is a symlink; an asset's files must be regular files",
+            p.file_name().unwrap_or_default().to_string_lossy()
+        )),
+        _ => Ok(()),
     }
+}
+
+fn read_resources(dir: &Path) -> Result<Vec<Resource>, String> {
+    let res = dir.join("resources");
+    refuse_symlink(&res)?;
+    if !res.is_dir() {
+        return Ok(Vec::new());
+    }
+    read_resource_tree(dir, res).map_err(|e| e.to_string())
+}
+
+fn read_resource_tree(dir: &Path, res: PathBuf) -> std::io::Result<Vec<Resource>> {
+    let mut out = Vec::new();
     let mut stack = vec![res];
     while let Some(d) = stack.pop() {
         let mut entries: Vec<_> = std::fs::read_dir(&d)?.collect::<Result<_, _>>()?;
@@ -1031,6 +1249,7 @@ fn read_resources(dir: &Path) -> std::io::Result<Vec<Resource>> {
 }
 
 fn load_one(root: &Path, kind: Kind, yaml_path: &Path, stem: &str) -> Result<Asset, String> {
+    refuse_symlink(yaml_path)?;
     let text = std::fs::read_to_string(yaml_path).map_err(|e| e.to_string())?;
     let mut asset = Asset::from_yaml(Some(kind), &text)?;
     if asset.header.name != stem {
@@ -1046,9 +1265,10 @@ fn load_one(root: &Path, kind: Kind, yaml_path: &Path, stem: &str) -> Result<Ass
     if kind.is_folder() {
         let dir = yaml_path.parent().unwrap_or(root);
         let body = dir.join(body_file(kind));
+        refuse_symlink(&body)?;
         asset.body =
             std::fs::read_to_string(&body).map_err(|_| format!("missing {}", body_file(kind)))?;
-        asset.resources = read_resources(dir).map_err(|e| e.to_string())?;
+        asset.resources = read_resources(dir)?;
     }
     Ok(asset)
 }
@@ -1429,6 +1649,66 @@ mod tests {
     use super::*;
     use crate::service::catalog::model::{Asset, Kind, Resource};
     use std::fs;
+
+    /// Assets M5 (R19): the commits that touched one asset, newest first;
+    /// a repo with no commit has none; `limit` caps them; another asset's
+    /// commit and a sibling whose name only starts the same are not its.
+    #[test]
+    fn asset_log_lists_the_commits_that_touched_one_asset_newest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]).unwrap();
+        assert!(asset_log(root, Kind::Skill, "w", 10).unwrap().is_empty());
+        fs::create_dir_all(root.join("skills/w")).unwrap();
+        fs::write(root.join("skills/w/asset.yaml"), "kind: skill\nname: w\n").unwrap();
+        stage_paths(root, &[]).unwrap();
+        let first = commit(root, "add w").unwrap();
+        fs::write(root.join("other.txt"), "x\n").unwrap();
+        fs::create_dir_all(root.join("skills/w2")).unwrap();
+        fs::write(root.join("skills/w2/asset.yaml"), "kind: skill\nname: w2\n").unwrap();
+        stage_paths(root, &[]).unwrap();
+        commit(root, "unrelated").unwrap();
+        fs::write(
+            root.join("skills/w/asset.yaml"),
+            "kind: skill\nname: w\ndescription: d\n",
+        )
+        .unwrap();
+        stage_paths(root, &[]).unwrap();
+        let second = commit(root, "edit w").unwrap();
+
+        let log = asset_log(root, Kind::Skill, "w", 10).unwrap();
+        assert_eq!(
+            log.iter()
+                .map(|c| (c.sha.as_str(), c.subject.as_str()))
+                .collect::<Vec<_>>(),
+            [(second.as_str(), "edit w"), (first.as_str(), "add w")]
+        );
+        assert!(log.iter().all(|c| c.at > 0 && !c.author.is_empty()));
+        assert_eq!(asset_log(root, Kind::Skill, "w", 1).unwrap().len(), 1);
+        assert!(asset_log(root, Kind::Agent, "w", 10).unwrap().is_empty());
+    }
+
+    /// Fix round 1: only a repository with no commit yet has an empty
+    /// history; a missing, non-git or broken checkout is `E_CATALOG_GIT`,
+    /// as `git_status` (repo_status) answers it.
+    #[test]
+    fn asset_log_refuses_a_missing_or_broken_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("gone");
+        let err = asset_log(&missing, Kind::Skill, "w", 10).unwrap_err();
+        assert_eq!(err.code, E_CATALOG_GIT, "{}", err.message);
+        let plain = dir.path().join("plain");
+        fs::create_dir_all(&plain).unwrap();
+        let err = asset_log(&plain, Kind::Skill, "w", 10).unwrap_err();
+        assert_eq!(err.code, E_CATALOG_GIT, "{}", err.message);
+        let broken = dir.path().join("broken");
+        fs::create_dir_all(&broken).unwrap();
+        git(&broken, &["init", "-q", "-b", "main"]).unwrap();
+        assert!(asset_log(&broken, Kind::Skill, "w", 10).unwrap().is_empty());
+        fs::write(broken.join(".git/HEAD"), "garbage\n").unwrap();
+        let err = asset_log(&broken, Kind::Skill, "w", 10).unwrap_err();
+        assert_eq!(err.code, E_CATALOG_GIT, "{}", err.message);
+    }
 
     /// Final review I1: a remote's userinfo never survives into a git error.
     #[test]
@@ -1830,6 +2110,82 @@ mod tests {
         assert_eq!(skill.resources[0].rel_path, "resources/real.txt");
     }
 
+    #[test]
+    fn a_remote_that_looks_like_an_option_is_not_cloned() {
+        let root = tmp("dash-url");
+        let path = root.join("checkout");
+        let marker = root.join("ran");
+        let url = format!("--upload-pack=touch {}", marker.display());
+        let err = ensure_repo(&path, Some(&url)).unwrap_err();
+        assert_eq!(err.code, E_CATALOG_GIT);
+        assert!(!marker.exists());
+        assert!(!path.exists());
+    }
+
+    /// A catalog repo is pushed to by other people, and a committed symlink
+    /// is checked out as one. The asset's own files must not reach outside
+    /// it: the body, `asset.yaml` and `resources/` are refused as symlinks,
+    /// and the asset becomes a problem rather than shipping the target.
+    #[cfg(unix)]
+    #[test]
+    fn load_dir_refuses_an_asset_whose_own_files_are_symlinks() {
+        let root = tmp("symlink-own");
+        let outside = tmp("symlink-outside");
+        write(&outside, "id_ed25519", "PRIVATE KEY\n");
+        write(&outside, "secrets/token", "t0ken\n");
+        write(
+            &outside,
+            "asset.yaml",
+            "kind: skill\nname: y\ndescription: d\n",
+        );
+        write(&root, "catalog.yaml", "schema_version: 1\n");
+        // Body links out.
+        write(
+            &root,
+            "skills/a/asset.yaml",
+            "kind: skill\nname: a\ndescription: d\n",
+        );
+        std::os::unix::fs::symlink(outside.join("id_ed25519"), root.join("skills/a/body.md"))
+            .unwrap();
+        // resources/ links out.
+        write(
+            &root,
+            "skills/b/asset.yaml",
+            "kind: skill\nname: b\ndescription: d\n",
+        );
+        write(&root, "skills/b/body.md", "b\n");
+        std::os::unix::fs::symlink(outside.join("secrets"), root.join("skills/b/resources"))
+            .unwrap();
+        // asset.yaml links out.
+        fs::create_dir_all(root.join("skills/y")).unwrap();
+        write(&root, "skills/y/body.md", "b\n");
+        std::os::unix::fs::symlink(outside.join("asset.yaml"), root.join("skills/y/asset.yaml"))
+            .unwrap();
+        // A plain asset beside them still loads.
+        write(
+            &root,
+            "skills/ok/asset.yaml",
+            "kind: skill\nname: ok\ndescription: d\n",
+        );
+        write(&root, "skills/ok/body.md", "fine\n");
+
+        let cat = load_dir(&root).unwrap();
+        assert!(cat.find(Kind::Skill, "ok").is_some());
+        for name in ["a", "b", "y"] {
+            assert!(cat.find(Kind::Skill, name).is_none(), "{name} loaded");
+            assert!(
+                cat.problems
+                    .iter()
+                    .any(|p| p.path.starts_with(&format!("skills/{name}/"))
+                        && p.message.contains("symlink")),
+                "{name}: {:?}",
+                cat.problems
+            );
+        }
+        let all = format!("{cat:?}");
+        assert!(!all.contains("PRIVATE KEY") && !all.contains("t0ken"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn load_dir_records_problem_when_kind_dir_unreadable_and_continues() {
@@ -1990,6 +2346,32 @@ mod tests {
     }
 
     #[test]
+    fn changes_group_per_asset_and_draft_a_message() {
+        let porcelain = "M skills/notes/body.md\n M skills/notes/asset.yaml\n?? commands/ship/\n D hooks/stop.yaml\n M catalog.yaml\nR  mcp/a.yaml -> mcp/b.yaml";
+        let c = changes_of(porcelain);
+        let got: Vec<(&str, &str)> = c
+            .iter()
+            .map(|c| (c.path.as_str(), c.status.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("skills/notes", "M"),
+                ("commands/ship", "A"),
+                ("hooks/stop", "D"),
+                ("catalog.yaml", "M"),
+                ("mcp/b", "M"),
+            ]
+        );
+        assert_eq!(
+            commit_message_for(&c),
+            "catalog: update skills/notes, commands/ship, hooks/stop (+2)"
+        );
+        assert_eq!(commit_message_for(&c[1..2]), "catalog: add commands/ship");
+        assert_eq!(commit_message_for(&[]), "catalog: commit pending changes");
+    }
+
+    #[test]
     fn git_status_counts_dirty_and_ahead() {
         let root = tmp("status");
         init_repo(&root);
@@ -2008,6 +2390,13 @@ mod tests {
         write(&root, "hooks/x.yaml", "kind: hook\n");
         let status = git_status(&root).unwrap();
         assert_eq!(status.dirty, 1);
+        assert_eq!(
+            status.changes,
+            vec![RepoChange {
+                path: "hooks/x".into(),
+                status: "A".into()
+            }]
+        );
 
         let remote = tmp("status-remote");
         git_run(&remote, &["init", "-q", "--bare", "-b", "main"]);

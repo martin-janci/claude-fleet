@@ -63,6 +63,7 @@ fn a_reason_never_carries_the_token_and_stays_one_capped_line() {
     let long = "x".repeat(5 * MAX_REASON);
     s.report(HubConnection::Offline {
         attempt: 1,
+        refused: 1,
         retry_in_secs: 1,
         reason: format!("401 from proxy:\nAuthorization: Bearer cl_s3cret\r\n{long}"),
     });
@@ -130,6 +131,7 @@ fn the_contract_verdict_outlives_the_state_and_only_a_hello_moves_it() {
     for state in [
         HubConnection::Offline {
             attempt: 1,
+            refused: 1,
             retry_in_secs: 1,
             reason: "connection refused".into(),
         },
@@ -162,6 +164,7 @@ fn only_an_in_range_hello_confirms_the_contract() {
         HubConnection::Connecting,
         HubConnection::Offline {
             attempt: 1,
+            refused: 1,
             retry_in_secs: 1,
             reason: "connection refused".into(),
         },
@@ -205,6 +208,7 @@ fn every_transition_away_from_connected_withdraws_the_confirmation() {
         },
         HubConnection::Offline {
             attempt: 2,
+            refused: 2,
             retry_in_secs: 2,
             reason: "connection refused".into(),
         },
@@ -236,4 +240,25 @@ fn a_standalone_status_emits_nothing() {
 fn the_status_debug_hides_the_token() {
     let (s, _) = status("cl_s3cret");
     assert!(!format!("{s:?}").contains("cl_s3cret"));
+}
+
+/// The banner's Retry now wakes a bridge that is waiting, and only that: a
+/// press while nothing waits leaves no permit to cut a later wait short.
+#[tokio::test]
+async fn retry_now_wakes_a_waiting_bridge_and_leaves_no_permit() {
+    let s = HubConnectionStatus::standalone();
+    s.retry_now();
+    let later = s.retry_handle();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), later.notified())
+            .await
+            .is_err(),
+        "a press with nobody waiting is not stored"
+    );
+    let waiting = s.retry_handle();
+    let woken = waiting.notified();
+    s.retry_now();
+    tokio::time::timeout(std::time::Duration::from_secs(1), woken)
+        .await
+        .expect("a waiting bridge is woken");
 }

@@ -9,14 +9,18 @@
       "PLAT"
     ],
     "description": null,
+    "estimate": null,
+    "estimate_unit": null,
     "external_id": "40001",
     "hierarchy_level": null,
     "iteration": null,
     "iteration_active": false,
     "key": "PLAT-1",
     "kind": "Epic",
+    "labels": [],
     "parent_external_id": null,
     "parent_key": null,
+    "priority": "urgent",
     "status": {
       "category": "in_progress",
       "name": "In Progress",
@@ -24,7 +28,8 @@
     },
     "title": "Billing platform",
     "updated": 1789977600,
-    "url": "https://jira.corp.example/jira/browse/PLAT-1"
+    "url": "https://jira.corp.example/jira/browse/PLAT-1",
+    "versions": []
   },
   {
     "aliases": [],
@@ -36,14 +41,20 @@
       "PLAT"
     ],
     "description": "Export invoices as CSV.\nPlain text on Data Center.",
+    "estimate": 3.0,
+    "estimate_unit": "points",
     "external_id": "40002",
     "hierarchy_level": null,
     "iteration": "PLAT Sprint 3",
     "iteration_active": true,
     "key": "PLAT-2",
     "kind": "Story",
+    "labels": [
+      "export"
+    ],
     "parent_external_id": "40001",
     "parent_key": "PLAT-1",
+    "priority": "low",
     "status": {
       "category": "in_progress",
       "name": "In Review",
@@ -51,7 +62,11 @@
     },
     "title": "Invoice export",
     "updated": 1789978530,
-    "url": "https://jira.corp.example/jira/browse/PLAT-2"
+    "url": "https://jira.corp.example/jira/browse/PLAT-2",
+    "versions": [
+      "2026.10",
+      "2026.11"
+    ]
   },
   {
     "aliases": [],
@@ -63,14 +78,18 @@
       "PLAT"
     ],
     "description": null,
+    "estimate": null,
+    "estimate_unit": null,
     "external_id": "40003",
     "hierarchy_level": -1,
     "iteration": null,
     "iteration_active": false,
     "key": "PLAT-3",
     "kind": "Sub-task",
+    "labels": [],
     "parent_external_id": "40002",
     "parent_key": "PLAT-2",
+    "priority": null,
     "status": {
       "category": "todo",
       "name": "Open",
@@ -78,7 +97,8 @@
     },
     "title": "Export: date format",
     "updated": 1789898400,
-    "url": "https://jira.corp.example/jira/browse/PLAT-3"
+    "url": "https://jira.corp.example/jira/browse/PLAT-3",
+    "versions": []
   },
   {
     "aliases": [],
@@ -90,14 +110,18 @@
       "OPS"
     ],
     "description": null,
+    "estimate": null,
+    "estimate_unit": null,
     "external_id": "40004",
     "hierarchy_level": null,
     "iteration": null,
     "iteration_active": false,
     "key": "OPS-4",
     "kind": "Task",
+    "labels": [],
     "parent_external_id": null,
     "parent_key": null,
+    "priority": null,
     "status": {
       "category": "done",
       "name": "Closed",
@@ -105,7 +129,8 @@
     },
     "title": "Renew certificates",
     "updated": 1789826400,
-    "url": "https://jira.corp.example/jira/browse/OPS-4"
+    "url": "https://jira.corp.example/jira/browse/OPS-4",
+    "versions": []
   },
   {
     "aliases": [],
@@ -117,14 +142,18 @@
       "OPS"
     ],
     "description": null,
+    "estimate": null,
+    "estimate_unit": null,
     "external_id": "40005",
     "hierarchy_level": null,
     "iteration": null,
     "iteration_active": false,
     "key": "OPS-5",
     "kind": "Task",
+    "labels": [],
     "parent_external_id": null,
     "parent_key": null,
+    "priority": null,
     "status": {
       "category": "done",
       "name": "Closed",
@@ -132,7 +161,8 @@
     },
     "title": "Migrate CI to v1",
     "updated": 1789718400,
-    "url": "https://jira.corp.example/jira/browse/OPS-5"
+    "url": "https://jira.corp.example/jira/browse/OPS-5",
+    "versions": []
   },
   {
     "aliases": [],
@@ -142,14 +172,18 @@
       "OPS"
     ],
     "description": null,
+    "estimate": null,
+    "estimate_unit": null,
     "external_id": "40006",
     "hierarchy_level": null,
     "iteration": null,
     "iteration_active": false,
     "key": "OPS-6",
     "kind": "Task",
+    "labels": [],
     "parent_external_id": null,
     "parent_key": null,
+    "priority": null,
     "status": {
       "category": "todo",
       "name": "To Do",
@@ -157,6 +191,7 @@
     },
     "title": "Rotate backups",
     "updated": 1789714800,
-    "url": "https://jira.corp.example/jira/browse/OPS-6"
+    "url": "https://jira.corp.example/jira/browse/OPS-6",
+    "versions": []
   }
 ]

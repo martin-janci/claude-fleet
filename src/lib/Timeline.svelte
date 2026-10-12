@@ -2,7 +2,7 @@
   // Read-only session event timeline (Q9). Renders the `session_events`
   // rows the backend already records (status changes, prompts, stuck,
   // kills, repairs, …) newest first, with filter chips.
-  import { untrack } from 'svelte';
+  import { untrack, type Snippet } from 'svelte';
   import {
     sessionHistory,
     eventCategory,
@@ -15,6 +15,7 @@
     type SessionEvent,
   } from './timeline';
   import { onTimelineEvent } from './live_events';
+  import Skeleton from './states/Skeleton.svelte';
 
   // Matches the backend's SESSION_EVENTS_CAP (store/rows.rs): the pushed-event
   // list is capped the same way the fetched one is.
@@ -24,6 +25,7 @@
     sessionId,
     refreshKey = '',
     onEvents,
+    head,
   }: {
     sessionId: number;
     /** Any change re-fetches (the parent passes turn/status fields so a new
@@ -35,6 +37,9 @@
      *  `session_history` round trip. Optional: Timeline's other uses are
      *  unaffected when it is omitted. */
     onEvents?: (events: SessionEvent[]) => void;
+    /** Pinned above the events whatever their state: the session's J1
+     *  suggested link (redesign 6.8, `TimelineWorkProposal`). */
+    head?: Snippet;
   } = $props();
 
   let events = $state<SessionEvent[]>([]);
@@ -122,8 +127,9 @@
     </div>
   </div>
 
+  {@render head?.()}
   {#if loading}
-    <p class="muted">Loading…</p>
+    <Skeleton />
   {:else if error}
     <p class="err" data-testid="timeline-error">{error}</p>
   {:else if shown.length === 0}
@@ -159,16 +165,16 @@
   }
   h3 {
     margin: 0;
-    font-size: 0.7rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     text-transform: uppercase;
     letter-spacing: 0.05em;
   }
   .chips { display: flex; gap: 0.25rem; flex-wrap: wrap; }
   .chip {
-    font-size: 0.65rem;
+    font-size: var(--text-2xs);
     padding: 0.1rem 0.45rem;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     border: 1px solid var(--border);
     background: transparent;
     color: var(--fg-muted);
@@ -182,7 +188,7 @@
     padding: 0;
     max-height: 18rem;
     overflow-y: auto;
-    font-size: 0.75rem;
+    font-size: var(--text-2xs);
   }
   .ev {
     display: grid;
@@ -193,12 +199,12 @@
     border-bottom: 1px solid var(--border);
   }
   time {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
     color: var(--fg-muted);
     white-space: nowrap;
   }
   .kind { white-space: nowrap; font-weight: 600; }
-  .cat-errors .kind { color: #e64a4a; }
+  .cat-errors .kind { color: var(--danger); }
   .cat-prompts .kind { color: var(--accent); }
   .detail {
     overflow: hidden;
@@ -206,6 +212,6 @@
     white-space: nowrap;
     color: var(--fg-muted);
   }
-  .muted { color: var(--fg-muted); font-style: italic; font-size: 0.75rem; margin: 0; }
-  .err { color: #e64a4a; font-size: 0.75rem; margin: 0; }
+  .muted { color: var(--fg-muted); font-style: italic; font-size: var(--text-2xs); margin: 0; }
+  .err { color: var(--danger); font-size: var(--text-2xs); margin: 0; }
 </style>

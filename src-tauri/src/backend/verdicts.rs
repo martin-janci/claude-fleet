@@ -27,11 +27,13 @@ pub enum Verdict {
     /// part of what the command does has a counterpart on the hub. `unless`
     /// names the shape that refuses; `instead` is that refusal's sentence.
     ///
-    /// One command has this verdict, and the honest thing is to say so rather
-    /// than to file it under whichever half is more convenient: `repair_session`
+    /// Two commands have this verdict, and the honest thing is to say so rather
+    /// than to file them under whichever half is more convenient: `repair_session`
     /// routes the explicit repair (the Repair workspace button, which maps
     /// one-to-one onto the tool's always-explicit repair) and refuses the
-    /// automatic pre-attach check, which would become destructive by surprise.
+    /// automatic pre-attach check, which would become destructive by surprise;
+    /// `provision_hosts` routes one host's content-only refresh and refuses a
+    /// full provisioning, which mints tokens.
     RoutedUnless {
         tool: &'static str,
         unless: &'static str,
@@ -77,6 +79,13 @@ impl Verdict {
 /// to the hub is the fleet's database and hosts, not this machine.
 const WHY_ATTACH: &str = "the same story as `upload_to_session`: this machine has the disk, the file dialog and the `ssh` that carries the bytes, and the session is addressed by the alias passed in, reading no state.db. Being a window onto a hub does not take this machine away";
 
+/// Why local workspace sync is the same in both modes: a link binds a
+/// folder on this machine to a worktree it reaches over its own SSH, as
+/// `upload_to_session` does; nothing in it is the hub's fleet.
+const WHY_LOCAL_SYNC: &str = "a link binds a folder on THIS machine to a worktree this machine \
+     reaches over its own SSH, the same story as `upload_to_session`; its rows live in this \
+     machine's database, paired or not";
+
 /// The verdict of `command`, or `None` when the table has no row for it —
 /// which the tests make unshippable.
 pub fn verdict(command: &str) -> Option<&'static Verdict> {
@@ -86,16 +95,26 @@ pub fn verdict(command: &str) -> Option<&'static Verdict> {
         .map(|(_, v)| v)
 }
 
-/// Organisations (work graph M5.2): the hub's `work_admin` is master-only.
-const ORGS_ARE_ADMIN: &str = "organisations, their rules and which org a host or tracker belongs \
-     to are the hosts' security boundary and fleet administration: the hub's work_admin is \
-     master-only, and a paired client is never the fleet's administrator; configure them on the \
-     hub with `fleet-hub org add|rule add|assign-host|assign-tracker`";
+/// Why this desktop's own update is the same in both modes (update design
+/// S7, §6.5, §9): it is about THIS app's installed build. Paired, the check
+/// goes to the hub's `/update/check` — an `update_proto` route, not an MCP
+/// tool, and exempt from the contract gate so a desktop its hub can no
+/// longer read still learns what to update to; standalone, it reads the
+/// published channel. The install always happens on this machine, from a
+/// target verified against the release key.
+const WHY_SELF_UPDATE: &str = "this app's own build: paired, the hub's /update/check decides      (an update_proto route, not an MCP tool, exempt from the contract gate), standalone the      published channel does; either way the target is verified against the release key and      installed on THIS machine";
 
 /// Trackers (work graph M3.1): the hub's `work_admin` is master-only.
 const TRACKERS_ARE_ADMIN: &str = "trackers and their credentials are fleet administration: the \
      hub's work_admin is master-only, and a paired client is never the fleet's administrator; \
      configure them on the hub with `fleet-hub tracker add|set-credential|test`";
+
+/// Ticket keys (`store::ticket_keys`): a project's prefix is fleet
+/// administration, `work_admin`, master-only.
+const TICKET_PREFIXES_ARE_ADMIN: &str = "which prefix a project's ticket keys carry is fleet \
+     administration: the hub's work_admin is master-only, and a paired client is never the \
+     fleet's administrator; set them on the hub with `fleet-hub tracker prefixes` and \
+     `fleet-hub tracker prefix <PREFIX> --project <id>`";
 
 /// Jev's section proposals (Asana `status_map`): applying one writes the
 /// tracker's settings, which is `work_admin`, master-only.
@@ -105,15 +124,26 @@ const SECTION_PROPOSALS_ARE_ADMIN: &str = "the decision model's Asana section pr
      on the hub with `fleet-hub decide proposals apply|reject`";
 
 /// Retention (work graph M12.3): the hub sweeps its own store.
+/// Settings' Repair now and Restore lost sessions (gap plan G4.6) are this
+/// app's own fleet-wide passes; a paired client repairs or restores one
+/// host at a time from Hosts.
+const FLEET_PASS_IS_LOCAL: &str = "repairing every workspace or restoring every host's lost \
+     sessions at once is the fleet's own pass: on a paired client, open the host in Hosts and \
+     use its Repair or Restore, which route to the hub";
+
 const RETENTION_IS_ADMIN: &str = "work retention is the hub's own sweep of its store: its \
      status and sweep_now are the hub's work_admin, master-only, and a paired client is never \
      the fleet's administrator; set the windows with set_setting and read the status on the \
      hub";
 
-/// The ten git-write commands of the Files tab, likewise.
+/// The eleven git-write commands of the Files tab, likewise.
 const NO_GIT_WRITE_TOOL: &str =
     "the hub exposes no git-write tool — a remote client must not stage or commit under a \
      running agent; do it in the session, or from a standalone app";
+
+const NO_DRAFT_TOOL: &str =
+    "the hub exposes no draft tool — a commit message is drafted where the commit is made: \
+     in the session, or from a standalone app";
 
 /// Every command in `generate_handler!`, grouped as there, with its verdict.
 pub const VERDICTS: &[(&str, Verdict)] = &[
@@ -135,6 +165,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "open_log_folder",
         Verdict::SameInBoth {
             why: "this app's own log folder, which it has either way",
+        },
+    ),
+    (
+        "set_tray_state",
+        Verdict::SameInBoth {
+            why: "this window's own tray icon, which it has either way",
         },
     ),
     // ── projects ────────────────────────────────────────────────────────────
@@ -162,17 +198,23 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "list_github_repos",
         },
     ),
+    (
+        "project_picks",
+        Verdict::Routed {
+            tool: "project_picks",
+        },
+    ),
+    (
+        "set_project_pick",
+        Verdict::Routed {
+            tool: "set_project_pick",
+        },
+    ),
     // ── sessions ────────────────────────────────────────────────────────────
     (
         "list_sessions",
         Verdict::Routed {
             tool: "list_sessions",
-        },
-    ),
-    (
-        "related_sessions",
-        Verdict::Routed {
-            tool: "related_sessions",
         },
     ),
     (
@@ -185,6 +227,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "kill_session",
         Verdict::Routed {
             tool: "kill_session",
+        },
+    ),
+    (
+        "shell_terminals",
+        Verdict::Routed {
+            tool: "shell_terminals",
         },
     ),
     (
@@ -209,21 +257,9 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     // ── worktrees ───────────────────────────────────────────────────────────
     (
-        "list_worktrees",
-        Verdict::Routed {
-            tool: "list_worktrees",
-        },
-    ),
-    (
         "list_host_worktrees",
         Verdict::Routed {
             tool: "list_host_worktrees",
-        },
-    ),
-    (
-        "delete_worktree",
-        Verdict::Routed {
-            tool: "delete_worktree",
         },
     ),
     (
@@ -247,6 +283,27 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "set_session_friendly_name",
         Verdict::Routed {
             tool: "set_friendly_name",
+        },
+    ),
+    // The Label field (M15 G2.7): the hub's own `set_session_tags`, `own`.
+    (
+        "set_session_tags",
+        Verdict::Routed {
+            tool: "set_session_tags",
+        },
+    ),
+    // Link / Not related on a related-session proposal (M15 G4.3): the
+    // hub's own `decide_related_session`, `own`.
+    (
+        "decide_related_session",
+        Verdict::Routed {
+            tool: "decide_related_session",
+        },
+    ),
+    (
+        "touch_session_viewed",
+        Verdict::Routed {
+            tool: "touch_session_viewed",
         },
     ),
     (
@@ -282,15 +339,9 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("work_tidy", Verdict::Routed { tool: "work" }),
     ("work_reopened", Verdict::Routed { tool: "work" }),
     (
-        "archive_session_work",
-        Verdict::Routed { tool: "work_link" },
-    ),
-    (
         "unarchive_session_work",
         Verdict::Routed { tool: "work_link" },
     ),
-    ("snooze_tidy", Verdict::Routed { tool: "work_link" }),
-    ("never_tidy", Verdict::Routed { tool: "work_link" }),
     ("tidy_apply", Verdict::Routed { tool: "work_link" }),
     ("dismiss_reopened", Verdict::Routed { tool: "work_link" }),
     // Work graph M2.4: resume past work, and what a purge would strand.
@@ -314,12 +365,47 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("start_work_multi", Verdict::Routed { tool: "work_link" }),
     // Work graph M11.1: "Name this work…" — local work items, listed from
     // `work`, named and renamed through `work_link { name }`.
-    ("list_local_work_items", Verdict::Routed { tool: "work" }),
     ("name_session_work", Verdict::Routed { tool: "work_link" }),
     ("rename_work_item", Verdict::Routed { tool: "work_link" }),
     // Shared work context (design 2026-09-29): a task or subtask a person
     // writes, and a person's decision on an agent's proposal.
     ("create_work_task", Verdict::Routed { tool: "work_link" }),
+    // The board (sprints design 2026-09-28 §6c): a person's status for a
+    // native item, set by dragging its card to a column.
+    ("set_work_status", Verdict::Routed { tool: "work_link" }),
+    // Task editing: a person's title, notes and assignees for a native item.
+    ("edit_work_item", Verdict::Routed { tool: "work_link" }),
+    // Epics (sprints design 2026-09-28 §3): a local item filed under an epic.
+    ("set_work_parent", Verdict::Routed { tool: "work_link" }),
+    // Task comments: a note on a task, kept in fleet; deleting is the author's.
+    ("comment_on_work", Verdict::Routed { tool: "work_link" }),
+    ("delete_work_comment", Verdict::Routed { tool: "work_link" }),
+    // Task attachments: files on a task, kept in fleet; the bytes are read
+    // through `work`; deleting is the author's.
+    ("attach_to_work", Verdict::Routed { tool: "work_link" }),
+    (
+        "delete_work_attachment",
+        Verdict::Routed { tool: "work_link" },
+    ),
+    ("work_attachment", Verdict::Routed { tool: "work" }),
+    // A ticket's comments at its tracker, read live beside fleet's own;
+    // posting one is `comment_on_work`'s `post_to_tracker`.
+    ("work_tracker_comments", Verdict::Routed { tool: "work" }),
+    // A task of fleet's own becomes a tracker's ticket (owner decision
+    // 2026-10-11): the hub owns the trackers and the outbox that creates it.
+    ("promote_work_item", Verdict::Routed { tool: "work_link" }),
+    // Sprints and releases (design 2026-09-28 §6a/§6b): reads and
+    // membership route; so do the buckets themselves, as work_link's
+    // bucket_admin (owner decision 2026-10-10: the hub decides who plans).
+    ("work_buckets", Verdict::Routed { tool: "work" }),
+    ("work_stats", Verdict::Routed { tool: "work" }),
+    ("work_bucket", Verdict::Routed { tool: "work" }),
+    ("add_work_to_bucket", Verdict::Routed { tool: "work_link" }),
+    (
+        "remove_work_from_bucket",
+        Verdict::Routed { tool: "work_link" },
+    ),
+    ("work_bucket_admin", Verdict::Routed { tool: "work_link" }),
     (
         "accept_work_proposal",
         Verdict::Routed { tool: "work_link" },
@@ -339,6 +425,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("work_views", Verdict::Routed { tool: "work" }),
     ("work_org_impact", Verdict::Routed { tool: "work" }),
     ("set_primary_work", Verdict::Routed { tool: "work_link" }),
+    ("switch_session_work", Verdict::Routed { tool: "work_link" }),
     (
         "reconsider_work_link",
         Verdict::Routed { tool: "work_link" },
@@ -351,6 +438,43 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("delete_work_rule", Verdict::Routed { tool: "work_link" }),
     ("save_work_view", Verdict::Routed { tool: "work_link" }),
     ("delete_work_view", Verdict::Routed { tool: "work_link" }),
+    // Orchestration O1: missions are a person's, fenced by owner and org
+    // in fleet-core (`service::work::missions`), so every one routes.
+    ("work_missions", Verdict::Routed { tool: "work" }),
+    ("work_mission", Verdict::Routed { tool: "work" }),
+    ("save_mission", Verdict::Routed { tool: "work_link" }),
+    ("set_mission_state", Verdict::Routed { tool: "work_link" }),
+    ("set_mission_repo", Verdict::Routed { tool: "work_link" }),
+    ("set_mission_item", Verdict::Routed { tool: "work_link" }),
+    ("import_mission_plan", Verdict::Routed { tool: "work_link" }),
+    ("delete_mission", Verdict::Routed { tool: "work_link" }),
+    // Orchestration O2: the mission graph's writes.
+    ("set_work_dep", Verdict::Routed { tool: "work_link" }),
+    ("set_work_hold", Verdict::Routed { tool: "work_link" }),
+    (
+        "accept_work_proposals",
+        Verdict::Routed { tool: "work_link" },
+    ),
+    ("undo_work_accept", Verdict::Routed { tool: "work_link" }),
+    // Orchestration O3: acceptance conditions and a person's check.
+    ("set_work_done_when", Verdict::Routed { tool: "work_link" }),
+    ("verify_work_item", Verdict::Routed { tool: "work_link" }),
+    ("start_mission_wave", Verdict::Routed { tool: "work_link" }),
+    ("retry_work_item", Verdict::Routed { tool: "work_link" }),
+    ("plan_mission", Verdict::Routed { tool: "work_link" }),
+    ("decide_mission_card", Verdict::Routed { tool: "work_link" }),
+    ("grant_mission", Verdict::Routed { tool: "work_link" }),
+    (
+        "revoke_mission_grant",
+        Verdict::Routed { tool: "work_link" },
+    ),
+    ("pause_all_missions", Verdict::Routed { tool: "work_link" }),
+    (
+        "mission_release_note",
+        Verdict::Routed { tool: "work_link" },
+    ),
+    ("today_brief", Verdict::Routed { tool: "work_link" }),
+    ("mission_triage", Verdict::Routed { tool: "work_link" }),
     // Work graph M3.1: trackers and their credentials are fleet
     // administration. The hub's `work_admin` is master-only, and a paired
     // desktop is a client, never the master (review C17).
@@ -392,6 +516,20 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             instead: TRACKERS_ARE_ADMIN,
         },
     ),
+    // Ticket keys: which prefix a project's tickets carry is
+    // `work_admin { ticket_prefixes | set_ticket_prefix }`, master-only.
+    (
+        "ticket_prefixes",
+        Verdict::LocalOnly {
+            instead: TICKET_PREFIXES_ARE_ADMIN,
+        },
+    ),
+    (
+        "set_ticket_prefix",
+        Verdict::LocalOnly {
+            instead: TICKET_PREFIXES_ARE_ADMIN,
+        },
+    ),
     // Jev `status_map` in assist: reading and deciding the section
     // proposals is tracker administration (an apply is `work_admin
     // update`); the hub's operator uses the CLI.
@@ -416,6 +554,18 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "repair_workspaces_now",
+        Verdict::LocalOnly {
+            instead: FLEET_PASS_IS_LOCAL,
+        },
+    ),
+    (
+        "restore_all_lost_sessions",
+        Verdict::LocalOnly {
+            instead: FLEET_PASS_IS_LOCAL,
+        },
+    ),
+    (
         "work_retention_sweep",
         Verdict::LocalOnly {
             instead: RETENTION_IS_ADMIN,
@@ -425,56 +575,67 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     // other work read and decision.
     ("list_trackers", Verdict::Routed { tool: "work" }),
     ("work_tickets", Verdict::Routed { tool: "work" }),
+    // Search phase 3: the hub's full-text index, fenced there per person.
+    ("search", Verdict::Routed { tool: "search" }),
     ("work_lookup", Verdict::Routed { tool: "work" }),
     ("start_work", Verdict::Routed { tool: "work_link" }),
-    // Work graph M5: orgs are the per-host tokens' security boundary, so
-    // changing them is fleet administration (the hub's `work_admin`,
-    // master-only); reading them routes like every other work read.
+    // Task → session spec P-6: cancel a start nobody worked in.
+    ("abandon_start", Verdict::Routed { tool: "work_link" }),
+    // Task → session spec P-1: the start's dry run, the Work button's
+    // popover. Nothing is made, so it routes exactly as the start does.
+    ("preview_start_work", Verdict::Routed { tool: "work_link" }),
+    // Work graph M5: orgs are the per-host tokens' security boundary. Since
+    // org administration phase B the hub's `org_admin` lets its owner's own
+    // trusted `full` device change them (and refuses anyone else), so they
+    // route; reading them routes like every other work read.
+    ("add_org", Verdict::Routed { tool: "org_admin" }),
+    ("update_org", Verdict::Routed { tool: "org_admin" }),
+    ("remove_org", Verdict::Routed { tool: "org_admin" }),
+    ("add_org_rule", Verdict::Routed { tool: "org_admin" }),
+    ("remove_org_rule", Verdict::Routed { tool: "org_admin" }),
+    ("assign_host_org", Verdict::Routed { tool: "org_admin" }),
+    ("assign_tracker_org", Verdict::Routed { tool: "org_admin" }),
+    ("set_org_setting", Verdict::Routed { tool: "org_admin" }),
+    ("set_org_member", Verdict::Routed { tool: "org_admin" }),
+    ("remove_org_member", Verdict::Routed { tool: "org_admin" }),
+    ("org_member_grants", Verdict::Routed { tool: "org_admin" }),
+    // M15 step G2.10: a rule's live impact (a read) and the org's project
+    // catalog.
+    ("org_rule_preview", Verdict::Routed { tool: "org_admin" }),
+    ("add_org_project", Verdict::Routed { tool: "org_admin" }),
+    ("remove_org_project", Verdict::Routed { tool: "org_admin" }),
+    ("revoke_org_share", Verdict::Routed { tool: "org_admin" }),
+    ("narrow_org_share", Verdict::Routed { tool: "org_admin" }),
     (
-        "add_org",
-        Verdict::LocalOnly {
-            instead: ORGS_ARE_ADMIN,
-        },
+        "revoke_org_member_grants",
+        Verdict::Routed { tool: "org_admin" },
     ),
-    (
-        "update_org",
-        Verdict::LocalOnly {
-            instead: ORGS_ARE_ADMIN,
-        },
-    ),
-    (
-        "remove_org",
-        Verdict::LocalOnly {
-            instead: ORGS_ARE_ADMIN,
-        },
-    ),
-    (
-        "add_org_rule",
-        Verdict::LocalOnly {
-            instead: ORGS_ARE_ADMIN,
-        },
-    ),
-    (
-        "remove_org_rule",
-        Verdict::LocalOnly {
-            instead: ORGS_ARE_ADMIN,
-        },
-    ),
-    (
-        "assign_host_org",
-        Verdict::LocalOnly {
-            instead: ORGS_ARE_ADMIN,
-        },
-    ),
-    (
-        "assign_tracker_org",
-        Verdict::LocalOnly {
-            instead: ORGS_ARE_ADMIN,
-        },
-    ),
-    ("work_scopes", Verdict::Routed { tool: "work" }),
     ("list_orgs", Verdict::Routed { tool: "work" }),
     ("org_suggestions", Verdict::Routed { tool: "work" }),
+    // Org administration phase B: the company's paired devices and people,
+    // on the hub that holds them (`org_admin`; standalone, this desktop's
+    // own store, where `pair_device` refuses — a code is the hub's).
+    ("list_devices", Verdict::Routed { tool: "org_admin" }),
+    ("pair_device", Verdict::Routed { tool: "org_admin" }),
+    ("revoke_device", Verdict::Routed { tool: "org_admin" }),
+    ("set_device_trust", Verdict::Routed { tool: "org_admin" }),
+    ("update_device", Verdict::Routed { tool: "org_admin" }),
+    ("bind_device_org", Verdict::Routed { tool: "org_admin" }),
+    ("set_device_person", Verdict::Routed { tool: "org_admin" }),
+    (
+        "grant_device_catalog",
+        Verdict::Routed { tool: "org_admin" },
+    ),
+    ("list_people", Verdict::Routed { tool: "org_admin" }),
+    ("add_person", Verdict::Routed { tool: "org_admin" }),
+    ("rename_person", Verdict::Routed { tool: "org_admin" }),
+    ("disable_person", Verdict::Routed { tool: "org_admin" }),
+    (
+        "session_summary_since",
+        Verdict::Routed {
+            tool: "session_summary_since",
+        },
+    ),
     (
         "session_conversation",
         Verdict::Routed {
@@ -491,6 +652,66 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "session_activity",
         Verdict::Routed {
             tool: "session_activity",
+        },
+    ),
+    // Multi-user M1 (T13): sharing a session, and the one view of a live pane
+    // a watcher gets. All six route — each command's argument struct is its
+    // tool's params field for field — and all six are gated on the hub per
+    // request, which is the point: a revoked grant stops the next call.
+    //
+    // `capture_session` is here for the WATCHER (R5-e). Sharing never confers
+    // a terminal (spec §4.3 invariant 5), so `pty_open` is not a watcher's
+    // path to the pane; this read-only snapshot is, and unlike an SSH
+    // attach the hub can refuse the next poll. The owner still attaches.
+    //
+    // `session_claim` has no row because it has no command: parity fails on
+    // the CALLER (the tool is `Access::HostToken`, which a desktop's client
+    // token can never satisfy), and a UI claim button for an arbitrary org
+    // member is what spec §4.3 forbids outright. `fleet-hub session claim`
+    // is the operator's path.
+    (
+        "capture_session",
+        Verdict::Routed {
+            tool: "capture_session",
+        },
+    ),
+    (
+        "session_share",
+        Verdict::Routed {
+            tool: "session_share",
+        },
+    ),
+    (
+        "session_unshare",
+        Verdict::Routed {
+            tool: "session_unshare",
+        },
+    ),
+    (
+        "session_narrow",
+        Verdict::Routed {
+            tool: "session_narrow",
+        },
+    ),
+    (
+        "session_access",
+        Verdict::Routed {
+            tool: "session_access",
+        },
+    ),
+    ("my_grants", Verdict::Routed { tool: "my_grants" }),
+    // Gap plan G4.2: a recipient's ask for a wider level, and the owner's
+    // list and answer. Both route; the hub gates each per request.
+    (
+        "session_ask_access",
+        Verdict::Routed {
+            tool: "session_ask_access",
+        },
+    ),
+    (
+        "access_requests",
+        Verdict::Routed {
+            tool: "access_requests",
         },
     ),
     (
@@ -515,6 +736,24 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "spawn_review",
         Verdict::Routed {
             tool: "spawn_review",
+        },
+    ),
+    (
+        "queue_prompt",
+        Verdict::Routed {
+            tool: "queue_prompt",
+        },
+    ),
+    (
+        "queued_prompts",
+        Verdict::Routed {
+            tool: "queued_prompts",
+        },
+    ),
+    (
+        "cancel_queued_prompt",
+        Verdict::Routed {
+            tool: "queued_prompts",
         },
     ),
     (
@@ -545,6 +784,24 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "resolve_move",
         Verdict::Routed {
             tool: "resolve_move",
+        },
+    ),
+    (
+        "adopt_session",
+        Verdict::Routed {
+            tool: "adopt_session",
+        },
+    ),
+    (
+        "lost_target",
+        Verdict::Routed {
+            tool: "lost_target",
+        },
+    ),
+    (
+        "place_transcript",
+        Verdict::Routed {
+            tool: "place_transcript",
         },
     ),
     (
@@ -605,6 +862,17 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "remove_download",
         },
     ),
+    (
+        "pause_download",
+        Verdict::Routed {
+            tool: "pause_download",
+        },
+    ),
+    // Control's Library (9.7) is indexed on the machine that owns the
+    // fleet, the hub when paired, beside the downloads; one tool by action.
+    ("list_library", Verdict::Routed { tool: "library" }),
+    ("add_library_items", Verdict::Routed { tool: "library" }),
+    ("remove_library_item", Verdict::Routed { tool: "library" }),
     // Saving reads the row through `list_downloads` (refusing a file that
     // is not ready or not this client's), then streams the bytes from the
     // hub's `GET /downloads/<id>` into the file this machine's save dialog
@@ -691,6 +959,169 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("list_guides", Verdict::Routed { tool: "guide" }),
     ("decide_guide", Verdict::Routed { tool: "guide" }),
     ("remove_guide", Verdict::Routed { tool: "guide" }),
+    ("list_forms", Verdict::Routed { tool: "ask" }),
+    ("get_form", Verdict::Routed { tool: "ask" }),
+    ("answer_form", Verdict::Routed { tool: "ask" }),
+    ("decline_form", Verdict::Routed { tool: "ask" }),
+    // Settings → Federation (Orbit Fleet 11.5): the hub's links to other
+    // fleets' hubs. The master's and the hub owner's own device's; changing
+    // a link also needs that device trusted (the tool checks).
+    (
+        "list_peer_links",
+        Verdict::Routed {
+            tool: "list_peer_links",
+        },
+    ),
+    ("link_peer_hub", Verdict::Routed { tool: "link_peer" }),
+    (
+        "unlink_peer_hub",
+        Verdict::Routed {
+            tool: "unlink_peer",
+        },
+    ),
+    // Settings → Updates (Orbit Fleet 11.9b): what each part of the fleet
+    // runs, from the hub's update picture.
+    (
+        "update_check",
+        Verdict::SameInBoth {
+            why: WHY_SELF_UPDATE,
+        },
+    ),
+    (
+        "update_install",
+        Verdict::SameInBoth {
+            why: WHY_SELF_UPDATE,
+        },
+    ),
+    (
+        "list_update_targets",
+        Verdict::Routed {
+            tool: "update_status",
+        },
+    ),
+    ("list_pull_requests", Verdict::Routed { tool: "prs" }),
+    // Named Control API tokens (M15 step G2.8): a token for the fleet this
+    // window is onto, so the hub's. Its tool serves the owner's trusted full
+    // device read and act tokens; an admin one stays the hub master's.
+    ("api_tokens", Verdict::Routed { tool: "api_tokens" }),
+    // Add account (M15 step G2.9): the profile goes on a host of the fleet
+    // this window is onto, and its account into that fleet's list.
+    (
+        "add_account",
+        Verdict::Routed {
+            tool: "add_account",
+        },
+    ),
+    // Start rules (Orbit Fleet 8.11): the hub decides and tallies its own
+    // starts, so its rules are the ones that count.
+    (
+        "start_rules",
+        Verdict::Routed {
+            tool: "start_rules",
+        },
+    ),
+    // A wizard left half-way (G7.2) is kept on the hub, so it resumes on
+    // the person's other devices.
+    (
+        "wizard_state",
+        Verdict::Routed {
+            tool: "wizard_state",
+        },
+    ),
+    // Pinned dashboards (persona design step 6) are kept on the hub, so
+    // every device of the person shows them.
+    ("dashboards", Verdict::Routed { tool: "dashboards" }),
+    (
+        "session_presence",
+        Verdict::Routed {
+            tool: "session_presence",
+        },
+    ),
+    (
+        "list_debug_devices",
+        Verdict::Routed {
+            tool: "debug_devices",
+        },
+    ),
+    (
+        "scan_debug_devices",
+        Verdict::Routed {
+            tool: "debug_devices",
+        },
+    ),
+    (
+        "update_debug_device",
+        Verdict::Routed {
+            tool: "debug_devices",
+        },
+    ),
+    (
+        "release_debug_device",
+        Verdict::Routed {
+            tool: "debug_devices",
+        },
+    ),
+    (
+        "forget_debug_device",
+        Verdict::Routed {
+            tool: "debug_devices",
+        },
+    ),
+    (
+        "boot_debug_device",
+        Verdict::Routed {
+            tool: "debug_devices",
+        },
+    ),
+    (
+        "shutdown_debug_device",
+        Verdict::Routed {
+            tool: "debug_devices",
+        },
+    ),
+    (
+        "claim_debug_device",
+        Verdict::Routed {
+            tool: "debug_devices",
+        },
+    ),
+    (
+        "install_debug_device",
+        Verdict::Routed {
+            tool: "debug_devices",
+        },
+    ),
+    (
+        "debug_device_logs",
+        Verdict::Routed {
+            tool: "debug_devices",
+        },
+    ),
+    (
+        "debug_device_screenshot",
+        Verdict::Routed {
+            tool: "debug_devices",
+        },
+    ),
+    (
+        "start_device_mirror",
+        Verdict::SameInBoth {
+            why: "opens a scrcpy window on THIS machine; it looks the device up and claims it through \
+                  the routed debug_devices commands, so a paired desktop uses the hub's inventory",
+        },
+    ),
+    (
+        "stop_device_mirror",
+        Verdict::SameInBoth {
+            why: "stops a scrcpy window this machine runs",
+        },
+    ),
+    (
+        "list_device_mirrors",
+        Verdict::SameInBoth {
+            why: "the scrcpy windows this machine runs",
+        },
+    ),
     (
         "set_fleet_setting",
         Verdict::Routed {
@@ -698,6 +1129,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     ("list_tasks", Verdict::Routed { tool: "list_tasks" }),
+    // Orbit Fleet 8.3: the Automation screen's Runs list.
+    ("list_runs", Verdict::Routed { tool: "runs" }),
+    // Agents step 5: the Automation screen's Agents tab and the Inbox's
+    // agent actions. The hub serves `agents` to the owner's own device only.
+    ("agents_status", Verdict::Routed { tool: "agents" }),
+    ("agents_decide", Verdict::Routed { tool: "agents" }),
+    // Orbit Fleet 8.6: the Automation screen's Routines and the Inbox's failed runs.
+    ("routines", Verdict::Routed { tool: "routines" }),
     // ── tasks ───────────────────────────────────────────────────────────────
     (
         "cancel_task",
@@ -715,6 +1154,19 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("repo_tree", Verdict::Routed { tool: "repo_tree" }),
     ("repo_file", Verdict::Routed { tool: "repo_file" }),
     ("repo_diff", Verdict::Routed { tool: "repo_diff" }),
+    ("repo_blame", Verdict::Routed { tool: "repo_blame" }),
+    (
+        "repo_branch_diff",
+        Verdict::Routed {
+            tool: "repo_branch_diff",
+        },
+    ),
+    (
+        "repo_range_diff",
+        Verdict::Routed {
+            tool: "repo_range_diff",
+        },
+    ),
     (
         "upload_to_session",
         Verdict::SameInBoth {
@@ -782,6 +1234,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "repo_delete_merged_branches",
+        Verdict::LocalOnly {
+            instead: NO_GIT_WRITE_TOOL,
+        },
+    ),
+    (
         "repo_stage",
         Verdict::LocalOnly {
             instead: NO_GIT_WRITE_TOOL,
@@ -797,6 +1255,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "repo_commit_create",
         Verdict::LocalOnly {
             instead: NO_GIT_WRITE_TOOL,
+        },
+    ),
+    (
+        "draft_commit_message",
+        Verdict::LocalOnly {
+            instead: NO_DRAFT_TOOL,
         },
     ),
     (
@@ -820,9 +1284,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     // ── hosts and accounts ──────────────────────────────────────────────────
     (
         "discover_hosts",
-        Verdict::LocalOnly {
-            instead: "it reads this machine's ~/.ssh/config, not the hub's — register hosts \
-                      on the hub itself with `fleet-hub` or a standalone app",
+        Verdict::Routed {
+            tool: "discover_hosts",
         },
     ),
     ("list_hosts", Verdict::Routed { tool: "list_hosts" }),
@@ -832,14 +1295,22 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "list_accounts",
         },
     ),
+    ("add_host", Verdict::Routed { tool: "add_host" }),
+    ("probe_host", Verdict::Routed { tool: "probe_host" }),
+    // Orbit Fleet 4.9: only a hub accepts agents, so the job runs there; a
+    // standalone desktop answers with the service's own refusal.
     (
-        "add_host",
-        Verdict::LocalOnly {
-            instead: "registering a host is fleet administration, which the hub reserves for \
-                      its own operator — add it there with `fleet-hub`",
+        "install_agent",
+        Verdict::Routed {
+            tool: "install_agent",
         },
     ),
-    ("probe_host", Verdict::Routed { tool: "probe_host" }),
+    (
+        "agent_installs",
+        Verdict::Routed {
+            tool: "agent_installs",
+        },
+    ),
     (
         "probe_ssh_alias",
         Verdict::LocalOnly {
@@ -866,6 +1337,39 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
                       <from> <into>`",
         },
     ),
+    ("check_host", Verdict::Routed { tool: "check_host" }),
+    (
+        "list_host_setups",
+        Verdict::LocalOnly {
+            instead: "the add-host wizard adds a host of this machine's ~/.ssh/config and checks \
+                      it over this app's own SSH; the hub adds hosts with `add_host` and installs \
+                      fleet-agent with `install_agent`",
+        },
+    ),
+    (
+        "save_host_setup",
+        Verdict::LocalOnly {
+            instead: "the add-host wizard adds a host of this machine's ~/.ssh/config and checks \
+                      it over this app's own SSH; the hub adds hosts with `add_host` and installs \
+                      fleet-agent with `install_agent`",
+        },
+    ),
+    (
+        "discard_host_setup",
+        Verdict::LocalOnly {
+            instead: "the add-host wizard adds a host of this machine's ~/.ssh/config and checks \
+                      it over this app's own SSH; the hub adds hosts with `add_host` and installs \
+                      fleet-agent with `install_agent`",
+        },
+    ),
+    (
+        "run_host_setup_check",
+        Verdict::LocalOnly {
+            instead: "the add-host wizard adds a host of this machine's ~/.ssh/config and checks \
+                      it over this app's own SSH; the hub adds hosts with `add_host` and installs \
+                      fleet-agent with `install_agent`",
+        },
+    ),
     (
         "hide_host",
         Verdict::LocalOnly {
@@ -875,17 +1379,48 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     (
         "set_account_nickname",
-        Verdict::LocalOnly {
-            instead: "the nickname lives in the hub's database and there is no tool to set \
-                      it; rename the account on the hub",
+        Verdict::Routed {
+            tool: "set_account_nickname",
         },
     ),
     // ── account usage ───────────────────────────────────────────────────────
     (
         "list_account_usage",
+        Verdict::Routed {
+            tool: "account_usage",
+        },
+    ),
+    (
+        "account_spend",
+        Verdict::LocalOnly {
+            instead: "this app collects no usage while a hub owns the fleet, so its store \
+                      has no spend per account; read usage on the hub",
+        },
+    ),
+    (
+        "account_usage_history",
         Verdict::LocalOnly {
             instead: "this app does not poll account usage while a hub owns the fleet, so \
-                      the cache is empty; read usage on the hub",
+                      it keeps no history; read usage on the hub",
+        },
+    ),
+    (
+        "check_account_headroom",
+        Verdict::Routed {
+            tool: "check_account_headroom",
+        },
+    ),
+    (
+        "propose_host_placement",
+        Verdict::Routed {
+            tool: "propose_host_placement",
+        },
+    ),
+    (
+        "record_host_placement",
+        Verdict::LocalOnly {
+            instead: "the decision model's runs are recorded on the hub that owns the fleet; \
+                      nothing to record here",
         },
     ),
     (
@@ -917,11 +1452,19 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
                       running; install it from the hub",
         },
     ),
+    // "Re-provision this host" routes as the hub's content-only refresh of
+    // that one host (`Access::Person`: the hub owner's own device); every
+    // host at once, or a rotation, mints tokens and rewrites
+    // `~/.claude.json`, which stays the hub operator's.
     (
         "provision_hosts",
-        Verdict::LocalOnly {
-            instead: "it rewrites every host's hook block to report to this app; provision \
-                      from the hub with `fleet-hub provision [--host <alias>] [--content-only]`",
+        Verdict::RoutedUnless {
+            tool: "provision_hosts",
+            unless: "no host, or rotate: true — a full provisioning",
+            instead: "it rewrites every host's hook block and tokens to report to this app; \
+                      provision from the hub with `fleet-hub provision [--host <alias>] \
+                      [--rotate]` (one host's content is refreshed from its page, and the hub \
+                      refreshes stale hosts by itself)",
         },
     ),
     (
@@ -945,17 +1488,27 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
                       the hub",
         },
     ),
+    // Redesign step 9.2: the operator's calls that wait for a person wait in
+    // the queue of the server they reached, which on a hub-backed desktop is
+    // the hub's. The owner's device lists and answers it there.
     (
         "mcp_confirm",
-        Verdict::SameInBoth {
-            why: "answers this process's own confirm queue, which is empty in remote mode — \
-                  answering nothing is correct",
+        Verdict::Routed {
+            tool: "answer_mcp_confirm",
         },
     ),
     (
         "mcp_pending_confirms",
-        Verdict::SameInBoth {
-            why: "the same queue, the same reason",
+        Verdict::Routed {
+            tool: "mcp_confirms",
+        },
+    ),
+    // Redesign step 9.3: the receipts of what the agent handed on live
+    // where the agent runs, which on a hub-backed desktop is the hub.
+    (
+        "control_handoffs",
+        Verdict::Routed {
+            tool: "control_handoffs",
         },
     ),
     // ── the UX agent's operator session ─────────────────────────────────────
@@ -978,6 +1531,32 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "operator_status",
         Verdict::Routed {
             tool: "operator_status",
+        },
+    ),
+    // Redesign step 9.9 (Jev K2): the hub decides where a Control message
+    // goes, since it owns the fleet and the decision envelope.
+    (
+        "control_route_propose",
+        Verdict::Routed {
+            tool: "control_route",
+        },
+    ),
+    (
+        "control_route_follow",
+        Verdict::Routed {
+            tool: "control_route",
+        },
+    ),
+    (
+        "resume_or_new_propose",
+        Verdict::Routed {
+            tool: "resume_or_new",
+        },
+    ),
+    (
+        "resume_or_new_follow",
+        Verdict::Routed {
+            tool: "resume_or_new",
         },
     ),
     // ── the pairing itself — about THIS process, either way ─────────────────
@@ -1004,11 +1583,26 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "hub_retry_now",
+        Verdict::SameInBoth {
+            why: "cuts THIS process's wait before it reconnects to the hub. It is the \
+                  banner's Retry now, pressed exactly when the hub cannot be reached",
+        },
+    ),
+    (
         "hub_connection",
         Verdict::SameInBoth {
             why: "reports whether THIS process's event stream to the hub is up. Asking the \
                   hub would be circular, and the answer matters most exactly when the hub \
                   cannot be reached",
+        },
+    ),
+    (
+        "offline_local_sessions",
+        Verdict::SameInBoth {
+            why: "lists the tmux sessions on THIS machine for Open offline, when the hub \
+                  cannot be reached. It reads this machine's own tmux server only: no \
+                  state.db, no SSH, no host the hub manages, and it writes nothing",
         },
     ),
     (
@@ -1069,8 +1663,10 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     // The overview's read, open to every paired client: the hub's
-    // `list_assets` answers `catalog::list_assets` over its own catalog and
-    // inventory — the same `AssetListing`.
+    // `list_assets` over its own catalogs and inventory — the same
+    // `AssetListing`. Assets M5: this desktop sends `all_catalogs: true`;
+    // the hub lists every catalog for the master or an unbound full client
+    // and personal only for anyone else (or when the flag is absent).
     (
         "catalog_list_assets",
         Verdict::Routed {
@@ -1259,6 +1855,119 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "catalog_admin",
         },
     ),
+    // Assets M5 (R13): the workspace's reads. The footer's catalog chips:
+    // `catalog_admin { list_catalogs }`, the master's or an unbound full
+    // client's — no grant (M3 PF15).
+    (
+        "catalog_list_catalogs",
+        Verdict::Routed {
+            tool: "catalog_admin",
+        },
+    ),
+    // The Inbox's cards: `changesets { list }`, the master's or an unbound
+    // full client's. The card verbs follow below.
+    (
+        "catalog_list_changesets",
+        Verdict::Routed { tool: "changesets" },
+    ),
+    // Assets M6 (R8): the card verbs — `changesets { list(id) | apply |
+    // undo | dismiss | reject_item | propose | propose_layer }`. The hub
+    // checks the caller's grant per catalog the card touches and runs its
+    // confirm gate for a rollout or restore apply; the desktop never sends
+    // a nonce (as `catalog_apply_sync`). A hub before M6 refuses
+    // `propose_layer` with E_INVALID (R13 precedent) — no contract bump.
+    (
+        "catalog_get_changeset",
+        Verdict::Routed { tool: "changesets" },
+    ),
+    (
+        "catalog_apply_changeset",
+        Verdict::Routed { tool: "changesets" },
+    ),
+    (
+        "catalog_undo_changeset",
+        Verdict::Routed { tool: "changesets" },
+    ),
+    (
+        "catalog_dismiss_changeset",
+        Verdict::Routed { tool: "changesets" },
+    ),
+    (
+        "catalog_reject_changeset_items",
+        Verdict::Routed { tool: "changesets" },
+    ),
+    (
+        "catalog_propose_changesets",
+        Verdict::Routed { tool: "changesets" },
+    ),
+    (
+        "catalog_propose_layer_change",
+        Verdict::Routed { tool: "changesets" },
+    ),
+    // Assets M6 (R9): the catalog set (add / remove: the master only on a
+    // hub; admit / unadmit: a grant on that catalog), one catalog's layers,
+    // one host's provenance (the MCP resolve_preview projection) and a
+    // drifted asset's two texts (catalog_admin drift_diff — a hub before M6
+    // refuses the action with E_INVALID; no contract bump).
+    (
+        "catalog_add_catalog",
+        Verdict::Routed {
+            tool: "catalog_admin",
+        },
+    ),
+    (
+        "catalog_remove_catalog",
+        Verdict::Routed {
+            tool: "catalog_admin",
+        },
+    ),
+    (
+        "catalog_admit_catalog",
+        Verdict::Routed {
+            tool: "catalog_admin",
+        },
+    ),
+    (
+        "catalog_unadmit_catalog",
+        Verdict::Routed {
+            tool: "catalog_admin",
+        },
+    ),
+    (
+        "catalog_list_layers_in",
+        Verdict::Routed {
+            tool: "catalog_admin",
+        },
+    ),
+    (
+        "catalog_host_provenance",
+        Verdict::Routed {
+            tool: "resolve_preview",
+        },
+    ),
+    (
+        "catalog_drift_diff",
+        Verdict::Routed {
+            tool: "catalog_admin",
+        },
+    ),
+    // One catalog's repo status by name: `catalog_admin { repo_status }`
+    // with the tool's `catalog` parameter; needs a grant on that catalog.
+    (
+        "catalog_repo_status_in",
+        Verdict::Routed {
+            tool: "catalog_admin",
+        },
+    ),
+    // The Inspector's History: `catalog_admin { asset_history }`, per
+    // catalog, with a grant on it. A hub before M5 refuses the action with
+    // E_INVALID (unknown variant) — no contract bump (R13).
+    (
+        "catalog_asset_history",
+        Verdict::Routed {
+            tool: "catalog_admin",
+        },
+    ),
     (
         "catalog_spawn_author_session",
         Verdict::LocalOnly {
@@ -1272,18 +1981,42 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     (
         "pty_open",
         Verdict::SameInBoth {
-            why: "the attach is this machine's own `ssh … tmux attach`, built from the alias \
-                  and tmux name passed in; it reads no state.db and the hub is not in the \
-                  path, so a paired client attaches exactly as a standalone app does. The \
-                  session it cannot attach is one on an AGENT host, which has no SSH route \
-                  from anywhere — the terminal pane declines that one itself",
+            why: "the attach is this machine's own `ssh … tmux attach`, built from the \
+                  alias and tmux name passed in; it reads no state.db and the hub is not \
+                  in the path, so a paired client attaches exactly as a standalone app \
+                  does. That is also why it is NOT where a grant is enforced: the hub \
+                  cannot refuse this attach and cannot revoke it once it is up, so \
+                  sharing never confers a terminal (multi-user M1) and the pane itself \
+                  declines to attach a session this client does not own, offering \
+                  capture_session's read-only snapshot instead. A session on an AGENT \
+                  host is attempted like any other — that transport says the HUB cannot \
+                  dial the host, not that this machine cannot — and a failure is \
+                  explained after it happens",
         },
     ),
     (
         "pty_write",
         Verdict::SameInBoth {
-            why: "acts on whatever is attached; with pty_open refused nothing ever is, so \
-                  E_PTY_CLOSED is the true answer",
+            why: "acts on a pty THIS process opened, named by the id it was opened \
+                  under, and pty_open is the same in both modes, so there is one answer \
+                  either way; E_PTY_CLOSED when nothing is attached under that id, which \
+                  includes every session the pane declined to attach",
+        },
+    ),
+    (
+        "context_help",
+        Verdict::SameInBoth {
+            why: "the shell terminal's helper takes the terminal's path: one claude -p over \
+                  this machine's own ssh to the alias passed in, with the shell's scrollback \
+                  read over that same ssh; it reads no state.db and the hub is not in the \
+                  path. The strip offers it only where it offers the attach (a session this \
+                  client owns); the composer asks session_context_help",
+        },
+    ),
+    (
+        "session_context_help",
+        Verdict::Routed {
+            tool: "session_context_help",
         },
     ),
     (
@@ -1302,6 +2035,151 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "pty_drain",
         Verdict::SameInBoth {
             why: "the same as pty_write",
+        },
+    ),
+    (
+        "open_session_in_editor",
+        Verdict::SameInBoth {
+            why: "the same story as pty_open: VS Code and the `ssh` that asks the pane \
+                  for its folder are this machine's, built from the alias and tmux name \
+                  passed in; it reads no state.db and the hub is not in the path",
+        },
+    ),
+    (
+        "open_terminal_window",
+        Verdict::SameInBoth {
+            why: "a window of this app, whose pane attaches through pty_open like the \
+                  main window's; it reads no state.db and the hub is not in the path",
+        },
+    ),
+    // ── the voice relay's microphone claim ──────────────────────────────────
+    (
+        "voice_claim",
+        Verdict::SameInBoth {
+            why: "the microphone is this machine's: standalone it is registered with the \
+                  embedded server; paired, the desktop holds /voice/source open on the hub",
+        },
+    ),
+    (
+        "voice_release",
+        Verdict::SameInBoth {
+            why: "releases whichever claim voice_claim made on this machine",
+        },
+    ),
+    // ── local workspace sync ────────────────────────────────────────────────
+    (
+        "list_local_workspaces",
+        Verdict::SameInBoth {
+            why: "links bind a folder on THIS machine, so they live in this machine's \
+                  database, paired or not",
+        },
+    ),
+    (
+        "enable_local_workspace",
+        Verdict::SameInBoth {
+            why: "the folder is on THIS machine and the sync runs over its own SSH; paired, \
+                  the session and its project are read from the hub (list_sessions, \
+                  list_projects) and the worktree's path from the session's pane",
+        },
+    ),
+    (
+        "pause_local_workspace",
+        Verdict::SameInBoth {
+            why: WHY_LOCAL_SYNC,
+        },
+    ),
+    (
+        "resume_local_workspace",
+        Verdict::SameInBoth {
+            why: WHY_LOCAL_SYNC,
+        },
+    ),
+    (
+        "sync_local_workspace_now",
+        Verdict::SameInBoth {
+            why: WHY_LOCAL_SYNC,
+        },
+    ),
+    (
+        "disconnect_local_workspace",
+        Verdict::SameInBoth {
+            why: WHY_LOCAL_SYNC,
+        },
+    ),
+    (
+        "set_local_workspace_excludes",
+        Verdict::SameInBoth {
+            why: WHY_LOCAL_SYNC,
+        },
+    ),
+    (
+        "resolve_local_workspace_conflict",
+        Verdict::SameInBoth {
+            why: WHY_LOCAL_SYNC,
+        },
+    ),
+    (
+        "open_local_workspace",
+        Verdict::SameInBoth {
+            why: WHY_LOCAL_SYNC,
+        },
+    ),
+    (
+        "local_workspace_changes",
+        Verdict::SameInBoth {
+            why: WHY_LOCAL_SYNC,
+        },
+    ),
+    (
+        "local_workspace_diff",
+        Verdict::SameInBoth {
+            why: WHY_LOCAL_SYNC,
+        },
+    ),
+    (
+        "commit_local_workspace",
+        Verdict::SameInBoth {
+            why: WHY_LOCAL_SYNC,
+        },
+    ),
+    (
+        "discard_local_workspace_changes",
+        Verdict::SameInBoth {
+            why: WHY_LOCAL_SYNC,
+        },
+    ),
+    (
+        "dismiss_local_workspace_activity",
+        Verdict::SameInBoth {
+            why: WHY_LOCAL_SYNC,
+        },
+    ),
+    (
+        "compare_local_conflict",
+        Verdict::SameInBoth {
+            why: WHY_LOCAL_SYNC,
+        },
+    ),
+    (
+        "keep_both_local_conflict",
+        Verdict::SameInBoth {
+            why: WHY_LOCAL_SYNC,
+        },
+    ),
+    (
+        "ask_ai_about_local_changes",
+        Verdict::SameInBoth {
+            why: "the link and its folder are THIS machine's; paired, the session is found \
+                  among the hub's (list_sessions) and the prompt goes through the hub's \
+                  send_prompt",
+        },
+    ),
+    (
+        "set_local_workspace_driver",
+        Verdict::SameInBoth {
+            why: "the link and its folder are THIS machine's; paired, the session is found \
+                  among the hub's (list_sessions) and the prompt goes through the hub's \
+                  send_prompt",
         },
     ),
     (

@@ -57,7 +57,7 @@ pub fn apply_hook(
         Some("PostCompact") => apply_post_compact_hook(store, ssh, payload, ctx),
         Some("SessionEnd") => apply_session_end_hook(store, payload, ctx),
         Some("StopFailure") => apply_stop_failure_hook(store, ssh, payload, ctx),
-        Some("Notification") => apply_notification_hook(store, payload, ctx),
+        Some("Notification") => apply_notification_hook(store, ssh, payload, ctx),
         // `EnterWorktree` is the real tool (the installed matcher).
         // `WorktreeCreate` is a hook EVENT that replaces git worktree
         // creation, not a tool — no PostToolUse ever carries it; it is still
@@ -529,6 +529,29 @@ pub fn prompt_submit_context(
     })
 }
 
+/// The session a person's prompt was typed into, for the decision model's
+/// `work_link` question (J1, redesign 6.8,
+/// [`crate::service::decide::work_link::spawn_ask`]): the row, when the
+/// prompt is a person's (not one Claude Code submitted itself) in the row's
+/// CURRENT conversation. Whether to ask at all is the adapter's call.
+pub fn work_link_subject(
+    store: &Arc<Mutex<Store>>,
+    payload: &HookPayload,
+    ctx: &HookContext,
+) -> Option<i64> {
+    if payload
+        .prompt
+        .as_deref()
+        .is_some_and(crate::service::prompt_origin::is_harness)
+    {
+        return None;
+    }
+    let s = lock(store).ok()?;
+    let (row, _) = resolve_hook_row(&s, payload, ctx, false).ok()??;
+    let current = row.claude_session_id.as_deref()?;
+    (payload.session_id.as_deref() == Some(current)).then_some(row.id)
+}
+
 /// The classification nudge for this prompt, if it fires: `(row id, text,
 /// conversation id)`. Only for the row's CURRENT conversation — a nested
 /// `claude -p` sharing the pane never gets it (see
@@ -584,6 +607,33 @@ pub fn take_pending_stop_delivery(
     ))
 }
 
+/// The worker guard's answer to a `PreToolUse(Bash)` hook (orchestration
+/// §7.2): why the command is a person's step, for a mission's worker only;
+/// `None` lets it run. Never an error: a guard that cannot read the store
+/// lets the command through, as a hub that does not answer would.
+pub fn pre_tool_use_denial(
+    store: &Arc<Mutex<Store>>,
+    payload: &HookPayload,
+    ctx: &HookContext,
+) -> Option<&'static str> {
+    if payload.tool_name.as_deref() != Some("Bash") {
+        return None;
+    }
+    let command = payload.tool_input.as_ref()?.get("command")?.as_str()?;
+    // The pure reading first, as if on the default branch: most commands
+    // that reach here are not a person's step on any branch.
+    crate::service::work::orchestrate::guard::deny_reason(command, Some("main"))?;
+    let s = lock(store).ok()?;
+    let (row, _) = resolve_hook_row(&s, payload, ctx, false).ok()??;
+    if !s.is_mission_worker(row.id).ok()? {
+        return None;
+    }
+    let branch = s.session_branch(row.id).ok().flatten();
+    let why = crate::service::work::orchestrate::guard::deny_reason(command, branch.as_deref())?;
+    tracing::info!(session = %row.tmux_name, why, "[hook] worker guard refused a command");
+    Some(why)
+}
+
 /// Most characters of a SessionStart `additionalContext` (work graph M4.5).
 pub const SESSION_START_CONTEXT_MAX: usize = 4000;
 
@@ -627,7 +677,7 @@ pub fn session_start_context(
     // never a ticket of another org a person force-linked here.
     crate::service::orgs::OrgScope::for_host(&s, &row.host_alias)
         .ok()?
-        .redact_row(&mut row);
+        .redact_row_org_only(&mut row);
     let w = row.work.as_ref()?;
     let key = w.key.as_deref().unwrap_or(w.title.as_str());
     let flat = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1173,6 +1223,12 @@ fn apply_stop_hook(
     if steps_backstop {
         crate::service::work::harvest::spawn_harvest_steps(store, ssh, row_id, &session_id);
     }
+    // J2 (step 5.11): the Stop said the turn ended, not how. When the
+    // feature is on, Jev reads the screen off this path; any later hook
+    // overrides it.
+    crate::service::decide::turn_outcome::spawn_after_stop(store, ssh, row_id);
+    // The turn is over: a prompt queued while it ran goes in now (step 5.10).
+    crate::service::sessions::deferred::spawn_deliver_after_stop(store, ssh, row_id);
     spawn_refresh_context(store, ssh, row_id);
     Ok(())
 }
@@ -1216,6 +1272,19 @@ fn apply_prompt_submit_hook(
         let touch = payload.prompt.as_deref().is_none_or(|p| {
             crate::service::work::detect::loop_guard(p, row.last_prompt.as_deref(), &[]).is_none()
         });
+        // J2: a person answering the turn that ended (the row idle after
+        // its Stop) confirms Jev's `asked`.
+        if touch && row.claude_status.as_deref() == Some("idle") {
+            if let Err(e) = crate::service::decide::turn_outcome::record_prompt(
+                s,
+                row.id,
+                row.turn_seq,
+                crate::store::now_unix(),
+            ) {
+                tracing::debug!(error = %e.message, "[decide] turn_outcome follow-up not recorded");
+                s.ensure_in_tx()?;
+            }
+        }
         s.record_prompt_submit_hook_for_row_with(row.id, touch)?;
         // What Claude Code submits itself (a `<task-notification>`, a slash
         // command's echo) is neither the first prompt nor evidence: the
@@ -1393,6 +1462,7 @@ pub(crate) fn notification_effect(
 /// current conversation may change its status.
 fn apply_notification_hook(
     store: &Arc<Mutex<Store>>,
+    ssh: &Arc<SshClient>,
     payload: &HookPayload,
     ctx: &HookContext,
 ) -> Result<(), IpcError> {
@@ -1406,18 +1476,57 @@ fn apply_notification_hook(
     };
     let s = lock(store)?;
     // Task 3: one transaction — pure store logic, no SSH/spawn.
-    s.atomically(|s| {
+    let raised = s.atomically(|s| {
         let Some((row, Binding::Current)) =
             resolve_and_rebind(s, payload, ctx, StartSource::Unknown)?
         else {
-            return Ok(());
+            return Ok(None);
         };
         remember_transcript_path(s, row.id, payload, session_id)?;
+        // J2: a hook speaking about the turn that ended (the row still idle
+        // after its Stop) settles Jev's answer about it — and the write
+        // below clears that answer: hooks always win.
+        if row.claude_status.as_deref() == Some("idle") {
+            if let Some(said) = crate::service::decide::turn_outcome::hook_word(status, stuck) {
+                if let Err(e) = crate::service::decide::turn_outcome::record_hook(
+                    s,
+                    row.id,
+                    row.turn_seq,
+                    said,
+                    crate::store::now_unix(),
+                ) {
+                    tracing::debug!(error = %e.message, "[decide] turn_outcome follow-up not recorded");
+                    s.ensure_in_tx()?;
+                }
+            }
+        }
         if let Some(row) = s.record_notification_hook_for_row(row.id, status, stuck)? {
             best_effort_event_for(s, row.id, Some(session_id), "notification", Some(kind))?;
         }
-        Ok(())
-    })
+        Ok(Some(row.id))
+    })?;
+    drop(s);
+    // The hook says "blocked" at once, but the dialog's question and options
+    // come only from a pane read — until now the next 20 s tick's. Read just
+    // this pane now, so the buttons arrive with the status (after the
+    // transaction: no SSH under the store lock).
+    if let (Some(row_id), true) = (raised, raises_dialog(kind)) {
+        crate::service::sessions::spawn_dialog_followup(
+            Arc::clone(store),
+            Arc::clone(ssh),
+            row_id,
+            crate::service::sessions::DialogFollowup::Raised,
+        );
+    }
+    Ok(())
+}
+
+/// The Notification types that put a dialog with options on the pane.
+pub(crate) fn raises_dialog(notification_type: &str) -> bool {
+    matches!(
+        notification_type,
+        "permission_prompt" | "elicitation_dialog" | "elicitation_url_dialog"
+    )
 }
 
 /// Timeline writes never fail the hook that produced them — unless the
@@ -1570,11 +1679,8 @@ fn apply_worktree_hook(
                 format!("worktree_path {path} is not under a known project on host {host}"),
             ));
         };
-        let name = Path::new(&path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unnamed")
-            .to_string();
+        let name =
+            crate::projects::worktree_name_for_path(&path).unwrap_or_else(|| "unnamed".to_string());
         s.upsert_worktree_on(host, project_id, &name, &path, branch)?;
         return Ok(());
     }
@@ -1585,11 +1691,8 @@ fn apply_worktree_hook(
     crate::service::hub::ensure_local_allowed(host)?;
     let path = canonical_str(&path);
     validate_worktree_path(&path)?;
-    let name = Path::new(&path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unnamed")
-        .to_string();
+    let name =
+        crate::projects::worktree_name_for_path(&path).unwrap_or_else(|| "unnamed".to_string());
     let projects = {
         let s = lock(store)?;
         s.list_projects()?
@@ -1713,9 +1816,12 @@ mod tests {
                 .unwrap();
         }
         let host_a = Caller {
+            api: None,
             host_alias: Some("hosta".into()),
             client: None,
             mode: crate::mcp::TokenMode::Full,
+            pane: None,
+            is_personal_owner: false,
         };
         let err = apply_hook(
             &store,
@@ -1732,9 +1838,12 @@ mod tests {
         }
         // The session's own host token (and the master token) may.
         let host_b = Caller {
+            api: None,
             host_alias: Some("hostb".into()),
             client: None,
             mode: crate::mcp::TokenMode::Readonly,
+            pane: None,
+            is_personal_owner: false,
         };
         apply_hook(
             &store,
@@ -2036,9 +2145,12 @@ mod tests {
             id
         };
         let host_a = Caller {
+            api: None,
             host_alias: Some("hosta".into()),
             client: None,
             mode: crate::mcp::TokenMode::Full,
+            pane: None,
+            is_personal_owner: false,
         };
         let err = apply_hook(
             &store,
@@ -2055,9 +2167,12 @@ mod tests {
             assert!(row.idle_since.is_some());
         }
         let host_b = Caller {
+            api: None,
             host_alias: Some("hostb".into()),
             client: None,
             mode: crate::mcp::TokenMode::Readonly,
+            pane: None,
+            is_personal_owner: false,
         };
         apply_hook(
             &store,
@@ -2285,9 +2400,12 @@ mod tests {
 
     fn host_caller(host: &str) -> Caller {
         Caller {
+            api: None,
             host_alias: Some(host.into()),
             client: None,
             mode: crate::mcp::TokenMode::Full,
+            pane: None,
+            is_personal_owner: false,
         }
     }
 
@@ -2684,7 +2802,8 @@ mod tests {
     }
 
     /// Seed `pending_input` directly with a raw UPDATE — the reconcile
-    /// upsert is the only production writer of this column — so a test can
+    /// upsert and the dialog fast path (`record_dialog_probe`) are its only
+    /// production writers — so a test can
     /// check that a hook path clears a stale dialog.
     fn seed_pending_input(s: &Store, id: i64) {
         s.conn_ref()
@@ -3100,9 +3219,12 @@ mod tests {
         let store = make_store();
         hooked(&store);
         let other = Caller {
+            api: None,
             host_alias: Some("hostb".into()),
             client: None,
             mode: crate::mcp::TokenMode::Full,
+            pane: None,
+            is_personal_owner: false,
         };
         for (event, field) in [
             ("SessionEnd", "reason"),
@@ -4207,6 +4329,34 @@ mod tests {
         assert!(s.conversation_nudged(b, "conv-b").unwrap());
     }
 
+    /// The operator coordinates every task and is never asked to classify its
+    /// own conversation: the same ready state that nudges beta stays silent
+    /// once beta is the recorded operator.
+    #[test]
+    fn the_operator_is_never_nudged_to_classify() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let (_, b, payload) = nudge_ready(&store);
+        crate::service::operator::set_operator_ref(
+            &store.lock().unwrap(),
+            &crate::service::operator::OperatorRef {
+                host_alias: "local".into(),
+                tmux_name: "beta".into(),
+            },
+        )
+        .unwrap();
+        let ctx = HookContext {
+            caller: &Caller::master(),
+            pane_id: None,
+            sync_start: false,
+        };
+        assert_eq!(prompt_submit_context(&store, &payload, &ctx), None);
+        assert!(!store
+            .lock()
+            .unwrap()
+            .conversation_nudged(b, "conv-b")
+            .unwrap());
+    }
+
     /// A nudge never displaces mail: when the mail fills the budget it waits,
     /// unstamped, and rides the next prompt on its own.
     #[test]
@@ -4646,5 +4796,53 @@ mod tests {
             0,
             "a legitimate Stop with nothing pending must reset the streak"
         );
+    }
+
+    /// The worker guard (orchestration §7.2): a mission's worker is refused
+    /// a person's step; the same command from any other session runs.
+    #[test]
+    fn the_guard_refuses_a_missions_worker_and_nobody_else() {
+        let store = make_store();
+        let id = hooked(&store);
+        let master = Caller::master();
+        let c = ctx(&master, None);
+        let bash = |cmd: &str| HookPayload {
+            tool_name: Some("Bash".into()),
+            tool_input: Some(serde_json::json!({ "command": cmd })),
+            ..make_payload("PreToolUse", "uuid-1")
+        };
+        assert_eq!(
+            pre_tool_use_denial(&store, &bash("gh pr merge 3"), &c),
+            None,
+            "not a worker"
+        );
+        {
+            let s = store.lock().unwrap();
+            let m = s
+                .create_mission(
+                    &crate::store::NewMission {
+                        name: "m",
+                        goal: "g",
+                        ..Default::default()
+                    },
+                    "fleet",
+                )
+                .unwrap()
+                .id;
+            s.set_mission_state(m, None, "active", "fleet").unwrap();
+            let item = s.create_local_work_item(None, "a").unwrap().id;
+            s.set_mission_item(m, item, true, "fleet").unwrap();
+            let t = s.insert_task(None, Some(id), "go", "n").unwrap();
+            s.set_task_run(t.id, item, 1, "implement").unwrap();
+        }
+        assert!(pre_tool_use_denial(&store, &bash("gh pr merge 3"), &c).is_some());
+        assert!(pre_tool_use_denial(&store, &bash("git push origin main"), &c).is_some());
+        assert_eq!(
+            pre_tool_use_denial(&store, &bash("git push -u origin feat"), &c),
+            None
+        );
+        let mut other_tool = bash("gh pr merge 3");
+        other_tool.tool_name = Some("Read".into());
+        assert_eq!(pre_tool_use_denial(&store, &other_tool, &c), None);
     }
 }

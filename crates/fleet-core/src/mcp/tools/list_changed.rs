@@ -185,20 +185,27 @@ mod tests {
     fn every_caller_but_a_peer_is_notified() {
         assert!(wants_notification(&Caller::master()));
         let host = Caller {
+            api: None,
             host_alias: Some("a".into()),
             client: None,
             mode: TokenMode::Full,
+            pane: None,
+            is_personal_owner: false,
         };
         assert!(wants_notification(&host));
         let client = |mode| Caller {
+            api: None,
             host_alias: None,
             client: Some(ClientRef {
                 id: 1,
                 name: "phone".into(),
                 trusted: false,
                 org_id: None,
+                person_id: None,
             }),
             mode,
+            pane: None,
+            is_personal_owner: false,
         };
         assert!(wants_notification(&client(TokenMode::Full)));
         assert!(wants_notification(&client(TokenMode::Readonly)));

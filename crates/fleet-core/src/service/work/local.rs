@@ -11,6 +11,16 @@
 //! `orgs::require_key`). An item outside that answers exactly as an item id
 //! that does not exist.
 //!
+//! **Who may WRITE one** is a narrower question, answered at the tool layer
+//! by `support::require_drive_on_item_sessions`: every live session linked
+//! to the item must be this caller's to drive, every ended link must be one
+//! it may see — and an item with no CONFIRMED link at all is refused to
+//! everybody but a per-host token and a one-person install, because there
+//! is then no record of whose work it was (multi-user M1, T9e). An item
+//! whose last link was unlinked therefore stops being renameable by its own
+//! owner too; it is still listed, and linking a session to it again makes
+//! it writable again.
+//!
 //! **A key that is taken.** Naming work with a key a tracker item the
 //! caller can see already carries (by key or alias) is refused with
 //! `E_EXISTS` — that work has a ticket; link it (`work_link { action: link,
@@ -47,11 +57,27 @@ pub struct LocalWorkItem {
 /// The links of one item this scope may count: all of them for `All`; for
 /// a per-host token, live links on its own host's sessions and ended links
 /// whose session ran there, inside its orgs.
+///
+/// The ORG half only. Two callers, and they take different halves on top of
+/// it: [`person_visible_links`] is the half every READ of a count takes, and
+/// [`local_item_visible`] — the "does this item exist for this caller"
+/// question, which stays on this org half because what it answers is about
+/// the ITEM — has its person half at the tool layer instead
+/// (`support::require_drive_on_item_sessions`).
+///
+/// [`local_item_visible`] has THREE call sites, not two (T9e corrected an
+/// undercount here and in `scope_guard_tests.rs`): [`rename_local_item`],
+/// `status::set_status`, and [`name_session_work_as`]. The first two carry
+/// the tool-layer person gate; the third does not, and what fences it is
+/// written at the guard itself.
 fn visible_links(
     s: &Store,
     scope: &OrgScope,
     links: Vec<LocalItemLink>,
 ) -> Result<Vec<LocalItemLink>, IpcError> {
+    // This is the org boundary, not a privacy fence: the doc above says the same thing at
+    // length: this is the ORG half, and `person_visible_links` is the half every READ of a count
+    // takes on top of it.
     if scope.is_all() {
         return Ok(links);
     }
@@ -81,6 +107,47 @@ fn visible_links(
     Ok(out)
 }
 
+/// [`visible_links`], then the PERSON fence
+/// ([`orgs::link_person_visible`]) — multi-user M1, T8d.
+///
+/// `LocalWorkItem::live_sessions` is the "someone is working on this" bit, and
+/// `Graph::build` person-fences that exact signal one directory away,
+/// deliberately and with a comment saying why (`working_session_items`). Here
+/// it was counted over every link that survived `visible_links`' first line,
+/// `if scope.is_all() { return Ok(links) }` — and `All` is what every paired
+/// client bound to no org resolves to, so a second person's phone was told how
+/// many live sessions the fleet was running on each named item. Rule 6's
+/// allowance is a per-host count of `unclaimed` rows, not a per-item count of
+/// somebody's live work.
+///
+/// The ITEM is not fenced here: a local item's title and key are item data,
+/// and the Work view already shows a task while dropping the links under it.
+/// So this keeps the item and zeroes the count.
+///
+/// **One kind of local item is the exception, and the sentence above used to
+/// be written as though there were none** (multi-user M1, T5's review): a JOB
+/// MIRROR, whose title is the first line of the dispatch prompt
+/// (`Store::create_agent_task_item`). Its title is withheld in
+/// [`local_items`] itself, on the same fence every other surface of a mirror
+/// asks (`view::visible_job_states`).
+fn person_visible_links(
+    s: &Store,
+    view: &crate::service::view_scope::ViewScope,
+    links: Vec<LocalItemLink>,
+) -> Result<Vec<LocalItemLink>, IpcError> {
+    let kept = visible_links(s, &view.org, links)?;
+    if view.is_internal() {
+        return Ok(kept);
+    }
+    let mut out = Vec::with_capacity(kept.len());
+    for l in kept {
+        if orgs::link_person_visible(s, view, &l.link)? {
+            out.push(l);
+        }
+    }
+    Ok(out)
+}
+
 fn live_count(links: &[LocalItemLink]) -> u32 {
     links
         .iter()
@@ -92,23 +159,43 @@ fn live_count(links: &[LocalItemLink]) -> u32 {
 
 /// `work { action: local_items }`: the local items this scope sees, most
 /// recently changed first.
-pub fn local_items(store: &Mutex<Store>, scope: &OrgScope) -> Result<Vec<LocalWorkItem>, IpcError> {
+pub fn local_items(
+    store: &Mutex<Store>,
+    view: &crate::service::view_scope::ViewScope,
+) -> Result<Vec<LocalWorkItem>, IpcError> {
+    let scope = &view.org;
     let s = lock(store)?;
     let mut by_item: BTreeMap<i64, Vec<LocalItemLink>> = BTreeMap::new();
-    for l in visible_links(&s, scope, s.local_item_links(None)?)? {
+    for l in person_visible_links(&s, view, s.local_item_links(None)?)? {
         by_item.entry(l.item_id).or_default().push(l);
     }
+    // The dispatch fence, for the job mirrors among these items: this list
+    // has no `Graph`, so it asks the same predicate directly.
+    let jobs = crate::service::work::view::visible_job_states(&s, view)?;
     Ok(s.local_work_items()?
         .into_iter()
         .filter_map(|i| {
             let links = by_item.get(&i.id);
+            // This is the org boundary, not a privacy fence: it decides whether the ITEM is
+            // listed, and a local item's key and title are item data. The count beside it is
+            // person-fenced, by `person_visible_links`.
             if !scope.is_all() && links.is_none() {
                 return None;
             }
+            // A job mirror's title is the dispatch PROMPT's first line, so it
+            // is content of both ends of the dispatch and not item data. The
+            // row stays — the key still names it, and that is what a caller
+            // links by — under the same withheld label every other surface
+            // uses.
+            let hidden = i.origin.as_deref() == Some("agent") && !jobs.contains_key(&i.id);
             Some(LocalWorkItem {
                 id: i.id,
                 key: i.key,
-                title: i.title,
+                title: if hidden {
+                    crate::service::work::view::JOB_TITLE_WITHHELD.to_string()
+                } else {
+                    i.title
+                },
                 created_at: i.created_at,
                 updated_at: i.updated_at,
                 live_sessions: links.map_or(0, |l| live_count(l)),
@@ -152,7 +239,11 @@ pub fn name_session_work_as(
     let visible = s
         .get_session_by_id(sid)?
         .is_some_and(|r| match scope.host() {
-            None => scope.sees_row(&r) && scope.sees_org(r.org_id),
+            // The org half. The person half is `resolve_row_person_gated(..,
+            // Reach::Drive, ..)` in `work_link { action: name }`, taken
+            // without the host gate in front so an unreachable session
+            // answers as an unknown id.
+            None => scope.sees_row_org_only(&r) && scope.sees_org(r.org_id),
             Some(h) => r.host_alias == h && scope.sees_org(r.org_id),
         });
     if !visible {
@@ -231,6 +322,152 @@ pub fn rename_local_item(
         .ok_or_else(|| orgs::not_found("work item", id))
 }
 
+/// `work_link { action: edit, item_id, title?, notes?, assignees?, due_at?,
+/// epic?, priority?, labels?, estimate?, estimate_unit? }`: a person edits a
+/// local item (task editing). `priority: ""`, `labels: []` and `estimate: 0`
+/// clear them; `estimate_unit` alone re-units the estimate the item has. The same fences as
+/// [`rename_local_item`]: a tracker's ticket is `E_INVALID` (its tracker
+/// owns its text), and an item outside the scope answers as an unknown id.
+pub fn edit_local_item(
+    args: &WorkLinkArgs,
+    store: &Mutex<Store>,
+    scope: &OrgScope,
+) -> Result<WorkItemRow, IpcError> {
+    let id = args
+        .item_id
+        .ok_or_else(|| IpcError::new(codes::E_INVALID, "edit needs item_id"))?;
+    if args.title.is_none()
+        && args.notes.is_none()
+        && args.assignees.is_none()
+        && args.due_at.is_none()
+        && args.epic.is_none()
+        && args.priority.is_none()
+        && args.labels.is_none()
+        && args.estimate.is_none()
+        && args.estimate_unit.is_none()
+    {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "edit needs title, notes, assignees, due_at, epic, priority, labels or estimate",
+        ));
+    }
+    // Checked before anything is written (the epic flag is written first):
+    // a bad value refuses the whole edit.
+    if let Some(p) = args.priority.as_deref() {
+        crate::store::validate_priority(p)?;
+    }
+    if let Some(l) = args.labels.as_deref() {
+        crate::store::validate_labels(l)?;
+    }
+    if let Some(e) = args.estimate {
+        crate::store::validate_estimate(e)?;
+    }
+    if let Some(u) = args.estimate_unit.as_deref() {
+        crate::store::validate_estimate_unit(u)?;
+    }
+    let s = lock(store)?;
+    let Some(item) = s.get_work_item(id)? else {
+        return Err(orgs::not_found("work item", id));
+    };
+    if item.source != "local" {
+        if !scope.sees_org(s.item_org(id)?) {
+            return Err(orgs::not_found("work item", id));
+        }
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "{} is a tracker's ticket; edit it in its tracker",
+                item.key.as_deref().unwrap_or("this item")
+            ),
+        ));
+    }
+    if !local_item_visible(&s, scope, id)? {
+        return Err(orgs::not_found("work item", id));
+    }
+    if args.estimate.is_none() && args.estimate_unit.is_some() && item.estimate.is_none() {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "estimate_unit needs an estimate: give both",
+        ));
+    }
+    // The epic flag first: its refusal (an item under a parent) leaves the
+    // rest of the edit unwritten too.
+    if let Some(epic) = args.epic {
+        s.set_local_epic(id, epic)?
+            .ok_or_else(|| orgs::not_found("work item", id))?;
+    }
+    s.edit_local_item(
+        id,
+        &crate::store::ItemEdit {
+            title: args.title.as_deref(),
+            notes: args.notes.as_deref(),
+            assignees: args.assignees.as_deref(),
+            due_at: args.due_at.as_deref(),
+            priority: args.priority.as_deref(),
+            labels: args.labels.as_deref(),
+            estimate: args.estimate,
+            estimate_unit: args.estimate_unit.as_deref(),
+        },
+    )?
+    .ok_or_else(|| orgs::not_found("work item", id))
+}
+
+/// `work_link { action: set_parent, item_id, parent }` (sprints design
+/// 2026-09-28 §3): a person files a local item under an epic or a task
+/// (`parent: "item:<id>"`), or takes it out to the top (`parent: ""`). The
+/// fences of [`edit_local_item`]: a tracker's ticket is `E_INVALID` (its
+/// tracker files it), and an item or a parent outside the scope answers as
+/// an unknown id. The rules of the hierarchy are
+/// [`Store::set_local_parent`]'s.
+pub fn set_parent(
+    args: &WorkLinkArgs,
+    store: &Mutex<Store>,
+    scope: &OrgScope,
+) -> Result<WorkItemRow, IpcError> {
+    let id = args
+        .item_id
+        .ok_or_else(|| IpcError::new(codes::E_INVALID, "set_parent needs item_id"))?;
+    let parent = match args.parent.as_deref().map(str::trim) {
+        None => {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "set_parent needs parent: item:<id>, or \"\" for the top",
+            ))
+        }
+        Some("") => None,
+        Some(_) => parent_id(args)?,
+    };
+    let s = lock(store)?;
+    let Some(item) = s.get_work_item(id)? else {
+        return Err(orgs::not_found("work item", id));
+    };
+    if item.source != "local" {
+        if !scope.sees_org(s.item_org(id)?) {
+            return Err(orgs::not_found("work item", id));
+        }
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "{} is a tracker's ticket; its tracker files it",
+                item.key.as_deref().unwrap_or("this item")
+            ),
+        ));
+    }
+    if !local_item_visible(&s, scope, id)? {
+        return Err(orgs::not_found("work item", id));
+    }
+    if let Some(p) = parent {
+        // This is the org boundary, not a privacy fence: it asks whether the
+        // PARENT ITEM exists for this caller, as `create_task`'s does, and an
+        // item's key and title are work data.
+        if !scope.is_all() {
+            visible_parent(&s, scope, p)?;
+        }
+    }
+    s.set_local_parent(id, parent)?
+        .ok_or_else(|| orgs::not_found("work item", id))
+}
+
 /// `item:<id>` → the id.
 fn parent_id(args: &WorkLinkArgs) -> Result<Option<i64>, IpcError> {
     match args.parent.as_deref() {
@@ -245,7 +482,7 @@ fn parent_id(args: &WorkLinkArgs) -> Result<Option<i64>, IpcError> {
 
 /// The parent a scoped caller may add under: an item it can see. One it
 /// cannot answers exactly as an id that does not exist.
-fn visible_parent(s: &Store, scope: &OrgScope, id: i64) -> Result<(), IpcError> {
+pub(super) fn visible_parent(s: &Store, scope: &OrgScope, id: i64) -> Result<(), IpcError> {
     let Some(item) = s.get_work_item(id)? else {
         return Err(orgs::not_found("work item", id));
     };
@@ -261,8 +498,9 @@ fn visible_parent(s: &Store, scope: &OrgScope, id: i64) -> Result<(), IpcError> 
     }
 }
 
-/// `work_link { action: create, title, parent?, project_id?, notes? }`
-/// (shared work context, design 2026-09-29). A standalone task needs an
+/// `work_link { action: create, title, parent?, project_id?, notes?,
+/// assignees?, due_at? }` (shared work context, design 2026-09-29; the owner
+/// and due date, Orbit Fleet M15). A standalone task needs an
 /// unscoped caller (a new item has no links, and a scoped caller sees a
 /// local item only through its links); a subtask needs a parent the caller
 /// sees.
@@ -276,8 +514,19 @@ pub fn create_task(
         .as_deref()
         .ok_or_else(|| IpcError::new(codes::E_INVALID, "create needs title"))?;
     let parent = parent_id(args)?;
+    // Checked before anything is written: a bad date or name refuses the
+    // whole create rather than leave a task without them.
+    if let Some(a) = args.assignees.as_deref() {
+        crate::store::validate_assignees(a)?;
+    }
+    if let Some(d) = args.due_at.as_deref() {
+        crate::store::validate_due_date(d)?;
+    }
     let s = lock(store)?;
     match parent {
+        // This is the org boundary, not a privacy fence: a standalone task has
+        // no links and no sessions, so there is no row and nobody to fence —
+        // the question is authority to add top-level work.
         None if !scope.is_all() => {
             return Err(IpcError::new(
                 codes::E_FORBIDDEN,
@@ -285,15 +534,30 @@ pub fn create_task(
                  token); add a subtask under a task you work on instead",
             ))
         }
+        // This is the org boundary, not a privacy fence: it asks whether the
+        // PARENT ITEM exists for this caller, and an item's key and title are
+        // work data that survive the person fence (as `task_visible`'s do).
         Some(p) if !scope.is_all() => visible_parent(&s, scope, p)?,
         _ => {}
     }
-    s.create_native_item(&crate::store::NativeItem {
+    let item = s.create_native_item(&crate::store::NativeItem {
         title,
         parent_id: parent,
         project_id: args.project_id,
         notes: args.notes.as_deref(),
-    })
+    })?;
+    if args.assignees.is_none() && args.due_at.is_none() {
+        return Ok(item);
+    }
+    s.edit_local_item(
+        item.id,
+        &crate::store::ItemEdit {
+            assignees: args.assignees.as_deref(),
+            due_at: args.due_at.as_deref(),
+            ..Default::default()
+        },
+    )?
+    .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "work item vanished after create"))
 }
 
 /// `work_link { action: propose, parent, title, notes?, why? }`: a subtask
@@ -312,6 +576,10 @@ pub fn propose(
     let parent =
         parent_id(args)?.ok_or_else(|| IpcError::new(codes::E_INVALID, "propose needs parent"))?;
     let s = lock(store)?;
+    // This is the org boundary, not a privacy fence: the same parent-ITEM
+    // question `create_task` asks. The person half of a proposal is at the
+    // tool layer, where the session that gets the credit passes
+    // `resolve_target_row` at `Reach::Drive` before `proposer` is built.
     if !scope.is_all() {
         visible_parent(&s, scope, parent)?;
     }
@@ -324,6 +592,38 @@ pub fn propose(
     })
 }
 
+/// `work_link { action: propose_tree, parent, tree }` (orchestration O2):
+/// several subtasks with the edges between them, for a person to accept in
+/// one go. `proposer` is the caller's session label, as for `propose`.
+pub fn propose_tree(
+    args: &WorkLinkArgs,
+    store: &Mutex<Store>,
+    scope: &OrgScope,
+    proposer: &str,
+) -> Result<Vec<WorkItemRow>, IpcError> {
+    let tree = args
+        .tree
+        .as_deref()
+        .ok_or_else(|| IpcError::new(codes::E_INVALID, "propose_tree needs tree"))?;
+    let parent = parent_id(args)?
+        .ok_or_else(|| IpcError::new(codes::E_INVALID, "propose_tree needs parent"))?;
+    let s = lock(store)?;
+    // This is the org boundary, not a privacy fence: `propose`'s parent-ITEM
+    // question, asked of the parent and of every existing item an entry
+    // waits for; the person half is at the tool layer, as for `propose`.
+    if !scope.is_all() {
+        visible_parent(&s, scope, parent)?;
+        for e in tree {
+            for d in &e.depends_on {
+                if let crate::store::TreeRef::Item(id) = d {
+                    visible_parent(&s, scope, *id)?;
+                }
+            }
+        }
+    }
+    s.propose_tree(parent, tree, proposer)
+}
+
 /// `work_link { action: accept | reject, item_id }` (no `session_id`): a
 /// person's decision on a proposal. Refused to per-host tokens and bound
 /// clients: an agent never accepts its own (or any) proposal.
@@ -333,6 +633,9 @@ pub fn decide(
     scope: &OrgScope,
     accept: bool,
 ) -> Result<WorkItemRow, IpcError> {
+    // This is the org boundary, not a privacy fence: deciding a proposal is a
+    // PERSON's act by design (an agent never accepts its own), so every scoped
+    // caller is refused outright and no row is reached to fence.
     if !scope.is_all() {
         return Err(IpcError::new(
             codes::E_FORBIDDEN,
@@ -342,7 +645,38 @@ pub fn decide(
     let id = args
         .item_id
         .ok_or_else(|| IpcError::new(codes::E_INVALID, "accept / reject needs item_id"))?;
-    lock(store)?.decide_proposal(id, accept)
+    // Redesign 6.9: a reject naming `task_id: item:<id>` is Merge — what
+    // hangs on the proposal moves to that task before the proposal closes.
+    // A person's act like every decision here (the fence above), and only
+    // ever on their click: nothing merges by itself.
+    let merge_into = match (accept, args.task_id.as_deref()) {
+        (false, Some(raw)) => Some(
+            raw.strip_prefix("item:")
+                .and_then(|n| n.parse::<i64>().ok())
+                .ok_or_else(|| IpcError::new(codes::E_INVALID, "merge into item:<id>"))?,
+        ),
+        _ => None,
+    };
+    let s = lock(store)?;
+    let row = match merge_into {
+        Some(into) => {
+            s.merge_proposal_into(id, into)?;
+            s.get_work_item(id)?
+                .ok_or_else(|| orgs::not_found("work item", id))?
+        }
+        None => s.decide_proposal(id, accept)?,
+    };
+    // K4's follow-up: Merge (reject) confirms Jev's "may duplicate", Keep
+    // both (accept) rejects it. Never fails the decision.
+    if let Err(e) = crate::service::decide::duplicate::record_decision(
+        &s,
+        id,
+        accept,
+        crate::service::catalog::now_secs(),
+    ) {
+        tracing::warn!("[decide] duplicate follow-up not recorded: {}", e.message);
+    }
+    Ok(row)
 }
 
 /// A local item is visible: always to `All`; to a per-host token through
@@ -352,11 +686,41 @@ pub fn decide(
 /// rather than a second copy of it (a tracker item's is `Store::item_org` +
 /// `OrgScope::sees_org`, applied at that call site the way `rename_local_item`
 /// below does).
+///
+/// THREE call sites, enumerated at the guard inside: the two writes
+/// ([`rename_local_item`], `status::set_status`) and
+/// [`name_session_work_as`], which has no item-level person gate. Read that
+/// comment before adding a fourth.
 pub(super) fn local_item_visible(
     s: &Store,
     scope: &OrgScope,
     item_id: i64,
 ) -> Result<bool, IpcError> {
+    // This is the org boundary, not a privacy fence: what this answers is
+    // about the ITEM, as the doc above says.
+    //
+    // THREE call sites, enumerated because the count itself has been wrong
+    // twice. The two WRITES — `local::rename_local_item` and
+    // `status::set_status` — carry the person fence
+    // `require_drive_on_item_sessions`, threaded at the tool layer
+    // (`mcp/tools/orchestration.rs`'s `name` and `set_status` arms). T9c's
+    // row said "the two writes" while the gate was on the rename half only,
+    // so `set_status` had no person gate at all and a stranger could mark
+    // another person's work done (fixed in T9d); T9d's row then still said
+    // "both writes that ask it" while a THIRD site existed (T9e).
+    //
+    // The third site is `local::name_session_work_as`, and it has NO
+    // item-level person gate — stated here rather than left to be
+    // rediscovered. What fences it: the caller has already been gated at
+    // `Reach::Drive` on its OWN session (orchestration.rs's
+    // `resolve_row_person_gated` in the `name` + `session_id` arm), and the
+    // only item-derived output under this shortcut is the `item_id` in an
+    // `E_EXISTS` reply — an id `work { local_items }` deliberately lists to
+    // every caller, because a local item's key and title are item data and
+    // only the live-session COUNT beside them is person-fenced
+    // (`person_visible_links`). So the shortcut discloses nothing there that
+    // the same caller cannot list by name. A write at that site would need
+    // the gate; a disclosure wider than an id would too.
     if scope.is_all() {
         return Ok(true);
     }
@@ -371,5 +735,423 @@ fn required_title(args: &WorkLinkArgs) -> Result<String, IpcError> {
     )
 }
 
+/// `work_link { action: comment, item_id, notes, post_to_tracker? }`: a
+/// comment on a task the caller sees — fleet's own or a tracker's ticket.
+/// An item outside the scope answers as an unknown id. With
+/// `post_to_tracker`, the comment is also queued for the ticket's tracker in
+/// the same transaction ([`comment_post`] says when that is refused, and
+/// then nothing is written at all).
+pub fn comment(
+    args: &WorkLinkArgs,
+    store: &Mutex<Store>,
+    scope: &OrgScope,
+    author: &str,
+    person: Option<i64>,
+) -> Result<crate::store::CommentRow, IpcError> {
+    let id = args
+        .item_id
+        .ok_or_else(|| IpcError::new(codes::E_INVALID, "comment needs item_id"))?;
+    let body = args
+        .notes
+        .as_deref()
+        .ok_or_else(|| IpcError::new(codes::E_INVALID, "comment needs notes: its text"))?;
+    let s = lock(store)?;
+    visible_parent(&s, scope, id)?;
+    let post = match args.post_to_tracker {
+        Some(true) => Some(comment_post(&s, scope, id, person)?),
+        _ => None,
+    };
+    let mut c = s.add_comment_posting(
+        id,
+        author,
+        person,
+        body,
+        post.as_ref()
+            .map(|p| crate::store::CommentPost {
+                tracker_id: p.tracker_id,
+                item_key: &p.item_key,
+                external_id: p.external_id.as_deref(),
+                tracker_org_id: p.tracker_org_id,
+                signature: &p.signature,
+            })
+            .as_ref(),
+    )?;
+    drop(s);
+    if post.is_some() {
+        crate::service::trackers::write_back::nudge();
+    }
+    c.mine = true;
+    Ok(c)
+}
+
+/// What a comment's post to its tracker needs, owned.
+struct PostSpec {
+    tracker_id: i64,
+    item_key: String,
+    external_id: Option<String>,
+    tracker_org_id: Option<i64>,
+    signature: String,
+}
+
+/// May a comment on item `id` be posted to its tracker, and as what. Refused
+/// — and then the comment is not written either — for a per-host token (an
+/// agent never posts outside fleet: `E_FORBIDDEN`), for fleet's own work or
+/// a tracker that does not take comments (`E_UNSUPPORTED`), and where the
+/// tracker's admin has not turned `write_back.comments` on
+/// (`E_INVALID_STATE`). The signature names the person when the caller
+/// proves one, never a device: a device name is its person's own.
+fn comment_post(
+    s: &Store,
+    scope: &OrgScope,
+    id: i64,
+    person: Option<i64>,
+) -> Result<PostSpec, IpcError> {
+    use crate::service::trackers;
+    if !crate::service::work::tracker_comments::may_post(scope) {
+        return Err(IpcError::new(
+            codes::E_FORBIDDEN,
+            "only a person posts a comment to the tracker",
+        ));
+    }
+    let item = s
+        .get_work_item(id)?
+        .ok_or_else(|| orgs::not_found("work item", id))?;
+    let tracker = match item.tracker_id {
+        Some(t) if item.source != "local" => s.get_tracker(t)?,
+        _ => None,
+    };
+    let Some(t) = tracker.filter(|t| trackers::provider_caps(t).comments) else {
+        return Err(IpcError::new(
+            codes::E_UNSUPPORTED,
+            "this task has no tracker ticket to post a comment to",
+        ));
+    };
+    if !trackers::write_back::writes_comments(&t) {
+        return Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            format!(
+                "posting comments to {} is off; a tracker admin turns it on in Settings → \
+                 Trackers → Write-back",
+                t.name
+            ),
+        ));
+    }
+    let Some(item_key) = crate::service::work::tracker_comments::outbox_key(&item) else {
+        return Err(IpcError::new(
+            codes::E_UNSUPPORTED,
+            "this ticket has no key or tracker id to post to",
+        ));
+    };
+    Ok(PostSpec {
+        tracker_id: t.id,
+        item_key,
+        external_id: item.external_id.clone(),
+        tracker_org_id: t.org_id,
+        signature: fleet_signature(s, person)?,
+    })
+}
+
+/// What fleet signs a text it writes to a tracker with: `— <name> via
+/// fleet` with the person's display name when the caller proves one, else
+/// `— via fleet` (never a device name: a device name is its person's own).
+pub(super) fn fleet_signature(s: &Store, person: Option<i64>) -> Result<String, IpcError> {
+    let name = match person {
+        Some(p) => s
+            .get_person(p)?
+            .map(|p| p.display_name.unwrap_or(p.name))
+            .map(|n| n.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|n| !n.is_empty()),
+        None => None,
+    };
+    Ok(match name {
+        Some(n) => format!("— {n} via fleet"),
+        None => "— via fleet".into(),
+    })
+}
+
+/// `work_link { action: comment_delete, comment_id }`: its author's alone.
+/// A comment on an item outside the scope answers as an unknown one.
+pub fn comment_delete(
+    args: &WorkLinkArgs,
+    store: &Mutex<Store>,
+    scope: &OrgScope,
+    author: &str,
+    person: Option<i64>,
+) -> Result<crate::store::CommentRow, IpcError> {
+    let id = args
+        .comment_id
+        .ok_or_else(|| IpcError::new(codes::E_INVALID, "comment_delete needs comment_id"))?;
+    let unknown = || IpcError::new(codes::E_NOTFOUND, format!("comment {id} not found"));
+    let s = lock(store)?;
+    let c = s.get_comment(id)?.ok_or_else(unknown)?;
+    visible_parent(&s, scope, c.item_id).map_err(|_| unknown())?;
+    s.delete_comment(id, person, author)?.ok_or_else(unknown)
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod due_tests {
+    use super::*;
+
+    fn args(action: &str) -> WorkLinkArgs {
+        WorkLinkArgs {
+            action: action.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_task_is_created_with_its_owner_and_due_date_and_edited_to_another() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let t = create_task(
+            &WorkLinkArgs {
+                title: Some("Rotate NAS sudo password".into()),
+                assignees: Some(vec!["Ana".into()]),
+                due_at: Some("2026-10-16".into()),
+                ..args("create")
+            },
+            &store,
+            &OrgScope::All,
+        )
+        .unwrap();
+        assert_eq!(
+            (t.assignees.clone(), t.due_at.as_deref()),
+            (vec!["Ana".to_string()], Some("2026-10-16"))
+        );
+        let e = edit_local_item(
+            &WorkLinkArgs {
+                item_id: Some(t.id),
+                due_at: Some("2026-10-23".into()),
+                ..args("edit")
+            },
+            &store,
+            &OrgScope::All,
+        )
+        .unwrap();
+        assert_eq!(
+            (e.assignees, e.due_at.as_deref()),
+            (vec!["Ana".to_string()], Some("2026-10-23"))
+        );
+    }
+
+    #[test]
+    fn a_bad_due_date_refuses_the_create_and_writes_no_task() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let before = lock(&store).unwrap().local_work_items().unwrap().len();
+        let e = create_task(
+            &WorkLinkArgs {
+                title: Some("Ship".into()),
+                due_at: Some("Friday".into()),
+                ..args("create")
+            },
+            &store,
+            &OrgScope::All,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID);
+        assert_eq!(
+            lock(&store).unwrap().local_work_items().unwrap().len(),
+            before
+        );
+    }
+
+    #[test]
+    fn a_trackers_ticket_keeps_its_trackers_due_date() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let id = {
+            let s = lock(&store).unwrap();
+            let t = s
+                .add_tracker("jira", "Acme", "https://acme.atlassian.net")
+                .unwrap();
+            s.upsert_tracker_item(
+                t.id,
+                &crate::store::TrackerItemWrite {
+                    external_id: "1".into(),
+                    key: Some("ABC-1".into()),
+                    title: "Ticket".into(),
+                    status_name: "To Do".into(),
+                    status_category: "todo".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .id
+        };
+        let e = edit_local_item(
+            &WorkLinkArgs {
+                item_id: Some(id),
+                due_at: Some("2026-10-16".into()),
+                ..args("edit")
+            },
+            &store,
+            &OrgScope::All,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID);
+        assert_eq!(
+            lock(&store)
+                .unwrap()
+                .get_work_item(id)
+                .unwrap()
+                .unwrap()
+                .due_at,
+            None
+        );
+    }
+}
+
+#[cfg(test)]
+mod size_tests {
+    use super::*;
+
+    fn edit(id: i64) -> WorkLinkArgs {
+        WorkLinkArgs {
+            action: "edit".into(),
+            item_id: Some(id),
+            ..Default::default()
+        }
+    }
+
+    fn task(store: &Mutex<Store>) -> WorkItemRow {
+        create_task(
+            &WorkLinkArgs {
+                action: "create".into(),
+                title: Some("Rotate NAS sudo password".into()),
+                ..Default::default()
+            },
+            store,
+            &OrgScope::All,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn work_link_edit_sets_and_clears_priority_labels_and_estimate() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let t = task(&store);
+        let e = edit_local_item(
+            &WorkLinkArgs {
+                priority: Some("urgent".into()),
+                labels: Some(vec!["infra".into(), "security".into()]),
+                estimate: Some(4.0),
+                estimate_unit: Some("hours".into()),
+                ..edit(t.id)
+            },
+            &store,
+            &OrgScope::All,
+        )
+        .unwrap();
+        assert_eq!(e.priority.as_deref(), Some("urgent"));
+        assert_eq!(e.labels, vec!["infra", "security"]);
+        assert_eq!(
+            (e.estimate.map(|x| x.0), e.estimate_unit.as_deref()),
+            (Some(4.0), Some("hours"))
+        );
+        // Each is enough for an edit on its own, and each clears.
+        let e = edit_local_item(
+            &WorkLinkArgs {
+                priority: Some(String::new()),
+                labels: Some(vec![]),
+                estimate: Some(0.0),
+                ..edit(t.id)
+            },
+            &store,
+            &OrgScope::All,
+        )
+        .unwrap();
+        assert_eq!(
+            (e.priority, e.labels.len(), e.estimate, e.estimate_unit),
+            (None, 0, None, None)
+        );
+    }
+
+    #[test]
+    fn a_bad_value_refuses_the_whole_edit_epic_flag_included() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let t = task(&store);
+        for bad in [
+            WorkLinkArgs {
+                priority: Some("P1".into()),
+                ..edit(t.id)
+            },
+            WorkLinkArgs {
+                labels: Some(vec!["x".repeat(41)]),
+                ..edit(t.id)
+            },
+            WorkLinkArgs {
+                estimate: Some(1001.0),
+                ..edit(t.id)
+            },
+            WorkLinkArgs {
+                estimate: Some(2.0),
+                estimate_unit: Some("days".into()),
+                ..edit(t.id)
+            },
+            WorkLinkArgs {
+                estimate_unit: Some("hours".into()),
+                ..edit(t.id)
+            },
+        ] {
+            let e = edit_local_item(
+                &WorkLinkArgs {
+                    epic: Some(true),
+                    ..bad.clone()
+                },
+                &store,
+                &OrgScope::All,
+            )
+            .unwrap_err();
+            assert_eq!(e.code, codes::E_INVALID, "{bad:?}");
+        }
+        let row = lock(&store).unwrap().get_work_item(t.id).unwrap().unwrap();
+        assert_eq!(row.kind, t.kind, "the epic flag was not written either");
+        assert_eq!((row.priority, row.estimate), (None, None));
+    }
+
+    #[test]
+    fn a_trackers_ticket_keeps_its_trackers_priority_labels_and_estimate() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let id = {
+            let s = lock(&store).unwrap();
+            let t = s
+                .add_tracker("jira", "Acme", "https://acme.atlassian.net")
+                .unwrap();
+            s.upsert_tracker_item(
+                t.id,
+                &crate::store::TrackerItemWrite {
+                    external_id: "1".into(),
+                    key: Some("ABC-1".into()),
+                    title: "Ticket".into(),
+                    status_name: "To Do".into(),
+                    status_category: "todo".into(),
+                    priority: Some("low".into()),
+                    labels: vec!["infra".into()],
+                    estimate: crate::store::Estimate::new(3.0),
+                    estimate_unit: Some("points".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .id
+        };
+        let e = edit_local_item(
+            &WorkLinkArgs {
+                priority: Some("urgent".into()),
+                labels: Some(vec![]),
+                estimate: Some(0.0),
+                ..edit(id)
+            },
+            &store,
+            &OrgScope::All,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID);
+        assert!(e.message.contains("tracker"), "{}", e.message);
+        let row = lock(&store).unwrap().get_work_item(id).unwrap().unwrap();
+        assert_eq!(row.priority.as_deref(), Some("low"));
+        assert_eq!(row.labels, vec!["infra"]);
+        assert_eq!(row.estimate.map(|x| x.0), Some(3.0));
+    }
+}

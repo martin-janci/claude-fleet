@@ -1,0 +1,64 @@
+<!-- @dsCard height=288 -->
+<style>
+html,body{margin:0;background:var(--bg)}
+.c{position:relative;width:960px;height:288px;overflow:hidden;background:var(--bg)}
+svg{position:absolute;inset:0}
+.ink{fill:var(--brand-ink)} .lt{fill:var(--brand-light)} .amb{fill:var(--brand-amber)} .ring{fill:none;stroke:var(--brand-light);stroke-opacity:.5;stroke-width:15}
+.wait{fill:var(--status-waiting)} .work{fill:var(--status-working)} .done{fill:var(--status-done)} .idle{fill:var(--status-idle)} .acc{fill:var(--accent)} .dot{fill:var(--fg-muted)}
+.t{position:absolute;left:48px;bottom:40px;width:420px}
+.t h1{margin:0;font-family:var(--font-sans);font-size:96px;line-height:.92;font-weight:700;letter-spacing:-0.03em;color:var(--fg)}
+.t p{margin:14px 0 0;font-family:var(--font-sans);font-size:14px;line-height:20px;color:var(--fg-muted)}
+</style>
+<div class="c">
+<!-- blocks: brand-ink slab 312 wide (radius-brand 24) carrying the Orbit at 3x; status-waiting/working/done/idle bars 40 tall (space-6+space-4), lengths 112/88/64/40, radius-md; accent tile 40 (radius-sm)
+     arrangement: one tall slab with satellites; status bars stacked by attention and bleeding off the right edge, like a list sorted by who needs you
+     pattern: the literal motif, the orbit (hub, ring, three hosts) built from the mark's own radii, plus a dot grid at space-4 pitch for the 4 px dense tool
+     scales: space-4 pitch, gaps 12 (space-3), radius-brand, radius-md, radius-sm -->
+<svg width="960" height="288" viewBox="0 0 960 288" aria-hidden="true">
+<rect class="ink" x="560" y="-24" width="312" height="336" rx="24"/>
+<circle class="ring" cx="716" cy="144" r="72"/>
+<circle class="lt" cx="716" cy="144" r="30"/>
+<circle class="lt" cx="716.0" cy="72.0" r="22.5"/>
+<circle class="amb" cx="778.4" cy="180.0" r="22.5"/>
+<circle class="lt" cx="653.6" cy="180.0" r="22.5"/>
+<rect class="wait" x="872" y="48" width="112" height="40" rx="6"/>
+<rect class="work" x="896" y="100" width="88" height="40" rx="6"/>
+<rect class="done" x="920" y="152" width="64" height="40" rx="6"/>
+<rect class="idle" x="944" y="204" width="40" height="40" rx="6"/>
+<rect class="acc" x="496" y="224" width="40" height="40" rx="4"/>
+<circle class="dot" cx="504" cy="32" r="1.5"/>
+<circle class="dot" cx="504" cy="48" r="1.5"/>
+<circle class="dot" cx="504" cy="64" r="1.5"/>
+<circle class="dot" cx="504" cy="80" r="1.5"/>
+<circle class="dot" cx="504" cy="96" r="1.5"/>
+<circle class="dot" cx="504" cy="112" r="1.5"/>
+<circle class="dot" cx="504" cy="128" r="1.5"/>
+<circle class="dot" cx="504" cy="144" r="1.5"/>
+<circle class="dot" cx="504" cy="160" r="1.5"/>
+<circle class="dot" cx="504" cy="176" r="1.5"/>
+<circle class="dot" cx="504" cy="192" r="1.5"/>
+<circle class="dot" cx="520" cy="32" r="1.5"/>
+<circle class="dot" cx="520" cy="48" r="1.5"/>
+<circle class="dot" cx="520" cy="64" r="1.5"/>
+<circle class="dot" cx="520" cy="80" r="1.5"/>
+<circle class="dot" cx="520" cy="96" r="1.5"/>
+<circle class="dot" cx="520" cy="112" r="1.5"/>
+<circle class="dot" cx="520" cy="128" r="1.5"/>
+<circle class="dot" cx="520" cy="144" r="1.5"/>
+<circle class="dot" cx="520" cy="160" r="1.5"/>
+<circle class="dot" cx="520" cy="176" r="1.5"/>
+<circle class="dot" cx="520" cy="192" r="1.5"/>
+<circle class="dot" cx="536" cy="32" r="1.5"/>
+<circle class="dot" cx="536" cy="48" r="1.5"/>
+<circle class="dot" cx="536" cy="64" r="1.5"/>
+<circle class="dot" cx="536" cy="80" r="1.5"/>
+<circle class="dot" cx="536" cy="96" r="1.5"/>
+<circle class="dot" cx="536" cy="112" r="1.5"/>
+<circle class="dot" cx="536" cy="128" r="1.5"/>
+<circle class="dot" cx="536" cy="144" r="1.5"/>
+<circle class="dot" cx="536" cy="160" r="1.5"/>
+<circle class="dot" cx="536" cy="176" r="1.5"/>
+<circle class="dot" cx="536" cy="192" r="1.5"/>
+</svg>
+<div class="t"><h1>Orbit<br>Fleet</h1><p>Every Claude session on every machine, and which ones need you.</p></div>
+</div>

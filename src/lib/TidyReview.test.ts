@@ -14,6 +14,9 @@ import { sessionFocus } from './session_focus';
 import { sessions, type SessionRow } from './sessions';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { hubConnection } from './hub_connection';
+import { applyGrantChanges, resetAccessForTests, setMyGrants } from './access';
+import { session as fixtureSession } from './hosts_fixture';
+import { expectAccessible } from './a11y_check';
 
 /** A desktop paired with a hub whose live link is down: every routed
  *  mutation (tidy_apply, dismiss_reopened) is blocked with a reason. */
@@ -59,6 +62,10 @@ beforeEach(() => {
   sessions.set([]);
   hubStatus.set({ ...STANDALONE });
   hubConnection.set({ state: 'standalone' });
+  // Who this client is, forgotten between tests: since F2d an unresolvable
+  // candidate is REFUSED on a paired desktop, so a leaked identity would change
+  // what the next test's sheet offers.
+  resetAccessForTests();
   vi.mocked(invoke).mockReset();
   vi.mocked(invoke).mockImplementation(async (cmd: string) => {
     switch (cmd) {
@@ -86,6 +93,34 @@ async function mount() {
 }
 
 describe('TidyReview', () => {
+  describe('Tidy › Duplicates: Jev\'s same work (redesign 6.9)', () => {
+    const pair = () => {
+      candidates = [cand(1), cand(2, { reason: 'same_work', link_id: null, key: null, same_as: 9 })];
+      sessions.set([
+        { id: 1, tmux_name: 's1', host_alias: 'h' },
+        { id: 2, tmux_name: 's2', host_alias: 'h' },
+        { id: 9, tmux_name: 's9', host_alias: 'h', friendly_name: 'payments retry' },
+      ] as SessionRow[]);
+    };
+
+    it('groups it, names the kept session, marks Jev, never ticks it', async () => {
+      pair();
+      await mount();
+      await fireEvent.click(await screen.findByTestId('tidy-pill'));
+      await tick();
+      expect(screen.getAllByTestId('tidy-group').map((g) => g.textContent)).toEqual([
+        'Done and idle · 1',
+        'Same work as another session · 1',
+      ]);
+      expect(screen.getByTestId('tidy-same-work')).toHaveTextContent('same work as payments retry');
+      expect(screen.getByTestId('tidy-same-work-by')).toHaveTextContent('Proposed by Jev');
+      const checks = screen.getAllByTestId('tidy-check') as HTMLInputElement[];
+      expect(checks.map((c) => c.checked)).toEqual([true, false]);
+      expect(screen.getByTestId('tidy-apply')).toHaveTextContent('Tidy 1');
+    });
+
+  });
+
   it('clicking a row shows only that session; its checkbox does not; Cancel lifts it', async () => {
     candidates = [cand(1), cand(2)];
     // The focus refuses a session the store does not have (a stale row).
@@ -145,16 +180,16 @@ describe('TidyReview', () => {
     expect(screen.queryByTestId('reopened-pill')).toBeNull();
   });
 
-  it('a neutral "Tidy up · n" and an accent "Reopened · n"', async () => {
+  it('a neutral "n to tidy" and an accent "n reopened"', async () => {
     candidates = [cand(1), cand(2)];
     reopened = [{ item_id: 7, key: 'PAY-7', title: 'Retry', reopened_at: 5, past_sessions: 2 }];
     await mount();
     const pill = await screen.findByTestId('tidy-pill');
-    expect(pill).toHaveTextContent('Tidy up · 2');
+    expect(pill).toHaveTextContent('2 to tidy');
     expect(pill.classList.contains('tidy-pill')).toBe(true);
     expect(pill.classList.contains('reopened-pill')).toBe(false);
     const r = screen.getByTestId('reopened-pill');
-    expect(r).toHaveTextContent('Reopened · 1');
+    expect(r).toHaveTextContent('1 reopened');
     expect(r.classList.contains('reopened-pill')).toBe(true);
   });
 
@@ -189,6 +224,66 @@ describe('TidyReview', () => {
     );
   });
 
+  it('says what the ticked safe kills free, and follows the ticks and choices (G1.9)', async () => {
+    const GB = 1024 * 1024;
+    candidates = [
+      cand(1, { worktree_kb: 1.5 * GB }),
+      cand(2, { reason: 'pr_merged_idle', worktree_kb: 0.6 * GB }),
+      cand(3, { reason: 'pr_merged_idle' }),
+    ];
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    expect(screen.getByTestId('tidy-frees')).toHaveTextContent('3 selected · frees about 2.1 GB');
+    // Archive keeps the tree: it frees nothing.
+    const selects = screen.getAllByTestId('tidy-choice') as HTMLSelectElement[];
+    await fireEvent.change(selects[1], { target: { value: 'archive' } });
+    await tick();
+    expect(screen.getByTestId('tidy-frees')).toHaveTextContent('3 selected · frees about 1.5 GB');
+    // Unticking the only measured safe kill left: nothing measured, nothing said.
+    const sheet = screen.getByTestId('tidy-sheet');
+    await fireEvent.keyDown(sheet, { key: ' ' });
+    await tick();
+    expect(screen.queryByTestId('tidy-frees')).toBeNull();
+  });
+
+  it('the done toast says what the safe kills that went through free (G4.8)', async () => {
+    const GB = 1024 * 1024;
+    candidates = [cand(1, { worktree_kb: 1.5 * GB }), cand(2, { worktree_kb: 0.6 * GB }), cand(3, { worktree_kb: 9 * GB })];
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_tidy') return { ...EMPTY_REPORT, candidates };
+      if (cmd === 'work_reopened') return reopened;
+      if (cmd === 'tidy_apply')
+        return {
+          results: [
+            { session_id: 1, action: 'safe_kill', ok: true, outcome: 'killed' },
+            { session_id: 2, action: 'safe_kill', ok: true, outcome: 'safe_kill_requested' },
+            // Refused: its tree stays, so its size is not counted.
+            { session_id: 3, action: 'safe_kill', ok: false, error: 'the tree is dirty' },
+          ],
+        };
+      return null;
+    });
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    await fireEvent.click(screen.getByTestId('tidy-apply'));
+    await waitFor(() => expect(get(toasts)).toHaveLength(1));
+    expect(get(toasts)[0].message).toBe('Tidied 2; 1 failed: the tree is dirty');
+    expect(get(toasts)[0].sub).toBe('frees about 2.1 GB');
+  });
+
+  it('the done toast has no second line when nothing measured went', async () => {
+    candidates = [cand(1)];
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    await fireEvent.click(screen.getByTestId('tidy-apply'));
+    await waitFor(() => expect(get(toasts)).toHaveLength(1));
+    expect(get(toasts)[0].message).toBe('Tidied 1 session');
+    expect(get(toasts)[0].sub).toBeUndefined();
+  });
+
   it('a per-row choice changes the action sent', async () => {
     candidates = [cand(1)];
     await mount();
@@ -196,10 +291,10 @@ describe('TidyReview', () => {
     await tick();
     const select = screen.getByTestId('tidy-choice') as HTMLSelectElement;
     expect(Array.from(select.options, (o) => o.textContent)).toEqual([
-      'Safe kill',
-      'Archive only',
-      'Snooze 7 d',
-      'Never for this work',
+      'Clean up',
+      'Archive',
+      'Keep for 7 days',
+      'Never',
     ]);
     await fireEvent.change(select, { target: { value: 'archive' } });
     await fireEvent.click(screen.getByTestId('tidy-apply'));
@@ -208,6 +303,83 @@ describe('TidyReview', () => {
         args: { items: [{ session_id: 1, action: 'archive', link_id: 101 }] },
       }),
     );
+  });
+
+  // G3.12: the selected row says why and what its choice does.
+  it('the cursor row shows its detail: why, and the tree a clean up removes with its size', async () => {
+    candidates = [
+      cand(1, { reason: 'pr_merged_idle', worktree_path: '/w/.worktrees/abc-1', worktree_kb: 380 * 1024 }),
+      cand(2, { reason: 'pr_merged_idle' }),
+    ];
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    const detail = screen.getByTestId('tidy-detail');
+    expect(detail).toHaveTextContent('Selected: s1');
+    expect(detail).toHaveTextContent('PR merged, idle: PR merged, ABC-1 is Done, branch abc-1, idle 5 h.');
+    expect(detail).toHaveTextContent('Clean up has Claude commit and push first, then removes /w/.worktrees/abc-1 (380 MB).');
+    // The choice changes what it says; j moves it to the next row.
+    await fireEvent.change(screen.getAllByTestId('tidy-choice')[0], { target: { value: 'archive' } });
+    await tick();
+    expect(screen.getByTestId('tidy-detail')).toHaveTextContent("Archive folds it into its work's Done section");
+    await fireEvent.keyDown(screen.getByTestId('tidy-sheet'), { key: 'j' });
+    await tick();
+    expect(screen.getByTestId('tidy-detail')).toHaveTextContent('Selected: s2');
+    expect(screen.getByTestId('tidy-detail')).toHaveTextContent('then removes its worktree.');
+  });
+
+  it('the legend says what each offered choice does, and Restore when a stopped session is shown', async () => {
+    candidates = [cand(1)];
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    const legend = screen.getByTestId('tidy-legend');
+    expect(legend).toHaveTextContent('What each choice does');
+    expect(Array.from(legend.querySelectorAll('dt'), (d) => d.textContent)).toEqual([
+      'Clean up',
+      'Archive',
+      'Keep for 7 days',
+      'Never',
+    ]);
+    expect(legend).toHaveTextContent('Claude commits and pushes first; the worktree goes only if that succeeds');
+    expect(screen.queryByTestId('tidy-restore-all')).toBeNull();
+  });
+
+  it('Restore all restores the stopped group, one batch per host, and says how it went', async () => {
+    const ghost = (id: number, host: string) =>
+      cand(id, { host_alias: host, reason: 'ghost_expiring', action: 'resume_or_expire', expires_at: 2e9 });
+    candidates = [cand(1), ghost(2, 'trn'), ghost(3, 'trn'), ghost(4, 'mac')];
+    const base = vi.mocked(invoke).getMockImplementation()!;
+    vi.mocked(invoke).mockImplementation(async (cmd: string, a?: unknown) => {
+      if (cmd === 'restore_host_sessions') {
+        const args = (a as { args: { host_alias: string; session_ids: number[] } }).args;
+        return {
+          host_alias: args.host_alias,
+          dry_run: false,
+          plan: [],
+          results: args.session_ids.map((id) => ({ session_id: id, tmux_name: `s${id}`, ok: true, error: null })),
+        };
+      }
+      return base(cmd, a as never);
+    });
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    expect(Array.from(screen.getByTestId('tidy-legend').querySelectorAll('dt'), (d) => d.textContent)).toContain(
+      'Restore all',
+    );
+    await fireEvent.click(screen.getByTestId('tidy-restore-all'));
+    await waitFor(() =>
+      expect(get(toasts).some((t) => t.message === 'Restored 3 of 3 stopped sessions')).toBe(true),
+    );
+    expect(invoke).toHaveBeenCalledWith('restore_host_sessions', {
+      args: { host_alias: 'mac', dry_run: false, session_ids: [4] },
+    });
+    expect(invoke).toHaveBeenCalledWith('restore_host_sessions', {
+      args: { host_alias: 'trn', dry_run: false, session_ids: [2, 3] },
+    });
+    // Nothing else was tidied by it.
+    expect(invoke).not.toHaveBeenCalledWith('tidy_apply', expect.anything());
   });
 
   it('Enter on a focused control (Cancel, checkbox, PR link) is not a sheet chord', async () => {
@@ -260,6 +432,20 @@ describe('TidyReview', () => {
     await waitFor(() =>
       expect(vi.mocked(invoke).mock.calls.some((c) => c[0] === 'tidy_apply')).toBe(true),
     );
+  });
+
+  it('closing the sheet hands focus back to the pill (review r11)', async () => {
+    candidates = [cand(1)];
+    await mount();
+    const pill = await screen.findByTestId('tidy-pill');
+    pill.focus();
+    await fireEvent.click(pill);
+    await tick();
+    expect(document.activeElement).toBe(screen.getByTestId('tidy-sheet'));
+    await fireEvent.keyDown(screen.getByTestId('tidy-sheet'), { key: 'Escape' });
+    await tick();
+    expect(screen.queryByTestId('tidy-sheet')).toBeNull();
+    expect(document.activeElement).toBe(screen.getByTestId('tidy-pill'));
   });
 
   it('Cancel closes the sheet without applying', async () => {
@@ -426,6 +612,16 @@ describe('TidyReview', () => {
     reopened = [{ item_id: 7, key: 'PAY-7', title: 'Retry', reopened_at: 5, past_sessions: 2 }];
     hubStatus.set(remote);
     hubConnection.set({ state: 'offline', attempt: 4, retry_in_secs: 30, reason: 'connect refused' });
+    // This test is about the HUB half alone, so the access half is satisfied:
+    // the rows are in the store and they are this person's. Without them F2d's
+    // fail-closed rule would refuse both candidates for a second, different
+    // reason and the assertion below would stop measuring what it names.
+    sessions.set(
+      candidates.map((c) =>
+        fixtureSession(c.host_alias, c.tmux_name, { id: c.session_id, owner_person_id: 1 }),
+      ),
+    );
+    setMyGrants(1, []);
     await mount();
     await fireEvent.click(await screen.findByTestId('tidy-pill'));
     await tick();
@@ -490,36 +686,57 @@ describe('TidyReview', () => {
     }
   });
 
-  it('the Reopened pill closes the tidy sheet and toggles its own list; the Tidy pill closes the list', async () => {
+  it('Reopened is a group of the tidy sheet: both pills open the one sheet (G7.9)', async () => {
     candidates = [cand(1)];
     reopened = [{ item_id: 7, key: 'PAY-7', title: 'Retry', reopened_at: 5, past_sessions: 2 }];
     await mount();
-    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await fireEvent.click(await screen.findByTestId('reopened-pill'));
     await tick();
-    expect(screen.getByTestId('tidy-sheet')).toBeTruthy();
-    await fireEvent.click(screen.getByTestId('reopened-pill'));
+    const sheet = screen.getByTestId('tidy-sheet');
+    const group = screen.getByTestId('reopened-list');
+    expect(sheet.contains(group)).toBe(true);
+    expect(screen.getAllByTestId('tidy-group').map((g) => g.textContent)).toContain('Reopened · 1');
+    // The reopened rows are not tidied: the footer counts the candidates only.
+    expect(screen.getByTestId('tidy-apply')).toHaveTextContent('Tidy 1');
+    await fireEvent.click(screen.getByTestId('tidy-cancel'));
     await tick();
     expect(screen.queryByTestId('tidy-sheet')).toBeNull();
-    expect(screen.getByTestId('reopened-list')).toBeTruthy();
-    // The pill is a toggle; so is the list's own close.
-    await fireEvent.click(screen.getByTestId('reopened-pill'));
-    await tick();
-    expect(screen.queryByTestId('reopened-list')).toBeNull();
-    await fireEvent.click(screen.getByTestId('reopened-pill'));
-    await tick();
-    expect(screen.getByTestId('reopened-list')).toBeTruthy();
-    await fireEvent.click(screen.getByText('close'));
-    await tick();
-    expect(screen.queryByTestId('reopened-list')).toBeNull();
-    // Opening the tidy sheet puts the list away, so only one sheet shows.
-    await fireEvent.click(screen.getByTestId('reopened-pill'));
-    await tick();
     await fireEvent.click(screen.getByTestId('tidy-pill'));
     await tick();
-    expect(screen.getByTestId('tidy-sheet')).toBeTruthy();
-    expect(screen.queryByTestId('reopened-list')).toBeNull();
+    expect(screen.getByTestId('tidy-sheet').contains(screen.getByTestId('reopened-list'))).toBe(true);
     expect(invoke).not.toHaveBeenCalledWith('tidy_apply', expect.anything());
     expect(invoke).not.toHaveBeenCalledWith('dismiss_reopened', expect.anything());
+  });
+
+  it('with only reopened work the sheet still opens, and empties away when it is dismissed', async () => {
+    reopened = [{ item_id: 7, key: 'PAY-7', title: 'Retry', reopened_at: 5, past_sessions: 2 }];
+    await mount();
+    await fireEvent.click(await screen.findByTestId('reopened-pill'));
+    await tick();
+    expect(screen.getByTestId('reopened-row')).toHaveTextContent('PAY-7');
+    reopenedWork.set([]);
+    await tick();
+    expect(screen.queryByTestId('tidy-sheet')).toBeNull();
+  });
+
+  it('Expire forgets a stopped session through dismiss_ghost_session; the rest go to tidy_apply (G7.9)', async () => {
+    candidates = [
+      cand(1),
+      cand(3, { reason: 'ghost_expiring', action: 'resume_or_expire', expires_at: 2_000_000_000 }),
+    ];
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    const rows = screen.getAllByTestId('tidy-row');
+    const ghostRow = rows.find((r) => r.getAttribute('data-session-id') === '3')!;
+    const select = ghostRow.querySelector('[data-testid="tidy-choice"]') as HTMLSelectElement;
+    expect(Array.from(select.options).map((o) => o.textContent)).toContain('Expire');
+    await fireEvent.change(select, { target: { value: 'expire' } });
+    await fireEvent.click(ghostRow.querySelector('[data-testid="tidy-check"]')!);
+    await fireEvent.click(screen.getByTestId('tidy-apply'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('dismiss_ghost_session', { args: { session_id: 3 } }));
+    const tidyCall = vi.mocked(invoke).mock.calls.find((c) => c[0] === 'tidy_apply');
+    expect((tidyCall?.[1] as { args: { items: { session_id: number }[] } }).args.items.map((i) => i.session_id)).toEqual([1]);
   });
 
   describe('idle, no work linked (work graph M11.3)', () => {
@@ -550,9 +767,9 @@ describe('TidyReview', () => {
       const checks = screen.getAllByTestId('tidy-check') as HTMLInputElement[];
       expect(checks.map((c) => c.checked)).toEqual([true, false]);
       const select = row.querySelector('[data-testid="tidy-choice"]') as HTMLSelectElement;
-      expect(Array.from(select.options, (o) => o.textContent)).toEqual(['Safe kill', 'Keep 7 d']);
-      expect(row.querySelector('[data-testid="tidy-keep"]')).toHaveTextContent('Keep 7 d');
-      expect(row.querySelector('[data-testid="tidy-safe-kill"]')).toHaveTextContent('Safe kill');
+      expect(Array.from(select.options, (o) => o.textContent)).toEqual(['Clean up', 'Keep for 7 days']);
+      expect(row.querySelector('[data-testid="tidy-keep"]')).toHaveTextContent('Keep for 7 days');
+      expect(row.querySelector('[data-testid="tidy-safe-kill"]')).toHaveTextContent('Clean up');
     });
 
     it('Keep sends a per-session keep for 7 days', async () => {
@@ -576,7 +793,7 @@ describe('TidyReview', () => {
       const kill = screen.getByTestId('tidy-safe-kill');
       await fireEvent.click(kill);
       await tick();
-      expect(kill).toHaveTextContent('Confirm safe kill');
+      expect(kill).toHaveTextContent('Confirm clean up');
       expect(invoke).not.toHaveBeenCalledWith('tidy_apply', expect.anything());
       await fireEvent.click(kill);
       await waitFor(() =>
@@ -595,5 +812,153 @@ describe('TidyReview', () => {
       await tick();
       expect(invoke).not.toHaveBeenCalledWith('tidy_apply', expect.anything());
     });
+  });
+});
+
+// ── Multi-user M1 (F2a): Tidy up can safe-kill, so it is the owner's ────────
+//
+// `blocked` here was `hubActionBlocked('tidy_apply', …)` and that was the whole
+// gate on `applyRow` and `apply` — a live write path, so this was one of the
+// task's two blockers: Tidy up could SAFE-KILL a session this client does not
+// own. `tidy_apply` is `own` in `share.ts::SESSION_TIER` because
+// `safe_kill_session` is.
+//
+// A `TidyCandidate` carries a session id, a host and a tmux name and no
+// `owner_person_id`, so the sheet resolves the row out of `$sessions` first —
+// the lookup that made every indirect surface get skipped by F2.
+describe('TidyReview access gate (multi-user M1)', () => {
+  const paired = () => {
+    hubStatus.set({ ...remote });
+    hubConnection.set({ state: 'connected' });
+  };
+  /** A candidate plus the session row it names, owned by `owner`. */
+  function withRow(id: number, owner: number | null, over: Partial<TidyCandidate> = {}) {
+    const c = cand(id, over);
+    const row = fixtureSession(c.host_alias, c.tmux_name, {
+      id,
+      status: 'running',
+      visibility: owner === null ? 'unclaimed' : 'private',
+      owner_person_id: owner,
+    }) as SessionRow;
+    return { c, row };
+  }
+  const dis = (el: Element) => (el as HTMLButtonElement | HTMLInputElement).disabled;
+
+  beforeEach(() => {
+    resetAccessForTests();
+  });
+
+  it('the owner keeps the whole sheet: ticks, Tidy n and the row buttons', async () => {
+    // The positive control. Without it, a gate that disabled everything for
+    // everybody would pass every assertion below.
+    const mine = withRow(7, 1, { reason: 'idle_unlinked', action: 'safe_kill' });
+    candidates = [mine.c];
+    sessions.set([mine.row]);
+    paired();
+    setMyGrants(1, []);
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    expect(dis(screen.getByTestId('tidy-check'))).toBe(false);
+    expect(dis(screen.getByTestId('tidy-keep'))).toBe(false);
+    expect(dis(screen.getByTestId('tidy-safe-kill'))).toBe(false);
+    expect(screen.queryByTestId('tidy-not-mine')).toBeNull();
+    await fireEvent.click(screen.getByTestId('tidy-check'));
+    await tick();
+    expect(dis(screen.getByTestId('tidy-apply'))).toBe(false);
+    expect(screen.getByTestId('tidy-apply')).toHaveTextContent('Tidy 1');
+  });
+
+  it('a drive grantee cannot safe-kill the owner’s session from the sheet', async () => {
+    // `drive` and not only `watch`: `tidy_apply` is the `own` tier, so a
+    // driver is barred too. The reason a gate on `watch` alone would be wrong.
+    const theirs = withRow(8, 42, { reason: 'idle_unlinked', action: 'safe_kill' });
+    candidates = [theirs.c];
+    sessions.set([theirs.row]);
+    paired();
+    setMyGrants(9, [{ session_id: 8, level: 'drive' }]);
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    expect(dis(screen.getByTestId('tidy-check'))).toBe(true);
+    expect(dis(screen.getByTestId('tidy-keep'))).toBe(true);
+    expect(dis(screen.getByTestId('tidy-safe-kill'))).toBe(true);
+    expect(screen.getByTestId('tidy-safe-kill').title).toMatch(/only the session’s owner/i);
+    expect(screen.getByTestId('tidy-not-mine')).toBeInTheDocument();
+    // And the two write paths refuse even when reached directly: Safe kill is
+    // two clicks, and ↵ applies from anywhere in the sheet.
+    await fireEvent.click(screen.getByTestId('tidy-safe-kill'));
+    await fireEvent.click(screen.getByTestId('tidy-safe-kill'));
+    await fireEvent.keyDown(screen.getByTestId('tidy-sheet'), { key: 'Enter' });
+    await tick();
+    expect(invoke).not.toHaveBeenCalledWith('tidy_apply', expect.anything());
+  });
+
+  it('a mixed sheet applies only the owner’s rows — narrowed per target', async () => {
+    // The fan-out half of the rule: one answer for the whole sheet would
+    // either kill somebody else's session or refuse the owner's own.
+    const mine = withRow(10, 1);
+    const theirs = withRow(11, 42);
+    candidates = [mine.c, theirs.c];
+    sessions.set([mine.row, theirs.row]);
+    paired();
+    setMyGrants(1, [{ session_id: 11, level: 'watch' }]);
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    // Both are preselected candidates; only the owner's is ticked.
+    expect(screen.getByTestId('tidy-apply')).toHaveTextContent('Tidy 1');
+    expect(screen.getByTestId('tidy-not-mine').textContent).toMatch(/1 session/);
+    await fireEvent.click(screen.getByTestId('tidy-apply'));
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('tidy_apply', {
+        args: { items: [{ session_id: 10, action: 'safe_kill', link_id: 110 }] },
+      }),
+    );
+  });
+
+  it('a revoke while the sheet is open disables the row with no row event at all', async () => {
+    // A grant moves no column on any session, so nothing a `session:updated`
+    // could carry has changed here — the derivation is what re-answers.
+    const theirs = withRow(12, 42, { reason: 'idle_unlinked', action: 'safe_kill' });
+    candidates = [theirs.c];
+    sessions.set([theirs.row]);
+    paired();
+    setMyGrants(9, [{ session_id: 12, level: 'drive' }]);
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    expect(dis(screen.getByTestId('tidy-safe-kill'))).toBe(true);
+    // (already blocked at drive; narrowing to watch keeps it blocked, and a
+    // revoke changes the sentence rather than the answer)
+    applyGrantChanges([{ session_id: 12, person_id: 9, level: null }]);
+    await tick();
+    expect(dis(screen.getByTestId('tidy-safe-kill'))).toBe(true);
+    expect(screen.getByTestId('tidy-safe-kill').title).toMatch(/belongs to someone else/i);
+  });
+
+  it('standalone is untouched: every row stays the owner’s', async () => {
+    const mine = withRow(13, 1, { reason: 'idle_unlinked', action: 'safe_kill' });
+    candidates = [mine.c];
+    sessions.set([mine.row]);
+    // No hub, no `my_grants` answer at all — `access.ts`'s rule 1.
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    expect(dis(screen.getByTestId('tidy-safe-kill'))).toBe(false);
+    expect(screen.queryByTestId('tidy-not-mine')).toBeNull();
+  });
+});
+
+describe('TidyReview accessibility (7.2)', () => {
+  it('passes the axe and audit checks with the review open', async () => {
+    candidates = [cand(1), cand(2)];
+    sessions.set(
+      candidates.map((c) => ({ id: c.session_id, tmux_name: c.tmux_name, host_alias: c.host_alias }) as SessionRow),
+    );
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    await expectAccessible(document.body);
   });
 });

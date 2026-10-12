@@ -43,6 +43,9 @@ export function matchesRecency(p: ProjectTreeRow, r: Recency): boolean {
  *  `nowMs` is injectable so callers with a shared clock (and tests) stay
  *  deterministic. */
 export function timeAgo(unixSecs: number, nowMs: number = Date.now()): string {
+  // An unreadable timestamp (a transcript's free-form `timestamp`) is NaN
+  // here; every comparison below is false for NaN, so it read "NaNd ago".
+  if (!Number.isFinite(unixSecs)) return '';
   const ageSec = Math.floor((nowMs - unixSecs * 1000) / 1000);
   if (ageSec < 60) return 'just now';
   if (ageSec < 3600) return `${Math.floor(ageSec / 60)}m ago`;
@@ -51,6 +54,13 @@ export function timeAgo(unixSecs: number, nowMs: number = Date.now()): string {
 }
 
 /** Elapsed since the session started ("3h 5m"), or '' before it started. */
+/** The short age the redesign's rows use (step 3.6, the manual's content
+ *  rules): `now`, `2m`, `3h`, `4d`. */
+export function shortAge(unixSecs: number, nowSec: number = Math.floor(Date.now() / 1000)): string {
+  const t = timeAgo(unixSecs, nowSec * 1000);
+  return t === 'just now' ? 'now' : t.replace(/ ago$/, '');
+}
+
 export function rowElapsed(sess: SessionRow, nowSec: number): string {
   return sess.started_at !== null ? formatElapsed(sessionStart(sess), nowSec) : '';
 }

@@ -11,6 +11,17 @@
         "$ref": "#/$defs/Filter"
       }
     },
+    "graph": {
+      "description": "A `master_detail` page's records also drawn as a graph above the\nlist: each one a node joined to the centre, its line solid while\nits state is up and dashed while it is not (Federation's linked\nhubs). The list stays the text alternative and the keyboard path.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GraphView"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "id": {
       "description": "Dotted lowercase route, e.g. \"settings.automation\". Also the deep\nlink: `settings/<id>#<key>`.",
       "type": "string"
@@ -78,6 +89,17 @@
     "spec": {
       "description": "Always \"fleet.page/1\".",
       "type": "string"
+    },
+    "table": {
+      "description": "A `master_detail` page's records also shown as one table (M15 step\nG4.7: People & devices), with filters and a grouping. A row opens\nits record; the list stays the keyboard path.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TableView"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "tabs": {
       "type": "array",
@@ -226,6 +248,40 @@
       "additionalProperties": false,
       "required": [
         "param"
+      ]
+    },
+    "GraphView": {
+      "description": "How a `master_detail` page draws its records as a graph (`Page::graph`).",
+      "type": "object",
+      "properties": {
+        "center": {
+          "description": "The centre node's name, e.g. \"This hub\".",
+          "type": "string"
+        },
+        "facts": {
+          "description": "Fields shown under a node's name, at most three: plain values\n(text, count or time), never a list.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "state": {
+          "description": "The resource's `choice` field each line follows.",
+          "type": "string"
+        },
+        "up": {
+          "description": "The values of `state` drawn as a link that is up (a solid line);\nevery other value is down (a dashed line).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "center",
+        "state",
+        "up"
       ]
     },
     "Item": {
@@ -572,6 +628,14 @@
             "$ref": "#/$defs/Item"
           }
         },
+        "matrix": {
+          "description": "Settings fields that are each a subset of the same options, shown as\none grid: a row per option, a column per field, a tick where the\nfield holds the option (Orbit Fleet 11.9, the notifications matrix).",
+          "type": "boolean"
+        },
+        "tiles": {
+          "description": "A `master_detail` page's overview: its `count` and `money` fields\nshown as tiles (label, value, and the field's `sub` line) rather\nthan rows.",
+          "type": "boolean"
+        },
         "title": {
           "type": "string"
         },
@@ -673,12 +737,64 @@
         "sections"
       ]
     },
+    "TableView": {
+      "description": "How a `master_detail` page shows its records as a table (`Page::table`).",
+      "type": "object",
+      "properties": {
+        "columns": {
+          "description": "The resource's plain fields, one column each, at most six.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "filters": {
+          "description": "Columns that get a filter: a select over the values the records hold.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "group_by": {
+          "description": "A column the rows can be grouped by, offered as a switch.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subtitle": {
+          "description": "A plain field shown in a smaller line under the record's title in its\ncolumn (M15 step G7.14: a device's \"phone · fleet-mobile 0.5.4\").",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "description": "The view's name, e.g. \"People & devices\".",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "columns"
+      ]
+    },
     "Tone": {
-      "type": "string",
-      "enum": [
-        "info",
-        "warn",
-        "danger"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "info",
+            "warn",
+            "danger"
+          ]
+        },
+        {
+          "description": "Something the page will offer and does not yet, shown greyed with\n\"Not built yet\" (M15 step G7.14: a debug device's live screen).",
+          "type": "string",
+          "const": "later"
+        }
       ]
     },
     "UsageView": {

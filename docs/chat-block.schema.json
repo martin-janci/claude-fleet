@@ -1,0 +1,1485 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ChatBlock",
+  "description": "One `fleet.ui/1` block.",
+  "type": "object",
+  "properties": {
+    "spec": {
+      "description": "Always \"fleet.ui/1\".",
+      "type": "string"
+    }
+  },
+  "oneOf": [
+    {
+      "description": "A run's result, read the way a run's report is read.",
+      "type": "object",
+      "properties": {
+        "blockers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "confidence": true,
+        "followups": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "kind": {
+          "type": "string",
+          "const": "report"
+        },
+        "outcome": {
+          "description": "done, partial, blocked or failed; anything else reads as partial.",
+          "type": "string",
+          "default": ""
+        },
+        "summary": {
+          "type": "string",
+          "default": ""
+        },
+        "tests_run": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "kind"
+      ]
+    },
+    {
+      "description": "A tutorial the person ticks off.",
+      "type": "object",
+      "properties": {
+        "intro": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": "string",
+          "const": "steps"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TutorialStep"
+          }
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "title",
+        "steps"
+      ]
+    },
+    {
+      "description": "Reference material in folding sections, or with `page` a guide\nfleet already has (a `fleet.page/1` page of layout `guide`), drawn\nas Settings draws it; the other keys are then ignored.",
+      "type": "object",
+      "properties": {
+        "intro": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": "string",
+          "const": "guide"
+        },
+        "page": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sections": {
+          "description": "Required without `page`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GuideSection"
+          }
+        },
+        "title": {
+          "description": "Required without `page`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "body": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "const": "callout"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tone": {
+          "description": "info (default), tip, success, warning or danger.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "body"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/$defs/FactValue"
+              }
+            ]
+          }
+        },
+        "kind": {
+          "type": "string",
+          "const": "facts"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "items"
+      ]
+    },
+    {
+      "description": "Buttons that fill the composer.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "choices"
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Choice"
+          }
+        },
+        "question": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "options"
+      ]
+    },
+    {
+      "description": "A `fleet.form/1` whose answers fill the composer. No `secret` fields.",
+      "type": "object",
+      "properties": {
+        "form": {
+          "$ref": "#/$defs/FormSpec"
+        },
+        "kind": {
+          "type": "string",
+          "const": "form"
+        }
+      },
+      "required": [
+        "kind",
+        "form"
+      ]
+    },
+    {
+      "description": "A long job's state. Blocks with the same `id` in one conversation are\none card that updates in place.",
+      "type": "object",
+      "properties": {
+        "done": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "const": "progress"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "started_at": {
+          "description": "When the job started, unix seconds: the card counts the time\nsince (\"4 min 12 s\") while it runs.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "state": {
+          "description": "running (default), waiting (on a person), done or failed.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "steps": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/ProgressStep"
+          }
+        },
+        "title": {
+          "type": "string"
+        },
+        "total": {
+          "description": "Absent when the size is not known yet.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "unit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "id",
+        "title"
+      ]
+    },
+    {
+      "description": "Numbers, a chart and a table, drawn with the page widgets.",
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ResultItem"
+          }
+        },
+        "kind": {
+          "type": "string",
+          "const": "results"
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "items"
+      ]
+    },
+    {
+      "description": "What failed, its code, and what the person can do next.",
+      "type": "object",
+      "properties": {
+        "body": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "code": {
+          "type": "string"
+        },
+        "detail": {
+          "description": "A log excerpt, drawn as code under a fold.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": "string",
+          "const": "error"
+        },
+        "next": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NextStep"
+          }
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "code",
+        "title"
+      ]
+    },
+    {
+      "description": "A settings change waiting for a person: the id `set_setting` with\n`propose: true` answered. The card reads the key and both values\nfrom the proposal itself, never from the block, and applies it only\nafter a confirm.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "setting"
+        },
+        "note": {
+          "description": "What the change does, in words.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "kind",
+        "proposal"
+      ]
+    },
+    {
+      "description": "One of the app's own wizards, opened in the chat as a form (redesign\n10.12): the spec is the app's (`src/lib/forms/wizards/<id>.json`),\nnever the block's, and nothing runs until the person presses its last\nstep's button.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "wizard"
+        },
+        "values": {
+          "description": "Answers read from the person's own words (\"Set up a new project\nfor acme/pos on mercury\"), by field name: written in as drafted\ndefaults the person checks (G7.4). A name the wizard does not\nhave, a secret, or a value its field refuses is dropped.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": true
+        },
+        "why": {
+          "description": "Why the agent opens it, in one sentence.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "wizard": {
+          "$ref": "#/$defs/ChatWizard"
+        }
+      },
+      "required": [
+        "kind",
+        "wizard"
+      ]
+    },
+    {
+      "description": "A dashboard the agent proposes (persona design, step 5): widgets over\n`work { stats }`, which the app reads and draws itself under the\nperson's access. The block names filters and what to show, never a\nnumber. The person pins it; a block with the id of a pinned\ndashboard is offered as its replacement.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Letters, digits and `. _ : -`; the same id again is a new version.",
+          "type": "string"
+        },
+        "intro": {
+          "description": "One line under the title: what it answers.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": "string",
+          "const": "dashboard"
+        },
+        "title": {
+          "type": "string"
+        },
+        "why": {
+          "description": "Why the agent proposes it, in one sentence.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "widgets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DashWidget"
+          }
+        }
+      },
+      "required": [
+        "kind",
+        "id",
+        "title",
+        "widgets"
+      ]
+    }
+  ],
+  "required": [
+    "spec"
+  ],
+  "$defs": {
+    "ChatWizard": {
+      "description": "A wizard a `wizard` block opens ([`CHAT_WIZARDS`]).",
+      "type": "string",
+      "enum": [
+        "add_host",
+        "add_project",
+        "get_started",
+        "new_session",
+        "pair_device"
+      ]
+    },
+    "Choice": {
+      "type": "object",
+      "properties": {
+        "hint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "type": "string"
+        },
+        "prompt": {
+          "description": "What a click puts in the composer, as the person's instruction.",
+          "type": "string"
+        },
+        "recommended": {
+          "description": "The option you would pick. At most one per block; Control's chat\nsends it after `control.auto_continue_minutes` when nobody answers\n(`src/lib/auto_continue.ts`).",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "label",
+        "prompt"
+      ]
+    },
+    "DashQuery": {
+      "description": "A widget's filters: the Work view's (`work { tree }`'s `filters`), less\nthe ones that only page or order it. Any other key is refused, so a\nmisspelt filter never counts the wrong tasks.",
+      "type": "object",
+      "properties": {
+        "assignee": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "epic": {
+          "description": "Under one epic: its key or item:<id>.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "group_by": {
+          "description": "group, org, person, mission, account, repo, sprint, release or epic.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "has": {
+          "description": "any, active, past_only, none or suggested: its sessions.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "item_type": {
+          "description": "The tracker's type name (Story, Bug …).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "iteration": {
+          "description": "The sprint: current, none or its name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mine": {
+          "description": "Assigned to the person in its tracker.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "org": {
+          "description": "An org id, or \"none\"."
+        },
+        "query": {
+          "description": "Words of the key or title.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "review": {
+          "description": "Only tasks with something to review.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "stages": {
+          "description": "Any of these stages.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "status": {
+          "description": "any, open, todo, in_progress or done.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status_name": {
+          "description": "One tracker column, by its own name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "DashWidget": {
+      "description": "One widget of a `dashboard` block.",
+      "oneOf": [
+        {
+          "description": "One number of the query's answer.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "stat"
+            },
+            "query": {
+              "$ref": "#/$defs/DashQuery",
+              "default": {}
+            },
+            "title": {
+              "type": "string"
+            },
+            "value": {
+              "description": "total, open, needs_you, pct_done, cost, or a stage's count.",
+              "type": "string"
+            },
+            "warn": {
+              "description": "Drawn in the warning colour when above zero.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "title",
+            "value"
+          ]
+        },
+        {
+          "description": "One row per group of `query.group_by`: a bar split by stage, or the\ndone share.",
+          "type": "object",
+          "properties": {
+            "hide_none": {
+              "description": "Leave the \"No …\" group out.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "groups"
+            },
+            "limit": {
+              "description": "At most this many groups, 1–20 (default 10).",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0
+            },
+            "query": {
+              "$ref": "#/$defs/DashQuery"
+            },
+            "show": {
+              "description": "stages (default) or done.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "title",
+            "query"
+          ]
+        },
+        {
+          "description": "Sprints or releases (`query.group_by`) with their health.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "buckets"
+            },
+            "query": {
+              "$ref": "#/$defs/DashQuery"
+            },
+            "states": {
+              "description": "Only buckets in these states: planned, active, closed, released.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "title",
+            "query"
+          ]
+        }
+      ]
+    },
+    "Drafted": {
+      "description": "Where a drafted default came from: `by` who wrote it (\"haiku on\nmercury\"), `from` what it read (\"the Jira epic PD-3012\").",
+      "type": "object",
+      "properties": {
+        "by": {
+          "type": "string"
+        },
+        "from": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "by",
+        "from"
+      ]
+    },
+    "FactValue": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "number",
+          "format": "double"
+        },
+        {
+          "type": "boolean"
+        }
+      ]
+    },
+    "FieldCondition": {
+      "description": "When a step or a field is asked. Exactly one form: `{field, eq}`,\n`{field, in}`, `{field, truthy}`, `{all}`, `{any}` or `{not}`. `field`\nnames an EARLIER field, never a secret.",
+      "type": "object",
+      "properties": {
+        "all": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/FieldCondition"
+          }
+        },
+        "any": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/FieldCondition"
+          }
+        },
+        "eq": true,
+        "field": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "in": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": true
+        },
+        "not": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FieldCondition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "truthy": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "FieldType": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "text",
+            "textarea",
+            "number",
+            "bool",
+            "select",
+            "multiselect"
+          ]
+        },
+        {
+          "description": "Written to a 0600 file on the session's host; the agent gets the path.",
+          "type": "string",
+          "const": "secret"
+        }
+      ]
+    },
+    "FormField": {
+      "description": "One field. Flat, like a page `Condition`: which keys a type may carry is\nthe validator's to say, not serde's.",
+      "type": "object",
+      "properties": {
+        "disabled_reason": {
+          "description": "Shown but not answerable, with this reason under it (\"Needs 2 GB\nfree; mercury has 1.4 GB\"). Never required; never in the answers.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "drafted": {
+          "description": "The default `value` was drafted by an AI: who and from what. The\nfield shows the Drafted label until the person changes it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Drafted"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "help": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "integer": {
+          "description": "number: whole numbers only.",
+          "type": "boolean"
+        },
+        "label": {
+          "type": "string"
+        },
+        "max": {
+          "description": "number.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "max_len": {
+          "description": "text (default 500, ≤ 2000), textarea (default 5000, ≤ 20000).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "min": {
+          "description": "number.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "name": {
+          "type": "string"
+        },
+        "options": {
+          "description": "select, multiselect: `[value, label]` pairs, or\n`{value, label, detail?, proposed?}` objects; the two mix.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/FormOption"
+          }
+        },
+        "other": {
+          "description": "select: offer \"Another…\", a free entry beside the options. The\nanswer may then be any text (≤ 500 chars), not only an option value.",
+          "type": "boolean"
+        },
+        "placeholder": {
+          "description": "text, textarea.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "secret_note": {
+          "description": "secret: where the value goes, shown under the field (\"Written to a\n0600 file on mercury, never shown to the agent\").",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "$ref": "#/$defs/FieldType"
+        },
+        "value": {
+          "description": "The default. Never on a secret."
+        },
+        "when": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FieldCondition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "type",
+        "label"
+      ]
+    },
+    "FormOption": {
+      "description": "One option of a select or multiselect: the original `[value, label]`\npair, or an object that may add a detail line and a proposal.",
+      "anyOf": [
+        {
+          "description": "`[value, label]`.",
+          "type": "array",
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "string"
+            }
+          ]
+        },
+        {
+          "$ref": "#/$defs/OptionSpec"
+        }
+      ]
+    },
+    "FormSpec": {
+      "type": "object",
+      "properties": {
+        "checks": {
+          "description": "What the answers need from a host, checked before the form is sent:\na shortfall is a warning above the last button (\"Postgres needs\n2 GB free, mercury has 1.4 GB\"), never a refusal (G7.4).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HostCheck"
+          }
+        },
+        "intro": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "save_later": {
+          "description": "Offer \"Save and finish later\": the person may leave the form with\nwhat they typed kept, and come back to it while it is pending.",
+          "type": "boolean"
+        },
+        "spec": {
+          "description": "Always \"fleet.form/1\".",
+          "type": "string"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FormStep"
+          }
+        },
+        "submit": {
+          "description": "The last step's button. Default \"Submit\".",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "spec",
+        "title",
+        "steps"
+      ]
+    },
+    "FormStep": {
+      "type": "object",
+      "properties": {
+        "fields": {
+          "description": "At least one, except on a `review` step, which has none.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/FormField"
+          }
+        },
+        "intro": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "`review`: a summary of the earlier steps, with no fields of its own.",
+          "$ref": "#/$defs/StepKind"
+        },
+        "name": {
+          "description": "The step's short name on its step chip (≤ 24 chars). Default: the title.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        },
+        "when": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FieldCondition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "title"
+      ]
+    },
+    "GuideSection": {
+      "type": "object",
+      "properties": {
+        "body": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "body"
+      ]
+    },
+    "HostCheck": {
+      "description": "One thing the answers need from a host.",
+      "type": "object",
+      "properties": {
+        "at_least": {
+          "description": "The least it needs, in GB.",
+          "type": "number",
+          "format": "double"
+        },
+        "host_field": {
+          "description": "The select field whose answer is the host. Absent: the session's host.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "description": "What needs it, in words: \"Postgres\".",
+          "type": "string"
+        },
+        "needs": {
+          "$ref": "#/$defs/HostFact"
+        },
+        "when": {
+          "description": "Checked only while this holds, like a field's `when`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FieldCondition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "label",
+        "needs",
+        "at_least"
+      ]
+    },
+    "HostFact": {
+      "description": "A host fact a [`HostCheck`] reads, from the host's last health probe.",
+      "oneOf": [
+        {
+          "description": "Free space in the home directory, GB.",
+          "type": "string",
+          "const": "disk_free_gb"
+        },
+        {
+          "description": "Available memory, GB.",
+          "type": "string",
+          "const": "mem_free_gb"
+        }
+      ]
+    },
+    "NextStep": {
+      "description": "An error's next step: a choice that fills the composer, or, with an\n`action`, one the app runs itself ([`NEXT_ACTIONS`]).",
+      "type": "object",
+      "properties": {
+        "action": {
+          "description": "login, open_host or open_accounts.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "host": {
+          "description": "The host a `login` or `open_host` acts on.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "type": "string"
+        },
+        "prompt": {
+          "description": "What a click puts in the composer, as the person's instruction; with\nan `action`, what it fills where the action cannot run.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "label",
+        "prompt"
+      ]
+    },
+    "OptionProposal": {
+      "description": "Who proposes an option, and why.",
+      "type": "object",
+      "properties": {
+        "by": {
+          "$ref": "#/$defs/ProposedBy"
+        },
+        "reason": {
+          "description": "Why, in words a person reads (≤ 500 chars).",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "by",
+        "reason"
+      ]
+    },
+    "OptionSpec": {
+      "type": "object",
+      "properties": {
+        "detail": {
+          "description": "One line under the label (\"2 idle\", \"next free on main\").",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "type": "string"
+        },
+        "proposed": {
+          "description": "This is the likely choice: shown first with \"Proposed by …\", the\nreason and Change. select only; at most one option per field.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OptionProposal"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "label"
+      ]
+    },
+    "PointX": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "number",
+          "format": "double"
+        }
+      ]
+    },
+    "ProgressStep": {
+      "type": "object",
+      "properties": {
+        "detail": {
+          "description": "One line under the step while it runs: \"attempt 2 of 10\".",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "description": "pending (default), running, done, failed or skipped.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title"
+      ]
+    },
+    "ProposedBy": {
+      "description": "The three proposers of the design manual's AI patterns: a fleet rule,\nthe decision model (Jev), or an LLM.",
+      "type": "string",
+      "enum": [
+        "rule",
+        "jev",
+        "llm"
+      ]
+    },
+    "ResultAxis": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "ty": {
+          "description": "text, int, tokens, usd_micros, day or time; as a page column.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "label"
+      ]
+    },
+    "ResultItem": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "hint": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "label": {
+              "type": "string"
+            },
+            "ty": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "stat"
+            },
+            "value": {
+              "$ref": "#/$defs/StatValue"
+            }
+          },
+          "required": [
+            "type",
+            "label",
+            "value"
+          ]
+        },
+        {
+          "description": "One series: line, bar or sparkline.",
+          "type": "object",
+          "properties": {
+            "chart": {
+              "type": "string"
+            },
+            "points": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "maxItems": 2,
+                "minItems": 2,
+                "prefixItems": [
+                  {
+                    "$ref": "#/$defs/PointX"
+                  },
+                  {
+                    "type": "number",
+                    "format": "double"
+                  }
+                ]
+              }
+            },
+            "title": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "chart"
+            },
+            "x": {
+              "$ref": "#/$defs/ResultAxis"
+            },
+            "y": {
+              "$ref": "#/$defs/ResultAxis"
+            }
+          },
+          "required": [
+            "type",
+            "chart",
+            "title",
+            "x",
+            "y",
+            "points"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "columns": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ResultAxis"
+              }
+            },
+            "rows": {
+              "description": "One cell per column: text, a number, a bool or null.",
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": true
+              }
+            },
+            "title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "table"
+            }
+          },
+          "required": [
+            "type",
+            "columns",
+            "rows"
+          ]
+        }
+      ]
+    },
+    "StatValue": {
+      "anyOf": [
+        {
+          "type": "number",
+          "format": "double"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "StepKind": {
+      "description": "What a step is: fields to fill (the default), or a review of the steps\nbefore it, each with an Edit link back to it.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "fields"
+          ]
+        },
+        {
+          "description": "Summarises the answers so far; has no fields and is the last step.",
+          "type": "string",
+          "const": "review"
+        }
+      ]
+    },
+    "TutorialStep": {
+      "type": "object",
+      "properties": {
+        "body": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lang": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title"
+      ]
+    }
+  }
+}

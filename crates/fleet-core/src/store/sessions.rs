@@ -18,7 +18,84 @@ pub struct PromptAckState {
     pub hooks_seen: bool,
 }
 
+/// The columns a `session:killed` frame's facts are read from, in
+/// [`map_killed`] order. The org is COMPUTED (`session_org_sql!`), exactly
+/// as it is on a `SessionRow`, so a frame and a row cannot disagree about
+/// which company a session belonged to.
+const KILLED_COLS: &str = concat!(
+    "id, host_alias, visibility, owner_person_id, ",
+    crate::session_org_sql!("sessions")
+);
+
+fn map_killed(r: &rusqlite::Row<'_>) -> rusqlite::Result<crate::events::SessionKilledPayload> {
+    Ok(crate::events::SessionKilledPayload {
+        id: r.get(0)?,
+        host_alias: r.get(1)?,
+        visibility: r.get(2)?,
+        owner_person_id: r.get(3)?,
+        org_id: r.get(4)?,
+    })
+}
+
+/// The facts a `session:killed` frame must carry, for every one of `ids`
+/// that is still in the table (multi-user M1, T9).
+///
+/// It takes a bare `&Connection` for one reason, and it is the whole point:
+/// the frame fires AFTER the row is deleted, so the only moment these values
+/// exist is inside the caller's own transaction, before its `DELETE`. A
+/// caller that reads them afterwards gets nothing — and a payload with no
+/// facts is dropped by `events_route::fence_frame` for every caller but the
+/// hub's own readers, which is the fail-closed direction but also an
+/// invisible row left on a phone.
+///
+/// An id with no row (already gone, or never there) is answered id-only
+/// rather than skipped: the frame still has to be emitted, since on the
+/// desktop it is what removes the row from the store.
+pub(super) fn killed_payloads(
+    conn: &rusqlite::Connection,
+    ids: &[i64],
+) -> rusqlite::Result<Vec<crate::events::SessionKilledPayload>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sql = format!(
+        "SELECT {KILLED_COLS} FROM sessions WHERE id IN ({phs})",
+        phs = in_clause(ids.len())
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let found: Vec<crate::events::SessionKilledPayload> = stmt
+        .query_map(rusqlite::params_from_iter(ids), map_killed)?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(ids
+        .iter()
+        .map(|id| {
+            found
+                .iter()
+                .find(|p| p.id == *id)
+                .cloned()
+                .unwrap_or_else(|| (*id).into())
+        })
+        .collect())
+}
+
 impl Store {
+    /// [`killed_payloads`] for one id, through this store's own connection.
+    /// Call it BEFORE the delete.
+    pub(crate) fn killed_payload(&self, id: i64) -> crate::events::SessionKilledPayload {
+        match killed_payloads(&self.conn, &[id]) {
+            Ok(mut v) if !v.is_empty() => v.remove(0),
+            Ok(_) => id.into(),
+            Err(e) => {
+                tracing::warn!(
+                    session_id = id,
+                    error = %e,
+                    "[store] could not read a killed session's facts; the frame will be fenced out"
+                );
+                id.into()
+            }
+        }
+    }
+
     // ---- Private fetch helpers used after writes to produce emit payloads ----
     //
     // The row-mapping SQL lives in free `fetch_*` functions that take a bare
@@ -636,10 +713,164 @@ impl Store {
         rows.collect()
     }
 
+    /// Record that a person looked at the session at `now` (migration 125).
+    /// Never moves the stamp backwards, so a late call from a second window
+    /// cannot make a seen turn unread again. Answers whether it moved; a
+    /// move emits `session_updated` (the row's unread state changed).
+    pub fn touch_session_viewed(&self, id: i64, now: i64) -> Result<bool, rusqlite::Error> {
+        let n = self.conn.execute(
+            "UPDATE sessions SET last_viewed_at = ?1 \
+             WHERE id = ?2 AND (last_viewed_at IS NULL OR last_viewed_at < ?1)",
+            rusqlite::params![now, id],
+        )?;
+        if n > 0 {
+            self.emit_session(id)?;
+        }
+        Ok(n > 0)
+    }
+
+    /// Forget that a session was viewed, so its last finished turn reads as
+    /// unread again and lands in the Inbox (G7.9: a person sends a routine
+    /// run Jev read as "nothing to do" to the Inbox). Answers whether the row
+    /// changed; a change emits `session_updated`.
+    pub fn clear_session_viewed(&self, id: i64) -> Result<bool, rusqlite::Error> {
+        let n = self.conn.execute(
+            "UPDATE sessions SET last_viewed_at = NULL WHERE id = ?1 AND last_viewed_at IS NOT NULL",
+            [id],
+        )?;
+        if n > 0 {
+            self.emit_session(id)?;
+        }
+        Ok(n > 0)
+    }
+
+    /// Set (or, with `None`, clear) what a finished turn came to (migration
+    /// 129; J2, step 5.11, writes it). Refuses a value outside
+    /// [`TURN_OUTCOMES`](super::TURN_OUTCOMES). Answers whether the row
+    /// changed; a change emits `session_updated`.
+    pub fn set_turn_outcome(
+        &self,
+        id: i64,
+        outcome: Option<&str>,
+    ) -> Result<bool, crate::ipc_error::IpcError> {
+        if let Some(o) = outcome {
+            if !super::TURN_OUTCOMES.contains(&o) {
+                return Err(crate::ipc_error::IpcError::new(
+                    crate::ipc_error::codes::E_INVALID,
+                    format!(
+                        "turn_outcome is one of {}, not {o:?}",
+                        super::TURN_OUTCOMES.join(", ")
+                    ),
+                ));
+            }
+        }
+        let n = self.conn.execute(
+            "UPDATE sessions SET turn_outcome = ?1 WHERE id = ?2 AND turn_outcome IS NOT ?1",
+            rusqlite::params![outcome, id],
+        )?;
+        if n > 0 {
+            self.emit_session(id)?;
+        }
+        Ok(n > 0)
+    }
+
+    /// J2 (step 5.11): set what turn `turn_seq` came to, as Jev read it —
+    /// only while NO hook has spoken since that turn's Stop. The write
+    /// lands when the row is still on that turn (`turn_seq`), still `idle`
+    /// (a Notification would have made it `blocked`, a prompt `working`, a
+    /// StopFailure `failed`, a SessionEnd `stopped`), no hook stamped
+    /// `last_hook_at` after the Stop's own stamp, and nothing answered the
+    /// turn yet. Every hook write clears `turn_outcome`, so a hook that
+    /// arrives after this wins too: hooks always win. Answers whether the
+    /// row changed (a change emits `session_updated`).
+    pub fn set_jev_turn_outcome(
+        &self,
+        id: i64,
+        turn_seq: i64,
+        outcome: &str,
+    ) -> Result<bool, crate::ipc_error::IpcError> {
+        if !super::TURN_OUTCOMES.contains(&outcome) {
+            return Err(crate::ipc_error::IpcError::new(
+                crate::ipc_error::codes::E_INVALID,
+                format!(
+                    "turn_outcome is one of {}, not {outcome:?}",
+                    super::TURN_OUTCOMES.join(", ")
+                ),
+            ));
+        }
+        let n = self.conn.execute(
+            "UPDATE sessions SET turn_outcome = ?1 \
+             WHERE id = ?2 AND turn_seq = ?3 AND claude_status = 'idle' \
+               AND turn_outcome IS NULL AND last_stop_at IS NOT NULL \
+               AND last_hook_at IS last_stop_at",
+            rusqlite::params![outcome, id, turn_seq],
+        )?;
+        if n > 0 {
+            self.emit_session(id)?;
+        }
+        Ok(n > 0)
+    }
+
+    /// Record who or what started a session (migration 124). Every start
+    /// path writes it once the row exists; a restart, recreate or repair
+    /// keeps the row and so keeps its origin. On the row, so this emits
+    /// `session_updated`.
+    pub fn set_session_origin(
+        &self,
+        id: i64,
+        origin: &SessionOrigin,
+    ) -> Result<(), rusqlite::Error> {
+        let n = self.conn.execute(
+            "UPDATE sessions SET origin = ?1, origin_ref = ?2 \
+             WHERE id = ?3 AND (origin IS NOT ?1 OR origin_ref IS NOT ?2)",
+            rusqlite::params![origin.origin, origin.origin_ref, id],
+        )?;
+        if n > 0 {
+            self.emit_session(id)?;
+        }
+        Ok(())
+    }
+
+    /// Record which agent runs in the session's pane (`sessions.agent`,
+    /// migration 121), for an agent other than the Claude Code a row starts
+    /// with. A shell row's agent follows its kind instead
+    /// ([`Store::set_session_kind`]). The column's `CHECK` refuses a value
+    /// outside [`crate::store::AGENTS`].
+    pub fn set_session_agent(&self, id: i64, agent: &str) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE sessions SET agent = ?1 WHERE id = ?2",
+            rusqlite::params![agent, id],
+        )?;
+        self.emit_session(id)?;
+        Ok(())
+    }
+
+    /// The tmux names of `host_alias`'s rows running `agent` (shell rows
+    /// aside). Reconcile asks the host where those of them that are live
+    /// keep their Codex conversations.
+    pub fn pane_names_running(
+        &self,
+        host_alias: &str,
+        agent: &str,
+    ) -> Result<Vec<String>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT tmux_name FROM sessions \
+             WHERE host_alias = ?1 AND agent = ?2 AND kind != 'shell' \
+             ORDER BY tmux_name",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![host_alias, agent], |r| r.get(0))?;
+        rows.collect()
+    }
+
     /// Mark a session as a review of `reviews_session_id` (or back to 'work' with
     /// None). Write-once at spawn_review time. Reconcile never touches these
     /// columns — they survive re-probe because upsert_session's ON CONFLICT clause
     /// omits them.
+    ///
+    /// `agent` (migration 121) follows a move into or out of `shell`: a
+    /// shell session runs no agent, and a session that stops being a shell
+    /// runs Claude Code, the only agent fleet launches today. Any other
+    /// kind change leaves the agent alone.
     pub fn set_session_kind(
         &self,
         id: i64,
@@ -647,7 +878,10 @@ impl Store {
         reviews_session_id: Option<i64>,
     ) -> Result<(), rusqlite::Error> {
         self.conn.execute(
-            "UPDATE sessions SET kind = ?1, reviews_session_id = ?2 WHERE id = ?3",
+            "UPDATE sessions SET kind = ?1, reviews_session_id = ?2, \
+             agent = CASE WHEN ?1 = 'shell' THEN 'shell' \
+                          WHEN agent = 'shell' THEN 'claude' ELSE agent END \
+             WHERE id = ?3",
             rusqlite::params![kind, reviews_session_id, id],
         )?;
         // A review inherits the reviewed session's primary work (M2.2).
@@ -677,6 +911,108 @@ impl Store {
             ))?
             .query_row(rusqlite::params![host_alias, tmux_name], map_session_row)
             .optional()
+    }
+
+    /// Any LOST row named `tmux_name` on `host_alias` that belongs to somebody
+    /// other than `person` (multi-user M1, T5).
+    ///
+    /// The hole this closes: `reject_lost_session_name` refuses only a lost row
+    /// with a `claude_session_id` ([`Self::lost_resumable_session_named`]),
+    /// because that is the one a restore could bring back. A lost row WITHOUT
+    /// one — a shell session, a work session that never bound a conversation —
+    /// is not refused, and reconcile's `ON CONFLICT DO UPDATE` revives it with
+    /// its `owner_person_id` intact. So person B starting a session under a
+    /// tmux name person A once used would come up owned by, and readable to, A:
+    /// DoD 7 broken by a live code path rather than by the migration.
+    ///
+    /// `person` is an `Option` because a caller may have none (a per-host
+    /// token, a pre-M1 device), and the SQL answers fail-closed for that case:
+    /// `owner_person_id IS NOT NULL AND owner_person_id IS NOT ?3` with a NULL
+    /// `?3` matches every OWNED lost row, so a person-less caller is refused
+    /// by all of them and inherits none. (`IS NOT` and not `!=`: SQL's `<>`
+    /// against NULL is NULL, which `WHERE` drops — the row would be let
+    /// through.) An unowned lost row matches nothing here and keeps its
+    /// existing behaviour: it is revived, owned by nobody, which is what
+    /// `unclaimed` is for.
+    pub fn lost_session_named_owned_by_other(
+        &self,
+        host_alias: &str,
+        tmux_name: &str,
+        person: Option<i64>,
+    ) -> rusqlite::Result<Option<SessionRow>> {
+        self.conn
+            .prepare_cached(&format!(
+                "SELECT {SESSION_COLUMNS} FROM sessions
+                 WHERE host_alias=?1 AND tmux_name=?2
+                   AND lost_at IS NOT NULL
+                   AND owner_person_id IS NOT NULL
+                   AND owner_person_id IS NOT ?3"
+            ))?
+            .query_row(
+                rusqlite::params![host_alias, tmux_name, person],
+                map_session_row,
+            )
+            .optional()
+    }
+
+    /// Stamp `owner` on session `session_id` — but only while nobody owns it.
+    ///
+    /// **The one mechanism that stamps an owner** (T5 and its review): the
+    /// create path calls this once the row exists, so the row a reconcile
+    /// pass inserted `unclaimed` — or one a `move_session` or a
+    /// `spawn_review` inherits an owner for — is the owner's by the time the
+    /// create path returns it. It is keyed on the ROW ID, which is why it
+    /// works where the deleted name-keyed reservation could not: an id names
+    /// one row that already exists, a tmux name names whatever is reused
+    /// under it next.
+    ///
+    /// `Ok(true)` when this call claimed the row, `Ok(false)` when there was
+    /// nothing to do: either `owner` is `None` (no person to attribute it to —
+    /// the row stays `unclaimed`, which is the answer and not a failure), or
+    /// the row is already owned by exactly that person (a `move_session` whose
+    /// target row already carries the source's owner, a re-entered claim).
+    ///
+    /// `E_FORBIDDEN` when the row is owned by someone ELSE. That is never a
+    /// benign outcome: it means the caller is about to hand back, as the
+    /// session it just created, a row that belongs to another person. Refusing
+    /// is what makes the caller's `?` a real guard — it never re-owns, and it
+    /// never lets a create path return somebody else's session either.
+    /// `E_NOTFOUND` when the row is gone.
+    pub fn claim_if_unclaimed(
+        &self,
+        session_id: i64,
+        owner: Option<i64>,
+    ) -> Result<bool, crate::ipc_error::IpcError> {
+        use crate::ipc_error::{codes, IpcError};
+        let Some(owner) = owner else {
+            return Ok(false);
+        };
+        // The claim, as one statement whose `WHERE` is the rule: an owned row
+        // is not matched, so there is no window between checking and writing.
+        let claimed = self.conn.execute(
+            "UPDATE sessions SET owner_person_id = ?2, visibility = 'private' \
+              WHERE id = ?1 AND owner_person_id IS NULL",
+            rusqlite::params![session_id, owner],
+        )?;
+        if claimed > 0 {
+            self.emit_session(session_id)?;
+            return Ok(true);
+        }
+        match self.get_session_by_id(session_id)? {
+            None => Err(IpcError::new(
+                codes::E_NOTFOUND,
+                format!("session {session_id} is gone; nothing to claim"),
+            )),
+            // Already this person's — the upsert got there first.
+            Some(row) if row.owner_person_id == Some(owner) => Ok(false),
+            Some(_) => Err(IpcError::new(
+                codes::E_FORBIDDEN,
+                format!(
+                    "session {session_id} already belongs to another person; \
+                     ownership is never transferred by a create path"
+                ),
+            )),
+        }
     }
 
     /// The session on `host_alias` (live or lost) holding Claude conversation
@@ -712,24 +1048,92 @@ impl Store {
         Ok(())
     }
 
-    /// The `claude --model` / `--effort` a session launches with
-    /// (`sessions.launch_model` / `effort_level`); `(None, None)` for a
-    /// missing row. Unvalidated: callers pass them to
-    /// `tmux::ClaudeLaunch::checked`.
+    /// Who a Claude CONVERSATION belonged to the first time a session bound
+    /// it to an owner (`conversation_owners`, migration 099); `None` for a
+    /// conversation no owned session ever held.
+    ///
+    /// The point of the table is that this answer outlives the session.
+    /// `new_session { resume_claude_session_id }` resurrects a transcript
+    /// precisely when the row is gone — `Store::delete_session` deletes it
+    /// outright and `conversations` cascades with it — so a check against
+    /// live or lost rows cannot close the takeover (spec §5.2). Two triggers
+    /// on `sessions` fill the record, so no writer of `claude_session_id` can
+    /// skip it, and they `INSERT OR IGNORE`: the FIRST owner wins, and a
+    /// later re-attribution of the session cannot rewrite history.
+    ///
+    /// NOT the answer to "who owns this session": that is
+    /// `SessionRow::owner_person_id`, read from the live row.
+    pub fn conversation_owner(&self, claude_session_id: &str) -> Result<Option<i64>> {
+        self.conn
+            .query_row(
+                "SELECT owner_person_id FROM conversation_owners \
+                 WHERE claude_session_id = ?1",
+                [claude_session_id],
+                |r| r.get(0),
+            )
+            .optional()
+    }
+
+    /// The `claude --model` / `--effort` / credential profile a session
+    /// launches with (`sessions.launch_model` / `effort_level` /
+    /// `claude_profile`); all `None` for a missing row. Unvalidated: callers
+    /// pass them to `tmux::ClaudeLaunch::checked`.
+    #[allow(clippy::type_complexity)]
     pub fn session_launch(
         &self,
         id: i64,
-    ) -> Result<(Option<String>, Option<String>), rusqlite::Error> {
+    ) -> Result<(Option<String>, Option<String>, Option<String>), rusqlite::Error> {
         use rusqlite::OptionalExtension;
         Ok(self
             .conn
             .query_row(
-                "SELECT launch_model, effort_level FROM sessions WHERE id = ?1",
+                "SELECT launch_model, effort_level, claude_profile FROM sessions WHERE id = ?1",
                 [id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?
-            .unwrap_or((None, None)))
+            .unwrap_or((None, None, None)))
+    }
+
+    /// Record the credential profile a session runs under (`None` = the
+    /// host's own login). A change also drops the session's account link:
+    /// the account it recorded belonged to the login it is leaving, and
+    /// reconcile only ever fills an empty link (a profile session's from
+    /// nothing yet, a host-login session's from the host). `claude_profile`
+    /// is on the row (the sidebar shows it), so this emits `session_updated`.
+    pub fn set_session_profile(
+        &self,
+        id: i64,
+        profile: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
+        let n = self.conn.execute(
+            "UPDATE sessions SET claude_profile = ?1, account_uuid = NULL \
+             WHERE id = ?2 AND claude_profile IS NOT ?1",
+            rusqlite::params![profile, id],
+        )?;
+        if n > 0 {
+            self.emit_session(id)?;
+        }
+        Ok(())
+    }
+
+    /// Drop the account link of a session on the HOST's own login
+    /// (`claude_profile IS NULL`), after its `claude` was relaunched. A
+    /// relaunched `claude` reads whatever login the host holds now (a `/login`
+    /// as another account since the pane started moves it), while reconcile
+    /// keeps an existing link forever; an empty one it fills from the host's
+    /// current account on the next pass. A profile session is left alone: its
+    /// link follows the profile's login. Emits `session_updated` on a change.
+    pub fn clear_host_login_account(&self, id: i64) -> Result<(), rusqlite::Error> {
+        let n = self.conn.execute(
+            "UPDATE sessions SET account_uuid = NULL \
+             WHERE id = ?1 AND claude_profile IS NULL AND account_uuid IS NOT NULL",
+            [id],
+        )?;
+        if n > 0 {
+            self.emit_session(id)?;
+        }
+        Ok(())
     }
 
     /// Record the model a session launches with (`None` = the host's
@@ -990,6 +1394,29 @@ impl Store {
         fetch_session_by_id(&self.conn, id)
     }
 
+    /// Announce every live session on `account_uuid` again, unchanged, so
+    /// the hub re-stamps their derived `needs_attention` after the account
+    /// moved into or out of a limit or a lost login (review r05 F9). A dead
+    /// row (ghost or lost) and a shell or external one never carry an
+    /// account `Blocked` reason, so they are left out. Returns how many.
+    pub fn reemit_live_sessions_on_account(
+        &self,
+        account_uuid: &str,
+    ) -> Result<usize, rusqlite::Error> {
+        let ids: Vec<i64> = self
+            .conn
+            .prepare_cached(
+                "SELECT id FROM sessions WHERE account_uuid = ?1 AND status != 'ghost' \
+                 AND lost_at IS NULL AND kind NOT IN ('shell', 'external') ORDER BY id",
+            )?
+            .query_map([account_uuid], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        for &id in &ids {
+            self.emit_session(id)?;
+        }
+        Ok(ids.len())
+    }
+
     /// Re-read `id` after a write and announce it: `session_updated` when
     /// the row exists, nothing when it is gone. Returns the row.
     pub(super) fn emit_session(&self, id: i64) -> Result<Option<SessionRow>, rusqlite::Error> {
@@ -1034,6 +1461,17 @@ impl Store {
     /// value once — a re-create keeps the original start. Emits
     /// `session_updated` so the sidebar's elapsed label does not wait for a
     /// re-list.
+    /// Put session `id` in project `project_id` (Adopt into, step 4.12).
+    /// The worktree it named belonged to its old project, so it is cleared.
+    pub fn set_session_project(&self, id: i64, project_id: i64) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE sessions SET project_id=?1, worktree_id=NULL WHERE id=?2",
+            rusqlite::params![project_id, id],
+        )?;
+        self.emit_session(id)?;
+        Ok(())
+    }
+
     pub fn set_started_at(&self, id: i64, at: i64) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "UPDATE sessions SET started_at=COALESCE(started_at, ?1) WHERE id=?2",
@@ -1082,6 +1520,23 @@ impl Store {
             .map(|n| n as u32)
     }
 
+    /// The `playbook_applied` details of session `id` since `since`, for
+    /// the week's playbook counts (`service::health::playbooks_since`).
+    /// Read through the `(session_id, at)` index.
+    pub fn playbook_details_since(
+        &self,
+        id: i64,
+        since: i64,
+    ) -> Result<Vec<String>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT detail FROM session_events \
+             WHERE session_id = ?1 AND at >= ?2 AND kind = 'playbook_applied' \
+               AND detail IS NOT NULL",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![id, since], |r| r.get::<_, String>(0))?;
+        rows.collect()
+    }
+
     /// Carry the row `(host_alias, old)` over to `new` after fleet renamed its
     /// tmux session (`rename_session`). Returns the renamed row, or `None`
     /// when no row held `old`.
@@ -1121,12 +1576,19 @@ impl Store {
         if old == new {
             return Ok(self.get_session(old, host_alias)?);
         }
-        if let Some(lost) = self.lost_resumable_session_named(host_alias, new)? {
+        // Multi-user M1 (T10): no row id in the message, for the reason
+        // `sessions::lifecycle::reject_lost_session_name` gives — `new` is
+        // the caller's own argument and the advice needs no id, while the
+        // id named another person's lost row.
+        if self
+            .lost_resumable_session_named(host_alias, new)?
+            .is_some()
+        {
             return Err(crate::ipc_error::IpcError::new(
                 crate::ipc_error::codes::E_EXISTS,
                 format!(
-                    "{new} belongs to a lost session (id {}); restore it with restore_host_sessions or dismiss it first",
-                    lost.id
+                    "{new} belongs to a lost session; restore it with \
+                     restore_host_sessions or dismiss it first"
                 ),
             ));
         }
@@ -1138,6 +1600,9 @@ impl Store {
                 |r| r.get(0),
             )
             .optional()?;
+        // The ghost's facts, read while it is still there: the frame that
+        // announces its death is fenced by them (see `killed_payloads`).
+        let stale_killed = killed_payloads(&tx, stale.as_slice())?;
         if let Some(id) = stale {
             // A dead ghost gives way: what `delete_session` does, inside
             // this transaction (its event is emitted after the commit).
@@ -1161,7 +1626,7 @@ impl Store {
             )
             .optional()?;
         tx.commit()?;
-        if let Some(gone) = stale {
+        for gone in stale_killed {
             self.bus.session_killed(gone);
         }
         self.note_kill(host_alias, old, now);
@@ -1186,7 +1651,15 @@ impl Store {
     /// is tombstoned instead; `service/gc.rs` sweeps the mail after the
     /// retention window, and a move re-points the participant BEFORE this
     /// runs, so there is nothing here left to retire.
+    ///
+    /// `session_grants` (migration 100) is NOT deleted here and must not be:
+    /// it is `REFERENCES sessions(id) ON DELETE CASCADE`, so it goes with the
+    /// row by itself — which matters for the same id-reuse reason as the
+    /// events above, and is pinned by
+    /// `store/session_grants.rs::deleting_a_session_cascades_its_grants_and_a_reused_rowid_inherits_none`.
     pub fn delete_session(&self, id: i64) -> Result<(), rusqlite::Error> {
+        // Before the delete: afterwards there is nothing to read.
+        let killed = self.killed_payload(id);
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
             "DELETE FROM session_events WHERE session_id=?1",
@@ -1199,7 +1672,7 @@ impl Store {
         )?;
         tx.execute("DELETE FROM sessions WHERE id=?1", rusqlite::params![id])?;
         tx.commit()?;
-        self.bus.session_killed(id);
+        self.bus.session_killed(killed);
         Ok(())
     }
 
@@ -1233,7 +1706,10 @@ impl Store {
         };
 
         for id in &ids_to_delete {
-            self.bus.session_killed(*id);
+            // The rows are already gone here (`DELETE ... RETURNING`), so
+            // these frames carry no facts — a test-only path, and the
+            // fence's fail-closed answer is the right one for it.
+            self.bus.session_killed((*id).into());
         }
         Ok(ids_to_delete.len())
     }
@@ -1287,7 +1763,8 @@ impl Store {
                 "UPDATE sessions SET claude_status = 'idle', turn_seq = turn_seq + 1, \
                      last_stop_at = ?2, last_turn_at = ?2, last_hook_at = ?2, \
                      idle_since = COALESCE(idle_since, ?2), pending_input = NULL, \
-                     stale_working_at = NULL, stale_demoted_at = NULL{END_COMPACTING} \
+                     stale_working_at = NULL, stale_demoted_at = NULL, \
+                     turn_outcome = NULL{END_COMPACTING} \
                  WHERE id = ?1"
             ),
             rusqlite::params![row_id, now],
@@ -1329,7 +1806,8 @@ impl Store {
             &format!(
                 "UPDATE sessions SET claude_status = 'working', idle_since = NULL, \
                      last_hook_at = ?2, prompt_submit_seq = prompt_submit_seq + 1, \
-                     pending_input = NULL, stale_working_at = NULL, stale_demoted_at = NULL{END_COMPACTING} WHERE id = ?1"
+                     pending_input = NULL, stale_working_at = NULL, stale_demoted_at = NULL, \
+                     turn_outcome = NULL{END_COMPACTING} WHERE id = ?1"
             ),
             rusqlite::params![row_id, now_unix()],
         )?;
@@ -1381,7 +1859,7 @@ impl Store {
             "UPDATE sessions SET claude_status = 'stopped', last_turn_at = ?2, \
                  last_hook_at = ?2, idle_since = COALESCE(idle_since, ?2), \
                  stuck_kind = NULL, stuck_since = NULL, pending_input = NULL, \
-                 stale_working_at = NULL, stale_demoted_at = NULL \
+                 stale_working_at = NULL, stale_demoted_at = NULL, turn_outcome = NULL \
                  WHERE id = ?1",
             rusqlite::params![row_id, now],
         )?;
@@ -1412,7 +1890,8 @@ impl Store {
                 "UPDATE sessions SET claude_status = 'failed', turn_seq = turn_seq + 1, \
                      last_stop_at = ?2, last_turn_at = ?2, last_hook_at = ?2, \
                      idle_since = COALESCE(idle_since, ?2), pending_input = NULL, \
-                     stale_working_at = NULL, stale_demoted_at = NULL{END_COMPACTING} \
+                     stale_working_at = NULL, stale_demoted_at = NULL, \
+                     turn_outcome = NULL{END_COMPACTING} \
                  WHERE id = ?1"
             ),
             rusqlite::params![row_id, now],
@@ -1575,7 +2054,7 @@ impl Store {
         };
         let sql = format!(
             "UPDATE sessions SET claude_status = ?4, last_hook_at = ?2, \
-             stale_working_at = NULL, stale_demoted_at = NULL, \
+             stale_working_at = NULL, stale_demoted_at = NULL, turn_outcome = NULL, \
              idle_since = {idle}{stuck_sql} WHERE id = ?1",
             idle = idle_since_sql("?4", "?2"),
         );
@@ -1591,6 +2070,77 @@ impl Store {
         }
         if let Err(e) = self.insert_session_event(row_id, "status_change", Some(status)) {
             tracing::warn!(session_id = row_id, error = %e, "[hook] status_change not recorded");
+        }
+        Ok(self.emit_session(row_id)?)
+    }
+
+    /// One fresh read of a session's pane, written through: the dialog fast
+    /// path (`service::sessions::activity::sync_dialog`), so a permission
+    /// dialog's buttons appear, and an answered one's disappear, within a
+    /// second instead of on the next 20 s reconcile tick.
+    ///
+    /// Deliberately narrow — the tick stays the authority for everything
+    /// else:
+    ///  - a pane blocked on a parsed dialog sets `blocked` and that dialog;
+    ///  - a pane `working` / `idle` with no dialog clears `pending_input`,
+    ///    and moves a stored `blocked` to what the pane shows (an answer
+    ///    mid-turn fires no hook, so nothing else would);
+    ///  - anything else (a stuck pane, a blocked pane whose dialog did not
+    ///    parse, an unreadable status) and any `shell` or stuck row is left
+    ///    alone.
+    ///
+    /// Emits `session:updated` only when something changed.
+    pub fn record_dialog_probe(
+        &self,
+        row_id: i64,
+        status: Option<crate::service::pane_intel::ClaudeStatus>,
+        pending: Option<&crate::service::pane_intel::PendingInput>,
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        use crate::service::pane_intel::ClaudeStatus;
+        let Some(before) = self.get_session_by_id(row_id)? else {
+            return Ok(None);
+        };
+        if before.kind == "shell" || before.stuck_kind.is_some() {
+            return Ok(None);
+        }
+        let (new_status, new_pending) = match (status, pending) {
+            (Some(ClaudeStatus::Blocked), Some(p)) if !p.options.is_empty() => {
+                ("blocked".to_string(), Some(p))
+            }
+            (Some(st @ (ClaudeStatus::Working | ClaudeStatus::Idle)), None) => {
+                let st = if before.claude_status.as_deref() == Some("blocked") {
+                    st.as_str().to_string()
+                } else {
+                    match before.claude_status.clone() {
+                        Some(cur) => cur,
+                        None => return Ok(None),
+                    }
+                };
+                (st, None)
+            }
+            _ => return Ok(None),
+        };
+        if before.claude_status.as_deref() == Some(new_status.as_str())
+            && before.pending_input.as_ref() == new_pending
+        {
+            return Ok(None);
+        }
+        let now = now_unix();
+        let sql = format!(
+            "UPDATE sessions SET claude_status = ?2, pending_input = ?3, \
+             idle_since = {idle} WHERE id = ?1",
+            idle = idle_since_sql("?2", "?4"),
+        );
+        self.conn.execute(
+            &sql,
+            rusqlite::params![row_id, new_status, encode_pending_input(new_pending), now],
+        )?;
+        if before.claude_status.as_deref() != Some(new_status.as_str()) {
+            if let Err(e) =
+                self.insert_session_event(row_id, "status_change", Some(new_status.as_str()))
+            {
+                tracing::warn!(session_id = row_id, error = %e, "[dialog] status_change not recorded");
+            }
         }
         Ok(self.emit_session(row_id)?)
     }
@@ -1678,6 +2228,73 @@ impl Store {
             rusqlite::params![id, activity],
         )?;
         Ok(self.emit_session(id)?)
+    }
+
+    /// How many `unclaimed` sessions each host carries — the ONE thing an
+    /// out-of-scope caller ever learns about a row nobody can speak for
+    /// (multi-user M1, spec §4.3, *`'unclaimed'`: the safe holding state*).
+    ///
+    /// A host with none is **absent from the map**, not present with `0`:
+    /// `0` is a claim about the host, and the carrier
+    /// (`HostRow.unclaimed_sessions`) distinguishes "no unclaimed rows here"
+    /// from "you are not being told", so the two must not collapse on the
+    /// way out. `service::hosts::list_hosts` turns an absent entry into
+    /// `Some(0)` for a caller entitled to the count, and into `None` for
+    /// everyone else.
+    ///
+    /// Ghost rows are excluded, exactly as [`Self::find_session_by_pane`]
+    /// excludes them: a ghost is a row reconcile is about to delete, and a
+    /// badge that counts it sends someone looking for a session that is not
+    /// there. Lost rows are counted — they are real sessions whose host went
+    /// away, and they are claimable when it comes back.
+    pub fn unclaimed_counts_by_host(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, i64>, crate::ipc_error::IpcError> {
+        let mut st = self.conn.prepare(
+            "SELECT host_alias, COUNT(*) FROM sessions \
+              WHERE visibility = ?1 AND status != 'ghost' GROUP BY host_alias",
+        )?;
+        let rows = st.query_map(rusqlite::params![crate::store::VISIBILITY_UNCLAIMED], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Per host, what the N5 host placement weighs (redesign step 4.11): the
+    /// live sessions there (ghosts excluded, as [`Self::unclaimed_counts_by_host`]
+    /// does), the sessions `project_id` started there since `since`, and
+    /// whether the project has a worktree row there.
+    pub fn host_placement_counts(
+        &self,
+        project_id: i64,
+        since: i64,
+    ) -> Result<std::collections::BTreeMap<String, (i64, i64, bool)>, crate::ipc_error::IpcError>
+    {
+        let mut out: std::collections::BTreeMap<String, (i64, i64, bool)> = Default::default();
+        let mut st = self.conn.prepare(
+            "SELECT host_alias, SUM(status != 'ghost'), \
+                    SUM(project_id = ?1 AND created_at >= ?2) \
+               FROM sessions GROUP BY host_alias",
+        )?;
+        let rows = st.query_map(rusqlite::params![project_id, since], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                r.get::<_, Option<i64>>(2)?.unwrap_or(0),
+            ))
+        })?;
+        for row in rows {
+            let (host, live, recent) = row?;
+            out.insert(host, (live, recent, false));
+        }
+        let mut st = self
+            .conn
+            .prepare("SELECT DISTINCT host_alias FROM worktrees WHERE project_id = ?1")?;
+        let hosts = st.query_map([project_id], |r| r.get::<_, String>(0))?;
+        for h in hosts {
+            out.entry(h?).or_default().2 = true;
+        }
+        Ok(out)
     }
 
     /// The one live row on `host_alias` whose last-seen pane is `pane_id`.
@@ -1816,6 +2433,30 @@ impl Store {
     /// Emit `move:progress` (not a store row).
     pub fn bus_move_progress(&self, p: &crate::events::MoveProgress) {
         self.bus.move_progress(p);
+    }
+
+    /// Emit `start:progress` (not a store row): a `new_session` step
+    /// boundary (redesign step 5.13).
+    pub fn bus_start_progress(&self, p: &crate::events::StartProgress) {
+        self.bus.start_progress(p);
+    }
+
+    /// Emit `repair:progress` (not a store row): an explicit repair step
+    /// boundary for the caller that passed a `progress_token` (G7.3).
+    pub fn bus_repair_progress(&self, p: &crate::events::RepairProgress) {
+        self.bus.repair_progress(p);
+    }
+
+    /// Emit `confirm:changed` (not a store row): the confirmation queue
+    /// moved (redesign step 9.2).
+    pub fn bus_confirm_changed(&self) {
+        self.bus.confirm_changed();
+    }
+
+    /// Emit `handoff:changed` (redesign step 9.3): Control's agent handed
+    /// work on and a receipt was written.
+    pub fn bus_handoff_changed(&self) {
+        self.bus.handoff_changed();
     }
 }
 
@@ -1976,8 +2617,8 @@ mod tests {
 
     #[test]
     fn pending_input_round_trips_and_defaults_to_none() {
-        // The reconcile upsert (`Store::apply_host_reconcile`) is the only
-        // production writer of this column; seed it directly here with a
+        // The reconcile upsert (`Store::apply_host_reconcile`) and the dialog
+        // fast path (`record_dialog_probe`) write this column; seed it here with a
         // raw UPDATE, the same way `map_session_row`/`encode_pending_input`
         // read and write it, to check the round trip without a dedicated
         // single-row setter.
@@ -1992,7 +2633,10 @@ mod tests {
                 n: 1,
                 label: "Yes".into(),
                 selected: true,
+                checked: false,
             }],
+            multi: false,
+            detail: None,
         };
         s.conn_ref()
             .execute(
@@ -2022,6 +2666,94 @@ mod tests {
         )
         .unwrap();
         assert!(row.pending_input.is_none());
+    }
+
+    /// The dialog fast path: a fresh pane read writes the dialog through,
+    /// and a later read with no dialog clears it and leaves `blocked` —
+    /// without waiting for a tick, and only when something changed.
+    #[test]
+    fn record_dialog_probe_writes_a_dialog_and_clears_it_after_the_answer() {
+        use crate::service::pane_intel::ClaudeStatus;
+        let s = store();
+        let id = s
+            .upsert_session("a", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        let dialog = PendingInput {
+            kind: "permission".into(),
+            question: Some("Do you want to proceed?".into()),
+            options: vec![
+                PendingOption {
+                    n: 1,
+                    label: "Yes".into(),
+                    selected: true,
+                    checked: false,
+                },
+                PendingOption {
+                    n: 2,
+                    label: "No".into(),
+                    selected: false,
+                    checked: false,
+                },
+            ],
+            multi: false,
+            detail: Some("Bash(git push)".into()),
+        };
+        let row = s
+            .record_dialog_probe(id, Some(ClaudeStatus::Blocked), Some(&dialog))
+            .unwrap()
+            .expect("a change is announced");
+        assert_eq!(row.claude_status.as_deref(), Some("blocked"));
+        assert_eq!(row.pending_input.as_ref(), Some(&dialog));
+        // The same read again changes nothing and announces nothing.
+        assert!(s
+            .record_dialog_probe(id, Some(ClaudeStatus::Blocked), Some(&dialog))
+            .unwrap()
+            .is_none());
+        // A blocked pane whose dialog did not parse leaves the row alone.
+        assert!(s
+            .record_dialog_probe(id, Some(ClaudeStatus::Blocked), None)
+            .unwrap()
+            .is_none());
+        // Answered mid-turn: no hook fires, but the pane is working again.
+        let row = s
+            .record_dialog_probe(id, Some(ClaudeStatus::Working), None)
+            .unwrap()
+            .expect("the answered dialog leaves");
+        assert_eq!(row.claude_status.as_deref(), Some("working"));
+        assert_eq!(row.pending_input, None);
+    }
+
+    /// A stuck row or a shell is the tick's to judge, and a pane that is not
+    /// blocked never moves a status other than `blocked`.
+    #[test]
+    fn record_dialog_probe_leaves_stuck_shell_and_other_statuses_alone() {
+        use crate::service::pane_intel::ClaudeStatus;
+        let s = store();
+        let id = s
+            .upsert_session("a", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET claude_status = 'failed' WHERE id = ?1",
+                rusqlite::params![id],
+            )
+            .unwrap();
+        assert!(s
+            .record_dialog_probe(id, Some(ClaudeStatus::Idle), None)
+            .unwrap()
+            .is_none());
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET claude_status = 'blocked', stuck_kind = 'trust_prompt' WHERE id = ?1",
+                rusqlite::params![id],
+            )
+            .unwrap();
+        assert!(s
+            .record_dialog_probe(id, Some(ClaudeStatus::Working), None)
+            .unwrap()
+            .is_none());
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.claude_status.as_deref(), Some("blocked"));
     }
 
     #[test]
@@ -3333,6 +4065,40 @@ mod tests {
         assert_eq!(row.reviews_session_id, Some(src));
     }
 
+    /// Migration 121: a shell session runs no agent, and the agent follows a
+    /// kind change into and out of `shell` and survives a re-probe.
+    #[test]
+    fn the_agent_follows_a_move_into_and_out_of_shell() {
+        let store = Store::open_in_memory().expect("store");
+        store.upsert_host("alpha").unwrap();
+        let id = store
+            .upsert_session("s", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        let agent = || store.get_session_by_id(id).unwrap().unwrap().agent;
+        assert_eq!(agent(), AGENT_CLAUDE, "a discovered row runs Claude Code");
+        store.set_session_kind(id, "shell", None).unwrap();
+        assert_eq!(agent(), AGENT_SHELL);
+        store
+            .upsert_session("s", "alpha", None, None, 1, 2, "running", None)
+            .unwrap();
+        assert_eq!(agent(), AGENT_SHELL, "a re-probe keeps the agent");
+        store.set_session_kind(id, "work", None).unwrap();
+        assert_eq!(agent(), AGENT_CLAUDE);
+        // A kind change that does not touch shell leaves a stored agent be.
+        let before = store.get_session_by_id(id).unwrap().unwrap().row_version;
+        store.set_session_agent(id, AGENT_CODEX).unwrap();
+        let after = store.get_session_by_id(id).unwrap().unwrap().row_version;
+        assert!(after > before, "a client sees the agent change");
+        store.set_session_kind(id, "review", None).unwrap();
+        assert_eq!(agent(), AGENT_CODEX);
+        store
+            .upsert_session("s", "alpha", None, None, 1, 3, "running", None)
+            .unwrap();
+        assert_eq!(agent(), AGENT_CODEX, "a re-probe keeps a Codex row Codex");
+        // The column refuses a name migration 121 does not know.
+        assert!(store.set_session_agent(id, "gemini").is_err());
+    }
+
     #[test]
     fn claude_session_id_round_trips_and_defaults_none() {
         let s = Store::open_in_memory().unwrap();
@@ -4308,6 +5074,266 @@ mod tests {
         assert_eq!(
             s.get_session_by_id(id).unwrap().unwrap().started_at,
             Some(42)
+        );
+    }
+
+    /// Migration 099's conversation-owner record, the INSERT half: a session
+    /// row that arrives with both a `claude_session_id` and an owner is
+    /// recorded by `trg_conversation_owner_on_session_insert`, and the record
+    /// is written by a TRIGGER rather than by a call at each write site for
+    /// the reason 045 gives — `claude_session_id` has three writers today
+    /// and a fourth must not be able to skip it.
+    ///
+    /// `INSERT OR IGNORE` means the FIRST owner wins: a later
+    /// re-attribution of the session (a claim, a move, an operator's
+    /// correction) must not rewrite who the conversation belonged to, which
+    /// is the only question the resume gate asks.
+    #[test]
+    fn an_insert_of_a_row_with_a_claude_session_id_and_an_owner_records_a_conversation_owner() {
+        let s = store();
+        let ada = s.create_person("ada", None).unwrap().id;
+        let bob = s.create_person("bob", None).unwrap().id;
+        // A row that arrives owned, as T5's create path will write it.
+        s.conn
+            .execute(
+                "INSERT INTO sessions (tmux_name, host_alias, created_at, last_activity_at, \
+                                       status, claude_session_id, owner_person_id, visibility) \
+                 VALUES ('owned', 'local', 1, 1, 'running', 'conv-a', ?1, 'private')",
+                rusqlite::params![ada],
+            )
+            .unwrap();
+        assert_eq!(s.conversation_owner("conv-a").unwrap(), Some(ada));
+
+        // A row that arrives unowned records nothing — there is no owner to
+        // record, and `unclaimed` is not a person.
+        let later = seed(&s, "unowned");
+        s.set_claude_session_id(later, "conv-b").unwrap();
+        assert_eq!(s.conversation_owner("conv-b").unwrap(), None);
+
+        // …until it is owned, which the UPDATE trigger catches. Both orders
+        // of the two writes therefore end up recorded.
+        s.conn
+            .execute(
+                "UPDATE sessions SET owner_person_id = ?1, visibility = 'private' WHERE id = ?2",
+                rusqlite::params![bob, later],
+            )
+            .unwrap();
+        assert_eq!(s.conversation_owner("conv-b").unwrap(), Some(bob));
+
+        // First writer wins: re-attributing the session leaves the record.
+        s.conn
+            .execute(
+                "UPDATE sessions SET owner_person_id = ?1 WHERE id = ?2",
+                rusqlite::params![ada, later],
+            )
+            .unwrap();
+        assert_eq!(
+            s.conversation_owner("conv-b").unwrap(),
+            Some(bob),
+            "a later re-attribution must not rewrite the record"
+        );
+        assert_eq!(s.conversation_owner("never-seen").unwrap(), None);
+    }
+
+    /// `claim_if_unclaimed` (multi-user M1, T5) — the second half of the create
+    /// seam, and the one a create path hard-fails on.
+    ///
+    /// Four answers, and the two that are NOT errors are the interesting ones:
+    /// "no person to attribute it to" leaves the row `unclaimed`, and "already
+    /// this very person" is the ordinary case, because the reconcile upsert
+    /// usually claimed the row from the reservation before this ever runs.
+    #[test]
+    fn claim_if_unclaimed_claims_once_and_never_re_owns() {
+        let s = store();
+        let ada = s.create_person("ada", None).unwrap().id;
+        let bob = s.create_person("bob", None).unwrap().id;
+        let id = seed(&s, "fresh");
+        let before = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(before.owner_person_id, None);
+        assert_eq!(before.visibility, VISIBILITY_UNCLAIMED);
+
+        // No owner: nothing to do, and the row stays nobody's. Not an error —
+        // a per-host token's session legitimately has no person.
+        assert!(!s.claim_if_unclaimed(id, None).unwrap());
+        assert_eq!(
+            s.get_session_by_id(id).unwrap().unwrap().visibility,
+            VISIBILITY_UNCLAIMED
+        );
+
+        // The claim.
+        assert!(s.claim_if_unclaimed(id, Some(ada)).unwrap());
+        let owned = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(owned.owner_person_id, Some(ada));
+        assert_eq!(owned.visibility, VISIBILITY_PRIVATE);
+        assert!(
+            owned.row_version > before.row_version,
+            "an open client must learn the row is now private"
+        );
+
+        // Again, same person: no write, no error — this is what the create
+        // path sees once the upsert has claimed the row from the reservation.
+        assert!(!s.claim_if_unclaimed(id, Some(ada)).unwrap());
+        assert_eq!(
+            s.get_session_by_id(id).unwrap().unwrap().row_version,
+            owned.row_version,
+            "a no-op claim writes nothing"
+        );
+
+        // Somebody else: refused, loudly. A create path that got here is about
+        // to return another person's session as the one it just made.
+        let e = s
+            .claim_if_unclaimed(id, Some(bob))
+            .expect_err("never re-owned");
+        assert_eq!(e.code, crate::ipc_error::codes::E_FORBIDDEN);
+        assert_eq!(
+            s.get_session_by_id(id).unwrap().unwrap().owner_person_id,
+            Some(ada)
+        );
+
+        // A row that is gone is `E_NOTFOUND`, not a silent success.
+        s.delete_session(id).unwrap();
+        assert_eq!(
+            s.claim_if_unclaimed(id, Some(ada))
+                .expect_err("no row")
+                .code,
+            crate::ipc_error::codes::E_NOTFOUND
+        );
+        // …but with no owner to write there is still nothing to fail at.
+        assert!(!s.claim_if_unclaimed(id, None).unwrap());
+    }
+
+    /// `lost_session_named_owned_by_other` (multi-user M1, T5): the read behind
+    /// `reject_lost_session_name`'s second refusal.
+    ///
+    /// The row it exists for is the one the resumable guard misses — lost, with
+    /// NO `claude_session_id` — because reconcile's `ON CONFLICT DO UPDATE`
+    /// revives exactly that row with its old owner intact. The NULL handling is
+    /// the point: a caller who is nobody must be refused by every owned lost
+    /// row, not pass as its owner.
+    #[test]
+    fn a_lost_row_is_only_anothers_when_somebody_else_owns_it() {
+        let s = store();
+        let ada = s.create_person("ada", None).unwrap().id;
+        let bob = s.create_person("bob", None).unwrap().id;
+        // Ada's lost row, no conversation: invisible to the resumable guard.
+        let adas = seed(&s, "shared-name");
+        s.conn
+            .execute(
+                "UPDATE sessions SET owner_person_id = ?1, visibility = 'private' WHERE id = ?2",
+                rusqlite::params![ada, adas],
+            )
+            .unwrap();
+        s.mark_session_killed(adas, 100).unwrap().expect("ghosted");
+        assert!(
+            s.lost_resumable_session_named("local", "shared-name")
+                .unwrap()
+                .is_none(),
+            "the resumable guard does not see it — that is why this read exists"
+        );
+
+        let hit = |person| {
+            s.lost_session_named_owned_by_other("local", "shared-name", person)
+                .unwrap()
+                .map(|r| r.id)
+        };
+        assert_eq!(hit(Some(bob)), Some(adas), "it is not bob's to reuse");
+        assert_eq!(
+            hit(None),
+            Some(adas),
+            "a caller who is nobody is not the owner either — two NULLs must              never compare equal"
+        );
+        assert_eq!(
+            hit(Some(ada)),
+            None,
+            "ada's own lost row does not block her"
+        );
+
+        // An UNOWNED lost row blocks nobody: the row it revives is `unclaimed`,
+        // which is no one's, so there is nothing to inherit.
+        let nobodys = seed(&s, "free-name");
+        s.mark_session_killed(nobodys, 100)
+            .unwrap()
+            .expect("ghosted");
+        for person in [Some(ada), Some(bob), None] {
+            assert_eq!(
+                s.lost_session_named_owned_by_other("local", "free-name", person)
+                    .unwrap()
+                    .map(|r| r.id),
+                None
+            );
+        }
+        // A LIVE row of somebody else's is not this read's business either —
+        // tmux refuses a duplicate name long before the row would matter.
+        let live = seed(&s, "live-name");
+        s.conn
+            .execute(
+                "UPDATE sessions SET owner_person_id = ?1, visibility = 'private' WHERE id = ?2",
+                rusqlite::params![ada, live],
+            )
+            .unwrap();
+        assert!(s
+            .lost_session_named_owned_by_other("local", "live-name", Some(bob))
+            .unwrap()
+            .is_none());
+        // And another host's lost row is another host's problem.
+        s.upsert_host("other").unwrap();
+        assert!(s
+            .lost_session_named_owned_by_other("other", "shared-name", Some(bob))
+            .unwrap()
+            .is_none());
+    }
+
+    /// The record's whole purpose: it outlives the session.
+    ///
+    /// `new_session { resume_claude_session_id }` resurrects a transcript
+    /// precisely when the row is GONE, so the gate T10 builds cannot read
+    /// live rows. `delete_session` deletes the `sessions` row outright and
+    /// `conversations` is `ON DELETE CASCADE` on it (037), so both of the
+    /// places a `claude_session_id` otherwise lives disappear with the
+    /// session. `conversation_owners` has no foreign key to either table, and
+    /// this is the test that would fail if one were added.
+    #[test]
+    fn a_reaped_sessions_conversation_owner_survives_delete_session() {
+        let s = store();
+        let ada = s.create_person("ada", None).unwrap().id;
+        let id = seed(&s, "doomed");
+        s.set_claude_session_id(id, "conv-gone").unwrap();
+        s.conn
+            .execute(
+                "UPDATE sessions SET owner_person_id = ?1, visibility = 'private' WHERE id = ?2",
+                rusqlite::params![ada, id],
+            )
+            .unwrap();
+        assert_eq!(s.conversation_owner("conv-gone").unwrap(), Some(ada));
+        let conversations: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM conversations WHERE session_id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(conversations > 0, "the rebind opened one");
+
+        s.delete_session(id).unwrap();
+        let count = |sql: &str| -> i64 { s.conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(
+            count(&format!("SELECT COUNT(*) FROM sessions WHERE id = {id}")),
+            0,
+            "the row is gone, not lost"
+        );
+        assert_eq!(
+            count(
+                "SELECT COUNT(*) FROM conversations \
+                 WHERE claude_session_id = 'conv-gone'"
+            ),
+            0,
+            "and its conversation cascaded away with it"
+        );
+        assert_eq!(
+            s.conversation_owner("conv-gone").unwrap(),
+            Some(ada),
+            "the owner record is what is left to refuse a resume with"
         );
     }
 }

@@ -40,6 +40,10 @@ is the only view, since they have no tmux pane to show a Terminal for.
   waiting for Claude…* right after you send, and an amber *Claude is waiting
   for you in the terminal* banner with an *Open terminal* button when the
   pane shows a permission or question dialog.
+- **Cards.** A task report (a `FLEET_TASK_DONE_…` line and its JSON) and
+  a `fleet-ui` block (a tutorial, a guide, a callout, facts, choices or a
+  form) are drawn as cards, not as code. A card that acts only fills the
+  composer. The format is [Chat blocks](chat-blocks.md).
 - **File paths.** `src/lib/foo.ts:42` in a reply is a link: it opens the
   Files tab on that file, at that line.
 - **↓ N new.** When you have scrolled up and more content lands, the button

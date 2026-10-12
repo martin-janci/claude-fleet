@@ -44,6 +44,8 @@ fn fx_with(source: Option<&str>, write_back: bool) -> Fx {
             &TrackerSettings {
                 write_back: WriteBack {
                     pr_remote_link: true,
+                    comments: false,
+                    create_tickets: false,
                 },
                 ..Default::default()
             },
@@ -235,6 +237,8 @@ fn write_back_is_a_jira_setting() {
     let wb = TrackerSettings {
         write_back: WriteBack {
             pr_remote_link: true,
+            comments: false,
+            create_tickets: false,
         },
         ..Default::default()
     };
@@ -251,6 +255,149 @@ fn write_back_is_a_jira_setting() {
     // Off serialises to nothing: an older reader sees the same JSON.
     let off = serde_json::to_string(&TrackerSettings::default()).unwrap();
     assert_eq!(off, "{}");
+    // Posting comments is every provider's.
+    let comments = TrackerSettings {
+        write_back: WriteBack {
+            comments: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    for p in ["jira", "jira_dc", "github", "asana", "linear"] {
+        assert!(
+            crate::store::validate_tracker_settings(p, comments.clone()).is_ok(),
+            "{p}"
+        );
+    }
+}
+
+// ── comments ────────────────────────────────────────────────────────────
+
+/// [`fx`]'s Jira with a fleet comment on ABC-1 queued for posting; the
+/// comments setting as `on`.
+fn with_comment_post(on: bool) -> (Fx, i64) {
+    let f = fx("manual", false);
+    let mut st = f.s.require_tracker(f.tracker).unwrap().settings;
+    st.write_back.comments = true;
+    f.s.set_tracker_settings(f.tracker, &st).unwrap();
+    let c =
+        f.s.add_comment_posting(
+            f.item,
+            "desktop",
+            None,
+            "Shipped",
+            Some(&crate::store::CommentPost {
+                tracker_id: f.tracker,
+                item_key: "ABC-1",
+                external_id: Some("10001"),
+                tracker_org_id: None,
+                signature: "— via fleet",
+            }),
+        )
+        .unwrap();
+    st.write_back.comments = on;
+    f.s.set_tracker_settings(f.tracker, &st).unwrap();
+    (f, c.id)
+}
+
+#[tokio::test]
+async fn a_comment_post_waits_while_the_setting_is_off_and_sends_once_when_on() {
+    let (f, comment) = with_comment_post(false);
+    let t = f.s.require_tracker(f.tracker).unwrap();
+    let store = Mutex::new(f.s);
+    let fake = FakeTransport::new();
+    fake.once(
+        Method::Post,
+        "/rest/api/3/issue/ABC-1/comment",
+        Ok(Response::json(201, &serde_json::json!({ "id": "777" }))),
+    );
+    let r = drain(&t, &cloud(&fake), &store, crate::store::now_unix() + 1).await;
+    assert_eq!(r, DrainReport::default());
+    assert!(fake.requests().is_empty());
+    assert_eq!(outbox(&store.lock().unwrap())[0].state, "pending");
+
+    let mut t = t;
+    t.settings.write_back.comments = true;
+    let r = drain(&t, &cloud(&fake), &store, crate::store::now_unix() + 1).await;
+    assert_eq!(r.sent, 1);
+    let sent = fake.requests();
+    assert_eq!(sent.len(), 1);
+    let body = sent[0].json_body().unwrap();
+    assert_eq!(body["body"]["type"], "doc");
+    assert_eq!(body["body"]["content"][0]["content"][0]["text"], "Shipped");
+    assert_eq!(
+        body["body"]["content"][1]["content"][0]["text"],
+        "— via fleet"
+    );
+    {
+        let s = store.lock().unwrap();
+        let row = &outbox(&s)[0];
+        assert_eq!(row.state, "done");
+        assert_eq!(row.remote_id.as_deref(), Some("777"));
+        assert_eq!(
+            row.remote_url.as_deref(),
+            Some("https://acme.atlassian.net/browse/ABC-1?focusedCommentId=777")
+        );
+        let post = s
+            .get_comment(comment)
+            .unwrap()
+            .unwrap()
+            .tracker_post
+            .unwrap();
+        assert_eq!(post.state, "done");
+    }
+    // Sent once: a comment is not idempotent at the tracker.
+    let r = drain(&t, &cloud(&fake), &store, crate::store::now_unix() + 1).await;
+    assert_eq!(r, DrainReport::default());
+    assert_eq!(fake.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn the_pr_link_setting_never_sends_a_comment_nor_the_comment_setting_a_link() {
+    // A PR link queued, only comments on: the link waits.
+    let f = fx("manual", true);
+    on_pr(&f.s, f.session, PR).unwrap();
+    let mut t = f.s.require_tracker(f.tracker).unwrap();
+    t.settings.write_back.pr_remote_link = false;
+    t.settings.write_back.comments = true;
+    let store = Mutex::new(f.s);
+    let fake = FakeTransport::new();
+    let r = drain(&t, &cloud(&fake), &store, crate::store::now_unix() + 1).await;
+    assert_eq!(r, DrainReport::default());
+    assert!(fake.requests().is_empty());
+
+    // A comment queued, only the PR link on: the comment waits.
+    let (f, _) = with_comment_post(false);
+    let mut t = f.s.require_tracker(f.tracker).unwrap();
+    t.settings.write_back.pr_remote_link = true;
+    let store = Mutex::new(f.s);
+    let r = drain(&t, &cloud(&fake), &store, crate::store::now_unix() + 1).await;
+    assert_eq!(r, DrainReport::default());
+    assert!(fake.requests().is_empty());
+}
+
+#[tokio::test]
+async fn a_refused_comment_post_gives_up_and_says_why_on_the_comment() {
+    let (f, comment) = with_comment_post(true);
+    let t = f.s.require_tracker(f.tracker).unwrap();
+    let store = Mutex::new(f.s);
+    let fake = FakeTransport::new();
+    fake.once(
+        Method::Post,
+        "/rest/api/3/issue/ABC-1/comment",
+        Ok(Response::json(403, &serde_json::json!({}))),
+    );
+    let r = drain(&t, &cloud(&fake), &store, crate::store::now_unix() + 1).await;
+    assert_eq!(r.given_up, 1);
+    let s = store.lock().unwrap();
+    let post = s
+        .get_comment(comment)
+        .unwrap()
+        .unwrap()
+        .tracker_post
+        .unwrap();
+    assert_eq!(post.state, "failed");
+    assert!(post.error.unwrap().contains("not permitted"));
 }
 
 // ── a PR that was there first ───────────────────────────────────────────

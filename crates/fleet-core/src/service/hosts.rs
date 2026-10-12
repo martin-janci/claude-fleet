@@ -47,9 +47,50 @@ pub async fn discover_hosts_fresh() -> Result<Vec<SshHost>, IpcError> {
         .map_err(|e| IpcError::new(codes::E_INTERNAL, format!("discover hosts: {e}")))?
 }
 
-pub fn list_hosts(store: &Mutex<Store>) -> Result<Vec<HostRow>, IpcError> {
+/// Every registered host, each carrying the one thing M1 ever says about a
+/// session nobody can speak for: [`HostRow::unclaimed_sessions`].
+///
+/// **Who gets the count is R5-d, and it is a two-way split, not a scale.**
+///
+/// * the hub's own reader ([`ViewScope::internal`] — the standalone
+///   desktop, which is one person's machine by construction) and the ONE
+///   live person on a single-person hub: the count;
+/// * everybody else, the master on a hub with two people included: `None`.
+///
+/// `None`, never `Some(0)`: `0` is a claim about the host, and a caller who
+/// may not know is not entitled to it. On a hub with more than one person
+/// the count reaches a human only through `fleet-hub session unclaimed` —
+/// shell access on the hub machine — and through no API surface at all.
+/// Org administration phase D defined who administers a host, and the
+/// count follows it ([`ViewScope::sees_unclaimed_count`]): the hub's owner
+/// and the admins of the company that owns the hub on every host, an org's
+/// admins on its own hosts when the hub's owner switched that on.
+///
+/// The master is resolved to the hub's personal owner for this read like
+/// any other (`Caller::view_scope`), so on a hub with two people it is
+/// served the count as that owner, a host administrator — not because it
+/// is the master token.
+///
+/// [`ViewScope::internal`]: crate::service::view_scope::ViewScope::internal
+pub fn list_hosts(
+    store: &Mutex<Store>,
+    scope: &crate::service::view_scope::ViewScope,
+) -> Result<Vec<HostRow>, IpcError> {
     let s = lock(store)?;
-    s.list_hosts().map_err(IpcError::from)
+    let mut rows = s.list_hosts().map_err(IpcError::from)?;
+    if rows.iter().any(|h| scope.sees_unclaimed_count(h.org_id)) {
+        let counts = s.unclaimed_counts_by_host()?;
+        for h in &mut rows {
+            if !scope.sees_unclaimed_count(h.org_id) {
+                continue;
+            }
+            // Absent from the map is a real zero for a caller entitled to
+            // the answer — and stays `None` for everyone else, which is
+            // what the two values mean apart.
+            h.unclaimed_sessions = Some(counts.get(&h.alias).copied().unwrap_or(0));
+        }
+    }
+    Ok(rows)
 }
 
 /// The hosts a fleet-wide loop may touch: every non-hidden row, and `local`
@@ -145,7 +186,7 @@ pub fn list_accounts(store: &Mutex<Store>) -> Result<Vec<crate::store::AccountRo
     s.list_accounts().map_err(IpcError::from)
 }
 
-#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "AddHostParams")]
 pub struct AddHostArgs {
     /// Fleet alias: letters, digits, dashes.
@@ -187,6 +228,21 @@ pub async fn add_host(
     // arrives from the agent registry — through the router, which needs the
     // row to exist — on the first `probe_host` or reconcile pass after the
     // agent connects.
+    //
+    // Re-adding a host that is ALREADY an agent host changes nothing the
+    // agent registry has not already said (review r18 A6): its reachable,
+    // versions and account stay as the last probe left them, rather than
+    // reading offline until the next one.
+    if args.transport.as_deref() == Some("agent") {
+        let s = lock(store)?;
+        if s.get_host_row(&args.alias)?
+            .is_some_and(|h| h.transport == "agent")
+        {
+            s.insert_host(&args.alias, Some(&args.ssh_alias))?;
+            drop(s);
+            return list_one(store, &args.alias);
+        }
+    }
     let (reachable, claude_ver, tmux_ver, account) = if args.transport.as_deref() == Some("agent") {
         (false, None, None, None)
     } else {
@@ -206,10 +262,7 @@ pub async fn add_host(
             s.set_host_transport(&args.alias, t)?;
         }
         // Link account if probe found one
-        if let Some(acc) = account
-            .as_ref()
-            .and_then(|a| account_row_from(a, now_unix()))
-        {
+        if let Some(acc) = probed_account_row(&s, account.as_ref(), now_unix())? {
             s.upsert_account(&acc)?;
             s.set_host_account(&args.alias, Some(&acc.uuid))?;
         } else {
@@ -321,10 +374,7 @@ pub async fn probe_host(
     };
     {
         let s = lock(store)?;
-        if let Some(acc) = account
-            .as_ref()
-            .and_then(|a| account_row_from(a, now_unix()))
-        {
+        if let Some(acc) = probed_account_row(&s, account.as_ref(), now_unix())? {
             s.upsert_account(&acc)?;
             s.set_host_account(&args.alias, Some(&acc.uuid))?;
         } else {
@@ -402,9 +452,13 @@ pub fn hide_host(args: HideHostArgs, store: &Mutex<Store>) -> Result<HostRow, Ip
     list_one(store, &args.alias)
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "SetAccountNicknameParams")]
 pub struct SetAccountNicknameArgs {
+    /// Account uuid (list_accounts).
     pub uuid: String,
+    /// The name; empty or null clears.
+    #[serde(default)]
     pub nickname: Option<String>,
 }
 
@@ -438,17 +492,22 @@ async fn probe(
 }
 
 /// The `oauthAccount` section of the probe on its own: prints
-/// `~/.claude.json`'s `oauthAccount` as one line of compact JSON (via `jq`,
+/// `.claude.json`'s `oauthAccount` as one line of compact JSON (via `jq`,
 /// falling back to `python3`), or nothing when the file/tools are missing.
 /// Also run by itself every reconcile pass for each remote host
 /// (`RemoteTmux::read_oauth_account`) so an account switch on a remote host
 /// is picked up without a manual Re-probe. A macro rather than a `const` so
 /// `PROBE_SCRIPT` can `concat!` it. MUST be `quote`'d before it is handed to
 /// `bash -lc` over ssh.
+///
+/// The file is `$CLAUDE_CONFIG_DIR/.claude.json` when that variable is set
+/// (Claude Code keeps its whole config there, login included), else
+/// `$HOME/.claude.json` — the same rule `account_usage`'s script uses for
+/// `.credentials.json`, so the account and its usage come from one login.
 macro_rules! oauth_account_script {
     () => {
-        r#"( cat "$HOME/.claude.json" 2>/dev/null | jq -c .oauthAccount 2>/dev/null \
-  || python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps(d.get("oauthAccount") or {}))' "$HOME/.claude.json" 2>/dev/null \
+        r#"( cj="${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"; cat "$cj" 2>/dev/null | jq -c .oauthAccount 2>/dev/null \
+  || python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps(d.get("oauthAccount") or {}))' "$cj" 2>/dev/null \
   || true )"#
     };
 }
@@ -513,16 +572,49 @@ async fn probe_with_token(
         });
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let mut parts = stdout.split("---");
-    let tmux_line = parts.next().unwrap_or("").trim().to_string();
-    let claude_line = parts.next().unwrap_or("").trim().to_string();
-    let oauth_line = parts.next().unwrap_or("").trim().to_string();
+    let (tmux_line, claude_line, oauth_line) = probe_sections(&stdout);
     Ok((
         true,
         parse_claude_version(&claude_line),
         parse_tmux_version(&tmux_line),
         parse_oauth_account(&oauth_line),
     ))
+}
+
+/// [`PROBE_SCRIPT`]'s stdout as its three sections: the tmux line, the
+/// claude line and the account JSON. Sections end at a line that is exactly
+/// `---` — never at a `---` inside a value (an org named `Acme --- Labs`
+/// would cut the JSON) — and the version sections take their LAST matching
+/// line, since the script runs under `bash -lc` and a login banner prints
+/// ahead of `tmux -V`.
+fn probe_sections(stdout: &str) -> (String, String, String) {
+    let mut sections: Vec<Vec<&str>> = vec![Vec::new()];
+    for line in stdout.lines() {
+        if line.trim_end_matches('\r') == "---" && sections.len() < 3 {
+            sections.push(Vec::new());
+        } else if let Some(cur) = sections.last_mut() {
+            cur.push(line);
+        }
+    }
+    sections.resize(3, Vec::new());
+    let tmux = sections[0]
+        .iter()
+        .rev()
+        .map(|l| l.trim())
+        .find(|l| l.starts_with("tmux "))
+        .unwrap_or_default();
+    let claude = sections[1]
+        .iter()
+        .rev()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty())
+        .unwrap_or_default();
+    let oauth = sections[2].join("\n");
+    (
+        tmux.to_string(),
+        claude.to_string(),
+        oauth.trim().to_string(),
+    )
 }
 
 /// Lenient probe with an explicit cancellation token. Used by `probe_host`.
@@ -547,12 +639,32 @@ pub(crate) fn local_home_dir() -> std::path::PathBuf {
         .unwrap_or_else(std::env::temp_dir)
 }
 
-/// Thin wrapper around [`probe_local_in`] that resolves the real `$HOME`.
+/// The directory holding this machine's `.claude.json`: `CLAUDE_CONFIG_DIR`
+/// when this process has it (non-empty), else [`local_home_dir`]. The same
+/// rule as the remote [`OAUTH_ACCOUNT_SCRIPT`], so `local` reads the login a
+/// `claude` started from this environment would use.
+pub(crate) fn local_claude_json_dir() -> std::path::PathBuf {
+    claude_json_dir(&local_home_dir(), std::env::var_os("CLAUDE_CONFIG_DIR"))
+}
+
+/// Pure half of [`local_claude_json_dir`], for tests.
+fn claude_json_dir(
+    home: &std::path::Path,
+    config_dir: Option<std::ffi::OsString>,
+) -> std::path::PathBuf {
+    match config_dir {
+        Some(d) if !d.is_empty() => std::path::PathBuf::from(d),
+        _ => home.to_path_buf(),
+    }
+}
+
+/// Thin wrapper around [`probe_local_in`] that resolves the real directory
+/// holding `.claude.json` ([`local_claude_json_dir`]).
 /// Kept zero-arg so `tokio::task::spawn_blocking(probe_local)` (blocking
 /// std::process + fs I/O, off the async runtime worker thread) needs no
 /// closure allocation at its one production call site.
 fn probe_local() -> (bool, Option<String>, Option<String>, Option<OauthAccount>) {
-    probe_local_in(&local_home_dir())
+    probe_local_in(&local_claude_json_dir())
 }
 
 /// Probe the local machine's tmux/claude versions and `oauthAccount`, reading
@@ -602,7 +714,7 @@ pub(crate) fn probe_local_in(
 /// `sync_local_account`, the only caller that cares about the distinction —
 /// `probe_local_in` collapses `LoggedOut` and `Unavailable` to `None` since
 /// its caller (a manual "Re-probe") already treats "no account" uniformly.
-enum LocalAccountProbe {
+pub(crate) enum LocalAccountProbe {
     /// The file parsed and has an `oauthAccount` with a uuid.
     LoggedIn(OauthAccount),
     /// The file parsed but has no `oauthAccount` (or one without a uuid) —
@@ -613,7 +725,7 @@ enum LocalAccountProbe {
     Unavailable,
 }
 
-fn probe_local_account_in(home: &std::path::Path) -> LocalAccountProbe {
+pub(crate) fn probe_local_account_in(home: &std::path::Path) -> LocalAccountProbe {
     let Ok(contents) = std::fs::read_to_string(home.join(".claude.json")) else {
         return LocalAccountProbe::Unavailable;
     };
@@ -710,7 +822,7 @@ pub(crate) fn sync_host_account(
         .into_iter()
         .find(|h| h.alias == alias)
         .and_then(|h| h.account_uuid);
-    let Some(row) = account.and_then(|a| account_row_from(a, now_unix())) else {
+    let Some(row) = probed_account_row(s, account, now_unix())? else {
         return Ok(stored_uuid);
     };
     // Refresh the account row's fields (email/org/seat_tier) whether or not
@@ -720,6 +832,43 @@ pub(crate) fn sync_host_account(
         s.set_host_account(alias, Some(&row.uuid))?;
     }
     Ok(Some(row.uuid))
+}
+
+/// Record a host's login profiles from this pass's read and return each
+/// profile's account uuid by name. `Some(profiles)`: every logged-in
+/// profile's account row is upserted (so the Accounts view and the usage
+/// poll know it) and the host's list is replaced. `None` (could not tell):
+/// nothing is written and the stored list answers. Takes the store guard
+/// the caller already holds — never `.await`s.
+pub(crate) fn sync_host_profiles(
+    s: &Store,
+    alias: &str,
+    profiles: Option<&[crate::tmux::HostProfile]>,
+) -> Result<std::collections::HashMap<String, Option<String>>, IpcError> {
+    let rows: Vec<crate::store::HostProfileRow> = match profiles {
+        Some(profiles) => {
+            let now = now_unix();
+            let mut rows = Vec::with_capacity(profiles.len());
+            for p in profiles {
+                let account = probed_account_row(s, p.account.as_ref(), now)?;
+                if let Some(a) = account.as_ref() {
+                    s.upsert_account(a)?;
+                }
+                rows.push(crate::store::HostProfileRow {
+                    name: p.name.clone(),
+                    account_uuid: account.as_ref().map(|a| a.uuid.clone()),
+                    email: account.and_then(|a| a.email),
+                });
+            }
+            s.set_host_profiles(alias, &rows)?;
+            rows
+        }
+        None => s
+            .get_host_row(alias)?
+            .and_then(|h| h.claude_profiles)
+            .unwrap_or_default(),
+    };
+    Ok(rows.into_iter().map(|r| (r.name, r.account_uuid)).collect())
 }
 
 pub(crate) fn parse_tmux_version(line: &str) -> Option<String> {
@@ -791,6 +940,46 @@ fn account_row_from(a: &OauthAccount, now: i64) -> Option<crate::store::AccountR
     })
 }
 
+/// [`account_row_from`] over what the store already knows (review r16): a
+/// field this probe's `oauthAccount` leaves out keeps the stored value, so
+/// two logins of one account that report different fields do not rewrite
+/// the row (and emit `account:upserted`) back and forth on every probe.
+fn probed_account_row(
+    s: &Store,
+    a: Option<&OauthAccount>,
+    now: i64,
+) -> Result<Option<crate::store::AccountRow>, IpcError> {
+    let Some(mut row) = a.and_then(|a| account_row_from(a, now)) else {
+        return Ok(None);
+    };
+    if let Some(prior) = s.get_account_by_uuid(&row.uuid)? {
+        merge_known_account_fields(&mut row, a.and_then(|a| a.has_extra_usage_enabled), &prior);
+    }
+    Ok(Some(row))
+}
+
+/// PURE: fill `row`'s absent fields from `prior`. `extra` is the probe's
+/// own `hasExtraUsageEnabled`, `None` when it did not say.
+fn merge_known_account_fields(
+    row: &mut crate::store::AccountRow,
+    extra: Option<bool>,
+    prior: &crate::store::AccountRow,
+) {
+    let keep = |new: &mut Option<String>, old: &Option<String>| {
+        if new.is_none() {
+            new.clone_from(old);
+        }
+    };
+    keep(&mut row.email, &prior.email);
+    keep(&mut row.display_name, &prior.display_name);
+    keep(&mut row.organization_name, &prior.organization_name);
+    keep(&mut row.organization_uuid, &prior.organization_uuid);
+    keep(&mut row.seat_tier, &prior.seat_tier);
+    if extra.is_none() {
+        row.has_extra_usage = prior.has_extra_usage;
+    }
+}
+
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -828,7 +1017,20 @@ mod tests {
             agent_version: None,
             provisioned_at: None,
             provision_stale: false,
+            unclaimed_sessions: None,
             provision_warning: None,
+            auth_overrides: None,
+            claude_profiles: None,
+            cpu_count: None,
+            mem_total_kb: None,
+            boot_at: None,
+            latency_ms: None,
+            worktree_kb: None,
+            worktree_at: None,
+            agents_on_path: None,
+            last_reachable_at: None,
+            last_probe_error_code: None,
+            last_probe_error: None,
             harnesses: None,
         }
     }
@@ -901,6 +1103,29 @@ mod tests {
     }
 
     #[test]
+    fn probe_sections_split_on_whole_lines_and_skip_banners() {
+        let (t, c, o) = probe_sections(
+            "Welcome!\ntmux 3.4\n---\n2.1.144 (Claude Code)\n---\n\
+             {\"accountUuid\":\"acc-1\",\"displayName\":\"A --- B\"}\n",
+        );
+        assert_eq!(parse_tmux_version(&t).as_deref(), Some("3.4"));
+        assert_eq!(parse_claude_version(&c).as_deref(), Some("2.1.144"));
+        assert_eq!(
+            parse_oauth_account(&o).and_then(|a| a.uuid).as_deref(),
+            Some("acc-1")
+        );
+        // A host without tmux, claude or an account degrades to empty.
+        assert_eq!(
+            probe_sections("---\n---\n"),
+            (String::new(), String::new(), String::new())
+        );
+        assert_eq!(
+            probe_sections(""),
+            (String::new(), String::new(), String::new())
+        );
+    }
+
+    #[test]
     fn parse_tmux_version_extracts_version() {
         assert_eq!(parse_tmux_version("tmux 3.6a").as_deref(), Some("3.6a"));
         assert_eq!(parse_tmux_version("tmux 3.5"), Some("3.5".into()));
@@ -965,6 +1190,41 @@ mod tests {
                 .unwrap()
                 .has_extra_usage_enabled,
             None
+        );
+    }
+
+    /// Review r16: two logins of one account reporting different
+    /// `oauthAccount` fields do not rewrite each other's known values.
+    #[test]
+    fn an_absent_probe_field_keeps_the_stored_value() {
+        let s = Store::open_in_memory().unwrap();
+        let full = OauthAccount {
+            uuid: Some("acc".into()),
+            email: Some("a@x".into()),
+            organization_name: Some("Org".into()),
+            has_extra_usage_enabled: Some(true),
+            ..Default::default()
+        };
+        let row = probed_account_row(&s, Some(&full), 100).unwrap().unwrap();
+        s.upsert_account(&row).unwrap();
+        let sparse = OauthAccount {
+            uuid: Some("acc".into()),
+            email: Some("a@x".into()),
+            ..Default::default()
+        };
+        let row = probed_account_row(&s, Some(&sparse), 101).unwrap().unwrap();
+        assert_eq!(row.organization_name.as_deref(), Some("Org"));
+        assert!(row.has_extra_usage, "absent is not false");
+        let said_no = OauthAccount {
+            has_extra_usage_enabled: Some(false),
+            ..sparse
+        };
+        let row = probed_account_row(&s, Some(&said_no), 102)
+            .unwrap()
+            .unwrap();
+        assert!(
+            !row.has_extra_usage,
+            "a probe that says so still changes it"
         );
     }
 
@@ -1113,6 +1373,46 @@ mod tests {
             Some("mj-janci@users.noreply.github.com")
         );
         assert!(account.seat_tier.is_none());
+    }
+
+    #[test]
+    fn claude_json_dir_prefers_a_non_empty_config_dir() {
+        let home = std::path::Path::new("/home/u");
+        assert_eq!(claude_json_dir(home, None), home);
+        assert_eq!(claude_json_dir(home, Some("".into())), home);
+        assert_eq!(
+            claude_json_dir(home, Some("/home/u/.claude-work".into())),
+            std::path::Path::new("/home/u/.claude-work")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_oauth_account_script_reads_the_config_dir_login_when_set() {
+        // Two logins on one host: the default one under $HOME and a second
+        // under CLAUDE_CONFIG_DIR. The script must follow the variable.
+        let home = tempfile::tempdir().unwrap();
+        let work = home.path().join(".claude-work");
+        std::fs::create_dir(&work).unwrap();
+        write_claude_json(home.path(), r#"{"accountUuid":"personal"}"#);
+        write_claude_json(&work, r#"{"accountUuid":"work"}"#);
+        let run = |config_dir: Option<&std::path::Path>| {
+            let mut cmd = std::process::Command::new("bash");
+            cmd.args(["-c", OAUTH_ACCOUNT_SCRIPT])
+                .env("HOME", home.path())
+                .env_remove("CLAUDE_CONFIG_DIR");
+            if let Some(d) = config_dir {
+                cmd.env("CLAUDE_CONFIG_DIR", d);
+            }
+            let out = cmd.output().unwrap();
+            parse_oauth_account(&String::from_utf8_lossy(&out.stdout)).and_then(|a| a.uuid)
+        };
+        if run(None).is_none() {
+            // Neither jq nor python3 on this machine: nothing to compare.
+            return;
+        }
+        assert_eq!(run(None).as_deref(), Some("personal"));
+        assert_eq!(run(Some(&work)).as_deref(), Some("work"));
     }
 
     #[test]
@@ -1432,6 +1732,45 @@ mod tests {
             fake.calls()
         );
         assert!(host_row(&store, "gamma").is_some(), "the row is persisted");
+    }
+
+    /// Review r18 A6: re-adding a connected agent host as an agent host
+    /// keeps what its agent last reported, rather than reading offline (and
+    /// with no account) until the next probe.
+    #[tokio::test]
+    async fn re_adding_a_connected_agent_host_keeps_its_reachability_and_account() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let fake = fake_fleet();
+        let args = || AddHostArgs {
+            alias: "gamma".into(),
+            ssh_alias: "gamma.example".into(),
+            transport: Some("agent".into()),
+        };
+        add_host(args(), &store, &fake).await.unwrap();
+        {
+            let s = store.lock().unwrap();
+            s.update_host_probe("gamma", true, Some("2.1.0"), Some("3.4"), 7)
+                .unwrap();
+            s.upsert_account(&crate::store::AccountRow {
+                uuid: "acct-1".into(),
+                email: None,
+                display_name: None,
+                organization_name: None,
+                organization_uuid: None,
+                seat_tier: None,
+                last_seen_at: Some(7),
+                nickname: None,
+                has_extra_usage: false,
+            })
+            .unwrap();
+            s.set_host_account("gamma", Some("acct-1")).unwrap();
+        }
+        let row = add_host(args(), &store, &fake).await.unwrap();
+        assert!(row.reachable, "still connected");
+        assert_eq!(row.claude_version.as_deref(), Some("2.1.0"));
+        assert_eq!(row.account_uuid.as_deref(), Some("acct-1"));
+        assert_eq!(row.last_pinged_at, Some(7));
+        assert!(fake.calls().is_empty(), "never SSH-probed");
     }
 
     #[tokio::test]

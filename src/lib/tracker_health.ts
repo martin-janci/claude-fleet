@@ -6,7 +6,7 @@
 //
 // - the footer's one-line summary ("trackers: 1 failing · 3 undecided > 7 d");
 // - decision D22's Attention items: ONE per failing tracker, deduplicated by
-//   tracker id, "Reconnect Jira (acme)", linking to Settings → Work — or,
+//   tracker id, "Reconnect Jira (acme)", linking to Settings → Trackers — or,
 //   when the roll-up's `reason` says the sync is skipping items it cannot
 //   store (work graph M13.1, D25), "Sync skipping items — Jira (acme)": not
 //   a credential problem, so never "Reconnect".
@@ -14,6 +14,7 @@
 // Pure helpers plus one store; `TrackerAttention.svelte` polls and renders.
 import { setContextRedPct } from './attention';
 import { decideHealth } from './decide_health';
+import { orgBudgets } from './org_budget';
 import { writable } from 'svelte/store';
 import { healthCheck } from './ipc';
 
@@ -70,6 +71,7 @@ export async function refreshTrackersHealth(): Promise<void> {
   if (r.ok) {
     trackersHealth.set(r.value.trackers ?? null);
     decideHealth.set(r.value.decide ?? null);
+    orgBudgets.set(r.value.org_budgets ?? []);
     setContextRedPct(r.value.context_red_pct);
   }
 }
@@ -148,7 +150,7 @@ export interface TrackerAttentionItem {
   label: string;
   /** Tooltip: the error, the failures in a row, the org. */
   detail: string;
-  /** Where the item leads: Settings → Work. */
+  /** Where the item leads: Settings → Trackers. */
   section: typeof RECONNECT_SECTION;
 }
 
@@ -181,7 +183,7 @@ export function trackerAttentionItems(h: TrackersHealth | null | undefined): Tra
         if (n > 0) parts.push(`last sync failed ${n}×`);
       }
       if (t.org_name) parts.push(`org: ${t.org_name}`);
-      parts.push(skipping ? "Open Settings → Work for the sync's last pass" : 'Open Settings → Work to reconnect');
+      parts.push(skipping ? "Open Settings → Trackers for the sync's last pass" : 'Open Settings → Trackers to reconnect');
       return {
         key: `tracker-${t.tracker_id}`,
         tracker_id: t.tracker_id,

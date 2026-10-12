@@ -23,6 +23,8 @@
     now = Math.floor(Date.now() / 1000),
     locale,
     timeZone,
+    selectedAccount,
+    proposedHost = null,
   }: {
     active: string;
     /** DOM id for the "Host" caption that names the group. */
@@ -37,6 +39,15 @@
     now?: number;
     locale?: string;
     timeZone?: string;
+    /**
+     * The account the session will run on, when the caller has picked a
+     * login other than the host's own (New session's Account select).
+     * The selected host's line and warning then describe that account.
+     */
+    selectedAccount?: string | null;
+    /** The chip a proposal pre-selected, ringed `ai-pre` while it holds
+     *  (design-system/ai.md, review r15 F15). */
+    proposedHost?: string | null;
   } = $props();
 
   const visible = $derived($hosts.filter((h) => !h.hidden));
@@ -53,6 +64,7 @@
     <button
       type="button"
       class="btn btn--chip btn--toggle tag--mono host-pick"
+      class:ai-pre={proposedHost === h.alias && active === h.alias}
       aria-pressed={active === h.alias}
       data-alias={h.alias}
       disabled={disabled || (!h.reachable && h.alias !== 'local') || locked !== null}
@@ -80,14 +92,14 @@
       timeZone,
       host: selected,
       hosts: $hosts,
-      account: accountOf(selected.account_uuid),
-      snapshot: snapshotOf(selected.account_uuid),
+      account: accountOf(selectedAccount ?? selected.account_uuid),
+      snapshot: snapshotOf(selectedAccount ?? selected.account_uuid),
     }}
   />
 {/if}
 
 <style>
-  .label { font-size: 0.7rem; color: var(--fg-muted); text-transform: uppercase; }
+  .label { font-size: var(--text-2xs); color: var(--fg-muted); text-transform: uppercase; }
   .host-row {
     display: flex;
     gap: 0.3rem;
@@ -104,7 +116,7 @@
     flex-direction: column;
     align-items: flex-start;
     gap: 0.05rem;
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     text-align: left;
   }
 </style>

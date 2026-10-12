@@ -16,6 +16,12 @@ use std::time::Duration;
 /// surrounding script.
 const MAX_CLIPBOARD_BYTES: usize = 64 * 1024;
 
+/// The most the quoted script may come to. Quoting is what grows it: a `'`
+/// becomes `'\''` once for the script and again for the ssh argv, so 64 KiB
+/// of quotes reached ~1 MiB, past Linux's 128 KiB limit on ONE argument
+/// (`MAX_ARG_STRLEN`) — an `E2BIG` from exec, reported as a broken ssh.
+const MAX_SCRIPT_ARG_BYTES: usize = 100 * 1024;
+
 const SSH_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
@@ -40,10 +46,26 @@ pub async fn get_clipboard(
     crate::validate::host_alias(&args.host_alias)?;
     let script = get_clipboard_script();
     let out = run_bash(&args.host_alias, &script, ssh).await?;
+    // Checked first: past the cap `head` closes the pipe, and the helper's
+    // SIGPIPE is a failed status that is not the host's fault.
+    if out.stdout.len() > MAX_CLIPBOARD_BYTES {
+        return Err(too_big_to_read());
+    }
     if !out.status.success() {
         return Err(clipboard_err(&out.stderr));
     }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// The read side of the cap `set_clipboard` has always had. The clipboard can
+/// hold an image or a large paste (`wl-paste` with no `--type` hands over
+/// whatever is there), and all of it was read into memory and answered
+/// whole over MCP.
+fn too_big_to_read() -> IpcError {
+    IpcError::new(
+        codes::E_INVALID,
+        format!("the host's clipboard holds more than {MAX_CLIPBOARD_BYTES} bytes"),
+    )
 }
 
 /// Write `content` to the host's clipboard. `E_CLIPBOARD_UNAVAILABLE` if no
@@ -60,6 +82,13 @@ pub async fn set_clipboard(args: SetClipboardArgs, ssh: &Arc<SshClient>) -> Resu
         ));
     }
     let script = set_clipboard_script(&args.content);
+    if quote(&script).len() > MAX_SCRIPT_ARG_BYTES {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "clipboard content is too large once quoted for the shell; \
+             it holds many single quotes",
+        ));
+    }
     let out = run_bash(&args.host_alias, &script, ssh).await?;
     if !out.status.success() {
         return Err(clipboard_err(&out.stderr));
@@ -99,21 +128,28 @@ fn clipboard_err(stderr: &[u8]) -> IpcError {
 /// Wayland first (most modern desktops), then X11 (xclip beats xsel because
 /// it's more commonly preinstalled), then macOS. The sentinel `NO_CLIPBOARD_TOOL`
 /// is grep-matched in [`clipboard_err`] to produce a typed error code.
+///
+/// The helper's output goes through `head -c <cap + 1>`, so no more than one
+/// byte past the cap ever crosses the wire; `pipefail` keeps a helper that
+/// failed (no display) a failure rather than `head`'s success.
 fn get_clipboard_script() -> String {
-    "set -e\n\
-     if command -v wl-paste >/dev/null 2>&1; then\n\
-       wl-paste --no-newline\n\
-     elif command -v xclip >/dev/null 2>&1; then\n\
-       xclip -selection clipboard -o\n\
-     elif command -v xsel >/dev/null 2>&1; then\n\
-       xsel --clipboard --output\n\
-     elif command -v pbpaste >/dev/null 2>&1; then\n\
-       pbpaste\n\
-     else\n\
-       echo NO_CLIPBOARD_TOOL >&2\n\
-       exit 127\n\
-     fi\n"
-        .to_string()
+    format!(
+        "set -e\n\
+         set -o pipefail\n\
+         if command -v wl-paste >/dev/null 2>&1; then\n\
+           wl-paste --no-newline | head -c {n}\n\
+         elif command -v xclip >/dev/null 2>&1; then\n\
+           xclip -selection clipboard -o | head -c {n}\n\
+         elif command -v xsel >/dev/null 2>&1; then\n\
+           xsel --clipboard --output | head -c {n}\n\
+         elif command -v pbpaste >/dev/null 2>&1; then\n\
+           pbpaste | head -c {n}\n\
+         else\n\
+           echo NO_CLIPBOARD_TOOL >&2\n\
+           exit 127\n\
+         fi\n",
+        n = MAX_CLIPBOARD_BYTES + 1
+    )
 }
 
 fn set_clipboard_script(content: &str) -> String {
@@ -176,6 +212,49 @@ mod tests {
             SetClipboardArgs {
                 host_alias: "local".into(),
                 content: oversize,
+            },
+            &ssh,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "E_INVALID");
+    }
+
+    #[test]
+    fn the_read_is_capped_on_the_host() {
+        let s = get_clipboard_script();
+        assert_eq!(
+            s.matches(&format!("| head -c {}", MAX_CLIPBOARD_BYTES + 1))
+                .count(),
+            4,
+            "{s}"
+        );
+        assert!(s.contains("pipefail"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_capped_read_hands_over_one_byte_past_the_cap_at_most() {
+        // The script's pipeline shape, with `yes` standing in for a helper
+        // whose clipboard never ends.
+        let script = get_clipboard_script().replace("wl-paste --no-newline", "yes");
+        let script = script.replace("command -v wl-paste", "command -v yes");
+        let out = std::process::Command::new("bash")
+            .args(["-c", &script])
+            .output()
+            .unwrap();
+        assert_eq!(out.stdout.len(), MAX_CLIPBOARD_BYTES + 1);
+    }
+
+    #[tokio::test]
+    async fn set_clipboard_refuses_a_payload_that_quoting_grows_past_one_argument() {
+        // Under the byte cap, but every byte a quote.
+        let quotes = "'".repeat(MAX_CLIPBOARD_BYTES);
+        let ssh = Arc::new(SshClient::new());
+        let err = set_clipboard(
+            SetClipboardArgs {
+                host_alias: "h1".into(),
+                content: quotes,
             },
             &ssh,
         )

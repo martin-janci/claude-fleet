@@ -284,6 +284,8 @@ fn protection_needs_you_dialog() {
         kind: "permission".into(),
         question: None,
         options: vec![],
+        multi: false,
+        detail: None,
     });
     assert!(run(&[s], &cfg()).is_empty());
 }
@@ -821,6 +823,8 @@ fn idle_unlinked_exclusions_table() {
                     kind: "question".into(),
                     question: None,
                     options: vec![],
+                    multi: false,
+                    detail: None,
                 });
                 s
             }),
@@ -946,4 +950,96 @@ fn a_keep_holds_every_reason_of_a_live_session() {
         ..done_session(1)
     };
     assert!(run(&[kept], &cfg()).is_empty());
+}
+
+/// Org administration phase C: an org may set its own unlinked-idle window
+/// (`work.tidy_idle_unlinked_days` per org); the rest keep the fleet's.
+#[test]
+fn an_org_keeps_its_own_unlinked_idle_window() {
+    let in_org = |id: i64, org: Option<i64>| {
+        let mut s = unlinked(id, 9 * DAY);
+        s.row.org_id = org;
+        s
+    };
+    let sessions = [in_org(1, Some(7)), in_org(2, Some(8)), in_org(3, None)];
+    let cfg = TidyConfig {
+        org_unlinked_idle_secs: HashMap::from([(7, 30 * DAY), (8, 2 * DAY)]),
+        ..cfg()
+    };
+    assert_eq!(cfg.unlinked_idle_for(Some(7)), 30 * DAY);
+    assert_eq!(cfg.unlinked_idle_for(None), cfg.unlinked_idle_secs);
+    let ids: Vec<i64> = run(&sessions, &cfg).iter().map(|c| c.session_id).collect();
+    assert_eq!(
+        ids,
+        vec![2, 3],
+        "org 7 waits 30 days; 8 and the fleet do not"
+    );
+}
+
+/// A session carrying N1's live `related_session` proposal naming `other`.
+fn same_work(mut s: TidySession, other: i64) -> TidySession {
+    s.row.proposals = vec![crate::store::DecisionProposal {
+        feature: "related_session".into(),
+        value: format!("s{other}"),
+        source: "jev".into(),
+        reason: None,
+        confidence_pct: Some(80),
+        run_id: Some(1),
+        at: Some(NOW - DAY),
+        linked: None,
+    }];
+    s
+}
+
+/// Redesign 6.9 (Tidy › Duplicates): of two sessions Jev says do the same
+/// work, the idler is suggested, names the kept one, is never automatic,
+/// and the kept one is not suggested.
+#[test]
+fn jevs_same_work_pair_suggests_the_idler_and_keeps_the_other() {
+    let newer = same_work(session(1, 5 * HOUR), 2);
+    let older = session(2, 9 * HOUR);
+    let every = TidyConfig {
+        auto: true,
+        auto_reasons: TidyReason::RANKED.to_vec(),
+        ..cfg()
+    };
+    let got = run(&[newer, older], &every);
+    assert_eq!(
+        reasons(&got),
+        vec![(2, TidyReason::SameWork, TidyAction::SafeKill)]
+    );
+    assert_eq!(got[0].same_as, Some(1));
+    assert!(!got[0].auto, "a model's answer never auto-tidies");
+    assert!(!TidyReason::SameWork.auto_allowed());
+    assert_eq!(TidyReason::parse("same_work"), Some(TidyReason::SameWork));
+}
+
+#[test]
+fn same_work_needs_both_sessions_running_and_the_idler_idle() {
+    // The other session is gone: nothing to keep.
+    let alone = same_work(session(1, 9 * HOUR), 2);
+    assert!(run(std::slice::from_ref(&alone), &cfg()).is_empty());
+    let mut gone = session(2, HOUR);
+    gone.row.status = "stopped".into();
+    assert!(run(&[alone.clone(), gone], &cfg()).is_empty());
+    // Both busy within the idle window: nothing yet.
+    let fresh = same_work(session(1, HOUR), 2);
+    assert!(run(&[fresh, session(2, 2 * HOUR)], &cfg()).is_empty());
+    // A proposal that names the session itself is no pair.
+    let own = same_work(session(1, 9 * HOUR), 1);
+    assert!(run(&[own], &cfg()).is_empty());
+}
+
+#[test]
+fn same_work_ranks_below_a_shared_worktree_and_rides_as_secondary() {
+    // Done and idle: the done reason leads, same work is secondary.
+    let done = same_work(done_session(1), 2);
+    let got = run(&[done, session(2, HOUR)], &cfg());
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].reason, TidyReason::DoneIdle);
+    assert_eq!(got[0].secondary, vec![TidyReason::SameWork]);
+    assert_eq!(
+        got[0].same_as, None,
+        "only the primary reason names the pair"
+    );
 }

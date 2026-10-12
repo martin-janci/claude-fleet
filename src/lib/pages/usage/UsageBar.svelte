@@ -8,6 +8,7 @@
   import {
     freshness,
     leftPct,
+    severityLeft,
     paceFraction,
     severity,
     type UsageWindowKind,
@@ -35,7 +36,7 @@
   const left = $derived(win && known ? leftPct(win) : null);
   const used = $derived(left === null ? null : 100 - left);
   const level = $derived(
-    win && left !== null ? severity(window, left, win.resets_at, now, hasExtraUsage) : null,
+    win && left !== null ? severity(window, severityLeft(win), win.resets_at, now, hasExtraUsage) : null,
   );
   const pace = $derived(
     window === 'weekly' && win && known ? paceFraction(win.resets_at, now) : null,
@@ -75,7 +76,7 @@
     box-sizing: border-box;
     width: 7rem;
     height: 0.55rem;
-    border-radius: 2px;
+    border-radius: var(--radius-xs);
     border: 1px solid var(--border);
     background: color-mix(in srgb, var(--fg) 6%, transparent);
     overflow: hidden;

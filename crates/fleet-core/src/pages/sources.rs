@@ -101,9 +101,9 @@ pub struct ParamSpec {
 
 /// A source the app keeps current itself instead of reading through
 /// `fetch_page_source`: `command` loads it, so that command's hub verdict
-/// is the source's (`list_account_usage` is `LocalOnly`: a paired desktop
-/// has no usage cache and shows no data items), and the `event` row kind
-/// keeps it live. `fetch` refuses it.
+/// is the source's (`list_account_usage` routes to the hub's
+/// `account_usage`), and the `event` row kind keeps it live. `fetch`
+/// refuses it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Live {
     pub command: &'static str,
@@ -148,6 +148,26 @@ pub const SOURCES: &[SourceSpec] = &[
         label: "Claude account usage",
         help: "Each Claude account's plan headroom: the 5-hour and weekly windows, per-model limits, when it was checked and from which host, and when a refresh is allowed.",
         shape: Shape::AccountUsage,
+        params: &[],
+    },
+    SourceSpec {
+        id: "updates.targets",
+        live: Some(Live {
+            command: "list_update_targets",
+            event: "update",
+        }),
+        label: "What runs where",
+        help: "The hub, every host's agent, each desktop and the phone: the version each runs and what the hub would tell it now (`update_status`).",
+        shape: Shape::Rows {
+            columns: &[
+                col("device", "Device", ColType::Text),
+                col("part", "Part", ColType::Text),
+                col("version", "Version", ColType::Text),
+                col("update", "Update", ColType::Text),
+                col("offers", "Offered", ColType::Text),
+                col("reported_at", "Reported", ColType::Time),
+            ],
+        },
         params: &[],
     },
     SourceSpec {
@@ -263,6 +283,23 @@ pub const SOURCES: &[SourceSpec] = &[
                 col("timeline_work_events", "Timeline events", ColType::Int),
                 col("tracker_writes", "PR links", ColType::Int),
                 col("describe_cache", "Full descriptions", ColType::Int),
+            ],
+        },
+        params: &[],
+    },
+    SourceSpec {
+        id: "decide.today",
+        live: None,
+        label: "Decision model today",
+        help: "Today's use of the decision model (Jev): input tokens against the daily budget, the breaker, the key and the organisations that allow it (`fleet-hub decide status`).",
+        shape: Shape::Record {
+            fields: &[
+                col("input_tokens", "Used today", ColType::Tokens),
+                col("budget", "Daily budget", ColType::Tokens),
+                col("cost_micros", "Cost today", ColType::UsdMicros),
+                col("breaker", "Breaker", ColType::Text),
+                col("key", "Key", ColType::Text),
+                col("orgs_allowed", "Orgs that allow Jev", ColType::Text),
             ],
         },
         params: &[],
@@ -482,11 +519,46 @@ pub fn fetch(
                 "describe_cache": l.describe_cache,
             }))
         }
+        "decide.today" => {
+            let st = crate::service::decide::status(s, now, 0)?;
+            Ok(decide_today_json(&st))
+        }
         other => Err(IpcError::new(
             codes::E_INTERNAL,
             format!("data source {other} is declared but has no reader"),
         )),
     }
+}
+
+/// PURE: the `decide.today` record from `fleet-hub decide status`. Never
+/// the key itself: only whether one is set.
+fn decide_today_json(st: &crate::service::decide::DecideStatus) -> Value {
+    let b = &st.breaker;
+    let breaker = if b.open {
+        format!("open, {} failed calls in a row", b.consecutive_failures)
+    } else if b.consecutive_failures > 0 {
+        format!("closed, {} failed in a row", b.consecutive_failures)
+    } else {
+        "closed".to_string()
+    };
+    let key = if st.key.configured { "set" } else { "not set" };
+    let orgs = if st.orgs_allowed.is_empty() {
+        "none".to_string()
+    } else {
+        st.orgs_allowed
+            .iter()
+            .map(|o| o.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    json!({
+        "input_tokens": st.today.input_tokens + st.today.bench_input_tokens,
+        "budget": st.today.budget,
+        "cost_micros": st.today.cost_microusd + st.today.bench_cost_microusd,
+        "breaker": breaker,
+        "key": key,
+        "orgs_allowed": orgs,
+    })
 }
 
 #[cfg(test)]
@@ -592,16 +664,15 @@ mod tests {
         }
     }
 
-    /// A live source is read through its command, never `fetch`; only an
-    /// `account_usage` source is live, and it is the only one of that shape.
+    /// A live source is read through its command, never `fetch`; every
+    /// `account_usage` source is live.
     #[test]
     fn a_live_source_is_refused_by_fetch_and_names_its_command() {
         let (s, now) = seeded();
         for spec in SOURCES {
-            assert_eq!(
-                spec.live.is_some(),
-                spec.shape == Shape::AccountUsage,
-                "{}: live exactly when it is account usage",
+            assert!(
+                spec.live.is_some() || spec.shape != Shape::AccountUsage,
+                "{}: account usage is read live",
                 spec.id
             );
             if let Some(live) = spec.live {
@@ -638,6 +709,43 @@ mod tests {
         let v = fetch(&s, "usage.by_model", &alpha, now).unwrap();
         assert_eq!(v.as_array().unwrap().len(), 1);
         assert!(fetch(&s, "no.such_source", &Map::new(), now).is_err());
+    }
+
+    /// Step 7.7: the Decisions page's Today record says what the gate sees,
+    /// in words, and never the key itself.
+    #[test]
+    fn decide_today_reads_the_budget_breaker_key_and_consent() {
+        use crate::service::decide::{self, OrgConsent};
+        let (s, now) = seeded();
+        let v = fetch(&s, "decide.today", &Map::new(), now).unwrap();
+        assert_eq!(v["input_tokens"], 0);
+        assert_eq!(v["breaker"], "closed");
+        assert_eq!(v["key"], "not set");
+        assert_eq!(v["orgs_allowed"], "none");
+        assert!(
+            v["budget"].as_i64().unwrap() > 0,
+            "the default budget shows"
+        );
+
+        let mut st = decide::status(&s, now, 0).unwrap();
+        st.breaker.open = true;
+        st.breaker.consecutive_failures = 5;
+        st.today.input_tokens = 40;
+        st.today.bench_input_tokens = 2;
+        st.orgs_allowed = vec![
+            OrgConsent {
+                id: 1,
+                name: "Acme".into(),
+            },
+            OrgConsent {
+                id: 2,
+                name: "Globex".into(),
+            },
+        ];
+        let v = decide_today_json(&st);
+        assert_eq!(v["breaker"], "open, 5 failed calls in a row");
+        assert_eq!(v["input_tokens"], 42, "the budget counts the benchmark too");
+        assert_eq!(v["orgs_allowed"], "Acme, Globex");
     }
 
     #[test]

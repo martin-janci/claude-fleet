@@ -20,6 +20,9 @@ pub mod jira_dc;
 pub mod linear;
 pub mod sync;
 #[cfg(test)]
+#[path = "tests_comments.rs"]
+mod tests_comments;
+#[cfg(test)]
 #[path = "tests_e2e_override.rs"]
 mod tests_e2e_override;
 #[cfg(test)]
@@ -74,7 +77,15 @@ pub struct Caps {
     pub multi_container: bool,
     #[serde(default)]
     pub incremental: Incremental,
-    /// Always false in M3–M6: read-only.
+    /// Release-like containers with a target date (Jira `fixVersions`, a
+    /// GitHub milestone, a Linear project milestone) — design 2026-09-28
+    /// §4. Without it a native release still works; it simply cannot adopt
+    /// one, and nothing offers "adopt from tracker".
+    #[serde(default)]
+    pub versions: bool,
+    /// The provider implements [`TrackerProvider::write`] for some op: the
+    /// sync pass drains its outbox. Which ops is the provider's own (a PR
+    /// remote link is Jira's alone; a comment, every provider's).
     #[serde(default)]
     pub write: bool,
     /// The provider can serve one item's WHOLE description on demand
@@ -82,6 +93,191 @@ pub struct Caps {
     /// pointed at the ticket instead.
     #[serde(default)]
     pub describe: bool,
+    /// The provider reads an item's comments on demand
+    /// ([`TrackerProvider::comments`], `work { action: tracker_comments }`)
+    /// and posts one ([`WriteOp::Comment`]).
+    #[serde(default)]
+    pub comments: bool,
+    /// The provider lists an item's attachments on demand
+    /// ([`TrackerProvider::attachments`]): the task page's Comments tab and
+    /// a start's brief name them with their links.
+    #[serde(default)]
+    pub attachments: bool,
+}
+
+/// Most attachments one read answers with.
+pub const TRACKER_ATTACHMENTS_MAX: usize = 50;
+/// Longest attachment name kept, in characters.
+pub const TRACKER_ATTACHMENT_NAME_MAX_CHARS: usize = 200;
+
+/// One file attached to a ticket, as the tracker lists it. Third-party
+/// text: `name` is flattened and capped, and `url` is kept only when it is a
+/// plain `https` link.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackerAttachment {
+    /// The tracker's own id for it.
+    pub id: String,
+    pub name: String,
+    /// Where the tracker opens it (behind the tracker's own sign-in).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Bytes, when the tracker says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    /// Unix seconds, when the tracker says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<i64>,
+}
+
+impl TrackerAttachment {
+    /// An attachment from an answer's fields, capped and checked: `None`
+    /// for an id that is empty, long or not printable, or an empty name.
+    pub fn from_parts(
+        id: &str,
+        name: &str,
+        url: Option<&str>,
+        size: Option<u64>,
+        created: Option<&str>,
+    ) -> Option<TrackerAttachment> {
+        let id = id.trim();
+        if id.is_empty()
+            || id.len() > 200
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'=' | b':'))
+        {
+            return None;
+        }
+        let name: String = name
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(TRACKER_ATTACHMENT_NAME_MAX_CHARS)
+            .collect();
+        if name.is_empty() {
+            return None;
+        }
+        let url = url
+            .map(str::trim)
+            .filter(|u| {
+                u.starts_with("https://")
+                    && u.len() <= 2048
+                    && !u.chars().any(|c| c.is_control() || c.is_whitespace())
+            })
+            .map(str::to_string);
+        Some(TrackerAttachment {
+            id: id.to_string(),
+            name,
+            url,
+            size,
+            created_at: created.and_then(parse_timestamp),
+        })
+    }
+}
+
+/// Most tracker comments one read answers with: the newest.
+pub const TRACKER_COMMENTS_MAX: usize = 50;
+/// Longest tracker comment body kept, in characters.
+pub const TRACKER_COMMENT_MAX_CHARS: usize = 8000;
+/// Longest tracker comment author name kept, in characters.
+pub const TRACKER_COMMENT_AUTHOR_MAX_CHARS: usize = 120;
+
+/// One comment as the tracker holds it, normalised. Third-party text: the
+/// service fences `body` for an agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackerComment {
+    /// The tracker's own id for it.
+    pub id: String,
+    /// Its author's display name at the tracker.
+    pub author: String,
+    /// Plain text (Jira's ADF flattened), at most
+    /// [`TRACKER_COMMENT_MAX_CHARS`].
+    pub body: String,
+    /// Unix seconds.
+    pub created_at: i64,
+    /// Where the tracker shows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+impl TrackerComment {
+    /// A comment from an answer's fields, capped and checked: `None` for an
+    /// id that is empty, long or not printable, or a time that does not
+    /// parse. A URL is kept only under `url_prefix` (the tracker's own
+    /// site), whatever the answer says.
+    pub fn from_parts(
+        id: &str,
+        author: &str,
+        body: &str,
+        created: &str,
+        url: Option<&str>,
+        url_prefix: &str,
+    ) -> Option<TrackerComment> {
+        let id = id.trim();
+        if id.is_empty()
+            || id.len() > 200
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'=' | b':'))
+        {
+            return None;
+        }
+        let created_at = parse_timestamp(created)?;
+        let author: String = author
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(TRACKER_COMMENT_AUTHOR_MAX_CHARS)
+            .collect();
+        let url = url
+            .map(str::trim)
+            .filter(|u| {
+                !url_prefix.is_empty()
+                    && u.starts_with(url_prefix)
+                    && u.len() <= 2048
+                    && !u.chars().any(|c| c.is_control() || c.is_whitespace())
+            })
+            .map(str::to_string);
+        Some(TrackerComment {
+            id: id.to_string(),
+            author: if author.is_empty() {
+                "Someone".into()
+            } else {
+                author
+            },
+            body: body
+                .trim()
+                .chars()
+                .take(TRACKER_COMMENT_MAX_CHARS)
+                .collect(),
+            created_at,
+            url,
+        })
+    }
+}
+
+/// PURE: the newest `limit` of `comments`, oldest first.
+pub fn newest_comments(mut comments: Vec<TrackerComment>, limit: usize) -> Vec<TrackerComment> {
+    comments.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
+    let cut = comments.len().saturating_sub(limit);
+    comments.split_off(cut)
+}
+
+/// What a write left at the tracker, when it says: the id and the URL of
+/// what was written (a comment's, a created ticket's). A PR remote link
+/// needs neither.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WriteOutcome {
+    pub remote_id: Option<String>,
+    pub url: Option<String>,
+    /// A created ticket's key as the tracker names it (`ENG-123`,
+    /// `asana:<gid>`): what the promoted fleet task is keyed by after.
+    pub key: Option<String>,
 }
 
 /// What a probe learned: the site's instance id and the config to store.
@@ -137,6 +333,22 @@ pub struct WorkItemSnapshot {
     pub iteration: Option<String>,
     /// The sprint named in `iteration` is active.
     pub iteration_active: bool,
+    /// The versions the item is planned into, by name (`Caps.versions`).
+    pub versions: Vec<String>,
+    /// The due date, `YYYY-MM-DD` (Jira `duedate`); `None` where the
+    /// tracker has none or the adapter does not read it.
+    pub due_at: Option<String>,
+    /// `urgent | high | medium | low`, normalised from the tracker's own
+    /// scale (Jira's priority name, Linear's 1-4); `None` where it has none.
+    pub priority: Option<String>,
+    /// Label names, in the tracker's order (Jira `labels`, GitHub and
+    /// Linear labels, Asana tags).
+    pub labels: Vec<String>,
+    /// The estimate, in `estimate_unit`: story points (Linear, a Jira
+    /// story-points field) or hours (Jira's original time estimate).
+    pub estimate: Option<crate::store::Estimate>,
+    /// `points | hours`.
+    pub estimate_unit: Option<String>,
     /// The tracker's `updated`, unix seconds.
     pub updated: Option<i64>,
     /// The first [`DESCRIPTION_MAX_CHARS`] of the description as plain text.
@@ -394,8 +606,9 @@ pub trait TrackerProvider: Send + Sync {
     }
     /// Write `op` to the tracker (work graph M13.4e, decision D3 / D29).
     /// Only a provider whose `caps.write` is true implements it; the default
-    /// refuses, so a write can never reach a read-only provider.
-    async fn write(&self, _op: &WriteOp) -> Result<(), TrackerError> {
+    /// refuses, so a write can never reach a read-only provider, and an op a
+    /// provider does not take is refused the same way.
+    async fn write(&self, _op: &WriteOp) -> Result<WriteOutcome, TrackerError> {
         Err(TrackerError::Refused(
             "this tracker does not accept writes".into(),
         ))
@@ -404,21 +617,218 @@ pub trait TrackerProvider: Send + Sync {
     /// and capped by [`DESCRIBE_MAX_CHARS`], with its true length (see
     /// [`FullDescription`]). `None` means this provider does not serve one;
     /// the default says so for every adapter that has not implemented it.
+    /// The issues `jql` matches (at most `max`), each with its description
+    /// and newest comments as plain text, for the support agent's poll
+    /// (`service::agents::support`). Only Jira Cloud answers; the default
+    /// refuses.
+    async fn issue_threads(
+        &self,
+        _jql: &str,
+        _max: usize,
+    ) -> Result<Vec<IssueThread>, TrackerError> {
+        Err(TrackerError::Refused(
+            "this tracker does not list issues with their comments".into(),
+        ))
+    }
     async fn describe(&self, _r: &ItemRef) -> Result<Option<FullDescription>, TrackerError> {
         Ok(None)
     }
+    /// One item's comments, the newest `limit` (at most
+    /// [`TRACKER_COMMENTS_MAX`]), oldest first. Only a provider whose
+    /// `caps.comments` is true implements it; the default refuses.
+    async fn comments(
+        &self,
+        _r: &ItemRef,
+        _limit: usize,
+    ) -> Result<Vec<TrackerComment>, TrackerError> {
+        Err(TrackerError::Refused(
+            "this tracker does not serve comments".into(),
+        ))
+    }
+    /// One item's attachments, at most `limit` (at most
+    /// [`TRACKER_ATTACHMENTS_MAX`]), oldest first. Only a provider whose
+    /// `caps.attachments` is true implements it; the default refuses.
+    async fn attachments(
+        &self,
+        _r: &ItemRef,
+        _limit: usize,
+    ) -> Result<Vec<TrackerAttachment>, TrackerError> {
+        Err(TrackerError::Refused(
+            "this tracker does not list attachments".into(),
+        ))
+    }
 }
 
-/// A write fleet may make to a tracker (work graph M13.4e). Only one today.
+/// A write fleet may make to a tracker (work graph M13.4e).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteOp {
     /// Add `url` to item `key` as a remote link titled `title`, idempotent
-    /// by a global id derived from the URL.
+    /// by a global id derived from the URL. Jira only.
     PrRemoteLink {
         key: String,
         url: String,
         title: String,
     },
+    /// Post `body` (plain text) as a comment on the item: `key` is its key
+    /// (or reference), `external_id` its tracker id where the provider
+    /// addresses an item by it (GitHub, Linear, Asana). Not idempotent at
+    /// the tracker: the outbox sends it once.
+    Comment {
+        key: String,
+        external_id: Option<String>,
+        body: String,
+    },
+    /// Post a formatted comment on Jira issue `key`: `adf` to Jira Cloud,
+    /// `wiki` (the same text as wiki markup) to Jira Data Center. Jira
+    /// only; the support agent's (`service::agents::support`).
+    RichComment {
+        key: String,
+        adf: serde_json::Value,
+        wiki: String,
+    },
+    /// Create an issue of `issue_type` in `project`; the outcome's
+    /// `remote_id` is its key. The description is `adf` on Cloud, `wiki` on
+    /// Data Center. Jira only.
+    CreateIssue {
+        project: String,
+        issue_type: String,
+        summary: String,
+        adf: serde_json::Value,
+        wiki: String,
+        labels: Vec<String>,
+    },
+    /// Link two issues: `inward` `link_type` `outward` (a `Causes` link:
+    /// the bug causes the ticket). Jira only.
+    LinkIssues {
+        link_type: String,
+        inward: String,
+        outward: String,
+    },
+    /// Create a ticket from a fleet task (owner decision 2026-10-11:
+    /// promoting a local task to a tracked one). Under `parent` — a ticket
+    /// of this tracker — it is that ticket's subtask; otherwise it goes into
+    /// `container` (a Jira project key, an Asana project gid, or none for
+    /// the Asana workspace). `description` is plain text. Not idempotent at
+    /// the tracker: the outbox sends it once. Jira (Cloud and Data Center)
+    /// and Asana only.
+    CreateItem {
+        container: Option<String>,
+        parent: Option<CreateParent>,
+        title: String,
+        description: String,
+    },
+}
+
+/// The ticket a created ticket goes under: its key and, for a provider that
+/// addresses an item by it (Asana), its tracker id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateParent {
+    pub key: String,
+    pub external_id: Option<String>,
+}
+
+/// The providers that create a ticket from a fleet task
+/// ([`WriteOp::CreateItem`]).
+pub const CREATE_PROVIDERS: &[&str] = &["jira", "jira_dc", "asana"];
+
+/// PURE: `provider` creates tickets ([`CREATE_PROVIDERS`]).
+pub fn creates_items(provider: &str) -> bool {
+    CREATE_PROVIDERS.contains(&provider)
+}
+
+/// PURE: a Jira project key (`PD`, `L2S`, `ABC_2`).
+pub fn is_project_key(s: &str) -> bool {
+    let b = s.as_bytes();
+    !b.is_empty()
+        && b.len() <= 32
+        && b[0].is_ascii_uppercase()
+        && b.iter()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == b'_')
+}
+
+/// PURE: the body of a Jira issue-create call (API v3 with ADF, v2 with wiki text).
+pub(crate) fn create_issue_body(op: &WriteOp, v3: bool) -> Result<serde_json::Value, TrackerError> {
+    let WriteOp::CreateIssue {
+        project,
+        issue_type,
+        summary,
+        adf,
+        wiki,
+        labels,
+    } = op
+    else {
+        return Err(TrackerError::Invalid("not an issue to create".into()));
+    };
+    if !is_project_key(project) {
+        return Err(TrackerError::Invalid(format!(
+            "{project:?} is not a Jira project key"
+        )));
+    }
+    if summary.trim().is_empty() || summary.contains('\n') {
+        return Err(TrackerError::Invalid(
+            "an issue summary is one non-empty line".into(),
+        ));
+    }
+    let description = if v3 {
+        adf.clone()
+    } else {
+        serde_json::Value::String(wiki.clone())
+    };
+    Ok(serde_json::json!({
+        "fields": {
+            "project": { "key": project },
+            "issuetype": { "name": issue_type },
+            "summary": summary,
+            "description": description,
+            "labels": labels,
+        }
+    }))
+}
+
+/// PURE: the body of a Jira issue-link call, the keys checked.
+pub(crate) fn link_issues_body(
+    link_type: &str,
+    inward: &str,
+    outward: &str,
+) -> Result<serde_json::Value, TrackerError> {
+    for k in [inward, outward] {
+        if !jira_common::is_key(k) {
+            return Err(TrackerError::Invalid(format!("{k:?} is not a Jira key")));
+        }
+    }
+    Ok(serde_json::json!({
+        "type": { "name": link_type },
+        "inwardIssue": { "key": inward.to_ascii_uppercase() },
+        "outwardIssue": { "key": outward.to_ascii_uppercase() },
+    }))
+}
+
+/// One issue with its comments, as the support agent reads it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IssueThread {
+    pub key: String,
+    pub summary: String,
+    /// Plain text, capped at [`DESCRIBE_MAX_CHARS`].
+    pub description: String,
+    /// The assignee's account id.
+    pub assignee_id: Option<String>,
+    pub status: String,
+    /// Unix seconds.
+    pub updated: Option<i64>,
+    /// Oldest first.
+    pub comments: Vec<IssueComment>,
+}
+
+/// One comment of an [`IssueThread`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IssueComment {
+    pub id: String,
+    pub author_id: Option<String>,
+    pub author: String,
+    /// Plain text, capped at [`DESCRIPTION_MAX_CHARS`].
+    pub body: String,
+    /// Unix seconds.
+    pub created: Option<i64>,
 }
 
 /// The provider for `row`, over the transport `net` picks for it. `cred` is
@@ -487,56 +897,71 @@ pub fn provider_caps(row: &TrackerRow) -> Caps {
             query_lang: Some("jql".into()),
             hierarchy: true,
             iterations: true,
+            versions: true,
             human_keys: true,
             repo_relative: false,
             multi_container: false,
             incremental: Incremental::Watermark,
             write: true,
             describe: true,
+            comments: true,
+            attachments: false,
         },
         "jira_dc" => Caps {
             query_lang: Some("jql".into()),
             hierarchy: true,
             iterations: true,
+            versions: true,
             human_keys: true,
             repo_relative: false,
             multi_container: false,
             incremental: Incremental::Watermark,
             write: true,
             describe: true,
+            comments: true,
+            attachments: false,
         },
         "asana" => Caps {
             query_lang: None,
             hierarchy: true,
             iterations: false,
+            versions: false,
             human_keys: false,
             repo_relative: false,
             multi_container: true,
             incremental: Incremental::SyncToken,
-            write: false,
+            write: true,
             describe: false,
+            comments: true,
+            attachments: true,
         },
         "linear" => Caps {
             query_lang: Some("gql".into()),
             hierarchy: true,
             iterations: true,
+            versions: true,
             human_keys: true,
             repo_relative: false,
             multi_container: false,
             incremental: Incremental::Watermark,
-            write: false,
+            write: true,
             describe: false,
+            comments: true,
+            attachments: false,
         },
         "github" => Caps {
             query_lang: Some("gql".into()),
             hierarchy: true,
             iterations: false,
+            versions: true,
             human_keys: false,
             repo_relative: true,
             multi_container: false,
             incremental: Incremental::Watermark,
-            write: false,
+            write: true,
             describe: true,
+            comments: true,
+            attachments: false,
         },
         _ => Caps::default(),
     }

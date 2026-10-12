@@ -15,6 +15,7 @@ import AddProjectDialog from './AddProjectDialog.svelte';
 import { hosts } from './hosts';
 import { hubStatus, STANDALONE } from './hub';
 import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
+import { expectAccessible } from './a11y_check';
 
 const mockedInvoke = invoke as ReturnType<typeof vi.fn>;
 const mockedOpen = open as ReturnType<typeof vi.fn>;
@@ -57,9 +58,11 @@ function chip(alias: string): HTMLButtonElement {
   )!;
 }
 
+/** Opens on Clone a URL, where most of these tests type; the default
+ *  source (From GitHub) has its own tests below. */
 function mount(onCreated = vi.fn()) {
   const onCancel = vi.fn();
-  render(AddProjectDialog, { props: { onCreated, onCancel } });
+  render(AddProjectDialog, { props: { onCreated, onCancel, initialMode: 'clone' } });
   return { onCreated, onCancel };
 }
 
@@ -98,6 +101,23 @@ describe('AddProjectDialog', () => {
     for (const m of ['clone', 'github', 'folder', 'new']) {
       expect(screen.getByTestId(`add-mode-${m}`)).toBeInTheDocument();
     }
+  });
+
+  it('initialCloneUrl prefills the Clone URL field', async () => {
+    route({});
+    render(AddProjectDialog, { props: { onCreated: vi.fn(), onCancel: vi.fn(), initialCloneUrl: 'acme/widgets' } });
+    await tick();
+    expect((screen.getByTestId('clone-url') as HTMLInputElement).value).toBe('acme/widgets');
+  });
+
+  it('a blocked reason disables Create and is shown', async () => {
+    route({});
+    render(AddProjectDialog, {
+      props: { onCreated: vi.fn(), onCancel: vi.fn(), initialCloneUrl: 'acme/widgets', blocked: 'The hub is unreachable' },
+    });
+    await tick();
+    expect((screen.getByTestId('add-create') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId('add-blocked').textContent).toContain('The hub is unreachable');
   });
 
   describe('clone', () => {
@@ -183,25 +203,47 @@ describe('AddProjectDialog', () => {
       expect(document.activeElement).toBe(screen.getByTestId('gh-filter'));
     });
 
-    it('picking a row switches to clone mode prefilled', async () => {
+    it('ticking a row offers to add it, and Add clones it on the host', async () => {
       route({
         list_github_repos: () => [
           { name_with_owner: 'o/alpha', description: 'first', is_private: true, updated_at: null },
           { name_with_owner: 'o/beta', description: null, is_private: false, updated_at: null },
         ],
+        add_project: () => row,
       });
-      mount();
+      const { onCreated } = mount();
       await tick();
       await fireEvent.click(screen.getByTestId('add-mode-github'));
       await vi.waitFor(() => expect(screen.getAllByTestId('gh-repo-row')).toHaveLength(2));
+      expect((screen.getByTestId('add-create') as HTMLButtonElement).disabled).toBe(true);
       await fireEvent.input(screen.getByTestId('gh-filter'), { target: { value: 'bet' } });
       await tick();
       const rows = screen.getAllByTestId('gh-repo-row');
       expect(rows).toHaveLength(1);
-      await fireEvent.click(rows[0]);
+      await fireEvent.click(screen.getAllByTestId('gh-repo-check')[0]);
       await tick();
-      expect((screen.getByTestId('clone-url') as HTMLInputElement).value).toBe('o/beta');
-      expect((screen.getByTestId('add-create') as HTMLButtonElement).disabled).toBe(false);
+      const add = screen.getByTestId('add-create') as HTMLButtonElement;
+      expect(add.disabled).toBe(false);
+      expect(add.textContent).toBe('Add project');
+      expect(screen.getByTestId('add-summary').textContent).toBe('1 repo · on local');
+      await fireEvent.click(add);
+      await flush();
+      expect(calls('add_project')[0].args).toMatchObject({ host_alias: 'local', source: { kind: 'clone', url: 'o/beta' } });
+      expect(onCreated).toHaveBeenCalledWith(row, 'local');
+    });
+
+    it('Enter in the filter ticks the highlighted row instead of adding', async () => {
+      route({
+        list_github_repos: () => [{ name_with_owner: 'o/alpha', description: null, is_private: false, updated_at: null }],
+      });
+      mount();
+      await tick();
+      await fireEvent.click(screen.getByTestId('add-mode-github'));
+      await vi.waitFor(() => expect(screen.getAllByTestId('gh-repo-row')).toHaveLength(1));
+      await fireEvent.keyDown(screen.getByTestId('gh-filter'), { key: 'Enter' });
+      await tick();
+      expect((screen.getByTestId('gh-repo-check') as HTMLInputElement).checked).toBe(true);
+      expect(calls('add_project')).toHaveLength(0);
     });
 
     it("a slow reply for a previous host doesn't overwrite the current one", async () => {
@@ -588,7 +630,7 @@ describe('AddProjectDialog', () => {
     const inflight = deferred();
     route({ add_project: () => inflight.promise });
     const onCreated = vi.fn();
-    const r = render(AddProjectDialog, { props: { onCreated, onCancel: vi.fn() } });
+    const r = render(AddProjectDialog, { props: { onCreated, onCancel: vi.fn(), initialMode: 'clone' } });
     await tick();
     await fireEvent.input(screen.getByTestId('clone-url'), { target: { value: 'o/r' } });
     await fireEvent.click(screen.getByTestId('add-create'));
@@ -666,13 +708,16 @@ describe('AddProjectDialog', () => {
       clone.focus();
       await fireEvent.keyDown(clone, { key: 'ArrowRight' });
       await tick();
-      expect(screen.getByTestId('add-mode-github').getAttribute('aria-pressed')).toBe('true');
-      expect(document.activeElement).toBe(screen.getByTestId('add-mode-github'));
+      expect(screen.getByTestId('add-mode-folder').getAttribute('aria-pressed')).toBe('true');
+      expect(document.activeElement).toBe(screen.getByTestId('add-mode-folder'));
       await fireEvent.keyDown(document.activeElement!, { key: 'ArrowLeft' });
       await fireEvent.keyDown(document.activeElement!, { key: 'ArrowLeft' });
       await tick();
+      expect(screen.getByTestId('add-mode-github').getAttribute('aria-pressed')).toBe('true');
+      expect(document.activeElement).toBe(screen.getByTestId('add-mode-github'));
+      await fireEvent.keyDown(document.activeElement!, { key: 'ArrowLeft' });
+      await tick();
       expect(screen.getByTestId('add-mode-new').getAttribute('aria-pressed')).toBe('true');
-      expect(document.activeElement).toBe(screen.getByTestId('add-mode-new'));
     });
   });
 });
@@ -768,5 +813,27 @@ describe('on a hub client', () => {
     dlg.dispatchEvent(new Event('close'));
     await flush();
     expect(onCancel).toHaveBeenCalled();
+  });
+});
+
+describe('AddProjectDialog: accessibility', () => {
+  it('the dialog, on From GitHub with a ticked repo and on Clone, is accessible', async () => {
+    route({
+      list_github_repos: () => [
+        { name_with_owner: 'o/alpha', description: 'first', is_private: true, updated_at: null },
+        { name_with_owner: 'o/beta', description: null, is_private: false, updated_at: null },
+      ],
+    });
+    mount();
+    await tick();
+    await fireEvent.click(screen.getByTestId('add-mode-github'));
+    await vi.waitFor(() => expect(screen.getAllByTestId('gh-repo-row')).toHaveLength(2));
+    await fireEvent.click(screen.getAllByTestId('gh-repo-check')[0]);
+    await tick();
+    await expectAccessible(screen.getByTestId('add-project-dialog'));
+    await fireEvent.click(screen.getByTestId('add-mode-clone'));
+    await fireEvent.input(screen.getByTestId('clone-url'), { target: { value: 'https://github.com/o/r' } });
+    await tick();
+    await expectAccessible(screen.getByTestId('add-project-dialog'));
   });
 });

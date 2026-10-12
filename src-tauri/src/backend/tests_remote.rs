@@ -226,19 +226,6 @@ fn each_typed_read_names_its_tool_and_arguments() {
     let _ = block_on(backend(&fake).list_hosts());
     assert_eq!(fake.only_call().0, "list_hosts");
 
-    // Full rows and no cap: the desktop draws the whole tree, where the
-    // tool's own defaults (slim, one page) are shaped for an agent.
-    let fake = Fake::answering(Ok(ok(r#"{"total":0,"worktrees":[]}"#)));
-    let worktrees = block_on(backend(&fake).list_worktrees(Some(7))).expect("worktrees");
-    assert!(worktrees.is_empty());
-    assert_eq!(
-        fake.only_call(),
-        (
-            "list_worktrees".into(),
-            json!({"project_id": 7, "summary": false, "limit": 0})
-        )
-    );
-
     let fake = Fake::answering(Ok(ok("[]")));
     let _ = block_on(backend(&fake).session_history(5, Some(20)));
     assert_eq!(
@@ -419,6 +406,17 @@ fn sample_session_row() -> SessionRow {
         work_rev: 0,
         pr_evidence: None,
         pr_checked_at: None,
+        owner_person_id: None,
+        visibility: fleet_core::store::VISIBILITY_UNCLAIMED.into(),
+        claude_profile: None,
+        agent: fleet_core::store::AGENT_CLAUDE.into(),
+        origin: None,
+        origin_ref: None,
+        last_viewed_at: None,
+        turn_outcome: None,
+        proposals: Vec::new(),
+        pending_form: None,
+        form_draft: None,
         parent_session_id: None,
         tags: vec!["review".into()],
         row_version: 0,
@@ -671,6 +669,7 @@ fn a_hub_that_has_never_been_judged_is_called_in_every_state() {
         },
         HubConnection::Offline {
             attempt: 1,
+            refused: 1,
             retry_in_secs: 1,
             reason: "connection refused".into(),
         },
@@ -709,6 +708,7 @@ fn a_dropped_socket_after_a_skew_does_not_reopen_the_gate() {
         for after in [
             HubConnection::Offline {
                 attempt: 1,
+                refused: 1,
                 retry_in_secs: 1,
                 reason: "connection refused".into(),
             },
@@ -1003,6 +1003,7 @@ fn a_call_while_the_link_is_known_offline_is_refused_before_the_transport_is_tou
     let fake = Fake::answering(Ok(ok("[]")));
     let status = link(HubConnection::Offline {
         attempt: 2,
+        refused: 2,
         retry_in_secs: 7,
         reason: "connect 127.0.0.1:4180: connection refused".into(),
     });
@@ -1013,6 +1014,18 @@ fn a_call_while_the_link_is_known_offline_is_refused_before_the_transport_is_tou
     // The first failed attempt is not yet a verdict: the call still goes out.
     let status = link(HubConnection::Offline {
         attempt: 1,
+        refused: 1,
+        retry_in_secs: 1,
+        reason: "connect 127.0.0.1:4180: connection refused".into(),
+    });
+    let fake = Fake::answering(Ok(ok("[]")));
+    block_on(watched(&fake, &status).list_sessions(false)).expect("still tried");
+    assert_eq!(fake.seen.lock().unwrap().len(), 1);
+    // Review r01 F13: after a stream that ended, the banner's attempt already
+    // reads 2 on the first failed reconnect. That is still one refusal.
+    let status = link(HubConnection::Offline {
+        attempt: 2,
+        refused: 1,
         retry_in_secs: 1,
         reason: "connect 127.0.0.1:4180: connection refused".into(),
     });
@@ -1037,6 +1050,7 @@ fn an_answered_but_unhappy_event_stream_never_refuses_a_call() {
         let fake = Fake::answering(Ok(ok("[]")));
         let status = link(HubConnection::Offline {
             attempt: 3,
+            refused: 3,
             retry_in_secs: 7,
             reason: reason.into(),
         });

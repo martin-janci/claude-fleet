@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Agent hook for the persistent builder (docs/buildkite.md). Install as
+# /etc/buildkite-agent/hooks/environment (or the agent's hooks-path). It runs
+# before every job's checkout.
+#
+# Everything a build should reuse lives OUTSIDE the checkout, so the default
+# `git clean -ffxdq` can wipe the checkout freely; the checkout path itself
+# is fixed, because cargo's fingerprints and incremental state record
+# absolute source paths and ~150 tests read files through the compile-time
+# CARGO_MANIFEST_DIR (RUST-BUILD-PERFORMANCE-AUDIT.md, Appendix I.5).
+set -euo pipefail
+
+CI_ROOT=${CI_ROOT:-/srv/ci}
+
+export BUILDKITE_BUILD_CHECKOUT_PATH="$CI_ROOT/src/$BUILDKITE_PIPELINE_SLUG"
+export CARGO_HOME="$CI_ROOT/cargo-home"
+export RUSTUP_HOME="$CI_ROOT/rustup"
+export CARGO_TARGET_DIR="$CI_ROOT/target/$BUILDKITE_PIPELINE_SLUG"
+export npm_config_store_dir="$CI_ROOT/pnpm-store"
+export PATH="$CARGO_HOME/bin:$PATH"
+
+# GitHub-hosted runners set CARGO_INCREMENTAL=0; a persistent builder wants
+# incremental workspace builds, which is cargo's default for the dev profile.
+unset CARGO_INCREMENTAL

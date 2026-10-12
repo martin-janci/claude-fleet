@@ -6,8 +6,8 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
-import { sessions, loadSessions, killSession, renameSession, restartSession, rewindConversation, repairSession, restoreHostSessions, discoverLostSessions, newSessionAbortable, newBgSession, dismissAgentSession, hasNoPane, isInactiveAgent, purgeProject, showBgAgents, resetTombstonesForTests, applySessionEvents } from './sessions';
-import { formatCostMicros, formatTokens, sessionUsageTokens, lostReasonLabel } from './sessions';
+import { sessions, loadSessions, killSession, renameSession, restartSession, rewindConversation, repairSession, restoreHostSessions, discoverLostSessions, adoptSession, newSessionAbortable, newBgSession, dismissAgentSession, hasNoPane, isInactiveAgent, purgeProject, showBgAgents, resetTombstonesForTests, applySessionEvents } from './sessions';
+import { formatCostMicros, formatTokens, sessionUsageTokens, lostReasonLabel, sessionAgent, queuePrompt } from './sessions';
 import type { SessionRow } from './sessions';
 
 beforeEach(() => {
@@ -26,6 +26,11 @@ describe('usage formatting', () => {
     expect(formatTokens(4_560_000)).toBe('4.56M');
     expect(formatTokens(245_000_000)).toBe('245.0M');
     expect(formatTokens(2_500_000_000)).toBe('2.50B');
+    // The unit follows the rounded value at every boundary.
+    expect(formatTokens(9_999)).toBe('10k');
+    expect(formatTokens(999_600)).toBe('1.00M');
+    expect(formatTokens(9_999_999)).toBe('10.0M');
+    expect(formatTokens(999_960_000)).toBe('1.00B');
   });
 
   it('formats estimated cost from micro-USD', () => {
@@ -226,6 +231,18 @@ describe('sessions store', () => {
     ]);
   });
 
+  it('adoptSession sends the id and puts the adopted row in the list', async () => {
+    const adopted = { ...base, id: 9, tmux_name: 'scratch', started_at: 100 };
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(adopted); // adopt_session
+    const r = await adoptSession(9);
+    expect(r.ok).toBe(true);
+    expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual([
+      'adopt_session',
+      { args: { session_id: 9 } },
+    ]);
+    expect(get(sessions).find((s) => s.id === 9)?.started_at).toBe(100);
+  });
+
   it('discoverLostSessions defaults omitted limit to null', async () => {
     (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValue([]);
     await discoverLostSessions('mefistos');
@@ -419,5 +436,121 @@ describe('optimistic merge guard', () => {
     );
     await loadSessions();
     expect(get(sessions).map((s) => s.id)).toEqual([2, 1]);
+  });
+
+  // r06 D2: the list was read before the row existed, and its
+  // `session:created` landed while the call was in flight.
+  it('loadSessions keeps a row created by an event while the list was in flight', async () => {
+    sessions.set([{ ...base, id: 1, row_version: 1 }]);
+    let answer!: (rows: SessionRow[]) => void;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation((cmd: string) =>
+      cmd === 'list_sessions' ? new Promise<SessionRow[]>((res) => (answer = res)) : Promise.resolve(null),
+    );
+    const p = loadSessions();
+    applySessionEvents([{ type: 'created', row: { ...base, id: 7, tmux_name: 'new', row_version: 1 } }]);
+    answer([{ ...base, id: 1, row_version: 1 }]);
+    await p;
+    // Kept after the listed rows (`applyList`); the next list places it.
+    expect(get(sessions).map((s) => s.id)).toEqual([1, 7]);
+  });
+
+  it('loadSessions still drops a row an event touched only before the call began', async () => {
+    applySessionEvents([{ type: 'created', row: { ...base, id: 7, tmux_name: 'old', row_version: 1 } }]);
+    let answer!: (rows: SessionRow[]) => void;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation((cmd: string) =>
+      cmd === 'list_sessions' ? new Promise<SessionRow[]>((res) => (answer = res)) : Promise.resolve(null),
+    );
+    const p = loadSessions();
+    answer([{ ...base, id: 1, row_version: 1 }]);
+    await p;
+    expect(get(sessions).map((s) => s.id)).toEqual([1]);
+  });
+});
+
+// r06 D3: `sessions.id` is INTEGER PRIMARY KEY without AUTOINCREMENT, so the
+// next insert can reuse a just-killed highest id.
+describe('a reused session id', () => {
+  const killed = { ...base, id: 9, tmux_name: 'old', created_at: 100, row_version: 4 };
+  const reborn = { ...base, id: 9, tmux_name: 'fresh', created_at: 200, row_version: 1 };
+
+  it('a session:created for a different row passes the killed id tombstone', () => {
+    sessions.set([killed]);
+    applySessionEvents([{ type: 'killed', id: 9 }]);
+    applySessionEvents([{ type: 'created', row: reborn }]);
+    expect(get(sessions).map((s) => s.tmux_name)).toEqual(['fresh']);
+  });
+
+  it('...and loadSessions then lists it', async () => {
+    sessions.set([killed]);
+    applySessionEvents([{ type: 'killed', id: 9 }, { type: 'created', row: reborn }]);
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) =>
+      cmd === 'list_sessions' ? [reborn] : null,
+    );
+    await loadSessions();
+    expect(get(sessions).map((s) => s.tmux_name)).toEqual(['fresh']);
+  });
+
+  it('a late updated or created for the killed row itself is still dropped', () => {
+    sessions.set([killed]);
+    applySessionEvents([{ type: 'killed', id: 9 }]);
+    applySessionEvents([
+      { type: 'updated', row: { ...killed, row_version: 5 } },
+      { type: 'created', row: killed },
+    ]);
+    expect(get(sessions)).toEqual([]);
+  });
+
+  it('review r06: a command row for the killed row that resolves after the kill does not resurrect it', async () => {
+    sessions.set([killed]);
+    let answer!: (r: SessionRow) => void;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation((cmd: string) =>
+      cmd === 'rename_session' ? new Promise<SessionRow>((res) => (answer = res)) : Promise.resolve(null),
+    );
+    const p = renameSession(killed.host_alias, 'old', 'late');
+    applySessionEvents([{ type: 'killed', id: 9 }]);
+    answer({ ...killed, tmux_name: killed.tmux_name, row_version: 5 });
+    await p;
+    expect(get(sessions)).toEqual([]);
+  });
+
+  it('...but a command row for a new session reusing the id is shown', async () => {
+    sessions.set([killed]);
+    applySessionEvents([{ type: 'killed', id: 9 }]);
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) =>
+      cmd === 'rename_session' ? reborn : null,
+    );
+    await renameSession(reborn.host_alias, 'x', 'fresh');
+    expect(get(sessions).map((s) => s.tmux_name)).toEqual(['fresh']);
+  });
+});
+
+describe('sessionAgent', () => {
+  it('reads the row, and an older hub\'s missing field from the kind', () => {
+    expect(sessionAgent({ agent: 'codex', kind: 'work' })).toBe('codex');
+    expect(sessionAgent({ agent: 'shell', kind: 'shell' })).toBe('shell');
+    expect(sessionAgent({ kind: 'work' })).toBe('claude');
+    expect(sessionAgent({ kind: 'bg' })).toBe('claude');
+    expect(sessionAgent({ kind: 'shell' })).toBe('shell');
+    // An older hub's shell row, after the Rust row's serde default.
+    expect(sessionAgent({ agent: 'claude', kind: 'shell' })).toBe('shell');
+  });
+});
+
+describe('queuePrompt (Send later, M15 G1.8)', () => {
+  const sent = () => (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], (c[1] as { args: unknown }).args]);
+
+  it('sends only the plain call when no time is chosen', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ session_id: 4, delivered: true });
+    const r = await queuePrompt(4, 'status?');
+    expect(r.ok).toBe(true);
+    expect(sent()).toEqual([['queue_prompt', { session_id: 4, prompt: 'status?' }]]);
+  });
+
+  it('carries the time, the limit wait and skip-if-archived when chosen', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ session_id: 4, delivered: false, queued_id: 2 });
+    await queuePrompt(4, 'rebase', { notBefore: 1_800_003_600.7, untilLimitReset: true, skipIfArchived: true });
+    expect(sent()).toEqual([
+      ['queue_prompt', { session_id: 4, prompt: 'rebase', not_before: 1_800_003_600, until_limit_reset: true, skip_if_archived: true }],
+    ]);
   });
 });

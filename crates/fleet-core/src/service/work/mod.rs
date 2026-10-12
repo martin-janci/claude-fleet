@@ -3,27 +3,42 @@
 //! agnostic entry the MCP tools `work` / `work_link` and the desktop commands
 //! share, so a paired desktop and a local one answer the same way.
 
+pub mod abandon;
 pub mod agent_handover;
+pub mod attachments;
+pub mod brief_draft;
+pub mod buckets;
 pub mod card;
+pub mod confidence;
 pub mod describe;
 pub mod detect;
+pub mod graph;
 pub mod handover;
 pub mod harvest;
 pub mod local;
+pub mod missions;
 pub mod nudge;
+pub mod orchestrate;
+pub mod plan_import;
+pub mod promote;
 pub mod recognize;
+pub mod report;
 pub mod resolve;
 pub mod resume;
 pub mod retention;
+pub mod run;
 #[cfg(test)]
 mod scale_tests;
+pub mod stats;
 pub mod status;
 pub mod steps;
 pub mod structure;
 pub mod summary;
 pub mod tidy;
 pub mod today;
+pub mod tracker_comments;
 pub mod usage;
+pub mod verify;
 pub mod view;
 
 use crate::ipc_error::{codes, lock, IpcError};
@@ -72,13 +87,16 @@ pub struct WorkArgs {
     /// Tickets: max rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
+    /// Tickets: own tasks too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_local: Option<bool>,
     /// Lookup: a ticket URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     /// Today: unix start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<i64>,
-    /// item:<id> or ref:<KEY>.
+    /// item:<id> or ref:<KEY>; reject: item:<id> merges into it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
     /// Tree filters.
@@ -102,6 +120,11 @@ pub struct WorkArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(skip)]
     pub with_review_total: Option<bool>,
+    /// Tree: name each task's mission and wave (the Board's chip). Kept out
+    /// of the served schema, as `sections`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    pub with_missions: Option<bool>,
     /// Draft rule.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "object_schema")]
@@ -109,6 +132,21 @@ pub struct WorkArgs {
     /// Org id; 0 none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<i64>,
+    /// sprint|release
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Bucket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket_id: Option<i64>,
+    /// Mission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mission_id: Option<i64>,
+    /// mission: older events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_event: Option<i64>,
+    /// attachment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
@@ -153,9 +191,21 @@ pub struct WorkLinkArgs {
     /// Start: brief Claude with the ticket.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub with_brief: Option<bool>,
+    /// preview_start: have a model draft the brief (one call on the host).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_brief: Option<bool>,
     /// Start: session name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// attach.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+    /// attach.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_base64: Option<String>,
+    /// attachment_delete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_id: Option<i64>,
     /// Start: worktree name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
@@ -165,6 +215,15 @@ pub struct WorkLinkArgs {
     /// Link across orgs anyway.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_cross_org: Option<bool>,
+    /// Start: beside a live one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallel: Option<bool>,
+    /// run: implement|review|test|research|integrate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// link/switch: false refuses when live elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ack_live: Option<bool>,
     /// Snooze (7).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub days: Option<u32>,
@@ -177,22 +236,55 @@ pub struct WorkLinkArgs {
     /// name/create/propose: title.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// create/propose: parent, item:<id>.
+    /// create/propose/set_parent: item:<id> ("" = none).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
-    /// create/propose: notes.
+    /// edit: epic or not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epic: Option<bool>,
+    /// comment_delete: which.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment_id: Option<i64>,
+    /// comment: also post it to the ticket's tracker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_to_tracker: Option<bool>,
+    /// promote: a top task's tracker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracker_id: Option<i64>,
+    /// promote: Jira project, Asana project gid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+    /// create/propose/edit/comment: text (edit: "" clears).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    /// Display names ([] clears).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignees: Option<Vec<String>>,
+    /// Due date, YYYY-MM-DD ("" clears).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_at: Option<String>,
+    /// edit: urgent|high|medium|low ("" clears).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
+    /// edit: ≤20 labels, ≤40 chars ([] clears).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<Vec<String>>,
+    /// edit: 0-1000 (0 clears).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate: Option<f64>,
+    /// edit: points|hours.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate_unit: Option<String>,
     /// propose: the reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub why: Option<String>,
     /// set_status: todo | in_progress | done.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
-    /// item:<id> or ref:<KEY>.
+    /// item:<id> or ref:<KEY>; reject: item:<id> merges into it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
-    /// Version seen (0 none).
+    /// Version seen (0 none); place needs it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_version: Option<i64>,
     /// Primary link seen; 0 none.
@@ -205,7 +297,7 @@ pub struct WorkLinkArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "array_schema")]
     pub decisions: Option<Vec<structure::LinkDecision>>,
-    /// Group label.
+    /// A group label, or an existing group id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
     /// Placement note.
@@ -231,6 +323,76 @@ pub struct WorkLinkArgs {
     /// view_delete.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view_id: Option<i64>,
+    /// Bucket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket_id: Option<i64>,
+    /// bucket_admin: a work_admin bucket_* call's fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "object_schema")]
+    pub bucket_op: Option<crate::service::trackers::admin::WorkAdminArgs>,
+    /// Mission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mission_id: Option<i64>,
+    /// mission_save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "object_schema")]
+    pub mission: Option<missions::MissionInput>,
+    /// dep: what `item_id` waits for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depends_on: Option<i64>,
+    /// accept_many, undo_accept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_ids: Option<Vec<i64>>,
+    /// propose_tree: [{title, notes?, why?, depends_on?: [{entry: n} |
+    /// {item: id}]}].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "array_schema")]
+    pub tree: Option<Vec<crate::store::TreeEntry>>,
+    /// mission_import: [{step, title, lane?, needs?, status?}]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "array_schema")]
+    pub plan: Option<Vec<plan_import::PlanRow>>,
+    /// done_when: the item's condition lines (`[]` clears them).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_when: Option<Vec<String>>,
+    /// verify: the condition line checked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<String>,
+    /// verify: whether it is met. card_decide: apply (true) or dismiss.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ok: Option<bool>,
+    /// mission_start: one step's key (`run:12`); omitted, the whole wave.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
+    /// card_decide.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card_id: Option<i64>,
+    /// mission_grant: the autonomy signed, 1 to 3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<i64>,
+    /// mission_grant: how long it lasts (default 8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hours: Option<u32>,
+    /// mission_grant: what its workers may spend, in cents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_cents: Option<i64>,
+    /// mission_grant: the hosts its runs may use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosts: Option<Vec<String>>,
+    /// mission_grant: runs at once, at most.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_parallel: Option<u32>,
+    /// mission_grant: the login its runs bill, a credential profile on the
+    /// run's host; omitted, the host's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// today_brief: draft a new brief (true) or answer the last one;
+    /// mission_triage: also draft the card's words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh: Option<bool>,
+    /// today_brief: the start of the viewer's day, unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<i64>,
 }
 
 /// `work_link { action: dismiss, item_id }`.
@@ -338,6 +500,20 @@ pub enum WorkAction {
     Views,
     /// What moving a local task to another org changes.
     OrgImpact,
+    /// Sprints and releases in scope, with roll-ups (design 2026-09-28 §7).
+    Buckets,
+    /// One sprint or release with its members.
+    Bucket,
+    /// The tree's tasks counted per group and stage (persona dashboards).
+    Stats,
+    /// Missions in scope (orchestration O1).
+    Missions,
+    /// One mission with its items and latest events.
+    Mission,
+    /// One task attachment with its bytes.
+    Attachment,
+    /// A ticket's comments as its tracker holds them, on demand.
+    TrackerComments,
 }
 
 /// Every `work` action, by name — the ONLY place an action is parsed from,
@@ -368,6 +544,13 @@ pub const WORK_ACTIONS: &[(&str, WorkAction)] = &[
     ("rule_preview", WorkAction::RulePreview),
     ("views", WorkAction::Views),
     ("org_impact", WorkAction::OrgImpact),
+    ("buckets", WorkAction::Buckets),
+    ("bucket", WorkAction::Bucket),
+    ("stats", WorkAction::Stats),
+    ("missions", WorkAction::Missions),
+    ("mission", WorkAction::Mission),
+    ("attachment", WorkAction::Attachment),
+    ("tracker_comments", WorkAction::TrackerComments),
 ];
 
 /// Every `work_link` action. The tool refuses any other name before
@@ -377,10 +560,14 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "link",
     "reject",
     "unlink",
+    "switch",
     "confirm",
     "trust_project",
     "resume",
     "start",
+    "preview_start",
+    "abandon_start",
+    "run",
     "handover",
     "archive",
     "unarchive",
@@ -393,17 +580,51 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "accept",
     "name",
     "set_status",
+    "edit",
+    "set_parent",
+    "comment",
+    "comment_delete",
+    "promote",
+    "attach",
+    "attachment_delete",
     "summarize",
     "set_primary",
     "reconsider",
     "ack",
     "decide_batch",
     "place",
+    "unplace",
     "assign_org",
     "rule_save",
     "rule_delete",
     "view_save",
     "view_delete",
+    "bucket_add",
+    "bucket_remove",
+    "bucket_admin",
+    "mission_save",
+    "mission_state",
+    "mission_repo",
+    "mission_item",
+    "mission_delete",
+    "mission_import",
+    "dep",
+    "hold",
+    "propose_tree",
+    "accept_many",
+    "undo_accept",
+    "done_when",
+    "verify",
+    "mission_start",
+    "mission_plan",
+    "mission_grant",
+    "mission_revoke",
+    "retry",
+    "card_decide",
+    "missions_pause_all",
+    "mission_release_note",
+    "today_brief",
+    "mission_triage",
 ];
 
 /// The desktop's Routed work commands and the hub action each one calls
@@ -416,7 +637,6 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("list_trackers", "work", "trackers"),
     ("work_tickets", "work", "tickets"),
     ("work_lookup", "work", "lookup"),
-    ("work_scopes", "work", "scopes"),
     ("list_orgs", "work", "orgs"),
     ("org_suggestions", "work", "org_suggestions"),
     ("work_today", "work", "today"),
@@ -424,24 +644,33 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("link_session_work", "work_link", "link"),
     ("reject_session_work", "work_link", "reject"),
     ("unlink_session_work", "work_link", "unlink"),
+    ("switch_session_work", "work_link", "switch"),
     ("confirm_session_work", "work_link", "confirm"),
     ("set_work_project_trust", "work_link", "trust_project"),
     ("resume_work", "work_link", "resume"),
     ("start_work", "work_link", "start"),
+    ("preview_start_work", "work_link", "preview_start"),
+    ("abandon_start", "work_link", "abandon_start"),
     ("request_work_handover", "work_link", "handover"),
     ("start_work_multi", "work_link", "start"),
     ("work_tidy", "work", "tidy"),
     ("work_reopened", "work", "reopened"),
-    ("archive_session_work", "work_link", "archive"),
     ("unarchive_session_work", "work_link", "unarchive"),
-    ("snooze_tidy", "work_link", "snooze"),
-    ("never_tidy", "work_link", "never"),
     ("tidy_apply", "work_link", "tidy_apply"),
     ("dismiss_reopened", "work_link", "dismiss"),
-    ("list_local_work_items", "work", "local_items"),
     ("name_session_work", "work_link", "name"),
     ("rename_work_item", "work_link", "name"),
     ("create_work_task", "work_link", "create"),
+    ("set_work_status", "work_link", "set_status"),
+    ("edit_work_item", "work_link", "edit"),
+    ("set_work_parent", "work_link", "set_parent"),
+    ("comment_on_work", "work_link", "comment"),
+    ("promote_work_item", "work_link", "promote"),
+    ("delete_work_comment", "work_link", "comment_delete"),
+    ("attach_to_work", "work_link", "attach"),
+    ("delete_work_attachment", "work_link", "attachment_delete"),
+    ("work_attachment", "work", "attachment"),
+    ("work_tracker_comments", "work", "tracker_comments"),
     ("accept_work_proposal", "work_link", "accept"),
     ("reject_work_proposal", "work_link", "reject"),
     ("summarize_past_work", "work_link", "summarize"),
@@ -464,6 +693,42 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("delete_work_rule", "work_link", "rule_delete"),
     ("save_work_view", "work_link", "view_save"),
     ("delete_work_view", "work_link", "view_delete"),
+    // Sprints and releases (design 2026-09-28 §6a/§6b).
+    ("work_buckets", "work", "buckets"),
+    ("work_bucket", "work", "bucket"),
+    // Persona dashboards: the Work view's tasks counted.
+    ("work_stats", "work", "stats"),
+    ("add_work_to_bucket", "work_link", "bucket_add"),
+    ("remove_work_from_bucket", "work_link", "bucket_remove"),
+    ("work_bucket_admin", "work_link", "bucket_admin"),
+    // Orchestration O1: missions.
+    ("work_missions", "work", "missions"),
+    ("work_mission", "work", "mission"),
+    ("save_mission", "work_link", "mission_save"),
+    ("set_mission_state", "work_link", "mission_state"),
+    ("set_mission_repo", "work_link", "mission_repo"),
+    ("set_mission_item", "work_link", "mission_item"),
+    ("delete_mission", "work_link", "mission_delete"),
+    ("import_mission_plan", "work_link", "mission_import"),
+    // Orchestration O2: the mission graph.
+    ("set_work_dep", "work_link", "dep"),
+    ("set_work_hold", "work_link", "hold"),
+    ("accept_work_proposals", "work_link", "accept_many"),
+    ("undo_work_accept", "work_link", "undo_accept"),
+    // Orchestration O3: acceptance conditions and a person's check.
+    ("set_work_done_when", "work_link", "done_when"),
+    ("verify_work_item", "work_link", "verify"),
+    ("start_mission_wave", "work_link", "mission_start"),
+    ("retry_work_item", "work_link", "retry"),
+    ("plan_mission", "work_link", "mission_plan"),
+    ("decide_mission_card", "work_link", "card_decide"),
+    ("grant_mission", "work_link", "mission_grant"),
+    ("revoke_mission_grant", "work_link", "mission_revoke"),
+    ("pause_all_missions", "work_link", "missions_pause_all"),
+    // Redesign 9.11: LLM drafts in Control.
+    ("mission_release_note", "work_link", "mission_release_note"),
+    ("today_brief", "work_link", "today_brief"),
+    ("mission_triage", "work_link", "mission_triage"),
 ];
 
 /// The `action` schemas are generated from the tables above (work graph
@@ -530,11 +795,12 @@ pub async fn work_context(
     args: &WorkArgs,
     store: &Mutex<Store>,
     ssh: &std::sync::Arc<crate::ssh::SshClient>,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
 ) -> Result<WorkContext, IpcError> {
+    let scope = &view.org;
     let key = crate::store::normalize_work_ref(args.required_key()?)?;
     orgs::require_key(&*lock(store)?, scope, &key)?;
-    let input = handover::gather_handover(store, ssh.as_ref(), &key, None, scope).await?;
+    let input = handover::gather_handover(store, ssh.as_ref(), &key, None, view).await?;
     Ok(WorkContext {
         text: handover::build_context(&input),
         key,
@@ -546,7 +812,7 @@ pub async fn work_resume_plan(
     args: &WorkArgs,
     store: &Mutex<Store>,
     ssh: &std::sync::Arc<crate::ssh::SshClient>,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
 ) -> Result<resume::ResumePlan, IpcError> {
     resume::resume_plan(
         store,
@@ -555,7 +821,7 @@ pub async fn work_resume_plan(
         args.link_id,
         args.host_alias.as_deref(),
         args.with_brief.unwrap_or(false),
-        scope,
+        view,
     )
     .await
 }
@@ -583,6 +849,34 @@ pub fn work_purge_impact(
     }
     let s = lock(store)?;
     let mut keys = s.work_keys_for_purge(pid, &hosts)?;
+    // This is the org boundary, not a privacy fence: which KEYS a purge may name. `PurgeImpact`
+    // carries keys and no session row.
+    //
+    // **Open, and recorded as an owner decision** (multi-user M1, T9d; the
+    // table row is in `scope_guard_tests::OPEN_QUESTIONS`). For a person's
+    // own device `is_all()` is true, so no retention runs and `keys` is
+    // every work key `Store::work_keys_for_purge` found on the project and
+    // hosts — other people's included. A ticket key is a company's; a LOCAL
+    // item's key is a sentence a person typed about their own work, which is
+    // why this is still the owner's and not settled here.
+    //
+    // **It is the WHOLE of that residual** (multi-user M1, T10). T9b/T9c
+    // attributed the same "key-level residual" to `orgs::require_key` /
+    // `require_key_bound`, and T10 traced those: for a per-host token or an
+    // org-bound client they answer an org question (does this key have work
+    // in YOUR scope), and for every other caller — a person's own device
+    // included — `require_key` returns `Ok(())` unconditionally and
+    // discloses nothing. So this site is not "the third call site" of a
+    // shared question; it is the only one, and `require_key`'s doc records
+    // the decision that closes its half.
+    //
+    // Why it is not simply fenced by person here: the natural fix is to keep
+    // a key only when the caller can see some link on it
+    // (`orgs::scope_links_for`), and that would fence the OPERATOR too — the
+    // master's `ViewScope` carries the personal owner as its person, so on a
+    // multi-person hub the purge warning would stop naming the work the
+    // purge is about to destroy, which §4.5 deliberately does not do to the
+    // hub operator. Keys, never session rows.
     if !scope.is_all() {
         keys.retain(|k| orgs::require_key(&s, scope, k).is_ok());
     }
@@ -596,8 +890,9 @@ pub async fn work_resume(
     ssh: &std::sync::Arc<crate::ssh::SshClient>,
     reg: &std::sync::Arc<crate::cancel::CancellationRegistry>,
     scope: &OrgScope,
+    reader: &crate::service::view_scope::ViewScope,
 ) -> Result<SessionRow, IpcError> {
-    resume::resume_work(store, ssh, reg, &resume_args(args)?, scope).await
+    resume::resume_work(store, ssh, reg, &resume_args(args)?, scope, reader).await
 }
 
 /// `work { action: lookup }`'s reference: `url`, else `key`.
@@ -610,8 +905,27 @@ pub fn lookup_reference(args: &WorkArgs) -> Result<&str, IpcError> {
 
 /// The start half of [`WorkLinkArgs`] (work graph M3.4): a PERSON's start
 /// (the desktop's); an agent's goes through [`start_args_as`].
+///
+/// No owner: the desktop is one person at the keyboard and the hub's own
+/// person is the right answer there (`hub_personal_owner`). The hub's own path
+/// goes through [`start_args_owned`] with the CALLER's person.
 pub fn start_args(args: &WorkLinkArgs) -> crate::service::trackers::tickets::StartArgs {
     start_args_as(args, Decider::Person)
+}
+
+/// [`start_args_as`] with the caller's person (multi-user M1, T5): whose the
+/// started session is; and who started it (migration 124).
+pub fn start_args_owned(
+    args: &WorkLinkArgs,
+    decider: Decider,
+    owner: Option<i64>,
+    origin: Option<crate::store::SessionOrigin>,
+) -> crate::service::trackers::tickets::StartArgs {
+    crate::service::trackers::tickets::StartArgs {
+        owner,
+        origin,
+        ..start_args_as(args, decider)
+    }
 }
 
 /// [`start_args`] started by `decider`, which decides the link's source:
@@ -622,6 +936,10 @@ pub fn start_args_as(
 ) -> crate::service::trackers::tickets::StartArgs {
     crate::service::trackers::tickets::StartArgs {
         decider,
+        owner: None,
+        origin: None,
+        // A start names no login: `profile` is mission_grant's.
+        profile: None,
         reference: args.url.clone().or(args.key.clone()),
         item_id: args.item_id,
         project_id: args.project_id,
@@ -632,12 +950,14 @@ pub fn start_args_as(
         worktree: args.worktree.clone(),
         force_cross_org: args.force_cross_org.unwrap_or(false),
         per_project: false,
+        parallel: args.parallel.unwrap_or(false),
     }
 }
 
 /// The resume half of [`WorkLinkArgs`].
 pub fn resume_args(args: &WorkLinkArgs) -> Result<resume::ResumeArgs, IpcError> {
     Ok(resume::ResumeArgs {
+        owner: None,
         key: args
             .key
             .clone()
@@ -654,17 +974,31 @@ pub fn resume_args(args: &WorkLinkArgs) -> Result<resume::ResumeArgs, IpcError> 
 pub const RECENT_LINKS_MAX: i64 = 200;
 
 /// `{session_id}` → that session's live links (confirmed and rejected,
-/// primary first); `{key}` → ended links to the key (past work). Exactly one.
+/// primary first); `{key}` → ended links to the key (past work); neither →
+/// every link that ended recently. At most one of the two arguments.
 /// A per-host token reads only links inside its orgs, and past links only of
 /// its own host's sessions (`orgs::scope_links`).
+///
+/// Multi-user M1 (T8d): it takes the caller's WHOLE scope, not its org half.
+/// Two of the three forms answer a PAGE — a key's ended links, and the
+/// fleet-wide recent page a bare `work {}` returns — and a `WorkLinkRow`
+/// carries `snap_tmux`, `snap_name`, `snap_branch`, `snap_worktree`,
+/// `snap_pr_url` and `snap_claude_ids`, which spec §4.3 calls content. The
+/// `{session_id}` form is gated per row in the handler as well, and the fence
+/// here is harmless to it (the caller's own row is visible to the caller);
+/// the two page forms had no person fence at all, because
+/// `orgs::scope_links`' `OrgScope::All` arm is `{}` and `All` is what every
+/// paired client bound to no org resolves to. T8's result gate could not net
+/// them either: a `WorkLinkRow` spells the session `snap_host` / `snap_tmux`
+/// and carries no `visibility`, so `looks_like_session_row` is false for it.
 pub fn work(
     args: &WorkArgs,
     store: &Mutex<Store>,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
 ) -> Result<Vec<WorkLinkRow>, IpcError> {
     let s = lock(store)?;
     let mut links = work_unscoped(args, &s)?;
-    orgs::scope_links(&s, scope, &mut links)?;
+    orgs::scope_links_for(&s, view, &mut links)?;
     Ok(links)
 }
 
@@ -779,6 +1113,7 @@ fn work_link_locked<'a>(
         args.action.as_str(),
         "resume"
             | "start"
+            | "run"
             | "trust_project"
             | "handover"
             | "dismiss"
@@ -786,6 +1121,7 @@ fn work_link_locked<'a>(
             | "name"
             | "decide_batch"
             | "place"
+            | "unplace"
             | "assign_org"
             | "rule_save"
             | "rule_delete"
@@ -810,7 +1146,11 @@ fn work_link_locked<'a>(
     if matches!(scope, OrgScope::Org { .. })
         && !s
             .get_session_by_id(session_id)?
-            .is_some_and(|row| scope.sees_row(&row))
+            // The org half. The person half is the transport's session gate
+            // (`resolve_row_person_gated`), which every `work_link` entry
+            // point takes before reaching here; this keeps the SERVICE's own
+            // answer the same for the batch path.
+            .is_some_and(|row| scope.sees_row_org_only(&row))
     {
         return Err(IpcError::new(
             codes::E_NOTFOUND,
@@ -862,6 +1202,9 @@ fn work_link_locked<'a>(
     // linked work, as the store does for a session without any.
     let tidy_target = || -> Result<i64, IpcError> {
         let link_id = s.tidy_link(session_id, args.link_id)?;
+        // This is the org boundary, not a privacy fence: the session was already reached through
+        // the tool layer's `Reach::Drive` person gate; what is left to ask is whether the LINK
+        // is this caller's org's.
         if !scope.is_all() && visible_link(link_id).is_err() {
             return Err(IpcError::new(
                 codes::E_NOTFOUND,
@@ -878,6 +1221,8 @@ fn work_link_locked<'a>(
     match args.action.as_str() {
         "archive" => {
             // A per-host token stamps only the links it sees.
+            // This is the org boundary, not a privacy fence: which of an already-reached
+            // session's links an archive stamps, by org.
             let only = if scope.is_all() {
                 None
             } else {
@@ -950,6 +1295,8 @@ fn work_link_locked<'a>(
             // nor be told that link's id. The store's own check then runs
             // on the actual primary, under this same lock.
             let actual = s.current_primary_link(session_id)?;
+            // This is the org boundary, not a privacy fence: the same org question about the
+            // primary link.
             let seen = actual.filter(|id| scope.is_all() || visible_link(*id).is_ok());
             if let Some(expected) = args.expected_primary {
                 if seen.unwrap_or(0) != expected {
@@ -992,6 +1339,30 @@ fn work_link_locked<'a>(
         }
     };
     match args.action.as_str() {
+        // Task → session P-2: end the live link `link_id` and make the
+        // target the primary, in one compare-and-set on the primary.
+        "switch" => {
+            let from = args
+                .link_id
+                .ok_or_else(|| IpcError::new(codes::E_INVALID, "switch needs link_id"))?;
+            visible_link(from)?;
+            let source = link_source(None, decider)?;
+            let (t, org) = visible_target(target()?)?;
+            orgs::check_cross_org(org, s.session_org(session_id)?, &target_name(t), force)?;
+            // The compare-and-set is on the primary the caller can see, as
+            // in `set_primary`: another org's primary reads as none and its
+            // id is never named in the refusal.
+            let actual = s.current_primary_link(session_id)?;
+            // This is the org boundary, not a privacy fence: the same org question about the
+            // primary link.
+            let seen = actual.filter(|id| scope.is_all() || visible_link(*id).is_ok());
+            if let Some(expected) = args.expected_primary {
+                if seen.unwrap_or(0) != expected {
+                    return Err(crate::store::primary_conflict(session_id, seen));
+                }
+            }
+            s.switch_session_work(session_id, from, t, source, Some(actual.unwrap_or(0)))?;
+        }
         "link" => {
             let source = link_source(args.source.as_deref(), decider)?;
             let (t, org) = visible_target(target()?)?;
@@ -1009,6 +1380,8 @@ fn work_link_locked<'a>(
         // `reject { key | item_id }` any target.
         "reject" if args.link_id.is_some() && args.key.is_none() && args.item_id.is_none() => {
             let link_id = args.link_id.unwrap_or_default();
+            // This is the org boundary, not a privacy fence: the same org question before a
+            // reject by link id.
             if !scope.is_all() || args.expected_version.is_some() {
                 checked_link(link_id)?;
             }
@@ -1031,6 +1404,8 @@ fn work_link_locked<'a>(
                     &format!("work link {link_id}"),
                     force,
                 )?;
+            // This is the org boundary, not a privacy fence: the same org question before a
+            // confirm by link id.
             } else if !scope.is_all() {
                 visible_link(link_id)?;
             }
@@ -1043,6 +1418,8 @@ fn work_link_locked<'a>(
             let link_id = args
                 .link_id
                 .ok_or_else(|| IpcError::new(codes::E_INVALID, "unlink needs link_id"))?;
+            // This is the org boundary, not a privacy fence: the same org question before an
+            // unlink by link id.
             if !scope.is_all() || args.expected_version.is_some() {
                 checked_link(link_id)?;
             }
@@ -1101,13 +1478,127 @@ fn work_link_locked<'a>(
     // A link made after the PR: the probe queues only when the PR's signals
     // change, so queue its write-back here (M13.4e). `on_pr` keeps it to a
     // person's confirmed link; the outbox makes a repeat a no-op.
-    if matches!(args.action.as_str(), "link" | "confirm") {
+    if matches!(args.action.as_str(), "link" | "switch" | "confirm") {
         if let Err(e) = crate::service::trackers::write_back::on_session_pr(s, session_id) {
             tracing::debug!(error = %e.message, "[write-back] not queued after a link");
         }
     }
     s.get_session_by_id(session_id)?
         .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found")))
+}
+
+/// One session already on the task a `link` or `switch` names (task →
+/// session P-3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveElsewhere {
+    /// Named only when the caller may see the session (D7, T9b).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<i64>,
+    /// One plain sentence for the person.
+    pub message: String,
+}
+
+/// Task → session P-3: a `link` or `switch` that asks for the warning
+/// (`ack_live: false`) is refused with `E_EXISTS` and
+/// `details.live_elsewhere[]` when the task already has another live
+/// session; the person then sends it again with `ack_live: true`.
+/// Absent `ack_live` checks nothing, so an older client, the phone and the
+/// agents link exactly as before. Only sessions in the caller's orgs are
+/// counted, so the refusal never says another org works on a key; one the
+/// caller may not see is "someone", never named.
+pub fn check_live_elsewhere(
+    args: &WorkLinkArgs,
+    store: &Mutex<Store>,
+    view: &crate::service::view_scope::ViewScope,
+) -> Result<(), IpcError> {
+    if args.ack_live != Some(false)
+        || !matches!(args.action.as_str(), "link" | "switch")
+        || args.source.as_deref() == Some(AGENT_INFERRED)
+    {
+        return Ok(());
+    }
+    let Some(session_id) = args.session_id else {
+        return Ok(());
+    };
+    let target = match (args.item_id, args.key.as_deref()) {
+        (Some(id), None) => WorkTarget::Item(id),
+        (None, Some(key)) => WorkTarget::Key(key),
+        // The action itself refuses the shape.
+        _ => return Ok(()),
+    };
+    let s = lock(store)?;
+    // The target as the action will read it: an item outside the scope
+    // answers as unknown there, so it is not looked at here; a key outside
+    // it is the bare key it is to this caller.
+    let target = match s.work_target_org(target) {
+        Ok(org) if view.org.sees_org(org) => target,
+        Ok(_) => match target {
+            WorkTarget::Key(k) | WorkTarget::Ref(k) => WorkTarget::Ref(k),
+            WorkTarget::Item(_) => return Ok(()),
+        },
+        Err(e) if matches!(e.code.as_str(), codes::E_NOTFOUND | codes::E_INVALID) => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let ids = match s.live_sessions_on_target(target, session_id) {
+        Ok(ids) => ids,
+        // An unknown item or a malformed key: the action answers it.
+        Err(e) if matches!(e.code.as_str(), codes::E_NOTFOUND | codes::E_INVALID) => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let mut found = Vec::new();
+    for id in ids {
+        let Some(row) = s.get_session_by_id(id)? else {
+            continue;
+        };
+        // The org half alone decides whether the session COUNTS: a task's
+        // other live session in the caller's org is worth a warning even
+        // when the caller may not see it. The person half,
+        // `sees_session_row`, decides only whether it is NAMED.
+        if !view.org.sees_row_org_only(&row) {
+            continue;
+        }
+        let visible = view.sees_session_row(&row).is_visible();
+        found.push(LiveElsewhere {
+            session_id: visible.then_some(row.id),
+            message: if visible {
+                format!(
+                    "Already open in {} on {}.",
+                    row.friendly_name.as_deref().unwrap_or(&row.tmux_name),
+                    row.host_alias
+                )
+            } else {
+                "Someone is already working on this.".into()
+            },
+        });
+    }
+    if found.is_empty() {
+        return Ok(());
+    }
+    Err(IpcError::new(
+        codes::E_EXISTS,
+        format!(
+            "this task already has {} live session{}; send again with ack_live: true to \
+             {} anyway",
+            found.len(),
+            if found.len() == 1 { "" } else { "s" },
+            args.action
+        ),
+    )
+    .with_details(serde_json::json!({ "live_elsewhere": found })))
+}
+
+/// A live session's own name, for a sentence that ALREADY names the task it
+/// is open on — `None` when naming it would only say the key again.
+///
+/// A start from a ticket names its session after the key, so the
+/// unconditional form said one thing twice: "TASK-230 is already open in
+/// TASK-230 on mefistos". Case-insensitive, because the same name reaches
+/// here from a branch-shaped rename (`task-230`) as readily as from the key;
+/// a parallel start's `TASK-230-2` is a different session and stays named.
+/// An empty name is nobody, not a blank in the middle of the sentence.
+pub(crate) fn name_beside_key<'a>(key: &str, name: &'a str) -> Option<&'a str> {
+    let name = name.trim();
+    (!name.is_empty() && !name.eq_ignore_ascii_case(key.trim())).then_some(name)
 }
 
 fn lifecycle_row(s: &Store, session_id: i64) -> Result<SessionRow, IpcError> {
@@ -1186,6 +1677,29 @@ mod tests {
         (Mutex::new(s), id)
     }
 
+    /// A session named after the key it is open on adds nothing to a
+    /// sentence that already names the key, however it is cased or padded;
+    /// every other name does, the `-N` of a parallel start included.
+    #[test]
+    fn a_session_is_named_beside_a_key_only_when_the_name_is_not_the_key() {
+        assert_eq!(name_beside_key("TASK-230", "TASK-230"), None);
+        assert_eq!(name_beside_key("TASK-230", "task-230"), None);
+        assert_eq!(name_beside_key("TASK-230", "  TASK-230 "), None);
+        assert_eq!(name_beside_key("TASK-230", ""), None, "nobody, not a blank");
+        assert_eq!(name_beside_key("TASK-230", "   "), None);
+        assert_eq!(
+            name_beside_key("TASK-230", "TASK-230-2"),
+            Some("TASK-230-2"),
+            "a parallel start is a different session"
+        );
+        assert_eq!(
+            name_beside_key("TASK-230", "TASK-230 fix the sentence"),
+            Some("TASK-230 fix the sentence"),
+            "a start's own `<key> <title>` name carries the title too"
+        );
+        assert_eq!(name_beside_key("TASK-230", " api "), Some("api"));
+    }
+
     /// The served schema's `enum` is the table, in order — what the phone
     /// reads to decide which buttons to draw (work graph M8.0).
     #[test]
@@ -1207,6 +1721,90 @@ mod tests {
             action: action.into(),
             ..Default::default()
         }
+    }
+
+    /// Task → session P-2 through the service: the primary moves, the old
+    /// link ends, and a stale view of the primary is a conflict.
+    #[test]
+    fn switch_moves_the_primary_in_one_step() {
+        let (st, sid) = store();
+        let a = WorkLinkArgs {
+            key: Some("ABC-1".into()),
+            ..link(sid, "link")
+        };
+        work_link(&a, &st, &OrgScope::All).unwrap();
+        let from = lock(&st)
+            .unwrap()
+            .current_primary_link(sid)
+            .unwrap()
+            .unwrap();
+        let stale = WorkLinkArgs {
+            key: Some("DEF-2".into()),
+            link_id: Some(from),
+            expected_primary: Some(from + 1),
+            ..link(sid, "switch")
+        };
+        assert_eq!(
+            work_link(&stale, &st, &OrgScope::All).unwrap_err().code,
+            codes::E_CONFLICT
+        );
+        let row = work_link(
+            &WorkLinkArgs {
+                expected_primary: Some(from),
+                ..stale
+            },
+            &st,
+            &OrgScope::All,
+        )
+        .unwrap();
+        let w = row.work.expect("the row carries its work");
+        assert_eq!(w.key.as_deref(), Some("DEF-2"));
+        let s = lock(&st).unwrap();
+        let old = s.get_work_link(from).unwrap().unwrap();
+        assert_eq!(old.end_reason.as_deref(), Some("switched"));
+        assert_eq!(s.session_work_links(sid).unwrap().len(), 1);
+    }
+
+    /// Task → session P-3: asked for, the warning names the other live
+    /// session; acknowledged, or not asked for, the link goes ahead.
+    #[test]
+    fn a_link_asked_to_warn_names_the_tasks_other_live_session() {
+        let (st, sid) = store();
+        let other = {
+            let s = lock(&st).unwrap();
+            let o = s
+                .upsert_session("other", "h", None, None, 1, 1, "running", None)
+                .unwrap();
+            s.link_session_work(o, WorkTarget::Key("ABC-1"), "manual")
+                .unwrap();
+            o
+        };
+        let view = crate::service::view_scope::ViewScope::internal();
+        let ask = |ack: Option<bool>| WorkLinkArgs {
+            key: Some("abc-1".into()),
+            ack_live: ack,
+            ..link(sid, "link")
+        };
+        let e = check_live_elsewhere(&ask(Some(false)), &st, &view).unwrap_err();
+        assert_eq!(e.code, codes::E_EXISTS);
+        let d = e.details.unwrap();
+        assert_eq!(d["live_elsewhere"][0]["session_id"], other);
+        assert!(d["live_elsewhere"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("other"));
+        check_live_elsewhere(&ask(Some(true)), &st, &view).unwrap();
+        check_live_elsewhere(&ask(None), &st, &view).unwrap();
+        // Nothing else on the work: nothing to say.
+        check_live_elsewhere(
+            &WorkLinkArgs {
+                key: Some("XYZ-9".into()),
+                ..ask(Some(false))
+            },
+            &st,
+            &view,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1234,7 +1832,7 @@ mod tests {
                 ..Default::default()
             },
             &st,
-            &OrgScope::All,
+            &crate::service::view_scope::ViewScope::internal(),
         )
         .unwrap();
         assert_eq!(links.len(), 1);
@@ -1276,7 +1874,7 @@ mod tests {
                 ..Default::default()
             },
             &st,
-            &OrgScope::All,
+            &crate::service::view_scope::ViewScope::internal(),
         )
         .unwrap();
         assert_eq!(links[0].state, "rejected");
@@ -1695,9 +2293,13 @@ mod tests {
             assert_eq!(err.code, codes::E_INVALID, "{args:?}");
         }
         assert!(
-            work(&WorkArgs::default(), &st, &OrgScope::All)
-                .unwrap()
-                .is_empty(),
+            work(
+                &WorkArgs::default(),
+                &st,
+                &crate::service::view_scope::ViewScope::internal()
+            )
+            .unwrap()
+            .is_empty(),
             "recent: none"
         );
         let both = WorkArgs {
@@ -1706,7 +2308,13 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            work(&both, &st, &OrgScope::All).unwrap_err().code,
+            work(
+                &both,
+                &st,
+                &crate::service::view_scope::ViewScope::internal()
+            )
+            .unwrap_err()
+            .code,
             codes::E_INVALID
         );
         let err = work_link(

@@ -76,6 +76,10 @@ impl RepairTickConfig {
             interval_secs: settings::get_secs(s, settings::REPAIR_TICK_INTERVAL_SECS),
         }
     }
+
+    fn period(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.interval_secs)
+    }
 }
 
 /// Where a candidate's worktree should be.
@@ -402,6 +406,10 @@ pub async fn run_with(
         let Ok(s) = store.lock() else {
             return report;
         };
+        // Pause all (redesign 8.1): no probe, no worktree re-added.
+        if crate::service::loops::paused(&s) {
+            return report;
+        }
         let rows = s.list_all_sessions().unwrap_or_default();
         let controller = s.get_controller().ok().flatten();
         // One hidden/local rule for every host loop (hub-ops F6).
@@ -542,6 +550,9 @@ pub fn due(last: Option<std::time::Instant>, interval_secs: u64) -> bool {
         .unwrap_or(true)
 }
 
+/// Set while a run (the tick's or Repair now's) is going: never two at once.
+static RUNNING: AtomicBool = AtomicBool::new(false);
+
 /// Resets the in-flight flag even if the run panics.
 struct InFlight(&'static AtomicBool);
 impl Drop for InFlight {
@@ -556,12 +567,15 @@ impl Drop for InFlight {
 pub fn maybe_run(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> bool {
     static LAST: std::sync::LazyLock<Mutex<Option<std::time::Instant>>> =
         std::sync::LazyLock::new(|| Mutex::new(None));
-    static RUNNING: AtomicBool = AtomicBool::new(false);
     let cfg = {
         let Ok(s) = store.lock() else {
             return false;
         };
-        RepairTickConfig::from_store(&s)
+        let cfg = RepairTickConfig::from_store(&s);
+        if cfg.enabled && !crate::service::loops::gate_in("repair", &s, Some(cfg.period())) {
+            return false;
+        }
+        cfg
     };
     if !cfg.enabled {
         return false;
@@ -591,6 +605,7 @@ pub fn maybe_run(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> bool {
             ssh,
         };
         let report = run_with(&store, &exec, &cfg, now_unix()).await;
+        crate::service::loops::report("repair", Ok::<_, String>(()), Some(cfg.period()));
         if report.attempted > 0 {
             tracing::info!(
                 "[repair-tick] repaired={} failed={} backed_off={} over_cap={}",
@@ -602,6 +617,85 @@ pub fn maybe_run(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> bool {
         }
     });
     true
+}
+
+/// What Settings › Repair workspace › Repair now answers (gap plan G4.6).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RepairNow {
+    pub hosts_checked: usize,
+    pub missing: usize,
+    pub repaired: usize,
+    pub failed: usize,
+    /// Missing folders left for the next run by [`MAX_REPAIRS_PER_TICK`].
+    pub left: usize,
+    /// The toast's sentence.
+    pub summary: String,
+}
+
+impl RepairNow {
+    pub fn of(r: &RepairTickReport) -> Self {
+        let left = r.over_cap + r.backed_off;
+        let summary = if r.missing == 0 {
+            format!(
+                "No worktree folder is missing on {} host{}.",
+                r.hosts_checked,
+                if r.hosts_checked == 1 { "" } else { "s" }
+            )
+        } else {
+            let mut s = format!(
+                "Re-added {} of {} missing worktree folders",
+                r.repaired, r.missing
+            );
+            if r.failed > 0 {
+                s.push_str(&format!("; {} could not be repaired", r.failed));
+            }
+            if left > 0 {
+                s.push_str(&format!("; {left} left for the next run"));
+            }
+            s.push('.');
+            s
+        };
+        Self {
+            hosts_checked: r.hosts_checked,
+            missing: r.missing,
+            repaired: r.repaired,
+            failed: r.failed,
+            left,
+            summary,
+        }
+    }
+}
+
+/// Repair now: one run of the tick's automatic repair, whether or not
+/// `repair.auto_on_tick` is on, with the same create-only policy and caps.
+/// `E_INVALID_STATE` while another run is going.
+pub async fn run_now(
+    store: &Arc<Mutex<Store>>,
+    ssh: &Arc<SshClient>,
+) -> Result<RepairNow, IpcError> {
+    if RUNNING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            "a workspace repair is already running",
+        ));
+    }
+    let _guard = InFlight(&RUNNING);
+    let cfg = RepairTickConfig {
+        enabled: true,
+        interval_secs: settings::get_secs(
+            &*crate::ipc_error::lock(store)?,
+            settings::REPAIR_TICK_INTERVAL_SECS,
+        ),
+    };
+    let exec = RealRepairTickExec {
+        store: Arc::clone(store),
+        ssh: Arc::clone(ssh),
+    };
+    let report = run_with(store, &exec, &cfg, now_unix()).await;
+    Ok(RepairNow::of(&report))
 }
 
 fn now_unix() -> i64 {
@@ -799,6 +893,19 @@ mod tests {
             .iter()
             .filter(|e| e.kind == kind)
             .count()
+    }
+
+    /// Redesign 8.1: Pause all stops the repair before it probes anything.
+    #[tokio::test]
+    async fn pause_all_makes_no_calls() {
+        let (store, ids) = seed(&[("local", "a")]);
+        settings::set(&store.lock().unwrap(), settings::AUTOMATION_PAUSED, "true").unwrap();
+        let fake = Fake::new(&store, &ids);
+        assert_eq!(
+            run_with(&store, &fake, &ON, 100).await,
+            RepairTickReport::default()
+        );
+        assert!(fake.calls().is_empty(), "{:?}", fake.calls());
     }
 
     #[tokio::test]
@@ -1494,5 +1601,33 @@ mod tests {
             "the host whose probe timed out is skipped: {:?}",
             fake.calls()
         );
+    }
+
+    // Gap plan G4.6: Repair now's sentence.
+    #[test]
+    fn repair_now_says_what_it_repaired() {
+        let none = RepairTickReport {
+            hosts_checked: 2,
+            ..Default::default()
+        };
+        assert_eq!(
+            RepairNow::of(&none).summary,
+            "No worktree folder is missing on 2 hosts."
+        );
+        let some = RepairTickReport {
+            hosts_checked: 1,
+            missing: 8,
+            attempted: 5,
+            repaired: 4,
+            failed: 1,
+            over_cap: 3,
+            ..Default::default()
+        };
+        let r = RepairNow::of(&some);
+        assert_eq!(
+            r.summary,
+            "Re-added 4 of 8 missing worktree folders; 1 could not be repaired; 3 left for the next run."
+        );
+        assert_eq!(r.left, 3);
     }
 }

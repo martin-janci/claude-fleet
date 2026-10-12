@@ -540,15 +540,26 @@ printf 'ok\036%s\036%s\036%s\036%s\036%s\036%s\036%s\036%s\036%s' "$present" "$c
 }
 
 /// PURE: parse [`probe_script`] output. `Err` carries the note to show.
+///
+/// The script runs under `bash -lc`, so a login banner may print ahead of
+/// the answer: the answer is read from the line it starts on.
 pub fn parse_probe(stdout: &str) -> Result<GitFacts, String> {
-    let t = stdout.trim_start();
-    if t.starts_with("norepo") {
-        return Err("no checkout of the project on the host".into());
-    }
-    if t.starts_with("nobranch") {
-        return Err("the branch is not on the host any more".into());
-    }
-    let f: Vec<&str> = stdout.trim_end_matches('\n').split('\u{1e}').collect();
+    let at_line_start = |i: usize| i == 0 || stdout.as_bytes()[i - 1] == b'\n';
+    let Some(start) = stdout
+        .match_indices("ok\u{1e}")
+        .map(|(i, _)| i)
+        .find(|&i| at_line_start(i))
+    else {
+        return Err(match stdout.trim_end().lines().last().map(str::trim) {
+            Some("norepo") => "no checkout of the project on the host".into(),
+            Some("nobranch") => "the branch is not on the host any more".into(),
+            _ => "unreadable git probe output".into(),
+        });
+    };
+    let f: Vec<&str> = stdout[start..]
+        .trim_end_matches('\n')
+        .split('\u{1e}')
+        .collect();
     if f.len() != 10 || f[0].trim() != "ok" {
         return Err("unreadable git probe output".into());
     }
@@ -616,8 +627,9 @@ pub fn gather_stored(
     s: &Store,
     key: &str,
     target: Option<ProbeTarget>,
-    reader: &crate::service::orgs::OrgScope,
+    view: &crate::service::view_scope::ViewScope,
 ) -> Result<Gathered, IpcError> {
+    let reader = &view.org;
     let key = crate::store::normalize_work_ref(key)?;
     // The first item carrying `key` inside the reader's orgs: two trackers
     // can hold the same key (one per org), and the other org's is not it.
@@ -625,6 +637,33 @@ pub fn gather_stored(
     let mut live = s.live_work_sessions_for_key(&key)?;
     let mut ended: Vec<WorkLinkRow> = s.ended_work_links_for_key(&key)?;
     let mut journal = s.journal_for_key(&key)?;
+    // The PERSON half, unconditionally and before the org half's
+    // `is_all()` shortcut (multi-user M1, T7): a handover's text is built
+    // out of other people's sessions and conversations, which spec §4.3
+    // calls content. A live session this caller may not see is not part of
+    // this key's handover; an ENDED link is judged by its conversation
+    // (`ViewScope::sees_past_conversation` — the surviving row first, then
+    // the durable record), which is the same question
+    // `work_link { summarize }` asks before it spends a model call.
+    live.retain(|(_, row)| view.sees_session_row(row).is_visible());
+    {
+        // `orgs::link_person_visible`, not a local copy of it (T9b): the
+        // copy read `claude_session_id` ALONE, so an ended link with no
+        // decision conversation but a recorded `snap_claude_ids` array
+        // passed — and the journal rows "follow the conversations of the
+        // links kept", which put another person's journal text into this
+        // brief. The shared predicate reads both recorded places.
+        let mut kept: Vec<WorkLinkRow> = Vec::with_capacity(ended.len());
+        for l in ended.drain(..) {
+            if crate::service::orgs::link_person_visible(s, view, &l)? {
+                kept.push(l);
+            }
+        }
+        ended = kept;
+    }
+    // This is the org boundary, not a privacy fence: which COMPANY's links
+    // this reader may read. The person fence on the same two lists ran
+    // unconditionally above, and the journal's runs unconditionally below.
     if !reader.is_all() {
         for (l, _) in live.iter_mut() {
             l.org_id = s.link_org(l)?;
@@ -632,23 +671,44 @@ pub fn gather_stored(
         live.retain(|(l, _)| reader.sees_link(l));
         s.fill_link_orgs(&mut ended)?;
         ended.retain(|l| reader.sees_link(l));
-        // Journal rows follow the conversations of the links kept.
-        let mut convs: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for (l, row) in &live {
-            convs.extend(l.claude_session_id.clone());
-            for c in s.list_conversations(row.id, 200)? {
-                convs.insert(c.claude_session_id);
-            }
+    }
+    // The JOURNAL half, and it is NOT inside the `is_all()` block above
+    // (multi-user M1, T9c). It used to be, and that was instance five of
+    // the class: `Store::journal_for_key` collects the conversation ids of
+    // every confirmed link on the key, any person's, with no fence of its
+    // own (`store/work_journal.rs::work_conversation_ids`), so for an
+    // ordinary person's device — `OrgScope::All`, like the master — nothing
+    // trimmed it. What came through was the ENDED half's own text: the
+    // M13.4c model-written `summary` of somebody else's reaped
+    // conversation, their `progress` notes, their compaction summary, their
+    // agent note, and each conversation's `first_prompt` verbatim with the
+    // host it ran on (`render`'s `Timeline:` line).
+    //
+    // The rule is the same one `scope_links_for` applies: the org fence,
+    // then the person fence, never short-circuited by `is_all()`. `live`
+    // and `ended` are already PERSON-kept at this point, so the set of
+    // conversations built from them is exactly "the conversations of the
+    // links this reader may see" and the journal follows it.
+    let mut convs: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (l, row) in &live {
+        convs.extend(l.claude_session_id.clone());
+        for c in s.list_conversations(row.id, 200)? {
+            convs.insert(c.claude_session_id);
         }
-        for l in &ended {
-            convs.extend(l.claude_session_id.clone());
-            let ids: Vec<String> = l
-                .snap_claude_ids
-                .as_deref()
-                .and_then(|j| serde_json::from_str(j).ok())
-                .unwrap_or_default();
-            convs.extend(ids);
-        }
+    }
+    for l in &ended {
+        convs.extend(l.claude_session_id.clone());
+        let ids: Vec<String> = l
+            .snap_claude_ids
+            .as_deref()
+            .and_then(|j| serde_json::from_str(j).ok())
+            .unwrap_or_default();
+        convs.extend(ids);
+    }
+    // The hub's own readers (a resume's landing brief with no reader, the
+    // GC) keep every row: `ViewScope::internal` is not a person and the
+    // live/ended lists above were not person-trimmed for it either.
+    if !view.is_internal() {
         journal.retain(|j| {
             j.claude_session_id
                 .as_deref()
@@ -869,11 +929,11 @@ pub async fn gather_handover(
     exec: &dyn SshExec,
     key: &str,
     target: Option<ProbeTarget>,
-    reader: &crate::service::orgs::OrgScope,
+    view: &crate::service::view_scope::ViewScope,
 ) -> Result<HandoverInput, IpcError> {
     let Gathered { mut input, target } = {
         let s = lock(store)?;
-        gather_stored(&s, key, target, reader)?
+        gather_stored(&s, key, target, view)?
     };
     if let Some(t) = target {
         match probe(exec, &t).await {
@@ -1133,7 +1193,13 @@ Verify the git state before acting; this summary may be stale. Full context: the
             .unwrap();
         s.delete_session(old).unwrap();
 
-        let g = gather_stored(&s, "abc-1", None, &crate::service::orgs::OrgScope::All).unwrap();
+        let g = gather_stored(
+            &s,
+            "abc-1",
+            None,
+            &crate::service::view_scope::ViewScope::internal(),
+        )
+        .unwrap();
         let i = &g.input;
         assert_eq!(i.key, "ABC-1");
         assert_eq!(i.title.as_deref(), Some("Fix login"));
@@ -1176,7 +1242,13 @@ Verify the git state before acting; this summary may be stale. Full context: the
         s.set_claude_status_by_session_id("c-xyz-1", "working")
             .unwrap();
 
-        let g = gather_stored(&s, "xyz-1", None, &crate::service::orgs::OrgScope::All).unwrap();
+        let g = gather_stored(
+            &s,
+            "xyz-1",
+            None,
+            &crate::service::view_scope::ViewScope::internal(),
+        )
+        .unwrap();
         assert_eq!(g.input.status.as_deref(), Some("in_progress"));
     }
 
@@ -1206,7 +1278,13 @@ Verify the git state before acting; this summary may be stale. Full context: the
         s.set_claude_status_by_session_id("c-bare-9", "working")
             .unwrap();
 
-        let g = gather_stored(&s, "bare-9", None, &crate::service::orgs::OrgScope::All).unwrap();
+        let g = gather_stored(
+            &s,
+            "bare-9",
+            None,
+            &crate::service::view_scope::ViewScope::internal(),
+        )
+        .unwrap();
         assert_eq!(
             g.input.status.as_deref(),
             Some("todo"),
@@ -1268,7 +1346,13 @@ Verify the git state before acting; this summary may be stale. Full context: the
             )
             .unwrap();
 
-        let g = gather_stored(&s, "abc-1", None, &crate::service::orgs::OrgScope::All).unwrap();
+        let g = gather_stored(
+            &s,
+            "abc-1",
+            None,
+            &crate::service::view_scope::ViewScope::internal(),
+        )
+        .unwrap();
         let prompts: Vec<_> = g
             .input
             .conversations
@@ -1306,6 +1390,17 @@ Verify the git state before acting; this summary may be stale. Full context: the
         assert_eq!(g.commits, vec!["fix: a", "feat: b"]);
         assert!(parse_probe("norepo").is_err());
         assert!(parse_probe("nobranch").is_err());
+        // A login banner ahead of the answer.
+        assert!(parse_probe("Welcome\nnorepo")
+            .unwrap_err()
+            .contains("no checkout"));
+        let f = parse_probe(
+            "Welcome\nok\u{1e}1\u{1e}main\u{1e}abc\u{1e}\u{1e}\u{1e}0\u{1e}0\u{1e}\u{1e}",
+        )
+        .unwrap();
+        assert!(f.worktree_present);
+        assert_eq!(f.branch.as_deref(), Some("main"));
+        assert_eq!(f.dirty, Some(false));
         assert!(parse_probe("garbage").is_err());
     }
 

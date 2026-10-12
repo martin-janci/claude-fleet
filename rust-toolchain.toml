@@ -5,7 +5,7 @@
 # its own, together with every `dtolnay/rust-toolchain@<version>` in
 # .github/workflows and the `rust:<version>-bookworm` image in
 # crates/fleet-hub/Dockerfile; scripts/check-version-consistency.sh fails CI
-# when they disagree. README's "Rust 1.83+" is the minimum, not the pin.
+# when they disagree. README's "Rust 1.88+" is the minimum, not the pin.
 [toolchain]
 channel = "1.99.0"
 components = ["rustfmt", "clippy"]

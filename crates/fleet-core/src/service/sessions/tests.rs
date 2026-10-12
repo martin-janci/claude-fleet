@@ -33,16 +33,16 @@ fn skipped_agents_pass_only_lets_the_pane_report_blocked() {
     // pane guess must not overwrite the stored status — only `Blocked` (a
     // real dialog / stuck pane) is strong enough to surface immediately.
     assert_eq!(
-        status_candidate(false, None, Some(ClaudeStatus::Working)),
+        status_candidate(false, None, Some(ClaudeStatus::Working), false),
         None
     );
     assert_eq!(
-        status_candidate(false, None, Some(ClaudeStatus::Idle)),
+        status_candidate(false, None, Some(ClaudeStatus::Idle), false),
         None
     );
-    assert_eq!(status_candidate(false, None, None), None);
+    assert_eq!(status_candidate(false, None, None, false), None);
     assert_eq!(
-        status_candidate(false, None, Some(ClaudeStatus::Blocked)),
+        status_candidate(false, None, Some(ClaudeStatus::Blocked), false),
         Some(ClaudeStatus::Blocked)
     );
 
@@ -50,16 +50,49 @@ fn skipped_agents_pass_only_lets_the_pane_report_blocked() {
     // authoritative agent status wins, falling back to the pane only when
     // the agent gave nothing.
     assert_eq!(
-        status_candidate(true, Some(ClaudeStatus::Working), Some(ClaudeStatus::Idle)),
+        status_candidate(
+            true,
+            Some(ClaudeStatus::Working),
+            Some(ClaudeStatus::Idle),
+            false
+        ),
         Some(ClaudeStatus::Working),
         "the agent status wins over the pane"
     );
     assert_eq!(
-        status_candidate(true, None, Some(ClaudeStatus::Idle)),
+        status_candidate(true, None, Some(ClaudeStatus::Idle), false),
         Some(ClaudeStatus::Idle),
         "falls back to the pane when the agent gave nothing"
     );
-    assert_eq!(status_candidate(true, None, None), None);
+    assert_eq!(status_candidate(true, None, None, false), None);
+}
+
+#[test]
+fn a_dialog_on_the_pane_and_its_answer_are_the_panes_to_report() {
+    use crate::service::pane_intel::ClaudeStatus;
+    // `claude agents` saying `working` while a dialog is up must not flip
+    // the row away from `blocked` every agents pass.
+    assert_eq!(
+        status_candidate(
+            true,
+            Some(ClaudeStatus::Working),
+            Some(ClaudeStatus::Blocked),
+            false
+        ),
+        Some(ClaudeStatus::Blocked)
+    );
+    // Answered in the terminal (no hook): a stored `blocked` whose pane now
+    // shows a turn or the input box is over, even on a skipped agents pass.
+    assert_eq!(
+        status_candidate(false, None, Some(ClaudeStatus::Working), true),
+        Some(ClaudeStatus::Working)
+    );
+    assert_eq!(
+        status_candidate(false, None, Some(ClaudeStatus::Idle), true),
+        Some(ClaudeStatus::Idle)
+    );
+    // An unreadable pane still keeps what is stored.
+    assert_eq!(status_candidate(false, None, None, true), None);
 }
 
 /// F2: the cached `claude agents` status reports a session with live
@@ -474,6 +507,17 @@ fn row(
         work_rev: 0,
         pr_evidence: None,
         pr_checked_at: None,
+        owner_person_id: None,
+        visibility: crate::store::VISIBILITY_UNCLAIMED.into(),
+        claude_profile: None,
+        agent: crate::store::AGENT_CLAUDE.into(),
+        origin: None,
+        origin_ref: None,
+        last_viewed_at: None,
+        turn_outcome: None,
+        proposals: Vec::new(),
+        pending_form: None,
+        form_draft: None,
         parent_session_id: None,
         tags: Vec::new(),
         usage: Default::default(),
@@ -501,7 +545,7 @@ fn select_targets_filters_by_host() {
     let s = sample_sessions();
     let f = BroadcastFilter {
         host: Some("mac".into()),
-        ..Default::default()
+        ..BroadcastFilter::internal()
     };
     assert_eq!(select_targets(&s, &f, None, None), vec![1, 2]);
 }
@@ -511,7 +555,7 @@ fn select_targets_filters_by_status() {
     let s = sample_sessions();
     let f = BroadcastFilter {
         status: Some("idle".into()),
-        ..Default::default()
+        ..BroadcastFilter::internal()
     };
     // session 4 is idle but kind=review, so excluded.
     assert_eq!(select_targets(&s, &f, None, None), vec![1, 3]);
@@ -522,7 +566,7 @@ fn select_targets_filters_by_project() {
     let s = sample_sessions();
     let f = BroadcastFilter {
         project_id: Some(20),
-        ..Default::default()
+        ..BroadcastFilter::internal()
     };
     assert_eq!(select_targets(&s, &f, None, None), vec![3]);
 }
@@ -532,7 +576,7 @@ fn select_targets_skips_blocked_and_stuck_sessions_unless_asked_for_them() {
     let mut s = sample_sessions();
     s[0].claude_status = Some("blocked".into());
     s[1].stuck_kind = Some("auth_menu".into());
-    let f = BroadcastFilter::default();
+    let f = BroadcastFilter::internal();
     let picked = select_targets(&s, &f, None, None);
     assert!(
         !picked.contains(&1),
@@ -544,7 +588,7 @@ fn select_targets_skips_blocked_and_stuck_sessions_unless_asked_for_them() {
     );
     let f = BroadcastFilter {
         status: Some("blocked".into()),
-        ..Default::default()
+        ..BroadcastFilter::internal()
     };
     assert_eq!(
         select_targets(&s, &f, None, None),
@@ -560,7 +604,7 @@ fn select_targets_filters_combined() {
         host: Some("mac".into()),
         project_id: Some(10),
         status: Some("running".into()),
-        scope: None,
+        view: crate::service::view_scope::ViewScope::internal(),
     };
     assert_eq!(select_targets(&s, &f, None, None), vec![2]);
 }
@@ -569,14 +613,14 @@ fn select_targets_filters_combined() {
 fn select_targets_excludes_non_work() {
     let s = sample_sessions();
     // No filters: every work session, never the review one (id 4).
-    let f = BroadcastFilter::default();
+    let f = BroadcastFilter::internal();
     assert_eq!(select_targets(&s, &f, None, None), vec![1, 2, 3]);
 }
 
 #[test]
 fn select_targets_excludes_controller() {
     let s = sample_sessions();
-    let f = BroadcastFilter::default();
+    let f = BroadcastFilter::internal();
     let controller = ("mac".to_string(), "work-a".to_string());
     // session 1 is the controller and must be dropped.
     assert_eq!(select_targets(&s, &f, Some(&controller), None), vec![2, 3]);
@@ -585,7 +629,7 @@ fn select_targets_excludes_controller() {
 #[test]
 fn select_targets_controller_only_matches_on_both_host_and_tmux() {
     let s = sample_sessions();
-    let f = BroadcastFilter::default();
+    let f = BroadcastFilter::internal();
     // Same tmux name on a different host must NOT be excluded.
     let controller = ("mefistos".to_string(), "work-a".to_string());
     assert_eq!(
@@ -609,7 +653,7 @@ fn select_targets_excludes_the_operator_as_well_as_the_controller() {
     let operator = ("local".to_string(), "fleet-operator".to_string());
     let ids = select_targets(
         &sessions,
-        &BroadcastFilter::default(),
+        &BroadcastFilter::internal(),
         Some(&controller),
         Some(&operator),
     );
@@ -619,7 +663,7 @@ fn select_targets_excludes_the_operator_as_well_as_the_controller() {
     let elsewhere = ("hetzner".to_string(), "fleet-operator".to_string());
     let ids = select_targets(
         &sessions,
-        &BroadcastFilter::default(),
+        &BroadcastFilter::internal(),
         None,
         Some(&elsewhere),
     );
@@ -1551,8 +1595,16 @@ impl TmuxExec for IdentityTmux {
     async fn new_session(&self, _n: &str, _c: &std::path::Path, _p: &str) -> Result<(), IpcError> {
         Ok(())
     }
-    async fn kill_session(&self, _n: &str) -> Result<(), IpcError> {
-        Ok(())
+    async fn kill_session(&self, n: &str) -> Result<(), IpcError> {
+        // As real tmux answers a kill of a session it does not have.
+        if self.sessions.iter().any(|t| t.name == n) {
+            Ok(())
+        } else {
+            Err(IpcError::new(
+                codes::E_TMUX,
+                format!("can't find session: {n}"),
+            ))
+        }
     }
     async fn rename_session(&self, _o: &str, _n: &str) -> Result<(), IpcError> {
         Ok(())
@@ -1588,6 +1640,8 @@ fn deps_with_cadence_for_tests() -> ReconcileDeps {
         local_host: true,
         agents_every: std::time::Duration::from_secs(60),
         last_agents: Arc::new(dashmap::DashMap::new()),
+        pass_budget: None,
+        late: Arc::default(),
     }
 }
 
@@ -2406,6 +2460,7 @@ async fn reconcile_links_the_local_account_when_it_becomes_known() {
 struct AccountTmux {
     inner: ScriptedTmux,
     account: Option<crate::service::hosts::OauthAccount>,
+    profiles: Option<Vec<crate::tmux::HostProfile>>,
 }
 
 #[async_trait::async_trait]
@@ -2437,6 +2492,9 @@ impl TmuxExec for AccountTmux {
     async fn read_oauth_account(&self) -> Option<crate::service::hosts::OauthAccount> {
         self.account.clone()
     }
+    async fn read_profiles(&self) -> Option<Vec<crate::tmux::HostProfile>> {
+        self.profiles.clone()
+    }
 }
 
 fn oauth_account(uuid: &str, email: &str) -> crate::service::hosts::OauthAccount {
@@ -2453,6 +2511,15 @@ fn remote_account_deps(
     sessions: Vec<crate::tmux::TmuxSession>,
     account: Option<crate::service::hosts::OauthAccount>,
 ) -> Arc<ReconcileDeps> {
+    remote_profile_deps(sessions, account, None)
+}
+
+/// [`remote_account_deps`] whose host `h` also reports login `profiles`.
+fn remote_profile_deps(
+    sessions: Vec<crate::tmux::TmuxSession>,
+    account: Option<crate::service::hosts::OauthAccount>,
+    profiles: Option<Vec<crate::tmux::HostProfile>>,
+) -> Arc<ReconcileDeps> {
     ReconcileDeps::fake(
         move |alias| {
             let is_h = alias == "h";
@@ -2464,6 +2531,7 @@ fn remote_account_deps(
                     probes: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 },
                 account: if is_h { account.clone() } else { None },
+                profiles: if is_h { profiles.clone() } else { None },
             })
         },
         std::time::Duration::from_secs(5),
@@ -2535,6 +2603,255 @@ async fn reconcile_relinks_a_remote_host_after_an_account_switch() {
     );
 }
 
+/// A session under a credential profile bills that profile's login, so
+/// reconcile never hands it the host's account, while a session on the
+/// host's own login still gets it.
+#[tokio::test]
+async fn reconcile_never_gives_a_profile_session_the_hosts_account() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("h").unwrap();
+    let deps = remote_account_deps(
+        vec![tmux_session("plain"), tmux_session("prof")],
+        Some(oauth_account("acc-host", "host@x.com")),
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    {
+        let s = store.lock().unwrap();
+        let id = s.get_session("prof", "h").unwrap().unwrap().id;
+        s.set_session_profile(id, Some("work")).unwrap();
+    }
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    let s = store.lock().unwrap();
+    assert_eq!(s.get_session_account("h", "prof").unwrap(), None);
+    assert_eq!(
+        s.get_session_account("h", "plain").unwrap().as_deref(),
+        Some("acc-host")
+    );
+}
+
+/// An `accounts` row for `uuid` (the sessions' link is a foreign key).
+fn seed_account(s: &Store, uuid: &str) {
+    s.upsert_account(&crate::store::AccountRow {
+        uuid: uuid.into(),
+        email: None,
+        display_name: None,
+        organization_name: None,
+        organization_uuid: None,
+        seat_tier: None,
+        last_seen_at: None,
+        nickname: None,
+        has_extra_usage: false,
+    })
+    .unwrap();
+}
+
+/// Review r05 F1: reconcile keeps a running session's account (the host's
+/// `/login` as someone else does not move a `claude` already running), but a
+/// relaunch reads the host's login afresh, so after a restart the row bills
+/// the account the host holds NOW, not the one it was first seen under.
+#[tokio::test]
+async fn a_relaunched_host_login_session_takes_the_hosts_current_account() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("h").unwrap();
+    let first = remote_account_deps(
+        vec![tmux_session("dev"), tmux_session("prof")],
+        Some(oauth_account("u1", "one@x.com")),
+    );
+    reconcile_sessions_with(&store, &first).await.unwrap();
+    let (dev, prof) = {
+        let s = store.lock().unwrap();
+        let dev = s.get_session("dev", "h").unwrap().unwrap().id;
+        let prof = s.get_session("prof", "h").unwrap().unwrap().id;
+        s.set_session_profile(prof, Some("work")).unwrap();
+        seed_account(&s, "u-work");
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET account_uuid = 'u-work' WHERE id = ?1",
+                [prof],
+            )
+            .unwrap();
+        (dev, prof)
+    };
+    // The host is relinked to u2; the running session keeps u1.
+    let second = remote_account_deps(
+        vec![tmux_session("dev"), tmux_session("prof")],
+        Some(oauth_account("u2", "two@x.com")),
+    );
+    reconcile_sessions_with(&store, &second).await.unwrap();
+    assert_eq!(
+        store
+            .lock()
+            .unwrap()
+            .get_session_account("h", "dev")
+            .unwrap()
+            .as_deref(),
+        Some("u1")
+    );
+    // Restarted: the next reconcile attributes it to the host's u2. The
+    // profile session's link follows its profile, not the host.
+    {
+        let s = store.lock().unwrap();
+        super::lifecycle::record_relaunched_login(&s, dev, None).unwrap();
+        super::lifecycle::record_relaunched_login(&s, prof, None).unwrap();
+    }
+    reconcile_sessions_with(&store, &second).await.unwrap();
+    let s = store.lock().unwrap();
+    assert_eq!(
+        s.get_session_account("h", "dev").unwrap().as_deref(),
+        Some("u2")
+    );
+    assert_eq!(
+        s.get_session_account("h", "prof").unwrap().as_deref(),
+        Some("u-work")
+    );
+}
+
+/// Review r05 F2: a restart that switches the profile stores it only once
+/// the relaunch succeeded. A refused repair or a failed respawn leaves the
+/// row's (profile, account) as they were, since the pane still runs the old
+/// login; a successful one stores the profile and drops the old link.
+#[tokio::test]
+async fn a_failed_relaunch_keeps_the_rows_profile_and_account() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("h").unwrap();
+        s.upsert_session("dev", "h", None, None, 1, 100, "running", None)
+            .unwrap();
+        let id = s.get_session("dev", "h").unwrap().unwrap().id;
+        s.set_session_profile(id, Some("old")).unwrap();
+        seed_account(&s, "u-old");
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET account_uuid = 'u-old' WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        id
+    };
+    let row = |store: &Mutex<Store>| {
+        let s = store.lock().unwrap();
+        let r = s.get_session_by_id(id).unwrap().unwrap();
+        (r.claude_profile, r.account_uuid)
+    };
+    for code in [codes::E_REPAIR_REQUIRED, codes::E_SSH] {
+        let e = super::lifecycle::relaunch_recording_login(
+            &store,
+            Some((id, Some(Some("new".to_string())))),
+            async move { Err(IpcError::new(code, "respawn-pane failed")) },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.code, code);
+        assert_eq!(
+            row(&store),
+            (Some("old".to_string()), Some("u-old".to_string())),
+            "{code}"
+        );
+    }
+    super::lifecycle::relaunch_recording_login(
+        &store,
+        Some((id, Some(Some("new".to_string())))),
+        async { Ok(()) },
+    )
+    .await
+    .unwrap();
+    assert_eq!(row(&store), (Some("new".to_string()), None));
+}
+
+/// `restart_session` itself never writes the profile before its relaunch:
+/// the write lives in [`super::lifecycle::relaunch_recording_login`] alone.
+#[test]
+fn restart_session_writes_no_profile_before_the_relaunch() {
+    let src = crate::repo_files::read("crates/fleet-core/src/service/sessions/lifecycle.rs");
+    let start = src.find("pub async fn restart_session(").unwrap();
+    let end = start + src[start..].find("\n}\n").unwrap();
+    let body = &src[start..end];
+    assert!(!body.contains("set_session_profile"), "{body}");
+    assert!(body.contains("relaunch_recording_login("), "{body}");
+}
+
+/// Once the host reports its profiles, a profile session is attributed to
+/// its profile's login, the account row exists for the usage poll, and the
+/// host row lists the profiles; a pass that cannot read them keeps both.
+#[tokio::test]
+async fn reconcile_attributes_a_profile_session_to_its_profiles_login() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("h").unwrap();
+    let profiles = vec![
+        crate::tmux::HostProfile {
+            name: "work".into(),
+            account: Some(oauth_account("acc-work", "work@x.com")),
+        },
+        crate::tmux::HostProfile {
+            name: "fresh".into(),
+            account: None,
+        },
+    ];
+    let deps = remote_profile_deps(
+        vec![tmux_session("prof")],
+        Some(oauth_account("acc-host", "host@x.com")),
+        Some(profiles),
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    {
+        let s = store.lock().unwrap();
+        let id = s.get_session("prof", "h").unwrap().unwrap().id;
+        s.set_session_profile(id, Some("work")).unwrap();
+    }
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    {
+        let s = store.lock().unwrap();
+        assert_eq!(
+            s.get_session_account("h", "prof").unwrap().as_deref(),
+            Some("acc-work")
+        );
+        assert!(s
+            .list_accounts()
+            .unwrap()
+            .iter()
+            .any(|a| a.uuid == "acc-work"));
+        let listed = s
+            .get_host_row("h")
+            .unwrap()
+            .unwrap()
+            .claude_profiles
+            .unwrap();
+        assert_eq!(
+            listed,
+            vec![
+                crate::store::HostProfileRow {
+                    name: "work".into(),
+                    account_uuid: Some("acc-work".into()),
+                    email: Some("work@x.com".into()),
+                },
+                crate::store::HostProfileRow {
+                    name: "fresh".into(),
+                    account_uuid: None,
+                    email: None,
+                },
+            ]
+        );
+    }
+    // Could not tell this pass: the list and the attribution stay.
+    let blind = remote_profile_deps(vec![tmux_session("prof")], None, None);
+    reconcile_sessions_with(&store, &blind).await.unwrap();
+    let s = store.lock().unwrap();
+    assert_eq!(
+        s.get_session_account("h", "prof").unwrap().as_deref(),
+        Some("acc-work")
+    );
+    assert_eq!(
+        s.get_host_row("h")
+            .unwrap()
+            .unwrap()
+            .claude_profiles
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
 /// A `TmuxExec` whose remote host `h` answers `host_versions` and
 /// `host_health`.
 struct VersionsTmux {
@@ -2574,6 +2891,9 @@ impl TmuxExec for VersionsTmux {
     }
     async fn host_health(&self) -> Option<crate::tmux::HostHealthSample> {
         self.health.clone()
+    }
+    async fn round_trip_ms(&self) -> Option<i64> {
+        self.health.as_ref().map(|_| 18)
     }
 }
 
@@ -2707,6 +3027,8 @@ async fn reconcile_writes_the_health_sample_every_pass_and_pings_it() {
         load_1m: Some(5.9),
         mem_avail_kb: Some(2_000_000),
         uptime_secs: Some(57 * 86400),
+        auth_overrides: Some(vec!["ANTHROPIC_API_KEY".into()]),
+        ..Default::default()
     };
     reconcile_sessions_with(&store, &versions_health_deps(None, Some(sample.clone())))
         .await
@@ -2716,7 +3038,16 @@ async fn reconcile_writes_the_health_sample_every_pass_and_pings_it() {
     assert_eq!(row.disk_home_total_kb, Some(480_000_000));
     assert_eq!(row.load_1m, Some(5.9));
     assert_eq!(row.uptime_secs, Some(57 * 86400));
+    assert_eq!(
+        row.auth_overrides,
+        Some(vec!["ANTHROPIC_API_KEY".to_string()])
+    );
     assert!(row.health_at.is_some());
+    // Orbit Fleet 4.6: the round trip is timed and stored with the sample,
+    // and a host with no worktrees measures 0 without running `du`.
+    assert_eq!(row.latency_ms, Some(18));
+    assert_eq!(row.worktree_kb, Some(0));
+    assert!(row.worktree_at.is_some());
 
     // A second identical pass changes only the stamps and the sample,
     // which is a ping (carrying the sample), not a full-row probe event.
@@ -2734,6 +3065,100 @@ async fn reconcile_writes_the_health_sample_every_pass_and_pings_it() {
     let seen = bus.take();
     assert!(seen.iter().any(|e| e == "host:pinged:h"), "{seen:?}");
     assert!(!seen.iter().any(|e| e == "host:probed:h"), "{seen:?}");
+}
+
+#[test]
+fn the_worktree_size_script_quotes_every_path_and_sums_one_line() {
+    use super::reconcile::{parse_worktree_size, worktree_size_script};
+    assert_eq!(worktree_size_script(&[]), None);
+    assert_eq!(worktree_size_script(&[""]), None);
+    let s = worktree_size_script(&["/w/a b", "~/wt/x'y"]).unwrap();
+    assert!(s.contains("'/w/a b'"), "{s}");
+    assert!(s.contains("\"$HOME\"/'wt/x'\\''y'"), "{s}");
+    assert_eq!(
+        parse_worktree_size("noise\nwtkb=9400000\n"),
+        Some(9_400_000)
+    );
+    assert_eq!(parse_worktree_size("wtkb=\n"), None);
+    assert_eq!(parse_worktree_size(""), None);
+}
+
+/// G1.9: the same `du` answers per worktree, by index, and the sum is the
+/// sum of what it measured. Runs the real script under `sh` on temp dirs.
+#[cfg(unix)]
+#[test]
+fn the_worktree_size_script_measures_each_path_by_index() {
+    use super::reconcile::{parse_worktree_size, parse_worktree_sizes, worktree_size_script};
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("wt a");
+    let b = dir.path().join("wt-b");
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    std::fs::write(a.join("big"), vec![7u8; 300 * 1024]).unwrap();
+    std::fs::write(b.join("small"), b"x").unwrap();
+    let missing = dir.path().join("gone");
+    let paths = [
+        a.to_str().unwrap(),
+        missing.to_str().unwrap(),
+        b.to_str().unwrap(),
+    ];
+    let script = worktree_size_script(&paths).unwrap();
+    let out = crate::proc::std_command("sh")
+        .arg("-c")
+        .arg(&script)
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&out.stdout);
+    let sizes = parse_worktree_sizes(&out, paths.len());
+    let by: std::collections::HashMap<usize, i64> = sizes.iter().copied().collect();
+    assert!(by[&0] >= 300, "{out}");
+    assert!(
+        !by.contains_key(&1),
+        "a missing path is not measured: {out}"
+    );
+    assert!(by[&2] < by[&0], "{out}");
+    assert_eq!(parse_worktree_size(&out), Some(by[&0] + by[&2]), "{out}");
+    // Lines that are not the script's, or out of range, are dropped.
+    assert_eq!(
+        parse_worktree_sizes("banner\nwtp=0 12\nwtp=9 5\nwtp=x 1\nwtp=1 -3\n", 2),
+        vec![(0, 12)]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_worktree_size_script_measures_real_directories() {
+    use super::reconcile::{parse_worktree_size, worktree_size_script};
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a");
+    std::fs::create_dir(&a).unwrap();
+    std::fs::write(a.join("f"), vec![0u8; 64 * 1024]).unwrap();
+    let a = a.to_string_lossy().into_owned();
+    let gone = dir.path().join("gone").to_string_lossy().into_owned();
+    let script = worktree_size_script(&[&a, &gone]).unwrap();
+    let out = std::process::Command::new("sh")
+        .args(["-c", &script])
+        .output()
+        .unwrap();
+    let kb = parse_worktree_size(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    assert!(
+        kb >= 64,
+        "a missing path adds nothing, a real one its size: {kb}"
+    );
+}
+
+#[test]
+fn a_worktree_size_is_due_once_per_interval() {
+    use super::reconcile::{worktree_size_due, WORKTREE_SIZE_REFRESH_SECS};
+    assert!(worktree_size_due(None, 1_000));
+    assert!(!worktree_size_due(
+        Some(1_000),
+        1_000 + WORKTREE_SIZE_REFRESH_SECS - 1
+    ));
+    assert!(worktree_size_due(
+        Some(1_000),
+        1_000 + WORKTREE_SIZE_REFRESH_SECS
+    ));
 }
 
 fn host_row_of(store: &Mutex<Store>, alias: &str) -> HostRow {
@@ -2868,6 +3293,36 @@ async fn concurrent_list_sessions_share_one_reconcile_pass() {
     let rows = list_sessions_with(&store, &deps, &gate, window, false)
         .await
         .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].tmux_name, "s1");
+}
+
+/// Review r06 (r17 F4): a forced listing while another pass holds the gate
+/// waits for it and then runs its own, so a session started after that pass
+/// probed its host is in the answer.
+#[tokio::test]
+async fn a_forced_listing_during_a_pass_runs_its_own_after_it() {
+    use std::time::Duration;
+    let store = Arc::new(Mutex::new(Store::open_in_memory().expect("store")));
+    let gate = Arc::new(ReconcileGate::new());
+    let (deps, probes) = scripted_deps(
+        vec![tmux_session("s1")],
+        Duration::from_millis(0),
+        Duration::from_secs(5),
+    );
+    let window = Duration::from_secs(60);
+    // Another caller's pass is running.
+    let held = gate.try_begin().expect("free");
+    let forced = {
+        let (store, deps, gate) = (Arc::clone(&store), Arc::clone(&deps), Arc::clone(&gate));
+        tokio::spawn(async move { list_sessions_with(&store, &deps, &gate, window, true).await })
+    };
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!forced.is_finished(), "it waits for the running pass");
+    assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 0);
+    drop(held);
+    let rows = forced.await.unwrap().expect("forced listing");
+    assert_eq!(gate.passes(), 1, "its own pass ran");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].tmux_name, "s1");
 }
@@ -3155,12 +3610,16 @@ async fn stale_probe_write_does_not_ghost_session_created_after_probe_start() {
         agent_rows: Some(Vec::new()),
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
+        pane_tails: Default::default(),
         account: None,
+        profiles: None,
         pr_info: PrInfoMap::new(),
         identity: None,
         versions: None,
         health: None,
         started_at: now_unix(),
+        worktree_kb: None,
+        codex_rollouts: Default::default(),
     };
     // 2. `new_session` creates the tmux session and runs its own
     //    single-host reconcile, which upserts + stamps the row.
@@ -3204,12 +3663,16 @@ async fn stale_probe_write_does_not_ghost_session_created_after_probe_start() {
         agent_rows: Some(Vec::new()),
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
+        pane_tails: Default::default(),
         account: None,
+        profiles: None,
         pr_info: PrInfoMap::new(),
         identity: None,
         versions: None,
         health: None,
         started_at: now_unix() + 5,
+        worktree_kb: None,
+        codex_rollouts: Default::default(),
     };
     let mut s = store.lock().unwrap();
     let projects = s.list_projects().unwrap();
@@ -3282,63 +3745,6 @@ fn upsert_session_captures_new_account_for_fresh_row() {
         s.get_session_account("h", "dev-new").unwrap().as_deref(),
         Some("u1")
     );
-}
-
-#[tokio::test]
-async fn wait_for_repl_ready_returns_once_prompt_appears() {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    use std::sync::Arc as StdArc;
-
-    struct FakeTmux {
-        calls: StdArc<AtomicU32>,
-    }
-    #[async_trait::async_trait]
-    impl TmuxExec for FakeTmux {
-        async fn list_sessions(&self) -> Result<Vec<crate::tmux::TmuxSession>, IpcError> {
-            Ok(vec![])
-        }
-        async fn new_session(&self, _: &str, _: &std::path::Path, _: &str) -> Result<(), IpcError> {
-            Ok(())
-        }
-        async fn kill_session(&self, _: &str) -> Result<(), IpcError> {
-            Ok(())
-        }
-        async fn rename_session(&self, _: &str, _: &str) -> Result<(), IpcError> {
-            Ok(())
-        }
-        async fn restart_session(&self, _: &str, _: &str) -> Result<(), IpcError> {
-            Ok(())
-        }
-        async fn capture_pane(&self, _: &str) -> Result<String, IpcError> {
-            let n = self.calls.fetch_add(1, Ordering::SeqCst);
-            // Not ready for the first 2 polls, then the prompt appears.
-            if n < 2 {
-                Ok("starting…".into())
-            } else {
-                Ok("│ > ".into())
-            }
-        }
-        async fn capture_pane_scrollback(
-            &self,
-            _name: &str,
-            _lines: u32,
-        ) -> Result<String, IpcError> {
-            Ok(String::new())
-        }
-        async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
-            Some(vec![])
-        }
-    }
-
-    let calls = StdArc::new(AtomicU32::new(0));
-    let tmux = FakeTmux {
-        calls: calls.clone(),
-    };
-    let start = std::time::Instant::now();
-    wait_for_repl_ready(&tmux, "x").await;
-    // Returned after ~3 polls (~600ms), well under the 6s cap.
-    assert!(start.elapsed() < std::time::Duration::from_secs(2));
-    assert!(calls.load(Ordering::SeqCst) >= 3);
 }
 
 #[test]
@@ -3511,6 +3917,8 @@ fn host_paths(root: &str, layout: crate::projects::Layout) -> HostPaths {
         root: root.into(),
         layout,
         worktrees: Vec::new(),
+        named: Vec::new(),
+        codex_panes: Vec::new(),
     }
 }
 
@@ -3782,12 +4190,16 @@ fn reconcile_linking(
         agent_rows: Some(Vec::new()),
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
+        pane_tails: Default::default(),
         account: None,
+        profiles: None,
         pr_info: PrInfoMap::new(),
         identity: None,
         versions: None,
         health: None,
         started_at: now_unix(),
+        worktree_kb: None,
+        codex_rollouts: Default::default(),
     };
     // Two ticks: the second must keep the link, not null it.
     reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
@@ -3977,6 +4389,67 @@ fn worktree_key_extracts_dot_worktrees_named_worktree() {
     );
 }
 
+/// A checkout at `.worktrees/feat/imports` (made before new worktrees were
+/// flattened) is recorded as `feat-imports`; a cwd anywhere in it keys to
+/// that row, not to `feat`, the first component below the marker. Without
+/// a row the path alone cannot tell, so the first component stays.
+#[test]
+fn worktree_key_of_a_nested_checkout_follows_its_recorded_row() {
+    use crate::projects::Layout;
+    let wt = "/home/dev/projects/github.com/o/r/.worktrees/feat/imports";
+    let mut paths = host_paths("~/projects/github.com", Layout::Github);
+    assert_eq!(worktree_key_for_host(wt, &paths), Some("feat".into()));
+    paths.named = vec![(wt.into(), "feat-imports".into())];
+    assert_eq!(
+        worktree_key_for_host(wt, &paths),
+        Some("feat-imports".into())
+    );
+    assert_eq!(
+        worktree_key_for_host(&format!("{wt}/src/lib"), &paths),
+        Some("feat-imports".into())
+    );
+    // A sibling `.worktrees/feat-x` is not inside the row: its own name.
+    assert_eq!(
+        worktree_key_for_host(
+            "/home/dev/projects/github.com/o/r/.worktrees/feat-x",
+            &paths
+        ),
+        Some("feat-x".into())
+    );
+    // The main checkout stays `main`.
+    assert_eq!(
+        worktree_key_for_host("/home/dev/projects/github.com/o/r/src", &paths),
+        Some("main".into())
+    );
+}
+
+/// `HostPaths::for_host` carries the host's linked worktree rows by name,
+/// and not its `main` row.
+#[test]
+fn host_paths_for_host_names_linked_worktrees_only() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("trn").unwrap();
+    let pid = s.upsert_project("o", "r", "/p/o/r").unwrap();
+    s.upsert_worktree_on("trn", pid, "main", "/h/o/r", None)
+        .unwrap();
+    s.upsert_worktree_on(
+        "trn",
+        pid,
+        "feat-imports",
+        "/h/o/r/.worktrees/feat/imports",
+        None,
+    )
+    .unwrap();
+    let paths = HostPaths::for_host(&s, "trn");
+    assert_eq!(
+        paths.named,
+        vec![(
+            "/h/o/r/.worktrees/feat/imports".to_string(),
+            "feat-imports".to_string()
+        )]
+    );
+}
+
 #[test]
 fn worktree_key_other_subdir_is_main() {
     assert_eq!(
@@ -3995,15 +4468,15 @@ fn worktree_key_non_repo_path_is_none() {
 fn recreate_pane_command_matches_kind_and_id() {
     let id = "550e8400-e29b-41d4-a716-446655440000";
     assert_eq!(
-        recreate_pane_command("shell", Some(id), "dev-x", &Default::default()),
+        recreate_pane_command("shell", "claude", Some(id), "dev-x", &Default::default()),
         crate::tmux::shell_pane_command(None)
     );
     assert_eq!(
-        recreate_pane_command("work", Some(id), "dev-x", &Default::default()),
+        recreate_pane_command("work", "claude", Some(id), "dev-x", &Default::default()),
         crate::tmux::pane_command_for(Some(id), "dev-x")
     );
     assert_eq!(
-        recreate_pane_command("work", None, "dev-x", &Default::default()),
+        recreate_pane_command("work", "claude", None, "dev-x", &Default::default()),
         crate::tmux::pane_command_for(None, "dev-x")
     );
     // A corrupt/non-UUID stored id must NOT inject — it degrades to the
@@ -4011,6 +4484,7 @@ fn recreate_pane_command_matches_kind_and_id() {
     assert_eq!(
         recreate_pane_command(
             "work",
+            "claude",
             Some("not-a-uuid; rm -rf /"),
             "dev-x",
             &Default::default()
@@ -4019,7 +4493,7 @@ fn recreate_pane_command_matches_kind_and_id() {
     );
     // "review" is a non-shell kind → same resume behavior as "work".
     assert_eq!(
-        recreate_pane_command("review", Some(id), "dev-x", &Default::default()),
+        recreate_pane_command("review", "claude", Some(id), "dev-x", &Default::default()),
         crate::tmux::pane_command_for(Some(id), "dev-x")
     );
 }
@@ -4085,6 +4559,14 @@ fn worktree_add_script_contains_expected_fragments() {
         script.contains("( cd \"$wt\" && pwd -P )"),
         "reports the physical path: {script}"
     );
+}
+
+#[test]
+fn worktree_add_script_puts_a_branch_shaped_name_in_a_flat_directory() {
+    let script = worktree_add_script("/repo/root", "feat/imports", None);
+    assert!(script.contains("name='feat/imports'"), "branch: {script}");
+    assert!(script.contains("dir='feat-imports'"), "directory: {script}");
+    assert!(script.contains("wt=\"$base/$dir\""), "{script}");
 }
 
 #[test]
@@ -4214,6 +4696,24 @@ async fn create_worktree_local_creates_and_is_idempotent() {
 
     // cleanup
     std::fs::remove_dir_all(&base).ok();
+}
+
+#[test]
+fn a_login_banner_never_becomes_the_worktree_path() {
+    assert_eq!(
+        worktree_path_from_stdout(b"Welcome to build-box\n/home/u/r/.worktrees/feat-x\n").unwrap(),
+        "/home/u/r/.worktrees/feat-x"
+    );
+    assert_eq!(
+        worktree_path_from_stdout(b"/home/u/r/.worktrees/x\n\n").unwrap(),
+        "/home/u/r/.worktrees/x"
+    );
+    for bad in [&b"Welcome to build-box\n"[..], b"", b"  \n"] {
+        assert_eq!(
+            worktree_path_from_stdout(bad).unwrap_err().code,
+            codes::E_GIT_SETUP
+        );
+    }
 }
 
 #[test]
@@ -5005,6 +5505,57 @@ async fn reconcile_turns_pr_signals_into_link_suggestions() {
     );
     assert_eq!(a.work, None, "suggestions only: the project is not trusted");
     assert_eq!(a.work_suggested.unwrap().suggestions, 2);
+}
+
+/// A shell whose PR probe always fails, counting the attempts.
+struct FailingShell {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl HostShell for FailingShell {
+    async fn run_script(&self, _host: &str, script: &str) -> Result<String, IpcError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        assert!(script.contains("gh pr view"), "probe script runs gh");
+        Err(IpcError::new(codes::E_SSH, "unreachable"))
+    }
+}
+
+/// Review r16: a failed PR probe is throttled like a successful one, so the
+/// next 20 s pass does not run the same `gh` batch over SSH again.
+#[tokio::test]
+async fn a_failed_pr_probe_is_not_retried_on_the_next_pass() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let shell = Arc::new(FailingShell {
+        calls: Arc::clone(&calls),
+    });
+    let live = vec![repo_session("dev-a", "/home/u/projects/github.com/o/r")];
+    let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let deps = ReconcileDeps::fake_with_shell(
+        move |_alias| {
+            Box::new(ScriptedTmux {
+                sessions: live.clone(),
+                delay: std::time::Duration::from_millis(0),
+                hang: false,
+                probes: Arc::clone(&probes),
+            })
+        },
+        std::time::Duration::from_secs(5),
+        shell,
+    );
+    {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+    }
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the failed batch waits out the TTL"
+    );
 }
 
 #[tokio::test]
@@ -5899,7 +6450,9 @@ async fn a_verdict_never_marks_a_row_a_newer_probe_already_saw_live() {
         agent_rows: Some(Vec::new()),
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
+        pane_tails: Default::default(),
         account: None,
+        profiles: None,
         pr_info: PrInfoMap::new(),
         identity: Some(crate::tmux::HostIdentity {
             boot_id: Some("a".into()),
@@ -5908,6 +6461,8 @@ async fn a_verdict_never_marks_a_row_a_newer_probe_already_saw_live() {
         versions: None,
         health: None,
         started_at: 1000,
+        worktree_kb: None,
+        codex_rollouts: Default::default(),
     };
     let mut s = store.lock().unwrap();
     let projects = s.list_projects().unwrap();
@@ -6378,12 +6933,16 @@ fn pair_pass(
         agent_rows: Some(agents),
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
+        pane_tails: Default::default(),
         account: None,
+        profiles: None,
         pr_info: PrInfoMap::new(),
         identity: None,
         versions: None,
         health: None,
         started_at: now_unix(),
+        worktree_kb: None,
+        codex_rollouts: Default::default(),
     };
     let projects = s.list_projects().unwrap();
     reconcile_write_one_host(s, &probe, &projects).unwrap();
@@ -6549,12 +7108,16 @@ fn vps_probe(
         agent_rows: Some(agents),
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
+        pane_tails: Default::default(),
         account: None,
+        profiles: None,
         pr_info,
         identity,
         versions: None,
         health: None,
         started_at: now_unix(),
+        worktree_kb: None,
+        codex_rollouts: Default::default(),
     }
 }
 
@@ -7151,7 +7714,8 @@ async fn a_stuck_transition_is_logged_with_host_session_and_kind() {
 
 #[test]
 fn launch_switch_reads_one_valid_argument_only() {
-    use super::prompt::{launch_switch, LaunchSwitch};
+    use crate::agent_adapter::LaunchSwitch;
+    let launch_switch = |p| crate::agent_adapter::claude().launch_switch(p);
     assert_eq!(
         launch_switch("/model opus"),
         Some(LaunchSwitch::Model(Some("opus")))
@@ -7203,10 +7767,10 @@ fn a_sent_switch_is_stored_and_relaunched() {
         let s = store.lock().unwrap();
         let row = s.get_session_by_id(id).unwrap().unwrap();
         assert_eq!(row.effort_level.as_deref(), Some("high"));
-        let launch = stored_launch(&s, id);
+        let launch = stored_launch(&s, id).unwrap();
         assert_eq!(launch.model.as_deref(), Some("opus[1m]"));
         let sid = "550e8400-e29b-41d4-a716-446655440000";
-        let pane = recreate_pane_command("work", Some(sid), "dev-launch", &launch);
+        let pane = recreate_pane_command("work", "claude", Some(sid), "dev-launch", &launch);
         assert_eq!(
             pane.matches("--model 'opus[1m]' --effort 'high'").count(),
             3,
@@ -7217,8 +7781,182 @@ fn a_sent_switch_is_stored_and_relaunched() {
     record_prompt_outcome(&store, "local", "dev-launch", "/model default", false);
     record_prompt_outcome(&store, "local", "dev-launch", "/effort auto", false);
     let s = store.lock().unwrap();
-    assert_eq!(stored_launch(&s, id), crate::tmux::ClaudeLaunch::default());
+    assert_eq!(
+        stored_launch(&s, id).unwrap(),
+        crate::tmux::ClaudeLaunch::default()
+    );
     assert_eq!(s.get_session_by_id(id).unwrap().unwrap().effort_level, None);
+}
+
+/// A session's credential profile is part of its stored launch: a rebuilt
+/// pane runs under the same `CLAUDE_CONFIG_DIR`. Changing it drops the
+/// account the session recorded under the login it is leaving.
+#[test]
+fn a_stored_profile_relaunches_under_its_config_dir_and_a_switch_drops_the_old_account() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let id = s
+        .upsert_session("dev-prof", "local", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.upsert_account(&crate::store::AccountRow {
+        uuid: "acc-host".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    s.conn_for_test()
+        .execute(
+            "UPDATE sessions SET account_uuid = 'acc-host' WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+
+    s.set_session_profile(id, Some("work")).unwrap();
+    let row = s.get_session_by_id(id).unwrap().unwrap();
+    assert_eq!(row.claude_profile.as_deref(), Some("work"));
+    assert_eq!(
+        row.account_uuid, None,
+        "the host login's account is not this session's any more"
+    );
+    let launch = stored_launch(&s, id).unwrap();
+    assert_eq!(launch.profile.as_deref(), Some("work"));
+    let sid = "550e8400-e29b-41d4-a716-446655440000";
+    let pane = recreate_pane_command("work", "claude", Some(sid), "dev-prof", &launch);
+    assert!(
+        pane.contains("export CLAUDE_CONFIG_DIR=\"$HOME/.claude-profiles/\"'work';"),
+        "{pane}"
+    );
+
+    // A shell session never runs under one, whatever is stored.
+    assert!(
+        !recreate_pane_command("shell", "claude", None, "dev-prof", &launch)
+            .contains("CLAUDE_CONFIG_DIR")
+    );
+
+    // A tampered value never reaches the shell.
+    s.conn_for_test()
+        .execute(
+            "UPDATE sessions SET claude_profile = '../../x' WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+    assert_eq!(stored_launch(&s, id).unwrap().profile, None);
+
+    s.set_session_profile(id, None).unwrap();
+    assert_eq!(
+        s.get_session_by_id(id).unwrap().unwrap().claude_profile,
+        None
+    );
+}
+
+#[test]
+fn a_restart_profile_is_keep_host_login_or_a_valid_name() {
+    use crate::service::sessions::lifecycle::profile_switch;
+    assert_eq!(profile_switch(None).unwrap(), None);
+    assert_eq!(profile_switch(Some("")).unwrap(), Some(None));
+    assert_eq!(profile_switch(Some("  ")).unwrap(), Some(None));
+    assert_eq!(
+        profile_switch(Some(" work ")).unwrap(),
+        Some(Some("work".into()))
+    );
+    assert_eq!(profile_switch(Some("a/b")).unwrap_err().code, "E_INVALID");
+}
+
+/// A restart's model / effort switch reads like its profile switch, so the
+/// composer can relaunch a Codex session under another model.
+#[test]
+fn a_restart_model_or_effort_is_keep_default_or_a_valid_value() {
+    use crate::service::sessions::lifecycle::launch_switch;
+    use crate::validate::{claude_model, effort_level};
+    assert_eq!(launch_switch(None, claude_model).unwrap(), None);
+    assert_eq!(launch_switch(Some(" "), claude_model).unwrap(), Some(None));
+    assert_eq!(
+        launch_switch(Some(" gpt-6.1-sol "), claude_model).unwrap(),
+        Some(Some("gpt-6.1-sol".into()))
+    );
+    assert_eq!(
+        launch_switch(Some("x'; rm -rf ~"), claude_model)
+            .unwrap_err()
+            .code,
+        "E_INVALID"
+    );
+    assert_eq!(
+        launch_switch(Some("xhigh"), effort_level).unwrap(),
+        Some(Some("xhigh".into()))
+    );
+    assert_eq!(
+        launch_switch(Some("huge"), effort_level).unwrap_err().code,
+        "E_INVALID"
+    );
+}
+
+/// The switched model reaches the relaunched Codex pane as `-m`.
+#[test]
+fn a_codex_relaunch_carries_the_switched_model_and_effort() {
+    let launch = crate::tmux::ClaudeLaunch {
+        model: Some("gpt-6-sol".into()),
+        effort: Some("high".into()),
+        profile: None,
+    };
+    let cmd = recreate_pane_command(
+        "work",
+        crate::store::AGENT_CODEX,
+        Some("0192f3a4-0000-7000-8000-000000000001"),
+        "dev-x",
+        &launch,
+    );
+    assert!(
+        cmd.contains("codex resume '0192f3a4-0000-7000-8000-000000000001'"),
+        "{cmd}"
+    );
+    assert!(cmd.contains(" -m 'gpt-6-sol'"), "{cmd}");
+    assert!(cmd.contains("model_reasoning_effort=\"high\""), "{cmd}");
+}
+
+#[test]
+fn a_new_shell_session_refuses_a_profile() {
+    let mut args = NewSessionArgs {
+        host_alias: "local".into(),
+        project_id: 1,
+        worktree_id: None,
+        name: "x".into(),
+        call_id: None,
+        new_worktree: None,
+        base_branch: None,
+        kind: Some("shell".into()),
+        start_command: None,
+        friendly_name: None,
+        resume_claude_session_id: None,
+        model: None,
+        effort: None,
+        profile: Some("work".into()),
+        agent: None,
+        origin: None,
+        over_limit_ok: false,
+        owner_person_id: None,
+        start_token: None,
+    };
+    assert_eq!(normalize_launch(&mut args).unwrap_err().code, "E_INVALID");
+    args.kind = None;
+    args.profile = Some("../x".into());
+    assert_eq!(normalize_launch(&mut args).unwrap_err().code, "E_INVALID");
+    args.profile = Some(" work ".into());
+    normalize_launch(&mut args).unwrap();
+    assert_eq!(args.profile.as_deref(), Some("work"));
+    args.profile = Some("  ".into());
+    normalize_launch(&mut args).unwrap();
+    assert_eq!(args.profile, None);
+}
+
+/// Review r05 F8: a launch read that fails fails the start (E_INTERNAL)
+/// instead of falling back to the host's login.
+#[test]
+fn a_failed_launch_read_fails_rather_than_using_the_host_login() {
+    let s = Store::open_in_memory().unwrap();
+    s.conn_ref()
+        .execute_batch("ALTER TABLE sessions RENAME COLUMN claude_profile TO gone_profile")
+        .unwrap();
+    let e = stored_launch(&s, 1).unwrap_err();
+    assert_eq!(e.code, codes::E_INTERNAL);
 }
 
 /// A tampered stored value never reaches the pane command.
@@ -7232,7 +7970,188 @@ fn stored_launch_drops_values_that_no_longer_validate() {
     s.set_session_launch_model(id, Some("opus'; rm -rf ~; '"))
         .unwrap();
     s.set_session_effort(id, Some("huge")).unwrap();
-    assert_eq!(stored_launch(&s, id), crate::tmux::ClaudeLaunch::default());
+    assert_eq!(
+        stored_launch(&s, id).unwrap(),
+        crate::tmux::ClaudeLaunch::default()
+    );
     s.set_session_launch_model(id, Some("sonnet")).unwrap();
-    assert_eq!(stored_launch(&s, id).model.as_deref(), Some("sonnet"));
+    assert_eq!(
+        stored_launch(&s, id).unwrap().model.as_deref(),
+        Some("sonnet")
+    );
+}
+
+/// A Codex row's pane is read by the Codex adapter (12.2): its approval
+/// becomes the session's prompt card. A Claude row on the same host keeps
+/// Claude's reading of the same screen, which differs.
+#[test]
+fn reconcile_reads_a_codex_pane_with_the_codex_adapter() {
+    let mut s = Store::open_in_memory().unwrap();
+    s.upsert_host("vps").unwrap();
+    let live = || vec![tmux_session("dev-cx"), tmux_session("dev-a")];
+    let first = vps_probe(&s, live(), None, vec![], PrInfoMap::new());
+    reconcile_write_one_host(&mut s, &first, &[]).unwrap();
+    let cx = s.get_session("dev-cx", "vps").unwrap().unwrap();
+    s.set_session_agent(cx.id, crate::store::AGENT_CODEX)
+        .unwrap();
+
+    let approval = include_str!("../../agent_adapter/testdata/codex/approval_command.txt");
+    let mut probe = vps_probe(&s, live(), None, vec![], PrInfoMap::new());
+    for name in ["dev-cx", "dev-a"] {
+        probe.pane_tails.insert(name.into(), approval.into());
+    }
+    probe.intel = intel_from_tails(&probe.pane_tails);
+    reconcile_write_one_host(&mut s, &probe, &[]).unwrap();
+
+    let cx = s.get_session("dev-cx", "vps").unwrap().unwrap();
+    let card = cx.pending_input.expect("the Codex approval is a card");
+    assert_eq!(card.kind, "permission");
+    assert_eq!(card.options[0].label, "Yes, proceed");
+    assert_eq!(card.detail.as_deref(), Some("curl -sI https://example.com"));
+    assert_eq!(cx.claude_status.as_deref(), Some("blocked"));
+    let a = s.get_session("dev-a", "vps").unwrap().unwrap();
+    let claude_read = crate::service::pane_intel::analyze(approval).pending_input;
+    assert_eq!(
+        a.pending_input, claude_read,
+        "a Claude row keeps Claude's reading"
+    );
+    assert_ne!(a.pending_input, Some(card), "and the two readings differ");
+}
+
+/// Codex names its own conversation: reconcile takes the id and rollout the
+/// probe found for a Codex pane, opens that conversation and stores the
+/// rollout as its transcript. A Claude pane's entry in the map is ignored,
+/// and a later pass that finds nothing keeps what was learned.
+#[test]
+fn reconcile_learns_a_codex_panes_conversation_from_its_rollout() {
+    use crate::agent_adapter::codex::PaneRollout;
+    const ID: &str = "01a11dac-6e90-7da0-81c9-280b14a35226";
+    let path =
+        format!("/home/dev/.codex/sessions/2026/10/08/rollout-2026-10-08T22-40-02-{ID}.jsonl");
+    let mut s = Store::open_in_memory().unwrap();
+    s.upsert_host("vps").unwrap();
+    let live = || vec![tmux_session("dev-cx"), tmux_session("dev-a")];
+    let first = vps_probe(&s, live(), None, vec![], PrInfoMap::new());
+    reconcile_write_one_host(&mut s, &first, &[]).unwrap();
+    let cx = s.get_session("dev-cx", "vps").unwrap().unwrap();
+    s.set_session_agent(cx.id, crate::store::AGENT_CODEX)
+        .unwrap();
+
+    let mut probe = vps_probe(&s, live(), None, vec![], PrInfoMap::new());
+    for name in ["dev-cx", "dev-a"] {
+        probe.codex_rollouts.insert(
+            name.into(),
+            PaneRollout {
+                id: ID.into(),
+                path: path.clone(),
+            },
+        );
+    }
+    reconcile_write_one_host(&mut s, &probe, &[]).unwrap();
+
+    let cx = s.get_session("dev-cx", "vps").unwrap().unwrap();
+    assert_eq!(cx.claude_session_id.as_deref(), Some(ID));
+    assert_eq!(
+        s.session_transcript_path(cx.id).unwrap().as_deref(),
+        Some(path.as_str())
+    );
+    let conv = s.get_conversation(cx.id, ID).unwrap().expect("opened");
+    assert_eq!(conv.transcript_path.as_deref(), Some(path.as_str()));
+    let a = s.get_session("dev-a", "vps").unwrap().unwrap();
+    assert_eq!(a.claude_session_id, None, "a Claude row is not Codex's");
+
+    let quiet = vps_probe(&s, live(), None, vec![], PrInfoMap::new());
+    reconcile_write_one_host(&mut s, &quiet, &[]).unwrap();
+    let cx = s.get_session("dev-cx", "vps").unwrap().unwrap();
+    assert_eq!(cx.claude_session_id.as_deref(), Some(ID));
+    assert_eq!(
+        s.session_transcript_path(cx.id).unwrap().as_deref(),
+        Some(path.as_str())
+    );
+}
+
+/// Review r05 F8: a credential profile that could not be saved at start
+/// fails the start, since a later restart would run under the host's own
+/// login; a failed model / effort write stays soft.
+#[test]
+fn a_failed_profile_write_at_start_is_an_error_and_a_model_write_is_not() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let id = s
+        .upsert_session("dev-f8", "local", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.conn_for_test()
+        .execute_batch(
+            "CREATE TEMP TRIGGER boom BEFORE UPDATE ON sessions \
+             BEGIN SELECT RAISE(ABORT, 'injected store fault'); END;",
+        )
+        .unwrap();
+    let model_only = crate::tmux::ClaudeLaunch {
+        model: Some("opus".into()),
+        ..Default::default()
+    };
+    assert!(store_start_launch(&s, id, "dev-f8", &model_only).is_ok());
+    let with_profile = crate::tmux::ClaudeLaunch {
+        profile: Some("work".into()),
+        ..Default::default()
+    };
+    let e = store_start_launch(&s, id, "dev-f8", &with_profile).unwrap_err();
+    assert_eq!(e.code, "E_INTERNAL");
+    assert!(e.message.contains("profile"), "{}", e.message);
+    assert!(!e.message.contains("injected"), "{}", e.message);
+}
+
+/// A ghost whose tmux is already gone (here a resumable `host_reboot` loss,
+/// which the reap keeps for the lost-session TTL): Kill used to fail with
+/// "can't find session" and leave the row listed. Now it succeeds and the
+/// row goes.
+#[tokio::test]
+async fn killing_a_ghost_whose_tmux_is_gone_removes_it() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("mefistos").unwrap();
+    let deps = identity_deps(
+        "mefistos",
+        vec![tmux_session("x")],
+        Some(boot_a_pid(Some(1))),
+        vec![],
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    let id = store
+        .lock()
+        .unwrap()
+        .get_session("x", "mefistos")
+        .unwrap()
+        .expect("row")
+        .id;
+    store
+        .lock()
+        .unwrap()
+        .conn_ref()
+        .execute(
+            "UPDATE sessions SET status = 'ghost', lost_at = 1, lost_reason = 'host_reboot' WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+
+    let deps = identity_deps("mefistos", vec![], Some(boot_a_pid(Some(2))), vec![]);
+    let ssh = Arc::new(SshClient::new());
+    let killed = kill_session_with(
+        KillSessionArgs {
+            host_alias: "mefistos".into(),
+            name: "x".into(),
+            force: false,
+        },
+        &store,
+        &ssh,
+        &deps,
+    )
+    .await
+    .expect("a kill of a session tmux no longer has is done, not failed");
+    assert_eq!(killed, id);
+    assert!(store
+        .lock()
+        .unwrap()
+        .get_session_by_id(id)
+        .unwrap()
+        .is_none());
 }

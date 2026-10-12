@@ -174,6 +174,13 @@ pub const IDLE_TIMEOUT: Duration = Duration::from_millis(
     fleet_core::mcp::events_route::KEEPALIVE_INTERVAL.as_millis() as u64 * 5 / 2,
 );
 
+/// The largest one event may grow (its unterminated line and its `data:`
+/// lines together) before the stream is dropped and reopened. A row frame is
+/// kilobytes; the bound is for a hub, or whatever answers at its URL, that
+/// sends a line with no end — bytes that also keep `IDLE_TIMEOUT` from ever
+/// firing.
+pub const MAX_EVENT_BYTES: usize = 8 * 1024 * 1024;
+
 /// A connection that stayed up this long counts as working even if it
 /// carried no row event — a quiet fleet is not a broken one. Longer than
 /// [`IDLE_TIMEOUT`], so a stream that said `ready` and then went silent does
@@ -259,6 +266,8 @@ pub struct EventBridge {
     /// The `id:` of the last row frame this bridge applied — what the next
     /// open sends as `Last-Event-ID`. `None` until a row frame carried one.
     last_id: Mutex<Option<String>>,
+    /// Ends a backoff wait early: the banner's "Retry now".
+    wake: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl EventBridge {
@@ -277,6 +286,7 @@ impl EventBridge {
             cancel,
             status: Arc::new(NoReporter),
             last_id: Mutex::new(None),
+            wake: None,
         }
     }
 
@@ -288,6 +298,12 @@ impl EventBridge {
         self
     }
 
+    /// Let `wake` end a backoff wait early (`HubConnectionStatus::retry_now`).
+    pub fn waking_on(mut self, wake: Arc<tokio::sync::Notify>) -> Self {
+        self.wake = Some(wake);
+        self
+    }
+
     /// Run until `cancel` fires. Never returns of its own accord: a hub that
     /// is down is a hub that may come back, and giving up would leave a
     /// desktop showing a frozen fleet with nothing to say why.
@@ -295,6 +311,10 @@ impl EventBridge {
         let mut backoff = backoff();
         // Retries since the stream last worked — what the banner counts.
         let mut attempt: u32 = 0;
+        // Connects that failed in a row — what the call breaker counts. A
+        // stream that opened (whatever it then carried) starts it over, so
+        // the reconnect after a stream ends never counts as a refusal.
+        let mut refused: u32 = 0;
         loop {
             if self.cancel.is_cancelled() {
                 return;
@@ -305,6 +325,7 @@ impl EventBridge {
             let last = self.last_id.lock().expect("last id").clone();
             match self.stream.open(last.as_deref()).await {
                 Ok(body) => {
+                    refused = 0;
                     // Reporting `Connected` and re-listing both move into
                     // `pump`, gated on the hub's `ready` frame: whether this
                     // hub's rows are trusted at all is not known until that
@@ -341,6 +362,7 @@ impl EventBridge {
                 }
                 Err(e) => {
                     attempt = attempt.saturating_add(1);
+                    refused = refused.saturating_add(1);
                     wait = backoff.next(jitter());
                     tracing::warn!(
                         error = %e,
@@ -349,6 +371,7 @@ impl EventBridge {
                     );
                     self.status.report(HubConnection::Offline {
                         attempt,
+                        refused,
                         retry_in_secs: retry_in_secs(wait),
                         reason: e,
                     });
@@ -357,7 +380,17 @@ impl EventBridge {
             if self.cancel.is_cancelled() {
                 return;
             }
-            self.delay.sleep(wait).await;
+            match &self.wake {
+                Some(wake) => {
+                    let woken = wake.notified();
+                    tokio::select! {
+                        _ = self.delay.sleep(wait) => {}
+                        _ = woken => tracing::info!("[hub events] retrying now, as asked"),
+                        _ = self.cancel.cancelled() => return,
+                    }
+                }
+                None => self.delay.sleep(wait).await,
+            }
         }
     }
 
@@ -365,7 +398,7 @@ impl EventBridge {
     async fn pump(&self, mut body: Box<dyn EventStreamBody>) -> StreamEnd {
         let opened = tokio::time::Instant::now();
         let stayed_up = || opened.elapsed() >= HEALTHY_AFTER;
-        let mut decoder = SseDecoder::new();
+        let mut decoder = SseDecoder::bounded(MAX_EVENT_BYTES);
         let mut row_events = false;
         // Whether this connection's `ready` frame has been read yet. A real
         // hub always sends it first, before touching its bus, so nothing
@@ -524,6 +557,16 @@ impl EventBridge {
                     }
                 }
             }
+            if decoder.overflowed() {
+                tracing::warn!(
+                    max_bytes = MAX_EVENT_BYTES,
+                    "[hub events] an event outgrew the frame limit; reconnecting"
+                );
+                return StreamEnd::Gap {
+                    delivered: row_events || stayed_up(),
+                    why: "an event from the hub was larger than this window accepts".to_string(),
+                };
+            }
         }
     }
 
@@ -677,6 +720,14 @@ pub fn payload_fits(name: &str, payload: &Value) -> Result<(), String> {
         | "work:tracker_removed" => integer("id"),
         "host:added" | "host:probed" | "host:removed" => string("alias"),
         "work:changed" | "update:changed" => string("what"),
+        "update:decision" => string("target").and_then(|()| string("status")),
+        // `grant:changed` (multi-user M1): `src/lib/access.ts` reads both
+        // ids as numbers and drops the frame otherwise, so the bridge
+        // checks what the consumer requires. `level` is deliberately not
+        // checked: a missing or unknown level IS the revoke
+        // (`parseGrantChanged`), and the one direction a grant may move is
+        // downward.
+        "grant:changed" => integer("session_id").and_then(|()| integer("person_id")),
         "settings:changed" => string("key"),
         "session:event" | "session:conversations" => integer("session_id"),
         "account:upserted" => string("uuid"),
@@ -691,6 +742,11 @@ pub fn payload_fits(name: &str, payload: &Value) -> Result<(), String> {
             .and_then(|()| string("step"))
             .and_then(|()| string("state"))
             .and_then(|()| integer("index")),
+        // `session_loaders.ts` `applyStartProgress` keys the start by
+        // `token` and moves the step named by `step` to `state`.
+        "start:progress" => string("token")
+            .and_then(|()| string("step"))
+            .and_then(|()| string("state")),
         _ => Ok(()),
     }
 }

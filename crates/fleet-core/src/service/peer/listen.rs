@@ -165,7 +165,13 @@ async fn serve(
             || !req.results.is_empty()
             || now >= deadline
         {
-            lock(store)?.set_peer_link_state(link.id, LINK_CONNECTED, None, now_unix())?;
+            {
+                let s = lock(store)?;
+                s.set_peer_link_state(link.id, LINK_CONNECTED, None, now_unix())?;
+                // What this exchange carried either way (Orbit Fleet 11.5);
+                // a listener cannot time the dialer's round trip.
+                s.record_peer_traffic(link.id, req.send.len() + messages.len(), None, now_unix())?;
+            }
             return Ok(ExchangeResponse {
                 proto: PROTO,
                 fleet_id: own,

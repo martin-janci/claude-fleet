@@ -9,6 +9,8 @@
 //! — into `<data dir>/downloads/<id>`, hashing as it writes. A client reads
 //! the rows with [`list`] and the bytes with `GET /downloads/<id>`
 //! ([`open_ready`]). [`sweep`] drops what is past `downloads.keep_secs`.
+//! [`pause`] holds a copy in flight between slices and lets it go on (gap
+//! plan G7.15); a removed copy stops at its next slice.
 //!
 //! Scope: the master and an unbound client see every row; a client bound
 //! to an org sees its org's; a per-host token sees, and sends from, its own
@@ -17,8 +19,8 @@
 
 use crate::ipc_error::{codes, IpcError};
 use crate::service::move_session::carry;
-use crate::service::orgs::OrgScope;
 use crate::service::settings;
+use crate::service::view_scope::ViewScope;
 use crate::shell::quote;
 use crate::ssh::SshExec;
 use crate::store::{DownloadRow, NewDownload, Store};
@@ -84,11 +86,63 @@ fn part_of(id: i64) -> Result<PathBuf, IpcError> {
     Ok(dir()?.join(format!("{id}.part")))
 }
 
-/// Whether `scope` may see `row`: its org boundary, and a per-host token's
-/// own host only.
-pub fn visible(scope: &OrgScope, row: &DownloadRow) -> bool {
-    scope.host().is_none_or(|h| h == row.host_alias)
-        && scope.sees_session(&row.host_alias, row.org_id)
+/// Whether `scope` may see `row`: its org boundary, a per-host token's own
+/// host only, and — multi-user M1 — the PERSON half, asked of the session
+/// the file came out of **at the `own` tier**.
+///
+/// **Why `may_own` and not `sees_session_row`.** A download is a file read
+/// off the session's host at an **unconstrained absolute path**: [`send`]
+/// resolves a RELATIVE path against the pane's `pwd`, but an ABSOLUTE one is
+/// taken as given — [`parse_stat`]'s success condition is
+/// `path.starts_with('/')`, with no canonicalisation against a root and no
+/// `starts_with(worktree)` check. So a download may be
+/// `~/.claude/.credentials.json` as easily as `out/report.pdf`, and
+/// [`crate::mcp::downloads_route`] hands its BYTES to whoever passes this
+/// predicate. An unconstrained read of the owner's host is a subset of what
+/// a terminal gives, and spec §4.3 invariant 5 — *sharing never confers a
+/// terminal* — exists to refuse that class, so a `watch` or even a `drive`
+/// grantee must not reach it. `list_downloads` is the INDEX into those bytes
+/// (its rows carry the absolute path) and `remove_download` destroys the
+/// owner's copy, so all three sit on the same tier.
+///
+/// **`repo_file` is not the precedent it looks like**: that one is confined
+/// to the worktree and this is not. If somebody who owns downloads later
+/// confines the path to the session's tree, `Reach::Read` becomes defensible
+/// and this predicate should be revisited. The reason it is not done here is
+/// that confining the path redesigns main's feature rather than fencing it,
+/// and an owner sending `/var/log/...` off their own machine is a use that
+/// survives intact under `own`.
+///
+/// When the session row is GONE (reaped, or a `session_id` of `None`) there
+/// is no person to ask and `DownloadRow.org_id` — recorded for exactly this
+/// case — is the whole of the fence: the org answer alone. The residue is
+/// BOUNDED rather than merely acknowledged: [`send`] is the `own` tier too,
+/// so every row that ever existed was created by the session's owner or by
+/// its own Claude, never by a grantee. A person's own device keeps seeing
+/// files it was sent; nobody inherits a file a grantee extracted, because a
+/// grantee can extract none.
+pub fn visible(s: &Store, scope: &ViewScope, row: &DownloadRow) -> bool {
+    if scope.host.as_deref().is_some_and(|h| h != row.host_alias) {
+        return false;
+    }
+    match row
+        .session_id
+        .and_then(|id| s.get_session_by_id(id).ok().flatten())
+    {
+        // The composition: `may_own` opens with `sees_session_row`, which
+        // opens with the org clause, so this one call is the org boundary,
+        // the person fence and the tier.
+        Some(sess) => scope.may_own(&sess),
+        // The session is gone (reaped, or the download had none). The org
+        // recorded with the row is the org half; the person half is
+        // `may_own_person_row` on the owner recorded with it (migration
+        // 148), so a reaped session's file stays its owner's (review r04
+        // F3).
+        None => {
+            scope.org.sees_session_org_only(&row.host_alias, row.org_id)
+                && scope.may_own_person_row(row.org_id, row.owner_person_id)
+        }
+    }
 }
 
 /// The budget, as `list` reports it.
@@ -118,10 +172,126 @@ impl Budget {
     }
 }
 
-/// One row as a client receives it: `expires_at` filled in.
+/// One row as a client receives it: `expires_at` and, while it is being
+/// copied, `fetched_bytes` filled in.
 fn present(b: &Budget, mut row: DownloadRow) -> DownloadRow {
     row.expires_at = b.expires_at(&row);
+    if row.state == "fetching" {
+        row.fetched_bytes = Some(progress::get(row.id).unwrap_or(0) as i64);
+        row.paused = control::is_paused(row.id).then_some(true);
+    }
     row
+}
+
+/// The copies in flight ([`spawn_fetch`]), which a person paused and which
+/// were removed, in memory like [`progress`]: a copy lives in this process,
+/// and a restart fails it (`fail_interrupted_downloads`), paused or not.
+mod control {
+    use std::collections::HashSet;
+    use std::sync::{LazyLock, Mutex};
+
+    static RUNNING: LazyLock<Mutex<HashSet<i64>>> = LazyLock::new(Default::default);
+    static PAUSED: LazyLock<Mutex<HashSet<i64>>> = LazyLock::new(Default::default);
+    static STOPPED: LazyLock<Mutex<HashSet<i64>>> = LazyLock::new(Default::default);
+
+    fn set(m: &Mutex<HashSet<i64>>, id: i64, on: bool) {
+        let mut g = m.lock().unwrap_or_else(|e| e.into_inner());
+        if on {
+            g.insert(id);
+        } else {
+            g.remove(&id);
+        }
+    }
+
+    fn has(m: &Mutex<HashSet<i64>>, id: i64) -> bool {
+        m.lock().unwrap_or_else(|e| e.into_inner()).contains(&id)
+    }
+
+    /// A copy of `id` starts in this process.
+    pub fn begin(id: i64) {
+        set(&RUNNING, id, true);
+    }
+
+    pub fn is_running(id: i64) -> bool {
+        has(&RUNNING, id)
+    }
+
+    /// Pause or go on: only a copy in flight here; false otherwise.
+    pub fn set_paused(id: i64, on: bool) -> bool {
+        if !is_running(id) {
+            return false;
+        }
+        set(&PAUSED, id, on);
+        true
+    }
+
+    pub fn is_paused(id: i64) -> bool {
+        has(&PAUSED, id)
+    }
+
+    /// The copy in flight stops at its next slice.
+    pub fn stop(id: i64) {
+        if is_running(id) {
+            set(&STOPPED, id, true);
+        }
+    }
+
+    pub fn is_stopped(id: i64) -> bool {
+        has(&STOPPED, id)
+    }
+
+    /// The copy ended: forget it.
+    pub fn clear(id: i64) {
+        set(&RUNNING, id, false);
+        set(&PAUSED, id, false);
+        set(&STOPPED, id, false);
+    }
+}
+
+/// How often a paused copy looks whether it may go on.
+const PAUSE_POLL: Duration = Duration::from_millis(250);
+
+/// Before each slice: wait while the copy is paused; `E_CANCELLED` once it
+/// was removed (the row is gone, so nothing more is worth reading).
+async fn hold_while_paused(id: i64) -> Result<(), IpcError> {
+    loop {
+        if control::is_stopped(id) {
+            return Err(IpcError::new(
+                codes::E_CANCELLED,
+                "the download was removed",
+            ));
+        }
+        if !control::is_paused(id) {
+            return Ok(());
+        }
+        tokio::time::sleep(PAUSE_POLL).await;
+    }
+}
+
+/// Bytes copied per download in flight, in memory: a copy lives in this
+/// process (`fail_interrupted_downloads` ends any a restart cut short), so
+/// nothing about it needs to outlive it.
+mod progress {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+
+    static COPIED: LazyLock<Mutex<HashMap<i64, u64>>> = LazyLock::new(Default::default);
+
+    fn map() -> std::sync::MutexGuard<'static, HashMap<i64, u64>> {
+        COPIED.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn set(id: i64, bytes: u64) {
+        map().insert(id, bytes);
+    }
+
+    pub fn get(id: i64) -> Option<u64> {
+        map().get(&id).copied()
+    }
+
+    pub fn clear(id: i64) {
+        map().remove(&id);
+    }
 }
 
 // ---- send ------------------------------------------------------------------
@@ -305,7 +475,7 @@ fn remove_files(id: i64) {
 pub async fn send(
     store: &Mutex<Store>,
     ssh: &dyn SshExec,
-    scope: &OrgScope,
+    scope: &ViewScope,
     source: &str,
     args: &SendFileArgs,
 ) -> Result<DownloadRow, IpcError> {
@@ -315,7 +485,30 @@ pub async fn send(
         let s = crate::ipc_error::lock(store)?;
         let row = s.get_session_by_id(args.session_id)?;
         match row {
-            Some(r) if scope.sees_row(&r) && scope.host().is_none_or(|h| h == r.host_alias) => r,
+            // Two arms, because two different callers send files and §4.4
+            // separates them:
+            //
+            // * a PERSON reaches the `own` tier and nothing less. This reads
+            //   an unconstrained absolute path off the session's host (see
+            //   [`visible`]), which is a subset of a terminal, and spec §4.3
+            //   invariant 5 says no grant confers one. A `watch` or `drive`
+            //   grantee is refused `E_NOTFOUND`, like any id that is not
+            //   theirs;
+            // * a per-host token is the session's OWN Claude, which is this
+            //   tool's headline use (`whoami` gives it its `session_id`).
+            //   `may_own` deliberately excludes it — the pane proof never
+            //   reaches that tier — so its arm is §4.4 clauses 1 and 2
+            //   instead, which `sees_session_row` already is: its own host,
+            //   and either an unclaimed row or the one pane this request
+            //   proves. Strictly tighter than main's host-only fence.
+            Some(r)
+                if (match scope.host.as_deref() {
+                    Some(h) => h == r.host_alias && scope.sees_session_row(&r).is_visible(),
+                    None => scope.may_own(&r),
+                }) =>
+            {
+                r
+            }
             _ => {
                 return Err(IpcError::new(
                     codes::E_NOTFOUND,
@@ -363,10 +556,19 @@ pub async fn send(
 
 /// Copy `row`'s bytes in the background; the row ends `ready` or `failed`.
 pub fn spawn_fetch(store: Arc<Mutex<Store>>, ssh: Arc<dyn SshExec>, row: DownloadRow) {
+    control::begin(row.id);
     tokio::spawn(async move {
         let id = row.id;
-        let result = fetch(&*ssh, &row).await;
+        let copied = |got: u64| {
+            progress::set(id, got);
+            if let Ok(s) = crate::ipc_error::lock(&store) {
+                s.note_download_progress(id);
+            }
+        };
+        let result = fetch_chunked(&*ssh, &row, CHUNK_BYTES, &copied).await;
+        progress::clear(id);
         let Ok(s) = crate::ipc_error::lock(&store) else {
+            control::clear(id);
             return;
         };
         match result {
@@ -384,19 +586,25 @@ pub fn spawn_fetch(store: Arc<Mutex<Store>>, ssh: Arc<dyn SshExec>, row: Downloa
                 }
             }
         }
+        // Under the store's lock, after the row left `fetching`: a pause
+        // that comes later is refused rather than left behind.
+        control::clear(id);
     });
 }
 
 /// Pull the bytes into `<id>.part`, then rename it to `<id>`; the SHA-256
 /// of what was written.
 pub async fn fetch(ssh: &dyn SshExec, row: &DownloadRow) -> Result<String, IpcError> {
-    fetch_chunked(ssh, row, CHUNK_BYTES).await
+    fetch_chunked(ssh, row, CHUNK_BYTES, &|_| {}).await
 }
 
+/// `copied` hears the running total after each slice (not after the last:
+/// the row turns `ready` then).
 async fn fetch_chunked(
     ssh: &dyn SshExec,
     row: &DownloadRow,
     chunk_bytes: u64,
+    copied: &(dyn Fn(u64) + Send + Sync),
 ) -> Result<String, IpcError> {
     use sha2::Digest;
     use tokio::io::AsyncWriteExt;
@@ -412,6 +620,7 @@ async fn fetch_chunked(
     let mut hash = sha2::Sha256::new();
     let mut got = 0u64;
     while got < size {
+        hold_while_paused(row.id).await?;
         let want = chunk_bytes.min(size - got);
         let out = crate::ssh::run_shell(
             ssh,
@@ -439,6 +648,9 @@ async fn fetch_chunked(
         f.write_all(chunk).await?;
         hash.update(chunk);
         got += chunk.len() as u64;
+        if got < size {
+            copied(got);
+        }
     }
     f.sync_all().await?;
     drop(f);
@@ -479,7 +691,7 @@ pub struct DownloadList {
 
 pub fn list(
     s: &Store,
-    scope: &OrgScope,
+    scope: &ViewScope,
     args: &ListDownloadsArgs,
 ) -> Result<DownloadList, IpcError> {
     let b = Budget::from_store(s);
@@ -492,7 +704,7 @@ pub fn list(
     let limit = args.limit.unwrap_or(LIST_LIMIT).clamp(1, LIST_LIMIT);
     let downloads = rows
         .into_iter()
-        .filter(|r| visible(scope, r))
+        .filter(|r| visible(s, scope, r))
         .filter(|r| args.session_id.is_none_or(|id| r.session_id == Some(id)))
         .take(limit)
         .map(|r| present(&b, r))
@@ -505,9 +717,9 @@ pub fn list(
     })
 }
 
-fn visible_row(s: &Store, scope: &OrgScope, id: i64) -> Result<DownloadRow, IpcError> {
+fn visible_row(s: &Store, scope: &ViewScope, id: i64) -> Result<DownloadRow, IpcError> {
     match s.download(id)? {
-        Some(r) if visible(scope, &r) => Ok(r),
+        Some(r) if visible(s, scope, &r) => Ok(r),
         _ => Err(IpcError::new(
             codes::E_NOTFOUND,
             format!("download {id} not found"),
@@ -517,20 +729,55 @@ fn visible_row(s: &Store, scope: &OrgScope, id: i64) -> Result<DownloadRow, IpcE
 
 /// Drop a download and its bytes. `false` when it was already gone. A copy
 /// still in flight finds no row when it ends and deletes what it wrote.
-pub fn remove(s: &Store, scope: &OrgScope, id: i64) -> Result<bool, IpcError> {
+pub fn remove(s: &Store, scope: &ViewScope, id: i64) -> Result<bool, IpcError> {
     let Ok(row) = visible_row(s, scope, id) else {
         return Ok(false);
     };
+    // The copy in flight stops at its next slice, paused or not.
+    control::stop(row.id);
     let removed = s.delete_download(row.id)?;
     remove_files(row.id);
     Ok(removed)
+}
+
+/// Arguments of `pause_download`.
+#[derive(Debug, Clone, serde::Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct PauseDownloadArgs {
+    /// The download's id (`list_downloads`).
+    pub id: i64,
+    /// true pauses the copy, false lets it go on.
+    pub paused: bool,
+}
+
+/// Pause a copy in flight, or let it go on (Toasts board, "Pause" on a copy
+/// in flight). It stops between slices, so the slice being read finishes
+/// first. The row as `list` shows it; `E_NOTFOUND` for a row this caller
+/// may not see, `E_INVALID_STATE` for one that is not being copied.
+pub fn pause(
+    s: &Store,
+    scope: &ViewScope,
+    args: &PauseDownloadArgs,
+) -> Result<DownloadRow, IpcError> {
+    let row = visible_row(s, scope, args.id)?;
+    if row.state != "fetching" || !control::set_paused(row.id, args.paused) {
+        return Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            format!(
+                "download {} is {}: only a copy in flight pauses",
+                row.id, row.state
+            ),
+        ));
+    }
+    s.note_download_progress(row.id);
+    Ok(present(&Budget::from_store(s), row))
 }
 
 /// A ready download the caller may fetch, and where its bytes are; stamps
 /// `downloaded_at`. `E_NOTFOUND` otherwise.
 pub fn open_ready(
     s: &Store,
-    scope: &OrgScope,
+    scope: &ViewScope,
     id: i64,
 ) -> Result<(DownloadRow, PathBuf), IpcError> {
     let row = visible_row(s, scope, id)?;

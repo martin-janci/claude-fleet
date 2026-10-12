@@ -12,6 +12,7 @@ import type { ProjectTreeRow } from './projects';
 import type { StartWorkArgs } from './trackers';
 import type { WorkLink } from './work';
 import { push, pushError, type PushOptions } from './toasts';
+import { offerRuleAfterStart } from './rule_offer_toast';
 
 export interface StartSkip {
   project_id: number;
@@ -51,7 +52,11 @@ export async function startWorkMulti(
   args: StartWorkArgs & { project_ids: number[] },
 ): Promise<Result<MultiStart>> {
   const r = await invokeCmd<MultiStart>('start_work_multi', { args });
-  if (r.ok) for (const row of r.value.started ?? []) acceptCommandRow(row);
+  if (r.ok) {
+    for (const row of r.value.started ?? []) acceptCommandRow(row);
+    // The dialog's own repository counts toward a start rule (8.11).
+    if ((r.value.started ?? []).length > 0) void offerRuleAfterStart(r.value.key);
+  }
   return r;
 }
 

@@ -36,6 +36,7 @@ pub const KNOWN_SOURCES: &[&str] = &[
     "url",
     "prompt",
     "agent_inferred",
+    "jev",
     "resumed",
     "forked",
     "inherited",

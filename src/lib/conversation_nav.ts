@@ -3,6 +3,7 @@
 import { get } from 'svelte/store';
 import { sessions, sessionsLoaded } from './sessions';
 import type { ConvItem, ThreadRow } from './conversation';
+import { fold, foldedIncludes } from './text_fold';
 
 /** The key the panel's `{#each thread}` uses for a row. */
 export function rowKey(row: ThreadRow): string {
@@ -42,15 +43,15 @@ function rowTexts(row: ThreadRow): (string | null)[] {
 }
 
 /** Row keys (`t<index>` / `e<id>`) whose searchable text contains `query`
- *  (case-insensitive, trimmed; empty → []). Searchable text: prompt, text
+ *  (case and accents ignored, trimmed; empty → []). Searchable text: prompt, text
  *  items, tool summaries/targets, command name/args/output, subagent
  *  description/result, compaction summary, event label/detail. In document
  *  order. */
 export function findMatches(rows: ThreadRow[], query: string): Match[] {
-  const q = query.trim().toLowerCase();
+  const q = fold(query.trim());
   if (q === '') return [];
   return rows
-    .filter((row) => rowTexts(row).some((t) => t !== null && t.toLowerCase().includes(q)))
+    .filter((row) => rowTexts(row).some((t) => foldedIncludes(t, q)))
     .map((row) => ({ rowKey: rowKey(row) }));
 }
 
@@ -73,7 +74,9 @@ export function turnIndex(rows: ThreadRow[]): TurnIndexEntry[] {
     let label: string | null = null;
     if (turn.prompt !== null && turn.prompt.trim() !== '') {
       const first = turn.prompt.trim().split('\n')[0].trim();
-      label = first.length > INDEX_LABEL_MAX ? `${first.slice(0, INDEX_LABEL_MAX - 1)}…` : first;
+      // By code point: a UTF-16 cut splits an emoji into a lone surrogate.
+      const chars = first.length > INDEX_LABEL_MAX ? Array.from(first) : null;
+      label = chars && chars.length > INDEX_LABEL_MAX ? `${chars.slice(0, INDEX_LABEL_MAX - 1).join('')}…` : first;
     } else {
       const cmd = turn.items.find((i) => i.kind === 'command');
       if (cmd?.kind === 'command') label = cmd.args ? `${cmd.name} ${cmd.args}` : cmd.name;

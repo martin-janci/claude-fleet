@@ -75,15 +75,31 @@ Frames are JSON, one request and one response per id:
 | Hub → agent | Meaning |
 |---|---|
 | `exec { id, argv, stdin?, timeout_ms, cap_bytes? }` | Run this argv, no shell unless the argv says so |
-| `upload { id, path, mode, bytes_b64 }` | Write a file, creating parents, with this mode |
+| `upload { id, path, mode, bytes_b64, chunks? }` | Write a file, creating parents, with this mode |
+| `upload_chunk { id, bytes_b64 }` | Proto 2: one piece of an upload, ahead of its `upload` |
 | `cancel { id }` | Kill the child of an in-flight request |
 | `ping { id }` | Liveness |
+| `welcome { hub_version, proto }` | First frame down an accepted connection |
 
 | Agent → hub | Meaning |
 |---|---|
-| `hello { agent_version, host_name, os }` | First frame after the upgrade |
-| `result { id, exit_code, stdout_b64, stderr_b64, truncated }` | One per request |
+| `hello { agent_version, host_name, os, proto }` | First frame after the upgrade |
+| `result { id, exit_code, stdout_b64, stderr_b64, truncated, chunks? }` | One per request |
+| `result_chunk { id, stdout_b64, stderr_b64 }` | Proto 2: one piece of a result, ahead of its `result` |
 | `pong { id }` | |
+| `report { reports, dropped }` | The agent's own error log, on a heartbeat |
+
+**Chunks (proto 2).** A payload over 1 MiB (`CHUNK_BYTES`) travels as 1 MiB
+`*_chunk` frames and a final `upload` / `result` carrying the last piece and
+`chunks`, the number of chunks before it. One frame of up to ~267 MiB used to
+hold everything else on the link — pongs, small probe answers — until it had
+crossed, which on a slow uplink outlasted the heartbeat the hub drops a link
+after. Each writer sends small frames ahead of queued chunks. A side chunks
+only toward a peer whose own `proto` (`hello` / `welcome`) is at least 2; a
+proto-1 peer would skip the chunks as unknown kinds and take the last piece for
+the whole. The receiver refuses a final frame whose `chunks` does not match the
+pieces it holds, so a chunk lost with a replaced connection fails the call
+rather than writing a short file. `MIN_SUPPORTED_PROTO` stays 1.
 
 The agent enforces its own ceiling on output size and on concurrent
 executions, and refuses a frame whose id it has already seen. The hub applies

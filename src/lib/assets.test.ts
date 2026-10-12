@@ -11,7 +11,7 @@ import {
   createAsset, updateAsset, deleteAsset, addResource, removeResource, lintAsset, lintAll,
   commitPending, pushCatalog, repoStatus, assetTemplate, spawnAuthorSession, resourceSize,
   repoStatusStore, KIND_FIELDS, TOOLS, TIERS, EVENTS,
-  identitiesOf, hostOrder,
+  identitiesOf, hostOrder, hostOrderOf, oddHosts,
   type AssetInventoryRow, type AssetListing, type SyncPlan, type HostPlan, type SyncAction,
   type EditableAsset,
 } from './assets';
@@ -117,6 +117,17 @@ describe('assets store', () => {
     expect(identitiesOf(server)[0].name).toBe('x');
   });
 
+  it('hostOrderOf is the one ordering, over bare aliases; hostOrder delegates to it', () => {
+    expect(hostOrderOf(['trn', 'local', 'oci', 'trn'])).toEqual(['local', 'oci', 'trn']);
+    expect(hostOrderOf(['trn', 'oci'])).toEqual(['oci', 'trn']);
+    expect(hostOrderOf([])).toEqual([]);
+  });
+  it('oddHosts reads the hosts a "copies differ" identity names, and none otherwise', () => {
+    const id = (reason: string | null) => ({ kind: 'skill', name: 'x', hosts: [], signature: '', variants: 2, class: 'needs_person' as const, reason });
+    expect(oddHosts(id('copies differ on oci, trn'))).toEqual(['oci', 'trn']);
+    expect(oddHosts(id('carries a secret'))).toEqual([]);
+    expect(oddHosts(id(null))).toEqual([]);
+  });
   it('hostOrder puts local first, then alphabetical', () => {
     const ids = [{ kind: 'skill', name: 'a', signature: 'oci,local', variants: 1, class: 'normal' as const, reason: null,
       hosts: [{ host_alias: 'trn', harness: 'claude', host_hash: null }, { host_alias: 'local', harness: 'claude', host_hash: null }, { host_alias: 'htz', harness: 'claude', host_hash: null }] }];
@@ -347,5 +358,34 @@ describe('authoring wrappers', () => {
     expect(TOOLS).toContain('bash');
     expect(TIERS).toEqual(['fast', 'default', 'strong']);
     expect(EVENTS).toContain('session_start');
+  });
+});
+
+// G2.6 helpers.
+describe('Toolkit form helpers', () => {
+  it('harness boxes read and write targets.<harness>.enabled, dropping a bare override', async () => {
+    const { harnessOn, withHarness } = await import('./assets');
+    expect(harnessOn({}, 'codex')).toBe(true);
+    const off = withHarness(undefined, 'codex', false);
+    expect(off).toEqual({ codex: { enabled: false } });
+    expect(harnessOn({ targets: off }, 'codex')).toBe(false);
+    expect(withHarness(off, 'codex', true)).toBeUndefined();
+    // Another field on the override stays.
+    expect(withHarness({ codex: { enabled: false, model: 'o3' } }, 'codex', true)).toEqual({ codex: { model: 'o3' } });
+  });
+
+  it('the What boxes and the commit message', async () => {
+    const { importOnlyFor, commitMessageFor, KIND_ORDER } = await import('./assets');
+    expect(importOnlyFor(KIND_ORDER)).toEqual([]);
+    expect(importOnlyFor(['skill', 'command'])).toEqual(['skill:*', 'command:*']);
+    expect(commitMessageFor([])).toBe('catalog: commit pending changes');
+    expect(
+      commitMessageFor([
+        { path: 'a/1', status: 'A' },
+        { path: 'a/2', status: 'M' },
+        { path: 'a/3', status: 'M' },
+        { path: 'a/4', status: 'D' },
+      ]),
+    ).toBe('catalog: update a/1, a/2, a/3 (+1)');
   });
 });

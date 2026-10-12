@@ -211,16 +211,30 @@ async fn a_company_a_host_sees_none_of_company_bs_work_in_any_provider() {
         let host_b = OrgScope::for_host(&st.lock().unwrap(), "h-b").unwrap();
 
         // Host A: only its own org's ticket, whatever it asks.
-        let seen: Vec<i64> = tickets(&st, None, None, None, None, &host_a)
-            .unwrap()
-            .into_iter()
-            .map(|t| t.item.id)
-            .collect();
+        let seen: Vec<i64> = tickets(
+            &st,
+            None,
+            None,
+            None,
+            None,
+            &crate::service::view_scope::org_only_view(&host_a),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|t| t.item.id)
+        .collect();
         assert_eq!(seen, vec![aa], "{}", c.provider);
         assert!(
-            tickets(&st, Some(tb.id), None, None, None, &host_a)
-                .unwrap()
-                .is_empty(),
+            tickets(
+                &st,
+                Some(tb.id),
+                None,
+                None,
+                None,
+                &crate::service::view_scope::org_only_view(&host_a)
+            )
+            .unwrap()
+            .is_empty(),
             "{}",
             c.provider
         );
@@ -236,7 +250,14 @@ async fn a_company_a_host_sees_none_of_company_bs_work_in_any_provider() {
             let mut refs = vec![item.key.clone().unwrap()];
             refs.extend(item.url.clone());
             for r in refs {
-                let e = lookup(&st, &r, &host_a, &net).await.unwrap_err();
+                let e = lookup(
+                    &st,
+                    &r,
+                    &crate::service::view_scope::org_only_view(&host_a),
+                    &net,
+                )
+                .await
+                .unwrap_err();
                 assert_eq!(
                     e.code,
                     codes::E_FORBIDDEN,
@@ -254,18 +275,32 @@ async fn a_company_a_host_sees_none_of_company_bs_work_in_any_provider() {
 
         // Host B: the item its own session works on, and not the one
         // forced onto an A session.
-        let seen_b: Vec<i64> = tickets(&st, None, None, None, None, &host_b)
-            .unwrap()
-            .into_iter()
-            .map(|t| t.item.id)
-            .collect();
+        let seen_b: Vec<i64> = tickets(
+            &st,
+            None,
+            None,
+            None,
+            None,
+            &crate::service::view_scope::org_only_view(&host_b),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|t| t.item.id)
+        .collect();
         assert_eq!(seen_b, vec![ids[0]], "{}", c.provider);
 
         // Master sees all of them.
         assert_eq!(
-            tickets(&st, None, None, None, None, &OrgScope::All)
-                .unwrap()
-                .len(),
+            tickets(
+                &st,
+                None,
+                None,
+                None,
+                None,
+                &crate::service::view_scope::org_only_view(&OrgScope::All)
+            )
+            .unwrap()
+            .len(),
             3,
             "{}",
             c.provider

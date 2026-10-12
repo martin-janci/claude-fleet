@@ -1,17 +1,19 @@
 <script lang="ts">
-  // The agent's sheet: a compact conversation over the operator session, the
-  // removable context chip, and nothing else. Everything that renders turns
+  // Control's Chat tab (redesign step 9.1): a conversation over the operator
+  // session, the removable context chip, and nothing else. Everything that renders turns
   // — and everything that sends — is ConversationPanel's job; what lives
   // here is the frame, the chip, and the four states where the agent cannot
   // simply be talked to.
   //
-  // Only two of the four blocked states get a button (`blockedCopy`'s own
-  // rule): `absent` -> openAgent() wakes it, `lost` -> restartOperator()
-  // brings the session back. `no_mcp` / `token_revoked` are explanatory
-  // only — their fixes live outside this panel (Settings, the sidebar), so
-  // there is nothing here to wire a click to.
+  // Every blocked state gets a next step (redesign step 9.1, `blockedCopy`'s
+  // `next`): wake, restart and move run here; Control API opens Settings,
+  // add/open host open the Hosts view; replace kills the agent's session
+  // after an inline confirm (a kill is always confirmed) and starts a new one.
   //
-  // This sheet used to own a composer of its own, because the chip's prefix
+  // It is drawn inline in the right column. Until step 13.1 it was also
+  // Classic's floating sheet, with a grip, maximize and close.
+  //
+  // The sheet used to own a composer of its own, because the chip's prefix
   // had to be glued onto the prompt and ConversationPanel knew nothing about
   // it. That bought a second sender and cost every live signal the panel
   // had: `pending`, `optimistic` (which is what keeps the transcript on the
@@ -22,29 +24,51 @@
   // there is exactly one composer again.
   import ConversationPanel from './ConversationPanel.svelte';
   import {
-    agentPanelOpen,
     operatorState,
     operatorHost,
+    operatorFallback,
     operatorRow,
+    operatorError,
     blockedCopy,
-    closeAgent,
-    openAgent,
+    ensureAgent,
     restartOperator,
+    replaceOperator,
     type OperatorBlocked,
   } from './operator';
+  import { openSettingsAt, requestHostsView, requestNewSessionOnHost } from './app_views';
+  import { hosts } from './hosts';
   import { agentContext, type AgentContextInput } from './agent_context';
   import { OPERATOR_COMMANDS } from './operator';
   import { insertIntoComposer } from './conversation';
-  import {
-    agentPanelSize,
-    agentPanelMaximized,
-    clampAgentPanelSize,
-    dragResize,
-    AGENT_PANEL_DEFAULT_W,
-    type AgentPanelSize,
-  } from './agent_panel_size';
+  import ConfirmCards from './ConfirmCards.svelte';
+  import { openChatWizard } from './forms/chat_wizards';
+  import HandoffCards from './HandoffCards.svelte';
+  import { controlThinking } from './control_loaders';
+  import ControlRouteReceipts from './ControlRouteReceipts.svelte';
+  import ControlCommandReceipts from './ControlCommandReceipts.svelte';
+  import ControlSuggestions from './ControlSuggestions.svelte';
+  import { takeControlCommand } from './control_slash';
+  import { linkableTasks, type TaskLink } from './control_task_link';
+  import { workTree } from './work_view';
+
+  // Gap plan G3.9: the box's words in Control. `#KEY` names a task and
+  // `@name` a host or session in Control's commands; `/` opens them.
+  const CONTROL_HINT = '# task · @ host · / command · ↵ send';
+  const CONTROL_PLACEHOLDER = 'Ask the fleet, or start a task…';
+
+  /** G7.8: the tasks `#` offers, read from the Work tree when first typed. */
+  async function linkTasks(): Promise<TaskLink[]> {
+    const r = await workTree({ filters: {}, limit: 200, per_task: 1 });
+    return r.ok ? linkableTasks(r.value.tasks) : [];
+  }
 
   let { contextInput = null }: { contextInput?: AgentContextInput | null } = $props();
+
+  // Control shows the agent whenever it is open, so it makes sure there is
+  // one.
+  $effect(() => {
+    void ensureAgent();
+  });
 
   // Which context's chip the person dismissed, by label rather than a bare
   // boolean: "not this context" outlives the click, but only for as long as
@@ -66,95 +90,110 @@
 
   const blocked = $derived(
     $operatorState !== 'ready' && $operatorState !== 'waking' && $operatorState !== 'unknown'
-      ? blockedCopy($operatorState as OperatorBlocked, $operatorHost)
+      ? blockedCopy($operatorState as OperatorBlocked, $operatorHost, $operatorFallback)
       : null,
   );
-  // Which function a blocked-state button runs, keyed on the actual state
-  // rather than matching the copy string — `absent` wakes, `lost` restarts,
-  // everything else has no button at all (`blocked.action` is null there).
-  const blockedAction = $derived(
-    $operatorState === 'absent'
-      ? () => void openAgent()
-      : $operatorState === 'lost'
-        ? () => void restartOperator()
-        : null,
-  );
-
-  // Escape closes the sheet, INCLUDING from inside the composer. This is a
-  // non-modal overlay, so it is not a <dialog> and gets no `cancel` event
-  // from the browser (Modal.svelte's route); and App.svelte's window-level
-  // Escape deliberately leaves an editable element alone, which would leave
-  // the one field you are most likely to be in with no way out. Handled
-  // here, where the panel owns the key, and marked handled so the same
-  // press does not also leave Files or Hosts behind it.
-  function onPanelKeydown(e: KeyboardEvent) {
-    if (e.key !== 'Escape') return;
-    e.preventDefault();
-    e.stopPropagation();
-    closeAgent();
-  }
-
-  // Resizing. The sheet is pinned bottom-right, so its top-left corner is
-  // the one that moves: dragging it left / up grows the sheet. The grip
-  // also answers the arrow keys (Home returns to the default size), and a
-  // double-click resets it, the way a split-pane divider does.
-  let panelEl: HTMLDivElement | undefined = $state();
-  let drag: { x: number; y: number; start: AgentPanelSize } | null = null;
-  const RESIZE_STEP = 20;
-  // How far the sheet may grow: up to 20px from the window's top and left
-  // edges. Its right and bottom edges do not move.
-  function growRoom(): AgentPanelSize | undefined {
-    if (!panelEl) return undefined;
-    const r = panelEl.getBoundingClientRect();
-    return r.right > 0 && r.bottom > 0 ? { w: r.right - 20, h: r.bottom - 20 } : undefined;
-  }
-  function currentSize(): AgentPanelSize {
-    const r = panelEl?.getBoundingClientRect();
-    return r && r.width > 0 ? { w: r.width, h: r.height } : { w: AGENT_PANEL_DEFAULT_W, h: 0 };
-  }
-  function onGripDown(e: PointerEvent) {
-    if (e.button !== 0) return;
-    e.preventDefault();
-    drag = { x: e.clientX, y: e.clientY, start: currentSize() };
-    agentPanelMaximized.set(false);
-    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
-  }
-  function onGripMove(e: PointerEvent) {
-    if (!drag) return;
-    agentPanelSize.set(dragResize(drag.start, e.clientX - drag.x, e.clientY - drag.y, growRoom()));
-  }
-  function endGrip() {
-    drag = null;
-  }
-  function resetSize() {
-    agentPanelMaximized.set(false);
-    agentPanelSize.set(null);
-  }
-  function onGripKey(e: KeyboardEvent) {
-    const d: Record<string, [number, number]> = {
-      ArrowLeft: [RESIZE_STEP, 0],
-      ArrowRight: [-RESIZE_STEP, 0],
-      ArrowUp: [0, RESIZE_STEP],
-      ArrowDown: [0, -RESIZE_STEP],
-    };
-    if (e.key === 'Home') {
-      e.preventDefault();
-      resetSize();
-      return;
+  // Which function a blocked-state button runs, keyed on `blocked.next`
+  // rather than the copy string.
+  function runNext() {
+    if (!blocked) return;
+    switch (blocked.next) {
+      case 'wake':
+      case 'move':
+        void ensureAgent();
+        return;
+      case 'restart':
+        void busyWhile(restartOperator);
+        return;
+      case 'control_api':
+        openSettingsAt('control-api');
+        return;
+      case 'replace':
+        confirmingReplace = true;
+        return;
+      case 'add_host':
+        requestHostsView();
+        return;
+      case 'open_host':
+        requestHostsView($operatorHost);
+        return;
     }
-    const step = d[e.key];
-    if (!step) return;
-    e.preventDefault();
-    const s = currentSize();
-    agentPanelMaximized.set(false);
-    agentPanelSize.set(clampAgentPanelSize({ w: s.w + step[0], h: s.h + step[1] }, growRoom()));
   }
+  // A restart or a replace is an SSH round trip or two (and after a host
+  // reboot, a new tmux session); the button says so and takes no second
+  // press meanwhile.
+  let restarting = $state(false);
+  let confirmingReplace = $state(false);
+  async function busyWhile(fn: () => Promise<void>) {
+    if (restarting) return;
+    restarting = true;
+    try {
+      await fn();
+    } finally {
+      restarting = false;
+    }
+  }
+  async function replace() {
+    confirmingReplace = false;
+    await busyWhile(replaceOperator);
+  }
+  // A confirm left open belongs to the state that asked it.
+  $effect(() => {
+    if ($operatorState !== 'token_revoked') confirmingReplace = false;
+  });
+
+  // Gap plan G3.13 (board Finish, "Control · first run"): an agent nobody
+  // has written to yet opens on a card with three first steps. The first
+  // two fill the box (nothing is sent until Enter); the third opens New
+  // session on the first host.
+  let firstRunClosed = $state(false);
+  const firstRun = $derived(!!session && !session.last_prompt && !firstRunClosed);
+  const firstHost = $derived($hosts.find((h) => !h.hidden)?.alias ?? $operatorHost);
 </script>
 
 {#snippet chip()}
+  {#if firstRun && session}
+    <div class="first-run" data-testid="control-first-run">
+      <p class="first-title">Ask Control about your fleet</p>
+      <p class="first-sub">It reads every session, task and routine, and can start, send or plan work for you.</p>
+      <div class="first-actions">
+        <button class="chip command" data-testid="control-first-needs" onclick={() => insertIntoComposer(session.id, 'What needs me?')}
+          >What needs me?</button
+        >
+        <button class="chip command" data-testid="control-first-plan" onclick={() => insertIntoComposer(session.id, '/plan ')}>Plan a task</button>
+        <button class="chip command" data-testid="control-first-start" onclick={() => requestNewSessionOnHost(firstHost)}
+          >Start a session on {firstHost}</button
+        >
+        <button class="chip" data-testid="control-first-close" title="Hide these first steps" onclick={() => (firstRunClosed = true)}
+          >Not now</button
+        >
+      </div>
+    </div>
+  {/if}
+  <!-- Step 9.2: the agent's starts and kills wait here as cards, above the
+       composer (not in the transcript; parity P30 accepts the placement).
+       Mounted only while this row renders, so a request is never parked on
+       a card nobody can see (confirms.ts). -->
+  <ConfirmCards />
+  <!-- Steps 9.3 and 9.6: what the agent handed on, as chips and cards
+       that follow their target's state. -->
+  <HandoffCards />
+  <!-- Step 9.9 (Jev K2): where each message just sent here goes. Keyed, so
+       another Control session primes afresh instead of routing its history. -->
+  {#if session}{#key session.id}<ControlRouteReceipts sessionId={session.id} />{/key}{/if}
+  <!-- G3.9: what /task, /done, /assign and /start did (control_slash.ts). -->
+  <ControlCommandReceipts />
+  <!-- G3.9: suggestions read from the fleet's rows; a press runs them. -->
+  {#if session}<ControlSuggestions sessionId={session.id} />{/if}
+{/snippet}
+
+{#snippet tools()}
+  <!-- Control chat UX (2026-10-10): these join the quick-prompt row
+       (Clear, Compact, Status), so one row of chips sits above the box. -->
   {#if ctx}
     <button
-      class="chip"
+      type="button"
+      class="btn btn--chip"
       data-testid="agent-context-chip"
       onclick={() => (droppedLabel = ctx!.chipLabel)}
       title="Send without this context"
@@ -163,9 +202,21 @@
     </button>
   {/if}
   <!-- Operator commands (work graph M9): they fill the composer, never send. -->
+  <!-- Step 10.12: Add project as a form at the end of this chat; nothing
+       runs until its last button. -->
+  {#if session}
+    <button
+      type="button"
+      class="btn btn--chip command"
+      data-testid="agent-add-project"
+      title="Add a repository to the fleet with a form in this chat"
+      onclick={() => session && openChatWizard(session.id, 'add_project', { from: 'Control' })}>Add project</button
+    >
+  {/if}
   {#each OPERATOR_COMMANDS as c (c.label)}
     <button
-      class="chip command"
+      type="button"
+      class="btn btn--chip command"
       data-testid="agent-command"
       title="Put this request in the box; nothing is sent until you press Enter"
       onclick={() => session && insertIntoComposer(session.id, c.text)}>{c.label}</button
@@ -173,185 +224,129 @@
   {/each}
 {/snippet}
 
-{#if $agentPanelOpen}
-  <!-- A non-modal dialog: `role="dialog"` on a div (a <section> is a
-       landmark and may not take the role), `tabindex="-1"` so the sheet
-       itself can hold focus and Escape reaches this handler even when no
-       control inside it is focused. Not <dialog>/Modal.svelte: showModal()
-       would dim and focus-trap the whole app, and the point of this sheet
-       is that the app stays usable underneath it. -->
-  <div
-    class="agent-panel"
-    class:sized={$agentPanelSize !== null && !$agentPanelMaximized}
-    class:maximized={$agentPanelMaximized}
-    style:--agent-w={$agentPanelSize ? `${$agentPanelSize.w}px` : undefined}
-    style:--agent-h={$agentPanelSize ? `${$agentPanelSize.h}px` : undefined}
-    role="dialog"
-    tabindex="-1"
-    aria-label="Agent"
-    data-testid="agent-panel"
-    bind:this={panelEl}
-    onkeydown={onPanelKeydown}
-  >
-    <!-- A focusable separator is a widget (it takes the arrow keys), which
-         the a11y rules do not model; the same exception Resizer.svelte is. -->
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-    <div
-      class="grip"
-      data-testid="agent-panel-grip"
-      role="separator"
-      aria-label="Resize the agent"
-      aria-orientation="horizontal"
-      tabindex="0"
-      title="Drag to resize · double-click to reset"
-      onpointerdown={onGripDown}
-      onpointermove={onGripMove}
-      onpointerup={endGrip}
-      onpointercancel={endGrip}
-      onlostpointercapture={endGrip}
-      ondblclick={resetSize}
-      onkeydown={onGripKey}
-    ></div>
-    <header class="head">
-      <span class="who">Agent</span>
-      <button
-        class="close"
-        data-testid="agent-panel-maximize"
-        aria-label={$agentPanelMaximized ? 'Restore the agent' : 'Maximize the agent'}
-        aria-pressed={$agentPanelMaximized}
-        title={$agentPanelMaximized ? 'Restore' : 'Maximize'}
-        onclick={() => agentPanelMaximized.update((m) => !m)}>{$agentPanelMaximized ? '⤡' : '⤢'}</button
+<div class="agent-panel" role="region" aria-label="Agent" data-testid="control-agent">
+  {#if blocked}
+   <!-- One empty state with one primary step (UX audit 2026-10-09, C4). -->
+   <div class="blocked-state" data-testid="agent-blocked">
+    <p class="blocked">{blocked.title}</p>
+    {#if confirmingReplace}
+      <p class="confirm" data-testid="agent-replace-confirm">
+        Kill the agent's session on {$operatorHost} and start a new one? Its conversation so far stays in that session's
+        transcript.
+      </p>
+      <div class="confirm-row">
+        <button class="btn btn--crit" onclick={() => void replace()} data-testid="agent-replace-yes">Kill and start a new agent</button>
+        <button class="btn btn--quiet" onclick={() => (confirmingReplace = false)}>Cancel</button>
+      </div>
+    {:else}
+      <button class="btn btn--primary" onclick={runNext} disabled={restarting} data-testid="agent-next-step"
+        >{restarting ? (blocked.next === 'replace' ? 'Replacing…' : 'Restarting…') : blocked.action}</button
       >
-      <button
-        class="close"
-        data-testid="agent-panel-close"
-        aria-label="Close the agent"
-        title="Close the agent (Esc)"
-        onclick={closeAgent}>✕</button
-      >
-    </header>
-    {#if blocked}
-      <p class="blocked">{blocked.title}</p>
-      {#if blocked.action && blockedAction}
-        <button onclick={blockedAction}>{blocked.action}</button>
-      {/if}
-    {:else if session}
-      <!-- `blockWhileBusy` is the gate the sheet's own composer had before it
-           was deleted (`busy = statusNote !== null` at v0.2.35) and lost in
-           the refactor. It is passed explicitly, and only here: the
-           Conversation tab never had it, and queueing a prompt behind a
-           running turn is a workflow there, not a mistake. -->
-      <ConversationPanel
-        {session}
-        visible={true}
-        promptPrefix={ctx?.prefix ?? null}
-        blockWhileBusy={true}
-        composerAbove={chip}
-      />
     {/if}
-  </div>
-{/if}
+    {#if $operatorError}
+      <p class="error" role="alert" data-testid="agent-panel-error">{$operatorError}</p>
+    {/if}
+   </div>
+  {:else if session}
+    <!-- `blockWhileBusy` is the gate the sheet's own composer had before it
+         was deleted (`busy = statusNote !== null` at v0.2.35) and lost in
+         the refactor. It is passed explicitly, and only here: the
+         Conversation tab never had it, and queueing a prompt behind a
+         running turn is a workflow there, not a mistake. -->
+    <ConversationPanel
+      {session}
+      visible={true}
+      promptPrefix={ctx?.prefix ?? null}
+      blockWhileBusy={true}
+      autoContinue={true}
+      composerAbove={chip}
+      composerTools={tools}
+      thinkingAs={controlThinking}
+      runCommand={takeControlCommand}
+      composerHint={CONTROL_HINT}
+      placeholder={CONTROL_PLACEHOLDER}
+      {linkTasks}
+      daySeparators={true}
+    />
+  {/if}
+</div>
 
 <style>
+  /* Fills Control's right column. */
   .agent-panel {
-    position: fixed;
-    right: 20px;
-    /* Same slot as the toast column: clear of the status bar AND the FAB.
-       Reads the tokens rather than restating the sum, so a change to any
-       one of them moves this too (the hardcoded 80px was already 9px off). */
-    --agent-bottom: calc(var(--status-h) + var(--fab-size) + var(--layer-gap) * 2);
-    bottom: var(--agent-bottom);
-    width: min(360px, calc(100vw - 40px));
-    max-height: 60vh;
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
+    height: 100%;
+    min-height: 0;
+    box-sizing: border-box;
     padding: 0.75rem;
-    border: 1px solid var(--border);
-    border-radius: 8px;
     background: var(--bg-pane);
     color: var(--fg);
-    box-shadow: 0 4px 20px rgb(0 0 0 / 35%);
-    z-index: 39;
   }
-  /* A size the person chose (drag / arrow keys), capped by the window so a
-     size saved on a large screen never pushes the sheet off a small one. */
-  .agent-panel.sized {
-    width: min(var(--agent-w), calc(100vw - 40px));
-    height: min(var(--agent-h), calc(100vh - var(--agent-bottom) - 20px));
-    max-height: none;
-  }
-  .agent-panel.maximized {
-    width: calc(100vw - 40px);
-    height: calc(100vh - var(--agent-bottom) - 20px);
-    max-height: none;
-  }
-  .grip {
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 14px;
-    height: 14px;
-    cursor: nwse-resize;
-    border-top-left-radius: 8px;
-    /* Two short diagonal strokes: the corner reads as a handle. */
-    background: linear-gradient(
-      135deg,
-      transparent 0 30%,
-      var(--fg-muted) 30% 38%,
-      transparent 38% 52%,
-      var(--fg-muted) 52% 60%,
-      transparent 60%
-    );
-    opacity: 0.45;
-    touch-action: none;
-  }
-  .grip:hover,
-  .grip:focus-visible {
-    opacity: 1;
-  }
-  .head {
+  .blocked-state {
+    margin: auto;
+    max-width: 440px;
     display: flex;
+    flex-direction: column;
     align-items: center;
-    justify-content: space-between;
-    gap: 0.5rem;
-  }
-  .who {
-    margin-right: auto;
-    color: var(--fg-muted);
-    font-size: 0.75rem;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-  .close {
-    border: none;
-    background: none;
-    color: var(--fg-muted);
-    font-size: 0.9rem;
-    line-height: 1;
-    padding: 0.15rem 0.3rem;
-    cursor: pointer;
-    border-radius: 4px;
-  }
-  .close:hover {
-    color: var(--fg);
+    gap: var(--space-3);
+    padding: var(--space-6);
+    text-align: center;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
     background: var(--bg);
   }
   .blocked {
     margin: 0;
+    color: var(--fg);
+    font-size: var(--text-sm);
+    line-height: 1.5;
+  }
+  .confirm {
+    margin: 0;
+  }
+  .confirm-row {
+    display: flex;
+    gap: 0.5rem;
+  }
+  .error {
+    margin: 0;
+    color: var(--usage-crit);
+    font-size: var(--text-2xs);
+  }
+  .first-run {
+    flex-basis: 100%;
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--bg-raise);
+  }
+  .first-title {
+    margin: 0;
+    font-weight: 500;
+  }
+  .first-sub {
+    margin: 2px 0 var(--space-2);
     color: var(--fg-muted);
+    font-size: var(--text-xs);
+  }
+  .first-actions {
+    display: flex;
+    gap: var(--space-1);
+    flex-wrap: wrap;
   }
   .chip {
     align-self: flex-start;
     border: 1px solid var(--border);
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     background: var(--bg);
     color: var(--fg-muted);
-    font-size: 0.75rem;
+    font-size: var(--text-2xs);
     padding: 0.15rem 0.6rem;
     cursor: pointer;
   }
-  .chip.command {
+  .command {
     border-style: dashed;
   }
   .chip:hover {

@@ -9,8 +9,10 @@ import {
   listConversations,
   toolDetail,
   sameConversation,
+  reuseTurns,
   isPinned,
   emptyStateText,
+  agentLabel,
   emptyStateHint,
   relativeTime,
   blockTypeLabel,
@@ -62,6 +64,7 @@ import {
   type ConvTurn,
   type ConvItem,
 } from './conversation';
+import { agentModelProfile, slashCommandsFor, presetForAgent, CODEX_MODEL_OPTIONS, CODEX_SLASH_COMMANDS } from './conversation';
 import { notificationTone, notificationMark, notificationLabel } from './conversation';
 import type { SessionRow } from './sessions';
 import type { TaskRow } from './tasks';
@@ -159,6 +162,24 @@ describe('sameConversation', () => {
   });
 });
 
+describe('reuseTurns', () => {
+  it('keeps the earlier object for every turn that did not change', () => {
+    const a = conv({ turns: [...conv().turns, { prompt: 'and then', at: '2026-09-13T10:05:00Z', ended_at: null, items: [] }] });
+    const b = structuredClone(a);
+    b.turns[1].items = [{ kind: 'text', text: 'on it' }];
+    const merged = reuseTurns(a, b);
+    expect(merged.turns[0]).toBe(a.turns[0]);
+    expect(merged.turns[1]).toBe(b.turns[1]);
+    expect(merged).toEqual(b);
+  });
+
+  it('hands back the read itself when nothing can be reused', () => {
+    const b = conv();
+    expect(reuseTurns(null, b)).toBe(b);
+    expect(reuseTurns(conv({ turns: [] }), b)).toBe(b);
+  });
+});
+
 describe('isPinned', () => {
   it('is true exactly at the bottom', () => {
     expect(isPinned(100, 50, 150)).toBe(true);
@@ -231,6 +252,10 @@ describe('relativeTime', () => {
 
   it('reports days', () => {
     expect(relativeTime('2026-09-11T12:00:00Z', now)).toBe('2d ago');
+  });
+
+  it('shows nothing for an unreadable timestamp, never "NaNd ago"', () => {
+    expect(relativeTime('not a date', now)).toBe('');
   });
 });
 
@@ -575,6 +600,7 @@ describe('formatTokens', () => {
     expect(formatTokens(200_000)).toBe('200k');
     expect(formatTokens(1_000_000)).toBe('1M');
     expect(formatTokens(1_250_000)).toBe('1.25M');
+    expect(formatTokens(999_600)).toBe('1M');
   });
 });
 
@@ -625,6 +651,12 @@ describe('switcherEntries / conversationTitle', () => {
   });
   it('labels the switcher button without a turn count', () => {
     expect(switcherLabel(c({ current: true, turns: 1 }))).toEqual({ when: 'Current', source: '/clear' });
+  });
+  it('reads a Codex conversation’s unknown start as started, not as something wrong', () => {
+    const codex = c({ current: true, turns: 2, start_source: 'unknown' });
+    expect(switcherLabel(codex, 'codex').source).toBe('started');
+    expect(conversationTitle(codex, 'codex')).toBe('Current · started · 2 turns');
+    expect(switcherLabel(codex).source).toBe('new conversation');
   });
 });
 
@@ -691,6 +723,10 @@ describe('lastEventLabel / mergeEvents / statusChip', () => {
 });
 
 describe('tool helpers', () => {
+  it('names the fleet ask tool a Form', () => {
+    expect(toolVerb('mcp__claude-fleet__ask')).toBe('Form');
+  });
+
   it('verbs', () => {
     expect(toolVerb('Bash')).toBe('Run');
     expect(toolVerb('MultiEdit')).toBe('Edit');
@@ -1134,5 +1170,100 @@ describe('fleetBackground', () => {
     expect(of('done')).toBe('done');
     expect(of('failed')).toBe('failed');
     expect(of('cancelled')).toBe('stopped');
+  });
+});
+
+describe('conversation copy names the row’s agent (Codex Conversation tab)', () => {
+  it('Codex says it starts a conversation on its first prompt', () => {
+    expect(emptyStateText(null, false, 'codex')).toBe('No conversation yet');
+    expect(emptyStateHint(null, false, true, 'codex')).toBe('Codex starts a conversation on its first prompt. Send one below.');
+    expect(emptyStateHint(null, false, false, 'codex')).toBe('Codex starts a conversation on its first prompt.');
+  });
+
+  it('Agy says its conversations cannot be shown yet, whatever the transcript read said', () => {
+    for (const [code, hasId] of [[null, false], [null, true], ['E_NO_TRANSCRIPT', true]] as const) {
+      expect(emptyStateText(code, hasId, 'agy')).toBe('Agy conversations can’t be shown yet');
+      expect(emptyStateHint(code, hasId, true, 'agy')).toBeTruthy();
+    }
+  });
+
+  it('Claude Code keeps its own wording', () => {
+    expect(emptyStateText(null, false, 'claude')).toBe('No Claude session id yet');
+    expect(emptyStateHint(null, false, true, 'claude')).toContain('as soon as Claude Code runs');
+  });
+
+  it('the composer note names the agent that is working', () => {
+    expect(composerStatus({ claude_status: 'working', stuck_kind: null }, 'codex')).toBe(
+      'Codex is working. The prompt is queued until the current turn ends.',
+    );
+    expect(agentLabel('agy')).toBe('Agy');
+    expect(agentLabel('claude')).toBe('Claude Code');
+  });
+});
+
+describe('daySeparator (G7.8, Control: a line per day)', () => {
+  const NOW = new Date(2026, 9, 10, 15, 0).getTime();
+  const iso = (d: Date) => d.toISOString();
+  const turn = (d: Date) => ({ kind: 'turn' as const, index: 0, turn: { prompt: 'x', at: iso(d), ended_at: null, items: [] } });
+  const ev = (d: Date) =>
+    ({ kind: 'event' as const, event: { at: Math.floor(d.getTime() / 1000), label: 'e', tone: 'info' } }) as never;
+
+  it('names the day above the first row of each day, and only there', async () => {
+    const { daySeparator } = await import('./conversation');
+    const rows = [
+      turn(new Date(2026, 9, 8, 9, 0)),
+      turn(new Date(2026, 9, 9, 10, 0)),
+      ev(new Date(2026, 9, 9, 11, 0)),
+      turn(new Date(2026, 9, 10, 8, 2)),
+      turn(new Date(2026, 9, 10, 9, 0)),
+    ];
+    const seps = rows.map((_, i) => daySeparator(rows, i, NOW));
+    expect(seps[0]).toMatch(/Thu 8 Oct/);
+    expect(seps.slice(1)).toEqual(['Yesterday', null, 'Today', null]);
+  });
+
+  it('a row with no time never starts a day', async () => {
+    const { daySeparator } = await import('./conversation');
+    const rows = [{ kind: 'turn' as const, index: 0, turn: { prompt: 'x', at: null, ended_at: null, items: [] } }];
+    expect(daySeparator(rows, 0, NOW)).toBeNull();
+  });
+});
+
+describe('Codex in the composer', () => {
+  it('offers Codex its own models and efforts, switched by a relaunch', () => {
+    const codex = agentModelProfile('codex');
+    expect(codex.mode).toBe('relaunch');
+    expect(codex.models).toBe(CODEX_MODEL_OPTIONS);
+    expect(codex.models.some((o) => o.value === 'opus')).toBe(false);
+    expect(codex.efforts.some((o) => o.value === 'auto')).toBe(false);
+    const claude = agentModelProfile('claude');
+    expect(claude.mode).toBe('command');
+    expect(claude.models.some((o) => o.value === 'opus')).toBe(true);
+    expect(claude.launchModels.some((o) => o.value === 'default')).toBe(false);
+  });
+
+  it('names a Codex model as its picker does', () => {
+    expect(modelShortLabel('gpt-6-sol')).toBe('GPT-6-Sol');
+    expect(modelShortLabel('claude-opus-5-5')).toBe('opus 5.5');
+    expect(modelShortLabel('gpt-9-unknown')).toBe('gpt-9-unknown');
+  });
+
+  it("matches a Codex session's slash commands, not Claude's", () => {
+    expect(slashCommandsFor('codex')).toBe(CODEX_SLASH_COMMANDS);
+    expect(slashCommandsFor('claude')).toBe(SLASH_COMMANDS);
+    const codex = matchSlashCommands('/c', [], slashCommandsFor('codex')).map((c) => c.name);
+    expect(codex).toEqual(['compact', 'copy']);
+    expect(matchSlashCommands('/n', [], slashCommandsFor('codex')).map((c) => c.name)).toEqual(['new']);
+    expect(matchSlashCommands('/context', [], slashCommandsFor('codex'))).toEqual([]);
+  });
+
+  it('fits quick-action chips to Codex', () => {
+    const chip = (text: string) => ({ label: 'x', text });
+    expect(presetForAgent(chip('/clear'), 'codex')?.text).toBe('/new');
+    expect(presetForAgent(chip('/compact'), 'codex')?.text).toBe('/compact');
+    expect(presetForAgent(chip('/context'), 'codex')).toBeNull();
+    expect(presetForAgent(chip('continue'), 'codex')?.text).toBe('continue');
+    // Claude may run a project skill no list knows of: left alone.
+    expect(presetForAgent(chip('/my-skill'), 'claude')?.text).toBe('/my-skill');
   });
 });

@@ -251,6 +251,9 @@ fn fence_for_scope(scope: &OrgScope, body: &str, full_chars: i64) -> String {
             Some(full_chars),
             crate::mcp::guard::DescribeOffer::None,
         ),
+        // This is the org boundary, not a privacy fence: the same trim as
+        // `tickets::lookup`'s, on the same datum — one tracker item's
+        // description. Company text, no session in it.
         OrgScope::All | OrgScope::Org { .. } => body.to_string(),
     }
 }

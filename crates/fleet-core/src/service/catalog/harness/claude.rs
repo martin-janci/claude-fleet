@@ -14,6 +14,7 @@ pub const PLUGINS_PATH: &str = "~/.claude/plugins/installed_plugins.json";
 pub const MANIFEST_PATH: &str = "~/.claude/.fleet-assets.json";
 pub const SKILLS_DIR: &str = "~/.claude/skills";
 pub const AGENTS_DIR: &str = "~/.claude/agents";
+pub const COMMANDS_DIR: &str = "~/.claude/commands";
 
 const TOOL_MAP: &[(&str, &str)] = &[
     ("read", "Read"),
@@ -205,6 +206,49 @@ impl Claude {
         });
     }
 
+    /// A slash command (G2.6): `~/.claude/commands/<name>.md`, its
+    /// frontmatter Claude Code's own (`description`, `argument-hint`,
+    /// `allowed-tools`, `model`), its prompt the body.
+    fn render_command(&self, a: &Asset, plan: &mut RenderPlan) {
+        let AssetSpec::Command {
+            allowed_tools,
+            argument_hint,
+            model,
+        } = &a.spec
+        else {
+            return;
+        };
+        let t = a.target("claude");
+        let mut fields: Vec<(&str, serde_yaml::Value)> =
+            vec![("description", yaml_str(&a.header.description))];
+        if let Some(h) = argument_hint.as_deref().filter(|h| !h.trim().is_empty()) {
+            fields.push(("argument-hint", yaml_str(h)));
+        }
+        let mut mapped: Vec<String> = allowed_tools.iter().map(|x| map_tool(x)).collect();
+        if let Some(arr) = t.extra.get("tools").and_then(Value::as_array) {
+            mapped.extend(arr.iter().filter_map(Value::as_str).map(String::from));
+        }
+        if !mapped.is_empty() {
+            fields.push(("allowed-tools", yaml_str(&mapped.join(", "))));
+        }
+        if let Some(m) = t
+            .model
+            .clone()
+            .or_else(|| model.as_deref().map(|m| map_tier(m).to_string()))
+        {
+            fields.push(("model", yaml_str(&m)));
+        }
+        for (k, v) in t.extra.iter().filter(|(k, _)| k.as_str() != "tools") {
+            fields.push((k.as_str(), json_to_yaml(v)));
+        }
+        let text = format!("{}{}", frontmatter(&fields), a.body);
+        plan.note_placeholders(&text);
+        plan.files.push(FileWrite {
+            path: format!("{COMMANDS_DIR}/{}.md", a.install_name()),
+            bytes: text.into_bytes(),
+        });
+    }
+
     fn render_hook(&self, a: &Asset, plan: &mut RenderPlan) {
         let AssetSpec::Hook {
             event,
@@ -368,12 +412,13 @@ impl Harness for Claude {
             Kind::Hook => self.render_hook(asset, &mut plan),
             Kind::McpServer => self.render_mcp(asset, &mut plan),
             Kind::PluginRef => self.render_plugin(asset, &mut plan),
+            Kind::Command => self.render_command(asset, &mut plan),
         }
         Ok(plan)
     }
 
     /// Prints `##HASHES` + `<sha256>  <home-relative path>` lines for every
-    /// file under skills/ and agents/ (symlinks followed), then one
+    /// file under skills/, agents/ and commands/ (symlinks followed), then one
     /// `##CONFIG <path>` block per config file with its base64 content on
     /// one line, then `##END`. No single quotes: the caller wraps the whole
     /// script in `shell::quote`.
@@ -390,7 +435,7 @@ impl Harness for Claude {
         // invoking the hasher with zero paths (which reads stdin, producing
         // a bogus `<hash>  -` line or hanging on an open pipe).
         s.push_str(
-            "for d in .claude/skills .claude/agents; do if [ -d \"$d\" ]; then find -L \"$d\" -type f -exec $H {} + 2>/dev/null; fi; done; ",
+            "for d in .claude/skills .claude/agents .claude/commands; do if [ -d \"$d\" ]; then find -L \"$d\" -type f -exec $H {} + 2>/dev/null; fi; done; ",
         );
         // Also hash the config files themselves (`~/.claude/settings.json`
         // etc.) so `snap.files` carries a content hash for them alongside
@@ -435,6 +480,12 @@ impl Harness for Claude {
                 if let Some(stem) = rest.strip_suffix(".md") {
                     if !stem.contains('/') {
                         push(Kind::Agent, stem.to_string());
+                    }
+                }
+            } else if let Some(rest) = path.strip_prefix(&format!("{COMMANDS_DIR}/")) {
+                if let Some(stem) = rest.strip_suffix(".md") {
+                    if !stem.contains('/') {
+                        push(Kind::Command, stem.to_string());
                     }
                 }
             }
@@ -496,6 +547,13 @@ impl Harness for Claude {
                     ),
                     Kind::Agent => (
                         snap.files.get(&format!("{AGENTS_DIR}/{name}.md")).cloned(),
+                        false,
+                        false,
+                    ),
+                    Kind::Command => (
+                        snap.files
+                            .get(&format!("{COMMANDS_DIR}/{name}.md"))
+                            .cloned(),
                         false,
                         false,
                     ),
@@ -738,6 +796,39 @@ mod tests {
             text,
             "---\nname: pm-qa\ndescription: QA lens.\ntools: Read, Grep, Bash\nmodel: opus\n---\nYou are QA.\n"
         );
+    }
+
+    #[test]
+    fn command_renders_a_slash_command_file() {
+        let plan = render(
+            "kind: command\nname: ship-it\ndescription: Ship the branch.\nallowed_tools: [bash, read]\nargument_hint: \"[ticket]\"\nmodel: fast\n",
+            "Ship $ARGUMENTS.\n",
+        );
+        assert_eq!(plan.files.len(), 1);
+        assert_eq!(plan.files[0].path, "~/.claude/commands/ship-it.md");
+        let text = String::from_utf8(plan.files[0].bytes.clone()).unwrap();
+        assert_eq!(
+            text,
+            "---\ndescription: Ship the branch.\nargument-hint: '[ticket]'\nallowed-tools: Bash, Read\nmodel: haiku\n---\nShip $ARGUMENTS.\n"
+        );
+        // No model: the session's own runs it, so nothing is written.
+        let plain = render("kind: command\nname: c\ndescription: d\n", "p\n");
+        let text = String::from_utf8(plain.files[0].bytes.clone()).unwrap();
+        assert_eq!(text, "---\ndescription: d\n---\np\n");
+    }
+
+    #[test]
+    fn installed_lists_commands_and_hashes_them() {
+        let snap = Claude
+            .parse_scan("##HASHES\nffff  .claude/commands/ship-it.md\neeee  .claude/commands/nested/x.md\n##END\n")
+            .unwrap();
+        assert_eq!(
+            Claude.installed(&snap),
+            vec![(Kind::Command, "ship-it".to_string())]
+        );
+        let d = Claude.installed_detail(&snap);
+        assert_eq!(d[0].hash.as_deref(), Some("ffff"));
+        assert!(Claude.scan_script().unwrap().contains(".claude/commands"));
     }
 
     #[test]

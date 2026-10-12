@@ -144,16 +144,26 @@ export async function hubStrandedToken(): Promise<Result<boolean>> {
  */
 const REASONS = {
   // --- fleet administration: refused to a client by design -----------------
-  add_host:
-    'this desktop is a paired client, and a client is never the fleet’s administrator',
+  // (No `add_host` / `discover_hosts`: since contract 13 the hub adds a host
+  // for its owner's trusted full device, so both route — Add host reads the
+  // hub's ~/.ssh/config and the hub probes what it adds, as the phone's does.)
   remove_host:
     'this desktop is a paired client, and a client is never the fleet’s administrator',
   hide_host:
     'this desktop is a paired client, and a client is never the fleet’s administrator',
-  discover_hosts:
-    'host discovery reads this machine’s SSH config, and a paired client does not administer the fleet anyway',
-  provision_hosts:
-    'provisioning rewrites every host’s hook block to report to whichever app ran it, and this desktop is a paired client',
+  list_host_setups:
+    'the add-host wizard adds hosts from this machine’s SSH config, and a paired client does not administer the fleet',
+  save_host_setup:
+    'the add-host wizard adds hosts from this machine’s SSH config, and a paired client does not administer the fleet',
+  discard_host_setup:
+    'the add-host wizard adds hosts from this machine’s SSH config, and a paired client does not administer the fleet',
+  run_host_setup_check:
+    'the add-host wizard checks a host over this app’s own SSH, and a paired client does not administer the fleet',
+  // Not a command: `provision_hosts` for every host (Settings → Control
+  // API). One host's content refresh routes — HostDetail's "Re-provision this
+  // host" is `ROUTED_ACTIONS`' `provision_hosts`.
+  provision_all:
+    'provisioning every host mints tokens and rewrites each host’s hook block, which is the hub operator’s. The hub refreshes a stale host’s skills and hooks by itself, and one host’s page can ask for it now',
   install_fleet_hook:
     'the hook points at a control API this app is not running, because a paired client runs none',
   host_tokens:
@@ -173,27 +183,23 @@ const REASONS = {
     'trackers and their credentials are fleet administration, and a client is never the fleet’s administrator — use `fleet-hub tracker remove`',
   tracker_sync_metrics:
     'sync metrics live in the hub’s memory, and a client is never the fleet’s administrator — use `fleet-hub tracker status`',
+  // Ticket keys: a project's prefix is `work_admin`, master-only.
+  ticket_prefixes:
+    'which prefix a project’s ticket keys carry is fleet administration, and a client is never the fleet’s administrator — use `fleet-hub tracker prefixes`',
+  set_ticket_prefix:
+    'which prefix a project’s ticket keys carry is fleet administration, and a client is never the fleet’s administrator — use `fleet-hub tracker prefix <PREFIX> --project <id>`',
   // Jev's Asana section proposals: applying one is `work_admin update`.
   status_map_proposals:
     'section proposals are tracker administration, and a client is never the fleet’s administrator — use `fleet-hub decide proposals`',
   decide_status_map_proposal:
     'applying a section proposal writes the tracker’s section map, and a client is never the fleet’s administrator — use `fleet-hub decide proposals apply|reject`',
-  // Organisations (work graph M5): the per-host tokens' boundary is set on
-  // the hub only; `work_admin` is master-only.
-  add_org:
-    'organisations are the hosts’ security boundary, and a client is never the fleet’s administrator — use `fleet-hub org add`',
-  update_org:
-    'organisations are the hosts’ security boundary, and a client is never the fleet’s administrator — use `fleet-hub org set`',
-  remove_org:
-    'organisations are the hosts’ security boundary, and a client is never the fleet’s administrator — use `fleet-hub org rm`',
-  add_org_rule:
-    'which org a session belongs to is fleet administration, and a client is never the fleet’s administrator — use `fleet-hub org rule add`',
-  remove_org_rule:
-    'which org a session belongs to is fleet administration, and a client is never the fleet’s administrator — use `fleet-hub org rule rm`',
-  assign_host_org:
-    'a host’s org is its token’s boundary, set only by the fleet’s administrator — use `fleet-hub org assign-host`',
-  assign_tracker_org:
-    'which org a tracker belongs to is fleet administration, and a client is never the fleet’s administrator — use `fleet-hub org assign-tracker`',
+  // Asset catalogs (Assets M6, R11): which catalogs exist is the master's
+  // alone (`add_catalog` / `remove_catalog` are `MasterOnly`). Both commands
+  // ROUTE, so this is not a command-named key: Settings → Catalogs shows a
+  // paired desktop this reason (`resourceBlock`), and the commands keep their
+  // routed verdicts.
+  catalog_registry:
+    'which catalogs exist, and who may change them, is fleet administration, and a client is never the fleet’s administrator — use `fleet-hub catalog add` / `remove`, and `fleet-hub client grant`',
 
   // --- things about THIS machine ------------------------------------------
   // (No `terminal` key: the terminal is not blocked by being a hub client.
@@ -212,12 +218,13 @@ const REASONS = {
   // P6); this is what a paired desktop says when the hub serves them none.
   fleet_settings:
     'the hub did not serve its settings to this device — a hub older than this app, or a device bound to one organisation, reads none; the hub’s operator changes them with fleet-hub settings or set_setting',
-  list_account_usage:
-    'this app does not poll account usage while a hub owns the fleet, so its cache stays empty',
   refresh_account_usage:
     'it reads the account’s usage over this machine’s SSH connection to the host',
-  set_account_nickname:
-    'the nickname lives in the hub’s database and there is no tool to set it',
+  account_usage_history:
+    'this app does not poll account usage while a hub owns the fleet, so it keeps no history',
+  account_spend:
+    'this app collects no usage while a hub owns the fleet, so it has no spend per account',
+  record_host_placement: 'the decision model’s runs are recorded on the hub that owns the fleet; nothing to record here',
 
   // --- acted out over this machine's SSH, and the hub has no tool for it ---
   repo_write:
@@ -253,12 +260,44 @@ export function ownsTheFleet(status: HubStatus = get(hubStatus)): boolean {
  * F1's sentence, shared by `hubBlock` and `hubActionBlocked`: a hub is
  * configured but THIS launch could not use it, so the backend owns no fleet
  * at all and refuses every command — routed or refused — the same way.
+ *
+ * **Exported because it is the only copy.** `access.ts::noAttachReason` and
+ * `share.ts::sessionActionBlocked` both have to say this — a terminal pane and
+ * a disabled button owe the same explanation, and the one thing neither may
+ * say is "this session is not yours" when the hub is the problem. They used to
+ * hand-copy the sentence, with a comment claiming it mirrored this one;
+ * nothing held the copies together, so the next edit here would have left the
+ * other surfaces saying the old thing. One function, three callers.
  */
-function unavailableReason(status: HubStatus): string | null {
+export function unavailableReason(status: HubStatus): string | null {
   if (!status.unavailable) return null;
   // Not "do it on the hub": the hub is the problem, and every action is
   // refused until it is fixed.
-  return `Not available: ${status.unavailable}. This app is set to use that hub, so it manages no fleet of its own until that is fixed — pair again, or Disconnect, in Settings → Hub.`;
+  return `Not available: ${status.unavailable}. This app is set to use that hub, so it manages no fleet of its own until that is fixed — pair again, or Disconnect, in Settings → Hub & sync.`;
+}
+
+/**
+ * The backend's reason a configured hub is unusable this launch, in a
+ * person's words. The raw reason (`HubStatus.unavailable`) names setting keys
+ * such as `hub.client_plaintext_token`; it stays available for a details
+ * disclosure, but the sentence a person reads first must not need them. The
+ * patterns follow `Backend::resolve` in `src-tauri/src/backend/mod.rs`; an
+ * unrecognised reason gets a generic sentence rather than the raw text.
+ */
+export function plainUnavailableReason(reason: string): string {
+  if (reason.includes('no client token is stored')) {
+    return 'this machine has no saved pairing for that hub';
+  }
+  if (reason.includes('cannot read the client token')) {
+    return 'the saved pairing could not be read (the system keychain may be locked, or access to it was denied)';
+  }
+  if (reason.includes('not a usable hub address')) {
+    return 'the saved hub address is not a valid URL';
+  }
+  if (reason.includes('plain http')) {
+    return 'the address uses plain http to another machine, which would send this app\'s credential unencrypted — use https:// instead';
+  }
+  return 'its hub settings could not be used';
 }
 
 /**
@@ -272,6 +311,34 @@ export function hubBlock(action: HubAction, status: HubStatus = get(hubStatus)):
   if (!status.remote) return null;
   const where = status.url ?? 'the hub';
   return `${REASONS[action]}. Do it on the hub (${where}).`;
+}
+
+/**
+ * The reason a resource's routed commands share when the hub refuses a client
+ * the whole page: master-only commands that ROUTE (so `REASONS` has no key of
+ * their name).
+ */
+const MASTER_ONLY_RESOURCE_COMMANDS: Readonly<Record<string, HubAction>> = {
+  catalog_add_catalog: 'catalog_registry',
+  catalog_remove_catalog: 'catalog_registry',
+};
+
+/**
+ * Why a resource's page is read-only here, or `null` when it is not: the
+ * reason of its update command, else its create, else its delete — a resource
+ * with no update (Catalogs) is explained by the command a client would reach
+ * for first. `null` in standalone mode, like `hubBlock`.
+ */
+export function resourceBlock(
+  resource: { update?: { command: string }; create?: { command: string }; delete?: { command: string } },
+  status: HubStatus = get(hubStatus),
+): string | null {
+  for (const a of [resource.update, resource.create, resource.delete]) {
+    if (!a) continue;
+    const key = Object.hasOwn(REASONS, a.command) ? (a.command as HubAction) : MASTER_ONLY_RESOURCE_COMMANDS[a.command];
+    if (key) return hubBlock(key, status);
+  }
+  return null;
 }
 
 // ---- offline gating: routed mutations while the live link is down ---------
@@ -301,22 +368,51 @@ export const ROUTED_ACTIONS = [
   // Multi-harness F3a: a host's Codex choice is a catalog_admin action too.
   'catalog_set_host_harnesses',
   'send_prompt',
+  'answer_form',
+  'decline_form',
   'kill_session',
+  // A session's shell terminals (step 5.3).
+  'shell_terminals',
   'safe_kill_session',
   'rename_session',
   'set_friendly_name',
+  // The Label field (M15 G2.7): a session's tags.
+  'set_session_tags',
+  // Link / Not related on a related-session proposal (M15 G4.3).
+  'decide_related_session',
   'restart_session',
   'rewind_conversation',
   'spawn_review',
+  // Send prompt's "when idle" (step 5.10): queue, list, take back.
+  'queue_prompt',
+  'queued_prompts',
+  'cancel_queued_prompt',
+  // The composer's context help: one claude -p the hub runs and books.
+  'session_context_help',
   'recreate_session',
+  // `restore_host_sessions` batches `recreate_session` over a host's lost
+  // rows and is `routed` in `verdicts.rs` like it — it was missing here, so
+  // HostDetail's "Restore n lost sessions…" could not ask the hub half at all
+  // (multi-user M1, F2b).
+  'restore_host_sessions',
   'dismiss_ghost_session',
+  'adopt_session',
+  'place_transcript',
   'new_bg_session',
-  'delete_worktree',
   'cancel_task',
   'probe_host',
+  // Add host on a paired desktop: the hub's add_host (contract 13).
+  'add_host',
+  // A host's health checklist, run by the hub over its own SSH.
+  'check_host',
+  // An account's nickname: the hub's set_account_nickname.
+  'set_account_nickname',
   'move_session',
   'new_session',
   'repair_session',
+  // One host's content refresh, from its page (the hub owner's device may ask
+  // for it; every host at once is `REASONS.provision_all`).
+  'provision_hosts',
   'link_session_work',
   'reject_session_work',
   'unlink_session_work',
@@ -324,19 +420,33 @@ export const ROUTED_ACTIONS = [
   'set_work_project_trust',
   'start_work',
   'start_work_multi',
+  'abandon_start',
   'request_work_handover',
   'summarize_past_work',
   'tidy_apply',
-  'archive_session_work',
   'unarchive_session_work',
-  'snooze_tidy',
-  'never_tidy',
   'dismiss_reopened',
   'name_session_work',
   'rename_work_item',
+  // The board: a native item's status, set by dragging its card.
+  'set_work_status',
+  // Task editing: a native item's title, notes and assignees.
+  'edit_work_item',
+  // Task comments: kept in fleet; deleting is the author's own.
+  'comment_on_work',
+  'delete_work_comment',
+  // Promoting a task of fleet's own: the hub owns the trackers that create it.
+  'promote_work_item',
+  // Task attachments: kept in fleet; deleting is the author's own.
+  'attach_to_work',
+  'delete_work_attachment',
+  // Sprints and releases: the hub decides who plans (a person's own; an
+  // org's as its admin, or member when the org allows it).
+  'work_bucket_admin',
   // The Work view (work graph M14): every write is `work_link { … }` on the
   // hub, so a paired desktop sends them while the link is up.
   'set_primary_work',
+  'switch_session_work',
   'reconsider_work_link',
   'ack_work_link',
   'decide_work_batch',
@@ -347,6 +457,45 @@ export const ROUTED_ACTIONS = [
   'save_work_view',
   'delete_work_view',
   'add_project',
+  // Assets M6: the card verbs.
+  'catalog_apply_changeset',
+  'catalog_undo_changeset',
+  'catalog_dismiss_changeset',
+  'catalog_reject_changeset_items',
+  'catalog_propose_changesets',
+  'catalog_propose_layer_change',
+  // Assets M6: the catalog set (the reads — layers_in, host_provenance,
+  // drift_diff — are not listed).
+  'catalog_add_catalog',
+  'catalog_remove_catalog',
+  'catalog_admit_catalog',
+  'catalog_unadmit_catalog',
+  // Multi-user M1 (F3): the Share sheet's three writes. They route to the
+  // hub's sharing tools (T13), so a paired desktop can take them while the
+  // live link is up and must not offer them while it is down.
+  //
+  // The milestone's three routed READS are deliberately absent, by this
+  // list's own rule above: `session_access` (the sheet's grant list),
+  // `capture_session` (the watcher's pane snapshot) and `my_grants` have no
+  // control to disable. `my_grants` failing is a different surface again —
+  // `access.ts`'s fail-closed arm, which disables what it cannot vouch for
+  // and says the hub has not told this device who it is, rather than "try
+  // again once connected".
+  'session_share',
+  'session_unshare',
+  'session_narrow',
+  // Gap plan G4.2: a recipient's ask for a wider level, and the owner's
+  // grant or decline of one (both buttons, so both are writes here).
+  'session_ask_access',
+  'access_requests',
+  // Gap plan G7.11: the Share sheet's "Trust now" (a device's mode, through
+  // the hub's org_admin).
+  'update_device',
+  // Orchestration O1: the Missions tab's writes.
+  'save_mission',
+  'set_mission_state',
+  // The Missions tab's Import plan.
+  'import_mission_plan',
 ] as const;
 
 export type RoutedAction = (typeof ROUTED_ACTIONS)[number];
@@ -427,7 +576,7 @@ export function hubNextStep(
     case 'E_CONFIRM_REQUIRED':
       return `${where} is holding this until someone confirms it there, and this desktop's confirmation dialog answers only its own queue, which is empty. Approve it on the hub — this window will follow.`;
     case 'E_UNAUTHORIZED':
-      return `${where} no longer accepts this desktop's client token. Pair again in Settings → Hub.`;
+      return `${where} no longer accepts this desktop's client token. Pair again in Settings → Hub & sync.`;
     default:
       return null;
   }

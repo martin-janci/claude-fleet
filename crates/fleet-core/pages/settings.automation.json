@@ -7,6 +7,24 @@
   "intro": "Playbooks, the idle-session GC and workspace repair run from the background tick. Everything here is off by default.",
   "sections": [
     {
+      "title": "Pause all",
+      "items": [
+        {
+          "type": "field",
+          "key": "automation.paused"
+        }
+      ]
+    },
+    {
+      "title": "Routines",
+      "items": [
+        {
+          "type": "field",
+          "key": "automation.daily_budget"
+        }
+      ]
+    },
+    {
       "title": "Playbooks",
       "items": [
         {
@@ -29,6 +47,28 @@
           "type": "notice",
           "tone": "info",
           "text": "Auth menus, trust prompts and reconnects are always notify-only."
+        }
+      ]
+    },
+    {
+      "title": "Agents",
+      "items": [
+        {
+          "type": "notice",
+          "tone": "info",
+          "text": "The PR reviewer and the support agent work only under a rule a person grants: fleet-hub agents grant."
+        },
+        {
+          "type": "field",
+          "key": "agents.poll_interval_secs"
+        },
+        {
+          "type": "field",
+          "key": "agents.max_concurrent"
+        },
+        {
+          "type": "field",
+          "key": "agents.max_retries"
         }
       ]
     },
@@ -91,6 +131,10 @@
             "key": "repair.auto_on_tick",
             "truthy": true
           }
+        },
+        {
+          "type": "action",
+          "action": "repair.now"
         }
       ]
     },

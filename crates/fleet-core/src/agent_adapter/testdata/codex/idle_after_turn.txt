@@ -1,0 +1,14 @@
+
+  >_ OpenAI Codex (v0.162.0)
+     /home/dev/repo
+
+› hello there
+
+• Done.
+
+  Worked for <1s • 9:53 PM
+
+› Ask Codex to do anything
+
+  mock-model default · /home/dev/repo
+  ← for agents · ? for shortcuts                                                               ⚠ 1 warning · f2 to view

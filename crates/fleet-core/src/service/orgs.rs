@@ -11,7 +11,10 @@
 //!   when its org is the host's or unassigned; a host with no org sees
 //!   unassigned work only ([`OrgScope::sees_org`]);
 //! * sessions are fenced too, but only between orgs that turned
-//!   `isolate_sessions` on (decision D7, default off) — [`OrgScope::sees_session`].
+//!   `isolate_sessions` on (decision D7, default off) —
+//!   [`OrgScope::sees_session_org_only`]. Since multi-user M1 that is only
+//!   the ORG half of a session read; the person half lives in
+//!   [`crate::service::view_scope::ViewScope`], which wraps this type.
 //!
 //! The scope is computed in exactly one place, `Caller::org_scope` (MCP), and
 //! is `All` for every Tauri command (the desktop is the master; a paired
@@ -65,6 +68,16 @@ pub enum OrgScope {
         /// The host's org; `None` sees unassigned data only.
         org: Option<i64>,
         /// Orgs with `isolate_sessions` on (D7).
+        ///
+        /// **No longer consulted for session visibility** (multi-user M1,
+        /// plan T6): [`OrgScope::sees_session_org_only`]'s host arm is now
+        /// "its own host's rows, and nothing else", which hides strictly
+        /// more than D7 ever did for a per-host token — every other host's
+        /// rows, isolating org or not. The set is still read with the scope
+        /// (and still administered through `work_admin`) because it is the
+        /// recorded intent of an org, and M2's memberships are where a
+        /// reader for it comes back; nothing in M1 may widen a caller on
+        /// the strength of it.
         isolated: BTreeSet<i64>,
     },
 }
@@ -90,12 +103,22 @@ impl OrgScope {
     }
 
     pub fn is_all(&self) -> bool {
+        // This is the org boundary, not a privacy fence — and this is where
+        // the whole class comes from: `All` is "no ORG fence", which is NOT
+        // "no fence". The master, a person's own device and a paired client
+        // bound to no org all resolve to it, so a privacy question asked of
+        // this predicate is asked of nobody. The person half is
+        // `ViewScope`, and `scope_guard_tests` classifies every caller that
+        // reads this one.
         matches!(self, OrgScope::All)
     }
 
     /// The host a per-host token is bound to.
     pub fn host(&self) -> Option<&str> {
         match self {
+            // This is the org boundary, not a privacy fence: it reports the
+            // scope's own HOST BINDING, which only a per-host token has. An
+            // accessor, not a decision about anybody's data.
             OrgScope::All | OrgScope::Org { .. } => None,
             OrgScope::Host { alias, .. } => Some(alias),
         }
@@ -114,6 +137,10 @@ impl OrgScope {
     /// unassigned data while its org's `bound_sees_unassigned` is on (D31).
     pub fn sees_org(&self, org: Option<i64>) -> bool {
         match self {
+            // This is the org boundary, not a privacy fence: it is the org
+            // boundary itself, asked of an ORG id and nothing else. Every
+            // session answer that composes it also takes the person half
+            // (`ViewScope::sees_session_row`).
             OrgScope::All => true,
             OrgScope::Host { org: mine, .. } => org.is_none() || org == *mine,
             OrgScope::Org {
@@ -131,33 +158,54 @@ impl OrgScope {
         self.sees_org(l.org_id)
     }
 
-    /// Session isolation (D7). A host always sees its own host's sessions
-    /// and unassigned ones; another org's session is hidden when either org
-    /// isolates sessions.
-    pub fn sees_session(&self, row_host: &str, row_org: Option<i64>) -> bool {
+    /// The ORG half of "may this caller see that session" — and, since
+    /// multi-user M1, only the org half. The person half is
+    /// [`crate::service::view_scope::ViewScope::sees_session_row`], which
+    /// composes this with ownership, grants and the pane proof; the name
+    /// says `_org_only` so that no call site can go on believing this one
+    /// answers the whole question (plan T6; T10 removes it outright).
+    ///
+    /// * `All`: everything, as before.
+    /// * `Org` (a bound client, M14): strict — another org's session never
+    ///   reaches it, isolated or not; an unassigned one only under D31.
+    /// * `Host` (a per-host token): **its own host's rows, and nothing
+    ///   else.**
+    ///
+    /// The host arm was re-derived rather than trimmed clause by clause.
+    /// It used to read `row_host == alias || row_org.is_none() || row_org ==
+    /// *org`, with a permissive `!(theirs || mine)` fall-through under it —
+    /// three unconditional wins, the widest of which let a host token in
+    /// org X read every session of org X on **every** host in the fleet.
+    /// Deleting one or two of them would have left the arm closer to `All`
+    /// than to the rule a host token is supposed to have, so the rule is
+    /// written out instead: a machine's token speaks for that machine.
+    ///
+    /// D7 (`isolate_sessions`) is subsumed rather than dropped: its whole
+    /// effect for a host token was to hide OTHER hosts' rows, and those are
+    /// now hidden unconditionally. The flag still fences a stream
+    /// (`mcp/events_route.rs`) and still means what it meant for everyone
+    /// else.
+    pub fn sees_session_org_only(&self, row_host: &str, row_org: Option<i64>) -> bool {
         match self {
+            // This is the org boundary, not a privacy fence, and the `_org_only`
+            // in the name is the whole contract: this answers "may this
+            // caller read this company's rows", and the PERSON half is
+            // `ViewScope::sees_session_row` / `sees_session_facts`, which
+            // every caller-facing path applies next to it. Called straight
+            // only where there is no person to ask about.
             OrgScope::All => true,
-            // Strict for a bound client: another org's session never reaches
-            // it, isolated or not (M14); an unassigned one only under D31.
             OrgScope::Org { .. } => self.sees_org(row_org),
-            OrgScope::Host {
-                alias,
-                org,
-                isolated,
-            } => {
-                if row_host == alias || row_org.is_none() || row_org == *org {
-                    return true;
-                }
-                let theirs = row_org.is_some_and(|o| isolated.contains(&o));
-                let mine = org.is_some_and(|o| isolated.contains(&o));
-                !(theirs || mine)
-            }
+            OrgScope::Host { alias, .. } => row_host == alias,
         }
     }
 
-    /// [`Self::sees_session`] over a row.
-    pub fn sees_row(&self, row: &SessionRow) -> bool {
-        self.sees_session(&row.host_alias, row.org_id)
+    /// [`Self::sees_session_org_only`] over a row — the same half-answer in
+    /// the shape most call sites have. The person half is
+    /// [`crate::service::view_scope::ViewScope::sees_session_row`], and every
+    /// production CALLER of this is a row in `scope_guard_tests`'
+    /// `ORG_HALF_SITES`, which names where that half runs for each one.
+    pub fn sees_row_org_only(&self, row: &SessionRow) -> bool {
+        self.sees_session_org_only(&row.host_alias, row.org_id)
     }
 
     /// Take out of a session row the work data this scope may not read: all
@@ -166,7 +214,9 @@ impl OrgScope {
     /// with no org of their own, which only the sidebar's fallback
     /// recognition reads — and `work_rev` (a digest over every link) never
     /// reach a scoped caller.
-    pub fn redact_row(&self, row: &mut SessionRow) {
+    pub fn redact_row_org_only(&self, row: &mut SessionRow) {
+        // This is the org boundary, not a privacy fence: this function answers half the
+        // question, and its name says which half.
         if self.is_all() {
             return;
         }
@@ -191,7 +241,7 @@ impl OrgScope {
         }
     }
 
-    /// [`Self::redact_row`] over serialised output: every JSON object that
+    /// [`Self::redact_row_org_only`] over serialised output: every JSON object that
     /// is a session row (it has `tmux_name` and a work field) anywhere in
     /// `v`. `session_org` answers a row object's org — the MCP gate looks it
     /// up by `id` (a projection may have dropped `org_id`); an event frame
@@ -201,6 +251,8 @@ impl OrgScope {
         v: &mut serde_json::Value,
         session_org: &dyn Fn(&serde_json::Map<String, serde_json::Value>) -> Option<i64>,
     ) {
+        // This is the org boundary, not a privacy fence: as for `redact_row_org_only` above: the
+        // org half, by name.
         if self.is_all() {
             return;
         }
@@ -318,6 +370,14 @@ pub fn scope_links(
 ) -> Result<(), IpcError> {
     s.fill_link_orgs(links)?;
     match scope {
+        // This is the org boundary, not a privacy fence: `scope_links` is
+        // the ORG-only link pager, as its callers' own names say. The person
+        // half is `scope_links_for`, which composes this with
+        // `link_person_visible` — and the classified `link_session_visible`
+        // guard below is this function's child. Written as
+        // `if scope.is_all() { return Ok(()); }` it would have needed a row
+        // from the first round; it was spelled as a match arm, which is why
+        // the scan now reads the discriminant too (T9d).
         OrgScope::All => {}
         OrgScope::Host { alias, .. } => links.retain(|l| {
             scope.sees_link(l) && (l.ended_at.is_none() || l.snap_host.as_deref() == Some(alias))
@@ -335,6 +395,195 @@ pub fn scope_links(
     Ok(())
 }
 
+/// May `view`'s PERSON see the session behind link `l` (multi-user M1, T8d)?
+///
+/// The person half of [`link_session_visible`], and a separate function for
+/// the reason the whole of `ViewScope` is a separate type: the org half's
+/// first line is `scope.is_all()`, which is TRUE for the master AND for every
+/// paired client bound to no org — i.e. for every ordinary person's own phone
+/// or laptop, the caller M1 exists to fence. A `work { links }` page was
+/// filtered by the org half alone and therefore by nothing at all for such a
+/// caller, which handed a second person's readonly device `snap_tmux`,
+/// `snap_name`, `snap_branch`, `snap_worktree`, `snap_pr_url` and
+/// `snap_claude_ids` for every recently ended link on the hub.
+///
+/// Three arms, in this order, and they are the three
+/// [`ViewScope::sees_past_conversation`] asks, for the same reason — two
+/// mechanisms answering one question must not disagree:
+///
+/// 1. **A live participant decides**, through
+///    [`ViewScope::sees_session_row`]. This covers a live link and a link
+///    that ended on a session still running, the two cases where there is a
+///    row to judge. A participant naming a row that is GONE is refused
+///    rather than falling through to the snapshot arm: the snapshot is what
+///    the fence exists to withhold, so it must never stand in for the row
+///    (the same discipline `Graph::link_visible` applies to
+///    `hidden_sessions`).
+/// 2. **Else the conversations the link ran in decide.** An ended link whose
+///    session was reaped is all snapshot, and the only durable handle on
+///    whose work it was is `conversation_owners`, keyed by the conversation
+///    ids the link itself recorded (`claude_session_id` and the
+///    `snap_claude_ids` array). EVERY recorded id must be this caller's — a
+///    link that ran two conversations, one of them somebody else's, is
+///    somebody else's work.
+/// 3. **Else nothing is recorded at all**: no live participant and not one
+///    conversation id. There is no record to judge, and the answer is rule
+///    7's and nothing wider (multi-user M1, T9c) —
+///    [`ViewScope::is_sole_person`] or a per-host token passes, every other
+///    caller is refused.
+///
+///    It used to pass for everybody, on the reading that such a link can
+///    only be a pre-M1 one whose row was reaped long ago. That reading was
+///    wrong, and the loop below is why: with `session_id == None` and no
+///    conversation id the `for` body never runs, so the function fell
+///    through to `Ok(true)` — fail-OPEN, for the one shape it has nothing to
+///    judge. The shape is reachable on a fleet running M1 today: migration
+///    046's retire trigger fills `snap_claude_ids` only
+///    `HAVING COUNT(*) > 0`, and `work_links.claude_session_id` is NULL both
+///    for a session that never had one (a `new_shell_session` row, a Claude
+///    session reaped before its first SessionStart hook) and for
+///    `Store::link_session_work_at`'s insert, which never sets the column.
+///    So an ordinary private session, linked to work and then reaped, handed
+///    every person in the org its `snap_host` / `snap_tmux` / `snap_name` /
+///    `snap_branch` / `snap_pr_url` through `work { links }`, `today`,
+///    `tree` and `resume_plan`.
+///
+///    Rule 7 is kept where it is actually about rule 7:
+///    [`ViewScope::is_sole_person`] is the predicate M1 already uses for
+///    "this install cannot tell two people apart, so nothing may narrow for
+///    it", and it is false for a person-less caller and false the moment a
+///    second person exists. A per-host token passes for the other reason —
+///    §4.4 gives it a HOST's reach and no person dimension at all, and the
+///    org/host fence it does answer to ([`scope_links`], M2's own-host
+///    clause for an ended link) has already run.
+///
+/// A failed read is never a pass: the error propagates.
+///
+/// [`ViewScope::sees_past_conversation`]: crate::service::view_scope::ViewScope::sees_past_conversation
+/// [`ViewScope::sees_session_row`]: crate::service::view_scope::ViewScope::sees_session_row
+pub fn link_person_visible(
+    s: &Store,
+    view: &crate::service::view_scope::ViewScope,
+    l: &WorkLinkRow,
+) -> Result<bool, IpcError> {
+    link_person_visible_at(s, view, l, s.link_session_id(l)?)
+}
+
+/// **[`link_person_visible`] with the link's live session already resolved —
+/// the ONE body of the rule, and the entry point every page-shaped reader
+/// takes** (multi-user M1, T9b).
+///
+/// `session_id` is the link's LIVE participant's session, i.e. exactly what
+/// [`crate::store::Store::link_session_id`] answers and exactly what
+/// `ViewLink.session_id` already holds (both are
+/// `participants … AND retired_at IS NULL`). Taking it as an argument is the
+/// point: the Work view's `Graph` has it in hand already, and before this
+/// existed it wrote its own half of the rule — one that tested a LIVE id and
+/// fell through to the snapshot for everything else, so every link of a
+/// reaped session (`session_id IS NULL`) was judged by `OrgScope` alone and
+/// served by its snapshot name. Two fences for one question is how the ENDED
+/// half of a session's life came to be fenced differently from the LIVE half,
+/// five separate ways; there is now one.
+///
+/// `seen` memoises [`crate::service::view_scope::ViewScope::sees_past_conversation`]
+/// across the links of one page, so a page costs one lookup per DISTINCT
+/// conversation rather than one per link. Pass a fresh map for a single link.
+pub fn link_person_visible_at(
+    s: &Store,
+    view: &crate::service::view_scope::ViewScope,
+    l: &WorkLinkRow,
+    session_id: Option<i64>,
+) -> Result<bool, IpcError> {
+    link_person_visible_memo(s, view, l, session_id, &mut BTreeMap::new())
+}
+
+/// [`link_person_visible_at`] with the conversation memo supplied; see there.
+pub fn link_person_visible_memo(
+    s: &Store,
+    view: &crate::service::view_scope::ViewScope,
+    l: &WorkLinkRow,
+    session_id: Option<i64>,
+    seen: &mut BTreeMap<String, bool>,
+) -> Result<bool, IpcError> {
+    if view.is_internal() {
+        return Ok(true);
+    }
+    if let Some(sid) = session_id {
+        return Ok(match s.get_session_by_id(sid)? {
+            Some(row) => view.sees_session_row(&row).is_visible(),
+            None => false,
+        });
+    }
+    let cids = link_conversations(l);
+    // Arm 3, written as a branch rather than as the loop's fall-through: a
+    // link with nothing recorded has no record to judge, and the `for` below
+    // silently answering `true` for it is what made this fail open. See the
+    // doc comment.
+    if cids.is_empty() {
+        return Ok(view.host.is_some() || view.is_sole_person());
+    }
+    for cid in cids {
+        let ok = match seen.get(&cid) {
+            Some(v) => *v,
+            None => {
+                let v = view.sees_past_conversation(s, &cid)?;
+                seen.insert(cid, v);
+                v
+            }
+        };
+        if !ok {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Every Claude conversation id one link recorded: the one it was decided in
+/// and the snapshot's whole array. Deduplicated, so a link that names the
+/// same id twice costs one lookup.
+pub(crate) fn link_conversations(l: &WorkLinkRow) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if let Some(c) = l.claude_session_id.clone() {
+        out.push(c);
+    }
+    if let Some(ids) = l
+        .snap_claude_ids
+        .as_deref()
+        .and_then(|j| serde_json::from_str::<Vec<String>>(j).ok())
+    {
+        out.extend(ids);
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// [`scope_links`] with the caller's WHOLE scope: the org fence, then the
+/// person fence ([`link_person_visible`]) on every link that survived it.
+///
+/// The one every READ of a link page takes. `scope_links` stays for the
+/// writes, which name one link the caller already reached by id.
+pub fn scope_links_for(
+    s: &Store,
+    view: &crate::service::view_scope::ViewScope,
+    links: &mut Vec<WorkLinkRow>,
+) -> Result<(), IpcError> {
+    scope_links(s, &view.org, links)?;
+    if view.is_internal() {
+        return Ok(());
+    }
+    let mut seen: BTreeMap<String, bool> = BTreeMap::new();
+    let mut keep = Vec::with_capacity(links.len());
+    for l in links.drain(..) {
+        let sid = s.link_session_id(&l)?;
+        if link_person_visible_memo(s, view, &l, sid, &mut seen)? {
+            keep.push(l);
+        }
+    }
+    *links = keep;
+    Ok(())
+}
+
 /// May `scope` see the session behind link `l`: the live session's row, or
 /// for an ended link the snapshot's host and org. A link with no session
 /// left to name (a swept participant, no snapshot) names nothing.
@@ -343,6 +592,9 @@ pub fn link_session_visible(
     scope: &OrgScope,
     l: &WorkLinkRow,
 ) -> Result<bool, IpcError> {
+    // This is the org boundary, not a privacy fence: the org half of a link's session fence.
+    // `link_person_visible` is the person half and `scope_links_for` composes the two; a caller
+    // that reads a PAGE of links takes both.
     if scope.is_all() {
         return Ok(true);
     }
@@ -350,12 +602,17 @@ pub fn link_session_visible(
     // session (no snapshot yet).
     if let Some(sid) = s.link_session_id(l)? {
         return Ok(match s.get_session_by_id(sid)? {
-            Some(row) => scope.sees_row(&row),
+            // The org half of a live participant; `link_person_visible` is
+            // the person half and `scope_links_for` composes the two.
+            Some(row) => scope.sees_row_org_only(&row),
             None => false,
         });
     }
     let (host, org) = s.link_snapshot_place(l.id)?;
-    Ok(scope.sees_session(host.as_deref().unwrap_or_default(), org))
+    // The snapshot arm, org half again: `link_person_visible`'s third arm
+    // judges a reaped participant's recorded conversations through
+    // `sees_past_conversation`.
+    Ok(scope.sees_session_org_only(host.as_deref().unwrap_or_default(), org))
 }
 
 /// The first item carrying `key` (in [`Store::work_items_by_key`]'s order)
@@ -371,6 +628,8 @@ pub fn visible_item_for_key(
     scope: &OrgScope,
     key: &str,
 ) -> Result<Option<WorkItemRow>, IpcError> {
+    // This is the org boundary, not a privacy fence: it asks which ORG's item a shared key
+    // resolves to. An item is a ticket, not a session.
     if scope.is_all() {
         return s.work_item_by_key(key);
     }
@@ -394,6 +653,7 @@ pub fn org_item_for_key(
     scope: &OrgScope,
     key: &str,
 ) -> Result<Option<WorkItemRow>, IpcError> {
+    // This is the org boundary, not a privacy fence: the same item question, with no host fence.
     if scope.is_all() {
         return s.work_item_by_key(key);
     }
@@ -409,6 +669,27 @@ pub fn org_item_for_key(
 /// resume it)? When the key's item is inside its orgs, and some of the
 /// work — a live link on a session of its host, or a past one whose session
 /// ran there — is visible to it. One refusal whether the key exists or not.
+///
+/// **DECIDED, multi-user M1 (T10): this is an org-authority question and it
+/// is correctly asked of the org alone.** T9b/T9c disclosed a "key-level
+/// residual" here — that a second person could learn *this key has some
+/// work on it* from the absence of `E_NOTFOUND` — and T10 traced it and
+/// found it is not in this function:
+///
+/// * for a per-host token and for an org-bound client (which goes to
+///   [`require_key_bound`]) the question answered is "does this key have
+///   work inside YOUR host / YOUR org", and that is the org boundary doing
+///   its job;
+/// * for every other caller — including a person's own device, whose
+///   `OrgScope` is `All` — `scope.host()` is `None` and this returns
+///   `Ok(())` **unconditionally**. It discloses nothing, because it decides
+///   nothing: the read it precedes is person-fenced downstream
+///   ([`scope_links_for`], which composes [`link_session_visible`] with
+///   `link_person_visible`).
+///
+/// So the residual the two earlier rounds attributed partly here belongs
+/// wholly to `work::work_purge_impact`, whose `OPEN_QUESTIONS` row says so
+/// since T10. There is no owner decision owed at this function.
 pub fn require_key(s: &Store, scope: &OrgScope, key: &str) -> Result<(), IpcError> {
     if let OrgScope::Org { .. } = scope {
         return require_key_bound(s, scope, key);
@@ -516,6 +797,48 @@ fn require_key_bound(s: &Store, scope: &OrgScope, key: &str) -> Result<(), IpcEr
     }
 }
 
+/// The live session rows `view` may count: what `work { action: scopes }`
+/// and the org overview tally. Two org clauses, and both earn their place:
+/// `sees_row_org_only` is the host/org answer (see the ORG_HALF_SITES note on
+/// this file's other sites — an internal-and-narrowed scope is fenced by it
+/// alone), and `sees_org` is what keeps another org's row on a per-host
+/// token's OWN host out of the tally, which the first does not ask.
+/// `view.sees_session_row` is the person half (multi-user M1, T9b).
+fn counted_rows(
+    s: &Store,
+    view: &crate::service::view_scope::ViewScope,
+) -> Result<Vec<SessionRow>, IpcError> {
+    let scope = &view.org;
+    Ok(s.list_all_sessions()?
+        .into_iter()
+        .filter(|r| r.status != "ghost" && scope.sees_row_org_only(r) && scope.sees_org(r.org_id))
+        .filter(|r| view.sees_session_row(r).is_visible())
+        .collect())
+}
+
+/// Whether a row waits on a person (`service::attention::needs_attention`).
+fn needs_person(s: &Store) -> impl Fn(&SessionRow) -> bool {
+    let red = crate::service::health::context_red_pct(s);
+    let facts = s.attention_facts();
+    move |r: &SessionRow| crate::service::attention::needs_attention_in(r, red, &facts).is_some()
+}
+
+/// `org id → (sessions, sessions that need a person)` over `rows`.
+fn org_session_counts(
+    rows: &[SessionRow],
+    needs: &dyn Fn(&SessionRow) -> bool,
+) -> BTreeMap<i64, (usize, usize)> {
+    let mut out: BTreeMap<i64, (usize, usize)> = BTreeMap::new();
+    for r in rows {
+        if let Some(org) = r.org_id {
+            let slot = out.entry(org).or_default();
+            slot.0 += 1;
+            slot.1 += usize::from(needs(r));
+        }
+    }
+    out
+}
+
 /// One entry of `work { action: scopes }`: a named org, or — zero-config —
 /// a project owner no org covers, or the unassigned rest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -541,7 +864,20 @@ pub struct ScopeEntry {
 /// then an owner pseudo-scope per project owner whose sessions no org
 /// covers, then the unassigned rest when there is any. A host-bound caller
 /// sees only its org and unassigned work.
-pub fn scopes(store: &Mutex<Store>, scope: &OrgScope) -> Result<Vec<ScopeEntry>, IpcError> {
+///
+/// **Takes the caller's WHOLE [`crate::service::view_scope::ViewScope`]**
+/// (multi-user M1, T9b), not only its org half. `ScopeEntry.session_count`
+/// and `.needs_you` are counts OVER SESSION ROWS, and rule 6's allowance is
+/// a per-host count of `unclaimed` rows — not a per-org, per-owner tally of
+/// every person's live work with "how much of it is blocked or stuck" beside
+/// it. Fenced by the org scope alone these were fleet-wide, because
+/// `OrgScope::All` is what the master AND every paired client bound to no
+/// org resolve to.
+pub fn scopes(
+    store: &Mutex<Store>,
+    view: &crate::service::view_scope::ViewScope,
+) -> Result<Vec<ScopeEntry>, IpcError> {
+    let scope = &view.org;
     let s = lock(store)?;
     let orgs = s.list_orgs()?;
     let projects: BTreeMap<i64, String> = s
@@ -550,24 +886,20 @@ pub fn scopes(store: &Mutex<Store>, scope: &OrgScope) -> Result<Vec<ScopeEntry>,
         .filter(|p| p.owner != "local" && !p.system)
         .map(|p| (p.id, p.owner))
         .collect();
-    let rows: Vec<SessionRow> = s
-        .list_all_sessions()?
-        .into_iter()
-        .filter(|r| r.status != "ghost" && scope.sees_row(r) && scope.sees_org(r.org_id))
-        .collect();
-    let red = crate::service::health::context_red_pct(&s);
-    let needs = |r: &SessionRow| crate::service::attention::needs_attention_with(r, red).is_some();
+    let rows = counted_rows(&s, view)?;
+    let needs = needs_person(&s);
+    let per_org = org_session_counts(&rows, &needs);
     let mut out = Vec::new();
     for o in orgs.iter().filter(|o| scope.sees_org(Some(o.id))) {
-        let mine: Vec<&SessionRow> = rows.iter().filter(|r| r.org_id == Some(o.id)).collect();
+        let (session_count, needs_you) = per_org.get(&o.id).copied().unwrap_or_default();
         out.push(ScopeEntry {
             id: Some(o.id),
             owner: None,
             unassigned: false,
             label: o.name.clone(),
             color: o.color.clone(),
-            session_count: mine.len(),
-            needs_you: mine.iter().filter(|r| needs(r)).count(),
+            session_count,
+            needs_you,
         });
     }
     let mut by_owner: BTreeMap<String, (usize, usize)> = BTreeMap::new();
@@ -606,7 +938,9 @@ pub fn scopes(store: &Mutex<Store>, scope: &OrgScope) -> Result<Vec<ScopeEntry>,
 }
 
 /// `work { action: orgs }`: the orgs with their rules, hosts and trackers,
-/// for Settings → Organisations (read-only; changes are `work_admin`).
+/// and what the org overview shows (org administration, phase A), for
+/// Settings → Organisations (read-only; changes are `work_admin`). Every
+/// field past `trackers` is absent from an older hub and reads empty.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrgDetail {
     #[serde(flatten)]
@@ -618,6 +952,182 @@ pub struct OrgDetail {
     /// `(id, name)` of the trackers assigned to it.
     #[serde(default)]
     pub trackers: Vec<OrgTrackerRef>,
+    /// The asset catalogs it owns (`catalogs.org_id`), by name.
+    #[serde(default)]
+    pub catalogs: Vec<String>,
+    /// M15 step G2.10: its project catalog. Absent from an older hub.
+    #[serde(default)]
+    pub projects: Vec<crate::store::OrgProjectRow>,
+    /// Its live sessions the caller may count, as `work { action: scopes }`
+    /// counts them.
+    #[serde(default)]
+    pub session_count: usize,
+    /// Of those, the ones waiting on a person.
+    #[serde(default)]
+    pub needs_you: usize,
+    /// The live paired devices bound to it — only for the fleet's
+    /// administrator ([`AdminView::Admin`]). `None` (no key at all) for
+    /// everyone else, so a host or an org-bound device never learns another
+    /// device's name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devices: Option<Vec<OrgDevice>>,
+    /// Phase C, administrator only: the per-org settings
+    /// ([`crate::service::settings::OrgSetting`]: the setting described with
+    /// the fleet's value, and the org's own). Kept as JSON, so a desktop
+    /// reads a hub's whatever settings that hub has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<Vec<serde_json::Value>>,
+    /// Phase C, administrator only and only for a caller that sees every
+    /// session: live spend in micro-USD today, over the last 7 days and this
+    /// month (UTC), and the budgets in whole USD (`0` none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spent_today_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spent_week_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spent_month_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_daily_usd: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_monthly_usd: Option<u64>,
+    /// `daily` / `monthly`: the budgets it has reached.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub over_budget: Vec<crate::service::org_spend::Period>,
+    /// Redesign 11.1, with the spend above: its live spend on each of the
+    /// last 14 UTC days, today last.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spend_series: Option<Vec<crate::service::org_spend::SpendDay>>,
+    /// Redesign 11.8: the same spend by person (today, 7 days, month), all
+    /// or nothing — only to an administrator who sees every session there
+    /// is, since a person's figure counts their private sessions. Absent
+    /// for anyone else, never cut down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spend_by_person: Option<Vec<crate::service::org_spend::PersonSpend>>,
+    /// Redesign 11.1, for whoever administers it: what its admins should
+    /// look at (`service::org_needs`). Absent for anyone else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_admin: Option<Vec<crate::service::org_needs::AdminNeed>>,
+    /// Phase D: who is in the company, with their roles — for the fleet's
+    /// administrator and for the org's own people. Absent for anyone else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub members: Option<Vec<OrgMember>>,
+    /// M15 step G7.14, with `members`: how many there are, for the
+    /// overview's Members tile (its line says them by role).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_count: Option<usize>,
+    /// Phase D: the caller's own role in it (`admin` / `member` / `viewer`),
+    /// so a page offers what the caller may do. Absent when they have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub my_role: Option<String>,
+    /// M15 step G4.7, for whoever administers it: every live share on its
+    /// sessions (the Sharing tab). A session the caller may not see is not
+    /// named. Absent for anyone else, and from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shares: Option<Vec<OrgShare>>,
+    /// G4.7, for the org's own people and the fleet's administrator: who is
+    /// working on what — each live member's live sessions in it that the
+    /// caller sees, and how many more are private.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team: Option<Vec<TeamMember>>,
+    /// G4.7, for whoever administers it: its former members, with the shares
+    /// on its sessions they still hold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed_members: Option<Vec<RemovedMember>>,
+    /// G4.7, for the org's own people and the fleet's administrator: the
+    /// Claude accounts its hosts are signed in to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounts: Option<Vec<OrgAccount>>,
+}
+
+/// One live share on an org's session (M15 step G4.7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrgShare {
+    /// The grant, for Revoke and Narrow.
+    pub id: i64,
+    /// The session's name, only when the caller may see the session;
+    /// absent, it reads "a private session".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<i64>,
+    /// Whose session it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// A person's name, or "everyone in <org>" for an org share.
+    pub shared_with: String,
+    /// `watch`, `answer` or `drive`.
+    pub level: String,
+    pub since: i64,
+}
+
+/// One live member and what they are working on (M15 step G4.7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamMember {
+    pub person_id: i64,
+    pub name: String,
+    pub role: String,
+    /// Their live sessions in the org the caller sees.
+    #[serde(default)]
+    pub sessions: Vec<TeamSession>,
+    /// Their live sessions in the org the caller does not see: counted,
+    /// never named.
+    #[serde(default)]
+    pub private: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamSession {
+    pub id: i64,
+    pub name: String,
+    /// `needs you`, else what Claude reports (`working`, `idle`, …).
+    pub state: String,
+}
+
+/// A former member (M15 step G4.7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemovedMember {
+    pub person_id: i64,
+    pub name: String,
+    pub removed_at: i64,
+    /// Live shares TO them still standing on the org's sessions.
+    pub grants: usize,
+}
+
+/// A Claude account one of an org's hosts is signed in to (M15 step G4.7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrgAccount {
+    /// Its nickname, else its email, else its uuid.
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seat_tier: Option<String>,
+    /// The org's hosts signed in to it.
+    pub hosts: Vec<String>,
+}
+
+/// One member as the org overview lists them (phase D).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrgMember {
+    pub person_id: i64,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    pub role: String,
+    /// Redesign 11.2: when they joined (absent from an older hub).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added_at: Option<i64>,
+    /// Redesign 11.2: since when an org share reaches them (a grant made
+    /// before it does not); absent for a viewer, who receives none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shares_since: Option<i64>,
+    /// Redesign 11.2, for whoever administers the org: their live devices,
+    /// by name. Absent for anyone else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devices: Option<Vec<String>>,
+    /// M15 step G7.14, with `devices`: the ones not trusted yet, so the
+    /// member row says "not trusted" and offers Trust device. Absent with
+    /// `devices`, and from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub untrusted_devices: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -626,8 +1136,261 @@ pub struct OrgTrackerRef {
     pub name: String,
 }
 
-pub fn org_details(store: &Mutex<Store>, scope: &OrgScope) -> Result<Vec<OrgDetail>, IpcError> {
-    org_details_locked(&*lock(store)?, scope)
+/// A paired client bound to an org, as the org overview lists it. Never
+/// carries the token digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrgDevice {
+    pub name: String,
+    /// `full` or `readonly`.
+    pub mode: String,
+    pub trusted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_at: Option<i64>,
+}
+
+/// Whether [`org_details`] carries what only the fleet's administrator
+/// sees of an org: its bound devices, its own settings and — when the
+/// caller also sees every session (`org_spend::sees_all_spend`) — its
+/// spend and budget.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdminView {
+    /// The fleet's administrator: the desktop's own store, the master token,
+    /// or the hub's personal owner on an unbound device.
+    Admin,
+    /// A person's device (phase D): the orgs they administer — whose
+    /// devices, own settings and spend they see, as the fleet's
+    /// administrator does — and every org they are in, live (whose members
+    /// they see), with their role.
+    Person { roles: BTreeMap<i64, String> },
+    /// Everyone else.
+    Other,
+}
+
+impl AdminView {
+    /// The one rule for an MCP caller (`work { action: orgs }`).
+    pub fn for_caller(
+        caller: &crate::mcp::auth::Caller,
+        store: &Mutex<Store>,
+    ) -> Result<Self, IpcError> {
+        if caller.is_master() || (caller.is_person_device() && caller.is_personal_owner) {
+            return Ok(AdminView::Admin);
+        }
+        let Some(p) = caller.person() else {
+            return Ok(AdminView::Other);
+        };
+        let s = lock(store)?;
+        let mut roles: BTreeMap<i64, String> = s
+            .memberships_of(p)?
+            .into_iter()
+            .filter(|m| m.is_live())
+            .map(|m| (m.org_id, m.role))
+            .collect();
+        // The hub's owner on a device bound to an org administers it.
+        if caller.is_personal_owner {
+            if let Some(o) = caller.client.as_ref().and_then(|c| c.org_id) {
+                roles.insert(o, crate::store::ROLE_ADMIN.to_string());
+            }
+        }
+        Ok(if roles.is_empty() {
+            AdminView::Other
+        } else {
+            AdminView::Person { roles }
+        })
+    }
+
+    fn role(&self, org: i64) -> Option<&str> {
+        match self {
+            AdminView::Person { roles } => roles.get(&org).map(String::as_str),
+            _ => None,
+        }
+    }
+
+    /// Sees `org`'s administrator data: devices, own settings, spend.
+    fn administers(&self, org: i64) -> bool {
+        matches!(self, AdminView::Admin) || self.role(org) == Some(crate::store::ROLE_ADMIN)
+    }
+}
+
+pub fn org_details(
+    store: &Mutex<Store>,
+    view: &crate::service::view_scope::ViewScope,
+    devices: AdminView,
+) -> Result<Vec<OrgDetail>, IpcError> {
+    org_details_locked(&*lock(store)?, view, devices)
+}
+
+// --- rule preview (M15 step G2.10) ----------------------------------------------
+
+/// One "Match by" value as the rule it makes (the org form's single rule
+/// form, `pages::resources::ORG_RULE_MATCH`): `repository` takes `owner/name`
+/// (or the repository's GitHub URL), `owner` a GitHub owner, `path` a path
+/// prefix, `host` a host alias. The rule's `org_id` is the caller's.
+pub fn rule_from_match(org_id: i64, match_by: &str, value: &str) -> Result<OrgRuleRow, IpcError> {
+    let v = value.trim();
+    if v.is_empty() {
+        return Err(IpcError::new(codes::E_INVALID, "say what the rule matches"));
+    }
+    let mut rule = OrgRuleRow {
+        id: 0,
+        org_id,
+        owner: None,
+        repo: None,
+        path_prefix: None,
+        host_alias: None,
+    };
+    match match_by.trim() {
+        "repository" => {
+            let bare = v
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .trim_start_matches("git@github.com:")
+                .trim_start_matches("github.com/")
+                .trim_end_matches('/')
+                .trim_end_matches(".git");
+            let Some((owner, repo)) = bare
+                .split_once('/')
+                .filter(|(o, r)| !o.is_empty() && !r.is_empty() && !r.contains('/'))
+            else {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    format!("a repository is owner/name, not {v:?}"),
+                ));
+            };
+            rule.owner = Some(owner.to_string());
+            rule.repo = Some(repo.to_string());
+        }
+        "owner" => rule.owner = Some(v.to_string()),
+        "path" => rule.path_prefix = Some(v.to_string()),
+        "host" => rule.host_alias = Some(v.to_string()),
+        other => {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!("match_by is repository, path, host or owner, not {other:?}"),
+            ))
+        }
+    }
+    Ok(rule)
+}
+
+/// What an unsaved org rule would do now: the live sessions its condition
+/// matches, and how many of them would move into the org, from where.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RulePreview {
+    /// Live sessions the rule's condition matches.
+    pub matches: usize,
+    /// Of those, the ones that would move into the org (another rule that is
+    /// more specific keeps the rest where they are).
+    pub moving: usize,
+    /// Where the moving ones are now, largest first.
+    #[serde(default)]
+    pub from: Vec<RuleMoveFrom>,
+    /// Matched sessions a more specific rule keeps elsewhere.
+    #[serde(default)]
+    pub kept: usize,
+    /// "Matches 14 sessions now; 3 of them are in Personal and would move."
+    pub sentence: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleMoveFrom {
+    /// The org they are in now; `None` = no org (Personal).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<i64>,
+    /// Its name, or `Personal`.
+    pub name: String,
+    pub count: usize,
+}
+
+/// Preview `rule` for `org` (M15 step G2.10): normalised and checked as
+/// `add_rule` would, then answered over the live sessions without writing.
+/// Counts only, never a session: an admin previewing a rule learns how many
+/// of the fleet's sessions it reaches, which the org overview's counts
+/// already tell the hub's owner.
+pub fn rule_preview(s: &Store, org: i64, rule: OrgRuleRow) -> Result<RulePreview, IpcError> {
+    if s.get_org(org)?.is_none() {
+        return Err(not_found("org", org));
+    }
+    let rule = crate::store::normalize_rule(OrgRuleRow {
+        org_id: org,
+        ..rule
+    })?;
+    let rows = s.preview_org_rule(&rule)?;
+    let names: std::collections::HashMap<i64, String> =
+        s.list_orgs()?.into_iter().map(|o| (o.id, o.name)).collect();
+    let matches = rows.iter().filter(|r| r.matched).count();
+    let mut from: std::collections::BTreeMap<Option<i64>, usize> = Default::default();
+    let mut kept = 0;
+    for r in rows.iter().filter(|r| r.matched) {
+        if r.after == Some(org) && r.before != Some(org) {
+            *from.entry(r.before).or_default() += 1;
+        } else if r.after != Some(org) {
+            kept += 1;
+        }
+    }
+    let mut from: Vec<RuleMoveFrom> = from
+        .into_iter()
+        .map(|(o, count)| RuleMoveFrom {
+            org_id: o,
+            name: o
+                .and_then(|o| names.get(&o).cloned())
+                .unwrap_or_else(|| "Personal".into()),
+            count,
+        })
+        .collect();
+    from.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
+    let moving: usize = from.iter().map(|f| f.count).sum();
+    let sentence = rule_preview_sentence(matches, moving, &from, kept);
+    Ok(RulePreview {
+        matches,
+        moving,
+        from,
+        kept,
+        sentence,
+    })
+}
+
+fn sessions_word(n: usize) -> String {
+    format!("{n} {}", if n == 1 { "session" } else { "sessions" })
+}
+
+/// The preview in one sentence, the form's live impact line.
+fn rule_preview_sentence(
+    matches: usize,
+    moving: usize,
+    from: &[RuleMoveFrom],
+    kept: usize,
+) -> String {
+    if matches == 0 {
+        return "Matches no session now; it applies to sessions started later.".into();
+    }
+    let mut out = format!("Matches {} now", sessions_word(matches));
+    if moving == 0 {
+        out.push_str("; none would move");
+    } else if let [only] = from {
+        out.push_str(&format!(
+            "; {moving} of them {} in {} and would move",
+            if moving == 1 { "is" } else { "are" },
+            only.name
+        ));
+    } else {
+        let wheres: Vec<String> = from
+            .iter()
+            .map(|f| format!("{} from {}", f.count, f.name))
+            .collect();
+        out.push_str(&format!(
+            "; {moving} of them would move ({})",
+            wheres.join(", ")
+        ));
+    }
+    if kept > 0 {
+        out.push_str(&format!(
+            "; a more specific rule keeps {} where {}",
+            sessions_word(kept),
+            if kept == 1 { "it is" } else { "they are" }
+        ));
+    }
+    out.push('.');
+    out
 }
 
 // --- administration (work graph M5.2) ------------------------------------------
@@ -722,11 +1485,16 @@ pub fn admin(
     let before = s.session_orgs()?;
     let out = match action {
         OrgAction::ListOrgs => {
-            return to_json(&org_details_locked(s, &OrgScope::All)?);
+            return to_json(&org_details_locked(
+                s,
+                &crate::service::view_scope::ViewScope::internal(),
+                AdminView::Admin,
+            )?);
         }
         OrgAction::AddOrg => {
             let auto = parse_auto_tidy(args.auto_tidy.as_deref())?;
             let jev = parse_jev(args.jev.as_deref())?;
+            let jev_reply = parse_jev(args.jev_reply.as_deref())?;
             let mut org = s.add_org(
                 &need(&args.name, name, "name")?,
                 args.color.as_deref(),
@@ -738,6 +1506,9 @@ pub fn admin(
             if let Some(j) = jev {
                 org = s.set_org_jev_allowed(org.id, j)?;
             }
+            if let Some(j) = jev_reply {
+                org = s.set_org_jev_reply_allowed(org.id, j)?;
+            }
             if let Some(on) = args.bound_sees_unassigned {
                 org = s.set_org_bound_sees_unassigned(org.id, on)?;
             }
@@ -746,6 +1517,7 @@ pub fn admin(
         OrgAction::UpdateOrg => {
             let auto = parse_auto_tidy(args.auto_tidy.as_deref())?;
             let jev = parse_jev(args.jev.as_deref())?;
+            let jev_reply = parse_jev(args.jev_reply.as_deref())?;
             let id = need(&args.org_id, name, "org_id")?;
             let mut org = s.update_org(
                 id,
@@ -759,6 +1531,15 @@ pub fn admin(
             if let Some(j) = jev {
                 org = s.set_org_jev_allowed(id, j)?;
                 tracing::info!(org_id = id, jev = j, "[decide] org consent changed");
+            }
+            // D48: the second consent, to reply text (J2).
+            if let Some(j) = jev_reply {
+                org = s.set_org_jev_reply_allowed(id, j)?;
+                tracing::info!(
+                    org_id = id,
+                    jev_reply = j,
+                    "[decide] org reply consent changed"
+                );
             }
             // D31 (work graph M14.1b): what the org's bound clients see of
             // unassigned work and sessions.
@@ -837,16 +1618,123 @@ pub fn admin(
     Ok(out)
 }
 
-fn org_details_locked(s: &Store, scope: &OrgScope) -> Result<Vec<OrgDetail>, IpcError> {
+fn org_details_locked(
+    s: &Store,
+    view: &crate::service::view_scope::ViewScope,
+    devices: AdminView,
+) -> Result<Vec<OrgDetail>, IpcError> {
+    let scope = &view.org;
     let rules = s.list_org_rules()?;
     let hosts = s.list_hosts()?;
+    let catalogs = s.list_catalogs()?;
+    let needs = needs_person(s);
+    let counts = org_session_counts(&counted_rows(s, view)?, &needs);
+    let admin = devices == AdminView::Admin;
+    let any_admin = admin || matches!(devices, AdminView::Person { .. });
+    // The devices as the auth layer resolves them: an org admin sees the
+    // devices fenced to their org by membership (phase D); the fleet's
+    // administrator, the ones bound to it.
+    let clients = any_admin
+        .then(|| {
+            if admin {
+                s.list_client_tokens(false)
+            } else {
+                s.auth_client_tokens()
+            }
+        })
+        .transpose()?;
+    let owner = s.personal_owner_id()?;
+    // An org admin sees their own org's spend (phases A–C, for that org);
+    // the fleet's administrator every org's, when they see every session.
+    let now = crate::service::catalog::now_secs();
+    let sees_all = any_admin && crate::service::org_spend::sees_all_spend(s, view);
+    let spend = (any_admin && (!admin || sees_all))
+        .then(|| crate::service::org_spend::spend_by_org(s, now));
+    // Read once, and only when an org's admin is told the count.
+    let mut unclaimed: Option<BTreeMap<String, i64>> = None;
     let mut out = Vec::new();
     for o in s.list_orgs()? {
         if !scope.sees_org(Some(o.id)) {
             continue;
         }
-        out.push(OrgDetail {
+        let (session_count, needs_you) = counts.get(&o.id).copied().unwrap_or_default();
+        let administers = devices.administers(o.id);
+        let my_role = devices.role(o.id).map(str::to_string);
+        let member_devices = clients.as_deref().filter(|_| administers);
+        let members = (admin || my_role.is_some())
+            .then(|| org_member_list(s, o.id, member_devices))
+            .transpose()?;
+        // The devices fenced to it, as its administrators are shown them.
+        let org_clients: Option<Vec<&crate::store::ClientTokenRow>> =
+            clients.as_ref().filter(|_| administers).map(|cs| {
+                cs.iter()
+                    .filter(|c| c.org_id == Some(o.id))
+                    .filter(|c| admin || !(c.person_id.is_some() && c.person_id == owner))
+                    .filter(|c| crate::store::machine_token_kind(&c.mode).is_none())
+                    .collect()
+            });
+        let mut needs_admin = administers.then(Vec::new);
+        if let (Some(needs), Some(cs)) = (needs_admin.as_mut(), org_clients.as_ref()) {
+            use crate::service::org_needs::AdminNeed;
+            needs.extend(
+                cs.iter()
+                    .filter(|c| c.trusted_at.is_none() && c.mode == "full")
+                    .map(|c| AdminNeed::UntrustedDevice {
+                        device: c.name.clone(),
+                        paired_at: c.created_at,
+                    }),
+            );
+        }
+        if let Some(needs) = needs_admin.as_mut() {
+            if view.sees_unclaimed_count(Some(o.id)) {
+                let counts = unclaimed
+                    .get_or_insert_with(|| s.unclaimed_counts_by_host().unwrap_or_default());
+                for h in hosts.iter().filter(|h| h.org_id == Some(o.id)) {
+                    let count = counts.get(&h.alias).copied().unwrap_or(0);
+                    if count > 0 {
+                        needs.push(crate::service::org_needs::AdminNeed::UnclaimedSessions {
+                            host: h.alias.clone(),
+                            count: count as usize,
+                        });
+                    }
+                }
+            }
+        }
+        let people_of_org = admin || my_role.is_some();
+        let mut d = OrgDetail {
+            shares: administers.then(|| org_shares(s, view, o.id)).transpose()?,
+            team: people_of_org
+                .then(|| org_team(s, view, o.id, &needs))
+                .transpose()?,
+            removed_members: administers.then(|| removed_members(s, o.id)).transpose()?,
+            accounts: people_of_org
+                .then(|| org_accounts(s, &hosts, o.id))
+                .transpose()?,
+            needs_admin,
+            spend_series: None,
+            spend_by_person: None,
+            member_count: members.as_ref().map(Vec::len),
+            members,
+            my_role,
+            catalogs: catalogs
+                .iter()
+                .filter(|c| c.org_id == Some(o.id))
+                .map(|c| c.name.clone())
+                .collect(),
+            session_count,
+            needs_you,
+            devices: org_clients.as_ref().map(|cs| {
+                cs.iter()
+                    .map(|c| OrgDevice {
+                        name: c.name.clone(),
+                        mode: c.mode.clone(),
+                        trusted: c.trusted_at.is_some(),
+                        last_seen_at: c.last_seen_at,
+                    })
+                    .collect()
+            }),
             rules: rules.iter().filter(|r| r.org_id == o.id).cloned().collect(),
+            projects: s.org_projects(o.id)?,
             hosts: hosts
                 .iter()
                 .filter(|h| h.org_id == Some(o.id))
@@ -857,8 +1745,237 @@ fn org_details_locked(s: &Store, scope: &OrgScope) -> Result<Vec<OrgDetail>, Ipc
                 .into_iter()
                 .map(|(id, name)| OrgTrackerRef { id, name })
                 .collect(),
+            settings: administers.then(|| {
+                crate::service::settings::org_settings(s, o.id)
+                    .iter()
+                    .filter_map(|v| serde_json::to_value(v).ok())
+                    .collect()
+            }),
+            spent_today_micros: None,
+            spent_week_micros: None,
+            spent_month_micros: None,
+            budget_daily_usd: None,
+            budget_monthly_usd: None,
+            over_budget: Vec::new(),
             org: o,
+        };
+        if let Some(spend) = spend.as_ref().filter(|_| administers) {
+            use crate::service::org_spend as os;
+            let got = spend.get(&d.org.id).copied().unwrap_or_default();
+            let (daily, monthly) = os::budgets(s, d.org.id);
+            d.spent_today_micros = Some(got.today_micros);
+            d.spent_week_micros = Some(got.week_micros);
+            d.spent_month_micros = Some(got.month_micros);
+            d.budget_daily_usd = Some(daily);
+            d.budget_monthly_usd = Some(monthly);
+            d.over_budget = os::reached(got, (daily, monthly))
+                .into_iter()
+                .map(|(p, ..)| p)
+                .collect();
+            d.spend_series = Some(os::series(s, d.org.id, now));
+            // A person's figure is a sum over their sessions, private ones
+            // among them: the whole table or none of it (11.8).
+            if sees_all {
+                d.spend_by_person = Some(os::by_person(s, d.org.id, now));
+            }
+            if let Some(needs) = d.needs_admin.as_mut() {
+                let found = crate::service::org_needs::budget_needs(
+                    got,
+                    (daily, monthly),
+                    now.div_euclid(86_400),
+                );
+                // Budgets first: they are the org's own, the rest are things in it.
+                needs.splice(0..0, found);
+            }
+        }
+        out.push(d);
+    }
+    Ok(out)
+}
+
+/// A person as a list names them: their display name, else their name.
+fn person_label(s: &Store, person: Option<i64>) -> Result<Option<String>, IpcError> {
+    let Some(p) = person else { return Ok(None) };
+    Ok(s.get_person(p)?.map(|p| p.display_name.unwrap_or(p.name)))
+}
+
+/// A session as a list names it.
+fn session_label(r: &SessionRow) -> String {
+    r.friendly_name
+        .clone()
+        .unwrap_or_else(|| r.tmux_name.clone())
+}
+
+/// Every live share on `org`'s sessions (M15 step G4.7), naming only the
+/// sessions `view` sees.
+fn org_shares(
+    s: &Store,
+    view: &crate::service::view_scope::ViewScope,
+    org: i64,
+) -> Result<Vec<OrgShare>, IpcError> {
+    let mut out = Vec::new();
+    for (g, owner) in s.live_grants_in_org(org)? {
+        let row = s
+            .get_session_by_id(g.session_id)?
+            .filter(|r| view.sees_session_row(r).is_visible());
+        let shared_with = match (g.person_id, g.org_id) {
+            (Some(p), _) => person_label(s, Some(p))?.unwrap_or_else(|| format!("person {p}")),
+            (None, Some(o)) => match s.get_org(o)? {
+                Some(o) => format!("everyone in {}", o.name),
+                None => "a removed org".to_string(),
+            },
+            (None, None) => continue,
+        };
+        out.push(OrgShare {
+            id: g.id,
+            session: row.as_ref().map(session_label),
+            session_id: row.as_ref().map(|r| r.id),
+            owner: person_label(s, owner)?,
+            shared_with,
+            level: g.level,
+            since: g.granted_at,
         });
+    }
+    Ok(out)
+}
+
+/// Who is working on what in `org` (M15 step G4.7): each live member's live
+/// sessions in it, the ones `view` sees by name and the rest as a count.
+fn org_team(
+    s: &Store,
+    view: &crate::service::view_scope::ViewScope,
+    org: i64,
+    needs: &dyn Fn(&SessionRow) -> bool,
+) -> Result<Vec<TeamMember>, IpcError> {
+    let live: Vec<SessionRow> = s
+        .list_all_sessions()?
+        .into_iter()
+        .filter(|r| r.org_id == Some(org) && r.status == "running" && r.lost_at.is_none())
+        .collect();
+    let mut out = Vec::new();
+    for m in s.org_members(org)? {
+        let Some(p) = s
+            .get_person(m.person_id)?
+            .filter(|p| p.disabled_at.is_none())
+        else {
+            continue;
+        };
+        let mut member = TeamMember {
+            person_id: p.id,
+            name: p.display_name.unwrap_or(p.name),
+            role: m.role,
+            sessions: Vec::new(),
+            private: 0,
+        };
+        for r in live.iter().filter(|r| r.owner_person_id == Some(p.id)) {
+            if view.sees_session_row(r).is_visible() {
+                member.sessions.push(TeamSession {
+                    id: r.id,
+                    name: session_label(r),
+                    state: if needs(r) {
+                        "needs you".to_string()
+                    } else {
+                        r.claude_status
+                            .clone()
+                            .unwrap_or_else(|| "idle".to_string())
+                    },
+                });
+            } else {
+                member.private += 1;
+            }
+        }
+        out.push(member);
+    }
+    Ok(out)
+}
+
+/// `org`'s former members and the shares they still hold on it (G4.7). A
+/// person who is a live member again is not listed.
+fn removed_members(s: &Store, org: i64) -> Result<Vec<RemovedMember>, IpcError> {
+    let mut out = Vec::new();
+    for m in s.removed_org_members(org)? {
+        let Some(removed_at) = m.removed_at else {
+            continue;
+        };
+        let Some(p) = s.get_person(m.person_id)? else {
+            continue;
+        };
+        let (w, a, d) = s.person_grants_in_org(p.id, org)?;
+        out.push(RemovedMember {
+            person_id: p.id,
+            name: p.display_name.unwrap_or(p.name),
+            removed_at,
+            grants: w + a + d,
+        });
+    }
+    Ok(out)
+}
+
+/// The Claude accounts `org`'s hosts are signed in to (G4.7).
+fn org_accounts(
+    s: &Store,
+    hosts: &[crate::store::HostRow],
+    org: i64,
+) -> Result<Vec<OrgAccount>, IpcError> {
+    let mut by_uuid: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for h in hosts.iter().filter(|h| h.org_id == Some(org)) {
+        if let Some(u) = h.account_uuid.as_ref() {
+            by_uuid.entry(u.clone()).or_default().push(h.alias.clone());
+        }
+    }
+    if by_uuid.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for a in s.list_accounts()? {
+        if let Some(hosts) = by_uuid.remove(&a.uuid) {
+            out.push(OrgAccount {
+                name: a.nickname.or(a.email).unwrap_or(a.uuid),
+                seat_tier: a.seat_tier,
+                hosts,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// The live members of `org`, admins first, as the overview lists them;
+/// with each one's devices out of `devices` when the caller administers it.
+fn org_member_list(
+    s: &Store,
+    org: i64,
+    devices: Option<&[crate::store::ClientTokenRow]>,
+) -> Result<Vec<OrgMember>, IpcError> {
+    let mut out = Vec::new();
+    for m in s.org_members(org)? {
+        if let Some(p) = s
+            .get_person(m.person_id)?
+            .filter(|p| p.disabled_at.is_none())
+        {
+            let theirs: Option<Vec<&crate::store::ClientTokenRow>> = devices.map(|cs| {
+                cs.iter()
+                    .filter(|c| c.person_id == Some(p.id) && c.revoked_at.is_none())
+                    .filter(|c| crate::store::machine_token_kind(&c.mode).is_none())
+                    .collect()
+            });
+            out.push(OrgMember {
+                devices: theirs
+                    .as_ref()
+                    .map(|cs| cs.iter().map(|c| c.name.clone()).collect()),
+                untrusted_devices: theirs.as_ref().map(|cs| {
+                    cs.iter()
+                        .filter(|c| c.trusted_at.is_none())
+                        .map(|c| c.name.clone())
+                        .collect()
+                }),
+                person_id: p.id,
+                name: p.name,
+                display_name: p.display_name,
+                role: m.role,
+                added_at: Some(m.added_at),
+                shares_since: m.shares_since,
+            });
+        }
     }
     Ok(out)
 }
@@ -902,10 +2019,18 @@ fn site_label(site_url: &str) -> Option<String> {
 ///   GitHub `acme` are one company more often than not).
 ///
 /// Empty for a per-host token: it cannot act on any of it.
+///
+/// `OrgSuggestion.sessions` ("Live sessions the rule would place") is a count
+/// over session ROWS, so this takes the caller's whole
+/// [`crate::service::view_scope::ViewScope`] too — see [`scopes`] for why the
+/// org half alone fences nobody's own device.
 pub fn org_suggestions(
     store: &Mutex<Store>,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
 ) -> Result<Vec<OrgSuggestion>, IpcError> {
+    let scope = &view.org;
+    // This is the org boundary, not a privacy fence: only a caller that may CREATE an org is
+    // offered one to create. The person half is below, on every row a suggestion counts.
     if !scope.is_all() {
         return Ok(Vec::new());
     }
@@ -930,6 +2055,10 @@ pub fn org_suggestions(
     let mut uncovered: BTreeMap<String, (String, usize)> = BTreeMap::new();
     for r in s.list_all_sessions()? {
         if r.status == "ghost" || r.org_id.is_some() {
+            continue;
+        }
+        // The PERSON half: a suggestion counts the rows this caller may see.
+        if !view.sees_session_row(&r).is_visible() {
             continue;
         }
         let Some(owner) = r.project_id.and_then(|p| owners.get(&p)) else {

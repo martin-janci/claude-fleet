@@ -187,6 +187,9 @@ impl Harness for GitHubHarness {
     fn describe_ref(&self) -> &'static str {
         "acme/api#1"
     }
+    fn version(&self) -> Option<(&'static str, &'static str)> {
+        Some(("I_kwDOAcme0001", "v0.3"))
+    }
 }
 
 crate::conformance_suite!(GitHubHarness);
@@ -803,7 +806,7 @@ mod flow {
         let t = lookup(
             &st,
             "https://github.com/acme/api/issues/42",
-            &OrgScope::All,
+            &crate::service::view_scope::org_only_view(&OrgScope::All),
             &net,
         )
         .await
@@ -814,7 +817,7 @@ mod flow {
         let e = lookup(
             &st,
             "https://github.com/other/x/issues/1",
-            &OrgScope::All,
+            &crate::service::view_scope::org_only_view(&OrgScope::All),
             &net,
         )
         .await
@@ -829,7 +832,7 @@ mod flow {
                 host_alias: Some("h".into()),
                 ..Default::default()
             },
-            &OrgScope::All,
+            &crate::service::view_scope::ViewScope::internal(),
             &net,
         )
         .await
@@ -1078,6 +1081,9 @@ mod ghes {
         fn describe_ref(&self) -> &'static str {
             "ghe.corp.example/acme/api#1"
         }
+        fn version(&self) -> Option<(&'static str, &'static str)> {
+            Some(("I_kwDOAcme0001", "v0.3"))
+        }
     }
 
     crate::conformance_suite!(GhesHarness);
@@ -1146,13 +1152,20 @@ mod ghes {
             "https://ghe.corp.example:8443/Acme/API/issues/42",
             "ghe.corp.example/acme/api#42",
         ] {
-            let got = lookup(&st, r, &OrgScope::All, &net).await.unwrap();
+            let got = lookup(
+                &st,
+                r,
+                &crate::service::view_scope::org_only_view(&OrgScope::All),
+                &net,
+            )
+            .await
+            .unwrap();
             assert_eq!(got.item.id, id, "{r}");
         }
         let e = lookup(
             &st,
             "https://ghe.other.example/acme/api/issues/42",
-            &OrgScope::All,
+            &crate::service::view_scope::org_only_view(&OrgScope::All),
             &net,
         )
         .await
@@ -1162,7 +1175,7 @@ mod ghes {
         let e = lookup(
             &st,
             "https://github.com/acme/api/issues/42",
-            &OrgScope::All,
+            &crate::service::view_scope::org_only_view(&OrgScope::All),
             &net,
         )
         .await
@@ -1238,4 +1251,20 @@ fn a_body_is_cut_to_the_excerpt_with_its_true_length() {
     let s = github(&f).snapshot(&n).expect("a snapshot");
     assert_eq!(s.description.as_deref(), Some("short body"));
     assert_eq!(s.description_chars, Some(10));
+}
+
+#[test]
+fn an_issues_labels_are_read_and_it_has_no_priority_or_estimate() {
+    assert!(ISSUE_FIELDS.contains("labels(first: 20) { nodes { name } }"));
+    let f = FakeTransport::new();
+    let g = github(&f);
+    let page = fixture("github", "search_mine_p1.json");
+    let s = g.snapshot(&page["data"]["search"]["nodes"][0]).unwrap();
+    assert_eq!(s.labels, vec!["bug", "auth"]);
+    assert_eq!(
+        (s.priority, s.estimate, s.estimate_unit),
+        (None, None, None)
+    );
+    let none = g.snapshot(&page["data"]["search"]["nodes"][1]).unwrap();
+    assert!(none.labels.is_empty());
 }

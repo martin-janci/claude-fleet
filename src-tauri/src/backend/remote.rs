@@ -227,13 +227,14 @@ impl HubBackend {
     fn offline_error(&self, what: &str) -> Option<IpcError> {
         match self.link.as_ref()?.current() {
             HubConnection::Offline {
-                attempt,
+                refused,
                 retry_in_secs,
                 reason,
-            } if attempt >= 2 && is_connect_failure(&reason) => Some(IpcError::new(
+                ..
+            } if refused >= 2 && is_connect_failure(&reason) => Some(IpcError::new(
                 codes::E_HUB_UNREACHABLE,
                 format!(
-                    "{what} was not sent: {} has refused {attempt} connection attempts ({}); \
+                    "{what} was not sent: {} has refused {refused} connection attempts ({}); \
                      retrying in {retry_in_secs}s",
                     self.cfg.base_url,
                     self.redact(&reason)
@@ -351,6 +352,13 @@ impl HubBackend {
     /// Not `pub`, for the same reason as [`Self::call`]: only
     /// [`Self::route_text`] calls it from outside this module.
     pub(super) async fn call_text(&self, tool: &str, args: Value) -> Result<String, IpcError> {
+        Ok(first_text(&self.call_result(tool, args).await?))
+    }
+
+    /// Call one tool and return its whole `result` (every content block),
+    /// for the one tool that answers an image (`debug_devices` screenshot).
+    /// [`Self::call_text`] is this, narrowed to the first text block.
+    pub(super) async fn call_result(&self, tool: &str, args: Value) -> Result<Value, IpcError> {
         // The three refusals that happen before a socket is opened, in this
         // order. "This launch cannot use the hub at all"
         // ([`Self::unavailable_error`]) comes first: it is about the
@@ -417,12 +425,12 @@ impl HubBackend {
                         format!("{} did not answer: {}", self.cfg.base_url, self.redact(&e)),
                     )
                 })?;
-        self.read_response(tool, response)
+        self.read_result(tool, response)
     }
 
-    /// Turn one answered request into the tool's result text or an
-    /// [`IpcError`]. Pure, so every branch is a unit test.
-    fn read_response(&self, tool: &str, response: HubResponse) -> Result<String, IpcError> {
+    /// Turn one answered request into the tool's `result` (its content
+    /// blocks) or an [`IpcError`]. Pure, so every branch is a unit test.
+    fn read_result(&self, tool: &str, response: HubResponse) -> Result<Value, IpcError> {
         let body = response.body;
         match response.status {
             200 => {}
@@ -515,13 +523,7 @@ impl HubBackend {
             return Err(self.tool_error(tool, result));
         }
 
-        Ok(result
-            .get("content")
-            .and_then(|c| c.get(0))
-            .and_then(|c| c.get("text"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string())
+        Ok(result.clone())
     }
 
     /// Rebuild the `IpcError` the service layer raised on the other side.
@@ -619,6 +621,40 @@ impl HubBackend {
         self.call_text(tool, arguments(command, args)?).await
     }
 
+    /// [`Self::route`] for a tool that answers an image block: the first
+    /// text block (the tool's caption) and the image's MIME type and
+    /// base64 data. `E_PARSE` when the answer carries no image.
+    pub async fn route_image<A: serde::Serialize>(
+        &self,
+        command: &str,
+        args: &A,
+    ) -> Result<HubImage, IpcError> {
+        let tool = self.tool_for(command)?;
+        let result = self.call_result(tool, arguments(command, args)?).await?;
+        let image = result
+            .get("content")
+            .and_then(Value::as_array)
+            .and_then(|blocks| {
+                blocks
+                    .iter()
+                    .find(|b| b.get("type").and_then(Value::as_str) == Some("image"))
+            })
+            .ok_or_else(|| {
+                IpcError::new(
+                    codes::E_PARSE,
+                    format!("{tool} on {} answered no image", self.cfg.base_url),
+                )
+            })?;
+        let field = |k: &str| image.get(k).and_then(Value::as_str).map(str::to_string);
+        Ok(HubImage {
+            caption: first_text(&result),
+            mime: field("mimeType")
+                .or_else(|| field("mime_type"))
+                .unwrap_or_else(|| "image/png".into()),
+            data: field("data").unwrap_or_default(),
+        })
+    }
+
     /// The hub tool `command` routes to.
     ///
     /// **It fails closed**, for the same reason
@@ -656,6 +692,27 @@ fn arguments<A: serde::Serialize>(command: &str, args: &A) -> Result<Value, IpcE
             format!("{command}'s arguments could not be encoded for the hub: {e}"),
         )
     })
+}
+
+/// An image a hub tool answered ([`HubBackend::route_image`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HubImage {
+    /// The tool's first text block.
+    pub caption: String,
+    pub mime: String,
+    /// Base64, as the MCP image block carries it.
+    pub data: String,
+}
+
+/// A tool result's first text block: the tool's JSON, or its prose.
+fn first_text(result: &Value) -> String {
+    result
+        .get("content")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// `E_` followed by upper-case ASCII, digits or `_` — the shape every code in
@@ -736,28 +793,6 @@ impl HubBackend {
         self.route("refresh_projects", &json!({})).await
     }
 
-    /// `commands::worktrees::list_worktrees`.
-    ///
-    /// The tool is shaped for agents: slim rows, capped at a page, wrapped in
-    /// `{total, worktrees}`. The desktop renders the whole project tree, so it
-    /// asks for full rows and `limit: 0` (no cap) and unwraps the envelope.
-    pub async fn list_worktrees(
-        &self,
-        project_id: Option<i64>,
-    ) -> Result<Vec<fleet_core::service::worktrees::WorktreeOccupancy>, IpcError> {
-        #[derive(serde::Deserialize)]
-        struct Page {
-            worktrees: Vec<fleet_core::service::worktrees::WorktreeOccupancy>,
-        }
-        let page: Page = self
-            .route(
-                "list_worktrees",
-                &json!({ "project_id": project_id, "summary": false, "limit": 0 }),
-            )
-            .await?;
-        Ok(page.worktrees)
-    }
-
     /// `commands::quick_replies::quick_replies`.
     ///
     /// Sends no `set` key at all rather than `set: null` — a present-but-null
@@ -791,6 +826,29 @@ impl HubBackend {
         self.route("set_quick_replies", &args).await
     }
 
+    /// `commands::account_usage::list_account_usage`.
+    pub async fn list_account_usage(
+        &self,
+    ) -> Result<Vec<fleet_core::service::account_usage::AccountUsageSnapshot>, IpcError> {
+        self.route("list_account_usage", &json!({})).await
+    }
+
+    /// `commands::account_usage::check_account_headroom` (contract 14).
+    pub async fn check_account_headroom(
+        &self,
+        args: &fleet_core::service::account_limits::CheckAccountHeadroomArgs,
+    ) -> Result<fleet_core::service::account_limits::Headroom, IpcError> {
+        self.route("check_account_headroom", args).await
+    }
+
+    /// `commands::prs::list_pull_requests`.
+    pub async fn list_pull_requests(
+        &self,
+        args: &fleet_core::service::prs::PrsArgs,
+    ) -> Result<fleet_core::service::prs::PrList, IpcError> {
+        self.route("list_pull_requests", args).await
+    }
+
     /// `commands::downloads::list_downloads`.
     pub async fn list_downloads(
         &self,
@@ -810,6 +868,61 @@ impl HubBackend {
             v["note"] = json!(note);
         }
         self.route("send_file", &v).await
+    }
+
+    /// `commands::library::list_library`.
+    pub async fn list_library(
+        &self,
+        args: &fleet_core::service::library::ListArgs,
+    ) -> Result<fleet_core::service::library::LibraryList, IpcError> {
+        let mut v = json!({ "action": "list" });
+        if let Some(id) = args.session_id {
+            v["session_id"] = json!(id);
+        }
+        if let Some(h) = &args.host_alias {
+            v["host_alias"] = json!(h);
+        }
+        if let Some(n) = args.limit {
+            v["limit"] = json!(n);
+        }
+        self.route("list_library", &v).await
+    }
+
+    /// `commands::library::add_library_items`.
+    pub async fn add_library_items(
+        &self,
+        args: &fleet_core::service::library::AddArgs,
+    ) -> Result<fleet_core::service::library::LibraryList, IpcError> {
+        let v = json!({
+            "action": "add",
+            "kind": args.kind,
+            "session_id": args.session_id,
+            "files": args.files,
+        });
+        self.route("add_library_items", &v).await
+    }
+
+    /// `commands::library::remove_library_item`.
+    pub async fn remove_library_item(&self, id: i64) -> Result<bool, IpcError> {
+        let v: Value = self
+            .route(
+                "remove_library_item",
+                &json!({ "action": "remove", "id": id }),
+            )
+            .await?;
+        Ok(v.get("removed").and_then(Value::as_bool).unwrap_or(false))
+    }
+
+    /// `commands::downloads::pause_download`.
+    pub async fn pause_download(
+        &self,
+        args: &fleet_core::service::downloads::PauseDownloadArgs,
+    ) -> Result<fleet_core::store::DownloadRow, IpcError> {
+        self.route(
+            "pause_download",
+            &json!({ "id": args.id, "paused": args.paused }),
+        )
+        .await
     }
 
     /// `commands::downloads::remove_download`.
@@ -880,6 +993,94 @@ impl HubBackend {
                         format!("downloading from {} failed: {e}", self.cfg.base_url),
                     )
                 }
+            })
+    }
+
+    /// The hub's `/update` routes (update-channel design §6.5): the ONLY calls
+    /// this window makes that skip the wire-contract gate. A desktop whose hub
+    /// it can no longer read is exactly the desktop that must still learn what
+    /// to update to; the routes' own schema is `update_proto`, frozen and only
+    /// ever extended, never the MCP contract. `update_routes_are_the_only_contract_exemption`
+    /// pins this list.
+    pub const UPDATE_PATHS: &'static [&'static str] = &["/update/check", "/update/report"];
+
+    /// POST `body` to one of [`Self::UPDATE_PATHS`] and return the answer's
+    /// body. Refused only when the hub is unusable this launch (no transport);
+    /// never by the contract verdict.
+    pub async fn post_update(&self, path: &str, body: String) -> Result<String, IpcError> {
+        if !Self::UPDATE_PATHS.contains(&path) {
+            return Err(IpcError::new(
+                codes::E_INTERNAL,
+                format!("{path} is not an update route"),
+            ));
+        }
+        if let Some(refused) = self.unavailable_error("update_check") {
+            return Err(refused);
+        }
+        let url = format!("{}{path}", self.cfg.base_url);
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.transport.post_json(&url, &self.cfg.token, body),
+        )
+        .await
+        .map_err(|_| IpcError::new(codes::E_HUB_UNREACHABLE, format!("{path}: timed out")))?
+        .map_err(|e| {
+            IpcError::new(
+                codes::E_HUB_UNREACHABLE,
+                format!(
+                    "{path} at {} failed: {}",
+                    self.cfg.base_url,
+                    self.redact(&e)
+                ),
+            )
+        })?;
+        match resp.status {
+            200 => Ok(resp.body),
+            401 => Err(IpcError::new(
+                codes::E_UNAUTHORIZED,
+                "the hub revoked this client — pair again in Settings",
+            )),
+            403 => Err(IpcError::new(
+                codes::E_FORBIDDEN,
+                format!("the hub refused {path}: {}", self.redact(&resp.body)),
+            )),
+            status => Err(IpcError::new(
+                codes::E_HUB_UNREACHABLE,
+                format!("{path}: HTTP {status}: {}", self.redact(&resp.body)),
+            )),
+        }
+    }
+
+    /// The hub's artifact mirror (`GET /update/artifact/<sha256>`, S9): a
+    /// release file into `dest`, for an update this desktop installs. Like
+    /// [`Self::post_update`], outside the contract gate — a skewed desktop is
+    /// the one that must update — and only that route. The bytes are trusted
+    /// by the caller's own sha256 check against the signed manifest.
+    pub async fn fetch_update_artifact(
+        &self,
+        path: &str,
+        dest: &std::path::Path,
+        max: u64,
+    ) -> Result<u64, IpcError> {
+        let sha = path.strip_prefix("/update/artifact/").unwrap_or_default();
+        if sha.len() != 64 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(IpcError::new(
+                codes::E_INTERNAL,
+                format!("{path} is not a mirror path"),
+            ));
+        }
+        if let Some(refused) = self.unavailable_error("update_check") {
+            return Err(refused);
+        }
+        let url = format!("{}{path}", self.cfg.base_url);
+        self.transport
+            .get_to_file(&url, &self.cfg.token, dest, max)
+            .await
+            .map_err(|e| {
+                IpcError::new(
+                    codes::E_HUB_UNREACHABLE,
+                    format!("the hub's mirror: {}", self.redact(&e)),
+                )
             })
     }
 
@@ -1021,13 +1222,17 @@ impl HubBackend {
         self.route("ensure_operator", &json!({})).await
     }
 
-    /// `commands::assets::catalog_list_assets`: the hub's catalog with each
+    /// `commands::assets::catalog_list_assets`: the hub's catalogs with each
     /// asset's per-host state, the same `AssetListing` the local command
-    /// builds.
+    /// builds. Assets M5: `all_catalogs` asks for every catalog, which the
+    /// hub grants the master and an unbound full client and answers
+    /// personal-only for anyone else; without it (an older desktop) the hub
+    /// answers personal-only for everyone.
     pub async fn catalog_list_assets(
         &self,
     ) -> Result<fleet_core::service::catalog::AssetListing, IpcError> {
-        self.route("catalog_list_assets", &json!({})).await
+        self.route("catalog_list_assets", &json!({ "all_catalogs": true }))
+            .await
     }
 
     /// `commands::assets::assets_scan_hosts`: `None` scans every reachable
@@ -1060,28 +1265,47 @@ impl HubBackend {
     /// cancellation-registry key (`cancel_command`) and has no hub
     /// counterpart, so it is never sent — which is why this spells the
     /// arguments out rather than serialising `NewSessionArgs`.
+    ///
+    /// `owner_person_id` is the second field deliberately absent, and for a
+    /// stronger reason (multi-user M1, T5): whose a session is follows from the
+    /// CONNECTION, so the hub resolves it from the token that reached it and a
+    /// client that could name an owner would be a client that could create a
+    /// session in somebody else's name. The field is `skip_deserializing` on
+    /// `NewSessionArgs` for the same reason, and
+    /// `tests_routing::new_session_never_sends_an_owner_over_the_wire` holds
+    /// this list to it.
     pub async fn new_session(
         &self,
         args: &sessions::NewSessionArgs,
     ) -> Result<SessionRow, IpcError> {
-        self.route(
-            "new_session",
-            &json!({
-                "host_alias": args.host_alias,
-                "project_id": args.project_id,
-                "worktree_id": args.worktree_id,
-                "name": args.name,
-                "new_worktree": args.new_worktree,
-                "base_branch": args.base_branch,
-                "kind": args.kind,
-                "start_command": args.start_command,
-                "friendly_name": args.friendly_name,
-                "resume_claude_session_id": args.resume_claude_session_id,
-                "model": args.model,
-                "effort": args.effort,
-            }),
-        )
-        .await
+        let mut body = json!({
+            "host_alias": args.host_alias,
+            "project_id": args.project_id,
+            "worktree_id": args.worktree_id,
+            "name": args.name,
+            "new_worktree": args.new_worktree,
+            "base_branch": args.base_branch,
+            "kind": args.kind,
+            "start_command": args.start_command,
+            "friendly_name": args.friendly_name,
+            "resume_claude_session_id": args.resume_claude_session_id,
+            "model": args.model,
+            "effort": args.effort,
+            "profile": args.profile,
+            "agent": args.agent,
+            // Unlike `call_id`, the start token has a hub counterpart:
+            // the hub reports the start's steps under it as
+            // `start:progress`, and this desktop's `/events` stream
+            // carries them to the dialog that minted it (step 5.13).
+            "start_token": args.start_token,
+        });
+        // Step 4.4: the person was asked about `accounts.pause_at` and chose
+        // to start anyway. Sent only then, so an older hub sees the same
+        // arguments it always did.
+        if args.over_limit_ok {
+            body["over_limit_ok"] = json!(true);
+        }
+        self.route("new_session", &body).await
     }
 
     /// `commands::sessions::repair_session` with `explicit: true` only — the
@@ -1091,6 +1315,39 @@ impl HubBackend {
     pub async fn repair_session(&self, session_id: i64) -> Result<repair::RepairReport, IpcError> {
         self.route("repair_session", &json!({ "session_id": session_id }))
             .await
+    }
+
+    /// `commands::mcp::provision_hosts` for one host, without a rotation:
+    /// the hub's content-only refresh, the one provisioning its owner's
+    /// device may ask for (`routed::provision_hosts` refuses the rest before
+    /// this is called). A hub older than that answers `E_FORBIDDEN`, which
+    /// is turned into what to do about it rather than "a fleet-admin tool".
+    pub async fn reprovision_host(
+        &self,
+        host: &str,
+    ) -> Result<Vec<fleet_core::service::provision::HostProvisionResult>, IpcError> {
+        self.route(
+            "provision_hosts",
+            &json!({ "host": host, "content_only": true }),
+        )
+        .await
+        .map_err(|e| {
+            if e.code == codes::E_FORBIDDEN {
+                IpcError::new(
+                    codes::E_FORBIDDEN,
+                    format!(
+                        "the hub did not let this device re-provision {host} — it is older \
+                         than this app, or this device is not the hub owner's. An up-to-date \
+                         hub refreshes a stale host by itself within a few minutes; to do it \
+                         now, run `fleet-hub provision --host {host} --content-only` on the hub \
+                         ({})",
+                        e.message
+                    ),
+                )
+            } else {
+                e
+            }
+        })
     }
 }
 

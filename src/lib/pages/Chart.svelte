@@ -13,6 +13,7 @@
     y,
     kind,
     title,
+    limit = null,
     testid = 'chart',
   }: {
     points: Record<string, unknown>[];
@@ -20,6 +21,10 @@
     y: Column;
     kind: 'line' | 'bar' | 'stacked_bar' | 'sparkline';
     title: string;
+    /** A budget drawn as a dashed line across the plot, in the y column's
+     *  unit; a bar above it is marked over. The line's words are in the
+     *  caption, so the picture is never the only place it is said. */
+    limit?: { value: number; label: string } | null;
     testid?: string;
   } = $props();
 
@@ -30,7 +35,8 @@
   const PAD_T = 8;
 
   const values = $derived(points.map((p) => Number(p[y.id]) || 0));
-  const max = $derived(niceMax(Math.max(0, ...values)));
+  const max = $derived(niceMax(Math.max(0, limit?.value ?? 0, ...values)));
+  const over = (v: number) => limit !== null && limit.value > 0 && v > limit.value;
   const plotW = $derived(W - PAD_L);
   const plotH = $derived(H - PAD_B - PAD_T);
   const band = $derived(points.length ? plotW / points.length : plotW);
@@ -64,7 +70,7 @@
 
 <figure class="chart" data-testid={testid}>
   <figcaption>
-    <span>{title}</span>
+    <span>{title}{#if limit}<span class="limit-label" data-testid={`${testid}-limit`}> · {limit.label}</span>{/if}</span>
     {#if kind !== 'sparkline'}
       <button
         type="button"
@@ -108,13 +114,16 @@
         {/if}
         {#if kind === 'bar' || kind === 'stacked_bar'}
           {#each values as v, i (i)}
-            <path class="bar" class:dim={hover !== null && hover !== i} d={barPath(i, v)} />
+            <path class="bar" class:over={over(v)} class:dim={hover !== null && hover !== i} d={barPath(i, v)} />
           {/each}
         {:else}
           <path class="line" d={linePath} />
           {#if hover !== null}
             <circle class="dot" cx={xMid(hover)} cy={yOf(values[hover])} r="4" />
           {/if}
+        {/if}
+        {#if limit && limit.value > 0 && kind !== 'sparkline'}
+          <line class="limit" x1={PAD_L} x2={W} y1={yOf(limit.value)} y2={yOf(limit.value)} data-testid={`${testid}-limit-line`} />
         {/if}
         <!-- Hit targets: the whole band, bigger than the mark. -->
         {#each values as _, i (i)}
@@ -161,7 +170,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--fg);
     margin-bottom: 0.25rem;
   }
@@ -181,10 +190,22 @@
   }
   .tick {
     fill: var(--fg-muted);
-    font-size: 8px;
+    font-size: var(--text-2xs);
   }
   .bar {
     fill: var(--accent);
+  }
+  .bar.over {
+    fill: var(--status-waiting);
+  }
+  .limit {
+    stroke: var(--fg-muted);
+    stroke-width: 1;
+    stroke-dasharray: 4 3;
+    vector-effect: non-scaling-stroke;
+  }
+  .limit-label {
+    color: var(--fg-muted);
   }
   .bar.dim {
     opacity: 0.45;
@@ -213,7 +234,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     padding: 0.2rem 0.4rem;
-    font-size: 0.72rem;
+    font-size: var(--text-2xs);
     display: flex;
     gap: 0.4rem;
     pointer-events: none;
@@ -238,12 +259,12 @@
     margin: 0.25rem 0 0;
   }
   .empty {
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   table.data {
     width: 100%;
-    font-size: 0.78rem;
+    font-size: var(--text-2xs);
     border-collapse: collapse;
   }
   table.data th,

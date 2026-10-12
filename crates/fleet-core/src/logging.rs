@@ -551,6 +551,38 @@ pub fn init_in_with(log_dir: &Path, force_stderr: bool) -> Result<PathBuf, Strin
     Ok(dir)
 }
 
+/// Route panics through `tracing` as well: the default hook writes only to
+/// raw stderr, so a panic never reached the file log or the error reports
+/// ([`ReportLayer`]) and a hub that died of one left no logged cause. The
+/// previous hook still runs afterwards, so stderr keeps its usual message.
+/// Call once, after the subscriber is installed.
+pub fn install_panic_hook() {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        tracing::error!(
+            thread = thread.name().unwrap_or("<unnamed>"),
+            location = %info
+                .location()
+                .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+                .unwrap_or_else(|| "<unknown>".into()),
+            backtrace = %std::backtrace::Backtrace::force_capture(),
+            "panicked: {}",
+            panic_payload(info.payload())
+        );
+        prev(info);
+    }));
+}
+
+/// A panic payload as text: `panic!` carries a `&str` or a `String`.
+fn panic_payload(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("<non-string payload>")
+}
+
 /// Whether [`init_in_with`] adds the stderr layer: forced by the caller,
 /// always in a debug build, else when [`STDERR_ENV`] is `1` / `true`.
 fn want_stderr_layer(force: bool, debug_build: bool, env_value: Option<&str>) -> bool {
@@ -634,6 +666,16 @@ pub(crate) mod capture {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn panic_payloads_read_as_text() {
+        let s: Box<dyn std::any::Any + Send> = Box::new("static msg");
+        assert_eq!(super::panic_payload(&*s), "static msg");
+        let owned: Box<dyn std::any::Any + Send> = Box::new(format!("owned {}", 1));
+        assert_eq!(super::panic_payload(&*owned), "owned 1");
+        let other: Box<dyn std::any::Any + Send> = Box::new(7_u32);
+        assert_eq!(super::panic_payload(&*other), "<non-string payload>");
+    }
+
     use super::*;
 
     #[test]

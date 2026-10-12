@@ -1,6 +1,7 @@
 // The rule editor (work graph M14): a rule is saved only after a preview of
 // exactly the draft being saved (any edit that changes the wire draft needs
-// a new preview), it is sent as `ruleWire(draft)` with the version it was
+// a new preview, which runs by itself once the draft is still — gap plan
+// G2.2's live "Matches N open tasks now"), it is sent as `ruleWire(draft)` with the version it was
 // read at, and a rule changed or deleted elsewhere is said so and needs a
 // fresh preview at the current version.
 import { render, screen, fireEvent } from '@testing-library/svelte';
@@ -13,6 +14,9 @@ import WorkRuleEditor from './WorkRuleEditor.svelte';
 import { ruleWire, workTreeMeta, type WorkRule, type WorkRuleDraft } from './work_view';
 import { hubStatus, STANDALONE } from './hub';
 import { hubConnection } from './hub_connection';
+import { hosts } from './hosts';
+import { clearToasts, toasts } from './toasts';
+import { get } from 'svelte/store';
 
 const fresh: WorkRuleDraft = {
   name: 'Payments',
@@ -62,8 +66,9 @@ async function type(id: string, value: string) {
   await flush();
 }
 
+/** Let the live preview's timer (0 ms in these tests) fire and answer. */
 async function preview() {
-  await fireEvent.click(btn('rule-preview-btn'));
+  await new Promise((r) => setTimeout(r, 5));
   await flush();
 }
 
@@ -97,12 +102,13 @@ describe('WorkRuleEditor', () => {
     workTreeMeta.set({ orgs: [], trackers: [], groups: [] });
   });
 
-  const mount = (initial: WorkRuleDraft) => render(WorkRuleEditor, { initial, onclose, onsaved });
+  const mount = (initial: WorkRuleDraft) => render(WorkRuleEditor, { initial, onclose, onsaved, previewDebounceMs: 0 });
 
-  it('Save waits for a preview of the draft as the wire takes it', async () => {
+  it('Save waits for the live preview of the draft as the wire takes it', async () => {
     mount(fresh);
     expect(btn('rule-save').disabled).toBe(true);
-    expect(btn('rule-preview-btn').disabled).toBe(false);
+    expect(screen.getByTestId('rule-preview-stale').textContent).toContain('Checking which tasks it matches');
+    expect(calls('work_rule_preview')).toEqual([]);
     await preview();
     // The preview carries the draft without its version.
     const { expected_version: _v, ...draftOnly } = fresh;
@@ -202,32 +208,147 @@ describe('WorkRuleEditor', () => {
     expect(btn('rule-save').disabled).toBe(true);
   });
 
-  it('Preview needs a name, a group and at least one condition', async () => {
+  it('the live preview needs a name, a group and at least one condition', async () => {
     mount({ ...fresh, conditions: {} });
-    expect(btn('rule-preview-btn').disabled).toBe(true);
+    await preview();
+    expect(calls('work_rule_preview')).toEqual([]);
     expect(screen.getByTestId('work-rule-editor').textContent).toContain('Give the rule at least one condition.');
     // Whitespace is no condition.
     await type('rule-repo', '   ');
-    expect(btn('rule-preview-btn').disabled).toBe(true);
-    await type('rule-repo', 'acme/api');
-    expect(btn('rule-preview-btn').disabled).toBe(false);
-    await type('rule-name', '  ');
-    expect(btn('rule-preview-btn').disabled).toBe(true);
-    await type('rule-name', 'Api');
-    expect(btn('rule-preview-btn').disabled).toBe(false);
-    await type('rule-group', '');
-    expect(btn('rule-preview-btn').disabled).toBe(true);
-    await fireEvent.click(btn('rule-preview-btn'));
-    await flush();
+    await preview();
     expect(calls('work_rule_preview')).toEqual([]);
+    await type('rule-repo', 'acme/api');
+    await preview();
+    expect(calls('work_rule_preview')).toHaveLength(1);
+    await type('rule-name', '  ');
+    await preview();
+    expect(calls('work_rule_preview')).toHaveLength(1);
+    expect(btn('rule-save').disabled).toBe(true);
+    await type('rule-name', 'Api');
+    await type('rule-group', '');
+    await preview();
+    expect(calls('work_rule_preview')).toHaveLength(1);
+  });
+
+  it('says live how many open tasks the draft matches, naming the first few', async () => {
+    handlers.work_rule_preview = (a) => {
+      const prefix = ((a.rule as WorkRuleDraft).conditions.key_prefix ?? '').toUpperCase();
+      return prefix === 'ABC'
+        ? { affected: [], total: 0, kept_manual: 0, matched: 4, matched_sample: ['ABC-14', 'ABC-15', 'ABC-16'] }
+        : { affected: [], total: 0, kept_manual: 0, matched: 0, matched_sample: [] };
+    };
+    mount(fresh);
+    await preview();
+    expect(screen.getByTestId('rule-match-count').textContent).toBe('Matches 4 open tasks now: ABC-14, ABC-15, ABC-16 +1');
+    await type('rule-key-prefix', 'ZZZ');
+    // The old count is not shown for the new draft.
+    expect(screen.queryByTestId('rule-match-count')).toBeNull();
+    await preview();
+    expect(screen.getByTestId('rule-match-count').textContent).toBe('Matches no open task now.');
+  });
+
+  it('a slow answer for an older draft is dropped', async () => {
+    let release: (() => void) | undefined;
+    handlers.work_rule_preview = async (a) => {
+      const prefix = (a.rule as WorkRuleDraft).conditions.key_prefix;
+      if (prefix === 'ABC') await new Promise<void>((r) => (release = r));
+      return { affected: [], total: 0, kept_manual: 0, matched: prefix === 'ABC' ? 9 : 2, matched_sample: [] };
+    };
+    mount(fresh);
+    await preview();
+    await type('rule-key-prefix', 'ABD');
+    await preview();
+    expect(screen.getByTestId('rule-match-count').textContent).toBe('Matches 2 open tasks now.');
+    release?.();
+    await flush();
+    expect(screen.getByTestId('rule-match-count').textContent).toBe('Matches 2 open tasks now.');
+  });
+
+  it('an older hub (no match count) still previews and saves', async () => {
+    mount(fresh);
+    await preview();
+    expect(screen.queryByTestId('rule-match-count')).toBeNull();
+    expect(btn('rule-save').disabled).toBe(false);
+  });
+
+  it('names the host and account its sessions start on (G7.1)', async () => {
+    hosts.set([{ alias: 'mac', claude_profiles: [{ name: 'work', email: null }] }] as never);
+    mount(existing);
+    await fireEvent.change(screen.getByTestId('rule-host'), { target: { value: 'mac' } });
+    await flush();
+    await fireEvent.change(screen.getByTestId('rule-account'), { target: { value: 'work' } });
+    await flush();
+    await preview();
+    await fireEvent.click(btn('rule-save'));
+    await flush();
+    expect(calls('save_work_rule')[0].rule).toMatchObject({ id: 9, host_alias: 'mac', profile: 'work' });
+    hosts.set([]);
+  });
+
+  it('deletes the rule from inside the editor after a confirm', async () => {
+    handlers.delete_work_rule = () => ({ deleted: true });
+    const ondeleted = vi.fn();
+    render(WorkRuleEditor, { initial: existing, onclose, onsaved, ondeleted, previewDebounceMs: 0 });
+    await fireEvent.click(btn('rule-editor-delete'));
+    await flush();
+    expect(calls('delete_work_rule')).toEqual([]);
+    await fireEvent.click(btn('rule-editor-delete-confirm'));
+    await flush();
+    expect(calls('delete_work_rule')).toEqual([{ rule_id: 9, expected_version: 3 }]);
+    expect(ondeleted).toHaveBeenCalledWith('Payments');
+    expect(onclose).toHaveBeenCalledTimes(1);
+  });
+
+  it('a new rule has no Delete', () => {
+    mount(fresh);
+    expect(screen.queryByTestId('rule-editor-delete')).toBeNull();
   });
 
   it('a tracker alone is a condition', async () => {
     mount({ ...fresh, conditions: {} });
     await fireEvent.change(screen.getByTestId('rule-tracker'), { target: { value: '1' } });
     await flush();
-    expect(btn('rule-preview-btn').disabled).toBe(false);
     await preview();
     expect((calls('work_rule_preview')[0].rule as WorkRuleDraft).conditions.tracker_id).toBe(1);
+  });
+
+  describe('the saved toast offers Undo (G7.4)', () => {
+    beforeEach(() => clearToasts());
+
+    async function saveAndUndo(initial: WorkRuleDraft, onundone: Mock<() => void>) {
+      render(WorkRuleEditor, { initial, onclose, onsaved, onundone, previewDebounceMs: 0 });
+      await preview();
+      await fireEvent.click(btn('rule-save'));
+      await flush();
+      const t = get(toasts).at(-1);
+      expect(t?.action?.label).toBe('Undo');
+      t!.action!.run();
+      await flush();
+    }
+
+    it('Undo on a new rule deletes it at the version just saved', async () => {
+      handlers.delete_work_rule = () => ({ deleted: true });
+      const onundone = vi.fn();
+      await saveAndUndo(fresh, onundone);
+      expect(get(toasts).some((t) => t.message === 'Rule “Payments” added.')).toBe(true);
+      expect(calls('delete_work_rule')).toEqual([{ rule_id: 9, expected_version: 4 }]);
+      expect(onundone).toHaveBeenCalledTimes(1);
+    });
+
+    it('Undo on an edit saves what the rule held, over the version just saved', async () => {
+      handlers.save_work_rule = () => saved({ group: 'Billing' });
+      const onundone = vi.fn();
+      render(WorkRuleEditor, { initial: existing, onclose, onsaved, onundone, previewDebounceMs: 0 });
+      await type('rule-group', 'Billing');
+      await preview();
+      await fireEvent.click(btn('rule-save'));
+      await flush();
+      get(toasts).at(-1)!.action!.run();
+      await flush();
+      const undo = calls('save_work_rule')[1].rule as WorkRuleDraft;
+      expect(undo).toMatchObject({ id: 9, group: 'Payments', expected_version: 4 });
+      expect(undo.conditions).toMatchObject({ tracker_id: 1, container: 'PAY' });
+      expect(onundone).toHaveBeenCalledTimes(1);
+    });
   });
 });

@@ -10,6 +10,7 @@
     formatResetShort,
     freshness,
     leftPct,
+    severityLeft,
     paceFraction,
     paceLabel,
     severity,
@@ -54,7 +55,7 @@
   const known = $derived(win !== null && fresh !== 'expired');
   const left = $derived(win && known ? leftPct(win) : null);
   const level = $derived(
-    win && left !== null ? severity(window, left, win.resets_at, now, hasExtraUsage) : null,
+    win && left !== null ? severity(window, severityLeft(win), win.resets_at, now, hasExtraUsage) : null,
   );
   const badge = $derived(level ? severityBadge(level, hasExtraUsage) : null);
   const leftText = $derived(
@@ -117,7 +118,7 @@
     column-gap: 0.5rem;
     row-gap: 0.1rem;
     align-items: center;
-    font-size: 0.75rem;
+    font-size: var(--text-2xs);
   }
   .name { color: var(--fg-muted); }
   .nums {
@@ -131,7 +132,7 @@
   .left.stale { color: var(--fg-muted); }
   .used,
   .bucket { color: var(--fg-muted); }
-  .sev { font-weight: 600; font-size: 0.7rem; }
+  .sev { font-weight: 600; font-size: var(--text-2xs); }
   .sev-caution { color: var(--usage-warn); }
   .sev-low,
   .sev-limit { color: var(--usage-crit); }
@@ -139,6 +140,6 @@
   .note {
     grid-column: 3;
     color: var(--fg-muted);
-    font-size: 0.7rem;
+    font-size: var(--text-2xs);
   }
 </style>

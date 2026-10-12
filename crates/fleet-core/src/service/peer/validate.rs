@@ -64,6 +64,13 @@ fn check_kind(kind: &str) -> Result<(), Rejection> {
     Ok(())
 }
 
+/// The same shape for a message that stays on this hub: a local recipient's
+/// inbox serves `kind` back to every reader, so it is as bounded as one
+/// that crosses a link (only `question` stays local-only).
+pub fn check_local_kind(kind: &str) -> Result<(), Rejection> {
+    check_kind(kind)
+}
+
 /// An address that may cross a link: at most [`PEER_ADDR_MAX`] bytes. It
 /// becomes the sender label of a recipient's hook delivery, which has a
 /// hard character budget. Checked before parsing, so the refusal never

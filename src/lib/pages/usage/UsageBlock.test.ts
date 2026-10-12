@@ -182,16 +182,16 @@ describe('UsageBlock — staleness', () => {
     mount({ snapshot: snap({ fetched_at: NOW - 14 * MIN, next_try_at: NOW + 8 * MIN }) });
     expect(leftOf('5h')).toBe('~91% left');
     expect(leftOf('weekly')).toBe('~58% left');
-    expect(messages()).toEqual(['◷ 14 min old. Next try 14:40.']);
+    expect(messages()).toEqual(['14 min old. Next try 14:40.']);
     expect(norm(screen.getByTestId('usage-footer'))).toBe('via mefistos · checked 14 min ago');
     for (const m of screen.getAllByRole('meter')) expect(m).toHaveClass('stale');
   });
 
   it.each<[UsageStatus, string]>([
-    ['ok', '◷ 14 min old.'],
-    ['rate_limited', '◷ 14 min old — last check failed: rate-limited.'],
-    ['login_expired', '◷ 14 min old — last check failed: Claude login expired on mefistos.'],
-    ['no_online_host', '◷ 14 min old — last check failed: no online host.'],
+    ['ok', '14 min old.'],
+    ['rate_limited', '14 min old — last check failed: rate-limited.'],
+    ['login_expired', '14 min old — last check failed: Claude login expired on mefistos.'],
+    ['no_online_host', '14 min old — last check failed: no online host.'],
   ])('a stale value under status %s still shows ~ and its age', (status, age) => {
     mount({ snapshot: snap({ status, fetched_at: NOW - 14 * MIN, detail: status === 'login_expired' ? 'mefistos: login expired' : null }) });
     expect(leftOf('5h')).toMatch(/^~\d+% left$/);
@@ -226,44 +226,44 @@ describe('UsageBlock — statuses', () => {
     [
       'rate_limited',
       { status: 'rate_limited', fetched_at: NOW - 2 * MIN, next_try_at: NOW + 20 * MIN, detail: 'rate limited by the usage endpoint' },
-      ['⏸ Anthropic is rate-limiting usage checks. Next try 14:52.'],
+      ['Anthropic is rate-limiting usage checks. Next try 14:52.'],
     ],
     [
       'unavailable',
       { ...noData, status: 'unavailable', next_try_at: NOW + 8 * MIN, detail: 'HTTP 404: <html>nope</html>' },
       [
-        "⚠ Usage unavailable. Anthropic's usage endpoint returned an unexpected response (HTTP 404). It's undocumented and may have changed. Sessions are unaffected. Next try 14:40.",
+        "Usage unavailable. Anthropic's usage endpoint returned an unexpected response (HTTP 404). It's undocumented and may have changed. Sessions are unaffected. Next try 14:40.",
       ],
     ],
     [
       'access_token_expired',
       { ...noData, status: 'access_token_expired', detail: 'mefistos: access token expired' },
-      ['🔑 Usage checks are paused until Claude Code refreshes its token on mefistos; it does so the next time it runs there.'],
+      ['Usage checks are paused until Claude Code refreshes its token on mefistos; it does so the next time it runs there.'],
     ],
     [
       'login_expired',
       { ...noData, status: 'login_expired', detail: 'claude-fleet-oci: login expired' },
-      ["🔑 Claude login expired on claude-fleet-oci — usage can't be checked from it. Run claude /login there."],
+      ["Claude login expired on claude-fleet-oci — usage can't be checked from it. Run claude /login there."],
     ],
     [
       'token_rejected',
       { ...noData, status: 'token_rejected', detail: 'mefistos: token rejected' },
-      ["🔑 Anthropic rejected the Claude token on mefistos — usage can't be checked from it."],
+      ["Anthropic rejected the Claude token on mefistos — usage can't be checked from it."],
     ],
     [
       'host_unsupported',
       { ...noData, status: 'host_unsupported', detail: 'mefistos: missing curl' },
-      ["⚠ curl 7.55+ needed on mefistos — usage can't be checked from it."],
+      ["curl 7.55+ needed on mefistos — usage can't be checked from it."],
     ],
     [
       'no_credentials (local mac)',
       { ...noData, status: 'no_credentials', source_host: null, detail: 'local: no credentials file' },
-      ['○ Usage is read through another host on this account. No other host is logged in to it.'],
+      ['Usage is read through another host on this account. No other host is logged in to it.'],
     ],
     [
       'no_online_host',
       { ...noData, status: 'no_online_host', detail: 'no reachable host is logged in to this account' },
-      ['○ No online host is logged in to this account (mefistos offline).'],
+      ['No online host is logged in to this account (mefistos offline).'],
     ],
   ])('%s renders its exact wording and never a solid empty bar', (_name, over, expected) => {
     mount({ snapshot: snap(over) });
@@ -274,6 +274,12 @@ describe('UsageBlock — statuses', () => {
       expect(leftOf('weekly')).toBe('—');
       expect(screen.queryByTestId('usage-footer')).toBeNull();
     }
+  });
+
+  it('leads a line with a kit icon, not an emoji glyph (manual: Iconography)', () => {
+    mount({ snapshot: snap({ status: 'rate_limited', fetched_at: NOW - 2 * MIN, next_try_at: NOW + 20 * MIN, detail: 'x' }) });
+    const line = screen.getAllByTestId('usage-message').find((m) => m.dataset.kind === 'rate_limited')!;
+    expect(line.querySelector('svg.of-ico')?.getAttribute('data-icon')).toBe('pause');
   });
 
   it('never shows the raw detail, but offers to copy it', () => {

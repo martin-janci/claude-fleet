@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { viewKey } from './shortcuts';
+  import Icon from './kit/Icon.svelte';
+  import { tick, type Snippet } from 'svelte';
   import {
     recreateSession,
     dismissGhostSession,
@@ -7,39 +9,32 @@
     isInactiveAgent,
     showFriendlyNames,
     showRowDetails,
-    formatCostMicros,
-    formatTokens,
-    sessionUsageTokens,
     lostReasonLabel,
+    sessions,
     type SessionRow,
   } from './sessions';
+  import { get } from 'svelte/store';
   import { selectedSession } from './selection';
-  import { forgetSessionUi } from './session_ui';
   import { hostByAlias } from './hosts';
   import { hintAnchor } from './hints';
-  import {
-    claudeStatusColor,
-    claudeStatusLabel,
-    contextColor,
-    contextLevel,
-    ciStatusColor,
-    ciStatusLabel,
-    rank,
-    stuckKindLabel,
-    STUCK_COLOR,
-  } from './attention';
+  import { bucketState, rank } from './attention';
   import { attentionIdleMinutes } from './notify';
+  import { attentionFacts, blockedLine } from './attention_facts';
+  import { slideIn, wash } from './motion_catalog';
+  import { accountByUuid, accountLabel } from './accounts';
   import { pushError } from './toasts';
-  import { rowElapsed, rowPrompt, timeAgo } from './session_status';
-  import { isStale } from './evidence';
+  import { rowPrompt, shortAge, timeAgo } from './session_status';
   import { hubStatus, hubBlock, hubActionBlocked } from './hub';
-  import { hubConnection } from './hub_connection';
+  import { hubConnection, isLost } from './hub_connection';
+  import { sessionBlocked } from './share';
   import AnswerPrompt from './AnswerPrompt.svelte';
   import NameWorkDialog from './NameWorkDialog.svelte';
   import { pendingInputFor } from './pending_input';
   import type { WorkKey } from './work_keys';
   import WorkChip from './WorkChip.svelte';
+  import AccountPill from './AccountPill.svelte';
   import {
+    branchMates,
     confirmSessionWork,
     describeEvidence,
     linkSessionWork,
@@ -49,6 +44,7 @@
     setWorkProjectTrust,
     unlinkSessionWork,
     workWhy,
+    JEV_RULE,
     crossOrgOf,
     crossOrgSentence,
     type WorkLink,
@@ -56,7 +52,17 @@
   import { fleetSettings, SETTING_KEYS } from './fleet_settings';
   import type { Result } from './result';
   import { orgs } from './orgs';
-  import SpiralLoader from './SpiralLoader.svelte';
+  import SessionStatusChip from './SessionStatusChip.svelte';
+  import SessionRowDetails from './SessionRowDetails.svelte';
+  import SessionRowMeta from './SessionRowMeta.svelte';
+  import LimitActions from './LimitActions.svelte';
+  import { uiDensity } from './prefs';
+  import { localWorkspaces, linkFor, badgeFor } from './local_workspaces';
+  import { projectById } from './projects';
+  import SessionRowMenu from './SessionRowMenu.svelte';
+  import PulseSteps from './PulseSteps.svelte';
+  import { sessionPulse } from './session_loaders';
+  import { startingSessions } from './session_starting';
 
   // Rename and selection state stay in the Sidebar (they must survive a
   // sessions store refresh); the row gets them as props and calls back.
@@ -85,6 +91,7 @@
     askRestart,
     askKill,
     orgColor = null,
+    trailing = undefined,
   }: {
     sess: SessionRow;
     selectMode: boolean;
@@ -127,17 +134,34 @@
     /** Work graph M5: the org's colour, drawn as a thin bar at the row's
      *  left edge — only when two or more orgs exist (the caller decides). */
     orgColor?: string | null;
+    /** Drawn last inside the row: a control that belongs to it (the
+     *  archived chip), so a tree row owns its own controls. */
+    trailing?: Snippet;
   } = $props();
 
   const sessSelected = $derived($selectedSession?.id === sess.id);
-  const ctxLevel = $derived(contextLevel(sess.context_pct));
-  const elapsed = $derived(rowElapsed(sess, nowSec));
-  // An old reading describes the past (result evidence): dim the badge
-  // rather than let yesterday's `passing` look current.
-  const ciStale = $derived(isStale(sess.pr_checked_at, nowSec));
+  // Step 5.14: a session this window just started, until its agent is up
+  // (`session_starting.ts`).
+  const starting = $derived($startingSessions.has(sess.id));
+  const startPulse = $derived(sessionPulse(sess));
+  /** "Worktree ✓ · tmux ✓ · Claude Code starting", as the board words it. */
+  const startText = $derived(
+    startPulse.steps
+      .map((s) => (s.state === 'done' ? `${s.label} ✓` : s.state === 'active' ? `${s.label} starting` : s.label))
+      .join(' · '),
+  );
   // The row's triage bucket (P13). Published as data-bucket because component
   // CSS never reaches jsdom, so this is how tests assert a row's triage state.
-  const triage = $derived(rank(sess, { idleSecs: $attentionIdleMinutes * 60, now: nowSec }));
+  const triage = $derived(
+    rank(sess, { idleSecs: $attentionIdleMinutes * 60, now: nowSec, facts: $attentionFacts }),
+  );
+  // Redesign step 3.6: Compact is the two-line row (sans title, one meta
+  // line, chips on hover); Comfortable is 0.5.4's row unchanged.
+  const compact = $derived($uiDensity === 'compact');
+  // A Blocked row's reason (step 2.4), in either density.
+  const blockedReason = $derived(
+    blockedLine(triage.bucket, sess, $attentionFacts, (u) => accountLabel($accountByUuid.get(u))),
+  );
   const promptText = $derived(rowPrompt(sess));
   // The dialog this row is blocked on, straight from the row: the sidebar
   // does not probe (that would be one `capture-pane` per visible row, every
@@ -163,29 +187,41 @@
 
   async function doRecreate(sess: SessionRow, e?: Event) {
     e?.stopPropagation();
+    // Re-asked at the call (multi-user M1, F2b): the button's `disabled` is
+    // reactive, but the keyboard and a stale render are not it.
+    if ($sessionBlocked(sess, 'recreate_session') !== null) return;
     const r = await recreateSession(sess.id);
     if (!r.ok) pushError(r.error, 'Recreate failed');
   }
 
   async function doDismissGhost(sess: SessionRow, e?: Event) {
     e?.stopPropagation();
+    // Re-asked at the call (multi-user M1, F2b): the button's `disabled` is
+    // reactive, but the keyboard and a stale render are not it.
+    if ($sessionBlocked(sess, 'dismiss_ghost_session') !== null) return;
     const r = await dismissGhostSession(sess.id);
     if (!r.ok) {
       pushError(r.error, 'Dismiss failed');
-      return;
     }
-    forgetSessionUi(sess.host_alias, sess.tmux_name);
   }
 
   /** Remove an inactive bg agent from the list. The row itself disappears
    *  via the `session:removed` event the backend emits on success. */
   async function doDismissAgent(sess: SessionRow, e?: Event) {
     e?.stopPropagation();
+    // Re-asked at the call (multi-user M1, F2b): the button's `disabled` is
+    // reactive, but the keyboard and a stale render are not it.
+    if ($sessionBlocked(sess, 'dismiss_agent_session') !== null) return;
     const r = await dismissAgentSession(sess.id);
     if (!r.ok) {
       pushError(r.error, 'Remove failed');
     }
   }
+
+  // Review r13 (States board): with the hub lost, or the row's host known
+  // unreachable, the status shown is the last one read. The row is dimmed
+  // and says so, rather than reading as live.
+  const stale = $derived(isLost($hubConnection) || $hostByAlias.get(sess.host_alias)?.reachable === false);
 
   function hostIsReachable(alias: string): boolean {
     return $hostByAlias.get(alias)?.reachable ?? false;
@@ -195,19 +231,116 @@
   // dismiss_agent_session does, but this row's Kill button is hidden for an
   // inactive one (`!isInactiveAgent(sess)` below) — so a paired client sees
   // the reason instead of a control that fails at the click.
-  const dismissAgentBlocked = $derived(hubBlock('dismiss_agent_session', $hubStatus));
-  // These route, so they only need the live connection to be up.
-  const killBlocked = $derived(hubActionBlocked('kill_session', $hubStatus, $hubConnection));
-  const restartBlocked = $derived(hubActionBlocked('restart_session', $hubStatus, $hubConnection));
-  const recreateBlocked = $derived(hubActionBlocked('recreate_session', $hubStatus, $hubConnection));
-  const labelBlocked = $derived(hubActionBlocked('set_friendly_name', $hubStatus, $hubConnection));
-  const tmuxRenameBlocked = $derived(hubActionBlocked('rename_session', $hubStatus, $hubConnection));
-  const ghostDismissBlocked = $derived(
-    hubActionBlocked('dismiss_ghost_session', $hubStatus, $hubConnection),
+  const dismissAgentBlocked = $derived(
+    hubBlock('dismiss_agent_session', $hubStatus) ?? $sessionBlocked(sess, 'dismiss_agent_session'),
   );
-  const workBlocked = $derived(hubActionBlocked('link_session_work', $hubStatus, $hubConnection));
-  const nameBlocked = $derived(hubActionBlocked('name_session_work', $hubStatus, $hubConnection));
-  const renameWorkBlocked = $derived(hubActionBlocked('rename_work_item', $hubStatus, $hubConnection));
+  // These route, so they only need the live connection to be up — plus, since
+  // multi-user M1, the client's own access to THIS row. The two predicates are
+  // composed rather than merged: `hubActionBlocked` takes an action name and no
+  // session (so a per-session refusal cannot ride it unnoticed) and
+  // `sessionBlocked` takes the row; the hub's half wins when both answer,
+  // because "the hub never accepts this from a client" is true of every session
+  // and so the more useful sentence. `$sessionBlocked` is read through its
+  // store on purpose: a revoke or a narrow changes no column on the row, so a
+  // version that read `sess` alone would leave these buttons enabled until the
+  // next re-list.
+  const killBlocked = $derived(
+    hubActionBlocked('kill_session', $hubStatus, $hubConnection) ??
+      $sessionBlocked(sess, 'kill_session'),
+  );
+  const restartBlocked = $derived(
+    hubActionBlocked('restart_session', $hubStatus, $hubConnection) ??
+      $sessionBlocked(sess, 'restart_session'),
+  );
+  const recreateBlocked = $derived(
+    hubActionBlocked('recreate_session', $hubStatus, $hubConnection) ??
+      $sessionBlocked(sess, 'recreate_session'),
+  );
+  const labelBlocked = $derived(
+    hubActionBlocked('set_friendly_name', $hubStatus, $hubConnection) ??
+      $sessionBlocked(sess, 'set_friendly_name'),
+  );
+  const tmuxRenameBlocked = $derived(
+    hubActionBlocked('rename_session', $hubStatus, $hubConnection) ??
+      $sessionBlocked(sess, 'rename_session'),
+  );
+  const ghostDismissBlocked = $derived(
+    hubActionBlocked('dismiss_ghost_session', $hubStatus, $hubConnection) ??
+      $sessionBlocked(sess, 'dismiss_ghost_session'),
+  );
+  const workBlocked = $derived(
+    hubActionBlocked('link_session_work', $hubStatus, $hubConnection) ??
+      $sessionBlocked(sess, 'link_session_work'),
+  );
+  const nameBlocked = $derived(
+    hubActionBlocked('name_session_work', $hubStatus, $hubConnection) ??
+      $sessionBlocked(sess, 'name_session_work'),
+  );
+  const renameWorkBlocked = $derived(
+    hubActionBlocked('rename_work_item', $hubStatus, $hubConnection) ??
+      $sessionBlocked(sess, 'rename_work_item'),
+  );
+  /** "Trust this project's branch names" writes fleet settings from inside the
+   *  work popover: `set_work_project_trust`, `drive`. It is the one control in
+   *  the popover that does not go through `workAction`. */
+  const trustBlocked = $derived(
+    hubActionBlocked('set_work_project_trust', $hubStatus, $hubConnection) ??
+      $sessionBlocked(sess, 'set_work_project_trust'),
+  );
+  /** Whether this client may type into the row's pane at all — the gate on the
+   *  inline answer card below, which is a pane write (`send_prompt`), not a
+   *  status display. A watcher still sees the `blocked` chip; what they do not
+   *  get is the buttons that answer for the owner. */
+  const promptBlocked = $derived(
+    hubActionBlocked('send_prompt', $hubStatus, $hubConnection) ??
+      $sessionBlocked(sess, 'send_prompt'),
+  );
+  // UX audit L2: a Compact row says what the question is ("Waiting for you:
+  // Allow Bash(…)?") and leaves the answer card to the conversation, the
+  // Inbox's open row and ⌘K Approve; Comfortable keeps the card in the row.
+  const waitingLine = $derived(
+    answerView && promptBlocked === null && (answerView.question || answerView.detail)
+      ? `Waiting for you: ${answerView.question || answerView.detail}`
+      : null,
+  );
+  /**
+   * The row's privacy badge (multi-user M1). Read straight off the row —
+   * `visibility` plus whether an owner arrived with it — so it says the same
+   * thing to every viewer and needs no derivation: it is a fact about the
+   * session, not about who is looking at it.
+   *
+   * `null` renders nothing. That covers a hub older than M1 (neither field
+   * arrives) and the one inconsistent shape the wire can produce: `private`
+   * with no `owner_person_id`, because `strip_nulls` removes a null on the way
+   * out and an unowned private row cannot be described honestly. Guessing
+   * either way would be worse than saying nothing.
+   */
+  // Local workspace sync: the link on this row's worktree, if any.
+  const localLink = $derived(
+    linkFor(
+      $localWorkspaces,
+      sess,
+      sess.project_id != null ? $projectById.get(sess.project_id)?.project : undefined,
+    ),
+  );
+  const localBadge = $derived(badgeFor(localLink));
+  const privacyBadge = $derived.by((): { text: string; title: string } | null => {
+    if (sess.visibility === 'unclaimed') {
+      return {
+        text: 'unclaimed',
+        title:
+          'Fleet did not start this session and nobody has claimed it. Until someone does, all anyone sees of it is a per-host count.',
+      };
+    }
+    if (sess.visibility === 'private' && sess.owner_person_id != null) {
+      return {
+        text: 'private',
+        title:
+          'Private to its owner: only they, and the people they have shared it with, can see this session.',
+      };
+    }
+    return null;
+  });
 
   // ── Work menu (roadmap M1b.2): set the row's work, "Not this", "Clear". ──
   const rowWork = $derived(workOf === undefined ? workKey : workOf);
@@ -225,12 +358,28 @@
   // explains it and offers "Link anyway", which retries with the override.
   let crossOrg = $state<{ sentence: string; retry: () => Promise<Result<unknown>> } | null>(null);
 
+  /**
+   * Every work write this row can make goes through here, and the gate goes
+   * here with it (multi-user M1, F2b). The menu's ENTRANCE was gated and
+   * nothing inside it was: a `drive` grant narrowed to `watch` while the
+   * popover was open still landed a link, a rejection, a confirm or a clear,
+   * and `y`/`n` on the row reach these paths with no button in between.
+   *
+   * `workBlocked` is `link_session_work`, `drive` — the same tier as every
+   * other per-session work write this runner performs (`reject_session_work`,
+   * `unlink_session_work`, `confirm_session_work`), so one answer covers them:
+   * `share.ts`'s refusal is a function of the TIER, not of the action name,
+   * and a `watch` grantee is refused all four with the same sentence.
+   */
   async function workAction(
     run: () => Promise<Result<unknown>>,
     failure: string,
     forced?: { what: string; retry: () => Promise<Result<unknown>> },
   ) {
-    if (workBusy) return;
+    if (workBusy || workBlocked !== null) {
+      workMenuOpen = false;
+      return;
+    }
     workBusy = true;
     const r = await run();
     workBusy = false;
@@ -294,7 +443,7 @@
   // `effective_status`, a different field entirely — irrelevant to this
   // local-vs-ticket check.
   let nameDialog = $state<
-    | { mode: 'name'; sessions: { id: number; label: string }[] }
+    | { mode: 'name'; sessions: { id: number; label: string }[]; branchMates?: { id: number; label: string }[] }
     | { mode: 'rename'; itemId: number; title: string; key?: string | null }
     | null
   >(null);
@@ -309,13 +458,18 @@
 
   function openNameWork(e: Event) {
     e.stopPropagation();
+    if (nameBlocked !== null) return;
     workMenuOpen = false;
-    nameDialog = { mode: 'name', sessions: [{ id: sess.id, label: primaryName }] };
+    nameDialog = {
+      mode: 'name',
+      sessions: [{ id: sess.id, label: primaryName }],
+      branchMates: branchMates(sess, get(sessions)).map((s) => ({ id: s.id, label: s.friendly_name || s.tmux_name })),
+    };
   }
 
   function openRenameWork(e: Event) {
     e.stopPropagation();
-    if (!localItem) return;
+    if (!localItem || renameWorkBlocked !== null) return;
     workMenuOpen = false;
     nameDialog = { mode: 'rename', ...localItem };
   }
@@ -396,6 +550,9 @@
     e.stopPropagation();
     const pid = sess.project_id;
     if (pid == null) return;
+    // `set_work_project_trust` is `drive` and does not go through
+    // `workAction`, so it carries its own re-ask (multi-user M1, F2b).
+    if (trustBlocked !== null) return;
     const on = (e.currentTarget as HTMLInputElement).checked;
     const r = await setWorkProjectTrust(pid, on);
     if (!r.ok) {
@@ -407,18 +564,26 @@
 
   /** `y` / `n` decide the row's top suggestion, `l` links or picks. */
   function onRowKey(e: KeyboardEvent) {
-    if (e.target === e.currentTarget && !e.metaKey && !e.ctrlKey && !e.altKey && workBlocked === null) {
-      if (e.key === 'y' && suggestion) {
+    if (rowMenuOn && (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey))) {
+      e.preventDefault();
+      const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+      rowMenu = { x: r.left + 24, y: r.bottom };
+      return;
+    }
+    // The keys are the registry's `session-row` rows (step 0.1).
+    const act = e.target === e.currentTarget && workBlocked === null ? viewKey('session-row', e) : null;
+    if (act) {
+      if (act === 'session-row.yes' && suggestion) {
         e.preventDefault();
         confirmLink(suggestion.link_id);
         return;
       }
-      if (e.key === 'n' && suggestion) {
+      if (act === 'session-row.no' && suggestion) {
         e.preventDefault();
         rejectLink(suggestion.link_id);
         return;
       }
-      if (e.key === 'l') {
+      if (act === 'session-row.link') {
         e.preventDefault();
         openWorkMenu();
         void tick().then(() => workInput?.focus());
@@ -426,6 +591,26 @@
       }
     }
     onKeySession(e, sess);
+  }
+
+  // The row's ⋯ menu and right-click (redesign step 3.10): every
+  // Details action, run by Details (`session_actions.ts`). Ghost and outside-
+  // fleet rows keep their own inline actions.
+  const rowMenuOn = $derived(!readOnly && sess.status !== 'ghost');
+  let rowMenu = $state<{ x: number; y: number } | null>(null);
+  function openRowMenu(e: MouseEvent) {
+    e.stopPropagation();
+    if (rowMenu) {
+      rowMenu = null;
+      return;
+    }
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    rowMenu = { x: r.left, y: r.bottom + 2 };
+  }
+  function onRowContextMenu(e: MouseEvent) {
+    if (!rowMenuOn || isRenaming) return;
+    e.preventDefault();
+    rowMenu = { x: e.clientX, y: e.clientY };
   }
 
   function onWorkKey(e: KeyboardEvent) {
@@ -441,25 +626,34 @@
   class:renaming={isRenaming}
   class:checked={isChecked}
   class:stuck={sess.stuck_kind !== null}
+  class:compact
+  class:stale
+  data-stale={stale ? 'true' : undefined}
+  title={stale ? 'Last known state: no live updates until the connection is back' : undefined}
   data-testid="sess-row"
+  data-density={$uiDensity}
   data-session-id={sess.id}
   data-org-color={orgColor ?? undefined}
-  style:box-shadow={orgColor ? `inset 3px 0 0 ${orgColor}` : undefined}
+  style:--org-color={orgColor ?? undefined}
+  aria-current={sessSelected ? 'true' : undefined}
   data-stuck={sess.stuck_kind ?? undefined}
   data-bucket={triage.bucket}
-  role="button"
+  role="treeitem"
+  aria-selected={sessSelected}
   tabindex="0"
   ondblclick={(e) => sess.status !== 'ghost' && !readOnly && beginLabelEdit(sess, e)}
   onclick={(e) => !isRenaming && (sess.status !== 'ghost' || selectMode) && onSelectSession(sess, e)}
   onkeydown={(e) => !isRenaming && (sess.status !== 'ghost' || selectMode) && onRowKey(e)}
+  oncontextmenu={onRowContextMenu}
   use:hintAnchor={{ id: 'session-actions', when: !!sess.claude_session_id && sess.status !== 'ghost' }}
+  use:slideIn={sess.id}
+  use:wash={bucketState(triage.bucket)}
 >
   {#if selectMode && !readOnly}
-    <!-- a11y smell, known: an <input> nested in a role="button" row. The
-         row is the click target for open/toggle; the box is a visible
-         affordance for the same toggle and stops propagation so the two
-         never double-fire. Splitting the row into a real <button> plus a
-         sibling checkbox is the proper fix (F5 sidebar split). -->
+    <!-- The row is a treeitem (redesign step 7.2), so the box is a control
+         of its own inside it, not a child a button would hide. It is a
+         visible affordance for the row's toggle and stops propagation so
+         the two never double-fire. -->
     <input
       type="checkbox"
       class="select-box"
@@ -488,25 +682,11 @@
            Read-only — name and status chip only, no actions. Checked before
            the ghost branch: a ghosted external row must not offer
            Recreate / Dismiss either. -->
-      <span class="status-dot status-{sess.status}" title={sess.status} aria-hidden="true"></span>
+      <span class="status-dot status-{sess.status}" title={sess.status} role="img" aria-label="Status: {sess.status}"></span>
       <span class="sess-name" title={sess.tmux_name}>{primaryName}</span>
-      {#if sess.stuck_kind}
-        <span
-          class="claude-chip stuck-chip"
-          data-testid="stuck-chip"
-          style="background: {STUCK_COLOR}22; color: {STUCK_COLOR}; border-color: {STUCK_COLOR}66;"
-          title="Stuck: {stuckKindLabel(sess.stuck_kind)}"
-        >⚠ stuck: {stuckKindLabel(sess.stuck_kind)}</span>
-      {:else if sess.claude_status}
-        <span
-          class="claude-chip"
-          data-testid="claude-chip"
-          style="background: {claudeStatusColor(sess.claude_status)}22; color: {claudeStatusColor(sess.claude_status)}; border-color: {claudeStatusColor(sess.claude_status)}44;"
-          title="Claude: {sess.claude_status}"
-        >{claudeStatusLabel(sess.claude_status)}</span>
-      {/if}
+      <SessionStatusChip {sess} brief />
     {:else if sess.status === 'ghost'}
-      <span class="status-dot status-ghost" title="ghost — session lost" aria-hidden="true"></span>
+      <span class="status-dot status-ghost" title="Failed · session lost" role="img" aria-label="Status: Failed, session lost"></span>
       <span class="host-badge" data-testid="host-badge" aria-label="host {sess.host_alias}">{sess.host_alias}</span>
       <span class="sess-name" title={sess.tmux_name}>{
         $showFriendlyNames && sess.friendly_name ? sess.friendly_name : sess.tmux_name
@@ -530,14 +710,14 @@
           data-testid="ghost-dismiss"
           onclick={(e) => doDismissGhost(sess, e)}
           disabled={ghostDismissBlocked !== null}
-          title={ghostDismissBlocked ?? 'Dismiss ghost session'}
+          title={ghostDismissBlocked ?? 'Dismiss lost session'}
           aria-label="Dismiss"
         >×</button>
       </div>
     {:else}
       <div class="sess-lines">
         <div class="sess-line1">
-          <span class="status-dot status-{sess.status}" title={sess.status} aria-hidden="true"></span>
+          <span class="status-dot status-{sess.status}" title={sess.status} role="img" aria-label="Status: {sess.status}"></span>
           {#if relatedCount > 0}
             <span
               class="related-badge"
@@ -545,50 +725,72 @@
               role="img"
               title="{relatedCount} related session(s)"
               aria-label="{relatedCount} related sessions"
-            >🔗{relatedCount}</span>
+            ><Icon name="link" size={12} />{relatedCount}</span>
           {/if}
           {#if sess.kind === 'review'}
-            <span class="review-badge" role="img" title="review session" aria-label="review session">🔍</span>
+            <span class="review-badge" role="img" title="review session" aria-label="review session"><Icon name="search" size={12} /></span>
           {/if}
           {#if sess.kind === 'shell'}
-            <span class="shell-badge" title="shell session">▶</span>
+            <span class="shell-badge" role="img" title="shell session" aria-label="shell session"><Icon name="terminal" size={12} /></span>
           {/if}
           {#if sess.kind === 'bg'}
-            <span class="bg-badge" role="img" title="background agent" aria-label="background agent">🤖</span>
+            <span class="bg-badge" role="img" title="background agent" aria-label="background agent"><Icon name="agent" size={12} /></span>
           {/if}
           <span class="sess-name" title={sess.tmux_name}>{primaryName}</span>
-          {#if workKey}
-            <WorkChip {workKey} />
-          {/if}
+          <!-- The chip strip. A Compact row hides it until hover or focus
+               (its state is on the meta line); Comfortable lays the chips
+               out as if the wrapper were not there. The work suggestion
+               stays outside it: a proposal is never hidden. -->
+          <span class="chips" data-testid="row-chips">
+            {#if privacyBadge}
+              <!-- Beside WorkChip in the line-1 chip strip: the same place every
+                   other fact about the row is drawn. -->
+              <span class="privacy-chip" data-testid="privacy-chip" title={privacyBadge.title}
+                >{privacyBadge.text}</span
+              >
+            {/if}
+            {#if localLink}
+              <!-- Local workspace sync: shown only on a linked worktree. -->
+              <span
+                class="lw-dot tone-{localBadge.tone}"
+                data-testid="local-sync-dot"
+                title="Local workspace: {localBadge.label} — {localLink.local_path}"
+                aria-label="Local workspace: {localBadge.label}"
+              ></span>
+              {#if (localLink.local_activity ?? 0) > 0}
+                <span class="lw-changes" data-testid="local-sync-changes">changes</span>
+              {/if}
+            {/if}
+            {#if workKey}
+              <WorkChip {workKey} />
+            {/if}
+            {#each sess.tags ?? [] as t (t)}
+              <!-- The session's label (its tags, gap plan G2.7). -->
+              <span class="label-chip" data-testid="row-label" title="Label: {t}">{t}</span>
+            {/each}
+          </span>
           {#if suggestionKey && suggestion}
             <WorkChip
               workKey={suggestionKey}
               suggested
+              proposed={suggestion.rule === JEV_RULE}
               testid="work-suggestion"
               onclick={(e) => (workBlocked === null ? openWorkMenu(e) : e.stopPropagation())}
             />
           {/if}
-          {#if sess.stuck_kind}
-            <!-- Stuck outranks claude_status: one red chip, no green "working"
-                 next to it to soften the signal. -->
-            <span
-              class="claude-chip stuck-chip"
-              data-testid="stuck-chip"
-              style="background: {STUCK_COLOR}22; color: {STUCK_COLOR}; border-color: {STUCK_COLOR}66;"
-              title="Stuck: {stuckKindLabel(sess.stuck_kind)}{sess.current_activity ? ' — ' + sess.current_activity : ''}"
-            >⚠ stuck: {stuckKindLabel(sess.stuck_kind)}</span>
-          {:else if isInactiveAgent(sess)}
-            <!-- A bg agent whose CLI process is gone: shown as stopped
-                 (grey), offering Remove from list instead of the usual
-                 claude_status chip. -->
-            <span class="claude-chip inactive-chip" data-testid="inactive-chip">inactive</span>
-          {:else if sess.claude_status}
-            <span
-              class="claude-chip"
-              data-testid="claude-chip"
-              style="background: {claudeStatusColor(sess.claude_status)}22; color: {claudeStatusColor(sess.claude_status)}; border-color: {claudeStatusColor(sess.claude_status)}44;"
-              title="Claude: {sess.claude_status}{sess.current_activity ? ' — ' + sess.current_activity : ''}"
-            >{#if sess.claude_status === 'working'}<SpiralLoader size={10} class="chip-spiral" />{/if}{claudeStatusLabel(sess.claude_status)}</span>
+          <span class="chips" data-testid="row-chips">
+            <SessionStatusChip {sess} />
+          </span>
+          {#if sess.account_uuid}
+            <!-- Redesign 4.3: the account this session runs on, on every
+                 Comfortable row; a Compact row shows it with the chips, on
+                 hover (UX audit L1; the inspector names it too). -->
+            <span class="acct"><AccountPill uuid={sess.account_uuid} /></span>
+          {/if}
+          {#if compact}
+            <span class="sess-age" data-testid="sess-age" title={new Date(sess.last_activity_at * 1000).toLocaleString()}
+              >{shortAge(sess.last_activity_at, nowSec)}</span
+            >
           {/if}
           <div class="row-actions">
             {#if isInactiveAgent(sess)}
@@ -623,9 +825,9 @@
               data-testid="edit-label"
               onclick={(e) => beginLabelEdit(sess, e)}
               disabled={labelBlocked !== null}
-              title={labelBlocked ?? 'Edit label (double-click the row)'}
-              aria-label="Edit label"
-            >🏷</button>
+              title={labelBlocked ?? 'Rename (double-click the row)'}
+              aria-label="Rename"
+            ><Icon name="tag" size={12} /></button>
             <button
               class="icon-btn small"
               data-testid="rename-tmux"
@@ -633,7 +835,7 @@
               disabled={tmuxRenameBlocked !== null}
               title={tmuxRenameBlocked ?? 'Rename tmux session'}
               aria-label="Rename tmux session"
-            >✎</button>
+            ><Icon name="edit" size={12} /></button>
             <button
               class="icon-btn small"
               data-testid="recreate-live"
@@ -643,7 +845,7 @@
                 ? 'Recreate: kill the tmux session and start it fresh in the same worktree'
                 : 'Host is offline')}
               aria-label="Recreate"
-            >♻</button>
+            ><Icon name="recreate" size={12} /></button>
             {#if !isInactiveAgent(sess)}
               <!-- An inactive agent's daemon is gone: Remove from list is its
                    only removal action. -->
@@ -654,6 +856,17 @@
                 title={killBlocked ?? 'Kill session'}
                 aria-label="Kill"
               >×</button>
+            {/if}
+            {#if rowMenuOn}
+              <button
+                class="icon-btn small"
+                data-testid="row-menu-open"
+                onclick={openRowMenu}
+                title="Every action on this session (right-click the row)"
+                aria-label="More actions"
+                aria-haspopup="menu"
+                aria-expanded={rowMenu !== null}
+              >⋯</button>
             {/if}
           </div>
         </div>
@@ -677,10 +890,10 @@
                     {/each}
                     {#if l.state === 'suggested'}
                       <span class="why-actions">
-                        <button class="work-btn" data-testid="why-confirm" disabled={workBusy}
-                          title="Confirm (↵ / y)" onclick={(e) => confirmLink(l.id, e)}>Confirm</button>
-                        <button class="work-btn" data-testid="why-reject" disabled={workBusy}
-                          title="Not this (⌫ / n): never suggested again" onclick={(e) => rejectLink(l.id, e)}>Not this</button>
+                        <button class="work-btn" data-testid="why-confirm" disabled={workBusy || workBlocked !== null}
+                          title={workBlocked ?? 'Confirm (↵ / y)'} onclick={(e) => confirmLink(l.id, e)}>Confirm</button>
+                        <button class="work-btn" data-testid="why-reject" disabled={workBusy || workBlocked !== null}
+                          title={workBlocked ?? 'Not this (⌫ / n): never suggested again'} onclick={(e) => rejectLink(l.id, e)}>Not this</button>
                         <button class="work-btn" data-testid="why-pick" disabled={workBusy}
                           title="Type or paste another key or ticket URL" onclick={pickAnother}>Pick another…</button>
                       </span>
@@ -692,7 +905,14 @@
                        select the session); the checkbox is the control. -->
                   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
                   <label class="why-trust" onclick={(e) => e.stopPropagation()}>
-                    <input type="checkbox" data-testid="why-trust" checked={projectTrusted} onchange={toggleTrust} />
+                    <input
+                      type="checkbox"
+                      data-testid="why-trust"
+                      checked={projectTrusted}
+                      disabled={trustBlocked !== null}
+                      title={trustBlocked ?? ''}
+                      onchange={toggleTrust}
+                    />
                     Trust branch keys in this repo
                   </label>
                 {/if}
@@ -701,8 +921,12 @@
             {#if crossOrg}
               <div class="cross-org" data-testid="cross-org" role="alert">
                 <span>{crossOrg.sentence}</span>
-                <button class="work-btn" data-testid="cross-org-force" disabled={workBusy} onclick={linkAnyway}
-                  >Link anyway</button
+                <button
+                  class="work-btn"
+                  data-testid="cross-org-force"
+                  disabled={workBusy || workBlocked !== null}
+                  title={workBlocked ?? ''}
+                  onclick={linkAnyway}>Link anyway</button
                 >
                 <button
                   class="work-btn"
@@ -728,23 +952,25 @@
             <button
               class="work-btn"
               data-testid="work-set"
-              disabled={workBusy || !workDraft.trim()}
+              disabled={workBusy || workBlocked !== null || !workDraft.trim()}
+              title={workBlocked ?? ''}
               onclick={setWork}
             >Set</button>
             {#if rowWork}
               <button
                 class="work-btn"
                 data-testid="work-reject"
-                disabled={workBusy}
-                title="{rowWork.key} is not this session's work; it will not be suggested again"
+                disabled={workBusy || workBlocked !== null}
+                title={workBlocked ??
+                  `${rowWork.key} is not this session's work; it will not be suggested again`}
                 onclick={rejectWork}
               >Not {rowWork.key}</button>
               {#if rowWork.source === 'link' && sess.work}
                 <button
                   class="work-btn"
                   data-testid="work-unlink"
-                  disabled={workBusy}
-                  title="Remove the link (it may be recognised again)"
+                  disabled={workBusy || workBlocked !== null}
+                  title={workBlocked ?? 'Remove the link (it may be recognised again)'}
                   onclick={clearWork}
                 >Clear</button>
               {/if}
@@ -767,92 +993,70 @@
             {/if}
           </div>
         {/if}
-        {#if answerView}
+        {#if sess.pending_form}
+          <!-- Chat forms: the agent waits on a form; the row's own click opens the conversation. -->
+          <span class="form-chip" data-testid="row-form-chip" title={sess.pending_form.title}>Form waiting</span>
+        {/if}
+        {#if answerView && promptBlocked === null && !compact}
           <!-- Claude is asking this row a question. The "Needs you" filter
                shows exactly these rows, so the answer belongs here and not
-               only behind a click into the session. -->
+               only behind a click into the session.
+               Hidden rather than disabled when this client may not drive the
+               session (multi-user M1): the card is a set of answer buttons,
+               and a watcher pressing one would only earn an E_FORBIDDEN. The
+               `blocked` status chip above still says the session is waiting. -->
           <AnswerPrompt session={sess} view={answerView} compact />
         {/if}
-        {#if $showRowDetails}
-          <div class="sess-details" data-testid="sess-details">
-            <span class="host-badge" data-testid="host-badge" aria-label="host {sess.host_alias}">{sess.host_alias}</span>
-            {#if secondaryName}
-              <span class="sep" aria-hidden="true">·</span>
-              <span class="sess-secondary" data-testid="sess-tmux-name">{secondaryName}</span>
-            {/if}
-            {#if elapsed}
-              <span class="sep" aria-hidden="true">·</span>
-              <span class="sess-elapsed">{elapsed}</span>
-            {/if}
-            {#if ctxLevel !== null && sess.context_pct !== null}
-              <span class="sep" aria-hidden="true">·</span>
-              <span
-                class="ctx-badge ctx-{ctxLevel}"
-                data-testid="context-badge"
-                data-level={ctxLevel}
-                style="color: {contextColor(ctxLevel)}; border-color: {contextColor(ctxLevel)};"
-                title="Context window {Math.round(sess.context_pct)}% used"
-                role="meter"
-                aria-valuemin="0"
-                aria-valuemax="100"
-                aria-valuenow={Math.round(sess.context_pct)}
-                aria-label="context usage"
-              ><span class="ctx-bar" style="width: {Math.min(100, Math.max(0, sess.context_pct))}%; background: {contextColor(ctxLevel)};"></span><span class="ctx-pct">{Math.round(sess.context_pct)}%</span></span>
-            {/if}
-            {#if sessionUsageTokens(sess) > 0}
-              {@const priced = (sess.usage_cost_micros ?? 0) > 0}
-              <span class="sep" aria-hidden="true">·</span>
-              <span
-                class="cost-badge"
-                data-testid="cost-badge"
-                data-priced={priced}
-                title={priced
-                  ? `Estimated cost ${formatCostMicros(sess.usage_cost_micros)} · ${formatTokens(sessionUsageTokens(sess))} tokens${sess.usage_model ? ' · ' + sess.usage_model : ''}`
-                  : `Unpriced: no price for ${sess.usage_model ?? 'an unknown model'} · ${formatTokens(sessionUsageTokens(sess))} tokens`}
-              >{priced ? formatCostMicros(sess.usage_cost_micros) : 'unpriced'}</span>
-            {/if}
-            {#if sess.effort_level}
-              <span class="sep" aria-hidden="true">·</span>
-              <span class="effort-badge" title="Effort: {sess.effort_level}">{sess.effort_level}</span>
-            {/if}
-            {#if sess.pr_url}
-              <span class="sep" aria-hidden="true">·</span>
-              <a
-                class="pr-link"
-                href={sess.pr_url}
-                onclick={(e) => e.stopPropagation()}
-                title="Open pull request"
-                target="_blank"
-                rel="noreferrer"
-              >PR↗</a>
-              {#if sess.ci_status}
-                <span class="sep" aria-hidden="true">·</span>
-                <span
-                  class="ci-badge"
-                  class:ci-badge--stale={ciStale}
-                  data-testid="ci-badge"
-                  style="color: {ciStatusColor(sess.ci_status)};"
-                  title={ciStale && sess.pr_checked_at != null
-                    ? `CI checks: ${sess.ci_status}, last checked ${timeAgo(sess.pr_checked_at, nowSec * 1000)}`
-                    : `CI checks: ${sess.ci_status}`}
-                >{ciStatusLabel(sess.ci_status)}</span>
-              {/if}
-            {/if}
-            {#if promptText}
-              <span class="sep" aria-hidden="true">·</span>
-              <span class="sess-meta" data-testid="sess-meta" title={sess.last_prompt ?? undefined}>{promptText}</span>
-            {/if}
+        {#if starting}
+          <!-- Step 5.14: ⌘N closes into the Pulse sequence on the new row;
+               its worktree and tmux steps are done once the row is here, and
+               the agent step lights when the agent reports a status. The
+               only loader on the row: nothing else waits on it. -->
+          <div class="starting-line" data-testid="row-starting">
+            <PulseSteps pulse={startPulse} size={14} markOnly testid="row-pulse" />
+            <span class="starting-text" role="status">{startText}</span>
           </div>
+        {:else}
+          {#if compact}
+            <SessionRowMeta {sess} state={bucketState(triage.bucket)} {promptText} reason={blockedReason ?? waitingLine} />
+          {:else if blockedReason}
+            <!-- Comfortable has no meta line, but a Blocked row still says why
+                 (the SessionRow component's line two: "Paused · weekly limit
+                 on …") and offers its answers, in either density. -->
+            <div class="blocked-line" data-testid="row-blocked-reason">{blockedReason}</div>
+          {/if}
+          {#if triage.bucket === 'account_limit'}
+            <LimitActions
+              {sess}
+              resetsAt={$attentionFacts?.limited_accounts?.[sess.account_uuid ?? '']?.resets_at ?? null}
+              accountName={(u) => accountLabel($accountByUuid.get(u))}
+            />
+          {/if}
+          {#if !compact && $showRowDetails}
+            <SessionRowDetails {sess} {nowSec} {secondaryName} />
+          {/if}
         {/if}
       </div>
     {/if}
   {/if}
+  {@render trailing?.()}
 </div>
 {#if nameDialog}
-  <NameWorkDialog target={nameDialog} onclose={() => (nameDialog = null)} />
+  <!-- `rename` mode is handed an item id and no session, so the dialog cannot
+       ask the access half for itself: this row holds the session, so the answer
+       goes in as a prop (multi-user M1, F2b). `name` mode narrows its own
+       session list and ignores it. -->
+  <NameWorkDialog
+    target={nameDialog}
+    accessBlocked={nameDialog.mode === 'rename' ? renameWorkBlocked : null}
+    onclose={() => (nameDialog = null)}
+  />
 {/if}
 {#if isRenaming && renameError}
   <p class="err inline-err">{renameError}</p>
+{/if}
+{#if rowMenu}
+  <SessionRowMenu session={sess} x={rowMenu.x} y={rowMenu.y} onclose={() => (rowMenu = null)} />
 {/if}
 
 <style>
@@ -861,11 +1065,11 @@
     border: 1px solid var(--border);
     color: var(--fg-muted);
     padding: 0.25rem 0.5rem;
-    border-radius: 5px;
-    font-size: 0.9rem;
+    border-radius: var(--radius-sm);
+    font-size: var(--text-sm);
     line-height: 1;
     cursor: pointer;
-    min-width: 1.6rem;
+    min-width: var(--control-h);
   }
   .icon-btn:hover:not(:disabled) {
     color: var(--fg);
@@ -875,12 +1079,12 @@
   .icon-btn:disabled { opacity: 0.6; cursor: progress; }
   .icon-btn.small {
     padding: 0.1rem 0.35rem;
-    font-size: 0.85rem;
-    min-width: 1.4rem;
+    font-size: var(--text-xs);
+    min-width: var(--control-h);
     border-color: transparent;
   }
   .icon-btn.small:hover { border-color: var(--border); }
-  .icon-btn.danger:hover { color: #e64a4a; border-color: #e64a4a; }
+  .icon-btn.danger:hover { color: var(--danger); border-color: var(--danger); }
 
   /* Line 1's dot/badges/name sit near the row's vertical center; align the
      checkbox with that line instead of the two-line row's overall center
@@ -888,50 +1092,61 @@
      and visually float the box between the two lines). */
   .select-box { margin: 0; margin-top: 0.2rem; flex-shrink: 0; align-self: flex-start; }
   .sess-row.checked { outline: 1px solid var(--accent); }
-  .sess-row.stuck { background: rgba(230, 74, 74, 0.06); }
+  .sess-row.stuck { background: color-mix(in srgb, var(--danger) 6%, transparent); }
 
   .host-badge {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.7rem;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     border: 1px solid var(--border);
     padding: 0.05rem 0.3rem;
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     flex-shrink: 0;
   }
 
   .related-badge {
-    font-size: 0.65rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-    padding: 0.05rem 0.3rem;
-    border-radius: 3px;
+    background: var(--accent-soft);
+    padding: 0 var(--space-1);
+    border-radius: var(--radius-xs);
     flex-shrink: 0;
   }
 
-  .review-badge { font-size: 0.7rem; margin-left: 0.2rem; }
-  .shell-badge { font-size: 0.7rem; margin-left: 0.2rem; color: var(--fg-muted); }
-  .bg-badge { font-size: 0.7rem; margin-left: 0.2rem; }
+  .review-badge,
+  .shell-badge,
+  .bg-badge { display: inline-flex; margin-left: var(--space-1); color: var(--fg-muted); }
 
-  .err { color: #e64a4a; font-size: 0.8rem; padding: 0.2rem 0; margin: 0; }
-  .inline-err { padding-left: 1.6rem; font-size: 0.75rem; }
+  .err { color: var(--danger); font-size: var(--text-2xs); padding: 0.2rem 0; margin: 0; }
+  .inline-err { padding-left: 1.6rem; font-size: var(--text-2xs); }
 
+  .sess-row.stale {
+    opacity: 0.6;
+  }
   .sess-row {
     display: flex;
     align-items: center;
     gap: 0.4rem;
-    font-size: 0.82rem;
+    font-size: var(--text-2xs);
     padding: 0.22rem 0.4rem 0.22rem 1.4rem;
     color: var(--fg);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
     user-select: none;
   }
-  .sess-row:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
-  .sess-row.selected { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+  .sess-row:hover { background: var(--bg-hover); }
+  /* Selection is a bar as well as a tint (manual: SessionRow, accent-soft
+     and the 2 px accent bar), so it does not rest on colour alone; with an
+     org colour the bar sits just inside the 3 px org stripe. */
+  .sess-row.selected { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
+  .sess-row[data-org-color] { box-shadow: inset 3px 0 0 var(--org-color); }
+  .sess-row.selected[data-org-color] { box-shadow: inset 3px 0 0 var(--org-color), inset 5px 0 0 var(--accent); }
   .sess-row.renaming { background: var(--bg-pane); }
   /* The row is the app's primary navigation surface and is a tabbable
-     role="button". Without this a keyboard user tabbing the session list
+     treeitem. Without this a keyboard user tabbing the session list
      sees nothing move at all (WCAG 2.4.7). Drawn inward: the row is inside
      a scrolling list that clips an outset ring. */
   .sess-row:focus-visible {
@@ -972,17 +1187,17 @@
   }
   .sess-row:focus-within .sess-line1 .row-actions,
   .sess-row:hover .sess-line1 .row-actions {
-    background: color-mix(in srgb, var(--accent) 10%, var(--bg-pane));
+    background: var(--bg-hover);
   }
   .sess-row:focus-within .sess-line1 .row-actions::before,
   .sess-row:hover .sess-line1 .row-actions::before {
-    background: linear-gradient(to right, transparent, color-mix(in srgb, var(--accent) 10%, var(--bg-pane)));
+    background: linear-gradient(to right, transparent, var(--bg-hover));
   }
   .sess-row.selected .sess-line1 .row-actions {
-    background: color-mix(in srgb, var(--accent) 22%, var(--bg-pane));
+    background: var(--accent-soft);
   }
   .sess-row.selected .sess-line1 .row-actions::before {
-    background: linear-gradient(to right, transparent, color-mix(in srgb, var(--accent) 22%, var(--bg-pane)));
+    background: linear-gradient(to right, transparent, var(--accent-soft));
   }
 
   .status-dot {
@@ -992,89 +1207,66 @@
     flex-shrink: 0;
     background: var(--fg-muted);
   }
-  .status-dot.status-running { background: rgb(80, 200, 110); }
-  .status-dot.status-frozen { background: rgb(140, 180, 240); }
-  .status-dot.status-orphan { background: rgb(220, 130, 130); }
-  .status-dot.status-ghost { background: rgb(160, 120, 200); opacity: 0.55; }
+  /* Colour never carries the state alone (7.2): the dot is labelled, and
+     each state has its own shape. Running is a filled disc, frozen a ring,
+     orphan a square, ghost a dashed ring. */
+  .status-dot.status-running { background: var(--status-done); }
+  .status-dot.status-frozen { background: transparent; box-shadow: inset 0 0 0 1.5px var(--status-working); }
+  .status-dot.status-orphan { background: var(--status-failed); border-radius: var(--radius-xs); }
+  .status-dot.status-ghost { background: transparent; border: 1.5px dashed var(--status-idle); box-sizing: border-box; opacity: 0.8; }
   .lost-at {
-    font-size: 0.7em;
+    font-size: var(--text-2xs);
     opacity: 0.6;
     margin-left: auto;
     padding-right: 0.25rem;
     white-space: nowrap;
   }
 
-  .claude-chip {
-    font-size: 0.65rem;
-    padding: 0.05rem 0.3rem;
-    border-radius: 3px;
-    border: 1px solid;
+  /* The privacy badge (multi-user M1). Quiet on purpose: on a one-person
+     fleet every row carries it, so it has to read as a label and not as an
+     alert. */
+  .lw-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
     flex-shrink: 0;
-    white-space: nowrap;
+    display: inline-block;
   }
-  .claude-chip :global(.chip-spiral) {
-    margin-right: 0.2rem;
-    vertical-align: -1px;
-  }
-  .stuck-chip { font-weight: 600; }
-  .inactive-chip {
-    background: color-mix(in srgb, var(--fg-muted) 18%, transparent);
-    color: var(--fg-muted);
-    border-color: color-mix(in srgb, var(--fg-muted) 40%, transparent);
-  }
-  .ctx-badge {
-    position: relative;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 2.6rem;
-    height: 0.95rem;
-    font-size: 0.6rem;
-    border: 1px solid;
-    border-radius: 3px;
-    overflow: hidden;
-    flex-shrink: 0;
-    font-variant-numeric: tabular-nums;
-  }
-  .ctx-bar {
-    position: absolute;
-    left: 0;
-    top: 0;
-    bottom: 0;
-    opacity: 0.25;
-  }
-  .ctx-pct { position: relative; }
-  .cost-badge {
-    font-size: 0.6rem;
-    flex-shrink: 0;
-    white-space: nowrap;
-    opacity: 0.75;
-    font-variant-numeric: tabular-nums;
-  }
-  .ci-badge--stale {
-    opacity: 0.45;
-  }
-  .ci-badge {
-    font-size: 0.6rem;
-    flex-shrink: 0;
-    white-space: nowrap;
-  }
-  .effort-badge {
-    font-size: 0.6rem;
-    padding: 0.05rem 0.25rem;
-    border-radius: 3px;
-    background: color-mix(in srgb, var(--fg) 10%, transparent);
-    color: var(--fg-muted);
-    flex-shrink: 0;
-    white-space: nowrap;
+  .lw-dot.tone-ok { background: var(--usage-ok); }
+  .lw-dot.tone-pending { background: var(--usage-warn); }
+  .lw-dot.tone-conflict,
+  .lw-dot.tone-error { background: var(--usage-crit); }
+  .lw-dot.tone-idle { border: 1.5px solid var(--fg-muted); box-sizing: border-box; }
+  .lw-changes { font-size: var(--text-2xs); color: var(--usage-warn); }
+  .privacy-chip {
+    font-size: var(--text-2xs);
     text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 0.05rem 0.28rem;
+    border-radius: var(--radius-xs);
+    border: 1px solid color-mix(in srgb, var(--fg-muted) 35%, transparent);
+    color: var(--fg-muted);
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  .form-chip {
+    font-size: var(--text-2xs);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 0.05rem 0.28rem;
+    border-radius: var(--radius-xs);
+    border: 1px solid color-mix(in srgb, var(--usage-warn) 45%, transparent);
+    color: var(--usage-warn);
+    flex-shrink: 0;
+    white-space: nowrap;
+    align-self: flex-start;
   }
   .work-why {
     display: flex;
     flex-direction: column;
     gap: 0.3rem;
     width: 100%;
-    font-size: 0.7rem;
+    font-size: var(--text-2xs);
   }
   .why-link {
     display: flex;
@@ -1083,7 +1275,7 @@
     align-items: baseline;
   }
   .why-key {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
   }
   .why-what,
   .why-ev {
@@ -1109,8 +1301,8 @@
     flex-wrap: wrap;
     gap: 0.3rem;
     align-items: center;
-    font-size: 0.72rem;
-    color: var(--warn, #f59e0b);
+    font-size: var(--text-2xs);
+    color: var(--status-waiting);
   }
   .work-menu {
     display: flex;
@@ -1122,74 +1314,96 @@
   .work-input {
     flex: 1 1 8rem;
     min-width: 0;
-    font-size: 0.7rem;
+    font-size: var(--text-2xs);
     padding: 0.1rem 0.3rem;
   }
   .work-btn {
-    font-size: 0.65rem;
+    font-size: var(--text-2xs);
     padding: 0.05rem 0.35rem;
     white-space: nowrap;
   }
-  .pr-link {
-    font-size: 0.65rem;
-    color: var(--accent);
-    text-decoration: none;
-    flex-shrink: 0;
-    white-space: nowrap;
-  }
-  .pr-link:hover { text-decoration: underline; }
-
   .sess-lines { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.1rem; }
   .sess-line1 { position: relative; display: flex; align-items: center; gap: 0.4rem; min-width: 0; }
   .sess-line1 .sess-name { flex: 1; }
-  .sess-details {
+  .starting-line {
     display: flex;
     align-items: center;
-    flex-wrap: wrap;
-    gap: 0.35rem;
-    row-gap: 0.15rem;
+    gap: 0.4rem;
     min-width: 0;
     padding-left: 0.85rem;
-    font-size: 0.65rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
-  /* The line wraps instead of clipping — hiding the prompt preview (or any
-     badge) with no visible trace that it exists would defeat the point of
-     the line. Extra height is the user's choice: they opted into this line
-     via the details toggle and can collapse it. */
-  .sess-details > * { flex-shrink: 0; }
-  .sess-details > .sess-secondary { flex-shrink: 1; min-width: 0; }
-  .sess-details > .sess-meta { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  .sess-details .sep { color: var(--fg-muted); opacity: 0.6; }
+  .blocked-line {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding-left: 0.85rem;
+    font-size: var(--text-2xs);
+    color: var(--fg-muted);
+  }
+  .starting-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* Redesign step 3.6: the chip strip and the Compact row. */
+  .chips { display: contents; }
+  /* A 13px name line, a 2xs meta line and the row's padding: 40px
+     (COMPACT_ROW_PX), so 20 rows fit a 1080p window
+     (SessionRowDensity.test.ts measures it). */
+  .sess-row.compact { box-sizing: border-box; min-height: calc(var(--text-sm-lh) + var(--text-2xs-lh) + var(--space-2)); }
+  .acct { display: contents; }
+  .sess-row.compact .chips,
+  .sess-row.compact .acct { display: none; }
+  .sess-row.compact:hover .chips,
+  .sess-row.compact:focus-within .chips,
+  .sess-row.compact.selected .chips,
+  .sess-row.compact:hover .acct,
+  .sess-row.compact:focus-within .acct,
+  .sess-row.compact.selected .acct { display: contents; }
+  .sess-row.compact .sess-name {
+    flex: 1 1 auto;
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--fg);
+  }
+  .sess-age {
+    flex-shrink: 0;
+    font-size: var(--text-2xs);
+    color: var(--fg-muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .label-chip {
+    flex: 0 0 auto;
+    padding: 0 5px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    color: var(--fg-muted);
+    font-size: var(--text-2xs);
+    line-height: 14px;
+    white-space: nowrap;
+  }
   .sess-name {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.8rem;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .sess-secondary,
-  .sess-meta {
-    font-size: 0.65rem;
-    color: var(--fg-muted);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .sess-secondary { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 
   .rename-input {
     flex: 1;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.8rem;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
     padding: 0.1rem 0.3rem;
     border: 1px solid var(--accent);
     background: var(--bg);
     color: var(--fg);
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     outline: none;
     min-width: 0;
   }
+  .rename-input:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: var(--ring-offset); }
 
 </style>

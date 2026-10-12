@@ -5,72 +5,260 @@
   "parent": "settings",
   "layout": "master_detail",
   "resource": "org",
-  "intro": "Optional. Name an org to merge or split GitHub owners, to attach a tracker, or to make it a boundary for its hosts.",
+  "intro": "Optional. Name an org to merge or split GitHub owners, to attach a tracker or a catalog, or to make it a boundary for its hosts and devices. Each org's page shows what belongs to it.",
   "list_items": [
     {
       "type": "custom",
       "component": "org_suggestions"
     }
   ],
-  "sections": [
+  "tabs": [
     {
-      "title": "Organisation",
-      "items": [
+      "title": "Overview",
+      "sections": [
         {
-          "type": "field",
-          "key": "name"
+          "title": "Organisation",
+          "items": [
+            {
+              "type": "field",
+              "key": "name"
+            },
+            {
+              "type": "field",
+              "key": "color"
+            },
+            {
+              "type": "field",
+              "key": "my_role"
+            }
+          ]
         },
         {
-          "type": "field",
-          "key": "color"
+          "title": "Overview",
+          "tiles": true,
+          "items": [
+            {
+              "type": "field",
+              "key": "spent_today_micros"
+            },
+            {
+              "type": "field",
+              "key": "spent_month_micros"
+            },
+            {
+              "type": "field",
+              "key": "spent_week_micros"
+            },
+            {
+              "type": "field",
+              "key": "session_count"
+            },
+            {
+              "type": "field",
+              "key": "member_count"
+            }
+          ]
+        },
+        {
+          "title": "Needs an admin",
+          "items": [
+            {
+              "type": "field",
+              "key": "needs_admin"
+            },
+            {
+              "type": "field",
+              "key": "needs_you"
+            }
+          ]
+        },
+        {
+          "title": "What belongs to it",
+          "items": [
+            {
+              "type": "field",
+              "key": "rules"
+            },
+            {
+              "type": "field",
+              "key": "projects"
+            },
+            {
+              "type": "field",
+              "key": "accounts"
+            },
+            {
+              "type": "field",
+              "key": "hosts"
+            },
+            {
+              "type": "field",
+              "key": "trackers"
+            },
+            {
+              "type": "field",
+              "key": "catalogs"
+            }
+          ]
         }
       ]
     },
     {
-      "title": "What belongs to it",
-      "items": [
+      "title": "Members",
+      "sections": [
         {
-          "type": "field",
-          "key": "rules"
-        },
-        {
-          "type": "field",
-          "key": "hosts"
-        },
-        {
-          "type": "field",
-          "key": "trackers"
+          "title": "Members",
+          "items": [
+            {
+              "type": "field",
+              "key": "members"
+            },
+            {
+              "type": "field",
+              "key": "removed_members"
+            },
+            {
+              "type": "notice",
+              "tone": "info",
+              "text": "A member's devices are fenced to the org: they see its work and what is shared with it, and their own sessions. Adding a member offers a pairing code for their device; Pair a device mints another."
+            }
+          ]
         }
       ]
     },
     {
-      "title": "Boundary",
-      "items": [
+      "title": "Sharing",
+      "sections": [
         {
-          "type": "field",
-          "key": "isolate_sessions"
+          "title": "Team",
+          "items": [
+            {
+              "type": "field",
+              "key": "team"
+            }
+          ]
         },
         {
-          "type": "notice",
-          "tone": "warn",
-          "text": "Hosts outside this org can no longer list or message its sessions, and its hosts cannot see other orgs' sessions. Work data is fenced either way."
-        },
-        {
-          "type": "field",
-          "key": "bound_sees_unassigned"
+          "title": "Sharing",
+          "items": [
+            {
+              "type": "field",
+              "key": "shares"
+            },
+            {
+              "type": "notice",
+              "tone": "info",
+              "text": "An admin takes a share back or narrows it to watch; only a session's owner shares or widens."
+            }
+          ]
         }
       ]
     },
     {
-      "title": "Automation",
-      "items": [
+      "title": "Devices",
+      "sections": [
         {
-          "type": "field",
-          "key": "auto_tidy"
+          "title": "Devices",
+          "items": [
+            {
+              "type": "field",
+              "key": "devices"
+            },
+            {
+              "type": "notice",
+              "tone": "info",
+              "text": "Pair a new phone, browser or desktop in Settings → Devices, and bind it to this org there or here."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Spend",
+      "sections": [
+        {
+          "title": "Spend",
+          "items": [
+            {
+              "type": "field",
+              "key": "spend_series"
+            },
+            {
+              "type": "field",
+              "key": "spend_by_person"
+            },
+            {
+              "type": "notice",
+              "tone": "info",
+              "text": "Spend by person is shown only to an admin who sees every session; otherwise it is hidden whole, never in part. Fleet warns at a budget; it never stops a session."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Settings",
+      "sections": [
+        {
+          "title": "Boundary",
+          "items": [
+            {
+              "type": "field",
+              "key": "isolate_sessions"
+            },
+            {
+              "type": "notice",
+              "tone": "warn",
+              "text": "Hosts outside this org can no longer list or message its sessions, and its hosts cannot see other orgs' sessions. Work data is fenced either way."
+            },
+            {
+              "type": "field",
+              "key": "members_own_sessions_only"
+            },
+            {
+              "type": "field",
+              "key": "bound_sees_unassigned"
+            },
+            {
+              "type": "field",
+              "key": "owns_hub"
+            },
+            {
+              "type": "field",
+              "key": "admins_see_unclaimed"
+            }
+          ]
         },
         {
-          "type": "field",
-          "key": "jev_allowed"
+          "title": "Automation",
+          "items": [
+            {
+              "type": "field",
+              "key": "auto_tidy"
+            },
+            {
+              "type": "field",
+              "key": "jev_allowed"
+            },
+            {
+              "type": "field",
+              "key": "jev_reply_allowed"
+            }
+          ]
+        },
+        {
+          "title": "Its own settings",
+          "items": [
+            {
+              "type": "field",
+              "key": "settings"
+            },
+            {
+              "type": "notice",
+              "tone": "info",
+              "text": "The fleet-wide values are in Settings → Limits and Settings → Work; what is set here applies to this org's sessions only."
+            }
+          ]
         }
       ]
     }

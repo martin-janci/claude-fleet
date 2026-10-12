@@ -1,4 +1,7 @@
 <script lang="ts">
+  import Skeleton from './states/Skeleton.svelte';
+  import Icon from './kit/Icon.svelte';
+  import { tablistKeys } from './tablist_keys';
   import { onWorkChangedDebounced } from './work';
   // The Work view's tree (work graph M14), shown in the sidebar in place of
   // the Sessions tree: organisation → group → task → every session of the
@@ -18,26 +21,47 @@
   // Layout (design 2026-09-29): **List** (the default) is `TaskList` — every
   // task by status, To do / Doing / Done, from its own read; **Grouped** is
   // the org → group tree below, unchanged. The header is the same for both.
+  // **Board** is not a third layout here: it opens `WorkBoard` over the
+  // terminal (it needs the width), and this sidebar keeps its layout.
   import { onDestroy, onMount, tick } from 'svelte';
   import { get } from 'svelte/store';
   import { sessions } from './sessions';
   import { selectedSession, selectSessionExplicitly } from './selection';
-  import { providerInfo, unavailableLabel } from './trackers';
-  import { timeAgo } from './session_status';
-  import { workViewChordLabel } from './app_views';
+  import { openSettingsAt, workBoardOpen, workViewChordLabel } from './app_views';
   import { detectMac } from './terminal_keys';
+  import { isNewTaskChord, ownNewTaskChord } from './new_task';
+  import { shortcutLabel } from './shortcuts';
+  import NewTaskDialog from './NewTaskDialog.svelte';
   import WorkFiltersBar from './WorkFiltersBar.svelte';
   import { facetSentence, workFacets } from './filter_facets';
   import WorkReview from './WorkReview.svelte';
+  import WorkMissions from './WorkMissions.svelte';
+  import { missionOpenRequest } from './missions';
+  import WorkPrs from './WorkPrs.svelte';
   import WorkRules from './WorkRules.svelte';
+  import WorkBuckets from './WorkBuckets.svelte';
+  import {
+    bucketIdOfGroup,
+    bucketSummary,
+    fileUnder,
+    openBuckets,
+    workEpics,
+    type EpicChoice,
+    planInto,
+    unplanFrom,
+    workBuckets,
+    type BucketRow,
+    type BulkOutcome,
+  } from './work_buckets';
   import TaskList from './TaskList.svelte';
+  import WorkTaskRow from './WorkTaskRow.svelte';
+  import { formatCostMicros } from './sessions';
   import {
     buildSections,
     distributeTasks,
     filtersKey,
     isOccurrenceOf,
     mergeTasks,
-    occurrenceKind,
     openTask,
     orgSectionKey,
     readErrorText,
@@ -46,10 +70,6 @@
     sectionKey,
     selectedTaskId,
     setExpanded,
-    taskLabel,
-    taskStatus,
-    trackerDown,
-    trackerDownLabel,
     workExpanded,
     workReview,
     workTask,
@@ -71,7 +91,9 @@
     type WorkTreePage,
     type WorkTreeSection,
     type WorkTreeSectionAsk,
+    knownWorkFacets,
   } from './work_view';
+  import { loadTabCounts, taskTabCount } from './work_tab_counts';
   import type { IpcError } from './result';
 
   let {
@@ -83,11 +105,27 @@
     maxWaitMs = 3000,
   }: { pageSize?: number; debounceMs?: number; maxWaitMs?: number } = $props();
 
-  const chord = workViewChordLabel(detectMac(typeof navigator === 'undefined' ? undefined : navigator));
+  const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
+  const chord = workViewChordLabel(isMac);
+  const newTaskChord = shortcutLabel('work.new-task', isMac);
 
-  let tab = $state<'tasks' | 'review'>('tasks');
+  let tab = $state<'tasks' | 'review' | 'missions' | 'prs'>('tasks');
+  // A "Sent to a mission" chip in Control (redesign 9.3): the Missions tab,
+  // where WorkMissions opens the mission.
+  $effect(() => {
+    if ($missionOpenRequest) tab = 'missions';
+  });
   let page = $state.raw<WorkTreePage | null>(null);
   const archivedHidden = $derived(page?.archived_hidden ?? 0);
+  /** "Hidden by filters · Show": every filter off but the archived switch
+   *  and the grouping (the saved view is left). */
+  function showHidden() {
+    activeWorkViewId.set(null);
+    workViewFilters.update((f) => {
+      const n = normalizeFilters(f);
+      return normalizeFilters({ archived: n.archived, group_by: n.group_by });
+    });
+  }
   function setArchived(on: boolean) {
     workViewFilters.update((f) => {
       const { group: _g, archived: _a, ...rest } = normalizeFilters(f);
@@ -106,22 +144,139 @@
   let sectionErrors = $state.raw<Map<string, string>>(new Map());
   let reviewTotal = $state<number | null>(null);
   let rulesOpen = $state(false);
+  let bucketsOpen = $state(false);
+  // Sprints and releases (sprints design 2026-09-28 §6a/§6b): the buckets a
+  // section header names and the selection plans into. Read when the view
+  // groups by them or a selection starts, and after every change.
+  let buckets = $state.raw<BucketRow[]>([]);
+  const bucketById = $derived(new Map(buckets.map((b) => [b.id, b])));
+  const groupedByBucket = $derived($workViewFilters.group_by === 'sprint' || $workViewFilters.group_by === 'release');
+  let bucketSeq = 0;
+  async function loadBuckets() {
+    const mine = ++bucketSeq;
+    const r = await workBuckets();
+    if (mine !== bucketSeq) return;
+    if (r.ok && Array.isArray(r.value)) buckets = r.value;
+  }
+  // The epics a selection can be filed under (sprints design §3, §6b).
+  let epics = $state.raw<EpicChoice[]>([]);
+  let epicSeq = 0;
+  async function loadEpics() {
+    const mine = ++epicSeq;
+    const r = await workEpics();
+    if (mine !== epicSeq) return;
+    if (r.ok) epics = r.value;
+  }
+  // Bulk assignment: the tasks picked (by work item; a bare key has none).
+  let selecting = $state(false);
+  let picked = $state.raw<Set<number>>(new Set());
+  let bulkBusy = $state(false);
+  let bulkNotice = $state<string | null>(null);
+  function startSelecting() {
+    selecting = !selecting;
+    picked = new Set();
+    bulkNotice = null;
+    if (selecting) {
+      void loadBuckets();
+      void loadEpics();
+    }
+  }
+  function togglePick(itemId: number) {
+    const next = new Set(picked);
+    if (next.has(itemId)) next.delete(itemId);
+    else next.add(itemId);
+    picked = next;
+  }
+  /** Each picked item's section bucket, when the view groups by one. */
+  function pickedByBucket(): Map<number, number[]> {
+    const out = new Map<number, number[]>();
+    for (const st of states.values())
+      for (const t of st.tasks) {
+        if (t.item_id == null || !picked.has(t.item_id)) continue;
+        const b = bucketIdOfGroup(t.group?.id ?? '');
+        if (b == null) continue;
+        const ids = out.get(b) ?? [];
+        if (!ids.includes(t.item_id)) ids.push(t.item_id);
+        out.set(b, ids);
+      }
+    return out;
+  }
+  function outcomeText(verb: string, b: string, o: BulkOutcome): string {
+    const ok = o.done > 0 ? `${verb} ${o.done} task${o.done === 1 ? '' : 's'} ${b}.` : '';
+    const bad = o.failed.length > 0 ? ` ${o.failed.length} refused: ${readErrorText(o.failed[0].error)}` : '';
+    return (ok + bad).trim();
+  }
+  async function planPicked(bucketId: number) {
+    const b = bucketById.get(bucketId);
+    if (!b || picked.size === 0) return;
+    bulkBusy = true;
+    const o = await planInto(b, [...picked]);
+    bulkBusy = false;
+    bulkNotice = outcomeText('Planned', `into “${b.name}”`, o);
+    // Its bump (`planInto`) re-reads the view and, with it, the buckets.
+    if (o.failed.length === 0) picked = new Set();
+  }
+  async function filePicked(to: number | null) {
+    if (picked.size === 0) return;
+    bulkBusy = true;
+    const o = await fileUnder(to, [...picked]);
+    bulkBusy = false;
+    const name = to == null ? null : epics.find((e) => e.itemId === to)?.label;
+    bulkNotice = outcomeText(to == null ? 'Took' : 'Filed', to == null ? 'out to the top' : `under “${name ?? 'the epic'}”`, o);
+    // Each write bumped `workChanged`, which re-reads the view.
+    if (o.failed.length === 0) picked = new Set();
+  }
+  async function unplanPicked() {
+    bulkBusy = true;
+    const total: BulkOutcome = { done: 0, failed: [] };
+    for (const [bid, ids] of pickedByBucket()) {
+      const b = bucketById.get(bid);
+      if (!b) continue;
+      const o = await unplanFrom(b, ids);
+      total.done += o.done;
+      total.failed.push(...o.failed);
+    }
+    bulkBusy = false;
+    bulkNotice = outcomeText('Took', `out of their ${$workViewFilters.group_by}`, total);
+    if (total.failed.length === 0) picked = new Set();
+  }
   let root = $state<HTMLDivElement | null>(null);
   // The List layout's last read: the filter bar's orgs and trackers, and the
   // sessions it shows.
   let listPage = $state.raw<WorkTreePage | null>(null);
+  // The List layout reads its own page: its hidden count is that page's.
+  const hiddenByFilters = $derived(($workLayout === 'list' ? listPage : page)?.hidden_by_filters ?? 0);
   const listMode = $derived($workLayout === 'list');
+  // G3.3: the counts after the tabs. Tasks comes from the page shown;
+  // Missions and Pull requests are read on their own, on mount and when
+  // work changes.
+  const tasksCount = $derived(taskTabCount(listMode ? listPage : page, listMode));
+  let otherCounts = $state<{ missions: number | null; prs: number | null }>({ missions: null, prs: null });
+  let countsSeq = 0;
+  async function loadCounts() {
+    const mine = ++countsSeq;
+    const c = await loadTabCounts();
+    if (mine === countsSeq) otherCounts = c;
+  }
   function onListPage(p: WorkTreePage) {
     listPage = p;
+    if (p.facets) knownWorkFacets.set(p.facets);
     workTreeMeta.set({ orgs: p.orgs, trackers: p.trackers, groups: p.groups });
   }
 
   const sections: OrgSection[] = $derived(page ? buildSections(page.groups, page.orgs, states) : []);
+  // A blocked task names what it waits for by key when that task is loaded.
+  const loadedById = $derived(new Map(sections.flatMap((o) => o.groups.flatMap((g) => g.tasks.map((t) => [t.task_id, t] as const)))));
+  const taskById = (id: string) => loadedById.get(id);
   const selectedSessionId = $derived($selectedSession?.id ?? null);
   const expanded = $derived($workExpanded[$workViewKey] ?? {});
 
-  function orgOpen(o: OrgSection): boolean {
-    return expanded[o.key] ?? true;
+  /** "32bit · claude-fleet": the org, then the group (one section per org
+   *  when grouped by organisation). */
+  function sectionTitle(o: OrgSection, g: GroupSection): string {
+    if (g.group.source === 'org') return o.name;
+    const group = g.group.source === 'none' ? (g.group.label || 'No group') : g.group.label;
+    return `${o.name} · ${group}`;
   }
   // A section the first page filled is open unless closed; any other is
   // closed until opened (it costs a read).
@@ -138,6 +293,7 @@
       trackers: Array.isArray(v?.trackers) ? v.trackers : [],
       total: typeof v?.total === 'number' ? v.total : 0,
       archived_hidden: typeof v?.archived_hidden === 'number' ? v.archived_hidden : 0,
+      hidden_by_filters: typeof v?.hidden_by_filters === 'number' ? v.hidden_by_filters : 0,
       next_cursor: v?.next_cursor ?? null,
       generated_at: v?.generated_at,
     };
@@ -226,6 +382,7 @@
     pageFiltersKey = fk;
     const p = pageOf(r.value);
     page = p;
+    if (p.facets) knownWorkFacets.set(p.facets);
     if (opts.review) {
       if (typeof r.value?.review_total === 'number') reviewTotal = r.value.review_total;
       else void loadReviewCount();
@@ -267,6 +424,8 @@
       void loadSection(g, false, want);
     }
     loadedOnce = true;
+    if (filters.group_by === 'sprint' || filters.group_by === 'release' || selecting) void loadBuckets();
+    if (selecting) void loadEpics();
     flushReveal();
   }
 
@@ -350,8 +509,12 @@
     applySection(k, p.tasks, p.next_cursor ?? null, more);
   }
 
+  let reviewSeq = 0;
   async function loadReviewCount() {
+    // Only the newest count lands (review r07).
+    const mine = ++reviewSeq;
     const r = await workReview({ limit: 1 });
+    if (mine !== reviewSeq) return;
     reviewTotal = r.ok && r.value && typeof r.value.total === 'number' ? r.value.total : null;
   }
 
@@ -391,10 +554,27 @@
         return;
       }
       void load({ full, review: true });
+      void loadCounts();
     },
     () => debounceMs,
     () => maxWaitMs,
   );
+
+  // The tabs (step 3.10). The board is a destination of the
+  // right column (`workBoardOpen`), so its tab reads that store; any other tab
+  // leaves it.
+  const shownTab = $derived<'tasks' | 'missions' | 'board' | 'prs'>(
+    $workBoardOpen ? 'board' : tab === 'missions' || tab === 'prs' ? tab : 'tasks',
+  );
+  function pickTab(t: 'tasks' | 'review' | 'missions' | 'board' | 'prs') {
+    if (t === 'board') {
+      workBoardOpen.set(true);
+      return;
+    }
+    workBoardOpen.set(false);
+    if (t === 'tasks') showTasks();
+    else tab = t;
+  }
 
   function showTasks() {
     tab = 'tasks';
@@ -405,10 +585,28 @@
     void load({ full });
   }
 
+  // ⌘N makes a task while Work is open (G2.1; the registry's `work`
+  // scope): the quick switcher stands aside while this view owns it.
+  let newTaskOpen = $state(false);
+  const releaseNewTask = ownNewTaskChord();
+  function onNewTaskChord(e: KeyboardEvent) {
+    if (!isNewTaskChord(e, isMac)) return;
+    // Another dialog owns the keyboard while open.
+    if ((e.target as Element | null)?.closest?.('dialog')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    newTaskOpen = true;
+  }
+
   onMount(() => {
     void load({ review: true });
+    void loadCounts();
+    // Capture phase, as the switcher's: beat the terminal to the chord.
+    window.addEventListener('keydown', onNewTaskChord, true);
   });
   onDestroy(() => {
+    window.removeEventListener('keydown', onNewTaskChord, true);
+    releaseNewTask();
     offFilters();
     offLayout();
     offChanged();
@@ -425,9 +623,21 @@
     workTreeSessionIds.set(ids);
   });
 
-  function toggleOrg(o: OrgSection) {
-    setExpanded(get(workViewKey), o.key, !orgOpen(o));
+  // The people and tracker columns of the tasks loaded, for the filter
+  // bar's Assignee picker and Tracker column chips (redesign step 6.2).
+  function namesOf(pick: (t: WorkTask) => readonly (string | null | undefined)[]): string[] {
+    const seen = new Map<string, string>();
+    const lists = [page?.tasks ?? [], listPage?.tasks ?? [], ...[...states.values()].map((x) => x.tasks)];
+    for (const tasks of lists)
+      for (const t of tasks)
+        for (const n of pick(t)) {
+          const v = n?.trim();
+          if (v && !seen.has(v.toLowerCase())) seen.set(v.toLowerCase(), v);
+        }
+    return [...seen.values()].sort((a, b) => a.localeCompare(b));
   }
+  const people = $derived(namesOf((t) => t.assignees ?? []));
+  const columns = $derived(namesOf((t) => [t.status_name]));
 
   function toggleGroup(g: GroupSection) {
     const open = !groupOpen(g);
@@ -442,7 +652,7 @@
   }
 
   function selectTask(t: WorkTask) {
-    openTask(t.task_id);
+    openTask(t.task_id, t.sessions);
   }
 
   // Opening an occurrence opens its session — the same `session_id` from
@@ -451,30 +661,10 @@
   function openOccurrence(t: WorkTask, l: WorkTaskLink) {
     const row =
       l.session_id != null && l.state !== 'ended' ? $sessions.find((r) => r.id === l.session_id) : undefined;
-    if (row) {
-      selectedTaskId.set(t.task_id);
-      selectSessionExplicitly(row);
-    } else {
-      openTask(t.task_id);
-    }
+    if (row) selectSessionExplicitly(row, { task: t.task_id });
+    else openTask(t.task_id, t.sessions);
   }
 
-  function occurrenceTitle(l: WorkTaskLink): string {
-    const kind = occurrenceKind(l);
-    const what =
-      kind === 'primary'
-        ? 'primary work of this session'
-        : kind === 'secondary'
-          ? 'also worked on by this session (not its primary)'
-          : kind === 'suggested'
-            ? 'a suggestion nobody has decided — it never groups a session'
-            : kind === 'rejected'
-              ? 'rejected'
-              : `ended${l.ended_at ? ` ${timeAgo(l.ended_at)}` : ''}`;
-    const parts = [what, l.host ?? '', l.why ?? ''].filter(Boolean);
-    if (l.cross_org) parts.push('links two organisations');
-    return parts.join(' · ');
-  }
 
   // "Show in Work view": expand the task's section (loading it when the
   // first page did not reach it) and scroll to it.
@@ -524,70 +714,114 @@
     if (req) flushReveal();
   });
 
-  function badge(t: WorkTask): string {
-    if (t.kind === 'local') return 'local';
-    if (t.kind === 'ref') return 'key';
-    return providerInfo(t.provider)?.icon ?? t.provider ?? 'tracker';
-  }
 </script>
 
 <div class="work-tree" data-testid="work-tree" aria-busy={loading} bind:this={root}>
   <header class="work-header">
     <div class="row">
-      <div class="tabs" role="tablist" aria-label="Work view">
-        <button
-          class="btn btn--chip btn--toggle"
-          role="tab"
-          aria-selected={tab === 'tasks'}
-          class:is-active={tab === 'tasks'}
-          data-testid="work-tab-tasks"
-          onclick={showTasks}>Tasks</button
-        >
-        <button
-          class="btn btn--chip btn--toggle"
-          role="tab"
-          aria-selected={tab === 'review'}
-          class:is-active={tab === 'review'}
-          data-testid="work-tab-review"
-          onclick={() => (tab = 'review')}>Review{#if reviewTotal}&nbsp;· {reviewTotal}{/if}</button
-        >
-      </div>
-      {#if tab === 'tasks'}
-        <div class="layout" role="group" aria-label="Layout">
+        <!-- The fixed Work tabs (redesign step 3.10): Tasks, Missions, Board
+             and Pull requests, with the links waiting for review as a count
+             after them (a tablist holds only tabs). Review is part of Tasks;
+             the board is a Work view of its own, not an overlay toggled from
+             the layout chips. -->
+        <div class="tabs seg" role="tablist" aria-label="Work view" use:tablistKeys>
           <button
-            class="btn btn--chip btn--toggle"
-            type="button"
-            aria-pressed={listMode}
-            class:is-active={listMode}
-            data-testid="work-layout-list"
-            title="By status: To do, Doing, Done"
-            onclick={() => workLayout.set('list')}>List</button
+            class="seg-tab"
+            role="tab"
+            aria-selected={shownTab === 'tasks'}
+            class:is-active={shownTab === 'tasks'}
+            data-testid="work-tab-tasks"
+            onclick={() => pickTab('tasks')}
+            >Tasks{#if tasksCount != null}<span class="tab-count" data-testid="work-tab-tasks-count">{tasksCount}</span>{/if}</button
           >
           <button
-            class="btn btn--chip btn--toggle"
-            type="button"
-            aria-pressed={!listMode}
-            class:is-active={!listMode}
-            data-testid="work-layout-grouped"
-            title="Organisation → group"
-            onclick={() => workLayout.set('grouped')}>Grouped</button
+            class="seg-tab"
+            role="tab"
+            aria-selected={shownTab === 'missions'}
+            class:is-active={shownTab === 'missions'}
+            data-testid="work-tab-missions"
+            onclick={() => pickTab('missions')}
+            >Missions{#if otherCounts.missions != null}<span class="tab-count" data-testid="work-tab-missions-count">{otherCounts.missions}</span>{/if}</button
+          >
+          <button
+            class="seg-tab"
+            role="tab"
+            aria-selected={shownTab === 'board'}
+            class:is-active={shownTab === 'board'}
+            data-testid="work-tab-board"
+            title="These tasks on a board by status"
+            onclick={() => pickTab('board')}>Board</button
+          >
+          <button
+            class="seg-tab"
+            role="tab"
+            aria-selected={shownTab === 'prs'}
+            class:is-active={shownTab === 'prs'}
+            data-testid="work-tab-prs"
+            onclick={() => pickTab('prs')}
+            >Pull requests{#if otherCounts.prs != null}<span class="tab-count" data-testid="work-tab-prs-count">{otherCounts.prs}</span>{/if}</button
           >
         </div>
+        {#if reviewTotal}
+          <button
+            class="review-count"
+            type="button"
+            aria-pressed={shownTab === 'tasks' && tab === 'review'}
+            class:is-active={shownTab === 'tasks' && tab === 'review'}
+            title="{reviewTotal} {reviewTotal === 1 ? 'link waits' : 'links wait'} for review"
+            aria-label="Review: {reviewTotal} waiting"
+            data-testid="work-review-count"
+            onclick={() => pickTab('review')}>{reviewTotal}</button
+          >
+        {/if}
+      {#if tab === 'tasks' && !listMode}
+        <button
+          class="btn btn--quiet btn--icon"
+          type="button"
+          title="Select tasks to plan into a sprint or release"
+          aria-label="Select tasks"
+          aria-pressed={selecting}
+          data-testid="work-select-toggle"
+          onclick={startSelecting}><Icon name="checklist" size={14} /></button
+        >
       {/if}
+      <button
+        class="btn btn--quiet btn--icon"
+        type="button"
+        title="Sprints & releases"
+        aria-label="Sprints & releases"
+        data-testid="work-buckets-open"
+        onclick={() => (bucketsOpen = true)}><Icon name="clock" size={14} /></button
+      >
+      <button
+        class="btn btn--quiet btn--icon"
+        type="button"
+        title="New task ({newTaskChord})"
+        aria-label="New task"
+        data-testid="work-new-task"
+        onclick={() => (newTaskOpen = true)}>+</button
+      >
       <button
         class="btn btn--quiet btn--icon"
         type="button"
         title="Placement rules"
         aria-label="Placement rules"
         data-testid="work-rules-open"
-        onclick={() => (rulesOpen = true)}>⚙</button
+        onclick={() => (rulesOpen = true)}><Icon name="settings" size={14} /></button
       >
       <!-- Refresh is the sidebar's ↻ (it re-reads this view too), and
            collapse is the sidebar's ‹: one of each. -->
     </div>
     {#if tab === 'tasks'}
       {@const meta = listMode ? listPage : page}
-      <WorkFiltersBar orgs={meta?.orgs ?? []} trackers={meta?.trackers ?? []} listLayout={listMode} />
+      <WorkFiltersBar
+        orgs={meta?.orgs ?? []}
+        trackers={meta?.trackers ?? []}
+        listLayout={listMode}
+        {people}
+        {columns}
+        facets={meta?.facets ?? {}}
+      />
     {/if}
   </header>
 
@@ -598,17 +832,39 @@
         <button class="btn btn--quiet" type="button" data-testid="work-tree-refresh-retry" onclick={() => void load()}>Retry</button>
       </p>
     {/if}
+    {#if tab === 'review' && !$workBoardOpen}
+      <div class="review-strip" data-testid="work-review-strip">
+        <span>Review: {reviewTotal ?? 0} waiting</span>
+        <button
+          class="btn btn--quiet btn--icon"
+          type="button"
+          title="Back to the tasks"
+          aria-label="Close review"
+          data-testid="work-review-strip-close"
+          onclick={() => pickTab('tasks')}>×</button
+        >
+      </div>
+    {/if}
     {#if tab === 'review'}
       <WorkReview onchanged={() => void loadReviewCount()} />
+    {:else if tab === 'missions'}
+      <WorkMissions />
+    {:else if tab === 'prs'}
+      <WorkPrs />
     {:else if listMode}
       <TaskList {debounceMs} {maxWaitMs} onpage={onListPage} />
+      {#if hiddenByFilters > 0}
+        <button class="of-btn quiet hidden-row" type="button" data-testid="work-hidden-by-filters" onclick={showHidden}
+          ><span>Hidden by filters <span class="of-count">{hiddenByFilters}</span></span><span>Show</span></button
+        >
+      {/if}
     {:else if error}
       <div class="state error" role="alert" data-testid="work-tree-error">
         <p>{readErrorText(error)}</p>
         <button class="btn" type="button" data-testid="work-tree-retry" onclick={() => void load()}>Retry</button>
       </div>
     {:else if !page}
-      <p class="state muted" data-testid="work-tree-loading">Loading work…</p>
+      <div class="state" data-testid="work-tree-loading"><Skeleton rows={4} label="Loading work" /></div>
     {:else if sections.length === 0}
       {@const facets = workFacets($workViewFilters, {
         orgName: (id) => page?.orgs.find((o) => o.id === id)?.name,
@@ -626,135 +882,179 @@
               workViewFilters.set({});
             }}>Clear filters</button
           >
+        {:else if archivedHidden === 0 && page.trackers.length === 0}
+          <!-- Gap plan G3.13 (board Finish, "Work · no tracker connected"). -->
+          <div data-testid="work-tree-no-tracker">
+            <p><strong>No tracker connected.</strong> Fleet tracks its own tasks, or reads tickets from Jira, GitHub, Linear or Asana.</p>
+            <div class="empty-actions">
+              <button class="btn is-bounded" type="button" data-testid="work-empty-create" onclick={() => (newTaskOpen = true)}>Create a task…</button>
+              <button class="btn btn--quiet is-bounded" type="button" data-testid="work-empty-connect" onclick={() => openSettingsAt('trackers')}
+                >Connect a tracker…</button
+              >
+            </div>
+          </div>
         {:else if archivedHidden === 0}
           <p>No work yet. Tasks appear here once a session is linked to a ticket, or you name its work. Back to Sessions: {chord}.</p>
+          <button class="btn btn--quiet is-bounded" type="button" data-testid="work-empty-create" onclick={() => (newTaskOpen = true)}>Create a task…</button>
         {/if}
         {#if archivedHidden > 0}
           {@render archivedRow()}
         {/if}
       </div>
     {:else}
-      <ul class="orgs" aria-label="Work">
+      <!-- Board "Work · tasks with filters open": one flat list of
+           sections, each named by its org and its group, and a row per
+           task (WorkTaskRow). -->
+      <ul class="groups" aria-label="Work">
         {#each sections as o (o.key)}
-          <li class="org" data-testid="work-org">
-            <button class="org-head" type="button" data-testid="work-org-head" aria-expanded={orgOpen(o)} onclick={() => toggleOrg(o)}>
-              <span class="caret" class:open={orgOpen(o)} aria-hidden="true">▸</span>
-              {#if o.color}<span class="org-dot" style="background: {o.color}" aria-hidden="true"></span>{/if}
-              <span class="org-name">{o.name}</span>
-              <span class="count">{o.count}</span>
-            </button>
-            {#if orgOpen(o)}
-              <ul class="groups">
-                {#each o.groups as g (g.key)}
-                  <li class="group" data-testid="work-group" data-group-id={g.group.id}>
-                    <button class="group-head" type="button" data-testid="work-group-head" aria-expanded={groupOpen(g)} onclick={() => toggleGroup(g)}>
-                      <span class="caret" class:open={groupOpen(g)} aria-hidden="true">▸</span>
-                      <span class="group-name" class:none={g.group.source === 'none'}
-                        >{g.group.source === 'none' ? 'No group' : g.group.label}</span
+          {#each o.groups as g (g.key)}
+            {@const sectionBucket = groupedByBucket ? bucketById.get(bucketIdOfGroup(g.group.id) ?? -1) : undefined}
+            <li class="group" data-testid="work-group" data-group-id={g.group.id} data-org-id={o.orgId ?? 'none'}>
+              <button
+                class="of-sec group-head"
+                type="button"
+                data-testid="work-group-head"
+                aria-expanded={groupOpen(g)}
+                title={g.group.source === 'none' || g.group.source === 'org' ? undefined : `Grouped by ${g.group.source}`}
+                onclick={() => toggleGroup(g)}
+              >
+                <span class="caret" class:open={groupOpen(g)} aria-hidden="true">▸</span>
+                {#if o.color}<span class="org-dot" style="background: {o.color}" aria-hidden="true"></span>{/if}
+                <span class="group-name">{sectionTitle(o, g)}</span>
+                {#if sectionBucket}
+                  <span class="bucket-sum" data-testid="work-group-bucket">{bucketSummary(sectionBucket)}</span>
+                {/if}
+                {#if g.cost > 0}<span class="spend" data-testid="work-group-spend" title="Spend of its tasks">{formatCostMicros(g.cost)}</span>{/if}
+                <span class="of-count" data-testid="work-group-count">{g.count}</span>
+              </button>
+              {#if groupOpen(g)}
+                <ul class="tasks">
+                  {#each g.tasks as t (t.task_id)}
+                    <li
+                      class="task"
+                      class:selected={$selectedTaskId === t.task_id}
+                      class:lit={(t.sessions ?? []).some((l) => isOccurrenceOf(l, selectedSessionId))}
+                      class:picking={selecting}
+                      data-testid="work-task"
+                      data-task-id={t.task_id}
+                    >
+                      {#if selecting}
+                        <input
+                          class="pick"
+                          type="checkbox"
+                          aria-label="Select {t.key ?? t.title ?? t.task_id}"
+                          data-testid="work-task-pick"
+                          disabled={t.item_id == null}
+                          title={t.item_id == null ? 'A bare key has no task to plan yet: open it to make one' : undefined}
+                          checked={t.item_id != null && picked.has(t.item_id)}
+                          onchange={() => t.item_id != null && togglePick(t.item_id)}
+                        />
+                      {/if}
+                      <WorkTaskRow
+                        task={t}
+                        selected={$selectedTaskId === t.task_id}
+                        currentSessionId={selectedSessionId}
+                        lookup={taskById}
+                        onselect={() => selectTask(t)}
+                        onopen={(l) => openOccurrence(t, l)}
+                      />
+                    </li>
+                  {/each}
+                  {#if sectionBusy.has(g.key)}
+                    <li class="state" data-testid="work-section-loading"><Skeleton rows={1} label="Loading" /></li>
+                  {/if}
+                  {#if sectionErrors.get(g.key)}
+                    <li class="state error" role="alert" data-testid="work-section-error">
+                      {sectionErrors.get(g.key)}
+                      <button class="btn btn--quiet" type="button" onclick={() => loadMore(g)}>Retry</button>
+                    </li>
+                  {:else if g.more && !sectionBusy.has(g.key)}
+                    <li>
+                      <button class="btn btn--quiet more-btn" type="button" data-testid="work-load-more" onclick={() => loadMore(g)}
+                        >Load more ({g.count - g.tasks.length} left)</button
                       >
-                      <span class="source" title="Where this group comes from">{g.group.source}</span>
-                      <span class="count" data-testid="work-group-count">{g.count}</span>
-                    </button>
-                    {#if groupOpen(g)}
-                      <ul class="tasks">
-                        {#each g.tasks as t (t.task_id)}
-                          {@const lit = (t.sessions ?? []).some((l) => isOccurrenceOf(l, selectedSessionId))}
-                          <li
-                            class="task"
-                            class:selected={$selectedTaskId === t.task_id}
-                            class:lit
-                            data-testid="work-task"
-                            data-task-id={t.task_id}
-                          >
-                            <button
-                              class="task-row"
-                              type="button"
-                              data-testid="work-task-row"
-                              aria-current={$selectedTaskId === t.task_id ? 'true' : undefined}
-                              onclick={() => selectTask(t)}
-                            >
-                              <span class="tbadge" title={t.tracker_name ?? t.kind}>{badge(t)}</span>
-                              {#if t.needs_you}<span class="needs" data-testid="work-task-needs-you" title="A session needs you" aria-label="needs you">●</span>{/if}
-                              <span class="tlabel" class:unavailable={t.unavailable} title={t.unavailable ? unavailableLabel(t.unavailable_reason) : taskLabel(t)}>
-                                {#if t.key}<span class="key">{t.key}</span>{/if}
-                                <span class="title">{t.title || (t.key ? '' : t.task_id)}</span>
-                              </span>
-                              {#if t.review}<span class="review" data-testid="work-task-review" title="Something to review">?</span>{/if}
-                            </button>
-                            <div class="task-meta">
-                              {#if taskStatus(t)}<span class="status">{taskStatus(t)}</span>{/if}
-                              <span class="counts" data-testid="work-task-counts" title="active / past sessions"
-                                >{t.counts?.active ?? 0} active · {t.counts?.ended ?? 0} past</span
-                              >
-                              {#if trackerDown(t)}<span class="down" data-testid="work-task-tracker-down" title={`tracker state: ${t.tracker_state}`}>{trackerDownLabel(t)}</span>{/if}
-                            </div>
-                            {#if (t.sessions ?? []).length > 0}
-                              <ul class="occurrences">
-                                {#each t.sessions ?? [] as l (l.link_id)}
-                                  {@const kind = occurrenceKind(l)}
-                                  <li>
-                                    <button
-                                      class="occ occ--{kind}"
-                                      class:current={isOccurrenceOf(l, selectedSessionId)}
-                                      type="button"
-                                      data-testid="work-occurrence"
-                                      data-kind={kind}
-                                      data-session-id={l.session_id ?? ''}
-                                      title={occurrenceTitle(l)}
-                                      onclick={() => openOccurrence(t, l)}
-                                    >
-                                      <span class="mark" aria-hidden="true"
-                                        >{kind === 'primary' ? '★' : kind === 'suggested' ? '?' : kind === 'past' ? '·' : '○'}</span
-                                      >
-                                      <span class="oname">{l.name ?? `session ${l.session_id ?? l.link_id}`}</span>
-                                      {#if l.host}<span class="ohost">{l.host}</span>{/if}
-                                      {#if kind === 'past'}<span class="ended">ended</span>{/if}
-                                      {#if kind === 'suggested'}<span class="sr">suggested</span>{/if}
-                                      {#if l.needs_you}<span class="needs" aria-label="needs you">●</span>{/if}
-                                    </button>
-                                  </li>
-                                {/each}
-                                {#if (t.sessions_more ?? 0) > 0}
-                                  <li>
-                                    <button class="occ more" type="button" onclick={() => selectTask(t)}
-                                      >+{t.sessions_more} more</button
-                                    >
-                                  </li>
-                                {/if}
-                              </ul>
-                            {/if}
-                          </li>
-                        {/each}
-                        {#if sectionBusy.has(g.key)}
-                          <li class="state muted" data-testid="work-section-loading">Loading…</li>
-                        {/if}
-                        {#if sectionErrors.get(g.key)}
-                          <li class="state error" role="alert" data-testid="work-section-error">
-                            {sectionErrors.get(g.key)}
-                            <button class="btn btn--quiet" type="button" onclick={() => loadMore(g)}>Retry</button>
-                          </li>
-                        {:else if g.more && !sectionBusy.has(g.key)}
-                          <li>
-                            <button class="btn btn--quiet more-btn" type="button" data-testid="work-load-more" onclick={() => loadMore(g)}
-                              >Load more ({g.count - g.tasks.length} left)</button
-                            >
-                          </li>
-                        {/if}
-                      </ul>
-                    {/if}
-                  </li>
-                {/each}
-              </ul>
-            {/if}
-          </li>
+                    </li>
+                  {/if}
+                </ul>
+              {/if}
+            </li>
+          {/each}
         {/each}
       </ul>
+      {#if hiddenByFilters > 0}
+        <button class="of-btn quiet hidden-row" type="button" data-testid="work-hidden-by-filters" onclick={showHidden}
+          ><span>Hidden by filters <span class="of-count">{hiddenByFilters}</span></span><span>Show</span></button
+        >
+      {/if}
       {#if archivedHidden > 0 || $workViewFilters.archived}
         {@render archivedRow()}
       {/if}
     {/if}
   </div>
+  {#if selecting && tab === 'tasks' && !listMode}
+    {@const sprints = openBuckets(buckets, 'sprint')}
+    {@const releases = openBuckets(buckets, 'release')}
+    <div class="bulk-bar" role="toolbar" aria-label="Plan the selected tasks" data-testid="work-bulk-bar">
+      <span class="bulk-count">{picked.size} selected</span>
+      <select
+        aria-label="Add to sprint"
+        data-testid="work-bulk-sprint"
+        disabled={bulkBusy || picked.size === 0 || sprints.length === 0}
+        title={sprints.length === 0 ? 'No open sprint: create one in Sprints & releases' : 'Moves a task out of the sprint it is in'}
+        onchange={(e) => {
+          const v = Number((e.currentTarget as HTMLSelectElement).value);
+          (e.currentTarget as HTMLSelectElement).value = '';
+          if (v) void planPicked(v);
+        }}
+      >
+        <option value="">Add to sprint…</option>
+        {#each sprints as b (b.id)}<option value={b.id}>{b.name} ({b.state})</option>{/each}
+      </select>
+      <select
+        aria-label="Add to release"
+        data-testid="work-bulk-release"
+        disabled={bulkBusy || picked.size === 0 || releases.length === 0}
+        title={releases.length === 0 ? 'No planned release: create one in Sprints & releases' : undefined}
+        onchange={(e) => {
+          const v = Number((e.currentTarget as HTMLSelectElement).value);
+          (e.currentTarget as HTMLSelectElement).value = '';
+          if (v) void planPicked(v);
+        }}
+      >
+        <option value="">Add to release…</option>
+        {#each releases as b (b.id)}<option value={b.id}>{b.name}</option>{/each}
+      </select>
+      <select
+        aria-label="File under an epic"
+        data-testid="work-bulk-epic"
+        disabled={bulkBusy || picked.size === 0}
+        title={epics.length === 0 ? 'No epic yet: mark a task an epic in its Edit dialog' : 'Files each task one level under the epic'}
+        onchange={(e) => {
+          const v = (e.currentTarget as HTMLSelectElement).value;
+          (e.currentTarget as HTMLSelectElement).value = '';
+          if (v === 'top') void filePicked(null);
+          else if (v) void filePicked(Number(v));
+        }}
+      >
+        <option value="">Under epic…</option>
+        {#each epics as e (e.itemId)}<option value={e.itemId}>{e.label}</option>{/each}
+        <option value="top">Out of its epic (to the top)</option>
+      </select>
+      {#if groupedByBucket}
+        <button class="btn btn--quiet" type="button" data-testid="work-bulk-remove" disabled={bulkBusy || picked.size === 0} onclick={() => void unplanPicked()}
+          >Remove from {$workViewFilters.group_by}</button
+        >
+      {/if}
+      <button class="btn btn--quiet" type="button" data-testid="work-bulk-done" onclick={startSelecting}>Done</button>
+      {#if bulkNotice}<p class="bulk-notice" role="status" data-testid="work-bulk-notice">{bulkNotice}</p>{/if}
+    </div>
+  {/if}
 </div>
+
+{#if bucketsOpen}
+  <!-- Its writes bump `workChanged`, which re-reads the view. -->
+  <WorkBuckets onclose={() => (bucketsOpen = false)} />
+{/if}
 
 {#snippet archivedRow()}
   <!-- Archived tasks (done, or every session archived, and nothing
@@ -774,236 +1074,228 @@
   </div>
 {/snippet}
 
+{#if newTaskOpen}
+  <NewTaskDialog onclose={() => (newTaskOpen = false)} />
+{/if}
 {#if rulesOpen}
   <WorkRules onclose={() => (rulesOpen = false)} />
 {/if}
 
 <style>
+  .empty-actions {
+    display: flex;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+  .review-count {
+    min-width: 18px;
+    height: 16px;
+    padding: 0 5px;
+    border: none;
+    border-radius: var(--radius-sm);
+    background: var(--waiting-soft);
+    color: var(--status-waiting);
+    font: inherit;
+    font-size: var(--text-2xs);
+    line-height: 16px;
+    font-weight: 500;
+    cursor: pointer;
+    align-self: center;
+    margin-right: auto;
+  }
+  .review-count.is-active {
+    outline: 1px solid var(--status-waiting);
+  }
+  .review-strip {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.25rem 0.5rem;
+    margin: 0.25rem 0.5rem;
+    border-radius: var(--radius-sm);
+    background: var(--accent-soft);
+    font-size: var(--text-2xs);
+  }
   .work-tree {
     display: flex;
     flex-direction: column;
     flex: 1 1 auto;
     min-height: 0;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
   }
   .work-header {
     flex: 0 0 auto;
     display: flex;
     flex-direction: column;
-    gap: 0.35rem;
-    padding: 0.4rem 0.6rem;
-    border-bottom: 1px solid var(--border);
+    gap: 8px;
+    padding: 4px 12px 8px;
     background: var(--bg-pane);
   }
   .row {
     display: flex;
     align-items: center;
-    gap: 0.3rem;
+    gap: 6px;
   }
-  .tabs {
+  /* Board: one segmented control for the four Work views. */
+  .seg {
     display: flex;
-    gap: 0.25rem;
-    flex: 1 1 auto;
+    gap: 2px;
+    padding: 2px;
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-md);
+    background: var(--bg-raise);
+    flex: 0 1 auto;
+    min-width: 0;
   }
-  .layout {
-    display: flex;
-    gap: 0.25rem;
-    flex: 0 0 auto;
+  .seg-tab {
+    height: 22px;
+    padding: 0 8px;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--fg-2);
+    font: inherit;
+    font-size: var(--text-xs);
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .tab-count {
+    margin-left: 4px;
+    color: var(--fg-muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .seg-tab:hover {
+    color: var(--fg);
+  }
+  .seg-tab[aria-selected='true'] {
+    background: var(--bg-hover);
+    color: var(--fg);
+    font-weight: 500;
+  }
+  .seg-tab:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+    outline-offset: -1px;
+  }
+  .row:not(:has(.review-count)) .seg {
+    margin-right: auto;
   }
   .scroller {
     flex: 1 1 auto;
     overflow: auto;
     min-height: 0;
-    padding: 0.4rem 0.6rem;
+    padding: 0 0 8px;
   }
   ul {
     list-style: none;
     margin: 0;
     padding: 0;
   }
-  .org-head,
-  .group-head,
-  .task-row,
-  .occ {
-    display: flex;
-    align-items: center;
-    gap: 0.35rem;
+  .group-head {
     width: 100%;
-    background: transparent;
     border: 0;
-    color: var(--fg);
+    background: transparent;
     font: inherit;
+    font-size: var(--text-2xs);
     text-align: left;
-    padding: 0.2rem 0.3rem;
-    border-radius: 4px;
     cursor: pointer;
   }
-  .org-head:hover,
-  .group-head:hover,
-  .task-row:hover,
-  .occ:hover {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+  .group-head:hover {
+    color: var(--fg);
   }
-  .org-head:focus-visible,
-  .group-head:focus-visible,
-  .task-row:focus-visible,
-  .occ:focus-visible {
+  .group-head:focus-visible {
     outline: var(--ring-w) solid var(--ring);
     outline-offset: calc(-1 * var(--ring-w));
   }
-  .org-head {
-    font-weight: 600;
-  }
-  .groups {
-    padding-left: 0.5rem;
-  }
-  .group-head {
-    font-weight: 500;
-  }
-  .group-name.none {
-    color: var(--fg-muted);
-    font-style: italic;
+  .group-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .caret {
-    color: var(--fg-muted);
-    font-size: 0.65rem;
-    width: 0.7rem;
-    transition: transform 0.1s ease;
+    font-size: var(--text-2xs);
+    width: 8px;
+    transition: transform var(--dur-fast) ease;
   }
   .caret.open {
     transform: rotate(90deg);
   }
   .org-dot {
-    width: 0.55rem;
-    height: 0.55rem;
+    width: 6px;
+    height: 6px;
     border-radius: 50%;
+    flex: none;
   }
-  .count {
+  .spend {
     margin-left: auto;
     color: var(--fg-muted);
-    font-size: 0.75rem;
+    font-size: var(--text-2xs);
+    font-variant-numeric: tabular-nums;
   }
-  .source {
+  .spend + .of-count {
+    margin-left: var(--space-1);
+  }
+  .bucket-sum {
+    margin-left: var(--space-1);
     color: var(--fg-muted);
-    font-size: 0.7rem;
-  }
-  .tasks {
-    padding-left: 0.6rem;
-  }
-  .task {
-    border-radius: 4px;
-    margin: 0.1rem 0;
-  }
-  .task.selected {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-  }
-  .task.lit {
-    box-shadow: inset 2px 0 0 var(--accent);
-  }
-  .tbadge {
-    font-size: 0.65rem;
-    border: 1px solid var(--border);
-    border-radius: 3px;
-    padding: 0 0.2rem;
-    color: var(--fg-muted);
-    flex: 0 0 auto;
-  }
-  .tlabel {
-    display: flex;
-    gap: 0.3rem;
-    min-width: 0;
-    flex: 1 1 auto;
-    overflow: hidden;
-  }
-  .tlabel .title {
+    font-size: var(--text-2xs);
+    white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    white-space: nowrap;
   }
-  .tlabel.unavailable {
-    text-decoration: line-through;
-    color: var(--fg-muted);
+  .task.picking {
+    display: flex;
+    align-items: flex-start;
+    gap: 4px;
   }
-  .key {
-    font-family: var(--mono);
+  .task.picking > :global(.work-row) {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .pick {
+    margin: 8px 0 0 8px;
+    flex: none;
+  }
+  .bulk-bar {
     flex: 0 0 auto;
-  }
-  .needs {
-    color: var(--usage-crit, #c62828);
-    font-size: 0.6rem;
-  }
-  .review {
-    font-weight: 700;
-    color: var(--usage-warn, #b45309);
-  }
-  .task-meta {
     display: flex;
     flex-wrap: wrap;
-    gap: 0 0.4rem;
-    padding-left: 1.6rem;
-    color: var(--fg-muted);
-    font-size: 0.72rem;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-pane);
   }
-  /* Each fact wraps as a whole in a narrow sidebar, never mid-phrase. */
-  .task-meta > span {
-    white-space: nowrap;
+  .bulk-bar select {
+    font: inherit;
+    font-size: var(--text-xs);
+    max-width: 12rem;
   }
-  .down {
-    color: var(--usage-warn, #b45309);
+  .bulk-count {
+    font-weight: 500;
   }
-  .occurrences {
-    padding-left: 1.4rem;
-  }
-  .occ {
-    font-size: 0.8rem;
-    padding: 0.1rem 0.3rem;
-    border: 1px solid transparent;
-  }
-  .occ .mark {
-    width: 0.8rem;
-    text-align: center;
-    flex: 0 0 auto;
-  }
-  .occ--primary .mark {
-    color: var(--accent);
-  }
-  .occ--suggested {
-    border: 1px dashed var(--border);
-    color: var(--fg-muted);
-  }
-  .occ--past,
-  .occ--rejected {
-    opacity: 0.6;
-  }
-  .occ.current {
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
-    border-color: var(--accent);
-  }
-  .oname {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .ohost,
-  .ended,
-  .sr {
-    color: var(--fg-muted);
-    font-size: 0.72rem;
-  }
-  .occ.more {
+  .bulk-notice {
+    flex: 1 0 100%;
+    margin: 0;
     color: var(--fg-muted);
   }
   .more-btn {
-    margin: 0.15rem 0 0.15rem 0.6rem;
+    margin: 2px 0 2px 18px;
+  }
+  .hidden-row {
+    width: calc(100% - 12px);
+    margin: 8px 6px 0;
+    justify-content: space-between;
   }
   .state {
-    padding: 0.4rem 0.2rem;
+    padding: 6px 12px;
   }
   .archived-row {
     display: flex;
     align-items: center;
     gap: 6px;
-    margin: 6px 0 4px;
+    margin: 6px 6px 4px;
     padding: 4px 6px;
     border-top: 1px dashed var(--border);
     color: var(--fg-muted);
@@ -1030,11 +1322,11 @@
   }
   .refresh-error {
     margin: 0.2rem 0.4rem;
-    font-size: 0.75rem;
-    color: var(--usage-warn, #b45309);
+    font-size: var(--text-2xs);
+    color: var(--usage-warn);
   }
   .error {
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
   }
   .error p {
     margin: 0 0 0.4rem;

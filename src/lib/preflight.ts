@@ -4,6 +4,7 @@
 // the user stopped on — and safe against the same request firing twice with
 // the answers arriving out of order (see the sequence check in `settle`).
 import { writable, type Readable } from 'svelte/store';
+import { sessionIdActionBlocked } from './share';
 import { previewMove, type MovePreview } from './moveSession';
 import type { IpcError, Result } from './result';
 
@@ -86,6 +87,17 @@ function settle(sessionId: number, toHost: string, seq: number, r: Result<MovePr
 /** Ask for a preview, debounced per session: a burst of requests for one
  *  session fires only the last. */
 export function requestPreflight(sessionId: number, toHost: string): void {
+  // A preview is `move_session { preview: true }` on the named session, which
+  // spec §4.3 puts in the `own` tier — so the gate is here, at the funnel, and
+  // not only on the Transfer sheet's effect that calls it (multi-user M1, F2b).
+  //
+  // Through `sessionIdActionBlocked` since F2d, not a hand-rolled `find`: the
+  // row this resolved could be absent, and `sessionActionBlocked(undefined, …)`
+  // answers `null`, so the preview went out for a session this client could not
+  // see — on a paired desktop, precisely the rows the hub fences off the stream.
+  if (sessionIdActionBlocked(sessionId, 'move_session') !== null) {
+    return;
+  }
   const existing = timers.get(sessionId);
   if (existing !== undefined) clearTimeout(existing);
   const timer = setTimeout(() => {

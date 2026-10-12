@@ -10,6 +10,7 @@ import {
   trackerStale,
   syncedAgo,
   ticketBriefPreview,
+  ticketRef,
   applyWorkEvents,
   sessionsMentioning,
   statusDotClass,
@@ -118,6 +119,29 @@ describe('ticketBriefPreview', () => {
     const end = b.indexOf(UNTRUSTED_END);
     expect(open).toBeGreaterThan(0);
     expect(open < text && text < end).toBe(true);
+  });
+});
+
+describe('a fleet task start', () => {
+  const task: TicketRow = {
+    id: 12,
+    source: 'local',
+    key: 'TASK-12',
+    title: 'Polish the start dialog',
+    status_category: 'todo',
+    created_at: 1,
+    updated_at: 1,
+    tracker_id: null,
+    origin: 'manual',
+    notes: 'the brief toggle, the preview',
+  };
+  it('names the task by its item, not its key', () => {
+    expect(ticketRef(task)).toEqual({ item_id: 12 });
+    expect(ticketRef({ ...task, tracker_id: 4, origin: null })).toEqual({ item_id: 12 });
+  });
+  it('previews the title and notes the backend sends', () => {
+    expect(ticketBriefPreview(task, 'task-12')).toBe('Polish the start dialog\n\nthe brief toggle, the preview');
+    expect(ticketBriefPreview({ ...task, notes: null }, 'task-12')).toBe('Polish the start dialog');
   });
 });
 
@@ -233,6 +257,7 @@ describe('ticketBriefPreview fence (M3 review)', () => {
 import {
   inferProvider,
   displayKey,
+  shownKey,
   trackerClaims,
   showProviderBadges,
   sectionMapRows,
@@ -310,6 +335,13 @@ describe('keys across providers', () => {
   it('an Asana key shows short; badges appear with a second provider', () => {
     expect(displayKey('asana:1207000000000001')).toBe('Asana …000001');
     expect(displayKey('ABC-12')).toBe('ABC-12');
+    // A fleet ticket key, when the item drew one, wins over the tracker's.
+    expect(displayKey('asana:1207000000000001', 'CB-4')).toBe('CB-4');
+    expect(displayKey('acme/web#7', 'WEB-3')).toBe('WEB-3');
+    expect(displayKey('acme/web#7', null)).toBe('acme/web#7');
+    expect(shownKey({ key: 'acme/web#7', display_key: 'WEB-3' })).toBe('WEB-3');
+    expect(shownKey({ key: 'asana:1207000000000001' })).toBe('Asana …000001');
+    expect(shownKey({ key: null })).toBeNull();
     expect(showProviderBadges([tracker(), tracker({ id: 9 })])).toBe(false);
     expect(showProviderBadges([tracker(), gh])).toBe(true);
   });

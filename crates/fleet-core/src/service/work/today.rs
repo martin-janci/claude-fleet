@@ -20,7 +20,7 @@
 //! standup's words are the desktop's to build from what it shows.
 
 use crate::ipc_error::{lock, IpcError};
-use crate::service::orgs::{self, OrgScope};
+use crate::service::orgs::{self};
 use crate::store::{ItemMeta, SessionRow, Store, TrackerRow, WorkItemRow, WorkLinkRow};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -45,6 +45,21 @@ pub struct Today {
     pub groups: Vec<TodayGroup>,
     #[serde(default)]
     pub shipped: Vec<TodayShipped>,
+    /// Missions waiting on a person (gap plan G1.6, hub contract 15): Today's
+    /// Needs you lists them beside the sessions, as the Inbox does. Absent
+    /// from an older hub's answer, and when none waits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missions: Vec<TodayMission>,
+}
+
+/// A mission that waits on a person, as Today lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodayMission {
+    pub id: i64,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<i64>,
+    pub waiting_on: crate::service::attention::MissionWait,
 }
 
 /// Live sessions sharing one piece of work (or none), in one bucket.
@@ -79,9 +94,17 @@ pub struct TodaySession {
     pub host_alias: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<i64>,
-    /// waiting | stuck | failed | lifecycle, when a person is needed.
+    /// The attention reason (waiting, stuck, failed, …) when the session's
+    /// state raises the Needs you badge (step 0.4), so Today's "Needs you"
+    /// lists the same sessions as the badge and the Inbox (step 3.3). A
+    /// ghost, lost or pending-kill row (`lifecycle`, state Paused) has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attention: Option<String>,
+    /// `probably_waiting` when Jev proposes the session waits on a person
+    /// (G1.6, hub contract 15): kept apart from `attention`, so it never
+    /// puts its group in Needs you.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed: Option<String>,
     /// idle | done, when this session is why its group is stale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale: Option<String>,
@@ -110,6 +133,11 @@ pub struct TodayShipped {
     pub at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<i64>,
+    /// Where it came from (gap plan G3.2, "from Morning PR sweep"): the
+    /// routine whose run started the session, or `mission <name>` for a
+    /// mission's task. Absent when a person started it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
 }
 
 /// A ticket that moved to done, as [`digest`] reads it.
@@ -117,6 +145,8 @@ pub struct TodayShipped {
 pub struct DoneItem {
     pub item: WorkItemRow,
     pub org_id: Option<i64>,
+    /// [`TodayShipped::from`].
+    pub from: Option<String>,
 }
 
 /// An ended link with what it was about.
@@ -126,6 +156,8 @@ pub struct EndedWork {
     pub key: Option<String>,
     pub title: String,
     pub url: Option<String>,
+    /// [`TodayShipped::from`].
+    pub from: Option<String>,
 }
 
 /// Why a session is stale, if it is.
@@ -148,7 +180,13 @@ fn stale_reason(row: &SessionRow, now: i64) -> Option<&'static str> {
     }
 }
 
-fn session_of(row: &SessionRow, now: i64, context_red_pct: f64) -> TodaySession {
+fn session_of(
+    row: &SessionRow,
+    now: i64,
+    context_red_pct: f64,
+    facts: &crate::service::attention::Facts,
+) -> TodaySession {
+    let attention = crate::service::attention::needs_attention_in(row, context_red_pct, facts);
     TodaySession {
         id: row.id,
         name: row
@@ -158,7 +196,11 @@ fn session_of(row: &SessionRow, now: i64, context_red_pct: f64) -> TodaySession 
             .unwrap_or_else(|| row.tmux_name.clone()),
         host_alias: row.host_alias.clone(),
         org_id: row.org_id,
-        attention: crate::service::attention::needs_attention_with(row, context_red_pct)
+        attention: attention
+            .filter(|a| a.reason.state().counts_toward_badge())
+            .map(|a| a.reason.as_str().into()),
+        proposed: attention
+            .filter(|a| a.reason.state() == crate::service::attention::State::Proposed)
             .map(|a| a.reason.as_str().into()),
         stale: stale_reason(row, now).map(str::to_string),
         claude_status: row.claude_status.clone(),
@@ -178,11 +220,33 @@ pub fn digest(
     since: i64,
     context_red_pct: f64,
 ) -> Today {
+    digest_in(
+        rows,
+        done,
+        ended,
+        now,
+        since,
+        context_red_pct,
+        &crate::service::attention::Facts::default(),
+    )
+}
+
+/// [`digest`], with what the fleet knows beyond the rows (step 2.6): a
+/// session on a down host or a limited account is in Needs you as Blocked.
+pub fn digest_in(
+    rows: &[SessionRow],
+    done: &[DoneItem],
+    ended: &[EndedWork],
+    now: i64,
+    since: i64,
+    context_red_pct: f64,
+    facts: &crate::service::attention::Facts,
+) -> Today {
     // Group by work key; no-work sessions by bucket.
     let mut by_key: BTreeMap<String, (TodayGroup, Vec<TodaySession>)> = BTreeMap::new();
     let mut no_work: Vec<TodaySession> = Vec::new();
     for row in rows {
-        let s = session_of(row, now, context_red_pct);
+        let s = session_of(row, now, context_red_pct, facts);
         match row.work.as_ref().and_then(|w| w.key.clone()) {
             Some(key) => {
                 let w = row.work.as_ref().cloned().unwrap_or_default();
@@ -285,6 +349,7 @@ pub fn digest(
             pr_url: None,
             at,
             org_id: d.org_id,
+            from: d.from.clone(),
         });
     }
     for e in ended {
@@ -302,6 +367,9 @@ pub fn digest(
                 .find(|s| s.key.is_some() && s.key == e.key && s.pr_url.is_none())
             {
                 s.pr_url = Some(pr);
+                if s.from.is_none() {
+                    s.from = e.from.clone();
+                }
             }
             continue;
         }
@@ -313,6 +381,7 @@ pub fn digest(
             pr_url: Some(pr),
             at,
             org_id: e.link.org_id,
+            from: e.from.clone(),
         });
     }
     shipped.sort_by(|a, b| b.at.cmp(&a.at).then(a.key.cmp(&b.key)));
@@ -322,6 +391,7 @@ pub fn digest(
         now,
         groups,
         shipped,
+        missions: Vec::new(),
     }
 }
 
@@ -339,29 +409,63 @@ fn mine(meta: &ItemMeta, tracker: Option<&TrackerRow>) -> bool {
 }
 
 /// `work { action: today, since? }`.
+///
+/// Takes the caller's whole [`ViewScope`] (multi-user M1, T7), not only its
+/// org half, **for both halves of the digest**: the LIVE one, where
+/// `TodaySession` carries the friendly-or-tmux name, the host, the PR url and
+/// `claude_status` of every live row; and the ENDED one, where
+/// `TodayShipped` carries the ticket key, title and `snap_pr_url` of the work
+/// that finished (T9b — that half was `orgs::scope_links`, i.e. org-only, so
+/// Ada's digest listed the PRs Bob shipped). All of it is content spec §4.3
+/// names. Fenced by the org scope alone this answer handed every private
+/// session in the fleet to any paired client bound to no org, because
+/// `OrgScope::All` is what such a caller's scope is.
 pub fn today(
     store: &Mutex<Store>,
     since: Option<i64>,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
 ) -> Result<Today, IpcError> {
+    let scope = &view.org;
     let now = crate::service::catalog::now_secs();
     let since = since.unwrap_or(now - DEFAULT_WINDOW_SECS).min(now);
     let s = lock(store)?;
     let operator = crate::service::operator::operator_ref(&s);
 
     // Live rows: a per-host token reads its own host's, redacted to its org.
+    //
+    // The org half of this filter, and it runs BEFORE the person
+    // predicate below rather than instead of it (multi-user M1, T10).
+    // When T10 first deleted it as a duplicate the suite caught a real
+    // hole: `ViewScope::sees_session_facts` then returned at its FIRST
+    // clause for the hub's own reader, before the org boundary, so a
+    // scope that was internal AND narrowed
+    // (`ViewScope::internal().with_org(..)` — this function's own
+    // per-host reader, a hook reader, every org-level test) was fenced
+    // by THIS call and nothing else. That ordering is fixed (the T6
+    // review): the org clause is first in `sees_session_facts` now, so
+    // the two halves genuinely compose. The call stays because this is
+    // where the page is CUT — a row dropped here is never derived from
+    // — and its row in `scope_guard_tests::ORG_HALF_SITES` names the
+    // person half.
     let mut rows: Vec<SessionRow> = s
         .list_all_sessions()?
         .into_iter()
         .filter(|r| counts(r, operator.as_ref()))
+        // The org half; `view.sees_session_row` just below is the person
+        // half, and composes this for every caller-built scope.
         .filter(|r| match scope.host() {
-            Some(h) => r.host_alias == h && scope.sees_row(r),
-            // `All` sees every row; a bound client (M14) its org's.
-            None => scope.sees_row(r),
+            // Org half; `sees_session_row` below is the person half.
+            Some(h) => r.host_alias == h && scope.sees_row_org_only(r),
+            // `All` sees every row; a bound client (M14) its org's. Org
+            // half again; `sees_session_row` below is the person half.
+            None => scope.sees_row_org_only(r),
         })
+        // And the PERSON half, which no org scope carries: whose row it is,
+        // what was shared with this caller, and §4.4's host clauses.
+        .filter(|r| view.sees_session_row(r).is_visible())
         .collect();
     for r in &mut rows {
-        scope.redact_row(r);
+        scope.redact_row_org_only(r);
     }
 
     // Tickets that moved to done since `since`: linked to work, or mine.
@@ -383,12 +487,21 @@ pub fn today(
             continue;
         }
         let org_id = s.item_org(item.id)?;
-        done.push(DoneItem { item, org_id });
+        let from = s.shipped_from(None, Some(item.id))?;
+        done.push(DoneItem { item, org_id, from });
     }
 
     // Work that ended since `since`, as the caller may read it.
+    //
+    // `scope_links_for`, never `scope_links` (multi-user M1, T9b): the ENDED
+    // half of this answer is `TodayShipped { key, title, url, pr_url }`, and
+    // `pr_url` is the link's own `snap_pr_url` — the PR another person opened
+    // from their own session. `scope_links` is the fence "for the writes,
+    // which name one link the caller already reached by id"; the read fence
+    // is `scope_links_for`, which runs the person half over every link that
+    // survived the org one.
     let mut links = s.recent_ended_work_links(since, TODAY_MAX as i64)?;
-    orgs::scope_links(&s, scope, &mut links)?;
+    orgs::scope_links_for(&s, view, &mut links)?;
     let mut ended = Vec::new();
     for link in links {
         if link.role != "work" || link.snap_pr_url.is_none() {
@@ -399,7 +512,9 @@ pub fn today(
             .map(|id| s.get_work_item(id))
             .transpose()?
             .flatten();
+        let from = s.shipped_from(link.participant_id, link.item_id)?;
         ended.push(EndedWork {
+            from,
             key: item
                 .as_ref()
                 .and_then(|i| i.key.clone())
@@ -410,7 +525,37 @@ pub fn today(
         });
     }
     let red = crate::service::health::context_red_pct(&s);
-    Ok(digest(&rows, &done, &ended, now, since, red))
+    let facts = s.attention_facts();
+    let mut today = digest_in(&rows, &done, &ended, now, since, red, &facts);
+    today.missions = waiting_missions(&s, view, now)?;
+    Ok(today)
+}
+
+/// The missions `view` sees that wait on a person, the longest waiting
+/// first (G1.6).
+fn waiting_missions(
+    s: &Store,
+    view: &crate::service::view_scope::ViewScope,
+    now: i64,
+) -> Result<Vec<TodayMission>, IpcError> {
+    let mut out = Vec::new();
+    for mut m in s.list_missions()? {
+        if m.state != "active" || !super::missions::sees_mission(s, view, &m)? {
+            continue;
+        }
+        super::orchestrate::fill_spend(s, &mut m, now)?;
+        if let Some(w) = m.waiting_on {
+            out.push(TodayMission {
+                id: m.id,
+                name: m.name,
+                org_id: m.org_id,
+                waiting_on: w,
+            });
+        }
+    }
+    out.sort_by_key(|m| (m.waiting_on.since, m.id));
+    out.truncate(TODAY_MAX);
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -545,8 +690,17 @@ mod tests {
                 proposal_state: None,
                 proposed_by: None,
                 proposal_why: None,
+                held_at: None,
+                done_when: Vec::new(),
+                due_at: None,
+                priority: None,
+                labels: Vec::new(),
+                estimate: None,
+                estimate_unit: None,
+                display_key: None,
             },
             org_id: None,
+            from: None,
         }
     }
 
@@ -584,7 +738,34 @@ mod tests {
             key: key.map(str::to_string),
             title: String::new(),
             url: None,
+            from: None,
         }
+    }
+
+    /// Gap plan G3.2: a shipped PR says where it came from; a done ticket
+    /// that also shipped a PR takes the PR's provenance.
+    #[test]
+    fn shipped_carries_where_it_came_from() {
+        let mut pr = ended(Some("B-1"), Some("https://github.com/o/r/pull/2"), NOW - 5);
+        pr.from = Some("Morning PR sweep".into());
+        let mut also = ended(Some("A-1"), Some("https://github.com/o/r/pull/1"), NOW - 5);
+        also.from = Some("mission Hub federation v2".into());
+        let t = digest(
+            &[],
+            &[item("A-1", "done", NOW - 10)],
+            &[pr, also],
+            NOW,
+            SINCE,
+            DEFAULT_CONTEXT_RED_PCT,
+        );
+        let from = |k: &str| {
+            t.shipped
+                .iter()
+                .find(|s| s.key.as_deref() == Some(k))
+                .and_then(|s| s.from.clone())
+        };
+        assert_eq!(from("B-1").as_deref(), Some("Morning PR sweep"));
+        assert_eq!(from("A-1").as_deref(), Some("mission Hub federation v2"));
     }
 
     #[test]
@@ -637,7 +818,12 @@ mod tests {
     #[test]
     fn today_reads_the_store_and_a_host_scope_reads_only_its_host() {
         let (st, a) = store_with_day();
-        let all = today(&st, None, &OrgScope::All).unwrap();
+        let all = today(
+            &st,
+            None,
+            &crate::service::view_scope::ViewScope::internal(),
+        )
+        .unwrap();
         let ids: Vec<i64> = all
             .groups
             .iter()
@@ -651,8 +837,13 @@ mod tests {
             .expect("PAY-7 group");
         assert_eq!(pay.sessions[0].id, a);
 
-        let host = OrgScope::for_host(&st.lock().unwrap(), "h").unwrap();
-        let mine = today(&st, None, &host).unwrap();
+        let host = orgs::OrgScope::for_host(&st.lock().unwrap(), "h").unwrap();
+        let mine = today(
+            &st,
+            None,
+            &crate::service::view_scope::ViewScope::internal().with_org(host),
+        )
+        .unwrap();
         let hosts: Vec<&str> = mine
             .groups
             .iter()
@@ -663,9 +854,116 @@ mod tests {
     }
 
     #[test]
+    fn needs_you_lists_only_what_raises_the_badge() {
+        // A ghost nobody can answer (`lifecycle`, state Paused) leaves the
+        // badge and the Inbox (steps 0.4, 3.3), so Today's Needs you drops it
+        // too; a blocked session stays.
+        let mut ghost = row(1, Some("GHOST-1"));
+        ghost.status = "ghost".into();
+        ghost.claude_status = Some("idle".into());
+        let mut blocked = row(2, Some("PAY-7"));
+        blocked.claude_status = Some("blocked".into());
+        let t = digest(
+            &[ghost, blocked],
+            &[],
+            &[],
+            NOW,
+            SINCE,
+            DEFAULT_CONTEXT_RED_PCT,
+        );
+        assert_eq!(bucket_of(&t, Some("PAY-7")), vec!["waiting"]);
+        assert_eq!(bucket_of(&t, Some("GHOST-1")), vec!["in_progress"]);
+        let ghost = &t
+            .groups
+            .iter()
+            .find(|g| g.key.as_deref() == Some("GHOST-1"))
+            .unwrap()
+            .sessions[0];
+        assert_eq!(ghost.attention, None);
+    }
+
+    /// G1.6: Jev's "probably waiting" is kept apart from Needs you: the
+    /// session says so in `proposed`, and its group stays in progress.
+    #[test]
+    fn jevs_question_is_proposed_not_needs_you() {
+        let mut r = row(3, Some("PD-3"));
+        r.claude_status = Some("idle".into());
+        r.turn_outcome = Some("asked".into());
+        let t = digest(&[r], &[], &[], NOW, SINCE, DEFAULT_CONTEXT_RED_PCT);
+        assert_eq!(bucket_of(&t, Some("PD-3")), vec!["in_progress"]);
+        let s = &t.groups[0].sessions[0];
+        assert_eq!(s.attention, None);
+        assert_eq!(s.proposed.as_deref(), Some("probably_waiting"));
+    }
+
+    /// G1.6: a mission waiting on a person reaches Today, with why.
+    #[test]
+    fn a_mission_waiting_on_its_grant_is_in_today() {
+        let (st, _) = store_with_day();
+        {
+            let s = st.lock().unwrap();
+            let m = s
+                .create_mission(
+                    &crate::store::NewMission {
+                        org_id: None,
+                        owner_person_id: None,
+                        root_item_id: None,
+                        name: "Hub federation v2",
+                        goal: "g",
+                        non_goals: None,
+                        done_when: &[],
+                        mode: None,
+                        level: Some(2),
+                    },
+                    "test",
+                )
+                .unwrap();
+            s.set_mission_state(m.id, None, "active", "test").unwrap();
+            s.create_mission(
+                &crate::store::NewMission {
+                    org_id: None,
+                    owner_person_id: None,
+                    root_item_id: None,
+                    name: "Still a draft",
+                    goal: "g",
+                    non_goals: None,
+                    done_when: &[],
+                    mode: None,
+                    level: Some(2),
+                },
+                "test",
+            )
+            .unwrap();
+        }
+        let t = today(
+            &st,
+            None,
+            &crate::service::view_scope::ViewScope::internal(),
+        )
+        .unwrap();
+        let names: Vec<(&str, crate::service::attention::MissionWaitReason)> = t
+            .missions
+            .iter()
+            .map(|m| (m.name.as_str(), m.waiting_on.reason))
+            .collect();
+        assert_eq!(
+            names,
+            [(
+                "Hub federation v2",
+                crate::service::attention::MissionWaitReason::SignGrant
+            )]
+        );
+    }
+
+    #[test]
     fn a_future_since_is_clamped_to_now() {
         let (st, _) = store_with_day();
-        let t = today(&st, Some(i64::MAX), &OrgScope::All).unwrap();
+        let t = today(
+            &st,
+            Some(i64::MAX),
+            &crate::service::view_scope::ViewScope::internal(),
+        )
+        .unwrap();
         assert_eq!(t.since, t.now);
     }
 }

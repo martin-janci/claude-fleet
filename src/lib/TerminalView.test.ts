@@ -152,6 +152,20 @@ describe('TerminalView session identity (FE-1)', () => {
     expect(screen.getByTestId('terminal-header').textContent).toContain('on alpha');
   });
 
+  it('names its PTY on every call, so a shell terminal never lands on the agent pane', async () => {
+    render(TerminalView);
+    selectSession(onAlpha);
+    await settle();
+    // Switching away closes the attach; every pty_* call so far carries the id.
+    selectSession(onBeta);
+    await settle();
+    const ptyCalls = inv().mock.calls.filter((c) => String(c[0]).startsWith('pty_'));
+    expect(ptyCalls.length).toBeGreaterThan(0);
+    for (const [cmd, payload] of ptyCalls) {
+      expect((payload as { args?: { id?: string } } | undefined)?.args?.id, String(cmd)).toBe('agent');
+    }
+  });
+
   it('puts the Transfer chip on the host name for a movable session', async () => {
     const movable = makeSession({
       id: 1, host_alias: 'alpha', kind: 'work', worktree_id: 10, claude_session_id: 'c-1',
@@ -297,6 +311,65 @@ describe('TerminalView run boxes are pinned to the cell grid (F3)', () => {
     // drift returns while the cursor and selection overlays stay put.
     expect(terminalViewSource).toContain('--cell-w={cellWidth > 0');
     expect(terminalViewSource).toMatch(/width:\s*calc\(var\(--cell-w\)\s*\*\s*var\(--n,\s*1\)\)/);
+  });
+});
+
+// Multi-user M1, in the spirit of `hub_verdicts.test.ts`'s sweeps: the two
+// calls that reach the owner's host outside the hub are gated once each
+// (`openTerm` and `handleDrop`), and a SECOND call site would be a second
+// thing to gate. This is a count, not a behaviour — the behaviour is pinned in
+// `TerminalView.hub.test.ts` — and its job is to make whoever adds the next
+// one come and read the gate instead of discovering it in review.
+describe('the unrevocable calls stay single-sited', () => {
+  it('has exactly one pty_open and one upload_to_session call site', () => {
+    const count = (needle: string) => terminalViewSource.split(needle).length - 1;
+    expect(count("invoke('pty_open'")).toBe(1);
+    expect(count("'upload_to_session'")).toBe(1);
+  });
+
+  it('checks the derived access before the workspace probe, not after it', () => {
+    // `repair_session` respawns tmux and re-adds worktrees: order is the whole
+    // point of the early return, so pin it against the source as well as
+    // against behaviour. A grep for the names is enough — the probe and the
+    // guard each appear once in `openTerm`.
+    // Anchored inside `openTerm`: the same guard also sits in `handleDrop`,
+    // which is declared earlier in the file, so a bare indexOf would pass
+    // while saying nothing about the attach path.
+    const fn = terminalViewSource.indexOf('async function openTerm(');
+    expect(fn).toBeGreaterThan(0);
+    const guard = terminalViewSource.indexOf('if (!termOwned) return;', fn);
+    const probe = terminalViewSource.indexOf('const rep = await repairSession(', fn);
+    expect(guard).toBeGreaterThan(0);
+    expect(probe).toBeGreaterThan(0);
+    expect(guard).toBeLessThan(probe);
+  });
+});
+
+describe('TerminalView open generation (review r06)', () => {
+  it("every drain names the generation pty_open returned for the attach on screen", async () => {
+    let gen = 6;
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'pty_open') return ++gen;
+      if (cmd === 'pty_drain') return { data: '', bytes: 0 };
+      return null;
+    });
+    vi.useFakeTimers();
+    try {
+      render(TerminalView);
+      selectSession(onAlpha);
+      await settle();
+      await vi.advanceTimersByTimeAsync(100);
+      const gens = () => calls('pty_drain').map((c) => (c[1] as { args: { generation?: number } }).args.generation);
+      expect(gens().length).toBeGreaterThan(0);
+      expect(new Set(gens())).toEqual(new Set([7]));
+      const before = gens().length;
+      selectSession(onBeta);
+      await settle();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(new Set(gens().slice(before))).toEqual(new Set([8]));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -534,7 +607,8 @@ describe('TerminalView open lifecycle (F12/N4)', () => {
     expect(openedHosts()).toEqual(['alpha', 'beta']);
     expect(screen.getByTestId('terminal-header').textContent).toContain('on beta');
     // Alpha's failure must not be shown under beta's header.
-    expect(document.body.textContent).not.toContain('PTY error');
+    expect(document.body.textContent).not.toContain("Couldn't attach");
+    expect(document.body.textContent).not.toContain('Connection refused');
   });
 
   it('a failing auto-reconnect spends the whole budget, then offers the manual banner', async () => {

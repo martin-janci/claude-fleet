@@ -3,8 +3,9 @@
 //! mode on a host the operator names, so the benchmarks' acceptance lines
 //! "beats / ties claude -p haiku" (card J3) and "not worse than haiku by more
 //! than 3 points" (card J1) can be judged. D33 also names it as the later
-//! generative fallback for asynchronous decisions only; nothing live calls
-//! it yet — only `fleet-hub decide bench … --provider haiku`.
+//! generative fallback for asynchronous decisions only. `fleet-hub decide
+//! bench … --provider haiku` calls it, and live only the second opinion
+//! ([`super::haiku_shadow`]), which records beside Jev and never acts.
 //!
 //! * **The same question.** [`prompt_for`] renders the request's
 //!   **redacted** form ([`JevRequest::redacted`], exactly what the envelope
@@ -47,8 +48,8 @@
 //!   calibration. Tokens and cost come from the `--output-format json`
 //!   envelope when it has them, else they are unknown.
 //!
-//! Nothing is recorded in `decision_runs`: that record is the envelope's,
-//! for Jev only.
+//! A benchmark's call records nothing in `decision_runs`; the second
+//! opinion records its own runs (provider [`PROVIDER_HAIKU`]).
 
 use super::{canonical_json, JevRequest, Question};
 use crate::ipc_error::codes;
@@ -90,6 +91,9 @@ pub mod reason {
     pub const NO_CLAUDE: &str = "noclaude";
     /// `claude` ran and failed, or said nothing readable.
     pub const CALL_FAILED: &str = "call_failed";
+    /// `claude` has no usable login on the host (its login expired): a
+    /// person runs `claude /login` there.
+    pub const SIGNED_OUT: &str = "signed_out";
     /// The prompt is over [`super::MAX_PROMPT_BYTES`].
     pub const TOO_LONG: &str = "too_long";
     /// The case's org is not the host's org: never sent.
@@ -181,7 +185,8 @@ fn text_of(v: &Value) -> String {
     }
 }
 
-/// PURE: the prompt for `req` and its option ids (in the order shown). The
+/// PURE: the prompt for `req` and its option ids (in the order shown: the
+/// order Jev is sent, [`JevRequest::option_order`]). The
 /// request is redacted first ([`JevRequest::redacted`]): the text holds the
 /// same state and options the envelope would send, and nothing else. Only a
 /// Choice is rendered.
@@ -205,8 +210,11 @@ pub fn prompt_for(req: &JevRequest) -> Result<(String, Vec<String>), String> {
     text.push_str("\n</state>\n\nQuestion: ");
     text.push_str(&text_of(instructions));
     text.push_str("\n\nOptions (answer with the id before the colon):\n");
+    // Jev's order (`JevRequest::option_order`): the baseline reads the
+    // options as Jev does, so a position bias cannot favour either side.
+    let order = r.option_order();
     let mut ids = Vec::with_capacity(criteria.len());
-    for (id, desc) in criteria {
+    for (id, desc) in order.iter().filter_map(|k| criteria.get_key_value(k)) {
         text.push_str("- ");
         text.push_str(id);
         let d = desc.as_ref().map(text_of).unwrap_or_default();
@@ -229,15 +237,18 @@ pub fn prompt_for(req: &JevRequest) -> Result<(String, Vec<String>), String> {
 /// `claude` reads the prompt from the command's stdin.
 pub fn haiku_script(model: &str, host_timeout_secs: u64) -> Result<String, String> {
     use crate::service::claude_print;
-    use crate::shell::quote;
+    use crate::service::headless::{self, HeadlessJob};
     if !MODELS.contains(&model) {
         return Err(format!("refusing model {model:?}"));
     }
-    let claude = format!(
-        "claude -p --model {} --output-format json {}",
-        quote(model),
-        claude_print::isolation_flags()
-    );
+    let agent = headless::default_agent();
+    let claude = agent.command(&HeadlessJob {
+        model,
+        prompt: None,
+        stdin_file: None,
+        fork_of: None,
+        ..Default::default()
+    });
     let t = HAIKU_TAG;
     Ok(format!(
         "set -o pipefail; \
@@ -247,7 +258,7 @@ pub fn haiku_script(model: &str, host_timeout_secs: u64) -> Result<String, Strin
          {run}; s=$?; \
          if [ -n \"$d\" ]; then cd / && rmdir -- \"$d\" 2>/dev/null; fi; \
          exit $s",
-        noclaude = claude_print::noclaude_check(t),
+        noclaude = agent.missing_check(t),
         run = claude_print::run_capped(t, &claude, host_timeout_secs, OUTPUT_CAP_BYTES, false),
     ))
 }
@@ -276,87 +287,7 @@ pub fn parse_script_output(stdout: &str) -> ScriptAnswer {
 
 // --- the reply -----------------------------------------------------------------
 
-/// What `--output-format json` wraps the model's text in.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Envelope {
-    /// The model's text.
-    pub result: String,
-    pub is_error: bool,
-    /// Input tokens (plain + cache creation + cache read), when reported.
-    pub input_tokens: Option<i64>,
-    pub output_tokens: Option<i64>,
-    /// `total_cost_usd` in micro-dollars, when reported.
-    pub cost_microusd: Option<i64>,
-}
-
-fn int(v: Option<&Value>) -> Option<i64> {
-    v.and_then(Value::as_i64)
-}
-
-fn envelope_of(v: &Value) -> Option<Envelope> {
-    let o = v.as_object()?;
-    if o.get("type").and_then(Value::as_str) != Some("result") && !o.contains_key("result") {
-        return None;
-    }
-    let usage = o.get("usage");
-    let input = usage.and_then(|u| {
-        let parts = [
-            int(u.get("input_tokens")),
-            int(u.get("cache_creation_input_tokens")),
-            int(u.get("cache_read_input_tokens")),
-        ];
-        parts
-            .iter()
-            .any(Option::is_some)
-            .then(|| parts.iter().flatten().sum())
-    });
-    Some(Envelope {
-        result: o
-            .get("result")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        is_error: o.get("is_error").and_then(Value::as_bool).unwrap_or(false)
-            || o.get("subtype")
-                .and_then(Value::as_str)
-                .is_some_and(|s| s != "success"),
-        input_tokens: input,
-        output_tokens: usage.and_then(|u| int(u.get("output_tokens"))),
-        cost_microusd: o
-            .get("total_cost_usd")
-            .and_then(Value::as_f64)
-            .filter(|c| c.is_finite() && *c >= 0.0)
-            .map(|c| (c * 1_000_000.0).round() as i64),
-    })
-}
-
-/// PURE: the `--output-format json` envelope in `out`: one JSON object (or
-/// an array of messages whose last `result` message is it), possibly after
-/// other lines. `None` when there is none.
-pub fn parse_envelope(out: &str) -> Option<Envelope> {
-    let t = out.trim();
-    let whole = serde_json::from_str::<Value>(t).ok();
-    let candidates = whole.into_iter().chain(
-        t.lines()
-            .rev()
-            .filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok()),
-    );
-    for v in candidates {
-        match &v {
-            Value::Array(a) => {
-                if let Some(e) = a.iter().rev().find_map(envelope_of) {
-                    return Some(e);
-                }
-            }
-            _ => {
-                if let Some(e) = envelope_of(&v) {
-                    return Some(e);
-                }
-            }
-        }
-    }
-    None
-}
+pub use crate::service::claude_print::{parse_envelope, Envelope};
 
 /// The model's answer, checked against the offered options.
 #[derive(Debug, Clone, PartialEq)]
@@ -582,6 +513,14 @@ impl Haiku<'_> {
                 reply.input_tokens = env.input_tokens;
                 reply.output_tokens = env.output_tokens;
                 reply.cost_microusd = env.cost_microusd;
+                if crate::service::claude_print::run_signed_out(
+                    Some(&env),
+                    &env.result,
+                    &out.stderr,
+                ) {
+                    reply.error = Some(reason::SIGNED_OUT);
+                    return reply;
+                }
                 if env.is_error {
                     reply.error = Some(reason::CALL_FAILED);
                     return reply;
@@ -606,8 +545,10 @@ impl Haiku<'_> {
     }
 }
 
-/// Used by the benchmarks' tests (behind `nl-detect`, like `bench`).
-#[cfg(all(test, feature = "nl-detect"))]
+/// Used by the benchmarks' tests (behind `nl-detect`, like `bench`) and the
+/// second opinion's ([`super::haiku_shadow`]).
+#[cfg(test)]
+#[cfg_attr(not(feature = "nl-detect"), allow(dead_code))]
 pub(crate) mod testing;
 #[cfg(test)]
 mod tests;

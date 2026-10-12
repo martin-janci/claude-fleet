@@ -21,12 +21,17 @@
       ]
     },
     {
-      "title": "Features",
+      "title": "Use cases",
       "when": {
         "key": "decide.jev.enabled",
         "truthy": true
       },
       "items": [
+        {
+          "type": "notice",
+          "tone": "info",
+          "text": "Each use case is off, shadow or assist. Shadow only records; assist pre-selects an answer you confirm. There is no auto mode."
+        },
         {
           "type": "field",
           "key": "decide.jev.work_link",
@@ -39,7 +44,161 @@
         },
         {
           "type": "field",
+          "key": "decide.jev.start_project",
+          "hint": "Pre-selects the repository when a task's first start has none; you still press Start."
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.sibling_repos",
+          "hint": "Pre-ticks the other repository a ticket start also needs; you still press Start."
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.host_placement",
+          "hint": "Pre-selects a new session's host when two or more online hosts under their limit are left; you press Create."
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.quick_answer",
+          "hint": "Puts the likely option first in an agent's question or a form; you still answer. Never a push or a permission."
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.adopt_target",
+          "hint": "Prefills the project when you adopt a pane fleet did not start; you still press Adopt."
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.restore_target",
+          "hint": "Prefills the project when you restore a conversation found on a host; you still press Restore."
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.duplicate",
+          "hint": "Marks a proposed task that may repeat an existing one; you still merge or keep both."
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.work_placement",
+          "hint": "Proposes a group for a new task nothing placed; you still place it."
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.related_session",
+          "hint": "Marks another of your sessions that works on the same thing; nothing is stopped or merged."
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.control_route",
+          "hint": "Says which mission or session a message in Control is about; you can change it. A short message gets a question instead."
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.summary_check",
+          "hint": "Checks a watcher's summary of a session against its transcript; in assist a summary it cannot confirm is not shown."
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.turn_outcome",
+          "hint": "Sends Claude's last reply, redacted, only for organisations that allow reply text. Hooks always win."
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.mission_triage",
+          "hint": "Proposes a stuck mission's outcome and next step; you still choose. It never completes a mission or sets Verified."
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.routine_run_outcome",
+          "hint": "Keeps runs with nothing to do out of the Inbox. Sends the run's last reply only for organisations that allow reply text."
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.pr_triage",
+          "hint": "Asked once per PR shepherd episode. Sends check names and states, never code."
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.main_ticket",
+          "hint": "Marks the main ticket in Review when a session's first prompt names several; you still confirm it."
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.tracker_duplicate",
+          "hint": "Marks a new local task in Review that may repeat a tracker ticket; linking the ticket instead is yours."
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.resume_or_new",
+          "hint": "In New session, proposes resuming a past session of the same work or starting fresh; you still press Resume or Create."
+        },
+        {
+          "type": "field",
           "key": "decide.jev.unassigned"
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.unassigned_reply"
+        }
+      ]
+    },
+    {
+      "title": "Second opinion",
+      "advanced": true,
+      "collapsible": true,
+      "items": [
+        {
+          "type": "notice",
+          "tone": "info",
+          "text": "Asks Claude the same questions as the use cases that are on, on one of your hosts, and records its answer beside Jev's to compare them. Nothing acts on it."
+        },
+        {
+          "type": "field",
+          "key": "decide.haiku.shadow"
+        },
+        {
+          "type": "field",
+          "key": "decide.haiku.host",
+          "when": {
+            "key": "decide.haiku.shadow",
+            "truthy": true
+          }
+        },
+        {
+          "type": "field",
+          "key": "decide.haiku.model",
+          "when": {
+            "key": "decide.haiku.shadow",
+            "truthy": true
+          }
+        },
+        {
+          "type": "field",
+          "key": "decide.haiku.daily_calls",
+          "when": {
+            "key": "decide.haiku.shadow",
+            "truthy": true
+          }
+        }
+      ]
+    },
+    {
+      "title": "Today",
+      "when": {
+        "key": "decide.jev.enabled",
+        "truthy": true
+      },
+      "items": [
+        {
+          "type": "record",
+          "source": {
+            "id": "decide.today"
+          }
+        },
+        {
+          "type": "link",
+          "page": "settings.orgs",
+          "label": "Choose which organisations allow Jev"
         }
       ]
     },
@@ -51,6 +210,10 @@
         {
           "type": "field",
           "key": "decide.jev.model"
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.floors"
         },
         {
           "type": "field",

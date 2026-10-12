@@ -30,7 +30,10 @@ use std::sync::Mutex;
 pub enum RowChange {
     SessionCreated(SessionRow),
     SessionUpdated(SessionRow),
-    SessionKilled(i64),
+    /// A session row is GONE (hard-deleted). Carries the row's identity
+    /// facts as well as its id, because the row is already deleted by the
+    /// time a reader could look it up — see [`SessionKilledPayload`].
+    SessionKilled(SessionKilledPayload),
     /// A timeline event was appended (migration 013/037). Carries the row.
     SessionEventAdded(SessionEvent),
     /// A session's conversation list changed (opened / closed / reopened).
@@ -90,6 +93,14 @@ pub enum RowChange {
     SyncProgress(SyncProgress),
     /// A step boundary of an in-flight move. Not a store row.
     MoveProgress(MoveProgress),
+    /// A step boundary of an in-flight `new_session` (redesign step 5.13):
+    /// worktree, tmux, agent. Keyed by the caller's own opaque start token,
+    /// never by host or name. Not a store row.
+    StartProgress(StartProgress),
+    /// A step boundary of an explicit `repair_session` (gap plan G7.3):
+    /// check, fix, verify, pane — the phone's repair checklist. Keyed by
+    /// the caller's own opaque token, like [`RowChange::StartProgress`].
+    RepairProgress(RepairProgress),
     /// A tracker item's normalised row changed (work graph M3). Emitted
     /// only on a real change: a sync pass that finds nothing new is silent.
     /// Never sent to a host-bound `/events` stream (the interim fence of
@@ -109,16 +120,43 @@ pub enum RowChange {
     /// only — a client re-reads what it shows. Kind `settings`, so never
     /// sent to a host-bound or org-bound stream: the values are master-only.
     SettingsChanged(String),
+    /// One share of one session was created, narrowed or revoked
+    /// (multi-user M1, T9). Ids only — the client patches its own grant set
+    /// (`src/lib/access.ts`). Kind `grant`, so never sent to a host-bound
+    /// or org-bound stream: a per-host token has no person and no grants.
+    GrantChanged(GrantChanged),
     /// The fleet's update picture changed (update-channel design §11): a
     /// target's observed version or phase, a pin, or the verified channel.
     /// Ids only — a client re-reads `update_status`. Kind `update`, so never
     /// sent to a host-bound or org-bound stream (it names every target).
     UpdateChanged(UpdateChanged),
+    /// What the hub would tell one target changed (update-channel design
+    /// §6.4): a pin, a new channel, or a policy setting moved its decision.
+    /// The target, its new status and version — no documents; a client that
+    /// is that target checks again (`POST /update/check`). Kind `update`.
+    UpdateDecision(UpdateDecision),
     /// A file download's row was added, moved state, was fetched or was
     /// removed (migration 095). The id only — a client re-reads
     /// `list_downloads`. Kind `download`, so never sent to a host-bound or
     /// org-bound stream (it names files of every host).
     DownloadChanged(i64),
+    /// A local workspace link (migration 109) was made, moved state, had a
+    /// pass or was removed. The id only — the desktop re-reads
+    /// `list_local_workspaces`. Kind `local_workspace`; links live on the
+    /// desktop that made them, so a hub never emits one, and it is host-bound
+    /// hidden besides (it names a directory on someone's machine).
+    LocalWorkspaceChanged(i64),
+    /// The queue of control-API calls waiting for a person changed: one was
+    /// asked for, answered or expired (redesign step 9.2). Carries nothing —
+    /// the owner's device re-reads `mcp_confirms` (Access::PersonDevice), so
+    /// the tool and its arguments never ride a stream. Kind `confirm`,
+    /// host-bound hidden.
+    ConfirmChanged,
+    /// Control's agent handed work on and a receipt was written (redesign
+    /// step 9.3). Carries nothing: the owner's device re-reads
+    /// `control_handoffs` (Access::PersonDevice), so what was sent never
+    /// rides a stream. Kind `handoff`, host-bound hidden.
+    HandoffChanged,
 }
 
 /// The payload of `update:changed`.
@@ -130,6 +168,46 @@ pub struct UpdateChanged {
     /// pinned target; absent for a component-wide pin and the channel.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+}
+
+/// The payload of `update:decision`.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct UpdateDecision {
+    /// `client:3`, `agent:h`, `hub:self`.
+    pub target: String,
+    /// The decision's status (`update_available`, `update_required`, …).
+    pub status: String,
+    /// The version it now names, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+/// The payload of `grant:changed` (multi-user M1, T9): one change to one
+/// share of one session, ids only.
+///
+/// `level: None` is a revoke — the frontend's `parseGrantChanged` reads a
+/// missing or unknown level as exactly that, since the one direction a
+/// grant may move is downward (spec §4.3 invariant 3).
+///
+/// A grant mutates no `sessions` column, so sharing could never ride a row
+/// event; the two frames `Store::announce_grant_change` emits are a
+/// `session:updated` (how a new recipient learns the row exists at all) and
+/// this one (how each client keeps its own grant set current). It reaches
+/// the person the grant names and the session's owner, and nobody else.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct GrantChanged {
+    pub session_id: i64,
+    pub person_id: i64,
+    /// `watch` | `drive`, or `None` for a revoke. Written as `null` rather
+    /// than omitted — `strip_nulls` takes it off the wire either way, and
+    /// the client reads absent and null the same.
+    pub level: Option<String>,
+    /// Gap plan G4.2: the level `person_id` has an open request for, on a
+    /// frame announcing that a request opened. Absent on every other frame
+    /// (a grant change, or a request answered), so an older client, which
+    /// reads `level` alone, sees an unchanged level.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request: Option<String>,
 }
 
 /// The payload of `work:changed`.
@@ -145,9 +223,82 @@ pub struct WorkChanged {
     pub view_id: Option<i64>,
 }
 
-#[derive(Serialize, Clone)]
+/// The payload of `session:killed`.
+///
+/// **Why it carries more than an id** (multi-user M1, T9). Every other
+/// `session:*` frame is fenced on `/events` by asking what the caller may
+/// see about that row — from the frame itself for a row-bearing frame, or
+/// by resolving `session_id` in the store. This frame can do neither: it
+/// fires *after* the `DELETE`, so there is no row left to resolve, and an
+/// id alone tells a stranger that a session with that id existed and has
+/// now ended. That is an existence oracle on exactly the mapping a former
+/// grantee learned while their grant was live.
+///
+/// So the facts travel with the frame, read while the row was still there
+/// ([`crate::store::Store::killed_payload`]), and
+/// `events_route::fence_frame` judges them through
+/// [`crate::service::view_scope::ViewScope::sees_session_facts`] — the same
+/// body a live row goes through.
+///
+/// Every added field is `Option` and `skip_serializing_if`, so a payload
+/// built from an id alone still serialises to exactly `{"id": N}` — the
+/// shape every existing client reads. A frame with the facts MISSING is
+/// dropped by the fence for every caller but the hub's own readers: that is
+/// the fail-closed direction, and [`SessionKilledPayload::from`] is the one
+/// way to build such a payload (tests, and nothing else).
+#[derive(Serialize, Clone, Debug, PartialEq, Eq, Default)]
 pub struct SessionKilledPayload {
     pub id: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_alias: Option<String>,
+    /// The session's org, for the org half of the fence (work graph M5/M14).
+    /// Not in the plan's three keys and required all the same: without it a
+    /// client bound to one org would learn that a session of another org
+    /// had died.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_person_id: Option<i64>,
+}
+
+impl SessionKilledPayload {
+    /// The facts of a row that is still there.
+    pub fn of_row(row: &SessionRow) -> Self {
+        Self {
+            id: row.id,
+            host_alias: Some(row.host_alias.clone()),
+            org_id: row.org_id,
+            visibility: Some(row.visibility.clone()),
+            owner_person_id: row.owner_person_id,
+        }
+    }
+
+    /// The facts this payload carries, for the fence — `None` when it
+    /// carries none, which the fence reads as "drop it".
+    pub fn facts(&self) -> Option<crate::service::view_scope::SessionFacts<'_>> {
+        Some(crate::service::view_scope::SessionFacts {
+            id: self.id,
+            host_alias: self.host_alias.as_deref()?,
+            org_id: self.org_id,
+            visibility: self.visibility.as_deref()?,
+            owner_person_id: self.owner_person_id,
+        })
+    }
+}
+
+/// An id and nothing else: a kill nobody can fence, dropped by
+/// `fence_frame` for every caller but the hub's own readers. Deliberately
+/// the only way to spell that, so a production emitter that forgets the
+/// facts reads as what it is.
+impl From<i64> for SessionKilledPayload {
+    fn from(id: i64) -> Self {
+        Self {
+            id,
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -284,6 +435,104 @@ pub struct MoveProgress {
     pub detail: Option<String>,
 }
 
+/// The three steps a session start goes through (redesign step 5.13), in
+/// order. `src/lib/start_steps.ts` mirrors them (`START_STEPS`).
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StartStep {
+    /// Resolving the checkout: clone, `git worktree add`, self-repair.
+    Worktree,
+    /// `tmux new-session` and the reconcile pass that registers the row.
+    Tmux,
+    /// The agent's launch recorded on the row (model, effort, agent, owner).
+    Agent,
+}
+
+impl StartStep {
+    pub const ALL: [StartStep; 3] = [StartStep::Worktree, StartStep::Tmux, StartStep::Agent];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            StartStep::Worktree => "worktree",
+            StartStep::Tmux => "tmux",
+            StartStep::Agent => "agent",
+        }
+    }
+
+    /// 1-based position in [`Self::ALL`].
+    pub const fn index(self) -> u8 {
+        self as u8 + 1
+    }
+}
+
+/// The four steps an explicit workspace repair goes through (gap plan
+/// G7.3), in order. A step with nothing to do reports `done` as the repair
+/// passes it.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RepairStep {
+    /// Probing the host: the directory, the worktree, the branch, tmux.
+    Check,
+    /// The git steps: unregister, re-add, adopt, recreate the branch.
+    Fix,
+    /// Probing again: the directory is a healthy worktree on its branch.
+    Verify,
+    /// The tmux session: created or respawned in the directory.
+    Pane,
+}
+
+impl RepairStep {
+    pub const ALL: [RepairStep; 4] = [
+        RepairStep::Check,
+        RepairStep::Fix,
+        RepairStep::Verify,
+        RepairStep::Pane,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            RepairStep::Check => "check",
+            RepairStep::Fix => "fix",
+            RepairStep::Verify => "verify",
+            RepairStep::Pane => "pane",
+        }
+    }
+
+    /// 1-based position in [`Self::ALL`].
+    pub const fn index(self) -> u8 {
+        self as u8 + 1
+    }
+}
+
+/// One step boundary of an explicit `repair_session` with a
+/// `progress_token`: the token the caller minted, the step, its place and
+/// a state (`started`, `done` or `failed`). Like [`StartProgress`] it names
+/// no host, no session and no path; the report and any error reach the
+/// caller through the tool's result.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RepairProgress {
+    pub token: String,
+    pub step: RepairStep,
+    pub index: u8,
+    pub total: u8,
+    pub state: MoveStepState,
+}
+
+/// One step boundary of an in-flight `new_session`. `token` is the opaque
+/// string the caller minted and passed as `start_token`, so only the client
+/// that started the session can tell whose start this is: the frame names
+/// no host, no session, no person. `state` is `started`, `done` or `failed`
+/// (never `warned`); the error itself reaches the caller through the
+/// command's result.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct StartProgress {
+    pub token: String,
+    pub step: StartStep,
+    pub index: u8,
+    pub total: u8,
+    pub state: MoveStepState,
+}
+
 impl RowChange {
     /// The frontend event name (`src/lib/events.ts` `RowEvent.name`).
     pub fn name(&self) -> &'static str {
@@ -308,13 +557,20 @@ impl RowChange {
             RowChange::CatalogLoaded(_) => "catalog:loaded",
             RowChange::SyncProgress(_) => "sync:progress",
             RowChange::MoveProgress(_) => "move:progress",
+            RowChange::StartProgress(_) => "start:progress",
+            RowChange::RepairProgress(_) => "repair:progress",
             RowChange::WorkItemUpdated(_) => "work:item",
             RowChange::TrackerUpdated(_) => "work:tracker",
             RowChange::TrackerRemoved(_) => "work:tracker_removed",
             RowChange::WorkChanged(_) => "work:changed",
             RowChange::SettingsChanged(_) => "settings:changed",
+            RowChange::GrantChanged(_) => "grant:changed",
             RowChange::UpdateChanged(_) => "update:changed",
+            RowChange::UpdateDecision(_) => "update:decision",
             RowChange::DownloadChanged(_) => "download:changed",
+            RowChange::LocalWorkspaceChanged(_) => "local_workspace:changed",
+            RowChange::ConfirmChanged => "confirm:changed",
+            RowChange::HandoffChanged => "handoff:changed",
         }
     }
 
@@ -327,7 +583,7 @@ impl RowChange {
         }
         match self {
             RowChange::SessionCreated(r) | RowChange::SessionUpdated(r) => to_value(r),
-            RowChange::SessionKilled(id) => to_value(&SessionKilledPayload { id: *id }),
+            RowChange::SessionKilled(k) => to_value(k),
             RowChange::SessionEventAdded(e) => to_value(e),
             RowChange::ConversationsChanged(id) => serde_json::json!({ "session_id": id }),
             RowChange::HostAdded(r) | RowChange::HostProbed(r) => to_value(r),
@@ -364,13 +620,19 @@ impl RowChange {
             RowChange::CatalogLoaded(s) => to_value(s),
             RowChange::SyncProgress(p) => to_value(p),
             RowChange::MoveProgress(p) => to_value(p),
+            RowChange::StartProgress(p) => to_value(p),
+            RowChange::RepairProgress(p) => to_value(p),
             RowChange::WorkItemUpdated(r) => to_value(r),
             RowChange::TrackerUpdated(r) => to_value(r),
             RowChange::TrackerRemoved(id) => serde_json::json!({ "id": id }),
             RowChange::WorkChanged(w) => to_value(w),
             RowChange::SettingsChanged(key) => serde_json::json!({ "key": key }),
+            RowChange::GrantChanged(g) => to_value(g),
             RowChange::UpdateChanged(u) => to_value(u),
+            RowChange::UpdateDecision(u) => to_value(u),
             RowChange::DownloadChanged(id) => serde_json::json!({ "id": id }),
+            RowChange::LocalWorkspaceChanged(id) => serde_json::json!({ "id": id }),
+            RowChange::ConfirmChanged | RowChange::HandoffChanged => serde_json::json!({}),
         }
     }
 }
@@ -385,8 +647,10 @@ pub trait EventBus: Send + Sync {
     fn session_updated(&self, row: &SessionRow) {
         self.emit(&RowChange::SessionUpdated(row.clone()));
     }
-    fn session_killed(&self, id: i64) {
-        self.emit(&RowChange::SessionKilled(id));
+    /// See [`SessionKilledPayload`] — a production emitter passes the facts
+    /// it read before the row went; `id.into()` is the id-only form.
+    fn session_killed(&self, killed: SessionKilledPayload) {
+        self.emit(&RowChange::SessionKilled(killed));
     }
     /// See [`RowChange::SessionEventAdded`].
     fn session_event_added(&self, e: &SessionEvent) {
@@ -448,6 +712,26 @@ pub trait EventBus: Send + Sync {
     fn move_progress(&self, p: &MoveProgress) {
         self.emit(&RowChange::MoveProgress(p.clone()));
     }
+    /// See [`RowChange::StartProgress`].
+    fn start_progress(&self, p: &StartProgress) {
+        self.emit(&RowChange::StartProgress(p.clone()));
+    }
+    /// See [`RowChange::RepairProgress`].
+    fn repair_progress(&self, p: &RepairProgress) {
+        self.emit(&RowChange::RepairProgress(p.clone()));
+    }
+    /// See [`RowChange::GrantChanged`].
+    fn grant_changed(&self, g: &GrantChanged) {
+        self.emit(&RowChange::GrantChanged(g.clone()));
+    }
+    /// See [`RowChange::ConfirmChanged`].
+    fn confirm_changed(&self) {
+        self.emit(&RowChange::ConfirmChanged);
+    }
+    /// See [`RowChange::HandoffChanged`].
+    fn handoff_changed(&self) {
+        self.emit(&RowChange::HandoffChanged);
+    }
 
     /// Flush a single deferred `RowChange`. Used by batched (transactional)
     /// writes to emit AFTER commit; an alias of [`EventBus::emit`] kept for
@@ -462,6 +746,30 @@ pub trait EventBus: Send + Sync {
     /// keeps its copy of the threshold in step with the store through this.
     /// Every other bus ignores it.
     fn context_red_pct_changed(&self, _pct: f64) {}
+
+    /// What the fleet knows beyond a session's own row (step 2.6): which
+    /// hosts are down, and which accounts are at a usage limit or have no
+    /// login. The hub's [`BroadcastEventBus`] follows it from the host and
+    /// usage events it carries, after [`Self::attention_seeded`]; every
+    /// other bus knows nothing, which is the row-only classification.
+    fn attention_facts(&self) -> crate::service::attention::Facts {
+        crate::service::attention::Facts::default()
+    }
+
+    /// Hand [`Self::attention_facts`] the host rows and usage answers that
+    /// predate this process's events: `fleet-hub serve`'s hosts at startup,
+    /// the usage history `restore_usage` seeds. Not an event. Every bus but
+    /// the hub's ignores it.
+    fn attention_seeded(&self, _hosts: &[HostRow], _usage: &[AccountUsageSnapshot]) {}
+
+    /// Each account's latest usage answer this bus has carried (or was
+    /// seeded with), by account: what the hub's `account_usage` tool serves,
+    /// since the usage tick's cache is not reachable from the control API.
+    /// Only the hub's [`BroadcastEventBus`] follows it; every other bus knows
+    /// none.
+    fn account_usage(&self) -> Vec<AccountUsageSnapshot> {
+        Vec::new()
+    }
 }
 
 /// Silently drops every event. For tests and any context that doesn't need
@@ -537,6 +845,81 @@ pub struct BroadcastEventBus {
     /// refreshes it on every write of the setting
     /// ([`EventBus::context_red_pct_changed`]).
     context_red_pct: AtomicU64,
+    /// The host rows and usage answers [`EventBus::attention_facts`] is
+    /// decided from, followed off the events this bus carries (step 2.6).
+    attention: Mutex<AttentionInputs>,
+}
+
+/// What [`BroadcastEventBus`] knows of the fleet's hosts and accounts, kept
+/// current from `host:*` and `account_usage:updated` frames, and the
+/// [`Facts`](crate::service::attention::Facts) they make.
+#[derive(Default)]
+struct AttentionInputs {
+    hosts: std::collections::BTreeMap<String, HostRow>,
+    usage: std::collections::BTreeMap<String, AccountUsageSnapshot>,
+    /// The facts as last decided, and the unix second they stop holding (the
+    /// earliest limit reset among them): past it they are decided again.
+    facts: Option<(crate::service::attention::Facts, Option<i64>)>,
+}
+
+impl AttentionInputs {
+    /// Take in one event; anything but a host or usage change is ignored.
+    fn observe(&mut self, e: &RowChange) {
+        match e {
+            RowChange::HostAdded(row) | RowChange::HostProbed(row) => {
+                self.hosts.insert(row.alias.clone(), row.clone());
+            }
+            RowChange::HostPinged {
+                alias,
+                last_pinged_at,
+                reachable,
+                ..
+            } => match self.hosts.get_mut(alias) {
+                Some(h) if h.reachable != *reachable || h.last_pinged_at.is_none() => {
+                    h.reachable = *reachable;
+                    h.last_pinged_at = Some(*last_pinged_at);
+                }
+                // A heartbeat that changes nothing the facts read.
+                _ => return,
+            },
+            RowChange::HostRemoved(alias) => {
+                self.hosts.remove(alias);
+            }
+            RowChange::AccountUsageUpdated(snap) => {
+                self.usage.insert(snap.account_uuid.clone(), snap.clone());
+            }
+            _ => return,
+        }
+        self.facts = None;
+    }
+
+    fn seed(&mut self, hosts: &[HostRow], usage: &[AccountUsageSnapshot]) {
+        for h in hosts {
+            self.hosts.insert(h.alias.clone(), h.clone());
+        }
+        for u in usage {
+            self.usage.insert(u.account_uuid.clone(), u.clone());
+        }
+        self.facts = None;
+    }
+
+    fn facts(&mut self, now: i64) -> crate::service::attention::Facts {
+        if let Some((facts, until)) = &self.facts {
+            if until.is_none_or(|at| now < at) {
+                return facts.clone();
+            }
+        }
+        let hosts: Vec<HostRow> = self.hosts.values().cloned().collect();
+        let usage: Vec<AccountUsageSnapshot> = self.usage.values().cloned().collect();
+        let facts = crate::service::attention::Facts::from_fleet(&hosts, &usage, now);
+        let until = facts
+            .limited_accounts
+            .values()
+            .filter_map(|l| l.resets_at)
+            .min();
+        self.facts = Some((facts.clone(), until));
+        facts
+    }
 }
 
 /// Every event name a [`RowChange`] renders to — the exact strings
@@ -557,7 +940,7 @@ pub struct BroadcastEventBus {
 /// at COMPILE time: the match there is exhaustive, so a new variant does not
 /// build until it has an arm, and the arm's literal is const-checked against
 /// this list and [`EVENT_KINDS`].
-pub const EVENT_NAMES: [&str; 27] = [
+pub const EVENT_NAMES: [&str; 34] = [
     "session:created",
     "session:updated",
     "session:killed",
@@ -578,19 +961,26 @@ pub const EVENT_NAMES: [&str; 27] = [
     "catalog:loaded",
     "sync:progress",
     "move:progress",
+    "start:progress",
+    "repair:progress",
     "work:item",
     "work:tracker",
     "work:tracker_removed",
     "work:changed",
     "settings:changed",
     "update:changed",
+    "update:decision",
     "download:changed",
+    "grant:changed",
+    "local_workspace:changed",
+    "confirm:changed",
+    "handoff:changed",
 ];
 
 /// Every event kind — the part of a [`RowChange::name`] before the `:`, which
 /// is what the `/events` route's `?kinds=` filter matches on.
 /// `event_kinds_cover_every_name` keeps it in step with the variants.
-pub const EVENT_KINDS: [&str; 15] = [
+pub const EVENT_KINDS: [&str; 21] = [
     "session",
     "host",
     "account",
@@ -602,10 +992,16 @@ pub const EVENT_KINDS: [&str; 15] = [
     "catalog",
     "sync",
     "move",
+    "start",
+    "repair",
     "work",
     "settings",
     "update",
     "download",
+    "grant",
+    "local_workspace",
+    "confirm",
+    "handoff",
 ];
 
 /// Seconds since the Unix epoch (0 on a clock set before 1970).
@@ -620,7 +1016,16 @@ fn unix_now() -> i64 {
 /// transaction commits and then flushes them in one burst (one pass every
 /// ~20 s on a hub), so the buffer has to absorb a whole pass over a busy
 /// fleet, not a steady trickle.
-pub const BROADCAST_CAPACITY: usize = 256;
+///
+/// A subscriber that falls this far behind is `lagged`: its stream closes
+/// and its client re-lists the whole fleet — so the small, urgent frame that
+/// arrives next (a dialog going up) waits for that. Every subscriber shares
+/// the one ring and the `?kinds=` filter runs after the receive, so frames a
+/// phone never asked for count against it too. 256 was one busy pass; 2048
+/// (the device-communication analysis's own figure, phase 4 item 12) is a
+/// few passes for a phone whose socket stalls for a moment. The cost is the
+/// ring's slots, a few MB at most on a hub.
+pub const BROADCAST_CAPACITY: usize = 2048;
 
 /// Events kept for replay. At the measured churn of a busy fleet — about
 /// 0.64 frames a second — 512 slots is roughly thirteen minutes of history,
@@ -638,6 +1043,10 @@ pub const REPLAY_RING: usize = 512;
 /// filling — so there would be nothing to replay precisely when it is
 /// wanted. For this long after the last subscriber, the hub keeps rendering
 /// into the ring and sending nothing.
+///
+/// Which serves a resume no production caller can be given any more — see
+/// [`REPLAY_RING`] for why that is a retention kept on purpose, and what
+/// would end it.
 pub const RING_GRACE_SECS: i64 = 15 * 60;
 
 impl BroadcastEventBus {
@@ -660,6 +1069,7 @@ impl BroadcastEventBus {
             context_red_pct: AtomicU64::new(
                 crate::service::attention::DEFAULT_CONTEXT_RED_PCT.to_bits(),
             ),
+            attention: Mutex::new(AttentionInputs::default()),
         }
     }
 
@@ -697,7 +1107,9 @@ impl BroadcastEventBus {
             None => (seq == self.seq.load(Ordering::Relaxed)).then(Vec::new),
             // The ring must still hold the event AFTER the one the client
             // has, or there is a hole between them.
-            Some(oldest) if oldest <= seq + 1 => {
+            // `seq` is the client's own `Last-Event-ID`, so `+ 1` is checked:
+            // `u64::MAX` overflowed it under the ring's lock.
+            Some(oldest) if seq.checked_add(1).is_some_and(|n| oldest <= n) => {
                 Some(ring.iter().filter(|m| m.seq > seq).cloned().collect())
             }
             Some(_) => None,
@@ -738,7 +1150,32 @@ impl EventBus for BroadcastEventBus {
         self.set_context_red_pct(pct);
     }
 
+    fn attention_facts(&self) -> crate::service::attention::Facts {
+        match self.attention.lock() {
+            Ok(mut a) => a.facts(unix_now()),
+            Err(_) => Default::default(),
+        }
+    }
+
+    fn attention_seeded(&self, hosts: &[HostRow], usage: &[AccountUsageSnapshot]) {
+        if let Ok(mut a) = self.attention.lock() {
+            a.seed(hosts, usage);
+        }
+    }
+
+    fn account_usage(&self) -> Vec<AccountUsageSnapshot> {
+        match self.attention.lock() {
+            Ok(a) => a.usage.values().cloned().collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     fn emit(&self, e: &RowChange) {
+        // Before anything that can return early: the facts must follow every
+        // host and usage change, listened to or not.
+        if let Ok(mut a) = self.attention.lock() {
+            a.observe(e);
+        }
         // The usual state of a hub nobody has connected a phone to. Checked
         // FIRST because `payload()` serializes a whole store row, and a
         // reconcile pass emits one per session on a busy fleet: without this,
@@ -787,10 +1224,15 @@ impl EventBus for BroadcastEventBus {
         // deserialises the payload straight back into `SessionRow`.
         // `context_full` is judged at `health.context_red_pct`, the same
         // threshold `list_sessions` reads — held on the bus, which has no
-        // store (see `Self::context_red_pct`).
+        // store (see `Self::context_red_pct`) — and the three `Blocked`
+        // reasons from the facts the bus follows (`attention_facts`).
         if let RowChange::SessionCreated(row) | RowChange::SessionUpdated(row) = e {
             if let (Some(att), serde_json::Value::Object(map)) = (
-                crate::service::attention::needs_attention_with(row, self.context_red_pct()),
+                crate::service::attention::needs_attention_in(
+                    row,
+                    self.context_red_pct(),
+                    &self.attention_facts(),
+                ),
                 &mut payload,
             ) {
                 if let Ok(v) = serde_json::to_value(att) {
@@ -798,24 +1240,24 @@ impl EventBus for BroadcastEventBus {
                 }
             }
         }
-        // The number and the ring position are taken under one lock, so a
-        // client resuming at N can never be sent N+1 before N.
-        let msg = {
-            let Ok(mut ring) = self.ring.lock() else {
-                tracing::warn!("[events] replay ring poisoned; the stream stops recording");
-                return;
-            };
-            let msg = EventMessage {
-                name: e.name(),
-                payload,
-                seq: self.seq.fetch_add(1, Ordering::Relaxed) + 1,
-            };
-            if ring.len() == REPLAY_RING {
-                ring.pop_front();
-            }
-            ring.push_back(msg.clone());
-            msg
+        // The number, the ring position and the live send are taken under
+        // one lock, so a client resuming at N can never be sent N+1 before
+        // N, and a live stream (which skips `seq <= sent_through`) never sees
+        // a later number first and then drops the earlier one (review r06).
+        // `send` does not block.
+        let Ok(mut ring) = self.ring.lock() else {
+            tracing::warn!("[events] replay ring poisoned; the stream stops recording");
+            return;
         };
+        let msg = EventMessage {
+            name: e.name(),
+            payload,
+            seq: self.seq.fetch_add(1, Ordering::Relaxed) + 1,
+        };
+        if ring.len() == REPLAY_RING {
+            ring.pop_front();
+        }
+        ring.push_back(msg.clone());
         // `Err` means the last receiver went away in that window. Not an
         // error, not a log line.
         let _ = self.tx.send(msg);
@@ -859,9 +1301,8 @@ impl EventBus for RecordingEventBus {
     fn emit(&self, e: &RowChange) {
         let key = match e {
             RowChange::SessionCreated(r) | RowChange::SessionUpdated(r) => r.id.to_string(),
-            RowChange::SessionKilled(id)
-            | RowChange::WorktreeRemoved(id)
-            | RowChange::ConversationsChanged(id) => id.to_string(),
+            RowChange::SessionKilled(k) => k.id.to_string(),
+            RowChange::WorktreeRemoved(id) | RowChange::ConversationsChanged(id) => id.to_string(),
             RowChange::SessionEventAdded(ev) => format!("{}:{}", ev.session_id, ev.kind),
             RowChange::HostAdded(r) | RowChange::HostProbed(r) => r.alias.clone(),
             RowChange::HostPinged { alias, .. } => alias.clone(),
@@ -885,6 +1326,12 @@ impl EventBus for RecordingEventBus {
             RowChange::MoveProgress(p) => {
                 format!("{}:{}:{}", p.session_id, p.step.as_str(), p.state.as_str())
             }
+            RowChange::StartProgress(p) => {
+                format!("{}:{}:{}", p.token, p.step.as_str(), p.state.as_str())
+            }
+            RowChange::RepairProgress(p) => {
+                format!("{}:{}:{}", p.token, p.step.as_str(), p.state.as_str())
+            }
             RowChange::WorkItemUpdated(r) => r.id.to_string(),
             RowChange::TrackerUpdated(r) => format!("{}:{}", r.id, r.state),
             RowChange::TrackerRemoved(id) => id.to_string(),
@@ -896,10 +1343,22 @@ impl EventBus for RecordingEventBus {
                 w.view_id
             ),
             RowChange::SettingsChanged(key) => key.clone(),
+            RowChange::GrantChanged(g) => format!(
+                "{}:{}:{}{}",
+                g.session_id,
+                g.person_id,
+                g.level.as_deref().unwrap_or("revoked"),
+                g.request
+                    .as_deref()
+                    .map(|r| format!(":asks:{r}"))
+                    .unwrap_or_default()
+            ),
             RowChange::UpdateChanged(u) => {
                 format!("{}:{}", u.what, u.target.as_deref().unwrap_or_default())
             }
-            RowChange::DownloadChanged(id) => id.to_string(),
+            RowChange::UpdateDecision(u) => format!("{}:{}", u.target, u.status),
+            RowChange::DownloadChanged(id) | RowChange::LocalWorkspaceChanged(id) => id.to_string(),
+            RowChange::ConfirmChanged | RowChange::HandoffChanged => String::new(),
         };
         self.names.lock().unwrap().push(e.name());
         self.events
@@ -953,7 +1412,7 @@ mod tests {
             detail: None,
         };
         let cases: Vec<(RowChange, &str)> = vec![
-            (RowChange::SessionKilled(1), "session:killed"),
+            (RowChange::SessionKilled(1.into()), "session:killed"),
             (RowChange::ConversationsChanged(1), "session:conversations"),
             (RowChange::HostRemoved("h".into()), "host:removed"),
             (
@@ -1094,19 +1553,26 @@ mod tests {
                 RowChange::CatalogLoaded(_) => pinned_name!("catalog:loaded"),
                 RowChange::SyncProgress(_) => pinned_name!("sync:progress"),
                 RowChange::MoveProgress(_) => pinned_name!("move:progress"),
+                RowChange::StartProgress(_) => pinned_name!("start:progress"),
+                RowChange::RepairProgress(_) => pinned_name!("repair:progress"),
                 RowChange::WorkItemUpdated(_) => pinned_name!("work:item"),
                 RowChange::TrackerUpdated(_) => pinned_name!("work:tracker"),
                 RowChange::TrackerRemoved(_) => pinned_name!("work:tracker_removed"),
                 RowChange::WorkChanged(_) => pinned_name!("work:changed"),
                 RowChange::SettingsChanged(_) => pinned_name!("settings:changed"),
+                RowChange::GrantChanged(_) => pinned_name!("grant:changed"),
                 RowChange::UpdateChanged(_) => pinned_name!("update:changed"),
+                RowChange::UpdateDecision(_) => pinned_name!("update:decision"),
                 RowChange::DownloadChanged(_) => pinned_name!("download:changed"),
+                RowChange::LocalWorkspaceChanged(_) => pinned_name!("local_workspace:changed"),
+                RowChange::ConfirmChanged => pinned_name!("confirm:changed"),
+                RowChange::HandoffChanged => pinned_name!("handoff:changed"),
             }
         }
         // And for every variant a test can build without a full store row,
         // `RowChange::name` really is the name pinned above.
         for c in [
-            RowChange::SessionKilled(1),
+            RowChange::SessionKilled(1.into()),
             RowChange::ConversationsChanged(1),
             RowChange::HostRemoved("h".into()),
             RowChange::AccountUpserted(AccountRow::default()),
@@ -1146,9 +1612,46 @@ mod tests {
 
     #[test]
     fn scalar_payloads_keep_their_wire_shape() {
+        // An id-only kill still serialises to exactly what every client
+        // has always read — the four added keys are `skip_serializing_if`.
         assert_eq!(
-            RowChange::SessionKilled(7).payload(),
+            RowChange::SessionKilled(7.into()).payload(),
             serde_json::json!({ "id": 7 })
+        );
+        assert_eq!(
+            RowChange::SessionKilled(SessionKilledPayload {
+                id: 7,
+                host_alias: Some("box".into()),
+                org_id: None,
+                visibility: Some("private".into()),
+                owner_person_id: Some(2),
+            })
+            .payload(),
+            serde_json::json!({
+                "id": 7, "host_alias": "box",
+                "visibility": "private", "owner_person_id": 2
+            })
+        );
+        assert_eq!(
+            RowChange::GrantChanged(GrantChanged {
+                session_id: 7,
+                person_id: 2,
+                level: Some("watch".into()),
+                request: None,
+            })
+            .payload(),
+            serde_json::json!({ "session_id": 7, "person_id": 2, "level": "watch" })
+        );
+        // A revoke is the same frame with a null level.
+        assert_eq!(
+            RowChange::GrantChanged(GrantChanged {
+                session_id: 7,
+                person_id: 2,
+                level: None,
+                request: None,
+            })
+            .payload(),
+            serde_json::json!({ "session_id": 7, "person_id": 2, "level": null })
         );
         assert_eq!(
             RowChange::ConversationsChanged(4).payload(),
@@ -1176,7 +1679,7 @@ mod tests {
     async fn a_subscriber_receives_emitted_row_changes() {
         let bus = BroadcastEventBus::new(16);
         let mut rx = bus.subscribe();
-        bus.emit(&RowChange::SessionKilled(42));
+        bus.emit(&RowChange::SessionKilled(42.into()));
         let msg = rx.recv().await.expect("one message");
         assert_eq!(msg.name, "session:killed");
         assert_eq!(msg.payload["id"], 42);
@@ -1191,7 +1694,7 @@ mod tests {
         assert_eq!(bus.receiver_count(), 0, "nobody is listening yet");
         let mut rx = bus.subscribe();
         assert_eq!(bus.receiver_count(), 1);
-        bus.emit(&RowChange::SessionKilled(1));
+        bus.emit(&RowChange::SessionKilled(1.into()));
         bus.emit(&RowChange::HostRemoved("box".into()));
         assert_eq!(rx.recv().await.unwrap().name, "session:killed");
         assert_eq!(rx.recv().await.unwrap().name, "host:removed");
@@ -1199,7 +1702,37 @@ mod tests {
         // still fine.
         drop(rx);
         assert_eq!(bus.receiver_count(), 0);
-        bus.emit(&RowChange::SessionKilled(2));
+        bus.emit(&RowChange::SessionKilled(2.into()));
+    }
+
+    /// Review r06: a live stream drops any `seq` at or below the last one it
+    /// sent, so emitters on several threads must reach a subscriber in
+    /// number order, or the earlier event is skipped for good.
+    #[test]
+    fn concurrent_emitters_reach_a_subscriber_in_number_order() {
+        const THREADS: usize = 8;
+        const EACH: usize = 2_000;
+        let bus = std::sync::Arc::new(BroadcastEventBus::new(THREADS * EACH));
+        let mut rx = bus.subscribe();
+        let handles: Vec<_> = (0..THREADS)
+            .map(|t| {
+                let bus = std::sync::Arc::clone(&bus);
+                std::thread::spawn(move || {
+                    for i in 0..EACH {
+                        bus.emit(&RowChange::SessionKilled(((t * EACH + i) as i64).into()));
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let mut last = 0;
+        for _ in 0..THREADS * EACH {
+            let msg = rx.try_recv().expect("every event was sent");
+            assert!(msg.seq > last, "seq {} arrived after {last}", msg.seq);
+            last = msg.seq;
+        }
     }
 
     /// The stream and the tool boundary must agree about what a null field
@@ -1269,6 +1802,107 @@ mod tests {
             "a session that needs nobody carries no key: {}",
             msg.payload
         );
+    }
+
+    /// The three `Blocked` reasons on the stream (step 2.6): the bus follows
+    /// hosts and usage off the frames it carries, so a session on a host a
+    /// probe found down reads `host_down`, one on an account at its limit
+    /// `account_limit`, each with `state: blocked` — and both lift on the
+    /// frame that says so, a heartbeat included.
+    #[tokio::test]
+    async fn the_stream_follows_down_hosts_and_limited_accounts() {
+        use crate::service::account_usage::{
+            AccountUsage, AccountUsageSnapshot, UsageOutcomeKind, Window,
+        };
+        let s = crate::store::Store::open_in_memory().unwrap();
+        s.upsert_host("hosta").unwrap();
+        s.upsert_session("dev", "hosta", None, None, 1, 1, "running", None)
+            .unwrap();
+        let mut row = s.get_session("dev", "hosta").unwrap().expect("row");
+        row.claude_status = Some("idle".into());
+        row.account_uuid = Some("acc".into());
+        let mut host = s.list_hosts().unwrap().remove(0);
+
+        let bus = BroadcastEventBus::new(16);
+        bus.attention_seeded(std::slice::from_ref(&host), &[]);
+        let mut rx = bus.subscribe();
+        let mut attention = |bus: &BroadcastEventBus| {
+            bus.emit(&RowChange::SessionUpdated(row.clone()));
+            loop {
+                let msg = rx.try_recv().expect("a frame");
+                if msg.name == "session:updated" {
+                    return msg.payload.get("needs_attention").cloned();
+                }
+            }
+        };
+        assert_eq!(attention(&bus), None, "a reachable host, no usage known");
+
+        host.reachable = false;
+        host.last_pinged_at = Some(50);
+        bus.emit(&RowChange::HostProbed(host.clone()));
+        let att = attention(&bus).expect("stamped");
+        assert_eq!(att["reason"], "host_down", "{att}");
+        assert_eq!(att["state"], "blocked", "{att}");
+
+        bus.emit(&RowChange::HostPinged {
+            alias: "hosta".into(),
+            last_pinged_at: 60,
+            reachable: true,
+            claude_version_at: None,
+            health: None,
+        });
+        assert_eq!(attention(&bus), None, "the heartbeat that says it is back");
+
+        let snap = |pct: f64| AccountUsageSnapshot {
+            account_uuid: "acc".into(),
+            usage: Some(AccountUsage {
+                five_hour: Some(Window {
+                    utilization: pct,
+                    resets_at: Some(unix_now() + 3_600),
+                }),
+                ..Default::default()
+            }),
+            subscription: None,
+            fetched_at: Some(unix_now()),
+            source_host: None,
+            status: UsageOutcomeKind::Ok,
+            detail: None,
+            next_try_at: 0,
+        };
+        bus.emit(&RowChange::AccountUsageUpdated(snap(100.0)));
+        let att = attention(&bus).expect("stamped");
+        assert_eq!(att["reason"], "account_limit", "{att}");
+        assert_eq!(att["state"], "blocked", "{att}");
+        assert!(bus.attention_facts().limited_accounts.contains_key("acc"));
+
+        bus.emit(&RowChange::AccountUsageUpdated(snap(40.0)));
+        assert_eq!(attention(&bus), None, "the window has room again");
+    }
+
+    /// A store reads its bus's facts, and a read pool following the bus reads
+    /// the same: the sites that decide `needs_attention` off a pooled
+    /// connection must not fall back to the row-only answer (step 2.6).
+    #[test]
+    fn a_store_and_its_read_pool_read_the_bus_facts() {
+        let bus = std::sync::Arc::new(BroadcastEventBus::new(4));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let s = crate::store::Store::open_with_bus(&path, bus.clone()).unwrap();
+        s.upsert_host("hosta").unwrap();
+        s.update_host_probe("hosta", false, None, None, 50).unwrap();
+        assert!(s.attention_facts().down_hosts.contains("hosta"));
+
+        let pool = crate::store::ReadPool::open(&path, 2)
+            .unwrap()
+            .expect("WAL")
+            .following(bus as std::sync::Arc<dyn EventBus>);
+        let reader = pool.get().expect("a connection");
+        assert!(reader
+            .lock()
+            .unwrap()
+            .attention_facts()
+            .down_hosts
+            .contains("hosta"));
     }
 
     /// A row at 90 % context, live and working.
@@ -1344,7 +1978,7 @@ mod tests {
         let bus = BroadcastEventBus::new(16);
         let _rx = bus.subscribe();
         for i in 1..=4 {
-            bus.emit(&RowChange::SessionKilled(i));
+            bus.emit(&RowChange::SessionKilled(i.into()));
         }
 
         let after_two = bus
@@ -1361,6 +1995,22 @@ mod tests {
         );
     }
 
+    /// The resume point is the client's own number: `u64::MAX` overflowed
+    /// `seq + 1` while the ring's lock was held, poisoning it for every
+    /// later emit. It is refused, and the ring keeps recording.
+    #[tokio::test]
+    async fn a_resume_point_at_u64_max_is_refused_without_poisoning_the_ring() {
+        let bus = BroadcastEventBus::new(16);
+        let _rx = bus.subscribe();
+        bus.emit(&RowChange::SessionKilled(1.into()));
+        assert!(bus.replay_after(bus.generation(), u64::MAX).is_none());
+        bus.emit(&RowChange::SessionKilled(2.into()));
+        let after = bus
+            .replay_after(bus.generation(), 1)
+            .expect("still recording");
+        assert_eq!(after.iter().map(|m| m.seq).collect::<Vec<_>>(), vec![2]);
+    }
+
     /// A restarted hub counts from 1 again, so an id minted by the last
     /// process names events this one never sent. Replaying them under the
     /// right numbers would be the worst outcome — a client convinced it is
@@ -1370,7 +2020,7 @@ mod tests {
     async fn a_different_generation_is_refused_rather_than_replayed() {
         let bus = BroadcastEventBus::new(16);
         let _rx = bus.subscribe();
-        bus.emit(&RowChange::SessionKilled(1));
+        bus.emit(&RowChange::SessionKilled(1.into()));
 
         assert!(bus.replay_after(bus.generation() ^ 0xffff, 0).is_none());
     }
@@ -1382,7 +2032,7 @@ mod tests {
         let bus = BroadcastEventBus::new(4096);
         let _rx = bus.subscribe();
         for i in 0..(REPLAY_RING as i64 + 10) {
-            bus.emit(&RowChange::SessionKilled(i));
+            bus.emit(&RowChange::SessionKilled(i.into()));
         }
 
         assert!(
@@ -1401,11 +2051,11 @@ mod tests {
     async fn the_ring_keeps_recording_just_after_the_last_subscriber_leaves() {
         let bus = BroadcastEventBus::new(16);
         let rx = bus.subscribe();
-        bus.emit(&RowChange::SessionKilled(1));
+        bus.emit(&RowChange::SessionKilled(1.into()));
         drop(rx);
         assert_eq!(bus.receiver_count(), 0);
 
-        bus.emit(&RowChange::SessionKilled(2));
+        bus.emit(&RowChange::SessionKilled(2.into()));
 
         let missed = bus
             .replay_after(bus.generation(), 1)
@@ -1427,12 +2077,12 @@ mod tests {
     async fn an_event_dropped_after_the_grace_window_refuses_a_resume_from_before_it() {
         let bus = BroadcastEventBus::new(16);
         let rx = bus.subscribe();
-        bus.emit(&RowChange::SessionKilled(1));
+        bus.emit(&RowChange::SessionKilled(1.into()));
         drop(rx);
         bus.expire_grace_for_test();
 
         // Nobody listening and the window gone: not recorded.
-        bus.emit(&RowChange::SessionKilled(2));
+        bus.emit(&RowChange::SessionKilled(2.into()));
 
         assert!(
             bus.replay_after(bus.generation(), 1).is_none(),
@@ -1441,7 +2091,7 @@ mod tests {
         // A fresh subscriber is unaffected, and what follows is replayable
         // again from the ids it hands out.
         let _rx = bus.subscribe();
-        bus.emit(&RowChange::SessionKilled(3));
+        bus.emit(&RowChange::SessionKilled(3.into()));
         let after = bus.replay_after(bus.generation(), 3);
         assert_eq!(after.map(|v| v.len()), Some(0), "caught up at 3");
     }
@@ -1449,7 +2099,7 @@ mod tests {
     #[tokio::test]
     async fn emitting_without_subscribers_is_not_an_error() {
         let bus = BroadcastEventBus::new(4);
-        bus.emit(&RowChange::SessionKilled(1)); // must not panic
+        bus.emit(&RowChange::SessionKilled(1.into())); // must not panic
     }
 
     #[tokio::test]
@@ -1457,7 +2107,7 @@ mod tests {
         let bus = BroadcastEventBus::new(2);
         let mut rx = bus.subscribe();
         for i in 0..5 {
-            bus.emit(&RowChange::SessionKilled(i));
+            bus.emit(&RowChange::SessionKilled(i.into()));
         }
         let err = rx.recv().await.unwrap_err();
         assert!(matches!(
@@ -1469,7 +2119,7 @@ mod tests {
     #[test]
     fn typed_methods_route_through_emit() {
         let bus = RecordingEventBus::new();
-        bus.session_killed(5);
+        bus.session_killed(5.into());
         bus.host_removed("box");
         bus.worktree_removed(9);
         bus.asset_inventory_cleared("box", "claude");
@@ -1543,6 +2193,49 @@ mod tests {
         );
         let back: MoveProgress = serde_json::from_value(change.payload()).unwrap();
         assert_eq!(back, p);
+    }
+
+    #[test]
+    fn start_progress_keeps_its_wire_shape() {
+        let p = StartProgress {
+            token: "st-1".into(),
+            step: StartStep::Tmux,
+            index: StartStep::Tmux.index(),
+            total: 3,
+            state: MoveStepState::Started,
+        };
+        let change = RowChange::StartProgress(p.clone());
+        assert_eq!(change.name(), "start:progress");
+        assert_eq!(
+            change.payload(),
+            serde_json::json!({
+                "token": "st-1", "step": "tmux", "index": 2, "total": 3, "state": "started"
+            })
+        );
+        let back: StartProgress = serde_json::from_value(change.payload()).unwrap();
+        assert_eq!(back, p);
+        for step in StartStep::ALL {
+            assert_eq!(
+                serde_json::to_value(step).unwrap(),
+                serde_json::json!(step.as_str())
+            );
+        }
+    }
+
+    /// `start_steps.ts` names the same three start steps, in order.
+    #[test]
+    fn frontend_declares_the_start_steps_in_order() {
+        let ts = crate::repo_files::read("src/lib/start_steps.ts");
+        let line = ts
+            .lines()
+            .find(|l| l.contains("export const START_STEPS"))
+            .expect("start_steps.ts declares START_STEPS");
+        let want = StartStep::ALL
+            .iter()
+            .map(|s| format!("'{}'", s.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert!(line.contains(&format!("[{want}]")), "{line}");
     }
 
     /// The frontend's step list is the same nine names, in the same order.

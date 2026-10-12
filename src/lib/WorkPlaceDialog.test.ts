@@ -13,6 +13,8 @@ import { task } from './work_view_fixture';
 import { workTreeMeta, type WorkRuleDraft, type WorkTask } from './work_view';
 import { hubStatus, STANDALONE } from './hub';
 import { hubConnection } from './hub_connection';
+import { get } from 'svelte/store';
+import { clearToasts, toasts } from './toasts';
 
 type Handler = (args: Record<string, unknown>) => unknown;
 let handlers: Record<string, Handler>;
@@ -155,5 +157,79 @@ describe('WorkPlaceDialog', () => {
     const d = await makeRule();
     expect(d).toMatchObject({ name: 'Infra', group: 'Infra' });
     expect(d.conditions).toEqual({ tracker_id: null, container: null, key_prefix: null, repo: 'acme/api', title_contains: null });
+  });
+
+  describe('the Group combobox (G2.2)', () => {
+    const grp = (label: string, count: number, org_id: number | null = null) => ({
+      org_id,
+      group: { id: `label:${label}`, label, source: 'manual' },
+      count,
+    });
+    beforeEach(() => {
+      workTreeMeta.set({
+        orgs: [],
+        trackers: [],
+        groups: [grp('Orbit tokens', 3, 1), grp('Orbit tokens', 1, 2), grp('Orbit redesign', 11), grp('Infra', 2), { org_id: null, group: { id: 'none', label: '', source: 'none' }, count: 40 }],
+      });
+    });
+    const options = () => screen.queryAllByTestId('work-place-label').map((o) => `${o.dataset.label}=${o.textContent?.replace(/\s+/g, '')}`);
+
+    it('lists each existing group once with its task count, summed across orgs', () => {
+      mount(keyTask);
+      expect(options()).toEqual(['Infra=Infra2', 'Orbit redesign=Orbitredesign11', 'Orbit tokens=Orbittokens4']);
+      expect(screen.queryByTestId('work-place-new-group')).toBeNull();
+    });
+
+    it('filters as you type and offers a new group for what is not one', async () => {
+      mount(keyTask);
+      await fireEvent.input(screen.getByTestId('work-place-group'), { target: { value: 'Orbit' } });
+      expect(options().map((o) => o.split('=')[0])).toEqual(['Orbit redesign', 'Orbit tokens']);
+      expect(screen.getByTestId('work-place-new-group').textContent).toBe('+ New group “Orbit”');
+      expect(screen.getByTestId('work-place-existing').textContent).toBe('new group');
+      await fireEvent.click(screen.getAllByTestId('work-place-label').find((o) => o.dataset.label === 'Orbit tokens')!);
+      expect((screen.getByTestId('work-place-group') as HTMLInputElement).value).toBe('Orbit tokens');
+      expect(screen.getByTestId('work-place-existing').textContent).toBe('existing · 4 tasks');
+      expect(screen.queryByTestId('work-place-new-group')).toBeNull();
+      await fireEvent.click(screen.getByTestId('work-place-submit'));
+      await flush();
+      expect(calls('place_work')[0]).toMatchObject({ group: 'Orbit tokens' });
+    });
+
+    it('arrow keys and Enter pick an option without submitting', async () => {
+      mount(keyTask);
+      const input = screen.getByTestId('work-place-group');
+      await fireEvent.input(input, { target: { value: 'orbit' } });
+      await fireEvent.keyDown(input, { key: 'ArrowDown' });
+      await fireEvent.keyDown(input, { key: 'ArrowDown' });
+      expect(input.getAttribute('aria-activedescendant')).toBe('work-place-opt-1');
+      await fireEvent.keyDown(input, { key: 'Enter' });
+      await flush();
+      expect((input as HTMLInputElement).value).toBe('Orbit tokens');
+      expect(calls('place_work')).toEqual([]);
+      // Up from the top wraps to the last row.
+      await fireEvent.input(input, { target: { value: 'Pay' } });
+      await fireEvent.keyDown(input, { key: 'ArrowUp' });
+      await fireEvent.keyDown(input, { key: 'Enter' });
+      expect((input as HTMLInputElement).value).toBe('Pay');
+      expect(screen.getByTestId('work-place-existing').textContent).toBe('new group');
+    });
+  });
+
+  it('the placed toast offers Undo, which puts the task back over the new version (G7.4)', async () => {
+    clearToasts();
+    render(WorkPlaceDialog, {
+      task: task({ placement_version: 2, group: { id: 'label:Old', label: 'Old', source: 'manual' } }),
+      currentNote: 'why',
+      onclose,
+      ondone,
+    });
+    await placeIn('Payments');
+    const t = get(toasts).at(-1)!;
+    expect(t.message).toContain('placed in Payments');
+    t.action!.run();
+    await flush();
+    expect(calls('place_work')[1]).toEqual({ task_id: 'item:12', group: 'Old', note: 'why', expected_version: 3 });
+    expect(ondone).toHaveBeenCalledTimes(2);
+    expect(ondone.mock.calls[1][1]).toBe('why');
   });
 });

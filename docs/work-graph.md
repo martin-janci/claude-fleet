@@ -75,13 +75,32 @@ and *Clear all*; an empty list names the filters that hide it.
 
 The Work tab opens in **List** layout; the header, filters and saved views are unchanged, and **List | Grouped** switches to the organisation → group tree described below.
 
-- **List** sorts every task the filters match into **To do**, **Doing** (a live session, or in progress) and **Done** (the last 7 days, collapsed). A ticket keeps its tracker's own status name in its row; its section follows fleet's effective status and live sessions.
-- **+ New task** writes a task in fleet itself (`TASK-<id>`); ▾ adds a project and notes. **Start** opens a session in that project with the title and notes as its first prompt.
+- **List** sorts every task the filters match into **To do**, **Doing** (in progress) and **Done** (the last 7 days, collapsed). A ticket keeps its tracker's own status name in its row; its section follows fleet's effective status, by the same rule as the Board: only a task with no status (a bare key, or a ticket its tracker has not reported on yet) follows its live sessions — Doing while one runs, and off the List and the Board once none does, since nothing says where it stands. A line under the sections counts those (*N tasks not shown*); the Grouped tree lists them, and *Name this work…* gives a bare key a status of its own.
+- **+ New task** writes a task in fleet itself (`TASK-<id>`); ▾ opens the **New task** dialog, which ⌘N (Ctrl+Shift+N) also opens anywhere in Work: title, project, notes, and **Start a session for it now**, which opens the new task's start menu next. A new task stays in fleet: fleet creates no ticket in a tracker. Its **Work** button (below) opens a session in that project with the title and notes as its first prompt.
+- **The Work button** (2026-10-06) is on every task row. Its main half reads **Open** (a live session: select it), **Continue** (no live session but a past one: resume its last conversation) or **Start**. Start asks fleet first where it would land; when everything is known and nothing is in the way it starts at once, with the brief on — for a Jira, Asana, Linear or GitHub ticket too. Otherwise it opens the *start popover*: pick the **Repo**, the **Host** (an offline one says so), edit the **Branch**, turn the **Brief** off or preview it as text, and see what is in the way: a live session on the task (Start then makes a *parallel* session in a checkout of its own, `<branch>-2`, never the same tree; *Open it* jumps there — the warning names that session, unless its name is the task's key over again, which says nothing twice), a task that is done, a proposal (*Accept & start*), another organisation (tick *Start across organisations* if it is meant). ▾ offers *Start new…* (always the popover), *Continue* one of the last past sessions, *Attach running session…* and *Copy key*; Alt-click on Start opens the popover as well. In the list, `j` / `k` move the selection, `s` runs the selected task's Work button and ⇧S opens its popover. The task page's **Start new** asks the same way.
+- **Attach running session…** (2026-10-06) puts a session that is already running on the task. The picker lists every session not on it yet — the same repository first, then sessions with no task, then idle ones — with a filter. A session already on another task offers **Switch** (that task's link ends and this one becomes its primary; the old task keeps the conversation, and *Continue* there resumes it) or **Add** (this task is a secondary link and the other stays primary). Add is the default while the session is mid-turn or when its checkout is named after the other key, Switch otherwise. When the task is already open in another session the picker says so (naming it when it is yours to see, "someone" otherwise) and the button becomes *Attach anyway*. For ten seconds after, *Undo* puts things back: a Switch switches back, an attach to a session with no task removes the link.
 - **The task page** adds *Brief*, *Subtasks* (+ Add subtask, Start), *Proposals* (an agent's suggested subtasks — Accept / Reject; rejected ones behind a toggle), *Delegated jobs* with their result, and *Agent steps* — the agent's own `TaskCreate` / `TaskUpdate` todos per session, labelled "per the agent", never a status. Placement and rules sit under *Placement & rules*.
 - A subtask started from the list gets the parent ticket's brief (only when you may see that ticket) followed by its own title and notes.
 - Every `dispatch_task` job appears as an agent subtask under the requester's task and follows the job's state. The ☑ Tasks popover is gone; a session's jobs are still in its details.
 - Tracker items stay read-only: nothing here writes to Jira, Asana or GitHub.
 - Hosts pick up step capture after re-provisioning (they read `provision_stale` until then); meanwhile the Stop hook backfills steps from the transcript.
+
+### Priority, labels and estimate
+
+A task carries a **priority** (`urgent`, `high`, `medium` or `low`, or none), up to 20 **labels** and an **estimate** in story **points** or **hours** (`work_items.priority`, `labels`, `estimate`, `estimate_unit`; migration 171). The task page's rail shows them under *Details* (a row only when it is set: the priority as a coloured dot and its word, the labels as chips, the estimate as "3 pts" or "4 h"), and its header adds a chip for an urgent or high one.
+
+On a task written in fleet a person sets them in **Edit task** or with `work_link { action: edit, item_id, priority?, labels?, estimate?, estimate_unit? }`: a priority from the four, labels of at most 40 characters each (trimmed, each once), an estimate from 0 to 1000. `priority: ""`, `labels: []` and `estimate: 0` clear them, the unit going with the estimate; `estimate_unit` alone re-units the estimate the task has, and a first estimate without one is in points. A bad value refuses the whole edit.
+
+A ticket's come from its tracker on every sync and are read-only in fleet (nothing is written back); a change to any of them is a change readers see:
+
+| Tracker | Priority | Labels | Estimate |
+|---|---|---|---|
+| Jira Cloud and Data Center | the priority's name: Highest / Blocker / Critical → urgent, High / Major → high, Medium → medium, Low / Lowest / Minor / Trivial → low, any other name → none | `labels` | the story-points field the tracker test finds (a number field named *Story Points* or *Story point estimate*) in points, else the original time estimate in hours |
+| Linear | `priority` 1–4 → urgent … low, 0 → none | its labels | `estimate`, in points |
+| GitHub | none | the issue's labels | none |
+| Asana | none | the task's tags | none |
+
+A Jira tracker connected before this release learns its story-points field at its next **Test**.
 
 ## The Work view
 
@@ -170,6 +189,23 @@ says so:
   name; a note is optional). Clearing it returns the task to where it would
   sit by itself. If someone else placed it meanwhile you are told, with the
   current value, instead of overwriting it.
+  Over the API (`work_link { action: place }`) the task is `task_id`
+  (`item:<id>` / `ref:<KEY>`) **or** `item_id`, and `expected_version` is
+  the placement's version you saw — **`0` when it has none**. `group` is
+  normally a name of your own, but it may also be an existing group's **id**
+  — `repo:<owner>/<repo>`, `tracker:<tracker id>:<container>`,
+  `key:<PREFIX>`, `label:<text>` — which puts the task in *that* section
+  instead of opening a second one named after the id; an id that names no
+  such group is refused — and so is free text that is already a derived
+  group's *name* (`martin-janci/claude-fleet` beside the
+  `repo:martin-janci/claude-fleet` group), since a section is bucketed by
+  its id and ordered by its label, so the two would show one name over two
+  sections; the refusal names the id to pass, and `label:<name>` insists on
+  a group of your own with that name. Remember that a placement outranks every rule and
+  every derived grouping until it is cleared, so pinning a task to the
+  repository it sits in today keeps it there after its session moves.
+  `work_link { action: unplace, task_id | item_id, expected_version }`
+  clears a placement (so does `place` with an empty `group` and no note).
 - **Make a rule for similar tasks…** is a separate step after a placement:
   choose the conditions (tracker, project/container, key prefix, words in
   the title, repository) and the group, **Preview** the tasks it would move
@@ -186,8 +222,11 @@ says so:
 **A session's tasks.** A session's details list all its tasks — primary,
 secondary, suggested and past — each with *why*. **Make primary** moves the
 primary (every other link stays), **Remove** takes a mistaken link away,
-**Add task…** adds another task (it becomes primary only if the session has
-none), and **Show in Work view** jumps to the task.
+**Work on task…** adds another task — a ticket or one of your own tasks
+(`TASK-<id>`) — which becomes primary only if the session has none. When
+that task is already open in another session it says so first, with
+**Attach anyway**, *Open that one* and *Cancel*. **Show in Work view** jumps
+to the task.
 
 **Review.** The Work view's **Review · n** tab collects what needs a person:
 suggestions (with their reasons), a session linked to another org's task
@@ -219,14 +258,33 @@ including tasks with no session at all — as reads of the `work` tool
   count under the filters), and the orgs and trackers the caller sees.
   Filters: `org` (an id or `"none"`), `tracker` (an id, `"local"` or
   `"ref"`), `status`, `mine`, `has` (`active` / `past_only` / `none` /
-  `suggested`), `review`, `query`, `group`, `archived`. A task is
+  `suggested`), `review`, `query`, `group`, `archived`, and (redesign
+  step 6.2) `assignee` (one person by name, any case), `status_name` (one
+  tracker column, the tracker's own status name, any case) and `group_by`:
+  what a section under each org is, `group` (the default: a person, rule,
+  tracker container, repo or key), `org` (one section per org), `person`
+  (the first assignee), `mission` (named only when the caller may read the
+  mission), `account` (the account its sessions run on, an active one
+  first) or `repo`. A task with nothing to group by sits in `none`, last;
+  `group` then names a section of that grouping. An unknown `group_by` is
+  refused; a hub from before 6.2 ignores all three. The Work board's
+  panel chips pick several at once: `orgs` (ids or `"none"`, any of them)
+  and `stages` (any of `backlog`, `in_progress`, `in_review`, `blocked`,
+  `done`, matched against each task's `stage`: done, then blocked (waits
+  for another task), then in review (its tracker column says review, or a
+  live session has a pull request), then in progress (its tracker says so,
+  or a session works on it), else backlog). They apply with `org` and
+  `status` when both are set; an unknown stage or org word is refused, and
+  an older hub ignores both. `hidden_by_filters` counts the tasks the
+  filters hide that would show with none set (the archived switch kept;
+  0 on a section's read): the list's "Hidden by filters · Show" row. A task is
   *archived* when it has no active session and is done, or every one of
   its links (at least one of them past) is archived, judged over every
   link of the task, not only the ones the caller sees. The tree hides
   archived tasks only when asked, with `archived: false` (the desktop
   always sends it); absent shows them, so a client from before the archive
-  keeps seeing every task. `status: "done"` and `has: "past_only"` show
-  them anyway. `archived_hidden` says how many passed every other filter
+  keeps seeing every task. `status: "done"`, a `done` stage and
+  `has: "past_only"` show them anyway. `archived_hidden` says how many passed every other filter
   but were hidden that way (over the whole result, not the page). Each
   task carries `archived`; `task` / `session_tasks` / `review` answer archived
   tasks as any other. Pages are a keyset: pass
@@ -240,6 +298,22 @@ including tasks with no session at all — as reads of the `work` tool
   `review_total`, the review inbox's total — so one refresh is one read.
   Neither is in the tool's schema (an assistant pages a section by its
   filters), and an older hub answers without them.
+  Search phase 2 (2026-10) adds `iteration` (`current` for the tracker's
+  active sprint or cycle, `none`, or a sprint's name, any case), `epic`
+  (an epic's key or `item:<id>`: the epic and everything under it, through
+  any depth of parents), `item_type` (the tracker's type name, any case)
+  and `sort` (`activity`, the default: needing you first then the latest
+  activity; `updated`, the tracker's last change; `key`, by number so
+  TK-9 comes before TK-10; `title`; `due`), which orders the tasks inside
+  each section; an unknown `sort` is refused. `query` matches every word
+  of it in the key or title, in any order, case and accents ignored. Each
+  task carries `item_type`, `hierarchy_level`, `iteration`,
+  `iteration_active`, `in_epic` (`{task_id, key, title}`: its nearest
+  epic-level ancestor, else its top-most one) and `updated_at`; the page
+  carries `facets` (`iterations` with `active` and `count`, `epics` with
+  `count`, `item_types`), every value among the tasks the caller sees
+  whatever the filters, so a picker is not limited to the loaded page
+  (absent on a section's read). An older hub ignores all four filters.
 - `work { action: task, task_id }` (`item:<id>` or `ref:<KEY>`): one task
   with every session and why it is linked, its tracker description (at
   most 600 characters, with `description_chars`, the full length fleet
@@ -337,6 +411,14 @@ project group's header also has **Name this work…**, for its sessions that
 have no work. An explicit link always wins over anything fleet recognised,
 and a rejection is sticky: fleet never suggests that pair again.
 
+Local work is reached THROUGH the sessions linked to it, which is also how
+fleet knows whose it is. So a local item whose last link you removed —
+**Clear**, or an unlink — can no longer be renamed or given a status, by
+you or by anybody else: with no link there is no record of whose work it
+was, and fleet answers as it would for an item id that does not exist. It
+still appears in the local-work list, and linking a session to it again
+makes it writable again.
+
 **Clear** removes the link without rejecting the key: fleet may propose it
 again later. But not from the same evidence. When the session's branch,
 its pull request's head branch or a closing reference of its pull request
@@ -397,7 +479,7 @@ Fleet watches for work in:
 One recogniser (`service/work/recognize.rs`, mirrored in
 `src/lib/work_keys.ts` over a shared fixture) finds keys; with a tracker
 connected, a key must carry one of its prefixes, so `GPT-4` or `COVID-19`
-are never keys. One resolver (`service/work/resolve.rs`, rules R1–R11)
+are never keys. One resolver (`service/work/resolve.rs`, rules R1–R12)
 decides what each sighting becomes:
 
 - a **confirmed automatic link**, only for strong, unambiguous signals, for
@@ -433,7 +515,7 @@ suggestions, each with its **evidence**: one line per signal, for example
 - pull request closes ABC-123 · R4
 - Claude named ABC-7 when asked at 11:40 · R11
 
-The rule tag (R1…R11) says which resolver rule decided it. With
+The rule tag (R1…R12) says which resolver rule decided it. With
 `work.evidence_snippets` on (the default), hovering an evidence line shows
 a redacted ±40-character snippet of the prompt around the match; off, only
 the matched text is kept. The popover's buttons are **Confirm** (↵ / `y`),
@@ -464,6 +546,16 @@ work. Claude's answer (`source: agent_inferred`) is only ever a
 pre-selected suggestion (rule R11) that you confirm or reject. It spends
 context on a guess, which is why it is off.
 
+### Jev's proposal (off by default)
+
+With `decide.jev.work_link` on `assist`, the same unlinked conversation can
+get a suggestion from the decision model instead, without touching the
+conversation: Jev reads the first prompt (keys, links and the branch
+removed) and picks one of the same candidates or none. Its answer is a
+pre-selected suggestion (rule R12, source `jev`), marked ✦ and "Proposed by
+Jev" on the row and in Review, that you confirm or reject. See
+[decisions](decisions.md#work_link--the-work-item-of-a-session-no-rule-could-link-j1).
+
 ### SessionStart context (off by default)
 
 With `work.session_start_context` on, the SessionStart hook hands Claude the
@@ -481,7 +573,9 @@ Trackers give you:
 
 - titles and statuses on the chips and group headers;
 - **⌘K → My work** (and *Current sprint* / *Current cycle* where there is
-  one, *Recent*, and favourite filters), which searches the cache;
+  one, *Recent*, and favourite filters); a query of two or more letters
+  also searches the whole cache (key, title and assignees, every word,
+  accents ignored), so an older ticket is found by its title;
 - starting work from a ticket in one step;
 - ticket cards with acceptance criteria;
 - the "done" signal that tidy-up uses.
@@ -544,8 +638,9 @@ write is queued when the PR probe sees the PR (or its state change), when a
 person links or confirms work on a session that already has a PR (also when
 the sync binds a key typed before the tracker was connected), and when you
 turn the setting on, for every PR already open on a session linked to one of
-the tracker's tickets. Nothing else is ever written: no transition, no
-worklog, no comment (D29), and nothing a transcript or a tracker wrote.
+the tracker's tickets. Besides this link, fleet writes only a comment a
+person chose to post (next section): no transition, no worklog (D29), and
+nothing a transcript or a tracker wrote.
 
 - **Only work a person linked.** The link must be confirmed and made by
   hand or by *Start* (`manual` / `started`). A detection guess, an agent's
@@ -570,6 +665,86 @@ worklog, no comment (D29), and nothing a transcript or a tracker wrote.
 Turning it off stops sending at once; writes already queued wait, and go
 out if you turn it on again. Settled writes are dropped after the journal's
 retention window (`work.retention.journal_days`).
+
+### Comments: the tracker's, and posting one back (off by default)
+
+A ticket's **Comments** tab shows the tracker's own comments beside fleet's,
+in one timeline: each with the tracker's name as a badge, its author, when,
+and **Open in …** where the tracker gives a link. They are read live when the
+tab opens (`work { action: "tracker_comments", key }`, desktop
+`work_tracker_comments`): the newest 50, nothing cached or stored, every
+provider (Jira Cloud and Data Center, GitHub, Linear, Asana's comment
+stories). If the tracker cannot be reached the tab says so and still shows
+fleet's own comments. An agent (a per-host token) reads each body fenced as
+untrusted text, like a description.
+
+With **Post comments** on (Settings → Trackers → Write-back, any provider,
+off by default, behind a confirm: it is the tracker admin's call), the
+composer on a ticket has **Also post to <tracker>**, ticked by default. The
+comment is saved in fleet and queued for the tracker in one step, then sent
+as the tracker credential's account with the text, a blank line and
+`— <your name> via fleet` (your display name when the hub knows who you
+are, otherwise just `— via fleet`; never a device name). Jira Cloud gets it
+as rich text (paragraphs and line breaks, no markup read), Data Center as
+plain text, GitHub through `gh` (`addComment`), Linear (`commentCreate`)
+and Asana (a story). Under the comment fleet shows *Sending…*, *Sent to
+<tracker>* (a link to it) or *Not sent: <why>*. Only a person posts: an
+agent's `post_to_tracker` is refused, and so is a post where the setting is
+off or the task has no ticket — then nothing is saved at all.
+
+- **When it goes.** Queuing wakes the tracker sync, which sends it within
+  seconds on the desktop or hub that owns the trackers (not at the next
+  pass), on the tracker's own credential. Failures retry like a PR link's
+  and give up after five tries, or at once on a refusal (403, 404).
+- **Once.** A tracker comment is not idempotent, so each fleet comment is
+  posted at most once; fleet keeps the tracker's id for it and leaves that
+  comment out of the tracker's list while the fleet comment is live.
+- **Deleting.** Deleting a fleet comment whose post is still waiting cancels
+  the post. Once sent, deleting it in fleet does not delete it at the
+  tracker; it then shows there as the tracker's own.
+- **The token needs permission to comment** (Jira: *Add comments*; GitHub:
+  `gh` logged in with `repo` scope; Linear and Asana: a key that may
+  comment).
+
+This changes D29 on the owner's word (2026-10-11): comments a person posts
+are written back; transitions and worklogs still are not.
+
+### Local tasks, and promoting one to a ticket (off by default)
+
+Work can stay in fleet while it is small: a task of fleet's own, or a
+subtask under a Jira or Asana ticket (*+ Add subtask* on the ticket's page).
+Such a subtask is fleet's alone — the tracker never sees it — and starts,
+comments and sprints like any other task.
+
+When it should be tracked, **Promote to ticket…** on the task's page makes it
+one. With **Create tickets** on (Settings → Trackers → Write-back, Jira
+Cloud, Jira Data Center and Asana, off by default, behind a confirm):
+
+- **A subtask of a ticket** is created under that ticket, in its tracker: a
+  Jira sub-task (the project's first sub-task issue type), an Asana subtask.
+  Nothing to pick.
+- **A task at the top** goes to the tracker you pick: into a Jira project
+  the site owns (its *Task* type, else its first standard type), or into an
+  Asana project — or, with none, into the workspace, assigned to the
+  tracker's account so it shows in its views.
+- **What is sent**: the title and the description, signed `— <your name> via
+  fleet`. Assignees, due dates, priority, labels and estimates stay in fleet
+  for now.
+- **The task becomes the ticket.** Once the tracker answers, the same task
+  is that ticket — its new key (`ABC-7`; an Asana task draws its tracker's
+  display key), its tracker's status — and its sessions, comments,
+  subtasks, sprint and history stay with it. Its old fleet key still finds
+  it. Local subtasks under it stay fleet's own, and can be promoted in turn.
+- **Not promoted**: a tracker's ticket, an epic, a delegated job, an open
+  proposal, and a task under a task of fleet's own (promote its parent
+  first, or take it out to the top). Only a person promotes; an agent's
+  `promote` is refused.
+- **Once.** A create is not idempotent, so it is sent at most once, through
+  the same outbox as a comment: within seconds on the desktop or hub that
+  owns the trackers. The task page says *Creating the ticket in …* meanwhile,
+  or *Not created in …: <why>* after a refusal, and offers Promote again.
+- **The token needs permission to create issues** (Jira: *Create issues* in
+  the project; Asana: a key that may add tasks there).
 
 ### Sync
 
@@ -617,8 +792,10 @@ put in a session's event history. Disconnecting a tracker deletes it.
 
 ## Starting work
 
-- **From ⌘K:** type a key or paste a ticket URL, or pick a ticket from
-  *My work*, then ↵. Fleet starts it with a brief at once and selects the
+- **From ⌘K:** type a key, words of its title or paste a ticket URL, or
+  pick a ticket from *My work* or one of your own tasks from *My tasks*
+  (listed with or without a tracker; `#` narrows ⌘K to tasks and
+  tickets), then ↵. Fleet starts it with a brief at once and selects the
   new session; when the project is ambiguous it opens the New session
   dialog on that ticket instead, and when a session is already on it, it
   jumps there.
@@ -635,9 +812,28 @@ fenced as untrusted, rides the first hook's context, and a short start
 prompt is typed only once Claude's REPL is ready, never into a trust
 dialog. The brief is editable before you start.
 
+**Draft with Claude** (beside the brief in New session, and in the start
+popover) asks for a brief written from the ticket and from what earlier
+sessions on the same task left: commit subjects, first prompts, progress
+notes, summaries and hand-offs. Fleet scores each of those by the words it
+shares with the ticket and gives the model the best twelve that fit 3,000
+characters, most relevant first, fenced as untrusted (Jev J4). The run is
+one `claude -p` on the host the start would land on, only when the ticket's
+organisation may reach that host, with the model `work.summary_model` names,
+no tools, no MCP servers, no hooks and no transcript; its cost is booked as
+`brief`. The draft is the field's text: edit it, **Regenerate** it, or
+**Clear** it to go back to the ticket brief. Nothing is sent until you
+start the session. The wire is `work_link { action: preview_start,
+draft_brief: true }`; a hub older than this answers the ticket brief and
+the field says it cannot draft yet.
+
 If a live session is already on that key, the dialog says so ("ABC-123
 already running on X") and offers **Jump** instead of starting a second
-one. While another device is still starting or resuming the same key (a
+one. The Work tab's start popover offers a **parallel** start instead: a
+second session on the key in a checkout of its own (`work_link { start,
+parallel: true }`); `work_link { preview_start }` is the preview it
+reads, which makes nothing. A hub older than the preview has no such
+action, and the Work button then starts as it did before. While another device is still starting or resuming the same key (a
 multi-repo start holds it until its last repository), a second start or
 resume is refused: "ABC-123 is being started or resumed already; wait for
 that session, then jump to it".
@@ -755,6 +951,7 @@ counts toward *Needs you*. The sheet groups candidates by reason:
 | `pr_merged_idle` | its PR is merged and it is idle | Safe kill |
 | `not_planned` | the ticket was closed as won't-do or duplicate | Safe kill |
 | `duplicate_worktree` | two sessions work in one worktree | Kill (the worktree stays) |
+| `same_work` | Jev proposed (`decide.jev.related_session`, assist) that two running sessions do the same work; the idler is suggested | not ticked; never automatic |
 | `ghost_expiring` | a lost session is a day from being reaped | Resume or let it expire |
 | `idle_unlinked` | no work linked, idle and unprompted `work.tidy_idle_unlinked_days` | not ticked |
 
@@ -871,11 +1068,45 @@ only its own: the other org's task, its title, evidence, conversation and
 summary never reach a device bound to the first org, and a device bound to
 the other org sees the task without the first org's session.
 
-Orgs are managed in Settings → Organisations on a standalone
-desktop (read-only on a paired desktop), or with `fleet-hub org …` on a
-hub. **Assign every host of a company before
+Orgs are managed in Settings → Organisations — on a paired desktop too,
+when the hub trusts it — or with `fleet-hub org …` on a hub. **Assign every host of a company before
 connecting a second company's tracker.** The details and commands are in
 [hub.md → Organisations and isolation](hub.md#organisations-and-isolation).
+
+Each org's page opens with an **Overview**: how many of its live sessions
+you can see, and how many of them need you. Under *What belongs to it* it
+lists the org's asset catalogs next to its rules, hosts and trackers.
+**Devices** lists the phones, browsers and desktops bound to it, with
+read-only and trusted marked, and binds or unbinds one. Only the hub's
+operator sees that list: the master, or the owner's own device bound to no
+org.
+
+Settings → **Company** holds the rest of the company's administration:
+**Organisations**, **Devices** (pair a phone or a browser — the page shows
+the one-time code, its link and a QR to scan — trust it, bind it to an org,
+hand it to a person, let it change a catalog, or revoke it) and **People**
+(rename, or disable someone, which revokes their devices and the shares
+made to them). On a desktop paired with a hub these change the hub's orgs,
+devices and people, and need this desktop to be trusted (`fleet-hub client
+trust <name>`); none of them can lock out the device you are using. The
+**Its own settings** on an org's page let it keep a different value of a
+few settings — the classification nudge, the summary model, how long Tidy
+up waits for an unlinked session, and its budgets — while every other
+session keeps the fleet's. The overview shows what the org's sessions cost
+today, over the last 7 days and this month (counted from the upgrade that
+added it), and a daily or monthly budget (Settings → Limits → Company
+budgets, or per org) raises an Attention item when the org reaches it;
+fleet only warns. Spend is shown only to someone who sees every session.
+**Members** puts people in the company, each as an admin (administers the
+org — its settings, members and their devices), a member (sees its work and
+what is shared with it) or a viewer (reads only). A member's devices are fenced
+to the org. An org's admin manages it from their own device; the hub's owner
+keeps the rules, the trackers, people's names and which company owns the hub.
+Share a session with your whole team from the Share sheet (*an org*): it
+reaches the people in the org now, not someone who joins later. Removing a
+member takes back what was shared with them on the org's sessions; nobody —
+no admin either — reads someone else's private session. Details:
+`docs/hub.md` → *Companies: members and roles*.
 
 ## Trackers in fleet health
 
@@ -936,7 +1167,7 @@ status` and Settings → Trackers. See
 
 `work_admin { action: usage, days? }` (on a hub, `fleet-hub work usage
 [--days N] [--json]`; on a standalone desktop, Settings → Usage → *Work
-graph usage*, also linked from Settings → General → Work)
+graph usage*, also linked from Settings → Work & trackers)
 counts how the work graph is actually used over the last `days` (default
 30, 1 to 365). It is read-only and master-only (a per-host or client token
 is refused, and a paired desktop shows no counts: the page says to read
@@ -1024,10 +1255,32 @@ tools like any client, with one rule (decision D12): **its starts and kills
 always wait for you**, whatever `mcp.confirm_destructive` says. That covers
 `work_link` start and resume, new and restarted sessions, safe kill, and
 tidy-up kills: each returns `E_CONFIRM_REQUIRED` until you approve it in the
-desktop's dialog. On a hub there is nobody to approve, so the operator's
+desktop's dialog. Since review round 15 (F21) **what it writes waits too**:
+`send_prompt`, `run_prompt`, `queue_prompt` and a `dispatch_task` to a
+worker that already exists, because nothing an agent composes should reach a
+session without you reading it first. The toggle does not lift any of this —
+only a different token does: these tools are `confirm: false`, so the master
+token and your other paired clients send prompts ungated. On a hub there is nobody to approve, so the operator's
 starts and kills are refused (`E_FORBIDDEN`); there it offers archive or
 snooze instead. The agent panel's **Tidy up done tickets** chip fills the
 operator's composer with that request; it never sends it.
+
+**Brainstorming with the operator.** Ask the operator to brainstorm or plan
+something new and it works in four stages: options, a choice, decisions, a
+plan. Each stage waits for your answer. When you say yes to the plan it
+creates a task (`TASK-<id>`) whose notes hold the plan, and proposes up to
+ten subtasks under it. You accept or reject each one; the operator cannot,
+and it starts nothing: press **Work** on a subtask when you want it done.
+The skill is `skills/fleet-brainstorm/SKILL.md`, written into the
+operator's directory when it starts.
+
+**Watching a start, and cancelling it.** After **Work** starts a session,
+a strip under the button shows its steps: session, checkout, Claude ready,
+brief sent. When Claude asks you to trust the folder it says "Waiting for
+you" with an Open button that takes you to the terminal. Until the brief is
+in, **Cancel start** ends the session and removes the checkout and branch
+the start made. It refuses, and touches nothing, when the checkout was not
+made by that start or already has changes or commits of its own.
 
 Your own starts and kills from the desktop are not gated by this rule. With
 `mcp.confirm_destructive` on, a tidy-up batch that contains a kill still
@@ -1042,25 +1295,33 @@ them with `get_settings`. This table is generated from
 in [the settings reference](settings-reference.md).
 
 <!-- BEGIN GENERATED: settings work. -->
-<!-- Generated from service/settings.rs: REGEN_SETTINGS_DOCS=1 cargo test -p fleet-core settings_docs_are_current -->
-| Setting | Default | Range | What it does |
-|---|---|---|---|
-| `work.retention.journal_days` | `365` | 0–3650 days, `0` = forever | Days a work journal row is kept once its conversation ended and its work is done or unlinked. |
-| `work.retention.tracker_items_days` | `180` | 0–3650 days, `0` = forever | Days a done ticket that no session links to is kept in the cache. |
-| `work.retention.timeline_work_events_days` | `180` | 0–3650 days, `0` = forever | Days handover, nudge, tidy and withdrawn-suggestion timeline events are kept; the newest of each kind per session always stays. |
-| `work.recent_days` | `14` | 1–365 days | How long ended work with no live session keeps a sidebar group. |
-| `work.sync_interval_secs` | `300` | seconds, `0` = off | Seconds between tracker sync passes. Under a minute is raised to one. Applies after a restart. |
-| `work.describe_cache_secs` | `300` | seconds, shown in minutes, `0` = off | How long a fetched ticket description is reused before the tracker is asked again; never longer than the done-tickets retention window. |
-| `work.trusted_branch_projects` | `[]` | JSON array of ids | Projects where a sole ticket key in the branch name links automatically; elsewhere it is a suggestion. Set from the work popover. |
-| `work.evidence_snippets` | `true` | on / off | Keep a short, redacted prompt snippet around a detected ticket key as evidence. Off keeps only the matched text. |
-| `work.session_start_context` | `false` | on / off | Give Claude the linked ticket at session start. Makes the start hook synchronous, which can add up to 2 s when the hub is down. Experimental. Applies when the hooks are next installed. |
-| `work.classify_nudge` | `false` | on / off | After three prompts with no ticket, ask Claude once which of your few open tickets it is on. Its answer is only ever a suggestion. Experimental. |
-| `work.summary_model` | `haiku` | `haiku` / `sonnet` / `opus` | The model Summarise runs on for a past session, on that session's own host and account. |
-| `work.tidy_done_days` | `2` | 1–365 days | Days a linked ticket must be done before Tidy up suggests its session. |
-| `work.tidy_idle_hours` | `4` | 1–720 hours | Hours a session must be idle before any tidy reason suggests it. |
-| `work.tidy_idle_unlinked_days` | `7` | 1–90 days | Days a session with no work linked must sit idle and unprompted before Tidy up suggests it. Only ever suggested, never auto-tidied. |
-| `work.auto_tidy` | `false` | on / off | Let the GC sweep act on the allowed tidy reasons by itself, by safe kill or archive only. Off, Tidy up only suggests. An organisation can override it. Asks to confirm. |
-| `work.auto_tidy_reasons` | `done_idle,pr_merged_idle` | any of `done_idle`, `pr_merged_idle`, `not_planned` | The tidy reasons auto-tidy may act on. |
+<!-- Generated from service/settings.rs: REGEN_SETTINGS_DOCS=1 cargo fleet-test -- settings_docs_are_current -->
+| Setting | Default | Range | Scope | What it does |
+|---|---|---|---|---|
+| `work.retention.journal_days` | `365` | 0–3650 days, `0` = forever | fleet | Days a work journal row is kept once its conversation ended and its work is done or unlinked. |
+| `work.retention.tracker_items_days` | `180` | 0–3650 days, `0` = forever | fleet | Days a done ticket that no session links to is kept in the cache. |
+| `work.retention.timeline_work_events_days` | `180` | 0–3650 days, `0` = forever | fleet | Days handover, nudge, tidy and withdrawn-suggestion timeline events are kept; the newest of each kind per session always stays. |
+| `work.recent_days` | `14` | 1–365 days | fleet | How long ended work with no live session keeps a sidebar group. |
+| `work.sync_interval_secs` | `300` | seconds, `0` = off | fleet | Seconds between tracker sync passes. Under a minute is raised to one. Applies after a restart. |
+| `work.describe_cache_secs` | `300` | seconds, shown in minutes, `0` = off | fleet | How long a fetched ticket description is reused before the tracker is asked again; never longer than the done-tickets retention window. |
+| `work.trusted_branch_projects` | `[]` | JSON array of ids | fleet | Projects where a sole ticket key in the branch name links automatically; elsewhere it is a suggestion. Set from the work popover. |
+| `work.evidence_snippets` | `true` | on / off | fleet | Keep a short, redacted prompt snippet around a detected ticket key as evidence. Off keeps only the matched text. |
+| `work.session_start_context` | `false` | on / off | fleet | Give Claude the linked ticket at session start. Makes the start hook synchronous, which can add up to 2 s when the hub is down. Experimental. Applies when the hooks are next installed. |
+| `work.classify_nudge` | `false` | on / off | fleet, per org | After three prompts with no ticket, ask Claude once which of your few open tickets it is on. Its answer is only ever a suggestion. Experimental. |
+| `work.members_plan_sprints` | `false` | on / off | fleet, per org | Let an organisation's members, not only its admins, create and change its sprints and releases. Viewers never can; anyone can keep personal ones. |
+| `work.summary_model` | `haiku` | `haiku` / `sonnet` / `opus` | fleet, per org | The model Summarise runs on for a past session, on that session's own host and account. |
+| `work.context_help` | `false` | on / off | fleet | Terminal and composer: Ask asks a model about the line you are typing, with its history as context, on the session's host. A proposed command is put on the line, never run. |
+| `work.help_model` | `haiku` | `haiku` / `sonnet` / `opus` | fleet | The model that answers a question asked at a terminal or composer prompt line, on the session's own host and account. |
+| `work.draft_commit_messages` | `false` | on / off | fleet | Files tab: Draft writes a commit message from the staged diff with claude -p on the session's host. A draft is text you edit and commit yourself. |
+| `work.draft_briefs` | `false` | on / off | fleet | Starting from a ticket: Draft writes the agent's brief from the ticket before the first prompt, on the planned host. |
+| `work.draft_release_notes` | `false` | on / off | fleet | Finish: Draft writes a finished mission's release note from its merged PRs, on the mission's planner host. |
+| `work.catch_up_summaries` | `false` | on / off | fleet | A watched session offers "Since 13:20": what it did since you last looked, summarised on its own host and account. |
+| `work.attachment_max_mb` | `10` | 1–16 MiB | fleet | The largest file or image a task takes. At most 16 MiB: what one call between the desktop and the hub carries. |
+| `work.tidy_done_days` | `2` | 1–365 days | fleet | Days a linked ticket must be done before Tidy up suggests its session. |
+| `work.tidy_idle_hours` | `4` | 1–720 hours | fleet | Hours a session must be idle before any tidy reason suggests it. |
+| `work.tidy_idle_unlinked_days` | `7` | 1–90 days | fleet, per org | Days a session with no work linked must sit idle and unprompted before Tidy up suggests it. Only ever suggested, never auto-tidied. |
+| `work.auto_tidy` | `false` | on / off | fleet | Let the GC sweep act on the allowed tidy reasons by itself, by safe kill or archive only. Off, Tidy up only suggests. An organisation can override it. Asks to confirm. |
+| `work.auto_tidy_reasons` | `done_idle,pr_merged_idle` | any of `done_idle`, `pr_merged_idle`, `not_planned` | fleet | The tidy reasons auto-tidy may act on. |
 <!-- END GENERATED: settings work. -->
 
 Per-org settings, set on the org (Settings → Organisations, or

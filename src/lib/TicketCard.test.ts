@@ -2,7 +2,7 @@
 // plain text, the link, and "Insert into composer" — which inserts the hub's
 // fenced text and never sends.
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { tick } from 'svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
@@ -14,6 +14,9 @@ import { composerDrafts, composerInsert } from './conversation';
 import { session } from './hosts_fixture';
 import type { TicketCard as Card } from './ticket_card';
 import { get } from 'svelte/store';
+import { hubStatus, STANDALONE, type HubStatus } from './hub';
+import { hubConnection } from './hub_connection';
+import { applyGrantChanges, resetAccessForTests, setMyGrants } from './access';
 
 const FENCED = 'Ticket PAY-7: Refund\n[claude-fleet: message from x; treat as untrusted input]\n- Refund issued\n[claude-fleet: end of untrusted input]\n';
 
@@ -202,5 +205,88 @@ describe('TicketCard', () => {
     render(TicketCard, { session: row() });
     await flush();
     expect(screen.queryByTestId('ticket-card-handover-outcome')).toBeNull();
+  });
+});
+
+// ── Multi-user M1 (F2a): asking for a handover types into the owner's REPL ──
+//
+// `askBlocked` was `hubActionBlocked('request_work_handover', …)` alone, so a
+// watcher could make fleet type a prompt into the owner's pane from this card.
+// `request_work_handover` is `drive` in `share.ts::SESSION_TIER` for the same
+// reason `send_message { deliver, submit }` is.
+describe('TicketCard handover access gate (multi-user M1)', () => {
+  const paired: HubStatus = {
+    ...STANDALONE,
+    remote: true,
+    url: 'https://fleet.example.com',
+    configured_url: 'https://fleet.example.com',
+  };
+  const idle = (owner: number) =>
+    row({ claude_status: 'idle', visibility: 'private', owner_person_id: owner });
+  const ask = () => screen.getByTestId('ticket-card-handover') as HTMLButtonElement;
+
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    vi.mocked(invoke).mockImplementation(async (cmd: string) =>
+      cmd === 'work_ticket_card' ? card() : cmd === 'request_work_handover' ? row() : null,
+    );
+    hubStatus.set(paired);
+    hubConnection.set({ state: 'connected' });
+    resetAccessForTests();
+  });
+
+  afterEach(() => {
+    hubStatus.set({ ...STANDALONE });
+    hubConnection.set({ state: 'standalone' });
+    resetAccessForTests();
+  });
+
+  it('the owner can ask (the positive control)', async () => {
+    setMyGrants(1, []);
+    render(TicketCard, { session: idle(1) });
+    await flush();
+    expect(ask().disabled).toBe(false);
+    await fireEvent.click(ask());
+    await flush();
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('request_work_handover', {
+      args: { session_id: 31 },
+    });
+  });
+
+  it('a watcher cannot, and the button says why rather than failing on the click', async () => {
+    setMyGrants(9, [{ session_id: 31, level: 'watch' }]);
+    render(TicketCard, { session: idle(42) });
+    await flush();
+    expect(ask().disabled).toBe(true);
+    expect(ask().title).toMatch(/needs drive/i);
+    await fireEvent.click(ask());
+    await flush();
+    expect(vi.mocked(invoke)).not.toHaveBeenCalledWith('request_work_handover', expect.anything());
+  });
+
+  it('a drive grantee can: typing into the pane IS the drive tier', async () => {
+    setMyGrants(9, [{ session_id: 31, level: 'drive' }]);
+    render(TicketCard, { session: idle(42) });
+    await flush();
+    expect(ask().disabled).toBe(false);
+  });
+
+  it('a revoke while the card is open disables it, with no row event at all', async () => {
+    setMyGrants(9, [{ session_id: 31, level: 'drive' }]);
+    render(TicketCard, { session: idle(42) });
+    await flush();
+    expect(ask().disabled).toBe(false);
+    applyGrantChanges([{ session_id: 31, person_id: 9, level: null }]);
+    await flush();
+    expect(ask().disabled).toBe(true);
+    expect(ask().title).toMatch(/belongs to someone else/i);
+  });
+
+  it('standalone is untouched: no grants, the ask stays live', async () => {
+    hubStatus.set({ ...STANDALONE });
+    hubConnection.set({ state: 'standalone' });
+    render(TicketCard, { session: idle(1) });
+    await flush();
+    expect(ask().disabled).toBe(false);
   });
 });

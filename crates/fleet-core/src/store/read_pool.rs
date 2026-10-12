@@ -57,6 +57,20 @@ impl ReadPool {
         }))
     }
 
+    /// Let every connection answer [`Store::attention_facts`] from `bus`,
+    /// the writer's (step 2.6): the facts are followed on the hub's bus, not
+    /// read from the file, and a pooled `list_sessions` must stamp the same
+    /// `needs_attention` the writer would. Nothing else of the bus is used:
+    /// a read-only connection never writes, so it never emits.
+    pub fn following(mut self, bus: std::sync::Arc<dyn crate::events::EventBus>) -> Self {
+        for c in &mut self.conns {
+            if let Ok(s) = c.get_mut() {
+                s.bus = super::StoreBus::new(std::sync::Arc::clone(&bus));
+            }
+        }
+        self
+    }
+
     /// A connection to read through: the first free one, starting from a
     /// rotating cursor; when all are busy, the cursor's own (a pooled read is
     /// short, so waiting on it is bounded — it never waits on the writer).
@@ -106,15 +120,28 @@ impl Store {
     /// the rows are exactly the ones at that epoch. (Read apart, a revoke
     /// committing between the two reads could pair pre-revoke rows with the
     /// post-revoke epoch, and a cache would keep them.)
+    #[allow(clippy::type_complexity)]
     pub fn auth_snapshot(
         &self,
-    ) -> Result<(i64, Vec<HostTokenRow>, Vec<ClientTokenRow>), crate::ipc_error::IpcError> {
+    ) -> Result<
+        (
+            i64,
+            Vec<HostTokenRow>,
+            Vec<ClientTokenRow>,
+            Vec<super::ControlTokenRow>,
+        ),
+        crate::ipc_error::IpcError,
+    > {
         let tx = self.conn.unchecked_transaction()?;
         let epoch = self.auth_epoch()?;
         let hosts = self.list_host_tokens()?;
-        let clients = self.active_client_tokens()?;
+        // As the auth layer must see them: org and mode from memberships
+        // (org administration phase D).
+        let clients = self.auth_client_tokens()?;
+        // Named tokens (migration 157); expiry is judged per request.
+        let controls = self.auth_control_tokens()?;
         tx.commit()?;
-        Ok((epoch, hosts, clients))
+        Ok((epoch, hosts, clients, controls))
     }
 }
 
@@ -161,6 +188,14 @@ mod tests {
         moved(&s, "trusting a client");
         s.set_client_trust("phone", false).unwrap();
         moved(&s, "untrusting a client");
+        // Multi-user M1: whose device this is decides which sessions the
+        // caller may read, so migration 098's own trigger has to move the
+        // epoch for it too.
+        let owner = s.personal_owner_id().unwrap().expect("096 mints one");
+        s.set_client_person("phone", Some(owner)).unwrap();
+        moved(&s, "binding a client to a person");
+        s.set_client_person("phone", None).unwrap();
+        moved(&s, "unbinding a client from a person");
         s.touch_client_token(row.id, 1_000).unwrap();
         assert_eq!(
             s.auth_epoch().unwrap(),
@@ -197,7 +232,7 @@ mod tests {
         s.insert_client_token("old", &"c".repeat(64), "full")
             .unwrap();
         s.revoke_client_token("old").unwrap();
-        let (epoch, hosts, clients) = s.auth_snapshot().unwrap();
+        let (epoch, hosts, clients, _) = s.auth_snapshot().unwrap();
         assert_eq!(epoch, s.auth_epoch().unwrap());
         assert_eq!(hosts.len(), 1);
         let names: Vec<_> = clients.iter().map(|c| c.name.as_str()).collect();

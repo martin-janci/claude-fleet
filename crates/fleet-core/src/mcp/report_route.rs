@@ -30,6 +30,12 @@ impl ReportState {
     pub(crate) fn store(&self) -> &Mutex<Store> {
         &self.store
     }
+
+    /// The store, shared: for a `/voice/source` socket that re-checks its
+    /// caller for as long as it stays open.
+    pub(crate) fn store_arc(&self) -> Arc<Mutex<Store>> {
+        Arc::clone(&self.store)
+    }
 }
 
 /// `POST /report`: any authenticated caller — `readonly` included, since
@@ -267,6 +273,37 @@ mod tests {
                 .await
                 .0,
             403
+        );
+    }
+
+    /// `/update/artifact/<sha256>`: the mirror's door. Off (the default) or
+    /// for a sha no manifest lists, a 404; a hub link is refused, an updater
+    /// and an unknown token are told apart as everywhere else.
+    #[tokio::test]
+    async fn the_artifact_mirror_route_sits_behind_the_update_identity() {
+        let (addr, _store) = app().await;
+        let path = format!("/update/artifact/{}", "a".repeat(64));
+        assert_eq!(http(addr, "GET", &path, "upd-tok", "").await.0, 404);
+        assert_eq!(http(addr, "GET", &path, "ro-tok", "").await.0, 404);
+        assert_eq!(
+            http(addr, "GET", "/update/artifact/..%2F..%2Fetc", "upd-tok", "")
+                .await
+                .0,
+            404
+        );
+        assert_eq!(http(addr, "GET", &path, "peer-link-tok", "").await.0, 403);
+        assert_eq!(http(addr, "GET", &path, "nope", "").await.0, 401);
+    }
+
+    /// The release workflow's ping holds no token: the poke answers anyone,
+    /// at once, and nothing else under `/update/` opens with it.
+    #[tokio::test]
+    async fn a_release_poke_needs_no_token_and_opens_nothing_else() {
+        let (addr, _store) = app().await;
+        assert_eq!(http(addr, "POST", "/update/poke", "nope", "").await.0, 202);
+        assert_eq!(
+            http(addr, "POST", "/update/check", "nope", "{}").await.0,
+            401
         );
     }
 

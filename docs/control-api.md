@@ -55,13 +55,24 @@ the host's detail in the **Hosts** view (⌘I):
   `E_FORBIDDEN`; fleet-wide listings (`list_sessions`, …) still see every
   host.
 - `readonly` — only tools that observe the fleet (`list_*`, `capture_session`,
-  `session_history`, `session_conversations`, `inbox`, `peer_status`,
+  `session_history`, `session_conversations`, `search`, `inbox`, `peer_status`,
   `session_transcript`, `repo_*`,
   `get_clipboard`, `wait_for_session`, `wait_for_reply`, `wait_for_task`, `list_tasks`, …).
   Anything that sends, kills, deletes, provisions, dispatches, writes the
   clipboard, or writes a session row (including `set_friendly_name`, so an
   agent on a `readonly` host cannot set its sidebar label) returns
   `E_FORBIDDEN`.
+
+Since multi-user M1 a host token's reach inside its own host is narrower
+still: it addresses a session only when that session is `unclaimed`, or when
+the request proves it is standing in that session's pane (the
+`X-Fleet-Pane` header the provisioned MCP entry carries). Another person's
+private session on the same machine answers `E_PANE_UNPROVEN` — its own
+code, because the ordinary cause is an agent in a second split of the same
+tmux window rather than an attack, and it says nothing about whose the
+session is. A session on another host still answers `E_FORBIDDEN`, and one
+outside the caller's reach entirely answers `E_NOTFOUND`, exactly as an id
+that does not exist.
 
 The fleet-admin tools — `provision_hosts`, `add_host`, `remove_host`,
 `merge_host`, `hide_host`, `forget_project` — are **master-token only** in either mode: a token lifted from
@@ -71,6 +82,62 @@ one host must not be able to rotate, re-provision or remove the others.
 it (the new token is only persisted once the host's files were rewritten, so an
 unreachable host keeps its old one). **Rotate all tokens** does the same for
 every host; the master token is unaffected.
+
+Settings → Control API lists every token in one **Control API tokens** table:
+each host's (per-host), with when it was last **used** (the last request it
+authenticated, stamped at most once a minute), when it was created and, once
+rotated, when; and beside them the paired devices' tokens, with when each was
+last seen. A host row has **Rotate**, a device row **Revoke** (as Settings →
+Devices does; the device you are using has none). A rotation keeps the host's
+created time, records the rotation and starts "used" over; stamping use never
+invalidates the hub's token cache (`auth_epoch`), a rotation does.
+
+### Add account
+
+`add_account` makes a new login profile on a host (M15 step G2.9,
+[accounts.md](accounts.md#add-an-account)): a Claude subscription through a
+login pane fleet opens on the host (`start_login`, `login_status`,
+`login_key`, `login_code`, `end_login`), or an Anthropic API key checked
+with Anthropic and written to the host only (`api_key`, with an optional
+`daily_limit_usd`; `daily_limit` changes it). Served to the master and the
+hub owner's devices; everything but `login_status` needs the master or a
+trusted full device. The key and the code are never logged or returned.
+
+### Named tokens
+
+Settings → Control API → **+ Token** (or the `api_tokens` tool) creates a
+token for a script or another agent, under a name, with a scope, an expiry
+and an optional host limit:
+
+- **Read** — the tools that observe the fleet, as a `readonly` token.
+- **Act** — start, send to and stop sessions: every tool but the fleet-admin
+  and settings ones, and it cannot create tokens.
+- **Admin** — what the master token can do. The master token is the fleet's
+  first Admin token; only the master (or another admin token) creates one.
+
+**Expires** is a number of days (1–3650) or never; an expired token is
+refused from that second on, with no write. **Hosts** limits a Read or Act
+token to some hosts: sessions elsewhere are invisible to it and host-addressed
+calls on another host answer `E_FORBIDDEN`. A limited token reaches only the
+tools whose every host goes through that check (`guard::HOST_LIMITED_TOOLS`:
+listing, reading, starting, prompting and stopping sessions); routines,
+clipboard, probes and the fleet-wide reads are refused to it. An Admin token
+is never limited.
+
+A named token is for the tool surface: it authenticates `/mcp` and
+`/mcp/json` and is refused (`403`) on every other route, `/hook` and the
+`/events` stream included, so no open connection outlives its revoke or
+expiry.
+
+A named token speaks for the hub's owner, like the master token: the sessions
+it starts are the owner's, and what it sends is delivered with the
+untrusted-content marker naming the token. The token (`flt_live_…`) is shown
+once, with **Copy token** and **Copy as env line** (`FLEET_MCP_TOKEN=…`); the
+store keeps only its SHA-256, and nothing logs it. The table lists each with
+its scope, hosts, expiry and when it was last used (to the minute);
+**Revoke** ends it on its next request. On a desktop paired with a hub the
+same panel creates the hub's tokens, from the owner's trusted full device,
+Read or Act only.
 
 ## Connecting a client
 
@@ -132,6 +199,12 @@ carrying `result` or `error` (as fleet-mobile does), is unaffected.
 | `GET` / `POST /pair` | **none, by design** | The pairing exchange (below). Outside the Host allowlist. |
 | `GET /events` | bearer | The row-change stream (below). |
 | `GET /agent` | bearer (per-host, `full`, agent host) | The WebSocket a `fleet-agent` dials in on (below). |
+| `POST /mcp/json` | bearer | The same tools with an unframed JSON body — see *`/mcp/json`* in [`hub.md`](hub.md). |
+| `GET /metrics` | bearer | What each caller costs the hub — see *`/metrics`* in [`hub.md`](hub.md). |
+| `POST /report`, `GET /reports` | bearer | Error reports from the hub's participants — see *Error reports* in [`hub.md`](hub.md). |
+| `GET /downloads/<id>` | bearer | A file's bytes for the downloads tools (not a tool result). |
+| `GET /voice/capture`, `GET /voice/source` | bearer | The voice relay (off by default; Settings → Limits → Voice). |
+| `POST /update/check`, `POST /update/report` | bearer | The updater wire — see [`updates.md`](updates.md). |
 
 ### `/pair` — how a client gets its first credential
 
@@ -154,7 +227,8 @@ allowlist too, since a phone may reach the hub by a name nobody listed. What
 stands in for the token is the code: single-use (a replay answers `404`),
 minutes-long (`ttl_s`, clamped 30 s…1 h, default 10 min), compared in constant
 time, voided wholesale by a restart, and rate-limited to **one attempt per
-source address every six seconds** (`429` with `Retry-After` otherwise). The
+source address every six seconds**, an IPv6 address counting as its /64, and
+to **thirty attempts a minute hub-wide** (`429` with `Retry-After` otherwise). The
 address is the request's peer, or the last parseable `X-Forwarded-For` hop
 when the peer is a loopback/private address — i.e. plausibly the reverse proxy
 in front.
@@ -184,7 +258,7 @@ the next heartbeat.
 - Each frame is `event: <name>` + `data: <json>` where `<name>` is the event
   (`session:created`, `session:updated`, `session:killed`, `host:probed`,
   `task:updated`, `account_usage:updated`, `asset_inventory:updated`,
-  `catalog:loaded`, `sync:progress`, `move:progress`, …) and the payload is
+  `catalog:loaded`, `sync:progress`, `move:progress`, `start:progress`, …) and the payload is
   the same JSON the desktop frontend receives.
 - The first frame is `ready`, carrying `{ version, now, kinds }` — the kinds
   this stream will actually deliver.
@@ -237,14 +311,15 @@ side are in `hub.md` → *A host that cannot be reached*; this is the contract.
 
 Tools see an agent host through the same calls as an SSH host. `agent_status`
 reports which agent hosts are connected. `add_host { transport: "agent" }`
-registers one without an SSH probe.
+registers one without an SSH probe. `install_agent` does the whole *Set it
+up* of `docs/hub.md` for a host the hub already reaches over SSH.
 
 ## Tools
 
 The authoritative per-tool documentation — description and parameter list for
 every tool, straight from the tool router — is the generated
 [`control-api-reference.md`](control-api-reference.md). It is regenerated with
-`REGEN_DOCS=1 cargo test -p fleet-core reference_is_current`
+`REGEN_DOCS=1 cargo fleet-test -- reference_is_current`
 and CI fails when it is stale. The workflows that tie the tools together
 (steering, recovery, safe-kill, self-identification) live in the
 `claude-fleet-control` skill (`skills/claude-fleet-control/SKILL.md`), which
@@ -254,12 +329,37 @@ Index by area (names only; see the reference for details):
 
 - **Fleet & hosts** — `fleet_health` (with `trackers`: each tracker's sync
   health and the detection backlog, from cached sync state; a per-host token
-  sees its own org's trackers), `usage_report` (estimated token
+  sees its own org's trackers; and `org_budgets`, the orgs at or over a
+  daily or monthly budget, for a caller that sees every session; `devices`,
+  the paired device count with the caller's last seen and the hub's last
+  sync; `playbooks_week`, playbook runs this week per kind; `decide.week`,
+  this week's decision counts),
+  `usage_report` (estimated token
   usage and cost per session, host and day), `list_hosts`, `discover_hosts`,
   `add_host`, `remove_host`, `merge_host` (fold a renamed alias into another),
-  `probe_host`, `hide_host`, `provision_hosts`,
-  `list_accounts`, `agent_status` (which agent hosts have a `fleet-agent`
-  connected; see *`/agent`* above).
+  `probe_host`, `check_host` (a host's health checklist over the hub's SSH:
+  tmux, agents on PATH, fleet's hooks; the hub owner's devices, contract
+  17), `hide_host`, `provision_hosts`, `wizard_state` (a wizard
+  left half-way, Add host or Add a project, kept on the hub so it resumes
+  on the person's other device; not served to a per-host token),
+  `propose_host_placement` (the decision model's host for a new session of
+  a project: `{host_alias, confidence_pct, run_id}` or null; a person's
+  device only, never a per-host token; hub contract 17),
+  `list_accounts`, `set_account_nickname` (an account's label on every
+  device; the hub owner's devices, contract 17), `account_usage` (each account's latest plan usage: the
+  5-hour and weekly windows with their reset times, status and when it was
+  fetched, as the hub's usage poll last answered; never fetches; hub
+  contract 11), `check_account_headroom` (whether starting or switching a
+  session on a host under a login crosses `accounts.pause_at`, and the
+  login there with the most headroom; reads the same usage, never fetches;
+  `new_session` asks the same question itself: a Claude start on a login at
+  or past the line fails `E_ACCOUNT_LIMIT`, naming the account and the
+  login with headroom, unless `over_limit_ok: true` says the person chose
+  it; `agent: "agy"` fails `E_UNSUPPORTED` until its adapter is validated),
+  `agent_status` (which agent hosts have a `fleet-agent`
+  connected; see *`/agent`* above), `install_agent` (install `fleet-agent`
+  on a host the hub reaches over SSH and move the host onto it; a job read
+  with `agent_installs`).
 - **Projects & worktrees** — `list_projects`, `refresh_projects`,
   `forget_project` (drop a row a local-less hub cannot rescan away),
   `add_project` (clone, adopt or create a repository on a host — `git` and
@@ -267,13 +367,54 @@ Index by area (names only; see the reference for details):
   `create_remote` — publishing on GitHub — needs a person's approval from
   any caller but a paired client, refused outright on a hub with no
   approver), `list_github_repos` (what `gh` on a host can see),
+  `project_picks` / `set_project_pick` (a person's New session picker
+  choices per project — pinned, hide or keep, group; a paired device only),
   `list_worktrees`, `list_host_worktrees` (one host scanned over SSH, for the
   worktrees fleet's own rows do not cover), `delete_worktree`.
 - **Sessions** — `list_sessions`, `related_sessions`, `new_session`,
   `new_shell_session`, `new_bg_session`, `spawn_review`, `rename_session`,
-  `set_friendly_name`, `register_self`, `whoami`, `ensure_operator` (the UX
+  `set_friendly_name`, `touch_session_viewed` (the turns it has finished
+  read as seen; drive reach), `shell_terminals` (list, open or close the
+  session's shell terminals, tmux sessions `<name>--sh<N>` beside the agent
+  that no session list shows; own reach), `register_self`, `whoami`, `ensure_operator` (the UX
   agent's own session, idempotent), `operator_status` (why it cannot work,
   if it cannot).
+- **Sharing & ownership** (multi-user M1) — `session_share` (give one
+  person `watch`, `answer` or `drive` on a session you own — or, with `org` instead of
+  `person`, an org you are a member of: its members and admins as of now,
+  never a later joiner or a viewer), `session_unshare` (take it
+  back), `session_narrow` (`drive` or `answer` → `watch`; there is deliberately no tool
+  that raises a grant — widen by revoking and sharing again),
+  `session_access` (who holds a live grant on your session), `my_grants`
+  (who *you* are on this fleet and every live grant to you, which is what a
+  client derives access from together with each row's `owner_person_id` and
+  `visibility`), `session_ask_access` (someone a session is shared with
+  asks its owner for `answer` or `drive`; it confers nothing, one open ask
+  each, and a decline holds a repeat back an hour), `access_requests` (the
+  owner's open asks: `list`, then `grant`, which revokes the asker's share
+  and shares again at the asked level, or `decline`), and `session_claim`
+  (give an `unclaimed` session to a person). All but the last are a
+  person's device and the master; a per-host
+  token is refused all of them, because it proves no person. `session_claim`
+  is the mirror image: a **per-host token only**, and only for the session
+  whose active pane its `X-Fleet-Pane` header names — the operator's own
+  claim is `fleet-hub session claim <id> --person <name>`, beside
+  `fleet-hub session unclaimed`. Sharing never confers a terminal: a
+  terminal is this machine's own SSH, which no revoke could reach.
+  `answer` (Orbit Fleet 11.7) sits between the two: it reads like `watch`
+  and may also answer the dialog on the pane — `send_prompt` with an empty
+  `prompt` and one of `keys` Enter, Escape, Tab, Up, Down or a digit the
+  dialog numbers, accepted only while a fresh read of the pane shows a
+  dialog. Any prompt text, `C-c`, the Ctrl letters, Left, Right and BTab
+  still need `drive`.
+- **Presence** (redesign 11.7b) — `session_presence` (`session_id`,
+  `leaving?`): say you have a session open, again every `heartbeat_secs`
+  (20), and once with `leaving: true` when you close it; the answer is who
+  has it open now, `{ person_id, name, device?, since, you? }` per device.
+  Watch reach. The owner sees everyone; anyone else sees the owner and
+  themselves, never another grantee. The hub keeps it in memory only, so a
+  report lapses 45 s after its last heartbeat and a restart forgets it. A
+  per-host token is refused it.
 - **Composer** — `quick_replies` (the fleet's shared chip row: the prompt
   presets the desktop and the phone both draw above their text box, in list
   order, each with `auto_send`: a tap sends at once rather than filling the
@@ -282,6 +423,8 @@ Index by area (names only; see the reference for details):
   the list last read, turns a lost race into `E_CONFLICT`; `set` is refused
   to a per-host token and the operator).
 - **Steering & observing** — `send_prompt`, `broadcast_prompt`,
+  `queue_prompt` and `queued_prompts` (a prompt typed as a new turn once the
+  session is idle; list or take back what still waits),
   `capture_session`, `session_transcript` (the conversation of any session,
   including pane-less `bg:<uuid>` rows — track background runs with it),
   `peer_status`, `session_history`, `session_conversations` (the Claude
@@ -290,6 +433,18 @@ Index by area (names only; see the reference for details):
   one), `send_message`, `inbox`. Rows with
   `kind: external` are interactive Claude sessions running outside tmux:
   fleet can read them (`session_transcript`) but not control them.
+- **Search** — `search { query, kinds?, limit? }` finds anything the hub
+  indexes, without knowing where to look: tasks and tickets (key, title,
+  brief, description), sessions (name, host, branch, tags, last prompt,
+  notes), a conversation's first prompt, pull requests, the work journal,
+  and — when an owner has turned on `search.index_transcripts` (off by
+  default; `transcripts_indexed` in the answer says) — what was said in
+  every conversation. Every word must match, in any order, case and accents
+  ignored, each as a prefix. Only what the caller may see comes back; a
+  hit names its `session_id` or `task_id`, so the next call reads it
+  (`session_conversation`, `work { action: task }`). The Work view's
+  `filters` (`work { action: tree }`, including `iteration`, `epic`,
+  `item_type` and `sort`) are described in `docs/work-graph.md`.
 - **Lifecycle & recovery** — `restart_session`, `rewind_conversation`
   (truncate a session's Claude transcript into a new conversation: mode
   `fork` starts a new session from that point — in this worktree, or with
@@ -300,8 +455,19 @@ Index by area (names only; see the reference for details):
   `repair_session` (explicit repair, same as the Repair workspace button:
   may unregister this worktree's stale entry, adopt a moved checkout,
   recreate the branch and respawn the pane; behind the desktop confirmation
-  when `mcp.confirm_destructive` is on), `kill_session`, `safe_kill_session`,
-  `dismiss_ghost_session`, `move_session` (continue a work session on another
+  when `mcp.confirm_destructive` is on; a `progress_token` streams its
+  check / fix / verify / pane steps as `repair:progress` events of kind
+  `repair`), `kill_session`, `safe_kill_session`,
+  `dismiss_ghost_session`, `adopt_session` (a live tmux session fleet did
+  not start, `started_at` null, becomes fleet's: `started_at` is set and the
+  caller owns it when nobody did; the pane is untouched; `project_id` puts it
+  in a project), `lost_target` (read-only: the project a Lost and found
+  entry would go into, to prefill Adopt or Restore: a directory inside a
+  project answers `rule`; otherwise Jev may propose one, `decide.jev.adopt_target`
+  and `decide.jev.restore_target`, both off by default), `place_transcript`
+  (Restore into a project: copies a found conversation under the directory
+  Claude Code keys the project's root by, so `new_session { resume_claude_session_id }`
+  resumes it there; never moves or overwrites a transcript), `move_session` (continue a work session on another
   host: the transcript is copied and the work travels as it is — unpushed
   commits, uncommitted files and small git-ignored ones, nothing pushed or
   committed for you (`strict: true` restores the old clean + pushed
@@ -329,11 +495,13 @@ Index by area (names only; see the reference for details):
   inferable; restore a candidate with `new_session`'s
   `resume_claude_session_id`).
 - **Worktree files & git (read-only)** — `repo_changes`, `repo_tree`,
-  `repo_file`, `repo_diff`, `repo_log`, `repo_branches`, `repo_commit`,
-  `repo_commit_diff`.
+  `repo_file`, `repo_diff`, `repo_blame`, `repo_log`, `repo_branches`,
+  `repo_commit`, `repo_commit_diff`, `repo_branch_diff`, `repo_range_diff`.
 - **Host clipboard** — `get_clipboard`, `set_clipboard`.
 - **Asset catalog** — `list_assets` (catalog assets with per-host drift
-  state, unmanaged assets and parse problems), `scan_assets` (re-scan hosts,
+  state, unmanaged assets and parse problems; the personal catalog only
+  unless `all_catalogs` is set, which lists every catalog for the master
+  or an unbound full client and still personal only for anyone else), `scan_assets` (re-scan hosts,
   read-only on the hosts, and recompute asset states), `import_assets`
   (import the controller's `~/.claude` into the catalog working tree;
   `dry_run` supported), `plan_sync` (compute a fleet-wide sync plan with
@@ -400,9 +568,12 @@ Index by area (names only; see the reference for details):
   `catalog_admin`'s `set_host_harnesses` action is the same call for a
   granted desktop.
 - **Orchestration** — `wait_for_session`, `session_transcript`,
-  `session_conversation`, `session_tool_detail`, `run_prompt`,
+  `session_conversation`, `session_tool_detail`, `session_summary_since`,
+  `session_context_help` (help at the composer, for an `answer` grant too), `run_prompt`,
   `dispatch_task`, `wait_for_task`, `list_tasks`, `cancel_task`,
-  `set_session_tags`.
+  `set_session_tags`, `decide_related_session` (Link or Not related on a
+  session's `related_session` proposal; a linked partner stays on the row
+  with `linked: true`).
 - **Work** — `work` (read: `{session_id}` → that session's live work links,
   primary first; `{key}` → ended links to the key, each with the snapshot of
   the session that did it), `work_link` (`{session_id, action}`: `link` a key
@@ -492,7 +663,25 @@ Index by area (names only; see the reference for details):
   linked to one of the tracker's items is added to that item once as a
   remote link, `globalId` `fleet:pr:<url>`, through an outbox drained by the
   sync pass; `fleet_health.trackers[].write_failures` counts the writes
-  given up). `update` replaces the whole `settings` object. Keys are
+  given up), and for every provider `write_back: { comments }` (off by
+  default: a person's `work_link { comment, item_id, notes,
+  post_to_tracker: true }` on a ticket also posts the comment there, signed
+  `— <name> via fleet`, through the same outbox, drained at once; refused
+  for a per-host token, fleet's own work, or with the setting off, and then
+  nothing is written), and for Jira (Cloud and Data Center) and Asana
+  `write_back: { create_tickets }` (off by default: a person's `work_link {
+  promote, item_id, tracker_id?, container? }` turns a task of fleet's own
+  into a ticket there — a subtask of a ticket under that ticket, a task at
+  the top into `container`, a Jira project key or an Asana project gid — and
+  the task becomes that ticket once the outbox sends it; `work { task }`
+  answers `promotion` and `promote_targets`). `work { action: "tracker_comments", key }` reads a
+  ticket's own comments live (newest 50, oldest first, no cache; the ones
+  fleet posted from a live comment left out; bodies fenced for a per-host
+  token; `can_post` says whether the caller may post there), and for Asana
+  its `attachments` (name, link, size). A ticket start's brief ends with the
+  ticket's attachments and newest 10 comments, read live by the hub and
+  fenced (at most 1800 characters; a tracker that fails or takes over 8 s
+  leaves them out). `update` replaces the whole `settings` object. Keys are
   the tracker's own: `ABC-123` (Jira, Linear team keys), `owner/repo#42`
   (GitHub), `asana:<task gid>` (Asana, which has no human keys — detection is
   by URL); `lookup` and `start` take any of them, or the item's URL.
@@ -564,10 +753,13 @@ Index by area (names only; see the reference for details):
   Lifecycle (roadmap M7): `work { action: "tidy" }` returns the tidy-up
   candidates — each with `session_id`, `link_id`, a primary `reason`
   (`done_idle` | `pr_merged_idle` | `not_planned` | `duplicate_worktree` |
-  `ghost_expiring`), `secondary` reasons, the preselected `action`
+  `same_work` | `ghost_expiring` | `idle_unlinked`; `same_work` carries
+  `same_as`, the session kept), `secondary` reasons, the preselected `action`
   (`safe_kill` | `kill` | `archive` | `resume_or_expire`), a preview (host,
-  branch, key, item status, PR, idle time) and `auto` (auto-tidy would act
-  on it) — plus the policy (`auto_tidy`, `auto_reasons`, `done_days`,
+  branch, key, item status, PR, idle time), `auto` (auto-tidy would act
+  on it) and, on a `safe_kill` row, `worktree_path` (the tree a clean up
+  removes) and `worktree_kb` (its size as the host probe last measured it;
+  absent until measured) — plus the policy (`auto_tidy`, `auto_reasons`, `done_days`,
   `idle_hours`). `work { action: "reopened" }` lists work moved out of done
   that has past sessions. `work_link { action: "tidy_apply", items: [{
   session_id, action, link_id?, days? }] }` applies a batch (`safe_kill`,
@@ -653,6 +845,53 @@ Index by area (names only; see the reference for details):
   `E_INVALID` too, naming it — its status belongs to its tracker, and the
   next sync would otherwise overwrite it here. The setting is final: fleet
   never derives a status back over what a person set.
+  `work_link { action: "edit", item_id, title?, notes?, assignees? }` edits a
+  local item's title, notes (`""` clears) and assignees (display names, `[]`
+  clears; trimmed, each once, at most 10 of 80 characters) and returns the
+  item; a field left out stays as it is. A ticket is `E_INVALID`, naming it,
+  and a delegated job's notes (its dispatch prompt) are `E_INVALID` too. The
+  person gate is `set_status`'s.
+  **Sprints and releases** (design `2026-09-28-sprints-releases-epics-design.md`):
+  `work { action: "buckets", kind? }` lists the sprints and releases in the
+  caller's scope with their roll-up (`total`, `done`) and the tracker sprints
+  or versions each adopts from; `work { action: "bucket", bucket_id }` answers
+  one with its members, past ones too (`removed_at`: carried over, or taken
+  out). `work_link { action: "bucket_add" | "bucket_remove", bucket_id,
+  item_id }` plans work into one: an item is in at most one current sprint
+  (a second is `E_CONFLICT`, naming the first) and any number of releases; a
+  closed sprint takes nothing; an item of another organisation than the
+  bucket's is `E_FORBIDDEN` (`cross_org: true`); a per-host token is
+  `E_FORBIDDEN` — a session does not plan. Creating and changing them is the
+  master's: `work_admin { action: "bucket_create", kind, name, org_id?,
+  starts_at?, ends_at?, goal? }`, `bucket_update { bucket_id, …, state:
+  active | released, shipped_ref?, expected_version? }` (a sprint goes
+  planned → active, a release planned → released, stamping `shipped_at`; an
+  active sprint beside another active one answers with a `warning`, never a
+  refusal), `bucket_close { bucket_id, carry_to?, carry? }` (ends every
+  membership; carries the unfinished — all of them unless `carry` names the
+  confirmed list — into `carry_to`), `bucket_delete` (confirmed), and
+  `bucket_adopt | bucket_unadopt { bucket_id, tracker_id, external_id }`: a
+  Jira sprint or fixVersion, a Linear cycle or project milestone, a GitHub
+  milestone (by name) whose synced items join the bucket as `adopted` and
+  leave it when the tracker stops reporting them. A person's membership is
+  never touched by a sync. A provider without sprints (GitHub, Asana) or
+  versions (Asana) only cannot be adopted from (`E_INVALID`).
+  **Counting work** (persona dashboards, step 3): `work { action: "stats",
+  filters? }` answers the Work view's tasks counted instead of listed. It
+  takes the tree's `filters` (`group_by` included) and returns `total`,
+  `stages` (`backlog`, `in_progress`, `in_review`, `blocked`, `done`),
+  `pct_done`, `needs_you` and `cost_micros`, overall and per group. Groups
+  come largest first, at most 200, with the rest counted in `groups_more`.
+  The counts come from the same filtering and the same scope as `tree`, so
+  they agree with the board, and a task the caller could not open is never
+  counted. Grouped by `sprint` or `release`, each group also carries its
+  bucket's `bucket` health: `state`, `starts_at`, `ends_at`, `goal`,
+  `pct_time_elapsed`, and `added_after_start` / `removed_after_start` (the
+  members the caller sees that joined or left after the start). An agent
+  asked "how is the sprint going" reads this and answers with a `results`
+  card (`docs/chat-blocks.md`). Every change of an item's stored status is
+  also logged by triggers in `work_status_log` (migration 170), so later
+  burn-up and cycle-time reads have history to draw from.
   `work { action: "local_items" }` lists local items (`id`, `key`, `title`,
   `created_at`, `updated_at`, `live_sessions`), newest change first.
   Readonly tokens cannot name or rename. A per-host token names work only on
@@ -677,40 +916,232 @@ Index by area (names only; see the reference for details):
   `peer` token long-polls it to trade messages and acknowledgements; the one
   tool a peer token reaches, and no other token reaches it, so it is listed
   to peer tokens only), `list_peer_links` (this hub's links to other fleets'
-  hubs — fleet, role, state, pending count, last exchange and error, never a
-  token; a read, but master token only, since it names other fleets — the
-  `fleet-hub peer add|list|remove` commands drive the same links straight on
-  `state.db`).
+  hubs — fleet, role, state, pending count, last exchange and error, the
+  last round trip and the messages carried today and in all, never a token;
+  a read for the master and the hub owner's own device, since it names other
+  fleets), `link_peer` / `unlink_peer` (link a hub with the one-time code its
+  owner minted, or remove a link and fail what waits for it; the master or
+  the owner's trusted full device). Settings → Federation shows and drives
+  them from a paired desktop; the `fleet-hub peer add|list|remove` commands
+  drive the same links straight on `state.db`.
 - **Updates** — `update_status` (the fleet's application updates: the
   verified release channel, each target's reported version and phase with
   what the hub would tell it now, per-component counts and the operator's
   pins; a read any client may make, but a per-host or org-bound token sees
   its own row only) and `update_admin` (master token only: `pin` a version
   for a component or one target, where a pin below installed is a rollback;
-  `unpin`; `refresh` to re-read the signed channel now). `update_status {
+  `unpin`; `update_now` to install at once; `refresh` to re-read the signed
+  channel now), and `update_policy` (a person's device: `list`, `set` or
+  `clear` the update policy of the org it administers — an org admin's own
+  org, or any org from the hub owner's device). `update_status {
   target }` answers for one target (`client:<id>`, `agent:<alias>`,
   `hub:self`) with its whole decision — status, reason code, the release it
   would be offered and whether it is mandatory — the dashboard's "why"; a
   scoped token may ask about itself only. `fleet_health.updates` names what
   needs a person: `update_required`, `update_failed`,
-  `update_rolled_back`, `rollback_failed` per target, and
-  `channel_stale`. Events: `update:changed` carries ids only — `{ what:
+  `update_rolled_back`, `rollback_failed` per target, `channel_stale`, and
+  `rollout_paused` per paused rollout (`rollout_start` / `rollout_pause` /
+  `rollout_resume` / `rollout_abort` stage a release in waves, and
+  `set_policy` / `clear_policy` override the policy for one org's targets;
+  see `docs/updates.md`). Events: `update:changed` carries ids only — `{ what:
   observed | pin | channel, target? }` — when a target's reported build or
   phase, a pin or the verified channel changes; a client re-reads
   `update_status`. It never reaches a per-host token or an org-bound
   client. The update wire itself, `POST /update/check` and
-  `/update/report`, is not a tool: see `docs/updates.md`.
+  `/update/report` (and `GET /update/artifact/<sha256>`, the mirror), is
+  not a tool: see `docs/updates.md`.
 - **File downloads** — `send_file` (`{ session_id, path, note? }`) copies a
   file from a session's host to the machine that owns the fleet (the hub),
   for the person's phone and desktop: absolute or relative to the session's
   worktree root, ≤ `downloads.max_file_mb`, folders refused (zip them). It
   answers the row in state `fetching` at once; the copy runs in the
   background. A per-host token sends from its OWN host only — that is how a
-  session's Claude hands over what it made. `list_downloads` (a read) and
+  session's Claude hands over what it made. `list_downloads` (a read),
+  `pause_download` (`{ id, paused }`: hold a copy in flight between slices,
+  or let it go on; the row answers `paused: true` while held) and
   `remove_download` are a person's, never served to a per-host token; the
   bytes are `GET /downloads/<id>` (bearer, not a tool result). Events:
   `download:changed { id }`, ids only, never on a host- or org-bound
   stream. See `docs/hub.md` → *File downloads*.
+- **Library** — `library`, by `action` (Orbit Fleet 9.7): the files a
+  person put on a host, by Control's Library Upload… or as a prompt's
+  attachment (`library_items`). `list { session_id?, host_alias?, limit? }`
+  answers `{ items }`, newest first; `add { kind: upload | attachment,
+  session_id, files: [{ path, name?, size? }] }` records files already on
+  the session's host (the desktop puts them there over its own ssh), taking
+  the host, session name and org from the session's row; `remove { id }`
+  drops a row and never the file. A row names a path on the owner's host,
+  so it is the downloads' `own` tier: a grantee or another person sees an
+  empty page and `add` answers `E_NOTFOUND`. Never served to a per-host
+  token. The Library lists downloads and repos beside these from
+  `list_downloads` and the sessions it already has.
+- **Routines** — `routines`, by `action` (Orbit Fleet 8.5): a person's
+  saved prompt that starts a session on a cron schedule (`trigger: cron`,
+  five fields read at the `utc_offset_min` the device had when it was
+  saved), on a session timeline event (`trigger: event`, one of `turn_done`,
+  `stop_failure`, `stuck`, `lost`, `task_done`, `task_failed`,
+  `session_restore_failed`, `workspace_repair_failed`, written for a
+  session its owner owns and not started by a routine), on a pull
+  request's review, checks or merge (`pr_review` when it gains an approval
+  or a request for changes, `pr_ci_failed`, `pr_ci_passed`, `pr_merged`:
+  written when reconcile's `pull_requests` row changes, on the timeline of
+  the session that opened it; M15 G2.4), or only when a person presses
+  `run_now` (`trigger: manual`). A pull request routine may narrow to
+  `event_repo` (`owner/name`, or `name` of any owner) and widen with
+  `event_author: anyone` from its owner's PRs to those of any session on a
+  host of its org, never one a routine's session opened; its run's prompt
+  ends with a line naming the PR. Any event routine may set
+  `event_rate_secs` (up to a week): at most one run per PR, or per
+  session, in that window; a fire inside it is dropped. `list`; `get {
+  routine_id }` with its last runs; `runs { routine_id, limit? }`; `save {
+  routine, routine_id? }` writes the whole routine (host, project,
+  `profile` = the account it bills, prompt, `budget_run_micros`,
+  `budget_day_micros`, `overlap: skip | parallel`); `preview { routine,
+  routine_id? }` is the editor's dry run (gap plan G2.3): it writes
+  nothing and answers `problem` (what `save` would refuse, absent when it
+  would save), `next_runs` (the schedule's next five fires at
+  `utc_offset_min`, which a daylight-saving change does not move), the
+  `account` its login bills and the host's `logins` for the Account
+  picker; `delete`; `set_enabled
+  { enabled }`; `skip_next { skip? }`; `run_now`; `set_run_outcome {
+  run_id, outcome }` (gap plan G7.9), a person's answer to what a finished
+  run came to (`did_work`, `nothing` or `needs_person`; a failed run stays
+  failed): it outranks Jev's reading and is stored as `rule`, and
+  `needs_person` clears the session's `last_viewed_at` so its turn lands in
+  the Inbox. Each run's session has
+  origin `routine` and is the routine's owner's; the prompt is its
+  handover, typed into the session once Claude's REPL is ready (a run
+  whose prompt could not be typed fails with `E_PROMPT_NOT_DELIVERED`,
+  fix: open its session). A run is `done` when its session's first turn finishes,
+  `failed` on an error, a lost or removed session, six quiet hours, or a
+  session past the run budget (which also turns the routine off with
+  `paused_reason`), and `skipped` when the last run is still going under
+  `overlap: skip`, today's budget is spent, the account its login bills
+  is at or past `accounts.pause_at` (Orbit Fleet 8.7, read from the stored
+  usage readings), or a person skipped it.
+  Guards (gap plan G3.8, migration 159), all optional in `save`:
+  `time_zone` (the IANA zone shown with the schedule; `utc_offset_min`
+  still drives it), `run_max_secs` (60 to 21600: a run still going after
+  it has its turn stopped with Escape and fails), `fallback_host` (a host
+  of the same org that takes a run when its host is unreachable, its login
+  is past `accounts.pause_at`, or its start failed; the run's `host_alias`
+  says where it ran), `retry_once` (a failed run starts again once on the
+  next pass, `trigger_ref` `retry:<run id>`, never while paused) and
+  `autonomy` (0 report only, 1 ask before push, 2 or absent push: a line
+  under the prompt, not a sandbox). `automation.daily_budget` (whole USD,
+  0 none) skips every routine's runs, `run_now` included, once all of them
+  spent it in the UTC day; `budget` answers `{ spent_micros,
+  budget_micros?, since }`. A failed run carries `error_code`, and `get`'s
+  `fixes` and `failing`'s `fix` name its fix `{ run_id, code, label,
+  action: edit | host | accounts | session | retry, host? }`.
+  A finished run also carries an `outcome` (8.10): `did_work`, `nothing`,
+  `failed` or `needs_person`, with `outcome_source` `exit` (a failed run,
+  which nothing overrides), `rule` (an open question or a wedged session is
+  `needs_person`, a pull request `did_work`) or `jev`; a run no rule can
+  read has none until Jev answers. A `nothing` run marks its session seen,
+  so it stays out of the Inbox. `automation.paused` (Pause all) stops the
+  schedule and event fires,
+  never `run_now`. Read and changed by the owner and the org's admins, read
+  by the org's members, never served to a per-host token; the routine's
+  org is its host's.
+- **Start rules** — `start_rules`, by `action` (Orbit Fleet 8.11): a task
+  key pattern (`PD-*`, `*` for any run of characters, any case) that names
+  the project, and optionally the host, a start of a matching task lands
+  in. An active rule decides before the key's history and before Jev K1,
+  so a rule match records no decision run; a project or host the caller
+  names still wins. The most specific pattern decides. After a person
+  starts tasks of one `PREFIX-N` prefix in the same project five times in
+  a row, fleet offers the rule: the start preview carries it as
+  `rule_offer`, and `list` shows it first. `list` (offers, active and
+  dismissed rules, each with `project` and `may_change`); `save { rule,
+  rule_id? }` writes the whole rule (`pattern`, `project_id`,
+  `host_alias?`, `org_id?` on a new one) as active; `accept { rule_id }`
+  makes an offer the caller's active rule and replaces the pattern's other
+  active rule; `dismiss { rule_id }` (an offer is never made again);
+  `delete { rule_id }`. A rule decides for its org's tasks only; read by
+  the org's members, added and changed by its admins and the owner, never
+  served to a per-host token. A plan a rule decided carries `rule_id`.
+- **Debug devices** — `debug_devices`, by `action`. Android phones and
+  emulators, iOS simulators and devices attached to any fleet host,
+  inventoried by a scan of that host (`list { refresh? }`, `scan { host? }`,
+  which also answers the emulators and simulators `boot { host, name }`
+  could start). Every command runs on the device's own host over the
+  fleet's usual SSH, so a session on one host drives a phone plugged into
+  another: `run { device, args, timeout_s? }` takes one `adb` (`shell`,
+  `uninstall`, `reboot`, `forward`, `reverse`, `emu`…), `simctl` (`launch`,
+  `terminate`, `openurl`, `privacy`, `ui`, `status_bar`, `location`…) or
+  `devicectl device` (`info`, `process`…) command, every argument quoted
+  and nothing that reads or writes a host path; `install { device, path }`
+  copies the app from the caller's host (a per-host token: its own host
+  only) to the device's host first; `logs` (`logcat -d`, a simulator's
+  `log show`), `screenshot` (an image content block), `boot`, `shutdown`.
+  `claim { device, claim_s?, note?, queue? }` keeps every other caller off
+  the device (`E_CONFLICT`) until it lapses or is released; each use by its
+  holder extends it. With `queue: true` a held device answers your place in
+  its line (`queue_place`) instead of `E_CONFLICT`, and the claim passes to
+  the first in line when the holder releases it or lets it lapse;
+  `release` from someone in that line only leaves it. A per-host token sees its own host's devices and the
+  ones a person marked `shared` on hosts of its own org; `configure {
+  label, shared }` and `forget` are a person's. See `docs/debug-devices.md`.
+- **Pull requests** — `prs`, `action: list { state?: open|merged|closed|all,
+  project_id?, limit? }` (redesign 6.4). Every PR a session's branch has had,
+  newest change first: repo and number, title, head branch, state, draft,
+  CI, review decision, merge state, merged time and the session that opened
+  it. Reconcile records them from the `gh pr view` probe that already fills
+  a session's `pr_url` / `ci_status`, and keeps them after the session is
+  gone. A row is served to whoever may see the session that opened it; a PR
+  whose session is gone only to the hub's own reader or the person of a
+  one-person hub. A read: nothing here merges or closes a PR.
+- **Runs** — `runs`, by `action` (`list` today; Orbit Fleet 8.3). One
+  newest-first list of everything that ran on the fleet's behalf: dispatched
+  tasks, a mission's steps and brakes, Jev's decisions, fleet's own
+  `claude -p` runs (the planner, a summary) and routine fires. `list { since?, until?, kind?,
+  outcome?, org_id?, mission_id?, session_id?, routine_id?, limit? (≤ 200,
+  50), offset? }`
+  answers `{ runs, total }`; each run carries `id` (`<source>:<rowid>`),
+  `kind` (`operator` | `task` | `mission` | `jev` | `routine`, or a fleet
+  `claude -p` origin: `planner` | `summary` | `commit_message` |
+  `release_note` | `morning_brief` | `brief` | `watch_summary` | `triage`),
+  `owner`, `started_at`, `ended_at?`, `duration_ms?`, `outcome` (`ok` |
+  `failed` | `needs_person` | `nothing_to_do` | `running`), `error?`,
+  `cost_micros?`, `model?`, `host?`, `org_id?`, `mission_id?`,
+  `session_ids`, `summary?` and `routine_id?`. Jev rows are only the
+  decisions that called the provider. The list is cut to the caller's view scope
+  (`service::runs`): a task needs every session it names to be visible, a
+  mission's rows need the mission, a routine's fires the routine, and runs that belong to no session or
+  mission need whole-fleet spend. A person's, never served to a per-host
+  token.
+- **PR shepherd** — `pr_shepherd`, the standing rules that let fleet look
+  after a project's PRs (`docs/superpowers/specs/2026-10-08-pr-shepherd-design.md`):
+  `status` (rules, recent episodes and merges), `grant { project_id, level:
+  watch|nudge|merge, hours?, recipes? }`, `revoke { project_id }`,
+  `pause_all`. Served only to the hub owner's own paired device, never to
+  the master an agent holds (the operator has `fleet-hub shepherd`); a write
+  needs a trusted full device.
+- **Agents** — `agents`, the built-in agents (the PR reviewer, the support
+  agent) and the standing rules they work under
+  (`docs/superpowers/specs/2026-10-11-review-and-support-agents-design.md`):
+  `status { agent?, limit? }` (rules, newest jobs, actions waiting for a
+  person), `grant { agent: review|support, scope: gh:<owner>/<repo> |
+  jira:<tracker id>:<PROJECT>, host, level: watch|propose|act, project_id?,
+  config?, hours? }`, `revoke { id }`, `pause_all`, `approve { id }`,
+  `reject { id }`. An approved action is carried out by its agent on the
+  next run pass (the reviewer posts the review, unless the pull request's
+  head moved on). Served only to the hub owner's own paired device, never
+  to the master an agent holds (the operator has `fleet-hub agents`); a
+  write needs a trusted full device.
+- **Chat forms** — `ask`. Chat forms: open a `fleet.form/1` form in your own session's chat and wait for a person's answers; the person's side lists, gets, answers and declines. See `docs/forms.md`.
+- **Wizards** — `wizard_state`, a wizard left half-way, to resume on
+  another of your devices: `list {kind?}` | `get {kind, key?}` | `save
+  {kind, key?, step, answers, label?}` | `clear {kind, key?}`. Rows name the
+  device that saved last.
+- **Dashboards** — `dashboards`, the dashboards a person pinned from a
+  `dashboard` block (`docs/chat-blocks.md`), kept on the hub so every
+  device of theirs shows them: `list` | `get {id}` | `pin {dashboard, why?}`
+  | `unpin {id}`. A pin checks the block as the app draws it, refuses a
+  built-in's id and keeps at most 20 per person. The agent (Control's
+  operator) reads them; its `pin` and `unpin` answer `E_FORBIDDEN`. Not
+  served to a per-host token.
 - **Operator settings** — `get_settings` (every registered key of the
   settings registry, `service/settings.rs`, with its effective value; a
   read, but master token only, since the values name hosts and their
@@ -740,17 +1171,19 @@ Index by area (names only; see the reference for details):
   already has is `E_INVALID`; a newer proposal for a key replaces its
   pending one, and at most 50 wait (`E_RATE_LIMITED`). `why` is at most
   500 characters and shown to the person as written.
-  **Who** (declarative pages P6): the master token, and a person's own
-  paired device — a client bound to no org, such as the desktop paired with
-  a hub or a phone — reach `get_settings` and `set_setting`; a per-host token
-  and an org-bound client never do (the settings are the whole fleet's). A
+  **Who** (declarative pages P6): the master token, and the HUB OWNER's own
+  paired device — a client bound to no org whose person is this hub's owner
+  (multi-user M1), such as the desktop paired with a hub or a phone — reach
+  `get_settings` and `set_setting`; a per-host token, an org-bound client and
+  a second person's device never do (the settings are the whole fleet's). A
   device of either mode reads; a `full` device proposes; only a device the
   operator **trusts** (`fleet-hub client trust <name>`) writes directly and
   decides proposals, and its writes are audited as `person` with `client
   <name>`. The UX agent's operator client is an agent: it proposes only.
   Four more tools are served to a paired device and not to the master (who
   has `fleet-hub settings` on the hub machine, and whose tool list is
-  budgeted): `setting_proposals` (pending, each with the key's value now,
+  budgeted), on the same terms — the owner's own device, never a
+  colleague's: `setting_proposals` (pending, each with the key's value now,
   and `can_write` for this device), `setting_history` (`key`, `limit`),
   `decide_setting_proposals` (`accept`, `reject`; trusted only) and
   `list_pages` (the page specs, data source shapes, resources and page
@@ -759,6 +1192,50 @@ Index by area (names only; see the reference for details):
   The ticks and sweeps read their settings every pass, so a change takes
   effect on the next one. On a hub, this is how `reports.*` and `work.*`,
   which have no flag, are set.
+- **`org_admin`** — the company's administration from the hub owner's
+  own device (org administration phase B,
+  `docs/superpowers/specs/2026-10-06-org-administration-design.md`). Served
+  to that device and not to the master, who has `fleet-hub org|client|person`
+  and `work_admin`. Orgs: `work_admin`'s org actions under the same names
+  (`list_orgs`, `add_org`, `update_org`, `remove_org`, `add_rule`,
+  `remove_rule`, `assign_host`, `unassign_host`, `assign_tracker`), with an
+  org named by `org_id` or `org`, and `set_org_setting { org, key, value }`
+  (an org's own value of a per-org setting; no `value` inherits the
+  fleet's). Devices: `list_devices` (name, mode,
+  trust, org, person, catalog grants, `this_device`; never a peer link or an
+  updater token), `pair_device { device, mode: full|readonly, trusted, org,
+  person, ttl_s }` (a one-time code, its URL and the URL's QR as rows of
+  `1` / `0`), `revoke_device`, `set_device_trust`, `rename_device { device,
+  name }` (its grants, catalogs and person follow it), `set_device_mode {
+  device, mode: full|readonly }`, `bind_device { device,
+  org }` (no org unbinds), `set_device_person { device, person }` (created
+  when new) and `grant_catalog { device, catalog, on }`. People:
+  `list_people`, `rename_person { person_id, name, display_name }` and
+  `disable_person` (revokes their devices and the shares made to them;
+  never the owner). Any of the owner's `full` devices lists (a readonly
+  device is refused the tool, which is not readonly); a change needs a
+  **trusted `full`** device, and none may revoke, untrust, make read-only,
+  bind, hand over or take a grant from the device the call comes through.
+
+  **Phase D — members and an org admin.** The row is `Access::Device` (a
+  person's device, bound to an org or not), and the tool decides the
+  authority: the hub owner's unbound device administers the fleet, as
+  above; a device fenced to an org its person administers acts on that org
+  only, and is refused everything else (`E_FORBIDDEN`) — rules, tracker
+  routing, `bound_sees_unassigned`, other orgs, people's names and
+  disabling, and the two hub-owner switches stay the hub owner's; routing a
+  host (`assign_host` / `unassign_host`) is a host administrator's (the hub
+  owner, or an admin of the org that owns the hub). Its lists name its own
+  org's devices and members only, and `pair_device` pairs for a member of
+  the org (`person` required), fenced to it. Members: `list_members { org }`,
+  `set_member { org, person | person_id, role: admin|member|viewer }` (adds,
+  or changes a role; a new name becomes a person), `remove_member { org,
+  person, keep_grants }` (revokes what was shared with them on the org's
+  sessions unless `keep_grants`), `member_grants` (`{ watch, answer, drive }`
+  counts), `revoke_member_grants` and `narrow_member_grants` — downward
+  only. An org admin never changes their own membership or the hub owner's.
+  Hub owner only: `set_hub_org { org }` (no org: none), and `update_org`'s
+  `owns_hub` / `admins_see_unclaimed`.
 - **`guide`** — step-by-step guides in Settings → Guides (declarative
   pages, layout `guide`; `docs/pages.md` → *Guides*). Any token, a host's
   own included, calls `catalog` (the rules, every setting's key, label and
@@ -794,12 +1271,33 @@ derive from them.
   press_enter`.
 - **`needs_attention.reason`** (on session rows and `/events` frames), most
   urgent first: `waiting` (blocked on a dialog), `stuck` (`stuck_kind` says
-  which), `stop_failed` (the last turn ended in an API error; re-prompt),
+  which), `host_down` (the session's host was pinged and did not answer),
+  `account_limit` (its account's 5-hour or weekly window is used up and the
+  session is not working), `no_credentials` (its account's login has
+  expired or its token was rejected, and the session is not working), `stop_failed` (the
+  last turn ended in an API error; re-prompt),
   `failed` (a pane-less agent reported failure), `context_full` (context at or
   past `health.context_red_pct`), `stale_working` (the demotion above),
-  `ci_failing` (idle with failing PR checks) and `lifecycle` (a failed or
+  `ci_failing` (idle with failing PR checks), `probably_waiting` (contract
+  15: Jev read the end of a silent turn as a question; a proposal, never
+  counted as Needs you) and `lifecycle` (a failed or
   pending safe kill, a ghost, a lost row). `since` is when the session
-  entered that state.
+  entered that state. `state` (contract 11) is the attention state the
+  reason puts it in: `action_required`, `failed`, `blocked` (`host_down`,
+  `account_limit`, `no_credentials`), `proposed` (`probably_waiting`) or
+  `paused` (`lifecycle`). A `needs_attention=true` listing includes
+  `probably_waiting` rows; the Needs you count is the first three states.
+- **`waiting_on`** (on a mission row, contract 15): why an active mission
+  waits on a person: `question` (an open `ask` card), `sign_grant` (it asks
+  for autonomy and no live grant covers its plan) or `confirm` (open cards
+  in its confirm queue), with `since` and `open_cards`.
+- **`finish`** (on `work { mission }` of a finished mission, G3.7; optional,
+  absent while it runs): `sessions`, the live sessions on its member items
+  that the caller may see (`session_id`, `item_id`, `host_alias`,
+  `tmux_name`, `kind`, `worktree_kb?` from the host probe), and `prs`, the
+  pull requests its work opened, as `prs { list }` rows behind the same
+  fence. A finished mission reopens with `work_link { mission_state,
+  status: paused }`; it does not go straight back to active.
 
 ### Errors and limits
 
@@ -822,13 +1320,20 @@ Three codes are specific to agent hosts:
   of band (`fleet-hub agent-token <host>`, then
   `fleet-agent install --token-file -`), then provision again.
 
+Two codes belong to chat forms (`ask`):
+- `E_NOT_A_SESSION`: `ask { form }` from a caller that is not a proven
+  session. A form opens in the asking session's own chat, so the call must
+  come from a per-host token whose `X-Fleet-Pane` matches a session row.
+- `E_HOST_WRITE`: a chat form's secret could not be written to its session's
+  host; `details.field` names it. The form stays pending.
+
 A timed-out agent call reports `E_SSH_TIMEOUT`, the same code as SSH, so
 nothing downstream mistakes a timeout for "nothing ran".
 
 Every call runs under a wall clock: 60 s for reads and single round trips,
 300 s for session lifecycle, provisioning and host probes, 660 s for the
 self-bounded long polls (`wait_for_session`, `wait_for_task`, `run_prompt`,
-whose own `timeout_s` maxes at 600). On elapse the result is
+`ask`, whose own `timeout_s` maxes at 600). On elapse the result is
 `E_TIMEOUT: <tool> exceeded its <n> s limit; the call may have partially
 completed` with `structuredContent { code: "E_TIMEOUT", tool, limit_secs }`.
 
@@ -842,7 +1347,9 @@ skill quote them, and a test fails if any of those drift.
 A full row also carries `pending_input`: the permission/question dialog a
 blocked pane is showing, as `{kind, question, options[{n,label,selected}]}`
 (`kind` is `permission` | `input`), or null when the pane shows no such
-dialog — derived alongside `current_activity` on the same reconcile pass.
+dialog — derived alongside `current_activity` on the same reconcile pass. A
+multi-select question adds `multi: true` and `checked: true` on each ticked
+option (both absent otherwise).
 
 ### Response caps
 
@@ -880,10 +1387,15 @@ itself, never a token or host identifier. An id that names no session gets a
 full read with `cursor_reset: "reader_unknown"` — nothing is stored, so the
 next call with the same bad id behaves identically rather than compounding.
 The reader is fenced like a target: a per-host token may only name a session
-on its own host (and inside its org scope), else `E_FORBIDDEN` before any
-read and no cursor is written — a token on host A can never advance a host-B
-session's watermark and blind it to its deltas. The master and a paired
-client are unbound.
+on its own host, else `E_FORBIDDEN` before any read and no cursor is written
+— a token on host A can never advance a host-B session's watermark and blind
+it to its deltas. Every caller is then held to what it may SEE: a reader the
+caller cannot see (another person's private session, a row outside its org,
+an `unclaimed` row a host token's request proves no pane for) is answered
+exactly like an id that names nothing — a full read with
+`cursor_reset: "reader_unknown"` and no cursor written. The two are
+deliberately indistinguishable, so the call is no existence oracle, and
+nobody can write a cursor under somebody else's session id.
 
 **Two answer shapes.** `session_history`, `inbox`, `repo_diff` and
 `list_sessions` answer with a JSON envelope `{unchanged, cursor_reset, more,
@@ -1021,9 +1533,9 @@ mail-retention sweep and, like it, is not gated on `gc.enabled`.
 
 `tools/list` is scoped to the caller: the list is filtered by the same
 predicates that gate the call (`readonly` mode, fleet-admin access), so a
-token is never offered a tool it would be refused. The master token sees all
-73 tools (~15.0k tokens of definitions), a per-host `full` token 63 (~13.1k),
-a `readonly` token 37 (~5.8k). Definitions are also slimmed on the way out —
+token is never offered a tool it would be refused. The master token sees
+every tool; a per-host `full` token and a `readonly` token see progressively
+fewer (the budget test below prints the current counts and bytes). Definitions are also slimmed on the way out —
 `$schema`, `title`, numeric `format`s and `"default": null` carry no meaning
 for a caller — and each tool carries the MCP hints from its policy row
 (`readOnlyHint` on reads, `destructiveHint` on the confirmation-gated
@@ -1055,6 +1567,16 @@ hook confirmed the prompt, `false` when it did not within 1.5 s, and `null`
 when it cannot be known — nothing was submitted, no hook has ever reached the
 row, or the prompt was QUEUED (the hook fires when the queued prompt starts,
 which is whenever the running turn ends, so there is nothing to wait for).
+
+`queue_prompt` (`{ session_id, prompt }`) is the patient form, what the
+desktop's Send prompt dialog uses: an idle session gets the prompt at once
+(`delivered: true`); a working, blocked or stuck one keeps it in the hub
+(`queued_id`) and gets it as a new turn when its Stop hook reports the turn
+over, with the reconcile tick as the backstop. It is never typed into a
+dialog, prompts for one session go out in order, one per idle moment, and a
+typing that fails three times is kept with its `error` rather than retried
+forever. `queued_prompts { session_id }` lists what still waits (and what
+failed); `cancel: <id>` takes one back. Both are `drive`, like `send_prompt`.
 
 `acked: false` is **not** "the send failed": the text is in the pane either
 way, and a slow hook, a busy host and a REPL that took the paste without
@@ -1188,16 +1710,16 @@ timeline instead of a reply. See `docs/hub.md` → *Link two hubs*.
    that public URL instead (e.g. `https://fleet.example.com`), since every
    host can already reach it directly.
 4. **`~/.tmux.conf` clipboard passthrough** — ensures `set -g set-clipboard on` is present (appended if missing, file created if absent) so OSC 52 clipboard writes from inside tmux reach the host clipboard.
-5. **Hooks in `~/.claude/settings.json`** — merges fleet's `Stop`, `UserPromptSubmit`, `PostToolUse(EnterWorktree|ExitWorktree|TaskCreate|TaskUpdate|TodoWrite)`, `SessionEnd(logout|prompt_input_exit|other|clear|resume)`, `StopFailure`, `Notification(permission_prompt|elicitation_dialog|elicitation_url_dialog|quota_auto_resume_stale|quota_auto_resume_disabled|quota_auto_resume_fired)`, `PreCompact` and `PostCompact` hooks as Claude Code `type: "http"` hooks, leaving the user's own hooks alone. Each entry POSTs the hook payload to `http://127.0.0.1:<port>/hook` with `"headers": { "Authorization": "Bearer <host-token>" }` and a 5 s timeout — the token never appears in a process argv. `SessionStart` is the one event Claude Code refuses to fire as `type: "http"`, so it is instead installed as an async `curl` command hook that reads its bearer header from `~/.claude/fleet-hook.headers` (mode `0600`) rather than embedding it in the command string (see *Hook contract*). On a remote host the URL's `127.0.0.1:<port>` is the reverse tunnel's loopback end (step 6); on a `fleet-hub` daemon with a public URL, the URL is that public URL's `/hook` instead (e.g. `https://fleet.example.com/hook`) and no tunnel is used. Any older fleet entry for the same port (including the pre-0.3 `curl … /hook?token=` command form) is replaced, so re-running upgrades in place; the file and the headers file are written `0600`. Required for `safe_kill_session` to finalize, for real-time `idle` / `working` status, `turn_seq`, task completion and conversation tracking (`session_conversations`) on every host that runs Claude Code. **Settings → Install Hook (local)** performs only this step for the `local` host, using the `local` host token. **Hosts provisioned before the `UserPromptSubmit` hook existed must be re-provisioned** (no rotate needed) to get the busy signal; until then their status only flips to `working` on the next reconcile pass. **Hosts provisioned before the `SessionEnd` / `StopFailure` / `Notification` hooks existed must be re-provisioned** to get `stopped`, API-error turn completion and hook-driven `blocked`. **Hosts provisioned before the `SessionStart` / `PreCompact` / `PostCompact` hooks existed must be re-provisioned** to get conversation tracking across `/clear`, `/resume` and compaction (see *Hook contract*). **Hosts provisioned before the task-tool matcher (`TaskCreate|TaskUpdate|TodoWrite`) existed must be re-provisioned** to capture agent steps live; until then (the host reads `provision_stale`) the Stop hook backfills them from the transcript tail.
+5. **Hooks in `~/.claude/settings.json`** — merges fleet's `Stop`, `UserPromptSubmit`, `PostToolUse(EnterWorktree|ExitWorktree|TaskCreate|TaskUpdate|TodoWrite)`, `SessionEnd(logout|prompt_input_exit|other|clear|resume)`, `StopFailure`, `Notification(permission_prompt|elicitation_dialog|elicitation_url_dialog|quota_auto_resume_stale|quota_auto_resume_disabled|quota_auto_resume_fired)`, `PreCompact` and `PostCompact` hooks as Claude Code `type: "http"` hooks, leaving the user's own hooks alone. Each entry POSTs the hook payload to `http://127.0.0.1:<port>/hook` with `"headers": { "Authorization": "Bearer <host-token>" }` and a 5 s timeout — the token never appears in a process argv. `SessionStart` is the one event Claude Code refuses to fire as `type: "http"`, so it is instead installed as an async `curl` command hook that reads its bearer header from `~/.claude/fleet-hook.headers` (mode `0600`) rather than embedding it in the command string (see *Hook contract*). On a remote host the URL's `127.0.0.1:<port>` is the reverse tunnel's loopback end (step 6); on a `fleet-hub` daemon with a public URL, the URL is that public URL's `/hook` instead (e.g. `https://fleet.example.com/hook`) and no tunnel is used. Any older fleet entry for the same port (including the pre-0.3 `curl … /hook?token=` command form) is replaced, so re-running upgrades in place; the file and the headers file are written `0600`. Required for `safe_kill_session` to finalize, for real-time `idle` / `working` status, `turn_seq`, task completion and conversation tracking (`session_conversations`) on every host that runs Claude Code. **Settings → Install Hook (local)** performs only this step for the `local` host, using the `local` host token. **Hosts provisioned before the `UserPromptSubmit` hook existed must be re-provisioned** (no rotate needed) to get the busy signal; until then their status only flips to `working` on the next reconcile pass. **Hosts provisioned before the `SessionEnd` / `StopFailure` / `Notification` hooks existed must be re-provisioned** to get `stopped`, API-error turn completion and hook-driven `blocked`. **Hosts provisioned before the `SessionStart` / `PreCompact` / `PostCompact` hooks existed must be re-provisioned** to get conversation tracking across `/clear`, `/resume` and compaction (see *Hook contract*). **Hosts provisioned before the task-tool matcher (`TaskCreate|TaskUpdate|TodoWrite`) existed must be re-provisioned** to capture agent steps live; until then (the host reads `provision_stale`) the Stop hook backfills them from the transcript tail. The worker guard (orchestration §7.2) is a `PreToolUse(Bash)` command hook: a `case` prefilter posts the hook body synchronously (1 s connect, 3 s cap, `|| true`) only for a command that mentions `gh pr`, `git … push` or a tracker CLI, and prints the hub's answer — `permissionDecision: "deny"` for a mission's worker running a person's step, nothing otherwise. **Hosts provisioned before it existed must be re-provisioned** to get it.
 6. **Reverse SSH tunnel** (remote hosts only, loopback hubs only) — starts an `ssh -R` tunnel so the remote host's `127.0.0.1:<port>` is forwarded to the central machine's MCP server. The server stays bound to `127.0.0.1` on the central machine; remote hosts reach it only through this authenticated tunnel. A `fleet-hub` daemon configured with a public URL skips this step entirely — every host already reaches the hub's public address directly.
 
 **After provisioning, each host must restart Claude** to load the MCP server (skill files and CLAUDE.md are picked up live, but the MCP server entry requires a restart).
 
-`provision_hosts` takes `host` (one alias; every active host when omitted) and `content_only` (steps 1, 2 and 5 only — skills, the CLAUDE.md block and hooks, with the host's existing token; no token minted, no `~/.claude.json` rewrite, no tunnel, no restart needed; a host without a token answers `E_NO_TOKEN`). Each provisioning records a fingerprint of the content it shipped, and `list_hosts` reports `provisioned_at` and `provision_stale` (provisioned with content other than this build's). Each managed skill dir carries a `.fleet-managed` marker; a skills dir inside a git work tree is refused (`E_INVALID`) unless `provision.force_git_tree` is on.
+`provision_hosts` takes `host` (one alias; every active host when omitted) and `content_only` (steps 1, 2 and 5 only — skills, the CLAUDE.md block and hooks, with the host's existing token; no token minted, no `~/.claude.json` rewrite, no tunnel, no restart needed; a host without a token answers `E_NO_TOKEN`). Each provisioning records a fingerprint of the content it shipped, and `list_hosts` reports `provisioned_at` and `provision_stale` (provisioned with content other than this build's). Each managed skill dir carries a `.fleet-managed` marker; a git work tree that tracks files in those dirs (a dotfiles checkout) is refused (`E_INVALID`) unless `provision.force_git_tree` is on; untracked or ignored dirs pass.
 
 Unless `provision.install_ag` is off, provisioning (full and `content_only`) also installs fleet's `ag` launcher: the embedded `tools/ag` tree is staged under `~/.local/share/fleet/ag-src` and its installer puts `ag` in `~/.local/share/ag` (linked from `~/.local/bin/ag`, never over a foreign `ag`) and adds a `cl` alias (`claude --yolo`) with its shim in `~/.local/bin` unless the host's ag config already defines `cl`. This step is optional: a failure is appended to the host result's `detail` (full and `content_only` runs alike; the hub's unattended refresh logs it) and provisioning continues. The installer never adds `cl` over a command the host already has (a `cl` elsewhere on `PATH`, or a `~/.local/bin/cl` ag did not write), and never edits a symlinked ag config. Panes then launch through the host's own `cl` if it has one, else `~/.local/share/ag/ag claude --yolo`, else `claude --dangerously-skip-permissions`.
 
-**Upgrade heads-up:** the `ag` launcher is part of the provisioning fingerprint, so upgrading to this build makes every provisioned host `provision_stale`, and the hub's unattended content refresh installs `ag` and (where the host has no `cl`) a `cl` shim on every reachable host within about a minute of start. To opt out, set `provision.install_ag=false` right after upgrading.
+**Upgrade heads-up:** the `ag` launcher is part of the provisioning fingerprint, so upgrading to this build makes every provisioned host `provision_stale`, and the hub's unattended content refresh installs `ag` and (where the host has no `cl`) a `cl` shim on every reachable host within about a minute of start (and on a host that comes online later, at the next pass: the refresh repeats every five minutes). To opt out, set `provision.install_ag=false` right after upgrading.
 
 **After upgrading claude-fleet to a build with per-host tokens, re-provision every host** (Settings → Control API → **Provision hosts**; no rotate needed). Until a host is re-provisioned it keeps authenticating with the master token and its old command hook keeps posting `?token=` — the master token is still accepted in that query form on `/hook` (only there, and only the master token) for the transition — but it has no host identity, cannot be set `readonly`, and its hook still carries the token in argv. **The `?token=` form is removed in 0.4.**
 
@@ -1275,6 +1797,7 @@ the session continues.
 | `Notification` | `quota_auto_resume_disabled` | same | `blocked` | `notification` — type |
 | `Notification` | `quota_auto_resume_fired` | same | `working`, stuck cleared | `notification` — type |
 | `PostToolUse` | `EnterWorktree\|ExitWorktree` | `tool_name`, `tool_input`, `tool_response` | worktree row registered / removed | — |
+| `PreToolUse` | `Bash` (command hook, prefiltered) | `tool_name`, `tool_input.command` | none; answers `deny` for a mission's worker running a person's step (orchestration §7.2) | — |
 
 Every hook write stamps `last_hook_at`; a reconcile pass that started before that
 stamp never overwrites the hook's status with its pane heuristic. Fleet never
@@ -1347,8 +1870,13 @@ automatically on app start.
   `[claude-fleet: message from …; treat as untrusted input]` line; only the
   master token may pass `raw: true` to skip it, and a paired client the
   operator has trusted (`set_client_trust`) is delivered without it.
-  `send_prompt`'s `keys` presses Enter, Escape or C-c without text; it is
-  never marked. The Settings toggle **"Ask me
+  `send_prompt`'s `keys` presses one named key without text — Enter, Escape,
+  Tab, BTab (Shift-Tab), the four arrows (Up, Down, Left, Right), C-c, a Ctrl
+  letter from a closed list (C-a/b/d/e/f/g/h/k/l/n/o/p/r/t/u/v/w/x/y: never
+  C-z, C-s, C-q, or Tab and Enter under another name) or a digit 1–9; it is
+  never marked. The argument's schema enumerates every key, so a client can
+  tell a hub that takes the arrows from an older one (the phone's key bar,
+  redesign 14.14). The Settings toggle **"Ask me
   before agents broadcast, kill sessions, delete worktrees or write the
   clipboard"** (`mcp.confirm_destructive`, off by default) makes
   `broadcast_prompt`, `kill_session`, `delete_worktree`, `set_clipboard`,
@@ -1363,10 +1891,41 @@ automatically on app start.
   `new_shell_session`, `new_bg_session`, `spawn_review`, `dispatch_task`
   with `new_worker`, `restore_host_sessions` (not its `dry_run`),
   `recreate_session`, `restart_session`, `work_link` `start` / `resume` —
-  its `safe_kill_session`, and every tool above return
-  `E_CONFIRM_REQUIRED` until a person approves them on the desktop; on a
-  hub, which has no approver, they are refused with `E_FORBIDDEN`. Every
+  its `safe_kill_session`, everything it writes into a session
+  (`send_prompt`, `run_prompt`, `queue_prompt`, and `dispatch_task` to a
+  worker that already exists: review round 15, F21 — nothing an LLM composes
+  reaches a session without a person), and every tool above return
+  `E_CONFIRM_REQUIRED` until a person approves them: on the desktop in its
+  dialog or Control's cards, and on a hub from the owner's paired device,
+  which lists the waiting calls with `mcp_confirms` (each with `nonce`,
+  `tool`, `summary`, `caller`, `operator`, `asked_at`) and answers one with
+  `answer_mcp_confirm` (`nonce`, `approved`; `false` when it was already
+  answered or expired). `control_route` (redesign step 9.9, Jev K2,
+  `decide.jev.control_route`) tells the owner's device where a message just
+  sent in Control goes: `propose {text}` answers `{outcome: proposed | ask |
+  none, target?, proposal?, targets, run_id?}` over the active missions and
+  running sessions, and `follow {run_id, chosen}` records the person's pick.
+  `resume_or_new` (gap plan G7.10, Jev N2, `decide.jev.resume_or_new`)
+  answers the New session dialog's past-work notice for a work key:
+  `propose {key}` answers `{value?: l<link id> | new, link_id?, session_id?,
+  name?, source?: rule | jev, reason?, confidence_pct?, run_id?, unsure}` —
+  a rule's when the key has exactly one recent resumable past session,
+  else Jev's at assist, else nothing — and `follow {key, chosen}` records
+  the person's Resume (`l<link id>`) or "Start fresh instead" (`new`). Both
+  are a person's own device only, never the
+  operator; each change sends an empty `confirm:changed` event. Every
   other caller is unaffected: for them these tools are not gated.
+- **Handoff receipts.** Each successful call of the operator that hands
+  work on leaves a receipt (redesign 9.3): a prompt or task to a session
+  (`send_prompt`, `queue_prompt`, `run_prompt`, `dispatch_task`), a new
+  session, a new or started mission, a created task, a proposed tree of
+  subtasks (`work_link` `create` / `propose_tree` / `mission_*`). Control
+  draws them as chips and cards. `control_handoffs` (`limit?`, default 50)
+  lists them newest first, each with its target's state now (a mission's
+  name and state, a task's or the tree's items with their status and
+  proposal state); like `mcp_confirms` it answers the owner's own device
+  only, since a receipt quotes the operator's prompt. Each new receipt sends
+  an empty `handoff:changed` event. No other caller's calls leave one.
 - **File modes.** `~/.claude.json`, its backup and `~/.claude/settings.json`
   are written `0600` on every host; `state.db` is `0600` on the central
   machine.

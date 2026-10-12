@@ -16,8 +16,9 @@ import {
 } from './moves';
 import { MOVE_STEPS, type MoveProgress, type MoveStep, type MoveStepState } from './moveProgress';
 import { sessions, type SessionRow } from './sessions';
-import { hubStatus } from './hub';
+import { hubStatus, STANDALONE } from './hub';
 import { hubConnection } from './hub_connection';
+import { resetAccessForTests, setMyGrants } from './access';
 
 const movable = {
   id: 5, tmux_name: 'dev-foo', host_alias: 'alpha', kind: 'work', worktree_id: 10,
@@ -178,5 +179,65 @@ describe('TransferChip', () => {
     const chip = screen.getByTestId('transfer-chip') as HTMLButtonElement;
     expect(chip.disabled).toBe(true);
     expect(chip.title).toContain('unreachable right now');
+  });
+});
+
+// Multi-user M1: the move lifecycle is spec §4.3's `own` tier. The details
+// panel's "Move to host…" has composed both halves — the hub's refusal and this
+// client's access to the row — since F2; this chip is the SAME control in the
+// terminal header and asked only the hub's half, so a watcher's header still
+// offered the move.
+describe('TransferChip access gate (multi-user M1)', () => {
+  const REMOTE = {
+    ...STANDALONE,
+    remote: true,
+    url: 'https://fleet.example.com',
+    configured_url: 'https://fleet.example.com',
+  };
+
+  beforeEach(() => {
+    resetAccessForTests();
+  });
+
+  for (const level of ['watch', 'drive'] as const) {
+    it(`a ${level} grantee gets the chip disabled, with the owner-only reason`, async () => {
+      hubStatus.set(REMOTE);
+      hubConnection.set({ state: 'connected' });
+      const theirs = { ...movable, owner_person_id: 9 } as SessionRow;
+      sessions.set([theirs]);
+      setMyGrants(7, [{ session_id: theirs.id, level }]);
+      render(TransferChip, { props: { session: theirs } });
+      await tick();
+      const chip = screen.getByTestId('transfer-chip') as HTMLButtonElement;
+      expect(chip.disabled).toBe(true);
+      expect(chip.title).toMatch(/only the session’s owner/i);
+      // Not even a click that lands opens the app's one Transfer sheet.
+      transferSheetFor.set(null);
+      await fireEvent.click(chip);
+      await tick();
+      expect(get(transferSheetFor)).toBeNull();
+    });
+  }
+
+  it('the owner’s own row keeps the chip on a paired desktop', async () => {
+    hubStatus.set(REMOTE);
+    hubConnection.set({ state: 'connected' });
+    const mine = { ...movable, owner_person_id: 7 } as SessionRow;
+    sessions.set([mine]);
+    setMyGrants(7, []);
+    render(TransferChip, { props: { session: mine } });
+    await tick();
+    const chip = screen.getByTestId('transfer-chip') as HTMLButtonElement;
+    expect(chip.disabled).toBe(false);
+    await fireEvent.click(chip);
+    expect(get(transferSheetFor)).toBe(mine.id);
+  });
+
+  it('a standalone desktop is untouched, even by a row naming another owner', async () => {
+    const theirs = { ...movable, owner_person_id: 99 } as SessionRow;
+    sessions.set([theirs]);
+    render(TransferChip, { props: { session: theirs } });
+    await tick();
+    expect((screen.getByTestId('transfer-chip') as HTMLButtonElement).disabled).toBe(false);
   });
 });

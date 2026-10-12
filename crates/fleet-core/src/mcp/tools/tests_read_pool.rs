@@ -43,28 +43,34 @@ fn pool(path: &std::path::Path) -> Option<Arc<ReadPool>> {
 
 fn host_caller() -> Caller {
     Caller {
+        api: None,
         host_alias: Some("hosta".to_string()),
         client: None,
         mode: TokenMode::Full,
+        pane: None,
+        is_personal_owner: false,
     }
 }
 
 async fn call(t: &FleetTools, tool: &str) -> Result<CallToolResult, McpError> {
     let empty = || serde_json::json!({});
     match tool {
-        "list_hosts" => t.list_hosts().await,
+        "list_hosts" => t.list_hosts(Extension(host_caller())).await,
         "whoami" => {
             t.whoami(
                 Extension(host_caller()),
                 Parameters(WhoamiParams {
-                    tmux_name: "dev".to_string(),
+                    tmux_name: Some("dev".to_string()),
                 }),
             )
             .await
         }
         "list_worktrees" => {
-            t.list_worktrees(Parameters(serde_json::from_value(empty()).unwrap()))
-                .await
+            t.list_worktrees(
+                Extension(host_caller()),
+                Parameters(serde_json::from_value(empty()).unwrap()),
+            )
+            .await
         }
         "list_projects" => {
             t.list_projects(Parameters(serde_json::from_value(empty()).unwrap()))

@@ -34,9 +34,10 @@ export function isTerminal(state: TaskState): boolean {
 
 /** Fetch every task (newest-first) into the store. */
 export async function loadTasks(): Promise<Result<TaskRow[]>> {
+  const token = rows.beginList();
   const r = await invokeCmd<TaskRow[]>('list_tasks', {});
   // Defensive: a mocked / older backend may answer with nothing.
-  if (r.ok && Array.isArray(r.value)) tasks.set(r.value);
+  if (r.ok && Array.isArray(r.value)) rows.applyList(r.value, token);
   return r;
 }
 
@@ -70,7 +71,9 @@ export function promptFirstLine(prompt: string | null, max = 120): string {
   if (!prompt) return '';
   const line = prompt.split('\n').find((l) => l.trim().length > 0) ?? '';
   const t = line.trim();
-  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+  // By code point, as `promptPreview` does: a UTF-16 cut splits an emoji.
+  const chars = t.length > max ? Array.from(t) : null;
+  return chars && chars.length > max ? `${chars.slice(0, max - 1).join('')}…` : t;
 }
 
 /** Elapsed time of a task: running → since started_at (or created_at);

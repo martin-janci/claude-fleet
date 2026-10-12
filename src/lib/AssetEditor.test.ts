@@ -8,6 +8,8 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import { open as mockedOpen } from '@tauri-apps/plugin-dialog';
 import AssetEditor from './AssetEditor.svelte';
 import type { EditableAsset } from './assets';
+import { get } from 'svelte/store';
+import { clearToasts, toasts } from './toasts';
 
 const invoke = mockedInvoke as ReturnType<typeof vi.fn>;
 const open = mockedOpen as ReturnType<typeof vi.fn>;
@@ -187,9 +189,9 @@ describe('AssetEditor', () => {
     await waitFor(() => expect(screen.queryByTestId('editor-resource-resources/run.sh')).toBeNull());
   });
 
-  it('adding a resource opens the file picker and calls addResource with the picked path', async () => {
-    open.mockResolvedValueOnce('/tmp/script.sh');
+  it('adding a resource opens the Rust-side picker and calls addResource with the picked path', async () => {
     byCmd({
+      pick_attachments: [{ path: '/tmp/script.sh', name: 'script.sh', size: 2, kind: 'binary' }],
       catalog_lint_asset: { errors: [], warnings: [] },
       catalog_add_resource: { commit: 'sha3', lint: { errors: [], warnings: [] } },
       catalog_get_asset: {
@@ -202,7 +204,10 @@ describe('AssetEditor', () => {
 
     await fireEvent.click(screen.getByTestId('editor-resource-add'));
 
-    expect(open).toHaveBeenCalledWith({ multiple: false });
+    // SEC-9: the webview never names a path itself — the picker runs in Rust,
+    // which authorises the choice that catalog_add_resource then requires.
+    expect(open).not.toHaveBeenCalled();
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pick_attachments', {}));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_add_resource', { args: { kind: 'skill', name: 'worktree', local_path: '/tmp/script.sh', rel_path: null } }));
     await waitFor(() => expect(screen.getByTestId('editor-resource-resources/script.sh')).toBeTruthy());
   });
@@ -350,5 +355,100 @@ describe('AssetEditor', () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_lint_asset', { args: { kind: 'hook', name: 'on-stop' } }));
 
     expect(screen.queryByTestId('editor-install-as')).toBeNull();
+  });
+});
+
+// G2.6: the Command kind's fields and the Harness boxes.
+describe('AssetEditor: Toolkit forms', () => {
+  const saved = () => {
+    const call = invoke.mock.calls.find((c) => c[0] === 'catalog_update_asset');
+    return (call![1] as { args: { asset: EditableAsset } }).args.asset;
+  };
+  const ok = () =>
+    byCmd({
+      catalog_lint_asset: { errors: [], warnings: [] },
+      catalog_update_asset: { commit: 'sha', lint: { errors: [], warnings: [] } },
+    });
+
+  it('a command edits its tools, arguments and model, and its prompt', async () => {
+    ok();
+    const onsaved = vi.fn();
+    render(AssetEditor, {
+      asset: { kind: 'command', name: 'ship-it', version: '1', description: 'Ship it.', tags: [], body: 'Ship $ARGUMENTS.', resources: [] },
+      onsaved,
+      oncancel: () => {},
+    });
+    expect(screen.getByTestId('editor-field-argument_hint')).toBeTruthy();
+    expect(screen.getByTestId('editor-install-as')).toBeTruthy();
+    // Claude Code only: Codex cannot render a command, so there is no box.
+    expect(screen.queryByTestId('editor-field-harnesses')).toBeNull();
+    await fireEvent.click(screen.getByTestId('editor-tool-allowed_tools-bash'));
+    await fireEvent.input(screen.getByTestId('editor-field-argument_hint').querySelector('input')!, { target: { value: '[ticket]' } });
+    const model = screen.getByTestId('editor-field-model').querySelector('select')!;
+    expect(model.value).toBe('');
+    await fireEvent.change(model, { target: { value: 'fast' } });
+    await fireEvent.click(screen.getByTestId('editor-save'));
+    await waitFor(() => expect(onsaved).toHaveBeenCalled());
+    const a = saved();
+    expect(a.allowed_tools).toEqual(['bash']);
+    expect(a.argument_hint).toBe('[ticket]');
+    expect(a.model).toBe('fast');
+  });
+
+  it('Harness boxes turn a harness off and on through targets', async () => {
+    ok();
+    const onsaved = vi.fn();
+    render(AssetEditor, { asset: mcpAsset(), onsaved, oncancel: () => {} });
+    expect(screen.getByTestId('editor-field-env').textContent).toContain('Use ${NAME} for values from Secrets');
+    const codex = screen.getByTestId('editor-harness-codex') as HTMLInputElement;
+    expect(codex.checked).toBe(true);
+    expect((screen.getByTestId('editor-harness-claude') as HTMLInputElement).checked).toBe(true);
+    await fireEvent.click(codex);
+    await fireEvent.click(screen.getByTestId('editor-save'));
+    await waitFor(() => expect(onsaved).toHaveBeenCalled());
+    expect(saved().targets).toEqual({ codex: { enabled: false } });
+  });
+
+  it('the saved toast offers Undo, which writes back what the editor opened with (G7.4)', async () => {
+    clearToasts();
+    byCmd({
+      catalog_lint_asset: { errors: [], warnings: [] },
+      catalog_update_asset: { commit: 'sha123', lint: { errors: [], warnings: [] } },
+    });
+    const onsaved = vi.fn();
+    render(AssetEditor, { asset: skillAsset(), onsaved, oncancel: () => {} });
+    await fireEvent.input(screen.getByTestId('editor-description'), { target: { value: 'Changed.' } });
+    await fireEvent.click(screen.getByTestId('editor-save'));
+    await waitFor(() => expect(onsaved).toHaveBeenCalledTimes(1));
+    const t = get(toasts).at(-1)!;
+    expect(t.message).toBe('Saved worktree.');
+    t.action!.run();
+    await waitFor(() => expect(onsaved).toHaveBeenCalledTimes(2));
+    const writes = invoke.mock.calls.filter((c) => c[0] === 'catalog_update_asset');
+    expect((writes[1][1] as { args: { asset: EditableAsset } }).args.asset.description).toBe('Create an isolated git worktree.');
+  });
+
+  it('Discard drops the staged edits and goes back to what the editor opened with (G7.5)', async () => {
+    byCmd({ catalog_lint_asset: { errors: [], warnings: [] } });
+    render(AssetEditor, { asset: skillAsset(), onsaved: () => {}, oncancel: () => {} });
+    expect(screen.getByTestId('editor-discard')).toBeDisabled();
+    await fireEvent.input(screen.getByTestId('editor-description'), { target: { value: 'Changed.' } });
+    expect(screen.getByTestId('editor-discard')).not.toBeDisabled();
+    await fireEvent.click(screen.getByTestId('editor-discard'));
+    expect((screen.getByTestId('editor-description') as HTMLTextAreaElement).value).toBe('Create an isolated git worktree.');
+    expect(screen.getByTestId('editor-save')).toBeDisabled();
+    expect(screen.getByTestId('editor-discard')).toBeDisabled();
+  });
+
+  it('Lint runs the server lint on demand and says what it found (G7.5)', async () => {
+    byCmd({ catalog_lint_asset: { errors: [], warnings: [{ field: 'body', message: 'has a TODO' }] } });
+    render(AssetEditor, { asset: skillAsset(), onsaved: () => {}, oncancel: () => {} });
+    await waitFor(() => expect(invoke).toHaveBeenCalledTimes(1));
+    await fireEvent.click(screen.getByTestId('editor-lint-run'));
+    await waitFor(() => expect(screen.getByTestId('editor-lint-note').textContent).toBe('0 errors, 1 warning.'));
+    expect(invoke.mock.calls.filter((c) => c[0] === 'catalog_lint_asset')).toHaveLength(2);
+    await fireEvent.input(screen.getByTestId('editor-version'), { target: { value: '2' } });
+    await fireEvent.click(screen.getByTestId('editor-lint-run'));
+    await waitFor(() => expect(screen.getByTestId('editor-lint-note').textContent).toBe('0 errors, 1 warning in the saved version. Save to lint your changes.'));
   });
 });

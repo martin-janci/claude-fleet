@@ -32,6 +32,28 @@ pub enum Command {
     Install(InstallArgs),
     /// Is the service running, and is it connected to its hub?
     Status(StatusArgs),
+    /// One update pass: ask the hub what this host should run, and install
+    /// it when the hub says to (a pin, a required update, a rollback, or
+    /// `update.agent.mode = automatic`) — checked against the signed
+    /// release, restarted, and rolled back when it does not reconnect.
+    /// `install --auto-update` runs it from a timer.
+    Update(UpdateArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct UpdateArgs {
+    /// The user unit's agent instead of the system one.
+    #[arg(long)]
+    pub user: bool,
+    /// The agent's config (its hub and token) instead of the scope's.
+    #[arg(long)]
+    pub config: Option<PathBuf>,
+    /// Print the updater's state and exit.
+    #[arg(long, conflicts_with = "clear")]
+    pub status: bool,
+    /// After an operator sorted out a rollback failure: forget it.
+    #[arg(long)]
+    pub clear: bool,
 }
 
 #[derive(Debug, Args)]
@@ -93,6 +115,10 @@ pub struct InstallArgs {
     /// Write the files but leave systemd alone.
     #[arg(long)]
     pub no_start: bool,
+    /// Also install `fleet-agent-update.timer`: every six hours, install
+    /// what the hub decides for this host (`fleet-agent update`).
+    #[arg(long)]
+    pub auto_update: bool,
 }
 
 #[derive(Debug, Args)]
@@ -196,6 +222,16 @@ pub fn install_plan(
         return Err(env.systemd.refusal());
     }
     Endpoint::parse(&args.hub, args.insecure)?;
+    // The unit runs in the service user's home, not the directory `install`
+    // ran in, so a relative bundle would resolve somewhere else and fail
+    // every start: a unit that restarts forever.
+    if let Some(ca) = args.ca_file.as_deref().filter(|p| !p.is_absolute()) {
+        return Err(format!(
+            "--ca-file {} is relative; pass an absolute path (the service does \
+             not run in this directory)",
+            ca.display()
+        ));
+    }
     let token = read_token(args.token.as_deref(), args.token_file.as_deref(), stdin)?;
     config::check_token(&token).map_err(|e| e.to_string())?;
     let config = Config {
@@ -243,6 +279,7 @@ pub fn install_plan(
         config,
         owner,
         start: !args.no_start,
+        auto_update: args.auto_update,
     })
 }
 
@@ -464,6 +501,41 @@ mod tests {
         let plan = install_plan(&a, &env(false, None), uid_1000, &mut std::io::empty()).unwrap();
         assert_eq!(plan.layout.config_path, PathBuf::from("/srv/agent.json"));
         assert!(!plan.start);
+    }
+
+    #[test]
+    fn install_refuses_a_relative_ca_file() {
+        let with_ca = |ca: &str| {
+            install_args(&[
+                "install",
+                "--hub",
+                "https://hub.example",
+                "--token",
+                "t",
+                "--user",
+                "--ca-file",
+                ca,
+            ])
+        };
+        let err = install_plan(
+            &with_ca("ca.pem"),
+            &env(false, None),
+            uid_1000,
+            &mut std::io::empty(),
+        )
+        .unwrap_err();
+        assert!(err.contains("--ca-file"), "{err}");
+        let plan = install_plan(
+            &with_ca("/etc/fleet/ca.pem"),
+            &env(false, None),
+            uid_1000,
+            &mut std::io::empty(),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.config.ca_file,
+            Some(PathBuf::from("/etc/fleet/ca.pem"))
+        );
     }
 
     #[test]

@@ -164,6 +164,10 @@ pub fn branch_name(value: &str) -> Result<(), IpcError> {
     if value.ends_with('.') || value.ends_with(".lock") {
         return Err(invalid("branch must not end with '.' or '.lock'"));
     }
+    // git refuses `.lock` at the end of ANY component, not only the last.
+    if value.split('/').any(|seg| seg.ends_with(".lock")) {
+        return Err(invalid("a branch name component must not end with '.lock'"));
+    }
     if value.contains("//") || value.contains("@{") {
         return Err(invalid("branch must not contain '//' or '@{'"));
     }
@@ -245,18 +249,34 @@ pub fn repo_rel_path(value: &str) -> Result<(), IpcError> {
     no_dotdot_component("file path", value, &['/', '\\'])
 }
 
-/// Shared body of [`tmux_name`] / [`tmux_name_lookup`]: the two differ only
-/// in whether `:` is allowed (and, correspondingly, in the message).
-fn tmux_name_with(value: &str, allow_colon: bool) -> Result<(), IpcError> {
+/// Shared body of [`tmux_name`] / [`tmux_name_lookup`] /
+/// [`tmux_name_addressable`]: they differ only in whether `:` and `#` are
+/// allowed (and, correspondingly, in the message).
+///
+/// `#` is refused only for a name tmux will CREATE: `new-session -s` and
+/// `rename-session` expand tmux formats in it (`#{pid}`, `#H`, and `#(cmd)`
+/// RUNS `cmd` on the host), so the session would come out under another
+/// name than the row's. `-t` targets are not expanded, so an existing
+/// session with a `#` in its name stays addressable.
+fn tmux_name_with(value: &str, allow_colon: bool, allow_hash: bool) -> Result<(), IpcError> {
     non_empty("session name", value)?;
     no_leading_dash("session name", value)?;
-    let bad =
-        |c: char| c.is_whitespace() || c.is_control() || c == '.' || (!allow_colon && c == ':');
+    let bad = |c: char| {
+        c.is_whitespace()
+            || c.is_control()
+            || c == '.'
+            || (!allow_colon && c == ':')
+            || (!allow_hash && c == '#')
+    };
     if value.chars().any(bad) {
-        return Err(invalid(if allow_colon {
-            "session name must not contain whitespace, control characters, or '.'"
-        } else {
-            "session name must not contain whitespace, control characters, '.' or ':'"
+        return Err(invalid(match (allow_colon, allow_hash) {
+            (true, _) => "session name must not contain whitespace, control characters, or '.'",
+            (false, true) => {
+                "session name must not contain whitespace, control characters, '.' or ':'"
+            }
+            (false, false) => {
+                "session name must not contain whitespace, control characters, '.', ':' or '#'"
+            }
         }));
     }
     Ok(())
@@ -273,7 +293,15 @@ fn tmux_name_with(value: &str, allow_colon: bool) -> Result<(), IpcError> {
 /// commands could not find. The UI trims before calling in; only DevTools /
 /// the MCP API reach here with padding, and they get a clear `E_INVALID`.
 pub fn tmux_name(value: &str) -> Result<(), IpcError> {
-    tmux_name_with(value, false)
+    tmux_name_with(value, false, false)?;
+    // A name ending `--sh<N>` is a shell terminal's (step 5.3), which every
+    // session list leaves out: a session created under one would vanish.
+    if crate::tmux::is_shell_terminal_name(value) {
+        return Err(invalid(
+            "session name must not end in --sh and a number; that suffix names a terminal",
+        ));
+    }
+    Ok(())
 }
 
 /// Validate a tmux session name used as a **lookup key**, not a creation
@@ -284,7 +312,7 @@ pub fn tmux_name(value: &str) -> Result<(), IpcError> {
 /// row claude-fleet actually inserts, so a value containing them can only be
 /// a malformed/hostile caller.
 pub fn tmux_name_lookup(value: &str) -> Result<(), IpcError> {
-    tmux_name_with(value, true)
+    tmux_name_with(value, true, true)
 }
 
 /// Validate a tmux session name for operations that need a real tmux pane
@@ -294,7 +322,8 @@ pub fn tmux_name_lookup(value: &str) -> Result<(), IpcError> {
 /// with a dedicated `E_BG_SESSION` code and a pointer to the tool that works
 /// for both kinds, instead of the generic (and misleading) `tmux_name`
 /// character-set error.
-/// Everything else defers to `tmux_name`.
+/// Everything else follows `tmux_name`, except that a `#` is allowed: these
+/// name an EXISTING pane through `-t`, which tmux does not format-expand.
 pub fn tmux_name_addressable(value: &str) -> Result<(), IpcError> {
     if value.starts_with("bg:") {
         return Err(IpcError::new(
@@ -302,7 +331,7 @@ pub fn tmux_name_addressable(value: &str) -> Result<(), IpcError> {
             "this session runs outside tmux; use session_transcript to read it",
         ));
     }
-    tmux_name(value)
+    tmux_name_with(value, false, true)
 }
 
 /// Validate a session friendly-name (display label set by the in-session
@@ -333,6 +362,29 @@ pub fn claude_model(value: &str) -> Result<(), IpcError> {
     } else {
         Err(invalid(
             "model must be a Claude model alias or id (letters, digits, . _ - [ ])",
+        ))
+    }
+}
+
+/// Validate a Claude credential profile name: the directory
+/// `~/.claude-profiles/<name>` a session runs under as `CLAUDE_CONFIG_DIR`
+/// (docs/accounts.md). A plain name, never a path: letters, digits, `_`
+/// and `-`, starting with a letter or digit, at most 32 characters.
+pub fn claude_profile(value: &str) -> Result<(), IpcError> {
+    let ok = !value.is_empty()
+        && value.len() <= 32
+        && value
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'));
+    if ok {
+        Ok(())
+    } else {
+        Err(invalid(
+            "profile must be a name of up to 32 letters, digits, _ or -, starting with a letter or digit",
         ))
     }
 }
@@ -410,6 +462,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn claude_profile_takes_plain_names_only() {
+        for ok in ["work", "Personal-2", "a", "team_max", &"x".repeat(32)] {
+            assert!(claude_profile(ok).is_ok(), "{ok:?}");
+        }
+        for bad in [
+            "",
+            "-work",
+            "_work",
+            "../x",
+            "a/b",
+            "~",
+            "a b",
+            "a'b",
+            "$HOME",
+            ".hidden",
+            &"x".repeat(33),
+        ] {
+            assert_eq!(
+                claude_profile(bad).unwrap_err().code,
+                "E_INVALID",
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
     fn not_blank_accepts_leading_dash_rejects_whitespace_only() {
         assert!(not_blank("prompt", "- fix login\n- add test").is_ok());
         assert!(not_blank("prompt", "--foo").is_ok());
@@ -478,8 +556,8 @@ mod tests {
             assert!(branch_name(ok).is_ok(), "{ok} should be valid");
         }
         for bad in [
-            "x.lock", "a:b", "@", "a/", "a.", "/a", "a//b", "a@{1}", ".a", "a/.b", "a~1", "a^",
-            "a?", "a*", "a[b", "a\\b", "a..b", "-a", "a b", "",
+            "x.lock", "a.lock/b", "a:b", "@", "a/", "a.", "/a", "a//b", "a@{1}", ".a", "a/.b",
+            "a~1", "a^", "a?", "a*", "a[b", "a\\b", "a..b", "-a", "a b", "",
         ] {
             assert!(branch_name(bad).is_err(), "{bad:?} should be refused");
         }
@@ -540,6 +618,18 @@ mod tests {
         assert!(tmux_name("has:colon").is_err());
         assert!(tmux_name("-leading").is_err());
         assert!(tmux_name("").is_err());
+    }
+
+    #[test]
+    fn tmux_name_rejects_tmux_format_sequences() {
+        // tmux expands these in a NEW name; `#(...)` runs a command.
+        for bad in ["a#{pid}", "x#(id)", "a#Hb", "fix#1"] {
+            assert!(tmux_name(bad).is_err(), "{bad}");
+        }
+        // An existing pane is addressed through `-t`, which does not expand.
+        assert!(tmux_name_addressable("fix#1").is_ok());
+        assert!(tmux_name_lookup("fix#1").is_ok());
+        assert!(tmux_name("dev-foo").is_ok());
     }
 
     #[test]

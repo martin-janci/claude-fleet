@@ -43,6 +43,17 @@ pub struct Page {
     /// above the list: notices and custom items only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub list_items: Vec<Item>,
+    /// A `master_detail` page's records also drawn as a graph above the
+    /// list: each one a node joined to the centre, its line solid while
+    /// its state is up and dashed while it is not (Federation's linked
+    /// hubs). The list stays the text alternative and the keyboard path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<GraphView>,
+    /// A `master_detail` page's records also shown as one table (M15 step
+    /// G4.7: People & devices), with filters and a grouping. A row opens
+    /// its record; the list stays the keyboard path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table: Option<TableView>,
     /// An `embed` page's place in a hand-built screen (`Slot`). Only an
     /// embed page names one, and each slot has at most one page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -60,6 +71,45 @@ pub struct Page {
     pub sections: Vec<Section>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tabs: Vec<Tab>,
+}
+
+/// How a `master_detail` page draws its records as a graph (`Page::graph`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(deny_unknown_fields)]
+pub struct GraphView {
+    /// The centre node's name, e.g. "This hub".
+    pub center: String,
+    /// The resource's `choice` field each line follows.
+    pub state: String,
+    /// The values of `state` drawn as a link that is up (a solid line);
+    /// every other value is down (a dashed line).
+    pub up: Vec<String>,
+    /// Fields shown under a node's name, at most three: plain values
+    /// (text, count or time), never a list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub facts: Vec<String>,
+}
+
+/// How a `master_detail` page shows its records as a table (`Page::table`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(deny_unknown_fields)]
+pub struct TableView {
+    /// The view's name, e.g. "People & devices".
+    pub title: String,
+    /// The resource's plain fields, one column each, at most six.
+    pub columns: Vec<String>,
+    /// Columns that get a filter: a select over the values the records hold.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub filters: Vec<String>,
+    /// A column the rows can be grouped by, offered as a switch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_by: Option<String>,
+    /// A plain field shown in a smaller line under the record's title in its
+    /// column (M15 step G7.14: a device's "phone · fleet-mobile 0.5.4").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle: Option<String>,
 }
 
 /// One control in a `data_page`'s filter bar, bound by name to a source
@@ -202,6 +252,16 @@ pub struct Section {
     pub collapsible: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub advanced: bool,
+    /// A `master_detail` page's overview: its `count` and `money` fields
+    /// shown as tiles (label, value, and the field's `sub` line) rather
+    /// than rows.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tiles: bool,
+    /// Settings fields that are each a subset of the same options, shown as
+    /// one grid: a row per option, a column per field, a tick where the
+    /// field holds the option (Orbit Fleet 11.9, the notifications matrix).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub matrix: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<Condition>,
     pub items: Vec<Item>,
@@ -341,6 +401,9 @@ pub enum Tone {
     Info,
     Warn,
     Danger,
+    /// Something the page will offer and does not yet, shown greyed with
+    /// "Not built yet" (M15 step G7.14: a debug device's live screen).
+    Later,
 }
 
 /// When an item, section or tab is shown. Exactly one form per condition:

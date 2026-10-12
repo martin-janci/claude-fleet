@@ -28,6 +28,7 @@ use super::sync::fetch_one;
 use super::ItemRef;
 use super::TrackerNet;
 use crate::ipc_error::{codes, lock, IpcError};
+use crate::search_text;
 use crate::service::orgs::{self, OrgScope};
 use crate::service::work::resume::InFlight;
 use crate::store::{Decider, SessionRow, Store, TrackerRow, WorkItemRow, WorkLinkRow, WorkTarget};
@@ -121,6 +122,11 @@ pub(crate) fn item_visible(
     item: &WorkItemRow,
 ) -> Result<bool, IpcError> {
     match scope {
+        // This is the org boundary, not a privacy fence: which COMPANY's
+        // work item this is. An item is not a session — its key and title
+        // are item data — and every session field hung off it is
+        // person-fenced where it is read (`tickets::live_ids` takes the
+        // whole `ViewScope`).
         OrgScope::All => Ok(true),
         OrgScope::Org { .. } => Ok(scope.sees_org(s.item_org(item.id)?)),
         OrgScope::Host { alias, .. } => {
@@ -137,7 +143,7 @@ pub(crate) fn item_visible(
 /// B's `start` or be named as working on B's ticket by typing its key. The
 /// rule is [`Store::bind_tracker_refs`]'s: an unassigned side never
 /// conflicts, and a forced item link keeps its item's org.
-fn live_work_on(
+pub(crate) fn live_work_on(
     s: &Store,
     key: &str,
     item_org: Option<i64>,
@@ -154,15 +160,35 @@ fn live_work_on(
     Ok(out)
 }
 
-/// The live sessions working on `item` that the scope may see (D7: an
+/// The live sessions working on `item` that the reader may see (D7: an
 /// isolated org's session is not named to a host outside it).
-fn live_ids(s: &Store, scope: &OrgScope, item: &WorkItemRow) -> Result<Vec<i64>, IpcError> {
+///
+/// **The WHOLE [`ViewScope`], not its org half** (multi-user M1, T9c).
+/// `Ticket.live_session_ids` is a list of session ids — spec §4.3 content,
+/// and the same "somebody is working on this" bit `Graph::build`
+/// person-fences one directory away — and the org half it used to be
+/// filtered by (`OrgScope::sees_row_org_only`) is `true` for `OrgScope::All`,
+/// i.e. for the master AND for every paired client bound to no org. So
+/// `work { tickets }` enumerated the ids of every private live session on
+/// each shared ticket to a second person's phone. T8's result gate cannot
+/// net it either: the ids are a bare integer array, and
+/// `view_scope::looks_like_session_row` needs an object with `host_alias`
+/// and `tmux_name`.
+///
+/// [`ViewScope`]: crate::service::view_scope::ViewScope
+fn live_ids(
+    s: &Store,
+    reader: &crate::service::view_scope::ViewScope,
+    item: &WorkItemRow,
+) -> Result<Vec<i64>, IpcError> {
     let Some(k) = item.key.as_deref() else {
         return Ok(Vec::new());
     };
     Ok(live_work_on(s, k, s.item_org(item.id)?)?
         .into_iter()
-        .filter(|(_, r)| scope.sees_row(r))
+        // Org half; the next line, `sees_session_row`, is the person half.
+        .filter(|(_, r)| reader.org.sees_row_org_only(r))
+        .filter(|(_, r)| reader.sees_session_row(r).is_visible())
         .map(|(_, r)| r.id)
         .collect())
 }
@@ -195,16 +221,106 @@ fn views_of(
 }
 
 /// `work { action: tickets, tracker_id?, view?, query?, limit? }`.
+///
+/// `include_local` (task → session P-4) adds the caller's own tasks — local
+/// items a person made or accepted, never a dispatch's job mirror or a
+/// proposal still waiting — after the tickets, under the same text filter
+/// and limit, so "Work on task…" and ⌘K find them. Only for the unfiltered
+/// list: a tracker or a tracker view names tickets alone.
 pub fn tickets(
     store: &Mutex<Store>,
     tracker_id: Option<i64>,
     view: Option<&str>,
     query: Option<&str>,
     limit: Option<usize>,
-    scope: &OrgScope,
+    reader: &crate::service::view_scope::ViewScope,
 ) -> Result<Vec<Ticket>, IpcError> {
+    tickets_and_tasks(store, tracker_id, view, query, limit, false, reader)
+}
+
+/// [`tickets`], with the caller's own tasks after them when
+/// `include_local` (task → session P-4).
+#[allow(clippy::too_many_arguments)]
+pub fn tickets_and_tasks(
+    store: &Mutex<Store>,
+    tracker_id: Option<i64>,
+    view: Option<&str>,
+    query: Option<&str>,
+    limit: Option<usize>,
+    include_local: bool,
+    reader: &crate::service::view_scope::ViewScope,
+) -> Result<Vec<Ticket>, IpcError> {
+    let want_local = include_local && tracker_id.is_none() && view.is_none();
+    // The same gate as the task list (`work { local_items }`): a scoped
+    // caller sees a task only through a link it can see, so a teammate's
+    // private task is not listed here either. Read before the guard below,
+    // which it takes itself.
+    let visible: Option<HashSet<i64>> = if want_local {
+        Some(
+            crate::service::work::local::local_items(store, reader)?
+                .into_iter()
+                .map(|i| i.id)
+                .collect(),
+        )
+    } else {
+        None
+    };
     let s = lock(store)?;
-    tickets_in(&s, tracker_id, view, query, limit, scope)
+    let limit_n = limit
+        .unwrap_or(TICKETS_DEFAULT_LIMIT)
+        .clamp(1, TICKETS_MAX_LIMIT);
+    let mut tasks: Vec<WorkItemRow> = Vec::new();
+    if let Some(visible) = &visible {
+        let allowed = allowed(&reader.org, &s)?;
+        let q = query.map(str::trim).filter(|q| !q.is_empty());
+        for item in s.local_work_items()? {
+            if tasks.len() >= limit_n {
+                break;
+            }
+            if !visible.contains(&item.id)
+                || allowed.as_ref().is_some_and(|a| !a.contains(&item.id))
+            {
+                continue;
+            }
+            let own = match item.origin.as_deref() {
+                Some("agent") => false,
+                Some("proposed") => item.proposal_state.as_deref() == Some("accepted"),
+                _ => true,
+            };
+            if !own {
+                continue;
+            }
+            if let Some(q) = q {
+                let hay = search_text::fold(&format!(
+                    "{} {}",
+                    item.key.as_deref().unwrap_or_default(),
+                    item.title
+                ));
+                if !search_text::matches_words(&hay, q) {
+                    continue;
+                }
+            }
+            tasks.push(item);
+        }
+    }
+    // Tickets first, but never the whole limit while tasks match: up to
+    // half of it is kept for them, so a query matching many tickets still
+    // shows the caller's TASK-n.
+    let reserve = tasks.len().min(limit_n / 2);
+    let mut out = tickets_in(&s, tracker_id, view, query, Some(limit_n - reserve), reader)?;
+    for item in tasks {
+        if out.len() >= limit_n {
+            break;
+        }
+        let live = live_ids(&s, reader, &item)?;
+        out.push(Ticket {
+            item,
+            live_session_ids: live,
+            description: None,
+            views: Vec::new(),
+        });
+    }
+    Ok(out)
 }
 
 /// [`tickets`] under a store guard the caller already holds — the hook path
@@ -215,14 +331,13 @@ pub(crate) fn tickets_in(
     view: Option<&str>,
     query: Option<&str>,
     limit: Option<usize>,
-    scope: &OrgScope,
+    reader: &crate::service::view_scope::ViewScope,
 ) -> Result<Vec<Ticket>, IpcError> {
+    let scope = &reader.org;
     let allowed = allowed(scope, s)?;
     let trackers = s.list_trackers()?;
     let now = crate::service::catalog::now_secs();
-    let q = query
-        .map(|q| q.trim().to_lowercase())
-        .filter(|q| !q.is_empty());
+    let q = query.map(str::trim).filter(|q| !q.is_empty());
     let limit = limit
         .unwrap_or(TICKETS_DEFAULT_LIMIT)
         .clamp(1, TICKETS_MAX_LIMIT);
@@ -237,19 +352,23 @@ pub(crate) fn tickets_in(
                 continue;
             }
         }
-        if let Some(q) = &q {
-            let hay = format!(
+        if let Some(q) = q {
+            let hay = search_text::fold(&format!(
                 "{} {} {}",
                 item.key.as_deref().unwrap_or_default(),
                 item.title,
                 item.assignees.join(" ")
-            )
-            .to_lowercase();
-            if !hay.contains(q.as_str()) && !item.aliases.iter().any(|a| a.to_lowercase() == *q) {
+            ));
+            if !search_text::matches_words(&hay, q)
+                && !item
+                    .aliases
+                    .iter()
+                    .any(|a| search_text::fold(a) == search_text::fold(q))
+            {
                 continue;
             }
         }
-        let live = live_ids(s, scope, &item)?;
+        let live = live_ids(s, reader, &item)?;
         out.push(Ticket {
             item,
             live_session_ids: live,
@@ -353,15 +472,18 @@ fn recognise(s: &Store, reference: &str) -> Result<(Option<TrackerRow>, String, 
 pub async fn lookup(
     store: &Mutex<Store>,
     reference: &str,
-    scope: &OrgScope,
+    reader: &crate::service::view_scope::ViewScope,
     net: &TrackerNet,
 ) -> Result<Ticket, IpcError> {
+    let scope = &reader.org;
     let (tracker, key, by_url) = {
         let s = lock(store)?;
         match recognise(&s, reference) {
             Ok(r) => r,
             // Which sites are connected is not a host token's to learn: an
             // unknown site answers as an invisible key does.
+            // This is the org boundary, not a privacy fence: which tracker SITES are connected
+            // is an org question.
             Err(e) if e.code == codes::E_NOTFOUND && !scope.is_all() => {
                 return Err(orgs::not_visible_to(scope, reference.trim()));
             }
@@ -379,6 +501,8 @@ pub async fn lookup(
         // several): that URL names one site's ticket, and another site's
         // item with the same key is a different ticket — it stays
         // ambiguous, as before.
+        // This is the org boundary, not a privacy fence: which org's cache answers a bare key
+        // when two sites hold the same one.
         (_, false) if !scope.is_all() => {
             let s = lock(store)?;
             let mut found = None;
@@ -402,6 +526,8 @@ pub async fn lookup(
             }
             // A bound client (M14) may make the hub fetch only from a tracker
             // of its own orgs.
+            // This is the org boundary, not a privacy fence: which tracker this caller may make
+            // the hub fetch from.
             if !scope.is_all() && !tracker.as_ref().is_some_and(|t| scope.sees_org(t.org_id)) {
                 return Err(orgs::not_visible_to(scope, &key));
             }
@@ -469,7 +595,7 @@ pub async fn lookup(
         t.as_ref(),
         crate::service::catalog::now_secs(),
     );
-    let live = live_ids(&s, scope, &item)?;
+    let live = live_ids(&s, reader, &item)?;
     // The key may end up in DescribeOffer::Key, which fence_ticket puts in
     // fleet's own notice line: flatten it like every other tracker line does
     // (defuse alone does not fold a newline).
@@ -489,6 +615,9 @@ pub async fn lookup(
             describe_offer(t.as_ref(), flat_key.as_deref()),
         ),
         // A person reads it on a phone or the desktop (bound or not): as is.
+        // This is the org boundary, not a privacy fence: what is trimmed for
+        // a per-host token is a TICKET's description — the tracker's own
+        // text, which belongs to a company and names no session.
         OrgScope::All | OrgScope::Org { .. } => d,
     });
     Ok(Ticket {
@@ -525,10 +654,31 @@ pub struct StartArgs {
     /// A multi-repo start (work graph M9.6): the duplicate guard counts only
     /// live sessions on the key in THIS start's project.
     pub per_project: bool,
+    /// A second session on a key that already has a live one (task → session
+    /// spec P-8): the key's duplicate guard is skipped, never the branch's,
+    /// and an unnamed worktree is a fresh `<slug>-N`, so two Claudes never
+    /// share a checkout.
+    pub parallel: bool,
     /// Who starts (D34): a person's start links `started`, an agent's
     /// (a per-host token, the operator) `agent_started`. The desktop's is
     /// always a person's (the default).
     pub decider: Decider,
+    /// WHOSE the started session is (multi-user M1, T5): the `people` row of
+    /// the caller who asked for the start, `None` for a caller that is no
+    /// person (a per-host token, the operator) or for a hub that cannot say.
+    ///
+    /// Never on the wire — these args are built from a tool's own parameters
+    /// and this field is filled from `Caller`, never from JSON — because a
+    /// value a caller could set would be a way to start a session in somebody
+    /// else's name.
+    pub owner: Option<i64>,
+    /// Who or what is starting it (migration 124): a mission's run, an
+    /// agent's token, the operator. `None` = a person, recorded with
+    /// `owner`. Never on the wire, for `owner`'s reason.
+    pub origin: Option<crate::store::SessionOrigin>,
+    /// The login the session bills (redesign 8.7): a credential profile on
+    /// the host; `None` = the host's own. Set by a mission's grant.
+    pub profile: Option<String>,
 }
 
 /// Where a start lands and what it is called.
@@ -551,10 +701,48 @@ pub struct StartPlan {
     /// sessions on the key in this plan's project.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub per_project: bool,
+    /// A parallel start ([`StartArgs::parallel`]): the key's duplicate guard
+    /// is not this plan's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub parallel: bool,
     /// Who starts ([`StartArgs::decider`]): decides the link's source.
     /// Never on the wire: a plan read back is a person's.
     #[serde(skip)]
     pub decider: Decider,
+    /// Whose the started session is ([`StartArgs::owner`]). `#[serde(skip)]`
+    /// for the same reason `decider` is: a plan a client hands back must not
+    /// be able to name an owner.
+    #[serde(skip)]
+    pub owner: Option<i64>,
+    /// Who or what starts it ([`StartArgs::origin`]). `#[serde(skip)]` for
+    /// `owner`'s reason: a plan a client hands back must not name a mission.
+    #[serde(skip)]
+    pub origin: Option<crate::store::SessionOrigin>,
+    /// The start rule (redesign 8.11) that picked the project, when one
+    /// did: the popover says "by rule PD-*".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<i64>,
+    /// The login it bills: a mission's grant ([`StartArgs::profile`]), else
+    /// the start rule's account, else the placement rule's (gap plan G7.1).
+    /// Shown on the preview; never read back from a client.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// The start rule's model, effort and agent (G7.1). Shown on the
+    /// preview; never read back from a client.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// The rule's own host, when it was unreachable and the start took the
+    /// rule's fallback host instead ("mercury, mac is offline").
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub fell_back_from: Option<String>,
+    /// The placement rule whose "its sessions start here" named the host or
+    /// the account (G7.1).
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub placement_rule_id: Option<i64>,
 }
 
 /// `slug(key + " " + title)`: lower case, `[a-z0-9-]`, runs collapsed, at
@@ -619,11 +807,11 @@ pub fn start_name(key: &str, title: &str) -> String {
 pub async fn plan_start(
     store: &Mutex<Store>,
     args: &StartArgs,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
     net: &TrackerNet,
 ) -> Result<StartPlan, IpcError> {
-    let ticket = resolve_start(store, args, scope, net).await?;
-    plan_resolved(store, args, scope, &ticket)
+    let ticket = resolve_start(store, args, view, net).await?;
+    plan_resolved(store, args, view, &ticket)
 }
 
 /// The ticket a start names, resolved once: its key, title and (when a
@@ -640,9 +828,22 @@ pub struct StartTicket {
 pub async fn resolve_start(
     store: &Mutex<Store>,
     args: &StartArgs,
-    scope: &OrgScope,
+    reader: &crate::service::view_scope::ViewScope,
     net: &TrackerNet,
 ) -> Result<StartTicket, IpcError> {
+    resolve_ticket(store, args, reader, net, false).await
+}
+
+/// [`resolve_start`]; `allow_proposal` lets an unaccepted proposal through
+/// for a preview, which reports it as a conflict instead.
+async fn resolve_ticket(
+    store: &Mutex<Store>,
+    args: &StartArgs,
+    reader: &crate::service::view_scope::ViewScope,
+    net: &TrackerNet,
+    allow_proposal: bool,
+) -> Result<StartTicket, IpcError> {
+    let scope = &reader.org;
     let (key, title, item_id) = match (args.item_id, args.reference.as_deref()) {
         (Some(id), None) => {
             let s = lock(store)?;
@@ -651,7 +852,8 @@ pub async fn resolve_start(
                 Some(item) if item_visible(scope, &s, &item)? => item,
                 _ => return Err(orgs::not_found("work item", id)),
             };
-            if item.origin.as_deref() == Some("proposed")
+            if !allow_proposal
+                && item.origin.as_deref() == Some("proposed")
                 && item.proposal_state.as_deref() != Some("accepted")
             {
                 return Err(IpcError::new(codes::E_INVALID, "accept the proposal first"));
@@ -661,7 +863,7 @@ pub async fn resolve_start(
             })?;
             (key, item.title, Some(id))
         }
-        (None, Some(r)) => match lookup(store, r, scope, net).await {
+        (None, Some(r)) => match lookup(store, r, reader, net).await {
             Ok(t) => (
                 t.item.key.clone().unwrap_or_else(|| r.to_string()),
                 t.item.title,
@@ -695,26 +897,42 @@ fn host_fence(h: &str) -> IpcError {
     )
 }
 
-/// `E_EXISTS` naming `row` (or not, when the scope cannot see it — an
-/// isolated org's session is not named to a host outside it, D7). `what`
+/// `E_EXISTS` naming `row` (or not, when the caller cannot see it — an
+/// isolated org's session is not named to a host outside it, D7; another
+/// PERSON's session is not named to anybody, multi-user M1 T9b). `what`
 /// qualifies the session ("on branch x"); `then` is what to do about it.
+///
+/// **The fence is [`crate::service::view_scope::ViewScope`], not its org
+/// half.** The long form prints the occupant's friendly-or-tmux name and its
+/// host, and `OrgScope::All` is what every paired client bound to no org
+/// resolves to — so `work_link { start, key: PAY-123 }` answered with another
+/// person's session name and machine. The `details` object IS netted by T8's
+/// result gate (`session_id` + `host_alias` + `tmux_name` → a row shape), but
+/// the TEXT block is not: `support::rewrite_json_content` skips any content
+/// block that will not parse as JSON. The sibling path was hardened against
+/// exactly this (`repo.rs`'s `E_WORKTREE_BUSY` prints a COUNT, never a
+/// host or a tmux name); this one was missed.
+///
+/// An invisible occupant is then indistinguishable from a merely-busy key,
+/// which is the point: the bare sentence is no oracle either way.
 fn already_running(
     key: &str,
     row: &SessionRow,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
     what: &str,
     then: &str,
 ) -> IpcError {
-    if !scope.sees_row(row) {
+    if !view.sees_session_row(row).is_visible() {
         return IpcError::new(codes::E_EXISTS, format!("{key} already has a live session"));
     }
+    let name = row.friendly_name.as_deref().unwrap_or(&row.tmux_name);
+    let at = match crate::service::work::name_beside_key(key, name) {
+        Some(name) => format!("({name} on {})", row.host_alias),
+        None => format!("(on {})", row.host_alias),
+    };
     IpcError::new(
         codes::E_EXISTS,
-        format!(
-            "{key} already has a live session{what} ({} on {}); {then}",
-            row.friendly_name.as_deref().unwrap_or(&row.tmux_name),
-            row.host_alias
-        ),
+        format!("{key} already has a live session{what} {at}; {then}"),
     )
     .with_details(serde_json::json!({
         "session_id": row.id,
@@ -723,42 +941,42 @@ fn already_running(
     }))
 }
 
-/// Plan where a resolved ticket's start lands. `E_EXISTS` (with the
-/// session) when the key already has a live session — in THIS project for a
-/// multi-repo start, where a live session on the start's branch counts too,
-/// linked or not (a sibling that spawned but failed to link, or a person's
-/// own session there); `E_AMBIGUOUS` (with candidates) when no project can
-/// be picked.
-pub fn plan_resolved(
-    store: &Mutex<Store>,
-    args: &StartArgs,
-    scope: &OrgScope,
-    ticket: &StartTicket,
-) -> Result<StartPlan, IpcError> {
-    let StartTicket {
-        key,
-        title,
-        item_id,
-    } = ticket.clone();
-    // The host fence answers first: a per-host token asking for another
-    // host learns nothing about the sessions there.
-    if let (Some(h), Some(asked)) = (scope.host(), args.host_alias.as_deref()) {
-        if asked != h {
-            return Err(host_fence(h));
+/// Where a start of `key` would land before any host is named: a start rule
+/// (redesign 8.11) first when the caller named no project (`project_id`
+/// `None`), before the key's history and so before Jev is ever asked; else
+/// where this kind of work last ran, a GitHub issue's own repository's
+/// project first, else the newest link with the same key prefix. The
+/// rule that decided, the `(project, host)` (host `""` when unknown) and the
+/// label an "ambiguous" refusal names. Reads only: the mission loop's
+/// over-limit hold asks it too, so it checks the host the start lands on.
+#[allow(clippy::type_complexity)]
+pub(crate) fn seen_place(
+    s: &Store,
+    key: &str,
+    item_org: Option<i64>,
+    project_id: Option<i64>,
+) -> Result<
+    (
+        Option<crate::store::StartRuleRow>,
+        Option<(i64, String)>,
+        String,
+    ),
+    IpcError,
+> {
+    let rule = match project_id {
+        None => crate::service::start_rules::matching(s, item_org, key)?,
+        Some(_) => None,
+    };
+    let (seen, label) = match crate::store::github_ref(key) {
+        _ if rule.is_some() => {
+            let r = rule.as_ref().expect("checked above");
+            let last = s.last_host_for_project(r.project_id)?;
+            let (host, _) = crate::service::start_rules::rule_host(s, r, last.as_deref())?;
+            (
+                Some((r.project_id, host.unwrap_or_default())),
+                String::new(),
+            )
         }
-    }
-    let s = lock(store)?;
-    let item_org = item_id.map(|id| s.item_org(id)).transpose()?.flatten();
-    let live = live_work_on(&s, &key, item_org)?;
-    if let Some((_, row)) = live
-        .iter()
-        .find(|(_, r)| !args.per_project || r.project_id == args.project_id)
-    {
-        return Err(already_running(&key, row, scope, "", "jump to it"));
-    }
-    // Where this kind of work last ran: a GitHub issue's own repository's
-    // project first, else the newest link with the same key prefix.
-    let (seen, prefix_label) = match crate::store::github_ref(&key) {
         Some((repo, _)) => (
             s.project_for_repo(repo)?.map(|pid| {
                 let host = s.last_host_for_project(pid).ok().flatten();
@@ -779,6 +997,65 @@ pub fn plan_resolved(
             (s.last_place_for_prefix(&prefix)?, label)
         }
     };
+    Ok((rule, seen, label))
+}
+
+/// The host a start in `project_id` lands on when none is named: the
+/// [`seen_place`] host when it is this project's, else the host the project
+/// last ran on.
+pub(crate) fn seen_host(
+    s: &Store,
+    seen: Option<(i64, String)>,
+    project_id: i64,
+) -> Result<Option<String>, IpcError> {
+    match seen
+        .filter(|p| p.0 == project_id && !p.1.is_empty())
+        .map(|p| p.1)
+    {
+        Some(h) => Ok(Some(h)),
+        None => Ok(s.last_host_for_project(project_id)?),
+    }
+}
+
+/// Plan where a resolved ticket's start lands. `E_EXISTS` (with the
+/// session) when the key already has a live session — in THIS project for a
+/// multi-repo start, where a live session on the start's branch counts too,
+/// linked or not (a sibling that spawned but failed to link, or a person's
+/// own session there); `E_AMBIGUOUS` (with candidates) when no project can
+/// be picked.
+pub fn plan_resolved(
+    store: &Mutex<Store>,
+    args: &StartArgs,
+    view: &crate::service::view_scope::ViewScope,
+    ticket: &StartTicket,
+) -> Result<StartPlan, IpcError> {
+    let scope = &view.org;
+    let StartTicket {
+        key,
+        title,
+        item_id,
+    } = ticket.clone();
+    // The host fence answers first: a per-host token asking for another
+    // host learns nothing about the sessions there.
+    if let (Some(h), Some(asked)) = (scope.host(), args.host_alias.as_deref()) {
+        if asked != h {
+            return Err(host_fence(h));
+        }
+    }
+    let s = lock(store)?;
+    let item_org = item_id.map(|id| s.item_org(id)).transpose()?.flatten();
+    let live = if args.parallel {
+        Vec::new()
+    } else {
+        live_work_on(&s, &key, item_org)?
+    };
+    if let Some((_, row)) = live
+        .iter()
+        .find(|(_, r)| !args.per_project || r.project_id == args.project_id)
+    {
+        return Err(already_running(&key, row, view, "", "jump to it"));
+    }
+    let (rule, seen, prefix_label) = seen_place(&s, &key, item_org, args.project_id)?;
     let project_id = match args.project_id.or(seen.as_ref().map(|p| p.0)) {
         Some(pid) => {
             if !s.list_projects()?.iter().any(|p| p.id == pid) {
@@ -802,17 +1079,43 @@ pub fn plan_resolved(
                 codes::E_AMBIGUOUS,
                 format!("no project has worked on {prefix_label} yet; pick one (project_id)"),
             )
-            .with_details(serde_json::json!({ "candidates": candidates })));
+            .with_details(serde_json::json!({ "missing": "project", "candidates": candidates })));
         }
+    };
+    // How the start runs (gap plan G7.1): the start rule's account, model,
+    // effort and agent; with no start rule naming a host, the placement
+    // rule's "its sessions start here" host and account.
+    let rule_names_host = seen
+        .as_ref()
+        .is_some_and(|p| rule.is_some() && p.0 == project_id && !p.1.is_empty());
+    let placement = if rule_names_host && rule.as_ref().is_some_and(|r| r.profile.is_some()) {
+        None
+    } else {
+        let repo = s
+            .get_project(project_id)?
+            .map(|p| format!("{}/{}", p.owner, p.repo));
+        crate::service::start_rules::placement_start(&s, item_id, &key, &title, repo.as_deref())?
+    };
+    let fell_back_from = match (&rule, &seen) {
+        (Some(r), Some(p)) if p.0 == project_id && r.fallback_host.as_deref() == Some(&p.1) => r
+            .host_alias
+            .clone()
+            .or(s.last_host_for_project(project_id)?)
+            .filter(|h| h != &p.1),
+        _ => None,
     };
     let host_alias = match (&args.host_alias, scope.host()) {
         (Some(h), _) => h.clone(),
         (None, Some(h)) => h.to_string(),
-        (None, None) => match seen
-            .filter(|p| p.0 == project_id && !p.1.is_empty())
-            .map(|p| p.1)
-            .or(s.last_host_for_project(project_id)?)
+        (None, None)
+            if !rule_names_host && placement.as_ref().is_some_and(|w| w.host_alias.is_some()) =>
         {
+            placement
+                .as_ref()
+                .and_then(|w| w.host_alias.clone())
+                .expect("checked above")
+        }
+        (None, None) => match seen_host(&s, seen, project_id)? {
             Some(h) => h,
             None => {
                 let hosts: Vec<String> = s
@@ -825,7 +1128,7 @@ pub fn plan_resolved(
                     codes::E_AMBIGUOUS,
                     "no host has run this project yet; pick one (host_alias)",
                 )
-                .with_details(serde_json::json!({ "candidates": hosts })));
+                .with_details(serde_json::json!({ "missing": "host", "candidates": hosts })));
             }
         },
     };
@@ -870,11 +1173,25 @@ pub fn plan_resolved(
         }
         None => branch_slug(&key, &title),
     };
-    let worktree_id = s
+    let checkouts: Vec<_> = s
         .list_worktrees_on_host(&host_alias)?
         .into_iter()
-        .find(|w| w.project_id == project_id && w.name == branch)
-        .map(|w| w.id);
+        .filter(|w| w.project_id == project_id)
+        .collect();
+    let branch = if args.parallel && args.worktree.is_none() {
+        free_branch(&branch, |b| checkouts.iter().any(|w| w.name == b))
+    } else {
+        branch
+    };
+    let worktree_id = checkouts.iter().find(|w| w.name == branch).map(|w| w.id);
+    // A start whose branch slug matches an EXISTING checkout lands its pane
+    // in that checkout — so `work_link { start }` acts on an existing row
+    // after all, and takes the same landing gate `new_session` /
+    // `new_shell_session` take (multi-user M1, T9b; the hole T8d's blocker 5
+    // closed, reopened one arm over). `new_worktree` is untouched: a tree
+    // that does not exist yet has no occupants, and `worktree_id` is `None`
+    // on that path.
+    crate::service::sessions::require_may_land_in_worktree(&s, view, worktree_id)?;
     if args.per_project {
         // A live session already on this branch in this project, linked or
         // not: a retry after a spawn whose link failed must not start a
@@ -890,7 +1207,7 @@ pub fn plan_resolved(
             return Err(already_running(
                 &key,
                 row,
-                scope,
+                view,
                 &format!(" on branch {branch}"),
                 "jump to it",
             ));
@@ -918,8 +1235,41 @@ pub fn plan_resolved(
         branch,
         worktree_id,
         per_project: args.per_project,
+        parallel: args.parallel,
         decider: args.decider,
+        owner: args.owner,
+        origin: args.origin.clone(),
+        profile: args
+            .profile
+            .clone()
+            .or_else(|| rule.as_ref().and_then(|r| r.profile.clone()))
+            .or_else(|| {
+                let codex = rule.as_ref().and_then(|r| r.agent.as_deref())
+                    == Some(crate::store::AGENT_CODEX);
+                placement
+                    .as_ref()
+                    .and_then(|w| w.profile.clone())
+                    .filter(|_| !codex)
+            }),
+        model: rule.as_ref().and_then(|r| r.model.clone()),
+        effort: rule.as_ref().and_then(|r| r.effort.clone()),
+        agent: rule.as_ref().and_then(|r| r.agent.clone()),
+        fell_back_from,
+        placement_rule_id: placement.as_ref().map(|w| w.id),
+        rule_id: rule.map(|r| r.id),
     })
+}
+
+/// `base`, else the first `base-N` (N ≥ 2) that `taken` does not hold: a
+/// parallel start's own checkout.
+fn free_branch(base: &str, taken: impl Fn(&str) -> bool) -> String {
+    if !taken(base) {
+        return base.to_string();
+    }
+    (2..)
+        .map(|n| format!("{base}-{n}"))
+        .find(|b| !taken(b))
+        .expect("an unbounded range has a free name")
 }
 
 /// Most characters of a key fleet's own lines carry.
@@ -954,6 +1304,22 @@ pub fn ticket_brief_with(
     store: &Mutex<Store>,
     plan: &StartPlan,
     extra: &str,
+) -> Result<String, IpcError> {
+    ticket_brief_within(
+        store,
+        plan,
+        extra,
+        crate::service::work::handover::BRIEF_MAX_CHARS,
+    )
+}
+
+/// [`ticket_brief_with`] cut to `max_total` characters (a start keeps the
+/// rest of the brief's budget for the ticket's comments and attachments).
+fn ticket_brief_within(
+    store: &Mutex<Store>,
+    plan: &StartPlan,
+    extra: &str,
+    max_total: usize,
 ) -> Result<String, IpcError> {
     const FROM: &str = "the tracker ticket's description";
     let s = lock(store)?;
@@ -1006,7 +1372,6 @@ pub fn ticket_brief_with(
                     .chars()
                     .count()
                 + 2;
-            let max_total = crate::service::work::handover::BRIEF_MAX_CHARS;
             let budget = max_total.saturating_sub(overhead);
             // budget 0 no longer means silence: fence_ticket says it did not
             // fit. The notice it may append sits outside `budget`, so a cut
@@ -1072,6 +1437,29 @@ pub fn ticket_brief_with(
     Ok(out)
 }
 
+/// The ticket brief with `tail` (the ticket's comments and attachments,
+/// [`crate::service::work::tracker_comments::brief_extras`]) after it, the
+/// whole within the brief's budget: the description gives up what the tail
+/// takes, so both fences keep their ends.
+pub fn ticket_brief_and(
+    store: &Mutex<Store>,
+    plan: &StartPlan,
+    extra: &str,
+    tail: &str,
+) -> Result<String, IpcError> {
+    let max = crate::service::work::handover::BRIEF_MAX_CHARS;
+    if tail.is_empty() {
+        return ticket_brief_within(store, plan, extra, max);
+    }
+    let head = ticket_brief_within(
+        store,
+        plan,
+        extra,
+        max.saturating_sub(tail.chars().count() + 1),
+    )?;
+    Ok(format!("{head}\n{tail}"))
+}
+
 /// May the ticket's text reach a Claude on the plan's host? Only when the
 /// item's org is inside that host's scope (M5).
 pub fn brief_visible_on(store: &Mutex<Store>, plan: &StartPlan) -> Result<bool, IpcError> {
@@ -1104,7 +1492,7 @@ pub async fn start_with<F, Fut>(
     store: &Arc<Mutex<Store>>,
     plan: &StartPlan,
     brief: Option<String>,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
     spawn: F,
 ) -> Result<(SessionRow, bool), IpcError>
 where
@@ -1121,11 +1509,11 @@ where
         // `plan_start`'s guard ran before the claim: a start that claimed,
         // linked and released since is caught here, before the spawn.
         if let Some(other) = rival(&s, plan, None)? {
-            return Err(already_running(&plan.key, &other, scope, "", "jump to it"));
+            return Err(already_running(&plan.key, &other, view, "", "jump to it"));
         }
         claim
     };
-    let one = start_one(store, plan, brief, scope, spawn).await?;
+    let one = start_one(store, plan, brief, view, spawn).await?;
     match one.warning {
         Some(e) => {
             let mut d = e.details.clone().unwrap_or_else(|| serde_json::json!({}));
@@ -1155,7 +1543,7 @@ pub async fn start_one<F, Fut>(
     store: &Arc<Mutex<Store>>,
     plan: &StartPlan,
     brief: Option<String>,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
     spawn: F,
 ) -> Result<StartOutcome, IpcError>
 where
@@ -1176,27 +1564,98 @@ where
             .is_ok()
             .then(|| plan.name.clone()),
         resume_claude_session_id: None,
-        model: None,
-        effort: None,
+        model: plan.model.clone(),
+        effort: plan.effort.clone(),
+        profile: plan.profile.clone(),
+        agent: plan.agent.clone(),
+        // Who or what started it (migration 124); `None` = a person.
+        origin: plan.origin.clone(),
+        // Whose the started session is (multi-user M1, T5): the caller who
+        // asked for the start (`StartArgs::owner`, filled from `Caller` at
+        // the tool), and the hub's own person only for a path that genuinely
+        // has no caller — the operator's own starts, the catalog's author
+        // session, the desktop. Without the first half, a second person's
+        // `work_link { start }` created a session owned by the HUB's owner:
+        // readable by somebody who did not ask for it, and `null` in the
+        // answer to the person who did (T8 drops the row they may not see).
+        over_limit_ok: false,
+        owner_person_id: plan
+            .owner
+            .or_else(|| crate::service::sessions::hub_personal_owner(store)),
+        start_token: None,
     };
     let row = spawn(args).await?;
-    match link_started(store, plan, brief, scope, &row) {
-        Ok((linked, queued)) => Ok(StartOutcome {
+    let outcome = match link_started(store, plan, brief, view, &row) {
+        Ok((linked, queued)) => StartOutcome {
             row: linked.unwrap_or(row),
             queued,
             warning: None,
-        }),
-        Err(e) => Ok(StartOutcome {
+        },
+        Err(e) => StartOutcome {
             row,
             queued: false,
             warning: Some(e),
-        }),
+        },
+    };
+    record_start_steps(store, plan, &outcome.row, outcome.queued);
+    Ok(outcome)
+}
+
+/// The timeline kind for a session a start has just made (task → session
+/// P-5). Its detail is a [`StartSpawned`]: what `abandon_start` (P-6)
+/// reads to know the checkout is the start's own.
+pub const START_SPAWNED: &str = "start_spawned";
+/// The start's checkout is in place (P-5); its detail is the branch.
+pub const WORKTREE_READY: &str = "worktree_ready";
+
+/// The detail of a [`START_SPAWNED`] event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartSpawned {
+    pub key: String,
+    /// The session's checkout, when it has one.
+    #[serde(default)]
+    pub worktree_id: Option<i64>,
+    /// Whether this start created that checkout (and its branch), rather
+    /// than reusing one.
+    #[serde(default)]
+    pub new_worktree: bool,
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// Whether a brief was queued, so the start prompt will be typed and
+    /// `repl_ready` / `handover_started` will follow; without one the
+    /// start's progress ends here.
+    #[serde(default)]
+    pub brief: bool,
+}
+
+/// Write a fresh start's first progress steps on its timeline: the session
+/// exists (`start_spawned`) in its checkout (`worktree_ready`). Best-effort,
+/// like every timeline write: a start never fails over its progress strip.
+fn record_start_steps(store: &Mutex<Store>, plan: &StartPlan, row: &SessionRow, brief: bool) {
+    let new_worktree = plan.worktree_id.is_none() && row.worktree_id.is_some();
+    let detail = StartSpawned {
+        key: plan.key.clone(),
+        worktree_id: row.worktree_id,
+        new_worktree,
+        branch: row.worktree_id.map(|_| plan.branch.clone()),
+        brief,
+    };
+    let Ok(s) = store.lock() else {
+        return;
+    };
+    let json = serde_json::to_string(&detail).unwrap_or_default();
+    let _ = s.insert_session_event(row.id, START_SPAWNED, Some(&json));
+    if row.worktree_id.is_some() {
+        let _ = s.insert_session_event(row.id, WORKTREE_READY, Some(&plan.branch));
     }
 }
 
 /// A live session of `plan`'s key other than `except` (in `plan`'s project
 /// for a multi-repo sibling): the start that would make a second one.
 fn rival(s: &Store, plan: &StartPlan, except: Option<i64>) -> Result<Option<SessionRow>, IpcError> {
+    if plan.parallel {
+        return Ok(None);
+    }
     let item_org = plan.item_id.map(|id| s.item_org(id)).transpose()?.flatten();
     Ok(live_work_on(s, &plan.key, item_org)?
         .into_iter()
@@ -1212,7 +1671,7 @@ fn link_started(
     store: &Arc<Mutex<Store>>,
     plan: &StartPlan,
     brief: Option<String>,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
     row: &SessionRow,
 ) -> Result<(Option<SessionRow>, bool), IpcError> {
     let s = lock(store)?;
@@ -1226,7 +1685,7 @@ fn link_started(
         return Err(already_running(
             &plan.key,
             &other,
-            scope,
+            view,
             "",
             &format!(
                 "the session this start made ({}) is not linked to it",
@@ -1267,10 +1726,22 @@ fn with_native_defaults(
     args: &StartArgs,
     scope: &OrgScope,
 ) -> Result<StartArgs, IpcError> {
+    let s = lock(store)?;
+    let local = match (args.item_id, args.reference.as_deref()) {
+        (None, Some(r)) => local_item_for_key(&s, r, scope)?,
+        _ => None,
+    };
+    let args = &match local {
+        Some(id) => StartArgs {
+            item_id: Some(id),
+            reference: None,
+            ..args.clone()
+        },
+        None => args.clone(),
+    };
     let Some(id) = args.item_id else {
         return Ok(args.clone());
     };
-    let s = lock(store)?;
     let Some(item) = s.get_work_item(id)? else {
         return Ok(args.clone());
     };
@@ -1339,28 +1810,43 @@ fn with_native_defaults(
     Ok(out)
 }
 
+/// The fleet task a bare key names (`TASK-12`), when no tracker holds the
+/// key: started by key, it would resolve as a key no tracker knows, so the
+/// session was linked to the key alone and briefed with nothing but it,
+/// never the task's title and notes.
+fn local_item_for_key(
+    s: &Store,
+    reference: &str,
+    scope: &OrgScope,
+) -> Result<Option<i64>, IpcError> {
+    if reference.contains("://") {
+        return Ok(None);
+    }
+    let Ok(key) = crate::store::normalize_work_ref(reference) else {
+        return Ok(None);
+    };
+    let items = s.work_items_by_key(&key)?;
+    if items.iter().any(|i| i.tracker_id.is_some()) {
+        return Ok(None);
+    }
+    for item in items {
+        if item_visible(scope, s, &item)? {
+            return Ok(Some(item.id));
+        }
+    }
+    Ok(None)
+}
+
 /// `work_link { action: start }` end to end over the real `new_session`.
 pub async fn start_work(
     store: &Arc<Mutex<Store>>,
     ssh: &Arc<crate::ssh::SshClient>,
     reg: &Arc<crate::cancel::CancellationRegistry>,
     args: &StartArgs,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
     net: &TrackerNet,
 ) -> Result<SessionRow, IpcError> {
-    let args = &with_native_defaults(store, args, scope)?;
-    let plan = plan_start(store, args, scope, net).await?;
-    let brief = match (&args.brief, args.with_brief) {
-        (Some(b), _) => Some(b.clone()),
-        // The brief is read by the new session's Claude: never another
-        // org's ticket text, even on a forced cross-org start.
-        (None, true) if brief_visible_on(store, &plan)? => Some(ticket_brief(store, &plan)?),
-        (None, _) => None,
-    };
-    let (row, queued) = start_with(store, &plan, brief, scope, |a| {
-        crate::service::sessions::new_session(a, store.as_ref(), ssh, reg)
-    })
-    .await?;
+    let (row, plan, queued) = start_work_unprompted(store, ssh, reg, args, view, net).await?;
     if queued {
         crate::service::work::resume::spawn_start_prompt(
             Arc::clone(store),
@@ -1370,6 +1856,583 @@ pub async fn start_work(
         );
     }
     Ok(row)
+}
+
+/// [`start_work`] without its first prompt: the session, linked, with its
+/// brief queued (`true` when one was), and the plan it was started on. The
+/// caller types its own prompt, as `work_link { run }` does to append its
+/// task's done-marker instruction.
+pub async fn start_work_unprompted(
+    store: &Arc<Mutex<Store>>,
+    ssh: &Arc<crate::ssh::SshClient>,
+    reg: &Arc<crate::cancel::CancellationRegistry>,
+    args: &StartArgs,
+    view: &crate::service::view_scope::ViewScope,
+    net: &TrackerNet,
+) -> Result<(SessionRow, StartPlan, bool), IpcError> {
+    // Main's native-subtask defaults, under M1's `ViewScope`: the step needs
+    // only the org half, which is what `with_native_defaults` takes.
+    let args = &with_native_defaults(store, args, &view.org)?;
+    let plan = plan_start(store, args, view, net).await?;
+    let brief = match (&args.brief, args.with_brief) {
+        (Some(b), _) => Some(b.clone()),
+        // The brief is read by the new session's Claude: never another
+        // org's ticket text, even on a forced cross-org start.
+        (None, true) if brief_visible_on(store, &plan)? => {
+            let tail =
+                crate::service::work::tracker_comments::brief_extras(store, &plan, net).await;
+            Some(ticket_brief_and(store, &plan, "", &tail)?)
+        }
+        (None, _) => None,
+    };
+    let (row, queued) = start_with(store, &plan, brief, view, |a| {
+        crate::service::sessions::new_session(a, store.as_ref(), ssh, reg)
+    })
+    .await?;
+    // Redesign 8.11: a rule that decided counts the start; a person's start
+    // no rule decided counts toward offering one.
+    match plan.rule_id {
+        Some(id) => crate::service::start_rules::note_hit(store, id),
+        None if args.decider == Decider::Person => crate::service::start_rules::tally_logged(
+            store,
+            plan.item_id,
+            &plan.key,
+            plan.project_id,
+        ),
+        None => {}
+    }
+    // Jev K1's follow-up: where a person's start landed answers a proposal
+    // they were shown. Best effort; an agent's start answers nothing.
+    if args.decider == Decider::Person {
+        if let Ok(s) = lock(store) {
+            if let Err(e) = crate::service::decide::start_project::record_start(
+                &s,
+                plan.item_id,
+                &plan.key,
+                plan.project_id,
+                crate::store::now_unix(),
+            ) {
+                tracing::warn!(
+                    "[decide] start_project follow-up not recorded: {}",
+                    e.message
+                );
+            }
+        }
+        // Jev N3's: a single start ticked no sibling.
+        record_sibling_start(
+            store,
+            plan.item_id,
+            &plan.key,
+            plan.project_id,
+            &[plan.project_id],
+        );
+    }
+    Ok((row, plan, queued))
+}
+
+// --- start preview (task → session spec P-1) ---------------------------------
+
+/// What would stop or change a start, as data rather than an error: the
+/// Work button's popover shows each with its choices before anything is
+/// made.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartConflict {
+    /// `live_session` | `proposal` | `cross_org` | `worktree_busy` | `done`.
+    pub kind: String,
+    /// One plain sentence for the person.
+    pub message: String,
+    /// The session in the way, only when the caller may see it (D7, T9b).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<i64>,
+}
+
+/// A project a start could land in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectChoice {
+    pub id: i64,
+    pub owner: String,
+    pub repo: String,
+}
+
+/// A host a start could land on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostChoice {
+    pub alias: String,
+    pub reachable: bool,
+}
+
+/// The checkout a planned start would use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckoutPreview {
+    /// The planned worktree already exists and is reused.
+    pub exists: bool,
+    /// A live session is working in it, when the caller may see it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub busy_by: Option<i64>,
+}
+
+/// `work_link { action: start, dry_run: true }`: where a start would land,
+/// what it would send, and what is in the way — nothing is made.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartPreview {
+    pub key: String,
+    pub title: String,
+    #[serde(default)]
+    pub item_id: Option<i64>,
+    /// The resolved start; `None` while `missing` names what to pick.
+    #[serde(default)]
+    pub plan: Option<StartPlan>,
+    /// `project` | `host`: what the person must pick before a start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing: Option<String>,
+    pub projects: Vec<ProjectChoice>,
+    pub hosts: Vec<HostChoice>,
+    pub conflicts: Vec<StartConflict>,
+    /// The brief the start would queue, as it stands.
+    #[serde(default)]
+    pub brief: Option<String>,
+    #[serde(default)]
+    pub checkout: Option<CheckoutPreview>,
+    /// With `missing: "project"`: the candidate the decision model proposes
+    /// (Jev K1, `decide.jev.start_project` at `assist`). A pre-selection
+    /// only; the person still starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_project: Option<crate::service::decide::start_project::SuggestedProject>,
+    /// The same pre-selection in the shape every row proposes in (step 2.8):
+    /// feature `start_project`, value `p<id>`. `suggested_project`
+    /// stays for clients that read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<crate::store::DecisionProposal>,
+    /// With a planned project: the sibling repository (one of the projects
+    /// the key ran in before) the decision model proposes the same task
+    /// also needs (Jev N3, `decide.jev.sibling_repos` at `assist`). A
+    /// pre-tick only; the person still starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_sibling: Option<crate::service::decide::sibling_repos::SuggestedSibling>,
+    /// The start rule fleet offers for this key after a person started its
+    /// prefix in one project five times in a row (redesign 8.11): "Add rule
+    /// PD-* → papaya-pos?". Accept or dismiss it with `start_rules`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_offer: Option<crate::store::StartRuleRow>,
+    /// The brief above was drafted by a model (redesign 6.10, `draft_brief`):
+    /// by which, on which host, from how many notes. `None` for the template.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brief_draft: Option<crate::service::work::brief_draft::BriefDraft>,
+}
+
+/// The projects `key` ran in before, other than `chosen`: ended links'
+/// `snap_project_id` and live sessions linked to the key (under the item's
+/// org, as [`live_work_on`] fences them). Newest first, limited to projects
+/// the fleet still has, system projects left out. The backend's mirror of
+/// the dialog's `siblingCandidates` (`src/lib/multi_start.ts`).
+pub fn sibling_candidates(
+    s: &Store,
+    key: &str,
+    item_org: Option<i64>,
+    chosen: i64,
+) -> Result<Vec<crate::service::decide::start_project::Candidate>, IpcError> {
+    let mut seen: Vec<(i64, i64)> = Vec::new();
+    let mut add = |id: Option<i64>, at: i64| {
+        let Some(id) = id.filter(|&id| id != chosen) else {
+            return;
+        };
+        match seen.iter_mut().find(|(p, _)| *p == id) {
+            Some(had) => had.1 = had.1.max(at),
+            None => seen.push((id, at)),
+        }
+    };
+    for l in s.ended_work_links_for_key(key)? {
+        add(l.snap_project_id, l.ended_at.unwrap_or(l.created_at));
+    }
+    for (_, row) in live_work_on(s, key, item_org)? {
+        add(row.project_id, row.last_activity_at);
+    }
+    // Stable: equal times keep their first-seen order, as the dialog's do.
+    seen.sort_by_key(|&(_, at)| std::cmp::Reverse(at));
+    let mut out = Vec::new();
+    for (id, _) in seen {
+        if let Some(p) = s.get_project(id)? {
+            if !p.system {
+                out.push(crate::service::decide::start_project::Candidate {
+                    project_id: p.id,
+                    owner: p.owner,
+                    repo: p.repo,
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// [`preview_start`], and when it answers `missing: "project"`, the
+/// decision model's pre-selection (Jev K1, `service::decide::start_project`):
+/// in `shadow` asked off this path and only recorded; in `assist` awaited
+/// (one call, bounded by `decide.jev.timeout_ms`) and returned as
+/// `suggested_project`. With the defaults the gate refuses and nothing is
+/// asked. `decide` is `None` where no call may be made.
+///
+/// When the preview has a planned project instead, the same applies to the
+/// sibling repository the task also needs (Jev N3,
+/// `service::decide::sibling_repos`), asked over [`sibling_candidates`] and
+/// returned as `suggested_sibling`.
+pub async fn preview_start_decided(
+    store: &Mutex<Store>,
+    args: &StartArgs,
+    view: &crate::service::view_scope::ViewScope,
+    net: &TrackerNet,
+    decide: Option<&crate::service::decide::DecideCtx>,
+) -> Result<StartPreview, IpcError> {
+    use crate::service::decide::{start_project, Mode};
+    let mut preview = preview_start(store, args, view, net).await?;
+    let Some(ctx) = decide else {
+        return Ok(preview);
+    };
+    if preview.missing.is_none() {
+        if let Some(plan) = preview.plan.clone() {
+            suggest_sibling(store, ctx, &mut preview, &plan).await?;
+        }
+        return Ok(preview);
+    }
+    if preview.missing.as_deref() != Some("project") {
+        return Ok(preview);
+    }
+    let input = {
+        let s = lock(store)?;
+        let org_id = preview
+            .item_id
+            .map(|id| s.item_org(id))
+            .transpose()?
+            .flatten();
+        let description = preview
+            .item_id
+            .map(|id| s.work_item_meta(id))
+            .transpose()?
+            .and_then(|m| m.description);
+        start_project::StartInput {
+            key: preview.key.clone(),
+            title: preview.title.clone(),
+            item_id: preview.item_id,
+            org_id,
+            description,
+            candidates: start_project::fenced(
+                &s,
+                crate::service::decide::Feature::StartProject,
+                org_id,
+                &preview
+                    .projects
+                    .iter()
+                    .map(|p| start_project::Candidate {
+                        project_id: p.id,
+                        owner: p.owner.clone(),
+                        repo: p.repo.clone(),
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+        }
+    };
+    match start_project::mode_for(ctx, &input) {
+        Some(Mode::Assist) => {
+            preview.suggested_project = start_project::ask(ctx, &input).await;
+            preview.proposal = preview
+                .suggested_project
+                .as_ref()
+                .map(start_project::SuggestedProject::proposal);
+        }
+        Some(Mode::Shadow) => {
+            let ctx = ctx.clone();
+            tokio::spawn(async move {
+                start_project::ask(&ctx, &input).await;
+            });
+        }
+        None => {}
+    }
+    Ok(preview)
+}
+
+/// [`preview_start_decided`]'s N3 half: with a planned project, ask
+/// `sibling_repos` over the projects the key ran in before (assist awaited
+/// into `suggested_sibling`, shadow spawned and only recorded).
+async fn suggest_sibling(
+    store: &Mutex<Store>,
+    ctx: &crate::service::decide::DecideCtx,
+    preview: &mut StartPreview,
+    plan: &StartPlan,
+) -> Result<(), IpcError> {
+    use crate::service::decide::{sibling_repos, start_project, Mode};
+    let input = {
+        let s = lock(store)?;
+        let Some(chosen) = s.get_project(plan.project_id)? else {
+            return Ok(());
+        };
+        let org_id = preview
+            .item_id
+            .map(|id| s.item_org(id))
+            .transpose()?
+            .flatten();
+        let candidates = sibling_candidates(&s, &preview.key, org_id, plan.project_id)?;
+        if candidates.is_empty() {
+            return Ok(());
+        }
+        let description = preview
+            .item_id
+            .map(|id| s.work_item_meta(id))
+            .transpose()?
+            .and_then(|m| m.description);
+        sibling_repos::SiblingInput {
+            key: preview.key.clone(),
+            title: preview.title.clone(),
+            item_id: preview.item_id,
+            org_id,
+            description,
+            chosen: start_project::Candidate {
+                project_id: chosen.id,
+                owner: chosen.owner,
+                repo: chosen.repo,
+            },
+            candidates,
+        }
+    };
+    match sibling_repos::mode_for(ctx, &input) {
+        Some(Mode::Assist) => preview.suggested_sibling = sibling_repos::ask(ctx, &input).await,
+        Some(Mode::Shadow) => {
+            let ctx = ctx.clone();
+            tokio::spawn(async move {
+                sibling_repos::ask(&ctx, &input).await;
+            });
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+/// Jev N3's follow-up after a PERSON's start of `key` in `primary` (and
+/// `started`, every project of it): best effort, never an error.
+fn record_sibling_start(
+    store: &Mutex<Store>,
+    item_id: Option<i64>,
+    key: &str,
+    primary: i64,
+    started: &[i64],
+) {
+    if let Ok(s) = lock(store) {
+        if let Err(e) = crate::service::decide::sibling_repos::record_start(
+            &s,
+            item_id,
+            key,
+            primary,
+            started,
+            crate::store::now_unix(),
+        ) {
+            tracing::warn!(
+                "[decide] sibling_repos follow-up not recorded: {}",
+                e.message
+            );
+        }
+    }
+}
+
+/// Most projects a preview offers to pick from.
+const PREVIEW_PROJECTS_MAX: usize = 8;
+
+/// Preview a start: [`start_work`]'s path up to the spawn, with every
+/// conflict collected instead of returned. A key that already has a live
+/// session is planned as a parallel start (its own `-N` checkout), so the
+/// popover can offer one; a cross-org start is planned as if forced, so the
+/// person sees where it would land before they choose to. Refusals that are
+/// not choices — a host fence, an org a bound client may not start in, a
+/// checkout the caller may not land in — stay errors.
+pub async fn preview_start(
+    store: &Mutex<Store>,
+    args: &StartArgs,
+    view: &crate::service::view_scope::ViewScope,
+    net: &TrackerNet,
+) -> Result<StartPreview, IpcError> {
+    let args = with_native_defaults(store, args, &view.org)?;
+    let mut conflicts = Vec::new();
+    let ticket = resolve_ticket(store, &args, view, net, true).await?;
+    let (projects, hosts, live, done, rule_offer) = {
+        let s = lock(store)?;
+        let mut projects = s.list_projects()?;
+        projects.retain(|p| !p.system);
+        projects.sort_by_key(|p| std::cmp::Reverse(p.last_session_at.unwrap_or(0)));
+        let projects: Vec<ProjectChoice> = projects
+            .into_iter()
+            .take(PREVIEW_PROJECTS_MAX)
+            .map(|p| ProjectChoice {
+                id: p.id,
+                owner: p.owner,
+                repo: p.repo,
+            })
+            .collect();
+        let local = crate::service::hub::local_host_enabled();
+        let hosts: Vec<HostChoice> = s
+            .list_hosts()?
+            .into_iter()
+            .filter(|h| crate::service::hosts::is_active(h, local))
+            .filter(|h| view.org.host().is_none_or(|own| own == h.alias))
+            .map(|h| HostChoice {
+                alias: h.alias,
+                reachable: h.reachable,
+            })
+            .collect();
+        let item_org = ticket
+            .item_id
+            .map(|id| s.item_org(id))
+            .transpose()?
+            .flatten();
+        let live: Vec<SessionRow> = live_work_on(&s, &ticket.key, item_org)?
+            .into_iter()
+            .map(|(_, r)| r)
+            .collect();
+        let item = ticket
+            .item_id
+            .map(|id| s.get_work_item(id))
+            .transpose()?
+            .flatten();
+        if let Some(item) = &item {
+            if item.origin.as_deref() == Some("proposed")
+                && item.proposal_state.as_deref() != Some("accepted")
+            {
+                conflicts.push(StartConflict {
+                    kind: "proposal".into(),
+                    message: "This is a proposal: accept it to start.".into(),
+                    session_id: None,
+                });
+            }
+        }
+        let done = item.as_ref().is_some_and(|i| i.status_category == "done");
+        let offer = crate::service::start_rules::offer_for(&s, view, item_org, &ticket.key)?;
+        (projects, hosts, live, done, offer)
+    };
+    if let Some(row) = live.first() {
+        let visible = view.sees_session_row(row).is_visible();
+        conflicts.push(StartConflict {
+            kind: "live_session".into(),
+            message: if visible {
+                let name = row.friendly_name.as_deref().unwrap_or(&row.tmux_name);
+                match crate::service::work::name_beside_key(&ticket.key, name) {
+                    Some(name) => format!(
+                        "{} is already open in {name} on {}.",
+                        ticket.key, row.host_alias
+                    ),
+                    None => format!("{} is already open on {}.", ticket.key, row.host_alias),
+                }
+            } else {
+                "Someone is already working on this.".into()
+            },
+            session_id: visible.then_some(row.id),
+        });
+    }
+    if done {
+        conflicts.push(StartConflict {
+            kind: "done".into(),
+            message: "This task is done.".into(),
+            session_id: None,
+        });
+    }
+    let planned = StartArgs {
+        parallel: args.parallel || !live.is_empty(),
+        ..args.clone()
+    };
+    let mut preview = StartPreview {
+        key: ticket.key.clone(),
+        title: ticket.title.clone(),
+        item_id: ticket.item_id,
+        plan: None,
+        missing: None,
+        projects,
+        hosts,
+        conflicts,
+        brief: None,
+        checkout: None,
+        suggested_project: None,
+        proposal: None,
+        suggested_sibling: None,
+        rule_offer,
+        brief_draft: None,
+    };
+    let plan = match plan_resolved(store, &planned, view, &ticket) {
+        Ok(p) => p,
+        Err(e) if e.code == codes::E_AMBIGUOUS => {
+            preview.missing = e
+                .details
+                .as_ref()
+                .and_then(|d| d.get("missing"))
+                .and_then(|m| m.as_str())
+                .map(str::to_string);
+            return Ok(preview);
+        }
+        Err(e)
+            if e.code == codes::E_FORBIDDEN
+                && e.details
+                    .as_ref()
+                    .and_then(|d| d.get("cross_org"))
+                    .and_then(|v| v.as_bool())
+                    == Some(true) =>
+        {
+            preview.conflicts.push(StartConflict {
+                kind: "cross_org".into(),
+                message: e.message.clone(),
+                session_id: None,
+            });
+            let forced = StartArgs {
+                force_cross_org: true,
+                ..planned.clone()
+            };
+            plan_resolved(store, &forced, view, &ticket)?
+        }
+        Err(e) if e.code == codes::E_EXISTS => {
+            // A multi-repo sibling's branch already has a live session.
+            preview.conflicts.push(StartConflict {
+                kind: "worktree_busy".into(),
+                message: e.message.clone(),
+                session_id: e
+                    .details
+                    .as_ref()
+                    .and_then(|d| d.get("session_id"))
+                    .and_then(|v| v.as_i64()),
+            });
+            return Ok(preview);
+        }
+        Err(e) => return Err(e),
+    };
+    preview.brief = match (&args.brief, args.with_brief) {
+        (Some(b), _) => Some(b.clone()),
+        (None, true) if brief_visible_on(store, &plan)? => Some(ticket_brief(store, &plan)?),
+        (None, _) => None,
+    };
+    if let Some(wid) = plan.worktree_id {
+        let s = lock(store)?;
+        let busy = s
+            .list_sessions_for_host(&plan.host_alias)?
+            .into_iter()
+            .find(|r| r.worktree_id == Some(wid) && r.status == "running" && r.lost_at.is_none());
+        let busy_by = busy
+            .as_ref()
+            .filter(|r| view.sees_session_row(r).is_visible())
+            .map(|r| r.id);
+        if let Some(r) = &busy {
+            preview.conflicts.push(StartConflict {
+                kind: "worktree_busy".into(),
+                message: format!(
+                    "The checkout {} is in use by a live session; a parallel start takes its own.",
+                    plan.branch
+                ),
+                session_id: busy_by.filter(|id| *id == r.id),
+            });
+        }
+        preview.checkout = Some(CheckoutPreview {
+            exists: true,
+            busy_by,
+        });
+    } else {
+        preview.checkout = Some(CheckoutPreview {
+            exists: false,
+            busy_by: None,
+        });
+    }
+    preview.plan = Some(plan);
+    Ok(preview)
 }
 
 // --- multi-repo start (work graph M9.6) ---------------------------------------
@@ -1515,11 +2578,12 @@ fn sibling_brief(
     args: &StartArgs,
     plan: &StartPlan,
     sib: &str,
+    tail: &str,
 ) -> Result<Option<String>, IpcError> {
     Ok(match (&args.brief, args.with_brief) {
         (Some(b), _) => Some(format!("{sib}\n\n{b}")),
         (None, true) if brief_visible_on(store, plan)? => {
-            Some(ticket_brief_with(store, plan, sib)?)
+            Some(ticket_brief_and(store, plan, sib, tail)?)
         }
         (None, _) => None,
     })
@@ -1542,7 +2606,7 @@ pub async fn start_many<F, Fut, P>(
     store: &Arc<Mutex<Store>>,
     args: &StartArgs,
     project_ids: &[i64],
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
     net: &TrackerNet,
     deadline: tokio::time::Instant,
     mut spawn: F,
@@ -1554,7 +2618,7 @@ where
     P: FnMut(&SessionRow, &str),
 {
     let ids = multi_start_ids(args.project_id, project_ids)?;
-    let ticket = resolve_start(store, args, scope, net).await?;
+    let ticket = resolve_start(store, args, view, net).await?;
     // One claim for the whole batch (work graph M14), taken before the
     // siblings are planned so their guards see any start that won before
     // it: another start or resume of the key waits for the batch to end.
@@ -1570,7 +2634,7 @@ where
             per_project: true,
             ..args.clone()
         };
-        match plan_resolved(store, &one, scope, &ticket) {
+        match plan_resolved(store, &one, view, &ticket) {
             Ok(p) => plans.push(p),
             Err(e) if e.code == codes::E_EXISTS => out.skipped.push(StartSkip {
                 project_id: *pid,
@@ -1581,6 +2645,13 @@ where
         }
     }
     let labels = sibling_labels(store, &plans);
+    // One ticket, one read of its comments and attachments for every sibling.
+    let tail = match plans.first() {
+        Some(p) if args.brief.is_none() && args.with_brief => {
+            crate::service::work::tracker_comments::brief_extras(store, p, net).await
+        }
+        _ => String::new(),
+    };
     for (i, plan) in plans.iter().enumerate() {
         if deadline.saturating_duration_since(tokio::time::Instant::now()) < START_RESERVE {
             out.skipped.push(StartSkip {
@@ -1597,7 +2668,7 @@ where
             .map(|(_, l)| l.clone())
             .collect();
         let sib = siblings_line(&plan.key, &labels[i], &others, &plan.branch);
-        let brief = match sibling_brief(store, args, plan, &sib) {
+        let brief = match sibling_brief(store, args, plan, &sib, &tail) {
             Ok(b) => b,
             Err(e) => {
                 out.failed.push(StartFailure::of(plan.project_id, &e));
@@ -1605,7 +2676,7 @@ where
             }
         };
         let one =
-            tokio::time::timeout_at(deadline, start_one(store, plan, brief, scope, &mut spawn))
+            tokio::time::timeout_at(deadline, start_one(store, plan, brief, view, &mut spawn))
                 .await
                 .unwrap_or_else(|_| {
                     Err(IpcError::new(
@@ -1631,6 +2702,15 @@ where
             Err(e) => out.failed.push(StartFailure::of(plan.project_id, &e)),
         }
     }
+    // Jev N3's follow-up: the repositories a person chose to start the key
+    // in (the first is the dialog's own project, the rest its ticked
+    // siblings) answer a sibling proposal they were shown. What they chose,
+    // not what came up: a sibling that failed to start was still chosen.
+    if args.decider == Decider::Person {
+        record_sibling_start(store, ticket.item_id, &ticket.key, ids[0], &ids);
+        // Redesign 8.11: the dialog's own project counts toward a rule.
+        crate::service::start_rules::tally_logged(store, ticket.item_id, &ticket.key, ids[0]);
+    }
     Ok(out)
 }
 
@@ -1642,14 +2722,14 @@ pub async fn start_work_many(
     reg: &Arc<crate::cancel::CancellationRegistry>,
     args: &StartArgs,
     project_ids: &[i64],
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
     net: &TrackerNet,
 ) -> Result<MultiStart, IpcError> {
     start_many(
         store,
         args,
         project_ids,
-        scope,
+        view,
         net,
         tokio::time::Instant::now() + MULTI_START_BUDGET,
         |a| crate::service::sessions::new_session(a, store.as_ref(), ssh, reg),

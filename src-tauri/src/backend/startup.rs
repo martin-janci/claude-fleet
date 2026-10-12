@@ -67,6 +67,13 @@ pub trait FleetTasks {
     /// Assets S1a: rescan stale hosts' assets. Fleet-owning, like the
     /// tracker sync: a paired desktop must not run it.
     fn start_catalog_scan_tick(&self);
+    /// The missions' loop (orchestration O4–O8). Fleet-owning, like the
+    /// tracker sync: a paired desktop's missions are the hub's to run.
+    fn start_mission_tick(&self);
+    /// Local workspace sync: a pass every few seconds for each enabled link.
+    /// It reaches hosts over this process's own SSH, so a paired desktop
+    /// (whose commands for it are `LocalOnly`) does not run it.
+    fn start_local_sync_tick(&self);
 }
 
 /// `CLAUDE_FLEET_HUB_REPORTS`: unset or anything but `0`/`false` means on.
@@ -77,7 +84,9 @@ pub fn report_flusher_wanted(env: Option<&str>) -> bool {
 /// Start exactly the background tasks this backend is entitled to run.
 ///
 /// Standalone: the three fleet-owning ones, and not the event bridge — there
-/// is no hub to subscribe to. Pointed at a hub: **only** the event bridge.
+/// is no hub to subscribe to. Pointed at a hub: the event bridge, and the
+/// local workspace sync, which is this machine's and owns nothing of the
+/// fleet.
 /// Pointed at a hub this launch cannot use: **nothing at all** — there is no
 /// stream to follow, and the fleet is still the hub's.
 ///
@@ -102,6 +111,9 @@ pub fn start_background_tasks(backend: &Backend, tasks: &dyn FleetTasks) {
             // changes: the local event bus has nothing to emit, because
             // nothing local mutates.
             tasks.start_event_bridge();
+            // Local workspace sync is this machine's own: its folders, its
+            // SSH. It reconciles nothing of the hub's fleet.
+            tasks.start_local_sync_tick();
             if report_flusher_wanted(std::env::var("CLAUDE_FLEET_HUB_REPORTS").ok().as_deref()) {
                 tasks.start_report_flusher();
             } else {
@@ -129,6 +141,8 @@ pub fn start_background_tasks(backend: &Backend, tasks: &dyn FleetTasks) {
             tasks.start_account_usage_tick();
             tasks.start_tracker_sync();
             tasks.start_catalog_scan_tick();
+            tasks.start_mission_tick();
+            tasks.start_local_sync_tick();
         }
     }
 }

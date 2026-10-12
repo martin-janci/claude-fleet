@@ -1,5 +1,10 @@
 <script lang="ts">
+  import HubProjectsPick from './HubProjectsPick.svelte';
+  import Icon from './kit/Icon.svelte';
+  import Loader from './Loader.svelte';
   import WorkSettings from './WorkSettings.svelte';
+  import ShortcutSettings from './ShortcutSettings.svelte';
+  import { DEFAULT_LEAF, leafById, leafForPage, resolveSection, type PanelId } from './settings_tree';
   import { onDestroy, onMount, tick } from 'svelte';
   import PageView from './pages/PageView.svelte';
   import SettingsNav from './pages/SettingsNav.svelte';
@@ -14,29 +19,30 @@
   import { loadProposals, settingProposals, settingsWritable } from './pages/review';
   import { allPages, guideProposals, loadGuides } from './pages/guides';
   import { hosts } from './hosts';
+  import { basePathLine, checkHost } from './host_check';
+  import { devices, loadDevices } from './devices';
+  import { hubHeaderFacts, othersText } from './hub_header';
+  import StartRules from './StartRules.svelte';
   import { mcpStatus } from './mcp';
   import { healthCheck } from './ipc';
   import { appVersion, loadAppVersion } from './app_version';
   import { onboardingDismissed, onboardingWelcomed } from './onboarding';
   import { hintsEnabled, resetHints } from './hints';
-  import {
-    composerPresets,
-    resetComposerPresets,
-    addPreset,
-    updatePreset,
-    removePreset,
-    movePreset,
-    flushComposerPresets,
-    refreshComposerPresetsIfIdle,
-    presetsConflict,
-  } from './composer_presets';
+  import { toolkitTab } from './toolkit_skills';
+  import { goTo } from './destination';
   import { copyOnSelect } from './prefs';
+  import { startTour } from './tour';
   import { collectDiagnostics, copyDiagnostics, openLogFolder } from './diagnostics';
   import { pushError } from './toasts';
-  import Modal from './Modal.svelte';
+  import WizardDialog from './forms/WizardDialog.svelte';
+  import { WIZARDS } from './forms/wizards';
+  import type { Values } from './forms/forms';
   import McpSettings from './McpSettings.svelte';
+  import TicketKeys from './TicketKeys.svelte';
+  import AppearanceSettings from './AppearanceSettings.svelte';
+  import UpdateCheck from './UpdateCheck.svelte';
   import { loadHostTokens } from './host_actions';
-  import { hostsChordLabel, requestHostsView, settingsSection } from './app_views';
+  import { hostsChordLabel, requestHostsView, settingsKey, settingsOpen, settingsSection } from './app_views';
   import { detectMac } from './terminal_keys';
   import { copyText } from './clipboard';
   import './settings_dialog.css';
@@ -59,9 +65,10 @@
     hubPair,
     hubDisconnect,
     hubBlock,
+    resourceBlock,
     hubStrandedToken,
     ownsTheFleet,
-    type HubAction,
+    plainUnavailableReason,
   } from './hub';
   import {
     attentionIdleMinutes,
@@ -72,61 +79,14 @@
     type NotificationPermissionState,
   } from './notify';
 
-  let { onClose: closeDialog }: { onClose: () => void } = $props();
+  let { onClose }: { onClose: () => void } = $props();
 
-  /**
-   * Chip edits are debounced (the editor saves on every keystroke), so a
-   * dialog closed straight after the last character would otherwise leave
-   * that character's save to a timer on an unmounted component. Flushing
-   * here is fire-and-forget: it is the same write, only sooner, and the
-   * dialog must not wait on a hub round trip to disappear.
-   */
-  function onClose() {
-    void flushComposerPresets();
-    closeDialog();
-  }
-
-  // A stable key per chip row, so a move re-orders the rows instead of
-  // rewriting every field in place under the cursor (keyed by index, the
-  // focused ↑ stayed at its index while the chip it moved went elsewhere).
-  // Kept beside the list rather than in it: the list is the backend's, and an
-  // id riding in it would be sent to the hub and cached as fleet state. A
-  // change of length the editor did not make (a reload, a conflict) deals
-  // fresh ids; the fields' values come from the list either way.
-  let nextRowId = 0;
-  let presetRowIds = $state<number[]>([]);
-  $effect(() => {
-    const n = $composerPresets.length;
-    if (presetRowIds.length !== n) presetRowIds = Array.from({ length: n }, () => nextRowId++);
-  });
-  const presetKey = (i: number) => presetRowIds[i] ?? `new-${i}`;
-  let presetRows: HTMLDivElement | undefined = $state();
-
-  async function onMovePreset(i: number, dir: -1 | 1) {
-    const to = i + dir;
-    if (to < 0 || to >= presetRowIds.length) return;
-    const id = presetRowIds[i];
-    const ids = [...presetRowIds];
-    [ids[i], ids[to]] = [ids[to], ids[i]];
-    presetRowIds = ids;
-    movePreset(i, dir);
-    await tick();
-    // Keep the keyboard on the chip that moved: its same arrow, or — at the
-    // end of the list, where that one is now disabled — the other one.
-    const row = presetRows?.querySelector<HTMLElement>(`[data-row-id="${id}"]`);
-    const same = row?.querySelector<HTMLButtonElement>(`[data-testid="preset-${dir === -1 ? 'up' : 'down'}"]`);
-    const other = row?.querySelector<HTMLButtonElement>(`[data-testid="preset-${dir === -1 ? 'down' : 'up'}"]`);
-    (same && !same.disabled ? same : other)?.focus();
-  }
-
-  function onRemovePreset(i: number) {
-    presetRowIds = presetRowIds.filter((_, k) => k !== i);
-    removePreset(i);
-  }
-
-  function onAddPreset() {
-    presetRowIds = [...presetRowIds, nextRowId++];
-    addPreset();
+  // The chip editor lives in Toolkit › Prompts & snippets (UX audit
+  // 2026-10-09, Martin's call); Settings keeps a link to it.
+  function openPrompts() {
+    toolkitTab.set('prompts');
+    goTo('assets');
+    onClose();
   }
 
   // Hosts live in the Hosts view; Settings keeps fleet-wide configuration and
@@ -136,6 +96,12 @@
     detectMac(typeof navigator === 'undefined' ? undefined : navigator),
   );
   const offlineCount = $derived($hosts.filter((h) => !h.reachable).length);
+
+  async function openAutomation() {
+    onClose();
+    await tick();
+    goTo('automation');
+  }
 
   async function openHosts() {
     onClose();
@@ -165,8 +131,10 @@
   // client, but it owns no fleet either, and the backend refuses the same
   // panels. See `ownsTheFleet`.
   const ownsFleet = $derived(ownsTheFleet($hubStatus));
+  /** The URL the link wizard opens with: the configured hub's, to pair again. */
   let hubUrlDraft = $state('');
-  let hubCode = $state('');
+  /** The hub link wizard (step 10.12: one fleet.form/1 spec, `link_hub`). */
+  let hubLinking = $state(false);
   let hubAllowPlaintext = $state(false);
   /** Set only after the backend has refused plaintext *in words*: the opt-in
    *  is not a checkbox anyone can tick past without having read why. */
@@ -179,26 +147,35 @@
    *  see `hubStrandedToken`. Asked once, on open, and only while standalone. */
   let hubStranded = $state(false);
 
-  const hubPairable = $derived(
-    !hubBusy && hubUrlDraft.trim() !== '' && hubCode.trim() !== '',
-  );
+  function openHubLink() {
+    hubError = null;
+    hubPlaintextRefused = false;
+    hubAllowPlaintext = false;
+    hubLinking = true;
+  }
 
-  async function doPair() {
+  async function doPair(values: Values) {
     hubBusy = true;
     hubError = null;
-    const r = await hubPair(hubUrlDraft, hubCode, hubAllowPlaintext);
+    const r = await hubPair(String(values.url ?? ''), String(values.code ?? ''), hubAllowPlaintext);
     hubBusy = false;
     if (r.ok) {
       hubRestartNeeded = r.value.restart_required;
       hubPlaintextRefused = false;
-      // The code dies on first use; leaving it in the box invites a second
-      // attempt that can only fail.
-      hubCode = '';
+      hubUrlDraft = r.value.configured_url ?? String(values.url ?? '');
+      // The code dies on first use: the wizard closes with it rather than
+      // inviting a second attempt that can only fail.
+      hubLinking = false;
     } else {
       hubError = r.error.message;
       if (r.error.code === 'E_HUB_PLAINTEXT') hubPlaintextRefused = true;
     }
   }
+
+  // M15 G7.13: the status header (SettingsHub board). Unpair… asks first,
+  // then is Disconnect.
+  const hubFacts = $derived(hubHeaderFacts($devices, Math.floor(Date.now() / 1000)));
+  let unpairAsk = $state(false);
 
   async function doDisconnect() {
     hubBusy = true;
@@ -215,17 +192,11 @@
     }
   }
 
-  // The chip editor starts from the fleet's current list, not the one read
-  // at launch: no event announces a chip saved on the phone, and an edit
-  // made from a stale list would be refused with E_CONFLICT on its first
-  // keystroke. Skipped while an edit of ours is still pending.
-  onMount(() => {
-    void refreshComposerPresetsIfIdle();
-  });
 
-  // --- Pages: General (the hand-written panels below) or a generated page
-  // (declarative pages P3; `crates/fleet-core/pages/`), picked in the nav. ---
-  let view = $state('general');
+  // --- The Settings tree (redesign step 7.1, `settings_tree.ts`): a leaf
+  // is a hand-written panel below, a generated page (declarative pages P3;
+  // `crates/fleet-core/pages/`) or one section of one, picked in the nav. ---
+  let view = $state(DEFAULT_LEAF);
   let focusKey = $state<string | null>(null);
   let settingsLoadError: string | null = $state(null);
   // Declarative pages P6: on a paired desktop the pages are the hub's
@@ -235,10 +206,18 @@
   let hubPagesError = $state<string | null>(null);
   /** The generated pages have the fleet's settings to show here. */
   const pagesHere = $derived(ownsFleet || hubPages === 'ok');
-  const currentPage = $derived($allPages.find((p) => p.id === view));
+  const leaf = $derived(leafById(view, $allPages) ?? leafById(DEFAULT_LEAF, $allPages));
+  const panel = $derived<PanelId | undefined>(leaf?.panel);
+  // The panel edits the same settings as its page where this app owns the
+  // fleet; elsewhere the page (the hub's settings) stands in for it.
+  const currentPage = $derived(
+    leaf?.page && !(leaf.pageOnlyRemote && ownsFleet) ? $allPages.find((p) => p.id === leaf.page) : undefined,
+  );
 
+  /** Open a leaf by id, or the leaf showing a page (a search hit, a link
+   *  between pages): the one holding `key`'s section when there is one. */
   function select(next: string, key?: string) {
-    view = next;
+    view = leafById(next, $allPages) ? next : (leafForPage(next, $allPages, key)?.id ?? `page:${next}`);
     focusKey = key ?? null;
   }
 
@@ -252,20 +231,16 @@
   });
 
   // Opened at a section (a "Reconnect Jira (acme)" Attention item, work
-  // graph M12.4): scroll it into view once, then forget the request. A
-  // page id opens that page instead.
+  // graph M12.4): a leaf id, a page id or one of the old General panels'
+  // names opens its leaf, then the request is forgotten.
   onMount(() => {
     const section = $settingsSection;
     if (!section) return;
+    const key = $settingsKey;
     settingsSection.set(null);
-    if (section.includes('.') || section === 'settings' || section === 'usage' || section === 'guides') {
-      select(section);
-      return;
-    }
-    void tick().then(() => {
-      const el = document.querySelector<HTMLElement>(`[data-testid="${section}-section"]`);
-      el?.scrollIntoView?.({ block: 'start' });
-    });
+    settingsKey.set(null);
+    // With a setting named, a page id opens the leaf that holds it.
+    select(key ? section : (resolveSection(section, $allPages) ?? section), key ?? undefined);
   });
 
   async function subscribeSettings() {
@@ -318,6 +293,8 @@
           if (r.ok && r.value) hubVersion = r.value.version;
           else hubVersionFailed = true;
         });
+        // M15 G7.13: the status header's last sync and device count.
+        void loadDevices();
         await loadHubPages();
       }
       return;
@@ -385,10 +362,53 @@
     baseDrafts = { ...baseDrafts, [alias]: (e.currentTarget as HTMLInputElement).value };
   }
 
+  // M15 G7.12: each base path is checked on its host (`check_host` with a
+  // base path) before it is saved: a path the login user cannot write stops
+  // the save, a host that does not answer does not.
+  let baseChecks = $state<Record<string, { path: string; text: string; problem: boolean }>>({});
+
+  async function checkBasePaths(): Promise<boolean> {
+    const asked = $hosts.map((h) => ({ alias: h.alias, path: previewRoot(h.alias) }));
+    const answers = await Promise.all(asked.map((a) => checkHost(a.alias, a.path)));
+    const next: typeof baseChecks = {};
+    let blocked = false;
+    answers.forEach((r, i) => {
+      const { alias, path } = asked[i];
+      const line = r.ok ? (r.value ? basePathLine(alias, r.value) : null) : { text: `${alias}: ${r.error.message}`, problem: false };
+      if (!line) return;
+      // Only a host that answered can say a path is wrong.
+      const problem = line.problem && r.ok && !r.value?.error;
+      next[alias] = { path, text: line.text, problem };
+      blocked ||= problem;
+    });
+    baseChecks = next;
+    return !blocked;
+  }
+
+  async function checkProjects() {
+    projectsBusy = true;
+    projectsError = null;
+    projectsMsg = null;
+    await checkBasePaths();
+    projectsBusy = false;
+  }
+
+  function discardProjects() {
+    resetProjectDrafts();
+    baseChecks = {};
+    projectsError = null;
+    projectsMsg = null;
+  }
+
   async function saveProjects() {
     projectsBusy = true;
     projectsError = null;
     projectsMsg = null;
+    if (!(await checkBasePaths())) {
+      projectsError = 'Not saved: a base path below cannot be used on its host.';
+      projectsBusy = false;
+      return;
+    }
     const map: Record<string, string> = {};
     for (const [alias, p] of Object.entries(baseDrafts)) {
       const t = p.trim();
@@ -452,25 +472,35 @@
 
 </script>
 
-<!-- Escape + backdrop are handled by Modal (native <dialog>). -->
-<Modal label="Settings" onclose={onClose} width="min(1040px, 94vw)" maxWidth="94vw">
-  <div class="dialog settings-dialog">
-    <header>
-      <h3>Settings</h3>
-      <button class="close" onclick={onClose} aria-label="Close">×</button>
-    </header>
+<!-- Settings is a rail destination (UX audit 2026-10-09, S1): a page in
+     the list and right columns, its nav where the session list sits. The rail
+     or Esc (App.svelte) leaves it; no modal, no close button. -->
+<!-- `settings-dialog` scopes settings_dialog.css, shared with the panels. -->
+<section class="settings-page settings-dialog" aria-label="Settings" data-testid="settings-page">
     <div class="settings-body">
+    <div class="settings-side">
+    <h2 class="settings-title">Settings</h2>
     <SettingsNav
       pages={$allPages}
       descs={$descriptors}
       values={$settingValues}
-      selected={view}
+      selected={leaf?.id ?? view}
       counts={pagesHere ? { 'settings.review': $settingProposals.length, guides: $guideProposals.length } : {}}
       canWrite={pagesHere && $settingsWritable}
       onselect={select} />
+    </div>
+    <div class="settings-scroll">
     <div class="settings-content">
-    {#if view === 'general'}
+    <!-- UX audit S2: the open leaf's name heads the page (Settings board). -->
+    <h2 class="page-title" data-testid="settings-page-title">{leaf?.label ?? 'Settings'}</h2>
+    <!-- The hand-written panels stay mounted and are hidden when another
+         leaf is open, so a draft (a hub URL, a projects root) survives a
+         look at another section. -->
+    <div class="panel" hidden={panel !== 'appearance'} data-testid="settings-panel-appearance">
+    <AppearanceSettings />
+    </div>
 
+    <div class="panel" hidden={panel !== 'hosts'} data-testid="settings-panel-hosts">
     <section class="block hosts-line" data-testid="settings-hosts-line">
       <h4>Hosts</h4>
       <span class="hosts-summary" data-testid="settings-hosts-summary"
@@ -480,12 +510,57 @@
         >Open Hosts <kbd>{hostsChord}</kbd></button
       >
     </section>
+    <p class="hook-desc">
+      Accounts and hosts have their own view, beside Sessions and Work. Settings keeps the
+      preferences; the hosts themselves are there.
+    </p>
+    </div>
 
+    <div class="panel" hidden={panel !== 'automation-limits'} data-testid="settings-panel-automation-limits">
+    <section class="block hosts-line" data-testid="settings-automation-limits">
+      <h4>Automation limits</h4>
+      <span class="hosts-summary">The routines' daily budget, today's spend and Pause all</span>
+      <button class="hook-btn" onclick={openAutomation} data-testid="settings-open-automation">Open Automation</button>
+    </section>
+    <p class="hook-desc">
+      Automation has its own view, beside Work and Toolkit. Its foot shows what the routines spent today
+      against their budget, with Pause all; the budget itself is under System › Automation here.
+    </p>
+    </div>
+
+    <div class="panel" hidden={panel !== 'hub'} data-testid="settings-panel-hub">
     <section class="block" data-testid="hub-section">
       <div class="section-header">
         <h4>Hub</h4>
       </div>
       {#if isRemote}
+        <div class="hub-status" data-testid="hub-status-header">
+          <span
+            >Paired with <code>{$hubStatus.url}</code>{#if hubVersion} · hub {hubVersion}{/if} · this desktop is a client{#if hubFacts.lastSync}
+              · <span data-testid="hub-last-sync">{hubFacts.lastSync}</span>{/if}{#if othersText(hubFacts.others)}
+              · <span data-testid="hub-device-count">{othersText(hubFacts.others)}</span>{/if}</span
+          >
+          <span class="grow"></span>
+          <button class="hook-btn" data-testid="hub-open-devices" onclick={() => select('devices')}>People &amp; devices</button>
+          {#if !unpairAsk}
+            <button class="hook-btn" data-testid="hub-unpair" disabled={hubBusy} onclick={() => (unpairAsk = true)}>Unpair…</button>
+          {/if}
+        </div>
+        {#if unpairAsk}
+          <div class="mcp-field" data-testid="hub-unpair-confirm">
+            <span class="hook-desc">Unpair from <code>{$hubStatus.url}</code>? This machine forgets the pairing; the hub keeps the client until an operator revokes it.</span>
+            <button class="hook-btn" data-testid="hub-unpair-cancel" onclick={() => (unpairAsk = false)}>Cancel</button>
+            <button
+              class="hook-btn"
+              data-testid="hub-unpair-confirm-btn"
+              disabled={hubBusy}
+              onclick={async () => {
+                await doDisconnect();
+                unpairAsk = false;
+              }}>Unpair</button
+            >
+          </div>
+        {/if}
         <p class="mcp-blurb" data-testid="hub-connected">
           This window is a <strong>client</strong> of
           <code>{$hubStatus.url}</code>, paired as
@@ -507,8 +582,9 @@
             its own banner, not as this line.
           {/if}
         </p>
+        <HubProjectsPick />
         {#if $hubStatus.warning}
-          <p class="err" data-testid="hub-status-warning">⚠ {$hubStatus.warning}</p>
+          <p class="err" data-testid="hub-status-warning"><Icon name="warning" size={12} /> {$hubStatus.warning}</p>
         {/if}
         <!-- The trap: with `mcp.confirm_destructive` on, the hub refuses a
              kill, a worktree delete, a move or a task cancel until someone
@@ -554,10 +630,14 @@
              "This app runs its own fleet" here, as this section used to, was
              the opposite of the truth: it runs NO fleet until this is fixed. -->
         <p class="err" data-testid="hub-unavailable-reason">
-          ⚠ This app is set to use
+          <Icon name="warning" size={12} /> This app is set to use
           {#if $hubStatus.configured_url}<code>{$hubStatus.configured_url}</code>{:else}a hub{/if},
-          but this launch cannot: {$hubStatus.unavailable}.
+          but this launch cannot: {plainUnavailableReason($hubStatus.unavailable)}.
         </p>
+        <details class="hook-desc" data-testid="hub-unavailable-detail">
+          <summary>Details</summary>
+          <code>{$hubStatus.unavailable}</code>
+        </details>
         <p class="hook-desc">
           Until that is fixed it manages no fleet at all — no reconcile tick, no
           control API, every fleet action refused — rather than quietly
@@ -595,7 +675,7 @@
                reads it — a blank URL is standalone — so this is the only place
                it is ever mentioned, and the only place it can be cleared. -->
           <p class="err" data-testid="hub-stranded-token">
-            ⚠ A hub <strong>client token</strong> is still stored on this
+            <Icon name="warning" size={12} /> A hub <strong>client token</strong> is still stored on this
             machine, left behind by a pairing that did not finish. Nothing uses
             it: no hub is configured, and this app runs its own fleet. It is a
             credential for someone else's fleet sitting in this machine's
@@ -619,76 +699,55 @@
 
       {#if !isRemote || hubRestartNeeded}
         <div class="mcp-field">
-          <span class="lbl">url</span>
-          <input
-            class="port base-input"
-            type="text"
-            spellcheck="false"
-            placeholder="https://fleet.example.com"
-            bind:value={hubUrlDraft}
-            disabled={hubBusy}
-            data-testid="hub-url"
-            aria-label="Hub URL" />
-        </div>
-        <div class="mcp-field">
-          <span class="lbl">code</span>
-          <input
-            class="port base-input"
-            type="text"
-            spellcheck="false"
-            placeholder="ABCD1234"
-            bind:value={hubCode}
-            disabled={hubBusy}
-            data-testid="hub-code"
-            aria-label="Pairing code" />
-          <button onclick={doPair} disabled={!hubPairable} data-testid="hub-pair">
-            {hubBusy ? 'Pairing…' : 'Pair'}
+          <button onclick={openHubLink} disabled={hubBusy} data-testid="hub-link">
+            {$hubStatus.configured_url ? 'Pair again…' : 'Link to a hub…'}
           </button>
         </div>
       {/if}
 
-      {#if hubError}
+      {#if hubError && !hubLinking}
         <p class="err" role="alert" data-testid="hub-error">{hubError}</p>
       {/if}
-      {#if hubPlaintextRefused}
-        <!-- Only after the refusal, and only with the reason above it: the
-             opt-in is a decision someone makes having read what it costs,
-             not a box that was already there to be ticked past. -->
-        <label class="toggle">
-          <input
-            type="checkbox"
-            bind:checked={hubAllowPlaintext}
-            data-testid="hub-allow-plaintext" />
-          Send the client token in the clear anyway — this hop is already
-          private (a tunnel, a VPN, a container network)
-        </label>
+      {#if hubLinking}
+        <WizardDialog
+          wizard={WIZARDS.link_hub}
+          initial={{ url: hubUrlDraft }}
+          busy={hubBusy}
+          error={hubError}
+          errorTestid="hub-error"
+          run={(v) => void doPair(v)}
+          onclose={() => (hubLinking = false)}>
+          {#snippet extra()}
+            {#if hubPlaintextRefused}
+              <!-- Only after the refusal, and only with the reason above it: the
+                   opt-in is a decision someone makes having read what it costs,
+                   not a box that was already there to be ticked past. -->
+              <label class="toggle">
+                <input
+                  type="checkbox"
+                  bind:checked={hubAllowPlaintext}
+                  data-testid="hub-allow-plaintext" />
+                Send the client token in the clear anyway — this hop is already
+                private (a tunnel, a VPN, a container network)
+              </label>
+            {/if}
+          {/snippet}
+        </WizardDialog>
       {/if}
       {#if hubRestartNeeded}
         <p class="hook-desc" data-testid="hub-restart">
-          Saved. <strong>Restart claude-fleet to apply it</strong> — which
+          Saved. <strong>Restart Orbit Fleet to apply it</strong> — which
           fleet this app is a window onto is decided once, at startup, so that
           half the app can never be talking to a hub while the other half
           talks to the local database.
         </p>
       {/if}
     </section>
+    </div>
 
-    {#if !ownsFleet}
-      <section class="block" data-testid="projects-remote-section">
-        <div class="section-header"><h4>Projects</h4></div>
-        {#if pagesHere}
-          <p class="hook-desc" data-testid="projects-remote">
-            The hub’s projects roots and layout are on the
-            <button type="button" class="link-btn" data-testid="projects-remote-open" onclick={() => select('settings.projects')}>Projects page</button>;
-            a rescan runs on the hub.
-          </p>
-        {:else}
-          <p class="hook-desc" data-testid="projects-remote">
-            {hubBlock('fleet_settings', $hubStatus)}
-          </p>
-        {/if}
-      </section>
-    {:else}
+    <div class="panel" hidden={panel !== 'projects'} data-testid="settings-panel-projects">
+    <!-- A paired desktop: the leaf shows the hub's Projects page instead. -->
+    {#if ownsFleet}
     <section class="block" data-testid="projects-section">
       <div class="section-header">
         <h4>Projects</h4>
@@ -735,25 +794,56 @@
             data-testid="projects-preview-{h.alias}">
             {pathErr ?? projectPathPreview(previewRoot(h.alias), layoutDraft)}
           </span>
+          {#if baseChecks[h.alias] && baseChecks[h.alias].path === previewRoot(h.alias) && pathErr === null}
+            <span
+              class="hook-desc project-preview"
+              class:err={baseChecks[h.alias].problem}
+              data-testid="projects-check-{h.alias}">{baseChecks[h.alias].text}</span
+            >
+          {/if}
         </div>
       {/each}
       <div class="mcp-field">
+        <button
+          onclick={checkProjects}
+          disabled={projectsBusy || projectsInvalid || !projectsLoaded}
+          data-testid="projects-check">Check on hosts</button>
+        <button
+          onclick={discardProjects}
+          disabled={projectsBusy || !projectsLoaded}
+          data-testid="projects-discard">Discard</button>
         <button
           onclick={saveProjects}
           disabled={projectsBusy || projectsInvalid || !projectsLoaded}
           data-testid="projects-save">Save &amp; rescan</button>
         {#if projectsMsg}<span class="hook-desc" data-testid="projects-msg">{projectsMsg}</span>{/if}
       </div>
-      {#if projectsError}<p class="err">{projectsError}</p>{/if}
+      {#if projectsError}<p class="err" data-testid="projects-error">{projectsError}</p>{/if}
     </section>
     {/if}
+    <!-- M15 G7.12: the start rules inline under Projects (Accounts forms
+         board); the same list Automation › Rules shows. -->
+    <section class="block" data-testid="projects-start-rules">
+      <div class="section-header">
+        <h4>Start rules</h4>
+      </div>
+      <p class="mcp-blurb">A ticket key decides the project and host a session starts in.</p>
+      {#if panel === 'projects'}<StartRules />{/if}
+    </section>
+    </div>
 
+    <div class="panel" hidden={panel !== 'appearance'} data-testid="settings-panel-onboarding">
     <section class="block" data-testid="onboarding-section">
       <div class="section-header">
         <h4>Setup guide</h4>
       </div>
-      <div class="hook-section">
-        <p class="hook-desc">Re-show the "Get started" checklist in the sidebar.</p>
+      <!-- UX audit S2: one row per item, its name and help on the left and
+           its control on the right (Settings board). -->
+      <div class="pref-row">
+        <div class="pref-text">
+          <span class="pref-lbl">Get started checklist</span>
+          <p class="hook-desc">Re-show the "Get started" checklist.</p>
+        </div>
         <button
           class="hook-btn"
           onclick={() => {
@@ -764,36 +854,64 @@
           Replay setup guide
         </button>
       </div>
-      <div class="hook-section">
-        <p class="hook-desc">Show inline tips the first time a feature is used.</p>
-        <label class="toggle">
-          <input type="checkbox" bind:checked={$hintsEnabled} />
-          Show feature hints
-        </label>
-        <button class="hook-btn" onclick={resetHints} data-testid="reset-hints">
-          Reset hints
+      <div class="pref-row">
+        <div class="pref-text">
+          <span class="pref-lbl">Tour</span>
+          <p class="hook-desc">Walk through the main parts of the window again, six short steps.</p>
+        </div>
+        <button
+          class="hook-btn"
+          data-testid="settings-take-tour"
+          onclick={() => {
+            settingsOpen.set(false);
+            startTour();
+          }}
+        >
+          Take the tour
         </button>
       </div>
-      <div class="hook-section">
-        <p class="hook-desc">
-          Copy a terminal drag-selection to the clipboard as soon as the mouse
-          is released. Off: use Cmd+C / Ctrl+Shift+C or the context menu.
-        </p>
+      <div class="pref-row">
+        <div class="pref-text">
+          <span class="pref-lbl">Feature hints</span>
+          <p class="hook-desc">Show inline tips the first time a feature is used.</p>
+        </div>
+        <div class="pref-ctl">
+          <label class="toggle">
+            <input type="checkbox" bind:checked={$hintsEnabled} />
+            Show feature hints
+          </label>
+          <button class="hook-btn" onclick={resetHints} data-testid="reset-hints">
+            Reset hints
+          </button>
+        </div>
+      </div>
+      <div class="pref-row">
+        <div class="pref-text">
+          <span class="pref-lbl">Copy on select</span>
+          <p class="hook-desc">
+            Copy a terminal drag-selection to the clipboard as soon as the mouse
+            is released. Off: use Cmd+C / Ctrl+Shift+C or the context menu.
+          </p>
+        </div>
         <label class="toggle">
           <input type="checkbox" bind:checked={$copyOnSelect} data-testid="copy-on-select" />
           Copy on select
         </label>
       </div>
     </section>
+    </div>
 
+    <div class="panel" hidden={panel !== 'notifications'} data-testid="settings-panel-notifications">
     <section class="block" data-testid="notifications-section">
       <div class="section-header">
-        <h4>Notifications</h4>
+        <h4>Stuck sessions</h4>
       </div>
       <p class="mcp-blurb">
         When a session becomes stuck (auth menu, trust prompt, reconnect,
         out of memory, press Enter) fleet announces it for screen readers and,
-        optionally, shows a toast and an OS notification.
+        optionally, shows a toast and an OS notification. With OS notifications
+        on, the hub's Notifications page decides which other states reach this
+        desktop (and which make a sound) while the window is in the background.
       </p>
       <label class="toggle">
         <input type="checkbox" bind:checked={$notifyStuckToast} data-testid="notify-toast" />
@@ -810,7 +928,7 @@
               if ($notifyStuckOs) notifyStuckOs.set(false);
               else void enableOsNotifications();
             }} />
-          OS notification on stuck transitions
+          OS notifications
         </label>
         <span class="status status-{permission === 'granted' ? 'on' : permission === 'denied' ? 'off' : 'neutral'}" data-testid="notify-permission">
           {permission}
@@ -819,7 +937,7 @@
       {#if permission === 'unsupported'}
         <p class="hook-desc">This webview does not expose the Notification API; toasts and the live region still work.</p>
       {:else if permission === 'denied'}
-        <p class="hook-desc">Notifications were denied at the OS level; allow them for claude-fleet in your system settings.</p>
+        <p class="hook-desc">Notifications were denied at the OS level; allow them for Orbit Fleet (listed as claude-fleet) in your system settings.</p>
       {/if}
       <div class="mcp-field">
         <span class="lbl">Idle</span>
@@ -833,76 +951,38 @@
         <span class="hook-desc">minutes before an idle work session counts as "needs attention" (0 = never)</span>
       </div>
     </section>
+    </div>
 
+    {#if panel === 'shortcuts'}
+      <ShortcutSettings />
+    {/if}
+
+    <div class="panel" hidden={panel !== 'composer'} data-testid="settings-panel-composer">
     <section class="block" data-testid="composer-section">
       <h4>Conversation composer</h4>
       <div class="hook-section">
         <p class="hook-desc">
-          Quick-action chips above the prompt box in the Conversation tab and
-          on the phone, in this order. A click fills the box; with
-          <em>Send</em> ticked it sends at once (Shift+click does the other
-          one) — except while the session waits on an answer, when it only
-          fills. Chips with an empty label or text are not shown.
+          The quick-action chips above the prompt box are edited in Toolkit ›
+          Prompts & snippets.
         </p>
-        {#if $presetsConflict}
-          <p class="hook-desc" role="status" data-testid="preset-conflict">
-            Another device changed the chips first. This is its list now; make your change again.
-          </p>
-        {/if}
-        <div class="preset-rows" bind:this={presetRows}>
-        {#each $composerPresets as p, i (presetKey(i))}
-          <div class="preset-row" data-row-id={presetKey(i)}>
-            <input
-              class="preset-label"
-              data-testid="preset-label"
-              placeholder="Label"
-              value={p.label}
-              oninput={(e) => updatePreset(i, { label: e.currentTarget.value })}
-            />
-            <textarea
-              class="preset-text"
-              data-testid="preset-text"
-              rows="1"
-              placeholder="Prompt or /command"
-              value={p.text}
-              oninput={(e) => updatePreset(i, { text: e.currentTarget.value })}
-            ></textarea>
-            <label class="preset-send" title="Send on click instead of only filling the box">
-              <input
-                type="checkbox"
-                data-testid="preset-auto-send"
-                checked={p.auto_send === true}
-                onchange={(e) => updatePreset(i, { auto_send: e.currentTarget.checked })}
-              />
-              Send
-            </label>
-            <button
-              class="hook-btn"
-              data-testid="preset-up"
-              title="Move up"
-              aria-label="Move up"
-              disabled={i === 0}
-              onclick={() => void onMovePreset(i, -1)}>↑</button>
-            <button
-              class="hook-btn"
-              data-testid="preset-down"
-              title="Move down"
-              aria-label="Move down"
-              disabled={i === $composerPresets.length - 1}
-              onclick={() => void onMovePreset(i, 1)}>↓</button>
-            <button class="hook-btn" data-testid="preset-remove" title="Remove" onclick={() => onRemovePreset(i)}>×</button>
-          </div>
-        {/each}
-        </div>
-        <div class="preset-actions">
-          <button class="hook-btn" data-testid="preset-add" onclick={onAddPreset}>Add chip</button>
-          <button class="hook-btn" data-testid="preset-reset" onclick={resetComposerPresets}>Reset to defaults</button>
-        </div>
+        <button class="hook-btn" data-testid="composer-open-toolkit" onclick={openPrompts}
+          >Open Prompts & snippets ↗</button
+        >
       </div>
     </section>
+    </div>
 
+    <div class="panel" hidden={panel !== 'work'} data-testid="settings-panel-work">
     <WorkSettings onopen={(id) => select(id)} />
+    </div>
 
+    {#if panel === 'ticket-keys'}
+      <div class="panel" data-testid="settings-panel-ticket-keys">
+        <TicketKeys />
+      </div>
+    {/if}
+
+    <div class="panel" hidden={panel !== 'mcp'} data-testid="settings-panel-mcp">
     {#if !ownsFleet}
       <section class="block" data-testid="mcp-remote-section">
         <div class="section-header"><h4>Control API (MCP)</h4></div>
@@ -910,16 +990,26 @@
           {hubBlock('mcp_status', $hubStatus)}
         </p>
         <p class="hook-desc" data-testid="provision-remote">
-          {hubBlock('provision_hosts', $hubStatus)}
+          {hubBlock('provision_all', $hubStatus)}
         </p>
       </section>
     {:else}
     <!-- Provisioning mints host tokens: refresh the shared token cache the
          Hosts view reads (host_actions.ts). Module-level, so it is safe even
          when a slow multi-host provision outlives this dialog. -->
-    <McpSettings bind:this={mcpSettings} onProvisioned={loadHostTokens} />
+    <McpSettings bind:this={mcpSettings} onProvisioned={loadHostTokens} active={panel === 'mcp'} />
     {/if}
+    </div>
 
+    <div class="panel" hidden={panel !== 'diagnostics'} data-testid="settings-panel-diagnostics">
+    <!-- Redesign step 3.13: About gets the Wordmark reveal. It sits with
+         Diagnostics, the section that already names the version, until the
+         Settings tree (7.1) gives About a leaf of its own. -->
+    <section class="block about" data-testid="about-section">
+      <Loader name="wordmark-reveal" size={184} delay={0} label="Orbit Fleet" testid="about-wordmark" />
+      <p class="hook-desc" data-testid="about-version">Orbit Fleet {$appVersion ?? ''}</p>
+      <UpdateCheck />
+    </section>
     <section class="block" data-testid="diagnostics-section">
       <div class="section-header">
         <h4>Diagnostics</h4>
@@ -936,7 +1026,7 @@
           disabled={diagBusy}
           data-testid="copy-diagnostics"
         >
-          {diagBusy ? 'Collecting…' : 'Copy diagnostics'}
+          {#if diagBusy}<Loader name="comet" size={12} class="btn-loader" />{/if}{diagBusy ? 'Collecting…' : 'Copy diagnostics'}
         </button>
         <button class="hook-btn" onclick={onOpenLogFolder} data-testid="open-log-folder">
           Open log folder
@@ -949,12 +1039,14 @@
         </p>
       {/if}
     </section>
-    {:else if currentPage}
+    </div>
+
+    {#if currentPage}
       {#if !ownsFleet && currentPage.layout === 'master_detail'}
         <!-- A resource's list routes to the hub: shown, read-only, with
              where to change it instead. -->
         {@const res = $pagesBundle.resources.find((r) => r.id === currentPage.resource)}
-        {#key currentPage.id}
+        {#key view}
           <PageView
             page={currentPage}
             pages={$allPages}
@@ -964,12 +1056,13 @@
             resources={$pagesBundle.resources}
             actions={$pagesBundle.actions}
             readonly
-            reason={res?.update ? hubBlock(res.update.command as HubAction, $hubStatus) : null}
+            reason={res ? resourceBlock(res, $hubStatus) : null}
+            section={leaf?.section}
             onnavigate={(id) => select(id)} />
         {/key}
       {:else if !pagesHere}
         <section class="block" data-testid="pages-remote">
-          <div class="section-header"><h4>{currentPage.title}</h4></div>
+          <div class="section-header"><h4>{leaf?.section ?? currentPage.title}</h4></div>
           {#if hubPages === 'loading'}
             <p class="hook-desc">Reading the hub’s settings…</p>
           {:else}
@@ -989,7 +1082,7 @@
             {/if}
           </p>
         {/if}
-        {#key currentPage.id}
+        {#key view}
           <PageView
             readonly={!ownsFleet && !$settingsWritable}
             remote={!ownsFleet}
@@ -1001,6 +1094,7 @@
             resources={$pagesBundle.resources}
             actions={$pagesBundle.actions}
             {focusKey}
+            section={leaf?.section}
             proposals={$settingProposals}
             onnavigate={(id) => select(id)}
             onopen={(id, key) => select(id, key)} />
@@ -1009,49 +1103,85 @@
     {/if}
     </div>
     </div>
-  </div>
-</Modal>
+    </div>
+</section>
 
 <style>
-  .dialog {
-    display: flex;
-    flex-direction: column;
-    gap: 0.8rem;
+  .settings-page {
+    height: 100%;
+    min-height: 0;
+    background: var(--bg);
+    color: var(--fg);
   }
-  header { display: flex; align-items: center; justify-content: space-between; }
   .settings-body {
     display: grid;
-    grid-template-columns: 12rem minmax(0, 1fr);
-    gap: 1.25rem;
-    align-items: start;
+    grid-template-columns: var(--settings-nav-w) minmax(0, 1fr);
+    height: 100%;
+    min-height: 0;
   }
-  .settings-body > :global(.settings-nav) {
-    position: sticky;
-    top: 0;
+  /* The nav takes the list column's place: its own scroll, a border on the
+     right, the page title above it (Settings board). */
+  .settings-side {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    min-height: 0;
+    overflow: auto;
+    padding: var(--space-3) var(--space-2) var(--space-3) var(--space-3);
+    border-right: 1px solid var(--border);
+    background: var(--bg-pane);
+  }
+  .settings-title { margin: 0 0 var(--space-1) var(--space-1); font-size: var(--text-lg); font-weight: 600; }
+  .settings-scroll { min-width: 0; min-height: 0; overflow: auto; }
+  .pref-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+    padding: var(--space-3) 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .pref-text { flex: 1; min-width: 0; }
+  .pref-lbl { font-size: var(--text-sm); font-weight: 500; }
+  .pref-ctl { display: flex; align-items: center; gap: var(--space-2); flex: 0 0 auto; }
+  .pref-row .hook-btn { align-self: center; flex: 0 0 auto; }
+  .page-title {
+    margin: 0 0 var(--space-1);
+    font-size: var(--text-xl);
+    font-weight: 600;
   }
   .settings-content {
     display: flex;
     flex-direction: column;
     gap: 0.8rem;
     min-width: 0;
+    max-width: var(--prose-max);
+    padding: var(--space-4) var(--space-6);
+  }
+  .panel {
+    display: contents;
+  }
+  .panel[hidden] {
+    display: none;
   }
   @media (max-width: 640px) {
     .settings-body {
       grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: auto minmax(0, 1fr);
     }
+    .settings-side { border-right: 0; border-bottom: 1px solid var(--border); max-height: 40vh; }
   }
-  header h3 { margin: 0; font-size: 1rem; }
-  .close {
-    border: none;
-    background: transparent;
-    color: var(--fg-muted);
-    font-size: 1.2rem;
-    cursor: pointer;
-    padding: 0 0.4rem;
-  }
-  .close:hover { color: var(--fg); }
 
   .log-path code { word-break: break-all; }
+
+  .hub-status {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    font-size: var(--text-xs);
+  }
+  .hub-status .grow { flex: 1; }
 
   .hosts-line {
     display: flex;
@@ -1060,19 +1190,19 @@
   }
   .hosts-line h4 {
     margin: 0;
-    font-size: 0.75rem;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--fg-muted);
   }
-  .hosts-summary { flex: 1; font-size: 0.8rem; color: var(--fg-muted); font-variant-numeric: tabular-nums; }
+  .hosts-summary { flex: 1; font-size: var(--text-2xs); color: var(--fg-muted); font-variant-numeric: tabular-nums; }
   .hosts-line kbd {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.7rem;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
 
-  .err { color: #e64a4a; font-size: 0.8rem; margin: 0; }
+  .err { color: var(--danger); font-size: var(--text-2xs); margin: 0; }
 
   .project-base-row { margin-bottom: 0.3rem; }
   .project-base-row .mcp-field { margin-bottom: 0.1rem; }
@@ -1088,7 +1218,7 @@
     flex: 1;
     min-width: 0;
     width: auto;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
   }
   /* Qualified with .hook-desc: the preview span carries both classes, and the
      later `.hook-desc { margin: 0 }` used to win the equal-specificity tie and
@@ -1096,36 +1226,27 @@
   .hook-desc.project-preview {
     display: block;
     margin-left: 6.4rem;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
     word-break: break-all;
   }
   /* Same tie, for the invalid-path message: .hook-desc's muted colour used to
      beat the .err red the class:err toggle asks for. */
-  .project-preview.err { color: #e64a4a; }
+  .project-preview.err { color: var(--danger); }
   .layout-select {
     background: transparent;
     border: 1px solid var(--border);
     color: var(--fg);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     padding: 0.2rem 0.4rem;
   }
 
   .hook-desc {
     margin: 0;
-    font-size: 12px;
-    color: var(--text-secondary, #888);
+    font-size: var(--text-xs);
+    color: var(--fg-muted);
   }
 
   .hub-scope {
     margin: 0 0 0.6rem;
-  }
-  .link-btn {
-    background: none;
-    border: none;
-    padding: 0;
-    color: var(--accent);
-    font: inherit;
-    cursor: pointer;
-    text-decoration: underline;
   }
 </style>

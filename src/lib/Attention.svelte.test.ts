@@ -1,5 +1,5 @@
 import { render, screen } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tick } from 'svelte';
 import { get } from 'svelte/store';
 
@@ -11,6 +11,8 @@ import Attention from './Attention.svelte';
 import { sessions, sessionsLoaded, type SessionRow } from './sessions';
 import { toasts, clearToasts } from './toasts';
 import { notifyStuckOs, notifyStuckToast } from './notify';
+import { fleetSettings } from './fleet_settings';
+import { failing, type FailingRoutine } from './routines';
 
 let nextId = 1;
 function row(over: Partial<SessionRow> = {}): SessionRow {
@@ -123,5 +125,69 @@ describe('Attention', () => {
     await tick();
     expect(screen.getByTestId('stuck-announcer')).toHaveTextContent('dev-b on local is stuck: auth menu');
     expect(get(toasts)).toHaveLength(0);
+  });
+});
+
+const shown: string[] = [];
+class FakeNotification {
+  static permission = 'granted';
+  static requestPermission = async () => 'granted';
+  constructor(title: string) {
+    shown.push(title);
+  }
+}
+
+describe('Attention: the notifications matrix (11.9)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    failing.set([]);
+  });
+  beforeEach(() => {
+    shown.length = 0;
+    vi.stubGlobal('Notification', FakeNotification);
+    vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+    notifyStuckOs.set(true);
+    fleetSettings.set({ ...get(fleetSettings), 'notify.desktop': 'needs_you,failed', 'notify.sound': '', 'notify.quiet_hours': '' });
+  });
+
+  it('announces a session that comes to need you, by the Desktop column', async () => {
+    const a = row({ tmux_name: 'dev-q', claude_status: 'working' });
+    sessions.set([a]);
+    render(Attention);
+    await tick();
+    sessions.set([{ ...a, claude_status: 'blocked' }]);
+    await tick();
+    expect(shown).toEqual(['dev-q needs you']);
+  });
+
+  it('stays quiet for a state the column leaves out, and while the window has focus', async () => {
+    const a = row({ tmux_name: 'dev-r', claude_status: 'working' });
+    const b = row({ tmux_name: 'dev-s', claude_status: 'working' });
+    sessions.set([a, b]);
+    render(Attention);
+    await tick();
+    fleetSettings.set({ ...get(fleetSettings), 'notify.desktop': 'failed' });
+    sessions.set([{ ...a, claude_status: 'blocked' }, b]);
+    await tick();
+    expect(shown).toEqual([]);
+    vi.mocked(document.hasFocus).mockReturnValue(true);
+    sessions.set([{ ...a, claude_status: 'blocked' }, { ...b, claude_status: 'failed' }]);
+    await tick();
+    expect(shown).toEqual([]);
+  });
+
+  it('announces a routine run that fails after the app opened', async () => {
+    fleetSettings.set({ ...get(fleetSettings), 'notify.desktop': 'routine_failed' });
+    render(Attention);
+    await tick();
+    const now = Math.floor(Date.now() / 1000);
+    const routine = { id: 3, name: 'nightly' } as FailingRoutine['routine'];
+    failing.set([{ routine, run: { id: 9, started_at: now - 99_999, finished_at: now - 99_000 } as FailingRoutine['run'], may_change: true }]);
+    await tick();
+    expect(shown).toEqual([]);
+    failing.set([{ routine, run: { id: 10, started_at: now, finished_at: now + 1 } as FailingRoutine['run'], may_change: true }]);
+    await tick();
+    expect(shown).toEqual(['Routine nightly failed']);
   });
 });

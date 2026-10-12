@@ -7,6 +7,24 @@ use super::*;
 /// tail); re-exported here so `SessionRow` can name them.
 pub use crate::service::pane_intel::{PendingInput, PendingOption};
 
+/// The chat form a session's agent is waiting on (chat forms, migration
+/// 119): read by a subselect on `form_requests`, null when none.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingForm {
+    pub form_id: String,
+    pub title: String,
+}
+
+/// The form a session's agent is still writing (`ask { draft }`, migration
+/// 153): the JSON so far, which the chat draws in as skeleton fields.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FormDraft {
+    pub draft: String,
+    #[serde(default)]
+    pub why: Option<String>,
+    pub updated_at: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProjectRow {
     pub id: i64,
@@ -291,7 +309,7 @@ pub struct SessionRow {
     /// the top guess; this moves on every link change, a secondary's too, so
     /// a client knows when to re-read the session's tasks. Opaque; `0` (and
     /// absent) when the session has no live link. Never sent to a scoped
-    /// caller (`OrgScope::redact_row`): another org's link would move it.
+    /// caller (`OrgScope::redact_row_org_only`): another org's link would move it.
     #[serde(default, skip_serializing_if = "is_zero_i64")]
     pub work_rev: i64,
     /// What the PR probe last read as evidence about the session's PR
@@ -307,6 +325,293 @@ pub struct SessionRow {
     /// `outcome::PR_EVIDENCE_STALE_SECS` describes the past.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_checked_at: Option<i64>,
+    /// Whose session this is (migration 099, multi-user M1): the `people`
+    /// row that owns it. `None` for a row nobody can speak for — one
+    /// reconcile discovered on a host, or a pre-M1 row fleet did not create
+    /// (`visibility = 'unclaimed'`).
+    ///
+    /// A caller-INDEPENDENT fact: it says who the owner is, not what the
+    /// reader may do, so it is safe on the broadcast bus. There is
+    /// deliberately no per-caller access field on this row; the answer to
+    /// "may THIS caller see it" is computed at the gate from this field,
+    /// [`SessionRow::visibility`] and the caller's grants, and never
+    /// stored on the row a broadcast carries.
+    ///
+    /// It is **not** what the stream fence keys on. `BroadcastEventBus::emit`
+    /// runs `strip_nulls` before the frame enters the replay ring
+    /// (`events.rs`), so an unowned row's key is *absent* rather than null —
+    /// indistinguishable from a hub built before the column, and "absent"
+    /// reads as "no restriction" (spec §3.7). `visibility`, which is NOT
+    /// NULL, is the key that survives that and the one a fence may read.
+    /// Hence no `skip_serializing_if` on either field.
+    #[serde(default)]
+    pub owner_person_id: Option<i64>,
+    /// [`VISIBILITY_PRIVATE`] or [`VISIBILITY_UNCLAIMED`] (migration 099,
+    /// whose `CHECK` admits nothing else — in particular no `'org'`, which
+    /// the owner removed from M1 because the schema's only referent for
+    /// "the org can see it" is a column an admin binds their own device to;
+    /// spec §4.3). `private` is the default for anything a person starts;
+    /// `unclaimed` is the safe holding state.
+    ///
+    /// `#[serde(default = "visibility_unclaimed")]`, never a bare
+    /// `#[serde(default)]`: see that function for why the difference is the
+    /// privacy-critical one.
+    #[serde(default = "visibility_unclaimed")]
+    pub visibility: String,
+    /// The credential profile the session runs under (migration 113,
+    /// docs/accounts.md): `CLAUDE_CONFIG_DIR` is
+    /// `~/.claude-profiles/<name>` on its host. `None` = the host's own login.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_profile: Option<String>,
+    /// Which coding agent runs in the session's pane (migration 121): one of
+    /// [`AGENTS`]. A different axis from `kind` (what the session is for);
+    /// a `shell` session is the one place they meet, and
+    /// `Store::set_session_kind` keeps the two in step there.
+    ///
+    /// `#[serde(default = "agent_claude")]`: a hub older than the column
+    /// sends no `agent`, and every session such a hub runs is Claude Code
+    /// (a shell row there still says `kind: "shell"`). Never skipped when
+    /// serialised, so a client can tell a Claude row from an old hub's.
+    #[serde(default = "agent_claude")]
+    pub agent: String,
+    /// Who or what started the session (migration 124): one of
+    /// [`ORIGINS`], or `None` for a row fleet did not start (found on a
+    /// host by reconcile, or older than the column). See [`SessionOrigin`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// What [`SessionRow::origin`] points at, as text: a person id, a
+    /// session id, a mission id (migration 124 lists which). `None` when
+    /// the origin has nothing to point at, or is itself `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_ref: Option<String>,
+    /// When a person last looked at the session (migration 125), unix
+    /// seconds: `touch_session_viewed`. A turn that ended after it
+    /// (`last_stop_at`) is unread. `None` for a row nobody has opened since
+    /// fleet found it; a session fleet started counts from `started_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_viewed_at: Option<i64>,
+    /// What a finished turn came to when hooks said nothing (migration
+    /// 129, J2 in step 5.11): one of [`TURN_OUTCOMES`]. A hook event always
+    /// wins over it. `None` when nothing answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_outcome: Option<String>,
+    /// What a rule, Jev or an LLM proposes about this session, one per
+    /// feature (step 2.8): read from `decision_runs`, never stored on the
+    /// row. A person confirms or changes each; none ever acts. Empty, and
+    /// absent on the wire, when nothing proposes anything.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proposals: Vec<DecisionProposal>,
+    /// The form this session's agent asked and is waiting on. `serde(default)`
+    /// so an older hub's row (without it) still parses.
+    #[serde(default)]
+    pub pending_form: Option<PendingForm>,
+    /// The form this session's agent is still writing (`ask { draft }`),
+    /// absent when none. `serde(default)` for an older hub's row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub form_draft: Option<FormDraft>,
+}
+
+/// `sessions.agent` (migration 121): Claude Code, the default.
+pub const AGENT_CLAUDE: &str = "claude";
+
+/// `sessions.agent` (migration 121): OpenAI's Codex CLI (redesign 12.2).
+pub const AGENT_CODEX: &str = "codex";
+
+/// `sessions.agent` (migration 121): Google's Antigravity CLI (`agy`),
+/// launched through `agent_adapter::Agy` (redesign step 12.3).
+pub const AGENT_AGY: &str = "agy";
+
+/// `sessions.agent` (migration 121): no agent, a plain login shell
+/// (`kind = 'shell'`).
+pub const AGENT_SHELL: &str = "shell";
+
+/// Every value migration 121's `CHECK` admits. `agy` has its adapter but
+/// `new_session` refuses it until its start path is enabled.
+pub const AGENTS: [&str; 4] = [AGENT_CLAUDE, AGENT_CODEX, AGENT_AGY, AGENT_SHELL];
+
+/// [`SessionRow::agent`] when a frame carries no `agent` key: a hub built
+/// before migration 121, whose sessions all run Claude Code.
+fn agent_claude() -> String {
+    AGENT_CLAUDE.to_string()
+}
+
+/// `sessions.turn_outcome` (migration 130): every value its `CHECK` admits.
+pub const TURN_OUTCOMES: [&str; 5] = ["finished", "asked", "stuck", "working", "unsure"];
+
+/// `decision_runs.subject_kind` of a run about one session: its
+/// `subject_id` is the session id as text. What [`SessionRow::proposals`]
+/// reads.
+pub const PROPOSAL_SUBJECT_SESSION: &str = "session";
+
+/// `decision_runs.subject_kind` of a run about one work item: its
+/// `subject_id` is the `work_items.id` as text.
+pub const PROPOSAL_SUBJECT_WORK_ITEM: &str = "work_item";
+
+/// Below this confidence an answer is recorded, never proposed: the UI
+/// pre-selects nothing (redesign ai.md, "below the confidence floor").
+pub const PROPOSAL_MIN_CONFIDENCE: f64 = 0.5;
+
+/// One proposal on the wire (step 2.8): a value a rule, Jev or an LLM
+/// suggests for one question about a row, with where it came from. The
+/// shape every row carries, so the UI draws "Proposed by Jev · why ·
+/// Change" one way. Only a live `assist` answer is proposed: never a
+/// shadow run, a fallback, `unsure`, one under [`PROPOSAL_MIN_CONFIDENCE`],
+/// or one a person already confirmed, corrected or rejected (save a linked
+/// `related_session`, see [`DecisionProposal::linked`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DecisionProposal {
+    /// The question: a `decide` feature (`start_project`, `turn_outcome`,
+    /// `work_link`…).
+    pub feature: String,
+    /// The proposed answer, an id or a vocabulary word (`p12`,
+    /// `finished`).
+    pub value: String,
+    /// `rule`, `jev` or `llm`.
+    pub source: String,
+    /// Fleet's own words for why, when the use case composes them; never
+    /// model text. A run read back from `decision_runs` (which holds no
+    /// text) carries none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The model's confidence in whole percent, when it gave one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_pct: Option<u8>,
+    /// The recorded run, which a confirm or a change marks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<i64>,
+    /// When it was decided, unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<i64>,
+    /// `Some(true)` on a `related_session` a person confirmed with Link
+    /// (M15 G4.3): no longer a proposal but the row's linked partner, kept
+    /// so Details lists it. Absent on every other proposal and from an
+    /// older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked: Option<bool>,
+}
+
+/// `DecisionProposal::source` for a `decision_runs.provider`.
+pub fn proposal_source(provider: &str) -> &'static str {
+    match provider {
+        "rules" => "rule",
+        "llm" => "llm",
+        _ => "jev",
+    }
+}
+
+/// Decode a [`proposals_sql!`] subselect: a JSON array, sorted by feature
+/// so two reads of the same runs compare equal. Malformed text reads as
+/// no proposals rather than failing the row.
+pub(super) fn decode_proposals(raw: Option<String>) -> Vec<DecisionProposal> {
+    let mut v: Vec<DecisionProposal> = raw
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+    v.sort_by(|a, b| a.feature.cmp(&b.feature));
+    v
+}
+
+/// `sessions.origin` (migration 124): every value its `CHECK` admits.
+pub const ORIGINS: [&str; 6] = [
+    "person",
+    "operator",
+    "mission",
+    "background",
+    "token",
+    "routine",
+];
+
+/// Who or what started a session, as `finalize_new_session` and the other
+/// start paths record it (`sessions.origin` / `origin_ref`, migration 124).
+///
+/// Never read from a request: like `owner_person_id` it follows from the
+/// connection or from the code path that starts the session, so a client
+/// cannot label its own session as a mission's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionOrigin {
+    /// One of [`ORIGINS`].
+    pub origin: &'static str,
+    pub origin_ref: Option<String>,
+}
+
+impl SessionOrigin {
+    /// A person started it, from the desktop, the phone or the master token.
+    /// `None` when the hub cannot say who that person is.
+    pub fn person(person_id: Option<i64>) -> Self {
+        Self::with("person", person_id)
+    }
+
+    /// The operator (the UX agent) started it; its own session's id.
+    pub fn operator(operator_session: Option<i64>) -> Self {
+        Self::with("operator", operator_session)
+    }
+
+    /// A mission's run started it.
+    pub fn mission(mission_id: i64) -> Self {
+        Self::with("mission", Some(mission_id))
+    }
+
+    /// A `claude --bg` agent, launched for `requester` when one is named.
+    pub fn background(requester: Option<i64>) -> Self {
+        Self::with("background", requester)
+    }
+
+    /// A per-host token started it: an agent in the session whose pane the
+    /// request proved, or a script on the host (`None`).
+    pub fn token(proven_session: Option<i64>) -> Self {
+        Self::with("token", proven_session)
+    }
+
+    /// A routine's run started it (redesign 8.5).
+    pub fn routine(routine_id: i64) -> Self {
+        Self::with("routine", Some(routine_id))
+    }
+
+    /// The origin a row records, to carry it onto another row (a move).
+    /// `None` for a row with no origin, or one this build does not know.
+    pub fn of_row(row: &SessionRow) -> Option<Self> {
+        let origin = ORIGINS
+            .iter()
+            .find(|o| Some(**o) == row.origin.as_deref())?;
+        Some(Self {
+            origin,
+            origin_ref: row.origin_ref.clone(),
+        })
+    }
+
+    fn with(origin: &'static str, id: Option<i64>) -> Self {
+        Self {
+            origin,
+            origin_ref: id.map(|i| i.to_string()),
+        }
+    }
+}
+
+/// `sessions.visibility` (migration 100): private to its owner, and to the
+/// people the owner has granted `watch` or `drive` to. The default for
+/// anything a person starts through fleet.
+pub const VISIBILITY_PRIVATE: &str = "private";
+
+/// `sessions.visibility` (migration 100): nobody can speak for this row —
+/// reconcile found it on a host, or it predates M1 and fleet did not create
+/// it. An out-of-scope caller learns a per-host COUNT of these and not one
+/// byte more (spec §4.3); claiming one needs proof of host access.
+pub const VISIBILITY_UNCLAIMED: &str = "unclaimed";
+
+/// [`SessionRow::visibility`] when a frame carries no `visibility` key at
+/// all: a hub built before migration 099, or a row read from one.
+///
+/// **It must be a named function.** A bare `#[serde(default)]` on a `String`
+/// yields `String::default()` — the empty string — which is neither
+/// `private` nor `unclaimed` and so matches no arm anybody writes: the
+/// privacy fence would fail *open* into a case that does not exist (spec
+/// §3.7). The repo's convention for exactly this shape is a named default
+/// function (`store/orgs.rs::bound_sees_unassigned_default`,
+/// `store/trackers.rs::default_true`, `store/work.rs::default_role`), and
+/// `rows::tests::a_session_row_with_no_visibility_key_reads_unclaimed`
+/// asserts the VALUE, not merely that parsing succeeded.
+fn visibility_unclaimed() -> String {
+    VISIBILITY_UNCLAIMED.to_string()
 }
 
 fn is_zero_i64(n: &i64) -> bool {
@@ -363,8 +668,8 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
      model, context_tokens, context_window, context_source, context_at, context_stale, tmux_pane_id, \
      pending_input, row_version, lost_reason, \
      (SELECT json_object('link_id', l.id, 'item_id', l.item_id, \
-                         'key', COALESCE(i.key, l.ref_key), 'title', COALESCE(i.title, ''), \
-                         'source', l.source, \
+                         'key', COALESCE(i.key, l.ref_key), 'display_key', i.display_key, \
+                         'title', COALESCE(i.title, ''), 'source', l.source, \
                          'kind', \
                            CASE WHEN i.id IS NULL THEN 'ref' \
                                 WHEN i.tracker_id IS NOT NULL THEN 'tracker' \
@@ -391,8 +696,8 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
        WHERE p.session_id = sessions.id AND p.retired_at IS NULL \
          AND COALESCE(i.key, l.ref_key) IS NOT NULL) AS work_rejected, \
      (SELECT json_object('link_id', l.id, 'item_id', l.item_id, \
-                         'key', COALESCE(i.key, l.ref_key), 'title', COALESCE(i.title, ''), \
-                         'source', l.source, 'state', l.state, 'strength', l.strength, \
+                         'key', COALESCE(i.key, l.ref_key), 'display_key', i.display_key, \
+                         'title', COALESCE(i.title, ''), 'source', l.source, 'state', l.state, 'strength', l.strength, \
                          'rule', l.rule, \
                          'preselected', json(CASE WHEN l.preselected = 1 \
                                                   THEN 'true' ELSE 'false' END), \
@@ -433,7 +738,14 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
      (SELECT COALESCE(SUM(l.version * 1000003 + l.id), 0) FROM work_links l \
         JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
        WHERE p.session_id = sessions.id AND l.ended_at IS NULL) AS work_rev, \
-     pr_evidence, pr_checked_at"
+     pr_evidence, pr_checked_at, owner_person_id, visibility, claude_profile, \
+     (SELECT json_object('form_id', f.form_id, 'title', json_extract(f.spec, '$.title')) \
+        FROM form_requests f WHERE f.session_id = sessions.id AND f.state = 'pending') \
+       AS pending_form, agent, origin, origin_ref, last_viewed_at, turn_outcome, ",
+    crate::proposals_sql!("session", "CAST(sessions.id AS TEXT)"),
+    " AS proposals, \
+     (SELECT json_object('draft', d.draft, 'why', d.why, 'updated_at', d.updated_at) \
+        FROM form_drafts d WHERE d.session_id = sessions.id) AS form_draft"
 );
 
 /// Decode `sessions.pr_evidence`. Malformed text (never written by us)
@@ -540,6 +852,21 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
         work_rev: row.get(61)?,
         pr_evidence: decode_pr_evidence(row.get(62)?),
         pr_checked_at: row.get(63)?,
+        owner_person_id: row.get(64)?,
+        visibility: row.get(65)?,
+        claude_profile: row.get(66)?,
+        pending_form: row
+            .get::<_, Option<String>>(67)?
+            .and_then(|j| serde_json::from_str(&j).ok()),
+        agent: row.get(68)?,
+        origin: row.get(69)?,
+        origin_ref: row.get(70)?,
+        last_viewed_at: row.get(71)?,
+        turn_outcome: row.get(72)?,
+        proposals: decode_proposals(row.get(73)?),
+        form_draft: row
+            .get::<_, Option<String>>(74)?
+            .and_then(|j| serde_json::from_str(&j).ok()),
     })
     .map(|mut r| {
         // A link's org is its tracker item's, else the session's (M5).
@@ -716,6 +1043,20 @@ pub struct DayDelta {
     pub day: i64,
     pub totals: UsageTotals,
     pub backfill: bool,
+    /// The model that spent this slice (`usage_daily_account`, step 4.2);
+    /// `None` when the transcript line carried none.
+    pub model: Option<String>,
+}
+
+/// One account's LIVE spend on one model over a window, summed from
+/// `usage_daily_account` (migration 130, redesign step 4.2). `''` names an
+/// unknown account (a session whose login fleet has not read yet) or a
+/// transcript line with no model.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AccountModelCost {
+    pub account_uuid: String,
+    pub model: String,
+    pub totals: UsageTotals,
 }
 
 /// One usage pass's result for a session, applied by `Store::apply_usage`.
@@ -868,6 +1209,26 @@ pub struct HostRow {
     /// unknown). Computed from the stored fingerprint, never stored.
     #[serde(default)]
     pub provision_stale: bool,
+    /// How many `unclaimed` sessions this host carries (multi-user M1,
+    /// spec §4.3) — the ONE thing a caller ever learns about a row nobody
+    /// can speak for. Computed per request by
+    /// `service::hosts::list_hosts`, never stored.
+    ///
+    /// **`None` and `Some(0)` are different answers, and the difference is
+    /// the privacy rule.** `Some(0)` says "this host has no unclaimed
+    /// sessions"; `None` says "you are not being told", and it is what a
+    /// hub with more than one person serves everybody (R5-d). Serving `0`
+    /// there would be a claim about the host that the caller is not
+    /// entitled to. On such a hub the count reaches a human through
+    /// `fleet-hub session unclaimed` — shell access on the hub machine —
+    /// and through no API at all.
+    ///
+    /// Plain `#[serde(default)]` and no `skip_serializing_if`: the key is
+    /// always on the wire, as `null` when withheld, so an older hub (which
+    /// omits it entirely) and a hub that withheld it read the same —
+    /// `None`, which is the closed answer either way.
+    #[serde(default)]
+    pub unclaimed_sessions: Option<i64>,
     /// Which harnesses the asset catalog syncs on this host (multi-harness
     /// F3a, migration 089). `None` = auto: Claude, plus Codex where a scan
     /// finds it or fleet already manages Codex assets there. `Some` = exactly
@@ -883,6 +1244,63 @@ pub struct HostRow {
     /// looks. Per-field default: an older hub omits it.
     #[serde(default)]
     pub provision_warning: Option<String>,
+    /// Credential variables set on the host that outrank its `/login`, by
+    /// name only (migration 111, [`crate::tmux::AUTH_OVERRIDE_VARS`]).
+    /// `None`: never sampled, or the host could not tell. Per-field default:
+    /// an older hub omits it.
+    #[serde(default)]
+    pub auth_overrides: Option<Vec<String>>,
+    /// The host's Claude login profiles (migration 114, docs/accounts.md),
+    /// by name, each with the account it is logged into when known. `None`:
+    /// never read. Per-field default: an older hub omits it.
+    #[serde(default)]
+    pub claude_profiles: Option<Vec<HostProfileRow>>,
+    /// Probe facts for the Hosts page (Orbit Fleet 4.6, migration 123):
+    /// online CPUs, physical memory, the boot epoch the host states, the
+    /// round trip of an empty command (`None` for `local`), and the disk
+    /// fleet's worktrees hold with when that was last asked. All
+    /// per-field default: an older hub omits them.
+    #[serde(default)]
+    pub cpu_count: Option<i64>,
+    #[serde(default)]
+    pub mem_total_kb: Option<i64>,
+    #[serde(default)]
+    pub boot_at: Option<i64>,
+    #[serde(default)]
+    pub latency_ms: Option<i64>,
+    #[serde(default)]
+    pub worktree_kb: Option<i64>,
+    #[serde(default)]
+    pub worktree_at: Option<i64>,
+    /// Which agent CLIs the host has on its `PATH` (Orbit Fleet 12.4,
+    /// migration 134). `None`: never sampled, or the host could not tell.
+    /// Per-field default: an older hub omits it.
+    #[serde(default)]
+    pub agents_on_path: Option<Vec<String>>,
+    /// When the host last answered a probe (migration 150). Unlike
+    /// `last_pinged_at`, which a failed probe stamps too, this stays put
+    /// while the host is unreachable. `None`: never answered. Per-field
+    /// default: an older hub omits it.
+    #[serde(default)]
+    pub last_reachable_at: Option<i64>,
+    /// Why the last probe failed: its `IpcError` code and a short message
+    /// (migration 150). Cleared by the next probe the host answers.
+    /// Per-field default: an older hub omits them.
+    #[serde(default)]
+    pub last_probe_error_code: Option<String>,
+    #[serde(default)]
+    pub last_probe_error: Option<String>,
+}
+
+/// One login profile on a host, as `hosts.claude_profiles` stores it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HostProfileRow {
+    pub name: String,
+    /// The `accounts` row its `/login` is; `None` = not logged in yet.
+    #[serde(default)]
+    pub account_uuid: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
 }
 
 /// The volatile half of a host row, as `host:pinged` carries it (host
@@ -898,6 +1316,26 @@ pub struct HostHealth {
     pub mem_avail_kb: Option<i64>,
     pub uptime_secs: Option<i64>,
     pub health_at: Option<i64>,
+    /// Sampled with the rest (migration 111). Per-field default: an older
+    /// hub's ping omits it.
+    #[serde(default)]
+    pub auth_overrides: Option<Vec<String>>,
+    /// Migration 123 (Orbit Fleet 4.6). Per-field default: an older hub's
+    /// ping omits them.
+    #[serde(default)]
+    pub cpu_count: Option<i64>,
+    #[serde(default)]
+    pub mem_total_kb: Option<i64>,
+    #[serde(default)]
+    pub boot_at: Option<i64>,
+    #[serde(default)]
+    pub latency_ms: Option<i64>,
+    #[serde(default)]
+    pub worktree_kb: Option<i64>,
+    /// Migration 134 (Orbit Fleet 12.4). Per-field default: an older hub's
+    /// ping omits it.
+    #[serde(default)]
+    pub agents_on_path: Option<Vec<String>>,
 }
 
 impl HostHealth {
@@ -910,6 +1348,13 @@ impl HostHealth {
             mem_avail_kb: row.mem_avail_kb,
             uptime_secs: row.uptime_secs,
             health_at: row.health_at,
+            auth_overrides: row.auth_overrides.clone(),
+            cpu_count: row.cpu_count,
+            mem_total_kb: row.mem_total_kb,
+            boot_at: row.boot_at,
+            latency_ms: row.latency_ms,
+            worktree_kb: row.worktree_kb,
+            agents_on_path: row.agents_on_path.clone(),
         }
     }
 }
@@ -937,7 +1382,9 @@ pub(super) const HOST_COLUMNS: &str =
      last_pinged_at, account_uuid, provisioned, transport, org_id, claude_version_at, \
      disk_home_free_kb, disk_home_total_kb, disk_tmp_free_kb, load_1m, mem_avail_kb, \
      uptime_secs, health_at, last_hook_at, agent_version, provisioned_at, provision_fingerprint, \
-     harnesses, provision_warning";
+     harnesses, provision_warning, auth_overrides, claude_profiles, cpu_count, mem_total_kb, \
+     boot_at, latency_ms, worktree_kb, worktree_at, agents_on_path, \
+     last_reachable_at, last_probe_error_code, last_probe_error";
 
 /// Map a row selected with [`HOST_COLUMNS`].
 pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow> {
@@ -970,6 +1417,10 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
         provisioned_at: row.get(21)?,
         provision_stale: provisioned
             && fingerprint.as_deref() != Some(crate::service::provision::fingerprint()),
+        // Never stored, and never derivable from a `hosts` row:
+        // `service::hosts::list_hosts` fills it in per request, for the
+        // callers R5-d entitles to it.
+        unclaimed_sessions: None,
         // Migration 089. A value that is not a JSON string array reads as
         // auto rather than failing the whole row.
         harnesses: row
@@ -978,6 +1429,29 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
         // Migration 091: what the last provisioning warned about, if it
         // degraded. Cleared by the next clean run.
         provision_warning: row.get(24)?,
+        // Migration 111. Same lenient read as `harnesses`.
+        auth_overrides: row
+            .get::<_, Option<String>>(25)?
+            .and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok()),
+        // Migration 114. Same lenient read.
+        claude_profiles: row
+            .get::<_, Option<String>>(26)?
+            .and_then(|t| serde_json::from_str::<Vec<HostProfileRow>>(&t).ok()),
+        // Migration 123 (Orbit Fleet 4.6).
+        cpu_count: row.get(27)?,
+        mem_total_kb: row.get(28)?,
+        boot_at: row.get(29)?,
+        latency_ms: row.get(30)?,
+        worktree_kb: row.get(31)?,
+        worktree_at: row.get(32)?,
+        // Migration 134 (Orbit Fleet 12.4). Same lenient read.
+        agents_on_path: row
+            .get::<_, Option<String>>(33)?
+            .and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok()),
+        // Migration 150 (review r13).
+        last_reachable_at: row.get(34)?,
+        last_probe_error_code: row.get(35)?,
+        last_probe_error: row.get(36)?,
     })
 }
 
@@ -1076,8 +1550,14 @@ pub struct SessionEvent {
 pub struct HostTokenRow {
     pub host_alias: String,
     pub token: String,
+    /// When the host's first token was minted.
     pub created_at: i64,
     pub mode: String,
+    /// The last request this token authenticated (migration 126), stamped
+    /// at most once a minute; `None` never since.
+    pub last_used_at: Option<i64>,
+    /// When a fresh token last replaced the host's (migration 126).
+    pub rotated_at: Option<i64>,
 }
 
 /// One paired client token (migration 032): a phone, a laptop browser. Unlike
@@ -1103,6 +1583,14 @@ pub struct ClientTokenRow {
     /// (migration 074, `fleet-hub client grant <name> assets`): the hub's
     /// `catalog_admin` tool answers it as it answers the master.
     pub assets_admin_at: Option<i64>,
+    /// Whose device this is (multi-user M1, migration 100): the `people` row
+    /// this token belongs to. `None` is the `person: None` privilege level —
+    /// a caller nobody owns — which every gate must refuse and no scope can
+    /// resolve; migration 098 leaves no live row in that state, and
+    /// `Store::set_client_person` is the only thing that puts one back.
+    /// Deliberately no foreign key: deleting a person leaves the token bound
+    /// to an id nothing has (fail closed), never widened.
+    pub person_id: Option<i64>,
 }
 
 /// One inter-session message (migration 015). The store is the source of
@@ -1175,6 +1663,40 @@ pub struct TaskRow {
     /// Not serialised either, hence `None` on a row read back from a hub.
     #[serde(skip_serializing, default)]
     pub worker_claude_session_id: Option<String>,
+    /// When a session this task names was DELETED, so the task's ends no
+    /// longer identify anybody (migration 101, multi-user M1 T9d).
+    ///
+    /// `sessions.id` is reused, and a task outlives its sessions, so an id
+    /// kept past the row's death would make the task read as belonging to
+    /// whoever holds that id next. The trigger NULLs the id and stamps this;
+    /// [`crate::service::tasks::task_visible_in_scope_pure`] then answers
+    /// `false` for everyone but the hub's own reader, because the sessions
+    /// are over and there is nothing left for a person to drive.
+    ///
+    /// `#[serde(skip)]`, like `SessionRow::stale_demoted_at`: it is a fence
+    /// input, decided where the rows live, and never a field a client reads
+    /// or a hub client has to be told. So it is `None` on a row read back
+    /// from a hub — harmless, because the hub already applied the fence.
+    #[serde(skip)]
+    pub detached_at: Option<i64>,
+    /// The work item this task is an attempt at (`work_link { run }`,
+    /// migration 110); `None` for a plain dispatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_item_id: Option<i64>,
+    /// 1, 2, … within (`work_item_id`, `role`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<i64>,
+    /// implement | review | test | research | integrate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// The worker's structured report (`tasks.result_json`, orchestration
+    /// O3): what it SAYS it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<super::TaskReport>,
+    /// What git said about its checkout when it finished
+    /// (`tasks.evidence_json`): fleet's own reading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<super::TaskEvidence>,
 }
 
 /// Where the catalog repo lives and its last-loaded HEAD (migration 030).
@@ -1241,6 +1763,12 @@ pub struct AssetInventoryRow {
     /// `unmanaged`/`orphan` row, which names nothing the catalog defines.
     #[serde(default)]
     pub catalog_id: Option<i64>,
+    /// Assets M5 (migration 096, Rulings R4): on a `drifted` managed row,
+    /// `host` (edited there) or `catalog` (the host copy is as fleet wrote
+    /// it; the catalog moved on). `None` otherwise, or when the manifest
+    /// entry cannot tell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drift_side: Option<String>,
 }
 
 /// A secret name known to the sync engine (migration 031). Never carries the
@@ -1270,7 +1798,8 @@ pub const TASK_TERMINAL_STATES: [&str; 3] = ["done", "failed", "cancelled"];
 
 pub(super) const TASK_COLUMNS: &str =
     "id, requester_session_id, worker_session_id, prompt, state, result, \
-     error, created_at, started_at, finished_at, nonce, worker_claude_session_id";
+     error, created_at, started_at, finished_at, nonce, worker_claude_session_id, \
+     detached_at, work_item_id, attempt, role, result_json, evidence_json";
 
 /// [`TASK_COLUMNS`] qualified with the `t.` alias for joined queries.
 pub(super) fn task_columns_t() -> String {
@@ -1291,6 +1820,12 @@ pub(super) fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow>
         finished_at: row.get(9)?,
         nonce: row.get(10)?,
         worker_claude_session_id: row.get(11)?,
+        detached_at: row.get(12)?,
+        work_item_id: row.get(13)?,
+        attempt: row.get(14)?,
+        role: row.get(15)?,
+        report: super::task_report::decode(row.get(16)?),
+        evidence: super::task_report::decode(row.get(17)?),
     })
 }
 
@@ -1589,6 +2124,94 @@ mod tests {
             back.eq_ignoring_row_version(&row),
             "a demoted-only difference is not a visible one"
         );
+    }
+
+    /// One private, owned session, for the two wire tests below.
+    fn owned_private_session(s: &Store) -> (i64, i64) {
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("w", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        let person = s.create_person("ada", None).unwrap().id;
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET owner_person_id = ?1, visibility = 'private' \
+                 WHERE id = ?2",
+                rusqlite::params![person, id],
+            )
+            .unwrap();
+        (id, person)
+    }
+
+    /// The inverse of the test above, and the privacy-critical one
+    /// (migration 099, spec §3.7): a `SessionRow` parsed from a frame with
+    /// **no `visibility` key at all** — an older hub, or a replayed frame
+    /// from before the column — reads [`VISIBILITY_UNCLAIMED`].
+    ///
+    /// This is what the named `#[serde(default = "visibility_unclaimed")]`
+    /// buys. A bare `#[serde(default)]` on a `String` yields the empty
+    /// string, which is neither value 097's `CHECK` admits and so matches no
+    /// arm any fence writes — the one default that fails OPEN. The assertion
+    /// is therefore on the VALUE, not on parsing having succeeded: parsing
+    /// succeeds either way, which is exactly why this test has to exist.
+    #[test]
+    fn a_session_row_with_no_visibility_key_reads_unclaimed() {
+        // Built from a real row and then stripped, rather than hand-written:
+        // a hand-written payload drifts, and this must stay a test about the
+        // two missing keys and nothing else. The row is private and owned
+        // BEFORE the strip, so the assertion tells the serde default apart
+        // from the value passing through — a row that was already
+        // `unclaimed` would pass either way.
+        let s = Store::open_in_memory().unwrap();
+        let (id, _) = owned_private_session(&s);
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        let mut json = serde_json::to_value(&row).unwrap();
+        let obj = json.as_object_mut().expect("a row is an object");
+        let was = obj.remove("visibility");
+        assert_eq!(
+            was.as_ref().and_then(|v| v.as_str()),
+            Some(VISIBILITY_PRIVATE),
+            "the key must have been there to be removed"
+        );
+        obj.remove("owner_person_id");
+        let back: SessionRow = serde_json::from_value(json)
+            .expect("a pre-095 hub's session row must still deserialize");
+        assert_eq!(
+            back.visibility, VISIBILITY_UNCLAIMED,
+            "a missing visibility reads `unclaimed`, never the empty string"
+        );
+        assert_ne!(
+            back.visibility, "",
+            "String::default() is the default that fails open"
+        );
+        assert_eq!(back.owner_person_id, None);
+    }
+
+    /// And the round trip: a current hub's values survive the wire, so the
+    /// default has not quietly made the field write-only — the failure
+    /// `a_project_row_from_a_current_hub_keeps_its_system_flag` pins for
+    /// `ProjectRow`.
+    ///
+    /// Neither field carries `skip_serializing_if`, and `visibility` must
+    /// not: `BroadcastEventBus::emit` runs `strip_nulls` before a frame
+    /// enters the replay ring, so an unowned row's `owner_person_id` is
+    /// ABSENT on the stream and indistinguishable from a pre-095 hub's.
+    /// `visibility` is NOT NULL and is therefore the only key a fence can
+    /// safely read (spec §3.7).
+    #[test]
+    fn visibility_and_owner_survive_the_wire() {
+        let s = Store::open_in_memory().unwrap();
+        let (id, person) = owned_private_session(&s);
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.owner_person_id, Some(person));
+        assert_eq!(row.visibility, VISIBILITY_PRIVATE);
+        let json = serde_json::to_value(&row).unwrap();
+        let vis = json.get("visibility").and_then(|v| v.as_str());
+        let own = json.get("owner_person_id").and_then(|v| v.as_i64());
+        assert_eq!(vis, Some(VISIBILITY_PRIVATE), "the fence's key");
+        assert_eq!(own, Some(person), "and the owner beside it");
+        let back: SessionRow = serde_json::from_value(json).unwrap();
+        assert!(back.eq_ignoring_row_version(&row));
     }
 
     /// `WorkSummary.effective_status` (native item status task 4, fix round

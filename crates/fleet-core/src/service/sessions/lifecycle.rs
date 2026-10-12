@@ -50,6 +50,63 @@ pub struct NewSessionArgs {
     /// default. Rejected for a `"shell"` session.
     #[serde(default)]
     pub effort: Option<String>,
+    /// Credential profile for the new session: `claude` runs with
+    /// `CLAUDE_CONFIG_DIR=~/.claude-profiles/<profile>` on the host, so it
+    /// bills that profile's `/login` (docs/accounts.md). A profile with no
+    /// login yet asks for one in the pane. `None` / empty = the host's own
+    /// login. Rejected for a `"shell"` session.
+    #[serde(default)]
+    pub profile: Option<String>,
+    /// Which agent runs in the pane (`sessions.agent`, migration 121):
+    /// `"claude"` (the default), `"codex"` (OpenAI's Codex CLI), `"agy"`
+    /// (Google's Antigravity CLI) or `"shell"`, which is the same as
+    /// `kind: "shell"`. `None` / empty = Claude Code, or a shell for
+    /// `kind: "shell"`. `"agy"` is refused (`E_UNSUPPORTED`) until its
+    /// adapter is validated.
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// Who or what is starting the session (migration 124): set by the
+    /// caller in Rust, like `owner_person_id` and for the same reason never
+    /// read from the request, so a client cannot label its own session a
+    /// mission's. `None` = a person: `finalize_new_session` records
+    /// [`SessionOrigin::person`] with `owner_person_id`.
+    #[serde(skip_deserializing)]
+    pub origin: Option<crate::store::SessionOrigin>,
+    /// The person was asked about `accounts.pause_at` (redesign step 4.4)
+    /// and chose to start on that login anyway. The MCP / hub `new_session`
+    /// refuses a login at or past the line without it
+    /// (`E_CONFIRM_REQUIRED`, naming the login with headroom); the
+    /// desktop's own dialog asks first and sets it.
+    #[serde(default)]
+    pub over_limit_ok: bool,
+    /// Whose session this is to be (multi-user M1, T5): the `people` row the
+    /// new row is owned by, and therefore `private` to. `None` leaves it
+    /// `unclaimed` — the safe holding state (spec §4.3), never "everybody's".
+    ///
+    /// **`#[serde(skip_deserializing)]`, and that is the point.** A hub client
+    /// must not be able to name an owner over the wire: whose a session is
+    /// follows from the CONNECTION (`mcp::tools::fleet::owner_for`, which maps
+    /// a `Caller` to its person) or from the SOURCE row a create path derives
+    /// from, never from a field in the request. Every caller that may set it
+    /// does so in Rust, after the request has been authenticated;
+    /// `HubBackend::new_session` deliberately does not send it, and
+    /// `backend::tests_routing` asserts it is absent from the wire.
+    ///
+    /// It is read ONCE on the way through, after the row exists: the
+    /// hard-failing [`Store::claim_if_unclaimed`] in `finalize_new_session`.
+    /// There is no second, name-keyed mechanism ahead of the tmux create any
+    /// more — see the note on `finalize_new_session` and the long one in
+    /// `store::reconcile` for why that shape cannot be made sound.
+    #[serde(skip_deserializing)]
+    pub owner_person_id: Option<i64>,
+    /// An opaque id the caller minted (redesign step 5.13): when set, the
+    /// start reports its worktree, tmux and agent steps as `start:progress`
+    /// frames carrying this token and nothing else, so the client that
+    /// started the session can drive its Pulse sequence from them. Unlike
+    /// `call_id` it crosses to a hub: the frames reach a paired desktop on
+    /// the hub's `/events` stream. 1–64 of `[A-Za-z0-9_-]`.
+    #[serde(default)]
+    pub start_token: Option<String>,
 }
 
 /// An existing worktree to make sure is present on a remote host, ahead of
@@ -255,7 +312,9 @@ pub(super) fn git_setup_error(
 
 /// Build a bash script (run via `bash -lc`) that creates a new worktree for a
 /// NEW branch `name` off the repo's default branch, under `.worktrees/` or
-/// `.claude/worktrees/` (auto-detected, fallback `.worktrees/`). Idempotent:
+/// `.claude/worktrees/` (auto-detected, fallback `.worktrees/`), in the
+/// directory [`crate::projects::worktree_dir_name`] gives (`feat/imports` →
+/// `feat-imports`; the branch keeps its `/`). Idempotent:
 /// if the worktree dir already exists it's reused. Git's chatter goes to
 /// stderr; the ONLY stdout is the absolute PHYSICAL path of the worktree
 /// (`pwd -P`, last line), which the caller uses as the tmux cwd. The logical
@@ -279,9 +338,10 @@ pub(super) fn worktree_add_script(root: &str, name: &str, base: Option<&str>) ->
         "set -e\n\
          cd {root}\n\
          name={name}\n\
+         dir={dir}\n\
          basebr={basebr}\n\
          {WORKTREE_BASE_SNIPPET}\
-         wt=\"$base/$name\"\n\
+         wt=\"$base/$dir\"\n\
          if [ ! -e \"$wt\" ]; then\n\
          def=\"$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')\"\n\
          [ -z \"$def\" ] && def=\"$(git rev-parse --abbrev-ref HEAD 2>/dev/null)\"\n\
@@ -298,6 +358,7 @@ pub(super) fn worktree_add_script(root: &str, name: &str, base: Option<&str>) ->
          ( cd \"$wt\" && pwd -P )\n",
         root = quote(root),
         name = quote(name),
+        dir = quote(&crate::projects::worktree_dir_name(name)),
     )
 }
 
@@ -344,7 +405,28 @@ pub(super) async fn create_worktree_local(
             String::from_utf8_lossy(&out.stderr).trim().to_string(),
         ));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    worktree_path_from_stdout(&out.stdout)
+}
+
+/// The worktree path [`worktree_add_script`] printed: its LAST non-empty
+/// line. The script runs under `bash -lc`, so a login banner (`/etc/profile`,
+/// `~/.bash_profile`) prints ahead of it; taken whole, the banner became the
+/// pane's cwd and the stored `worktrees.path`. Anything but an absolute path
+/// is refused.
+pub(super) fn worktree_path_from_stdout(stdout: &[u8]) -> Result<String, IpcError> {
+    let text = String::from_utf8_lossy(stdout);
+    let path = text
+        .lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty())
+        .unwrap_or_default();
+    if !path.starts_with('/') {
+        return Err(IpcError::new(
+            codes::E_GIT_SETUP,
+            format!("git worktree add did not report a worktree path: {path:?}"),
+        ));
+    }
+    Ok(path.to_string())
 }
 
 pub async fn new_session(
@@ -374,13 +456,33 @@ pub async fn new_session(
                 "resume_claude_session_id applies to Claude sessions, not shell sessions",
             ));
         }
-        reject_held_conversation(&*lock(store)?, &args.host_alias, id)?;
+        let s = lock(store)?;
+        reject_held_conversation(&s, &args.host_alias, id)?;
+        reject_foreign_conversation(&s, id, args.owner_person_id)?;
     }
     normalize_launch(&mut args)?;
-    reject_lost_session_name(&*lock(store)?, &args.host_alias, &args.name)?;
+    {
+        let s = lock(store)?;
+        // M15 step G2.9: a login whose API-key account spent its daily limit
+        // starts nothing today, from any caller (`over_limit_ok` is the
+        // usage window's question, not this).
+        if args.profile.is_some() {
+            crate::service::account_limits::refuse_over_daily_limit(
+                &s,
+                &args.host_alias,
+                args.profile.as_deref(),
+                crate::store::now_unix(),
+            )?;
+        }
+        reject_lost_session_name(&s, &args.host_alias, &args.name, args.owner_person_id)?;
+        reject_adoptable_session_name(&s, &args.host_alias, &args.name)?;
+    }
 
     if let Some(name) = args.new_worktree.as_deref() {
         validate_new_worktree_name(name)?;
+    }
+    if let Some(t) = args.start_token.as_deref() {
+        validate_start_token(t)?;
     }
 
     // Mint / bind a cancellation token for the duration of this command.
@@ -399,7 +501,15 @@ pub async fn new_session(
     // panic inside new_session_inner, which a manual unregister would miss.
     let _guard = CancelGuard::new(Arc::clone(reg), cancel_id);
 
-    new_session_inner(args, store, ssh, token).await
+    // The steps are reported from inside; the outcome closes the last one
+    // (or marks the one in flight failed) here, on every exit path.
+    let progress = StartReporter::new(store, args.start_token.clone());
+    let out = new_session_inner(args, store, ssh, token, &progress).await;
+    match &out {
+        Ok(_) => progress.finish(),
+        Err(_) => progress.fail(),
+    }
+    out
 }
 
 /// Refuse a name that belongs to a lost session with a resumable
@@ -407,21 +517,101 @@ pub async fn new_session(
 /// revive that row and `set_claude_session_id` would overwrite its id, losing
 /// the conversation `restore_host_sessions` could bring back. Runs before any
 /// tmux call and before the work/shell split.
+///
+/// It also refuses a name held by a lost row belonging to **another person**
+/// (multi-user M1, T5), resumable or not. The same `ON CONFLICT DO UPDATE`
+/// revives such a row with its `owner_person_id` intact, so without this
+/// refusal person B's `new_session` under a name person A once used comes back
+/// as a row owned by — and readable only to — A. `as_person` is the person the
+/// caller is acting as (`None` for a caller that is nobody); the store's
+/// comparison answers fail-closed for it, so a person-less caller is refused
+/// by every owned lost row rather than inheriting one.
 pub(crate) fn reject_lost_session_name(
     s: &Store,
     host_alias: &str,
     name: &str,
+    as_person: Option<i64>,
 ) -> Result<(), IpcError> {
-    match s.lost_resumable_session_named(host_alias, name)? {
-        Some(row) => Err(IpcError::new(
+    if s.lost_session_named_owned_by_other(host_alias, name, as_person)?
+        .is_some()
+    {
+        // Deliberately names neither the row nor the person: the caller may
+        // not see either, and "pick another name" is the whole of what they
+        // need to act on.
+        return Err(IpcError::new(
             codes::E_EXISTS,
             format!(
-                "{name} belongs to a lost session (id {}); restore it with restore_host_sessions or dismiss it first",
-                row.id
+                "{name} on {host_alias} belongs to another person's lost session; \
+                 pick a different name"
             ),
-        )),
-        None => Ok(()),
+        ));
     }
+    // Multi-user M1 (T10): the ROW's id is not in the message. The name is
+    // the caller's own argument and the advice is actionable without it —
+    // `restore_host_sessions` takes a host, and the ids a caller may see come
+    // from `discover_lost_sessions`, which is person-fenced. The owned-row
+    // arm above already named neither the row nor the person; this arm
+    // reached the same caller (`new_session`, before the work/shell split)
+    // and was naming a row id, so the two arms disagreed about the same
+    // question.
+    if s.lost_resumable_session_named(host_alias, name)?.is_some() {
+        return Err(IpcError::new(
+            codes::E_EXISTS,
+            format!(
+                "{name} belongs to a lost session; restore it with \
+                 restore_host_sessions or dismiss it first"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Refuse a name that ALREADY has a `sessions` row on this host, of any
+/// status (multi-user M1, T5's review).
+///
+/// `new_session` inserts no row: it starts tmux, runs a reconcile pass, and
+/// then finds "its" row **by name** (`list_sessions_for_host(...).find(|r|
+/// r.tmux_name == args.name)`), which is the `row_id`
+/// [`finalize_new_session`] claims. That lookup cannot tell the row this
+/// create caused from a row that was already there, and a pre-existing row
+/// under the same name reliably survives the create:
+///
+/// * a ghost / lost row is REVIVED by the reconcile upsert's `ON CONFLICT DO
+///   UPDATE` (`status='running'`, `lost_at=NULL`) — the same row id, with its
+///   `session_events` timeline, conversations, journal entries, work links and
+///   tags still attached;
+/// * a row still recorded `running` whose tmux session has in fact died takes
+///   that same `DO UPDATE` branch without even a revival.
+///
+/// Either way the create would hand back, as the session it just made, a row
+/// it did not make — and `claim_if_unclaimed` would stamp the caller as the
+/// owner of somebody's abandoned history. So the create FAILS here instead of
+/// adopting it, before any tmux call.
+///
+/// [`reject_lost_session_name`] runs first and keeps its two more specific
+/// messages (another person's lost session, a restorable one). What is left
+/// for this one is every other row: a live row, a ghost, an unclaimed lost
+/// row with no conversation to restore. It names neither the row nor its
+/// owner — the name is the caller's own argument and "pick another" is the
+/// whole of what they can act on (T10).
+///
+/// Nothing legitimate is refused by it. A minted name already avoids every
+/// row on the host ([`fill_session_name`] checks `list_sessions_for_host`), a
+/// killed session's row is hard-deleted by the kill's own reconcile pass, and
+/// a name whose tmux session is genuinely live could only ever have failed in
+/// `tmux new-session` with `duplicate session` — later, and less legibly.
+pub(crate) fn reject_adoptable_session_name(
+    s: &Store,
+    host_alias: &str,
+    name: &str,
+) -> Result<(), IpcError> {
+    if s.get_session(name, host_alias)?.is_some() {
+        return Err(IpcError::new(
+            codes::E_EXISTS,
+            format!("{name} on {host_alias} already names a session; pick a different name"),
+        ));
+    }
+    Ok(())
 }
 
 /// Refuse to resume a conversation some session on the host already holds
@@ -432,20 +622,98 @@ pub(crate) fn reject_held_conversation(
     host_alias: &str,
     claude_id: &str,
 ) -> Result<(), IpcError> {
-    match s.session_with_claude_id(host_alias, claude_id)? {
-        Some(row) => Err(IpcError::new(
+    // Multi-user M1 (T10): the HOLDER's id and tmux name are not in the
+    // message. `claude_id` is the caller's own argument, so saying "something
+    // on this host already holds it" tells them nothing they did not supply;
+    // naming the row told them a private session's id and its tmux name,
+    // which in this fleet is a branch or a ticket key — spec §4.3 content,
+    // and the one thing this refusal must not disclose. The tool layer's
+    // `require_conversation_person` normally refuses a foreign conversation
+    // before this runs, but this function is also the desktop path's fence,
+    // where there is no `Caller` to ask, and an `unclaimed` holder on a
+    // multi-person hub reaches it either way.
+    if s.session_with_claude_id(host_alias, claude_id)?.is_some() {
+        return Err(IpcError::new(
             codes::E_EXISTS,
             format!(
-                "conversation {claude_id} already belongs to session {} ({}); restore it with restore_host_sessions instead",
-                row.id, row.tmux_name
+                "conversation {claude_id} is already held by a session on \
+                 {host_alias}; restore it with restore_host_sessions instead"
             ),
-        )),
-        None => Ok(()),
+        ));
     }
+    Ok(())
+}
+
+/// Multi-user M1 (T7, with T3's record): refuse to resume a conversation
+/// that belonged to somebody else.
+///
+/// **The attack works precisely when the session row is gone**, which is why
+/// a check against live rows cannot close it and why migration 099 records
+/// `conversation_owners` durably: A's session is reaped (a kill, a GC
+/// sweep, a `move_session`), B passes its `claude_session_id` to
+/// `new_session`, and the resumed session replays A's whole transcript into
+/// a pane B owns. `reject_held_conversation` above does not see it — there
+/// is no live row holding that conversation any more — and nothing else on
+/// this path asks whose it was.
+///
+/// The predicate has the shape every ownership comparison in M1 has, and for
+/// the same reason: a conversation nobody is recorded against (`None`) must
+/// never match a caller who is nobody (`None`). Written out rather than as
+/// `recorded == owner`, so it cannot be read as an identity check.
+///
+/// A conversation with no recorded owner is allowed through — that is the
+/// pre-M1 world and an `unclaimed` row's conversation, and refusing it would
+/// make every pre-upgrade transcript unresumable (rule 7: the upgrade widens
+/// nothing, and it must not narrow a single-person install into uselessness
+/// either).
+pub fn reject_foreign_conversation(
+    s: &Store,
+    claude_id: &str,
+    owner: Option<i64>,
+) -> Result<(), IpcError> {
+    if conversation_owner_allows(s, claude_id, owner)? {
+        return Ok(());
+    }
+    Err(IpcError::new(
+        codes::E_FORBIDDEN,
+        format!(
+            "conversation {claude_id} belongs to another person; a transcript is \
+             not resumed into somebody else's session"
+        ),
+    ))
+}
+
+/// The predicate half of [`reject_foreign_conversation`]: may `owner` take
+/// over the conversation `claude_id`?
+///
+/// Written out because two callers need the ANSWER rather than this
+/// function's refusal. `work_link { resume }` and `work_link { summarize }`
+/// are addressed by a work key and a link id, never by a session
+/// (multi-user M1, T7), so they must answer with the LINK's own
+/// `E_NOTFOUND` — a link whose conversation is not this caller's reads
+/// exactly like a link that does not exist — and not with an `E_FORBIDDEN`
+/// that confirms both the link and whose it is.
+///
+/// Every rule the doc above states holds here, because this is where it is
+/// written: a failed read is not a pass, `(None, None)` never matches, and a
+/// conversation with no recorded owner is allowed through.
+pub fn conversation_owner_allows(
+    s: &Store,
+    claude_id: &str,
+    owner: Option<i64>,
+) -> Result<bool, IpcError> {
+    // A failed read is NOT a pass: a conversation whose owner cannot be
+    // established is one this caller cannot show it owns.
+    Ok(match s.conversation_owner(claude_id)? {
+        None => true,
+        Some(o) => matches!(owner, Some(p) if p == o),
+    })
 }
 
 /// Blank `model` / `effort` mean the host's default (`None`); anything else
-/// must be a valid value, and neither applies to a shell session.
+/// must be a valid value, and neither applies to a shell session. `agent`
+/// folds into `kind` here ([`normalize_agent`]), so everything after this
+/// reads a shell session from `kind` alone.
 pub(crate) fn normalize_launch(args: &mut NewSessionArgs) -> Result<(), IpcError> {
     let trim = |v: &mut Option<String>| {
         *v = v
@@ -453,13 +721,36 @@ pub(crate) fn normalize_launch(args: &mut NewSessionArgs) -> Result<(), IpcError
             .map(|x| x.trim().to_string())
             .filter(|x| !x.is_empty());
     };
+    trim(&mut args.agent);
+    normalize_agent(args)?;
     trim(&mut args.model);
     trim(&mut args.effort);
-    if args.kind.as_deref() == Some("shell") && (args.model.is_some() || args.effort.is_some()) {
+    trim(&mut args.profile);
+    if args.kind.as_deref() == Some("shell")
+        && (args.model.is_some() || args.effort.is_some() || args.profile.is_some())
+    {
         return Err(IpcError::new(
             codes::E_INVALID,
-            "model and effort apply to Claude sessions, not shell sessions",
+            "model, effort and profile apply to Claude sessions, not shell sessions",
         ));
+    }
+    if let Some(p) = args.profile.as_deref() {
+        match args.agent.as_deref() {
+            Some(crate::store::AGENT_CODEX) => {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    "a credential profile applies to Claude Code sessions; Codex has none",
+                ))
+            }
+            Some(crate::store::AGENT_AGY) => {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    "a credential profile applies to Claude Code sessions; agy keeps its own login",
+                ))
+            }
+            _ => {}
+        }
+        crate::validate::claude_profile(p)?;
     }
     if let Some(m) = args.model.as_deref() {
         crate::validate::claude_model(m)?;
@@ -470,38 +761,99 @@ pub(crate) fn normalize_launch(args: &mut NewSessionArgs) -> Result<(), IpcError
     Ok(())
 }
 
-/// The Claude conversation id a new session runs under, and its pane command.
+/// Settle `agent` against `kind`: `agent: "shell"` makes a shell session
+/// (and conflicts with any other kind), `kind: "shell"` with no agent is a
+/// shell, and no agent can run in a shell session. A shell row's `agent`
+/// follows from `kind` (`Store::set_session_kind`), so an absent agent
+/// stays absent here; a Codex or agy row is written by `new_session`.
+/// An unknown name is invalid.
+fn normalize_agent(args: &mut NewSessionArgs) -> Result<(), IpcError> {
+    use crate::store::{AGENTS, AGENT_AGY, AGENT_CLAUDE, AGENT_CODEX, AGENT_SHELL};
+    let shell_kind = args.kind.as_deref() == Some("shell");
+    match args.agent.as_deref() {
+        None => {}
+        Some(AGENT_SHELL) => match args.kind.as_deref() {
+            None | Some("shell") => args.kind = Some("shell".into()),
+            Some(other) => {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    format!("agent shell runs a plain shell; it cannot start a {other} session"),
+                ))
+            }
+        },
+        Some(AGENT_CLAUDE | AGENT_CODEX | AGENT_AGY) if shell_kind => {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "a shell session runs no agent; drop agent or kind",
+            ))
+        }
+        Some(AGENT_AGY) => refuse_unvalidated_agent(AGENT_AGY)?,
+        Some(AGENT_CLAUDE | AGENT_CODEX) => {}
+        Some(_) => {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!("agent must be one of {}", AGENTS.join(", ")),
+            ))
+        }
+    }
+    Ok(())
+}
+
+/// Refuse to launch an agent whose adapter is not validated yet (redesign
+/// 12.3): agy's adapter (`agent_adapter::agy`) is provisional — no captured
+/// pane fixtures, its SQLite transcripts unread — so the New session picker
+/// shows it as coming, and `new_session`, restart, recreate and repair
+/// refuse it with `E_UNSUPPORTED` rather than start a pane fleet cannot
+/// read. The adapter code stays; lifting this is one line once it is
+/// validated against real captures.
+pub(crate) fn refuse_unvalidated_agent(agent: &str) -> Result<(), IpcError> {
+    if agent == crate::store::AGENT_AGY {
+        return Err(IpcError::new(
+            codes::E_UNSUPPORTED,
+            "agy sessions are not supported yet: fleet cannot read agy's state or \
+             transcripts until its adapter is validated; use claude or codex",
+        ));
+    }
+    Ok(())
+}
+
+/// The conversation id a new session runs under, and its pane command.
 /// Work/review sessions get an app-minted id so a later recreate/restart
 /// resumes THIS conversation, not "most recent for the cwd" — or, with
 /// `resume_claude_session_id`, the given conversation, launched exactly as
-/// `recreate_pane_command` would. A shell session has no id.
+/// `recreate_pane_command` would. A shell session has no id, and neither
+/// does a new session of an agent that picks its own (Codex).
 pub(crate) fn claude_id_and_pane_cmd(args: &NewSessionArgs) -> (Option<String>, String) {
-    if args.kind.as_deref() == Some("shell") {
+    let kind = args.kind.as_deref().unwrap_or("work");
+    let Some(agent) = crate::agent_adapter::for_session(kind, args.agent.as_deref()) else {
         return (
             None,
             crate::tmux::shell_pane_command(args.start_command.as_deref()),
         );
-    }
+    };
     // `model` / `effort` are also stored on the row (`store_launch`), so a
     // later recreate / restart / repair / move launches with them again.
     let launch = crate::tmux::ClaudeLaunch {
         model: args.model.clone(),
         effort: args.effort.clone(),
+        profile: args.profile.clone(),
     };
     match args.resume_claude_session_id.as_deref() {
         Some(id) => (
             Some(id.to_string()),
-            crate::tmux::pane_command_with(
-                Some(id).filter(|id| crate::validate::claude_session_id(id).is_ok()),
+            agent.launch_command(
+                Some(id).filter(|id| agent.valid_conversation_id(id)),
                 &args.name,
                 &launch,
             ),
         ),
-        None => {
-            let id = uuid::Uuid::new_v4().to_string();
-            let pane = crate::tmux::pane_command_with(Some(&id), &args.name, &launch);
-            (Some(id), pane)
-        }
+        None => match agent.mint_conversation_id() {
+            Some(id) => {
+                let pane = agent.launch_command(Some(&id), &args.name, &launch);
+                (Some(id), pane)
+            }
+            None => (None, agent.start_command(&args.name, &launch)),
+        },
     }
 }
 
@@ -591,6 +943,54 @@ pub(super) fn project_taken_slugs(
     Ok(taken)
 }
 
+/// The checkout of project `project_id` on `host`: the project's own path
+/// on `local`, else the projects-root layout on that host, cloned there
+/// first when it is missing (as a new session would). A system project has
+/// no repository and is refused. For the agents' runs
+/// (`service::agents::review`), which work beside this checkout.
+pub(crate) async fn project_checkout_on(
+    store: &Mutex<Store>,
+    ssh: &SshClient,
+    host: &str,
+    project_id: i64,
+) -> Result<String, IpcError> {
+    crate::service::hub::ensure_local_allowed(host)?;
+    let system = {
+        let s = lock(store)?;
+        fetch_system_base_path(&s, project_id)?.is_some()
+    };
+    if system {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!("project {project_id} is a system project without a repository"),
+        ));
+    }
+    if host == "local" {
+        let s = lock(store)?;
+        return fetch_base_path(&s, project_id);
+    }
+    let (owner, repo) = {
+        let s = lock(store)?;
+        fetch_owner_repo(&s, project_id)?
+    };
+    let home = ssh.remote_home(host).await?;
+    let (root, _) = {
+        let s = lock(store)?;
+        remote_project_path_for(&s, host, &home, &owner, &repo, None)
+    };
+    ensure_remote_project(
+        ssh,
+        host,
+        &owner,
+        &repo,
+        &root,
+        None,
+        CancellationToken::new(),
+    )
+    .await?;
+    Ok(root)
+}
+
 /// The pane cwd for a SYSTEM project (`Some`), or `None` for an ordinary one.
 ///
 /// A system project (the UX agent's operator dir) is not a repository: its
@@ -622,7 +1022,10 @@ pub(super) async fn new_session_inner(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
     token: CancellationToken,
+    progress: &StartReporter<'_>,
 ) -> Result<SessionRow, IpcError> {
+    use crate::events::StartStep;
+    progress.advance(StartStep::Worktree);
     // Resolve the cwd that tmux will spawn the pane in. For LOCAL the path
     // comes straight from the DB (it was discovered by scanning ~/projects).
     // For REMOTE we can't use the local path — it doesn't exist on the other
@@ -708,7 +1111,7 @@ pub(super) async fn new_session_inner(
                     String::from_utf8_lossy(&out.stderr).trim().to_string(),
                 ));
             }
-            PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            PathBuf::from(worktree_path_from_stdout(&out.stdout)?)
         } else {
             let (owner, repo, wt_info) = {
                 let s = lock(store)?;
@@ -794,13 +1197,22 @@ pub(super) async fn new_session_inner(
         (path, None)
     };
 
+    progress.advance(StartStep::Tmux);
     let tmux = exec_for(&args.host_alias, ssh);
     tmux.new_session(&args.name, &path, &pane_cmd).await?;
 
-    // The name is live again — a kill of it moments ago must not make the
-    // reconcile below refuse to insert the row this function returns.
+    // AFTER the create, like every other create site (the one rule, and
+    // `every_path_that_creates_a_tmux_session_forgets_the_kill_first` pins
+    // it): the forget is what lets the reconcile below insert a row for a
+    // name fleet killed moments ago, and a create that FAILED must not forget
+    // a real kill — a pass still carrying the old name would re-insert the
+    // dead row. Nothing rides this call any more besides the forget; the
+    // owner reservation that used to make this site the inverted one is gone
+    // (T5's review — see `store::reconcile`'s ownership note).
     record_tmux_created(store, &args.host_alias, &args.name);
+
     reconcile_one_host(store, ssh, &args.host_alias).await?;
+    progress.advance(StartStep::Agent);
     if let Some(rep) = &repaired {
         // Same detail as every other workspace_repaired event (branch_source
         // included), attached now that reconcile created the row.
@@ -830,16 +1242,22 @@ pub(super) async fn new_session_inner(
     let worktree_id =
         link_new_session_worktree(&s, row.id, &args, &path.to_string_lossy(), fixed.is_some())?;
     let derived_friendly = derive_friendly_name(&s, &args, worktree_id.or(row.worktree_id))?;
-    // Soft-fail: the pane already runs with them; a failed write only means
-    // a later recreate / restart uses the host's defaults.
     if !is_shell {
         let launch = crate::tmux::ClaudeLaunch {
             model: args.model.clone(),
             effort: args.effort.clone(),
+            profile: args.profile.clone(),
         };
-        if let Err(e) = store_launch(&s, row.id, &launch) {
-            tracing::warn!(session = %args.name, error = %e, "[new_session] storing the launch options failed");
-        }
+        store_start_launch(&s, row.id, &args.name, &launch)?;
+    }
+    // Not soft: a Codex or agy pane on a row that says Claude would be resumed,
+    // read and answered as Claude's.
+    if let Some(agent) = args
+        .agent
+        .as_deref()
+        .filter(|a| *a != crate::store::AGENT_CLAUDE && !is_shell)
+    {
+        s.set_session_agent(row.id, agent)?;
     }
     finalize_new_session(
         &s,
@@ -849,6 +1267,11 @@ pub(super) async fn new_session_inner(
         derived_friendly.as_deref(),
         claude_id.as_deref(),
         is_shell,
+        args.owner_person_id,
+        &args
+            .origin
+            .clone()
+            .unwrap_or_else(|| crate::store::SessionOrigin::person(args.owner_person_id)),
     )
 }
 
@@ -878,9 +1301,13 @@ pub(super) fn link_new_session_worktree(
             Some(row) if row.name == "main" => return Ok(None),
             _ => w,
         },
-        (None, Some(name)) => {
-            s.upsert_worktree_on(&args.host_alias, args.project_id, name, cwd, Some(name))?
-        }
+        (None, Some(name)) => s.upsert_worktree_on(
+            &args.host_alias,
+            args.project_id,
+            &crate::projects::worktree_dir_name(name),
+            cwd,
+            Some(name),
+        )?,
         (None, None) => return Ok(None),
     };
     s.link_session_worktree(row_id, wid)?;
@@ -891,7 +1318,14 @@ pub(super) fn link_new_session_worktree(
 /// so the returned row is the row as of the last write (the frontend merges
 /// it optimistically and orders it by `row_version`). Soft-fails the
 /// cosmetic writes (`started_at`, friendly name, claude id) with a warning;
-/// the `kind` tag and the final read are hard failures.
+/// the `kind` tag, the OWNERSHIP claim and the final read are hard failures,
+/// and so is the origin (migration 124): the origin chip is how a person
+/// tells their own start from a mission's or an agent's.
+// Nine arguments: the row's identity, the three values to write, the owner
+// and the origin. Grouping them into a struct would mean a type whose only purpose is
+// this one call, and every one of them is already named at the single call
+// site.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn finalize_new_session(
     s: &Store,
     row_id: i64,
@@ -900,7 +1334,48 @@ pub(super) fn finalize_new_session(
     friendly_name: Option<&str>,
     claude_id: Option<&str>,
     is_shell: bool,
+    owner: Option<i64>,
+    origin: &crate::store::SessionOrigin,
 ) -> Result<SessionRow, IpcError> {
+    // Ownership (multi-user M1, T5), and a HARD failure — alone among the
+    // writes here, which are all soft because "the session is live either
+    // way". This one is not cosmetic: an unstamped row is `unclaimed`, which
+    // means the person who just started the session cannot read their own row
+    // (spec §4.3 serves an out-of-scope caller a count and nothing more) and
+    // an agent that can prove the pane could claim it for somebody else.
+    // Returning such a row as a success would be the privacy failure dressed
+    // as one.
+    //
+    // It is also the ONLY mechanism that stamps an owner (T5's review). The
+    // name-keyed intent reconcile used to read before the row existed is
+    // deleted: a tmux name is not an identity, and three attempts to guard
+    // that mechanism each moved its hole rather than closing it (the long
+    // note in `store::reconcile` records all three). So every row the
+    // reconcile upsert inserts is `unclaimed`, and this call does the work.
+    //
+    // **What that trades, written down rather than papered over.** The intent
+    // existed to close the window between the reconcile pass inserting the row
+    // and this claim: in that window the row is `unclaimed`, so an agent that
+    // can prove the pane (spec rule 6) could claim it first. That window is
+    // accepted, because it is not comparable to the hole it replaces:
+    //
+    // * the claimant must PROVE the pane — of a session that is still being
+    //   created, in which no agent is yet running and no prompt has been sent;
+    // * it is in-process and short: the pass that inserts the row and this
+    //   claim are separated only by `list_sessions_for_host`, one worktree
+    //   link and one friendly-name derivation, all under the same `Store`
+    //   lock this function already holds (the pass that inserted the row had
+    //   to release it, and nothing awaits in between);
+    // * losing it is loud, not silent — the claim then meets a row owned by
+    //   somebody else and `E_FORBIDDEN` fails the create, so the caller never
+    //   gets handed a session that is not theirs.
+    //
+    // Whereas the intent's hole needed no race at all: naming an existing
+    // `unclaimed` row, or a live tmux session fleet had no row for yet, was
+    // enough to be stamped its owner by the next pass. A smaller, loud,
+    // proof-gated window replaces a silent deterministic one.
+    s.claim_if_unclaimed(row_id, owner)?;
+    s.set_session_origin(row_id, origin)?;
     // PROD-5: the fleet created this session now.
     if let Err(e) = s.set_started_at(row_id, now_unix()) {
         tracing::warn!(session = %name, error = %e, "[new_session] storing started_at failed");
@@ -1061,11 +1536,53 @@ pub(super) fn bg_kill_action(
 /// otherwise make the reconcile refuse the insert, and the caller would be
 /// left with a live tmux session and no row to return.
 ///
+/// It says nothing about WHOSE the next row under that name is, and there is
+/// no sibling call that does (multi-user M1, T5's review). A create path
+/// states its owner once, against a row id, through
+/// [`Store::claim_if_unclaimed`] — `new_session` in [`finalize_new_session`],
+/// `spawn_review` and `move_session` carrying their SOURCE row's owner. The
+/// name-keyed reservation this function used to file alongside the forget is
+/// deleted; `store::reconcile`'s ownership note says why a name cannot carry
+/// that statement.
+///
 /// Best-effort and lock-safe: the guard is taken and dropped inside, never
 /// held across an await, and a poisoned lock only costs one refused cycle.
 pub(crate) fn record_tmux_created(store: &Mutex<Store>, host_alias: &str, tmux_name: &str) {
     if let Ok(s) = store.lock() {
         s.forget_kill(host_alias, tmux_name);
+    }
+}
+
+/// The hub's own personal owner, for a create path that has no caller to ask
+/// (multi-user M1, T5).
+///
+/// Several service-layer paths build a `NewSessionArgs` far from any request:
+/// the operator session, the asset catalog's authoring session, a ticket start,
+/// a work resume. None of them carries a `Caller` — the person is known at the
+/// MCP / Tauri edge and the signature chain in between is long — and all of
+/// them are "fleet, acting for whoever runs this hub". That is
+/// `Store::personal_owner_id`, the same person `mcp::tools::fleet::owner_for`
+/// maps the master token to.
+///
+/// `None` on a hub that cannot say who its owner is (T1's fail-closed rule),
+/// which leaves the session `unclaimed` rather than guessing. A failed read is
+/// logged and treated the same way: this must never be the reason a start
+/// fails, and `unclaimed` is recoverable (the row can be claimed) where a
+/// wrong owner is not.
+///
+/// It is **not** a substitute for a caller's own person. On a hub with several
+/// people, a start made through one of these paths is the hub owner's; the
+/// paths that DO have a caller (`mcp::tools::session_ops`, `dispatch_task`)
+/// pass that caller's person instead, and a path that gains a caller later
+/// should stop calling this.
+pub fn hub_personal_owner(store: &Mutex<Store>) -> Option<i64> {
+    let s = store.lock().ok()?;
+    match s.personal_owner_id() {
+        Ok(owner) => owner,
+        Err(e) => {
+            tracing::warn!(error = %e.message, "[owner] reading the hub's personal owner failed");
+            None
+        }
     }
 }
 
@@ -1075,6 +1592,9 @@ pub(crate) fn record_kill(s: &Store, id: i64, claude_session_id: Option<&str>) {
     }
     if let Some(cid) = claude_session_id {
         let _ = s.close_conversation(id, cid, "killed");
+    }
+    if let Err(e) = s.cancel_forms_of_session(id) {
+        tracing::warn!(session_id = id, error = %e, "[forms] cancel on kill failed");
     }
 }
 
@@ -1166,11 +1686,26 @@ pub(super) async fn kill_session_with(
         if let Ok(s) = store.lock() {
             record_kill(&s, id, Some(&sid));
         }
-        super::reconcile::reconcile_one_host_with(store, deps, &args.host_alias).await?;
+        super::reconcile::reconcile_one_host_with(store, deps, &args.host_alias)
+            .await
+            .map_err(after_the_kill)?;
         return Ok(id);
     }
     let tmux = (deps.exec)(&args.host_alias);
-    tmux.kill_session(&args.name).await?;
+    let tmux_gone = match tmux.kill_session(&args.name).await {
+        Ok(()) => false,
+        // A ghost: its tmux session (or the whole server) is already gone,
+        // so there is nothing to kill. Finish the bookkeeping below instead
+        // of failing with "can't find session" and leaving the row stuck.
+        Err(e) if crate::tmux::session_already_gone(&e.message) => {
+            tracing::info!(session_id = id, error = %e.message, "[kill] tmux already gone");
+            true
+        }
+        Err(e) => return Err(e),
+    };
+    // Its shell terminals (step 5.3) go with it. Best-effort: a terminal
+    // left behind is no session row, only a stray tmux session.
+    super::terminals::close_all_after_kill(&*tmux, &args.name).await;
     // Task G: record the kill before reconcile reaps the row. Best-effort.
     // Then ghost the row as fleet's OWN kill (`lost_reason='killed'`)
     // before the reconcile below probes the host: tmux exits with its last
@@ -1182,12 +1717,52 @@ pub(super) async fn kill_session_with(
     // still ghosts the row, as before.
     if let Ok(s) = store.lock() {
         record_kill(&s, id, claude_sid.as_deref());
-        if let Err(e) = s.mark_session_killed(id, now_unix()) {
-            tracing::warn!(session_id = id, error = %e, "[kill] marking the killed row failed");
+        match s.mark_session_killed(id, now_unix()) {
+            // Already a ghost before this kill, with no tmux left: a
+            // resumable loss (`host_reboot`, `tmux_server_gone`) is exempt
+            // from the reap for the lost-session TTL, so the person's Kill
+            // would leave it listed for days. They asked for it gone.
+            Ok(None) if tmux_gone => {
+                if let Err(e) = s.delete_session(id) {
+                    tracing::warn!(session_id = id, error = %e, "[kill] removing the ghost row failed");
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(session_id = id, error = %e, "[kill] marking the killed row failed");
+            }
         }
     }
-    super::reconcile::reconcile_one_host_with(store, deps, &args.host_alias).await?;
+    super::reconcile::reconcile_one_host_with(store, deps, &args.host_alias)
+        .await
+        .map_err(after_the_kill)?;
     Ok(id)
+}
+
+/// The `details` key [`kill_session`] sets on an error that came AFTER the
+/// session was killed: the trailing reconcile failed, the kill did not.
+pub const KILL_LANDED: &str = "kill_landed";
+
+/// Mark a post-kill failure (review r18 M4): a caller that must know whether
+/// the session is gone — `move_session`'s finalise — reads it with
+/// [`kill_landed`] instead of taking every `Err` for "still alive".
+pub(crate) fn after_the_kill(e: IpcError) -> IpcError {
+    let mut details = match e.details {
+        Some(serde_json::Value::Object(ref m)) => m.clone(),
+        _ => serde_json::Map::new(),
+    };
+    details.insert(KILL_LANDED.into(), serde_json::Value::Bool(true));
+    let details = serde_json::Value::Object(details);
+    e.with_details(details)
+}
+
+/// Whether a [`kill_session`] error came after the kill itself succeeded.
+pub fn kill_landed(e: &IpcError) -> bool {
+    e.details
+        .as_ref()
+        .and_then(|d| d.get(KILL_LANDED))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1232,7 +1807,17 @@ pub(super) async fn rename_session_with(
         // tmux would accept the new name (a lost session is not in tmux),
         // and the row carry-over below would then dismiss the lost row —
         // its timeline, participant and restore entry. Refuse first.
-        reject_lost_session_name(&s, &args.host_alias, &args.new_name)?;
+        //
+        // The person the guard compares against is the RENAMED row's own owner
+        // (multi-user M1, T5): a rename is not a create path, it carries this
+        // row over, so "another person" means a lost row that is not this
+        // session's owner's. `rename_session_row` hard-DELETES the stale row
+        // standing under the new name, which is exactly what must not happen
+        // to a colleague's lost session.
+        let as_person = s
+            .get_session(&args.old_name, &args.host_alias)?
+            .and_then(|r| r.owner_person_id);
+        reject_lost_session_name(&s, &args.host_alias, &args.new_name, as_person)?;
     }
     tmux.rename_session(&args.old_name, &args.new_name).await?;
     // The session now answers to `new_name`, which may be a name fleet killed
@@ -1263,6 +1848,8 @@ pub(super) async fn rename_session_with(
         }
         return Err(e);
     }
+    // Its shell terminals (step 5.3) follow it to the new name.
+    super::terminals::rename_after_rename(tmux, &args.old_name, &args.new_name).await;
     reconcile_one_host(store, ssh, &args.host_alias).await?;
     let s = lock(store)?;
     // `new_name` is validated verbatim (no padding), so look it up as-is —
@@ -1277,6 +1864,31 @@ pub(super) async fn rename_session_with(
                 ),
             )
         })
+}
+
+/// `touch_session_viewed`: the session a person is looking at.
+#[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "TouchSessionViewedParams")]
+pub struct TouchSessionViewedArgs {
+    /// The session on screen.
+    pub session_id: i64,
+}
+
+/// Record that a person is looking at the session now (migration 125), so
+/// every turn that has ended reads as seen (`done_unread` clears). Answers
+/// the row as it now stands; a call that moves nothing still answers it.
+pub fn touch_session_viewed(
+    args: TouchSessionViewedArgs,
+    store: &Mutex<Store>,
+) -> Result<SessionRow, IpcError> {
+    let s = lock(store)?;
+    s.touch_session_viewed(args.session_id, now_unix())?;
+    s.get_session_by_id(args.session_id)?.ok_or_else(|| {
+        IpcError::new(
+            codes::E_NOTFOUND,
+            format!("session {} not found", args.session_id),
+        )
+    })
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1319,6 +1931,64 @@ pub fn set_session_friendly_name(
         })
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetSessionTagsArgs {
+    pub session_id: i64,
+    /// The full list (replaces; empty clears).
+    pub tags: Vec<String>,
+}
+
+/// Validate a session's tags: at most 16, each 1–32 chars of
+/// `[A-Za-z0-9_.:-]`, trimmed and de-duplicated in order. PURE; the MCP
+/// `set_session_tags` and the desktop's Label field share it.
+pub fn normalize_session_tags(tags: Vec<String>) -> Result<Vec<String>, IpcError> {
+    if tags.len() > 16 {
+        return Err(IpcError::new(
+            codes::E_VALIDATE,
+            "at most 16 tags per session",
+        ));
+    }
+    let mut out: Vec<String> = Vec::with_capacity(tags.len());
+    for t in tags {
+        let t = t.trim().to_string();
+        if t.is_empty() || t.chars().count() > 32 {
+            return Err(IpcError::new(
+                codes::E_VALIDATE,
+                format!("tag {t:?} must be 1–32 characters"),
+            ));
+        }
+        if !t
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '-'))
+        {
+            return Err(IpcError::new(
+                codes::E_VALIDATE,
+                format!("tag {t:?} may only contain letters, digits, _ . : -"),
+            ));
+        }
+        if !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    Ok(out)
+}
+
+/// Replace a session's tags (the desktop's Label, M15 G2.7). Answers the
+/// updated row.
+pub fn set_session_tags(
+    args: SetSessionTagsArgs,
+    store: &Mutex<Store>,
+) -> Result<SessionRow, IpcError> {
+    let tags = normalize_session_tags(args.tags)?;
+    let s = lock(store)?;
+    s.set_session_tags(args.session_id, &tags)?.ok_or_else(|| {
+        IpcError::new(
+            codes::E_NOTFOUND,
+            format!("session {} not found", args.session_id),
+        )
+    })
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct RestartSessionArgs {
     pub host_alias: String,
@@ -1326,6 +1996,54 @@ pub struct RestartSessionArgs {
     /// Override the controller self-target guard.
     #[serde(default)]
     pub force: bool,
+    /// Switch the session's credential profile on the way through: a
+    /// profile name, or `""` for the host's own login. The conversation is
+    /// resumed under it (a running `claude` cannot change its login, so a
+    /// switch IS a restart). `None` keeps the stored profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// Switch the model the relaunched agent runs: a model alias or id, or
+    /// `""` for the host's default. For an agent whose model is chosen at
+    /// launch only (Codex's `/model` takes no argument), this is how the
+    /// composer changes it: the conversation is resumed under the new
+    /// model. `None` keeps the stored model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Switch the reasoning effort the same way: one of
+    /// [`crate::validate::EFFORT_LEVELS`], or `""` for the host's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+/// The stored model / effort change a [`RestartSessionArgs::model`] or
+/// [`RestartSessionArgs::effort`] asks for, shaped like [`profile_switch`]:
+/// `None` = keep, `Some(None)` = the host's default, `Some(Some(v))` = `v`.
+pub(crate) fn launch_switch(
+    raw: Option<&str>,
+    check: fn(&str) -> Result<(), IpcError>,
+) -> Result<Option<Option<String>>, IpcError> {
+    match raw.map(str::trim) {
+        None => Ok(None),
+        Some("") => Ok(Some(None)),
+        Some(v) => {
+            check(v)?;
+            Ok(Some(Some(v.to_string())))
+        }
+    }
+}
+
+/// The stored-profile change a [`RestartSessionArgs::profile`] asks for:
+/// `None` = keep, `Some(None)` = the host's login, `Some(Some(name))` = that
+/// profile. A name is validated here, before anything is written.
+pub(crate) fn profile_switch(raw: Option<&str>) -> Result<Option<Option<String>>, IpcError> {
+    match raw.map(str::trim) {
+        None => Ok(None),
+        Some("") => Ok(Some(None)),
+        Some(p) => {
+            crate::validate::claude_profile(p)?;
+            Ok(Some(Some(p.to_string())))
+        }
+    }
 }
 
 pub async fn restart_session(
@@ -1335,6 +2053,10 @@ pub async fn restart_session(
 ) -> Result<SessionRow, IpcError> {
     crate::validate::host_alias(&args.host_alias)?;
     crate::validate::tmux_name_addressable(&args.name)?;
+    let switch = profile_switch(args.profile.as_deref())?;
+    let model_switch = launch_switch(args.model.as_deref(), crate::validate::claude_model)?;
+    let effort_switch = launch_switch(args.effort.as_deref(), crate::validate::effort_level)?;
+    let launch_switched = model_switch.is_some() || effort_switch.is_some();
     // EXEMPT from `service::operator::refuse_if_operator`, deliberately, and
     // alone among the session-addressed operations. This IS the agent
     // panel's `lost` recovery — `restartOperator()` in `src/lib/operator.ts`
@@ -1349,58 +2071,160 @@ pub async fn restart_session(
     // Respawn the pane with the command matching the session's kind so a
     // restarted shell session comes back as a shell, not a Claude pane. Read
     // the controller under the same lock and refuse to restart ourselves
-    // unless forced.
-    let (kind, claude_id, session_id, launch) = {
+    // unless forced ([`restart_guard`], which exempts the operator).
+    let (kind, agent, claude_id, session_id, launch, gone_cwd) = {
         let s = lock(store)?;
-        guard_not_controller(
-            s.get_controller()?.as_ref(),
-            &args.host_alias,
-            &args.name,
-            args.force,
-        )?;
-        match s.get_session(&args.name, &args.host_alias)? {
+        restart_guard(&s, &args.host_alias, &args.name, args.force)?;
+        let row = s.get_session(&args.name, &args.host_alias)?;
+        let gone_cwd = gone_pane_cwd(&s, row.as_ref(), &args.host_alias, &args.name)?;
+        match row {
             Some(r) => {
-                let launch = stored_launch(&s, r.id);
-                (r.kind, r.claude_session_id, Some(r.id), launch)
+                if switch.is_some()
+                    && (r.kind == "shell"
+                        || crate::store::has_no_pane(&r.kind)
+                        || r.agent != crate::store::AGENT_CLAUDE)
+                {
+                    return Err(IpcError::new(
+                        codes::E_INVALID,
+                        "a credential profile applies to Claude sessions only",
+                    ));
+                }
+                if launch_switched && (r.kind == "shell" || crate::store::has_no_pane(&r.kind)) {
+                    return Err(IpcError::new(
+                        codes::E_INVALID,
+                        "a model or effort applies to agent sessions, not shell sessions",
+                    ));
+                }
+                // The new profile is launched from memory and stored only
+                // once the relaunch succeeded ([`relaunch_recording_login`]):
+                // written first, a refused repair or a failed respawn left the
+                // row naming a login the pane never ran under. A model or
+                // effort switch is stored the same way, after the relaunch.
+                let mut launch = stored_launch(&s, r.id)?;
+                if let Some(profile) = switch.as_ref() {
+                    launch.profile = profile.clone();
+                }
+                if let Some(model) = model_switch.as_ref() {
+                    launch.model = model.clone();
+                }
+                if let Some(effort) = effort_switch.as_ref() {
+                    launch.effort = effort.clone();
+                }
+                (
+                    r.kind,
+                    r.agent,
+                    r.claude_session_id,
+                    Some(r.id),
+                    launch,
+                    gone_cwd,
+                )
             }
-            None => ("work".to_string(), None, None, Default::default()),
+            None if switch.is_some() || launch_switched => {
+                return Err(IpcError::new(
+                    codes::E_NOTFOUND,
+                    format!(
+                        "no session {} on {} to relaunch with a new profile, model or effort",
+                        args.name, args.host_alias
+                    ),
+                ));
+            }
+            // No row under that name: a restart is about to create a live
+            // tmux session fleet has no record of. It lands `unclaimed`
+            // (multi-user M1, T5) — `record_tmux_created` below reserves no
+            // owner for it. A restart is not a create path and carries no
+            // person; attributing the session to whoever pressed the button
+            // would be a guess, and `unclaimed` is the defined answer for a
+            // row nobody can speak for (spec §4.3).
+            None => (
+                "work".to_string(),
+                crate::store::AGENT_CLAUDE.to_string(),
+                None,
+                None,
+                Default::default(),
+                gone_cwd,
+            ),
         }
     };
-    let pane_cmd: String = recreate_pane_command(&kind, claude_id.as_deref(), &args.name, &launch);
-    let tmux = exec_for(&args.host_alias, ssh);
-    // Automatic self-repair (create-only) before the pane is respawned, then
-    // respawn INTO the verified directory (a pane whose cwd was deleted keeps
-    // the dead inode until respawned with an explicit `-c`). A dead tmux
-    // session is created instead of failing with "can't find session". A
-    // workspace that needs more returns E_REPAIR_REQUIRED. Sessions with
-    // nothing to repair (orphans, bg rows) keep the plain respawn.
-    let repaired = match session_id {
-        Some(id) => match crate::service::repair::ensure_session_workspace(
-            id,
-            crate::service::repair::Entry::Restart,
-            store,
-            ssh,
-        )
-        .await
-        {
-            Ok(rep) => Some(rep),
-            Err(e) if e.code == codes::E_NOREPO || e.code == codes::E_BG_SESSION => None,
-            Err(e) => return Err(e),
-        },
-        None => None,
-    };
-    match repaired {
-        Some(rep) if !rep.tmux_alive => {
-            tmux.new_session(&args.name, std::path::Path::new(&rep.cwd), &pane_cmd)
-                .await?
-        }
-        Some(rep) => {
-            tmux.respawn_pane_in(&args.name, std::path::Path::new(&rep.cwd), &pane_cmd)
-                .await?
-        }
-        None => tmux.restart_session(&args.name, &pane_cmd).await?,
+    refuse_unvalidated_agent(&agent)?;
+    if launch.profile.is_some() && agent == crate::store::AGENT_CLAUDE && kind != "shell" {
+        // As `new_session`: no relaunch under a login past its daily limit.
+        crate::service::account_limits::refuse_over_daily_limit(
+            &*lock(store)?,
+            &args.host_alias,
+            launch.profile.as_deref(),
+            crate::store::now_unix(),
+        )?;
     }
-    // Any of the three branches leaves a live tmux session under this name,
+    let pane_cmd: String =
+        recreate_pane_command(&kind, &agent, claude_id.as_deref(), &args.name, &launch);
+    let tmux = exec_for(&args.host_alias, ssh);
+    // A Claude pane relaunched reads the login it runs under afresh.
+    let login = session_id
+        .filter(|_| agent == crate::store::AGENT_CLAUDE && kind != "shell")
+        .map(|id| (id, switch.clone()));
+    relaunch_recording_login(store, login, async {
+        // Automatic self-repair (create-only) before the pane is respawned, then
+        // respawn INTO the verified directory (a pane whose cwd was deleted keeps
+        // the dead inode until respawned with an explicit `-c`). A dead tmux
+        // session is created instead of failing with "can't find session". A
+        // workspace that needs more returns E_REPAIR_REQUIRED. Sessions with
+        // nothing to repair (orphans, bg rows) keep the plain respawn.
+        let repaired = match session_id {
+            Some(id) => match crate::service::repair::ensure_session_workspace(
+                id,
+                crate::service::repair::Entry::Restart,
+                store,
+                ssh,
+            )
+            .await
+            {
+                Ok(rep) => Some(rep),
+                Err(e) if e.code == codes::E_NOREPO || e.code == codes::E_BG_SESSION => None,
+                Err(e) => return Err(e),
+            },
+            None => None,
+        };
+        match repaired {
+            Some(rep) if !rep.tmux_alive => {
+                tmux.new_session(&args.name, std::path::Path::new(&rep.cwd), &pane_cmd)
+                    .await?
+            }
+            Some(rep) => {
+                tmux.respawn_pane_in(&args.name, std::path::Path::new(&rep.cwd), &pane_cmd)
+                    .await?
+            }
+            None if crate::store::has_no_pane(&kind) => {
+                tmux.restart_session(&args.name, &pane_cmd).await?
+            }
+            None => {
+                restart_unrepaired(&*tmux, &args.name, &pane_cmd, || {
+                    resolve_gone_pane_cwd(gone_cwd, &args.host_alias, ssh.as_ref())
+                })
+                .await?
+            }
+        }
+        Ok(())
+    })
+    .await?;
+    if launch_switched {
+        if let Some(id) = session_id {
+            // The pane already runs with the new values; a failed write only
+            // means a later restart falls back to the old ones.
+            let s = lock(store)?;
+            let stored = model_switch
+                .as_ref()
+                .map_or(Ok(()), |m| s.set_session_launch_model(id, m.as_deref()))
+                .and_then(|()| {
+                    effort_switch
+                        .as_ref()
+                        .map_or(Ok(()), |e| s.set_session_effort(id, e.as_deref()))
+                });
+            if let Err(e) = stored {
+                tracing::warn!(session = %args.name, error = %e, "[restart_session] storing the switched model / effort failed");
+            }
+        }
+    }
+    // Any of the branches leaves a live tmux session under this name,
     // and the create branch may even have rebuilt it from nothing.
     record_tmux_created(store, &args.host_alias, &args.name);
     reconcile_one_host(store, ssh, &args.host_alias).await?;
@@ -1416,20 +2240,138 @@ pub async fn restart_session(
     })
 }
 
-/// Poll the tmux pane until `cl`'s REPL prompt appears, up to ~6s. Returns
-/// when ready, or after the timeout (best-effort — a missed prompt just means
-/// the user presses Enter / re-sends manually; spawn_review already soft-fails
-/// the seed). `cl`'s prompt box draws a border (│) and a `>` prompt; we look
-/// for either as a readiness signal.
-pub(super) async fn wait_for_repl_ready(tmux: &dyn TmuxExec, name: &str) {
-    for _ in 0..30 {
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        if let Ok(pane) = tmux.capture_pane(name).await {
-            if pane.contains('>') || pane.contains('│') {
-                return;
-            }
+/// Run `relaunch` (a restart's repair + respawn), then record the login the
+/// relaunched pane runs under on `login`'s row: `Some(profile)` switches the
+/// stored profile, and a host-login row drops its account link either way
+/// ([`Store::clear_host_login_account`]) so the next reconcile takes the
+/// host's current account. On `Err` nothing is written: the pane still runs
+/// the old login, and the row must keep saying so.
+pub(super) async fn relaunch_recording_login(
+    store: &Mutex<Store>,
+    login: Option<(i64, Option<Option<String>>)>,
+    relaunch: impl std::future::Future<Output = Result<(), IpcError>>,
+) -> Result<(), IpcError> {
+    relaunch.await?;
+    if let Some((id, switch)) = login {
+        let s = lock(store)?;
+        record_relaunched_login(&s, id, switch.as_ref())?;
+    }
+    Ok(())
+}
+
+/// The store half of [`relaunch_recording_login`], for every path that
+/// relaunches a Claude pane (restart, recreate, repair).
+pub(crate) fn record_relaunched_login(
+    s: &Store,
+    session_id: i64,
+    switch: Option<&Option<String>>,
+) -> Result<(), rusqlite::Error> {
+    if let Some(profile) = switch {
+        s.set_session_profile(session_id, profile.as_deref())?;
+    }
+    s.clear_host_login_account(session_id)
+}
+
+/// `restart_session`'s controller guard: refuse to restart the registered
+/// fleet controller unless forced — except the operator.
+///
+/// The operator is exempt for the reason it is exempt from
+/// `refuse_if_operator`: the agent panel's `lost` button calls
+/// `restart_session` without `force`. It is never the controller now
+/// (`operator::refuse_operator_as_controller`), but a hub where it once
+/// registered itself keeps the record, and there the button answered
+/// `E_SELF_TARGET` (2026-10-06, `fleet-operator` on mefistos).
+pub(super) fn restart_guard(
+    s: &Store,
+    host_alias: &str,
+    name: &str,
+    force: bool,
+) -> Result<(), IpcError> {
+    if crate::service::operator::is_operator_session(s, host_alias, name) {
+        return Ok(());
+    }
+    guard_not_controller(s.get_controller()?.as_ref(), host_alias, name, force)
+}
+
+/// Where [`restart_session`] starts a NEW tmux session for a row repair
+/// declines (no project, a system project, no row at all) once its tmux
+/// session is gone. Decided under the store lock, resolved after it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum GonePaneCwd {
+    /// A system project's `base_path`: stored absolute, the cwd verbatim on
+    /// any host (`fetch_system_base_path`).
+    Fixed(String),
+    /// The UX agent's directory, [`crate::service::operator::OPERATOR_DIR`],
+    /// for a recorded operator row that lost its project.
+    Operator,
+    /// The host's home directory: an orphan has no directory of its own.
+    Home,
+}
+
+/// PURE (given the store): see [`GonePaneCwd`]. A system project wins over
+/// the operator check because it is the exact path the operator was born in.
+pub(super) fn gone_pane_cwd(
+    s: &Store,
+    row: Option<&SessionRow>,
+    host_alias: &str,
+    name: &str,
+) -> Result<GonePaneCwd, IpcError> {
+    if let Some(pid) = row.and_then(|r| r.project_id) {
+        if let Some(fixed) = fetch_system_base_path(s, pid)? {
+            return Ok(GonePaneCwd::Fixed(fixed));
         }
     }
+    if crate::service::operator::is_operator_session(s, host_alias, name) {
+        return Ok(GonePaneCwd::Operator);
+    }
+    Ok(GonePaneCwd::Home)
+}
+
+/// [`GonePaneCwd`] as an absolute path on `host_alias`; a `~` must not reach
+/// `tmux new-session -c`, which takes it literally.
+pub(super) async fn resolve_gone_pane_cwd(
+    cwd: GonePaneCwd,
+    host_alias: &str,
+    ssh: &dyn SshExec,
+) -> Result<String, IpcError> {
+    match cwd {
+        GonePaneCwd::Fixed(p) => Ok(p),
+        GonePaneCwd::Operator => crate::service::operator::operator_dir_on(host_alias, ssh).await,
+        GonePaneCwd::Home if host_alias == "local" => {
+            crate::service::provision::expand_home_local("~")
+        }
+        GonePaneCwd::Home => ssh.remote_home(host_alias).await,
+    }
+}
+
+/// The restart of a row with nothing to repair. `respawn-pane` needs the
+/// tmux session to exist, and after a host reboot there is no tmux server at
+/// all: the respawn failed `error connecting to /tmp/tmux-1000/default`, and
+/// the agent panel's `lost` button with it (2026-10-06, `fleet-operator` on
+/// mefistos). A session tmux does not list is created instead, in `cwd()` —
+/// resolved only then, since it may cost an SSH round trip. A host whose
+/// sessions cannot be listed keeps the plain respawn, which reports that
+/// host's own error.
+pub(super) async fn restart_unrepaired<F, Fut>(
+    tmux: &dyn TmuxExec,
+    name: &str,
+    pane_cmd: &str,
+    cwd: F,
+) -> Result<(), IpcError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<String, IpcError>>,
+{
+    let alive = match tmux.list_sessions().await {
+        Ok(live) => live.iter().any(|t| t.name == name),
+        Err(_) => true,
+    };
+    if alive {
+        return tmux.restart_session(name, pane_cmd).await;
+    }
+    let cwd = cwd().await?;
+    tmux.new_session(name, std::path::Path::new(&cwd), pane_cmd)
+        .await
 }
 
 /// The pane command to relaunch when (re)creating a session. `shell` → a bare
@@ -1439,38 +2381,76 @@ pub(super) async fn wait_for_repl_ready(tmux: &dyn TmuxExec, name: &str) {
 /// `launch` is the session's stored model / effort ([`stored_launch`]).
 pub(crate) fn recreate_pane_command(
     kind: &str,
+    agent: &str,
     claude_session_id: Option<&str>,
     tmux_name: &str,
     launch: &crate::tmux::ClaudeLaunch,
 ) -> String {
-    if kind == "shell" {
+    let Some(agent) = crate::agent_adapter::for_session(kind, Some(agent)) else {
         return crate::tmux::shell_pane_command(None);
-    }
-    let id = claude_session_id.filter(|id| crate::validate::claude_session_id(id).is_ok());
-    crate::tmux::pane_command_with(id, tmux_name, launch)
+    };
+    let id = claude_session_id.filter(|id| agent.valid_conversation_id(id));
+    agent.launch_command(id, tmux_name, launch)
 }
 
-/// Store `launch` as the session's own (both halves, `None` included).
+/// Store `launch` as the session's own (every part, `None` included).
 pub(crate) fn store_launch(
     s: &Store,
     session_id: i64,
     launch: &crate::tmux::ClaudeLaunch,
 ) -> Result<(), rusqlite::Error> {
     s.set_session_launch_model(session_id, launch.model.as_deref())?;
+    s.set_session_profile(session_id, launch.profile.as_deref())?;
     s.set_session_effort(session_id, launch.effort.as_deref())
 }
 
-/// The model / effort a session was started or last switched to, checked
-/// again ([`crate::tmux::ClaudeLaunch::checked`]). A failed read is the
-/// host's default: a rebuilt pane must not fail over a cosmetic column.
-pub(crate) fn stored_launch(s: &Store, session_id: i64) -> crate::tmux::ClaudeLaunch {
-    match s.session_launch(session_id) {
-        Ok((model, effort)) => crate::tmux::ClaudeLaunch::checked(model, effort),
+/// [`store_launch`] for a session just started. Soft for model and effort:
+/// the pane already runs with them, and a failed write only means a later
+/// recreate / restart uses the host's defaults. Not soft for a profile
+/// (review r05 F8): that later restart would run under the host's own login
+/// and silently bill another account, so the start reports the failure.
+pub(crate) fn store_start_launch(
+    s: &Store,
+    session_id: i64,
+    name: &str,
+    launch: &crate::tmux::ClaudeLaunch,
+) -> Result<(), IpcError> {
+    match store_launch(s, session_id, launch) {
+        Ok(()) => Ok(()),
+        Err(e) if launch.profile.is_some() => {
+            tracing::warn!(session = %name, error = %e, "[new_session] storing the credential profile failed");
+            Err(IpcError::new(
+                codes::E_INTERNAL,
+                format!(
+                    "session {name} started, but its credential profile was not saved; \
+                     restart it with the profile chosen again so it keeps that login"
+                ),
+            ))
+        }
         Err(e) => {
-            tracing::warn!(session_id, error = %e, "reading the session's launch options failed");
-            crate::tmux::ClaudeLaunch::default()
+            tracing::warn!(session = %name, error = %e, "[new_session] storing the launch options failed");
+            Ok(())
         }
     }
+}
+
+/// The model / effort / profile a session was started or last switched to, checked
+/// again ([`crate::tmux::ClaudeLaunch::checked`]). A failed read is the
+/// host's default: a rebuilt pane must not fail over a cosmetic column.
+pub(crate) fn stored_launch(
+    s: &Store,
+    session_id: i64,
+) -> Result<crate::tmux::ClaudeLaunch, IpcError> {
+    // A read that fails fails the start, like a failed profile write (review
+    // r05 F8): falling back to the defaults would relaunch the session under
+    // the host's login, not the one it was started with.
+    let (model, effort, profile) = s.session_launch(session_id).map_err(|e| {
+        IpcError::new(
+            codes::E_INTERNAL,
+            format!("reading session {session_id}'s launch options failed: {e}"),
+        )
+    })?;
+    Ok(crate::tmux::ClaudeLaunch::checked(model, effort, profile))
 }
 
 #[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
@@ -1515,6 +2495,7 @@ pub async fn recreate_session(
             &sess.tmux_name,
             "recreate_session",
         )?;
+        refuse_unvalidated_agent(&sess.agent)?;
         let host = s
             .get_host_row(&sess.host_alias)?
             .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "host not found"))?;
@@ -1527,24 +2508,21 @@ pub async fn recreate_session(
         let cwd_src = cwd_source_for_session(&s, &sess)?;
         let pane_cmd = recreate_pane_command(
             &sess.kind,
+            &sess.agent,
             sess.claude_session_id.as_deref(),
             &sess.tmux_name,
-            &stored_launch(&s, sess.id),
+            &stored_launch(&s, sess.id)?,
         );
         (sess, cwd_src, pane_cmd)
     };
-    // Automatic self-repair (create-only): re-add a deleted worktree from its
-    // existing branch and use the verified path; anything more returns
-    // E_REPAIR_REQUIRED. Orphans (no project) keep the plain resolution.
-    let cwd = match crate::service::repair::ensure_session_workspace(
-        sess.id,
-        crate::service::repair::Entry::Recreate,
-        store,
-        ssh,
-    )
-    .await
-    {
-        Ok(rep) => rep.cwd,
+    // Recreate is the confirmed "rebuild it" action, so it brings the
+    // workspace back whatever that takes: re-clone a missing remote
+    // checkout, then repair — the explicit repair when the automatic one
+    // stops short (a stale `.git` link after a re-clone, a registration
+    // whose directory is gone). Orphans (no project) keep the plain
+    // resolution.
+    let cwd = match recreate_workspace(sess.id, &sess.host_alias, store, ssh).await {
+        Ok(cwd) => cwd,
         Err(e) if e.code == codes::E_NOREPO => {
             resolve_cwd_source(cwd_src, &sess.host_alias, ssh).await?
         }
@@ -1569,6 +2547,10 @@ pub async fn recreate_session(
     // Mark the row live again and return it.
     let row = {
         let s = lock(store)?;
+        // The rebuilt `claude` reads the host's login afresh.
+        if sess.agent == crate::store::AGENT_CLAUDE && sess.kind != "shell" {
+            record_relaunched_login(&s, sess.id, None)?;
+        }
         let row = s
             .restore_session(sess.id)?
             .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "session vanished after restore"))?;
@@ -1583,6 +2565,72 @@ pub async fn recreate_session(
         row
     };
     Ok(row)
+}
+
+/// The workspace a recreated session starts in. The automatic repair first;
+/// on a remote host whose checkout is gone, clone it back the way a new
+/// session there would and repair again (locally the checkout is the
+/// user's own, so that refusal stands); and when only an explicit repair
+/// can finish (`E_REPAIR_REQUIRED`), run it — the person already confirmed
+/// the rebuild, and the explicit repair never deletes a directory.
+async fn recreate_workspace(
+    session_id: i64,
+    host_alias: &str,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+) -> Result<String, IpcError> {
+    use crate::service::repair::{ensure_session_workspace, repair_session, Entry};
+    let first = match ensure_session_workspace(session_id, Entry::Recreate, store, ssh).await {
+        Err(e) if e.code == codes::E_REPO_MISSING && host_alias != "local" => {
+            reclone_project_root(store, &**ssh, session_id).await?;
+            ensure_session_workspace(session_id, Entry::Recreate, store, ssh).await
+        }
+        other => other,
+    };
+    match first {
+        Ok(rep) => Ok(rep.cwd),
+        Err(e) if e.code == codes::E_REPAIR_REQUIRED => {
+            tracing::info!(session_id, why = %e.message, "[recreate] running the explicit workspace repair");
+            Ok(repair_session(session_id, true, store, ssh).await?.cwd)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Clone a remote session's missing project checkout back to the root the
+/// repair resolved for it ([`ensure_remote_project`] without a worktree).
+/// The clone step only runs when `<root>/.git` is absent, and it never
+/// replaces a non-empty directory (`rmdir`), so a root that exists but is
+/// not a usable checkout fails here rather than being overwritten.
+pub(super) async fn reclone_project_root(
+    store: &Mutex<Store>,
+    ssh: &dyn SshExec,
+    session_id: i64,
+) -> Result<(), IpcError> {
+    let (spec, _) = crate::service::repair::spec_for_session_with(store, ssh, session_id).await?;
+    let project_id = spec
+        .project_id
+        .ok_or_else(|| IpcError::new(codes::E_NOREPO, "session has no project to clone"))?;
+    let (owner, repo) = {
+        let s = lock(store)?;
+        fetch_owner_repo(&s, project_id)?
+    };
+    tracing::info!(
+        session_id,
+        host = %spec.host_alias,
+        root = %spec.project_root,
+        "recreate: project checkout missing, cloning {owner}/{repo}"
+    );
+    ensure_remote_project(
+        ssh,
+        &spec.host_alias,
+        &owner,
+        &repo,
+        &spec.project_root,
+        None,
+        CancellationToken::new(),
+    )
+    .await
 }
 
 #[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]

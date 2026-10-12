@@ -4,7 +4,11 @@
 use crate::config::{resolve, resolve_data_dir, HubOptions, Resolved};
 use crate::out;
 use fleet_core::events::{BroadcastEventBus, EventBus, NoopEventBus};
-use fleet_core::mcp::{self, settings::ensure_master_token, McpGuards};
+use fleet_core::mcp::{
+    self,
+    settings::{ensure_master_token, ensure_personal_owner},
+    McpGuards,
+};
 use fleet_core::service::hub::{
     SETTING_ALLOWED_HOSTS, SETTING_ALLOW_PLAINTEXT, SETTING_BIND, SETTING_LOCAL_HOST,
     SETTING_PUBLIC_URL, SETTING_TLS, SETTING_TLS_CERT, SETTING_TLS_KEY,
@@ -60,9 +64,12 @@ pub(crate) fn open_store_with_bus(
     }
     let db_path = data_dir.join("state.db");
     let store = Store::open_with_bus(&db_path, bus).map_err(|e| {
+        let advice = fleet_core::store::open_failure_advice(
+            &e,
+            "\nIf the file is corrupt, deleting it resets all hub state — hosts, projects and sessions are re-discovered.",
+        );
         format!(
-            "failed to open the claude-fleet database at {}: {e}\n\
-             If the file is corrupt, deleting it resets all hub state — hosts, projects and sessions are re-discovered.",
+            "failed to open the claude-fleet database at {}: {e}{advice}",
             db_path.display()
         )
     })?;
@@ -147,6 +154,12 @@ pub fn init(
             s.set_setting(mcp::SETTING_TOKEN, &mcp::generate_token())
                 .map_err(|e| e.to_string())?;
         }
+        // Multi-user M1: a hub knows whose it is before it serves anything.
+        // Migration 098 inserts the personal owner, so this is normally one
+        // index seek; it is called at every entry point that mints the
+        // master token because a store opened outside `init` must have one
+        // too, and no single entry point is guaranteed to run first.
+        ensure_personal_owner(&s).map_err(|e| e.message)?;
         ensure_master_token(&s).map_err(|e| e.message)?
     };
     out::line(&format!("data dir: {}", r.data_dir.display()));
@@ -190,7 +203,16 @@ pub fn token(
     if regenerate {
         s.set_setting(mcp::SETTING_TOKEN, &mcp::generate_token())
             .map_err(|e| e.to_string())?;
+        // A running hub keeps the token it started with (docs/hub.md), so
+        // the old one stays valid until it restarts (review r04).
+        out::error(
+            "note: a new master token is saved; a running hub still accepts the old one \
+             until it restarts. Restart the hub now.",
+        );
     }
+    // The write paths of `token` are the other place a fresh database can
+    // be minted into; give it its personal owner here too (see `init`).
+    ensure_personal_owner(&s).map_err(|e| e.message)?;
     out::line(&ensure_master_token(&s).map_err(|e| e.message)?);
     Ok(ExitCode::SUCCESS)
 }
@@ -571,10 +593,9 @@ async fn healthcheck_probe(
 ) -> Result<String, String> {
     let port = match (port, env.get("FLEET_HUB_PORT")) {
         (Some(p), _) => p,
-        (None, Some(v)) => v
-            .trim()
-            .parse::<u16>()
-            .map_err(|e| format!("FLEET_HUB_PORT '{v}': {e}"))?,
+        (None, Some(v)) => {
+            crate::config::parse_port(v).map_err(|e| format!("FLEET_HUB_PORT {e}"))?
+        }
         (None, None) => mcp::DEFAULT_PORT,
     };
     let mode = match (tls, env.get("FLEET_HUB_TLS")) {
@@ -732,7 +753,7 @@ pub fn ssh_key() -> Result<ExitCode, String> {
             ));
         }
         KeyAction::Derive => {
-            let o = std::process::Command::new("ssh-keygen")
+            let o = fleet_core::proc::std_command("ssh-keygen")
                 .arg("-y")
                 .arg("-f")
                 .arg(&key)
@@ -756,7 +777,7 @@ pub fn ssh_key() -> Result<ExitCode, String> {
                 use std::os::unix::fs::PermissionsExt;
                 let _ = std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(0o700));
             }
-            let st = std::process::Command::new("ssh-keygen")
+            let st = fleet_core::proc::std_command("ssh-keygen")
                 .args(["-q", "-t", "ed25519", "-N", "", "-C", "fleet-hub", "-f"])
                 .arg(&key)
                 .status()
@@ -818,6 +839,7 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
             tracing::warn!(error = %e, "file logging unavailable; logging to stderr only");
         }
     }
+    fleet_core::logging::install_panic_hook();
     if let Some(warning) = crate::config::plaintext_exposure_warning(&r) {
         tracing::warn!("{warning}");
     }
@@ -829,6 +851,15 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
             Ok(dir) => tracing::info!(dir = %dir.display(), "downloads ready"),
             Err(e) => tracing::warn!(error = %e, "downloads unavailable"),
         }
+        // The release-file mirror (`update.mirror`, update design S9).
+        if let Err(e) = fleet_core::service::update::mirror::init(&r.data_dir) {
+            tracing::warn!(error = %e, "update mirror unavailable");
+        }
+        // Likewise an agent install the last run left `running`: its job
+        // died with that process, and it would refuse a new one for 30 min.
+        if let Err(e) = fleet_core::service::agent_install::fail_interrupted(&s) {
+            tracing::warn!(error = %e.message, "agent installs: could not fail interrupted jobs");
+        }
     }
     // `/events` stamps `needs_attention` without a store, so it is handed
     // the `context_full` threshold `list_sessions` reads; later writes
@@ -836,6 +867,12 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     // running hub) reach it through `service::settings::set`.
     if let Ok(s) = store.lock() {
         bus.set_context_red_pct(fleet_core::service::health::context_red_pct(&s));
+        // …and the host rows the three `Blocked` reasons start from; the bus
+        // follows every later probe itself (step 2.6).
+        match s.list_hosts() {
+            Ok(hosts) => bus.attention_seeded(&hosts, &[]),
+            Err(e) => tracing::warn!("attention facts: list_hosts failed: {e}"),
+        }
     }
     if !r.local_host {
         // Before the control API and the ticks start: from here on every
@@ -857,6 +894,11 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         let s = store
             .lock()
             .map_err(|_| "store lock poisoned".to_string())?;
+        // Before the listener: every `Caller` this process resolves asks who
+        // the personal owner is, and a hub that cannot answer fails closed
+        // (see `ensure_personal_owner`). Serving without one would refuse
+        // every session read, which is safe but useless.
+        ensure_personal_owner(&s).map_err(|e| e.message)?;
         ensure_master_token(&s).map_err(|e| e.message)?
     };
     let base = r.base()?;
@@ -872,17 +914,39 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     ));
     let reg = fleet_core::cancel::CancellationRegistry::new();
     let tunnels = Arc::new(fleet_core::service::tunnel::TunnelSupervisor::new());
-    // No desktop to approve a destructive-call confirmation: log it. The
-    // `mcp.confirm_destructive` setting is off by default; docs/hub.md says
-    // to leave it off on a hub.
-    let guards = McpGuards::new(Arc::new(|req: &fleet_core::mcp::guard::ConfirmRequest| {
-        tracing::warn!(
-            tool = %req.tool,
-            nonce = %req.nonce,
-            "confirmation requested but this hub has no approver; disable mcp.confirm_destructive"
-        );
-    }))
-    .without_approver();
+    // A call that waits for a person parks its nonce here and tells the
+    // owner's devices the queue moved (`confirm:changed`, ids-free); the
+    // owner's paired desktop or phone lists and answers it through
+    // `mcp_confirms` / `answer_mcp_confirm` (redesign step 9.2). Unanswered,
+    // it expires with CONFIRM_TTL like on a desktop.
+    let confirm_bus = Arc::clone(&bus);
+    // Single sign-on (Keycloak / OIDC): read from the environment only — the
+    // client secret must not sit in `state.db` beside what it guards. A
+    // half-configured provider fails the start rather than leaving sign-in
+    // silently off.
+    let oidc =
+        fleet_core::mcp::oidc::OidcConfig::from_lookup(|k| env.get(k).cloned())?.map(|cfg| {
+            tracing::info!(
+                issuer = %cfg.issuer,
+                client_id = %cfg.client_id,
+                auto_provision = cfg.auto_provision,
+                roles = ?cfg.allowed_roles,
+                "single sign-on on: devices pair through {}/auth/oidc/start",
+                base.url.trim_end_matches('/')
+            );
+            Arc::new(fleet_core::mcp::oidc::OidcProvider::new(cfg))
+        });
+    let guards = McpGuards::new(Arc::new(
+        move |req: &fleet_core::mcp::guard::ConfirmRequest| {
+            tracing::info!(
+                tool = %req.tool,
+                caller = %req.caller,
+                "confirmation requested; waiting for the owner's device"
+            );
+            confirm_bus.confirm_changed();
+        },
+    ))
+    .with_oidc(oidc);
 
     warn_if_confirm_destructive(&store);
 
@@ -920,7 +984,11 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         &r.data_dir.join("state.db"),
         fleet_core::store::READ_POOL_SIZE,
     ) {
-        Ok(Some(pool)) => Some(Arc::new(pool)),
+        // The facts `needs_attention` is decided from live on the bus, not
+        // in the file: a pooled read must see the writer's.
+        Ok(Some(pool)) => Some(Arc::new(
+            pool.following(Arc::clone(&bus) as Arc<dyn EventBus>),
+        )),
         Ok(None) => {
             tracing::warn!("state.db is not in WAL; every read stays on the writer");
             None
@@ -930,6 +998,14 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
             None
         }
     };
+    // A request that expires announces nothing by itself: without this, its
+    // card on the phone and the desktop stayed up (answering it only said
+    // "expired") until something else moved the queue.
+    tokio::spawn(announce_expired_confirms(
+        Arc::clone(&guards.confirms),
+        Arc::clone(&bus),
+        CONFIRM_EXPIRY_CHECK,
+    ));
     let (shutdown, serve_task) = mcp::start_with_listener(
         Arc::clone(&store),
         Arc::clone(&ssh),
@@ -1051,6 +1127,28 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         fleet_core::service::trackers::default_net(),
         ticks_cancel.clone(),
     );
+    // Missions (orchestration O4–O8): the hub owns the store, so its loop
+    // runs here, each mission under its lease (`orchestrator.enabled` is the
+    // kill switch). Stopped with the ticks.
+    let mission_handle = fleet_core::service::work::orchestrate::spawn_mission_tick(
+        fleet_core::service::work::orchestrate::Deps {
+            store: Arc::clone(&store),
+            ssh: Arc::clone(&ssh),
+            reg: Arc::clone(&reg),
+            net: fleet_core::service::trackers::default_net(),
+        },
+        ticks_cancel.clone(),
+    );
+    // Routines (redesign 8.5): the scheduler, each routine under its lease;
+    // Pause all stops it. Stopped with the ticks.
+    let routine_handle = fleet_core::service::routines::spawn_routine_tick(
+        fleet_core::service::routines::Deps::live(
+            Arc::clone(&store),
+            Arc::clone(&ssh),
+            Arc::clone(&reg),
+        ),
+        ticks_cancel.clone(),
+    );
     // Assets S1a: rescan stale hosts' assets without anyone pressing Scan.
     // The hub owns its fleet, so it runs this tick (`catalog.scan_check_secs`,
     // `0` = off), exactly like the tracker sync above. Stopped with the ticks.
@@ -1072,8 +1170,34 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         ticks_cancel.clone(),
     );
 
-    wait_for_signal().await?;
-    tracing::info!("fleet-hub stopping");
+    // Stop on a signal, but also when the hub can no longer serve: the
+    // control API task ended on its own (a listener that failed to start, a
+    // server error, a panic), or the store's writer lock is poisoned (a panic
+    // held it, and every write now fails). Either used to leave a process
+    // that looked alive and did nothing; exiting non-zero lets the
+    // supervisor (systemd `Restart=on-failure`, Docker's restart policy)
+    // start a working one.
+    let mut serve_task = serve_task;
+    let mut failure: Option<String> = None;
+    tokio::select! {
+        r = wait_for_signal() => {
+            let sig = r?;
+            tracing::info!(signal = sig, "fleet-hub stopping");
+        }
+        r = &mut serve_task => {
+            let why = match r {
+                Ok(()) => "the control API stopped unexpectedly".to_string(),
+                Err(e) => format!("the control API task failed: {e}"),
+            };
+            tracing::error!("{why}; fleet-hub stopping");
+            failure = Some(why);
+        }
+        () = watch_store_poison(&store, STORE_POISON_CHECK) => {
+            let why = "the store lock is poisoned (a panic held it); every write would fail".to_string();
+            tracing::error!("{why}; fleet-hub stopping");
+            failure = Some(why);
+        }
+    }
     // Cancel the ticks BEFORE tearing down the MCP server below: cancellation
     // is only observed between passes, so cancelling here is strictly safe
     // (it does not abort a pass already in flight) and it stops a new pass
@@ -1086,13 +1210,15 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     ticks_cancel.cancel();
     shutdown.cancel();
     // Let in-flight requests drain before tearing down what they use.
-    match tokio::time::timeout(DRAIN_TIMEOUT, serve_task).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => tracing::warn!(error = %e, "control API task ended abnormally"),
-        Err(_) => tracing::warn!(
-            timeout_secs = DRAIN_TIMEOUT.as_secs(),
-            "in-flight requests did not drain in time; exiting anyway"
-        ),
+    if !serve_task.is_finished() {
+        match tokio::time::timeout(DRAIN_TIMEOUT, serve_task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(error = %e, "control API task ended abnormally"),
+            Err(_) => tracing::warn!(
+                timeout_secs = DRAIN_TIMEOUT.as_secs(),
+                "in-flight requests did not drain in time; exiting anyway"
+            ),
+        }
     }
     // The hub-daemon spec's SIGTERM promise (docs/superpowers/specs/2026-09-17-hub-daemon-design.md):
     // the current reconcile pass finishes, then the loop exits. Await the
@@ -1106,6 +1232,8 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     tick_handles.push(peer_handle);
     tick_handles.push(ready_handle);
     tick_handles.push(update_handle);
+    tick_handles.push(mission_handle);
+    tick_handles.push(routine_handle);
     if let Some(h) = tracker_handle {
         tick_handles.push(h);
     }
@@ -1118,7 +1246,10 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     reprovision.abort();
     tunnels.stop_all();
     ssh.shutdown_all();
-    Ok(ExitCode::SUCCESS)
+    match failure {
+        None => Ok(ExitCode::SUCCESS),
+        Some(why) => Err(why),
+    }
 }
 
 /// How long `serve` waits for in-flight requests after a stop signal.
@@ -1152,8 +1283,9 @@ async fn await_ticks(handles: Vec<tokio::task::JoinHandle<()>>, timeout: std::ti
 }
 
 /// A state.db copied from a desktop can carry `mcp.confirm_destructive=true`;
-/// a hub has no approver, so every destructive tool would be refused. Say so
-/// once at startup (no behaviour change).
+/// on a hub every destructive tool then waits for the owner's paired device
+/// to approve it (`answer_mcp_confirm`). Say so once at startup (no
+/// behaviour change).
 fn warn_if_confirm_destructive(store: &Mutex<Store>) {
     let on = store
         .lock()
@@ -1163,33 +1295,104 @@ fn warn_if_confirm_destructive(store: &Mutex<Store>) {
     if on {
         tracing::warn!(
             setting = "mcp.confirm_destructive",
-            "mcp.confirm_destructive is on, but destructive tools cannot be approved on a hub \
-             (no desktop approver): they will be refused with E_CONFIRM_REQUIRED; turn the setting off"
+            "mcp.confirm_destructive is on: every destructive tool waits for the owner's paired \
+             device to approve it; turn the setting off if no device answers"
         );
     }
 }
 
-async fn wait_for_signal() -> Result<(), String> {
+/// How often the hub looks for confirmation requests that expired.
+const CONFIRM_EXPIRY_CHECK: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Every `every`, drop expired confirmation requests and, when any went,
+/// emit `confirm:changed` so every device re-reads the queue.
+async fn announce_expired_confirms(
+    confirms: Arc<fleet_core::mcp::guard::PendingConfirms>,
+    bus: Arc<BroadcastEventBus>,
+    every: std::time::Duration,
+) {
+    let mut tick = tokio::time::interval(every);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        if confirms.prune_expired() > 0 {
+            bus.confirm_changed();
+        }
+    }
+}
+
+/// How often `serve` checks whether the store's lock is poisoned.
+const STORE_POISON_CHECK: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Resolves once `store`'s lock is poisoned, checking every `every`.
+async fn watch_store_poison<T>(store: &Mutex<T>, every: std::time::Duration) {
+    let mut tick = tokio::time::interval(every);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        if store.is_poisoned() {
+            return;
+        }
+    }
+}
+
+/// Waits for a stop signal and names it. SIGHUP is logged and ignored: a hub
+/// started from a terminal or a tmux pane used to die of it silently (the
+/// default action), and a daemon has no use for a hangup.
+async fn wait_for_signal() -> Result<&'static str, String> {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
         let mut term =
             signal(SignalKind::terminate()).map_err(|e| format!("install SIGTERM handler: {e}"))?;
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
+        let mut hup =
+            signal(SignalKind::hangup()).map_err(|e| format!("install SIGHUP handler: {e}"))?;
+        loop {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => return Ok("SIGINT"),
+                _ = term.recv() => return Ok("SIGTERM"),
+                _ = hup.recv() => tracing::warn!("SIGHUP received; ignored (stop the hub with SIGTERM)"),
+            }
         }
     }
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+        Ok("Ctrl-C")
     }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The watchdog resolves once a panic has poisoned the store's lock,
+    /// and not before. (A `Mutex<()>` stands in for the store: poisoning is
+    /// the lock's, whatever it guards.)
+    #[tokio::test(start_paused = true)]
+    async fn the_store_watchdog_fires_once_the_lock_is_poisoned() {
+        let store = Arc::new(Mutex::new(()));
+        let every = std::time::Duration::from_secs(5);
+        let early = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            watch_store_poison(&store, every),
+        )
+        .await;
+        assert!(early.is_err(), "a healthy store must not trip the watchdog");
+        let s2 = Arc::clone(&store);
+        let _ = std::thread::spawn(move || {
+            let _g = s2.lock().unwrap();
+            panic!("poison the store");
+        })
+        .join();
+        assert!(store.is_poisoned());
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            watch_store_poison(&store, every),
+        )
+        .await
+        .expect("a poisoned store must trip the watchdog");
+    }
 
     #[test]
     fn backup_names_match_backup_sh() {

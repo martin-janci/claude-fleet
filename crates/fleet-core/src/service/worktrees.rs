@@ -25,6 +25,22 @@ pub struct WorktreeOccupancy {
 pub struct WorktreeOccupant {
     pub host_alias: String,
     pub tmux_name: String,
+    /// The occupant's `sessions` row (multi-user M1, T8d).
+    ///
+    /// Carried for two reasons, and both are the fence rather than the
+    /// feature. `mcp::tools::repo`'s `list_worktrees` needs the ROW to ask
+    /// `sees_session_row`, because an occupant is a private session's host and
+    /// tmux name — and a tmux name in this fleet is a branch or a ticket key,
+    /// which spec §4.3 calls content. And with all three keys present the
+    /// shape is finally one `view_scope::looks_like_session_row` recognises
+    /// (`host_alias` + `tmux_name` + `session_id`), so T8's result gate is a
+    /// net under it too instead of walking straight past a projection that
+    /// happened to spell the id nothing at all.
+    ///
+    /// `#[serde(default)]` so an older hub's answer still parses, where it
+    /// reads `0` — an id no row has.
+    #[serde(default)]
+    pub session_id: i64,
 }
 
 #[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
@@ -110,7 +126,8 @@ fn split_scan_output(stdout: &str) -> Option<(String, &str)> {
 /// worktree is the entry whose path equals `root`; if none matches exactly
 /// (a normalization difference), the FIRST remaining entry is treated as
 /// main, since `git worktree list` always lists it first. Every other entry
-/// is named by its last path component. Two entries that would collide on
+/// is named by `projects::worktree_name_for_path` (its directory name; the
+/// path below the worktree marker joined with `-` for a nested one). Two entries that would collide on
 /// name (two worktrees named e.g. `feat` under different parent dirs) keep
 /// only the first; the rest are dropped with a `tracing::warn!` — the
 /// returned list never has two entries with the same name.
@@ -137,10 +154,10 @@ pub fn rows_from_porcelain(root: &str, porcelain: &str) -> Vec<(String, String, 
         let name = if Some(&path) == main_path.as_ref() {
             "main".to_string()
         } else {
-            let Some(basename) = path.rsplit('/').next().filter(|s| !s.is_empty()) else {
+            let Some(name) = crate::projects::worktree_name_for_path(&path) else {
                 continue;
             };
-            basename.to_string()
+            name
         };
         if !seen.insert(name.clone()) {
             tracing::warn!(
@@ -358,14 +375,20 @@ pub async fn delete_worktree(
         if !args.force {
             let occupants = s.alive_sessions_for_worktree(wt.id)?;
             if !occupants.is_empty() {
-                let who = occupants
-                    .iter()
-                    .map(|(h, n)| format!("{h}/{n}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                // A COUNT, never the names (multi-user M1, T7). This message
+                // used to list `host/tmux_name` per occupant, and a tmux name
+                // is a branch or a ticket key — content by spec §4.3 — in an
+                // error string, which the result gate cannot reach (it
+                // rewrites JSON, not prose). The caller that may act on those
+                // rows learns which they are from `list_sessions`, where the
+                // person fence applies; a caller that may not learns only
+                // that the tree is busy.
                 return Err(IpcError::new(
                     codes::E_WORKTREE_BUSY,
-                    format!("worktree is in use by session(s): {who}"),
+                    format!(
+                        "worktree is in use by {} running session(s)",
+                        occupants.len()
+                    ),
                 ));
             }
         }
@@ -588,6 +611,18 @@ mod tests {
         assert_eq!(names, vec!["main", "feat"], "the later `feat` is dropped");
         assert_eq!(rows[1].1, "/r/.worktrees/feat", "first occurrence wins");
         assert_eq!(rows[1].2.as_deref(), Some("a"));
+    }
+
+    /// A checkout nested below the marker (`.worktrees/feat/imports`, as a
+    /// `feat/imports` worktree was once created) is named `feat-imports`,
+    /// the name its row carries, not its last component.
+    #[test]
+    fn rows_from_porcelain_names_a_nested_checkout_by_its_path_below_the_marker() {
+        let porcelain = "worktree /r\nHEAD 1\nbranch refs/heads/main\n\nworktree /r/.worktrees/feat/imports\nHEAD 2\nbranch refs/heads/feat/imports\n\n";
+        let rows = rows_from_porcelain("/r", porcelain);
+        assert_eq!(rows[1].0, "feat-imports");
+        assert_eq!(rows[1].1, "/r/.worktrees/feat/imports");
+        assert_eq!(rows[1].2.as_deref(), Some("feat/imports"));
     }
 
     #[tokio::test]

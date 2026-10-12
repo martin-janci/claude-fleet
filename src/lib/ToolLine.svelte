@@ -15,7 +15,9 @@
     type ToolDetail,
   } from './conversation';
   import CopyButton from './CopyButton.svelte';
-  import Icon, { type IconName } from './Icon.svelte';
+  import Loader from './Loader.svelte';
+  import Icon from './kit/Icon.svelte';
+  import type { OfIconName as IconName } from './kit/icons';
   import { lineDiff, splitPath, parseNumbered, parseTodos, parseFileList, inputField, detailKind } from './tool_view';
 
   let {
@@ -85,6 +87,9 @@
   const target = $derived(shortTarget(line.target) ?? argsOf(line.summary));
   const elapsed = $derived(toolDurationMs(line.at, line.ended_at, line.done || !live ? null : nowMs));
   const noResult = $derived(!line.done && !live);
+  // Redesign 5.14 (LoadersInFlows, Chat · Agent tool calls): a
+  // Comet only on the call that is running; a finished call goes still.
+  const running = $derived(!line.done && live);
   const duration = $derived(
     line.done
       ? elapsed === null
@@ -160,7 +165,7 @@
     WebSearch: 'search',
     TodoWrite: 'list',
   };
-  const icon = $derived<IconName>(ICONS[line.name || toolName(line.summary)] ?? 'tool');
+  const icon = $derived<IconName>(ICONS[line.name || toolName(line.summary)] ?? 'toolkit');
   const TODO_ICON: Record<string, IconName> = { completed: 'circle-check', in_progress: 'circle-half', pending: 'circle' };
   const resultLines = $derived(detail?.result != null ? detail.result.split('\n') : []);
   const longResult = $derived(resultLines.length > RESULT_MAX_LINES);
@@ -171,6 +176,9 @@
 
 {#snippet row()}
   <span class="chev" aria-hidden="true"></span>
+    <span class="state" data-testid="conv-tool-state" data-state={running ? 'running' : line.done && !line.error ? 'done' : 'still'}
+      >{#if running}<Loader name="comet" size={12} />{:else if line.done && !line.error}<span class="tick" aria-hidden="true">✓</span>{/if}</span
+    >
   <span class="ticon"><Icon name={icon} size={13} /></span>
   <span class="verb">{verb}</span>
   {#if target}<span class="target" title={line.summary}>{target}</span>{/if}
@@ -310,9 +318,9 @@
     padding: 0.05rem 0;
     background: none;
     border: none;
-    border-radius: 4px;
-    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 0.74rem;
+    border-radius: var(--radius-sm);
+    font-family: var(--mono);
+    font-size: var(--text-2xs);
     line-height: 1.5;
     color: var(--fg-muted);
     text-align: left;
@@ -334,7 +342,7 @@
     width: 0.7rem;
     text-align: center;
     opacity: 0.6;
-    transition: transform 0.12s ease;
+    transition: transform var(--dur-fast) ease;
   }
   button.tool .chev::before {
     content: '›';
@@ -344,6 +352,17 @@
   }
   .open button.tool .chev {
     transform: rotate(90deg);
+  }
+  .state {
+    flex: 0 0 12px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 12px;
+  }
+  .tick {
+    color: var(--status-done);
+    font-size: var(--text-2xs);
   }
   .verb {
     flex: 0 0 auto;
@@ -357,7 +376,7 @@
   .dur {
     flex: 0 0 auto;
     margin-left: auto;
-    font-size: 0.7rem;
+    font-size: var(--text-2xs);
     opacity: 0.8;
   }
   .x {
@@ -374,9 +393,9 @@
     margin: 0.2rem 0 0.5rem 1.15rem;
     padding: 0.4rem 0.6rem;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: var(--bg-pane);
-    font-size: 0.74rem;
+    font-size: var(--text-2xs);
   }
   .detail-error {
     display: flex;
@@ -391,8 +410,8 @@
     margin: -0.4rem -0.6rem 0.4rem;
     padding: 0.3rem 0.6rem;
     border-bottom: 1px solid var(--border);
-    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 0.72rem;
+    font-family: var(--mono);
+    font-size: var(--text-2xs);
   }
   .path {
     min-width: 0;
@@ -411,8 +430,8 @@
   .tag {
     flex: 0 0 auto;
     padding: 0 6px;
-    border-radius: 9px;
-    font-size: 0.66rem;
+    border-radius: var(--radius-lg);
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     border: 1px solid var(--border);
   }
@@ -430,20 +449,10 @@
     color: var(--diff-del-fg);
   }
   .detail {
-    --diff-add-fg: #1a7f37;
-    --diff-del-fg: #cf222e;
-    --diff-add-bg: rgba(46, 160, 67, 0.14);
-    --diff-del-bg: rgba(248, 81, 73, 0.14);
-  }
-  :global(:root[data-theme='dark']) .detail {
-    --diff-add-fg: #3fb950;
-    --diff-del-fg: #f85149;
-  }
-  @media (prefers-color-scheme: dark) {
-    :global(:root:not([data-theme='light'])) .detail {
-      --diff-add-fg: #3fb950;
-      --diff-del-fg: #f85149;
-    }
+    --diff-add-fg: var(--status-done);
+    --diff-del-fg: var(--status-failed);
+    --diff-add-bg: var(--done-soft);
+    --diff-del-bg: var(--failed-soft);
   }
   .code {
     margin: 0 0 0.35rem;
@@ -451,10 +460,10 @@
     overflow: auto;
     overscroll-behavior: contain;
     padding: 0.25rem 0;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: var(--bg);
-    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 0.72rem;
+    font-family: var(--mono);
+    font-size: var(--text-2xs);
     line-height: 1.5;
   }
   .code .row {
@@ -521,8 +530,8 @@
     align-items: center;
     gap: 0.4rem;
     padding: 0.08rem 0;
-    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 0.72rem;
+    font-family: var(--mono);
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     white-space: nowrap;
     overflow: hidden;
@@ -541,21 +550,21 @@
     align-items: center;
     gap: 0.45rem;
     padding: 0.12rem 0;
-    font-size: 0.76rem;
+    font-size: var(--text-2xs);
   }
   .todos li.completed {
     color: var(--fg-muted);
   }
-  .todos li.completed :global(.icon) {
+  .todos li.completed :global(.of-ico) {
     color: var(--diff-add-fg);
   }
   .todos li.in_progress {
     font-weight: 600;
   }
-  .todos li.in_progress :global(.icon) {
+  .todos li.in_progress :global(.of-ico) {
     color: var(--accent);
   }
-  .todos li.pending :global(.icon) {
+  .todos li.pending :global(.of-ico) {
     color: var(--fg-muted);
   }
   .ticon {
@@ -588,7 +597,7 @@
     margin: 0.2rem 0 0.4rem 1.15rem;
     color: var(--fg-muted);
     font-style: italic;
-    font-size: 0.74rem;
+    font-size: var(--text-2xs);
   }
   .detail .muted {
     margin-left: 0;
@@ -598,7 +607,7 @@
     background: none;
     border: none;
     color: var(--accent);
-    font-size: 0.72rem;
+    font-size: var(--text-2xs);
     cursor: pointer;
   }
   @media (prefers-reduced-motion: reduce) {

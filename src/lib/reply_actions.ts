@@ -1,5 +1,8 @@
-import { sessionActivity, type ActivityProbe, type ConvTurn } from './conversation';
+import { sessionActivity, splitMarker, type ActivityProbe, type ConvTurn } from './conversation';
+import { promptFirstLine } from './tasks';
 import type { Result } from './result';
+import { finalizeBranchSlug } from './branch-slug';
+import type { SessionRow } from './sessions';
 
 /** Which of the five reply actions this turn offers, and with what anchor. */
 export interface ReplyActionsView {
@@ -169,4 +172,37 @@ export function quoteText(text: string): string {
     .map((l) => (l.length === 0 ? '>' : `> ${l}`))
     .join('\n');
   return `${body}\n\n`;
+}
+
+/** `fork-of-<branch>`, slugified for use as a new worktree's name — the
+ *  branch/worktree's name when this session has one, else its tmux name,
+ *  which is what a `main`-checkout session forks from. The Fork sheet's
+ *  prefill, from a reply and from the session's own Fork… alike. */
+export function suggestedForkName(s: Pick<SessionRow, 'friendly_name' | 'tmux_name'>): string {
+  const base = s.friendly_name?.trim() || s.tmux_name;
+  return finalizeBranchSlug(`fork-of-${base}`) || 'fork';
+}
+
+/** One turn the session's Rewind… sheet offers. */
+export interface RewindChoice {
+  /** The turn's own `prompt_uuid`: the rewind's anchor. */
+  anchor: string;
+  /** The prompt as the composer would take it back (no hub marker). */
+  prompt: string | null;
+  /** Its first line, for the list. */
+  line: string;
+  at: string | null;
+}
+
+/** The turns a rewind can go back to before, newest first: exactly the
+ *  turns whose reply row offers Rewind (`replyActionsFor`). */
+export function rewindChoices(turns: ConvTurn[], truncated: boolean): RewindChoice[] {
+  const out: RewindChoice[] = [];
+  turns.forEach((t, i) => {
+    const v = replyActionsFor(turns, i, truncated, true);
+    if (!v.canRewind || !v.rewindAnchor) return;
+    const prompt = t.prompt == null ? null : splitMarker(t.prompt).text;
+    out.push({ anchor: v.rewindAnchor, prompt, line: promptFirstLine(prompt, 90) || '(no text)', at: t.at });
+  });
+  return out.reverse();
 }

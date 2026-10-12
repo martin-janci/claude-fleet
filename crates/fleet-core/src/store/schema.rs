@@ -107,6 +107,15 @@ fn worktrees_has_updated_at(conn: &Connection) -> rusqlite::Result<bool> {
 /// `already_applied` guard of migration 027: `projects` already has its
 /// `adopted` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
 /// See [`Migration`].
+fn work_items_has_display_key(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'display_key'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn projects_has_adopted(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name = 'adopted'",
@@ -315,6 +324,82 @@ fn trackers_has_settings(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 155: `deferred_prompts` already has
+/// its `not_before` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
+/// See [`Migration`].
+fn deferred_prompts_has_not_before(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('deferred_prompts') WHERE name = 'not_before'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 156: `routines` already has its
+/// `event_rate_secs` column (the last of the three it adds).
+fn orgs_has_members_own_sessions_only(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('orgs') WHERE name = 'members_own_sessions_only'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+fn routines_has_event_rate(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('routines') WHERE name = 'event_rate_secs'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 159: `routine_runs` already has its
+/// `host_alias` column (the last column it adds).
+fn routine_runs_has_host(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('routine_runs') WHERE name = 'host_alias'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 166: `routine_runs` already has its
+/// `routine_name` column (the rebuild ran). See [`Migration`].
+fn routine_runs_has_routine_name(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('routine_runs') WHERE name = 'routine_name'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 165: `wizard_state` exists (and
+/// `host_setups`, which it replaced, is gone). See [`Migration`].
+fn has_wizard_state(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'wizard_state'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 164: `start_rules` already has its
+/// `agent` column. See [`Migration`].
+fn start_rules_has_agent(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('start_rules') WHERE name = 'agent'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 052: `work_links` already has its
 /// `archived_at` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
 /// See [`Migration`].
@@ -349,6 +434,18 @@ fn orgs_has_jev_allowed(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 107 (org administration phase D):
+/// `orgs` already has `admins_see_unclaimed`, the last of its two
+/// `ADD COLUMN`s; everything else in the script is `IF NOT EXISTS`.
+fn orgs_has_admins_see_unclaimed(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('orgs') WHERE name = 'admins_see_unclaimed'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 066 (work graph M14.1b): its last
 /// ADD COLUMN (`client_tokens.org_id`) present means the whole migration is.
 fn client_tokens_has_org(conn: &Connection) -> rusqlite::Result<bool> {
@@ -365,6 +462,59 @@ fn client_tokens_has_org(conn: &Connection) -> rusqlite::Result<bool> {
 fn client_tokens_has_assets_admin(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('client_tokens') WHERE name = 'assets_admin_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 098 (multi-user M1): `client_tokens`
+/// already has `person_id`. That `ALTER TABLE ... ADD COLUMN` is the one
+/// statement in 094 that is not idempotent — the table, both indexes and the
+/// trigger are `IF NOT EXISTS`, and both writes are conditional — so the
+/// column being there means the whole migration is.
+fn client_tokens_has_person(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('client_tokens') WHERE name = 'person_id'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 101 (multi-user M1, T9d): the one
+/// `ADD COLUMN` in the script. The trigger is `IF NOT EXISTS` and the
+/// backfill `UPDATE`s are idempotent, so only the column needs the guard.
+fn tasks_has_role(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = 'role'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+fn tasks_has_detached_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = 'detached_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 101 (multi-user M1): `sessions`
+/// already has `visibility`, the LAST of 097's two `ADD COLUMN`s — the
+/// `work_items_has_status_set_at` convention. Everything else in the script
+/// is `IF NOT EXISTS` or a `DROP`/`CREATE` of the row-version trigger, and
+/// the two `ADD COLUMN`s are the statements that cannot be written
+/// idempotently, so the last of them being there means the whole migration
+/// is. The attribution of pre-M1 rows is NOT in the script (see
+/// [`Store::backfill_session_owner`]), so this guard skipping the script
+/// never skips the backfill.
+fn sessions_has_visibility(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'visibility'",
         [],
         |r| r.get(0),
     )?;
@@ -405,6 +555,63 @@ fn asset_inventory_has_catalog_id(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 096 (`drift_side` on
+/// `asset_inventory`, Assets M5).
+fn asset_inventory_has_drift_side(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('asset_inventory') WHERE name = 'drift_side'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 097 (`decided_at` on
+/// `changeset_items`, Assets M5).
+fn changeset_items_has_decided_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('changeset_items') WHERE name = 'decided_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 102 (`outcome` on
+/// `changeset_items`, Assets M6).
+fn changeset_items_has_outcome(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('changeset_items') WHERE name = 'outcome'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 103 (`withdrawn_at` on `changesets`,
+/// Assets M6).
+fn changesets_has_withdrawn_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('changesets') WHERE name = 'withdrawn_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 105: no worktree row is named with
+/// a `/`. A data rewrite with nothing left to rewrite is skipped rather than
+/// run, and it must be: its `UPDATE sessions` compiles every `sessions`
+/// trigger, which on a database whose skipped branch migrations are not yet
+/// repaired names columns that do not exist yet.
+fn no_slash_named_worktrees(conn: &Connection) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT NOT EXISTS (SELECT 1 FROM worktrees WHERE instr(name, '/') > 0)",
+        [],
+        |r| r.get(0),
+    )
+}
+
 /// `already_applied` guard of migration 087 (`secret_like` / `fleet_owned`
 /// on `asset_inventory`).
 fn asset_inventory_has_fleet_owned(conn: &Connection) -> rusqlite::Result<bool> {
@@ -431,6 +638,249 @@ fn hosts_has_harnesses(conn: &Connection) -> rusqlite::Result<bool> {
 fn hosts_has_provision_warning(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'provision_warning'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 114.
+fn hosts_has_claude_profiles(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'claude_profiles'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 129.
+fn grants_have_profile(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('orchestration_grants') WHERE name = 'profile'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+fn sessions_has_turn_outcome(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'turn_outcome'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 125.
+fn sessions_has_last_viewed_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'last_viewed_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 124.
+fn sessions_has_origin(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'origin'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 121.
+fn sessions_has_agent(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'agent'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 113.
+fn sessions_has_claude_profile(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'claude_profile'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 115.
+fn work_items_has_orchestration_project(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_items') \
+         WHERE name = 'orchestration_project_id'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 126.
+fn host_tokens_has_rotated_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('host_tokens') WHERE name = 'rotated_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 139.
+fn routine_runs_has_outcome_source(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('routine_runs') WHERE name = 'outcome_source'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 132.
+fn peer_links_has_msgs_total(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('peer_links') WHERE name = 'msgs_total'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 142: `session_grants`' CHECK
+/// already admits 'answer'. 142 rebuilds the table, so a re-run only records
+/// the version.
+fn session_grants_has_answer(conn: &Connection) -> rusqlite::Result<bool> {
+    let sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'session_grants'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(sql.is_some_and(|s| s.contains("'answer'")))
+}
+
+/// `already_applied` guard of migration 117.
+/// `already_applied` guard of migration 134.
+fn hosts_has_agents_on_path(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'agents_on_path'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 150.
+fn hosts_has_last_reachable_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'last_reachable_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// already_applied guard of migration 154.
+fn work_items_has_due_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'due_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// already_applied guard of migration 171.
+fn work_items_has_estimate_unit(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'estimate_unit'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// already_applied guard of migration 172.
+fn tracker_writes_has_remote_url(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('tracker_writes') WHERE name = 'remote_url'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// already_applied guard of migration 162.
+fn work_buckets_has_owner(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_buckets') WHERE name = 'owner_person_id'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// already_applied guard of migration 148.
+fn downloads_has_owner(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('downloads') WHERE name = 'owner_person_id'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+fn hosts_has_worktree_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'worktree_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+fn work_items_has_done_when(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'done_when'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 116.
+fn work_items_has_held_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'held_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 111.
+fn hosts_has_auth_overrides(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'auth_overrides'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 112.
+fn local_workspaces_has_driver_since(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('local_workspaces') WHERE name = 'driver_since'",
         [],
         |r| r.get(0),
     )?;
@@ -974,6 +1424,17 @@ const MIGRATIONS: &[Migration] = &[
         85,
         include_str!("../../migrations/085_work_unlinks_item_index.sql"),
     ),
+    // Multi-user M1's four scripts were written as 086-089, renumbered to
+    // 094-097 at the first `main` merge, and RENUMBERED AGAIN to 096-099 at
+    // the second: `main` had meanwhile shipped 086-093 (shared work context,
+    // inventory flags, guides, host harnesses, the catalogs) and then 094
+    // (changesets) and 095 (downloads). The scripts themselves are unchanged
+    // — every set touches disjoint tables (M1: `people`, `sessions`,
+    // `session_grants`, `tasks`) — so the renumber is the whole of it, and
+    // M1 deliberately has NO arm in `repair_skipped_main_migrations` below:
+    // no `fleet-hub` binary was ever built from an M1 worktree and the branch
+    // was first pushed on 2026-10-04, so no database in the wild has ever
+    // recorded 86-89 or 94-97 for these scripts. There is nothing to repair.
     // Shared work context (design 2026-09-29): origin, project, notes, job
     // and proposal columns on `work_items`. The ADD COLUMNs are not
     // idempotent, so the same guard 084 uses; the backfill and indexes are.
@@ -1026,6 +1487,513 @@ const MIGRATIONS: &[Migration] = &[
     // File downloads: `downloads` (a file a session sent from its host,
     // copied to the data dir). CREATE IF NOT EXISTS: safe to re-run.
     Migration::plain(95, include_str!("../../migrations/095_downloads.sql")),
+    // Assets M5: which side moved on a drifted managed row. ADD COLUMN is
+    // not idempotent: the same guard 087 uses.
+    Migration {
+        version: 96,
+        sql: include_str!("../../migrations/096_inventory_drift_side.sql"),
+        already_applied: Some(asset_inventory_has_drift_side),
+    },
+    // Assets M5: when a changeset item was decided. ADD COLUMN is not
+    // idempotent: guarded.
+    Migration {
+        version: 97,
+        sql: include_str!("../../migrations/097_changeset_item_decided_at.sql"),
+        already_applied: Some(changeset_items_has_decided_at),
+    },
+    // Multi-user M1 (T1): `people`, `client_tokens.person_id` with its own
+    // narrow auth-epoch trigger, this hub's personal owner, and the backfill
+    // that leaves no live device person-less. Guarded: the ADD COLUMN is the
+    // one statement here that is not idempotent.
+    Migration {
+        version: 98,
+        sql: include_str!("../../migrations/098_people.sql"),
+        already_applied: Some(client_tokens_has_person),
+    },
+    // Multi-user M1 (T3): `sessions.owner_person_id` / `visibility`,
+    // `idx_sessions_owner`, the durable `conversation_owners` record with
+    // the two triggers that fill it, and 082's `sessions_row_version_bump`
+    // re-issued to watch both new `SessionRow` fields. Guarded: the second
+    // ADD COLUMN. The attribution of pre-M1 rows is deliberately NOT in the
+    // script — it is `backfill_session_owner`, after the collision repair,
+    // for migration 080's reason.
+    Migration {
+        version: 99,
+        sql: include_str!("../../migrations/099_session_owner.sql"),
+        already_applied: Some(sessions_has_visibility),
+    },
+    // Multi-user M1 (T4): `session_grants` — the owner's explicit, revocable,
+    // downward-only share — with its NULL-safe one-live-grant index, the hot
+    // per-person read and the index the session cascade needs. Plain: every
+    // statement is `IF NOT EXISTS` and there is no ADD COLUMN, so re-running
+    // the script changes nothing. The rules it cannot express as constraints
+    // are in `store/session_grants.rs`.
+    Migration::plain(100, include_str!("../../migrations/100_session_grants.sql")),
+    // Multi-user M1 (T9d): `tasks.detached_at` plus the `AFTER DELETE ON
+    // sessions` trigger that NULLs a reaped session's id out of both ends and
+    // stamps the task, so a recycled `sessions.id` can never make another
+    // person's task read as theirs. Guarded: the ADD COLUMN.
+    Migration {
+        version: 101,
+        sql: include_str!("../../migrations/101_tasks_detach.sql"),
+        already_applied: Some(tasks_has_detached_at),
+    },
+    // Assets M6's two scripts were written as 098-099 and renumbered to
+    // 102-103 at the `main` merge that brought multi-user M1's 098-101; the
+    // scripts are unchanged (M6 touches only `changeset_items` and
+    // `changesets`).
+    //
+    // Assets M6: what a host-writing card left undone on an item's host.
+    // ADD COLUMN is not idempotent: guarded.
+    Migration {
+        version: 102,
+        sql: include_str!("../../migrations/102_changeset_item_outcome.sql"),
+        already_applied: Some(changeset_items_has_outcome),
+    },
+    // Assets M6: when the system withdrew a card, so it is pruned a week
+    // after withdrawal. ADD COLUMN is not idempotent: guarded.
+    Migration {
+        version: 103,
+        sql: include_str!("../../migrations/103_changeset_withdrawn_at.sql"),
+        already_applied: Some(changesets_has_withdrawn_at),
+    },
+    // The New session picker: a person's pin / visibility / group per
+    // project, keyed by owner/repo TEXT. A new table only, so plain.
+    Migration::plain(104, include_str!("../../migrations/104_project_picks.sql")),
+    // Worktree rows named after a branch with a `/` (`feat/imports`) take a
+    // flat name (`feat-imports`), and so do their sessions' keys. Rewrites
+    // rows only; guarded so it runs only while such a row exists.
+    Migration {
+        version: 105,
+        sql: include_str!("../../migrations/105_worktree_slash_names.sql"),
+        already_applied: Some(no_slash_named_worktrees),
+    },
+    Migration::plain(
+        106,
+        include_str!("../../migrations/106_org_settings_and_spend.sql"),
+    ),
+    // Org administration phase D: memberships, the company that owns the
+    // hub, and the unclaimed-count switch. ADD COLUMN is not idempotent:
+    // guarded on the last one.
+    Migration {
+        version: 107,
+        sql: include_str!("../../migrations/107_org_members.sql"),
+        already_applied: Some(orgs_has_admins_see_unclaimed),
+    },
+    // Sprints and releases (design 2026-09-28 §1): three new tables, so
+    // plain.
+    Migration::plain(108, include_str!("../../migrations/108_work_buckets.sql")),
+    // Local workspace sync, Phase 1: three new tables, so plain.
+    Migration::plain(
+        109,
+        include_str!("../../migrations/109_local_workspaces.sql"),
+    ),
+    // Orchestration O0: a task names the work item it is an attempt at, with
+    // its attempt number and role. ADD COLUMN is not idempotent: guarded on
+    // the last one.
+    Migration {
+        version: 110,
+        sql: include_str!("../../migrations/110_task_runs.sql"),
+        already_applied: Some(tasks_has_role),
+    },
+    // Auth-override names per host (multi-account groundwork): one ADD
+    // COLUMN, guarded.
+    Migration {
+        version: 111,
+        sql: include_str!("../../migrations/111_host_auth_overrides.sql"),
+        already_applied: Some(hosts_has_auth_overrides),
+    },
+    // Local workspace, Phases 2 and 3: who drives the worktree (two ADD
+    // COLUMNs, guarded on the last) and the per-path activity log.
+    Migration {
+        version: 112,
+        sql: include_str!("../../migrations/112_local_workspace_handoff.sql"),
+        already_applied: Some(local_workspaces_has_driver_since),
+    },
+    // A session's credential profile (multi-account phase 2): one ADD
+    // COLUMN, guarded, and the row-version trigger re-issued to watch it.
+    Migration {
+        version: 113,
+        sql: include_str!("../../migrations/113_session_claude_profile.sql"),
+        already_applied: Some(sessions_has_claude_profile),
+    },
+    // A host's login profiles and their accounts: one ADD COLUMN, guarded.
+    Migration {
+        version: 114,
+        sql: include_str!("../../migrations/114_host_claude_profiles.sql"),
+        already_applied: Some(hosts_has_claude_profiles),
+    },
+    // Orchestration O1: the mission container, its repos and its event log
+    // (new tables), and work_items.orchestration_project_id (ADD COLUMN,
+    // so guarded on it).
+    Migration {
+        version: 115,
+        sql: include_str!("../../migrations/115_orchestration_projects.sql"),
+        already_applied: Some(work_items_has_orchestration_project),
+    },
+    // Orchestration O2: the dependency graph (a new table) and a person's
+    // hold on an item (ADD COLUMN, so guarded on it).
+    Migration {
+        version: 116,
+        sql: include_str!("../../migrations/116_work_item_deps.sql"),
+        already_applied: Some(work_items_has_held_at),
+    },
+    // Orchestration O3: a task's report and git evidence, an item's
+    // done_when (three ADD COLUMNs, guarded on the last) and the journal of
+    // a person's checks (a new table).
+    Migration {
+        version: 117,
+        sql: include_str!("../../migrations/117_task_evidence.sql"),
+        already_applied: Some(work_items_has_done_when),
+    },
+    // Orchestration O4–O6: the loop's cards and a person's grants (new
+    // tables only, so idempotent).
+    Migration::plain(
+        118,
+        include_str!("../../migrations/118_orchestration_loop.sql"),
+    ),
+    // Chat forms: `form_requests`. A new table and indexes, `IF NOT EXISTS`,
+    // safe to re-run.
+    Migration::plain(119, include_str!("../../migrations/119_form_requests.sql")),
+    // Debug devices: `debug_devices`, `debug_device_scans` and a host-delete
+    // trigger. New objects only, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(120, include_str!("../../migrations/120_debug_devices.sql")),
+    // Orbit Fleet 2.1: which agent runs in a session (one ADD COLUMN,
+    // guarded, a shell backfill, and the row-version trigger re-issued).
+    Migration {
+        version: 121,
+        sql: include_str!("../../migrations/121_session_agent.sql"),
+        already_applied: Some(sessions_has_agent),
+    },
+    // Account usage history: `account_usage_snapshots` and its index. New
+    // objects only, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        122,
+        include_str!("../../migrations/122_account_usage_snapshots.sql"),
+    ),
+    // Orbit Fleet 4.6, the Hosts page: CPU, total memory, boot time,
+    // latency and worktree size on `hosts` (six ADD COLUMNs, guarded on the
+    // last).
+    Migration {
+        version: 123,
+        sql: include_str!("../../migrations/123_host_probe_facts.sql"),
+        already_applied: Some(hosts_has_worktree_at),
+    },
+    // Orbit Fleet 2.2: who or what started a session (two ADD COLUMNs,
+    // guarded, and the row-version trigger re-issued). No backfill.
+    Migration {
+        version: 124,
+        sql: include_str!("../../migrations/124_session_origin.sql"),
+        already_applied: Some(sessions_has_origin),
+    },
+    // Orbit Fleet 2.3: when a person last looked at a session (one ADD
+    // COLUMN, guarded, every row backfilled as viewed now, and the
+    // row-version trigger re-issued).
+    Migration {
+        version: 125,
+        sql: include_str!("../../migrations/125_session_last_viewed.sql"),
+        already_applied: Some(sessions_has_last_viewed_at),
+    },
+    // Orbit Fleet 11.4, the Control API tokens table: `last_used_at` and
+    // `rotated_at` on `host_tokens` (two ADD COLUMNs, guarded on the last),
+    // and its update trigger narrowed to leave liveness alone.
+    Migration {
+        version: 126,
+        sql: include_str!("../../migrations/126_host_token_use.sql"),
+        already_applied: Some(host_tokens_has_rotated_at),
+    },
+    // Orbit Fleet 8.2: `aux_usage`, the cost of fleet's own `claude -p`
+    // runs. A new table and indexes, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(127, include_str!("../../migrations/127_aux_usage.sql")),
+    // Pull requests (redesign 6.4): `pull_requests` and two indexes. New
+    // objects only, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(128, include_str!("../../migrations/128_pull_requests.sql")),
+    // Orbit Fleet 2.8: a finished turn's outcome (J2) and the subject index
+    // proposals are read through (one ADD COLUMN, guarded, an index, and the
+    // row-version trigger re-issued).
+    Migration {
+        version: 129,
+        sql: include_str!("../../migrations/129_session_turn_outcome.sql"),
+        already_applied: Some(sessions_has_turn_outcome),
+    },
+    // Orbit Fleet 4.2, cost per account and per model:
+    // `usage_daily_account` and its index. New objects only, `IF NOT
+    // EXISTS`, safe to re-run.
+    Migration::plain(
+        130,
+        include_str!("../../migrations/130_usage_daily_account.sql"),
+    ),
+    // Orbit Fleet 8.5: routines and their runs (two new tables).
+    Migration::plain(131, include_str!("../../migrations/131_routines.sql")),
+    // Orbit Fleet 11.5, the Federation page: a link's latency and message
+    // counts on `peer_links` (four ADD COLUMNs, guarded on the last).
+    Migration {
+        version: 132,
+        sql: include_str!("../../migrations/132_peer_link_traffic.sql"),
+        already_applied: Some(peer_links_has_msgs_total),
+    },
+    // Orbit Fleet 5.10, Send prompt: `deferred_prompts`, prompts typed in
+    // once a busy session is idle. New objects only, `IF NOT EXISTS`, safe
+    // to re-run.
+    Migration::plain(
+        133,
+        include_str!("../../migrations/133_deferred_prompts.sql"),
+    ),
+    // Orbit Fleet 12.4: which agent CLIs a host has on its PATH (one ADD
+    // COLUMN, guarded).
+    Migration {
+        version: 134,
+        sql: include_str!("../../migrations/134_host_agents_on_path.sql"),
+        already_applied: Some(hosts_has_agents_on_path),
+    },
+    // Orbit Fleet 4.9: the add-host wizard's saved drafts (`host_setups`)
+    // and the fleet-agent install jobs (`agent_installs`). New tables only,
+    // `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(135, include_str!("../../migrations/135_host_setup.sql")),
+    // PR shepherd: a person's standing rule per project and one row per
+    // problem the shepherd saw on a session's PR (two CREATE TABLE IF NOT
+    // EXISTS, idempotent as written).
+    Migration::plain(136, include_str!("../../migrations/136_pr_shepherd.sql")),
+    // Orbit Fleet 8.7: a mission grant names its login (one ADD COLUMN,
+    // guarded).
+    Migration {
+        version: 137,
+        sql: include_str!("../../migrations/137_grant_profile.sql"),
+        already_applied: Some(grants_have_profile),
+    },
+    // Orbit Fleet 11.8: `usage_daily_person`, an org's spend by person. A
+    // new table, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        138,
+        include_str!("../../migrations/138_usage_daily_person.sql"),
+    ),
+    // Orbit Fleet 8.10: what a routine run came to (two ADD COLUMNs,
+    // guarded on the last).
+    Migration {
+        version: 139,
+        sql: include_str!("../../migrations/139_routine_run_outcome.sql"),
+        already_applied: Some(routine_runs_has_outcome_source),
+    },
+    // Orbit Fleet 9.3: `control_handoffs`, what Control's agent sent where.
+    // A new table only, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        140,
+        include_str!("../../migrations/140_control_handoffs.sql"),
+    ),
+    // Orbit Fleet 8.3: the indexes behind `runs { list }` (one list over
+    // tasks, mission actions, Jev, `claude -p` and routine runs). Indexes only,
+    // `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(141, include_str!("../../migrations/141_runs_indexes.sql")),
+    // Orbit Fleet 11.7, the Answer share level: `session_grants.level`'s
+    // CHECK gains 'answer'. A table rebuild, so guarded.
+    Migration {
+        version: 142,
+        sql: include_str!("../../migrations/142_share_level_answer.sql"),
+        already_applied: Some(session_grants_has_answer),
+    },
+    // Orbit Fleet 9.7: Control's Library indexes the files a person put on
+    // a host (one CREATE TABLE IF NOT EXISTS, idempotent as written).
+    Migration::plain(143, include_str!("../../migrations/143_library_items.sql")),
+    // Orbit Fleet 8.11, from AI to rule: `start_rules`, the key patterns
+    // that pick a start's project before history and Jev. New objects only.
+    Migration::plain(144, include_str!("../../migrations/144_start_rules.sql")),
+    // PR shepherd, step 3: the merge queue's record (a new table and an
+    // index, `IF NOT EXISTS`, safe to re-run).
+    Migration::plain(
+        145,
+        include_str!("../../migrations/145_pr_shepherd_merges.sql"),
+    ),
+    // Review r02: routines whose project or host is gone are paused with
+    // the reason, and a partial index serves the scheduler's scan of runs
+    // without an outcome. Idempotent as written (the UPDATEs match only
+    // enabled orphans; the index is `IF NOT EXISTS`).
+    Migration::plain(
+        146,
+        include_str!("../../migrations/146_routine_orphans.sql"),
+    ),
+    // Review r16: a partial index on the live org grants, for the org half
+    // of `grants_for_person` (`IF NOT EXISTS`, safe to re-run).
+    Migration::plain(
+        147,
+        include_str!("../../migrations/147_session_grants_org.sql"),
+    ),
+    // Review r04 F3: Library items and downloads record their owner, so a
+    // reaped session's files stay that person's. Two ALTERs, so guarded.
+    Migration {
+        version: 148,
+        sql: include_str!("../../migrations/148_file_owner.sql"),
+        already_applied: Some(downloads_has_owner),
+    },
+    // Redesign: a background agent's "stop after" limits, enforced by the
+    // reconcile tick (`service::bg_sessions::spawn_enforce_stop_limits`).
+    // `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(149, include_str!("../../migrations/149_bg_stop_limits.sql")),
+    // Review r13: the host row's last probe error and last-reachable stamp
+    // (three ADD COLUMNs, guarded on the first).
+    Migration {
+        version: 150,
+        sql: include_str!("../../migrations/150_host_probe_error.sql"),
+        already_applied: Some(hosts_has_last_reachable_at),
+    },
+    // Update design S9: staged rollouts, one active per component.
+    // `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        151,
+        include_str!("../../migrations/151_update_rollouts.sql"),
+    ),
+    // Update design S9: per-org update policy. `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        152,
+        include_str!("../../migrations/152_update_org_policy.sql"),
+    ),
+    // Redesign 10.12: a chat form while its agent is still writing it
+    // (`ask { draft }`). `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(153, include_str!("../../migrations/153_form_drafts.sql")),
+    // Orbit Fleet M15 (G1.7): a task's due date.
+    Migration {
+        version: 154,
+        sql: include_str!("../../migrations/154_work_item_due.sql"),
+        already_applied: Some(work_items_has_due_at),
+    },
+    // M15 step G1.8: Send later's time choices on `deferred_prompts` — ADD
+    // COLUMNs, so a guard.
+    Migration {
+        version: 155,
+        sql: include_str!("../../migrations/155_deferred_prompt_timing.sql"),
+        already_applied: Some(deferred_prompts_has_not_before),
+    },
+    // M15 step G2.4: a routine's pull request triggers (repo, author, rate)
+    // on `routines` — ADD COLUMNs, so a guard.
+    Migration {
+        version: 156,
+        sql: include_str!("../../migrations/156_routine_triggers.sql"),
+        already_applied: Some(routines_has_event_rate),
+    },
+    // M15 step G2.8: named Control API tokens — a new table, idempotent.
+    Migration::plain(157, include_str!("../../migrations/157_control_tokens.sql")),
+    // M15 step G2.10: the org's own-sessions switch (ADD COLUMN, so a
+    // guard) and its project catalog.
+    Migration {
+        version: 158,
+        sql: include_str!("../../migrations/158_org_switches_and_projects.sql"),
+        already_applied: Some(orgs_has_members_own_sessions_only),
+    },
+    // M15 step G3.8: a routine's guards (time zone, time cap, host fallback,
+    // retry, autonomy) and a run's error code and host — ADD COLUMNs, so a
+    // guard.
+    Migration {
+        version: 159,
+        sql: include_str!("../../migrations/159_routine_guards.sql"),
+        already_applied: Some(routine_runs_has_host),
+    },
+    // M15 step G4.2: `access_requests`, a recipient's ask for a wider share
+    // level. `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        160,
+        include_str!("../../migrations/160_access_requests.sql"),
+    ),
+    // Task comments: a new table, idempotent.
+    Migration::plain(
+        161,
+        include_str!("../../migrations/161_work_item_comments.sql"),
+    ),
+    // Personal sprints: `work_buckets.owner_person_id` — an ADD COLUMN, so a
+    // guard.
+    Migration {
+        version: 162,
+        sql: include_str!("../../migrations/162_work_bucket_owner.sql"),
+        already_applied: Some(work_buckets_has_owner),
+    },
+    // Search phase 3: the full-text index (`search_docs`, FTS5
+    // `search_fts`) and the triggers that keep it in step. `IF NOT EXISTS`
+    // and an upsert backfill, then a rebuild: safe to re-run.
+    Migration::plain(163, include_str!("../../migrations/163_search_index.sql")),
+    // M15 step G7.1: start and placement rules name how a start runs (host
+    // fallback, account, model, effort, agent) — ADD COLUMNs, so a guard.
+    Migration {
+        version: 164,
+        sql: include_str!("../../migrations/164_rule_start_targets.sql"),
+        already_applied: Some(start_rules_has_agent),
+    },
+    // M15 step G7.2: `wizard_state`, the add-host wizard's drafts
+    // generalised so any wizard resumes on another device. It moves the
+    // `host_setups` rows and drops that table, so a guard.
+    Migration {
+        version: 165,
+        sql: include_str!("../../migrations/165_wizard_state.sql"),
+        already_applied: Some(has_wizard_state),
+    },
+    // M15 step G7.4: a routine's runs outlive it (`routine_id` nullable, ON
+    // DELETE SET NULL, plus `routine_name`). A table rebuild, so guarded.
+    Migration {
+        version: 166,
+        sql: include_str!("../../migrations/166_routine_runs_outlive_routine.sql"),
+        already_applied: Some(routine_runs_has_routine_name),
+    },
+    // Single sign-on: `person_identities`, which person an OIDC account
+    // (issuer, subject) is. `IF NOT EXISTS`: safe to re-run.
+    Migration::plain(
+        167,
+        include_str!("../../migrations/167_person_identities.sql"),
+    ),
+    // Task attachments and their content-addressed blobs: new tables,
+    // idempotent.
+    Migration::plain(
+        168,
+        include_str!("../../migrations/168_work_item_attachments.sql"),
+    ),
+    // Jira-style ticket keys (`store::ticket_keys`): `ticket_spaces` and the
+    // items' `ticket_space_id` / `ticket_seq` / `display_key`. `ALTER TABLE
+    // ADD COLUMN` cannot be re-run, so guarded.
+    Migration {
+        version: 169,
+        sql: include_str!("../../migrations/169_ticket_keys.sql"),
+        already_applied: Some(work_items_has_display_key),
+    },
+    // Status history for persona dashboards (`work_status_log`), written by
+    // triggers on `work_items`. All `IF NOT EXISTS`, so idempotent.
+    Migration::plain(
+        170,
+        include_str!("../../migrations/170_work_status_log.sql"),
+    ),
+    // A task's priority, labels and estimate: ADD COLUMNs, so a guard.
+    Migration {
+        version: 171,
+        sql: include_str!("../../migrations/171_work_item_priority_labels_estimate.sql"),
+        already_applied: Some(work_items_has_estimate_unit),
+    },
+    // Tracker comments posted back: ADD COLUMNs on the outbox, so a guard.
+    Migration {
+        version: 172,
+        sql: include_str!("../../migrations/172_tracker_comment_writes.sql"),
+        already_applied: Some(tracker_writes_has_remote_url),
+    },
+    // Agent runtime (reviewer and support agents, step 1): `agent_rules`,
+    // `agent_cursors`, `agent_jobs`, `agent_actions`. New tables, idempotent.
+    Migration::plain(173, include_str!("../../migrations/173_agents.sql")),
+    // The PR reviewer (agents step 3): `review_prs`, `review_records`. New
+    // tables, idempotent.
+    Migration::plain(174, include_str!("../../migrations/174_review_prs.sql")),
+    Migration::plain(
+        175,
+        include_str!("../../migrations/175_support_fingerprints.sql"),
+    ),
+    Migration::plain(
+        176,
+        include_str!("../../migrations/176_review_test_exemptions.sql"),
+    ),
+    // Debug devices: the line waiting for a claimed device,
+    // `debug_device_queue`. New table, idempotent.
+    Migration::plain(
+        177,
+        include_str!("../../migrations/177_debug_device_queue.sql"),
+    ),
+    // Persona dashboards step 6: dashboards a person pinned, on the hub.
+    // `IF NOT EXISTS` throughout, so idempotent.
+    Migration::plain(
+        178,
+        include_str!("../../migrations/178_pinned_dashboards.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -1080,17 +2048,43 @@ pub(super) fn migrations_through(version: i64) -> impl Iterator<Item = (i64, &'s
         .map(|m| (m.version, m.sql))
 }
 
+/// How [`newer_schema_error`]'s message starts; [`is_newer_schema_error`]
+/// recognises the refusal by it.
+const NEWER_SCHEMA_PREFIX: &str = "this database is at schema version ";
+
 /// The downgrade guard's refusal: `recorded` came from a newer build.
 fn newer_schema_error(recorded: i64) -> rusqlite::Error {
     rusqlite::Error::SqliteFailure(
         rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
         Some(format!(
-            "this database is at schema version {recorded}, but this build of claude-fleet \
+            "{NEWER_SCHEMA_PREFIX}{recorded}, but this build of claude-fleet \
              only knows up to {KNOWN_SCHEMA_VERSION}: it was last opened by a newer release. \
              It is not corrupt; do not delete it. Run that release (or a newer one) again, \
              or restore the copy of state.db you backed up before upgrading."
         )),
     )
+}
+
+/// Whether `e` is the downgrade guard's refusal (a database a newer release
+/// migrated). An opener's own "if the file is corrupt, delete it" advice must
+/// not follow it: that database is intact, and deleting it loses every
+/// token, pairing and work item a rollback was meant to keep.
+pub fn is_newer_schema_error(e: &rusqlite::Error) -> bool {
+    matches!(
+        e,
+        rusqlite::Error::SqliteFailure(f, Some(msg))
+            if f.code == rusqlite::ErrorCode::CannotOpen && msg.starts_with(NEWER_SCHEMA_PREFIX)
+    )
+}
+
+/// The advice an opener adds to a failure to open `state.db`: none for the
+/// downgrade refusal (its message already says what to do), else `corrupt`.
+pub fn open_failure_advice<'a>(e: &rusqlite::Error, corrupt: &'a str) -> &'a str {
+    if is_newer_schema_error(e) {
+        ""
+    } else {
+        corrupt
+    }
 }
 
 impl Store {
@@ -1156,7 +2150,9 @@ impl Store {
             restored?;
         }
         self.repair_skipped_main_migrations()?;
+        self.ensure_work_rules_start_columns()?;
         self.backfill_stale_demoted()?;
+        self.backfill_session_owner()?;
         self.reap_orphan_session_events()?;
         Ok(())
     }
@@ -1175,6 +2171,68 @@ impl Store {
         self.conn.execute(
             "UPDATE sessions SET stale_demoted_at = stale_working_at \
              WHERE stale_working_at IS NOT NULL AND stale_demoted_at IS NULL",
+            [],
+        )
+    }
+
+    /// Migration 099's backfill: on a hub with exactly ONE person, every
+    /// session fleet itself started becomes that person's, and private.
+    ///
+    /// **Why it is Rust and not an `UPDATE` in the script.** Migration 080
+    /// wrote the reason down: any `UPDATE sessions` compiles the row-version
+    /// trigger, which names `lost_reason` — a column that on a
+    /// conversations-branch database exists only once
+    /// [`Store::repair_skipped_main_migrations`] has added it, and that runs
+    /// *after* every pending migration. An inline `UPDATE` in 095 aborts
+    /// such an upgrade with `no such column: lost_reason`. So this runs
+    /// beside [`Store::backfill_stale_demoted`], after the repair.
+    ///
+    /// **Why `started_at`.** It is documented "when fleet created the
+    /// session (NULL for tmux-discovered rows)" (`store/rows.rs`), so it
+    /// separates exactly the two populations the spec's table (§4.3,
+    /// *`'unclaimed'`: the safe holding state*) distinguishes: a row fleet
+    /// started, which the hub's one person demonstrably owns, from a row
+    /// reconcile found on a host, which nobody can speak for. A
+    /// hand-started tmux session on a shared host is precisely the row that
+    /// must come out of the upgrade `unclaimed`. The companion spec's Q10
+    /// asks for "every session" to carry the person; that is the half of
+    /// Q10 that was wrong, and §4.3's own table is the authority.
+    ///
+    /// **Why one person.** With two or more people on the hub there is no
+    /// fact that says which of them started a pre-M1 row, and guessing
+    /// would widen (rule 7: the upgrade widens nothing). Those rows stay
+    /// `unclaimed`, which is a count and nothing else.
+    ///
+    /// `(SELECT id FROM people WHERE is_personal_owner = 1) IS NOT NULL`
+    /// looks redundant beside the count — migration 098 mints the flagged
+    /// row — and is there so that a database where the one person is
+    /// somehow not the flagged owner attributes NOTHING rather than
+    /// stamping `private` with a NULL owner, which no caller could ever
+    /// read. Fail closed, as `personal_owner_id()` does.
+    ///
+    /// Idempotent on two keys (`owner_person_id IS NULL` and
+    /// `visibility = 'unclaimed'`): after the first run it matches no row,
+    /// so the second `migrate()` of a session writes nothing. The two keys
+    /// also mean it never revisits a row somebody has since decided — a
+    /// session created after M1 carries its owner from its own create path
+    /// (T5), and a row deliberately left owner-less and `private` stays
+    /// unreadable rather than being handed to the hub's owner on the next
+    /// open.
+    ///
+    /// Both columns ARE watched by the row-version trigger, so each
+    /// attributed row's `row_version` moves once — which is correct: an
+    /// open client holding a cached row must learn that its visibility
+    /// changed.
+    fn backfill_session_owner(&self) -> Result<usize> {
+        self.conn.execute(
+            "UPDATE sessions \
+                SET owner_person_id = (SELECT id FROM people WHERE is_personal_owner = 1), \
+                    visibility = 'private' \
+              WHERE owner_person_id IS NULL \
+                AND visibility = 'unclaimed' \
+                AND started_at IS NOT NULL \
+                AND (SELECT COUNT(*) FROM people) = 1 \
+                AND (SELECT id FROM people WHERE is_personal_owner = 1) IS NOT NULL",
             [],
         )
     }
@@ -1206,6 +2264,33 @@ impl Store {
     /// ADD COLUMN plus `IF NOT EXISTS` / `DROP … IF EXISTS` DDL, and 065's
     /// trigger rebuild is still the latest one, so running them late is
     /// what running them in order would have left.
+    /// Migration 164's `work_rules` half (gap plan G7.1): `host_alias` and
+    /// `profile`, "its sessions start here". In Rust, after the repair of a
+    /// skipped 066 (which creates `work_rules`), so a database that met 164
+    /// before it had the table still gets them. Idempotent.
+    fn ensure_work_rules_start_columns(&self) -> Result<()> {
+        let has_table: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'work_rules'",
+            [],
+            |r| r.get(0),
+        )?;
+        if has_table == 0 {
+            return Ok(());
+        }
+        for column in ["host_alias", "profile"] {
+            let n: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('work_rules') WHERE name = ?1",
+                [column],
+                |r| r.get(0),
+            )?;
+            if n == 0 {
+                self.conn
+                    .execute_batch(&format!("ALTER TABLE work_rules ADD COLUMN {column} TEXT;"))?;
+            }
+        }
+        Ok(())
+    }
+
     fn repair_skipped_main_migrations(&self) -> Result<()> {
         /// `(table, column, column definition)` added by `main`'s 034 and 036.
         const COLUMNS: &[(&str, &str, &str)] = &[
@@ -1214,7 +2299,9 @@ impl Store {
             ("hosts", "tmux_server_pid", "INTEGER"),
             ("sessions", "lost_reason", "TEXT"),
         ];
-        let tx = self.conn.unchecked_transaction()?;
+        // Reads, then writes (035's `INSERT OR IGNORE`): IMMEDIATE, or a
+        // CLI opening this file beside the running hub fails on its write lock.
+        let tx = self.immediate_transaction()?;
         for (table, column, def) in COLUMNS {
             let n: i64 = tx.query_row(
                 "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
@@ -1278,7 +2365,7 @@ impl Store {
             already_applied,
         } in pending
         {
-            let tx = self.conn.unchecked_transaction()?;
+            let tx = self.immediate_transaction()?;
             if already_applied
                 .map(|applied| applied(&tx))
                 .transpose()?
@@ -1418,6 +2505,7 @@ mod tests {
             bus: StoreBus::new(Arc::new(NoopEventBus)),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            form_notify: Arc::new(tokio::sync::Notify::new()),
             peer_generations: Default::default(),
             instance: super::next_instance(),
         };
@@ -1487,6 +2575,7 @@ mod tests {
             bus: StoreBus::new(Arc::new(NoopEventBus)),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            form_notify: Arc::new(tokio::sync::Notify::new()),
             peer_generations: Default::default(),
             instance: super::next_instance(),
         };
@@ -1716,6 +2805,7 @@ mod tests {
             bus: StoreBus::new(Arc::new(NoopEventBus)),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            form_notify: Arc::new(tokio::sync::Notify::new()),
             peer_generations: Default::default(),
             instance: super::next_instance(),
         }
@@ -2361,6 +3451,159 @@ mod tests {
         );
     }
 
+    /// 121 on a database stopped at 120: every row gets an agent, a shell
+    /// session's is `shell`, the row-version trigger watches the column,
+    /// and a re-run (the column already there) changes nothing.
+    #[test]
+    fn migration_121_gives_every_session_an_agent() {
+        let old = Store::open_in_memory().expect("open");
+        old.upsert_host("h").unwrap();
+        let work = old
+            .upsert_session("w", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        let shell = old
+            .upsert_session("sh", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        old.conn
+            .execute_batch(&format!(
+                "UPDATE sessions SET kind = 'shell' WHERE id = {shell};\
+                 DROP TRIGGER sessions_row_version_bump;\
+                 ALTER TABLE sessions DROP COLUMN agent;\
+                 DELETE FROM schema_version WHERE version >= 121;"
+            ))
+            .unwrap();
+        old.migrate().expect("121 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let agent = |id| old.get_session_by_id(id).unwrap().unwrap().agent;
+        assert_eq!(
+            (agent(work), agent(shell)),
+            ("claude".into(), "shell".into())
+        );
+        let version = |id| old.get_session_by_id(id).unwrap().unwrap().row_version;
+        let before = version(work);
+        old.conn
+            .execute("UPDATE sessions SET agent = 'codex' WHERE id = ?1", [work])
+            .unwrap();
+        assert_eq!(version(work), before + 1, "the trigger watches agent");
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 121;")
+            .unwrap();
+        old.migrate().expect("re-running 121 is safe");
+        assert_eq!(agent(work), "codex", "a re-run does not backfill again");
+    }
+
+    /// 124 on a database stopped at 123: the columns arrive empty (no
+    /// guessed backfill), the CHECK refuses an unknown origin, and the
+    /// row-version trigger watches both.
+    #[test]
+    fn migration_124_adds_an_empty_origin() {
+        let old = Store::open_in_memory().expect("open");
+        old.upsert_host("h").unwrap();
+        let id = old
+            .upsert_session("w", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        old.conn
+            .execute_batch(
+                "DROP TRIGGER sessions_row_version_bump;\
+                 ALTER TABLE sessions DROP COLUMN origin_ref;\
+                 ALTER TABLE sessions DROP COLUMN origin;\
+                 DELETE FROM schema_version WHERE version >= 124;",
+            )
+            .unwrap();
+        old.migrate().expect("124 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let row = || old.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!((row().origin, row().origin_ref), (None, None));
+        let before = row().row_version;
+        old.set_session_origin(id, &crate::store::SessionOrigin::token(Some(3)))
+            .unwrap();
+        assert_eq!(row().row_version, before + 1, "the trigger watches origin");
+        assert_eq!(row().origin_ref.as_deref(), Some("3"));
+        assert!(old
+            .conn
+            .execute("UPDATE sessions SET origin = 'cron' WHERE id = ?1", [id])
+            .is_err());
+    }
+
+    /// 125 on an existing DB: every row reads as viewed at upgrade time, so
+    /// nothing turns unread by upgrading; the stamp only moves forward.
+    #[test]
+    fn migration_125_counts_every_session_as_viewed() {
+        let old = Store::open_in_memory().expect("open");
+        old.upsert_host("h").unwrap();
+        let id = old
+            .upsert_session("w", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        old.conn
+            .execute_batch(
+                "DROP TRIGGER sessions_row_version_bump;\
+                 ALTER TABLE sessions DROP COLUMN last_viewed_at;\
+                 DELETE FROM schema_version WHERE version >= 125;",
+            )
+            .unwrap();
+        old.migrate().expect("125 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let row = || old.get_session_by_id(id).unwrap().unwrap();
+        let stamped = row().last_viewed_at.expect("backfilled as viewed");
+        assert!(stamped > 1_600_000_000);
+        let before = row().row_version;
+        assert!(!old.touch_session_viewed(id, stamped - 5).unwrap());
+        assert!(old.touch_session_viewed(id, stamped + 5).unwrap());
+        assert_eq!(row().last_viewed_at, Some(stamped + 5));
+        assert_eq!(row().row_version, before + 1, "the trigger watches it");
+    }
+
+    /// 129 on a database stopped at 128: `turn_outcome` arrives empty, the
+    /// CHECK refuses a word J2 never answers, the row-version trigger
+    /// watches it, and proposals have their subject index.
+    #[test]
+    fn migration_129_adds_an_empty_turn_outcome() {
+        let old = Store::open_in_memory().expect("open");
+        old.upsert_host("h").unwrap();
+        let id = old
+            .upsert_session("w", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        old.conn
+            .execute_batch(
+                "DROP TRIGGER sessions_row_version_bump;\
+                 DROP INDEX decision_runs_subject;\
+                 ALTER TABLE sessions DROP COLUMN turn_outcome;\
+                 DELETE FROM schema_version WHERE version >= 129;",
+            )
+            .unwrap();
+        old.migrate().expect("129 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let row = || old.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row().turn_outcome, None);
+        let before = row().row_version;
+        assert!(old.set_turn_outcome(id, Some("asked")).unwrap());
+        assert!(
+            !old.set_turn_outcome(id, Some("asked")).unwrap(),
+            "no change"
+        );
+        assert_eq!(row().turn_outcome.as_deref(), Some("asked"));
+        assert_eq!(row().row_version, before + 1, "the trigger watches it");
+        assert!(old.set_turn_outcome(id, Some("done")).is_err());
+        assert!(old
+            .conn
+            .execute(
+                "UPDATE sessions SET turn_outcome = 'done' WHERE id = ?1",
+                [id]
+            )
+            .is_err());
+        assert!(old.set_turn_outcome(id, None).unwrap());
+        let indexed: i64 = old
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' \
+                 AND name = 'decision_runs_subject'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, 1);
+    }
+
     /// 091 on a database stopped at 090: existing host_layers rows and managed
     /// inventory rows get the personal catalog's id; a re-run is safe; the
     /// copy preserves axis/position/active, not just the key columns; and
@@ -2661,7 +3904,9 @@ mod tests {
                 "applied_at",
                 "commits",
                 "layers_snapshot",
-                "error"
+                "error",
+                // 103 (Assets M6): `migrate` runs on to the latest.
+                "withdrawn_at"
             ]
         );
         assert_eq!(
@@ -2676,7 +3921,10 @@ mod tests {
                 "action",
                 "params",
                 "decider",
-                "state"
+                "state",
+                // 097 (Assets M5), 102 (Assets M6): `migrate` runs on to the latest.
+                "decided_at",
+                "outcome"
             ]
         );
         assert_eq!(
@@ -3032,6 +4280,7 @@ mod tests {
             bus: StoreBus::new(Arc::new(NoopEventBus)),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            form_notify: Arc::new(tokio::sync::Notify::new()),
             peer_generations: Default::default(),
             instance: super::next_instance(),
         };
@@ -3770,13 +5019,16 @@ mod tests {
     /// token cache honest for one kind of write; a migration that rebuilds
     /// `host_tokens` or `client_tokens` (CREATE new / copy / DROP / RENAME)
     /// drops them silently, and this is what then fails.
-    const AUTH_EPOCH_TRIGGERS: [&str; 6] = [
+    const AUTH_EPOCH_TRIGGERS: [&str; 9] = [
         "auth_epoch_host_tokens_insert",
         "auth_epoch_host_tokens_update",
         "auth_epoch_host_tokens_delete",
         "auth_epoch_client_tokens_insert",
         "auth_epoch_client_tokens_update",
         "auth_epoch_client_tokens_delete",
+        "auth_epoch_control_tokens_insert",
+        "auth_epoch_control_tokens_update",
+        "auth_epoch_control_tokens_delete",
     ];
 
     /// Hub store latency, task 7: the token cache in `authorize` keys on
@@ -3825,8 +5077,19 @@ mod tests {
         };
         assert_eq!(
             cols("host_tokens"),
-            ["host_alias", "token", "created_at", "mode"],
-            "host_tokens changed: every UPDATE fires its trigger, but check resolve_token"
+            [
+                "host_alias",
+                "token",
+                "created_at",
+                "mode",
+                // Orbit Fleet 11.4 (migration 126): liveness, left out of
+                // auth_epoch_host_tokens_update like client_tokens.last_seen_at.
+                "last_used_at",
+                // Listed in the trigger: a rotation replaces the token.
+                "rotated_at"
+            ],
+            "host_tokens changed: add the column to auth_epoch_host_tokens_update \
+             (migration 126) unless it is liveness-only like last_used_at"
         );
         assert_eq!(
             cols("client_tokens"),
@@ -3844,10 +5107,32 @@ mod tests {
                 "org_id",
                 // Migration 074: its own trigger,
                 // `auth_epoch_client_tokens_assets_admin`.
-                "assets_admin_at"
+                "assets_admin_at",
+                // Multi-user M1 (migration 098): its own trigger,
+                // `auth_epoch_client_tokens_person`. Whose device this is
+                // decides which sessions the caller may read at all, so a
+                // re-binding MUST invalidate every cached caller.
+                "person_id"
             ],
             "client_tokens changed: add the column to auth_epoch_client_tokens_update \
              (migration 060) unless it is liveness-only like last_seen_at"
+        );
+        assert_eq!(
+            cols("control_tokens"),
+            [
+                "id",
+                "name",
+                "token_sha256",
+                "scope",
+                "hosts",
+                "expires_at",
+                "created_at",
+                // Liveness, left out of auth_epoch_control_tokens_update.
+                "last_used_at",
+                "revoked_at"
+            ],
+            "control_tokens changed: add the column to auth_epoch_control_tokens_update \
+             (migration 157) unless it is liveness-only like last_used_at"
         );
     }
 
@@ -3884,6 +5169,434 @@ mod tests {
         assert_eq!(s.active_client_tokens().unwrap()[0].org_id, Some(b.id));
     }
 
+    /// Multi-user M1 (migration 098): re-binding a paired device to another
+    /// person — or unbinding it — changes WHOSE token it is, and therefore
+    /// which sessions the caller may read at all. It must invalidate every
+    /// cached caller, or a device handed to a colleague would go on reading
+    /// the previous person's private work until the cache aged out.
+    #[test]
+    fn binding_a_client_to_a_person_bumps_the_auth_epoch() {
+        let s = Store::open_in_memory().unwrap();
+        let owner = s.personal_owner_id().unwrap().expect("096 mints one");
+        let ada = s.create_person("ada", None).unwrap();
+        s.insert_client_token("phone", &"0".repeat(64), "full")
+            .unwrap();
+        // A device paired AFTER the upgrade starts person-less: 096's
+        // backfill only reaches the rows that were there when it ran, and
+        // binding the new one is T2's pairing change.
+        assert_eq!(s.active_client_tokens().unwrap()[0].person_id, None);
+        let at = |s: &Store| s.auth_epoch().unwrap();
+        let e0 = at(&s);
+        s.set_client_person("phone", Some(owner)).unwrap();
+        let e1 = at(&s);
+        assert!(e1 > e0, "bound");
+        s.set_client_person("phone", Some(owner)).unwrap();
+        assert_eq!(at(&s), e1, "the same binding again is no change");
+        s.set_client_person("phone", Some(ada.id)).unwrap();
+        let e2 = at(&s);
+        assert!(e2 > e1, "re-bound");
+        s.set_client_person("phone", None).unwrap();
+        assert!(at(&s) > e2, "unbound");
+        assert_eq!(
+            s.set_client_person("phone", Some(9_999)).unwrap_err().code,
+            crate::ipc_error::codes::E_NOTFOUND
+        );
+        // Disabling the person revokes the device but leaves the binding:
+        // the audit trail keeps saying whose it was.
+        s.set_client_person("phone", Some(ada.id)).unwrap();
+        s.disable_person(ada.id).unwrap();
+        let binding = |s: &Store| -> Option<i64> {
+            s.list_client_tokens(true)
+                .unwrap()
+                .into_iter()
+                .find(|c| c.name == "phone")
+                .unwrap()
+                .person_id
+        };
+        assert_eq!(binding(&s), Some(ada.id));
+        assert!(s.active_client_tokens().unwrap().is_empty(), "revoked");
+        // And a person row removed outright leaves the device bound to an id
+        // nothing has — fail closed, exactly as a deleted org does. There is
+        // no FK to widen it to NULL and no cascade to hand it to somebody.
+        s.conn
+            .execute("DELETE FROM people WHERE id = ?1", [ada.id])
+            .unwrap();
+        assert_eq!(binding(&s), Some(ada.id));
+    }
+
+    /// Migration 098 on a populated v95 database: every LIVE DEVICE comes
+    /// out of the upgrade bound to this hub's personal owner (no row is left
+    /// at the `person: None` privilege level), a revoked row is left exactly
+    /// as it was, a `peer` and an `updater` row are left person-less because
+    /// neither is a device (`TokenMode::is_single_purpose`, and
+    /// `set_client_person` refuses both), and rolling the recorded version
+    /// back and migrating again — which the guard turns into a record-only
+    /// pass — changes nothing.
+    #[test]
+    fn migration_098_on_a_populated_v97_database_is_safe_to_rerun() {
+        const SEED_AT: i64 = 97;
+        let s = store_at_version(SEED_AT);
+        s.conn
+            .execute_batch(
+                "INSERT INTO client_tokens (name, token_sha256, mode, created_at) \
+                   VALUES ('phone', 'h1', 'full', 1);
+                 INSERT INTO client_tokens (name, token_sha256, mode, created_at, revoked_at) \
+                   VALUES ('old', 'h2', 'full', 1, 2);
+                 INSERT INTO client_tokens (name, token_sha256, mode, created_at) \
+                   VALUES ('hub-b', 'h3', 'peer', 1);
+                 INSERT INTO client_tokens (name, token_sha256, mode, created_at) \
+                   VALUES ('updater', 'h4', 'updater', 1);",
+            )
+            .unwrap();
+        assert_eq!(s.schema_version().unwrap(), SEED_AT);
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+
+        let owner = s.personal_owner_id().unwrap().expect("096 mints one");
+        assert_eq!(s.list_people().unwrap().len(), 1);
+        let unowned: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM client_tokens \
+                 WHERE person_id IS NULL AND revoked_at IS NULL \
+                   AND mode NOT IN ('peer', 'updater')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            unowned, 0,
+            "no live device survives the upgrade person-less"
+        );
+        let binding = |s: &Store, name: &str| -> Option<i64> {
+            s.conn
+                .query_row(
+                    "SELECT person_id FROM client_tokens WHERE name = ?1",
+                    [name],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(binding(&s, "phone"), Some(owner));
+        assert_eq!(binding(&s, "old"), None, "a revoked row is left as it was");
+        // The two machine tokens. A peer is ANOTHER FLEET and an updater is
+        // `fleet-updater` acting for this hub: giving either a person would
+        // make it a reader of that person's private sessions the moment T3
+        // keys session reads on the caller's person. The backfill's mode
+        // filter and `set_client_person`'s refusal are the same rule, and
+        // this is the half that holds at upgrade time.
+        for machine in ["hub-b", "updater"] {
+            assert_eq!(
+                binding(&s, machine),
+                None,
+                "{machine} is not a person's device"
+            );
+            assert_eq!(
+                s.set_client_person(machine, Some(owner)).unwrap_err().code,
+                crate::ipc_error::codes::E_VALIDATE,
+                "{machine}"
+            );
+        }
+
+        // Re-migrate over a schema that already has the column: the guard
+        // records the version and runs not one of 096's statements — no
+        // second owner, no rename undone, no binding rewritten.
+        s.rename_person(owner, Some("Martin"), None).unwrap();
+        s.set_client_person("phone", None).unwrap();
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 86;")
+            .unwrap();
+        s.migrate().expect("re-running 094 is safe");
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert_eq!(s.list_people().unwrap().len(), 1, "no second owner");
+        assert_eq!(s.personal_owner_id().unwrap(), Some(owner));
+        assert_eq!(
+            s.get_person(owner).unwrap().unwrap().name,
+            "Martin",
+            "the rename survives the re-run"
+        );
+        assert_eq!(
+            binding(&s, "phone"),
+            None,
+            "the guard ran nothing, the backfill included"
+        );
+        let rows: i64 = s
+            .conn
+            .query_row("SELECT COUNT(*) FROM client_tokens", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 4, "the re-run touched no rows");
+    }
+
+    /// Migration 099 on a populated v96 database: the two columns arrive
+    /// with the safe default, the backfill attributes exactly the rows fleet
+    /// started (`started_at IS NOT NULL`) to the hub's one person and leaves
+    /// a reconcile-discovered row `unclaimed`, each attributed row's
+    /// `row_version` moves once (an open client must learn its visibility
+    /// changed), the `CHECK` makes a third visibility value unrepresentable,
+    /// the conversation-owner record is written and survives the session's
+    /// deletion, and rolling the recorded version back and migrating again —
+    /// which the guard turns into a record-only pass — changes nothing.
+    #[test]
+    fn migration_099_on_a_populated_v98_database_is_safe_to_rerun() {
+        const SEED_AT: i64 = 98;
+        let s = store_at_version(SEED_AT);
+        s.conn
+            .execute_batch(
+                "INSERT INTO hosts (alias) VALUES ('h');
+                 -- fleet started this one, and it has a conversation
+                 INSERT INTO sessions (tmux_name, host_alias, created_at, last_activity_at, \
+                                       status, started_at, claude_session_id) \
+                   VALUES ('fleet-made', 'h', 1, 1, 'running', 10, 'conv-1');
+                 -- fleet started this one too, but it never bound a conversation
+                 INSERT INTO sessions (tmux_name, host_alias, created_at, last_activity_at, \
+                                       status, started_at) \
+                   VALUES ('fleet-quiet', 'h', 1, 1, 'running', 11);
+                 -- reconcile found this one: a hand-started tmux session
+                 INSERT INTO sessions (tmux_name, host_alias, created_at, last_activity_at, \
+                                       status, claude_session_id) \
+                   VALUES ('hand-made', 'h', 1, 1, 'running', 'conv-2');",
+            )
+            .unwrap();
+        assert_eq!(s.schema_version().unwrap(), SEED_AT);
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+
+        let owner = s.personal_owner_id().unwrap().expect("096 mints one");
+        let row = |s: &Store, name: &str| -> (Option<i64>, String, i64) {
+            s.conn
+                .query_row(
+                    "SELECT owner_person_id, visibility, row_version FROM sessions \
+                     WHERE tmux_name = ?1",
+                    [name],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap()
+        };
+        for started in ["fleet-made", "fleet-quiet"] {
+            assert_eq!(
+                row(&s, started),
+                (Some(owner), "private".to_string(), 1),
+                "{started}: a row fleet started is the one person's, private, \
+                 and its row_version moved once"
+            );
+        }
+        assert_eq!(
+            row(&s, "hand-made"),
+            (None, "unclaimed".to_string(), 0),
+            "a row reconcile found is nobody's: unclaimed, and untouched"
+        );
+
+        // The conversation-owner record: written by 097's UPDATE trigger
+        // when the backfill gave the row an owner, and only for a row that
+        // has both halves.
+        let owners: Vec<(String, i64)> = {
+            let mut stmt = s
+                .conn
+                .prepare(
+                    "SELECT claude_session_id, owner_person_id FROM conversation_owners \
+                     ORDER BY claude_session_id",
+                )
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        assert_eq!(
+            owners,
+            vec![("conv-1".to_string(), owner)],
+            "only the owned conversation is recorded"
+        );
+
+        // A third visibility value is unrepresentable, which is stronger
+        // than any test asserting that no migration produces one. In
+        // particular `'org'` — team sharing under another name — cannot be
+        // written by a hand edit, a future UPDATE, or a mistake here.
+        let err = s
+            .conn
+            .execute(
+                "UPDATE sessions SET visibility = 'org' WHERE tmux_name = 'hand-made'",
+                [],
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("CHECK constraint failed"), "{err}");
+
+        // The record outlives the session: `delete_session` deletes the
+        // `sessions` row outright and `conversations` cascades with it, so a
+        // resume gate that read live rows would see nothing. This one stays.
+        let id: i64 = s
+            .conn
+            .query_row(
+                "SELECT id FROM sessions WHERE tmux_name = 'fleet-made'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        s.delete_session(id).unwrap();
+        assert_eq!(
+            s.conn
+                .query_row(
+                    "SELECT owner_person_id FROM conversation_owners \
+                     WHERE claude_session_id = 'conv-1'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            owner,
+            "a reaped session's conversation owner survives"
+        );
+
+        // Re-migrate over a schema that already has the columns: the guard
+        // records the version and runs not one of 097's statements, and the
+        // backfill — which is outside the script and therefore DOES run
+        // again — matches no row.
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 87;")
+            .unwrap();
+        let before = row(&s, "hand-made");
+        s.migrate().expect("re-running 087 is safe");
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert_eq!(
+            row(&s, "hand-made"),
+            before,
+            "the unclaimed row is still unclaimed after a second open"
+        );
+        assert_eq!(row(&s, "fleet-quiet"), (Some(owner), "private".into(), 1));
+        assert_eq!(
+            count_rows(&s, "conversation_owners"),
+            1,
+            "the re-run recorded nothing twice"
+        );
+    }
+
+    /// `COUNT(*)` of one table, for the migration tests below.
+    fn count_rows(s: &Store, table: &str) -> i64 {
+        s.conn
+            .query_row(&format!("SELECT COUNT(*) FROM \"{table}\""), [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    }
+
+    /// 099's backfill attributes NOTHING once the hub has more than one
+    /// person: there is no fact saying which of them started a pre-M1 row,
+    /// and the upgrade widens nothing (rule 7). Those rows stay `unclaimed`,
+    /// which is a per-host count and not one byte more.
+    #[test]
+    fn the_099_backfill_attributes_nothing_on_a_hub_with_two_people() {
+        let s = store_at_version(98);
+        s.conn
+            .execute_batch(
+                "INSERT INTO hosts (alias) VALUES ('h');
+                 INSERT INTO people (name, is_personal_owner, created_at) \
+                   VALUES ('ada', 0, 1);
+                 INSERT INTO sessions (tmux_name, host_alias, created_at, last_activity_at, \
+                                       status, started_at) \
+                   VALUES ('fleet-made', 'h', 1, 1, 'running', 10);",
+            )
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.list_people().unwrap().len(), 2);
+        let (owner, vis, version): (Option<i64>, String, i64) = s
+            .conn
+            .query_row(
+                "SELECT owner_person_id, visibility, row_version FROM sessions",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (owner, vis.as_str(), version),
+            (None, "unclaimed", 0),
+            "two people: nobody is guessed, and the row is not even touched"
+        );
+    }
+
+    /// Migration 100 on a populated database: the table and its three indexes
+    /// arrive, the grants a hub already holds survive a second open, and the
+    /// NULL-safe live index still fires afterwards.
+    ///
+    /// Every statement in the script is `IF NOT EXISTS` and there is no
+    /// `ALTER TABLE ... ADD COLUMN`, which is why it is registered as a
+    /// `Migration::plain` with no `already_applied` guard — this is the test
+    /// that says so rather than the comment claiming it.
+    #[test]
+    fn migration_100_on_a_populated_database_is_safe_to_rerun() {
+        const SEED_AT: i64 = 99;
+        let s = store_at_version(SEED_AT);
+        s.conn
+            .execute_batch("INSERT INTO hosts (alias) VALUES ('h');")
+            .unwrap();
+        assert!(!s.has_table("session_grants").unwrap());
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(s.has_table("session_grants").unwrap());
+        let index = |name: &str| -> bool {
+            s.conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                    [name],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap()
+                == 1
+        };
+        for name in [
+            "idx_session_grants_live",
+            "idx_session_grants_person",
+            "idx_session_grants_session",
+        ] {
+            assert!(index(name), "{name} is missing");
+        }
+
+        // A hub that has already shared something: one live grant and one
+        // revoked row, which is what the audit trail looks like.
+        let ada = s.create_person("ada", None).unwrap().id;
+        let bo = s.create_person("bo", None).unwrap().id;
+        s.conn
+            .execute(
+                "INSERT INTO sessions (tmux_name, host_alias, created_at, last_activity_at, \
+                                       status, started_at, owner_person_id, visibility) \
+                 VALUES ('s', 'h', 1, 1, 'running', 1, ?1, 'private')",
+                [ada],
+            )
+            .unwrap();
+        let sid = s.conn.last_insert_rowid();
+        s.grant_session(sid, crate::store::GrantRecipient::Person(bo), "watch", ada)
+            .unwrap();
+        s.revoke_session_grant(sid, bo, ada).unwrap();
+        s.grant_session(sid, crate::store::GrantRecipient::Person(bo), "drive", ada)
+            .unwrap();
+        let grants = |s: &Store| -> (i64, Option<String>) {
+            (
+                count_rows(s, "session_grants"),
+                s.grants_for_person(bo).unwrap().get(&sid).cloned(),
+            )
+        };
+        let before = grants(&s);
+        assert_eq!(before, (2, Some("drive".to_string())));
+
+        // Re-migrate over a schema that already has the table: the script
+        // runs again in full (no guard) and changes nothing.
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 88;")
+            .unwrap();
+        s.migrate().expect("re-running 096 is safe");
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert_eq!(grants(&s), before, "the re-run touched no grant");
+
+        // And the live index is still the live index: a second grant to the
+        // same recipient is refused, which is the invariant the whole table
+        // exists to carry.
+        assert_eq!(
+            s.grant_session(sid, crate::store::GrantRecipient::Person(bo), "watch", ada)
+                .unwrap_err()
+                .code,
+            crate::ipc_error::codes::E_EXISTS
+        );
+    }
+
     /// Migration 060 on a populated v59 database: the counter starts at 0,
     /// the tokens are untouched, and running it again (as the tests' roll
     /// back and re-migrate does) neither fails nor resets the counter.
@@ -3899,19 +5612,27 @@ mod tests {
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let read_epoch = |s: &Store| -> i64 {
+            s.conn
+                .query_row("SELECT epoch FROM auth_epoch WHERE id = 1", [], |r| {
+                    r.get(0)
+                })
+                .unwrap()
+        };
+        // The baseline is whatever the rest of the chain left, not 0: a
+        // later migration that legitimately re-binds a token moves the
+        // counter too (096's backfill binds this live row to the hub's
+        // personal owner). What this test pins is the DELTA — one token
+        // write bumps it once, and re-running 060 does not reset it.
+        let base = read_epoch(&s);
         s.conn
             .execute("UPDATE host_tokens SET token = 't2'", [])
             .unwrap();
         s.conn
             .execute_batch(include_str!("../../migrations/060_auth_epoch.sql"))
             .unwrap();
-        let epoch: i64 = s
-            .conn
-            .query_row("SELECT epoch FROM auth_epoch WHERE id = 1", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(epoch, 1, "the re-run kept the counter");
+        let epoch = read_epoch(&s);
+        assert_eq!(epoch, base + 1, "the re-run kept the counter");
         let n: i64 = s
             .conn
             .query_row("SELECT COUNT(*) FROM client_tokens", [], |r| r.get(0))
@@ -3990,6 +5711,11 @@ mod tests {
     /// columns and fails for one the trigger neither watches nor lists in
     /// [`ROW_VERSION_UNWATCHED`] — and for a table rebuild that dropped the
     /// trigger.
+    ///
+    /// SQLite has no ALTER TRIGGER, so "add a line" means re-issuing the
+    /// whole body in a new migration; 095 is the newest such re-issue (065,
+    /// 082 before it), and this test is the one that fails if a column is
+    /// added without one.
     #[test]
     fn the_sessions_columns_are_the_ones_the_row_version_trigger_knows() {
         let s = Store::open_in_memory().unwrap();
@@ -4459,6 +6185,264 @@ mod tests {
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
     }
 
+    /// Assets M5 (R4): `asset_inventory.drift_side`, NULL on every existing
+    /// row, and a re-run is guarded (ADD COLUMN is not idempotent).
+    #[test]
+    fn migration_096_adds_drift_side_as_null_and_is_safe_to_rerun() {
+        let s = store_at_version(95);
+        s.conn
+            .execute_batch(
+                "INSERT INTO hosts (alias, reachable, provisioned) VALUES ('h', 1, 1); \
+                 INSERT INTO asset_inventory (host_alias, harness, kind, name, state, scanned_at) \
+                   VALUES ('h', 'claude', 'skill', 's', 'drifted', 1);",
+            )
+            .unwrap();
+        assert!(!asset_inventory_has_drift_side(&s.conn).unwrap());
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(asset_inventory_has_drift_side(&s.conn).unwrap());
+        let side: Option<String> = s
+            .conn
+            .query_row("SELECT drift_side FROM asset_inventory", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(side, None);
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 96;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    /// Assets M5 (R8): `changeset_items.decided_at`, NULL on existing items,
+    /// guarded on re-run.
+    #[test]
+    fn migration_097_adds_decided_at_as_null_and_is_safe_to_rerun() {
+        let s = store_at_version(96);
+        s.conn
+            .execute_batch(
+                "INSERT INTO changesets (id, kind, summary, state, created_at) \
+                   VALUES (1, 'new', 'New on oci', 'dismissed', 1); \
+                 INSERT INTO changeset_items \
+                   (changeset_id, position, grp, kind, name, action, decider, state) \
+                   VALUES (1, 0, 'core', 'skill', 's', 'import', 'person', 'rejected');",
+            )
+            .unwrap();
+        assert!(!changeset_items_has_decided_at(&s.conn).unwrap());
+        s.migrate().unwrap();
+        assert!(changeset_items_has_decided_at(&s.conn).unwrap());
+        let at: Option<i64> = s
+            .conn
+            .query_row("SELECT decided_at FROM changeset_items", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(at, None, "an item decided before 097 has no time");
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 97;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    /// Assets M6 (R1): `changeset_items.outcome`, NULL on existing items,
+    /// guarded on re-run.
+    #[test]
+    fn migration_102_adds_item_outcome_as_null_and_is_safe_to_rerun() {
+        let s = store_at_version(101);
+        s.conn
+            .execute_batch(
+                "INSERT INTO changesets (id, kind, summary, state, created_at) \
+                   VALUES (1, 'rollout', 'Roll out core to oci', 'applied', 1); \
+                 INSERT INTO changeset_items \
+                   (changeset_id, position, grp, kind, name, action, decider, state) \
+                   VALUES (1, 0, 'core', 'host', 'oci', 'sync', 'rule', 'skipped');",
+            )
+            .unwrap();
+        assert!(!changeset_items_has_outcome(&s.conn).unwrap());
+        s.migrate().unwrap();
+        assert!(changeset_items_has_outcome(&s.conn).unwrap());
+        let o: Option<String> = s
+            .conn
+            .query_row("SELECT outcome FROM changeset_items", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(o, None, "an item recorded before 102 has no outcome");
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 102;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    /// Assets M6 (R3): `changesets.withdrawn_at`, NULL on existing cards,
+    /// guarded on re-run.
+    #[test]
+    fn migration_103_adds_withdrawn_at_as_null_and_is_safe_to_rerun() {
+        let s = store_at_version(102);
+        s.conn
+            .execute_batch(
+                "INSERT INTO changesets (id, kind, summary, state, created_at, error) \
+                   VALUES (1, 'new', 'New on oci', 'dismissed', 1, 'withdrawn: no longer applies');",
+            )
+            .unwrap();
+        assert!(!changesets_has_withdrawn_at(&s.conn).unwrap());
+        s.migrate().unwrap();
+        assert!(changesets_has_withdrawn_at(&s.conn).unwrap());
+        let at: Option<i64> = s
+            .conn
+            .query_row("SELECT withdrawn_at FROM changesets", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(at, None);
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 103;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    /// 105: worktree rows named after a branch with a `/` (the live
+    /// `feat/imports` on claude-fleet-trn, `feat/abc` on mefistos) take a
+    /// flat name; the path, the branch and the session's link stay, and the
+    /// session's key follows the row. A name already taken gets the row id.
+    #[test]
+    fn migration_105_flattens_slash_named_worktrees_and_their_session_keys() {
+        let s = store_at_version(104);
+        // Raw rows: `upsert_host` reads back every current `hosts` column,
+        // and a 104 store predates the later ones (111's `auth_overrides`).
+        s.conn
+            .execute_batch(
+                "INSERT INTO hosts (alias, reachable) VALUES ('trn', 1), ('mefistos', 1);",
+            )
+            .unwrap();
+        let pid = s.upsert_project("o", "r", "/p/o/r").unwrap();
+        let nested = "/home/dev/projects/r/.worktrees/feat/imports";
+        let wid = s
+            .upsert_worktree_on("trn", pid, "feat/imports", nested, Some("feat/imports"))
+            .unwrap();
+        let abc = s
+            .upsert_worktree_on(
+                "mefistos",
+                pid,
+                "feat/abc",
+                "/m/r/.worktrees/feat/abc",
+                None,
+            )
+            .unwrap();
+        let taken = s
+            .upsert_worktree_on(
+                "trn",
+                pid,
+                "x-y",
+                "/home/dev/projects/r/.worktrees/x-y",
+                None,
+            )
+            .unwrap();
+        let clash = s
+            .upsert_worktree_on(
+                "trn",
+                pid,
+                "x/y",
+                "/home/dev/projects/r/.worktrees/x/y",
+                None,
+            )
+            .unwrap();
+        // Raw too: `upsert_session` reads the row back with every current
+        // `sessions` column (113's `claude_profile` among them).
+        s.conn
+            .execute(
+                "INSERT INTO sessions (tmux_name, host_alias, project_id, worktree_id, \
+                 created_at, last_activity_at, status, worktree_key) \
+                 VALUES ('dev-r--feat/imports', 'trn', ?1, ?2, 1, 1, 'lost', 'feat')",
+                rusqlite::params![pid, wid],
+            )
+            .unwrap();
+        let sid = s.conn.last_insert_rowid();
+
+        s.migrate().unwrap();
+        let row = |id| s.get_worktree_row(id).unwrap().unwrap();
+        let w = row(wid);
+        assert_eq!(w.name, "feat-imports");
+        assert_eq!(w.path, nested, "the checkout stays where it is");
+        assert_eq!(w.branch.as_deref(), Some("feat/imports"));
+        assert_eq!(row(abc).name, "feat-abc");
+        assert_eq!(row(taken).name, "x-y", "an existing flat name is kept");
+        assert_eq!(row(clash).name, format!("x-y-{clash}"));
+        let sess = s.get_session_by_id(sid).unwrap().unwrap();
+        assert_eq!(sess.worktree_id, Some(wid));
+        assert_eq!(sess.worktree_key.as_deref(), Some("feat-imports"));
+
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 105;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(row(wid).name, "feat-imports", "a re-run changes nothing");
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    /// 166 (gap plan G7.4): the runs keep their ids, rows and routine's
+    /// name through the rebuild, and from then on deleting a routine leaves
+    /// its runs with the name and no routine.
+    #[test]
+    fn migration_166_keeps_a_deleted_routines_runs() {
+        let s = store_at_version(165);
+        s.conn
+            .execute_batch(
+                "INSERT INTO routines (id, name, trigger, cron, host_alias, project_id, prompt, created_at, updated_at)
+                 VALUES (7, 'Nightly triage', 'cron', '0 3 * * *', 'local', 1, 'go', 1, 1);
+                 INSERT INTO routine_runs (id, routine_id, trigger, state, started_at, finished_at, outcome, outcome_source, host_alias)
+                 VALUES (41, 7, 'cron', 'done', 10, 20, 'did_work', 'rule', 'local');",
+            )
+            .unwrap();
+        s.migrate().unwrap();
+        type Row = (Option<i64>, Option<String>, String, Option<String>);
+        let row = |id: i64| -> Row {
+            s.conn
+                .query_row(
+                    "SELECT routine_id, routine_name, state, outcome FROM routine_runs WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            row(41),
+            (
+                Some(7),
+                Some("Nightly triage".into()),
+                "done".into(),
+                Some("did_work".into())
+            )
+        );
+        assert!(s.delete_routine(7).unwrap());
+        assert_eq!(row(41).0, None, "the run stays, without its routine");
+        assert_eq!(row(41).1.as_deref(), Some("Nightly triage"));
+        // A re-run only records the version.
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 166;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(row(41).1.as_deref(), Some("Nightly triage"));
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    /// 165 (gap plan G7.2): the add-host wizard's drafts move from
+    /// `host_setups` into `wizard_state` as `add_host` rows, and the old
+    /// table goes; the store still reads them as drafts.
+    #[test]
+    fn migration_168_moves_the_add_host_drafts_into_wizard_state() {
+        let s = store_at_version(164);
+        s.conn
+            .execute_batch(
+                "INSERT INTO host_setups (ssh_alias, alias, step, checks, answers, created_at, updated_at)
+                 VALUES ('mercury', 'merc', 3, '[{\"key\":\"ssh\",\"state\":\"ok\",\"label\":\"SSH\",\"detail\":\"18 ms\"}]',
+                         '{\"install_agent\":true}', 5, 6);",
+            )
+            .unwrap();
+        s.migrate().unwrap();
+        assert!(!s.has_table("host_setups").unwrap());
+        let d = s.host_setup("mercury").unwrap().expect("the draft moved");
+        assert_eq!((d.alias.as_str(), d.step, d.created_at), ("merc", 3, 5));
+        assert_eq!(d.checks[0].detail, "18 ms");
+        assert_eq!(d.answers["install_agent"], true);
+    }
+
     /// The hub-ops-accounting branch numbered its `usage_daily` rebuild
     /// 064–068 before it landed as 071. A database that branch's build
     /// opened at `main`'s 063 recorded (say) 68 for it, so `main`'s 064–068
@@ -4503,6 +6487,81 @@ mod tests {
         // A second open is a no-op.
         s.migrate().unwrap();
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    /// 142 (Orbit Fleet 11.7) rebuilds `session_grants` to widen its CHECK:
+    /// the rows it held come through with their ids, the indexes are back,
+    /// `answer` is admitted, and a re-run is only recorded.
+    #[test]
+    fn migration_142_keeps_every_grant_and_admits_answer() {
+        let s = Store::open_in_memory().unwrap();
+        let ada = s.create_person("ada", None).unwrap().id;
+        let bob = s.create_person("bob", None).unwrap().id;
+        s.upsert_host("h").unwrap();
+        let sid = s
+            .upsert_session("t", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.claim_if_unclaimed(sid, Some(ada)).unwrap();
+        let g = s
+            .grant_session(sid, crate::store::GrantRecipient::Person(bob), "drive", ada)
+            .unwrap();
+        // Back to the table as 100 wrote it, still holding the grant.
+        s.conn
+            .execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 CREATE TEMP TABLE keep AS SELECT * FROM session_grants;
+                 DROP TABLE session_grants;",
+            )
+            .unwrap();
+        s.conn
+            .execute_batch(include_str!("../../migrations/100_session_grants.sql"))
+            .unwrap();
+        s.conn
+            .execute_batch(
+                "INSERT INTO session_grants SELECT * FROM keep; DROP TABLE keep;
+                 PRAGMA foreign_keys = ON;",
+            )
+            .unwrap();
+        assert!(!session_grants_has_answer(&s.conn).unwrap());
+        let level_of = |s: &Store| -> String {
+            s.conn
+                .query_row(
+                    "SELECT level FROM session_grants WHERE id = ?1",
+                    [g.id],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        s.conn
+            .execute("DELETE FROM schema_version WHERE version >= 142", [])
+            .unwrap();
+        s.migrate().unwrap();
+        assert!(session_grants_has_answer(&s.conn).unwrap());
+        assert_eq!(level_of(&s), "drive", "the grant came through under its id");
+        let indexes: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' \
+                  AND tbl_name = 'session_grants' AND name LIKE 'idx_session_grants_%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // 142's three, rebuilt with the table, and 147's org index (review
+        // r16), which runs again after it.
+        assert_eq!(indexes, 4);
+        s.conn
+            .execute(
+                "UPDATE session_grants SET level = 'answer' WHERE id = ?1",
+                [g.id],
+            )
+            .expect("the CHECK admits answer");
+        // A re-run is recorded, not rebuilt: the row keeps its new level.
+        s.conn
+            .execute("DELETE FROM schema_version WHERE version >= 142", [])
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(level_of(&s), "answer");
     }
 }
 

@@ -332,6 +332,12 @@ impl SshClient {
         self.inner.route.as_ref()?.agent_alias(host)
     }
 
+    /// Whether commands for `host` go through its fleet-agent rather than
+    /// this machine's `ssh` (an agent-transport host this process serves).
+    pub fn routes_through_agent(&self, host: &str) -> bool {
+        self.agent_route(host).is_some()
+    }
+
     /// The agent transport. Only ever reached after [`Self::agent_route`] has
     /// said `Some`, so the `expect` is unreachable for any caller below.
     fn agent(&self) -> &Arc<crate::agent::AgentTransport> {
@@ -377,10 +383,14 @@ impl SshClient {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
         }
-        dir.join(format!("cm-{host}.sock"))
+        control_socket(&dir, host, "")
     }
 
-    /// The `-o` flags shared by every multiplexed ssh invocation. With
+    /// The `-o` flags shared by every multiplexed ssh invocation.
+    ///
+    /// Multiplexing is left out — every call connects on its own, as on
+    /// Windows — when the socket directory is not private to this user (see
+    /// [`control_dir_is_private`]). With
     /// `ControlMaster=auto` + `ControlPersist`, ssh creates the master on the
     /// first call and reuses/recreates it as needed — no app-side bookkeeping.
     ///
@@ -389,8 +399,8 @@ impl SshClient {
     /// `ConnectTimeout` bounds each one.
     pub fn mux_opts(&self, host: &str, timeout: Duration) -> Vec<String> {
         let mut opts: Vec<String> = Vec::new();
-        if self.inner.mux {
-            let path = self.control_path(host);
+        let path = self.control_path(host);
+        if self.inner.mux && path.parent().is_some_and(control_dir_is_private) {
             opts.extend([
                 "-o".into(),
                 "ControlMaster=auto".into(),
@@ -424,8 +434,9 @@ impl SshClient {
     /// The attached terminal's own ControlPath: a probe's master reset must
     /// never take the user's terminal down with it.
     pub fn control_path_for_pty(&self, host: &str) -> PathBuf {
-        self.control_path(host)
-            .with_file_name(format!("cm-{host}-tty.sock"))
+        let path = self.control_path(host);
+        let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        control_socket(&dir, host, "-tty")
     }
 
     /// `mux_opts` for the interactive attach: its own socket, and a keepalive
@@ -645,7 +656,7 @@ impl SshClient {
     }
 
     /// Upload a local file to `remote_path` on `host` by piping its bytes into
-    /// `cat > <quoted path>` over the ControlMaster. The remote parent
+    /// [`atomic_upload_command`] over the ControlMaster. The remote parent
     /// directory must already exist (caller `mkdir -p`s it). Returns Err on a
     /// non-zero ssh/cat exit. Uses the same `-o` muxing as `run`. Bounded by
     /// `UPLOAD_WALL_CLOCK` (uploads legitimately outlive a probe's budget).
@@ -669,9 +680,9 @@ impl SshClient {
                 format!("open {}: {e}", local_path.display()),
             )
         })?;
-        // Single remote word: the remote login shell runs `cat > 'path'`,
-        // reading the piped file from stdin. Path is single-quoted.
-        let remote_cmd = format!("cat > {}", crate::shell::quote(remote_path));
+        // The remote login shell runs `sh -c '<script>'`, the script reading
+        // the piped file from stdin into a temp file beside the target.
+        let remote_cmd = atomic_upload_command(remote_path);
         let mut cmd = self.remote_command(host, &mux_opts, &[&remote_cmd]);
         cmd.stdin(std::process::Stdio::from(file));
         let out = self
@@ -1378,6 +1389,22 @@ async fn run_local_with_stdin(
 /// scripted `FakeSsh`, which records every call and answers from canned
 /// replies. Services take `&dyn SshExec` so all three are interchangeable.
 ///
+/// The remote command an upload pipes the file into: stdin to a temp file
+/// in the target's own directory, then `mv` over the target, so an
+/// interrupted upload never leaves a torn file where a whole one was
+/// expected (a transcript, review r18 M5); the temp file is removed when
+/// either step fails. Run as `sh -c '<script>'`, one word for the remote
+/// login shell whatever shell that is; every value is `shell::quote`d.
+pub(crate) fn atomic_upload_command(remote_path: &str) -> String {
+    let script = format!(
+        "f={}; t=\"$f.cf-upload.$$\"; \
+         if cat > \"$t\" && mv -f -- \"$t\" \"$f\"; then exit 0; fi; \
+         rm -f -- \"$t\"; exit 1",
+        crate::shell::quote(remote_path)
+    );
+    format!("sh -c {}", crate::shell::quote(&script))
+}
+
 /// Semantics every implementation must keep, because the callers rely on
 /// them:
 ///
@@ -1387,7 +1414,8 @@ async fn run_local_with_stdin(
 ///   bound (`E_SSH_TIMEOUT`) and cancellation (`E_CANCELLED`).
 /// - `args` are space-joined and re-tokenised by the remote login shell, so
 ///   a multi-word script must already be `shell::quote`d by the caller.
-/// - `upload_file` streams the local file over stdin into `cat > <path>` and
+/// - `upload_file` streams the local file over stdin into a temp file beside
+///   `<path>` and renames it over `<path>` ([`atomic_upload_command`]), and
 ///   fails with `E_UPLOAD` on a non-zero exit.
 /// - `remote_home` resolves `$HOME` on the host (`E_SSH` if it cannot).
 #[async_trait::async_trait]
@@ -1684,11 +1712,28 @@ pub(crate) fn home_from_output(host: &str, out: &Output) -> Result<String, IpcEr
             ),
         ));
     }
-    let home = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    // The LAST line: the command runs through the remote user's shell, and
+    // a `~/.bashrc` that echoes before its interactivity guard prints ahead
+    // of it. The answer is cached for the app's lifetime and every remote
+    // project path is built on it, so anything but an absolute path is
+    // refused rather than cached.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let home = stdout
+        .lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty())
+        .unwrap_or_default()
+        .to_string();
     if home.is_empty() {
         return Err(IpcError::new(
             codes::E_SSH,
             format!("remote $HOME on {host} is empty"),
+        ));
+    }
+    if !home.starts_with('/') {
+        return Err(IpcError::new(
+            codes::E_SSH,
+            format!("remote $HOME on {host} is not an absolute path: {home:?}"),
         ));
     }
     Ok(home)
@@ -1717,9 +1762,9 @@ struct ConnectionSlot {
 /// `SshExec` over the local machine: the argv is space-joined exactly as ssh
 /// would join it and handed to `bash -c`, so the same re-tokenisation the
 /// remote login shell performs happens here too (a script that is not
-/// `quote`d breaks identically on both). `upload_file` is `cat > <path>` fed
-/// from the local file. No ControlMaster, no keepalives — the only failure
-/// modes are a missing `bash`, a non-zero exit, and the wall clock.
+/// `quote`d breaks identically on both). `upload_file` is
+/// [`atomic_upload_command`] fed from the local file. No ControlMaster, no
+/// keepalives — the only failure modes are a missing `bash`, a non-zero exit, and the wall clock.
 ///
 /// Used by the opt-in `tmux_roundtrip` integration test to drive the real
 /// `RemoteTmux` command builder against a private local tmux server.
@@ -1904,7 +1949,7 @@ impl SshExec for LocalExec {
                 format!("open {}: {e}", local_path.display()),
             )
         })?;
-        let remote_cmd = format!("cat > {}", crate::shell::quote(remote_path));
+        let remote_cmd = atomic_upload_command(remote_path);
         let mut cmd = self.command(&[remote_cmd.as_str()]);
         cmd.stdin(std::process::Stdio::from(file));
         let out = self
@@ -1953,13 +1998,167 @@ fn spawn_error_message(host: &str, e: &std::io::Error) -> String {
     format!("ssh spawn {host}: {e}")
 }
 
+/// The longest socket path OpenSSH can bind, less the `.` and 16 random
+/// characters a master first listens on: `sun_path` is 104 bytes on macOS
+/// (108 on Linux), one of them the NUL.
+const MAX_CONTROL_PATH: usize = 104 - 1 - 17;
+
+/// `dir/cm-<host><suffix>.sock`, or `dir/cm-<hash><suffix>.sock` when that
+/// would not fit a Unix socket path (r18-W4): a long alias from
+/// `~/.ssh/config` otherwise fails every ssh call with exit 255. The hash is
+/// of the alias, so the name stays the same from call to call.
+fn control_socket(dir: &Path, host: &str, suffix: &str) -> PathBuf {
+    let plain = dir.join(format!("cm-{host}{suffix}.sock"));
+    if plain.as_os_str().len() <= MAX_CONTROL_PATH {
+        return plain;
+    }
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(host.as_bytes());
+    let short: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+    dir.join(format!("cm-{short}{suffix}.sock"))
+}
+
 fn cache_dir() -> PathBuf {
     crate::home::cache_dir()
+}
+
+/// Whether `dir` may hold ControlMaster sockets: a real directory (not a
+/// symlink), owned by this user, with no group or other permission bits.
+///
+/// `control_path` creates and `chmod`s it best-effort and ignores failure,
+/// so it says nothing about a directory someone else made first — and with
+/// `HOME` unset the cache falls back to the shared temp dir
+/// (`/tmp/claude-fleet`). Another user who pre-created that, with a
+/// `cm-<host>.sock` of their own in it, would have every command (and every
+/// secret streamed over stdin) handed to their socket by `ControlMaster=auto`.
+pub fn control_dir_is_private(dir: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match std::fs::symlink_metadata(dir) {
+            Ok(m) => {
+                // SAFETY: geteuid has no preconditions and cannot fail.
+                let me = unsafe { libc::geteuid() };
+                m.is_dir() && m.uid() == me && m.mode() & 0o077 == 0
+            }
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        true
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review r18 M5: an upload lands whole or not at all. A read that fails
+    /// part way (a directory as the "file") leaves the old target in place
+    /// and no temp file beside it; a good one replaces the target.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_upload_replaces_the_target_whole_or_leaves_it_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("it's a.jsonl");
+        std::fs::write(&target, "old\n").unwrap();
+        let exec = LocalExec::default();
+        let remote = target.to_string_lossy().to_string();
+
+        let err = exec
+            .upload_file("h", dir.path(), &remote, Duration::from_secs(10))
+            .await
+            .expect_err("reading a directory fails part way");
+        assert_eq!(err.code, codes::E_UPLOAD);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "old\n");
+        let names = |d: &Path| -> Vec<String> {
+            let mut v: Vec<String> = std::fs::read_dir(d)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(
+            names(dir.path()),
+            vec!["it's a.jsonl".to_string()],
+            "no temp left"
+        );
+
+        let src = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(src.path(), "new\n").unwrap();
+        exec.upload_file("h", src.path(), &remote, Duration::from_secs(10))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new\n");
+        assert_eq!(names(dir.path()), vec!["it's a.jsonl".to_string()]);
+    }
+
+    /// Only a directory of this user's own, closed to everyone else, holds
+    /// ControlMaster sockets.
+    #[cfg(unix)]
+    #[test]
+    fn a_control_dir_must_be_private_to_this_user() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = tempfile::tempdir().unwrap();
+        let dir = base.path().join("claude-fleet");
+        assert!(!control_dir_is_private(&dir), "missing");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(control_dir_is_private(&dir));
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(!control_dir_is_private(&dir), "world-writable");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let link = base.path().join("link");
+        std::os::unix::fs::symlink(&dir, &link).unwrap();
+        assert!(!control_dir_is_private(&link), "a symlink");
+    }
+
+    #[test]
+    fn home_is_the_last_line_and_must_be_absolute() {
+        let out = |stdout: &str| Output {
+            status: crate::agent::transport::exit_status(0),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        };
+        // A `~/.bashrc` that echoes ahead of the answer.
+        assert_eq!(
+            home_from_output("h", &out("Loading env\n/home/u\n")).unwrap(),
+            "/home/u"
+        );
+        assert_eq!(
+            home_from_output("h", &out("/home/u\n\n")).unwrap(),
+            "/home/u"
+        );
+        let e = home_from_output("h", &out("garbage\n")).unwrap_err();
+        assert_eq!(e.code, codes::E_SSH);
+        assert!(home_from_output("h", &out("  \n")).is_err());
+    }
+
+    /// r18-W4: a long alias still gets a socket path a Unix socket can bind,
+    /// the same one every call, distinct for the terminal.
+    #[test]
+    fn a_long_alias_gets_a_control_path_that_fits_a_socket() {
+        let dir = Path::new("/Users/martinjanci/Library/Caches/claude-fleet");
+        let host = "ip-172-31-45-123.eu-central-1.compute.internal";
+        let p = control_socket(dir, host, "");
+        let tty = control_socket(dir, host, "-tty");
+        assert!(p.as_os_str().len() <= MAX_CONTROL_PATH, "{}", p.display());
+        assert!(
+            tty.as_os_str().len() <= MAX_CONTROL_PATH,
+            "{}",
+            tty.display()
+        );
+        assert_ne!(p, tty);
+        assert_eq!(p, control_socket(dir, host, ""));
+        assert_ne!(
+            p,
+            control_socket(dir, "ip-172-31-45-124.eu-central-1.compute.internal", "")
+        );
+        assert!(control_socket(dir, "mercury", "").ends_with("cm-mercury.sock"));
+    }
 
     #[test]
     fn control_path_lives_under_cache_dir() {

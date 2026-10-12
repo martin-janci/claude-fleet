@@ -164,7 +164,7 @@ runs. Changing one after seeing results needs a new decision row.
 | Acceptance (assist) | accuracy on answered ≥ 0.90 at coverage ≥ 0.40; ≥ 10 points above BM25 at equal coverage; not worse than haiku by more than 3 points; abstention quality ≥ 0.85; a language cell more than 10 points below English at equal coverage falls back |
 | Auto (pre-selection only) | accuracy on answered ≥ 0.97 at coverage ≥ 0.25, correction rate ≤ 3% over 200 assisted suggestions in that cell |
 | Rollback | mode `off`; suggestions made by it decay like any R6 suggestion |
-| Components | envelope; `work_link` adapter (after detection, off the hook path) **[proposed]**; the offline benchmark **[built]**: `fleet-core::service::decide::bench::work_link` (dataset A from `store::bench_work_link` — person-decided `manual`/`started` links; none-cases; the leakage guard `redact_prompt`; candidate recall incl. the nudge fence; time split; providers `none`, `bm25` (`bench::bm25`) and `jev` through `decide()` (`work_link.bench.v1`, subject `bench`); the question shape `--shape choice|choice+noul` (the Noul is a second call on the chosen item only, `work_link.bench.noul.v1`, kept above a dev-chosen threshold — the envelope sends one question per call); metrics, breakdown, bootstrap CIs, calibration (ECE / Brier per cell, `bench::Calibration`) and the acceptance above as PASS / FAIL / NOT JUDGED — Jev against BM25 at BM25's dev coverage (`EqualCoverage`) and the per-language-cell rule), `fleet-hub decide bench work-link` with `--export-unlinked` / `--labels` for D39 (dataset H); the haiku baseline (D33) **[built]**: provider `haiku` asks Jev's Choice (the same redacted first prompt, candidates and `none`) through `service::decide::haiku` on the same cases as Jev, and "not worse than haiku by more than 3 points" is judged at haiku's coverage (`VsHaiku`: Jev's threshold chosen on dev to match haiku's dev coverage, the gap ≥ −0.03 over 200+ paired cases); a test replays the leakage guard on what reaches the host; desktop chip / popover and the phone sheet show source `model`, confidence and the reason **[proposed]** |
+| Components | envelope; `work_link` adapter (after detection, off the hook path) **[proposed]**; the offline benchmark **[built]**: `fleet-core::service::decide::bench::work_link` (dataset A from `store::bench_work_link` — person-decided `manual`/`started` links; none-cases; the leakage guard `redact_prompt`; candidate recall incl. the nudge fence; time split; providers `none`, `bm25` (`bench::bm25`) and `jev` through `decide()` (`work_link.bench.v2`, subject `bench`); the question shape `--shape choice|choice+noul` (the Noul is a second call on the chosen item only, `work_link.bench.noul.v1`, kept above a dev-chosen threshold — the envelope sends one question per call); metrics, breakdown, bootstrap CIs, calibration (ECE / Brier per cell, `bench::Calibration`) and the acceptance above as PASS / FAIL / NOT JUDGED — Jev against BM25 at BM25's dev coverage (`EqualCoverage`) and the per-language-cell rule), `fleet-hub decide bench work-link` with `--export-unlinked` / `--labels` for D39 (dataset H); the haiku baseline (D33) **[built]**: provider `haiku` asks Jev's Choice (the same redacted first prompt, candidates and `none`) through `service::decide::haiku` on the same cases as Jev, and "not worse than haiku by more than 3 points" is judged at haiku's coverage (`VsHaiku`: Jev's threshold chosen on dev to match haiku's dev coverage, the gap ≥ −0.03 over 200+ paired cases); a test replays the leakage guard on what reaches the host; desktop chip / popover and the phone sheet show source `model`, confidence and the reason **[proposed]** |
 | Kill | correction rate > 10% over 100 in a cell; any cross-org candidate reaching the model (a test and a runtime assertion) |
 
 ### J2 — outcome of a turn after Stop (hypothesis)
@@ -177,8 +177,9 @@ runs. Changing one after seeing results needs a new decision row.
 | Reference | hand labels of ~300 turns; weak signals: the next prompt (a person answering means "asked") |
 | Baselines | "ends with ?" heuristic; the Notification hook `idle_prompt`; haiku |
 | Acceptance | "asks a question" precision ≥ 0.9 and recall ≥ 0.8 (a false "finished" hides a waiting session) |
-| Safety | sends Claude's reply text: the most sensitive input of any card. It needs its own consent line (D31 covers prompts and titles, not replies) → **a new decision before phase 0** |
-| Status | **[hypothesis]**, not started |
+| Safety | sends Claude's reply text: the most sensitive input of any card. It needs its own consent line (D31 covers prompts and titles, not replies) → **decided as D48** (owner, 2026-10-08): only where the org also consents to reply text, off by default |
+| Components | **[built]** (step 5.11) `service/decide/turn_outcome.rs`: setting `decide.jev.turn_outcome` (off / shadow / assist), question `turn_outcome.v2` over finished / asked / stuck / working / unsure, input the visible pane tail (ANSI stripped, chrome dropped, code blocks as placeholders, ≤ 40 lines / 2,000 chars, redacted), baseline the pane rules (`none` where they read nothing), floor 0.5, subject `session_turn` `<session>:<turn_seq>`; asked after a Stop that left the row idle (`spawn_after_stop`), shadow recorded, assist written to `sessions.turn_outcome` (attention: `asked` → waiting, `stuck` → stuck); every hook clears it and an answer lands only while no hook spoke since the Stop; follow-ups from a later Notification and a person's prompt; J8's `pane_unreadable` timeline entry; the bench `fleet-hub decide bench turn-outcome` (providers rule, qmark, jev; synthetic fixture `service/testdata/decide/turn_outcome_tails.jsonl`, 72 tails of which 51 `asked`, LLM-written, D43, never judged); J8's warning in the agent tab. Not built: a trigger for hosts without hooks (no turn counter to key one decision per turn), the haiku baseline |
+| Status | **[built, off]**; phase 0 waits on hand labels |
 
 ### J4 — ranking context for the brief and the ticket card
 
@@ -202,12 +203,22 @@ runs. Changing one after seeing results needs a new decision row.
 
 - A Choice over the keys found.
 - Low volume. Run it only as an extension of J1's harness.
+- **[built]** (redesign 6.8, off) as `main_ticket`: rule first (one key, a
+  branch naming one, more than eight keys is a dump: unsure), then a Choice
+  over the suggested keys with the prompt's keys masked as `[K1]`…; Review
+  marks the proposed suggestion. Bench `fleet-hub decide bench main-ticket`
+  (synthetic, not judged).
 
 ### J7 — local item vs tracker item (duplicate identity)
 
 - A Score for "same work?" plus Nouls for the fields that disagree
   (TypeSafe's entity-alignment pattern).
 - Low volume. Hypothesis.
+- **[built]** (redesign 6.8, off) as `tracker_duplicate`, a Choice rather
+  than a Score: a new standalone local task against the org's open tracker
+  tickets (K4's ranking), the key rule first; Review shows *May duplicate
+  KEY* with a person's *Link KEY instead*. Bench `fleet-hub decide bench
+  tracker-duplicate` (synthetic, not judged).
 
 ### J8 — pane status when the rules say nothing
 
@@ -228,6 +239,84 @@ runs. Changing one after seeing results needs a new decision row.
 
 - A Noul per project.
 - Low volume, weak.
+- **[built]** (redesign 4.12) as a Choice over the person's projects rather
+  than a Noul per project, behind `decide.jev.restore_target`, with N4's
+  pane case behind `decide.jev.adopt_target`: `service/decide/lost_target.rs`
+  (questions `restore_target.v1` / `adopt_target.v1`), only where no
+  directory rule places the entry. See `docs/decisions.md`.
+
+### K1–K5 — candidates found after the test map (owner, 2026-10-07)
+
+A survey of the features landed or designed after 2026-09-27 found five
+more closed-set decisions. The owner accepted all five on 2026-10-07, in
+this order: the phase-0 runs first (they gate every cell), then K1, K5 with
+the picker's phase 2, K2 and K3 as shadow slots in their designs, K4 last.
+Each becomes a full card above when its adapter is built.
+
+#### K1 — the project for a task's first start (`start_project`)
+
+| Field | Plan |
+|---|---|
+| Decision | A start of a task whose key prefix no project has worked on yet: today `start_work` answers `E_AMBIGUOUS` with `missing: "project"` and the 8 most recently used projects (`service/trackers/tickets.rs`), and the person picks in `StartPopover`. Jev pre-selects one of those candidates or abstains |
+| Input | the task's title and description excerpt (redacted), each candidate's `owner/repo`; nothing from the repositories |
+| Candidates | closed: the preview's candidate projects plus `unsure` |
+| Reference | free: the project the person starts in (a confirmed or corrected run) |
+| Baselines | the most recently used project (today's first row); BM25 of the title over `owner/repo` |
+| Acceptance (assist) | accuracy on answered ≥ 0.85 at coverage ≥ 0.50, ≥ 15 points above "first row" |
+| Safety | a pre-selection only; the person still presses Start. Never on the start path: shadow asks after the preview has answered |
+| Setting | `decide.jev.start_project` (`off / shadow / assist`), off |
+| Components | **[built]** `service/decide/start_project.rs` (question `start_project.v2`, subject `work_start` `item:<id>` / `key:<HMAC>`, options `p<id>` + `unsure`, floor 0.5, a decided run reused for 14 days); `tickets::preview_start_decided` (shadow spawned off the path, assist awaited → `suggested_project`), wired in the hub's `work_link { preview_start }` and the standalone desktop's `preview_start_work`; `record_start` marks the assist proposal `confirmed` / `corrected` on a person's start; the popover pre-selects it (`suggestedProjectId`, *Proposed by Jev*). Tests: `service/decide/start_project_tests.rs`, `src/lib/start_preview.test.ts`, `src/lib/WorkTaskDetail.test.ts`. Not built: a phase-0 bench over past first starts |
+
+#### K2 — which operator thread a prompt belongs to (`operator_thread`)
+
+- Where: Mode B (`2026-10-06-task-to-session-flow-design.md` §3.2), for a
+  prompt that names no task key.
+- A Choice over the current thread, the other open threads (title and
+  task key) and `new_topic`.
+- Asked after the prompt is sent, never before; the answer is at most the
+  banner *New topic …? / Send in its thread?*. Its buttons are the labels.
+- Weak spot: short prompts and indirection ("do the same for the other
+  one"); `unsure` must be cheap.
+- Waits on Mode B; built into it as a shadow slot from its first slice.
+
+#### K3 — triage in the mission loop (`mission_triage`)
+
+- Where: the orchestration loop (`2026-10-07-autonomous-orchestration-projects-design.md` §5.3, §6).
+- (a) The worker's outcome `done / partial / blocked / failed` when its
+  JSON report is missing; (b) a failure's next step `retry / split /
+  give_up / ask` as an early exit before the `claude -p` planner.
+- The state carries fleet's own evidence (CI, commits, the last error) next
+  to the worker's text, which is marked untrusted. Jev never proposes
+  `complete` and never marks a `done_when` line verified.
+- Labels: the planner's and the person's decisions in `orchestration_events`.
+- Waits on O2; built as a shadow slot there.
+
+#### K4 — is a new task a duplicate (`task_duplicate`)
+
+- Where: tasks proposed by the brainstorm (C0/C1), the planner's
+  `create_item` and `work_link create`.
+- A Noul "same work as X?" over the top 5 BM25 candidates of the same org;
+  extends J7. The answer is a *possible duplicate of …* line in the
+  approval sheet, never a merge.
+- Waits on bulk creation (C1 / O2).
+
+#### K5 — a task's group in the Work view (`work_placement`)
+
+- Where: placement (`service/work/structure.rs`), for a task no rule and no
+  person has placed.
+- A Choice over the person's groups ∪ `none` ∪ `unsure`; labels from
+  `set_work_placement`. Jev never writes a rule.
+- Built with the project picker's phase 2 (the same "which group" adapter).
+
+#### Not for Jev (found by the same survey)
+
+| Candidate | Why not |
+|---|---|
+| A local task's org (`assign_org`) | moves the org boundary behind a preview token |
+| A mission's `complete` and `done_when` checks | evidence (CI, tests, commits), never an opinion |
+| Decomposing a goal into tasks | generative; the planner's job |
+| The harness for a task | low volume, no labels |
+| A task's size or priority | numbers are a known weak spot; `work_items` has no priority |
 
 ### Weak candidates: not planned, with the reason
 
@@ -303,7 +392,11 @@ runs. Changing one after seeing results needs a new decision row.
 ## 10. What is still open
 
 - **D32 is decided:** J3 first (built as a shadow/assist adapter), J1 offline only (phase 0 built; no live adapter until its acceptance lines pass).
-- **J2's consent for reply text** (a new decision before phase 0).
+- ~~**J2's consent for reply text**~~ **decided: D48** (owner, 2026-10-08;
+  `docs/decisions.md` → *Decision D48*): reply text goes only where the org
+  consents to reply text, a consent separate from D31 and required on top
+  of it, off by default. J2 is built (step 5.11); its phase-0 run waits on
+  ~300 hand-labeled pane tails.
 - **The owner's census run and D46 labels:** they decide the language
   cells.
 - **The owner's D39 hand labels:** needed for J1's "none" cases

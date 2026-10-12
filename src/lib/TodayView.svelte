@@ -6,7 +6,19 @@
   // tracker cache — no network), cut to the scope the sidebar shows. Copy
   // standup puts the same four sections on the clipboard as plain text.
   // Tracker titles are rendered as text, never as markup.
+  //
+  // Gap plan G3.2 (board Today): four KPI tiles, the date and fleet line,
+  // a paused-limit row's Switch account and Wait right on it with an Open
+  // per row, "from <routine>" on what shipped, and In progress cut to four
+  // groups with "N more ›". Cut: "Release 0.5.3 · apps installed" (fleet
+  // records no install per device).
   import { onDestroy } from 'svelte';
+  import LimitActions from './LimitActions.svelte';
+  import { classify } from './attention';
+  import { attentionFacts } from './attention_facts';
+  import { accountByUuid, accountLabel } from './accounts';
+  import { hosts } from './hosts';
+  import { attentionIdleMinutes } from './notify';
   import { sessions, type SessionRow } from './sessions';
   import { selectSessionExplicitly } from './selection';
   import { effectiveScope, scopeOf } from './orgs';
@@ -15,6 +27,12 @@
   import { timeAgo } from './session_status';
   import { statusDotClass } from './trackers';
   import { candidatesFor, inScope, refreshTidy, requestTidy, tidyReport } from './tidy';
+  import MorningBrief from './MorningBrief.svelte';
+  import MissionNudge from './MissionNudge.svelte';
+  import { openMission } from './missions';
+  import { waitWords } from './mission_waits';
+  import Skeleton from './states/Skeleton.svelte';
+  import { errorText } from './error_copy';
   import {
     loadToday,
     localMidnight,
@@ -24,6 +42,10 @@
     groupLabel,
     groupStatusLabel,
     sessionPhrase,
+    todayKpis,
+    todayLine,
+    shippedWhen,
+    IN_PROGRESS_SHOWN,
     type Today,
     type TodayBucket,
     type TodayGroup,
@@ -43,6 +65,8 @@
   let today = $state<Today | null>(null);
   let error = $state<string | null>(null);
   let loading = $state(false);
+  /** The hub has no `work_today`: the plain empty state, for good. */
+  let unsupported = $state(false);
   let copied = $state(false);
   let copyTimer: ReturnType<typeof setTimeout> | undefined;
   let refreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -56,9 +80,14 @@
   // code, never by message text.
   const HUB_HAS_NO_TODAY = ['E_INVALID', 'E_FORBIDDEN', 'E_HUB_PROTOCOL'];
 
+  // Only the newest refresh lands: an older, slower answer would put
+  // stale counts back over the newer ones (review r07).
+  let refreshSeq = 0;
   async function refresh() {
+    const mine = ++refreshSeq;
     loading = true;
     const r = await loadToday(localMidnight(now()));
+    if (mine !== refreshSeq) return;
     loading = false;
     if (r.ok) {
       today = r.value;
@@ -66,9 +95,10 @@
     } else if (HUB_HAS_NO_TODAY.includes(r.error.code)) {
       today = null;
       error = null;
+      unsupported = true;
       stopFollowing();
     } else {
-      error = r.error.message;
+      error = errorText(r.error);
     }
   }
 
@@ -116,6 +146,27 @@
     copyTimer = setTimeout(() => (copied = false), 1_500);
   }
 
+  const kpis = $derived(view ? todayKpis(view) : null);
+  const dateLine = $derived(
+    todayLine(
+      now(),
+      $hosts.filter((h) => !h.hidden).map((h) => h.alias),
+      $sessions,
+      localMidnight(now()),
+    ),
+  );
+  let allInProgress = $state(false);
+  const inProgressShown = $derived(view ? (allInProgress ? view.inProgress : view.inProgress.slice(0, IN_PROGRESS_SHOWN)) : []);
+
+  /** The live row behind a digest session, when it is paused on a limit:
+   *  its Switch account and Wait go right on the row. */
+  function limited(s: TodaySession): SessionRow | null {
+    const row = $sessions.find((r) => r.id === s.id);
+    if (!row) return null;
+    const opts = { idleSecs: $attentionIdleMinutes * 60, now: Math.floor(now() / 1000), facts: $attentionFacts };
+    return classify(row, opts) === 'account_limit' ? row : null;
+  }
+
   function jump(s: TodaySession) {
     const row: SessionRow | undefined = $sessions.find((r) => r.id === s.id);
     if (!row) return;
@@ -158,6 +209,21 @@
                 onclick={() => jump(s)}>{sessionPhrase(s, bucket)}</button
               >
               <span class="meta">{s.host_alias}{#if s.ci_status} · CI {s.ci_status}{/if}</span>
+              <button class="btn btn--quiet open" type="button" data-testid="today-session-open" aria-label="Open {s.name}" onclick={() => jump(s)}
+                >Open</button
+              >
+              {#if bucket === 'waiting'}
+                {@const row = limited(s)}
+                {#if row}
+                  <div class="limit" data-testid="today-limit">
+                    <LimitActions
+                      sess={row}
+                      resetsAt={$attentionFacts?.limited_accounts?.[row.account_uuid ?? '']?.resets_at ?? null}
+                      accountName={(u) => accountLabel($accountByUuid.get(u))}
+                    />
+                  </div>
+                {/if}
+              {/if}
             </li>
           {/each}
         </ul>
@@ -168,7 +234,10 @@
 
 <section class="today" data-testid="today-view" aria-label="Today">
   <header>
-    <h2>Today</h2>
+    <div>
+      <h2>Today</h2>
+      <p class="dateline" data-testid="today-dateline">{dateLine}</p>
+    </div>
     <div class="actions">
       <button class="btn" type="button" data-testid="today-copy" disabled={!view} onclick={() => void copyStandup()}
         >{copied ? 'Copied' : 'Copy standup'}</button
@@ -185,20 +254,52 @@
   </header>
 
   {#if error}
-    <p class="error" role="alert" data-testid="today-error">{error}</p>
+    <p class="error" role="alert" data-testid="today-error">Couldn't load Today: {error}. Refresh tries again.</p>
+  {/if}
+
+  <!-- Redesign 9.11: the brief drafted last; a new one only on Refresh. -->
+  <MorningBrief />
+  <!-- Redesign 9.10: stuck missions, with the next step Jev proposes. -->
+  <MissionNudge />
+
+  {#if view && kpis}
+    <ul class="kpis" aria-label="Today in numbers" data-testid="today-kpis">
+      <li class="kpi" class:hot={kpis.needsYou > 0}><span class="n">{kpis.needsYou}</span>{' '}<span class="k">Needs you</span></li>
+      <li class="kpi"><span class="n">{kpis.inProgress}</span>{' '}<span class="k">In progress</span></li>
+      <li class="kpi"><span class="n">{kpis.shipped}</span>{' '}<span class="k">Shipped today</span></li>
+      <li class="kpi"><span class="n">{kpis.stale}</span>{' '}<span class="k">Stale</span></li>
+    </ul>
   {/if}
 
   {#if view}
     {#if isEmptyView(view)}
       <p class="empty" data-testid="details-empty">Nothing running today. Pick a session, or start work from ⌘K.</p>
     {/if}
-    {#if view.waiting.length > 0}
+    {#if view.waiting.length > 0 || (view.missions?.length ?? 0) > 0}
       <h3 data-testid="today-waiting">Waiting on you</h3>
-      {@render groups(view.waiting, 'waiting')}
+      {#if view.waiting.length > 0}{@render groups(view.waiting, 'waiting')}{/if}
+      {#if view.missions?.length}
+        <!-- G1.6: missions waiting on a person, beside the sessions. -->
+        <ul class="groups" data-testid="today-missions">
+          {#each view.missions as m (m.id)}
+            <li class="group">
+              <button class="btn btn--quiet link" type="button" data-testid="today-mission-open" onclick={() => openMission(m.id)}
+                >Mission {m.name}</button
+              >
+              <span class="status">{waitWords(m.waiting_on)}</span>
+            </li>
+          {/each}
+        </ul>
+      {/if}
     {/if}
     {#if view.inProgress.length > 0}
       <h3 data-testid="today-in-progress">In progress</h3>
-      {@render groups(view.inProgress, 'in_progress')}
+      {@render groups(inProgressShown, 'in_progress')}
+      {#if view.inProgress.length > inProgressShown.length}
+        <button class="btn btn--quiet more" type="button" data-testid="today-more" onclick={() => (allInProgress = true)}
+          >{view.inProgress.length - inProgressShown.length} more ›</button
+        >
+      {/if}
     {/if}
     {#if view.shipped.length > 0}
       <h3 data-testid="today-shipped">Shipped today</h3>
@@ -206,7 +307,8 @@
         {#each view.shipped as x (`${x.how}|${x.key ?? x.pr_url ?? x.at}`)}
           <li class="group shipped">
             <span class="label">{x.key ? groupLabel({ key: x.key, title: x.title ?? '' }) : x.title || 'Untitled work'}</span>
-            <span class="status">{x.how === 'done' ? 'done' : 'PR'}</span>
+            <span class="status" data-testid="today-shipped-when">{shippedWhen(x)}</span>
+            {#if x.from}<span class="status" data-testid="today-shipped-from">from {x.from}</span>{/if}
             {#if x.pr_url}
               <button class="btn btn--quiet link" type="button" onclick={() => void openExternal(x.pr_url ?? '')}>PR</button>
             {:else if x.url}
@@ -233,6 +335,9 @@
       </h3>
       {@render groups(view.stale, 'stale')}
     {/if}
+  {:else if !error && !unsupported && today === null}
+    <!-- Review r13 (step 10.6): the first read is loading, not empty. -->
+    <Skeleton rows={4} label="Loading Today" />
   {:else if !error}
     <p class="empty" data-testid="details-empty">Pick a session to see details.</p>
   {/if}
@@ -243,7 +348,7 @@
     display: flex;
     flex-direction: column;
     gap: 0.4rem;
-    font-size: 0.9rem;
+    font-size: var(--text-sm);
   }
   header {
     display: flex;
@@ -253,11 +358,49 @@
   }
   h2 {
     margin: 0;
-    font-size: 1rem;
+    font-size: var(--text-md);
+  }
+  .dateline {
+    margin: 0;
+    color: var(--fg-muted);
+    font-size: var(--text-2xs);
+  }
+  .kpis {
+    list-style: none;
+    margin: 0.2rem 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
+    gap: 0.4rem;
+  }
+  .kpi {
+    display: flex;
+    flex-direction: column;
+    padding: 0.4rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+  }
+  .kpi .n {
+    font-size: var(--text-md);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .kpi.hot .n {
+    color: var(--status-waiting);
+  }
+  .kpi .k {
+    color: var(--fg-muted);
+    font-size: var(--text-2xs);
+  }
+  .limit {
+    padding: 0.2rem 0 0.2rem 0.6rem;
+  }
+  .more {
+    align-self: flex-start;
   }
   h3 {
     margin: 0.6rem 0 0.2rem;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--fg-muted);
@@ -279,7 +422,7 @@
   }
   .group {
     padding: 0.25rem 0;
-    border-bottom: 1px solid var(--border, transparent);
+    border-bottom: 1px solid var(--border);
   }
   .head,
   .shipped {
@@ -299,7 +442,7 @@
   .status,
   .meta {
     color: var(--fg-muted);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .status {
     display: inline-flex;
@@ -318,10 +461,10 @@
     background: var(--fg-muted);
   }
   .dot-progress {
-    background: var(--accent, #3b82f6);
+    background: var(--accent);
   }
   .dot-done {
-    background: var(--ok, #22c55e);
+    background: var(--status-done);
   }
   .sessions {
     padding-left: 0.6rem;
@@ -333,6 +476,6 @@
     color: var(--fg-muted);
   }
   .error {
-    color: var(--danger, #c33);
+    color: var(--danger);
   }
 </style>

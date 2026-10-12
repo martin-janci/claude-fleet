@@ -6,11 +6,56 @@
   import { pushError } from './toasts';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection, connectionBanner } from './hub_connection';
+  import { sessionIdBlocked } from './share';
 
   // cancel_task routes to the hub, so it stays enabled on a hub client — but
   // only once the live connection to it is up; while it is not, sending it
   // would just wait on a socket that is not there.
   const cancelBlocked = $derived(hubActionBlocked('cancel_task', $hubStatus, $hubConnection));
+  /**
+   * The access half (multi-user M1, F2a). A `TaskRow` names its two parties by
+   * session id only, so each id has to be resolved to a row before the access
+   * half can be asked — the same shape `WorkReview` and `TidyReview` have.
+   *
+   * A task is a relationship between two sessions, so its parties are narrowed
+   * per target the way a fan-out list is: `cancel_task` is `drive` in
+   * `share.ts::SESSION_TIER` (the inverse of `dispatch_task`, which has no UI
+   * surface of its own), and a cancel writes the task's end onto BOTH parties'
+   * timelines, so a party shared with this client at `watch` — or not shared at
+   * all — refuses the cancel.
+   *
+   * ── Not knowing is not permission (F2d) ─────────────────────────────────
+   *
+   * F2a resolved both ids out of `$sessions` by hand and answered `null` when
+   * NEITHER resolved, reading an unresolvable party as "the session was reaped,
+   * so there is nothing to refuse". This panel is the worst place in the app for
+   * that reading: `$tasks` is the FLEET-WIDE `list_tasks`, so on a paired
+   * desktop it carries tasks between sessions this client holds no rows for at
+   * all — the hatch opened in exactly the case it should have closed.
+   *
+   * So each NAMED party goes through `share.ts::sessionIdBlocked`, which fails
+   * closed with `UNKNOWN_SESSION_REASON` on a fleet this client does not own and
+   * answers `null` on a standalone desktop (`access.ts::sessionAccess` rule 1).
+   * A `null` id is skipped, and that is not the hatch coming back: `null` means
+   * the task names no such party (the column is `ON DELETE SET NULL`), which is
+   * a different fact from "there is a party and this app cannot see whose it
+   * is". A task with no party at all is still asked about — `sessionIdBlocked`
+   * answers for a `null` id too — so the degenerate row refuses rather than
+   * sails through.
+   */
+  function cancelAccessBlocked(t: TaskRow): string | null {
+    const named = [t.requester_session_id, t.worker_session_id].filter((id) => id !== null);
+    if (named.length === 0) return $sessionIdBlocked(null, 'cancel_task');
+    for (const id of named) {
+      const why = $sessionIdBlocked(id, 'cancel_task');
+      if (why) return why;
+    }
+    return null;
+  }
+  /** One task's own gate: the hub's refusal first, then this client's access. */
+  function taskCancelBlocked(t: TaskRow): string | null {
+    return cancelBlocked ?? cancelAccessBlocked(t);
+  }
 
   // Same honest-empty-state fix as Sidebar/HostsList: `list_tasks` fails
   // with `E_HUB_CONTRACT` under a skewed hub, discarded like every other
@@ -59,17 +104,18 @@
   }
 
   const STATE_COLOR: Record<TaskRow['state'], string> = {
-    queued: '#8a8a8a',
-    running: '#4a90d2',
-    done: '#3cb45a',
-    failed: '#e64a4a',
-    cancelled: '#d29b4a',
+    queued: 'var(--status-idle)',
+    running: 'var(--status-working)',
+    done: 'var(--status-done)',
+    failed: 'var(--status-failed)',
+    cancelled: 'var(--status-waiting)',
   };
 
   let pendingCancel: TaskRow | null = $state(null);
   let busy = $state(false);
   async function doCancel() {
-    if (!pendingCancel) return;
+    // Re-asked on confirm: the dialog can be open when a revoke arrives.
+    if (!pendingCancel || taskCancelBlocked(pendingCancel) !== null) return;
     busy = true;
     const r = await cancelTask(pendingCancel.id);
     busy = false;
@@ -93,7 +139,7 @@
             <span
               class="pill"
               data-testid="task-state"
-              style="color: {STATE_COLOR[t.state]}; border-color: {STATE_COLOR[t.state]}66; background: {STATE_COLOR[t.state]}18;"
+              style="color: {STATE_COLOR[t.state]}; border-color: color-mix(in srgb, {STATE_COLOR[t.state]} 40%, transparent); background: color-mix(in srgb, {STATE_COLOR[t.state]} 9%, transparent);"
             >{t.state}</span>
             <span class="id">#{t.id}</span>
             <span class="parties" data-testid="task-parties">
@@ -111,12 +157,19 @@
             </span>
             <span class="elapsed" data-testid="task-elapsed" title={t.finished_at ? 'duration' : 'elapsed'}>{taskElapsed(t, nowSec)}</span>
             {#if !isTerminal(t.state)}
+              {@const why = taskCancelBlocked(t)}
               <button
                 class="cancel"
                 data-testid="task-cancel"
-                disabled={cancelBlocked !== null}
-                onclick={() => (pendingCancel = t)}
-                title={cancelBlocked ?? 'Cancel this task (the worker keeps running)'}
+                disabled={why !== null}
+                onclick={() => {
+                  // The gate again, not only on `disabled` (F2d): a synthetic or
+                  // scripted click reaches the handler past the attribute, and
+                  // `doCancel` re-asking would leave a confirm dialog open whose
+                  // button can never work. Refuse to open it instead.
+                  if (why === null) pendingCancel = t;
+                }}
+                title={why ?? 'Cancel this task (the worker keeps running)'}
               >Cancel</button>
             {/if}
           </div>
@@ -153,50 +206,50 @@
   .tasks { display: flex; flex-direction: column; gap: 0.4rem; }
   .tasks h3 {
     margin: 0;
-    font-size: 0.7rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
-  .empty { margin: 0; font-size: 0.8rem; color: var(--fg-muted); font-style: italic; }
+  .empty { margin: 0; font-size: var(--text-2xs); color: var(--fg-muted); font-style: italic; }
   .list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.35rem; }
   .row {
     border: 1px solid var(--border);
-    border-radius: 5px;
+    border-radius: var(--radius-sm);
     padding: 0.4rem 0.55rem;
     display: flex;
     flex-direction: column;
     gap: 0.25rem;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .head { display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; }
   .pill {
     padding: 0.05rem 0.4rem;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     border: 1px solid;
-    font-size: 0.65rem;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
-  .id { color: var(--fg-muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.72rem; }
+  .id { color: var(--fg-muted); font-family: var(--font-mono); font-size: var(--text-2xs); }
   .parties { display: inline-flex; gap: 0.3rem; align-items: baseline; min-width: 0; flex: 1; overflow: hidden; white-space: nowrap; }
   .arrow { color: var(--fg-muted); }
   .link {
     background: transparent; border: none; padding: 0; cursor: pointer;
-    color: var(--accent); font-size: 0.8rem; text-decoration: underline; text-underline-offset: 2px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--accent); font-size: var(--text-2xs); text-decoration: underline; text-underline-offset: 2px;
+    font-family: var(--font-mono);
   }
-  .elapsed { color: var(--fg-muted); font-size: 0.72rem; }
+  .elapsed { color: var(--fg-muted); font-size: var(--text-2xs); }
   .cancel {
-    font-size: 0.72rem; padding: 0.15rem 0.5rem; border-radius: 4px; cursor: pointer;
-    border: 1px solid #e64a4a; color: #e64a4a; background: transparent;
+    font-size: var(--text-2xs); padding: 0.15rem 0.5rem; border-radius: var(--radius-sm); cursor: pointer;
+    border: 1px solid var(--danger); color: var(--danger); background: transparent;
   }
-  .cancel:hover { background: rgba(230, 74, 74, 0.1); }
+  .cancel:hover { background: color-mix(in srgb, var(--danger) 10%, transparent); }
   .prompt { margin: 0; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .result, .error {
-    margin: 0; font-size: 0.78rem; line-height: 1.35; white-space: pre-wrap; overflow-wrap: anywhere;
-    max-height: 5.5rem; overflow: auto; padding: 0.3rem 0.45rem; border-radius: 4px;
+    margin: 0; font-size: var(--text-2xs); line-height: 1.35; white-space: pre-wrap; overflow-wrap: anywhere;
+    max-height: 5.5rem; overflow: auto; padding: 0.3rem 0.45rem; border-radius: var(--radius-sm);
   }
-  .result { background: rgba(60, 180, 90, 0.1); color: var(--fg); }
-  .error { background: rgba(230, 74, 74, 0.1); color: #e64a4a; }
+  .result { background: var(--done-soft); color: var(--fg); }
+  .error { background: color-mix(in srgb, var(--danger) 10%, transparent); color: var(--danger); }
 </style>

@@ -45,6 +45,10 @@ pub struct GcConfig {
 }
 
 impl GcConfig {
+    fn period(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.sweep_interval_secs)
+    }
+
     pub fn from_store(s: &Store) -> Self {
         Self {
             enabled: settings::get_bool(s, settings::GC_ENABLED),
@@ -158,6 +162,25 @@ pub fn plan(
         });
     }
     out
+}
+
+/// Whether session `id` is still a kill target now: Pause all is off and
+/// [`plan`] still picks its current row.
+fn still_planned(
+    s: &Store,
+    id: i64,
+    cfg: &GcConfig,
+    controller: Option<&(String, String)>,
+    reachable: &HashSet<String>,
+    now: i64,
+) -> bool {
+    if crate::service::loops::paused(s) {
+        return false;
+    }
+    match s.get_session_by_id(id) {
+        Ok(Some(row)) => !plan(&[row], cfg, controller, reachable, now).is_empty(),
+        _ => false,
+    }
 }
 
 /// Side effects the sweeper performs, injected for tests.
@@ -347,6 +370,13 @@ pub async fn sweep_with(
                 p.idle_secs
             );
             if let Ok(s) = store.lock() {
+                // The plan read every row once; an inspect is SSH and git, so
+                // by now a person may have resumed this session or pressed
+                // Pause all. Ask again for this one row, under the lock the
+                // event is written under (review r06 F4).
+                if !still_planned(&s, p.session_id, cfg, controller.as_ref(), &reachable, now) {
+                    continue;
+                }
                 if let Err(e) = s.insert_session_event(p.session_id, "gc_killed", Some(&detail)) {
                     tracing::warn!(
                         session_id = p.session_id,
@@ -428,6 +458,12 @@ pub async fn sweep_with(
     report.swept_decision_runs = crate::service::decide::sweep_runs(store, now);
     // File downloads past `downloads.keep_secs`, and bytes no row owns.
     report.swept_downloads = crate::service::downloads::sweep(store, now);
+    // Wizard drafts nobody resumed within `wizard_state::KEEP_SECS` (G7.2).
+    match crate::service::wizard_state::purge(store, now) {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(n, "[gc] dropped stale wizard drafts"),
+        Err(e) => tracing::warn!(error = %e, "[gc] wizard draft purge failed"),
+    }
     report
 }
 
@@ -480,7 +516,12 @@ pub async fn maybe_sweep(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> Opt
     let _flight = begin_flight()?;
     let cfg = {
         let s = store.lock().ok()?;
-        GcConfig::from_store(&s)
+        let cfg = GcConfig::from_store(&s);
+        // Pause all (redesign 8.1) stops every GC write, retention included.
+        if !crate::service::loops::gate_in("gc", &s, Some(cfg.period())) {
+            return None;
+        }
+        cfg
     };
     // Deliberately NOT gated on `cfg.enabled` here: that flag opts a fleet
     // into the destructive session-idle killer, but `sweep_with` also runs
@@ -505,6 +546,7 @@ pub async fn maybe_sweep(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> Opt
         ssh: Arc::clone(ssh),
     };
     let report = sweep_with(store, &exec, &cfg, now_unix()).await;
+    crate::service::loops::report("gc", Ok::<_, String>(()), Some(cfg.period()));
     if report != GcReport::default() {
         // Only when the sweep acted: a no-op sweep stays silent.
         tracing::info!(
@@ -540,6 +582,24 @@ mod tests {
     /// spawned single-flight (`spawn_sweep`), mirroring
     /// `service::usage`'s `only_one_collection_pass_is_in_flight`. A second
     /// spawn while one sweep is still running must do nothing.
+    /// Redesign 8.1: Pause all stops the sweep before it writes anything.
+    #[tokio::test]
+    async fn pause_all_stops_the_sweep() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        settings::set(&store.lock().unwrap(), settings::AUTOMATION_PAUSED, "true").unwrap();
+        let ssh = Arc::new(SshClient::new());
+        assert!(maybe_sweep(&store, &ssh).await.is_none());
+        let gc = crate::service::loops::registry()
+            .snapshot()
+            .into_iter()
+            .find(|l| l.name == "gc")
+            .unwrap();
+        assert_eq!(
+            gc.result.as_deref(),
+            Some(crate::service::loops::RESULT_PAUSED)
+        );
+    }
+
     #[test]
     fn only_one_sweep_pass_is_in_flight() {
         let first = begin_flight().expect("no pass running");
@@ -604,6 +664,17 @@ mod tests {
             work_rev: 0,
             pr_evidence: None,
             pr_checked_at: None,
+            owner_person_id: None,
+            visibility: crate::store::VISIBILITY_UNCLAIMED.into(),
+            claude_profile: None,
+            agent: crate::store::AGENT_CLAUDE.into(),
+            origin: None,
+            origin_ref: None,
+            last_viewed_at: None,
+            turn_outcome: None,
+            proposals: Vec::new(),
+            pending_form: None,
+            form_draft: None,
             parent_session_id: None,
             tags: Vec::new(),
             usage: Default::default(),
@@ -860,6 +931,60 @@ mod tests {
         let gc: Vec<_> = events.iter().filter(|e| e.kind == "gc_killed").collect();
         assert_eq!(gc.len(), 1);
         assert_eq!(gc[0].detail.as_deref(), Some("work:kill:idle_10000s"));
+    }
+
+    /// An exec whose inspect lets the world move on: it runs `during`
+    /// against the store, as a person resuming the session or pressing
+    /// Pause all while the inspect's git runs over SSH would.
+    struct MovingExec {
+        store: std::sync::Arc<Mutex<Store>>,
+        during: fn(&Store),
+        inner: FakeExec,
+    }
+
+    #[async_trait::async_trait]
+    impl GcExec for MovingExec {
+        async fn inspect(&self, h: &str, t: &str) -> Result<SafeKillInspection, IpcError> {
+            (self.during)(&self.store.lock().unwrap());
+            self.inner.inspect(h, t).await
+        }
+        async fn safe_kill(&self, h: &str, t: &str) -> Result<(), IpcError> {
+            self.inner.safe_kill(h, t).await
+        }
+        async fn kill(&self, h: &str, t: &str) -> Result<(), IpcError> {
+            self.inner.kill(h, t).await
+        }
+    }
+
+    /// Review r06 F4: the sweep asks again before each kill, so a session
+    /// resumed, or a Pause all pressed, while its inspect ran is left alone.
+    #[tokio::test]
+    async fn a_session_resumed_or_paused_during_its_inspect_is_not_killed() {
+        let resumed: fn(&Store) = |s| {
+            s.conn_ref()
+                .execute("UPDATE sessions SET idle_since = 10000", [])
+                .unwrap();
+        };
+        let paused: fn(&Store) = |s| {
+            crate::service::settings::set(s, crate::service::settings::AUTOMATION_PAUSED, "true")
+                .unwrap();
+        };
+        for during in [resumed, paused] {
+            let store = std::sync::Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+            let id = seed_idle_work(&store, 0);
+            let exec = MovingExec {
+                store: std::sync::Arc::clone(&store),
+                during,
+                inner: fake(false),
+            };
+            let report = sweep_with(&store, &exec, &CFG, 10_000).await;
+            assert_eq!(report.killed, 0);
+            assert_eq!(exec.inner.inspects.load(Ordering::SeqCst), 1);
+            assert_eq!(exec.inner.kills.load(Ordering::SeqCst), 0);
+            let s = store.lock().unwrap();
+            let events = s.list_session_events(id, 10).unwrap();
+            assert!(events.iter().all(|e| e.kind != "gc_killed"));
+        }
     }
 
     #[tokio::test]

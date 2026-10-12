@@ -272,7 +272,7 @@ pub fn preview_for(allow: &UploadAllowList, path: &str) -> Result<Option<String>
 /// A data URL for an attached image, so the composer can show a thumbnail.
 /// Reading bytes stays in Rust: there is no fs plugin, and the allow-list is
 /// the only thing that decides which files this process will open.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn attachment_preview(
     path: String,
     allow: State<'_, Arc<UploadAllowList>>,
@@ -287,7 +287,7 @@ pub fn attachment_preview(
 /// that gives a dropped file its real size and kind. See [`describe_for`]
 /// for the ordering this depends on: it authorises nothing, so it is safe to
 /// add without widening SEC-9's threat model.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn attachment_describe(
     paths: Vec<String>,
     allow: State<'_, Arc<UploadAllowList>>,

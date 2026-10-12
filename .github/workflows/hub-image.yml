@@ -404,3 +404,114 @@ jobs:
             // published under that placeholder instead of the tag.
             await github.rest.repos.updateRelease({ owner, repo, release_id: release.id, tag_name: tag, body: next });
             core.info(`Recorded ${IMAGE}:${VERSION}@${DIGEST} on release ${release.id} (${tag}).`);
+
+  # ── fleet-updater (docs/updates.md → fleet-updater) ──
+  # The hub's update sidecar, published beside it under the same tags. Same
+  # tag gate, same push-by-digest + merge shape and the same merge script as
+  # the hub; arm64 is required here (a small crate, no allow_failure), so an
+  # arm64 NAS never gets an updater that cannot run on it.
+  updater-meta:
+    if: github.ref_type == 'tag'
+    needs: version-consistency
+    runs-on: ubuntu-24.04
+    permissions: {}
+    outputs:
+      tags: ${{ steps.meta.outputs.tags }}
+      labels: ${{ steps.meta.outputs.labels }}
+    steps:
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/fleet-updater
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
+            type=sha
+
+  updater-build:
+    if: github.ref_type == 'tag'
+    needs: [version-consistency, updater-meta]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            os: ubuntu-24.04
+            arch: amd64
+          - platform: linux/arm64
+            os: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: crates/fleet-updater/Dockerfile
+          platforms: ${{ matrix.platform }}
+          labels: ${{ needs.updater-meta.outputs.labels }}
+          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/fleet-updater,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=updater-${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=updater-${{ matrix.platform }}
+      - name: Export the digest for the merge job
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: updater-digests-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  updater-merge:
+    if: github.ref_type == 'tag'
+    needs: [updater-meta, updater-build]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/updater
+          pattern: updater-digests-*
+      - name: Lay the digests out the way merge-hub-digests.sh reads them
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/digests
+          for a in amd64 arm64; do
+            mv "/tmp/updater/updater-digests-$a" "/tmp/digests/digests-$a"
+          done
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+      - name: Create the manifest and push it under the real tags
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/fleet-updater
+          TAGS: ${{ needs.updater-meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          scripts/merge-hub-digests.sh /tmp/digests >/tmp/merge-output.txt
+          tail -n +2 /tmp/merge-output.txt >/tmp/imagetools-args.txt
+          mapfile -t args </tmp/imagetools-args.txt
+          docker buildx imagetools create "${args[@]}"
+          first="$(printf '%s\n' "$TAGS" | head -n1)"
+          digest="$(docker buildx imagetools inspect "$first" --format '{{.Manifest.Digest}}')"
+          {
+            echo "### fleet-updater image"
+            echo
+            echo "\`$first\` — digest \`$digest\`"
+          } >>"$GITHUB_STEP_SUMMARY"

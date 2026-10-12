@@ -574,10 +574,30 @@ pub fn set_project_trust(s: &Store, project_id: i64, on: bool) -> Result<BTreeSe
     Ok(set)
 }
 
+/// The detection state of `session_id`, or `None` for a session that is
+/// never a detection subject: the operator (the UX agent). It coordinates
+/// every task, so the keys it reads and names are the fleet's, not a sign of
+/// what it works on — detecting them would hang a suggestion of every task on
+/// it. Its conversations are tied to tasks by threads instead (task → session
+/// spec §3.3).
+fn subject_state(s: &Store, session_id: i64) -> Result<Option<DetectionState>, IpcError> {
+    if crate::service::operator::operator_ref(s).is_some() {
+        // `operator_ref` swallows its settings read, as `trusted_projects`
+        // does in `run`.
+        s.ensure_in_tx()?;
+        if let Some(row) = s.get_session_by_id(session_id)? {
+            if crate::service::operator::is_operator_session(s, &row.host_alias, &row.tmux_name) {
+                return Ok(None);
+            }
+        }
+    }
+    s.detection_state(session_id)
+}
+
 /// Resolve `session_id` from its stored state plus `events`, and apply the
 /// changes. `true` when a link changed (the row was emitted).
 pub fn resolve_with(s: &Store, session_id: i64, events: Vec<Candidate>) -> Result<bool, IpcError> {
-    let Some(st) = s.detection_state(session_id)? else {
+    let Some(st) = subject_state(s, session_id)? else {
         return Ok(false);
     };
     let tv = tracker_view(s, st.repo.clone())?;
@@ -793,7 +813,7 @@ pub fn on_prompt(
 ) -> Result<bool, IpcError> {
     let person = crate::service::prompt_origin::human_part(prompt);
     let prompt: &str = person.as_deref().unwrap_or(prompt);
-    let Some(st) = s.detection_state(session_id)? else {
+    let Some(st) = subject_state(s, session_id)? else {
         return Ok(false);
     };
     let handovers = s.recent_handover_bodies(st.participant, 5)?;
@@ -829,7 +849,7 @@ pub fn on_agent_inference(
     target: &str,
     tracker_id: Option<i64>,
 ) -> Result<bool, IpcError> {
-    let Some(st) = s.detection_state(session_id)? else {
+    let Some(st) = subject_state(s, session_id)? else {
         return Ok(false);
     };
     let tv = tracker_view(s, st.repo.clone())?;
@@ -846,6 +866,32 @@ pub fn on_agent_inference(
         Strength::Inferred,
         ev,
     );
+    c.tracker_id = tracker_id;
+    run(s, &st, &tv, vec![c])
+}
+
+/// The decision model's answer for a session no rule could link (J1
+/// `work_link` in assist, [`crate::service::decide::work_link`]): one
+/// [`Signal::Jev`] event through the same resolver run as the agent's
+/// inference, which makes it a pre-selected suggestion (R12) and keeps R9.
+/// `target` is normalised (`ABC-7`); `tracker_id` binds it to the item.
+/// The model's confidence rides the evidence's note (`82%`), which Review
+/// and the row's popover show beside "Proposed by Jev".
+pub fn on_jev_proposal(
+    s: &Store,
+    session_id: i64,
+    target: &str,
+    tracker_id: Option<i64>,
+    confidence_pct: Option<u8>,
+) -> Result<bool, IpcError> {
+    let Some(st) = subject_state(s, session_id)? else {
+        return Ok(false);
+    };
+    let tv = tracker_view(s, st.repo.clone())?;
+    let now = crate::service::catalog::now_secs();
+    let mut ev = evidence(Signal::Jev, target, now, st.claude_session_id.as_deref());
+    ev.note = confidence_pct.map(|p| format!("{p}%"));
+    let mut c = candidate(target.to_string(), Signal::Jev, Strength::Inferred, ev);
     c.tracker_id = tracker_id;
     run(s, &st, &tv, vec![c])
 }
@@ -877,6 +923,27 @@ pub fn decide_as(
     decider: Decider,
 ) -> Result<bool, IpcError> {
     let link = s.decide_work_link_as(session_id, link_id, confirm, take_primary, decider)?;
+    if decider == Decider::Person {
+        // J1 (redesign 6.8): a person's answer is the label of the decision
+        // model's proposal about this session, whichever link it was on.
+        let now = crate::service::catalog::now_secs();
+        if let Err(e) = crate::service::decide::work_link::record_decision(
+            s,
+            session_id,
+            link.rule.as_deref(),
+            link.item_id,
+            confirm,
+            now,
+        ) {
+            tracing::warn!("[decide] work_link follow-up not recorded: {}", e.message);
+        }
+        // J6 (redesign 6.8): the same answer labels the main-ticket proposal.
+        if let Err(e) = crate::service::decide::main_ticket::record_decision(
+            s, session_id, link_id, confirm, now,
+        ) {
+            tracing::warn!("[decide] main_ticket follow-up not recorded: {}", e.message);
+        }
+    }
     let mut trusted_now = false;
     if confirm && decider == Decider::Person && matches!(link.rule.as_deref(), Some("R3b" | "R4")) {
         if let Some(pid) = s.detection_state(session_id)?.and_then(|st| st.project_id) {

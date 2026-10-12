@@ -15,6 +15,7 @@ import {
   type SessionRow,
   type StuckKind,
 } from './sessions';
+import attentionTable from './attention_states.json';
 
 // ── status vocabulary ──
 
@@ -26,29 +27,37 @@ export function isStuckKind(v: unknown): v is StuckKind {
   return typeof v === 'string' && (STUCK_KINDS as readonly string[]).includes(v);
 }
 
+// The theme's status tokens (app.css), so both themes clear the text floor
+// and the desktop reads like the phone: working blue, waiting amber, done
+// green. Callers tint with `color-mix`, never by appending hex alpha.
 const STATUS_COLOR: Record<ClaudeStatus, string> = {
-  working: '#50c86e', // green — active
-  blocked: '#f0b429', // yellow — needs input
-  completed: '#6c8ebf', // blue — done
-  failed: '#e64a4a', // red
-  stopped: '#888', // grey — stopped by hook or user
-  idle: '#888', // grey
+  working: 'var(--status-working)',
+  blocked: 'var(--status-waiting)', // needs input
+  completed: 'var(--status-done)',
+  failed: 'var(--status-failed)',
+  stopped: 'var(--status-idle)', // stopped by hook or user
+  idle: 'var(--status-idle)',
 };
 
+// The manual's status words (`kit/status.ts::STATUS_WORDS`): one plain word,
+// no glyph; the colour carries the tone. A session waiting on the person is
+// "Needs you"; one stopped by a hook or the user sits idle like any other.
 const STATUS_LABEL: Record<ClaudeStatus, string> = {
-  working: '⚡ working',
-  blocked: '⏸ blocked',
-  completed: '✓ done',
-  failed: '✗ failed',
-  stopped: '■ stopped',
-  idle: '· idle',
+  working: 'Working',
+  blocked: 'Needs you',
+  completed: 'Done',
+  failed: 'Failed',
+  stopped: 'Idle',
+  idle: 'Idle',
 };
 
 export function claudeStatusColor(status: ClaudeStatus | null): string {
   return status && isClaudeStatus(status) ? STATUS_COLOR[status] : 'transparent';
 }
 
-export function claudeStatusLabel(status: ClaudeStatus | null): string {
+/** The status word for a `claude_status`; '' for anything else (it reads
+ *  any string, so a caller holding a wider state need not narrow it). */
+export function claudeStatusLabel(status: ClaudeStatus | string | null): string {
   return status && isClaudeStatus(status) ? STATUS_LABEL[status] : '';
 }
 
@@ -65,8 +74,21 @@ export function stuckKindLabel(kind: StuckKind | null): string {
   return kind && isStuckKind(kind) ? STUCK_LABEL[kind] : '';
 }
 
+/** A stuck session's status: "Failed · press Enter". */
+export function stuckStatus(kind: StuckKind | null): string {
+  const why = stuckKindLabel(kind);
+  return why ? `Failed · ${why}` : 'Failed';
+}
+
+/** A session's one status word: stuck, then its claude_status, else Idle
+ *  (a pane with no Claude state, or a stopped one, sits idle). */
+export function sessionStatusWord(s: Pick<SessionRow, 'stuck_kind' | 'claude_status'>): string {
+  if (s.stuck_kind) return stuckStatus(s.stuck_kind);
+  return claudeStatusLabel(s.claude_status) || 'Idle';
+}
+
 /** Red, always — the stuck chip outranks whatever claude_status says. */
-export const STUCK_COLOR = '#e64a4a';
+export const STUCK_COLOR = 'var(--status-failed)';
 
 // ── context pressure ──
 
@@ -113,6 +135,23 @@ export interface AttentionOptions {
   idleSecs: number;
   /** Unix seconds "now" (injected so tests are deterministic). */
   now: number;
+  /** What the fleet knows beyond the row (step 2.4); none when absent. */
+  facts?: AttentionFacts;
+}
+
+/** A usage window at its limit. Mirrors `attention::Limit`. */
+export interface AttentionLimit {
+  window: 'five_hour' | 'weekly';
+  resets_at: number | null;
+}
+
+/** Mirrors `attention::Facts` (step 2.4): which hosts are down and which
+ *  accounts are at a limit or have no usable login. The three Blocked
+ *  buckets come from here; `attention_facts.ts` builds it from the stores. */
+export interface AttentionFacts {
+  down_hosts?: readonly string[];
+  limited_accounts?: Readonly<Record<string, AttentionLimit>>;
+  uncredentialed_accounts?: readonly string[];
 }
 
 /** Triage buckets, most urgent first. `classify()` puts a row in exactly one,
@@ -120,20 +159,23 @@ export interface AttentionOptions {
  *  "Needs you" queue, the project sort below, later the quick switcher and the
  *  digest — so those orderings cannot drift apart.
  *
- *  Two buckets are reachable but stay empty until Wave 1 A2 lands its columns:
- *   - `waiting` is driven by `claude_status === 'blocked'` alone. A2's
- *     `waiting_for` will separate a permission prompt from a question and let
- *     the age weighting apply per kind.
- *   - `done_unread` needs `last_viewed_at` and its `touch_session_viewed`
- *     writer, so nothing matches it today. */
+ *  `waiting` is driven by `claude_status === 'blocked'` (or a pending form)
+ *  alone. A2's `waiting_for` will separate a permission prompt from a
+ *  question and let the age weighting apply per kind. `done_unread` reads
+ *  `last_viewed_at` (redesign 2.3), which `session_viewed.ts` stamps while a
+ *  session is on screen. */
 export const TRIAGE_BUCKETS = [
   'waiting',
   'stuck',
+  'host_down',
+  'account_limit',
+  'no_credentials',
   'stop_failed',
   'failed',
   'context_full',
   'stale_working',
   'ci_failing',
+  'probably_waiting',
   'done_unread',
   'lifecycle',
   'idle_long',
@@ -143,21 +185,75 @@ export const TRIAGE_BUCKETS = [
 
 export type TriageBucket = (typeof TRIAGE_BUCKETS)[number];
 
-/** Buckets the "Needs you" FILTER shows. `idle_long` is in: the toggle is the
+/** Buckets the "Needs you" FILTER shows (never `probably_waiting`). `idle_long` is in: the toggle is the
  *  only surface for the operator-configured idle nudge, so leaving it out
  *  would delete that reach and reduce `attentionIdleMinutes` to a sort knob.
  *  `working` and `idle` are never in it. */
-export const NEEDS_YOU_BUCKETS: readonly TriageBucket[] = TRIAGE_BUCKETS.slice(0, 10);
+export const NEEDS_YOU_BUCKETS: readonly TriageBucket[] = TRIAGE_BUCKETS.filter(
+  // G1.6: Jev's "probably waiting" is kept apart from Needs you, in its own
+  // Inbox section, so the filter leaves it out as the badge does.
+  (b) => b !== 'working' && b !== 'idle' && b !== 'probably_waiting',
+);
 
-/** Buckets the "Needs you" COUNTER reports — deliberately one narrower than
- *  the filter, excluding `idle_long`.
+// ── the seven attention states (redesign step 0.4) ──
+
+/** The one attention model shared with the hub: the twelve buckets fold into
+ *  seven states, and only Action required, Failed and Blocked raise the
+ *  badge. The table is `attention_states.json`, which
+ *  `crates/fleet-core/src/service/attention.rs` checks against its own
+ *  `State` and `BUCKET_STATES`; `attention.test.ts` checks it here. */
+export type AttentionState =
+  | 'action_required'
+  | 'failed'
+  | 'blocked'
+  | 'proposed'
+  | 'working'
+  | 'paused'
+  | 'done'
+  | 'idle';
+
+export const ATTENTION_STATES: readonly AttentionState[] = attentionTable.states.map(
+  (s) => s.id as AttentionState,
+);
+
+const COUNTED_STATES = new Set<AttentionState>(
+  attentionTable.states.filter((s) => s.counted).map((s) => s.id as AttentionState),
+);
+
+const BUCKET_STATE = new Map<string, AttentionState>(
+  attentionTable.buckets.map(([b, st]) => [b, st as AttentionState]),
+);
+
+/** The state a triage bucket folds into. */
+export function bucketState(bucket: TriageBucket): AttentionState {
+  const st = BUCKET_STATE.get(bucket);
+  if (!st) throw new Error(`attention_states.json has no row for bucket ${bucket}`);
+  return st;
+}
+
+/** A row's attention state. */
+export function attentionState(s: SessionRow, opts: AttentionOptions): AttentionState {
+  return bucketState(classify(s, opts));
+}
+
+/** Whether a state raises the Needs you badge. */
+export function countsTowardBadge(state: AttentionState): boolean {
+  return COUNTED_STATES.has(state);
+}
+
+/** Buckets the "Needs you" COUNTER reports: the buckets whose state is
+ *  counted (step 0.4). Narrower than the filter: it leaves out `idle_long`,
+ *  and `lifecycle` (ghost, lost and pending-kill rows, which nobody can
+ *  answer) and `done_unread` (Done) since the seven-state model.
  *
  *  The divergence is intentional, not an oversight. The pill answers "which
  *  sessions need me NOW"; on a fleet of ~60 sessions most are idle, so
  *  counting them would read "Needs you (34)" and the number would stop
  *  meaning anything. The rows are still one toggle away, because the filter
  *  above does include them. Do not "reconcile" these two sets. */
-export const NEEDS_YOU_COUNTED_BUCKETS: readonly TriageBucket[] = TRIAGE_BUCKETS.slice(0, 9);
+export const NEEDS_YOU_COUNTED_BUCKETS: readonly TriageBucket[] = TRIAGE_BUCKETS.filter((b) =>
+  countsTowardBadge(bucketState(b)),
+);
 
 const NEEDS_YOU = new Set<TriageBucket>(NEEDS_YOU_BUCKETS);
 const NEEDS_YOU_COUNTED = new Set<TriageBucket>(NEEDS_YOU_COUNTED_BUCKETS);
@@ -178,12 +274,40 @@ export interface TriageRank {
 /** A2: `waiting_for` will distinguish permission, question and elicitation.
  *  Until then a blocked session is the only thing known to await the user. */
 function isWaiting(s: SessionRow): boolean {
-  return s.claude_status === 'blocked';
+  return s.claude_status === 'blocked' || s.pending_form != null;
 }
 
-/** A2: needs `last_viewed_at`, so nothing is done-unread yet. */
-function isDoneUnread(_s: SessionRow): boolean {
-  return false;
+/** J2 (step 5.11): what Jev read a silent turn's end as, on a row still idle
+ *  after it. Every hook clears `turn_outcome`, so it never outvotes one;
+ *  the same rule as the hub's `attention::needs_attention_in`. */
+function jevSays(s: SessionRow, outcome: 'asked' | 'stuck'): boolean {
+  return isIdleStatus(s.claude_status) && s.turn_outcome === outcome;
+}
+
+/** The J2 reading on a row, if any: the row says so (review r15 F17), since
+ *  the person, not Jev, decides what to do next. `stuck` puts it in Needs
+ *  you; `asked` makes it "probably waiting", kept apart (G1.6). */
+export function jevOutcome(s: SessionRow): 'asked' | 'stuck' | null {
+  if (jevSays(s, 'asked')) return 'asked';
+  if (jevSays(s, 'stuck')) return 'stuck';
+  return null;
+}
+
+/** A turn ended after the session was last viewed (redesign 2.3, migration
+ *  123) — or, for a session fleet started and nobody has opened yet, after
+ *  it started. A row reconcile found on a host has neither stamp and is
+ *  never unread. Seconds on both sides: a turn that ends in the second it
+ *  is viewed counts as seen. */
+export function isUnread(s: Pick<SessionRow, 'last_viewed_at' | 'started_at' | 'last_stop_at'>): boolean {
+  const seen = s.last_viewed_at ?? s.started_at;
+  return seen != null && s.last_stop_at != null && s.last_stop_at > seen;
+}
+
+/** Done and unread: the last turn finished (the session is idle) on a live
+ *  row nobody has looked at since. */
+function isDoneUnread(s: SessionRow): boolean {
+  if (s.status === 'ghost' || s.lost_at !== null) return false;
+  return isIdleStatus(s.claude_status) && isUnread(s);
 }
 
 function isLifecycleBroken(s: SessionRow): boolean {
@@ -206,18 +330,39 @@ export function classify(s: SessionRow, opts: AttentionOptions): TriageBucket {
   if (s.kind === 'external') return s.claude_status === 'working' ? 'working' : 'idle';
   if (s.kind === 'shell') return 'idle';
   if (isWaiting(s)) return 'waiting';
-  if (s.stuck_kind) return 'stuck';
-  if (s.claude_status === 'failed') return s.kind === 'bg' ? 'failed' : 'stop_failed';
+  if (s.stuck_kind || jevSays(s, 'stuck')) return 'stuck';
   // A dead row keeps its last context reading; a lost one reads `lifecycle`.
   const live = s.status !== 'ghost' && s.lost_at === null;
+  // Step 2.4: Blocked on something outside the session. Live rows only: a
+  // host's mass loss is one Restore row, not a badge per session.
+  const blocked = live ? blockedBy(s, opts) : null;
+  if (blocked) return blocked;
+  if (s.claude_status === 'failed') return s.kind === 'bg' ? 'failed' : 'stop_failed';
   if (live && contextLevel(s.context_pct) === 'crit') return 'context_full';
   if (live && (s.stale_working_at ?? null) !== null) return 'stale_working';
   if (s.ci_status === 'failing' && isIdleStatus(s.claude_status)) return 'ci_failing';
+  // G1.6: Jev's reading of a silent turn's end as a question is a proposal,
+  // after every reason a person must act on, and never on a dead row.
+  if (live && jevSays(s, 'asked')) return 'probably_waiting';
   if (isDoneUnread(s)) return 'done_unread';
   if (isLifecycleBroken(s)) return 'lifecycle';
   if (isIdleLong(s, opts)) return 'idle_long';
   if (s.claude_status === 'working') return 'working';
   return 'idle';
+}
+
+/** The Blocked bucket the fleet's facts put a live row in, if any: its host
+ *  is down; or, while it is not working, its account is at a limit that has
+ *  not reset yet ("Paused · limit"), or has no usable login. */
+function blockedBy(s: SessionRow, opts: AttentionOptions): TriageBucket | null {
+  const f = opts.facts;
+  if (!f) return null;
+  if (f.down_hosts?.includes(s.host_alias)) return 'host_down';
+  if (s.claude_status === 'working' || !s.account_uuid) return null;
+  const limit = f.limited_accounts?.[s.account_uuid];
+  if (limit && (limit.resets_at == null || limit.resets_at > opts.now)) return 'account_limit';
+  if (f.uncredentialed_accounts?.includes(s.account_uuid)) return 'no_credentials';
+  return null;
 }
 
 function isIdleStatus(status: ClaudeStatus | null): boolean {
@@ -239,7 +384,12 @@ function bucketSince(s: SessionRow, bucket: TriageBucket): number {
     case 'stale_working':
       return s.stale_working_at ?? s.last_activity_at;
     case 'ci_failing':
+    case 'probably_waiting':
+    case 'account_limit':
+    case 'no_credentials':
       return s.idle_since ?? s.last_activity_at;
+    case 'host_down':
+      return s.last_activity_at;
     case 'lifecycle':
       return s.lost_at ?? s.safe_kill_requested_at ?? s.last_activity_at;
     case 'done_unread':
@@ -386,11 +536,11 @@ export function ciStatusLabel(status: CiStatus | null): string {
 export function ciStatusColor(status: CiStatus | null): string {
   switch (status) {
     case 'passing':
-      return '#50c86e';
+      return 'var(--status-done)';
     case 'failing':
-      return '#e64a4a';
+      return 'var(--status-failed)';
     case 'pending':
-      return '#d29b4a';
+      return 'var(--status-waiting)';
     default:
       return 'transparent';
   }

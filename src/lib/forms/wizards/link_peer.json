@@ -1,0 +1,22 @@
+{
+  "spec": "fleet.form/1",
+  "title": "Link two hubs",
+  "intro": "Link this fleet's hub to another fleet's hub, so sessions on both sides can message each other. Each hub keeps its own hosts, devices and data.",
+  "submit": "Link",
+  "steps": [
+    {
+      "title": "Other hub",
+      "intro": "The hub to link to. This hub dials it, so it needs an https address this hub can reach.",
+      "fields": [
+        { "name": "url", "type": "text", "label": "Hub address", "required": true, "max_len": 512, "placeholder": "https://hub.example.com" }
+      ]
+    },
+    {
+      "title": "Link code",
+      "intro": "Its operator runs fleet-hub pair --mode peer on that hub and sends you the code it prints. The code works once and expires in minutes; linking needs nobody on that side after it.",
+      "fields": [
+        { "name": "code", "type": "secret", "label": "Link code", "required": true }
+      ]
+    }
+  ]
+}

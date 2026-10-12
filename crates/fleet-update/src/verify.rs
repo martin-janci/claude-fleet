@@ -36,6 +36,10 @@ pub enum VerifyError {
         seen: u64,
         got: u64,
     },
+    /// The channel document behind a target has expired. A stale channel
+    /// never names a target (`decide` holds instead), so one that arrives
+    /// with a target is a frozen channel being replayed.
+    Stale,
     /// The decision names a target but carries no evidence for it.
     MissingEvidence,
     /// The manifest's bytes are not the ones the channel lists for the target.
@@ -71,6 +75,9 @@ impl fmt::Display for VerifyError {
                     f,
                     "channel sequence {got} is older than {seen}, already seen (replay)"
                 )
+            }
+            VerifyError::Stale => {
+                write!(f, "the channel document behind the target has expired")
             }
             VerifyError::MissingEvidence => {
                 write!(f, "the decision carries no signed evidence for its target")
@@ -183,6 +190,27 @@ pub fn verify_manifest(
     serde_json::from_slice(bytes).map_err(|e| VerifyError::Decode(e.to_string()))
 }
 
+/// Verify an amendment (design §4) against the channel's listing of it: the
+/// exact bytes it names, a trusted signature, and the release it is listed
+/// under. `None` for anything else.
+pub fn verify_amendment(
+    bytes: &[u8],
+    minisig: &str,
+    keys: &TrustedKeys,
+    listed: &crate::channel_doc::AmendmentRef,
+    version: &crate::Version,
+) -> Option<crate::manifest::Amendment> {
+    if !sha256_hex(bytes).eq_ignore_ascii_case(&listed.manifest_sha256) {
+        return None;
+    }
+    keys.verify(bytes, minisig).ok()?;
+    if peek_schema(bytes).ok()? != MANIFEST_SCHEMA {
+        return None;
+    }
+    let a: crate::manifest::Amendment = serde_json::from_slice(bytes).ok()?;
+    (&a.version == version && a.components.contains_key(&listed.component)).then_some(a)
+}
+
 /// Verify a channel document for `track`. `seen` is the highest sequence the
 /// caller has stored for the track (0 for none); the caller stores
 /// `doc.sequence` after this succeeds.
@@ -276,6 +304,9 @@ pub fn verify_target(
         seen,
         now,
     )?;
+    if !ch.fresh {
+        return Err(VerifyError::Stale);
+    }
     let m = verify_manifest(manifest.as_bytes(), manifest_sig, keys)?;
     let listed = ch
         .doc

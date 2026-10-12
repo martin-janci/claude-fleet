@@ -392,8 +392,71 @@ fn check_section(
     if section.items.is_empty() {
         cx.bad(at, "a section needs at least one item");
     }
+    if section.tiles {
+        check_tiles(cx, at, section);
+    }
+    if section.matrix {
+        check_matrix(cx, at, section);
+    }
     for (i, item) in section.items.iter().enumerate() {
         check_item(cx, &format!("{at} › item {}", i + 1), page, item, placed);
+    }
+}
+
+/// A `tiles` section shows a record's numbers: only on a `master_detail`
+/// page, and only its `count` and `money` fields.
+fn check_tiles(cx: &mut Ctx, at: &str, section: &Section) {
+    use super::resources::FieldKind;
+    let Some(res) = cx.resource else {
+        cx.bad(at, "only a master_detail page's section shows tiles");
+        return;
+    };
+    for item in &section.items {
+        let tile = match item {
+            Item::Field { key, .. } => res
+                .field(key)
+                .is_none_or(|f| matches!(f.kind, FieldKind::Count | FieldKind::Money)),
+            _ => false,
+        };
+        if !tile {
+            cx.bad(at, "a tiles section holds count and money fields only");
+        }
+    }
+}
+
+/// A `matrix` section is two or more settings fields, each a choice set over
+/// the very same options, and nothing else: the grid's rows are those
+/// options.
+fn check_matrix(cx: &mut Ctx, at: &str, section: &Section) {
+    if cx.resource.is_some() {
+        cx.bad(at, "a matrix holds settings, not a record's fields");
+        return;
+    }
+    let mut options: Option<&'static [&'static str]> = None;
+    for item in &section.items {
+        let set = match item {
+            Item::Field {
+                key, widget: None, ..
+            } => match settings::spec(key).map(|s| s.kind) {
+                Some(settings::Kind::ChoiceSet(o)) => Some(o),
+                _ => None,
+            },
+            _ => None,
+        };
+        match (set, options) {
+            (None, _) => {
+                cx.bad(at, "a matrix holds choice-set settings fields only");
+                return;
+            }
+            (Some(o), Some(first)) if o != first => {
+                cx.bad(at, "a matrix's fields choose from the same options");
+                return;
+            }
+            (Some(o), _) => options = Some(o),
+        }
+    }
+    if section.items.len() < 2 {
+        cx.bad(at, "a matrix needs at least two columns");
     }
 }
 
@@ -659,13 +722,22 @@ pub fn validate(pages: &[Page]) -> Vec<Problem> {
         }
         for (i, item) in page.list_items.iter().enumerate() {
             let at = format!("list item {}", i + 1);
-            if !matches!(item, Item::Notice { .. } | Item::Custom { .. }) {
-                cx.bad(&at, "a list item is a notice or a custom item");
+            if !matches!(
+                item,
+                Item::Notice { .. } | Item::Custom { .. } | Item::Action { .. }
+            ) {
+                cx.bad(&at, "a list item is a notice, a custom item or an action");
             }
-            if let Item::Notice { text, .. } = item {
-                cx.text(&at, "text", text, MAX_TEXT);
+            match item {
+                Item::Notice { text, .. } => cx.text(&at, "text", text, MAX_TEXT),
+                Item::Action { action } if super::actions::action(action).is_none() => {
+                    cx.bad(&at, format!("`{action}` is not a page action"));
+                }
+                _ => {}
             }
         }
+        check_graph(&mut cx, page);
+        check_table(&mut cx, page);
         if let Some(res) = resource {
             for f in res.fields {
                 if !placed.contains_key(&format!("{}#{}", page.id, f.id)) {
@@ -762,6 +834,108 @@ pub fn validate(pages: &[Page]) -> Vec<Problem> {
         });
     }
     problems
+}
+
+/// Most columns a `table` (`Page::table`) shows.
+pub const MAX_TABLE_COLUMNS: usize = 6;
+
+/// A `table` is a `master_detail` page's: its columns are the resource's
+/// plain fields (text, choice, yes/no, count or time), its filters and its
+/// grouping name columns of it.
+fn check_table(cx: &mut Ctx, page: &Page) {
+    use super::resources::FieldKind;
+    let Some(t) = &page.table else { return };
+    let Some(res) = cx.resource else {
+        cx.bad("table", "a table belongs to a master_detail page");
+        return;
+    };
+    cx.text("table", "title", &t.title, MAX_TITLE);
+    if t.columns.is_empty() || t.columns.len() > MAX_TABLE_COLUMNS {
+        cx.bad("table", format!("1 to {MAX_TABLE_COLUMNS} columns"));
+    }
+    for c in t.columns.iter().chain(t.subtitle.iter()) {
+        match res.field(c).map(|f| f.kind) {
+            Some(
+                FieldKind::Text { .. }
+                | FieldKind::Choice { .. }
+                | FieldKind::Pick { .. }
+                | FieldKind::Bool { .. }
+                | FieldKind::Count
+                | FieldKind::Time,
+            ) => {}
+            Some(_) => cx.bad("table", format!("`{c}` is not a plain field of {}", res.id)),
+            None => cx.bad("table", format!("{} has no field `{c}`", res.id)),
+        }
+    }
+    if t.subtitle.is_some() && !t.columns.iter().any(|c| *c == res.title_field) {
+        cx.bad(
+            "table",
+            "a subtitle goes under the title's column, which is not shown",
+        );
+    }
+    for f in t.filters.iter().chain(t.group_by.iter()) {
+        if !t.columns.contains(f) {
+            cx.bad(
+                "table",
+                format!("`{f}` filters or groups but is not a column"),
+            );
+        }
+    }
+}
+
+/// Most facts a graph node shows under its name.
+pub const MAX_GRAPH_FACTS: usize = 3;
+
+/// A `graph` (`Page::graph`) is a `master_detail` page's: its `state` is a
+/// `choice` field of the resource, `up` names at least one of its options
+/// (and not all of them: a graph that can never show a link down says
+/// nothing), and its facts are the resource's plain fields.
+fn check_graph(cx: &mut Ctx, page: &Page) {
+    use super::resources::FieldKind;
+    let Some(g) = &page.graph else { return };
+    let Some(res) = cx.resource else {
+        cx.bad("graph", "a graph belongs to a master_detail page");
+        return;
+    };
+    cx.text("graph", "center", &g.center, MAX_TITLE);
+    match res.field(&g.state).map(|f| f.kind) {
+        Some(FieldKind::Choice { options }) => {
+            for v in &g.up {
+                if !options.iter().any(|(o, _)| o == v) {
+                    cx.bad(
+                        "graph",
+                        format!("`{v}` is not one of {}'s `{}` values", res.id, g.state),
+                    );
+                }
+            }
+            if g.up.is_empty() || g.up.len() >= options.len() {
+                cx.bad(
+                    "graph",
+                    "`up` names some of the state's values, not none and not all",
+                );
+            }
+        }
+        _ => cx.bad(
+            "graph",
+            format!("`{}` is not a choice field of {}", g.state, res.id),
+        ),
+    }
+    if g.facts.len() > MAX_GRAPH_FACTS {
+        cx.bad(
+            "graph",
+            format!("at most {MAX_GRAPH_FACTS} facts under a node"),
+        );
+    }
+    for f in &g.facts {
+        match res.field(f).map(|f| f.kind) {
+            Some(FieldKind::Text { .. } | FieldKind::Count | FieldKind::Time) => {}
+            Some(_) => cx.bad(
+                "graph",
+                format!("`{f}` is not a plain field: a fact is text, a count or a time"),
+            ),
+            None => cx.bad("graph", format!("`{f}` is not a field of {}", res.id)),
+        }
+    }
 }
 
 /// Call `f` with every item of `page` and where it is.

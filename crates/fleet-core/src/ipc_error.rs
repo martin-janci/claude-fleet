@@ -149,6 +149,27 @@ pub mod codes {
     /// on a fleet-admin tool, a denied confirmation, an upload path that
     /// was never dropped onto the window).
     pub const E_FORBIDDEN: &str = "E_FORBIDDEN";
+    /// A per-host token addressed a session on its OWN host that it cannot
+    /// prove it is standing in (multi-user M1, spec §4.4): the row is not
+    /// `unclaimed` and the request's `X-Fleet-Pane` does not name it.
+    ///
+    /// Its own code rather than `E_NOTFOUND`, because it is the everyday
+    /// mistake rather than an attack: one token authenticates every Claude
+    /// on a host, so an agent that opened a second pane in the same tmux
+    /// window — or whose row was reconciled onto a new pane id — reaches
+    /// here with a perfectly real session id. A bare "not found" would send
+    /// it hunting for a session it can see in `tmux list-sessions`. It is
+    /// not an existence oracle either: a token with shell access to the
+    /// host can already enumerate its tmux sessions, and this says nothing
+    /// about WHOSE the row is or what is in it.
+    pub const E_PANE_UNPROVEN: &str = "E_PANE_UNPROVEN";
+    /// `ask { form }` from a caller that is not a proven session: a form
+    /// opens in the asking session's own chat, so the call must come from a
+    /// per-host token whose `X-Fleet-Pane` matches a session row.
+    pub const E_NOT_A_SESSION: &str = "E_NOT_A_SESSION";
+    /// A chat form's secret could not be written to its session's host;
+    /// `details.field` names it. The form stays pending.
+    pub const E_HOST_WRITE: &str = "E_HOST_WRITE";
     /// The caller exceeded a per-caller rate limit (`broadcast_prompt`);
     /// `details.retry_after_secs` says when to retry.
     pub const E_RATE_LIMITED: &str = "E_RATE_LIMITED";
@@ -196,6 +217,10 @@ pub mod codes {
     /// The call needs a desktop confirmation first (`mcp.confirm_destructive`);
     /// retry with the `confirm_nonce` from `details` once approved.
     pub const E_CONFIRM_REQUIRED: &str = "E_CONFIRM_REQUIRED";
+    /// A start on a login whose account is at or past `accounts.pause_at`
+    /// (redesign step 4.4) that nobody confirmed: retry with
+    /// `over_limit_ok: true`, or start under the login `details` names.
+    pub const E_ACCOUNT_LIMIT: &str = "E_ACCOUNT_LIMIT";
     /// Asset catalog: no catalog repo is configured, or it is configured but
     /// not loaded yet (`catalog_configure` / `catalog_load` first).
     pub const E_CATALOG_NOT_CONFIGURED: &str = "E_CATALOG_NOT_CONFIGURED";
@@ -246,7 +271,7 @@ pub mod codes {
     /// plain `http://` without the opt-in, a URL that does not parse. The app
     /// then owns nothing and refuses every fleet command with this code and
     /// the reason, rather than quietly managing the hub's fleet itself. The
-    /// fix is in Settings → Hub: pair again, or Disconnect.
+    /// fix is in Settings → Hub & sync: pair again, or Disconnect.
     pub const E_HUB_UNAVAILABLE: &str = "E_HUB_UNAVAILABLE";
     /// Remote (hub-client) mode: the hub's `/events` hello frame named a
     /// wire-contract revision outside the range this build reads
@@ -296,6 +321,18 @@ pub mod codes {
     /// The message always names what to do instead: run it on the hub, or in
     /// a standalone app. Never returned in standalone mode.
     pub const E_LOCAL_ONLY: &str = "E_LOCAL_ONLY";
+    /// Device mirror: `scrcpy` or `adb` is not installed on this machine.
+    /// The message names the tool and how to install it.
+    pub const E_TOOL_MISSING: &str = "E_TOOL_MISSING";
+    /// Device mirror: this machine's adb speaks another protocol version
+    /// than the device host's adb server. Refused before any adb client
+    /// runs, because a mismatched client `host:kill`s the server.
+    pub const E_ADB_VERSION_MISMATCH: &str = "E_ADB_VERSION_MISMATCH";
+    /// Device mirror: no way from this machine to the device's host.
+    pub const E_NO_ROUTE: &str = "E_NO_ROUTE";
+    /// Device mirror: `scrcpy` exited with an error right after starting;
+    /// the message carries the tail of its output.
+    pub const E_MIRROR_FAILED: &str = "E_MIRROR_FAILED";
 
     /// Every code a *transport* raises when a command did not reach, or did
     /// not come back from, the host — over SSH or over an agent.

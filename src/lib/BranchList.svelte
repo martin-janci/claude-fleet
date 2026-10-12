@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Branch } from './history';
+  import Skeleton from './states/Skeleton.svelte';
 
   let {
     branches,
@@ -8,6 +9,8 @@
     onCheckout,
     onDelete,
     onNew,
+    onDeleteMerged = () => {},
+    onDeleteMergedRemotes = () => {},
     writeBlocked = null,
   }: {
     branches: Branch[];
@@ -16,11 +19,22 @@
     onCheckout: (name: string) => void;
     onDelete: (name: string) => void;
     onNew: () => void;
+    /** The local branches flagged merged, for one confirm-and-delete. */
+    onDeleteMerged?: (names: string[]) => void;
+    /** The remote branches flagged merged, deleted on their remote. */
+    onDeleteMergedRemotes?: (names: string[]) => void;
     writeBlocked?: string | null;
   } = $props();
 
-  const locals = $derived(branches.filter((b) => !b.isRemote));
-  const remotes = $derived(branches.filter((b) => b.isRemote));
+  // "Merged" narrows both groups to branches the base already contains; the
+  // current branch and the base are never flagged, so they drop out too.
+  let mergedOnly = $state(false);
+  const shown = $derived(mergedOnly ? branches.filter((b) => b.merged) : branches);
+  const locals = $derived(shown.filter((b) => !b.isRemote));
+  const remotes = $derived(shown.filter((b) => b.isRemote));
+  const mergedLocals = $derived(branches.filter((b) => !b.isRemote && b.merged).map((b) => b.name));
+  const mergedRemotes = $derived(branches.filter((b) => b.isRemote && b.merged).map((b) => b.name));
+  const mergedCount = $derived(branches.filter((b) => b.merged).length);
 </script>
 
 <div class="branches" data-testid="branch-list">
@@ -28,16 +42,36 @@
     <button class="new" disabled={writeBlocked !== null} title={writeBlocked ?? ''} onclick={onNew}
       >+ New branch</button
     >
+    <button
+      class="chip"
+      class:on={mergedOnly}
+      aria-pressed={mergedOnly}
+      data-testid="filter-merged"
+      title="Show only branches the base branch already contains"
+      onclick={() => (mergedOnly = !mergedOnly)}>Merged {mergedCount}</button
+    >
+    {#if mergedLocals.length}
+      <button
+        class="new del-merged"
+        data-testid="delete-merged"
+        disabled={writeBlocked !== null}
+        title={writeBlocked ?? 'Delete the local branches the base branch already contains'}
+        onclick={() => onDeleteMerged(mergedLocals)}>Delete merged ({mergedLocals.length})</button
+      >
+    {/if}
   </div>
   {#if loading}
-    <p class="hint">Loading…</p>
+    <Skeleton />
   {:else if error}
     <p class="hint err">{error}</p>
   {:else}
     <div class="group-label">Local</div>
     {#each locals as b (b.name)}
-      <div class="brow" class:cur={b.isCurrent}>
+      <div class="brow" class:cur={b.isCurrent} data-testid="branch-row">
         <span class="bname">{b.isCurrent ? '● ' : ''}{b.name}</span>
+        {#if b.merged}
+          <span class="merged" data-testid="branch-merged">merged</span>
+        {/if}
         {#if b.ahead || b.behind}
           <span class="track">{b.ahead ? `↑${b.ahead}` : ''}{b.behind ? `↓${b.behind}` : ''}</span>
         {/if}
@@ -48,12 +82,28 @@
           {/if}
         </span>
       </div>
+    {:else}
+      {#if mergedOnly}<p class="hint">No merged local branches.</p>{/if}
     {/each}
     {#if remotes.length}
-      <div class="group-label">Remote</div>
+      <div class="group-label">
+        Remote {remotes.length}{#if mergedRemotes.length}<span class="gnote"
+            > · {mergedRemotes.length} merged and safe to delete</span
+          >
+          <button
+            class="new del-merged del-remote"
+            data-testid="delete-merged-remote"
+            disabled={writeBlocked !== null}
+            title={writeBlocked ?? 'Delete the remote branches the base branch already contains, on their remote'}
+            onclick={() => onDeleteMergedRemotes(mergedRemotes)}>Delete</button
+          >{/if}
+      </div>
       {#each remotes as b (b.name)}
-        <div class="brow">
+        <div class="brow" data-testid="branch-row">
           <span class="bname">{b.name}</span>
+          {#if b.merged}
+            <span class="merged" data-testid="branch-merged">merged</span>
+          {/if}
           <span class="bactions">
             <button disabled={writeBlocked !== null} title={writeBlocked ?? ''} onclick={() => onCheckout(b.name)}>Checkout</button>
           </span>
@@ -64,31 +114,45 @@
 </div>
 
 <style>
-  .branches { font-size: 0.8rem; overflow: auto; height: 100%; }
-  .bbar { padding: 0.4rem 0.5rem; }
-  .new {
-    background: transparent; border: 1px solid var(--border); border-radius: 4px;
-    color: var(--fg); cursor: pointer; font-size: 0.74rem; padding: 0.2rem 0.5rem;
+  .branches { font-size: var(--text-2xs); overflow: auto; height: 100%; }
+  .bbar { padding: 0.4rem 0.5rem; display: flex; gap: 0.4rem; align-items: center; }
+  .new, .chip {
+    background: transparent; border: 1px solid var(--border); border-radius: var(--radius-sm);
+    color: var(--fg); cursor: pointer; font-size: var(--text-2xs); padding: 0.2rem 0.5rem;
   }
+  .new:disabled { opacity: 0.5; cursor: not-allowed; }
+  .chip { color: var(--fg-muted); border-radius: var(--radius-pill); }
+  .chip.on {
+    color: var(--fg); border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+  }
+  .del-merged { margin-left: auto; }
+  .del-merged:not(:disabled):hover { color: var(--danger); border-color: var(--danger); }
   .group-label {
-    color: var(--fg-muted); font-size: 0.68rem; text-transform: uppercase;
+    color: var(--fg-muted); font-size: var(--text-2xs); text-transform: uppercase;
     padding: 0.4rem 0.6rem 0.2rem;
   }
+  .gnote { text-transform: none; }
+  .del-remote { text-transform: none; padding: 0 0.4rem; margin-left: 0.4rem; }
   .brow {
     display: flex; align-items: center; gap: 0.5rem; padding: 0.25rem 0.6rem;
   }
   .brow:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
   .brow:hover .bactions { visibility: visible; }
-  .bname { flex: 1 1 auto; font-family: var(--mono, monospace); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bname { flex: 1 1 auto; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cur .bname { color: var(--accent); }
-  .track { flex: 0 0 auto; color: var(--fg-muted); font-size: 0.72rem; }
+  .merged {
+    flex: 0 0 auto; color: var(--fg-muted); font-size: var(--text-2xs);
+    border: 1px solid var(--border); border-radius: var(--radius-pill); padding: 0 0.4rem;
+  }
+  .track { flex: 0 0 auto; color: var(--fg-muted); font-size: var(--text-2xs); }
   .bactions { flex: 0 0 auto; visibility: hidden; display: flex; gap: 0.3rem; }
   .bactions button {
-    background: transparent; border: 1px solid var(--border); border-radius: 3px;
-    color: var(--fg-muted); cursor: pointer; font-size: 0.7rem; padding: 0 0.4rem;
+    background: transparent; border: 1px solid var(--border); border-radius: var(--radius-xs);
+    color: var(--fg-muted); cursor: pointer; font-size: var(--text-2xs); padding: 0 0.4rem;
   }
   .bactions button:hover { color: var(--fg); border-color: var(--accent); }
-  .bactions button.del:hover { color: #f85149; border-color: #f85149; }
+  .bactions button.del:hover { color: var(--status-failed); border-color: var(--status-failed); }
   .hint { color: var(--fg-muted); padding: 0.5rem 0.7rem; }
-  .hint.err { color: #e64a4a; }
+  .hint.err { color: var(--danger); }
 </style>

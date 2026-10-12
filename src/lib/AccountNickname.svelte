@@ -19,8 +19,8 @@
     onedit: () => void;
     ondone: () => void;
     testid: string;
-    /** `hubBlock('set_account_nickname', …)` from the owner — the nickname
-     *  lives in the hub's database, and there is no tool to set it from here. */
+    /** `hubActionBlocked('set_account_nickname', …)` from the owner: a
+     *  paired desktop sets it on the hub, while the hub can be reached. */
     blocked?: string | null;
   } = $props();
 
@@ -123,7 +123,7 @@
     max-width: 100%;
     padding: 0 0.25rem;
     border: 1px solid var(--accent);
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     background: var(--bg-pane);
     color: var(--fg);
   }

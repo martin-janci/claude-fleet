@@ -38,7 +38,7 @@
 //!   `handover` is for.
 
 use crate::ipc_error::{codes, lock, IpcError};
-use crate::service::orgs::{self, OrgScope};
+use crate::service::orgs::{self};
 use crate::service::settings;
 use crate::ssh::SshExec;
 use crate::store::Store;
@@ -102,6 +102,7 @@ struct SummaryPlan {
     claude_session_id: String,
     stored_path: Option<String>,
     model: String,
+    org_id: Option<i64>,
 }
 
 /// PURE: the one command the summary runs on the host. Every value is
@@ -114,18 +115,18 @@ pub fn summary_script(
     model: &str,
 ) -> Result<String, String> {
     use crate::service::claude_print;
-    use crate::shell::quote;
     if !settings::SUMMARY_MODELS.contains(&model) {
         return Err(format!("refusing summary model {model:?}"));
     }
     let candidates = super::resume::transcript_candidates(stored_path, claude_session_id)?;
-    let claude = format!(
-        "claude -p --resume {} --fork-session --model {} {} {}",
-        quote(claude_session_id),
-        quote(model),
-        claude_print::isolation_flags(),
-        quote(SUMMARY_PROMPT),
-    );
+    let agent = crate::service::headless::default_agent();
+    let claude = agent.command(&crate::service::headless::HeadlessJob {
+        model,
+        prompt: Some(SUMMARY_PROMPT),
+        stdin_file: None,
+        fork_of: Some(claude_session_id),
+        ..Default::default()
+    });
     let t = SUMMARY_TAG;
     Ok(format!(
         "set -o pipefail; f=''; \
@@ -136,7 +137,7 @@ pub fn summary_script(
          {noclaude} \
          {run}",
         cands = candidates.join(" "),
-        noclaude = claude_print::noclaude_check(t),
+        noclaude = agent.missing_check(t),
         run = claude_print::run_capped(t, &claude, HOST_TIMEOUT_SECS, OUTPUT_CAP_BYTES, true),
     ))
 }
@@ -213,19 +214,64 @@ impl Drop for HostSlot {
     }
 }
 
-/// Everything the store says, under one short lock: the ended link, its
-/// host and last conversation, the fences.
-fn plan(s: &Store, key: &str, link_id: i64, scope: &OrgScope) -> Result<SummaryPlan, IpcError> {
+/// What an ended link says about the conversation a summary would read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PastConversation {
+    /// The key in its one spelling ([`crate::store::normalize_work_ref`]).
+    pub key: String,
+    pub host: String,
+    pub claude_session_id: String,
+    /// The org the past session was in when it ended (`snap_org_id`).
+    pub org_id: Option<i64>,
+}
+
+/// What a link this caller may not summarise answers, and the same thing a
+/// `link_id` naming no ended link answers: `E_NOTFOUND` on the LINK.
+///
+/// A function rather than a closure because the owner gate at the MCP layer
+/// (multi-user M1, T7) refuses with it too, and the two sentences must be
+/// one sentence — a link whose conversation belongs to another person has to
+/// read exactly like a link that does not exist.
+pub fn no_such_link(key: &str, link_id: i64) -> IpcError {
+    IpcError::new(
+        codes::E_NOTFOUND,
+        format!("{key} has no ended work link {link_id}"),
+    )
+}
+
+/// PURE of the network: the ended link's host and last conversation, under
+/// this scope's org and host fences.
+///
+/// The half of [`plan`] that runs before anything is spent, exposed because
+/// the owner gate needs the conversation id BEFORE the model call
+/// (multi-user M1, T7): `summarize` is addressed by a link, so choke point
+/// 2's session gate never sees it, and the person it must be checked against
+/// is the one T3's `conversation_owners` recorded. [`plan`] calls this, so
+/// there is exactly one place a link is resolved.
+pub fn planned_conversation(
+    s: &Store,
+    key: &str,
+    link_id: i64,
+    reader: &crate::service::view_scope::ViewScope,
+) -> Result<PastConversation, IpcError> {
+    let scope = &reader.org;
     orgs::require_key(s, scope, key)?;
     let key = crate::store::normalize_work_ref(key)?;
     let mut ended = s.ended_work_links_for_key(&key)?;
-    orgs::scope_links(s, scope, &mut ended)?;
-    let not_found = || {
-        IpcError::new(
-            codes::E_NOTFOUND,
-            format!("{key} has no ended work link {link_id}"),
-        )
-    };
+    // `scope_links_for`, the ONE ended-link predicate, not the org-only
+    // `scope_links` (multi-user M1, T9c). The DATA was always person-gated
+    // at the choke point above — `require_conversation_person` runs on the
+    // id this function returns — but the REFUSALS below are not data and
+    // they are a wire answer all the same: for another person's ended link
+    // this function used to reach "that past session recorded no host"
+    // (`E_INVALID`), "that session's transcripts were purged with its
+    // project" or "that past session recorded no conversation"
+    // (`E_NO_TRANSCRIPT`), where a link id naming nothing answers
+    // `no_such_link`'s `E_NOTFOUND`. That is a cross-person
+    // existence-and-resumability oracle, one call per id, and it breaks the
+    // doctrine stated on `no_such_link`: the two must be one sentence.
+    orgs::scope_links_for(s, reader, &mut ended)?;
+    let not_found = || no_such_link(&key, link_id);
     let link = ended
         .into_iter()
         .find(|l| l.id == link_id)
@@ -258,6 +304,28 @@ fn plan(s: &Store, key: &str, link_id: i64, scope: &OrgScope) -> Result<SummaryP
         )
     })?;
     crate::validate::claude_session_id(&claude_session_id)?;
+    Ok(PastConversation {
+        key,
+        host,
+        claude_session_id,
+        org_id: link.org_id,
+    })
+}
+
+/// Everything the store says, under one short lock: the ended link, its
+/// host and last conversation, the fences.
+fn plan(
+    s: &Store,
+    key: &str,
+    link_id: i64,
+    reader: &crate::service::view_scope::ViewScope,
+) -> Result<SummaryPlan, IpcError> {
+    let PastConversation {
+        key,
+        host,
+        claude_session_id,
+        org_id,
+    } = planned_conversation(s, key, link_id, reader)?;
     if s.session_with_claude_id(&host, &claude_session_id)?
         .is_some()
     {
@@ -273,8 +341,35 @@ fn plan(s: &Store, key: &str, link_id: i64, scope: &OrgScope) -> Result<SummaryP
         host,
         claude_session_id,
         stored_path,
-        model: settings::get_string(s, settings::WORK_SUMMARY_MODEL),
+        // Org administration phase C: the org the work was done for may
+        // pick its own model (its account pays).
+        model: settings::get_string_for(s, settings::WORK_SUMMARY_MODEL, org_id),
+        org_id,
     })
+}
+
+/// Book a summary run in `aux_usage`. A failed write is logged, never the
+/// summary's error.
+fn book(
+    store: &Mutex<Store>,
+    p: &SummaryPlan,
+    usage: Option<&crate::service::claude_print::Envelope>,
+) {
+    let row = crate::store::NewAuxUsage {
+        origin: crate::store::AUX_ORIGIN_SUMMARY,
+        host_alias: p.host.clone(),
+        model: p.model.clone(),
+        mission_id: None,
+        org_id: p.org_id,
+        claude_session_id: Some(p.claude_session_id.clone()),
+        input_tokens: usage.and_then(|u| u.input_tokens),
+        output_tokens: usage.and_then(|u| u.output_tokens),
+        cost_micros: usage.and_then(|u| u.cost_microusd).unwrap_or(0),
+        at: crate::store::now_unix(),
+    };
+    if let Err(e) = lock(store).and_then(|s| s.insert_aux_usage(&row)) {
+        tracing::warn!(error = %e.message, "[summary] cost not booked");
+    }
 }
 
 /// Summarise past work `link_id` of `key` (`work_link { action: summarize }`).
@@ -285,11 +380,11 @@ pub async fn summarize(
     exec: &dyn SshExec,
     key: &str,
     link_id: i64,
-    scope: &OrgScope,
+    reader: &crate::service::view_scope::ViewScope,
 ) -> Result<SummaryOutcome, IpcError> {
     let p = {
         let s = lock(store)?;
-        plan(&s, key, link_id, scope)?
+        plan(&s, key, link_id, reader)?
     };
     let script = summary_script(p.stored_path.as_deref(), &p.claude_session_id, &p.model)
         .map_err(|e| IpcError::new(codes::E_INVALID, e))?;
@@ -330,11 +425,54 @@ pub async fn summarize(
                 format!("the summary took longer than {HOST_TIMEOUT_SECS}s"),
             ))
         }
+        ScriptAnswer::Ran(_) | ScriptAnswer::Nothing
+            if crate::service::claude_print::run_signed_out(None, "", &out.stderr) =>
+        {
+            return Err(crate::service::claude_print::signed_out_error(
+                &p.host, None,
+            ))
+        }
         ScriptAnswer::Ran(_) | ScriptAnswer::Nothing => {
             return Err(IpcError::new(
                 codes::E_CLAUDE_CLI,
                 format!("the summary run failed: {}", last_error_line(&out.stderr)),
             ))
+        }
+    };
+    // Redesign 8.2: the run is booked with its cost, whatever it said.
+    let text = match crate::service::claude_print::parse_envelope(&text) {
+        Some(env) => {
+            book(store, &p, Some(&env));
+            if crate::service::claude_print::run_signed_out(Some(&env), &env.result, &out.stderr) {
+                return Err(crate::service::claude_print::signed_out_error(
+                    &p.host, None,
+                ));
+            }
+            if env.is_error || env.result.trim().is_empty() {
+                return Err(IpcError::new(
+                    codes::E_CLAUDE_CLI,
+                    "the summary run failed: claude answered with an error",
+                ));
+            }
+            env.result
+        }
+        // An envelope the output cap cut: its text is JSON, not a summary.
+        None if text.trim_start().starts_with("{\"type\"") => {
+            book(store, &p, None);
+            return Err(IpcError::new(
+                codes::E_CLAUDE_CLI,
+                "the summary run failed: its answer was longer than the output cap",
+            ));
+        }
+        // No envelope (an older `claude`): the text itself.
+        None => {
+            book(store, &p, None);
+            if crate::service::claude_print::run_signed_out(None, &text, &out.stderr) {
+                return Err(crate::service::claude_print::signed_out_error(
+                    &p.host, None,
+                ));
+            }
+            text
         }
     };
     let (body, truncated) = clean_summary(&text);
@@ -368,7 +506,7 @@ pub async fn summarize(
 
 /// The last non-empty stderr line, redacted and short — enough to say why
 /// without echoing a transcript.
-fn last_error_line(stderr: &[u8]) -> String {
+pub(crate) fn last_error_line(stderr: &[u8]) -> String {
     let text = String::from_utf8_lossy(stderr);
     let line = text
         .lines()

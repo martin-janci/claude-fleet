@@ -81,10 +81,12 @@ describe('the Hub section, standalone', () => {
     expect(section.textContent).toContain('Hub');
     expect(screen.getByTestId('hub-empty')).toBeInTheDocument();
     expect(screen.queryByTestId('hub-disconnect')).toBeNull();
-    // The two fields a pairing needs, and nothing that claims a state it is
-    // not in.
-    expect(screen.getByTestId('hub-url')).toBeInTheDocument();
-    expect(screen.getByTestId('hub-code')).toBeInTheDocument();
+    // The way to pair, and nothing that claims a state it is not in.
+    expect(screen.getByTestId('hub-link').textContent).toContain('Link to a hub');
+    // The link is a wizard (step 10.12): the two fields a pairing needs.
+    await fireEvent.click(screen.getByTestId('hub-link'));
+    expect(await screen.findByTestId('form-field-url')).toBeInTheDocument();
+    expect(screen.getByTestId('form-field-code')).toBeInTheDocument();
   });
 
   it('tells the operator where the code comes from', async () => {
@@ -95,7 +97,8 @@ describe('the Hub section, standalone', () => {
 
   it('will not pair on an empty form', async () => {
     render(SettingsDialog, { props: { onClose: () => {} } });
-    const pair = (await screen.findByTestId('hub-pair')) as HTMLButtonElement;
+    await fireEvent.click(await screen.findByTestId('hub-link'));
+    const pair = (await screen.findByTestId('form-submit')) as HTMLButtonElement;
     expect(pair).toBeDisabled();
   });
 });
@@ -106,11 +109,12 @@ describe('pairing', () => {
       hub_pair: { ...remote, remote: false, restart_required: true },
     });
     render(SettingsDialog, { props: { onClose: () => {} } });
-    await fireEvent.input(await screen.findByTestId('hub-url'), {
+    await fireEvent.click(await screen.findByTestId('hub-link'));
+    await fireEvent.input(await screen.findByTestId('form-field-url'), {
       target: { value: 'https://fleet.example.com' },
     });
-    await fireEvent.input(screen.getByTestId('hub-code'), { target: { value: 'ABCD1234' } });
-    await fireEvent.click(screen.getByTestId('hub-pair'));
+    await fireEvent.input(screen.getByTestId('form-field-code'), { target: { value: 'ABCD1234' } });
+    await fireEvent.click(screen.getByTestId('form-submit'));
 
     await waitFor(() =>
       expect(inv.mock.calls.some((c) => c[0] === 'hub_pair')).toBe(true),
@@ -128,16 +132,19 @@ describe('pairing', () => {
     // worst of both.
     const restart = await screen.findByTestId('hub-restart');
     expect(restart.textContent!.toLowerCase()).toContain('restart');
+    // The code worked once: the wizard closes rather than invite a retry.
+    await waitFor(() => expect(screen.queryByTestId('wizard-link_hub')).toBeNull());
   });
 
   it('shows the hub’s own refusal rather than a generic failure', async () => {
     route({ hub_pair: ipcError('E_INVALID', 'that pairing code is unknown, used or expired') });
     render(SettingsDialog, { props: { onClose: () => {} } });
-    await fireEvent.input(await screen.findByTestId('hub-url'), {
+    await fireEvent.click(await screen.findByTestId('hub-link'));
+    await fireEvent.input(await screen.findByTestId('form-field-url'), {
       target: { value: 'https://fleet.example.com' },
     });
-    await fireEvent.input(screen.getByTestId('hub-code'), { target: { value: 'BADCODE1' } });
-    await fireEvent.click(screen.getByTestId('hub-pair'));
+    await fireEvent.input(screen.getByTestId('form-field-code'), { target: { value: 'BADCODE1' } });
+    await fireEvent.click(screen.getByTestId('form-submit'));
     const err = await screen.findByTestId('hub-error');
     expect(err.textContent).toContain('unknown, used or expired');
   });
@@ -152,16 +159,17 @@ describe('pairing', () => {
       ),
     });
     render(SettingsDialog, { props: { onClose: () => {} } });
-    await fireEvent.input(await screen.findByTestId('hub-url'), {
+    await fireEvent.click(await screen.findByTestId('hub-link'));
+    await fireEvent.input(await screen.findByTestId('form-field-url'), {
       target: { value: 'http://10.0.0.5:8787' },
     });
-    await fireEvent.input(screen.getByTestId('hub-code'), { target: { value: 'ABCD1234' } });
+    await fireEvent.input(screen.getByTestId('form-field-code'), { target: { value: 'ABCD1234' } });
 
     // Before the refusal there is nothing to click: the opt-in is not a
     // checkbox someone can tick past without reading.
     expect(screen.queryByTestId('hub-allow-plaintext')).toBeNull();
 
-    await fireEvent.click(screen.getByTestId('hub-pair'));
+    await fireEvent.click(screen.getByTestId('form-submit'));
 
     const err = await screen.findByTestId('hub-error');
     expect(err.textContent).toContain('in the clear');
@@ -177,7 +185,7 @@ describe('pairing', () => {
       return null;
     });
     await fireEvent.click(optIn);
-    await fireEvent.click(screen.getByTestId('hub-pair'));
+    await fireEvent.click(screen.getByTestId('form-submit'));
     await waitFor(() =>
       expect(inv.mock.calls.some((c) => c[0] === 'hub_pair')).toBe(true),
     );
@@ -190,6 +198,30 @@ describe('the Hub section, paired', () => {
   beforeEach(() => {
     hubStatus.set(remote);
     route();
+  });
+
+  it('heads the section with last sync, the other devices and Unpair… (M15 G7.13)', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const inv = route({
+      list_devices: [
+        { name: 'laptop', mode: 'full', trusted: true, created_at: 1, catalogs: [], person_id: 1, last_seen_at: now - 4, this_device: true },
+        { name: 'phone', mode: 'full', trusted: true, created_at: 1, catalogs: [], person_id: 1 },
+        { name: 'tablet', mode: 'answer', trusted: true, created_at: 1, catalogs: [], person_id: 1 },
+      ],
+      hub_disconnect: { ...STANDALONE, restart_required: true },
+    });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    const head = await screen.findByTestId('hub-status-header');
+    expect(head.textContent).toContain('Paired with https://fleet.example.com');
+    await waitFor(() => expect(screen.getByTestId('hub-last-sync').textContent).toMatch(/^last sync \d+ s ago$/));
+    expect(screen.getByTestId('hub-device-count').textContent).toBe('2 more of your devices');
+    // Unpair… asks first; Cancel sends nothing, Unpair disconnects.
+    await fireEvent.click(screen.getByTestId('hub-unpair'));
+    await fireEvent.click(screen.getByTestId('hub-unpair-cancel'));
+    expect(inv.mock.calls.some((c) => c[0] === 'hub_disconnect')).toBe(false);
+    await fireEvent.click(screen.getByTestId('hub-unpair'));
+    await fireEvent.click(screen.getByTestId('hub-unpair-confirm-btn'));
+    await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'hub_disconnect')).toBe(true));
   });
 
   it('names the hub and the client this desktop is paired as', async () => {
@@ -281,6 +313,17 @@ describe('the panels that do not apply to a hub client', () => {
     expect(await screen.findByTestId('copy-diagnostics')).toBeInTheDocument();
   });
 
+  it('About, beside Diagnostics, opens with the Wordmark reveal (redesign 3.13)', async () => {
+    route();
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    const about = await screen.findByTestId('about-section');
+    const mark = await screen.findByTestId('about-wordmark');
+    expect(about.contains(mark)).toBe(true);
+    expect(mark.dataset.loader).toBe('wordmark-reveal');
+    expect(mark).toHaveAttribute('aria-label', 'Orbit Fleet');
+    expect(screen.getByTestId('about-version')).toHaveTextContent('Orbit Fleet');
+  });
+
   it('standalone is untouched: every panel is still there', async () => {
     hubStatus.set({ ...STANDALONE });
     const inv = route();
@@ -293,8 +336,8 @@ describe('the panels that do not apply to a hub client', () => {
     // Updates are a generated page since declarative pages P3/P6, not a
     // hand-written panel here: the note that this desktop installs nothing
     // yet is `crates/fleet-core/pages/settings.updates.json`'s notice, and
-    // that `nightly` is not offered (S2b) is pinned in the settings
-    // registry (`nightly_is_not_offered_until_it_is_published`).
+    // the tracks offered are pinned in the settings registry
+    // (`nightly_is_a_track_once_it_is_published`).
     expect(screen.queryByTestId('update-section')).toBeNull();
     expect(screen.queryByTestId('update-remote')).toBeNull();
   });
@@ -320,8 +363,13 @@ describe('the Hub section, configured but unavailable', () => {
     route();
     render(SettingsDialog, { props: { onClose: () => {} } });
     const why = await screen.findByTestId('hub-unavailable-reason');
-    expect(why.textContent).toContain('no client token is stored');
+    expect(why.textContent).toContain('no saved pairing for that hub');
+    expect(why.textContent).not.toContain('client token');
     expect(why.textContent).toContain('fleet.example.com');
+    // The backend's raw reason stays one click away.
+    expect(screen.getByTestId('hub-unavailable-detail').textContent).toContain(
+      'no client token is stored',
+    );
     expect(screen.queryByTestId('hub-empty')).toBeNull();
     expect(screen.queryByTestId('hub-connected')).toBeNull();
   });
@@ -341,9 +389,11 @@ describe('the Hub section, configured but unavailable', () => {
   it('offers to pair again, prefilled with the configured URL', async () => {
     route();
     render(SettingsDialog, { props: { onClose: () => {} } });
-    const url = (await screen.findByTestId('hub-url')) as HTMLInputElement;
+    expect((await screen.findByTestId('hub-link')).textContent).toContain('Pair again');
+    await fireEvent.click(screen.getByTestId('hub-link'));
+    const url = (await screen.findByTestId('form-field-url')) as HTMLInputElement;
     expect(url.value).toBe('https://fleet.example.com');
-    expect(screen.getByTestId('hub-code')).toBeInTheDocument();
+    expect(screen.getByTestId('form-field-code')).toBeInTheDocument();
   });
 
   // This process runs no control API and no tick, and the backend refuses
@@ -443,7 +493,7 @@ describe('the hub’s settings on a paired desktop (P6)', () => {
       set_fleet_setting: { 'playbooks.press_enter': 'false' },
     });
     render(SettingsDialog, { props: { onClose: () => {} } });
-    await fireEvent.click(await screen.findByTestId('settings-nav-settings.automation'));
+    await fireEvent.click(await screen.findByTestId('settings-nav-automation'));
     const box = (await screen.findByTestId('setting-playbooks-press-enter')) as HTMLInputElement;
     expect(box.checked).toBe(true);
     expect(screen.getByTestId('hub-scope-note').textContent).toContain('paired as laptop');
@@ -456,6 +506,18 @@ describe('the hub’s settings on a paired desktop (P6)', () => {
     expect(inv.mock.calls.some((c) => c[0] === 'fetch_page_source')).toBe(false);
   });
 
+  it('Projects is the hub’s page, not this machine’s roots editor (7.1)', async () => {
+    route({
+      describe_fleet_settings: described,
+      get_fleet_settings: {},
+      setting_proposals: { can_write: true, proposals: [] },
+    });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await fireEvent.click(await screen.findByTestId('settings-nav-projects'));
+    expect(await screen.findByTestId('page-settings.projects')).toBeInTheDocument();
+    expect(screen.queryByTestId('projects-section')).toBeNull();
+  });
+
   it('an untrusted device reads them, and is told how to be trusted', async () => {
     route({
       describe_fleet_settings: described,
@@ -463,7 +525,7 @@ describe('the hub’s settings on a paired desktop (P6)', () => {
       setting_proposals: { can_write: false, proposals: [] },
     });
     render(SettingsDialog, { props: { onClose: () => {} } });
-    await fireEvent.click(await screen.findByTestId('settings-nav-settings.automation'));
+    await fireEvent.click(await screen.findByTestId('settings-nav-automation'));
     await screen.findByTestId('hub-scope-note');
     expect(screen.getByTestId('hub-scope-readonly').textContent).toContain('fleet-hub client trust laptop');
     // Shown, not editable: the value in words, no switch.
@@ -471,15 +533,53 @@ describe('the hub’s settings on a paired desktop (P6)', () => {
     expect(screen.getByTestId('setting-playbooks-press-enter').textContent).toBe('On');
   });
 
+  it('Decisions on an untrusted paired desktop: every use case shown, none editable (7.7)', async () => {
+    route({
+      describe_fleet_settings: described.map((d) => (d.key === 'decide.jev.enabled' ? { ...d, value: 'true' } : d)),
+      get_fleet_settings: { 'decide.jev.enabled': 'true' },
+      setting_proposals: { can_write: false, proposals: [] },
+    });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await fireEvent.click(await screen.findByTestId('settings-nav-decisions'));
+    await screen.findByTestId('hub-scope-readonly');
+    for (const k of ['enabled', 'status-map', 'start-project', 'work-link']) {
+      expect((await screen.findByTestId(`setting-decide-jev-${k}`)).tagName, k).toBe('SPAN');
+    }
+    // The Today record reads this app's store: a paired desktop shows none.
+    expect(screen.queryByTestId('data-record-decide.today')).toBeNull();
+  });
+
   it('a hub that serves no settings leaves its reason and its answer', async () => {
     route({
       describe_fleet_settings: ipcError('E_FORBIDDEN', 'describe_fleet_settings: get_settings is not a client-callable tool'),
     });
     render(SettingsDialog, { props: { onClose: () => {} } });
-    await fireEvent.click(await screen.findByTestId('settings-nav-settings.automation'));
+    await fireEvent.click(await screen.findByTestId('settings-nav-automation'));
     const note = await screen.findByTestId('pages-remote');
     await waitFor(() => expect(note.textContent).toContain('did not serve its settings'));
     expect(screen.getByTestId('pages-remote-error').textContent).toContain('not a client-callable tool');
     expect(screen.queryByTestId('setting-row-playbooks.press_enter')).toBeNull();
+  });
+});
+
+// Assets M6 (R11): Settings → Catalogs on a paired desktop is the hub's
+// catalogs, read-only, with the refusal — add and remove are the master's.
+describe('Settings → Catalogs on a paired desktop', () => {
+  it('lists the hub’s catalogs with no controls, and says to use the hub', async () => {
+    hubStatus.set(remote);
+    route({
+      catalog_list_catalogs: [
+        { id: 2, name: 'acme', org_id: 1, org: 'Acme', repo_path: '/r/acme', remote_url: null, head_commit: 'abc',
+          last_loaded_at: 1, state: 'loaded', asset_count: 3, admitted: ['mefistos'], granted: ['laptop'] },
+      ],
+    });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await fireEvent.click(await screen.findByTestId('settings-nav-catalogs'));
+    const reason = await screen.findByTestId('resource-readonly');
+    expect(reason.textContent).toContain('fleet-hub catalog add');
+    expect(reason.textContent).toContain('https://fleet.example.com');
+    await screen.findByRole('option', { name: /acme/ });
+    expect(screen.queryByTestId('resource-add')).toBeNull();
+    expect(screen.queryByTestId('item-remove-admitted')).toBeNull();
   });
 });

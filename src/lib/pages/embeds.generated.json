@@ -1,5 +1,5 @@
 {
-  "_generated": "from crates/fleet-core/pages (layout embed); regenerate with REGEN_PAGE_DOCS=1 cargo test -p fleet-core page_docs_are_current",
+  "_generated": "from crates/fleet-core/pages (layout embed); regenerate with REGEN_PAGE_DOCS=1 cargo fleet-test -- page_docs_are_current",
   "pages": [
     {
       "id": "embed.host_detail",

@@ -25,15 +25,25 @@ vi.mock('@tauri-apps/api/webview', () => ({
 }));
 vi.mock('./sessions', async () => {
   const actual = await vi.importActual<typeof import('./sessions')>('./sessions');
-  return { ...actual, sendPrompt: vi.fn() };
+  const sendPrompt = vi.fn();
+  // `answerDialog` is `send_prompt` with a key and no prompt (Orbit Fleet
+  // 11.7); routed through the one mock so the tests below keep asserting the
+  // keystroke as the pane receives it.
+  const answerDialog = vi.fn((host: string, tmux: string, key: string) => sendPrompt(host, tmux, '', { keys: key }));
+  return { ...actual, sendPrompt, answerDialog };
 });
+vi.mock('./forms/forms', async () => ({
+  ...(await vi.importActual<typeof import('./forms/forms')>('./forms/forms')),
+  getForm: vi.fn(async () => ({ ok: false, error: { code: 'E_NOTFOUND', message: 'x' } })),
+}));
 vi.mock('./selection', async () => {
   const actual = await vi.importActual<typeof import('./selection')>('./selection');
   return { ...actual, selectSession: vi.fn(), selectSessionExplicitly: vi.fn() };
 });
 import { sessionConversation, sessionActivity, listConversations, toolDetail, type ConversationSummary, PROMPT_CLAMP_LINES, CONVERSATION_POLL_MS, ACTIVITY_POLL_MS, QUIET_POLL_MS, PROBE_TTL_MS, CONV_MAX_TURNS, type Conversation, type ActivityProbe } from './conversation';
 import ConversationPanel from './ConversationPanel.svelte';
-import { sendPrompt, sessions, type SessionRow } from './sessions';
+import { getForm } from './forms/forms';
+import { sendPrompt, sessions, startedIds, type SessionRow } from './sessions';
 import { selectSessionExplicitly } from './selection';
 import { tasks, type TaskRow } from './tasks';
 import { composerPresets } from './composer_presets';
@@ -44,9 +54,13 @@ import { dispatchTimelineEvents, dispatchConversationsChanged } from './live_eve
 import type { SessionEvent } from './timeline';
 import { copyText } from './clipboard';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
+import { myGrants, myPersonId, type GrantLevel } from './access';
+import { hubConnection } from './hub_connection';
 import { invoke } from '@tauri-apps/api/core';
+import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 import type { PickedFile } from './attachments';
 import { outbox } from './outbox';
+import { toasts, clearToasts } from './toasts';
 
 const REMOTE: HubStatus = {
   remote: true,
@@ -123,6 +137,13 @@ function err(code: string, message = code) {
   return Promise.resolve({ ok: false as const, error: { code, message } });
 }
 
+/** What the live indicator says: its label, and the pane's own spinner line,
+ *  which "Thinking" carries as its tooltip when nothing runs (5.13). */
+function live(ind: HTMLElement): string {
+  const tip = ind.querySelector('.indicator-label')?.getAttribute('title') ?? '';
+  return `${ind.textContent ?? ''} ${tip}`;
+}
+
 function setVisibility(state: 'visible' | 'hidden') {
   Object.defineProperty(document, 'visibilityState', { value: state, configurable: true });
 }
@@ -149,6 +170,11 @@ beforeEach(() => {
   ]);
   setVisibility('visible');
   hubStatus.set({ ...STANDALONE });
+  // Multi-user M1: the identity half of the composer's gate. Standalone needs
+  // neither (every row reads as `own`), but a test that sets `REMOTE` does, so
+  // the two are reset together with it.
+  myPersonId.set(null);
+  myGrants.set(new Map());
   sessions.set([]);
   tasks.set([]);
 });
@@ -157,6 +183,8 @@ afterEach(() => {
   vi.useRealTimers();
   setVisibility('visible');
   hubStatus.set({ ...STANDALONE });
+  myPersonId.set(null);
+  myGrants.set(new Map());
 });
 
 describe('ConversationPanel', () => {
@@ -173,6 +201,17 @@ describe('ConversationPanel', () => {
     expect(screen.getByText(/Older turns not shown/)).toBeTruthy();
   });
 
+  it('draws a done marker and its report as a card whose follow-up fills the composer', async () => {
+    const text = 'Finished.\n\nFLEET_TASK_DONE_ab12\n```json\n{"summary": "Wrote the guide", "outcome": "done", "followups": ["Open a PR"]}\n```';
+    mockedConv.mockReturnValue(ok(conv({ turns: [{ prompt: 'go', at: null, ended_at: null, items: [{ kind: 'text', text }] }] })));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    expect(screen.getByTestId('rich-report-outcome').textContent).toContain('Done');
+    await fireEvent.click(screen.getByTestId('rich-report-followup'));
+    await settle();
+    expect((screen.getByTestId('conv-composer-input') as HTMLTextAreaElement).value).toBe('Open a PR');
+  });
+
   it('shows "No conversation yet" for E_NO_TRANSCRIPT', async () => {
     mockedConv.mockReturnValue(err('E_NO_TRANSCRIPT'));
     render(ConversationPanel, { session: session(), visible: true });
@@ -187,6 +226,23 @@ describe('ConversationPanel', () => {
     await tick();
     expect(screen.getByText('No Claude session id yet')).toBeTruthy();
     expect(mockedConv).not.toHaveBeenCalled();
+  });
+
+  it('a Codex row with no conversation yet says Codex starts one on its first prompt', async () => {
+    render(ConversationPanel, { session: session({ claude_session_id: null, agent: 'codex' }), visible: true });
+    await tick();
+    expect(screen.getByText('No conversation yet')).toBeTruthy();
+    expect(screen.getByText(/Codex starts a conversation on its first prompt/)).toBeTruthy();
+    expect(mockedConv).not.toHaveBeenCalled();
+  });
+
+  it('an Agy row says its conversations cannot be shown yet instead of waiting on one', async () => {
+    mockedConv.mockReturnValue(err('E_NO_TRANSCRIPT'));
+    render(ConversationPanel, { session: session({ agent: 'agy' }), visible: true });
+    await tick();
+    await Promise.resolve();
+    await tick();
+    expect(screen.getByText('Agy conversations can’t be shown yet')).toBeTruthy();
   });
 
   it('other errors show the message plus a retry button that refetches, keeping earlier good turns visible', async () => {
@@ -967,6 +1023,75 @@ describe('ConversationPanel model / effort pickers', () => {
     expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '/effort high');
     expect(pick.value).toBe('high');
   });
+
+  it("lists Codex's models for a Codex session and relaunches on a confirmed pick", async () => {
+    const mockedInvoke = invoke as unknown as ReturnType<typeof vi.fn>;
+    mockedInvoke.mockClear();
+    await mountPanel({ agent: 'codex', model: 'gpt-6-sol' });
+    const pick = screen.getByTestId('conv-model-pick') as HTMLSelectElement;
+    const values = Array.from(pick.options).map((o) => o.value);
+    expect(pick.options[0].textContent).toBe('GPT-6-Sol');
+    expect(values).toContain('gpt-6.1-sol');
+    expect(values).not.toContain('opus');
+    await fireEvent.change(pick, { target: { value: 'gpt-6.1-sol' } });
+    await settle();
+    // Codex's `/model` takes no argument: nothing is typed into the pane.
+    expect(mockedSend).not.toHaveBeenCalled();
+    expect(pick.value).toBe('');
+    expect(mockedInvoke).not.toHaveBeenCalledWith('restart_session', expect.anything());
+    await fireEvent.click(screen.getByTestId('conv-relaunch-confirm'));
+    await settle();
+    expect(mockedInvoke).toHaveBeenCalledWith('restart_session', {
+      args: { host_alias: 'local', name: 'ctl', model: 'gpt-6.1-sol' },
+    });
+  });
+
+  it('offers a Codex session no `auto` effort and no Claude slash commands', async () => {
+    await mountPanel({ agent: 'codex' });
+    const effort = screen.getByTestId('conv-effort-pick') as HTMLSelectElement;
+    expect(Array.from(effort.options).map((o) => o.value)).not.toContain('auto');
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: '/n' } });
+    await settle();
+    const menu = screen.getByTestId('conv-slash-menu');
+    expect(menu.textContent).toContain('/new');
+    await fireEvent.input(box, { target: { value: '/context' } });
+    await settle();
+    expect(screen.queryByTestId('conv-slash-menu')).toBeNull();
+  });
+});
+
+describe('ConversationPanel # link a task (G7.8)', () => {
+  it('a host that hands its tasks gets a # menu that puts the key in the box', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    const linkTasks = vi.fn(async () => [
+      { key: 'TASK-219', title: 'Fix login', status: 'In progress' },
+      { key: 'PD-2592', title: 'Support access' },
+    ]);
+    render(ConversationPanel, { session: session(), visible: true, linkTasks });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: '/done #pd' } });
+    await settle();
+    expect(linkTasks).toHaveBeenCalledTimes(1);
+    const menu = screen.getByTestId('conv-task-menu');
+    expect(box.getAttribute('aria-controls')).toBe(menu.id);
+    expect(within(menu).getAllByRole('option').map((o) => o.textContent)).toEqual([expect.stringContaining('#PD-2592')]);
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    expect(box.value).toBe('/done #PD-2592 ');
+    expect(screen.queryByTestId('conv-task-menu')).toBeNull();
+    expect(mockedSend).not.toHaveBeenCalled();
+  });
+
+  it('without a host that hands tasks, # is plain text', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: '#' } });
+    await settle();
+    expect(screen.queryByTestId('conv-task-menu')).toBeNull();
+  });
 });
 
 describe('ConversationPanel slash commands', () => {
@@ -1247,66 +1372,19 @@ describe('ConversationPanel quick actions', () => {
     expect(chip!.className).toContain('btn--warn');
   });
 
-  it('collapses overflowing chips behind More and expands them', async () => {
-    await mount();
-    const row = screen.getByTestId('conv-chips');
-    // jsdom lays nothing out, so state the overflow the way the observer would.
-    Object.defineProperty(row, 'scrollWidth', { value: 500, configurable: true });
-    Object.defineProperty(row, 'clientWidth', { value: 300, configurable: true });
-    window.dispatchEvent(new Event('resize'));
-    await tick();
-
-    const more = screen.getByTestId('conv-chips-more');
-    expect(more.getAttribute('aria-expanded')).toBe('false');
-    expect(row.getAttribute('data-expanded')).toBe('false');
-    await fireEvent.click(more);
-    expect(more.getAttribute('aria-expanded')).toBe('true');
-    expect(row.getAttribute('data-expanded')).toBe('true');
-  });
-
-  it('stays expanded on a re-measure while the wrapped chips span two lines', async () => {
-    await mount();
-    const row = screen.getByTestId('conv-chips');
-    Object.defineProperty(row, 'scrollWidth', { value: 500, configurable: true });
-    Object.defineProperty(row, 'clientWidth', { value: 300, configurable: true });
-    window.dispatchEvent(new Event('resize'));
-    await tick();
-    await fireEvent.click(screen.getByTestId('conv-chips-more'));
-
-    // Wrapped, nothing clips: scrollWidth equals clientWidth. The old
-    // measurement read that as "fits" and collapsed the row it had just
-    // opened, so More showed nothing.
-    Object.defineProperty(row, 'scrollWidth', { value: 300, configurable: true });
-    const chips = Array.from(row.children) as HTMLElement[];
-    chips.forEach((c, i) => Object.defineProperty(c, 'offsetTop', { value: i === chips.length - 1 ? 30 : 0, configurable: true }));
-    window.dispatchEvent(new Event('resize'));
-    await tick();
-    expect(row.getAttribute('data-expanded')).toBe('true');
-    expect(screen.getByTestId('conv-chips-more').getAttribute('aria-expanded')).toBe('true');
-
-    // Widened until every chip is back on one line: nothing more to show.
-    chips.forEach((c) => Object.defineProperty(c, 'offsetTop', { value: 0, configurable: true }));
-    window.dispatchEvent(new Event('resize'));
-    await tick();
-    expect(screen.queryByTestId('conv-chips-more')).toBeNull();
-    expect(row.getAttribute('data-expanded')).toBe('false');
-  });
-
   it('preserveThread keeps the viewport on the same content when the composer grows', async () => {
+    // Five presets: three chips, the rest under ⋯ (5.9).
+    composerPresets.set(['A', 'B', 'C', 'D', 'E'].map((l) => ({ label: l, text: `do ${l}` })));
     await mount();
-    const row = screen.getByTestId('conv-chips');
-    Object.defineProperty(row, 'scrollWidth', { value: 500, configurable: true });
-    Object.defineProperty(row, 'clientWidth', { value: 300, configurable: true });
-    window.dispatchEvent(new Event('resize'));
-    await tick();
+    const expanded = () => screen.queryByTestId('conv-chips-more')?.getAttribute('aria-expanded') === 'true';
 
     const scroller = screen.getByTestId('conv-scroller');
-    // Expanding the chips row (More) is the composer growing: model that by
-    // tying the scroller's measured height to the row's own expanded state,
-    // the way real layout would shrink the scroller underneath it.
+    // Expanding the chips (⋯) is the composer growing: model that by tying
+    // the scroller's measured height to the expanded state, the way real
+    // layout would shrink the scroller underneath it.
     Object.defineProperty(scroller, 'clientHeight', {
       configurable: true,
-      get: () => (row.getAttribute('data-expanded') === 'true' ? 350 : 400),
+      get: () => (expanded() ? 350 : 400),
     });
     Object.defineProperty(scroller, 'scrollHeight', { value: 2000, configurable: true });
     scroller.scrollTop = 500;
@@ -1320,17 +1398,15 @@ describe('ConversationPanel quick actions', () => {
   });
 
   it('preserveThread re-pins the transcript when the reader was already at the bottom', async () => {
+    // Five presets: three chips, the rest under ⋯ (5.9).
+    composerPresets.set(['A', 'B', 'C', 'D', 'E'].map((l) => ({ label: l, text: `do ${l}` })));
     await mount();
-    const row = screen.getByTestId('conv-chips');
-    Object.defineProperty(row, 'scrollWidth', { value: 500, configurable: true });
-    Object.defineProperty(row, 'clientWidth', { value: 300, configurable: true });
-    window.dispatchEvent(new Event('resize'));
-    await tick();
+    const expanded = () => screen.queryByTestId('conv-chips-more')?.getAttribute('aria-expanded') === 'true';
 
     const scroller = screen.getByTestId('conv-scroller');
     Object.defineProperty(scroller, 'clientHeight', {
       configurable: true,
-      get: () => (row.getAttribute('data-expanded') === 'true' ? 350 : 400),
+      get: () => (expanded() ? 350 : 400),
     });
     Object.defineProperty(scroller, 'scrollHeight', { value: 2000, configurable: true });
     // Pinned: composing at the bottom, which is where an attachment strip
@@ -1346,21 +1422,6 @@ describe('ConversationPanel quick actions', () => {
     expect(scroller.scrollTop).toBe(2000);
   });
 
-  it('re-measures when the preset list changes, not just on resize', async () => {
-    await mount();
-    const row = screen.getByTestId('conv-chips');
-    // The row's own border-box need not change when the preset count does,
-    // so a plain ResizeObserver on it can miss this — state the overflow
-    // the way real layout would, then change the list with no resize event.
-    Object.defineProperty(row, 'scrollWidth', { value: 500, configurable: true });
-    Object.defineProperty(row, 'clientWidth', { value: 300, configurable: true });
-    expect(screen.queryByTestId('conv-chips-more')).toBeNull();
-
-    composerPresets.set([{ label: 'Clear', text: '/clear' }, { label: 'Tests', text: 'run the tests' }]);
-    await tick();
-
-    expect(screen.getByTestId('conv-chips-more')).toBeTruthy();
-  });
 });
 
 describe('ConversationPanel live indicator', () => {
@@ -1388,10 +1449,62 @@ describe('ConversationPanel live indicator', () => {
     expect(ind.getAttribute('data-kind')).toBe('working');
     expect(mockedAct).toHaveBeenCalledTimes(1);
     expect(mockedAct).toHaveBeenCalledWith(1);
-    expect(ind.textContent).toContain('Cooking… 3s');
+    expect(live(ind)).toContain('Cooking… 3s');
     vi.advanceTimersByTime(ACTIVITY_POLL_MS);
     await settle();
     expect(mockedAct).toHaveBeenCalledTimes(2);
+  });
+
+  // Step 5.13 (LoadersInUse board): the new layout puts the Atom beside
+  // what the agent is doing, in words.
+  it('new layout: a running Read shows the Atom and "Thinking · reading <path>"', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const running = conv();
+    running.turns[0].items.push(tool('Read(hub/pair.rs)', { name: 'Read', target: 'hub/pair.rs', done: false }));
+    mockedConv.mockReturnValue(ok(running));
+    mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: 'working' }) });
+    render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true });
+    await settle();
+    const ind = screen.getByTestId('conv-indicator');
+    expect(ind.textContent).toMatch(/^\s*Thinking · reading hub\/pair\.rs/);
+    expect(ind.querySelector('[data-testid="conv-atom"], [data-testid="conv-atom-pending"]')).not.toBeNull();
+  });
+
+  // Step 9.13: Control's chat answers its own loader and line.
+  it('thinkingAs replaces the Atom line with the host’s loader and words', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const running = conv();
+    running.turns[0].items.push(tool('Read(hub/pair.rs)', { name: 'Read', target: 'hub/pair.rs', done: false }));
+    mockedConv.mockReturnValue(ok(running));
+    mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: 'working' }) });
+    const thinkingAs = vi.fn(() => ({ loader: 'constellation' as const, label: 'Planning · sent work to 2 sessions' }));
+    render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true, thinkingAs });
+    await settle();
+    const ind = screen.getByTestId('conv-indicator');
+    expect(ind.textContent?.trim()).toBe('Planning · sent work to 2 sessions');
+    expect(ind.querySelector('[data-testid^="conv-constellation"]')).not.toBeNull();
+    expect(ind.querySelector('[data-testid^="conv-atom"]')).toBeNull();
+    expect(thinkingAs).toHaveBeenCalledWith(expect.objectContaining({ turns: expect.any(Array) }));
+  });
+
+  it('new layout: a session this window just started shows the Pulse until its agent is up', async () => {
+    try {
+      const row = session({ id: 41, tmux_name: 'pd-3011', host_alias: 'mercury', claude_session_id: null, claude_status: null });
+      sessions.set([row]);
+      startedIds.set(new Set([41]));
+      mockedConv.mockReturnValue(err('E_NO_CONVERSATION'));
+      const { rerender } = render(ConversationPanel, { session: row, visible: true });
+      await settle();
+      expect(screen.getByTestId('conv-starting').textContent).toContain('Starting pd-3011 on mercury');
+      expect(screen.getAllByTestId('pulse-step').map((s) => s.getAttribute('data-state'))).toEqual(['done', 'done', 'active']);
+      const up = { ...row, claude_status: 'idle' as const };
+      sessions.set([up]);
+      await rerender({ session: up, visible: true });
+      await settle();
+      expect(screen.queryByTestId('conv-starting')).toBeNull();
+    } finally {
+      startedIds.set(new Set());
+    }
   });
 
   // #147 originally excluded the hub client here, because `session_activity`
@@ -1446,6 +1559,64 @@ describe('ConversationPanel live indicator', () => {
     expect(onOpenTerminal).toHaveBeenCalled();
   });
 
+  it('a session waiting on a form shows the form card instead of the indicator', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, {
+      session: session({ claude_status: 'working', pending_form: { form_id: 'f_a', title: 'Deploy' } }),
+      visible: true,
+    });
+    await settle();
+    expect(screen.getByTestId('form-card')).toBeTruthy();
+  });
+
+  describe('closed form line', () => {
+    const answered = { ok: true, value: { form_id: 'f_a', title: 'Deploy', state: 'answered', answered_by: 'me', spec: { steps: [] } } };
+    beforeEach(() => {
+      vi.mocked(getForm).mockResolvedValue(answered as never);
+    });
+
+    it('a form that leaves the same session\'s row leaves a closed outcome line', async () => {
+      mockedConv.mockReturnValue(ok(conv()));
+      const { rerender } = render(ConversationPanel, {
+        session: session({ id: 1, pending_form: { form_id: 'f_a', title: 'Deploy' } }),
+        visible: true,
+      });
+      await settle();
+      await rerender({ session: session({ id: 1, pending_form: null }), visible: true });
+      await settle();
+      expect(screen.getByTestId('form-outcome')).toBeTruthy();
+      expect(screen.queryByTestId('form-card')).toBeNull();
+    });
+
+    it('selecting another session does not show the previous session\'s form as closed', async () => {
+      mockedConv.mockReturnValue(ok(conv()));
+      const { rerender } = render(ConversationPanel, {
+        session: session({ id: 1, pending_form: { form_id: 'f_a', title: 'Deploy' } }),
+        visible: true,
+      });
+      await settle();
+      await rerender({ session: session({ id: 2, tmux_name: 'other', pending_form: null }), visible: true });
+      await settle();
+      expect(screen.queryByTestId('form-outcome')).toBeNull();
+      expect(screen.queryByTestId('form-card')).toBeNull();
+    });
+
+    it('a closed line of one session does not carry over to the next', async () => {
+      mockedConv.mockReturnValue(ok(conv()));
+      const { rerender } = render(ConversationPanel, {
+        session: session({ id: 1, pending_form: { form_id: 'f_a', title: 'Deploy' } }),
+        visible: true,
+      });
+      await settle();
+      await rerender({ session: session({ id: 1, pending_form: null }), visible: true });
+      await settle();
+      expect(screen.getByTestId('form-outcome')).toBeTruthy();
+      await rerender({ session: session({ id: 2, tmux_name: 'other', pending_form: null }), visible: true });
+      await settle();
+      expect(screen.queryByTestId('form-outcome')).toBeNull();
+    });
+  });
+
   it('a blocked row with a dialog shows the answer card instead of the bare banner', async () => {
     mockedConv.mockReturnValue(ok(conv()));
     render(ConversationPanel, {
@@ -1493,6 +1664,143 @@ describe('ConversationPanel live indicator', () => {
     expect(screen.getByTestId('conv-blocked')).toBeTruthy();
   });
 
+  describe('the one approval card (redesign 5.9, New layout)', () => {
+    const PUSH = { ...DIALOG, detail: 'Bash(git push -u origin main)' };
+    afterEach(() => {
+      sessions.set([]);
+      clearToasts();
+    });
+
+    it('card and agent tab stay in step: the card shows what the pane shows, whichever side answers', async () => {
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+      mockedConv.mockReturnValue(ok(conv()));
+      const blocked = { ok: true, value: probe({ claude_status: 'blocked', waiting_for: 'permission', pending_input: PUSH }) };
+      mockedAct.mockResolvedValue(blocked);
+      mockedSend.mockResolvedValue({ ok: true, value: undefined });
+      render(ConversationPanel, { session: session({ claude_status: 'blocked', pending_input: PUSH }), visible: true });
+      await settle();
+      const card = screen.getByTestId('answer-card');
+      expect(card.getAttribute('data-layout')).toBe('new');
+      expect(screen.getByTestId('question-detail').textContent).toBe('Bash(git push -u origin main)');
+      // Nothing is pre-selected on a permission: no answer is the primary.
+      expect(card.querySelector('.of-btn.primary')).toBeNull();
+      expect(screen.getAllByTestId('answer-option').map((b) => b.textContent?.trim())).toEqual([
+        '1Yes',
+        "2Yes, and don't ask again",
+        '3No, and tell Claude what to do differently',
+      ]);
+
+      // Answered in the agent tab: the next pane read has no dialog, and the
+      // card goes with it.
+      mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: 'working', spinner: 'Pushing…' }) });
+      vi.advanceTimersByTime(ACTIVITY_POLL_MS);
+      await settle();
+      await settle();
+      expect(screen.queryByTestId('answer-card')).toBeNull();
+
+      // A new dialog in the pane brings the card back; answering on the card
+      // presses the key into the same pane the agent tab shows.
+      mockedAct.mockResolvedValue(blocked);
+      vi.advanceTimersByTime(ACTIVITY_POLL_MS);
+      await settle();
+      await settle();
+      await fireEvent.click(screen.getAllByTestId('answer-option')[0]);
+      await settle();
+      expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '', { keys: '1' });
+    });
+
+    it('after Approve, focus moves to the next session that needs you, with Undo back', async () => {
+      const here = session({ claude_status: 'blocked', pending_input: PUSH });
+      const next = session({ id: 2, tmux_name: 'other', friendly_name: 'Fix the flake', claude_status: 'blocked', pending_input: DIALOG });
+      sessions.set([here, next]);
+      mockedConv.mockReturnValue(ok(conv()));
+      mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: 'blocked', waiting_for: 'permission', pending_input: PUSH }) });
+      mockedSend.mockResolvedValue({ ok: true, value: undefined });
+      render(ConversationPanel, { session: here, visible: true });
+      await settle();
+      await fireEvent.click(screen.getAllByTestId('answer-option')[0]);
+      await settle();
+      await settle();
+      expect(selectSessionExplicitlySpy).toHaveBeenCalledWith(expect.objectContaining({ id: 2 }));
+      const t = get(toasts).at(-1)!;
+      expect(t.message).toBe('✓ Approved · moved to next: Fix the flake');
+      expect(t.action?.label).toBe('Undo');
+      t.action!.run();
+      expect(selectSessionExplicitlySpy).toHaveBeenLastCalledWith(expect.objectContaining({ id: 1 }));
+    });
+
+    it('stays put when nothing else needs you', async () => {
+      const here = session({ claude_status: 'blocked', pending_input: PUSH });
+      sessions.set([here]);
+      mockedConv.mockReturnValue(ok(conv()));
+      mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: 'blocked', waiting_for: 'permission', pending_input: PUSH }) });
+      mockedSend.mockResolvedValue({ ok: true, value: undefined });
+      render(ConversationPanel, { session: here, visible: true });
+      await settle();
+      await fireEvent.click(screen.getAllByTestId('answer-option')[0]);
+      await settle();
+      expect(selectSessionExplicitlySpy).not.toHaveBeenCalled();
+    });
+
+    it('"Answer in your own words…" dismisses the dialog, then hands the composer the keyboard', async () => {
+      mockedConv.mockReturnValue(ok(conv()));
+      mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: 'blocked', waiting_for: 'permission', pending_input: PUSH }) });
+      mockedSend.mockResolvedValue({ ok: true, value: undefined });
+      render(ConversationPanel, { session: session({ claude_status: 'blocked', pending_input: PUSH }), visible: true });
+      await settle();
+      await fireEvent.click(screen.getByTestId('question-own-words'));
+      await settle();
+      await settle();
+      expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '', { keys: 'Escape' });
+      expect(document.activeElement).toBe(screen.getByTestId('conv-composer-input'));
+    });
+  });
+
+  describe('quick prompts in the New layout (redesign 5.9)', () => {
+    it('shows three chips and puts the rest under ⋯, every one still reachable', async () => {
+      composerPresets.set(['A', 'B', 'C', 'D', 'E'].map((l) => ({ label: l, text: `do ${l}` })));
+      mockedConv.mockReturnValue(ok(conv()));
+      render(ConversationPanel, { session: session(), visible: true });
+      await settle();
+      expect(screen.getAllByTestId('conv-chip').map((c) => c.textContent?.trim())).toEqual(['A', 'B', 'C']);
+      const more = screen.getByTestId('conv-chips-more');
+      expect(more.getAttribute('aria-label')).toBe('2 more quick prompts');
+      await fireEvent.click(more);
+      expect(screen.getAllByTestId('conv-chip').map((c) => c.textContent?.trim())).toEqual(['A', 'B', 'C', 'D', 'E']);
+      // Less rides with the last chip, so it never wraps onto a line alone.
+      expect(screen.getByTestId('conv-chips-more').previousElementSibling?.textContent?.trim()).toBe('E');
+      screen.getByTestId('conv-chips-more').focus();
+      await fireEvent.click(screen.getByTestId('conv-chips-more'));
+      await tick();
+      // The re-created toggle keeps keyboard focus.
+      expect(document.activeElement).toBe(screen.getByTestId('conv-chips-more'));
+      expect(screen.getAllByTestId('conv-chip').map((c) => c.textContent?.trim())).toEqual(['A', 'B', 'C']);
+      expect(screen.getByTestId('conv-chips-more').getAttribute('aria-expanded')).toBe('false');
+    });
+  });
+
+  describe('the New divider (redesign 5.9)', () => {
+    const turns = [
+      { prompt: 'old', at: '2026-09-13T10:00:00.000Z', ended_at: '2026-09-13T10:01:00.000Z', items: [] },
+      { prompt: 'new', at: '2026-09-13T11:00:00.000Z', ended_at: '2026-09-13T11:01:00.000Z', items: [] },
+    ];
+    const seen = Date.parse('2026-09-13T10:30:00.000Z') / 1000;
+
+    it('sits above the first turn after the person last looked, and stays put for the visit', async () => {
+      mockedConv.mockReturnValue(ok(conv({ turns })));
+      const { rerender } = render(ConversationPanel, { session: session({ last_viewed_at: seen }), visible: true });
+      await settle();
+      await settle();
+      const div = screen.getByTestId('conv-new-divider');
+      expect(div.nextElementSibling?.textContent).toContain('new');
+      // This visit's own stamp moves last_viewed_at: the line stays.
+      await rerender({ session: session({ last_viewed_at: seen + 7200 }), visible: true });
+      await settle();
+      expect(screen.getAllByTestId('conv-new-divider')).toHaveLength(1);
+    });
+
+  });
+
   it('a stuck row shows no indicator (the composer note covers it)', async () => {
     mockedConv.mockReturnValue(ok(conv()));
     render(ConversationPanel, { session: session({ claude_status: 'blocked', stuck_kind: 'auth_menu' }), visible: true });
@@ -1519,7 +1827,7 @@ describe('ConversationPanel live indicator', () => {
     await settle();
     await settle();
     expect(screen.getByTestId('conv-indicator').getAttribute('data-kind')).toBe('sent');
-    expect(screen.getByTestId('conv-indicator').textContent).toContain('Waiting for Claude…');
+    expect(screen.getByTestId('conv-indicator').textContent).toContain('Waiting for Claude Code…');
 
     // transcript carries the prompt: the message gives way, the session is still working
     const caughtUp = conv();
@@ -1629,7 +1937,7 @@ describe('ConversationPanel activity probe against a hub that lacks the tool', (
     vi.advanceTimersByTime(ACTIVITY_POLL_MS);
     await settle();
     expect(mockedAct).toHaveBeenCalledTimes(2);
-    expect(screen.getByTestId('conv-indicator').textContent).toContain('Cooking… 3s');
+    expect(live(screen.getByTestId('conv-indicator'))).toContain('Cooking… 3s');
   });
 
   it('re-learns on a session switch, so an upgraded hub needs no app restart', async () => {
@@ -1979,10 +2287,10 @@ describe('ConversationPanel review-round fixes', () => {
     mockedAct.mockResolvedValue({ ok: true, value: { claude_status: 'working', current_activity: null, stuck_kind: null, waiting_for: null, spinner: 'Cooking… (3s)' } });
     const { rerender } = render(ConversationPanel, { session: session({ claude_status: 'working', turn_seq: 1 }), visible: true });
     await settle();
-    expect(screen.getByTestId('conv-indicator').textContent).toContain('Cooking… 3s');
+    expect(live(screen.getByTestId('conv-indicator'))).toContain('Cooking… 3s');
     await rerender({ session: session({ claude_status: 'working', turn_seq: 1, context_pct: 55 }), visible: true });
     await settle();
-    expect(screen.getByTestId('conv-indicator').textContent).toContain('Cooking… 3s');
+    expect(live(screen.getByTestId('conv-indicator'))).toContain('Cooking… 3s');
     await rerender({ session: session({ claude_status: 'idle', turn_seq: 1, context_pct: 55 }), visible: true });
     await settle();
     expect(screen.queryByTestId('conv-indicator')).toBeNull();
@@ -2030,7 +2338,7 @@ describe('ConversationPanel second review-round fixes', () => {
     mockedAct.mockResolvedValue({ ok: true, value: { claude_status: 'working', current_activity: null, stuck_kind: null, waiting_for: null, spinner: 'Cooking… (9s)' } });
     vi.advanceTimersByTime(PROBE_TTL_MS);
     await settle();
-    expect(screen.getByTestId('conv-indicator').textContent).toContain('Cooking… 9s');
+    expect(live(screen.getByTestId('conv-indicator'))).toContain('Cooking… 9s');
     expect(mockedAct.mock.calls.length).toBeGreaterThan(calls);
   });
 
@@ -2146,6 +2454,45 @@ describe('ConversationPanel prompt recall', () => {
     await fireEvent.input(box, { target: { value: 'second edited' } });
     await fireEvent.keyDown(box, { key: 'ArrowUp' });
     expect(box.value).toBe('second edited');
+  });
+
+  it('offers no ? while Writing help\'s Context help is off', async () => {
+    await mountWithHistory();
+    expect(screen.queryByTestId('conv-help-button')).toBeNull();
+  });
+
+  it('? asks Haiku about the draft with the earlier prompts, and the proposal only fills the box', async () => {
+    const mocked = invoke as unknown as ReturnType<typeof vi.fn>;
+    const base = mocked.getMockImplementation() as ((cmd: string, payload?: unknown) => unknown) | undefined;
+    mocked.mockImplementation(async (cmd: string, payload?: unknown) =>
+      cmd === 'session_context_help'
+        ? { answer: 'Plan it first.', command: '/plan #FLEET-3', model: 'haiku', host_alias: 'local', history_items: 2, at: 1 }
+        : base?.(cmd, payload),
+    );
+    fleetSettings.set({ ...SETTING_DEFAULTS, 'work.context_help': 'true' });
+    try {
+      const box = await mountWithHistory();
+      await fireEvent.input(box, { target: { value: 'split the parser' } });
+      await fireEvent.click(screen.getByTestId('conv-help-button'));
+      await settle();
+      await fireEvent.keyDown(screen.getByTestId('conv-help-question'), { key: 'Enter' });
+      await settle();
+      const asked = mocked.mock.calls.filter((c) => c[0] === 'session_context_help');
+      expect(asked).toHaveLength(1);
+      expect((asked[0][1] as { args: Record<string, unknown> }).args).toMatchObject({
+        session_id: 1,
+        line: 'split the parser',
+        history: ['first', 'second'],
+        question: '',
+      });
+      await fireEvent.click(screen.getByTestId('conv-help-insert'));
+      await settle();
+      expect(box.value).toBe('/plan #FLEET-3');
+      expect(mockedSend).not.toHaveBeenCalled();
+    } finally {
+      mocked.mockImplementation(base ?? (() => undefined));
+      fleetSettings.set({ ...SETTING_DEFAULTS });
+    }
   });
 
   it('Enter sends the recalled prompt', async () => {
@@ -2635,7 +2982,7 @@ describe('ConversationPanel final phase-2 review fixes', () => {
     mockedAct.mockResolvedValue({ ok: true, value: { claude_status: 'working', current_activity: null, stuck_kind: null, waiting_for: null, spinner: 'Cooking… (3s)' } });
     render(ConversationPanel, { session: session({ claude_status: 'working', turn_seq: 1 }), visible: true });
     await settle();
-    expect(screen.getByTestId('conv-indicator').textContent).toContain('Cooking… 3s');
+    expect(live(screen.getByTestId('conv-indicator'))).toContain('Cooking… 3s');
     await fireEvent.click(screen.getByTestId('conv-switcher'));
     await fireEvent.click(screen.getAllByTestId('conv-switcher-item').find((li) => li.getAttribute('data-current') === 'false')!);
     await settle();
@@ -2643,7 +2990,7 @@ describe('ConversationPanel final phase-2 review fixes', () => {
     mockedAct.mockReturnValue(new Promise(() => {}));
     await fireEvent.click(screen.getByTestId('conv-back-current'));
     await settle();
-    expect(screen.getByTestId('conv-indicator').textContent).not.toContain('Cooking');
+    expect(live(screen.getByTestId('conv-indicator'))).not.toContain('Cooking');
   });
 
   it('an inline event carries a machine-readable time', async () => {
@@ -2765,8 +3112,8 @@ describe('ConversationPanel detail UX', () => {
     render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true });
     await settle();
     const ind = screen.getByTestId('conv-indicator');
-    expect(ind.textContent).toContain('Run cargo test');
-    expect(ind.textContent).toMatch(/Run cargo test · \d+s/);
+    expect(ind.textContent).toContain('Thinking · running cargo test');
+    expect(ind.textContent).toMatch(/running cargo test · \d+s/);
   });
 
   it('the running timer ticks every second while something runs', async () => {
@@ -2785,10 +3132,10 @@ describe('ConversationPanel detail UX', () => {
     mockedConv.mockReturnValue(ok(running));
     render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true });
     await settle();
-    expect(screen.getByTestId('conv-indicator').textContent).toContain('Run cargo test · 5s');
+    expect(screen.getByTestId('conv-indicator').textContent).toContain('running cargo test · 5s');
     vi.advanceTimersByTime(1_000);
     await settle();
-    expect(screen.getByTestId('conv-indicator').textContent).toContain('Run cargo test · 6s');
+    expect(screen.getByTestId('conv-indicator').textContent).toContain('running cargo test · 6s');
     expect(screen.getByTestId('conv-tool').textContent).toContain('running 6s');
   });
 
@@ -2800,7 +3147,7 @@ describe('ConversationPanel detail UX', () => {
     render(ConversationPanel, { session: session({ claude_status: 'working', turn_seq: 1 }), visible: true });
     await settle();
     await settle();
-    expect(screen.getByTestId('conv-indicator').textContent).toContain('Cooking… 3s');
+    expect(live(screen.getByTestId('conv-indicator'))).toContain('Cooking… 3s');
   });
 });
 
@@ -3527,13 +3874,13 @@ describe('ConversationPanel detail UX fixes', () => {
     mockedList.mockReturnValue(listOk([summary({ id: 2, claude_session_id: 'sess-abc', current: true }), summary({ id: 1, claude_session_id: 'aaa' })]));
     render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true });
     await settle();
-    expect(screen.getByTestId('conv-indicator').textContent).toContain('Run cargo test');
+    expect(screen.getByTestId('conv-indicator').textContent).toContain('running cargo test');
     // The earlier conversation also ends in an unfinished call.
     await fireEvent.click(screen.getByTestId('conv-switcher'));
     await fireEvent.click(screen.getAllByTestId('conv-switcher-item').find((li) => li.getAttribute('data-current') === 'false')!);
     await settle();
     expect(screen.queryByTestId('conv-indicator')).toBeNull();
-    expect(document.body.textContent).not.toMatch(/Run cargo test ·/);
+    expect(document.body.textContent).not.toMatch(/running cargo test ·/);
     expect(screen.getByTestId('conv-tool').textContent).toContain('no result');
   });
 
@@ -3957,9 +4304,15 @@ describe('ConversationPanel attachments', () => {
     return rerender;
   }
 
+  /** Hub mode on a row this client OWNS — which is what these two tests are
+   *  about: pairing hands the hub the fleet's database and hosts, not this
+   *  machine's disk. Who the device is has to be stated, because multi-user
+   *  M1 fails closed while the hub has not said (`access.ts` rule 2), and
+   *  "we cannot tell whose session this is" is not the state under test. */
   async function renderPanelInHubMode() {
     hubStatus.set(REMOTE);
-    await renderPanel();
+    myPersonId.set(7);
+    await renderPanel({ owner_person_id: 7 });
   }
 
   /**
@@ -4527,5 +4880,497 @@ describe('ConversationPanel attachments', () => {
     const tile = screen.getByTestId('conv-attachment');
     expect(tile.getAttribute('data-state')).toBe('error');
     expect(screen.getByTestId('conv-attach-error').textContent).toContain('attach it again');
+  });
+});
+
+// Multi-user M1 (spec §4.3): the composer is a WRITE surface, and one of its
+// two wire calls does not go through the hub at all. `upload_attachments` is
+// `same_in_both` in `hub_verdicts.generated.json` — this desktop's own scp
+// onto the owner's host — and `outbox.ts` runs it BEFORE the routed
+// `send_prompt`. So a watch-only grantee who could still attach would land the
+// file in the owner's worktree and only then be refused the prompt, which is
+// the same unrevocable channel as TerminalView's drop handler and `pty_open`.
+describe('ConversationPanel composer access (multi-user M1)', () => {
+  const mockedInvoke = invoke as unknown as ReturnType<typeof vi.fn>;
+  type InvokeImpl = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+  const baseInvoke = mockedInvoke.getMockImplementation() as unknown as InvokeImpl;
+
+  beforeEach(() => {
+    dragDrop = null;
+  });
+
+  afterEach(() => {
+    mockedInvoke.mockImplementation(baseInvoke);
+    hubConnection.set({ state: 'standalone' });
+  });
+
+  /** A paired desktop with a live link, this device known as person 3, holding
+   *  a row owned by person 7 (unless `over` says otherwise) at `level`. */
+  async function renderShared(level: GrantLevel | null, over: Partial<SessionRow> = {}) {
+    hubStatus.set(REMOTE);
+    hubConnection.set({ state: 'connected' });
+    myPersonId.set(3);
+    if (level) myGrants.set(new Map([[1, level]]));
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    // `visibility` stays `private`: a grant is not a visibility (there is no
+    // `shared` on the wire — `access.ts`), and that is exactly the row a
+    // watcher holds.
+    const row = session({ owner_person_id: 7, visibility: 'private', ...over });
+    // In the store as well as in the prop: the OUTBOX re-asks at the send
+    // (multi-user M1, F2c) and resolves the row by id out of `$sessions`,
+    // which is where the panel's own selection comes from in the app. A row
+    // the store has not got fails closed, by design.
+    sessions.set([row]);
+    render(ConversationPanel, { session: row, visible: true });
+    await settle();
+  }
+
+  const box = () => screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+  const sendBtn = () => screen.getByTestId('conv-composer-send') as HTMLButtonElement;
+  const attachBtn = () => screen.getByTestId('conv-attach-button') as HTMLButtonElement;
+  const names = () => mockedInvoke.mock.calls.map((c) => c[0] as string);
+
+  // Context help on a shared session: the hub runs it (`session_context_help`),
+  // for a grant that can answer; a watcher's ? says what it lacks.
+  for (const level of ['answer', 'drive'] as const) {
+    it(`a ${level} grantee asks context help through the hub`, async () => {
+      fleetSettings.set({ ...SETTING_DEFAULTS, 'work.context_help': 'true' });
+      mockedInvoke.mockImplementation(async (cmd: string, payload?: unknown) =>
+        cmd === 'session_context_help'
+          ? { answer: 'Say yes.', model: 'haiku', host_alias: 'h', history_items: 0, at: 1 }
+          : baseInvoke(cmd, payload as Record<string, unknown> | undefined),
+      );
+      mockedInvoke.mockClear();
+      try {
+        await renderShared(level);
+        const help = screen.getByTestId('conv-help-button') as HTMLButtonElement;
+        expect(help.disabled).toBe(false);
+        await fireEvent.click(help);
+        await settle();
+        await fireEvent.input(screen.getByTestId('conv-help-question'), { target: { value: 'what now?' } });
+        await fireEvent.keyDown(screen.getByTestId('conv-help-question'), { key: 'Enter' });
+        await settle();
+        const asked = mockedInvoke.mock.calls.filter((c) => c[0] === 'session_context_help');
+        expect(asked).toHaveLength(1);
+        expect((asked[0][1] as { args: Record<string, unknown> }).args).toMatchObject({
+          session_id: 1,
+          question: 'what now?',
+        });
+        expect(names()).not.toContain('context_help');
+      } finally {
+        fleetSettings.set({ ...SETTING_DEFAULTS });
+      }
+    });
+  }
+
+  it('a watch grantee’s ? is disabled and names the level it needs', async () => {
+    fleetSettings.set({ ...SETTING_DEFAULTS, 'work.context_help': 'true' });
+    try {
+      await renderShared('watch');
+      const help = screen.getByTestId('conv-help-button') as HTMLButtonElement;
+      expect(help.disabled).toBe(true);
+      expect(help.title).toMatch(/answer/i);
+    } finally {
+      fleetSettings.set({ ...SETTING_DEFAULTS });
+    }
+  });
+
+  it('a watch grantee gets no composer: every control is disabled and says why', async () => {
+    await renderShared('watch');
+    expect(box().disabled).toBe(true);
+    expect(sendBtn().disabled).toBe(true);
+    expect(attachBtn().disabled).toBe(true);
+    expect((screen.getByTestId('conv-model-pick') as HTMLSelectElement).disabled).toBe(true);
+    expect((screen.getByTestId('conv-effort-pick') as HTMLSelectElement).disabled).toBe(true);
+    expect(attachBtn().getAttribute('title')).toContain('Watch is read-only');
+    expect(screen.getByTestId('conv-composer-status').textContent).toContain('Watch is read-only');
+  });
+
+  it('a watch grantee cannot attach a file by any gesture — picker, drop or paste', async () => {
+    await renderShared('watch');
+    placeShellAt();
+    mockedInvoke.mockClear();
+
+    // The button is disabled, so drive the handler the way a stray click or a
+    // forced enable would: through the DOM event the markup binds.
+    await fireEvent.click(attachBtn());
+    for (let i = 0; i < 3; i++) await settle();
+
+    if (!dragDrop) throw new Error('the panel never subscribed to onDragDropEvent');
+    dragDrop({ payload: { type: 'drop', position: { x: 300, y: 450 }, paths: ['/tmp/a.png'] } });
+    for (let i = 0; i < 3; i++) await settle();
+
+    await fireEvent.paste(box(), {
+      clipboardData: {
+        types: ['Files'],
+        files: [{ name: 'shot.png', size: 32, type: 'image/png' }],
+        getData: () => '',
+      },
+    });
+    for (let i = 0; i < 3; i++) await settle();
+
+    expect(names()).not.toContain('pick_attachments');
+    expect(names()).not.toContain('attachment_describe');
+    expect(names()).not.toContain('upload_attachments');
+    expect(screen.queryByTestId('conv-attachments')).toBeNull();
+  });
+
+  it('a watch grantee cannot send: not Enter, not a chip, not the stuck key press', async () => {
+    await renderShared('watch', { claude_status: 'idle', stuck_kind: 'press_enter' });
+    await fireEvent.input(box(), { target: { value: 'ship it' } });
+    await fireEvent.keyDown(box(), { key: 'Enter' });
+    await settle();
+    await fireEvent.click(sendBtn());
+    await settle();
+    // Auto-send chips degrade to a fill; neither path reaches the REPL.
+    await fireEvent.click(screen.getAllByTestId('conv-chip')[0], { shiftKey: true });
+    await settle();
+    const enter = screen.getByTestId('conv-chip-enter') as HTMLButtonElement;
+    expect(enter.disabled).toBe(true);
+    await fireEvent.click(enter);
+    await settle();
+    expect(mockedSend).not.toHaveBeenCalled();
+    expect(names()).not.toContain('upload_attachments');
+  });
+
+  // The other half of invariant 5: `drive` is "make this machine do work".
+  it('a drive grantee keeps the whole composer, and the prompt goes out', async () => {
+    await renderShared('drive');
+    expect(box().disabled).toBe(false);
+    expect(attachBtn().disabled).toBe(false);
+    await fireEvent.input(box(), { target: { value: 'ship it' } });
+    expect(sendBtn().disabled).toBe(false);
+    await fireEvent.click(sendBtn());
+    for (let i = 0; i < 3; i++) await settle();
+    expect(mockedSend).toHaveBeenCalledTimes(1);
+    expect(mockedSend.mock.calls[0][2]).toBe('ship it');
+  });
+
+  it('the owner’s own row on a paired desktop is untouched', async () => {
+    await renderShared(null, { owner_person_id: 3 });
+    expect(box().disabled).toBe(false);
+    expect(attachBtn().disabled).toBe(false);
+    await fireEvent.input(box(), { target: { value: 'ship it' } });
+    expect(sendBtn().disabled).toBe(false);
+  });
+
+  // A hub that has not said who this device is: fail closed, with the sentence
+  // that sends someone to Settings → Hub & sync rather than blaming the session.
+  it('fails closed, and honestly, while the hub has not said who this device is', async () => {
+    hubStatus.set(REMOTE);
+    hubConnection.set({ state: 'connected' });
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session({ owner_person_id: 7 }), visible: true });
+    await settle();
+    expect(box().disabled).toBe(true);
+    expect(screen.getByTestId('conv-composer-status').textContent).toContain('who this device is');
+  });
+
+  // Rule 1 of `access.ts`: a standalone desktop IS the fleet, so every row it
+  // holds is its own — no `my_grants`, no person id, nothing to wait for.
+  it('standalone is untouched even by a row that names another owner', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    render(ConversationPanel, { session: session({ owner_person_id: 99 }), visible: true });
+    await settle();
+    expect(box().disabled).toBe(false);
+    expect(attachBtn().disabled).toBe(false);
+    await fireEvent.input(box(), { target: { value: 'ship it' } });
+    await fireEvent.click(sendBtn());
+    for (let i = 0; i < 3; i++) await settle();
+    expect(mockedSend).toHaveBeenCalledTimes(1);
+  });
+
+  // Staging a file reads THIS machine's disk: a blinking hub link is no reason
+  // to refuse it, and the tray is what a reconnect then sends.
+  it('an offline hub link stops the send but not the tray', async () => {
+    hubStatus.set(REMOTE);
+    hubConnection.set({ state: 'offline', attempt: 2, retry_in_secs: 5, reason: 'socket closed' });
+    myPersonId.set(3);
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session({ owner_person_id: 3 }), visible: true });
+    await settle();
+    expect(box().disabled).toBe(false);
+    expect(attachBtn().disabled).toBe(false);
+    await fireEvent.input(box(), { target: { value: 'ship it' } });
+    expect(sendBtn().disabled).toBe(true);
+    await fireEvent.click(sendBtn());
+    await settle();
+    expect(mockedSend).not.toHaveBeenCalled();
+  });
+
+  // ── the rest of the write controls, which stayed live after F2 ──────────
+  //
+  // `SessionRowItem` has hidden this same card when `send_prompt` is blocked
+  // since F2; this panel rendered it regardless, so the two surfaces disagreed
+  // about one control. Every option in it is a key press into the owner's
+  // pane.
+  const DIALOG: NonNullable<SessionRow['pending_input']> = {
+    kind: 'permission',
+    question: 'Do you want to proceed?',
+    options: [
+      { n: 1, label: 'Yes', selected: true },
+      { n: 2, label: 'No', selected: false },
+    ],
+  };
+
+  // Gap plan G4.2 (Watch board): a Read grantee sees the question, read
+  // only, with a line saying whose it is to answer.
+  it('a watch grantee sees the answer card read-only, with whose question it is', async () => {
+    await renderShared('watch', { claude_status: 'blocked', pending_input: DIALOG });
+    expect(screen.getByTestId('answer-card')).toBeTruthy();
+    const options = screen.getAllByTestId('answer-option') as HTMLButtonElement[];
+    expect(options).toHaveLength(2);
+    for (const o of options) expect(o.disabled).toBe(true);
+    expect(screen.getByTestId('answer-readonly').textContent).toContain(
+      'You can read this session. The question above is',
+    );
+    expect(screen.getByTestId('answer-readonly').textContent).toContain('with Answer you could reply here');
+    expect(screen.queryByTestId('answer-open-terminal')).toBeNull();
+  });
+
+  it('an answer grantee can press the choices, and gets no read-only line', async () => {
+    await renderShared('answer', { claude_status: 'blocked', pending_input: DIALOG });
+    const options = screen.getAllByTestId('answer-option') as HTMLButtonElement[];
+    expect(options).toHaveLength(2);
+    for (const o of options) expect(o.disabled).toBe(false);
+    expect(screen.queryByTestId('answer-readonly')).toBeNull();
+  });
+
+  it('the owner keeps the answer card on the same row', async () => {
+    await renderShared(null, {
+      owner_person_id: 3,
+      claude_status: 'blocked',
+      pending_input: DIALOG,
+    });
+    expect(screen.getByTestId('answer-card')).toBeTruthy();
+    expect(screen.getAllByTestId('answer-option')).toHaveLength(2);
+  });
+
+  // Fork / Rewind / Retry are `rewind_conversation`, which spec §4.3 puts in
+  // the `own` tier: each leaves a permanent verbatim copy of the owner's
+  // transcript behind, and a copy outlives the grant that allowed it. So a
+  // DRIVE grantee is barred too — the gate cannot be the composer's.
+  const twoTurns = () =>
+    conv({
+      truncated: false,
+      turns: [
+        { prompt: 'first', at: null, ended_at: null, items: [{ kind: 'text', text: 'reply one' }], prompt_uuid: 'a1' },
+        { prompt: 'second', at: null, ended_at: null, items: [{ kind: 'text', text: 'reply two' }], prompt_uuid: 'a2' },
+      ],
+    });
+
+  async function renderReplies(level: GrantLevel | null, over: Partial<SessionRow> = {}) {
+    hubStatus.set(REMOTE);
+    hubConnection.set({ state: 'connected' });
+    myPersonId.set(3);
+    if (level) myGrants.set(new Map([[1, level]]));
+    mockedConv.mockReturnValue(ok(twoTurns()));
+    render(ConversationPanel, {
+      session: session({ owner_person_id: 7, visibility: 'private', ...over }),
+      visible: true,
+    });
+    await settle();
+  }
+
+  // Fork is offered on every turn; Rewind and Retry only on the second (the
+  // first turn of an untruncated conversation cannot be rewound away). So take
+  // the LAST fork button — the one on the turn that has all three.
+  const forkBtn = () =>
+    screen.getAllByTestId('reply-fork').at(-1) as HTMLButtonElement;
+  const rewindBtn = () => screen.getByTestId('reply-rewind') as HTMLButtonElement;
+  const retryBtn = () => screen.getByTestId('reply-retry') as HTMLButtonElement;
+
+  for (const level of ['watch', 'drive'] as const) {
+    it(`a ${level} grantee cannot fork, rewind or retry — it is the own tier`, async () => {
+      await renderReplies(level);
+      // Two turns, so the second offers all three.
+      expect(forkBtn().disabled).toBe(true);
+      expect(rewindBtn().disabled).toBe(true);
+      expect(retryBtn().disabled).toBe(true);
+      for (const b of [forkBtn(), rewindBtn(), retryBtn()]) {
+        expect(b.getAttribute('title')).toMatch(/only the session’s owner/i);
+      }
+      // And the Fork sheet cannot be opened past the disabled button either.
+      await fireEvent.click(forkBtn());
+      await settle();
+      expect(screen.queryByTestId('fork-sheet')).toBeNull();
+      await fireEvent.click(rewindBtn());
+      await settle();
+      expect(screen.queryByTestId('confirm-ok')).toBeNull();
+      await fireEvent.click(retryBtn());
+      await settle();
+      expect(names()).not.toContain('rewind_conversation');
+    });
+  }
+
+  it('the owner keeps fork, rewind and retry on a paired desktop', async () => {
+    await renderReplies(null, { owner_person_id: 3 });
+    expect(forkBtn().disabled).toBe(false);
+    expect(rewindBtn().disabled).toBe(false);
+    expect(retryBtn().disabled).toBe(false);
+  });
+
+  // ── F2a: the outbox's own Retry ─────────────────────────────────────────
+  //
+  // A different control from the reply Retry above: this one re-sends a FAILED
+  // outgoing message through the outbox, which is `send_prompt`, so it needs
+  // the composer's gate and not the rewind's. It is reachable exactly in the
+  // state the plan names — a drive→watch narrow with a failed message still in
+  // the queue — because the composer being disabled does not empty the queue.
+  const retryOutgoing = () => screen.getByTestId('conv-outgoing-retry') as HTMLButtonElement;
+
+  it('a narrow to watch disables the failed message’s Retry, and Edit/Discard stay', async () => {
+    await renderShared('drive');
+    mockedSend.mockResolvedValue({ ok: false, error: { code: 'E_TMUX', message: "can't find session" } });
+    await fireEvent.input(box(), { target: { value: 'ship it' } });
+    await fireEvent.click(sendBtn());
+    for (let i = 0; i < 3; i++) await settle();
+    // The positive control: a driver may retry their own failed send.
+    expect(retryOutgoing().disabled).toBe(false);
+    expect(mockedSend).toHaveBeenCalledTimes(1);
+
+    // The narrow. No row event, no re-list: only the grant map moved.
+    myGrants.set(new Map([[1, 'watch']]));
+    await settle();
+    expect(retryOutgoing().disabled).toBe(true);
+    expect(retryOutgoing().title).toMatch(/needs drive/i);
+    await fireEvent.click(retryOutgoing());
+    for (let i = 0; i < 3; i++) await settle();
+    expect(mockedSend).toHaveBeenCalledTimes(1);
+
+    // Edit and Discard are this client's own queue, not a write to the owner's
+    // machine, so they stay live: the message has to be takeable back.
+    expect((screen.getByTestId('conv-outgoing-edit') as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByTestId('conv-outgoing-discard') as HTMLButtonElement).disabled).toBe(false);
+    await fireEvent.click(screen.getByTestId('conv-outgoing-discard'));
+    await settle();
+    expect(screen.queryByTestId('conv-outgoing')).toBeNull();
+  });
+
+  /** jsdom lays nothing out, so state the rect the Tauri drop is hit-tested
+   *  against (same shape as the attachments suite's `placeShell`). */
+  function placeShellAt() {
+    const shell = document.querySelector('.composer-shell') as HTMLElement;
+    const r = { left: 100, top: 400, right: 500, bottom: 500, width: 400, height: 100, x: 100, y: 400 };
+    shell.getBoundingClientRect = () => ({ ...r, toJSON: () => r }) as DOMRect;
+    return shell;
+  }
+});
+
+// Review round 13 (step 10.6): a loading conversation shows nothing for the
+// first 400 ms, then a skeleton; no "Loading conversation…" text flashes on
+// every session switch.
+describe('ConversationPanel while the conversation loads (review r13)', () => {
+  it('waits 400 ms, then shows a skeleton', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      mockedConv.mockReturnValue(new Promise(() => {}));
+      render(ConversationPanel, { session: session(), visible: true });
+      await tick();
+      expect(screen.queryByText(/Loading conversation/)).toBeNull();
+      expect(screen.queryByTestId('skeleton')).toBeNull();
+      await vi.advanceTimersByTimeAsync(400);
+      expect(screen.getByTestId('conv-loading')).toBeTruthy();
+      expect(screen.getByTestId('skeleton')).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+// Gap plan G2.7 (on G1.8): Send later from the composer. The draft goes into
+// the session's prompt queue with a time, the box empties, and the toast's
+// Undo takes the queued prompt back.
+describe('ConversationPanel Send later', () => {
+  const mockedInvoke = invoke as unknown as ReturnType<typeof vi.fn>;
+  type InvokeImpl = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+  const baseInvoke = mockedInvoke.getMockImplementation() as unknown as InvokeImpl;
+  beforeEach(() => mockedInvoke.mockClear());
+  afterEach(() => {
+    mockedInvoke.mockImplementation(baseInvoke);
+    clearToasts();
+  });
+
+  function answerQueue() {
+    mockedInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'queue_prompt') return { session_id: 1, delivered: false, queued_id: 12 };
+      if (cmd === 'cancel_queued_prompt') return [];
+      return baseInvoke(cmd, args);
+    });
+  }
+  const queued = () =>
+    mockedInvoke.mock.calls.filter((c) => c[0] === 'queue_prompt').map((c) => (c[1] as { args: Record<string, unknown> }).args);
+
+  it('schedules the draft for tomorrow at nine, empties the box, and Undo takes it back', async () => {
+    answerQueue();
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'Rebase on main and re-run the e2e suite.' } });
+    await fireEvent.click(screen.getByTestId('conv-send-later'));
+    expect((screen.getByTestId('send-later-message') as HTMLTextAreaElement).value).toBe('Rebase on main and re-run the e2e suite.');
+    await fireEvent.click(screen.getByTestId('send-later-tomorrow'));
+    await fireEvent.click(screen.getByTestId('send-later-schedule'));
+    await settle();
+    const nine = new Date();
+    nine.setDate(nine.getDate() + 1);
+    nine.setHours(9, 0, 0, 0);
+    expect(queued()).toEqual([
+      {
+        session_id: 1,
+        prompt: 'Rebase on main and re-run the e2e suite.',
+        not_before: Math.floor(nine.getTime() / 1000),
+        skip_if_archived: true,
+      },
+    ]);
+    expect(screen.queryByTestId('send-later-sheet')).toBeNull();
+    expect(box.value).toBe('');
+    const toast = get(toasts).at(-1)!;
+    expect(toast.message).toMatch(/^Scheduled at \w+ 09:00$/);
+    toast.action!.run();
+    await settle();
+    expect(mockedInvoke).toHaveBeenCalledWith('cancel_queued_prompt', { args: { session_id: 1, id: 12 } });
+  });
+
+  it('When the usage limit resets waits for the account; At… refuses a time that has passed', async () => {
+    answerQueue();
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    await fireEvent.click(screen.getByTestId('conv-send-later'));
+    const schedule = screen.getByTestId('send-later-schedule') as HTMLButtonElement;
+    expect(schedule.disabled).toBe(true);
+    await fireEvent.input(screen.getByTestId('send-later-message'), { target: { value: 'continue' } });
+    await fireEvent.click(screen.getByTestId('send-later-at'));
+    await fireEvent.input(screen.getByLabelText('Send at'), { target: { value: '2001-01-01T09:00' } });
+    expect(schedule.disabled).toBe(true);
+    expect(screen.getByTestId('sheet-why').textContent).toBe('That time has passed. Pick a later one.');
+    await fireEvent.click(screen.getByTestId('send-later-limit'));
+    await fireEvent.click(screen.getByTestId('send-later-skip'));
+    await fireEvent.click(schedule);
+    await settle();
+    expect(queued()).toEqual([{ session_id: 1, prompt: 'continue', until_limit_reset: true }]);
+  });
+
+  it('is off for a watcher, with the reason, and on for a driver', async () => {
+    for (const level of ['watch', 'drive'] as const) {
+      hubStatus.set(REMOTE);
+      hubConnection.set({ state: 'connected' });
+      myPersonId.set(3);
+      myGrants.set(new Map([[1, level]]));
+      mockedConv.mockReturnValue(ok(conv()));
+      const row = session({ owner_person_id: 7, visibility: 'private' });
+      sessions.set([row]);
+      const { unmount } = render(ConversationPanel, { session: row, visible: true });
+      await settle();
+      const later = screen.getByTestId('conv-send-later') as HTMLButtonElement;
+      expect(later.disabled, level).toBe(level === 'watch');
+      if (level === 'watch') expect(later.title).not.toBe('Send later…');
+      unmount();
+    }
+    hubConnection.set({ state: 'standalone' });
   });
 });

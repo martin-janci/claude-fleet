@@ -1,14 +1,18 @@
 <script lang="ts">
+  import ListLoading from './ListLoading.svelte';
   import { untrack } from 'svelte';
   import type { SessionRow } from './sessions';
   import {
     repoChanges,
     repoTree,
+    repoBranchDiff,
     isWorktreeGone,
+    type BranchDiff,
     type ChangedFile,
+    type DiffRange,
     type RepoTree,
   } from './files';
-  import { repoLog, repoCommit, repoBranches, repoCheckout, repoCheckoutCommit, repoCreateBranch, repoDeleteBranch, repoStage, repoUnstage, repoCommitCreate, type Commit, type CommitDetail, type Branch } from './history';
+  import { repoLog, repoCommit, repoBranches, repoCheckout, repoCheckoutCommit, repoDeleteBranch, repoDeleteMergedBranches, repoStage, repoUnstage, repoCommitCreate, repoPush, draftCommitMessage, type Commit, type CommitDetail, type Branch } from './history';
   import type { Result } from './result';
   import { readPref, writePref } from './prefs';
   import { openPathRequest } from './app_views';
@@ -18,14 +22,20 @@
   import CommitGraph from './CommitGraph.svelte';
   import BranchList from './BranchList.svelte';
   import RemoteToolbar from './RemoteToolbar.svelte';
+  import BranchPushBar from './BranchPushBar.svelte';
+  import GoToFile from './GoToFile.svelte';
+  import { matchShortcut } from './shortcuts';
+  import { detectMac } from './terminal_keys';
   import ConfirmDialog from './ConfirmDialog.svelte';
-  import PromptDialog from './PromptDialog.svelte';
-  import { validateBranchName } from './branch-slug';
+  import NewBranchSheet from './NewBranchSheet.svelte';
   import { hubStatus, hubBlock } from './hub';
+  import { pushError } from './toasts';
+  import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
 
   let { session }: { session: SessionRow } = $props();
 
-  // None of the ten git-write commands (checkout, branch create/delete,
+  // None of the eleven git-write commands (checkout, branch create/delete
+  // one or every merged one,
   // stage/unstage, commit, fetch/pull/push) has a hub tool — a remote client
   // must not mutate a worktree a running agent may be mid-edit in
   // (`src-tauri/src/commands/mutate.rs`). One reason, computed once, fans out
@@ -43,6 +53,11 @@
   // When set, the body shows a calm placeholder instead of raw git errors.
   let worktreeGone = $state(false);
   let selectedPath = $state<string | null>(null);
+  // The committed groups under Changed (redesign step 5.6) and the group the
+  // selected row came from; null for a worktree row. A hub or build without
+  // `repo_branch_diff` leaves `branch` null: the flat list, nothing lost.
+  let branch = $state<BranchDiff | null>(null);
+  let selectedRange = $state<DiffRange | null>(null);
   // Line to show for a path opened from the Conversation tab; cleared as
   // soon as the user picks another file.
   let focusLine = $state<number | null>(null);
@@ -68,9 +83,12 @@
     return () => clearTimeout(saveTimer);
   });
 
-  const selectedStatus = $derived(
-    selectedPath ? changes.find((c) => c.path === selectedPath)?.status : undefined,
-  );
+  const selectedStatus = $derived.by(() => {
+    if (!selectedPath) return undefined;
+    const files =
+      selectedRange === 'unpushed' ? branch?.unpushedFiles : selectedRange === 'base' ? branch?.baseFiles : changes;
+    return files?.find((c) => c.path === selectedPath)?.status;
+  });
 
   // Reload from scratch whenever the selected session changes. The panel is
   // remounted on each entry into files mode, so this also covers first load.
@@ -84,6 +102,8 @@
     tree = null;
     treeLoaded = false;
     selectedPath = null;
+    selectedRange = null;
+    branch = null;
     focusLine = null;
     commits = [];
     historyLoaded = false;
@@ -104,6 +124,7 @@
       mode = 'tree';
       if (!treeLoaded) void loadTree();
       selectedPath = req.path;
+      selectedRange = null;
       focusLine = req.line;
     });
   });
@@ -136,6 +157,16 @@
     loading = false;
     if (r.ok) changes = r.value;
     else applyFailure(r);
+    if (r.ok) void loadBranch(sid);
+  }
+
+  async function loadBranch(sid: number): Promise<void> {
+    const r = await repoBranchDiff(sid);
+    if (sid !== session.id) return;
+    // A failure only hides the groups: the worktree list above already
+    // says what is wrong with the repo, and an older hub has no such tool.
+    branch = r.ok ? r.value : null;
+    if (selectedRange && !branch) selectedRange = null;
   }
 
   async function loadTree(): Promise<void> {
@@ -176,11 +207,11 @@
     const sid = session.id;
     const r = await repoCommit(sid, hash);
     if (sid !== session.id) return;
-    if (r.ok) { openCommit = r.value; selectedPath = r.value.files[0]?.path ?? null; focusLine = null; }
+    if (r.ok) { openCommit = r.value; selectedPath = r.value.files[0]?.path ?? null; selectedRange = null; focusLine = null; }
     else applyFailure(r);
   }
 
-  function backToGraph(): void { openCommit = null; selectedPath = null; focusLine = null; }
+  function backToGraph(): void { openCommit = null; selectedPath = null; selectedRange = null; focusLine = null; }
 
   async function loadBranches(): Promise<void> {
     const sid = session.id;
@@ -218,11 +249,9 @@
     | { kind: 'checkout-branch'; name: string }
     | { kind: 'checkout-commit'; hash: string }
     | { kind: 'delete-branch'; name: string }
+    | { kind: 'delete-merged'; names: string[]; remotes: string[] }
     | { kind: 'new-branch'; startPoint: string | null };
   let dialog = $state<FilesDialog | null>(null);
-  // "Check out the new branch now?" — a checkbox inside the prompt instead
-  // of a second confirm box.
-  let newBranchCheckout = $state(true);
 
   function closeDialog(): void {
     dialog = null;
@@ -246,18 +275,41 @@
     void runAction(repoDeleteBranch(session.id, name, false), () => { loadBranches(); historyLoaded = false; });
   }
 
+  // What the last "Delete merged" kept, said once under the toolbar: a
+  // branch that gained a commit since the list was read, or one checked out
+  // in another worktree, is kept rather than lost.
+  let branchNotice = $state<string | null>(null);
+
+  function confirmDeleteMerged(names: string[], remotes: string[] = []): void {
+    dialog = { kind: 'delete-merged', names, remotes };
+  }
+
+  async function doDeleteMerged(names: string[], remotes: string[]): Promise<void> {
+    closeDialog();
+    branchNotice = null;
+    const r = await repoDeleteMergedBranches(session.id, names, remotes);
+    if (!r.ok) {
+      applyFailure(r);
+      return;
+    }
+    const { deleted, kept } = r.value;
+    branchNotice = kept.length
+      ? `Deleted ${deleted.length}; kept ${kept.join(', ')} (no longer merged, or checked out).`
+      : null;
+    void loadBranches();
+    historyLoaded = false;
+  }
+
   function promptCreateBranch(startPoint: string | null): void {
-    newBranchCheckout = true;
     dialog = { kind: 'new-branch', startPoint };
   }
 
-  function doCreateBranch(name: string, startPoint: string | null): void {
-    const checkout = newBranchCheckout;
+  // The sheet made the branch (it keeps its own input on a failure).
+  function branchCreated(): void {
     closeDialog();
-    void runAction(
-      repoCreateBranch(session.id, name, { startPoint, checkout }),
-      () => { loadBranches(); if (mode === 'history') loadHistory(); else historyLoaded = false; },
-    );
+    void loadBranches();
+    if (mode === 'history') void loadHistory();
+    else historyLoaded = false;
   }
 
   function stageToggle(path: string, staged: boolean): void {
@@ -265,16 +317,36 @@
     void runAction(p, () => loadChanges());
   }
 
-  function commitStaged(message: string): void {
-    void runAction(repoCommitCreate(session.id, message), () => { loadChanges(); historyLoaded = false; reloadKey++; });
+  // The commit form (gap plan G2.7): commit or amend, then push when asked.
+  // A failed push after a good commit says the commit is made, so nobody
+  // commits it twice.
+  async function commitStaged(message: string, opts: { amend: boolean; push: boolean }): Promise<void> {
+    const sid = session.id;
+    const firstPush = branch?.upstream === null;
+    const r = await repoCommitCreate(sid, message, opts.amend);
+    if (sid !== session.id) return;
+    if (!r.ok) {
+      applyFailure(r);
+      return;
+    }
+    if (opts.push) {
+      const p = await repoPush(sid, firstPush);
+      if (sid !== session.id) return;
+      if (!p.ok) pushError(p.error, `${opts.amend ? 'Amended' : 'Committed'}; the push failed`);
+    }
+    void loadChanges();
+    historyLoaded = false;
+    reloadKey++;
   }
 
   function onMode(m: typeof mode): void {
     mode = m;
     focusLine = null;
+    selectedRange = null;
     error = null;
     worktreeGone = false;
     openCommit = null;
+    branchNotice = null;
     if (m === 'tree' && !treeLoaded) void loadTree();
     if (m === 'history' && !historyLoaded) void loadHistory();
     if (m === 'branches') void loadBranches();
@@ -290,13 +362,44 @@
 
   function onSelect(path: string): void {
     selectedPath = path;
+    selectedRange = null;
+    focusLine = null;
+  }
+
+  function onSelectRange(path: string, range: DiffRange): void {
+    selectedPath = path;
+    selectedRange = range;
+    focusLine = null;
+  }
+
+  // Go to file (⌥⌘P / Ctrl+Alt+P): the panel only exists on the Files tab,
+  // so the chord does nothing anywhere else. The picker opens at once and
+  // fills when the tree arrives.
+  const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
+  let goToOpen = $state(false);
+  function onWindowKeydown(e: KeyboardEvent): void {
+    if (goToOpen || e.defaultPrevented || worktreeGone) return;
+    if (matchShortcut('global', e, isMac) !== 'go-to-file') return;
+    e.preventDefault();
+    if (!treeLoaded) void loadTree();
+    goToOpen = true;
+  }
+  function goToFile(path: string): void {
+    goToOpen = false;
+    if (mode !== 'tree') onMode('tree');
+    selectedPath = path;
+    selectedRange = null;
     focusLine = null;
   }
 
   function onResize(delta: number): void {
     listPx = Math.max(160, Math.min(560, listPx + delta));
   }
+  /** Writing help's "Draft commit messages" (G4.6), off by default. */
+  const draftsCommits = $derived(settingBool($fleetSettings, SETTING_KEYS.workDraftCommitMessages));
 </script>
+
+<svelte:window onkeydown={onWindowKeydown} />
 
 <div class="panel-wrap">
   <!-- Shared mode toggle header, always visible -->
@@ -327,7 +430,7 @@
       </div>
       <div class="hscroll">
         {#if loading && commits.length === 0}
-          <p class="hint">Loading…</p>
+          <ListLoading />
         {:else if error}
           <p class="hint err">{error}</p>
         {:else}
@@ -350,6 +453,9 @@
       <div class="hbar hbar-row">
         <RemoteToolbar {session} ondone={onRefresh} {writeBlocked} />
       </div>
+      {#if branchNotice}
+        <p class="branch-notice" data-testid="delete-merged-notice">{branchNotice}</p>
+      {/if}
       <div class="branch-scroll">
         <BranchList
           {branches}
@@ -358,6 +464,8 @@
           onCheckout={(n) => confirmCheckout(n)}
           onDelete={(n) => confirmDeleteBranch(n)}
           onNew={() => promptCreateBranch(null)}
+          onDeleteMerged={(names) => confirmDeleteMerged(names)}
+          onDeleteMergedRemotes={(names) => confirmDeleteMerged([], names)}
           {writeBlocked}
         />
       </div>
@@ -381,16 +489,47 @@
             {onSelect}
           />
         {:else}
-          <FileList {mode} {changes} {tree} {loading} {error} {selectedPath} {onSelect} enableStaging={true} onStageToggle={stageToggle} onCommit={commitStaged} {writeBlocked} />
+          <FileList
+            {mode}
+            {changes}
+            {tree}
+            {loading}
+            {error}
+            {selectedPath}
+            {onSelect}
+            enableStaging={true}
+            onStageToggle={stageToggle}
+            onCommit={(m, o) => void commitStaged(m, o)}
+            draftCommit={draftsCommits ? () => draftCommitMessage(session.id) : undefined}
+            {writeBlocked}
+            branch={mode === 'changes' ? branch : null}
+            {selectedRange}
+            {onSelectRange}
+          />
+          {#if mode === 'changes' && branch}
+            <BranchPushBar {session} {branch} ondone={onRefresh} {writeBlocked} />
+          {/if}
         {/if}
       </div>
       <Resizer id="files-list" onresize={onResize} />
       <div class="viewer-col">
-        <FileViewer {session} path={selectedPath} status={selectedStatus} {reloadKey} commit={openCommit?.hash ?? null} {focusLine} />
+        <FileViewer
+          {session}
+          path={selectedPath}
+          status={selectedStatus}
+          {reloadKey}
+          commit={openCommit?.hash ?? null}
+          range={openCommit ? null : selectedRange}
+          {focusLine}
+        />
       </div>
     </div>
   {/if}
 </div>
+
+{#if goToOpen}
+  <GoToFile entries={tree?.entries ?? []} loading={tree === null} onpick={goToFile} onclose={() => (goToOpen = false)} />
+{/if}
 
 {#if dialog?.kind === 'checkout-branch'}
   {@const name = dialog.name}
@@ -429,31 +568,38 @@
   >
     Delete branch <code>{name}</code>?
   </ConfirmDialog>
-{:else if dialog?.kind === 'new-branch'}
-  {@const startPoint = dialog.startPoint}
-  <PromptDialog
-    title="New branch"
-    label="Branch name"
-    placeholder="feature/my-change"
-    confirmLabel="Create"
-    validate={validateBranchName}
-    onsubmit={(name) => doCreateBranch(name, startPoint)}
+{:else if dialog?.kind === 'delete-merged'}
+  {@const names = dialog.names}
+  {@const remotes = dialog.remotes}
+  <ConfirmDialog
+    title={remotes.length ? 'Delete merged remote branches?' : 'Delete merged branches?'}
+    confirmLabel={`Delete ${names.length + remotes.length}`}
+    danger
+    onconfirm={() => void doDeleteMerged(names, remotes)}
     oncancel={closeDialog}
+    confirmTestId="confirm-delete-merged"
   >
-    {#if startPoint}
-      <p class="dlg-hint">Starting from <code>{startPoint.slice(0, 8)}</code>.</p>
+    {#if remotes.length}
+      The base branch already contains {remotes.length === 1 ? 'this remote branch' : `these ${remotes.length} remote branches`},
+      so no commit is lost: <code>{remotes.join(', ')}</code>. Each is fetched and checked again,
+      then deleted on its remote for everyone; local branches stay.
+    {:else}
+      The base branch already contains {names.length === 1 ? 'this local branch' : `these ${names.length} local branches`},
+      so no commit is lost: <code>{names.join(', ')}</code>. Each is checked again before it goes;
+      remote branches stay.
     {/if}
-    <label class="dlg-check">
-      <input type="checkbox" bind:checked={newBranchCheckout} data-testid="new-branch-checkout" />
-      Check out the new branch now
-    </label>
-  </PromptDialog>
+  </ConfirmDialog>
+{:else if dialog?.kind === 'new-branch'}
+  <NewBranchSheet
+    sessionId={session.id}
+    startPoint={dialog.startPoint}
+    ondone={branchCreated}
+    onclose={closeDialog}
+  />
 {/if}
 
 <style>
-  .dlg-hint { margin: 0; font-size: 0.8rem; color: var(--fg-muted); }
-  .dlg-hint code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .dlg-check { display: flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; cursor: pointer; }
+  .branch-notice { margin: 0; padding: 0.3rem 0.7rem; font-size: var(--text-2xs); color: var(--fg-muted); }
   .panel-wrap {
     display: flex;
     flex-direction: column;
@@ -480,17 +626,17 @@
     border: 1px solid var(--border);
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 0.72rem;
+    font-size: var(--text-2xs);
     padding: 0.2rem 0.4rem;
   }
   .modes button:first-child {
-    border-radius: 4px 0 0 4px;
+    border-radius: var(--radius-sm) 0 0 var(--radius-sm);
   }
   .modes button:not(:first-child) {
     border-left: none;
   }
   .modes button:last-child {
-    border-radius: 0 4px 4px 0;
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
   }
   .modes button.active {
     background: color-mix(in srgb, var(--accent) 18%, var(--bg-pane));
@@ -501,10 +647,10 @@
     flex: 0 0 auto;
     background: transparent;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     width: 1.7rem;
     height: 1.6rem;
     padding: 0;
@@ -542,7 +688,7 @@
   }
   .hbar {
     padding: 0.3rem 0.6rem;
-    font-size: 0.78rem;
+    font-size: var(--text-2xs);
     flex: 0 0 auto;
     border-bottom: 1px solid var(--border);
     color: var(--fg-muted);
@@ -570,12 +716,12 @@
   }
   .hint {
     color: var(--fg-muted);
-    font-size: 0.82rem;
+    font-size: var(--text-2xs);
     padding: 0.5rem 0.7rem;
     margin: 0;
   }
   .hint.err {
-    color: #e64a4a;
+    color: var(--danger);
   }
   .gone {
     flex: 1 1 auto;
@@ -589,7 +735,7 @@
   }
   .gone-title {
     color: var(--fg);
-    font-size: 0.9rem;
+    font-size: var(--text-sm);
     font-weight: 600;
     margin: 0;
   }
@@ -604,7 +750,7 @@
     border-top: 1px solid var(--border);
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 0.78rem;
+    font-size: var(--text-2xs);
     padding: 0.4rem 0.7rem;
     text-align: center;
   }
@@ -622,7 +768,7 @@
     border: none;
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 0.72rem;
+    font-size: var(--text-2xs);
     padding: 0;
     margin-bottom: 0.2rem;
   }
@@ -630,14 +776,14 @@
     color: var(--fg);
   }
   .csub {
-    font-size: 0.78rem;
+    font-size: var(--text-2xs);
     color: var(--fg);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .cmeta {
-    font-size: 0.7rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     margin-top: 0.1rem;
   }

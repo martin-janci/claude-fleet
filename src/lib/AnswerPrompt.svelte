@@ -8,18 +8,42 @@
   // instead of answering it.
   //
   // Rendered in two places (the Conversation panel and the sidebar row, the
-  // latter `compact`), which is why the send lives HERE rather than in each
-  // caller: the freshness check below is the whole safety of the feature and
-  // must not be something a second caller can forget.
+  // latter `compact`), which is why the send lives in this card (and, for
+  // the ⌘K Approve command, in `answer_send.ts`, which this card uses too)
+  // rather than in each caller: the freshness check is the whole safety of
+  // the feature and must not be something a second caller can forget.
   //
-  // Answering re-reads the pane first and refuses unless the dialog it is
-  // about to answer is still the dialog on screen. The row is written by the
+  // A multi-select question is answered in two steps, because a digit only
+  // TOGGLES a box there: each choice button toggles (and the card stays up),
+  // then Continue presses `Tab`, which keeps the ticks and moves Claude Code
+  // on — to the next question or to "Review your answers", whose
+  // `1. Submit answers` arrives as an ordinary dialog on this same card.
+  //
+  // Answering re-reads the pane first (`sendAnswer`) and refuses unless the
+  // dialog it is about to answer is still the dialog on screen. The row is written by the
   // 20 s reconcile tick, so without that check a click on a stale card could
   // approve a permission dialog the user never saw — or press a digit into
   // the REPL of a session that has already moved on.
-  import { sessionActivity } from './conversation';
-  import { sendPrompt, type SessionRow } from './sessions';
-  import { answerFingerprint, pendingInputFor, type AnswerOption, type AnswerView } from './pending_input';
+  import { sendAnswer } from './answer_send';
+  import { destination } from './destination';
+  import { matchShortcut } from './shortcuts';
+  import { detectMac, isEditable } from './terminal_keys';
+  import { hubActionBlocked, hubStatus } from './hub';
+  import { hubConnection } from './hub_connection';
+  import { sessionBlocked } from './share';
+  import ProposedBy from './ProposedBy.svelte';
+  import { quickOrder, quickProposal } from './quick_answer';
+  import { untrack } from 'svelte';
+  import type { SessionRow } from './sessions';
+  import QuestionCard from './kit/QuestionCard.svelte';
+  import type { Answer } from './kit/status';
+  import {
+    answerFingerprint,
+    isFreeTextOption,
+    MULTI_CONTINUE_KEY,
+    type AnswerOption,
+    type AnswerView,
+  } from './pending_input';
 
   interface Props {
     session: SessionRow;
@@ -27,9 +51,18 @@
     /** Sidebar density: choices only, no Escape / Open terminal. */
     compact?: boolean;
     onOpenTerminal?: () => void;
+    /** A single choice went through (redesign 5.9): the Conversation moves
+     *  on to the next session that needs you. `label` is the choice. */
+    onAnswered?: (label: string) => void;
+    /** "Answer in your own words…": the dialog is dismissed
+     *  first, then this puts the caret where the words go. */
+    onOwnWords?: () => void;
+    /** Gap plan G4.2: shown under the choices when this person may read the
+     *  session but not answer it ("You can read this session…"). */
+    readOnlyNote?: string;
   }
 
-  const { session, view, compact = false, onOpenTerminal }: Props = $props();
+  const { session, view, compact = false, onOpenTerminal, onAnswered, onOwnWords, readOnlyNote }: Props = $props();
 
   let busy = $state(false);
   let errorMsg = $state<string | null>(null);
@@ -39,6 +72,25 @@
    *  without this its buttons would stay live until the next 20 s tick. */
   let sent = $state<string | null>(null);
 
+  /**
+   * Why this client may not answer (multi-user M1, F2b). Both of this card's
+   * callers hide it when the client may not write to the row — but the card
+   * itself asked neither half, and it is the thing that sends: a key into the
+   * pane is `send_prompt`, `drive` in `share.ts::SESSION_TIER`. The gate
+   * belongs here for the same reason the freshness re-read does (see the
+   * header): this is the one place the send happens, and a second caller must
+   * not be able to forget it. It also closes the window the re-read opens — a
+   * revoke that lands during `await reread()` is seen by the check below it.
+   */
+  const writeBlocked = $derived(
+    hubActionBlocked('send_prompt', $hubStatus, $hubConnection) ?? $sessionBlocked(session, 'answer_dialog'),
+  );
+
+  /** Boxes this card toggled that no reading of the pane shows yet: a toggle
+   *  does not change the question, and the row behind the sidebar's card is
+   *  up to a tick old. Once a reading's ticks change, it is the truth again. */
+  let toggled = $state<ReadonlySet<number>>(new Set());
+
   // A new question is a new card: whatever the last one answered is spent.
   const identity = $derived(answerFingerprint(view));
   $effect(() => {
@@ -47,67 +99,158 @@
     errorMsg = null;
     staleMsg = null;
   });
+  const ticks = $derived(view.options.filter((o) => o.checked).map((o) => o.n).join());
+  $effect(() => {
+    void identity;
+    void ticks;
+    toggled = new Set();
+  });
 
+  const isChecked = (o: AnswerOption) => (o.checked === true) !== toggled.has(o.n);
+
+  // J5 quick answer (redesign step 10.9): Jev's likely option goes first,
+  // never on a permission, a multi-select, a question that names a risky
+  // action or a risky option (quick_answer.ts). The numbers follow the shown
+  // order; each option still sends its own key. "Keep the order" puts them
+  // back for this question.
+  //
+  // Never in `compact` (the sidebar): it has no room for "Proposed by Jev"
+  // and "Keep the order", and a reorder nobody is told about is AI deciding.
+  // Never late: once a question has been drawn in the pane's order, a
+  // proposal that arrives afterwards does not move it — a digit the person
+  // already read as one option must not come to mean another.
+  let keepOrder = $state(false);
+  /** The question this card first drew, and whether it drew it reordered. */
+  let drawn = $state<{ id: string; reordered: boolean } | null>(null);
+  $effect(() => {
+    void identity;
+    keepOrder = false;
+  });
+  const paneOrder = $derived({ shown: view.options, proposed: null, primary: null });
+  const proposedOrder = $derived(
+    view.multi || compact ? paneOrder : quickOrder(view.options, quickProposal(session), view.kind, view.question),
+  );
+  $effect(() => {
+    const id = identity;
+    untrack(() => {
+      if (drawn?.id !== id) drawn = { id, reordered: proposedOrder.proposed !== null };
+    });
+  });
+  const lateProposal = $derived(drawn?.id === identity && !drawn.reordered);
+  const order = $derived(keepOrder || lateProposal ? paneOrder : proposedOrder);
+
+  /** Why a multi-select's boxes cannot be toggled from here right now: with
+   *  the cursor in the free-text row, a digit is typed into that box. */
+  const toggleBlocked = $derived(
+    view.multi && view.options.some((o) => o.selected && isFreeTextOption(o))
+      ? 'The cursor is in the “Type something” box, where a digit would be typed — move it in the terminal'
+      : null,
+  );
   /** An option that changes what Claude asks NEXT time, not just this time.
    *  Claude writes these labels, so this reads them rather than guessing
    *  from the ordinal (which differs between dialog kinds). */
   function isSticky(o: AnswerOption): boolean {
-    return /don'?t ask again|auto[- ]?accept/i.test(o.label);
+    return /don['’]?t ask again|auto[- ]?accept/i.test(o.label);
   }
+
+  /** A multi-select's free-text row: a tick on it answers nothing without
+   *  text, and text is typed in the terminal. */
+  const terminalOnly = (o: AnswerOption) => view.multi && isFreeTextOption(o);
 
   const optionTitle = (o: AnswerOption) =>
     o.key === null
       ? `Option ${o.n} has no single keystroke — answer it in the terminal`
-      : `Press ${o.key}${isSticky(o) ? ' — this also stops Claude asking again' : ''}`;
+      : terminalOnly(o)
+        ? 'Type your own answer in the terminal'
+        : view.multi
+          ? (toggleBlocked ?? `Press ${o.key} — ${isChecked(o) ? 'untick' : 'tick'} it`)
+          : `Press ${o.key}${isSticky(o) ? ' — this also stops Claude asking again' : ''}`;
 
-  /** The pane as it is right now, or `null` when it cannot be read.
-   *
-   *  The reading has to come from the PROBE — `pendingInputFor` falls back to
-   *  the row when handed no probe, and the row is precisely the stale value
-   *  this check exists to distrust. So an absent probe is refused here rather
-   *  than quietly answered from the row. */
-  async function reread(): Promise<{ view: AnswerView | null } | { error: string }> {
-    const r = await sessionActivity(session.id);
-    if (!r.ok) return { error: r.error.message };
-    if (!r.value) return { view: null };
-    const fresh = pendingInputFor({
-      rowStatus: session.claude_status,
-      rowStuck: session.stuck_kind,
-      rowPending: session.pending_input,
-      probe: r.value,
-    });
-    return { view: fresh?.live ? fresh : null };
-  }
-
-  async function press(key: string, label: string) {
-    if (busy) return;
+  /** Re-read the pane, then press `key` only if it still shows this card's
+   *  dialog (`answer_send.ts`). `label` is what the card reports as sent; a
+   *  `null` label (a multi-select toggle) leaves the choices up and runs
+   *  `onSent` instead. */
+  async function press(key: string, label: string | null, onSent?: () => void): Promise<boolean> {
+    if (busy || writeBlocked !== null) return false;
     busy = true;
     errorMsg = null;
     staleMsg = null;
-    const fresh = await reread();
-    if ('error' in fresh) {
-      // Not knowing what is on the pane is not the same as knowing it is
-      // unchanged: without proof, a keystroke is a guess.
-      errorMsg = fresh.error;
-      busy = false;
-      return;
-    }
-    if (fresh.view === null || answerFingerprint(fresh.view) !== answerFingerprint(view)) {
-      staleMsg = fresh.view === null
-        ? 'That dialog is gone — nothing was sent.'
-        : 'The dialog changed — nothing was sent.';
-      busy = false;
-      return;
-    }
-    const r = await sendPrompt(session.host_alias, session.tmux_name, '', { keys: key });
-    if (!r.ok) errorMsg = r.error.message;
-    else sent = label;
+    const out = await sendAnswer(session, view, key);
+    if (out.ok) {
+      if (label !== null) sent = label;
+      else onSent?.();
+    } else if ('stale' in out) staleMsg = out.stale;
+    else if ('error' in out) errorMsg = out.error;
     busy = false;
+    return out.ok;
   }
 
   function choose(o: AnswerOption) {
     if (o.key === null) return;
-    void press(o.key, o.label);
+    if (!view.multi) {
+      void press(o.key, o.label).then((ok) => {
+        if (ok) onAnswered?.(o.label);
+      });
+      return;
+    }
+    if (toggleBlocked !== null || terminalOnly(o)) return;
+    void press(o.key, null, () => {
+      const next = new Set(toggled);
+      if (!next.delete(o.n)) next.add(o.n);
+      toggled = next;
+    });
+  }
+
+  /** What Continue reports: the ticked choices, so "Sent" says what went. */
+  function continueLabel(): string {
+    const ticked = view.options.filter(isChecked).map((o) => o.label);
+    return ticked.length ? ticked.join(', ') : 'Nothing ticked';
+  }
+
+  // 1–9 answer (redesign step 3.8): only the full card in the Conversation,
+  // only while the session view is showing (no overlay over it), and never
+  // while a text field, the terminal or a dialog has the keyboard. The
+  // sidebar's compact cards take no digits: there could be several.
+  const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
+  function onWindowKeydown(e: KeyboardEvent) {
+    if (compact || sent !== null || busy || e.defaultPrevented || $destination !== 'session') return;
+    if (matchShortcut('question-card', e, isMac) !== 'question-card.answer') return;
+    const target = e.target as HTMLElement | null;
+    if (isEditable(target) || target?.dataset?.imeProxy !== undefined || target?.closest?.('dialog')) return;
+    // Reordered, a digit is the shown place; otherwise the pane's number.
+    const o = order.proposed ? order.shown[Number(e.key) - 1] : view.options.find((x) => x.n === Number(e.key));
+    if (!o || o.key === null || writeBlocked !== null) return;
+    e.preventDefault();
+    choose(o);
+  }
+
+  // The one approval card (kit QuestionCard, redesign 5.9).
+  const optionDisabled = (o: AnswerOption) =>
+    busy || writeBlocked !== null || o.key === null || (view.multi && (toggleBlocked !== null || terminalOnly(o)));
+  const answers = $derived<Answer[]>(
+    sent !== null
+      ? []
+      : order.shown.map((o, i) => ({
+          label: o.label,
+          // Reordered by the quick answer, the number is the shown place.
+          kbd: order.proposed ? String(i + 1) : (o.key ?? undefined),
+          primary: order.primary === o || undefined,
+          disabled: optionDisabled(o),
+          title: writeBlocked ?? optionTitle(o),
+          checked: view.multi ? isChecked(o) : undefined,
+          testid: 'answer-option',
+          onselect: () => choose(o),
+        })),
+  );
+  const cardQuestion = $derived(
+    view.question ?? `Claude is waiting for one of these${view.kind === 'permission' ? ' (permission)' : ''}.`,
+  );
+  /** Own words: Escape dismisses the dialog (the re-read guards it like any
+   *  answer), then the caller's composer takes the words. */
+  function ownWords() {
+    void press('Escape', 'Dismissed').then((ok) => {
+      if (ok) onOwnWords?.();
+    });
   }
 
   /** In the sidebar this card sits inside a row that is itself a button:
@@ -119,116 +262,97 @@
   }
 </script>
 
-<div class="answer" class:compact data-testid="answer-card" data-kind={view.kind} role="group"
-  aria-label={view.kind === 'permission' ? 'Permission request' : 'Question from Claude'}>
-  {#if view.question}
-    <p class="question" data-testid="answer-question">{view.question}</p>
-  {:else}
-    <p class="question muted" data-testid="answer-question">
-      Claude is waiting for one of these{view.kind === 'permission' ? ' (permission)' : ''}.
-    </p>
-  {/if}
-  {#if sent !== null}
-    <p class="sent" role="status" data-testid="answer-sent">✓ Sent: {sent} · <button
-        type="button"
-        class="linkish"
-        data-testid="answer-again"
-        title="The dialog is still on screen — the key may not have registered"
-        onclick={(e) => mine(e, () => (sent = null))}>Choose again</button></p>
-  {:else}
-  <div class="options">
-    {#each view.options as o (o.n)}
-      <button
-        type="button"
-        class="btn btn--chip option"
-        class:sticky={isSticky(o)}
-        data-testid="answer-option"
-        data-n={o.n}
-        data-selected={o.selected || undefined}
-        data-sticky={isSticky(o) || undefined}
-        disabled={busy || o.key === null}
-        title={optionTitle(o)}
-        onclick={(e) => mine(e, () => choose(o))}
-      ><span class="ordinal" aria-hidden="true">{o.n}</span><span class="label">{o.label}</span></button>
-    {/each}
-  </div>
-  {#if !compact}
-    <div class="secondary">
-      <button
-        type="button"
-        class="btn btn--chip btn--quiet"
-        data-testid="answer-esc"
-        disabled={busy}
-        title="Dismiss the dialog (Escape)"
-        onclick={(e) => mine(e, () => void press('Escape', 'Dismissed'))}>Esc — dismiss</button>
-      {#if onOpenTerminal}
+<svelte:window onkeydown={onWindowKeydown} />
+
+
+<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+<div class="answer-new" data-testid="answer-card" data-kind={view.kind} data-layout="new" onclick={(e) => e.stopPropagation()}>
+  <QuestionCard
+    question={cardQuestion}
+    detail={view.detail ?? undefined}
+    {answers}
+    {compact}
+    enter={!compact}
+    keys={false}
+    mac={isMac}
+    label={view.kind === 'permission' ? 'Permission request' : 'Question from Claude'}
+    onownwords={onOwnWords && writeBlocked === null && sent === null ? ownWords : undefined}
+  >
+    {#if order.proposed && sent === null && !compact}
+      <ProposedBy
+        proposal={quickProposal(session)}
+        field="quick_answer"
+        changeLabel="Keep the order"
+        testid="answer-proposed"
+        onchange={() => (keepOrder = true)} />
+    {/if}
+    {#if sent !== null}
+      <p class="sent" role="status" data-testid="answer-sent">✓ Sent: {sent} · <button
+          type="button"
+          class="linkish"
+          data-testid="answer-again"
+          title="The dialog is still on screen — the key may not have registered"
+          onclick={(e) => mine(e, () => (sent = null))}>Choose again</button></p>
+    {:else if view.multi}
+      <div class="multi">
         <button
           type="button"
-          class="btn btn--chip btn--quiet"
-          data-testid="answer-open-terminal"
-          onclick={(e) => mine(e, () => onOpenTerminal?.())}>Open terminal</button>
-      {/if}
-    </div>
-  {/if}
-  {/if}
-  {#if staleMsg}<p class="stale" role="status" data-testid="answer-stale">{staleMsg}</p>{/if}
-  {#if errorMsg}<p class="err" role="status" data-testid="answer-error">{errorMsg}</p>{/if}
+          class="btn btn--chip continue"
+          data-testid="answer-continue"
+          disabled={busy || writeBlocked !== null}
+          title={writeBlocked ?? 'Keep these ticks and go on (Tab) — Claude asks you to confirm next'}
+          onclick={(e) => mine(e, () => void press(MULTI_CONTINUE_KEY, continueLabel()))}>Continue →</button>
+        {#if !compact}<span class="hint">Tick every answer that applies, then continue.</span>{/if}
+      </div>
+    {/if}
+    {#if !compact && sent === null && (onOpenTerminal || !onOwnWords)}
+      <div class="secondary">
+        {#if !onOwnWords}
+          <button
+            type="button"
+            class="btn btn--chip btn--quiet"
+            data-testid="answer-esc"
+            disabled={busy || writeBlocked !== null}
+            title={writeBlocked ?? 'Dismiss the dialog (Escape)'}
+            onclick={(e) => mine(e, () => void press('Escape', 'Dismissed'))}>Esc — dismiss</button>
+        {/if}
+        {#if onOpenTerminal}
+          <button
+            type="button"
+            class="btn btn--chip btn--quiet"
+            data-testid="answer-open-terminal"
+            onclick={(e) => mine(e, () => onOpenTerminal?.())}>Open terminal</button>
+        {/if}
+      </div>
+    {/if}
+    {#if readOnlyNote && writeBlocked !== null}<p class="readonly" data-testid="answer-readonly">{readOnlyNote}</p>{/if}
+    {#if staleMsg}<p class="stale" role="status" data-testid="answer-stale">{staleMsg}</p>{/if}
+    {#if errorMsg}<p class="err" role="status" data-testid="answer-error">{errorMsg}</p>{/if}
+  </QuestionCard>
 </div>
 
 <style>
-  .answer {
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
+  .answer-new {
     margin: 0.35rem 0 0.6rem;
-    padding: 0.5rem 0.75rem;
-    border: 1px solid var(--usage-warn);
-    border-left-width: 3px;
-    border-radius: 6px;
-    background: color-mix(in srgb, var(--usage-warn) 10%, var(--bg-pane));
-    font-size: 0.8rem;
   }
-  .question {
-    margin: 0;
-    font-weight: 600;
-    line-height: 1.35;
+  .answer-new .sent,
+  .answer-new .readonly,
+  .answer-new .stale,
+  .answer-new .err {
+    font-size: var(--text-xs);
   }
-  .question.muted {
-    font-weight: 500;
-    opacity: 0.8;
-  }
-  .options {
+  .multi {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.35rem;
-  }
-  .option {
-    display: inline-flex;
     align-items: center;
-    gap: 0.4rem;
-    max-width: 100%;
+    gap: 0.5rem;
   }
-  .option .label {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .ordinal {
-    flex: none;
-    min-width: 1.15em;
-    padding: 0 0.15em;
-    border-radius: 3px;
-    background: color-mix(in srgb, currentColor 16%, transparent);
-    font-variant-numeric: tabular-nums;
-    text-align: center;
-  }
-  .option[data-selected] {
+  .continue {
     border-color: var(--usage-warn);
+    font-weight: 600;
   }
-  /* The one choice that changes what Claude asks next time reads differently
-     from the ones that only answer today. */
-  .option.sticky .ordinal {
-    background: color-mix(in srgb, var(--usage-warn) 45%, transparent);
+  .hint {
+    opacity: 0.75;
   }
   .sent {
     margin: 0;
@@ -249,28 +373,18 @@
     flex-wrap: wrap;
     gap: 0.35rem;
   }
+  .readonly {
+    margin: 0;
+    line-height: 1.35;
+    color: var(--fg-muted);
+  }
   .stale,
   .err {
     margin: 0;
     line-height: 1.35;
   }
   .err {
-    color: var(--danger, #e64a4a);
+    color: var(--danger);
   }
 
-  /* Sidebar density: the choices are the whole point there. */
-  .answer.compact {
-    gap: 0.3rem;
-    margin: 0.2rem 0 0;
-    padding: 0.3rem 0.4rem;
-    font-size: 0.72rem;
-  }
-  .answer.compact .question {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .answer.compact .option .label {
-    max-width: 12rem;
-  }
 </style>

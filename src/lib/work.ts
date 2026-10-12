@@ -9,6 +9,7 @@ import { invokeCmd, type Result } from './result';
 import { acceptCommandRow, sessions, type SessionRow } from './sessions';
 import type { WorkItemRow } from './trackers';
 import { timeAgo } from './session_status';
+import type { ProposalLike } from './ai_proposal';
 
 /** One session ↔ work link (`store::WorkLinkRow`). The snapshot fields are
  *  set once the session has ended. */
@@ -196,14 +197,50 @@ function guards(opts: WorkDecisionGuards): Record<string, unknown> {
 export function linkSessionWork(
   sessionId: number,
   ref: WorkRef,
-  opts: { forceCrossOrg?: boolean } & WorkDecisionGuards = {},
+  opts: { forceCrossOrg?: boolean; ackLive?: boolean } & WorkDecisionGuards = {},
 ): Promise<Result<SessionRow>> {
   return decide('link_session_work', {
     session_id: sessionId,
     ...ref,
     ...(opts.forceCrossOrg ? { force_cross_org: true } : {}),
+    ...(opts.ackLive !== undefined ? { ack_live: opts.ackLive } : {}),
     ...guards(opts),
   });
+}
+
+/** Task → session P-2: move the session from the work of its live link
+ *  `fromLinkId` to `ref` in one step. The old link ends (its conversation
+ *  stays Continue-able on the old task) and `ref` becomes the primary; a
+ *  compare-and-set on the primary the person saw (`expectedPrimary`). */
+export function switchSessionWork(
+  sessionId: number,
+  fromLinkId: number,
+  ref: WorkRef,
+  opts: { expectedPrimary?: number; ackLive?: boolean; forceCrossOrg?: boolean } = {},
+): Promise<Result<SessionRow>> {
+  return decide('switch_session_work', {
+    session_id: sessionId,
+    link_id: fromLinkId,
+    ...ref,
+    ...(opts.expectedPrimary !== undefined ? { expected_primary: opts.expectedPrimary } : {}),
+    ...(opts.ackLive !== undefined ? { ack_live: opts.ackLive } : {}),
+    ...(opts.forceCrossOrg ? { force_cross_org: true } : {}),
+  });
+}
+
+/** One other live session on the task a link or switch named (P-3). Its
+ *  id only when this client may see it. */
+export interface LiveElsewhere {
+  session_id?: number;
+  message: string;
+}
+
+/** The P-3 refusal (`ack_live: false`): the task's other live sessions, or
+ *  null for any other error. */
+export function liveElsewhereOf(e: { code: string; details?: unknown }): LiveElsewhere[] | null {
+  const d = e.details as { live_elsewhere?: unknown } | undefined;
+  if (e.code !== 'E_EXISTS' || !Array.isArray(d?.live_elsewhere)) return null;
+  return (d.live_elsewhere as LiveElsewhere[]).filter((l) => typeof l?.message === 'string');
 }
 
 /** Work graph M5: the refusal to link work of one org to a session of
@@ -270,8 +307,35 @@ export async function setWorkProjectTrust(projectId: number, on: boolean): Promi
   return r.ok ? { ok: true, value: r.value?.trusted ?? [] } : r;
 }
 
+/** The rule a decision-model suggestion carries (J1 `work_link`, redesign
+ *  6.8): it keeps it after a person decides, when its source becomes theirs. */
+export const JEV_RULE = 'R12';
+
+/** Who proposed a link, when the decision model did (J1, rule R12): the
+ *  desktop's mirror of `service::work::view::proposer_of`, with the
+ *  confidence its last `jev` evidence note holds (`82%`). Null for a
+ *  rule's own reading. A J1 answer only becomes a link in assist mode;
+ *  shadow records it and writes nothing, so nothing here shows it. */
+export function linkProposal(
+  l: Pick<WorkLink, 'rule' | 'evidence' | 'ref_key' | 'item_id'>,
+): ProposalLike | null {
+  if (l.rule !== JEV_RULE) return null;
+  let confidence: number | null = null;
+  for (const e of l.evidence ?? []) {
+    if (e.signal !== 'jev' || !e.note) continue;
+    const n = Number.parseInt(e.note.replace(/%$/, ''), 10);
+    if (Number.isFinite(n)) confidence = n;
+  }
+  return {
+    value: l.ref_key ?? (l.item_id != null ? `item ${l.item_id}` : 'work'),
+    source: 'jev',
+    reason: 'from the first prompt',
+    confidence_pct: confidence,
+  };
+}
+
 /** Link sources detection writes; a confirmed link with one is "auto". */
-export const AUTO_SOURCES: readonly string[] = ['branch', 'pr', 'trailer', 'url', 'prompt', 'agent_inferred'];
+export const AUTO_SOURCES: readonly string[] = ['branch', 'pr', 'trailer', 'url', 'prompt', 'agent_inferred', 'jev'];
 
 /** A confirmed link detection made without a person (shown with a dot and
  *  offered for Undo). */
@@ -286,6 +350,7 @@ const SOURCE_LABEL: Record<string, string> = {
   url: 'ticket URL',
   prompt: 'prompt',
   agent_inferred: "Claude's guess when asked",
+  jev: 'proposed by Jev',
   manual: 'linked by you',
   started: 'started for it',
   agent: 'declared by Claude',
@@ -328,6 +393,8 @@ export function describeEvidence(e: WorkEvidence): string {
       return `mentioned ${e.text} in a prompt at ${clock(e.at)}${note}${rule}`;
     case 'agent_inferred':
       return `Claude named ${e.text} when asked at ${clock(e.at)}${rule}`;
+    case 'jev':
+      return `Jev proposed ${e.text} from the first prompt at ${clock(e.at)}${note}${rule}`;
     default:
       return `${e.signal}: ${e.text}${rule}`;
   }
@@ -339,6 +406,8 @@ export function workWhy(w: { source: string; state?: string; rule?: string | nul
   const rule = w.rule ? ` · rule ${w.rule}` : '';
   // The classification nudge's answer (M4.6) is Claude's, not a signal's.
   if (w.source === 'agent_inferred') return `${w.state === 'suggested' ? 'suggested' : 'named'} by Claude when asked${rule}`;
+  // The decision model's answer (J1, redesign 6.8) is Jev's, not a signal's.
+  if (w.source === 'jev' || w.rule === JEV_RULE) return `proposed by Jev from the first prompt${rule}`;
   return AUTO_SOURCES.includes(w.source)
     ? `${what} ${sourceLabel(w.source)}${rule}`
     : `${sourceLabel(w.source)}${rule}`;
@@ -416,6 +485,24 @@ export function nameSessionWork(
   });
 }
 
+/** The other sessions on `row`'s branch that have no work yet (G7.6, the
+ *  "Also name the N other sessions on this branch" box): the same host and
+ *  checkout (`worktree_id`), not lost. A row with no checkout has none. */
+export function branchMates<R extends Pick<SessionRow, 'id' | 'host_alias' | 'worktree_id' | 'lost_at' | 'work'>>(
+  row: Pick<SessionRow, 'id' | 'host_alias' | 'worktree_id'>,
+  all: readonly R[],
+): R[] {
+  if (row.worktree_id == null) return [];
+  return all.filter(
+    (s) =>
+      s.id !== row.id &&
+      s.host_alias === row.host_alias &&
+      s.worktree_id === row.worktree_id &&
+      s.lost_at == null &&
+      s.work?.item_id == null,
+  );
+}
+
 /** Name one piece of work for several sessions (a group header's "Name
  *  this work…"): the first session names it, the rest link to the new item.
  *  Stops at the first failure; answers the rows it updated. */
@@ -489,10 +576,174 @@ export async function createWorkTask(input: {
   return r;
 }
 
+/** The statuses a person may give a native item (`blocked` is a session's
+ *  state, never an item's). */
+export type WorkItemStatus = 'todo' | 'in_progress' | 'done';
+
+/** A person's status for a native item: final over the derived one
+ *  (sprints design 2026-09-28 §2). A tracker's ticket is refused,
+ *  `E_INVALID`, naming it: its status is its tracker's. */
+export async function setWorkStatus(itemId: number, status: WorkItemStatus): Promise<Result<WorkItemRow>> {
+  const r = await invokeCmd<WorkItemRow>('set_work_status', { args: { item_id: itemId, status } });
+  if (r.ok) bumpWorkChanged();
+  return r;
+}
+
+/** A person's edit of a native item: each field left out stays as it is;
+ *  `notes: ''`, `assignees: []` and `due_at: ''` clear them. A tracker's ticket is
+ *  refused, `E_INVALID`, naming it: its text is its tracker's. */
+export async function editWorkItem(
+  itemId: number,
+  edit: WorkItemEdit,
+): Promise<Result<WorkItemRow>> {
+  const args: Record<string, unknown> = { item_id: itemId };
+  if (edit.title !== undefined) args.title = edit.title.trim();
+  if (edit.notes !== undefined) args.notes = edit.notes;
+  if (edit.assignees !== undefined) args.assignees = edit.assignees;
+  if (edit.due_at !== undefined) args.due_at = edit.due_at;
+  if (edit.epic !== undefined) args.epic = edit.epic;
+  if (edit.priority !== undefined) args.priority = edit.priority;
+  if (edit.labels !== undefined) args.labels = edit.labels;
+  if (edit.estimate !== undefined) args.estimate = edit.estimate;
+  if (edit.estimate_unit !== undefined) args.estimate_unit = edit.estimate_unit;
+  const r = await invokeCmd<WorkItemRow>('edit_work_item', { args });
+  if (r.ok) {
+    if (edit.title !== undefined) patchWorkItemTitle(itemId, r.value.title);
+    bumpWorkChanged();
+  }
+  return r;
+}
+
+/** What a person may change on a native item (`editWorkItem`). */
+export interface WorkItemEdit {
+  title?: string;
+  notes?: string;
+  assignees?: string[];
+  /** `YYYY-MM-DD`; `''` clears. */
+  due_at?: string;
+  /** A top-level task is an epic (sprints design §3). */
+  epic?: boolean;
+  /** `''` clears. */
+  priority?: WorkPriority | '';
+  /** `[]` clears. */
+  labels?: string[];
+  /** 0 to 1000; `0` clears it and its unit. */
+  estimate?: number;
+  estimate_unit?: EstimateUnit;
+}
+
+/** A task's priority, most pressing first (migration 171). */
+export type WorkPriority = 'urgent' | 'high' | 'medium' | 'low';
+export const WORK_PRIORITIES: { value: WorkPriority; label: string }[] = [
+  { value: 'urgent', label: 'Urgent' },
+  { value: 'high', label: 'High' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'low', label: 'Low' },
+];
+/** What an estimate counts. */
+export type EstimateUnit = 'points' | 'hours';
+/** Most labels a task keeps, and the longest one a person types. */
+export const LABELS_MAX = 20;
+export const LABEL_MAX_CHARS = 40;
+/** The largest estimate a person types. */
+export const ESTIMATE_MAX = 1000;
+
+/** A priority as the task detail says it ("High"); `null` for none or one
+ *  this build does not know. */
+export function priorityLabel(p: string | null | undefined): string | null {
+  return WORK_PRIORITIES.find((x) => x.value === p)?.label ?? null;
+}
+
+/** An estimate as the task detail says it: "3 pts", "1 pt", "4 h";
+ *  `null` for none. */
+export function estimateLabel(estimate: number | null | undefined, unit: string | null | undefined): string | null {
+  if (estimate == null || !Number.isFinite(estimate) || estimate <= 0) return null;
+  const n = Number.isInteger(estimate) ? String(estimate) : String(Math.round(estimate * 100) / 100);
+  if (unit === 'hours') return `${n} h`;
+  return `${n} ${estimate === 1 ? 'pt' : 'pts'}`;
+}
+
+/** Labels typed as one line: split on commas, trimmed, empty ones and
+ *  repeats (case-insensitive) dropped, as the backend stores them. */
+export function parseLabels(raw: string): string[] {
+  return parseAssignees(raw);
+}
+
+/** File a local item under an epic or a task (`parentItemId`), or take it
+ *  out to the top (`null`) — sprints design 2026-09-28 §3. Refused
+ *  (`E_INVALID`, naming why) for a tracker's ticket, an epic, an item with
+ *  subtasks of its own or a parent that is itself filed under one, and
+ *  across organisations (`E_FORBIDDEN`). */
+export async function setWorkParent(itemId: number, parentItemId: number | null): Promise<Result<WorkItemRow>> {
+  const parent = parentItemId == null ? '' : `item:${parentItemId}`;
+  const r = await invokeCmd<WorkItemRow>('set_work_parent', { args: { item_id: itemId, parent } });
+  if (r.ok) bumpWorkChanged();
+  return r;
+}
+
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** A due date (`YYYY-MM-DD`) as the Board card says it, against `now`'s
+ *  local calendar day: "Today", "Tomorrow", a weekday within the coming
+ *  week ("Fri"), else the day and month ("Oct 23"). A past date is
+ *  `overdue`. `null` for no date or one that does not parse. */
+export function dueLabel(due: string | null | undefined, now: Date = new Date()): { text: string; overdue: boolean } | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(due ?? '');
+  if (!m) return null;
+  const day = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  if (day.getMonth() !== Number(m[2]) - 1) return null;
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const days = Math.round((day.getTime() - today.getTime()) / 86_400_000);
+  const date = `${MONTHS[day.getMonth()]} ${day.getDate()}`;
+  if (days < 0) return { text: date, overdue: true };
+  if (days === 0) return { text: 'Today', overdue: false };
+  if (days === 1) return { text: 'Tomorrow', overdue: false };
+  if (days < 7) return { text: WEEKDAYS[day.getDay()], overdue: false };
+  return { text: date, overdue: false };
+}
+
+/** The Board card's owner-and-due chip ("You · Fri"): the first assignee
+ *  ("You" when the task is the viewer's), then the due date. `null` when
+ *  the task names neither. */
+export function ownerDueChip(
+  t: { assignees?: string[] | null; mine?: boolean | null; due_at?: string | null },
+  now: Date = new Date(),
+): { text: string; overdue: boolean } | null {
+  const first = t.assignees?.find((a) => a.trim() !== '');
+  const who = t.mine ? 'You' : (first ?? null);
+  const due = dueLabel(t.due_at, now);
+  if (who === null && due === null) return null;
+  const extra = !t.mine && (t.assignees?.length ?? 0) > 1 ? ` +${(t.assignees?.length ?? 1) - 1}` : '';
+  const parts = [who !== null ? `${who}${extra}` : null, due?.text ?? null].filter((x): x is string => x !== null);
+  return { text: parts.join(' · '), overdue: due?.overdue ?? false };
+}
+
+/** Assignees typed as one line: split on commas, trimmed, empty ones and
+ *  repeats (case-insensitive) dropped, as the backend stores them. */
+export function parseAssignees(raw: string): string[] {
+  const out: string[] = [];
+  for (const a of raw.split(',').map((x) => x.trim())) {
+    if (a && !out.some((o) => o.toLowerCase() === a.toLowerCase())) out.push(a);
+  }
+  return out;
+}
+
 /** A person accepts or rejects an agent's proposed subtask. */
 export async function decideWorkProposal(itemId: number, accept: boolean): Promise<Result<WorkItemRow>> {
   const r = await invokeCmd<WorkItemRow>(accept ? 'accept_work_proposal' : 'reject_work_proposal', {
     args: { item_id: itemId },
+  });
+  if (r.ok) bumpWorkChanged();
+  return r;
+}
+
+/** Redesign 6.9: Merge a proposal into the task it duplicates. What hangs
+ *  on the proposal (its session links, its subtasks) moves to `intoItemId`,
+ *  then the proposal closes as rejected. Only ever a person's click. */
+export async function mergeWorkProposal(itemId: number, intoItemId: number): Promise<Result<WorkItemRow>> {
+  const r = await invokeCmd<WorkItemRow>('reject_work_proposal', {
+    args: { item_id: itemId, merge_into: intoItemId },
   });
   if (r.ok) bumpWorkChanged();
   return r;
@@ -624,6 +875,88 @@ export async function workResumePlan(key: string, opts: ResumePlanOpts = {}): Pr
     return { ok: false, error: { code: 'E_UNSUPPORTED', message: RESUME_UNSUPPORTED } };
   }
   return r;
+}
+
+/**
+ * The conversation ids an ended link's snapshot names.
+ *
+ * `snap_claude_ids` is written by SQLite's `json_group_array` over the session's
+ * conversations (migration 046, and `store/work_detect.rs` on every re-snap), so
+ * it is a JSON array of strings on the wire. Anything this build cannot parse
+ * names NOTHING rather than something: the only caller uses the answer to
+ * CONFIRM an identity, so an empty list fails closed.
+ */
+function snapClaudeIds(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const v: unknown = JSON.parse(raw);
+    if (!Array.isArray(v)) return [];
+    return v.filter((x): x is string => typeof x === 'string' && x !== '');
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The session an ended link came from — or `null` when this client cannot
+ * identify it, which is not the same as "there is none".
+ *
+ * Multi-user M1 (F2c). `resume_work` is `share.ts`'s `own` tier: it re-opens a
+ * past session's conversation, and the question "whose?" is about that SOURCE
+ * session. `WorkLink` names no `session_id` (the link rows predate the
+ * question), so the row has to be found from the snapshot it does carry.
+ *
+ * ── Why a name match is not an identity (F2d) ──────────────────────────────
+ *
+ * F2c matched on `snap_host` + `snap_tmux` alone. A tmux name is NOT a session
+ * identity over time: this repo's own reconcile logic treats a lost row's name
+ * as reusable, so `(host, tmux)` can name a row today that merely INHERITED the
+ * pane name from the session the link came from. Resolving to it answers the
+ * access question about the wrong row — and in the direction that matters, since
+ * the inheriting row is typically the one the current person just started, so an
+ * `own` answer would be handed out for somebody else's transcript.
+ *
+ * Two rows can hold one `(host, tmux)` at once as well (a lost row plus the live
+ * one that reused its name), and `find` would silently take whichever came
+ * first in the list.
+ *
+ * So the match has to be CORROBORATED, and the link carries the one thing that
+ * does it: `snap_claude_ids`, the conversation ids the session had when the link
+ * ended. A Claude conversation id is a uuid, so a row whose current
+ * `claude_session_id` is one of them is the same session and not a namesake.
+ * Three refusals, all answering `null`:
+ *
+ *   1. more than one row holds the name — ambiguous, so unidentifiable;
+ *   2. the snapshot names no conversation (an older hub, or a session that
+ *      never ran one) — nothing to corroborate with;
+ *   3. the row's conversation is not among them — either a namesake, or the
+ *      same session long since moved on by a `/clear`.
+ *
+ * (3) is the price: a live session that started a new conversation after the
+ * link ended stops being identifiable from the link, so a paired desktop loses
+ * Resume on it. That is the fail-closed direction and the undo is the backend's
+ * — the plan's T7 handoff asks for the link to carry its session (or its owner)
+ * — not a wider match here.
+ *
+ * `null` is NOT "nothing to check" either: the hub fences rows this client may
+ * not see off the stream, so an unresolvable link is one whose owner we cannot
+ * vouch for. `share.ts::sessionIdActionBlocked` reads it that way and fails
+ * closed on a paired desktop, while answering `null` on a standalone one, where
+ * the master owns every row.
+ */
+export function linkSessionId(
+  link: Pick<WorkLink, 'snap_host' | 'snap_tmux' | 'snap_claude_ids'> | null | undefined,
+  rows: readonly Pick<SessionRow, 'id' | 'host_alias' | 'tmux_name' | 'claude_session_id'>[],
+): number | null {
+  const host = link?.snap_host;
+  const tmux = link?.snap_tmux;
+  if (!host || !tmux) return null;
+  const named = rows.filter((r) => r.host_alias === host && r.tmux_name === tmux);
+  if (named.length !== 1) return null;
+  const row = named[0];
+  const conv = row.claude_session_id;
+  if (!conv) return null;
+  return snapClaudeIds(link?.snap_claude_ids).includes(conv) ? row.id : null;
 }
 
 export interface ResumeWorkArgs {

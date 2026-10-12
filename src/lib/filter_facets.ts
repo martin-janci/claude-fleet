@@ -21,6 +21,7 @@ import {
   HAS_FILTER_LABELS,
   normalizeFilters,
   STATUS_FILTER_LABELS as WORK_STATUS_LABELS,
+  WORK_STAGE_LABELS,
   type WorkTreeFilters,
 } from './work_view';
 
@@ -35,6 +36,7 @@ export interface Facet {
 export type SessionFacetId =
   | 'scope'
   | 'host'
+  | 'agent'
   | 'recency'
   | 'search'
   | 'needs-you'
@@ -50,6 +52,8 @@ export interface SessionFacetInput {
   scopeLabel?: string;
   /** The effective host filter (`all` = none). */
   host: string;
+  /** The agent filter's label (`undefined` = any agent). */
+  agent?: string;
   recency: Recency;
   search: string;
   needsYou: boolean;
@@ -64,6 +68,7 @@ export function sessionFacets(i: SessionFacetInput): (Facet & { id: SessionFacet
   if (i.needsYou) out.push({ id: 'needs-you', label: 'Needs you' });
   if (i.scope !== 'all') out.push({ id: 'scope', label: `Org: ${i.scopeLabel ?? i.scope}` });
   if (i.host !== 'all') out.push({ id: 'host', label: `Host: ${i.host}` });
+  if (i.agent) out.push({ id: 'agent', label: `Agent: ${i.agent}` });
   if (i.recency !== 'all') out.push({ id: 'recency', label: `Last ${i.recency}` });
   const q = i.search.trim();
   if (q) out.push({ id: 'search', label: `Search: “${q}”` });
@@ -102,11 +107,27 @@ export function clearWorkFilterPatch(id: SessionFacetId): Partial<WorkFilters> |
 
 // ── Work view ──
 
-export type WorkFacetId = 'org' | 'tracker' | 'status' | 'mine' | 'has' | 'review' | 'query';
+export type WorkFacetId =
+  | 'org'
+  | 'orgs'
+  | 'tracker'
+  | 'status'
+  | 'stages'
+  | 'status_name'
+  | 'mine'
+  | 'assignee'
+  | 'has'
+  | 'review'
+  | 'iteration'
+  | 'epic'
+  | 'item_type'
+  | 'query';
 
 export interface WorkFacetNames {
   orgName?: (id: number) => string | undefined;
   trackerName?: (id: number) => string | undefined;
+  /** An epic's title by its key or task id ("TK-10 Login"). */
+  epicTitle?: (ref: string) => string | undefined;
 }
 
 export function workFacets(f: WorkTreeFilters, names: WorkFacetNames = {}): (Facet & { id: WorkFacetId })[] {
@@ -115,15 +136,31 @@ export function workFacets(f: WorkTreeFilters, names: WorkFacetNames = {}): (Fac
   if (n.org !== undefined) {
     out.push({ id: 'org', label: `Org: ${n.org === 'none' ? 'Unassigned' : (names.orgName?.(n.org) ?? `#${n.org}`)}` });
   }
+  if (n.orgs) {
+    const each = n.orgs.map((o) => (o === 'none' ? 'Unassigned' : (names.orgName?.(o) ?? `#${o}`)));
+    out.push({ id: 'orgs', label: `Org: ${each.join(' or ')}` });
+  }
   if (n.tracker !== undefined) {
     const t =
       n.tracker === 'local' ? 'Local work' : n.tracker === 'ref' ? 'Bare keys' : (names.trackerName?.(n.tracker) ?? `#${n.tracker}`);
     out.push({ id: 'tracker', label: `Tracker: ${t}` });
   }
   if (n.status !== undefined) out.push({ id: 'status', label: `Status: ${WORK_STATUS_LABELS[n.status]}` });
+  if (n.stages) out.push({ id: 'stages', label: `Status: ${n.stages.map((st) => WORK_STAGE_LABELS[st]).join(' or ')}` });
+  if (n.status_name) out.push({ id: 'status_name', label: `Column: ${n.status_name}` });
   if (n.mine) out.push({ id: 'mine', label: 'Assigned to me' });
+  if (n.assignee) out.push({ id: 'assignee', label: `Assignee: ${n.assignee}` });
   if (n.has !== undefined) out.push({ id: 'has', label: `Sessions: ${HAS_FILTER_LABELS[n.has]}` });
   if (n.review) out.push({ id: 'review', label: 'To review' });
+  if (n.iteration) {
+    const it = n.iteration;
+    out.push({ id: 'iteration', label: it === 'current' ? 'Current sprint' : it === 'none' ? 'No sprint' : `Sprint: ${it}` });
+  }
+  if (n.epic) {
+    const title = names.epicTitle?.(n.epic);
+    out.push({ id: 'epic', label: `Epic: ${title ? `${n.epic} ${title}` : n.epic}` });
+  }
+  if (n.item_type) out.push({ id: 'item_type', label: `Type: ${n.item_type}` });
   if (n.query) out.push({ id: 'query', label: `Search: “${n.query}”` });
   return out;
 }

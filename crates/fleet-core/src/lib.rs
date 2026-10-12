@@ -11,10 +11,13 @@
 #![allow(clippy::double_must_use)]
 
 pub mod agent;
+pub mod agent_adapter;
 pub mod app_version;
 pub mod cancel;
 pub mod claude_agents;
 pub mod claude_cli;
+#[cfg(test)]
+mod desktop_command_tests;
 pub mod events;
 #[cfg(test)]
 mod fleet_e2e_tests;
@@ -31,10 +34,14 @@ mod no_eprintln_tests;
 pub mod pages;
 pub mod proc;
 pub mod projects;
+pub mod relay;
 #[cfg(test)]
 mod repo_files;
 pub mod repo_url;
 pub mod rt;
+#[cfg(test)]
+mod scope_guard_tests;
+pub mod search_text;
 pub mod service;
 pub mod shell;
 pub mod ssh;

@@ -351,7 +351,7 @@ problems=0
 
   echo "---"
   echo
-  echo "A tag that is *meant* to have no release (a withdrawn version) belongs in \`$IGNORE_FILE\`, one tag per line, with the reason in a \`#\` comment — that is the only way to silence a line here, and it leaves the reason in the repository."
+  echo "A tag that is *meant* to have no release (a withdrawn version) belongs in \`$IGNORE_FILE\`, one tag per line, with the reason in a \`#\` comment — that is the only way to silence a missing-release line, and it leaves the reason in the repository. The list does not cover drafts: a stale draft is published, or deleted and its tag listed there."
 } >"$work/report"
 
 cat "$work/report"

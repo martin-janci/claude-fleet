@@ -8,6 +8,7 @@
 // `pub(crate)` for `agent::ws`'s tests, which mint a client token the way the
 // pairing flow does; the public surface stays the `pub use`s below.
 pub(crate) mod auth;
+mod conn;
 #[cfg(test)]
 mod doc_gen;
 pub mod downloads_route;
@@ -16,6 +17,7 @@ pub mod guard;
 pub mod hooks;
 mod listener;
 pub mod metrics;
+pub mod oidc;
 pub mod pairing;
 pub mod report_route;
 pub mod settings;
@@ -26,6 +28,7 @@ mod tests_token_cache;
 mod token_cache;
 mod tools;
 pub mod update_route;
+mod voice_route;
 pub mod wire;
 
 use crate::cancel::CancellationRegistry;
@@ -121,11 +124,17 @@ pub struct McpGuards {
     /// one write path. Like the confirmations it outlives a server restart,
     /// so a code minted before a port change is still good.
     pub pairings: Arc<PendingPairings>,
-    /// Someone can answer a confirmation here (the desktop's dialog). A hub
-    /// has no approver: a call that MUST be confirmed there — the
-    /// operator's starts and kills (work graph M9.7) — is refused outright
-    /// rather than handed a nonce nobody can approve.
+    /// Someone can answer a confirmation here: the desktop's dialog and
+    /// Control's cards, or — on a hub — the owner's paired device through
+    /// `answer_mcp_confirm` (redesign step 9.2). A server built
+    /// [`Self::without_approver`] refuses a call that MUST be confirmed —
+    /// the operator's starts and kills (work graph M9.7) — outright rather
+    /// than handing out a nonce nobody can approve.
     pub approver: bool,
+    /// Single sign-on (`oidc`): pairing a device by signing in with Keycloak
+    /// or another OpenID Connect provider. `None` (the default) leaves
+    /// `/auth/oidc/*` answering 404.
+    pub oidc: Option<Arc<oidc::OidcProvider>>,
 }
 
 impl McpGuards {
@@ -137,7 +146,14 @@ impl McpGuards {
             notify,
             pairings: Arc::new(PendingPairings::new()),
             approver: true,
+            oidc: None,
         }
+    }
+
+    /// The same guards with single sign-on through `oidc`.
+    pub fn with_oidc(mut self, oidc: Option<Arc<oidc::OidcProvider>>) -> Self {
+        self.oidc = oidc;
+        self
     }
 
     /// The same guards for a server with no one to approve a confirmation.
@@ -159,13 +175,24 @@ pub fn generate_token() -> String {
     s
 }
 
-/// A failed bearer from one address is answered once per this interval; a
-/// repeat inside it gets 429 and a `debug` line instead of a `warn`, so a
+/// A failed bearer is always answered 401, but logged at `warn` once per
+/// this interval per address; a repeat inside it is a `debug` line, so a
 /// guessing loop costs the hub a hash-map probe and cannot flood the log.
 /// Keyed like `/pair` (`pairing::limiter_key`): the peer, or the last
-/// `X-Forwarded-For` hop when the peer is a trusted front end. Successful
-/// requests never touch the bucket.
+/// `X-Forwarded-For` hop when the peer is a trusted front end (an IPv6
+/// address by its /64). Successful requests never touch the bucket.
 pub const AUTH_FAIL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The most addresses the failed-bearer limiter tracks at once. Keys live
+/// one [`AUTH_FAIL_INTERVAL`]; past this many, an unseen address is logged
+/// at debug — a trusted front end's forwarding header can name a new
+/// address every request, and must not grow the map without bound.
+pub const AUTH_FAIL_KEYS: usize = 4096;
+
+/// Whatever the addresses, at most one failed-bearer `warn` per this long:
+/// ten lines a second is enough to see an attack in the log, and a flood
+/// spread over many addresses cannot write more.
+pub const AUTH_FAIL_WARN_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// What the auth middleware needs per request: the master token and a way
 /// to read the current per-host tokens (they change on provision/rotate
@@ -182,8 +209,9 @@ struct AuthState {
     /// tests, a store without a read pool — reads the tables through the
     /// writer per request, as before.
     tokens: Option<Arc<TokenCache>>,
-    /// The shared limiter (`McpGuards::rate`), keyed `auth:<address>` for
-    /// failed bearers. See [`AUTH_FAIL_INTERVAL`].
+    /// The failed-bearer limiter, keyed `auth:<address>`: its own, so its
+    /// horizon stays [`AUTH_FAIL_INTERVAL`] whatever interval another bucket
+    /// uses, and a flood never contends with `broadcast_prompt`'s bucket.
     rate: Arc<RateLimiter>,
 }
 
@@ -230,26 +258,34 @@ async fn authorize(
     // Otherwise a sync lock on the writer, released before the next `.await`
     // — never held across one. `active_client_tokens` drops revoked
     // pairings, so a revoked client token simply stops resolving on the next
-    // request.
-    let (host_tokens, client_tokens) = match cached {
+    // request. The hub's personal owner (multi-user M1) is read on the same
+    // pass as the rows, here as in the cache: it decides
+    // `Caller::is_personal_owner`, and a failed read yields `None`, which is
+    // the fail-closed answer (T1) rather than a guess.
+    let rows = match cached {
         Some(rows) => rows,
         None => {
             let s = state
                 .store
                 .lock()
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            (
-                Arc::new(s.list_host_tokens().unwrap_or_default()),
-                Arc::new(s.active_client_tokens().unwrap_or_default()),
-            )
+            token_cache::AuthRows {
+                hosts: Arc::new(s.list_host_tokens().unwrap_or_default()),
+                clients: Arc::new(s.auth_client_tokens().unwrap_or_default()),
+                controls: Arc::new(s.auth_control_tokens().unwrap_or_default()),
+                personal_owner: s.personal_owner_id().unwrap_or_default(),
+            }
         }
     };
-    let caller = match auth::check_request(
+    let personal_owner = rows.personal_owner;
+    let mut caller = match auth::check_request(
         request.headers(),
         &state.master,
-        &host_tokens,
-        &client_tokens,
+        &rows.hosts,
+        &rows.clients,
+        &rows.controls,
         &state.allowed_hosts,
+        personal_owner,
     ) {
         Ok(c) => c,
         // Header missing/unknown on /hook: try the legacy query form. Only
@@ -265,7 +301,7 @@ async fn authorize(
             // No host rows and no client rows are passed: only the master
             // token can satisfy this legacy path.
             query_token(request.uri().query())
-                .and_then(|t| auth::resolve_token(t, &state.master, &[], &[]))
+                .and_then(|t| auth::resolve_token(t, &state.master, &[], &[], personal_owner))
                 .ok_or_else(|| {
                     tracing::warn!("[mcp] rejected /hook request: no valid token");
                     StatusCode::UNAUTHORIZED
@@ -283,11 +319,13 @@ async fn authorize(
             // the interval is still `401` (a client reads 401 as "pair
             // again" and 429 as "the hub is busy, retry" — a revoked desktop
             // must see the first), logged at debug instead of warn.
+            let quiet = |key: &str, every| state.rate.check(key, every).is_err();
             if status == StatusCode::UNAUTHORIZED
-                && state
+                && (state
                     .rate
-                    .check(&format!("auth:{peer}"), AUTH_FAIL_INTERVAL)
+                    .check_capped(&format!("auth:{peer}"), AUTH_FAIL_INTERVAL, AUTH_FAIL_KEYS)
                     .is_err()
+                    || quiet("auth:*", AUTH_FAIL_WARN_EVERY))
             {
                 tracing::debug!(
                     %peer,
@@ -340,6 +378,80 @@ async fn authorize(
             }
         }
     }
+    // A host token's "last used" for the Control API tokens table (Orbit
+    // Fleet 11.4): the same once-a-minute, never-wait stamp as a client's,
+    // which moves no auth epoch (migration 126).
+    if let (None, Some(alias)) = (caller.client.as_ref(), caller.host_alias.as_deref()) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let stamp = |s: &crate::store::Store| {
+            if let Err(e) = s.touch_host_token(alias, now) {
+                tracing::debug!(error = %e.message, "[mcp] could not touch host token");
+            }
+        };
+        match state.tokens.as_ref() {
+            Some(cache) => {
+                if cache.host_touch_due(alias, now) {
+                    match state.store.try_lock() {
+                        Ok(s) => stamp(&s),
+                        Err(_) => cache.host_untouch(alias),
+                    }
+                }
+            }
+            None => {
+                if let Ok(s) = state.store.lock() {
+                    stamp(&s);
+                }
+            }
+        }
+    }
+    // A named token (G2.8) is for a script on the tool surface: `/mcp` and
+    // `/mcp/json` only. `/hook` is Claude Code's own callback, and a stream
+    // (`/events`, the voice relay) outlives the per-request expiry and revoke
+    // checks, so every other route refuses it.
+    if caller.api.is_some() && !matches!(request.uri().path(), "/mcp" | "/mcp/json") {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    // A named token's "last used" (G2.8): the same once-a-minute,
+    // never-wait stamp, which moves no auth epoch (migration 157).
+    if let Some(api) = caller.api.as_ref() {
+        let now = crate::store::now_unix();
+        let stamp = |s: &crate::store::Store| {
+            if let Err(e) = s.touch_control_token(api.id, now) {
+                tracing::debug!(error = %e.message, "[mcp] could not touch a named token");
+            }
+        };
+        match state.tokens.as_ref() {
+            Some(cache) => {
+                if cache.control_touch_due(api.id, now) {
+                    match state.store.try_lock() {
+                        Ok(s) => stamp(&s),
+                        Err(_) => cache.control_untouch(api.id),
+                    }
+                }
+            }
+            None => {
+                if let Ok(s) = state.store.lock() {
+                    stamp(&s);
+                }
+            }
+        }
+    }
+    // The pane proof (multi-user M1, R6-i): `X-Fleet-Pane` carries the
+    // caller's `$TMUX_PANE`, put there by the `claude-fleet` MCP entry's
+    // headers (`service::provision::merge_mcp_entry`). It is read HERE, on
+    // the connection, rather than as an argument on a handful of tools, so
+    // every tool can ask "is this the one row whose pane the caller can
+    // prove it is in".
+    //
+    // `mcp::hooks::pane_header` is called rather than reimplemented: it is
+    // the validator the `/hook` path already uses (`%` + digits, bounded,
+    // rejecting an unexpanded `${TMUX_PANE:-}` literal and an empty value)
+    // and `pane_header_accepts_only_tmux_pane_ids` pins it. Two validators
+    // for one header is how the two answers drift apart.
+    caller.pane = hooks::pane_header(request.headers());
     request.extensions_mut().insert(caller);
     Ok(next.run(request).await)
 }
@@ -387,6 +499,52 @@ async fn healthz() -> impl axum::response::IntoResponse {
     )
 }
 
+/// The largest `/mcp` request body the hub reads. Far above any other tool
+/// call (prompts and clipboard text cap at 64 KiB, a repo file at 512 KiB,
+/// JSON escaping at most doubles them); the one call that needs more is
+/// `work_link { attach }`, a task attachment as base64, so the cap is the
+/// larger of 8 MiB and an attachment at its ceiling on the wire
+/// ([`crate::store::ATTACHMENT_WIRE_BYTES`]).
+pub(crate) const MCP_BODY_MAX: usize = if crate::store::ATTACHMENT_WIRE_BYTES > 8 * 1024 * 1024 {
+    crate::store::ATTACHMENT_WIRE_BYTES
+} else {
+    8 * 1024 * 1024
+};
+
+/// Buffers an `/mcp` request body up to [`MCP_BODY_MAX`] and answers 413
+/// past it, before the MCP service sees the request. A declared
+/// `Content-Length` over the cap is refused without reading a byte.
+async fn limit_mcp_body(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    let too_large = || {
+        (
+            axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+            format!("request body over {MCP_BODY_MAX} bytes\n"),
+        )
+            .into_response()
+    };
+    let declared = req
+        .headers()
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+    if declared.is_some_and(|n| n > MCP_BODY_MAX as u64) {
+        return too_large();
+    }
+    let (parts, body) = req.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, MCP_BODY_MAX).await else {
+        return too_large();
+    };
+    next.run(axum::extract::Request::from_parts(
+        parts,
+        axum::body::Body::from(bytes),
+    ))
+    .await
+}
+
 /// Build the axum app: `/mcp` and `/mcp/json` (rmcp services), `/hook`,
 /// `/report` and `/reports` behind [`authorize`], plus the unauthenticated
 /// `/healthz` liveness and `/pair` exchange routes. Shared by `start` and the
@@ -423,6 +581,11 @@ fn build_app(
     if let Some(json_service) = mcp_json_service {
         mcp_routes = mcp_routes.route("/mcp/json", json_service);
     }
+    // rmcp reads a request body whole, with no limit, and axum's
+    // `DefaultBodyLimit` binds only its own extractors, never a mounted
+    // service; so without this cap one huge POST from any valid token
+    // buffered until the hub ran out of memory.
+    let mcp_routes = mcp_routes.layer(axum::middleware::from_fn(limit_mcp_body));
     let authorized = mcp_routes
         .route("/hook", axum::routing::post(hooks::handle_hook))
         .with_state(hook_state)
@@ -476,6 +639,20 @@ fn build_app(
                 )
                 .with_state(report_state.clone()),
         )
+        // The microphone relay (voice relay F1): a host's recorder reads a
+        // session's audio; a person's device supplies it over a websocket.
+        .merge(
+            axum::Router::new()
+                .route(
+                    "/voice/capture",
+                    axum::routing::get(voice_route::handle_capture),
+                )
+                .route(
+                    "/voice/source",
+                    axum::routing::get(voice_route::handle_source),
+                )
+                .with_state(report_state.clone()),
+        )
         // `/update/check` and `/update/report`: the frozen update wire
         // (update-channel design §6). Behind `authorize` like `/report`, and
         // the one door an `updater` token has.
@@ -489,8 +666,12 @@ fn build_app(
                     "/update/report",
                     axum::routing::post(update_route::handle_report),
                 )
+                .route(
+                    "/update/artifact/{sha256}",
+                    axum::routing::get(update_route::handle_artifact),
+                )
                 .layer(axum::extract::DefaultBodyLimit::max(update_route::BODY_MAX))
-                .with_state(report_state),
+                .with_state(report_state.clone()),
         )
         .layer(axum::middleware::from_fn_with_state(auth_state, authorize));
     // `/healthz` and `/pair` are registered on a SEPARATE router merged after
@@ -509,6 +690,14 @@ fn build_app(
     // what authorizes the exchange.
     axum::Router::new()
         .route("/healthz", axum::routing::get(healthz))
+        // `/update/poke`: the release workflow's "something was published".
+        // Outside `authorize` because GitHub holds no hub token; all it can
+        // cause is a rate-limited re-read of the signed channel
+        // (`update_route::handle_poke`).
+        .route(
+            "/update/poke",
+            axum::routing::post(update_route::handle_poke).with_state(report_state),
+        )
         .route(
             "/pair",
             // GET is the page a camera scan lands on (static, no JavaScript,
@@ -516,7 +705,20 @@ fn build_app(
             // never sends); POST is the exchange itself.
             axum::routing::get(pairing::handle_pair_page)
                 .post(pairing::handle_pair)
-                .with_state(pair_state),
+                .with_state(pair_state.clone()),
+        )
+        // Single sign-on (`oidc`) ends in a pairing code, so it stands where
+        // `/pair` stands and for the same reason: whoever signs in has no
+        // credential yet. What authorizes the exchange is the provider's
+        // ID token, taken straight from its token endpoint; without a
+        // configured provider both answer 404.
+        .route(
+            "/auth/oidc/start",
+            axum::routing::get(oidc::handle_start).with_state(pair_state.clone()),
+        )
+        .route(
+            "/auth/oidc/callback",
+            axum::routing::get(oidc::handle_callback).with_state(pair_state),
         )
         .merge(authorized)
 }
@@ -811,14 +1013,15 @@ pub async fn start_with_listener<A: TlsAcceptor>(
             store: Arc::clone(&store),
             allowed_hosts: Arc::new(allowed_hosts.clone()),
             tokens,
-            rate: Arc::clone(&guards.rate),
+            rate: Arc::new(RateLimiter::new()),
         };
         let pair_state = pairing::PairState::new(
             Arc::clone(&store),
             Arc::clone(&guards.pairings),
             Arc::clone(&guards.rate),
             base_url,
-        );
+        )
+        .with_oidc(guards.oidc.clone());
         // Cloned before `guards` moves into `FleetTools`: the route and the
         // tool router must write and read the same counters.
         let metrics_for_route = Arc::clone(&guards.metrics);
@@ -867,43 +1070,20 @@ pub async fn start_with_listener<A: TlsAcceptor>(
 
         let scheme = if tls.is_some() { "https" } else { "http" };
         tracing::info!("[mcp] control API listening on {scheme}://{addr}/mcp");
-        // `into_make_service_with_connect_info` is what puts the peer address
-        // in the request extensions, which is what `/pair` keys its
-        // per-address attempt budget on.
-        let shutdown_signal = async move {
-            serve_shutdown.cancelled().await;
-        };
-        let result = match tls {
-            // Unchanged: the `TcpListener` goes straight to axum.
-            None => {
-                axum::serve(
-                    listener,
-                    app.into_make_service_with_connect_info::<SocketAddr>(),
-                )
-                .with_graceful_shutdown(shutdown_signal)
-                .await
-            }
+        // `conn::serve` puts the peer address in each request's extensions
+        // (`ConnectInfo`), which is what `/pair` keys its per-address attempt
+        // budget on, and bounds slow and surplus connections.
+        match tls {
+            None => conn::serve(listener, app, serve_shutdown, conn::Limits::default()).await,
             Some(acceptor) => match listener::TlsListener::spawn(listener, acceptor) {
                 Err(e) => {
                     tracing::error!(error = %e, "[mcp] could not take over the listener");
                     return;
                 }
-                // `tap_io` is a no-op here; it is how axum lets a custom
-                // listener keep `SocketAddr` as its connect info (the
-                // `Connected` impl is written against `TapIo`).
                 Ok(tls_listener) => {
-                    use axum::serve::ListenerExt as _;
-                    axum::serve(
-                        tls_listener.tap_io(|_| {}),
-                        app.into_make_service_with_connect_info::<SocketAddr>(),
-                    )
-                    .with_graceful_shutdown(shutdown_signal)
-                    .await
+                    conn::serve(tls_listener, app, serve_shutdown, conn::Limits::default()).await
                 }
             },
-        };
-        if let Err(e) = result {
-            tracing::error!(error = %e, "[mcp] server error");
         }
         tracing::info!("[mcp] control API stopped");
     });
@@ -914,6 +1094,21 @@ pub async fn start_with_listener<A: TlsAcceptor>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pairing code for these tests: the hub's own owner's device, bound
+    /// to no org, with the production default lifetime. Multi-user M1 made
+    /// `mint` take a `MintRequest`, and spelling the struct at every call
+    /// site here would bury what each test is actually about.
+    fn mint_req<'a>(name: &'a str, mode: &'a str, trusted: bool) -> pairing::MintRequest<'a> {
+        pairing::MintRequest {
+            name,
+            mode,
+            trusted,
+            org_id: None,
+            person: Some("owner"),
+            ttl: std::time::Duration::from_secs(600),
+        }
+    }
 
     #[test]
     fn generated_token_is_64_hex_chars_and_unique() {
@@ -954,6 +1149,15 @@ mod tests {
                 .unwrap();
             s.insert_client_token("old", &auth::sha256_hex("revoked-tok"), "full")
                 .unwrap();
+            // A named Control API token (G2.8): /mcp only.
+            s.insert_control_token(&crate::store::NewControlToken {
+                name: "script",
+                token_sha256: &auth::sha256_hex("flt_live_script"),
+                scope: crate::store::ApiScope::Act,
+                hosts: None,
+                expires_at: None,
+            })
+            .unwrap();
             s.revoke_client_token("old").unwrap();
         }
         let hook_state = hooks::HookState {
@@ -979,6 +1183,7 @@ mod tests {
         // one-attempt-per-6s budget would refuse the second one. The budget
         // gets its own app at the end of this test.
         pair_state.attempt_interval = std::time::Duration::ZERO;
+        pair_state.global_limit = usize::MAX;
         let app = build_app(
             metrics::MetricsState {
                 metrics: Arc::new(metrics::Metrics::new()),
@@ -1106,12 +1311,7 @@ mod tests {
 
         // A minted code is redeemed with NO Authorization header and from a
         // Host nobody allowlisted — a phone that scanned a QR knows neither.
-        let minted = pairings.mint(
-            "kiosk",
-            "readonly",
-            false,
-            std::time::Duration::from_secs(600),
-        );
+        let minted = pairings.mint(mint_req("kiosk", "readonly", false));
         let paired = round_trip(addr, &pair_req(&minted.code, "phone.invalid")).await;
         assert!(
             paired.contains("200 OK"),
@@ -1148,7 +1348,7 @@ mod tests {
         );
         // A code minted `--trusted` lands a trusted row: the grant rides on
         // the code, not on anything the phone sends.
-        let vouched = pairings.mint("desk", "full", true, std::time::Duration::from_secs(600));
+        let vouched = pairings.mint(mint_req("desk", "full", true));
         let paired_desk = round_trip(addr, &pair_req(&vouched.code, "phone.invalid")).await;
         assert!(paired_desk.contains("200 OK"), "{paired_desk}");
         assert!(
@@ -1162,7 +1362,87 @@ mod tests {
             assert!(desk.trusted_at.is_some(), "the row is trusted");
             let kiosk = rows.iter().find(|r| r.name == "kiosk").expect("kiosk row");
             assert!(kiosk.trusted_at.is_none(), "the plain pairing is not");
+            // Multi-user M1: both pairings named the hub's own owner, and
+            // both rows came out bound to it.
+            let owner = s.personal_owner_id().unwrap().expect("096 mints one");
+            assert_eq!(desk.person_id, Some(owner));
+            assert_eq!(kiosk.person_id, Some(owner));
         }
+
+        // A code minted for a person this hub has never heard of: the
+        // `people` row is created at REDEMPTION, not at mint, so a code that
+        // is minted and never walked to the phone leaves nothing behind.
+        let colleague = pairings.mint(pairing::MintRequest {
+            person: Some("ada"),
+            ..mint_req("ada-laptop", "full", false)
+        });
+        let _abandoned = pairings.mint(pairing::MintRequest {
+            person: Some("never-redeemed"),
+            ..mint_req("ghost", "full", false)
+        });
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .get_person_by_name("ada")
+                .unwrap()
+                .is_none(),
+            "minting a code must not create a person"
+        );
+        let paired_ada = round_trip(addr, &pair_req(&colleague.code, "phone.invalid")).await;
+        assert!(paired_ada.contains("200 OK"), "{paired_ada}");
+        {
+            let s = store.lock().unwrap();
+            let ada = s
+                .get_person_by_name("ada")
+                .unwrap()
+                .expect("redemption created the person");
+            assert!(!ada.is_personal_owner, "a colleague is not the hub's owner");
+            let row = s
+                .active_client_tokens()
+                .unwrap()
+                .into_iter()
+                .find(|r| r.name == "ada-laptop")
+                .expect("ada-laptop row");
+            assert_eq!(row.person_id, Some(ada.id));
+            assert!(
+                s.get_person_by_name("never-redeemed").unwrap().is_none(),
+                "an abandoned code must leave no orphan person"
+            );
+        }
+
+        // A bind that fails after the insert (the org was removed while the
+        // code waited) rolls the whole redemption back: no live, unbound row
+        // that nobody holds the token for, and the name stays free.
+        let doomed_org = store
+            .lock()
+            .unwrap()
+            .add_org("doomed", None, false)
+            .unwrap()
+            .id;
+        let orphaned = pairings.mint(pairing::MintRequest {
+            org_id: Some(doomed_org),
+            ..mint_req("orphan", "full", false)
+        });
+        assert!(store.lock().unwrap().remove_org(doomed_org).unwrap());
+        let failed = round_trip(addr, &pair_req(&orphaned.code, "phone.invalid")).await;
+        assert!(failed.contains("500"), "{failed}");
+        assert!(
+            !store
+                .lock()
+                .unwrap()
+                .active_client_tokens()
+                .unwrap()
+                .iter()
+                .any(|r| r.name == "orphan"),
+            "a failed redemption must leave no client row"
+        );
+        let retry = pairings.mint(mint_req("orphan", "full", false));
+        let retried = round_trip(addr, &pair_req(&retry.code, "phone.invalid")).await;
+        assert!(
+            retried.contains("200 OK"),
+            "the name stays free:\n{retried}"
+        );
 
         // A camera scan opens `GET /pair`, which must explain what to do
         // rather than answer 405. No secret is in it: the code lives in the
@@ -1188,7 +1468,10 @@ mod tests {
         // Used, never-minted and expired are one and the same answer.
         let reused = round_trip(addr, &pair_req(&minted.code, "127.0.0.1")).await;
         let unknown = round_trip(addr, &pair_req("ZZZZZZZZ", "127.0.0.1")).await;
-        let stale = pairings.mint("late", "full", false, std::time::Duration::from_millis(1));
+        let stale = pairings.mint(pairing::MintRequest {
+            ttl: std::time::Duration::from_millis(1),
+            ..mint_req("late", "full", false)
+        });
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         let expired = round_trip(addr, &pair_req(&stale.code, "127.0.0.1")).await;
         for (what, resp) in [
@@ -1345,6 +1628,30 @@ mod tests {
             mcp_q.contains("401"),
             "query token must not authorize /mcp:\n{mcp_q}"
         );
+        // A named token reaches /mcp, and no other route: not /hook, whose
+        // stop path hands out a session's queued messages, nor a stream that
+        // would outlive its revoke.
+        auth_bucket_refilled().await;
+        let named = round_trip(addr, &post("/mcp", Some("flt_live_script"), None, "{}")).await;
+        assert!(
+            !named.contains("401") && !named.contains("403"),
+            "a named token must authorize /mcp:\n{named}"
+        );
+        let named_hook =
+            round_trip(addr, &post("/hook", Some("flt_live_script"), None, stop)).await;
+        assert!(
+            named_hook.contains("403"),
+            "a named token must not report hook events:\n{named_hook}"
+        );
+        let named_events = round_trip(
+            addr,
+            "GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer flt_live_script\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(
+            named_events.contains("403"),
+            "a named token must not open the event stream:\n{named_events}"
+        );
         // Origin/Host check applies to /hook (DNS-rebinding defense).
         let hook_rebind = round_trip(
             addr,
@@ -1456,12 +1763,19 @@ mod tests {
             None,
             hook_state3,
             auth_state3,
-            pairing::PairState::new(
-                store,
-                Arc::clone(&limited_pairings),
-                Arc::new(RateLimiter::new()),
-                "https://fleet.example.com".to_string(),
-            ),
+            {
+                // The production per-address budget; a hub-wide one of two
+                // attempts a second, so the test can spend it.
+                let mut s = pairing::PairState::new(
+                    store,
+                    Arc::clone(&limited_pairings),
+                    Arc::new(RateLimiter::new()),
+                    "https://fleet.example.com".to_string(),
+                );
+                s.global_limit = 2;
+                s.global_window = std::time::Duration::from_secs(1);
+                s
+            },
             EventsState::disabled(),
             crate::agent::ws::AgentWsState::disabled(),
             report_state3,
@@ -1485,10 +1799,40 @@ mod tests {
             first.contains("404"),
             "the first guess is answered, not throttled:\n{first}"
         );
+        // Guesses from other addresses — fresh forwarded hops behind the
+        // believed loopback front end — each get their own per-address
+        // budget, but share the hub-wide one: minting addresses buys no
+        // extra guesses once it is spent.
+        let forwarded = |xff: &str| {
+            let body = r#"{"code":"YYYYYYYY"}"#;
+            format!(
+                "POST /pair HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Forwarded-For: {xff}\r\n\
+                 Content-Type: application/json\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n{body}",
+                body.len()
+            )
+        };
+        let second = round_trip(addr3, &forwarded("203.0.113.50")).await;
+        assert!(
+            second.contains("404"),
+            "a burst inside the hub-wide budget is answered:\n{second}"
+        );
+        let minted_addr = round_trip(addr3, &forwarded("203.0.113.51")).await;
+        assert!(
+            minted_addr.contains("429"),
+            "a new address past the hub-wide budget must be throttled:\n{minted_addr}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        // The refused attempt spent neither budget: once the window rolls,
+        // the same address is answered at once.
+        let later = round_trip(addr3, &forwarded("203.0.113.51")).await;
+        assert!(
+            later.contains("404"),
+            "past the hub-wide window a new address is answered:\n{later}"
+        );
         // Even a GOOD code is refused inside the window: the budget is spent
         // before the code is looked at.
-        let good =
-            limited_pairings.mint("phone2", "full", false, std::time::Duration::from_secs(600));
+        let good = limited_pairings.mint(mint_req("phone2", "full", false));
         let throttled = round_trip(addr3, &pair_req(&good.code, "127.0.0.1")).await;
         assert!(
             throttled.contains("429"),
@@ -2124,24 +2468,61 @@ mod tests {
             );
             &self.seen
         }
+
+        /// Everything this stream said over `ms` milliseconds. The negative
+        /// assertion [`SseConn::wait_for`] cannot make: "this frame did NOT
+        /// arrive" has no needle to wait for, so the only honest shape is to
+        /// listen for a bounded while and look at what came.
+        async fn read_for(&mut self, ms: u64) -> &str {
+            use tokio::io::AsyncReadExt;
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(ms), async {
+                let mut tmp = [0u8; 4096];
+                loop {
+                    match self.sock.read(&mut tmp).await {
+                        Ok(0) => break,
+                        Ok(n) => self.seen.push_str(&String::from_utf8_lossy(&tmp[..n])),
+                        Err(_) => break,
+                    }
+                }
+            })
+            .await;
+            &self.seen
+        }
     }
 
-    /// A reconnect costs the events missed, not a full re-list.
+    /// **THE REPLAY RULE at the route** (multi-user M1, T9d): a reconnect
+    /// carrying a `Last-Event-ID` is answered `resumed: false` and replayed
+    /// nothing. [`Caller::view_scope`](auth::Caller::view_scope) never
+    /// builds [`ViewScope::internal`], so that is every caller there is —
+    /// the master included, as here.
     ///
-    /// Without this a phone paid 61 335 B and three round trips every time it
-    /// went through a lift, a tunnel or an app switch, because no frame
-    /// carried an `id:` and there was nothing to resume from.
+    /// **This is a deliberate product cost, named rather than hidden.** The
+    /// resume existed because a phone paid 61 335 B and three round trips
+    /// every time it went through a lift, a tunnel or an app switch; it now
+    /// pays that again on every reconnect. The two mechanisms that tried to
+    /// make the ring safe to replay were both unsound (see
+    /// `events_route::Delivery`): judging a frame by the facts it carries
+    /// describes the fleet as it WAS, and judging it against the row holding
+    /// its id now needs a birth marker, which `sessions.created_at` is not —
+    /// it is the remote host's tmux clock. Giving a row a hub-minted
+    /// `born_seq` would let the resume come back; that is an owner decision,
+    /// not something to re-derive here.
+    ///
+    /// What the test still pins: a row frame carries the `id:` a resume
+    /// would name, the `ready` frame says `resumed: false` plainly (which is
+    /// what the desktop bridge re-lists on), and the reconnected stream is
+    /// LIVE — it just starts from now.
     #[tokio::test]
-    async fn a_reconnect_resumes_from_its_last_event_id() {
-        use crate::events::{BroadcastEventBus, EventBus};
+    async fn a_reconnect_is_told_to_re_list_instead_of_being_replayed_to() {
+        use crate::events::{BroadcastEventBus, EventBus, RowChange};
         let bus = Arc::new(BroadcastEventBus::default());
         let addr = serve_with_events(&bus).await;
 
         let mut first = SseConn::open(addr, Some("s3cret"), "").await;
         first.wait_for("event: ready").await;
-        bus.session_killed(1);
-        let seen = first.wait_for("event: session:killed").await.to_string();
-        // Every row frame carries the id a resume names.
+        bus.emit(&RowChange::WorktreeRemoved(1));
+        let seen = first.wait_for("event: worktree:removed").await.to_string();
+        // Every row frame still carries an id: the wire did not change.
         let id = seen
             .lines()
             .find_map(|l| l.strip_prefix("id: "))
@@ -2150,26 +2531,27 @@ mod tests {
             .to_string();
         drop(first);
 
-        // Two changes while nothing is connected: the ring's grace window is
-        // what keeps them replayable.
-        bus.session_killed(2);
-        bus.session_killed(3);
+        // Two changes while nothing is connected. The ring records them —
+        // and will not hand them to this caller.
+        bus.emit(&RowChange::WorktreeRemoved(2));
+        bus.emit(&RowChange::WorktreeRemoved(3));
 
         let mut again = SseConn::open_resuming(addr, Some("s3cret"), "", Some(&id)).await;
         let head = again.wait_for("event: ready").await.to_string();
         assert!(
-            head.contains("\"resumed\":true"),
-            "the ready frame must say the resume was honoured:\n{head}"
+            head.contains("\"resumed\":false"),
+            "the ready frame must tell the client to re-list:\n{head}"
         );
-        let replayed = again.wait_for(r#"data: {"id":3}"#).await.to_string();
-        assert!(
-            replayed.contains(r#"data: {"id":2}"#),
-            "both missed events replay, in order:\n{replayed}"
-        );
-        assert!(
-            !replayed.contains(r#"data: {"id":1}"#),
-            "and nothing the client already had:\n{replayed}"
-        );
+        let quiet = again.read_for(300).await.to_string();
+        for missed in [r#"data: {"id":2}"#, r#"data: {"id":3}"#] {
+            assert!(
+                !quiet.contains(missed),
+                "nothing out of the ring reaches a caller:\n{quiet}"
+            );
+        }
+        // And the stream is live from now on.
+        bus.emit(&RowChange::WorktreeRemoved(4));
+        again.wait_for(r#"data: {"id":4}"#).await;
     }
 
     /// A phone away longer than the ring's grace window must be told to
@@ -2178,14 +2560,15 @@ mod tests {
     /// `ready` said `resumed: true`, and the killed session stayed on screen.
     #[tokio::test]
     async fn a_resume_across_an_unrecorded_gap_is_refused() {
-        use crate::events::{BroadcastEventBus, EventBus};
+        use crate::events::{BroadcastEventBus, EventBus, RowChange};
         let bus = Arc::new(BroadcastEventBus::default());
         let addr = serve_with_events(&bus).await;
 
         let mut first = SseConn::open(addr, Some("s3cret"), "").await;
         first.wait_for("event: ready").await;
-        bus.session_killed(1);
-        let seen = first.wait_for("event: session:killed").await.to_string();
+        // `worktree:removed`, for the reason the test above states.
+        bus.emit(&RowChange::WorktreeRemoved(1));
+        let seen = first.wait_for("event: worktree:removed").await.to_string();
         let id = seen
             .lines()
             .find_map(|l| l.strip_prefix("id: "))
@@ -2203,7 +2586,7 @@ mod tests {
         }
         assert_eq!(bus.receiver_count(), 0);
         bus.expire_grace_for_test();
-        bus.session_killed(2);
+        bus.emit(&RowChange::WorktreeRemoved(2));
 
         let mut again = SseConn::open_resuming(addr, Some("s3cret"), "", Some(&id)).await;
         let head = again.wait_for("event: ready").await.to_string();
@@ -2269,7 +2652,7 @@ mod tests {
     /// whole reason a phone can stop polling.
     #[tokio::test]
     async fn events_streams_changes_emitted_after_subscribing() {
-        use crate::events::{BroadcastEventBus, EventBus};
+        use crate::events::{BroadcastEventBus, EventBus, RowChange};
         let bus = Arc::new(BroadcastEventBus::default());
         let addr = serve_with_events(&bus).await;
 
@@ -2298,22 +2681,25 @@ mod tests {
         );
 
         // Emitted only now, with the subscription already live.
-        bus.session_killed(42);
-        let frame = sse.wait_for("event: session:killed").await.to_string();
+        // `worktree:removed` rather than a synthetic `session:killed`: a
+        // session frame is person-fenced since multi-user M1 (see
+        // `a_reconnect_resumes_from_its_last_event_id`'s note).
+        bus.emit(&RowChange::WorktreeRemoved(42));
+        let frame = sse.wait_for("event: worktree:removed").await.to_string();
         assert!(
             frame.contains(r#"data: {"id":42}"#),
             "the payload must be the frontend's:\n{frame}"
         );
 
-        // `?kinds=host` drops a session change and passes a host one.
+        // `?kinds=host` drops another kind's change and passes a host one.
         let mut filtered = SseConn::open(addr, Some("s3cret"), "?kinds=host").await;
         filtered.wait_for("event: ready").await;
-        bus.session_killed(43);
+        bus.emit(&RowChange::WorktreeRemoved(43));
         bus.host_removed("box");
         let seen = filtered.wait_for("event: host:removed").await.to_string();
         assert!(
-            !seen.contains("session:killed"),
-            "?kinds=host must drop session events:\n{seen}"
+            !seen.contains("worktree:removed"),
+            "?kinds=host must drop other kinds:\n{seen}"
         );
         assert!(
             seen.contains(r#"data: {"alias":"box"}"#),
@@ -2335,6 +2721,387 @@ mod tests {
         );
     }
 
+    // ---- the live stream's person fence (multi-user M1, T9) --------------
+
+    /// Two people, one private session, one device each — the M1 scenario,
+    /// end to end over a real socket.
+    ///
+    /// A unit test on `fence_frame` alone would not have caught the hole T9
+    /// closed: `rescope` was `caller.is_scoped().then(…)`, which is FALSE
+    /// for an unbound paired client (a person's device), so both of its
+    /// consumers sat behind an `if let Some(…)` that never fired for exactly
+    /// the caller M1 fences. Only a stream can say whether a frame arrived.
+    struct TwoPeople {
+        addr: std::net::SocketAddr,
+        store: Arc<Mutex<Store>>,
+        bus: Arc<crate::events::BroadcastEventBus>,
+        session: i64,
+        ada: i64,
+        bob: i64,
+    }
+
+    impl TwoPeople {
+        /// `keepalive` is short so a stream that must END can be seen to end
+        /// without waiting out the production fifteen seconds.
+        async fn new(keepalive: std::time::Duration) -> Self {
+            let bus = Arc::new(crate::events::BroadcastEventBus::default());
+            let store = Store::open_with_bus_in_memory(
+                Arc::clone(&bus) as Arc<dyn crate::events::EventBus>
+            )
+            .unwrap();
+            store.upsert_host("h").unwrap();
+            let ada = store.create_person("ada", None).unwrap().id;
+            let bob = store.create_person("bob", None).unwrap().id;
+            let cleo = store.create_person("cleo", None).unwrap().id;
+            let session = store
+                .upsert_session("s-ada", "h", None, None, 1, 1, "running", None)
+                .unwrap();
+            assert!(store.claim_if_unclaimed(session, Some(ada)).unwrap());
+            for (name, token, person) in [
+                ("phone-ada", "tok-ada", ada),
+                ("phone-bob", "tok-bob", bob),
+                ("phone-cleo", "tok-cleo", cleo),
+            ] {
+                store
+                    .insert_client_token(name, &auth::sha256_hex(token), "full")
+                    .unwrap();
+                store.set_client_person(name, Some(person)).unwrap();
+            }
+            let store = Arc::new(Mutex::new(store));
+            let addr = serve_events_app(
+                &bus,
+                keepalive,
+                CancellationToken::new(),
+                Arc::clone(&store),
+            )
+            .await
+            .0;
+            TwoPeople {
+                addr,
+                store,
+                bus,
+                session,
+                ada,
+                bob,
+            }
+        }
+
+        async fn stream(&self, token: &str) -> SseConn {
+            let mut c = SseConn::open(self.addr, Some(token), "").await;
+            c.wait_for("event: ready").await;
+            c
+        }
+
+        fn row(&self) -> crate::store::SessionRow {
+            let s = self.store.lock().unwrap();
+            s.get_session_by_id(self.session).unwrap().unwrap()
+        }
+    }
+
+    /// The finding, as an assertion: one `GET /events` from a second
+    /// person's own device used to receive every `session:created` /
+    /// `session:updated` frame in the fleet, each carrying a whole
+    /// `SessionRow`.
+    #[tokio::test]
+    async fn a_stream_carries_the_owners_session_and_not_a_strangers() {
+        use crate::events::EventBus;
+        let fx = TwoPeople::new(events_route::KEEPALIVE_INTERVAL).await;
+        let mut owner = fx.stream("tok-ada").await;
+        let mut stranger = fx.stream("tok-cleo").await;
+
+        fx.bus.session_updated(&fx.row());
+        let seen = owner.wait_for("event: session:updated").await.to_string();
+        assert!(
+            seen.contains("s-ada"),
+            "the owner receives their own row, whole:\n{seen}"
+        );
+        let quiet = stranger.read_for(300).await.to_string();
+        assert!(
+            !quiet.contains("session:updated") && !quiet.contains("s-ada"),
+            "a second person's device must receive nothing about it:\n{quiet}"
+        );
+    }
+
+    /// `session:killed` has no row left to look up, so it carries the facts
+    /// — and reaches the owner only.
+    #[tokio::test]
+    async fn a_kill_frame_reaches_the_owner_and_not_a_stranger() {
+        let fx = TwoPeople::new(events_route::KEEPALIVE_INTERVAL).await;
+        let mut owner = fx.stream("tok-ada").await;
+        let mut stranger = fx.stream("tok-cleo").await;
+        {
+            let s = fx.store.lock().unwrap();
+            s.delete_session(fx.session).unwrap();
+        }
+        let seen = owner.wait_for("event: session:killed").await.to_string();
+        assert!(
+            seen.contains(&format!("\"id\":{}", fx.session)),
+            "the owner is told their session is gone:\n{seen}"
+        );
+        let quiet = stranger.read_for(300).await.to_string();
+        assert!(
+            !quiet.contains("session:killed"),
+            "and a stranger is not told that it ever existed:\n{quiet}"
+        );
+    }
+
+    /// Sharing announces itself (a grant mutates no `sessions` column, so
+    /// before T9 it emitted nothing at all), and the announcement goes to
+    /// the two people a share is between.
+    ///
+    /// **The recipient's EXISTING stream ends rather than widening in
+    /// place**, and that is the design, not a shortfall: the stream is
+    /// fenced by the scope it opened under, a scope that moved ENDS it
+    /// (`read_scope` beside `client_is_live`), and the client reconnects and
+    /// re-lists — which repairs its whole picture rather than the one row a
+    /// frame would have carried. The owner's scope did not move, so the
+    /// owner's stream carries both frames; a third person's scope did not
+    /// move either, and carries neither.
+    #[tokio::test]
+    async fn sharing_announces_itself_to_the_owner_and_to_nobody_uninvolved() {
+        let fx = TwoPeople::new(std::time::Duration::from_millis(50)).await;
+        let mut owner = fx.stream("tok-ada").await;
+        let mut recipient = fx.stream("tok-bob").await;
+        let mut stranger = fx.stream("tok-cleo").await;
+
+        {
+            let s = fx.store.lock().unwrap();
+            s.grant_session(
+                fx.session,
+                crate::store::GrantRecipient::Person(fx.bob),
+                crate::store::GRANT_WATCH,
+                fx.ada,
+            )
+            .unwrap();
+        }
+        let seen = owner.wait_for("event: grant:changed").await.to_string();
+        assert!(
+            seen.contains("event: session:updated"),
+            "the row itself goes out too — a bumped `row_version`, the \
+             `announce_org_moves` shape:\n{seen}"
+        );
+        assert!(
+            seen.contains(&format!("\"person_id\":{}", fx.bob)) && seen.contains("\"watch\""),
+            "the grant frame names the person and the level:\n{seen}"
+        );
+
+        // The recipient's stream was opened under a scope that no longer
+        // describes them: it ends, and the reconnect re-lists.
+        let ended = recipient.read_for(400).await.to_string();
+        assert!(
+            ended.contains("\r\n0\r\n\r\n"),
+            "a stream whose caller's scope moved must end:\n{ended}"
+        );
+
+        let quiet = stranger.read_for(300).await.to_string();
+        assert!(
+            !quiet.contains("grant:changed") && !quiet.contains("session:updated"),
+            "a third person hears nothing about somebody else's share:\n{quiet}"
+        );
+        assert!(
+            !quiet.contains("\r\n0\r\n\r\n"),
+            "…and their own stream is not disturbed by it:\n{quiet}"
+        );
+    }
+
+    /// Once shared, the recipient's NEW stream carries the row — and a
+    /// revoke drops that stream within one beat (the ≤15 s bound in
+    /// `docs/hub.md`, which this test asks for in 50 ms).
+    #[tokio::test]
+    async fn a_grantees_stream_carries_the_shared_row_until_it_is_revoked() {
+        use crate::events::EventBus;
+        let fx = TwoPeople::new(std::time::Duration::from_millis(50)).await;
+        {
+            let s = fx.store.lock().unwrap();
+            s.grant_session(
+                fx.session,
+                crate::store::GrantRecipient::Person(fx.bob),
+                crate::store::GRANT_WATCH,
+                fx.ada,
+            )
+            .unwrap();
+        }
+        let mut recipient = fx.stream("tok-bob").await;
+        fx.bus.session_updated(&fx.row());
+        let seen = recipient
+            .wait_for("event: session:updated")
+            .await
+            .to_string();
+        assert!(seen.contains("s-ada"), "the shared row arrives:\n{seen}");
+
+        {
+            let s = fx.store.lock().unwrap();
+            s.revoke_session_grant(fx.session, fx.bob, fx.ada).unwrap();
+        }
+        let ended = recipient.read_for(400).await.to_string();
+        assert!(
+            ended.contains("\r\n0\r\n\r\n"),
+            "a revoked share must drop the stream within one beat:\n{ended}"
+        );
+        // Nothing after the revoke reaches it.
+        fx.bus.session_updated(&fx.row());
+        let after = recipient.read_for(200).await.to_string();
+        let last_frame = after.rfind("event: session:updated").unwrap();
+        assert!(
+            last_frame < after.rfind("\r\n0\r\n\r\n").unwrap(),
+            "no frame after the stream ended:\n{after}"
+        );
+    }
+
+    /// A `task:updated` frame carries the whole `TaskRow` — `prompt`,
+    /// `result`, `error`: the paragraphs the two Claudes wrote. Before T9
+    /// `fence_frame` returned early for every kind that was not `session`,
+    /// so every task in the fleet was broadcast to every open stream.
+    #[tokio::test]
+    async fn a_task_frame_is_fenced_by_the_sessions_it_names() {
+        use crate::events::EventBus;
+        let fx = TwoPeople::new(events_route::KEEPALIVE_INTERVAL).await;
+        let mut owner = fx.stream("tok-ada").await;
+        let mut stranger = fx.stream("tok-cleo").await;
+        // A REAL row: `fence_task_frame` re-reads the task by its id rather
+        // than trusting the payload (T9d), because the fence's own input
+        // (`detached_at`) is `#[serde(skip)]` and never on a frame.
+        let task = {
+            let s = fx.store.lock().unwrap();
+            let t = s
+                .insert_task(
+                    Some(fx.session),
+                    Some(fx.session),
+                    "CONFIDENTIAL-PROMPT",
+                    "abcd1234",
+                )
+                .unwrap();
+            s.finish_task(t.id, "done", Some("CONFIDENTIAL-RESULT"), None)
+                .unwrap()
+                .0
+                .expect("the task is there")
+        };
+        fx.bus.task_updated(&task);
+        let seen = owner.wait_for("event: task:updated").await.to_string();
+        assert!(seen.contains("CONFIDENTIAL-RESULT"), "{seen}");
+        let quiet = stranger.read_for(300).await.to_string();
+        assert!(
+            !quiet.contains("CONFIDENTIAL"),
+            "another person's task must not be broadcast:\n{quiet}"
+        );
+    }
+
+    /// `move:progress` names the source session and the host it is moving
+    /// to. Also never reached before T9.
+    #[tokio::test]
+    async fn a_move_progress_frame_is_fenced_by_its_session() {
+        use crate::events::EventBus;
+        let fx = TwoPeople::new(events_route::KEEPALIVE_INTERVAL).await;
+        let mut owner = fx.stream("tok-ada").await;
+        let mut stranger = fx.stream("tok-cleo").await;
+        fx.bus.move_progress(&crate::events::MoveProgress {
+            session_id: fx.session,
+            to_host: "elsewhere".into(),
+            step: crate::events::MoveStep::Check,
+            index: 1,
+            total: 9,
+            state: crate::events::MoveStepState::Started,
+            detail: None,
+        });
+        owner.wait_for("event: move:progress").await;
+        let quiet = stranger.read_for(300).await.to_string();
+        assert!(
+            !quiet.contains("move:progress") && !quiet.contains("elsewhere"),
+            "another person's move must not be broadcast:\n{quiet}"
+        );
+    }
+
+    /// The replay rule at the route for a PAIRED device, and for both sides
+    /// of a grant (multi-user M1, T9d).
+    ///
+    /// This test used to prove the narrower thing: that a `Last-Event-ID`
+    /// minted under one scope is refused after the scope moves (a revoked
+    /// grant), while an unchanged scope keeps its resume — the
+    /// `scope_fingerprint` folded into the id's generation half. The
+    /// fingerprint is still there and still per-caller
+    /// (`events_route::tests::the_frame_ids_generation_follows_the_callers_scope`), but it is now
+    /// belt-and-braces: no caller is replayed to at all, so the answer is
+    /// `resumed: false` either way and the grantee is not described by a
+    /// frame about the interval it held no grant in — by construction rather
+    /// than by a comparison.
+    #[tokio::test]
+    async fn no_paired_device_is_replayed_to_before_or_after_a_revoke() {
+        use crate::events::EventBus;
+        let fx = TwoPeople::new(std::time::Duration::from_millis(50)).await;
+        {
+            let s = fx.store.lock().unwrap();
+            s.grant_session(
+                fx.session,
+                crate::store::GrantRecipient::Person(fx.bob),
+                crate::store::GRANT_WATCH,
+                fx.ada,
+            )
+            .unwrap();
+        }
+        let mut recipient = fx.stream("tok-bob").await;
+        fx.bus.session_updated(&fx.row());
+        let seen = recipient
+            .wait_for("event: session:updated")
+            .await
+            .to_string();
+        let id = seen
+            .lines()
+            .find_map(|l| l.strip_prefix("id: "))
+            .expect("a row frame carries an id")
+            .trim()
+            .to_string();
+        drop(recipient);
+
+        // The same id, resumed by the same device under an UNCHANGED scope.
+        let mut same = SseConn::open_resuming(fx.addr, Some("tok-bob"), "", Some(&id)).await;
+        let head = same.wait_for("event: ready").await.to_string();
+        assert!(
+            head.contains("\"resumed\":false"),
+            "the ring is nobody's to replay, scope change or not:\n{head}"
+        );
+        drop(same);
+
+        {
+            let s = fx.store.lock().unwrap();
+            s.revoke_session_grant(fx.session, fx.bob, fx.ada).unwrap();
+        }
+        let mut after = SseConn::open_resuming(fx.addr, Some("tok-bob"), "", Some(&id)).await;
+        let head = after.wait_for("event: ready").await.to_string();
+        assert!(
+            head.contains("\"resumed\":false"),
+            "a scope that moved must force a re-list:\n{head}"
+        );
+        // Nothing out of the ring reaches the revoked grantee either — the
+        // half this test was originally written to prove.
+        let quiet = after.read_for(300).await.to_string();
+        assert!(
+            !quiet.contains("event: session:updated"),
+            "a revoked grantee must not be handed the interval it held a \
+             grant in:\n{quiet}"
+        );
+        // The OWNER, whose scope never moved, is told to re-list too: the
+        // rule is the ring, not the scope.
+        let mut owner = SseConn::open(fx.addr, Some("tok-ada"), "").await;
+        owner.wait_for("event: ready").await;
+        fx.bus.session_updated(&fx.row());
+        let seen = owner.wait_for("event: session:updated").await.to_string();
+        let owner_id = seen
+            .lines()
+            .find_map(|l| l.strip_prefix("id: "))
+            .expect("an id")
+            .trim()
+            .to_string();
+        drop(owner);
+        let mut again = SseConn::open_resuming(fx.addr, Some("tok-ada"), "", Some(&owner_id)).await;
+        let head = again.wait_for("event: ready").await.to_string();
+        assert!(
+            head.contains("\"resumed\":false"),
+            "and her stream is live from now, not resumed:\n{head}"
+        );
+        fx.bus.session_updated(&fx.row());
+        again.wait_for("event: session:updated").await;
+    }
+
     /// A subscriber that falls behind the ring is told how much it missed and
     /// the stream ends — the bus never waits for it. The emits below run
     /// without an await, so the server task cannot drain between them.
@@ -2347,12 +3114,18 @@ mod tests {
         sse.wait_for("event: ready").await;
 
         for i in 0..50 {
-            bus.emit(&crate::events::RowChange::SessionKilled(i));
+            bus.emit(&crate::events::RowChange::WorktreeRemoved(i));
         }
         let seen = sse.wait_for("event: lagged").await.to_string();
+        // The FRAME is the signal ("there is a hole, re-list"). The COUNT is
+        // the bus's global lag, so it reaches only the hub's own reader
+        // (multi-user M1, T9e): it is the same fleet-rate oracle the frame
+        // `id:` used to carry, and a sampleable one — open a stream, do not
+        // read it, read the number. The master is not that reader.
         assert!(
-            seen.contains(r#""skipped":"#),
-            "the lagged frame must say how many were missed:\n{seen}"
+            !seen.contains(r#""skipped":"#),
+            "a caller that may not see every frame must not be told how many \
+             it missed:\n{seen}"
         );
         // …and the stream ENDED rather than streaming on with a hole in it:
         // the chunked body is terminated (the socket itself stays up — HTTP
@@ -2361,6 +3134,56 @@ mod tests {
         assert!(
             ended.rfind("event: lagged") < ended.rfind("\r\n0\r\n\r\n"),
             "the lagged frame must be the last one:\n{ended}"
+        );
+    }
+
+    /// **A stream's `id:` counts the frames THIS caller was served, not the
+    /// fleet's** (multi-user M1, T9e).
+    ///
+    /// `frame_id` used to stamp the bus's global `seq` for everybody, so a
+    /// caller that may see one session of fifty watched its ids jump by
+    /// exactly the number of frames the fence had dropped — a live activity
+    /// counter for every private session on the hub. T9b accepted that
+    /// because the global number is the key of the one shared replay ring;
+    /// T9d's replay rule removed the reason, since no such caller is
+    /// replayed to at all and the seq it sends back is never read.
+    ///
+    /// Bob may not see Ada's private session, so the two `session:updated`
+    /// frames below are fenced out of his stream — and his ids must still
+    /// run 1, 2 over the two `worktree:removed` frames he does get.
+    #[tokio::test]
+    async fn a_fenced_out_frame_leaves_no_gap_in_a_callers_ids() {
+        use crate::events::{EventBus, RowChange};
+        let fx = TwoPeople::new(events_route::KEEPALIVE_INTERVAL).await;
+        let mut bob = fx.stream("tok-bob").await;
+
+        // Four frames, alternating: Ada's private row (fenced out of Bob's
+        // stream) and a worktree removal (content-free, so he gets it).
+        for i in 1..=2 {
+            fx.bus.session_updated(&fx.row());
+            fx.bus.emit(&RowChange::WorktreeRemoved(i));
+        }
+        let seen = bob.wait_for(r#"data: {"id":2}"#).await.to_string();
+        assert!(
+            !seen.contains("event: session:updated"),
+            "Ada's row must not reach Bob at all:\n{seen}"
+        );
+        let ids: Vec<String> = seen
+            .lines()
+            .filter_map(|l| l.strip_prefix("id: "))
+            .map(|id| {
+                id.trim()
+                    .rsplit('-')
+                    .next()
+                    .expect("the seq half")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["1".to_string(), "2".to_string()],
+            "the ids must count what Bob was served; a jump here is the \
+             fleet's frame rate on his wire:\n{seen}"
         );
     }
 
@@ -2448,6 +3271,41 @@ mod tests {
             freed.is_ok(),
             "the permit must be released when the stream ends"
         );
+    }
+
+    /// Review r04 K2: a per-host token's stream re-checks its token on every
+    /// beat too. Rotating a host's token, which is how an operator answers a
+    /// stolen one, ends a stream opened with the old token, as `agent/ws.rs`
+    /// already does for an agent connection.
+    #[tokio::test]
+    async fn a_rotated_host_tokens_stream_ends_at_the_next_heartbeat() {
+        use crate::events::BroadcastEventBus;
+        let bus = Arc::new(BroadcastEventBus::default());
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        store
+            .lock()
+            .unwrap()
+            .upsert_host_token("laptop", "host-tok")
+            .unwrap();
+        let (addr, _state) = serve_events_app(
+            &bus,
+            std::time::Duration::from_millis(50),
+            CancellationToken::new(),
+            Arc::clone(&store),
+        )
+        .await;
+
+        // An unrelated beat first: the stream survives while the token holds.
+        let mut sse = SseConn::open(addr, Some("host-tok"), "").await;
+        sse.wait_for("event: ready").await;
+        sse.wait_for(":\n\n").await;
+
+        store
+            .lock()
+            .unwrap()
+            .upsert_host_token("laptop", "rotated-tok")
+            .unwrap();
+        sse.wait_for("\r\n0\r\n\r\n").await;
     }
 
     /// Streams are capped per caller like the long-polling tools: the ninth

@@ -6,8 +6,10 @@
 // banner, and the plain-language consequence copy for the destructive
 // confirms. Everything takes `now` (unix seconds) so tests are deterministic.
 import type { HostRow } from './hosts';
+import type { OfIconName } from './kit/icons';
 import { accountLabel, type AccountRow } from './accounts';
 import type { SessionRow } from './sessions';
+import { fold, foldedIncludes } from './text_fold';
 import type { AccountUsageSnapshot, UsageStatus, UsageWindow } from './account_usage_store';
 import type { HookHealth } from './hook_health';
 import { formatAge } from './hook_health';
@@ -74,16 +76,16 @@ export function groupHostsByAccount(
 
 /** Groups narrowed to hosts matching `query` (alias, ssh alias, account label or email). */
 export function filterGroups(groups: readonly HostGroup[], query: string): HostGroup[] {
-  const q = query.trim().toLowerCase();
+  const q = fold(query.trim());
   if (!q) return [...groups];
   const out: HostGroup[] = [];
   for (const g of groups) {
     const groupHit =
-      g.label.toLowerCase().includes(q) || (g.account?.email ?? '').toLowerCase().includes(q);
+      foldedIncludes(g.label, q) || foldedIncludes(g.account?.email, q);
     const hosts = groupHit
       ? g.hosts
       : g.hosts.filter(
-          (h) => h.alias.toLowerCase().includes(q) || (h.ssh_alias ?? '').toLowerCase().includes(q),
+          (h) => foldedIncludes(h.alias, q) || foldedIncludes(h.ssh_alias, q),
         );
     if (hosts.length > 0) out.push({ ...g, hosts });
   }
@@ -105,7 +107,8 @@ export interface SessionCounts {
   total: number;
   working: number;
   blocked: number;
-  /** `6 ⚡2 ⏸1` (zero parts omitted). */
+  /** `6 · 2 working · 1 needs you` (zero parts omitted): the manual's
+   *  status words, no glyphs. A blocked Claude asks for a permission. */
   text: string;
   title: string;
 }
@@ -122,10 +125,10 @@ export function sessionCounts(alias: string, rows: readonly SessionRow[]): Sessi
     else if (s.claude_status === 'blocked') blocked++;
   }
   const parts = [String(total)];
-  if (working) parts.push(`⚡${working}`);
-  if (blocked) parts.push(`⏸${blocked}`);
-  const title = `${total} session${total === 1 ? '' : 's'}, ${working} working, ${blocked} blocked`;
-  return { total, working, blocked, text: parts.join(' '), title };
+  if (working) parts.push(`${working} working`);
+  if (blocked) parts.push(`${blocked} needs you`);
+  const title = `${total} session${total === 1 ? '' : 's'}, ${working} working, ${blocked} need${blocked === 1 ? 's' : ''} you`;
+  return { total, working, blocked, text: parts.join(' · '), title };
 }
 
 // ── attention ──
@@ -169,21 +172,23 @@ export type AttentionKind =
   | 'hooks_stale'
   | 'provision_warning'
   | 'provision_stale'
+  | 'auth_override'
   | 'disk_low'
   | 'agent_old'
   | 'claude_old';
 
 export interface HostAttention {
   kind: AttentionKind;
-  glyph: string;
+  /** The mark, from the manual's icon set. */
+  icon: OfIconName;
   /** The tooltip explaining the mark. */
   title: string;
 }
 
 /**
  * At most ONE attention mark per host, strongest first: no control-API token
- * (so no hooks either), hooks installed but silent, a home filesystem almost
- * full, a fleet-agent behind the hub, then a Claude Code older than the
+ * (so no hooks either), hooks installed but silent, a credential variable
+ * outranking the host's /login, a home filesystem almost full, a fleet-agent behind the hub, then a Claude Code older than the
  * newest in the fleet. Token-derived marks wait for `tokensLoaded` so a slow
  * token fetch never flashes a false alarm.
  */
@@ -209,20 +214,20 @@ export function hostAttention(args: {
     if (hook.state === 'seen') {
       return {
         kind: 'token_missing',
-        glyph: '🔑',
+        icon: 'key',
         title: `${host.alias} has no control-API token (it may have been revoked), so its fleet hooks can no longer report. Provision hosts to mint one.`,
       };
     }
     return {
       kind: 'hooks_missing',
-      glyph: '🔑',
+      icon: 'key',
       title: `Fleet hooks are not installed on ${host.alias}: it has no control-API token. Provision hosts to install them.`,
     };
   }
   if (tokensLoaded && hook.state === 'never_seen' && sessionCount > 0) {
     return {
       kind: 'hooks_stale',
-      glyph: '⚠',
+      icon: 'warning',
       title: `Fleet hooks are installed on ${host.alias}, but none of its sessions has reported a finished turn. The hooks may be stale — re-provision the host.`,
     };
   }
@@ -234,16 +239,27 @@ export function hostAttention(args: {
   if (host.provision_warning) {
     return {
       kind: 'provision_warning',
-      glyph: '⚠',
-      title: `${host.alias}: the last provisioning did not finish cleanly — ${host.provision_warning}. Fleet will retry it; to retry now, fleet-hub provision --host ${host.alias} --content-only.`,
+      icon: 'warning',
+      title: `${host.alias}: the last provisioning did not finish cleanly — ${host.provision_warning}. Fleet retries it by itself; to retry now, press Re-provision this host on its page.`,
     };
   }
   // hosts F1: every host ran skills from 15 hub upgrades ago and nothing said so.
   if (host.provision_stale) {
     return {
       kind: 'provision_stale',
-      glyph: '↻',
-      title: `${host.alias} was provisioned with an older fleet (content differs from this build): re-provision it — fleet-hub provision --host ${host.alias} --content-only.`,
+      icon: 'recreate',
+      title: `${host.alias} was provisioned with an older fleet (content differs from this build). Fleet refreshes it by itself while it is reachable; to do it now, press Re-provision this host on its page.`,
+    };
+  }
+  // Multi-account groundwork: a credential variable in the host's shell or tmux
+  // environment outranks its /login, so sessions there bill that credential
+  // while the Hosts view shows the logged-in account.
+  const overrides = host.auth_overrides ?? [];
+  if (overrides.length > 0) {
+    return {
+      kind: 'auth_override',
+      icon: 'key',
+      title: `${host.alias}: ${overrides.join(', ')} ${overrides.length === 1 ? 'is' : 'are'} set in its shell or tmux environment and outrank${overrides.length === 1 ? 's' : ''} the /login account, so new Claude sessions there use that credential instead. Unset it (and restart tmux) to use the login.`,
     };
   }
   // hosts F4 / ux F-14: two hosts sat at 98 % disk with no signal anywhere.
@@ -253,7 +269,7 @@ export function hostAttention(args: {
   if (disk && healthSampleFresh(host, now) && disk.pct >= diskLowPct) {
     return {
       kind: 'disk_low',
-      glyph: '▮',
+      icon: 'disk',
       title: `${host.alias} is at ${disk.pct}% disk in $HOME (${gb(host.disk_home_free_kb ?? 0)} free): transcripts, worktrees and moves onto it will fail with ENOSPC.`,
     };
   }
@@ -267,7 +283,7 @@ export function hostAttention(args: {
   ) {
     return {
       kind: 'agent_old',
-      glyph: '⬆',
+      icon: 'upgrade',
       title: `fleet-agent ${host.agent_version} on ${host.alias}, hub ${hubVersion}: upgrade the agent (fleet-agent install with the existing token, then systemctl restart fleet-agent).`,
     };
   }
@@ -281,7 +297,7 @@ export function hostAttention(args: {
   ) {
     return {
       kind: 'claude_old',
-      glyph: '⬆',
+      icon: 'upgrade',
       title: `Claude Code ${host.claude_version} on ${host.alias} is older than ${newestClaude}, the newest in the fleet (checked ${formatAge(now - (host.claude_version_at ?? now))} ago).`,
     };
   }

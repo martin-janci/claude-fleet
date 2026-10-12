@@ -10,10 +10,18 @@ vi.mock('@tauri-apps/api/core', () => ({
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import SettingsDialog from './SettingsDialog.svelte';
 import { hosts, type HostRow } from './hosts';
-import { composerPresets, flushComposerPresets } from './composer_presets';
+import { toolkitTab } from './toolkit_skills';
+import { destination } from './destination';
 import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 import { registryRouter } from './pages/testing';
 import { settingsSection } from './app_views';
+
+/** On screen: present, and not in a hidden Settings panel (step 7.1 keeps
+ *  every hand-written panel mounted and hides the ones another leaf is on). */
+function shown(testid: string): boolean {
+  const el = screen.queryByTestId(testid);
+  return el !== null && el.closest('[hidden]') === null;
+}
 
 const sample: HostRow[] = [
   { alias: 'local', ssh_alias: null, reachable: true, claude_version: '2.1.145', tmux_version: '3.5a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
@@ -91,6 +99,17 @@ describe('SettingsDialog', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(get(hostsViewRequest)).toEqual({ host: null }));
     hostsViewRequest.set(null);
+  });
+
+  it('Elsewhere › Automation limits opens the Automation view (M15 G7.13)', async () => {
+    const { destination } = await import('./destination');
+    const onClose = vi.fn();
+    render(SettingsDialog, { props: { onClose } });
+    await tick();
+    await fireEvent.click(screen.getByTestId('settings-open-automation'));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(get(destination)).toBe('automation'));
+    destination.set('session');
   });
 
   it('provisioning refreshes the host-token cache the Hosts view reads', async () => {
@@ -216,6 +235,40 @@ describe('SettingsDialog projects (W5 G3)', () => {
     expect(inv).toHaveBeenCalledWith('refresh_projects', undefined);
   });
 
+  it('checks each base path on its host and keeps a path the user cannot write unsaved (M15 G7.12)', async () => {
+    const inv = routeProjects();
+    const base = inv.getMockImplementation() as (cmd: string, args?: unknown) => Promise<unknown>;
+    inv.mockImplementation(async (cmd: string, args?: { args?: { alias: string; base_path?: string } }) => {
+      if (cmd === 'check_host') {
+        const a = args!.args!;
+        const state = a.base_path === '/srv/work' ? 'unwritable' : 'ok';
+        return { alias: a.alias, checked_at: 1, error: null, tmux_version: null, agents_on_path: null, fleet_hooks: null, guard_hook: null, base_path: { path: a.base_path, state, user: 'dev' } };
+      }
+      return base(cmd, args);
+    });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await ready();
+    await fireEvent.input(screen.getByTestId('projects-base-mefistos'), { target: { value: '/srv/work' } });
+    await fireEvent.click(screen.getByTestId('projects-save'));
+    await waitFor(() => expect(screen.getByTestId('projects-check-mefistos')).toHaveTextContent('/srv/work is not writable by user dev on mefistos.'));
+    expect(screen.getByTestId('projects-check-mefistos')).toHaveClass('err');
+    expect(screen.getByTestId('projects-error')).toBeInTheDocument();
+    expect(inv).not.toHaveBeenCalledWith('set_fleet_setting', expect.objectContaining({ key: 'projects.base_path' }));
+    expect(inv).toHaveBeenCalledWith('check_host', { args: { alias: 'mefistos', base_path: '/srv/work' } });
+    // Discard puts the saved value back and drops the stale line.
+    await fireEvent.click(screen.getByTestId('projects-discard'));
+    await tick();
+    expect((screen.getByTestId('projects-base-mefistos') as HTMLInputElement).value).toBe('');
+    expect(screen.queryByTestId('projects-check-mefistos')).toBeNull();
+  });
+
+  it('shows the start rules inline under Projects (M15 G7.12)', async () => {
+    routeProjects();
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await ready();
+    expect(screen.getByTestId('projects-start-rules')).toBeInTheDocument();
+  });
+
   it('flags an invalid path and disables Save', async () => {
     const inv = routeProjects();
     render(SettingsDialog, { props: { onClose: () => {} } });
@@ -261,136 +314,22 @@ describe('SettingsDialog projects (W5 G3)', () => {
     expect(screen.getByTestId('projects-preview-mefistos')).toHaveTextContent('~/projects/<repo>');
   });
 
-  it('re-reads the composer presets when it opens, so an edit starts from the fleet list', async () => {
-    composerPresets.set([{ label: 'Stale', text: 'stale' }]);
-    const fresh = [{ label: 'Phone', text: 'from the phone' }];
-    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
-    const base = inv.getMockImplementation() as (cmd: string, a?: unknown) => Promise<unknown>;
-    inv.mockImplementation(async (cmd: string, a?: unknown) => {
-      if (cmd === 'quick_replies') return fresh;
-      return base(cmd, a);
-    });
-    render(SettingsDialog, { props: { onClose: () => {} } });
-    await waitFor(() => expect(inv).toHaveBeenCalledWith('quick_replies', undefined));
-    await waitFor(() => expect(get(composerPresets)).toEqual(fresh));
-  });
-
-  it('lists the composer presets and edits them in place, saving through the backend', async () => {
-    // The list is fleet state now (`service::quick_replies`), so the editor
-    // starts from what the backend served and every edit is a write to it —
-    // debounced, which is why each assertion flushes.
-    const seeded = [
-      { label: 'Clear', text: '/clear' },
-      { label: 'Compact', text: '/compact' },
-    ];
-    composerPresets.set(seeded);
-    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
-    const base = inv.getMockImplementation() as (cmd: string, a?: unknown) => Promise<unknown>;
-    inv.mockImplementation(async (cmd: string, a?: { entries?: unknown }) => {
-      if (cmd === 'quick_replies') return seeded;
-      if (cmd === 'set_quick_replies') return a?.entries;
-      return base(cmd, a);
-    });
-    render(SettingsDialog, { props: { onClose: () => {} } });
-    await tick();
-    const section = screen.getByTestId('composer-section');
-    expect(section.textContent).toContain('Conversation composer');
-    const labels = screen.getAllByTestId('preset-label') as HTMLInputElement[];
-    expect(labels).toHaveLength(seeded.length);
-    expect(labels[0].value).toBe('Clear');
-
-    await fireEvent.input(labels[0], { target: { value: 'Wipe' } });
-    expect(get(composerPresets)[0].label).toBe('Wipe');
-    const texts = screen.getAllByTestId('preset-text') as HTMLTextAreaElement[];
-    await fireEvent.input(texts[0], { target: { value: '/clear now' } });
-    expect(get(composerPresets)[0].text).toBe('/clear now');
-    await flushComposerPresets();
-    expect(inv).toHaveBeenCalledWith(
-      'set_quick_replies',
-      expect.objectContaining({
-        entries: [{ label: 'Wipe', text: '/clear now' }, seeded[1]],
-      }),
-    );
-
-    // The Send box and the arrows save too; the arrows stop at either end.
-    await fireEvent.click(screen.getAllByTestId('preset-auto-send')[1]);
-    expect(get(composerPresets)[1].auto_send).toBe(true);
-    expect((screen.getAllByTestId('preset-up')[0] as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getAllByTestId('preset-down')[1] as HTMLButtonElement).disabled).toBe(true);
-    await fireEvent.click(screen.getAllByTestId('preset-down')[0]);
-    await flushComposerPresets();
-    expect(inv).toHaveBeenCalledWith(
-      'set_quick_replies',
-      expect.objectContaining({
-        entries: [{ ...seeded[1], auto_send: true }, { label: 'Wipe', text: '/clear now' }],
-      }),
-    );
-    await fireEvent.click(screen.getAllByTestId('preset-up')[1]);
-    expect(get(composerPresets)[0].label).toBe('Wipe');
-
-    await fireEvent.click(screen.getByTestId('preset-add'));
-    expect(get(composerPresets)).toHaveLength(seeded.length + 1);
-    expect(screen.getAllByTestId('preset-label')).toHaveLength(seeded.length + 1);
-
-    await fireEvent.click(screen.getAllByTestId('preset-remove')[0]);
-    expect(get(composerPresets)[0].label).toBe('Compact');
-
-    // Reset stores nothing and takes the backend's built-ins back.
-    inv.mockClear();
-    await fireEvent.click(screen.getByTestId('preset-reset'));
-    await flushComposerPresets();
-    expect(inv).toHaveBeenCalledWith('set_quick_replies', expect.objectContaining({ entries: [] }));
-  });
 });
 
-describe('SettingsDialog composer presets — moving a chip', () => {
-  it('keeps the rows keyed by chip, and the focus on the chip that moved', async () => {
-    const seeded = [
-      { label: 'A', text: 'a' },
-      { label: 'B', text: 'b' },
-      { label: 'C', text: 'c' },
-    ];
-    composerPresets.set(seeded);
-    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
-    const base = inv.getMockImplementation() as (cmd: string, a?: unknown) => Promise<unknown>;
-    inv.mockImplementation(async (cmd: string, a?: { entries?: unknown }) => {
-      if (cmd === 'quick_replies') return seeded;
-      if (cmd === 'set_quick_replies') return a?.entries;
-      return base(cmd, a);
-    });
-    render(SettingsDialog, { props: { onClose: () => {} } });
+describe('SettingsDialog composer link', () => {
+  it('sends the chip editor to Toolkit › Prompts & snippets and closes Settings', async () => {
+    destination.set('session');
+    toolkitTab.set('skills');
+    const onClose = vi.fn();
+    render(SettingsDialog, { props: { onClose } });
     await tick();
-    const rowOf = (label: string) =>
-      (screen.getAllByTestId('preset-label') as HTMLInputElement[])
-        .find((l) => l.value === label)!
-        .closest('.preset-row') as HTMLElement;
-    const aRow = rowOf('A');
-
-    const down = aRow.querySelector('[data-testid="preset-down"]') as HTMLButtonElement;
-    down.focus();
-    await fireEvent.click(down);
-    await tick();
-    await tick();
-    // The same row element moved with its chip…
-    expect(rowOf('A')).toBe(aRow);
-    expect((screen.getAllByTestId('preset-label') as HTMLInputElement[]).map((l) => l.value)).toEqual([
-      'B',
-      'A',
-      'C',
-    ]);
-    // …and the keyboard is still on it.
-    expect(document.activeElement).toBe(aRow.querySelector('[data-testid="preset-down"]'));
-
-    // Moved to the end, its ↓ is disabled: focus falls to its ↑.
-    await fireEvent.click(aRow.querySelector('[data-testid="preset-down"]') as HTMLButtonElement);
-    await tick();
-    await tick();
-    expect(rowOf('A')).toBe(aRow);
-    expect(document.activeElement).toBe(aRow.querySelector('[data-testid="preset-up"]'));
-    await flushComposerPresets();
+    expect(screen.queryByTestId('preset-label')).toBeNull();
+    await fireEvent.click(screen.getByTestId('composer-open-toolkit'));
+    expect(get(toolkitTab)).toBe('prompts');
+    expect(get(destination)).toBe('assets');
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });
-
 
 describe('SettingsDialog — generated pages (declarative pages P3)', () => {
   function routeRegistry(initial: Record<string, string> = {}) {
@@ -402,22 +341,26 @@ describe('SettingsDialog — generated pages (declarative pages P3)', () => {
   }
   afterEach(() => fleetSettings.set({ ...SETTING_DEFAULTS }));
 
-  it('opens on General, lists every page, and renders a page from the registry', async () => {
+  it('opens on Appearance, lists the tree, and renders a page from the registry', async () => {
     const inv = routeRegistry();
     render(SettingsDialog, { props: { onClose: () => {} } });
-    expect(await screen.findByTestId('settings-nav-settings.automation')).toBeInTheDocument();
-    expect(screen.getByTestId('settings-nav-general').getAttribute('aria-current')).toBe('page');
-    expect(screen.getByTestId('hub-section')).toBeInTheDocument();
+    expect(await screen.findByTestId('settings-nav-automation')).toBeInTheDocument();
+    expect(screen.getByTestId('settings-nav-appearance').getAttribute('aria-current')).toBe('page');
+    expect(shown('settings-panel-appearance')).toBe(true);
+    expect(shown('hub-section')).toBe(false);
+    await fireEvent.click(screen.getByTestId('settings-nav-hub'));
+    expect(screen.getByTestId('settings-nav-hub').getAttribute('aria-current')).toBe('page');
+    expect(shown('hub-section')).toBe(true);
     // The app-vs-hub versions line is about a pairing; standalone there is
     // one program and the footer already names its version.
     expect(screen.queryByTestId('hub-versions')).toBeNull();
-    for (const id of ['settings', 'settings.limits', 'settings.work', 'settings.decisions', 'usage']) {
+    for (const id of ['advanced', 'limits', 'work', 'decisions', 'usage', 'voice', 'downloads', 'playbooks']) {
       expect(screen.getByTestId(`settings-nav-${id}`)).toBeInTheDocument();
     }
     await waitFor(() => expect(inv).toHaveBeenCalledWith('describe_fleet_settings', undefined));
-    await fireEvent.click(screen.getByTestId('settings-nav-settings.automation'));
+    await fireEvent.click(screen.getByTestId('settings-nav-automation'));
     expect(await screen.findByTestId('page-settings.automation')).toBeInTheDocument();
-    expect(screen.queryByTestId('hub-section')).toBeNull();
+    expect(shown('hub-section')).toBe(false);
     const press = screen.getByTestId('setting-playbooks-press-enter') as HTMLInputElement;
     expect(press.checked).toBe(false);
     await fireEvent.click(press);
@@ -431,7 +374,7 @@ describe('SettingsDialog — generated pages (declarative pages P3)', () => {
   it('Decisions: off by default, says what is sent where, offers no auto mode, and asks before turning on', async () => {
     const inv = routeRegistry();
     render(SettingsDialog, { props: { onClose: () => {} } });
-    await fireEvent.click(await screen.findByTestId('settings-nav-settings.decisions'));
+    await fireEvent.click(await screen.findByTestId('settings-nav-decisions'));
     const page = await screen.findByTestId('page-settings.decisions');
     await waitFor(() => expect(screen.getByTestId('setting-decide-jev-enabled')).toBeInTheDocument());
     expect((screen.getByTestId('setting-decide-jev-enabled') as HTMLInputElement).checked).toBe(false);
@@ -451,18 +394,76 @@ describe('SettingsDialog — generated pages (declarative pages P3)', () => {
     expect(screen.getByTestId('setting-row-decide.jev.work_link').textContent).toContain('offline benchmark only until J1');
     const sm = screen.getByTestId('setting-decide-jev-status-map') as HTMLSelectElement;
     expect(Array.from(sm.querySelectorAll('option'), (o) => o.value)).toEqual(['off', 'shadow', 'assist']);
+    // Step 7.7: each use case its own row, today's budget, the breaker, the
+    // key and which orgs consent, with the way to change that consent.
+    for (const k of ['status_map', 'start_project', 'sibling_repos', 'quick_answer', 'duplicate', 'work_placement', 'related_session', 'work_link']) {
+      const sel = screen.queryByTestId(`setting-decide-jev-${k.replace('_', '-')}`) as HTMLSelectElement | null;
+      expect(sel, k).not.toBeNull();
+      if (sel?.tagName === 'SELECT') expect(Array.from(sel.options, (o) => o.value)).not.toContain('auto');
+    }
+    expect(screen.getByTestId('section-Use cases').textContent).toContain('There is no auto mode');
+    const today = await screen.findByTestId('section-Today');
+    await waitFor(() => expect(today.textContent).toContain('closed'));
+    expect(today.textContent).toContain('Acme');
+    expect(today.textContent).toContain('Daily budget');
+    expect(screen.getByTestId('page-link-settings.orgs').textContent).toContain('which organisations allow Jev');
   });
 
   it('search finds a setting and opens it on its page and tab', async () => {
     routeRegistry();
     render(SettingsDialog, { props: { onClose: () => {} } });
     const search = (await screen.findByTestId('settings-search')) as HTMLInputElement;
-    await waitFor(() => expect(screen.getByTestId('settings-nav-settings.work')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId('settings-nav-work')).toBeInTheDocument());
     await fireEvent.input(search, { target: { value: 'unlinked' } });
     await fireEvent.click(await screen.findByTestId('settings-hit-work.tidy_idle_unlinked_days'));
     const row = await screen.findByTestId('setting-row-work.tidy_idle_unlinked_days');
     await waitFor(() => expect(row.classList.contains('highlighted')).toBe(true));
     expect(screen.getByTestId('page-settings.work-tab-1').getAttribute('aria-selected')).toBe('true');
+    // The hits stay up until the search is cleared; then the tree marks the leaf.
+    await fireEvent.input(search, { target: { value: '' } });
+    expect(screen.getByTestId('settings-nav-work').getAttribute('aria-current')).toBe('page');
+  });
+
+  it('a hit in a section with its own leaf opens that leaf, and only that section', async () => {
+    routeRegistry();
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    const search = (await screen.findByTestId('settings-search')) as HTMLInputElement;
+    await fireEvent.input(search, { target: { value: 'voice.max_capture_secs' } });
+    await fireEvent.click(await screen.findByTestId('settings-hit-voice.max_capture_secs'));
+    await fireEvent.input(search, { target: { value: '' } });
+    expect(screen.getByTestId('settings-nav-voice').getAttribute('aria-current')).toBe('page');
+    const page = await screen.findByTestId('page-settings.limits');
+    expect(screen.getByTestId('section-Voice')).toBeInTheDocument();
+    expect(screen.queryByTestId('section-Downloads')).toBeNull();
+    expect(page.querySelector('h4')?.textContent).toBe('Voice');
+    // The whole page is one click away, on the Limits leaf.
+    await fireEvent.click(screen.getByTestId('page-whole-link'));
+    expect(screen.getByTestId('settings-nav-limits').getAttribute('aria-current')).toBe('page');
+    expect(await screen.findByTestId('section-Downloads')).toBeInTheDocument();
+  });
+
+  it('each tree leaf shows its own screen, and the old section names still open', async () => {
+    routeRegistry();
+    settingsSection.set('diagnostics');
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await waitFor(() => expect(screen.getByTestId('settings-nav-error-reports').getAttribute('aria-current')).toBe('page'));
+    expect(shown('diagnostics-section')).toBe(true);
+    expect(await screen.findByTestId('section-Error reports')).toBeInTheDocument();
+    for (const [leaf, testid] of [
+      ['notifications', 'notifications-section'],
+      ['shortcuts', 'shortcuts-section'],
+      ['sessions', 'composer-section'],
+      ['projects', 'projects-section'],
+      ['work', 'work-section'],
+      ['control-api', 'mcp-section'],
+      ['accounts-hosts', 'settings-hosts-line'],
+      ['automation-limits', 'settings-automation-limits'],
+      ['appearance', 'onboarding-section'],
+    ] as const) {
+      await fireEvent.click(screen.getByTestId(`settings-nav-${leaf}`));
+      expect(shown(testid), leaf).toBe(true);
+      expect(shown('diagnostics-section'), leaf).toBe(false);
+    }
   });
 
   it('a deep link to a page opens it', async () => {

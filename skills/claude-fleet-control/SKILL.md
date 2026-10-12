@@ -49,31 +49,59 @@ Every result lands in your context verbatim, and a fleet grows. Measured on a
 ## Finding the tools
 
 The server lists only the tools your token may call — the master token sees
-72, a per-host token 62, a `readonly` token 36 — so a tool you cannot find is
-usually one your token is not allowed to call, not a missing feature. Clients
-also defer the surface (~13k tokens of definitions): Claude Code, and any MCP
-connector with `defer_loading`, loads a definition only when it is searched
-for, so load **every tool you expect to need in one search call**, not one per
-call. The names, by job:
+~135 of those below (not the `device` row, which a person's paired device
+gets), a per-host token ~100, a `readonly` token ~50 — so a tool you
+cannot find is usually one your token is not allowed to call, not a missing
+feature. The full surface is ~28k tokens of definitions, so clients defer it:
+Claude Code, and any MCP connector with `defer_loading`, loads a definition
+only when it is searched for. Load **every tool you expect to need in one
+search call**, not one per call. Every tool, by job (a test keeps this list
+equal to the server's):
 
 ```text
-orient    fleet_health list_hosts list_projects list_sessions whoami
-          peer_status related_sessions usage_report agent_status
-spawn     new_session new_shell_session new_bg_session spawn_review
-steer     send_prompt run_prompt wait_for_session capture_session
-          session_transcript session_conversation(s) broadcast_prompt
-coordinate send_message inbox dispatch_task wait_for_task list_tasks
-          cancel_task set_session_tags session_history register_self
-          work work_link
-recover   restart_session recreate_session repair_session move_session
-          dismiss_ghost_session safe_kill_session kill_session
-review    repo_changes repo_diff repo_file repo_tree repo_log
-          repo_branches repo_commit repo_commit_diff
-admin     add_host remove_host probe_host hide_host provision_hosts
-          pair_client list_clients revoke_client set_client_trust set_secret
-          refresh_projects
-          delete_worktree get_clipboard set_clipboard rename_session
-          set_friendly_name list_accounts
+orient     fleet_health list_hosts list_projects list_worktrees list_sessions
+           whoami peer_status related_sessions usage_report agent_status
+           account_usage check_account_headroom session_activity search
+spawn      new_session new_shell_session new_bg_session spawn_review
+           shell_terminals adopt_session propose_host_placement
+steer      send_prompt run_prompt queue_prompt queued_prompts wait_for_session
+           capture_session session_transcript session_conversation
+           session_conversations session_tool_detail session_summary_since
+           session_context_help rewind_conversation broadcast_prompt
+           touch_session_viewed ask
+coordinate send_message inbox wait_for_reply dispatch_task wait_for_task
+           list_tasks cancel_task set_session_tags session_history
+           register_self work work_link decide_related_session runs routines
+           start_rules prs
+recover    restart_session recreate_session repair_session move_session
+           resolve_move dismiss_ghost_session safe_kill_session kill_session
+           restore_host_sessions discover_lost_sessions place_transcript
+           lost_target
+review     repo_changes repo_diff repo_file repo_tree repo_log repo_blame
+           repo_branches repo_branch_diff repo_range_diff repo_commit
+           repo_commit_diff
+share      session_share session_narrow session_unshare session_access
+           session_presence my_grants session_ask_access access_requests
+files      send_file list_downloads pause_download remove_download library
+           get_clipboard set_clipboard
+devices    debug_devices
+assets     list_assets scan_assets import_assets plan_sync apply_sync
+           changesets catalog_admin list_layers propose_layers resolve_preview
+           set_host_layers set_host_harnesses
+admin      add_host remove_host probe_host check_host hide_host merge_host
+           discover_hosts set_account_nickname
+           provision_hosts install_agent agent_installs add_project
+           forget_project list_github_repos list_host_worktrees
+           refresh_projects delete_worktree pair_client list_clients
+           revoke_client set_client_trust api_tokens set_secret rename_session
+           set_friendly_name list_accounts add_account get_settings set_setting guide
+           quick_replies work_admin ensure_operator operator_status
+           update_status update_admin link_peer unlink_peer list_peer_links
+device     pr_shepherd agents mcp_confirms answer_mcp_confirm setting_proposals
+           decide_setting_proposals setting_history control_route
+           resume_or_new control_handoffs list_pages project_picks
+           set_project_pick
+           org_admin update_policy session_claim wizard_state dashboards
 ```
 
 ## Status vocabulary
@@ -123,6 +151,9 @@ unless `force: true`), and excludes you from `broadcast_prompt`.
 **Never guess the alias.** `tmux_name` is `tmux display-message -p '#S'`;
 `host_alias` is configuration (whatever the user named the host in the picker)
 and is not derivable from `hostname`. Look it up:
+
+From inside a fleet session, `whoami {}` with no argument is enough: your pane
+(the `X-Fleet-Pane` header your MCP entry sends) names your row. Otherwise:
 
 1. `tmux display-message -p '#S'` — your `tmux_name`.
 2. `whoami { tmux_name: "<#S>" }` — returns your fleet row (`session_id`,
@@ -217,6 +248,87 @@ one-to-many use `broadcast_prompt { host?, project_id?, status?, prompt }` —
 `status` filters on `claude_status` (e.g. `"idle"`); work sessions only,
 controller excluded.
 
+### Asking the person a form
+
+`ask { form, why }` opens a `fleet.form/1` form in YOUR session's chat and
+waits ≤ 600 s for the answers. Use it instead of AskUserQuestion when the
+person may not be at the terminal or the input has several fields or
+steps. `pending` → call `ask { wait: form_id }` again. A secret field
+comes back as a file path: use the file, then delete it. Format and
+limits: `docs/forms.md`.
+
+### Cards in your reply
+
+When the person reads you in fleet's Conversation view, a fenced
+```` ```fleet-ui ```` block in your reply is drawn as a card: `steps` (a
+tutorial with checkboxes), `guide` (folding sections; or `{"kind": "guide", "page": <id>}` for a guide fleet has, from `guide { list }`, drawn as Settings draws it), `callout`, `facts`,
+`choices` (buttons that put a prompt in the composer), `form` (a
+`fleet.form/1` form, no secrets, whose answers arrive as the person's next
+prompt), `progress` (a long job; write it again with the same `id` and the
+first card updates in place), `results` (stats, a chart, a table), `error`
+(a code, what failed, next steps) or `setting` (a settings change to apply:
+propose it first with `set_setting { key, value, why, propose: true }`, then
+write `{"kind": "setting", "proposal": <its id>, "note"?}`; the person
+confirms Apply, you never apply it yourself) or `wizard` (one of the app's
+own forms: `add_host`, `add_project`, `get_started`, `new_session`,
+`pair_device`) or `dashboard` (widgets over `work { stats }` the person can
+pin; see below). Each is one JSON object, `{"spec": "fleet.ui/1", "kind": …}`; a
+broken one shows as code with the reason. Format: `docs/chat-blocks.md`.
+Use `ask` instead when you need the answers before you continue.
+
+In `choices`, mark the option you would pick `"recommended": true` (one
+per card). In Control's chat, when the person does not answer for the
+minutes `control.auto_continue_minutes` sets, the app sends that option for
+them, so recommend only what you would do anyway; it is never sent for an
+option or question naming a push, a delete or another step hard to undo.
+
+When the person asks for a dashboard, or for a view they will come back
+to ("how is release 4.2 doing, every morning"), answer with a `dashboard`
+block: `id` (letters, digits, `. _ : -`), `title`, `intro`, `why`, and 1–12
+`widgets`, each `stat` (`value`: total, open, needs_you, pct_done, cost or
+a stage), `groups` (`query.group_by`; `show`: stages or done) or
+`buckets` (`query.group_by`: sprint or release; `states`). A widget's
+`query` takes the Work view's filters (`status`, `mine`, `stages`,
+`group_by`, `epic`, `iteration`, `assignee`, …). Never write a number: the
+app counts each query itself under the person's access. Check the filters
+with `work { stats }` first. When their message starts with a dashboard
+block they pinned ("My pinned dashboard …"), answer with the changed block
+under the **same** `id`: the card offers it as a replacement. Before you
+change one, read what is pinned with `dashboards { list }` or
+`dashboards { get, id }`; pinning and unpinning are the person's.
+
+When the person asks in their own words for what a wizard does ("set up a
+new project for acme/pos on mercury"), answer with its `wizard` block and
+put what their message already says in `values`, by the wizard's field
+names (`{"repo": "acme/pos", "host": "mercury"}`). The form opens with
+those answers marked Drafted; the person checks them and presses its last
+button. Never guess a value the message does not say.
+
+## Your own tasks
+
+From inside a fleet session you can find and manage what is assigned to you
+without knowing your `session_id`:
+
+- `work { action: "session_tasks" }` — every task linked to YOUR session
+  (active, suggested, rejected, ended) with `is_self: true` on the page and on
+  each link; `primary_link_id` is the one you are on.
+- `work { action: "task", task_id }` — the task's `sessions[]`; the one with
+  `is_self: true` is you, the others are other sessions on the same task.
+- `list_tasks { mine: true }` — the delegated jobs you dispatched or were given;
+  each row says `is_self_requester` or `is_self_worker`.
+  `list_tasks { worker_session_id }` lists what one session was given.
+
+Change which task you are on with `work_link { session_id: <yours>, action:
+"link" | "switch" | "unlink", … }`. A local task (no tracker ticket) you work
+on also takes `work_link { action: "set_status", item_id, status }`, `edit`
+and `comment` by `item_id`; a tracker ticket's status changes in the tracker.
+`set_status`, `edit`, `comment` and renaming it (`name` with `item_id`) work
+on any local task your own session is on, even one shared with other people's
+sessions. So does planning it: `set_parent { item_id, parent }` files it under
+an epic or task, and `bucket_add` / `bucket_remove { bucket_id, item_id }` puts
+it in or takes it out of a sprint or release. A task your session is not on is
+the team's plan: a person sprints it.
+
 ## Tasks, subtasks and proposals (shared work context)
 
 - `work_link { action: "create", title, parent?: "item:<id>", project_id?, notes? }` — a native task `TASK-<id>`, or a subtask under `parent`. A standalone task needs the desktop or the master token; a per-host token may add subtasks under a task its own sessions work on.
@@ -243,7 +355,7 @@ back, dispatch a task instead of hand-rolling send / poll / capture:
 3. The result also lands in your `inbox` as `kind: task_result`, so a
    controller that is not blocked on `wait_for_task` still sees it.
 
-`list_tasks { requester_session_id?, state? }` shows what is outstanding
+`list_tasks { requester_session_id?, worker_session_id?, mine?, state? }` shows what is outstanding
 (`queued | running | done | failed | cancelled`). A worker's row carries
 `parent_session_id` = the requester. If **you** are the worker: when a prompt
 ends with the `FLEET_TASK_DONE_…` instruction, finish the work, then print
@@ -378,6 +490,29 @@ session; the delete only fires after the session's ready marker AND a
 clean-tree check (transitions arrive as row events; `E_SAFE_KILL_IN_PROGRESS`
 means one is already armed). Use it when the worktree may hold unpushed work;
 `delete_worktree` afterwards if the worktree should go too.
+
+## Phones, emulators, simulators — `debug_devices`
+
+Devices plugged into or running on ANY fleet host, driven from your session:
+every command runs on the device's own host. `debug_devices { action: "list" }`
+shows the ones you may use (your host's, and those a person shared); claim one
+before a test run so no other session drives it at the same time:
+
+1. `{ action: "claim", device: "pixel", note: "e2e for PR 12" }` — by id,
+   label, name or serial. `E_CONFLICT` names the holder: pick another device.
+2. `{ action: "install", device, path: "app/build/outputs/apk/debug/app-debug.apk" }`
+   — the app is copied from YOUR host (an `.apk`; a simulator takes a `.app`).
+3. `{ action: "run", device, args: ["shell", "am", "start", "-n", "com.x/.Main"] }`
+   (adb) or `args: ["launch", "com.x"]` (simctl): one command, no shell
+   pipes; the error lists the verbs allowed.
+4. `{ action: "screenshot", device }` returns the screen as an image; `{
+   action: "logs", device, filter: "MyApp:D *:S", contains: "Exception" }`
+   reads `logcat -d` (a simulator: `log show`, `filter` is a predicate).
+5. `{ action: "release", device }` when done (a claim also lapses).
+
+A stopped emulator or simulator: `scan` lists it under `bootable`; `{ action:
+"boot", host, name }` starts it. `unauthorized` means the phone's USB
+debugging prompt waits for a person; say so rather than retrying.
 
 ## Host clipboard — `get_clipboard` / `set_clipboard`
 

@@ -135,3 +135,28 @@ fn find_locates_the_first_occurrence_or_none() {
     assert_eq!(find(b"no boundary here", b"\r\n\r\n"), None);
     assert_eq!(find(b"", b"\r\n\r\n"), None);
 }
+
+#[test]
+fn a_size_line_that_never_ends_is_an_error_not_a_buffer() {
+    let mut d = Dechunker::new(true);
+    let mut raw = b"5\r\nhello\r\n".to_vec();
+    assert_eq!(d.take(&mut raw).unwrap(), b"hello");
+    let mut grown = Vec::new();
+    let mut failed = false;
+    for _ in 0..100 {
+        grown.extend_from_slice(&[b'a'; 64]);
+        let mut raw = grown.clone();
+        if d.take(&mut raw).is_err() {
+            failed = true;
+            break;
+        }
+    }
+    assert!(failed, "a 6 KiB size line was still being waited on");
+    // A size line split across reads is still fine.
+    let mut d = Dechunker::new(true);
+    let mut raw = b"3".to_vec();
+    assert!(d.take(&mut raw).unwrap().is_empty());
+    raw.extend_from_slice(b"\r\nabc\r\n0\r\n\r\n");
+    assert_eq!(d.take(&mut raw).unwrap(), b"abc");
+    assert!(d.finished());
+}

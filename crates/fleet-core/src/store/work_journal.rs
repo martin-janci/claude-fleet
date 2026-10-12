@@ -16,6 +16,7 @@
 
 use super::{now_unix, Store};
 use crate::ipc_error::{codes, IpcError};
+use rusqlite::OptionalExtension;
 
 /// `kind` values.
 pub const JOURNAL_KINDS: &[&str] = &[
@@ -127,6 +128,29 @@ const KEY_CONVERSATIONS: &str = "\
       JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
       JOIN conversations c ON c.session_id = p.session_id \
       WHERE l.ended_at IS NULL";
+
+/// A link's journal window (task → session P-7). A Switch moves a session
+/// from one task to another WITHOUT a new conversation, so "the link's
+/// conversations" would hand the old task the new task's work and the other
+/// way round. A link's rows are therefore the rows of its conversations
+/// written from the moment the session last switched AWAY from something
+/// before the link began (`lo`) until the link itself was switched away
+/// (`hi`, exclusive). A link no switch touched has neither bound and reads
+/// exactly as before: linking a session after it did the work still files
+/// that work under the task. `{l}` is the link's alias in the caller's
+/// query.
+const WINDOW_LO: &str = "(SELECT MAX(x.ended_at) FROM work_links x \
+      WHERE x.participant_id = {l}.participant_id AND x.end_reason = 'switched' \
+        AND x.id != {l}.id AND x.ended_at <= {l}.created_at)";
+const WINDOW_HI: &str = "CASE WHEN {l}.end_reason = 'switched' THEN {l}.ended_at END";
+
+/// The window bounds of [`WINDOW_LO`] / [`WINDOW_HI`] for a link aliased `l`.
+fn window_sql(alias: &str) -> (String, String) {
+    (
+        WINDOW_LO.replace("{l}", alias),
+        WINDOW_HI.replace("{l}", alias),
+    )
+}
 
 impl Store {
     /// Append one journal row and enforce its conversation's cap in the same
@@ -314,10 +338,64 @@ impl Store {
     }
 
     /// The journal of work `key`, through both live and ended links, oldest
-    /// first. Handover rows are never part of it.
+    /// first, each link's rows inside its window (P-7, [`WINDOW_LO`]).
+    /// Handover rows are never part of it.
     pub fn journal_for_key(&self, key: &str) -> Result<Vec<JournalRow>, IpcError> {
-        let ids = self.work_conversation_ids(key)?;
-        self.journal_for_conversations(&ids)
+        let key = super::normalize_work_ref(key)?;
+        let (lo, hi) = window_sql("l");
+        let mut stmt = self.conn.prepare(&format!(
+            "WITH links AS ( \
+               SELECT l.*, {lo} AS lo, {hi} AS hi FROM work_links l \
+               LEFT JOIN work_items i ON i.id = l.item_id \
+               WHERE l.state = 'confirmed' AND (l.ref_key = ?1 OR i.key = ?1)), \
+             wins(cid, lo, hi) AS ( \
+               SELECT j.value, l.lo, l.hi FROM links l, json_each(l.snap_claude_ids) j \
+                 WHERE l.ended_at IS NOT NULL AND l.snap_claude_ids IS NOT NULL \
+               UNION ALL \
+               SELECT c.claude_session_id, l.lo, l.hi FROM links l \
+                 JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
+                 JOIN conversations c ON c.session_id = p.session_id \
+                 WHERE l.ended_at IS NULL) \
+             SELECT {COLUMNS} FROM work_journal w \
+             WHERE w.kind != 'handover' AND EXISTS ( \
+               SELECT 1 FROM wins WHERE wins.cid = w.claude_session_id \
+                 AND (wins.lo IS NULL OR w.at >= wins.lo) \
+                 AND (wins.hi IS NULL OR w.at < wins.hi)) \
+             ORDER BY w.at ASC, w.id ASC"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![key], map_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The journal window of link `link_id` (P-7): `(from, until)`, each
+    /// `None` when unbounded. `(None, None)` for a link no switch touched,
+    /// and for one that is gone.
+    pub fn link_journal_window(
+        &self,
+        link_id: i64,
+    ) -> Result<(Option<i64>, Option<i64>), IpcError> {
+        let (lo, hi) = window_sql("l");
+        Ok(self
+            .conn
+            .query_row(
+                &format!("SELECT {lo}, {hi} FROM work_links l WHERE l.id = ?1"),
+                rusqlite::params![link_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .unwrap_or((None, None)))
+    }
+
+    /// [`Self::journal_for_conversations`] inside a link's window
+    /// ([`Self::link_journal_window`]).
+    pub fn journal_for_conversations_within(
+        &self,
+        ids: &[String],
+        (from, until): (Option<i64>, Option<i64>),
+    ) -> Result<Vec<JournalRow>, IpcError> {
+        let mut rows = self.journal_for_conversations(ids)?;
+        rows.retain(|r| from.is_none_or(|f| r.at >= f) && until.is_none_or(|u| r.at < u));
+        Ok(rows)
     }
 
     /// Queue a handover brief for `session_id`'s next hook delivery.
@@ -789,5 +867,195 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n as usize, STEP_CAP);
+    }
+
+    // ── task → session P-2 / P-7: switch and link windows ──────────────
+
+    /// Put the journal row with `body` at `at`.
+    fn at(s: &Store, body: &str, at: i64) {
+        s.conn
+            .execute(
+                "UPDATE work_journal SET at = ?2 WHERE body = ?1",
+                rusqlite::params![body, at],
+            )
+            .unwrap();
+    }
+
+    fn bodies(rows: &[JournalRow]) -> Vec<String> {
+        rows.iter()
+            .filter(|r| r.kind == "progress")
+            .filter_map(|r| r.body.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_switch_ends_the_old_link_with_its_snapshot_and_moves_the_primary() {
+        let s = Store::open_in_memory().unwrap();
+        let sid = seed(&s, "dev", "c1");
+        let a = s
+            .link_session_work(sid, WorkTarget::Key("ABC-1"), "manual")
+            .unwrap();
+        let b = s
+            .switch_session_work(sid, a.id, WorkTarget::Key("DEF-2"), "manual", Some(a.id))
+            .unwrap();
+        let old = s.get_work_link(a.id).unwrap().unwrap();
+        assert!(
+            old.ended_at.is_some(),
+            "the old link ends, it is not removed"
+        );
+        assert_eq!(old.end_reason.as_deref(), Some("switched"));
+        assert!(!old.is_primary);
+        assert_eq!(old.snap_claude_ids.as_deref(), Some(r#"["c1"]"#));
+        assert!(b.is_primary);
+        assert_eq!(b.ref_key.as_deref(), Some("DEF-2"));
+        assert_eq!(s.current_primary_link(sid).unwrap(), Some(b.id));
+        let live: Vec<i64> = s
+            .session_work_links(sid)
+            .unwrap()
+            .iter()
+            .map(|l| l.id)
+            .collect();
+        assert_eq!(live, vec![b.id], "one live link: the new one");
+    }
+
+    #[test]
+    fn a_stale_or_empty_switch_changes_nothing() {
+        let s = Store::open_in_memory().unwrap();
+        let sid = seed(&s, "dev", "c1");
+        let a = s
+            .link_session_work(sid, WorkTarget::Key("ABC-1"), "manual")
+            .unwrap();
+        let stale = s
+            .switch_session_work(
+                sid,
+                a.id,
+                WorkTarget::Key("DEF-2"),
+                "manual",
+                Some(a.id + 9),
+            )
+            .unwrap_err();
+        assert_eq!(stale.code, codes::E_CONFLICT);
+        let same = s
+            .switch_session_work(sid, a.id, WorkTarget::Key("abc-1"), "manual", None)
+            .unwrap_err();
+        assert_eq!(same.code, codes::E_INVALID);
+        let gone = s
+            .switch_session_work(sid, a.id + 50, WorkTarget::Key("DEF-2"), "manual", None)
+            .unwrap_err();
+        assert_eq!(gone.code, codes::E_NOTFOUND);
+        let links = s.session_work_links(sid).unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].id, a.id);
+        assert!(links[0].ended_at.is_none() && links[0].is_primary);
+    }
+
+    #[test]
+    fn a_switch_without_clear_splits_the_conversation_between_the_two_tasks() {
+        let s = Store::open_in_memory().unwrap();
+        let sid = seed(&s, "dev", "c1");
+        let a = s
+            .link_session_work(sid, WorkTarget::Key("ABC-1"), "manual")
+            .unwrap();
+        s.journal_for_session(sid, "c1", "progress", "hook", "on A")
+            .unwrap();
+        let now = now_unix();
+        at(&s, "on A", now - 100);
+        let b = s
+            .switch_session_work(sid, a.id, WorkTarget::Key("DEF-2"), "manual", None)
+            .unwrap();
+        s.journal_for_session(sid, "c1", "progress", "hook", "on B")
+            .unwrap();
+        at(&s, "on B", now + 100);
+        assert_eq!(bodies(&s.journal_for_key("ABC-1").unwrap()), vec!["on A"]);
+        assert_eq!(bodies(&s.journal_for_key("DEF-2").unwrap()), vec!["on B"]);
+        // The task page's last outcome reads the ended link inside its window.
+        let window = s.link_journal_window(a.id).unwrap();
+        assert_eq!(window.0, None);
+        assert!(window.1.is_some());
+        let rows = s
+            .journal_for_conversations_within(&["c1".into()], window)
+            .unwrap();
+        assert_eq!(bodies(&rows), vec!["on A"]);
+        assert_eq!(s.link_journal_window(b.id).unwrap().1, None);
+        assert!(s.link_journal_window(b.id).unwrap().0.is_some());
+    }
+
+    #[test]
+    fn a_switch_back_after_clear_keeps_each_task_its_own_conversation() {
+        let s = Store::open_in_memory().unwrap();
+        let sid = seed(&s, "dev", "c1");
+        let a = s
+            .link_session_work(sid, WorkTarget::Key("ABC-1"), "manual")
+            .unwrap();
+        s.journal_for_session(sid, "c1", "progress", "hook", "A in c1")
+            .unwrap();
+        let now = now_unix();
+        at(&s, "A in c1", now - 300);
+        let b = s
+            .switch_session_work(sid, a.id, WorkTarget::Key("DEF-2"), "manual", None)
+            .unwrap();
+        // `/clear`: a fresh conversation on task B.
+        s.rebind_conversation(sid, "c2", StartSource::Clear, None, None)
+            .unwrap();
+        s.journal_for_session(sid, "c2", "progress", "hook", "B in c2")
+            .unwrap();
+        at(&s, "B in c2", now + 100);
+        // Back to A later on: A's new link starts at that switch.
+        let back = s
+            .switch_session_work(sid, b.id, WorkTarget::Key("ABC-1"), "manual", Some(b.id))
+            .unwrap();
+        s.conn
+            .execute(
+                "UPDATE work_links SET ended_at = ?2 WHERE id = ?1",
+                rusqlite::params![b.id, now + 200],
+            )
+            .unwrap();
+        s.conn
+            .execute(
+                "UPDATE work_links SET created_at = ?2 WHERE id = ?1",
+                rusqlite::params![back.id, now + 200],
+            )
+            .unwrap();
+        s.journal_for_session(sid, "c2", "progress", "hook", "A again")
+            .unwrap();
+        at(&s, "A again", now + 300);
+        assert_eq!(
+            bodies(&s.journal_for_key("ABC-1").unwrap()),
+            vec!["A in c1", "A again"]
+        );
+        assert_eq!(
+            bodies(&s.journal_for_key("DEF-2").unwrap()),
+            vec!["B in c2"]
+        );
+        // A's first snapshot is its own conversation: Continue resumes c1.
+        let first = s.get_work_link(a.id).unwrap().unwrap();
+        assert_eq!(first.snap_claude_ids.as_deref(), Some(r#"["c1"]"#));
+        // c1 ran on into B until the `/clear`, so B keeps both; its journal
+        // window keeps A's c1 rows out, and Continue on B resumes c2.
+        let b_old = s.get_work_link(b.id).unwrap().unwrap();
+        assert_eq!(b_old.snap_claude_ids.as_deref(), Some(r#"["c1","c2"]"#));
+    }
+
+    #[test]
+    fn live_sessions_on_a_target_name_every_other_live_session() {
+        let s = Store::open_in_memory().unwrap();
+        let one = seed(&s, "one", "c1");
+        let two = seed(&s, "two", "c2");
+        let three = seed(&s, "three", "c3");
+        for sid in [one, two] {
+            s.link_session_work(sid, WorkTarget::Key("ABC-1"), "manual")
+                .unwrap();
+        }
+        s.link_session_work(three, WorkTarget::Key("DEF-2"), "manual")
+            .unwrap();
+        assert_eq!(
+            s.live_sessions_on_target(WorkTarget::Key("abc-1"), one)
+                .unwrap(),
+            vec![two]
+        );
+        assert!(s
+            .live_sessions_on_target(WorkTarget::Key("XYZ-9"), one)
+            .unwrap()
+            .is_empty());
     }
 }

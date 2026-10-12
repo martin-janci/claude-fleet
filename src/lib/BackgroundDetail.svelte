@@ -3,7 +3,7 @@
   // an agent or command this conversation launched, or a fleet task it
   // dispatched. Read-only — it renders what the transcript and the stores
   // already carry, and fetches nothing.
-  import { formatDuration, lastNonNull, type BackgroundEntry, type BackgroundReport } from './conversation';
+  import { backgroundStatusWord, formatDuration, lastNonNull, type BackgroundEntry, type BackgroundReport } from './conversation';
   import Markdown from './MarkdownView.svelte';
   import CopyButton from './CopyButton.svelte';
 
@@ -53,7 +53,7 @@
   <h3 class="bg-title">
     <span class="bg-kind" data-testid="bg-detail-kind">{entry.kind}</span>
     <span class="bg-label" data-testid="bg-detail-label">{entry.label}</span>
-    <span class="bg-status" data-status={entry.status} data-testid="bg-detail-status">{entry.status}</span>
+    <span class="bg-status" data-status={entry.status} data-testid="bg-detail-status">{backgroundStatusWord(entry.status)}</span>
     {#if duration}<span class="bg-dur" data-testid="bg-detail-duration">{duration}</span>{/if}
   </h3>
 
@@ -115,12 +115,12 @@
     align-items: baseline;
     gap: 0.5rem;
     margin: 0 0 0.6rem;
-    font-size: 0.95rem;
+    font-size: var(--text-sm);
     min-width: 0;
   }
   .bg-kind {
     flex: 0 0 auto;
-    font-size: 0.78rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .bg-label {
@@ -129,7 +129,7 @@
   }
   .bg-status {
     flex: 0 0 auto;
-    font-size: 0.75rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .bg-status[data-status='running'] {
@@ -143,12 +143,12 @@
   }
   .bg-dur {
     flex: 0 0 auto;
-    font-size: 0.75rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .bg-worker {
     margin: 0 0 0.6rem;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .bg-summary {
     margin: 0 0 0.4rem;
@@ -160,7 +160,7 @@
   }
   .bg-sub {
     margin: 1rem 0 0.4rem;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .bg-report {
@@ -171,7 +171,7 @@
   .bg-report-head {
     display: flex;
     gap: 0.4rem;
-    font-size: 0.75rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .bg-output {
@@ -180,7 +180,7 @@
     gap: 0.4rem;
     flex-wrap: wrap;
     margin-top: 1rem;
-    font-size: 0.78rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .bg-output code {

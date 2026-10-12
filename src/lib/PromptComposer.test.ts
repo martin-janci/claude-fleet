@@ -13,6 +13,7 @@ import { hosts } from './hosts';
 import { accounts } from './accounts';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { hubConnection } from './hub_connection';
+import { applyGrantChanges, resetAccessForTests, setMyGrants } from './access';
 
 const source: SessionRow = {
   id: 1,
@@ -90,6 +91,7 @@ beforeEach(() => {
   accounts.set([]);
   hubStatus.set({ ...STANDALONE });
   hubConnection.set({ state: 'standalone' });
+  resetAccessForTests();
 });
 
 afterEach(() => {
@@ -229,5 +231,139 @@ describe('PromptComposer', () => {
     const id = send.getAttribute('aria-describedby');
     expect(id).toBeTruthy();
     expect(document.getElementById(id!)?.textContent).toContain('hub');
+  });
+});
+
+// ── Multi-user M1 (F2a): the fan-out is narrowed PER TARGET ─────────────────
+//
+// This sheet was one of the task's two blockers. It gated on the hub half alone
+// and fanned `send_prompt` out over `$sessions.filter((s) => s.id !== source.id)`
+// — every session in the fleet with "Show all fleet" ticked. Its entry button in
+// `SessionDetails` is access-gated, so a watcher cannot open it for a shared
+// row; the TARGET list inside it was not, so anyone could prompt anyone's
+// session from it. The fix is per-target narrowing with `bulkTargets`, not one
+// answer for the whole sheet.
+describe('PromptComposer target narrowing (multi-user M1)', () => {
+  /** A paired desktop with a live link: `hubActionBlocked` answers null, so the
+   *  only thing left to gate is who this client is on each target. */
+  const paired = () => {
+    hubStatus.set({
+      ...REMOTE_DISCONNECTED,
+      url: 'https://fleet.example.com',
+      configured_url: 'https://fleet.example.com',
+    });
+    hubConnection.set({ state: 'connected' });
+  };
+  const owned = (row: SessionRow, person: number | null): SessionRow => ({
+    ...row,
+    visibility: person === null ? 'unclaimed' : 'private',
+    owner_person_id: person,
+  });
+  const sendCalls = () =>
+    (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'send_prompt');
+
+  async function open() {
+    render(PromptComposer, { props: { source, onClose: () => {} } });
+    await tick();
+    await fireEvent.input(screen.getByTestId('composer-textarea'), {
+      target: { value: 'echo hi' },
+    });
+    await tick();
+  }
+
+  it('the owner keeps every target, checked and sendable', async () => {
+    // The positive control: without it, a narrowing that dropped everything
+    // would satisfy every assertion below.
+    sessions.set([owned(source, 1), owned(sibling, 1), owned(unrelated, 1)]);
+    paired();
+    setMyGrants(1, []);
+    await open();
+    const cb = screen.getByTestId('target-checkbox-2') as HTMLInputElement;
+    expect(cb.disabled).toBe(false);
+    expect(cb.checked).toBe(true);
+    expect(screen.queryByTestId('target-not-mine-2')).toBeNull();
+    expect(screen.getByTestId('composer-send').getAttribute('aria-disabled')).toBe('false');
+    await fireEvent.click(screen.getByTestId('composer-send'));
+    for (let i = 0; i < 8; i++) await tick();
+    expect(sendCalls()).toHaveLength(1);
+  });
+
+  it('a target shared at watch is not checkable, not pre-checked, and not sent to', async () => {
+    sessions.set([owned(source, 1), owned(sibling, 42), owned(unrelated, 42)]);
+    paired();
+    setMyGrants(1, [{ session_id: 2, level: 'watch' }]);
+    await open();
+    const cb = screen.getByTestId('target-checkbox-2') as HTMLInputElement;
+    expect(cb.disabled).toBe(true);
+    expect(cb.checked).toBe(false);
+    expect(screen.getByTestId('target-not-mine-2').title).toMatch(/needs drive/i);
+    // Nothing left to send to, so Send stays off even with a prompt typed.
+    expect(screen.getByTestId('composer-send').getAttribute('aria-disabled')).toBe('true');
+    await fireEvent.click(screen.getByTestId('composer-send'));
+    for (let i = 0; i < 8; i++) await tick();
+    expect(sendCalls()).toHaveLength(0);
+  });
+
+  it('a drive grantee keeps the target: drive IS permission to prompt', async () => {
+    // The counter-test to the one above. Putting `send_prompt` out of a
+    // driver's reach would make the whole drive level meaningless.
+    sessions.set([owned(source, 1), owned(sibling, 42), owned(unrelated, 42)]);
+    paired();
+    setMyGrants(1, [{ session_id: 2, level: 'drive' }]);
+    await open();
+    expect((screen.getByTestId('target-checkbox-2') as HTMLInputElement).disabled).toBe(false);
+    await fireEvent.click(screen.getByTestId('composer-send'));
+    for (let i = 0; i < 8; i++) await tick();
+    expect(sendCalls()).toHaveLength(1);
+  });
+
+  it('Show all fleet does not widen past the grants: only the drivable ones are sent to', async () => {
+    // The blocker as a behaviour: "Show all fleet" is the toggle that turned
+    // this sheet into a fleet-wide prompt gun.
+    const mine = { ...unrelated, id: 3, tmux_name: 'dev-mine' };
+    const theirs = { ...unrelated, id: 4, tmux_name: 'dev-theirs', host_alias: 'elsewhere' };
+    sessions.set([owned(source, 1), owned(mine, 1), owned(theirs, 42)]);
+    paired();
+    setMyGrants(1, [{ session_id: 4, level: 'watch' }]);
+    render(PromptComposer, { props: { source, onClose: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByTestId('show-all-fleet'));
+    await tick();
+    await fireEvent.input(screen.getByTestId('composer-textarea'), { target: { value: 'ping' } });
+    await tick();
+    // Both are listed; only the owner's own can be ticked.
+    expect((screen.getByTestId('target-checkbox-3') as HTMLInputElement).disabled).toBe(false);
+    expect((screen.getByTestId('target-checkbox-4') as HTMLInputElement).disabled).toBe(true);
+    await fireEvent.click(screen.getByTestId('target-checkbox-3'));
+    await tick();
+    await fireEvent.click(screen.getByTestId('composer-send'));
+    for (let i = 0; i < 8; i++) await tick();
+    expect(sendCalls()).toHaveLength(1);
+    const [, payload] = sendCalls()[0] as [string, { args: { tmux_name: string } }];
+    expect(payload.args.tmux_name).toBe('dev-mine');
+  });
+
+  it('a narrow arriving while the sheet is open takes the target away, with no row event', async () => {
+    sessions.set([owned(source, 1), owned(sibling, 42), owned(unrelated, 42)]);
+    paired();
+    setMyGrants(1, [{ session_id: 2, level: 'drive' }]);
+    await open();
+    expect((screen.getByTestId('target-checkbox-2') as HTMLInputElement).disabled).toBe(false);
+    applyGrantChanges([{ session_id: 2, person_id: 1, level: 'watch' }]);
+    await tick();
+    expect((screen.getByTestId('target-checkbox-2') as HTMLInputElement).disabled).toBe(true);
+    await fireEvent.click(screen.getByTestId('composer-send'));
+    for (let i = 0; i < 8; i++) await tick();
+    expect(sendCalls()).toHaveLength(0);
+  });
+
+  it('standalone is untouched: no grants, every target sendable', async () => {
+    // `access.ts` rule 1 — a single-user install needs no `my_grants` answer.
+    sessions.set([source, sibling, unrelated]);
+    await open();
+    expect((screen.getByTestId('target-checkbox-2') as HTMLInputElement).disabled).toBe(false);
+    await fireEvent.click(screen.getByTestId('composer-send'));
+    for (let i = 0; i < 8; i++) await tick();
+    expect(sendCalls()).toHaveLength(1);
   });
 });

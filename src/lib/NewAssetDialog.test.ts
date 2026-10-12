@@ -31,6 +31,21 @@ describe('NewAssetDialog', () => {
     expect(optionsAfter).toEqual(['', 'reviewer']);
   });
 
+  it('offers only the personal catalog\'s assets to copy from, even when a name is in two catalogs (Assets M5, PF9)', () => {
+    catalog.set({
+      head: 'h', loaded_at: 1, problems: [], unmanaged: [],
+      assets: [
+        { kind: 'skill', name: 'worktree', version: '1', description: 'd', tags: [], hosts: [], catalog: 'personal' },
+        { kind: 'skill', name: 'worktree', version: '1', description: 'd', tags: [], hosts: [], catalog: 'acme' },
+        { kind: 'skill', name: 'acme-only', version: '1', description: 'd', tags: [], hosts: [], catalog: 'acme' },
+        { kind: 'skill', name: 'old-hub', version: '1', description: 'd', tags: [], hosts: [] },
+      ],
+    });
+    render(NewAssetDialog, { onclose: () => {}, onsaved: () => {} });
+    const options = Array.from((screen.getByTestId('new-asset-duplicate-from') as HTMLSelectElement).options).map((o) => o.value);
+    expect(options).toEqual(['', 'worktree', 'old-hub']);
+  });
+
   it('Create is disabled until a valid kebab-case name is entered', async () => {
     render(NewAssetDialog, { onclose: () => {}, onsaved: () => {} });
     expect(screen.getByTestId('new-asset-create')).toBeDisabled();
@@ -79,5 +94,30 @@ describe('NewAssetDialog', () => {
     await waitFor(() => expect(screen.getByTestId('new-asset-error')).toBeTruthy());
     expect(screen.getByTestId('new-asset-error').textContent).toContain('already exists');
     expect(onsaved).not.toHaveBeenCalled();
+  });
+});
+
+// G2.6: the Command kind, the name help and "Write it with Claude…".
+describe('NewAssetDialog: Toolkit forms', () => {
+  it('offers Command as a kind and says what the name becomes', () => {
+    render(NewAssetDialog, { onclose: () => {}, onsaved: () => {} });
+    const kinds = Array.from((screen.getByTestId('new-asset-kind') as HTMLSelectElement).options).map((o) => o.textContent);
+    expect(kinds).toEqual(['Skill', 'Agent', 'Command', 'Hook', 'MCP server', 'Plugin']);
+    expect(screen.getByTestId('new-asset-dialog').textContent).toContain('Lower case and dashes; it becomes the folder name.');
+  });
+
+  it('Write it with Claude hands the kind and name to a session', async () => {
+    const onwrite = vi.fn();
+    render(NewAssetDialog, { onclose: () => {}, onsaved: () => {}, onwrite });
+    await fireEvent.change(screen.getByTestId('new-asset-kind'), { target: { value: 'command' } });
+    await fireEvent.input(screen.getByTestId('new-asset-name'), { target: { value: 'ship-it' } });
+    await fireEvent.click(screen.getByTestId('new-asset-write'));
+    expect(onwrite).toHaveBeenCalledWith('Create a new command named "ship-it" that …');
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it('has no Write it with Claude where no session can start', () => {
+    render(NewAssetDialog, { onclose: () => {}, onsaved: () => {} });
+    expect(screen.queryByTestId('new-asset-write')).toBeNull();
   });
 });

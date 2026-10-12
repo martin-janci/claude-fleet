@@ -55,6 +55,10 @@
         {
           "type": "field",
           "key": "restore.stagger_ms"
+        },
+        {
+          "type": "action",
+          "action": "restore.lost"
         }
       ]
     },
@@ -106,6 +110,31 @@
       ]
     },
     {
+      "title": "Voice",
+      "items": [
+        {
+          "type": "field",
+          "key": "voice.enabled"
+        },
+        {
+          "type": "field",
+          "key": "voice.max_capture_secs",
+          "when": {
+            "key": "voice.enabled",
+            "truthy": true
+          }
+        },
+        {
+          "type": "field",
+          "key": "voice.claim_ttl_secs",
+          "when": {
+            "key": "voice.enabled",
+            "truthy": true
+          }
+        }
+      ]
+    },
+    {
       "title": "Usage",
       "items": [
         {
@@ -115,6 +144,14 @@
         {
           "type": "field",
           "key": "usage.interval_secs",
+          "when": {
+            "key": "usage.enabled",
+            "truthy": true
+          }
+        },
+        {
+          "type": "field",
+          "key": "accounts.pause_at",
           "when": {
             "key": "usage.enabled",
             "truthy": true
@@ -132,6 +169,41 @@
           "type": "link",
           "page": "usage",
           "label": "See usage"
+        }
+      ]
+    },
+    {
+      "title": "Search",
+      "items": [
+        {
+          "type": "field",
+          "key": "search.index_transcripts"
+        },
+        {
+          "type": "field",
+          "key": "search.transcript_days",
+          "when": {
+            "key": "search.index_transcripts",
+            "truthy": true
+          }
+        }
+      ]
+    },
+    {
+      "title": "Company budgets",
+      "items": [
+        {
+          "type": "field",
+          "key": "budget.org_daily_usd"
+        },
+        {
+          "type": "field",
+          "key": "budget.org_monthly_usd"
+        },
+        {
+          "type": "notice",
+          "tone": "info",
+          "text": "Each org can set its own budget on its page in Settings → Organisations. Spend is the estimated cost of the org's sessions, counted from the day this version was installed."
         }
       ]
     },

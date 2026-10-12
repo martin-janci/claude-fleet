@@ -19,8 +19,8 @@ use crate::cancel::CancellationRegistry;
 use crate::ipc_error::{codes, IpcError};
 use crate::service::pane_intel::{ClaudeStatus, StuckKind};
 use crate::service::{
-    catalog, fresh, health, hosts, projects, quick_replies, safe_kill, sessions, tasks, transcript,
-    usage, worktrees,
+    agent_install, catalog, fresh, health, hosts, projects, quick_replies, safe_kill, sessions,
+    tasks, transcript, usage, worktrees,
 };
 use crate::ssh::SshClient;
 use crate::store::Store;
@@ -37,21 +37,40 @@ use rmcp::{
 };
 use std::sync::{Arc, Mutex};
 
+mod add_account;
+mod agents;
+mod api_tokens;
 mod assets;
+mod dashboards;
+mod devices;
 mod downloads;
 mod fleet;
+mod forms;
+mod library;
 mod lifecycle;
 mod list_changed;
 mod messaging;
 mod orchestration;
 mod params;
 mod peer;
+mod pr_shepherd;
+mod presence;
 mod present;
+mod prs;
 mod repo;
+mod routines;
+mod runs;
+mod search;
 mod session_ops;
+mod sharing;
+mod start_rules;
 mod support;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_add_account;
+#[cfg(test)]
+mod tests_api_tokens;
 #[cfg(test)]
 mod tests_catalog_admin;
 #[cfg(test)]
@@ -60,8 +79,13 @@ mod tests_changesets;
 mod tests_isolation;
 #[cfg(test)]
 mod tests_read_pool;
+#[cfg(test)]
+mod tests_runs;
+#[cfg(test)]
+mod tests_sessions_isolation;
 mod updates;
 mod views;
+mod wizard_state;
 
 // `rmcp::model::*` also exports a `CancelTaskParams`. Name ours explicitly:
 // an explicit import outranks both globs, here and in every child module
@@ -107,6 +131,9 @@ pub struct FleetTools {
     /// retried call delivers once. Created once in `new`; every per-MCP-
     /// session clone shares it.
     recent_sends: Arc<std::sync::Mutex<RecentSends>>,
+    /// Who has which session open (redesign 11.7b), in memory only. Created
+    /// once in `new`; every per-MCP-session clone shares it.
+    presence: Arc<crate::service::presence::PresenceBoard>,
     /// The tool list each caller is known to hold, for
     /// `notifications/tools/list_changed`. Created once in `new`; both mounts
     /// and every per-request clone share it.
@@ -286,6 +313,7 @@ impl FleetTools {
             guards,
             long_polls: guard::LongPollLimiter::new(guard::MAX_LONG_POLLS_PER_CALLER),
             recent_sends: Arc::new(std::sync::Mutex::new(RecentSends::default())),
+            presence: Arc::default(),
             list_changed: Arc::default(),
             push_list_changed: false,
             tool_router: Self::tool_router(),
@@ -356,6 +384,22 @@ impl FleetTools {
             + Self::peer_router()
             + Self::updates_router()
             + Self::downloads_router()
+            + Self::sharing_router()
+            + Self::forms_router()
+            + Self::devices_router()
+            + Self::prs_router()
+            + Self::pr_shepherd_router()
+            + Self::agents_router()
+            + Self::add_account_router()
+            + Self::api_tokens_router()
+            + Self::routines_router()
+            + Self::start_rules_router()
+            + Self::wizard_state_router()
+            + Self::dashboards_router()
+            + Self::presence_router()
+            + Self::library_router()
+            + Self::runs_router()
+            + Self::search_router()
     }
 }
 
@@ -392,6 +436,16 @@ impl ServerHandler for FleetTools {
             return tool_error_result(e);
         }
         context.extensions.insert(caller.clone());
+        // Control's agent hands work on through ordinary tools; its
+        // successful calls leave a receipt (redesign step 9.3), read from
+        // these arguments once the call has run.
+        let handoff_args = caller.is_operator().then(|| {
+            request
+                .arguments
+                .clone()
+                .map(serde_json::Value::Object)
+                .unwrap_or_default()
+        });
         let tcc = ToolCallContext::new(self, request, context);
         // Tool-execution failures travel as `is_error` results; only rmcp's
         // own protocol errors (unknown tool, bad arguments) stay JSON-RPC.
@@ -410,20 +464,32 @@ impl ServerHandler for FleetTools {
             Ok(result) => Ok(result),
             Err(e) => tool_error_result(e),
         };
-        // Work graph M5: whatever tool answered — a result or an error's
-        // details — a per-host token never receives session rows' work of
-        // another org.
-        // A client bound to an org (M14) is gated the same way.
-        if let (Ok(result), true) = (out.as_mut(), caller.is_scoped()) {
+        if let (Some(args), Ok(result)) = (&handoff_args, &out) {
+            if !result.is_error.unwrap_or(false) {
+                crate::service::control_handoffs::record(&self.store, &tool, args, result);
+            }
+        }
+        // Choke point 3 (spec §5.1): whatever tool answered — a result or an
+        // error's details — this is the last net under it. A session row the
+        // caller may not see is dropped (multi-user M1, T8) and a row it may
+        // see loses another org's work (work graph M5 / M14).
+        //
+        // UNCONDITIONAL, and that is the whole of T8's first half: the
+        // condition here used to be `caller.is_scoped()`, which is false for
+        // the master and for every paired client bound to no org — so for a
+        // person's own phone, the caller M1 exists for, the backstop ran
+        // never. `fence_result_via` decides what each caller may keep; the
+        // call site decides nothing.
+        if let Ok(result) = out.as_mut() {
             // A tool that wrote nothing has no write of its own to see, so
             // its gate reads the pool too; every other tool's reads the
             // writer, after its own writes.
-            let orgs = if POOLED_READ_TOOLS.contains(&tool.as_str()) {
+            let gate = if POOLED_READ_TOOLS.contains(&tool.as_str()) {
                 self.reader()
             } else {
                 &self.store
             };
-            self.redact_work_via(orgs, &caller, result);
+            self.fence_result_via(gate, &caller, result);
         }
         out
     }

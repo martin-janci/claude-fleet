@@ -139,7 +139,7 @@ describe('BackgroundDetail', () => {
       entry: entry({ source: 'fleet_session', status: 'idle', result: null, history: [] }),
       onBack: () => {},
     });
-    expect(getByTestId('bg-detail-status').textContent).toContain('idle');
+    expect(getByTestId('bg-detail-status').textContent).toBe('Idle');
   });
 
   it('shows a failure reason instead of a report', () => {

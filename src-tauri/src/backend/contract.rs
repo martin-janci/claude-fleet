@@ -44,7 +44,7 @@
 //! # Regenerating the golden file
 //!
 //! ```text
-//! REGEN_HUB_CONTRACT=1 cargo test -p claude-fleet --lib contract
+//! REGEN_HUB_CONTRACT=1 cargo fleet-test -- the_hubs_field_names_are_the_ones_the_desktop_reads
 //! ```
 //!
 //! Read the diff before committing it. A key that changed name is the hub
@@ -118,7 +118,58 @@ pub fn wire_keys<T: Serialize>(value: &T) -> Vec<String> {
 /// Raised to 7 for revision 7: file downloads (`list_downloads`,
 /// `send_file`, `remove_download`, `GET /downloads/<id>`). A revision-6 hub
 /// serves none of them, so the Downloads sheet would fail every action.
-pub const MIN_HUB_CONTRACT: u32 = 7;
+///
+/// Raised to 8 for revision 8: multi-user M1's sharing commands route to the
+/// five new tools `session_share`, `session_unshare`, `session_narrow`,
+/// `session_access` and `my_grants`. A revision-7 hub serves none of them, so
+/// a desktop paired with one would open the Share sheet and fail every button
+/// with an unknown tool — and `my_grants` is the one place this client learns
+/// its own person id and grant set, so without it `src/lib/access.ts` keeps
+/// its previous (empty) answer rather than widening and a session shared with
+/// this person never becomes reachable at all. A watcher would see a row it
+/// may read and no way to read it. Refusing that hub with the skew banner
+/// says what to do (update the hub); leaving it `InRange` would ship a
+/// sharing UI that silently does nothing.
+///
+/// Raised to 9 for revision 9: chat forms route `list_forms`, `get_form`,
+/// `answer_form` and `decline_form` to the new `ask` tool. A revision-8 hub
+/// serves none of it, so every answer would fail with an unknown tool.
+///
+/// Raised to 10 for revision 10: the Debug devices page routes its seven
+/// commands to the new `debug_devices` tool, which a revision-9 hub lacks.
+///
+/// Raised to 11 for revision 11: the desktop routes `touch_session_viewed`
+/// and `repo_blame` to tools a revision-10 hub lacks, so the unread state
+/// would never clear and Blame would fail with an unknown tool.
+///
+/// Raised to 12 for revision 12: the desktop routes the prompt queue, the
+/// branch and range diffs, presence, peer linking, shell terminals, Runs
+/// and the Control handoffs to tools a revision-11 hub lacks.
+///
+/// Raised to 13 for revision 13: Control's routing, the Library, the lost
+/// session's target and placement, and start rules route to tools a
+/// revision-12 hub lacks.
+///
+/// Raised to 14 for revision 14: account headroom and mission triage route
+/// to tools a revision-13 hub lacks.
+///
+/// Raised to 16 for revision 16: named tokens and + Add account route to
+/// the `api_tokens` and `add_account` tools a revision-15 hub lacks.
+///
+/// Stays 16 for revision 17: wizard resume and Jev's host proposal route to
+/// the `wizard_state` and `propose_host_placement` tools a revision-16 hub
+/// lacks, and the desktop reads that hub's `E_HUB_PROTOCOL` as "nothing
+/// saved" and "nothing proposed" (as G7.10 does for `resume_or_new`). The
+/// owner's rule: a desktop that updates before its hub keeps working.
+/// Downloads Pause (`pause_download`, G7.15) is refused there with that
+/// same `E_HUB_PROTOCOL`, which the sheet words as "the hub needs updating first".
+/// The composer's context help (`session_context_help`) likewise answers
+/// that the hub needs updating for context help. An account's nickname and
+/// a host's health checklist (`set_account_nickname`, `check_host`) route
+/// to tools added at revision 17 without a bump; a hub without them answers
+/// `E_HUB_PROTOCOL`, which the field and the checklist show as their error,
+/// where before this build both were refused outright.
+pub const MIN_HUB_CONTRACT: u32 = 16;
 
 /// The highest hub wire-contract revision this build understands. A hub
 /// ahead of this is running row shapes compiled after this build was —
@@ -127,11 +178,36 @@ pub const MIN_HUB_CONTRACT: u32 = 7;
 /// Moves in lockstep with [`fleet_core::wire_contract::CONTRACT_REVISION`]:
 /// this build's own hub must be `InRange`, so bumping the revision without
 /// bumping this is a shipped outage against itself.
-pub const MAX_HUB_CONTRACT: u32 = 7;
+///
+/// Raised to 8 with revision 8 (multi-user M1's five sharing tools), in that
+/// lockstep: this build's own `fleet-hub` reports 8, and leaving this at 7
+/// would make every desktop refuse the hub it ships beside as `TooNew`.
+///
+/// Raised to 9 with revision 9 (chat forms' `ask` tool), in that lockstep.
+///
+/// Raised to 10 with revision 10 (debug devices' `debug_devices` tool).
+///
+/// Raised to 11 with revision 11 (the Orbit Fleet redesign's M2).
+///
+/// Raised to 12 with revision 12 (the redesign tools after M2).
+///
+/// Raised to 13 with revision 13.
+///
+/// Raised to 14 with revision 14.
+///
+/// Raised to 15 with revision 15 (the wider form spec, G1.1). The minimum
+/// stays 14: revision 15 adds no tool the desktop routes to, and a
+/// revision-14 hub's forms are in the older shape this build still reads.
+///
+/// Raised to 16 with revision 16 (gap plan M15 batch 2).
+///
+/// Raised to 17 with revision 17 (gap plan batch 3, G7.2 and G7.3, and
+/// `session_context_help`).
+pub const MAX_HUB_CONTRACT: u32 = 17;
 
 /// Where a hub's wire-contract revision stands against what this build
 /// accepts. A pure function of the three numbers on purpose: the real bounds
-/// are `7..=7` today, and unlike the original `0..=1` range this one CAN
+/// are `10..=10` today, and unlike the original `0..=1` range this one CAN
 /// exercise "too old" through a live `u32` (a hub reporting `0`…`3` is below
 /// `4`) — see `tests_contract.rs`, independent of whichever bounds
 /// a future release ships.

@@ -304,7 +304,14 @@ async fn a_warm_describe_cache_does_not_suppress_the_lookup_or_brief_notice() {
     let host = OrgScope::for_host(&store.lock().unwrap(), "hosta").unwrap();
     let net = TrackerNet::fake(Arc::new(FakeTransport::new()));
 
-    let looked_up = tickets::lookup(&store, "ABC-1", &host, &net).await.unwrap();
+    let looked_up = tickets::lookup(
+        &store,
+        "ABC-1",
+        &crate::service::view_scope::org_only_view(&host),
+        &net,
+    )
+    .await
+    .unwrap();
     let d = looked_up.description.unwrap();
     assert!(d.contains("shown 2000 of 6812 chars"), "{d}");
     assert!(
@@ -320,7 +327,7 @@ async fn a_warm_describe_cache_does_not_suppress_the_lookup_or_brief_notice() {
             host_alias: Some("hosta".into()),
             ..Default::default()
         },
-        &OrgScope::All,
+        &crate::service::view_scope::ViewScope::internal(),
         &net,
     )
     .await

@@ -21,6 +21,10 @@ vi.mock('@tauri-apps/api/core', () => ({
         allow_plaintext: false,
         warning: null,
         restart_required: false,
+        // Spelled out rather than left undefined: `access.ts::backendMode`
+        // reads it first, and a HubStatus missing the field is a shape the
+        // real backend never sends.
+        unavailable: null,
       };
     if (cmd === 'list_projects') return [];
     if (cmd === 'refresh_projects') return [];
@@ -56,8 +60,29 @@ vi.mock('@tauri-apps/api/core', () => ({
       tmux_version: '3.6a',
       account: null,
     };
-    if (cmd === 'related_sessions') return [];
+    // ── multi-user M1 ──────────────────────────────────────────────────
+    // `my_grants` is what a client derives its per-session access from
+    // (`src/lib/access.ts`). The default answer is a person with NO grants,
+    // which is the ordinary single-user shape; every existing test is
+    // standalone, where the derivation answers `own` from the backend mode
+    // alone and never reads this at all.
+    if (cmd === 'my_grants') return { person_id: 1, grants: [] };
+    // An ARRAY, not null: the Share sheet renders the grant list, and `null`
+    // would make a component that maps over it throw instead of showing the
+    // "not shared with anyone" state.
+    if (cmd === 'session_access') return [];
+    if (cmd === 'session_share') return null;
+    if (cmd === 'session_unshare') return null;
+    if (cmd === 'session_narrow') return null;
+    // Gap plan G4.2: no open asks by default.
+    if (cmd === 'access_requests') return [];
+    // Plain text, not JSON (the watcher's read-only pane snapshot).
+    if (cmd === 'capture_session') return '';
     if (cmd === 'send_prompt') return null;
+    // The fleet agent's status, which Control (redesign step 9.1) reads when
+    // it opens: blocked on the control API being off, which is the state a
+    // fresh install is in and the one that starts nothing.
+    if (cmd === 'operator_status') return { ready: false, session: null, blocked: 'no_mcp' };
     if (cmd === 'spawn_review') return null;
     if (cmd === 'mcp_status' || cmd === 'mcp_configure')
       return {
@@ -77,6 +102,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn(async () => () => {}),
   emit: vi.fn(async () => {}),
+  emitTo: vi.fn(async () => {}),
 }));
 
 // `getVersion()` is an IPC call into the Tauri runtime, which jsdom has none

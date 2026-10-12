@@ -104,6 +104,8 @@ pub struct Plan {
     pub owner: Option<(u32, u32)>,
     /// Enable and (re)start the unit after writing it.
     pub start: bool,
+    /// Also write and enable `fleet-agent-update.timer`.
+    pub auto_update: bool,
 }
 
 /// The one way this module reaches systemd.
@@ -170,6 +172,10 @@ pub fn render_unit(scope: &Scope, binary: &Path, config_path: &Path) -> Result<S
     unit.push_str("RestartSec=5\n");
     unit.push_str("KillMode=process\n");
     unit.push_str("NotifyAccess=main\n");
+    // `$RUNTIME_DIRECTORY` (`%t/fleet-agent`), the agent's own: the hub's
+    // `update_now` drops `update-now` there and `fleet-agent-update.path`
+    // starts a pass (crate::update).
+    unit.push_str("RuntimeDirectory=fleet-agent\n");
     unit.push('\n');
     unit.push_str("[Install]\n");
     unit.push_str(&format!("WantedBy={wanted_by}\n"));
@@ -260,6 +266,28 @@ pub fn install(
         let _ = writeln!(out, "    {line}");
     }
 
+    if plan.auto_update {
+        let dir = unit_path.parent().unwrap_or(Path::new("/"));
+        for (name, body) in [
+            (
+                crate::update::UPDATE_SERVICE,
+                crate::update::render_update_service(&plan.scope, &plan.binary)?,
+            ),
+            (
+                crate::update::UPDATE_TIMER,
+                crate::update::render_update_timer(),
+            ),
+            (
+                crate::update::UPDATE_PATH,
+                crate::update::render_update_path(),
+            ),
+        ] {
+            let p = dir.join(name);
+            std::fs::write(&p, &body).map_err(|e| format!("{}: {e}", p.display()))?;
+            let _ = writeln!(out, "wrote {}", p.display());
+        }
+    }
+
     if !plan.start {
         let _ = writeln!(out, "not started (--no-start)");
         return Ok(());
@@ -267,6 +295,15 @@ pub fn install(
     for call in systemctl_calls(&plan.scope) {
         let _ = writeln!(out, "systemctl {}", call.join(" "));
         systemctl.run(&call)?;
+    }
+    if plan.auto_update {
+        for call in crate::update::update_systemctl_calls(&plan.scope)
+            .into_iter()
+            .skip(1)
+        {
+            let _ = writeln!(out, "systemctl {}", call.join(" "));
+            systemctl.run(&call)?;
+        }
     }
     if plan.scope == Scope::User {
         let _ = writeln!(
@@ -502,6 +539,7 @@ mod tests {
             config: config(),
             owner: None,
             start,
+            auto_update: false,
         }
     }
 
@@ -557,6 +595,7 @@ mod tests {
             config: config(),
             owner: Some(me),
             start: false,
+            auto_update: false,
         };
         install(&plan, &mut Recorder::default(), &mut Vec::new()).unwrap();
         let cfg_dir = plan.layout.config_path.parent().unwrap();

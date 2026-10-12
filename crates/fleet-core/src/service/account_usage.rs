@@ -215,6 +215,24 @@ pub struct Window {
     pub resets_at: Option<i64>,
 }
 
+/// The 5-hour window's length, seconds.
+pub const FIVE_HOUR_SECS: i64 = 5 * 3_600;
+/// The weekly window's length, seconds.
+pub const WEEK_SECS: i64 = 7 * 86_400;
+
+impl Window {
+    /// Whether this window, of `len_secs`, read at `fetched_at`, has not
+    /// reset by `now`: before its `resets_at`; without one, only while the
+    /// reading is younger than the window itself (the window has rolled
+    /// over since an older one, so it says nothing about now).
+    pub fn live_at(&self, fetched_at: Option<i64>, len_secs: i64, now: i64) -> bool {
+        match self.resets_at {
+            Some(at) => at > now,
+            None => fetched_at.is_some_and(|f| now - f < len_secs),
+        }
+    }
+}
+
 /// The endpoint's buckets. Any may be absent.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct AccountUsage {
@@ -534,7 +552,7 @@ fn window_of(v: Option<&serde_json::Value>) -> Option<Window> {
 }
 
 /// RFC 3339 (`2026-02-06T22:00:00+00:00`, `…00.123Z`) → unix seconds.
-fn parse_rfc3339(s: &str) -> Option<i64> {
+pub(crate) fn parse_rfc3339(s: &str) -> Option<i64> {
     let s = s.trim();
     if !s.is_ascii() || s.len() < 20 {
         return None;
@@ -621,27 +639,60 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 /// The tick already feeds this through `service::hosts::active_hosts` (the
 /// one hidden/local rule, hub-ops F6); the `hidden` test here is kept as
 /// defence in depth for a caller that hands over raw rows.
+///
+/// A host's login profile logged into the account is a source too
+/// (docs/accounts.md), named `<alias> (<profile>)` ([`source_label`]); it is
+/// read with `CLAUDE_CONFIG_DIR` at that profile. A host's own login ranks
+/// before its profiles, so an existing "via" label does not move.
 pub fn source_hosts(account_uuid: &str, hosts: &[HostRow], sticky: Option<&str>) -> Vec<String> {
     let local = crate::service::projects::LOCAL_HOST;
-    let mut out: Vec<String> = hosts
-        .iter()
-        .filter(|h| h.reachable && !h.hidden && h.account_uuid.as_deref() == Some(account_uuid))
-        .map(|h| h.alias.clone())
-        .collect();
+    let mut out: Vec<String> = Vec::new();
+    for h in hosts.iter().filter(|h| h.reachable && !h.hidden) {
+        if h.account_uuid.as_deref() == Some(account_uuid) {
+            out.push(h.alias.clone());
+        }
+        for p in h.claude_profiles.iter().flatten() {
+            if p.account_uuid.as_deref() == Some(account_uuid)
+                && crate::validate::claude_profile(&p.name).is_ok()
+            {
+                out.push(source_label(&h.alias, Some(&p.name)));
+            }
+        }
+    }
     out.sort_by(|a, b| {
         let rank = |h: &str| {
+            let (alias, profile) = parse_source(h);
             if Some(h) == sticky {
                 0
-            } else if h == local {
-                2
+            } else if alias == local {
+                3 + u8::from(profile.is_some())
             } else {
-                1
+                1 + u8::from(profile.is_some())
             }
         };
         rank(a).cmp(&rank(b)).then_with(|| a.cmp(b))
     });
     out.dedup();
     out
+}
+
+/// A usage source's name: the host alias, or `<alias> (<profile>)` for one
+/// of its login profiles. Neither part can hold a space or a parenthesis
+/// (`validate::host_alias_syntax`, `validate::claude_profile`), so
+/// [`parse_source`] reads it back unambiguously.
+pub fn source_label(alias: &str, profile: Option<&str>) -> String {
+    match profile {
+        Some(p) => format!("{alias} ({p})"),
+        None => alias.to_string(),
+    }
+}
+
+/// The host alias and login profile a [`source_label`] names.
+pub fn parse_source(label: &str) -> (&str, Option<&str>) {
+    match label.split_once(" (") {
+        Some((alias, rest)) => (alias, rest.strip_suffix(')')),
+        None => (label, None),
+    }
 }
 
 /// Time source for the usage cache. Scheduling uses the monotonic
@@ -867,19 +918,37 @@ impl UsageCache {
         }
     }
 
+    /// Seed `account` with a last-known answer from before a restart
+    /// (`account_usage_snapshots`, redesign step 2.5), so the meters show it
+    /// at once instead of `never_fetched`. Only an account with no entry yet
+    /// is seeded, and its schedule is left alone: it is due straight away,
+    /// exactly as an unseeded account is.
+    pub fn restore(
+        &mut self,
+        account: &str,
+        usage: AccountUsage,
+        subscription: Option<String>,
+        fetched_at: i64,
+        source_host: Option<String>,
+    ) {
+        if self.entries.contains_key(account) {
+            return;
+        }
+        self.entries.insert(
+            account.to_string(),
+            AccountUsageEntry {
+                last_ok: Some((usage, subscription, fetched_at)),
+                last_outcome: Some(UsageOutcomeKind::Ok),
+                source_host,
+                ..AccountUsageEntry::default()
+            },
+        );
+    }
+
     /// What the UI needs for `account`.
     pub fn snapshot(&self, account: &str) -> AccountUsageSnapshot {
         match self.entries.get(account) {
-            None => AccountUsageSnapshot {
-                account_uuid: account.to_string(),
-                usage: None,
-                subscription: None,
-                fetched_at: None,
-                source_host: None,
-                status: UsageOutcomeKind::NeverFetched,
-                detail: None,
-                next_try_at: 0,
-            },
+            None => AccountUsageSnapshot::never_fetched(account),
             Some(e) => AccountUsageSnapshot {
                 account_uuid: account.to_string(),
                 usage: e.last_ok.as_ref().map(|(u, _, _)| u.clone()),
@@ -912,6 +981,20 @@ pub struct AccountUsageSnapshot {
 }
 
 impl AccountUsageSnapshot {
+    /// An account nothing has been asked about yet.
+    pub fn never_fetched(account: &str) -> Self {
+        Self {
+            account_uuid: account.to_string(),
+            usage: None,
+            subscription: None,
+            fetched_at: None,
+            source_host: None,
+            status: UsageOutcomeKind::NeverFetched,
+            detail: None,
+            next_try_at: 0,
+        }
+    }
+
     /// Whether this snapshot says anything new compared with `before`.
     ///
     /// Everything except [`Self::next_try_at`], which moves on every attempt
@@ -1074,7 +1157,6 @@ pub async fn fetch_account_usage_with(
     };
 
     let script = usage_script(&user_agent());
-    let quoted = quote(&script);
     let mut notes: Vec<String> = Vec::new();
     let mut host_state: Option<UsageOutcomeKind> = None;
     let mut transport_error = false;
@@ -1087,9 +1169,20 @@ pub async fn fetch_account_usage_with(
             Some(n) => *n -= 1,
             None => {}
         }
+        // A profile source reads that profile's credentials: the script's
+        // `cred` line follows `CLAUDE_CONFIG_DIR`. The name is re-checked:
+        // it came from a stored host row.
+        let (alias, profile) = parse_source(host);
+        let quoted = match profile.filter(|p| crate::validate::claude_profile(p).is_ok()) {
+            Some(p) => quote(&format!(
+                "CLAUDE_CONFIG_DIR=\"$HOME/.claude-profiles/\"{}\n{script}",
+                quote(p)
+            )),
+            None => quote(&script),
+        };
         let res = ssh
             .run_bounded_capped(
-                host,
+                alias,
                 &["bash", "-lc", &quoted],
                 CONNECT_TIMEOUT,
                 WALL_CLOCK,
@@ -1184,7 +1277,20 @@ mod tests {
             agent_version: None,
             provisioned_at: None,
             provision_stale: false,
+            unclaimed_sessions: None,
             provision_warning: None,
+            auth_overrides: None,
+            claude_profiles: None,
+            cpu_count: None,
+            mem_total_kb: None,
+            boot_at: None,
+            latency_ms: None,
+            worktree_kb: None,
+            worktree_at: None,
+            agents_on_path: None,
+            last_reachable_at: None,
+            last_probe_error_code: None,
+            last_probe_error: None,
             harnesses: None,
         }
     }
@@ -2278,6 +2384,53 @@ curl() { echo HIJACKED; }
         );
         assert_eq!(source_hosts("B", &hosts, None), vec!["other"]);
         assert!(source_hosts("C", &hosts, None).is_empty());
+    }
+
+    #[test]
+    fn a_login_profile_on_the_account_is_a_source_after_the_hosts_own_login() {
+        let profile = |name: &str, acct: &str| crate::store::HostProfileRow {
+            name: name.into(),
+            account_uuid: Some(acct.into()),
+            email: None,
+        };
+        let mut b = host("b", Some("H"), true);
+        b.claude_profiles = Some(vec![profile("work", "A"), profile("bad name", "A")]);
+        let mut local = host("local", Some("A"), true);
+        local.claude_profiles = Some(vec![profile("work", "A")]);
+        let hosts = vec![host("a", Some("A"), true), b, local];
+        assert_eq!(
+            source_hosts("A", &hosts, None),
+            vec!["a", "b (work)", "local", "local (work)"],
+            "an invalid stored name is never a source"
+        );
+        assert_eq!(source_hosts("A", &hosts, Some("b (work)"))[0], "b (work)");
+        assert_eq!(parse_source("b (work)"), ("b", Some("work")));
+        assert_eq!(parse_source("b"), ("b", None));
+    }
+
+    #[tokio::test]
+    async fn a_profile_source_reads_that_profiles_credentials() {
+        let mut b = host("b", None, true);
+        b.claude_profiles = Some(vec![crate::store::HostProfileRow {
+            name: "work".into(),
+            account_uuid: Some("acct".into()),
+            email: None,
+        }]);
+        let fake = FakeSsh::new();
+        fake.on_host(
+            "b",
+            Match::script_contains("api/oauth/usage"),
+            Reply::ok(&ok_output(OK_BODY)),
+        );
+        let (_clock, cache) = fake_cache();
+        let snap = fetch_account_usage_with("acct", &[b], &fake, &cache, false).await;
+        assert_eq!(snap.status, UsageOutcomeKind::Ok);
+        assert_eq!(snap.source_host.as_deref(), Some("b (work)"));
+        let script = fake.calls_for("b")[0].script().unwrap();
+        assert!(
+            script.starts_with("CLAUDE_CONFIG_DIR=\"$HOME/.claude-profiles/\"'work'\n"),
+            "{script}"
+        );
     }
 
     #[test]

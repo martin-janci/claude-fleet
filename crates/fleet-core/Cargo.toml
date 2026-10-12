@@ -34,6 +34,9 @@ nl-detect = ["dep:lingua"]
 testkit = []
 
 [dependencies]
+# The pairing QR `org_admin { pair_device }` answers (the same crate fleet-hub draws its
+# terminal QR with).
+qrcode = { version = "0.14", default-features = false }
 sysinfo = "0.33"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -67,6 +70,12 @@ rmcp = { version = "1", features = [
 # stack, plus their `sha1` and `data-encoding` — four packages, all MIT or
 # MIT/Apache-2.0.
 axum = { version = "0.8", features = ["ws"] }
+# `mcp::conn` serves connections itself (axum::serve sets no header-read
+# deadline and no connection cap). All three are already in the tree through
+# axum, at the same versions.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower-service = "0.3"
 # `GET /events` builds its SSE body with `stream::unfold`, which is what lets
 # one state machine hold the caller's stream permit for the life of the
 # connection. `sink` is what `/agent` needs: `StreamExt::split`, so the socket's
@@ -109,6 +118,12 @@ toml = "0.8"
 # Asset catalog: `import_host` stages a remote host's dumped `~/.claude`
 # under a throwaway directory before importing it (`service/catalog/mod.rs`).
 tempfile = "3"
+# Local workspace sync (`service/local_sync/`): the local walk honours the
+# synced `.gitignore` files (`ignore`, BurntSushi, MIT/Unlicense), and files
+# cross the SSH pipe as tar streams (`tar`, MIT/Apache-2.0) — the host side
+# uses its own `tar`.
+ignore = "0.4"
+tar = { version = "0.4", default-features = false }
 
 # `run_local_script` (service/add_project.rs) signals a script's whole process
 # group (`kill(-pgid, ..)`).

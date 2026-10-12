@@ -1,0 +1,907 @@
+{
+ "v": 3,
+ "createdOnFiles": {
+  "v": 1,
+  "at": "2026-10-08T12:45:00Z"
+ },
+ "title": "Orbit Fleet redesign",
+ "launch": {
+  "view": "canvas"
+ },
+ "pages": [],
+ "boards": {
+  "Main.dc.html": {
+   "x": 0,
+   "y": 0,
+   "w": 1440,
+   "h": 900,
+   "title": "Inbox · only what needs you, session in focus",
+   "expand": "fill"
+  },
+  "Work.dc.html": {
+   "x": 1520,
+   "y": 0,
+   "w": 1440,
+   "h": 900,
+   "title": "Work · tasks with filters open",
+   "expand": "fill"
+  },
+  "Automation.dc.html": {
+   "x": 3040,
+   "y": 0,
+   "w": 1440,
+   "h": 900,
+   "title": "Automation · routines, agents, runs",
+   "expand": "fill"
+  },
+  "Accounts.dc.html": {
+   "x": 4560,
+   "y": 0,
+   "w": 1440,
+   "h": 900,
+   "title": "Accounts & hosts",
+   "expand": "fill"
+  },
+  "Terminals.dc.html": {
+   "x": 0,
+   "y": 1000,
+   "w": 1440,
+   "h": 900,
+   "title": "Session · terminals 0…N beside the agent tab",
+   "expand": "fill"
+  },
+  "Sessions.dc.html": {
+   "x": 1520,
+   "y": 1000,
+   "w": 1440,
+   "h": 900,
+   "title": "Sessions · all sessions, view options, shared with me",
+   "expand": "fill"
+  },
+  "Agent.dc.html": {
+   "x": 3040,
+   "y": 1000,
+   "w": 1440,
+   "h": 900,
+   "title": "Session · Claude Code agent tab",
+   "expand": "fill"
+  },
+  "Files.dc.html": {
+   "x": 4560,
+   "y": 1000,
+   "w": 1440,
+   "h": 900,
+   "title": "Session · Files: changed, commit, push",
+   "expand": "fill"
+  },
+  "Palette.dc.html": {
+   "x": 0,
+   "y": 2000,
+   "w": 1440,
+   "h": 900,
+   "title": "⌘K palette, scoped to the session",
+   "expand": "fill"
+  },
+  "NewSession.dc.html": {
+   "x": 1520,
+   "y": 2000,
+   "w": 1440,
+   "h": 900,
+   "title": "New session · every 0.5.3 option kept",
+   "expand": "fill"
+  },
+  "Toolkit.dc.html": {
+   "x": 3040,
+   "y": 2000,
+   "w": 1440,
+   "h": 900,
+   "title": "Toolkit · skills synced across hosts",
+   "expand": "fill"
+  },
+  "Settings.dc.html": {
+   "x": 4560,
+   "y": 2000,
+   "w": 1440,
+   "h": 900,
+   "title": "Settings · layout, motion, density",
+   "expand": "fill"
+  },
+  "Missions.dc.html": {
+   "x": 0,
+   "y": 3000,
+   "w": 1440,
+   "h": 900,
+   "title": "Work › Missions · plan by wave, cards, autonomy",
+   "expand": "fill"
+  },
+  "MissionControl.dc.html": {
+   "x": 0,
+   "y": 4100,
+   "w": 1440,
+   "h": 900,
+   "title": "Control · coordinator chat, Today tab, views panel",
+   "expand": "fill"
+  },
+  "MCViews.dc.html": {
+   "x": 1520,
+   "y": 4100,
+   "w": 1440,
+   "h": 900,
+   "title": "Control · Library and Pull requests views, deep links",
+   "expand": "fill"
+  },
+  "MCSession.dc.html": {
+   "x": 3040,
+   "y": 4100,
+   "w": 1440,
+   "h": 900,
+   "title": "Control · a session opened in the panel",
+   "expand": "fill"
+  },
+  "MCTasks.dc.html": {
+   "x": 4560,
+   "y": 4100,
+   "w": 1440,
+   "h": 900,
+   "title": "Control · tasks in the chat + Tasks view",
+   "expand": "fill"
+  },
+  "Components.dc.html": {
+   "x": 0,
+   "y": 5200,
+   "w": 1440,
+   "h": 900,
+   "title": "Conversation components · form, wizard, progress, results, errors",
+   "expand": "fill"
+  },
+  "Wizard.dc.html": {
+   "x": 1520,
+   "y": 5200,
+   "w": 1440,
+   "h": 900,
+   "title": "Wizard · add a host, with live checks",
+   "expand": "fill"
+  },
+  "Tour.dc.html": {
+   "x": 3040,
+   "y": 5200,
+   "w": 1440,
+   "h": 900,
+   "title": "Tutorial · first-run tour and Get started checklist",
+   "expand": "fill"
+  },
+  "Guide.dc.html": {
+   "x": 4560,
+   "y": 5200,
+   "w": 1440,
+   "h": 900,
+   "title": "Guide · step-by-step, changes real settings",
+   "expand": "fill"
+  },
+  "Tidy.dc.html": {
+   "x": 0,
+   "y": 6300,
+   "w": 1440,
+   "h": 900,
+   "title": "Tidy up · failed never lands here",
+   "expand": "fill"
+  },
+  "Today.dc.html": {
+   "x": 1520,
+   "y": 6300,
+   "w": 1440,
+   "h": 900,
+   "title": "Today · daily triage and standup",
+   "expand": "fill"
+  },
+  "SessionDetails.dc.html": {
+   "x": 3040,
+   "y": 6300,
+   "w": 1440,
+   "h": 900,
+   "title": "Session · Details tab, full",
+   "expand": "fill"
+  },
+  "TaskDetail.dc.html": {
+   "x": 4560,
+   "y": 6300,
+   "w": 1440,
+   "h": 900,
+   "title": "Task detail · with the start menu open",
+   "expand": "fill"
+  },
+  "Review.dc.html": {
+   "x": 0,
+   "y": 7300,
+   "w": 1440,
+   "h": 900,
+   "title": "Work › Review · confirm session ↔ ticket",
+   "expand": "fill"
+  },
+  "Board.dc.html": {
+   "x": 1520,
+   "y": 7300,
+   "w": 1440,
+   "h": 900,
+   "title": "Work › Board · drag between tracker columns",
+   "expand": "fill"
+  },
+  "FilesTree.dc.html": {
+   "x": 3040,
+   "y": 7300,
+   "w": 1440,
+   "h": 900,
+   "title": "Files · Tree and file viewer",
+   "expand": "fill"
+  },
+  "FilesHistory.dc.html": {
+   "x": 4560,
+   "y": 7300,
+   "w": 1440,
+   "h": 900,
+   "title": "Files · History graph and Branches",
+   "expand": "fill"
+  },
+  "HostDetail.dc.html": {
+   "x": 0,
+   "y": 8500,
+   "w": 1440,
+   "h": 900,
+   "title": "Host detail · health, resources, lost & found",
+   "expand": "fill"
+  },
+  "Assets.dc.html": {
+   "x": 1520,
+   "y": 8500,
+   "w": 1440,
+   "h": 900,
+   "title": "Toolkit › Assets · layers and changesets",
+   "expand": "fill"
+  },
+  "AddProject.dc.html": {
+   "x": 3040,
+   "y": 8500,
+   "w": 1440,
+   "h": 900,
+   "title": "Add project · from GitHub, URL, folder, new",
+   "expand": "fill"
+  },
+  "Dialogs.dc.html": {
+   "x": 4560,
+   "y": 8500,
+   "w": 1440,
+   "h": 900,
+   "title": "Dialogs · Fork, Resume, Send prompt, Kill, Move, Review, Background, Rules",
+   "expand": "fill"
+  },
+  "AgentStates.dc.html": {
+   "x": 0,
+   "y": 9500,
+   "w": 1440,
+   "h": 900,
+   "title": "Fleet agent · confirms and six blocked states",
+   "expand": "fill"
+  },
+  "SettingsHub.dc.html": {
+   "x": 1520,
+   "y": 9500,
+   "w": 1440,
+   "h": 900,
+   "title": "Settings › Hub & sync · pairing and Control API tokens",
+   "expand": "fill"
+  },
+  "SettingsMore.dc.html": {
+   "x": 3040,
+   "y": 9500,
+   "w": 1440,
+   "h": 900,
+   "title": "Settings · Notifications, Presets, Updates, Shortcuts",
+   "expand": "fill"
+  },
+  "States.dc.html": {
+   "x": 4560,
+   "y": 9500,
+   "w": 1440,
+   "h": 900,
+   "title": "States · offline, empty, first run, loading, no results",
+   "expand": "fill"
+  },
+  "Toasts.dc.html": {
+   "x": 0,
+   "y": 10700,
+   "w": 1440,
+   "h": 900,
+   "title": "Toasts, notifications and Downloads",
+   "expand": "fill"
+  },
+  "Watch.dc.html": {
+   "x": 1520,
+   "y": 10700,
+   "w": 1440,
+   "h": 900,
+   "title": "Watch view · a shared session, read-only",
+   "expand": "fill"
+  },
+  "Light.dc.html": {
+   "x": 3040,
+   "y": 10700,
+   "w": 1440,
+   "h": 900,
+   "title": "Light mode · Inbox with a session",
+   "expand": "fill"
+  },
+  "Motion.dc.html": {
+   "x": 4560,
+   "y": 10700,
+   "w": 1440,
+   "h": 900,
+   "title": "Motion · four moments frame by frame",
+   "expand": "fill"
+  },
+  "OrgOverview.dc.html": {
+   "x": 0,
+   "y": 11900,
+   "w": 1440,
+   "h": 900,
+   "title": "Organisation · overview and switcher",
+   "expand": "fill"
+  },
+  "OrgMembers.dc.html": {
+   "x": 1520,
+   "y": 11900,
+   "w": 1440,
+   "h": 900,
+   "title": "Organisation · members and roles",
+   "expand": "fill"
+  },
+  "OrgDevices.dc.html": {
+   "x": 3040,
+   "y": 11900,
+   "w": 1440,
+   "h": 900,
+   "title": "Organisation · devices",
+   "expand": "fill"
+  },
+  "OrgSpend.dc.html": {
+   "x": 4560,
+   "y": 11900,
+   "w": 1440,
+   "h": 900,
+   "title": "Organisation · spend, budgets, settings",
+   "expand": "fill"
+  },
+  "Sharing.dc.html": {
+   "x": 0,
+   "y": 12900,
+   "w": 1440,
+   "h": 900,
+   "title": "Sharing · presence and grants",
+   "expand": "fill"
+  },
+  "Federation.dc.html": {
+   "x": 1520,
+   "y": 12900,
+   "w": 1440,
+   "h": 900,
+   "title": "Federation · linked hubs",
+   "expand": "fill"
+  },
+  "DebugDevices.dc.html": {
+   "x": 3040,
+   "y": 12900,
+   "w": 1440,
+   "h": 900,
+   "title": "Debug devices and trackers",
+   "expand": "fill"
+  },
+  "Finish.dc.html": {
+   "x": 1520,
+   "y": 3000,
+   "w": 1440,
+   "h": 900,
+   "title": "Work › a finished mission + empty and landing states",
+   "expand": "fill"
+  },
+  "SettingsSections.dc.html": {
+   "x": 4560,
+   "y": 12900,
+   "w": 1440,
+   "h": 900,
+   "title": "Settings · Voice, Downloads, Decisions, Playbooks and other sections",
+   "expand": "fill"
+  },
+  "AIPatterns.dc.html": {
+   "x": 3040,
+   "y": 3000,
+   "w": 1440,
+   "h": 900,
+   "title": "AI patterns · Proposed by Jev, Drafted, never AI",
+   "expand": "fill"
+  },
+  "LogoMotion.dc.html": {
+   "x": 0,
+   "y": 14000,
+   "w": 1440,
+   "h": 900,
+   "title": "Logo motion · 12 behaviours of the Orbit mark",
+   "expand": "fill"
+  },
+  "Loaders.dc.html": {
+   "x": 1520,
+   "y": 14000,
+   "w": 1440,
+   "h": 900,
+   "title": "Particle loaders · 12 futuristic loaders, one job each",
+   "expand": "fill"
+  },
+  "LoadersInUse.dc.html": {
+   "x": 3040,
+   "y": 14000,
+   "w": 1440,
+   "h": 900,
+   "title": "Loaders in use · which loader goes where",
+   "expand": "fill"
+  },
+  "Startup.dc.html": {
+   "x": 4560,
+   "y": 14000,
+   "w": 1440,
+   "h": 900,
+   "title": "Startup · loaders by stage + where else they go",
+   "expand": "fill"
+  },
+  "LoadersInFlows.dc.html": {
+   "x": 6080,
+   "y": 14000,
+   "w": 1440,
+   "h": 900,
+   "title": "Loaders in wizards and chats",
+   "expand": "fill"
+  },
+  "ChatWizards.dc.html": {
+   "x": 7600,
+   "y": 14000,
+   "w": 1440,
+   "h": 900,
+   "title": "Wizards built in chat",
+   "expand": "fill"
+  },
+  "MobileNav.dc.html": {
+   "x": 0,
+   "y": 15240,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Inbox and navigation",
+   "expand": "fill"
+  },
+  "MobileSession.dc.html": {
+   "x": 1520,
+   "y": 15240,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · One session",
+   "expand": "fill"
+  },
+  "MobileControl.dc.html": {
+   "x": 3040,
+   "y": 15240,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Control, notifications, chat forms",
+   "expand": "fill"
+  },
+  "MobileNewSession.dc.html": {
+   "x": 4560,
+   "y": 15240,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · New session",
+   "expand": "fill"
+  },
+  "MobileWork.dc.html": {
+   "x": 6080,
+   "y": 15240,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Work",
+   "expand": "fill"
+  },
+  "MobileMore.dc.html": {
+   "x": 0,
+   "y": 16260,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Hosts, accounts, files",
+   "expand": "fill"
+  },
+  "MobileSettings.dc.html": {
+   "x": 1520,
+   "y": 16260,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · More, settings, pairing",
+   "expand": "fill"
+  },
+  "MobileStates.dc.html": {
+   "x": 3040,
+   "y": 16260,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Offline and loading",
+   "expand": "fill"
+  },
+  "MobileRecovery.dc.html": {
+   "x": 4560,
+   "y": 16260,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Errors and recovery",
+   "expand": "fill"
+  },
+  "MobileSessionsTools.dc.html": {
+   "x": 0,
+   "y": 17280,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Search, bulk, Today",
+   "expand": "fill"
+  },
+  "MobileTidyTickets.dc.html": {
+   "x": 1520,
+   "y": 17280,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Tidy and tickets",
+   "expand": "fill"
+  },
+  "MobileMissions.dc.html": {
+   "x": 3040,
+   "y": 17280,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Missions and background agents",
+   "expand": "fill"
+  },
+  "MobileSessionFiles.dc.html": {
+   "x": 4560,
+   "y": 17280,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Session Files tab",
+   "expand": "fill"
+  },
+  "MobileSessionExtras.dc.html": {
+   "x": 6080,
+   "y": 17280,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Terminals, send later, find, menu",
+   "expand": "fill"
+  },
+  "MobileOrgsSettings.dc.html": {
+   "x": 0,
+   "y": 18300,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Organisations and hub settings",
+   "expand": "fill"
+  },
+  "MobileFullscreenLoaders.dc.html": {
+   "x": 1520,
+   "y": 18300,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Full-screen loaders",
+   "expand": "fill"
+  },
+  "MobileLight.dc.html": {
+   "x": 3040,
+   "y": 18300,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Light theme",
+   "expand": "fill"
+  },
+  "MobileUpdate.dc.html": {
+   "x": 0,
+   "y": 19320,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Updating the app",
+   "expand": "fill"
+  },
+  "MobileInstall.dc.html": {
+   "x": 1520,
+   "y": 19320,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · First launch and installing on a host",
+   "expand": "fill"
+  },
+  "MobileWizards.dc.html": {
+   "x": 3040,
+   "y": 19320,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Wizards",
+   "expand": "fill"
+  },
+  "MobileChatForms.dc.html": {
+   "x": 4560,
+   "y": 19320,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Wizards in chat",
+   "expand": "fill"
+  },
+  "MobileFullscreen.dc.html": {
+   "x": 6080,
+   "y": 19320,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Full-screen and landscape",
+   "expand": "fill"
+  },
+  "MobileTutorials.dc.html": {
+   "x": 0,
+   "y": 20340,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Tutorials",
+   "expand": "fill"
+  },
+  "MobileTutorialModes.dc.html": {
+   "x": 1520,
+   "y": 20340,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Tutorial modes, lessons, guides",
+   "expand": "fill"
+  },
+  "FormsAnatomy.dc.html": {
+   "x": 0,
+   "y": 21700,
+   "w": 1440,
+   "h": 1300,
+   "title": "Forms · field kinds, states, saving and rules",
+   "expand": "fill"
+  },
+  "FormsWork.dc.html": {
+   "x": 1520,
+   "y": 21700,
+   "w": 1440,
+   "h": 1240,
+   "title": "Forms · Work: tasks, rules, placing work",
+   "expand": "fill"
+  },
+  "FormsAutomation.dc.html": {
+   "x": 3040,
+   "y": 21700,
+   "w": 1440,
+   "h": 1500,
+   "title": "Forms · Automation and missions",
+   "expand": "fill"
+  },
+  "FormsToolkit.dc.html": {
+   "x": 4560,
+   "y": 21700,
+   "w": 1440,
+   "h": 1420,
+   "title": "Forms · Toolkit: assets, secrets, snippets",
+   "expand": "fill"
+  },
+  "FormsAccounts.dc.html": {
+   "x": 6080,
+   "y": 21700,
+   "w": 1440,
+   "h": 1300,
+   "title": "Forms · Accounts, tokens, hosts, projects",
+   "expand": "fill"
+  },
+  "FormsOrg.dc.html": {
+   "x": 0,
+   "y": 23320,
+   "w": 1440,
+   "h": 1300,
+   "title": "Forms · Organisations, people, devices",
+   "expand": "fill"
+  },
+  "FormsSession.dc.html": {
+   "x": 1520,
+   "y": 23320,
+   "w": 1440,
+   "h": 1240,
+   "title": "Forms · Session, files and git",
+   "expand": "fill"
+  },
+  "MobileFormsSession.dc.html": {
+   "x": 3040,
+   "y": 23320,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Forms in a session",
+   "expand": "fill"
+  },
+  "MobileFormsWork.dc.html": {
+   "x": 4560,
+   "y": 23320,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Forms for work, sharing, settings",
+   "expand": "fill"
+  }
+ },
+ "order": [
+  "Main.dc.html",
+  "Terminals.dc.html",
+  "Work.dc.html",
+  "Missions.dc.html",
+  "Automation.dc.html",
+  "Accounts.dc.html",
+  "Sessions.dc.html",
+  "Agent.dc.html",
+  "Files.dc.html",
+  "Palette.dc.html",
+  "NewSession.dc.html",
+  "Toolkit.dc.html",
+  "Settings.dc.html",
+  "MissionControl.dc.html",
+  "MCViews.dc.html",
+  "MCSession.dc.html",
+  "MCTasks.dc.html",
+  "Components.dc.html",
+  "Wizard.dc.html",
+  "Tour.dc.html",
+  "Guide.dc.html",
+  "Tidy.dc.html",
+  "Today.dc.html",
+  "SessionDetails.dc.html",
+  "TaskDetail.dc.html",
+  "Review.dc.html",
+  "Board.dc.html",
+  "FilesTree.dc.html",
+  "FilesHistory.dc.html",
+  "HostDetail.dc.html",
+  "Assets.dc.html",
+  "AddProject.dc.html",
+  "Dialogs.dc.html",
+  "AgentStates.dc.html",
+  "SettingsHub.dc.html",
+  "SettingsMore.dc.html",
+  "States.dc.html",
+  "Toasts.dc.html",
+  "Watch.dc.html",
+  "Light.dc.html",
+  "Motion.dc.html",
+  "OrgOverview.dc.html",
+  "OrgMembers.dc.html",
+  "OrgDevices.dc.html",
+  "OrgSpend.dc.html",
+  "Sharing.dc.html",
+  "Federation.dc.html",
+  "DebugDevices.dc.html",
+  "Finish.dc.html",
+  "SettingsSections.dc.html",
+  "AIPatterns.dc.html",
+  "LogoMotion.dc.html",
+  "Loaders.dc.html",
+  "LoadersInUse.dc.html",
+  "Startup.dc.html",
+  "LoadersInFlows.dc.html",
+  "ChatWizards.dc.html",
+  "MobileNav.dc.html",
+  "MobileSession.dc.html",
+  "MobileControl.dc.html",
+  "MobileNewSession.dc.html",
+  "MobileWork.dc.html",
+  "MobileMore.dc.html",
+  "MobileSettings.dc.html",
+  "MobileStates.dc.html",
+  "MobileRecovery.dc.html",
+  "MobileSessionsTools.dc.html",
+  "MobileTidyTickets.dc.html",
+  "MobileMissions.dc.html",
+  "MobileSessionFiles.dc.html",
+  "MobileSessionExtras.dc.html",
+  "MobileOrgsSettings.dc.html",
+  "MobileFullscreenLoaders.dc.html",
+  "MobileLight.dc.html",
+  "MobileUpdate.dc.html",
+  "MobileInstall.dc.html",
+  "MobileWizards.dc.html",
+  "MobileChatForms.dc.html",
+  "MobileFullscreen.dc.html",
+  "MobileTutorials.dc.html",
+  "MobileTutorialModes.dc.html",
+  "FormsAnatomy.dc.html",
+  "FormsWork.dc.html",
+  "FormsAutomation.dc.html",
+  "FormsToolkit.dc.html",
+  "FormsAccounts.dc.html",
+  "FormsOrg.dc.html",
+  "FormsSession.dc.html",
+  "MobileFormsSession.dc.html",
+  "MobileFormsWork.dc.html"
+ ],
+ "notes": {
+  "title": {
+   "x": 0,
+   "y": -300,
+   "text": "Orbit Fleet redesign: rail, left filters and grouping, one object in focus",
+   "kind": "title1",
+   "maxW": 6000
+  },
+  "mc": {
+   "x": 0,
+   "y": 3980,
+   "text": "Control: talk to the fleet on the left (⌘E), Today briefing tab, views on the right for what the chat produced (Library, Pull requests, the session in focus)",
+   "kind": "title1",
+   "maxW": 4500
+  },
+  "conv": {
+   "x": 0,
+   "y": 5080,
+   "text": "Conversation components, wizard and tutorials",
+   "kind": "title1",
+   "maxW": 4500
+  },
+  "p1": {
+   "x": 0,
+   "y": 6180,
+   "text": "Daily screens: Tidy up, Today, Session and Task detail, Review, Board",
+   "kind": "title1",
+   "maxW": 6000
+  },
+  "p2": {
+   "x": 0,
+   "y": 8380,
+   "text": "Files, hosts, assets, dialogs and the fleet agent",
+   "kind": "title1",
+   "maxW": 6000
+  },
+  "p3": {
+   "x": 0,
+   "y": 10580,
+   "text": "Settings, states, notifications, sharing, light mode and motion",
+   "kind": "title1",
+   "maxW": 6000
+  },
+  "p4": {
+   "x": 0,
+   "y": 11780,
+   "text": "Organisations, people, sharing, federation",
+   "kind": "title1",
+   "maxW": 4500
+  },
+  "p5": {
+   "x": 0,
+   "y": 13880,
+   "text": "Logo motion and loaders (animated: open a board to see it move)",
+   "kind": "title1",
+   "maxW": 4500
+  },
+  "p6": {
+   "x": 0,
+   "y": 15120,
+   "text": "Mobile app (fleet-mobile): Inbox · Sessions · Control · Work · More",
+   "kind": "title1",
+   "maxW": 4500
+  },
+  "p7": {
+   "x": 0,
+   "y": 21400,
+   "text": "Forms: every create, edit and settings form, one field set for dialogs, sheets and chat",
+   "kind": "title1",
+   "maxW": 7500
+  }
+ },
+ "designSystems": [
+  {
+   "title": "Fleet",
+   "namespace": "fleet",
+   "artifact": "https://claude.ai/artifact/KvZWoiomzJDRFetDxcb81x",
+   "version": "1791458649-a066",
+   "copiedAt": "2026-10-08T12:45:00Z"
+  }
+ ]
+}

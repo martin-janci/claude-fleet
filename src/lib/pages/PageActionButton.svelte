@@ -17,7 +17,10 @@
     busy = true;
     const r = await invokeCmd<unknown>(action.command);
     busy = false;
-    if (r.ok) push({ kind: 'success', message: `${action.label}: done` });
+    // A command may answer the sentence to show (`summary`, G4.6's repair
+    // buttons); otherwise "done".
+    const summary = r.ok ? (r.value as { summary?: unknown } | null)?.summary : undefined;
+    if (r.ok) push({ kind: 'success', message: typeof summary === 'string' ? summary : `${action.label}: done` });
     else pushError(r.error, action.label);
     onran();
   }
@@ -53,7 +56,7 @@
     flex-wrap: wrap;
   }
   .help {
-    font-size: 0.75rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
 </style>

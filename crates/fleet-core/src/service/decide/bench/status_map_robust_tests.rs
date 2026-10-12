@@ -53,10 +53,19 @@ fn a_variant_changes_only_what_its_perturbation_says() {
                 crate::service::trackers::asana::infer_section(&v.key)
             );
             assert!(
-                v.key != c.key || v.board != c.board,
+                v.key != c.key || v.board != c.board || p == Perturbation::OptionOrder,
                 "{p:?} changed nothing"
             );
             match p {
+                Perturbation::OptionOrder => {
+                    // The same section and board; only the options' order.
+                    assert_eq!((&v.key, &v.board), (&c.key, &c.board));
+                    let order = |x| {
+                        crate::service::decide::bench::status_map::request_for(x, None)
+                            .option_order()
+                    };
+                    assert_ne!(order(v), order(c));
+                }
                 Perturbation::NoBoard => {
                     assert!(v.board.is_empty());
                     assert_eq!(v.key, c.key);

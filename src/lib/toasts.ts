@@ -2,6 +2,8 @@ import { get, writable } from 'svelte/store';
 import type { IpcError, Result } from './result';
 import { hubNextStep } from './hub';
 import { reportError } from './error_report';
+import { recordNotice } from './notifications';
+import { errorDetail, errorText } from './error_copy';
 
 // Global, non-blocking notifications. Errors used to land in per-component
 // `error: string | null` state that never cleared and dropped the
@@ -28,6 +30,17 @@ export interface Toast {
   /** How many times the same code+message was pushed while visible. */
   count: number;
   action: ToastAction | null;
+  /** A second, quieter button beside `action` ("Not now" beside "Add rule"),
+   *  the Toasts board's two-button toast. Running it dismisses the toast too. */
+  secondary?: ToastAction;
+  /** A second line under the message, in the muted colour ("2 sessions
+   *  paused until Fri 11:00", "freed about 2.1 GB"). */
+  sub?: string;
+  /** A long job's progress, 0–1 (step 10.10): drawn as a 28 px Progress
+   *  ring. Absent on every other toast. */
+  progress?: number;
+  /** What Details shows: the code and the backend's own words (review r13). */
+  detail?: string;
 }
 
 export interface PushOptions {
@@ -40,6 +53,14 @@ export interface PushOptions {
   timeoutMs?: number;
   /** An inline button; a toast with one stays up for `ACTION_TIMEOUT_MS` by default. */
   action?: ToastAction;
+  /** A second, quieter button; only with `action`. */
+  secondary?: ToastAction;
+  /** A second line under the message. Not part of the dedup key. */
+  sub?: string;
+  /** 0–1 for a long job of known size; move it with `setToastProgress`. */
+  progress?: number;
+  /** Shown under Details instead of in the line itself. */
+  detail?: string;
 }
 
 export const INFO_TIMEOUT_MS = 4000;
@@ -65,6 +86,25 @@ export const droppedToasts = writable<number>(0);
 
 let nextId = 1;
 const timers = new Map<number, ReturnType<typeof setTimeout>>();
+/** When each running timer fires (ms since epoch), for `holdToast`. */
+const deadlines = new Map<number, number>();
+/** What was left on a held timer, for `releaseToast`. */
+const held = new Map<number, number>();
+/**
+ * Why each toast is held: the pointer, focus, or both. The countdown resumes
+ * only when the last reason goes, so the pointer leaving a toast whose Undo
+ * still has focus does not dismiss it out from under the keyboard.
+ */
+export type ToastHold = 'pointer' | 'focus';
+const holds = new Map<number, Set<ToastHold>>();
+
+/**
+ * Each auto-dismissing toast's current countdown: its length, and an arm
+ * count that changes whenever it restarts (a dedup push), so the timer bar
+ * (redesign step 7.4) restarts with it. Sticky toasts have no entry.
+ */
+export const toastCountdowns = writable<Record<number, { ms: number; arm: number }>>({});
+let armSeq = 0;
 
 function clearTimer(id: number): void {
   const t = timers.get(id);
@@ -72,6 +112,14 @@ function clearTimer(id: number): void {
     clearTimeout(t);
     timers.delete(id);
   }
+  deadlines.delete(id);
+  held.delete(id);
+  holds.delete(id);
+  toastCountdowns.update((c) => {
+    if (!(id in c)) return c;
+    const { [id]: _gone, ...rest } = c;
+    return rest;
+  });
 }
 
 /**
@@ -116,28 +164,94 @@ export function push(opts: PushOptions): number {
   const sticky = opts.sticky ?? kind === 'error';
   const key = keyOf(code, opts.message);
   const action = opts.action ?? null;
+  // A lone "Not now" with nothing to say no to is not a choice.
+  const secondary = action ? opts.secondary : undefined;
   const timeout = opts.timeoutMs ?? (action ? ACTION_TIMEOUT_MS : INFO_TIMEOUT_MS);
   const existing = get(toasts).find((t) => keyOf(t.code, t.message) === key);
   if (existing) {
     toasts.update((arr) =>
-      arr.map((t) => (t.id === existing.id ? { ...t, count: t.count + 1, action: action ?? t.action } : t)),
+      arr.map((t) =>
+        t.id === existing.id
+          ? {
+              ...t,
+              count: t.count + 1,
+              action: action ?? t.action,
+              ...(action ? { secondary } : {}),
+              ...(opts.sub !== undefined ? { sub: opts.sub } : {}),
+            }
+          : t,
+      ),
     );
     if (!existing.sticky) arm(existing.id, timeout);
+    recordNotice(existing.id, false, { kind, code, message: opts.message, sub: opts.sub });
     return existing.id;
   }
   const id = nextId++;
-  toasts.update((arr) => capped([...arr, { id, kind, code, message: opts.message, sticky, count: 1, action }]));
+  const toast: Toast = { id, kind, code, message: opts.message, sticky, count: 1, action };
+  if (opts.progress !== undefined) toast.progress = clamp01(opts.progress);
+  if (opts.detail) toast.detail = opts.detail;
+  if (secondary) toast.secondary = secondary;
+  if (opts.sub) toast.sub = opts.sub;
+  toasts.update((arr) => capped([...arr, toast]));
   if (!sticky) arm(id, timeout);
+  recordNotice(id, true, { kind, code, message: opts.message, sub: opts.sub });
   return id;
+}
+
+function clamp01(n: number): number {
+  return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0;
+}
+
+/** Move a long job's ring. False when the toast is gone (dismissed). */
+export function setToastProgress(id: number, progress: number): boolean {
+  if (!get(toasts).some((t) => t.id === id)) return false;
+  const p = clamp01(progress);
+  toasts.update((arr) => arr.map((t) => (t.id === id && t.progress !== p ? { ...t, progress: p } : t)));
+  return true;
 }
 
 function arm(id: number, ms: number): void {
   const prev = timers.get(id);
   if (prev) clearTimeout(prev);
+  held.delete(id);
   timers.set(
     id,
     setTimeout(() => dismiss(id), ms),
   );
+  deadlines.set(id, Date.now() + ms);
+  const seq = ++armSeq;
+  toastCountdowns.update((c) => ({ ...c, [id]: { ms, arm: seq } }));
+}
+
+/**
+ * Stop a toast's countdown while the pointer or focus is on it (the Motion
+ * board: "stays 6 s, longer on hover"). A sticky toast has nothing to hold.
+ */
+export function holdToast(id: number, why: ToastHold = 'pointer'): void {
+  const reasons = holds.get(id) ?? new Set<ToastHold>();
+  reasons.add(why);
+  holds.set(id, reasons);
+  const t = timers.get(id);
+  if (!t) return;
+  clearTimeout(t);
+  timers.delete(id);
+  held.set(id, Math.max(0, (deadlines.get(id) ?? Date.now()) - Date.now()));
+}
+
+/** Resume a held countdown with the time it had left. */
+export function releaseToast(id: number, why: ToastHold = 'pointer'): void {
+  const reasons = holds.get(id);
+  reasons?.delete(why);
+  if (reasons && reasons.size > 0) return;
+  holds.delete(id);
+  const left = held.get(id);
+  if (left === undefined) return;
+  held.delete(id);
+  timers.set(
+    id,
+    setTimeout(() => dismiss(id), left),
+  );
+  deadlines.set(id, Date.now() + left);
 }
 
 export function dismiss(id: number): void {
@@ -148,22 +262,29 @@ export function dismiss(id: number): void {
   if (get(toasts).length === 0) droppedToasts.set(0);
 }
 
-/** Run a toast's action (if it still has one) and dismiss the toast. */
-export function runToastAction(id: number): void {
+/** Run a toast's action (or its `secondary` one) if it still has it, and
+ *  dismiss the toast. */
+export function runToastAction(id: number, which: 'primary' | 'secondary' = 'primary'): void {
   const t = get(toasts).find((x) => x.id === id);
   dismiss(id);
-  t?.action?.run();
+  (which === 'secondary' ? t?.secondary : t?.action)?.run();
 }
 
 export function clearToasts(): void {
   for (const t of timers.values()) clearTimeout(t);
   timers.clear();
+  deadlines.clear();
+  held.clear();
+  holds.clear();
+  toastCountdowns.set({});
   toasts.set([]);
   droppedToasts.set(0);
 }
 
-/** Sticky error toast for a backend `IpcError`, keeping its `E_*` code
- *  visible. `context` prefixes the message ("Kill failed: …").
+/** Sticky error toast for a backend `IpcError`. The line is a sentence
+ *  (`errorText`); the `E_*` code and the backend's own words sit under
+ *  Details (review r13, step 1.3: no raw codes in user text). `context`
+ *  prefixes the message ("Kill failed: …"); `retry` adds a Retry button.
  *
  *  A hub client gets one sentence more, for the errors whose next step is
  *  different here and is written down nowhere else. `E_CONFIRM_REQUIRED` is
@@ -174,15 +295,23 @@ export function clearToasts(): void {
  *  a refusal, and has nowhere to go. This is the one place every backend
  *  failure passes through, which is why it is here and not at each call
  *  site; in standalone mode `hubNextStep` returns null and nothing changes. */
-export function pushError(error: IpcError, context?: string): number {
-  const base = context ? `${context}: ${error.message}` : error.message;
+export function pushError(error: IpcError, context?: string, retry?: () => void): number {
+  const text = errorText(error);
+  const base = context ? `${context}: ${text}` : text;
   const next = hubNextStep(error);
-  reportError('frontend', base, error.code ?? null);
-  return push({ kind: 'error', code: error.code, message: next ? `${base} — ${next}` : base });
+  reportError('frontend', context ? `${context}: ${error.message}` : error.message, error.code ?? null);
+  return push({
+    kind: 'error',
+    code: error.code,
+    message: next ? `${base} — ${next}` : base,
+    detail: errorDetail(error),
+    action: retry ? { label: 'Retry', run: retry } : undefined,
+    sticky: true,
+  });
 }
 
 /** Convenience: surface a failed `Result`. No-op (returns null) on Ok. */
-export function pushResultError(r: Result<unknown>, context?: string): number | null {
+export function pushResultError(r: Result<unknown>, context?: string, retry?: () => void): number | null {
   if (r.ok) return null;
-  return pushError(r.error, context);
+  return pushError(r.error, context, retry);
 }

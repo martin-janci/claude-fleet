@@ -154,6 +154,7 @@ pub fn answer_with(exit_code: i32, stdout: &'static [u8], stderr: &'static [u8])
         HubFrame::Ping { id } => Some(AgentFrame::Pong { id: id.clone() }),
         HubFrame::Cancel { .. } => None,
         other => Some(AgentFrame::Result {
+            chunks: 0,
             id: frame_id(other).to_string(),
             exit_code,
             stdout_b64: encode_b64(stdout),

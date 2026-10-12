@@ -3,6 +3,7 @@
 import { describe, it, expect } from 'vitest';
 import { session } from './hosts_fixture';
 import {
+  shippedWhen,
   bucketOf,
   localMidnight,
   scopeToday,
@@ -12,6 +13,7 @@ import {
   type TodaySession,
 } from './today';
 import type { SessionRow } from './sessions';
+import { ALL_SCOPES } from './orgs';
 
 const s = (id: number, name: string, over: Partial<TodaySession> = {}): TodaySession => ({
   id,
@@ -135,5 +137,45 @@ describe('localMidnight', () => {
   it('is the local start of the day, in seconds', () => {
     const noon = new Date(2026, 8, 25, 12, 30).getTime();
     expect(localMidnight(noon)).toBe(Math.floor(new Date(2026, 8, 25).getTime() / 1000));
+  });
+});
+
+describe('G1.6: missions waiting on you and Jev proposals', () => {
+  const t: Today = {
+    since: 0,
+    now: 200,
+    groups: [{ bucket: 'in_progress', key: 'PD-3', title: 'Docs', sessions: [s(9, 'docs', { proposed: 'probably_waiting' })] }],
+    shipped: [],
+    missions: [
+      { id: 1, name: 'Hub federation v2', waiting_on: { reason: 'sign_grant', since: 10, open_cards: 0 } },
+      { id: 2, name: 'Other org', org_id: 2, waiting_on: { reason: 'question', since: 20, open_cards: 1 } },
+    ],
+  };
+
+  it('lists the missions in the standup and keeps a proposal in progress', () => {
+    const v = scopeToday(t, ALL_SCOPES, [], () => ALL_SCOPES);
+    expect(v.waiting).toEqual([]);
+    expect(v.inProgress).toHaveLength(1);
+    expect(isEmptyView(v)).toBe(false);
+    expect(standupText(v)).toContain('- Mission Hub federation v2 — sign the autonomy grant');
+    expect(standupText(v)).toContain('docs (probably waiting)');
+  });
+
+  it('cuts the missions to an org scope', () => {
+    const v = scopeToday(t, 'org:2' as never, [], () => ALL_SCOPES);
+    expect(v.missions?.map((m) => m.id)).toEqual([2]);
+  });
+});
+
+describe('shippedWhen and the standup provenance (G7.9)', () => {
+  it('says how it shipped and the local time', () => {
+    const at = new Date(2026, 9, 10, 9, 12).getTime() / 1000;
+    expect(shippedWhen({ how: 'pr', at })).toBe('PR 09:12');
+    expect(shippedWhen({ how: 'done', at })).toBe('done 09:12');
+  });
+
+  it('the standup names where a shipped entry came from', () => {
+    const t = { since: 0, now: 10, groups: [], shipped: [{ how: 'pr', key: 'A-1', title: 'Sweep', at: 5, from: 'Morning PR sweep' }] };
+    expect(standupText(scopeToday(t, ALL_SCOPES, [], () => ALL_SCOPES))).toContain('· from Morning PR sweep');
   });
 });

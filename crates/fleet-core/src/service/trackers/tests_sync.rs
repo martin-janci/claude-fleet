@@ -122,6 +122,21 @@ impl Fx {
     }
 }
 
+/// Redesign 8.1: Pause all stops the pass before it calls the tracker.
+#[tokio::test]
+async fn pause_all_stops_the_pass() {
+    let fx = Fx::new();
+    crate::service::settings::set(
+        &fx.store.lock().unwrap(),
+        crate::service::settings::AUTOMATION_PAUSED,
+        "true",
+    )
+    .unwrap();
+    assert!(fx.sync(|| T0).run_pass(&fx.store).await.is_none());
+    assert!(fx.fake.requests().is_empty(), "no request while paused");
+    assert_eq!(fx.watermark("mine"), None);
+}
+
 #[tokio::test]
 async fn a_first_pass_lists_views_whole_and_sets_the_watermark() {
     let fx = Fx::new();
@@ -1875,6 +1890,8 @@ fn queue_pr_link(fx: &Fx) -> i64 {
             link_id: None,
             claude_session_id: None,
             session_org_id: None,
+            body: None,
+            external_id: None,
         })
         .unwrap());
     s.conn_ref()
@@ -1891,6 +1908,8 @@ fn opt_in(fx: &Fx) {
             &crate::store::TrackerSettings {
                 write_back: crate::store::WriteBack {
                     pr_remote_link: true,
+                    comments: false,
+                    create_tickets: false,
                 },
                 ..Default::default()
             },

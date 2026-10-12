@@ -582,7 +582,7 @@ pub struct SourceState {
 
 /// Parse the inspect script's `\x1e`-separated output.
 pub fn parse_inspection(stdout: &str) -> Result<SourceState, IpcError> {
-    let parts: Vec<&str> = stdout.split('\x1e').collect();
+    let parts: Vec<&str> = marked(stdout).split('\x1e').collect();
     if parts.len() != 7 {
         return Err(IpcError::new(
             codes::E_PARSE,
@@ -738,7 +738,7 @@ pub struct TargetPrep {
 
 /// Parse and sanity-check the target prep script's output.
 pub fn parse_target_prep(stdout: &str, claude_id: &str) -> Result<TargetPrep, IpcError> {
-    let line = stdout.lines().last().unwrap_or("").trim_end();
+    let line = marked(stdout).lines().last().unwrap_or("").trim_end();
     let parts: Vec<&str> = line.split('\t').collect();
     if parts.len() != 4 {
         return Err(IpcError::new(
@@ -876,12 +876,14 @@ if [ -n "$gd" ]; then
   elif [ -f "$gd/BISECT_LOG" ]; then midop=bisect
   fi
 fi
+printf '\n{OUT_MARKER}\n'
 printf '%s\036%s\036%s\036%s\036%s\036%s\036%s' "$wt" "$porcelain" "$head" "$cur" "$rsha" "$ahead" "$midop"
 "#,
         name = quote(tmux_name),
         hint = quote(hint.unwrap_or("")),
         br = quote(branch),
         status = carry::STATUS_PORCELAIN,
+        OUT_MARKER = carry::OUT_MARKER,
     )
 }
 
@@ -903,10 +905,12 @@ fi
 if [ -z "$f" ]; then printf '{NO_TRANSCRIPT} %s\n' "$id" >&2; exit 4; fi
 n=$(wc -c < "$f" | tr -d ' ')
 m=$(stat -c %Y -- "$f" 2>/dev/null || stat -f %m -- "$f" 2>/dev/null)
+printf '\n{OUT_MARKER}\n'
 printf '%s\t%s\t%s\n' "$n" "$m" "$f"
 "#,
         id = quote(claude_id),
         sp = quote(stored_path.unwrap_or("")),
+        OUT_MARKER = carry::OUT_MARKER,
     )
 }
 
@@ -919,9 +923,25 @@ pub struct Located {
     pub path: String,
 }
 
+/// What a move script printed after its [`carry::OUT_MARKER`] line: every
+/// script runs under `bash -lc`, so a login profile's banner can precede the
+/// body (review r18 M3). Output with no marker line is taken whole (a fake,
+/// or a script that never reached it, which its exit status reports).
+fn marked(stdout: &str) -> &str {
+    carry::payload_str(stdout).unwrap_or(stdout)
+}
+
+/// [`marked`] for raw bytes (the transcript read).
+fn marked_bytes(stdout: Vec<u8>) -> Vec<u8> {
+    match carry::payload(&stdout) {
+        Some(p) => p.to_vec(),
+        None => stdout,
+    }
+}
+
 /// Parse [`locate_script`] output.
 pub fn parse_locate(stdout: &str) -> Result<Located, IpcError> {
-    let line = stdout.trim();
+    let line = marked(stdout).trim();
     let mut parts = line.splitn(3, '\t');
     let size = parts.next().and_then(|n| n.trim().parse::<u64>().ok());
     let mtime = parts.next().map(|m| m.trim().parse::<i64>().unwrap_or(-1));
@@ -1000,7 +1020,11 @@ impl Drop for MoveClaim {
 
 /// Read at most `limit` bytes of the transcript.
 pub fn read_script(path: &str, limit: u64) -> String {
-    format!("# cf-move:read\nhead -c {limit} -- {}\n", quote(path))
+    format!(
+        "# cf-move:read\nprintf '\\n{}\\n'\nhead -c {limit} -- {}\n",
+        carry::OUT_MARKER,
+        quote(path)
+    )
 }
 
 /// Best-effort: refresh `origin/<branch>` in the target's main checkout so a
@@ -1054,6 +1078,7 @@ d="$HOME/.claude/projects/$enc"
 mkdir -p -- "$d" || exit 7
 f="$d/$id.jsonl"
 if [ -f "$f" ]; then n=$(wc -c < "$f" | tr -d ' '); else n=-1; fi
+printf '\n{OUT_MARKER}\n'
 printf '%s\t%s\t%s\t%s\n' "$h" "$enc" "$f" "$n"
 "#,
         cwd = quote(cwd),
@@ -1062,14 +1087,16 @@ printf '%s\t%s\t%s\t%s\n' "$h" "$enc" "$f" "$n"
         id = quote(claude_id),
         status = carry::STATUS_PORCELAIN,
         TARGET_DIRTY = carry::TARGET_DIRTY,
+        OUT_MARKER = carry::OUT_MARKER,
     )
 }
 
 /// Size of the target transcript, or -1.
 pub fn size_script(path: &str) -> String {
     format!(
-        "# cf-move:size\nf={}\nif [ -f \"$f\" ]; then wc -c < \"$f\" | tr -d ' '; else echo -1; fi\n",
-        quote(path)
+        "# cf-move:size\nf={}\nprintf '\\n{}\\n'\nif [ -f \"$f\" ]; then wc -c < \"$f\" | tr -d ' '; else echo -1; fi\n",
+        quote(path),
+        carry::OUT_MARKER,
     )
 }
 
@@ -1764,6 +1791,17 @@ fn snapshot(s: &Store, args: &MoveSessionArgs) -> Result<Snapshot, IpcError> {
             ),
         ));
     }
+    // A move carries Claude Code's conversation state (`claude_state`);
+    // another agent's would be left behind on the source host.
+    if row.agent != crate::store::AGENT_CLAUDE {
+        return Err(IpcError::new(
+            codes::E_UNSUPPORTED,
+            format!(
+                "only Claude Code sessions can move; this one runs {}",
+                row.agent
+            ),
+        ));
+    }
     let claude_id = row
         .claude_session_id
         .clone()
@@ -1888,13 +1926,16 @@ fn snapshot(s: &Store, args: &MoveSessionArgs) -> Result<Snapshot, IpcError> {
     .saturating_mul(1024 * 1024);
     let target_taken = target_rows.into_iter().map(|r| r.tmux_name).collect();
     Ok(Snapshot {
-        launch: crate::service::sessions::stored_launch(s, row.id),
+        launch: crate::service::sessions::stored_launch(s, row.id)?,
         claude_id,
         branch,
         project_id,
         worktree_id,
         worktree_name: wt.name,
-        worktree_path: s.worktree_path(worktree_id)?,
+        // Only a `local` row's path is a local path: a remote row holds the
+        // path its host's EnterWorktree hook reported (migration 024), which
+        // a move to `local` must not reuse as its cwd (r18-M2).
+        worktree_path: (wt.host_alias == LOCAL).then(|| wt.path.clone()),
         owner,
         repo,
         project_base: s.project_base_path(project_id)?,
@@ -2096,6 +2137,15 @@ fn carry_transport(step: &str, e: IpcError) -> IpcError {
 /// fails before that.
 pub(super) struct PartialCtx {
     pub from_host: String,
+    /// The SOURCE session's tmux name, so a later `resolve_move` can check
+    /// that the row it resolves by id really is the source (multi-user M1,
+    /// T9d). `sessions.id` is recycled, and the source's identity used to be
+    /// `(host, reused id)` and nothing else, while the target's was held to
+    /// id AND host AND tmux name — so a source ghosted and reaped between
+    /// the partial and the resolution handed `Finish` a brand-new session on
+    /// the same host to kill. Names are per-host unique and fleet-generated,
+    /// which is what makes the reuse detectable here.
+    pub from_tmux_name: String,
     pub to_host: String,
     pub to_tmux_name: String,
     pub claude_session_id: String,
@@ -2131,6 +2181,7 @@ fn partial(step: &str, ctx: &PartialCtx, target_id: Option<i64>, e: &IpcError) -
         // the run store is gone — see `record_partial`, which copies these
         // straight into the durable `session_move_partial` timeline event.
         "from_host": ctx.from_host,
+        "from_tmux_name": ctx.from_tmux_name,
         "to_tmux_name": ctx.to_tmux_name,
         "claude_session_id": ctx.claude_session_id,
         "branch": ctx.branch,
@@ -2204,6 +2255,7 @@ fn record_partial(store: &Mutex<Store>, source_id: i64, to_host: &str, e: &IpcEr
         "to_session_id": target_id,
         "cause_code": d["cause_code"],
         "from_host": d["from_host"],
+        "from_tmux_name": d["from_tmux_name"],
         "to_tmux_name": d["to_tmux_name"],
         "claude_session_id": d["claude_session_id"],
         "branch": d["branch"],
@@ -2633,7 +2685,7 @@ async fn move_session_inner(
             ),
         ));
     }
-    let mut bytes = out.stdout;
+    let mut bytes = marked_bytes(out.stdout);
     if bytes.len() as u64 > snap.cap {
         return Err(too_large(bytes.len() as u64, snap.cap));
     }
@@ -2802,6 +2854,7 @@ async fn move_session_inner(
     crate::validate::tmux_name(&tmux_name)?;
     let pane_cmd = crate::service::sessions::recreate_pane_command(
         "work",
+        crate::store::AGENT_CLAUDE,
         Some(&id),
         &tmux_name,
         &snap.launch,
@@ -3185,6 +3238,9 @@ async fn move_session_inner(
     // `pick_target_name` only avoids names live on the target, so the one it
     // chose may be a name fleet killed there moments ago; the refresh below
     // has to be free to insert its row.
+    // The target row inherits the SOURCE row's owner through
+    // `claim_if_unclaimed` below, which is the move's one carry — against the
+    // row id, never the name.
     crate::service::sessions::record_tmux_created(store, &target, &tmux_name);
     // Built once the target session exists: every `partial(...)` call site
     // from here on shares it. The transcript facts are already known (the
@@ -3192,6 +3248,7 @@ async fn move_session_inner(
     // that row itself becomes known, below.
     let mut partial_ctx = PartialCtx {
         from_host: src.clone(),
+        from_tmux_name: snap.row.tmux_name.clone(),
         to_host: target.clone(),
         to_tmux_name: tmux_name.clone(),
         claude_session_id: id.clone(),
@@ -3219,6 +3276,38 @@ async fn move_session_inner(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
+        // ── Ownership: the one HARD failure in this block ────────────────
+        //
+        // Multi-user M1 (T5, spec §4.3 *A grant is on a row, so it does not
+        // travel*). Everything else here is soft-fail by design — "the session
+        // is live either way" — and this one cannot be: a target row left at
+        // the schema default is `unclaimed`, on a host the caller named, where
+        // an agent that can prove the pane claims it. A move whose carry
+        // soft-failed would turn a private session into an unowned one without
+        // telling anybody, which makes moving a session a silent privacy
+        // event. Abort instead, as a PARTIAL move (the target is live, so the
+        // operator has to choose) rather than pretending it worked.
+        //
+        // An unowned source carries nothing: the target stays `unclaimed`,
+        // which is the same answer, not a failure.
+        s.claim_if_unclaimed(row.id, snap.row.owner_person_id)
+            .map_err(|e| {
+                partial(
+                    "carrying the owner to the target row",
+                    &partial_ctx,
+                    Some(row.id),
+                    &e,
+                )
+            })?;
+        // The origin travels with the session (migration 124): a moved
+        // mission run is still the mission's. Soft, like the rest of this
+        // block but the owner: an origin is a label, not an access rule.
+        if let Some(carried) = crate::store::SessionOrigin::of_row(&snap.row) {
+            if let Err(e) = s.set_session_origin(row.id, &carried) {
+                tracing::warn!(session_id = row.id, error = %e, "[move] carrying the origin failed");
+            }
+        }
+        // The GRANTS are dropped once the target is confirmed, below.
         // Soft-fail like new_session: the session is live either way.
         if let Err(e) = s.set_claude_session_id(row.id, &id) {
             tracing::warn!(
@@ -3286,7 +3375,7 @@ async fn move_session_inner(
     let deadline = tokio::time::Instant::now() + opts.confirm_timeout;
     let confirmed = loop {
         let size_ok = match sh(ssh, &target, &size_script(&prep.path), GIT_TIMEOUT).await {
-            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            Ok(o) if o.status.success() => marked(&String::from_utf8_lossy(&o.stdout))
                 .trim()
                 .parse::<i64>()
                 .is_ok_and(|n| n >= copied as i64),
@@ -3323,6 +3412,34 @@ async fn move_session_inner(
     // Confirmed: refresh the counters to what this row now shows.
     partial_ctx.to_turn_seq = Some(target_row.turn_seq);
     partial_ctx.to_last_turn_at = target_row.last_turn_at;
+    {
+        let s = lock(store)?;
+        // The GRANTS are DROPPED — the owner's decision of
+        // 2026-09-30 (spec §4.3). A grant is a statement about a ROW: it is
+        // keyed on `sessions.id`, the target is a new row with a new id, and
+        // the session the grantee was shown now lives on a different machine.
+        // Re-granting is one click for the owner; narrowing is the safe
+        // direction, so the move revokes rather than carries. This runs on the
+        // SOURCE row (`snap.row.id`) and holds whether or not the source is
+        // kept: a `keep_source` move leaves the old session running, and its
+        // shares end with the move the owner asked for, not silently with the
+        // row's reaping.
+        //
+        // Only now, with the target confirmed (review r18): a move that
+        // stops before this point is partial with the source still live,
+        // and its shares must still stand on it — nothing restores them.
+        //
+        // Hard too, and for the same reason the carry is: a soft-failed revoke
+        // leaves a share live on a session the owner believes they have moved.
+        s.revoke_all_grants_on_session(snap.row.id).map_err(|e| {
+            partial(
+                "revoking the source session's grants",
+                &partial_ctx,
+                Some(target_row.id),
+                &e,
+            )
+        })?;
+    }
 
     progress.start(MoveStep::Handoff);
     // 6/7. The source: check it wrote nothing since the copy, kill it (unless
@@ -3545,6 +3662,8 @@ mod tests {
         target_status: &'static str,
         /// `kill_tmux_session` fails.
         kill_fails: bool,
+        /// `kill_tmux_session` kills, then fails in the reconcile after it.
+        kill_then_reconcile_fails: bool,
         /// Starting the target makes the source transcript grow (a turn
         /// taken on the source after the copy).
         grow_source_on_start: bool,
@@ -3574,6 +3693,12 @@ mod tests {
         /// What `pane_status` answers (the live pane of a stale-demoted
         /// source); `None` = cannot tell. Each ask is logged `pane <id>`.
         pane: Option<&'static str>,
+        /// When set, `refresh_host` stamps this person as the target row's
+        /// owner — a row that belongs to somebody else by the time the move
+        /// tries to carry the source's owner onto it. The one way to make the
+        /// carry fail without reaching into the store mid-move (multi-user M1,
+        /// T5).
+        target_owner: Option<i64>,
     }
 
     impl FakeHooks {
@@ -3584,6 +3709,7 @@ mod tests {
                 worktree_id,
                 target_status: "running",
                 kill_fails: false,
+                kill_then_reconcile_fails: false,
                 grow_source_on_start: false,
                 grow_source_on_kill: false,
                 refresh_target_fails: false,
@@ -3594,6 +3720,7 @@ mod tests {
                 started: Mutex::new(Vec::new()),
                 log: Mutex::new(Vec::new()),
                 pane: None,
+                target_owner: None,
             }
         }
         fn log(&self) -> Vec<String> {
@@ -3683,7 +3810,7 @@ mod tests {
             let started = self.started.lock().unwrap().clone();
             let s = store.lock().unwrap();
             for (h, n) in started.iter().filter(|(h, _)| h == host) {
-                s.upsert_session(
+                let id = s.upsert_session(
                     n,
                     h,
                     Some(self.project_id),
@@ -3693,6 +3820,17 @@ mod tests {
                     self.target_status,
                     None,
                 )?;
+                // A target row that already belongs to somebody else, for the
+                // owner-carry failure test. `upsert_session` is the test
+                // helper, so it reads no owner reservation — which is why the
+                // real create path's claim is the thing under test here.
+                if let Some(other) = self.target_owner {
+                    s.conn_ref().execute(
+                        "UPDATE sessions SET owner_person_id = ?1, visibility = 'private' \
+                          WHERE id = ?2",
+                        rusqlite::params![other, id],
+                    )?;
+                }
             }
             Ok(())
         }
@@ -3724,6 +3862,12 @@ mod tests {
                 );
             }
             self.log.lock().unwrap().push(format!("kill {host} {name}"));
+            if self.kill_then_reconcile_fails {
+                return Err(crate::service::sessions::after_the_kill(IpcError::new(
+                    codes::E_SSH_TIMEOUT,
+                    "reconcile timed out",
+                )));
+            }
             Ok(())
         }
     }
@@ -3903,6 +4047,44 @@ mod tests {
         }
     }
 
+    /// r18-M2: a move to `local` must not reuse a remote worktree row's
+    /// path (the source host's own path) as the local cwd.
+    #[test]
+    fn only_a_local_worktree_rows_path_is_a_local_path() {
+        let f = fixture();
+        let s = f.store.lock().unwrap();
+        let snap = snapshot(&s, &args(&f, false)).unwrap();
+        assert_eq!(
+            snap.worktree_path.as_deref(),
+            Some("/local/o/r/.claude/worktrees/feat")
+        );
+        let remote = s
+            .upsert_worktree_on(
+                "alpha",
+                f.project_id,
+                "feat",
+                "/home/alpha/p/o/r/.claude/worktrees/feat",
+                Some("feat"),
+            )
+            .unwrap();
+        let id = s
+            .upsert_session(
+                "dev-o-r--feat",
+                "alpha",
+                Some(f.project_id),
+                Some(remote),
+                1,
+                1,
+                "running",
+                None,
+            )
+            .unwrap();
+        assert_eq!(id, f.source_id);
+        let snap = snapshot(&s, &args(&f, false)).unwrap();
+        assert_eq!(snap.worktree_id, remote);
+        assert_eq!(snap.worktree_path, None, "the layout path is used instead");
+    }
+
     fn args(f: &Fixture, keep_source: bool) -> MoveSessionArgs {
         MoveSessionArgs {
             session_id: f.source_id,
@@ -3989,6 +4171,167 @@ mod tests {
         assert_eq!(v["target"]["kind"], rep.target.kind);
         let back: MoveOutcome = serde_json::from_value(v).unwrap();
         assert!(matches!(back, MoveOutcome::Moved(_)));
+    }
+
+    /// Multi-user M1 (T5, spec §4.3). A move carries the OWNER onto the target
+    /// row and DROPS the source row's shares. The two halves are one decision:
+    /// the session stays the owner's wherever it runs, and a grant is a
+    /// statement about a row — the target is a new row with a new id, on a
+    /// machine the grantee may be the unix owner of, so the shares end here and
+    /// the owner re-grants if they still want to.
+    ///
+    /// `keep: true` on purpose: with the source reaped, its grants would go by
+    /// cascade and the revoke would prove nothing.
+    #[tokio::test]
+    async fn a_move_carries_the_owner_and_drops_the_sources_shares() {
+        let f = fixture();
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let (ann, bob) = {
+            let s = f.store.lock().unwrap();
+            let ann = s.create_person("ann", None).unwrap().id;
+            let bob = s.create_person("bob", None).unwrap().id;
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET owner_person_id = ?1, visibility = 'private' \
+                      WHERE id = ?2",
+                    rusqlite::params![ann, f.source_id],
+                )
+                .unwrap();
+            s.grant_session(
+                f.source_id,
+                crate::store::GrantRecipient::Person(bob),
+                crate::store::GRANT_WATCH,
+                ann,
+            )
+            .expect("ann shares her session with bob");
+            (ann, bob)
+        };
+        let rep = run(&f, &hooks, true).await.expect("the fixture moves");
+        assert_eq!(
+            rep.target.owner_person_id,
+            Some(ann),
+            "the moved session is still ann's"
+        );
+        assert_eq!(rep.target.visibility, crate::store::VISIBILITY_PRIVATE);
+
+        let s = f.store.lock().unwrap();
+        assert!(
+            s.grants_for_person(bob).unwrap().is_empty(),
+            "bob's share does not follow the session to another host"
+        );
+        // Revoked, not deleted: "ann shared this and the move took it back"
+        // stays answerable.
+        let revoked: i64 = s
+            .conn_ref()
+            .query_row(
+                "SELECT COUNT(*) FROM session_grants \
+                  WHERE session_id = ?1 AND person_id = ?2 AND revoked_at IS NOT NULL",
+                rusqlite::params![f.source_id, bob],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(revoked, 1);
+    }
+
+    /// Review r18: a move that stops before the target is confirmed is
+    /// partial with the source still live, so its shares still stand.
+    #[tokio::test]
+    async fn a_move_that_never_confirms_the_target_keeps_the_source_shares() {
+        let f = fixture();
+        let mut hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        hooks.target_status = "ghost";
+        let bob = {
+            let s = f.store.lock().unwrap();
+            let ann = s.create_person("ann", None).unwrap().id;
+            let bob = s.create_person("bob", None).unwrap().id;
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET owner_person_id = ?1 WHERE id = ?2",
+                    rusqlite::params![ann, f.source_id],
+                )
+                .unwrap();
+            s.grant_session(
+                f.source_id,
+                crate::store::GrantRecipient::Person(bob),
+                crate::store::GRANT_WATCH,
+                ann,
+            )
+            .unwrap();
+            bob
+        };
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_PARTIAL, "{}", err.message);
+        let s = f.store.lock().unwrap();
+        assert_eq!(
+            s.grants_for_person(bob).unwrap().len(),
+            1,
+            "bob still watches the live source"
+        );
+    }
+
+    /// Migration 122: a moved session keeps who started it.
+    #[tokio::test]
+    async fn a_move_carries_the_origin() {
+        let f = fixture();
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        f.store
+            .lock()
+            .unwrap()
+            .set_session_origin(f.source_id, &crate::store::SessionOrigin::mission(7))
+            .unwrap();
+        let rep = run(&f, &hooks, true).await.expect("the fixture moves");
+        assert_eq!(
+            (
+                rep.target.origin.as_deref(),
+                rep.target.origin_ref.as_deref()
+            ),
+            (Some("mission"), Some("7"))
+        );
+    }
+
+    /// The carry is a HARD failure: it is the one write in the target-row block
+    /// that is not "soft-fail like new_session, the session is live either way".
+    /// A soft-failed carry would leave the target `unclaimed` on the host the
+    /// caller named, where an agent that can prove the pane claims it — a move
+    /// that silently gave a private session away.
+    ///
+    /// Driven through the hooks: the fake's reconcile stamps somebody else as
+    /// the target row's owner, which is exactly what `claim_if_unclaimed`
+    /// refuses.
+    #[tokio::test]
+    async fn a_move_whose_owner_carry_fails_aborts_rather_than_leaving_the_target_unclaimed() {
+        let f = fixture();
+        let mut hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let ann = {
+            let s = f.store.lock().unwrap();
+            let ann = s.create_person("ann", None).unwrap().id;
+            let cat = s.create_person("cat", None).unwrap().id;
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET owner_person_id = ?1, visibility = 'private' \
+                      WHERE id = ?2",
+                    rusqlite::params![ann, f.source_id],
+                )
+                .unwrap();
+            hooks.target_owner = Some(cat);
+            ann
+        };
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_PARTIAL);
+        assert!(
+            err.message.contains("carrying the owner to the target row"),
+            "the refusal must name the step: {}",
+            err.message
+        );
+        // The source is untouched — the carry runs long before the kill — so
+        // the session is still ann's, still private, and still hers to move.
+        let s = f.store.lock().unwrap();
+        let src = s
+            .get_session_by_id(f.source_id)
+            .unwrap()
+            .expect("the source");
+        assert_eq!(src.owner_person_id, Some(ann));
+        assert_eq!(src.visibility, crate::store::VISIBILITY_PRIVATE);
     }
 
     #[tokio::test]
@@ -4537,6 +4880,23 @@ mod tests {
         );
     }
 
+    /// Review r18 M4: a kill that landed but whose trailing reconcile failed
+    /// is a finished move with a warning, not "both alive".
+    #[tokio::test]
+    async fn a_kill_that_landed_before_its_reconcile_failed_finishes_the_move() {
+        let f = fixture();
+        let mut hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        hooks.kill_then_reconcile_fails = true;
+        let rep = run(&f, &hooks, false).await.expect("the move finishes");
+        assert!(
+            rep.warnings
+                .iter()
+                .any(|w| w.contains("was killed, but the reconcile after the kill failed")),
+            "{:?}",
+            rep.warnings
+        );
+    }
+
     /// F8: `keep_source` skips the kill, not the step — the sheet must still
     /// see all nine steps finish.
     #[tokio::test]
@@ -5051,6 +5411,11 @@ mod tests {
         assert_eq!(d["claude_session_id"], SID);
         assert_eq!(d["branch"], "feat");
         assert!(d["to_tmux_name"].is_string(), "{d}");
+        // The SOURCE's tmux name, so `resolve_move` can tell the source
+        // apart from whatever session inherits its rowid (multi-user M1,
+        // T9d). Without it the source's recorded identity was `(host, id)`,
+        // and `Finish` kills what it resolves.
+        assert!(d["from_tmux_name"].is_string(), "{d}");
         assert!(d["source_transcript_size"].is_u64(), "{d}");
         assert!(d["source_transcript_mtime"].is_i64(), "{d}");
         assert!(d["source_transcript_path"].is_string(), "{d}");
@@ -6390,13 +6755,39 @@ mod tests {
     /// Every carry script runs under `bash -lc`, so a login profile can print
     /// a banner before the script body ever does: the parsers anchor on the
     /// output marker, and the relayed bundle must be the payload alone.
-    /// (Only the carry scripts are marker-protected; inspect, locate and
-    /// read are not — pre-existing, and out of this test's scope.)
+    /// The move's own inspect, locate, read, prep and size scripts are
+    /// marker-protected too (review r18 M3): the transcript that lands on the
+    /// target is the transcript, not the banner plus it.
     #[tokio::test]
     async fn a_login_banner_before_every_carry_script_does_not_break_the_move() {
         let f = fixture();
         let banner = |payload: &str| format!("Welcome to alpha!\n{}", out(payload));
         f.fake
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-move:inspect"),
+                Reply::ok(&banner(&inspection("", HEAD, "0"))),
+            )
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-move:locate"),
+                Reply::ok(&banner(&locate_out(TRANSCRIPT.len(), MTIME))),
+            )
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-move:read"),
+                Reply::ok(&banner(TRANSCRIPT)),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-move:prep"),
+                Reply::ok(&banner(&format!("{HEAD}\t{TGT_ENC}\t{}\t-1\n", tgt_path()))),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-move:size"),
+                Reply::ok(&banner(&format!("{}\n", TRANSCRIPT.len()))),
+            )
             .on_host(
                 "beta",
                 Match::script_contains("# cf-carry:seed"),
@@ -6439,6 +6830,12 @@ mod tests {
             .filter(|c| c.stdin.is_some())
             .collect();
         assert_eq!(uploads[0].stdin_str().as_deref(), Some(BUNDLE));
+        assert!(
+            uploads
+                .iter()
+                .any(|c| c.stdin_str().as_deref() == Some(TRANSCRIPT)),
+            "the transcript upload carries no banner"
+        );
     }
 
     #[tokio::test]

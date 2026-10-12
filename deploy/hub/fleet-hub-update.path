@@ -1,0 +1,15 @@
+# Starts one `fleet-hub update apply` at once when the hub's
+# `update_admin update_now` writes <data_dir>/update-now. Install beside
+# fleet-hub-update.timer:
+#
+#   sudo cp fleet-hub-update.path /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now fleet-hub-update.path
+[Unit]
+Description=claude-fleet hub: install an update now, when the operator says so
+
+[Path]
+PathExists=/var/lib/fleet-hub/update-now
+Unit=fleet-hub-update.service
+
+[Install]
+WantedBy=paths.target

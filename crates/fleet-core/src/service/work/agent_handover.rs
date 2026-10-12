@@ -241,11 +241,17 @@ pub async fn request(
         let mut row = s.get_session_by_id(session_id)?.ok_or_else(|| {
             IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found"))
         })?;
+        // Both arms are the ORG half. The person half is
+        // `resolve_row_person_gated(.., Reach::Drive, ..)` in
+        // `work_link { action: handover }` — drive, because a handover
+        // request types into the session's pane.
         if let Some(h) = scope.host() {
-            if row.host_alias != h || !scope.sees_row(&row) {
+            // Org half; `resolve_row_person_gated` is the person half.
+            if row.host_alias != h || !scope.sees_row_org_only(&row) {
                 return Err(orgs::not_found("session", session_id));
             }
-        } else if !scope.sees_row(&row) {
+            // Org half; `resolve_row_person_gated` is the person half.
+        } else if !scope.sees_row_org_only(&row) {
             // A client bound to another org (M14): an unknown session.
             return Err(orgs::not_found("session", session_id));
         }
@@ -255,7 +261,7 @@ pub async fn request(
             &row.tmux_name,
             "handover",
         )?;
-        scope.redact_row(&mut row);
+        scope.redact_row_org_only(&mut row);
         let key = row
             .work
             .as_ref()
@@ -316,7 +322,7 @@ pub async fn request(
     let mut out = s
         .get_session_by_id(row.id)?
         .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "the session vanished"))?;
-    scope.redact_row(&mut out);
+    scope.redact_row_org_only(&mut out);
     Ok(out)
 }
 

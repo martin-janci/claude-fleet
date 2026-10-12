@@ -52,13 +52,20 @@ pub enum Access {
     /// (send / kill / new_session across hosts stay allowed by design), not
     /// fleet admin.
     Client,
-    /// Reachable by the master and by a PERSON's own paired device: a paired
-    /// client bound to no org (the desktop paired with `fleet-hub pair`, a
-    /// phone). Never a per-host token — its Claude is fenced to its host's
-    /// org, and these tools are fleet-wide — nor a client bound to an org
-    /// (M14). The fleet's settings (declarative pages P6): what the hub's
-    /// GC, playbooks and limits do to the sessions that device shows. A
-    /// write needs more than this row; see `set_setting`.
+    /// Reachable by the master and by THE HUB'S OWNER's own paired device: a
+    /// paired client bound to no org (the desktop paired with `fleet-hub
+    /// pair`, a phone) whose person is `Store::personal_owner_id()`. Never a
+    /// per-host token — its Claude is fenced to its host's org, and these
+    /// tools are fleet-wide — nor a client bound to an org (M14), nor (since
+    /// multi-user M1) a SECOND person's device. The fleet's settings
+    /// (declarative pages P6): what the hub's GC, playbooks and limits do to
+    /// the sessions that device shows. A write needs more than this row; see
+    /// `set_setting`.
+    ///
+    /// "Whose settings are these?" stays an M2 question: M1's answer is that
+    /// the fleet's settings belong to the fleet's owner, which is the state a
+    /// single-person hub was already in. What M1 changes is that a colleague
+    /// paired to the same hub no longer inherits them.
     Person,
     /// [`Access::Person`], but not served to the master: the operator has
     /// `fleet-hub settings` on the hub machine, and every byte of the
@@ -66,17 +73,126 @@ pub enum Access {
     /// (`the_served_definition_budget_stays_bounded`). The desktop's own
     /// commands, under their own names (`setting_proposals`, …).
     PersonDevice,
+    /// A **per-host token** and nothing else: not the master, not a paired
+    /// device, not the operator (multi-user M1, T12).
+    ///
+    /// It exists because `session_claim` is not expressible with the four
+    /// variants above. [`Access::Client`]'s own doc says it covers a
+    /// per-host token *as well as* every paired phone, and
+    /// [`access_allows`] answers `true` for it unconditionally — so "host
+    /// token only" could not be written as a row, and a claim tool with a
+    /// `Client` row would have been reachable by every paired device on the
+    /// fleet.
+    ///
+    /// The gate is one conjunct and it narrows WHAT the caller is:
+    /// `host_alias.is_some()` is true for exactly one of the three shapes a
+    /// [`crate::mcp::Caller`] has (its own doc enumerates them — master:
+    /// neither field; host: `host_alias`; paired client: `client`), so this
+    /// admits the per-host token and refuses the other two. The further
+    /// narrowing — *which* row that token may claim — is not an access
+    /// question and is not answered here: it is the pane proof
+    /// (`ViewScope::proven_session`), re-resolved per request.
+    ///
+    /// **The master is deliberately out.** Its path to a claim is
+    /// `fleet-hub session claim`, which writes through `state.db` on the hub
+    /// machine — shell access there being the authority §4.5 already
+    /// concedes — and every byte of the master's tool surface is budgeted
+    /// (`the_served_definition_budget_stays_bounded`), the same reasoning
+    /// [`Access::PersonDevice`] records one variant up.
+    HostToken,
+    /// A PERSON's paired device, bound to an org or not (org administration
+    /// phase D): never the master (the operator has `fleet-hub org|client`),
+    /// a per-host token, a single-purpose token or a device that proves no
+    /// person. It exists for `org_admin`, whose every action then checks the
+    /// caller's authority itself (`service::org_admin::Authority`): the hub
+    /// owner's unbound device administers the fleet, an org's admin that
+    /// org, and anybody else is refused there — a row cannot say "an admin
+    /// of the org this device is bound to", because that is a store read.
+    Device,
 }
 
 /// Whether `caller` may call `tool` by its row's [`Access`] — the one
 /// predicate the call gate (`enforce_admin`) and the served list
 /// (`visible_to`) share. A tool with no row is the master's alone (fail
 /// closed).
+///
+/// **This function takes no store and must not grow one** (multi-user M1,
+/// R6-l). It is shared with `crate::mcp::tools::present::visible_to`, which
+/// has a `&Caller` and nothing else and runs over the whole router on every
+/// served list, so a lookup here would be a lock per request. Everything it
+/// needs about WHO the caller is was resolved once, where the token was
+/// resolved: [`crate::mcp::Caller::is_personal_owner`].
+/// The tools a host-limited named token may call (M15 step G2.8): each
+/// reaches a session through `resolve_row_and_gate` (which runs
+/// `require_host`) or lists through `ViewScope::sees_session_row` (which
+/// applies the limit), and `new_session` checks its host with
+/// `require_host`. A tool joins only after its every host path is checked.
+pub const HOST_LIMITED_TOOLS: &[&str] = &[
+    "list_sessions",
+    "capture_session",
+    "session_transcript",
+    "session_history",
+    "send_prompt",
+    "kill_session",
+    "wait_for_session",
+    "wait_for_reply",
+    "new_session",
+    "whoami",
+];
+
 pub fn access_allows(caller: &crate::mcp::Caller, tool: &str) -> bool {
+    // A named token limited to some hosts (G2.8) reaches only the tools
+    // whose every host goes through the session gate (`resolve_*_gate`,
+    // `ViewScope`) or `require_host`; anything that names a host another
+    // way (routines, clipboard, probes, fleet_health) could leave the limit.
+    if caller.api_hosts().is_some() && !HOST_LIMITED_TOOLS.contains(&tool) {
+        return false;
+    }
     match policy(tool).map(|p| p.access) {
         Some(Access::Client) => true,
-        Some(Access::Person) => caller.is_master() || caller.is_person_device(),
-        Some(Access::PersonDevice) => caller.is_person_device(),
+        // Multi-user M1 (T2a): the hub's OWNER, not any person. Without the
+        // boolean this arm read "any paired device bound to no org", which
+        // on a hub with a second person handed that person the whole fleet's
+        // settings. The boolean is false when the hub cannot say who its
+        // owner is, so that state refuses rather than opens.
+        Some(Access::Person) => {
+            caller.is_personal_owner && (caller.is_master() || caller.is_person_device())
+        }
+        // Two conjuncts, narrowing two different axes, and BOTH are needed:
+        //
+        // - `is_personal_owner` narrows WHOSE device it is. Without it this
+        //   arm read "any paired device bound to no org", so on a hub with a
+        //   second person that colleague's phone reached
+        //   `decide_setting_proposals` — which applies a proposed settings
+        //   change to the whole fleet. Same hole as `Access::Person` had, one
+        //   arm down.
+        // - `is_person_device` narrows WHAT the caller is: a paired client,
+        //   which is what keeps the MASTER out of this arm by design (the
+        //   operator has `fleet-hub settings` on the hub machine, and every
+        //   byte of the master's tool surface is budgeted —
+        //   `the_served_definition_budget_stays_bounded`). It also keeps out
+        //   a per-host token, an org-bound client and a single-purpose token.
+        //
+        // A device that reaches these still has to be trusted to write
+        // anything (`settings_writer`).
+        Some(Access::PersonDevice) => caller.is_personal_owner && caller.is_person_device(),
+        // Multi-user M1 (T12): a per-host token, and only one. `host_alias`
+        // is `Some` for exactly that shape of caller — the master carries
+        // neither field and a paired client carries `client` — so this arm
+        // admits the agent on a machine and refuses the master, every phone,
+        // every paired desktop and the operator's own client. WHICH row such
+        // a token may claim is the pane proof's question, not this one.
+        Some(Access::HostToken) => caller.host_alias.is_some(),
+        // Phase D: WHAT the caller is (a person's device); whose authority it
+        // carries is the tool's question (`org_admin::authority_for`).
+        Some(Access::Device) => {
+            caller.host_alias.is_none()
+                && !caller.mode.is_single_purpose()
+                && caller
+                    .client
+                    .as_ref()
+                    .is_some_and(|c| c.person_id.is_some())
+        }
         Some(Access::Master) | None => caller.is_master(),
     }
 }
@@ -114,7 +230,7 @@ pub struct ToolPolicy {
 /// The single source of truth for every router tool's access, readonly,
 /// confirm and deadline classification. Adding a tool means adding exactly
 /// one row here; the exhaustiveness test in `tools::tests`
-/// (`every_router_tool_has_exactly_one_policy_row`) walks the real router and
+/// (`every_router_tool_has_exactly_one_tool_policy_row`) walks the real router and
 /// fails with the row to add when one is missing, duplicated, or names a tool
 /// that no longer exists.
 pub const TOOL_POLICIES: &[ToolPolicy] = &[
@@ -164,6 +280,44 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Plan usage per account (hub contract 11 follow-up): the same reach as
+    // `list_accounts`, read from what the hub's bus followed.
+    // An account's nickname: the label every device shows for it. The hub
+    // owner's (master or own device), like `add_account`; another person's
+    // or an org's device reads the accounts and does not rename them.
+    ToolPolicy {
+        name: "set_account_nickname",
+        access: Access::Person,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "account_usage",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Contract 14: which login on a host has headroom, from the same answers
+    // `account_usage` serves. Same reach as it and `list_hosts`.
+    ToolPolicy {
+        name: "check_account_headroom",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Gap plan G7.3: Jev's host for a new session, for the phone's New
+    // session. Reads the store and asks the decision model; writes only the
+    // decision record. A per-host token does not place sessions.
+    ToolPolicy {
+        name: "propose_host_placement",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
     // The composer's shared chip row. One tool both reads and replaces the
     // list, so it is classified as a write and a `readonly` client cannot
     // call it at all — not even to read. That is deliberate: a readonly
@@ -185,6 +339,17 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // An org's own update policy (S9), from a person's device: the hub
+    // owner's unbound device for every org, an org admin's for theirs. The
+    // handler checks that authority (`org_admin::authority_for`); the master
+    // keeps `update_admin set_policy`.
+    ToolPolicy {
+        name: "update_policy",
+        access: Access::Device,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     ToolPolicy {
         name: "update_admin",
         access: Access::Master,
@@ -195,16 +360,44 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
     },
     ToolPolicy {
         name: "add_host",
-        access: Access::Master,
+        access: Access::Person,
         readonly: false,
         confirm: false,
         deadline: Deadline::Lifecycle,
+    },
+    // Orbit Fleet 4.9: installs fleet-agent on a host over SSH and moves the
+    // host onto it — fleet administration, like `add_host`. Returns at once;
+    // the job runs on. `add_host` and this are `Person` since contract 13:
+    // the hub owner's trusted phone may call them (`owner_device_admin`).
+    ToolPolicy {
+        name: "install_agent",
+        access: Access::Person,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "agent_installs",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
     },
     // Re-reads external (SSH) state without touching sessions — readonly
     // like `refresh_projects`.
     ToolPolicy {
         name: "probe_host",
         access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
+    // The host detail's health checklist (Orbit Fleet 4.7): one SSH read of
+    // tmux, PATH and ~/.claude/settings.json on a fleet host. The hub
+    // owner's, like `add_host`: it reads a host's own configuration.
+    ToolPolicy {
+        name: "check_host",
+        access: Access::Person,
         readonly: true,
         confirm: false,
         deadline: Deadline::Lifecycle,
@@ -232,9 +425,13 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // `Person` since mefistos (2026-10-11): the hub owner's own device may
+    // refresh ONE host's content (`content_only`, no rotation — the same
+    // secret-free pass the hub runs on its own); the tool refuses it
+    // anything wider, which mints tokens and stays the master's.
     ToolPolicy {
         name: "provision_hosts",
-        access: Access::Master,
+        access: Access::Person,
         readonly: false,
         confirm: false,
         deadline: Deadline::Lifecycle,
@@ -320,12 +517,72 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Redesign step 9.2: the owner's paired device lists and answers the
+    // confirmations waiting on this server — on a hub, the only place they
+    // can be answered. Not served to the master; answering is a write.
+    ToolPolicy {
+        name: "mcp_confirms",
+        access: Access::PersonDevice,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Redesign step 9.9 (Jev K2): the owner's device asks where a message
+    // sent in Control goes and records the pick. Not the master's budget;
+    // a run is recorded, so not readonly.
+    ToolPolicy {
+        name: "control_route",
+        access: Access::PersonDevice,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Gap plan G7.10 (Jev N2): the New session dialog's "Resume or start
+    // fresh" proposal and the person's pick. A person's own device, as
+    // `control_route`: the follow-up records a person's choice.
+    ToolPolicy {
+        name: "resume_or_new",
+        access: Access::PersonDevice,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "answer_mcp_confirm",
+        access: Access::PersonDevice,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Redesign step 9.3: the receipts of what Control's agent handed on,
+    // for the owner's device to draw Control's chips and cards from. They
+    // quote the agent's prompts, so the person's own device only.
+    ToolPolicy {
+        name: "control_handoffs",
+        access: Access::PersonDevice,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // The page specs, for a phone that renders them (P6). Compiled into the
     // hub like the desktop: the same answer for everyone who may see pages.
     ToolPolicy {
         name: "list_pages",
         access: Access::PersonDevice,
         readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Organisation administration: the company's orgs, devices, people and
+    // (phase D) members, from the hub owner's own device — or, for its own
+    // org only, from an org admin's. Not served to the master (it has
+    // `fleet-hub org|client|person` and `work_admin`). The tool decides the
+    // authority (`org_admin::authority_for`); a change needs a trusted full
+    // device (`org_admin_writer`), and no change locks out the device in use.
+    ToolPolicy {
+        name: "org_admin",
+        access: Access::Device,
+        readonly: false,
         confirm: false,
         deadline: Deadline::Quick,
     },
@@ -363,6 +620,158 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
     ToolPolicy {
         name: "remove_download",
         access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Gap plan G7.15: Pause on a copy in flight, a person's like removing.
+    ToolPolicy {
+        name: "pause_download",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Routines (Orbit Fleet 8.5): a person's own scheduled prompts. Its
+    // run_now starts a session, hence the lifecycle deadline; a host's token
+    // is not served it (`NOT_FOR_HOST_TOKENS`).
+    ToolPolicy {
+        name: "routines",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
+    // Start rules (Orbit Fleet 8.11): which project a task key starts in,
+    // before history and Jev. A person's; a host's token is not served it.
+    ToolPolicy {
+        name: "start_rules",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Wizard state (M15 G7.2): a person's wizard, kept to resume on their
+    // other device. A person's; a host's token is not served it.
+    ToolPolicy {
+        name: "wizard_state",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Pinned dashboards (persona design step 6): a person's, on the hub so
+    // every device of theirs shows them. The agent reads; a person pins.
+    ToolPolicy {
+        name: "dashboards",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Presence (redesign 11.7b): reports into the hub's in-memory board and
+    // reads it back; touches no row. A person's tool, not a host token's.
+    // Search phase 3: one query over the full-text index. Every hit is
+    // fenced for the caller in `service::search` (a session's through
+    // `sees_session_row`, a gone one's through `sees_past_conversation`, an
+    // item through the org), so a host's token finds what it may already
+    // read and nothing more.
+    ToolPolicy {
+        name: "search",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "session_presence",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Control's Library (Orbit Fleet 9.7): the files a person put on a
+    // host. A person's, like the downloads it sits beside, so a host's token
+    // is not served it (`NOT_FOR_HOST_TOKENS`).
+    ToolPolicy {
+        name: "library",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Runs (Orbit Fleet 8.3): the Automation screen's list of every run on
+    // the fleet's behalf, cut to the caller's view scope
+    // (`service::runs::reach`). A read, served to a readonly device too.
+    ToolPolicy {
+        name: "runs",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Debug devices: a host's Claude uses the devices it may see (its own
+    // host's, and those a person shared within its org); a person also
+    // labels, shares and forgets them (refused to host tokens in the
+    // service). `run` and `install` may take up to 600 s on the device's
+    // host, so the call is bounded like a long-poll.
+    ToolPolicy {
+        name: "debug_devices",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::LongPoll,
+    },
+    // Pull requests (redesign 6.4): a read of what reconcile recorded,
+    // filtered per row to the sessions the caller may see.
+    ToolPolicy {
+        name: "prs",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // PR shepherd (step 2): a person's standing rule per project, which
+    // lets fleet nudge sessions and merge their green PRs. The owner's own
+    // device only, never the master an agent holds (the operator has
+    // `fleet-hub shepherd`); a write also needs a trusted full device.
+    ToolPolicy {
+        name: "pr_shepherd",
+        access: Access::PersonDevice,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Agents (reviewer, support): a person's standing rule per repo or
+    // Jira project, which lets an agent read and write outside fleet, and
+    // a person's answer to a write an agent proposes. The owner's own
+    // device only, never the master an agent holds (the operator has
+    // `fleet-hub agents`); a write also needs a trusted full device.
+    ToolPolicy {
+        name: "agents",
+        access: Access::PersonDevice,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Named Control API tokens (M15 step G2.8): the master and the owner's
+    // own device. Creating or revoking needs the master or a trusted full
+    // device, and only the master creates an admin token
+    // (`tools::api_tokens::token_minter`). Not readonly: create and revoke
+    // hand out and take away fleet access.
+    // M15 step G2.9: a new login profile on a host, signed in or holding an
+    // API key. Fleet administration like `add_host`; the writes also need
+    // the master or a trusted full device (`owner_device_admin`).
+    ToolPolicy {
+        name: "add_account",
+        access: Access::Person,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
+    ToolPolicy {
+        name: "api_tokens",
+        access: Access::Person,
         readonly: false,
         confirm: false,
         deadline: Deadline::Quick,
@@ -448,6 +857,27 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         deadline: Deadline::Quick,
     },
     ToolPolicy {
+        name: "adopt_session",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "lost_target",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "place_transcript",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
         name: "new_bg_session",
         access: Access::Client,
         readonly: false,
@@ -469,6 +899,14 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         deadline: Deadline::Quick,
     },
     // lifecycle.rs
+    // Opens or closes a shell beside a session (step 5.3): never the agent.
+    ToolPolicy {
+        name: "shell_terminals",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     ToolPolicy {
         name: "kill_session",
         access: Access::Client,
@@ -494,6 +932,14 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
     // not call it.
     ToolPolicy {
         name: "set_friendly_name",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Stamps the row's `last_viewed_at`: a write, though a harmless one.
+    ToolPolicy {
+        name: "touch_session_viewed",
         access: Access::Client,
         readonly: false,
         confirm: false,
@@ -567,6 +1013,22 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Typed later, when the session is idle: a pane write like send_prompt.
+    ToolPolicy {
+        name: "queue_prompt",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Lists a session's waiting prompts, or takes one back (`cancel`).
+    ToolPolicy {
+        name: "queued_prompts",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     ToolPolicy {
         name: "broadcast_prompt",
         access: Access::Client,
@@ -627,6 +1089,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::LongPoll,
     },
+    // forms.rs — chat forms: an agent's `ask { form | wait }` is a bounded
+    // wait (≤ 600 s), the rest are quick. Answering is a person's (refused to
+    // host tokens in the tool).
+    ToolPolicy {
+        name: "ask",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::LongPoll,
+    },
     ToolPolicy {
         name: "session_transcript",
         access: Access::Client,
@@ -640,6 +1112,24 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         name: "session_conversation",
         access: Access::Client,
         readonly: true,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
+    // A summary of the same transcript, drafted on the session's host
+    // (redesign 11.11). Not read-only: it runs claude and books its cost.
+    ToolPolicy {
+        name: "session_summary_since",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
+    // Context help at the composer, drafted on the session's host. Not
+    // read-only: it runs claude and books its cost.
+    ToolPolicy {
+        name: "session_context_help",
+        access: Access::Client,
+        readonly: false,
         confirm: false,
         deadline: Deadline::Lifecycle,
     },
@@ -688,6 +1178,13 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         deadline: Deadline::Quick,
     },
     ToolPolicy {
+        name: "decide_related_session",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
         name: "set_session_tags",
         access: Access::Client,
         readonly: false,
@@ -713,13 +1210,14 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: true,
         deadline: Deadline::Lifecycle,
     },
-    // Trackers and their credentials (work graph M3): fleet admin, so the
-    // master only — on a paired desktop every command behind it is
-    // `LocalOnly` (review C17). Confirm-gated for `remove`; `test` talks to
+    // Trackers and their credentials (work graph M3): fleet admin. Since
+    // contract 13 the hub owner's trusted phone reaches the tracker actions
+    // (`owner_device_admin`); everything else stays the master's. On a
+    // paired desktop every command behind it is still `LocalOnly` (C17). Confirm-gated for `remove`; `test` talks to
     // the tracker, hence the lifecycle deadline.
     ToolPolicy {
         name: "work_admin",
-        access: Access::Master,
+        access: Access::Person,
         readonly: false,
         confirm: true,
         deadline: Deadline::Lifecycle,
@@ -744,6 +1242,23 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
     ToolPolicy {
         name: "forget_project",
         access: Access::Master,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // The New session picker (phase 1): a person's preference, so a person's
+    // own device only, under the desktop commands' own names. Not served to
+    // the master — nothing an agent needs, and its surface is budgeted.
+    ToolPolicy {
+        name: "project_picks",
+        access: Access::PersonDevice,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "set_project_pick",
+        access: Access::PersonDevice,
         readonly: false,
         confirm: false,
         deadline: Deadline::Quick,
@@ -823,6 +1338,13 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         deadline: Deadline::Quick,
     },
     ToolPolicy {
+        name: "repo_blame",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
         name: "repo_log",
         access: Access::Client,
         readonly: true,
@@ -845,6 +1367,20 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
     },
     ToolPolicy {
         name: "repo_commit_diff",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "repo_branch_diff",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "repo_range_diff",
         access: Access::Client,
         readonly: true,
         confirm: false,
@@ -1021,14 +1557,111 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
-    // Names other fleets: master-only, like list_clients — a paired client
-    // or per-host token must not enumerate what this hub is linked to.
-    // Read-only, so it gets the same two-flags-answer-different-questions
-    // treatment as `list_clients` above.
+    // Names other fleets: the master and the hub owner's own device (Orbit
+    // Fleet 11.5, the Federation page) — a per-host token, an org-bound
+    // client and a second person's device must not enumerate what this hub
+    // is linked to. Read-only, so it gets the same
+    // two-flags-answer-different-questions treatment as `list_clients`
+    // above.
     ToolPolicy {
         name: "list_peer_links",
-        access: Access::Master,
+        access: Access::Person,
         readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Change this hub's links (11.5): the same gate, and a device must also
+    // be trusted and full (`peer_writer` in the tool). `link_peer` dials the
+    // other hub's /pair, bounded at 20 s by `peer::link`.
+    ToolPolicy {
+        name: "link_peer",
+        access: Access::Person,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "unlink_peer",
+        access: Access::Person,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // sharing.rs — multi-user M1 (T12). The four sharing tools and the two
+    // reads are `Access::Client` so a paired device passes the central gate,
+    // and all five of them are in `NOT_FOR_HOST_TOKENS`: a per-host token has
+    // no person (`Caller::person` is `None` for it by construction), so it can
+    // never be an owner or a grantee and a definition it can never use would
+    // cost every host's Claude request bytes for nothing. Owner-only is NOT
+    // this row's job — it is `Reach::Own` in the handler and the
+    // `owner_person_id` comparison inside the store's own statements.
+    //
+    // None is confirm-gated: a share destroys nothing, and the one that takes
+    // reach away (`session_unshare`) is the recovery from the others.
+    ToolPolicy {
+        name: "session_share",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "session_unshare",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "session_narrow",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "session_access",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "my_grants",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Gap plan G4.2: a recipient's ask for a wider level, and the owner's
+    // list and answer. Person-only like the rest of this block. Neither is
+    // readonly (`access_requests` grants and declines) nor confirm-gated:
+    // an ask confers nothing, and granting is the owner's own share.
+    ToolPolicy {
+        name: "session_ask_access",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "access_requests",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // The claim path (spec §4.4, clause 1 + the pane proof). The ONE
+    // `Access::HostToken` row: see that variant's doc for why no existing one
+    // expresses it. Not readonly — it writes the owner and flips the row to
+    // `private` — and not confirm-gated, because the desktop confirmation is
+    // the operator's dialog and no operator is in this path: the caller is an
+    // agent in a pane, and the operator's own claim is `fleet-hub session
+    // claim`.
+    ToolPolicy {
+        name: "session_claim",
+        access: Access::HostToken,
+        readonly: false,
         confirm: false,
         deadline: Deadline::Quick,
     },
@@ -1048,6 +1681,23 @@ pub fn is_readonly_tool(name: &str) -> bool {
     policy(name).is_some_and(|p| p.readonly)
 }
 
+/// The tools an "answer only" device (`TokenMode::Answer`, M15 step G2.10)
+/// may call beyond the readonly ones. Each narrows itself to answering:
+/// `send_prompt` takes a dialog key and never a prompt, `ask` answers or
+/// declines a form and never opens one.
+pub const ANSWER_TOOLS: &[&str] = &["send_prompt", "ask"];
+
+/// May a token in `mode` call `tool` at all (the readonly and answer-only
+/// half of `enforce_mode`)?
+pub fn mode_allows_tool(mode: crate::mcp::auth::TokenMode, tool: &str) -> bool {
+    use crate::mcp::auth::TokenMode;
+    match mode {
+        TokenMode::Readonly => is_readonly_tool(tool),
+        TokenMode::Answer => is_readonly_tool(tool) || ANSWER_TOOLS.contains(&tool),
+        _ => true,
+    }
+}
+
 /// Tools gated by the `mcp.confirm_destructive` toggle.
 pub fn needs_confirmation(name: &str) -> bool {
     policy(name).is_some_and(|p| p.confirm)
@@ -1063,6 +1713,10 @@ pub fn needs_confirmation(name: &str) -> bool {
 /// for `new` with `create_remote` (publishing a GitHub repository) once the
 /// service's own confirm token is presented — and that one needs a person
 /// for every caller but a paired, non-operator client, not just the operator.
+/// `send_prompt`, `run_prompt` and `queue_prompt` type the operator's own
+/// text into another session, so a person confirms each one (review round
+/// 15, F21: nothing an LLM writes reaches a session without a person), and
+/// `dispatch_task` to an existing worker is gated for the same reason.
 pub const OPERATOR_CONFIRMS: &[&str] = &[
     "add_project",
     "new_session",
@@ -1076,12 +1730,39 @@ pub const OPERATOR_CONFIRMS: &[&str] = &[
     "rewind_conversation",
     "safe_kill_session",
     "work_link",
+    "send_prompt",
+    "run_prompt",
+    "queue_prompt",
 ];
 
 /// Whether a call by this caller must be approved on the desktop even with
 /// `mcp.confirm_destructive` off.
 pub fn operator_must_confirm(is_operator: bool, name: &str) -> bool {
     is_operator && (needs_confirmation(name) || OPERATOR_CONFIRMS.contains(&name))
+}
+
+/// WHY the operator's call needs a person, in the words of the rule that
+/// caught it — the parenthetical of its `E_CONFIRM_REQUIRED`.
+///
+/// It is a `match` rather than one sentence because the one sentence used to
+/// be "the operator's starts and kills always do", which `send_prompt` was
+/// told as well: a prompt into a running session is neither, so the error
+/// denied being the rule that had just fired and the reader went looking for
+/// a toggle that could not turn it off (`mcp.confirm_destructive` is not
+/// consulted here — see [`operator_must_confirm`]).
+pub fn operator_confirm_reason(tool: &str) -> &'static str {
+    match tool {
+        // Review round 15, F21.
+        "send_prompt" | "run_prompt" | "queue_prompt" | "dispatch_task" => {
+            "nothing the operator writes reaches a session without a person, \
+             whatever mcp.confirm_destructive says"
+        }
+        // D12.
+        _ => {
+            "the operator's starts, kills and work decisions always do, \
+             whatever mcp.confirm_destructive says"
+        }
+    }
 }
 
 /// Fleet-administration tools: reachable with the master token only — see
@@ -1094,10 +1775,15 @@ pub fn is_admin_tool(name: &str) -> bool {
 /// [`Access::Client`].
 ///
 /// Classification is MANDATORY, not a denylist: a tool with no
-/// [`TOOL_POLICIES`] row fails the exhaustiveness test in `tools::tests` (it
-/// walks the real router). Adding a tool means adding one row and picking
+/// [`TOOL_POLICIES`] row fails the exhaustiveness test in `tools::tests`
+/// (`every_router_tool_has_exactly_one_tool_policy_row`, which walks the real
+/// router). Adding a tool means adding one row and picking
 /// [`Access::Master`] if only the master may call it, [`Access::Client`]
-/// otherwise.
+/// otherwise — or one of the three narrow variants
+/// ([`Access::Person`], [`Access::PersonDevice`], [`Access::HostToken`])
+/// when the caller is a single named shape. This predicate answers `false`
+/// for all three of those, so a tool classified by one of them is neither
+/// "fleet admin" nor "client-callable" and neither list widens.
 pub fn is_client_tool(name: &str) -> bool {
     policy(name).is_some_and(|p| matches!(p.access, Access::Client))
 }
@@ -1110,14 +1796,46 @@ pub fn is_client_tool(name: &str) -> bool {
 /// another host and write into — the catalog is what the master gate exists
 /// to prevent. `changesets` (Assets M4) applies and undoes those same
 /// catalog edits and rolls layers out to hosts, so it is refused alike, its
-/// `list` included (R25 amended). `list_downloads` / `remove_download` are a
-/// person's: a host's Claude only sends files.
+/// `list` included (R25 amended). `list_downloads` / `remove_download` /
+/// `pause_download` are a person's: a host's Claude only sends files.
+/// `routines` (Orbit Fleet 8.5) is a person's too: a session does not
+/// schedule sessions. `library` (9.7) is the index beside the downloads, a
+/// person's for the same reason. So is `start_rules` (8.11): a session does
+/// not decide where everyone's tasks start. And `wizard_state` (G7.2): a
+/// session runs no wizard, and a row is a person's; nor does it ask Jev
+/// where a person's new session goes (`propose_host_placement`, G7.3).
+///
+/// The five sharing surfaces joined them in multi-user M1 (T12) for a
+/// different reason: a per-host token proves no PERSON
+/// ([`crate::mcp::Caller::person`] is `None` for it by construction), so it
+/// cannot own a session, cannot be granted one, and has no grant set of its
+/// own to read. `session_claim` is deliberately NOT here — it is the one tool
+/// a per-host token is the only caller of ([`Access::HostToken`]).
 pub const NOT_FOR_HOST_TOKENS: &[&str] = &[
     "catalog_admin",
     "import_assets",
     "changesets",
+    "library",
     "list_downloads",
     "remove_download",
+    "pause_download",
+    "routines",
+    "start_rules",
+    "wizard_state",
+    "dashboards",
+    "propose_host_placement",
+    "session_share",
+    "session_unshare",
+    "session_narrow",
+    "session_access",
+    "my_grants",
+    "session_ask_access",
+    "access_requests",
+    "session_presence",
+    // The Automation screen's Runs list is a person's: a host's Claude has
+    // `list_tasks` for the tasks it dispatched, and proves no person, so
+    // its scope would show it next to nothing here anyway.
+    "runs",
 ];
 
 // --- legacy name lists -------------------------------------------------------
@@ -1127,7 +1845,9 @@ pub const NOT_FOR_HOST_TOKENS: &[&str] = &[
 // Rather than touch every one of those (and risk drifting from
 // [`TOOL_POLICIES`] again), they stay as thin DERIVED views computed from the
 // table at compile time — not a second hand-maintained source. The
-// exhaustiveness test in `tools::tests` is what actually guards the table;
+// exhaustiveness test in `tools::tests`
+// (`every_router_tool_has_exactly_one_tool_policy_row`) is what actually
+// guards the table;
 // these are just `&[&str]` projections of it for callers that want a list to
 // iterate.
 
@@ -1272,6 +1992,24 @@ impl RateLimiter {
     }
 
     pub fn check_at(&self, key: &str, now: Instant, interval: Duration) -> Result<(), Duration> {
+        self.check_at_capped(key, now, interval, usize::MAX)
+    }
+
+    /// [`Self::check`] holding at most `cap` keys: once that many are live,
+    /// a key it has not seen is refused rather than stored, so a caller who
+    /// can mint keys (a spoofed forwarding header, a /64 of addresses) can
+    /// neither grow the map nor get a fresh bucket each time.
+    pub fn check_capped(&self, key: &str, interval: Duration, cap: usize) -> Result<(), Duration> {
+        self.check_at_capped(key, Instant::now(), interval, cap)
+    }
+
+    pub fn check_at_capped(
+        &self,
+        key: &str,
+        now: Instant,
+        interval: Duration,
+        cap: usize,
+    ) -> Result<(), Duration> {
         let mut b = self
             .last
             .lock()
@@ -1287,6 +2025,9 @@ impl RateLimiter {
         let horizon = b.max_interval;
         b.entries
             .retain(|_, t| now.saturating_duration_since(*t) < horizon);
+        if b.entries.len() >= cap && !b.entries.contains_key(key) {
+            return Err(interval);
+        }
         b.entries.insert(key.to_string(), now);
         Ok(())
     }
@@ -1296,14 +2037,22 @@ impl RateLimiter {
 
 /// What the desktop is asked to approve. Emitted to the frontend as the
 /// `mcp:confirm-required` event and echoed back in `E_CONFIRM_REQUIRED`.
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ConfirmRequest {
     pub nonce: String,
     pub tool: String,
     /// Redacted argument summary (never a prompt body).
     pub summary: String,
-    /// Caller label (`master` or `host:<alias>`).
+    /// Caller label (`master`, `host:<alias>` or `client:<name>`).
     pub caller: String,
+    /// The UX agent's operator session asked (`Caller::is_operator`): the
+    /// New layout answers it as a card in Control's transcript (redesign
+    /// step 9.2) rather than in the dialog.
+    #[serde(default)]
+    pub operator: bool,
+    /// When it was asked, unix seconds ("asked 2m ago" on the card).
+    #[serde(default)]
+    pub asked_at: i64,
 }
 
 /// Callback that surfaces a [`ConfirmRequest`] to the desktop. Wired in
@@ -1325,6 +2074,9 @@ pub enum ConfirmState {
 
 struct Pending {
     tool: String,
+    caller: String,
+    operator: bool,
+    asked_at: i64,
     /// The argument summary the user saw and approved. A retry must present
     /// the same summary — otherwise an approval for `kill_session name=x`
     /// could be replayed as `kill_session name=controller force=true`.
@@ -1346,7 +2098,22 @@ impl PendingConfirms {
 
     /// Mint a nonce for `tool` and return the request to show the user.
     pub fn request(&self, tool: &str, summary: &str, caller: &str) -> ConfirmRequest {
+        self.request_from(tool, summary, caller, false)
+    }
+
+    /// [`Self::request`], saying whether the operator asked.
+    pub fn request_from(
+        &self,
+        tool: &str,
+        summary: &str,
+        caller: &str,
+        operator: bool,
+    ) -> ConfirmRequest {
         let nonce = super::generate_token();
+        let asked_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
         let mut entries = self
             .entries
             .lock()
@@ -1356,6 +2123,9 @@ impl PendingConfirms {
             nonce.clone(),
             Pending {
                 tool: tool.to_string(),
+                caller: caller.to_string(),
+                operator,
+                asked_at,
                 summary: summary.to_string(),
                 created: Instant::now(),
                 approved: None,
@@ -1366,22 +2136,34 @@ impl PendingConfirms {
             tool: tool.to_string(),
             summary: summary.to_string(),
             caller: caller.to_string(),
+            operator,
+            asked_at,
         }
     }
 
-    /// Record the user's answer. `false` when the nonce is unknown / expired.
+    /// Record the user's answer. `false` when the nonce is unknown, expired
+    /// or ALREADY ANSWERED: the first answer wins. The desktop dialog and
+    /// the phone both show the same request, and without this a deny from a
+    /// dialog closed after the phone approved (or a stale card's approve
+    /// after a deny) silently replaced the answer the person meant.
+    ///
+    /// An answer restarts the TTL, so the agent's retry has the full window
+    /// to spend it: an approval given at 9:59 of a 10-minute ask is not lost
+    /// to a retry at 10:01.
     pub fn resolve(&self, nonce: &str, approved: bool) -> bool {
         let mut entries = self
             .entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        prune(&mut entries, Instant::now());
+        let now = Instant::now();
+        prune(&mut entries, now);
         match entries.get_mut(nonce) {
-            Some(p) => {
+            Some(p) if p.approved.is_none() => {
                 p.approved = Some(approved);
+                p.created = now;
                 true
             }
-            None => false,
+            _ => false,
         }
     }
 
@@ -1414,6 +2196,46 @@ impl PendingConfirms {
                 ConfirmState::Denied
             }
         }
+    }
+
+    /// Drop expired requests now and say how many unanswered ones went: a
+    /// request that expires announces nothing by itself, so a hub's tick
+    /// calls this and emits `confirm:changed` when it is not zero — or every
+    /// card and dialog for one stays up until something else moves the queue.
+    pub fn prune_expired(&self) -> usize {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let before = entries.values().filter(|p| p.approved.is_none()).count();
+        prune(&mut entries, Instant::now());
+        before - entries.values().filter(|p| p.approved.is_none()).count()
+    }
+
+    /// Outstanding (unanswered) requests in full, oldest first: what the
+    /// confirm cards and the dialog show after a reload, and what a hub
+    /// lists to its owner's desktop (`confirms { action: list }`).
+    pub fn pending(&self) -> Vec<ConfirmRequest> {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        prune(&mut entries, Instant::now());
+        let mut v: Vec<(&String, &Pending)> = entries
+            .iter()
+            .filter(|(_, p)| p.approved.is_none())
+            .collect();
+        v.sort_by_key(|(_, p)| p.created);
+        v.into_iter()
+            .map(|(n, p)| ConfirmRequest {
+                nonce: n.clone(),
+                tool: p.tool.clone(),
+                summary: p.summary.clone(),
+                caller: p.caller.clone(),
+                operator: p.operator,
+                asked_at: p.asked_at,
+            })
+            .collect()
     }
 
     /// Outstanding (unanswered) requests, oldest first — lets the desktop
@@ -1694,8 +2516,17 @@ const REDACT_KEYS: &[&str] = &[
 /// a one-time credential and must not land in the timeline, and `value` is
 /// `set_secret`'s secret value — not even its length may be persisted (a
 /// length still leaks information about a secret). `secret` is `work_admin`'s
-/// tracker credential, for the same reason.
-const SKIP_KEYS: &[&str] = &["confirm_nonce", "value", "secret"];
+/// tracker credential, for the same reason. `code` is `link_peer`'s one-time
+/// pairing code, still valid when the link fails (review r04 S3), and
+/// `add_account`'s sign-in code. `api_key` is `add_account`'s Anthropic key
+/// (M15 G2.9), which fleet never stores.
+const SKIP_KEYS: &[&str] = &["confirm_nonce", "value", "secret", "code", "api_key"];
+/// Argument keys whose value is an object of person-typed answers (`ask`'s
+/// `values` may carry a form's secret fields): only the field count is kept,
+/// as `<N fields>`, never a name or a value. `args` is a nested payload
+/// (`catalog_admin`'s `set_secret` carries its value there, review r04 S2),
+/// which the top-level keys above cannot see into.
+const COUNT_KEYS: &[&str] = &["values", "args"];
 const SUMMARY_MAX_CHARS: usize = 240;
 
 /// Replace every character that could end a line downstream — see
@@ -1738,7 +2569,13 @@ pub fn redact_args(args: Option<&serde_json::Map<String, serde_json::Value>>) ->
             continue;
         }
         let v = &map[k];
-        let rendered = if REDACT_KEYS.contains(&k.as_str()) {
+        let rendered = if COUNT_KEYS.contains(&k.as_str()) {
+            match v {
+                serde_json::Value::Object(o) => format!("<{} fields>", o.len()),
+                serde_json::Value::Null => "null".to_string(),
+                _ => "<redacted>".to_string(),
+            }
+        } else if REDACT_KEYS.contains(&k.as_str()) {
             match v {
                 serde_json::Value::String(s) => format!("<{} chars>", s.chars().count()),
                 serde_json::Value::Null => "null".to_string(),
@@ -1796,6 +2633,8 @@ mod tests {
             "apply_sync",
             // Writes a secret value; master-only.
             "set_secret",
+            // Opens, withdraws, answers and declines chat forms.
+            "ask",
             "no_such_tool",
         ] {
             assert!(!is_readonly_tool(t), "{t} must be mutating");
@@ -1834,6 +2673,38 @@ mod tests {
         assert!(!needs_confirmation("dispatch_task"));
     }
 
+    /// The operator's refusal says which rule caught the call. A prompt is
+    /// not a start and not a kill, and saying so sent the reader after
+    /// `mcp.confirm_destructive`, which cannot turn any of this off.
+    #[test]
+    fn the_operators_refusal_never_calls_a_prompt_a_start_or_a_kill() {
+        for t in ["send_prompt", "run_prompt", "queue_prompt", "dispatch_task"] {
+            assert!(
+                operator_must_confirm(true, t),
+                "{t} is gated for the operator"
+            );
+            let why = operator_confirm_reason(t);
+            assert!(why.contains("writes"), "{t}: {why}");
+            assert!(!why.contains("starts"), "{t} is not a start: {why}");
+        }
+        for t in ["new_session", "safe_kill_session", "work_link"] {
+            assert!(operator_confirm_reason(t).contains("starts"), "{t}");
+        }
+        // Whichever rule fires, it names the toggle that does NOT apply,
+        // because that is where the reader goes next.
+        for t in OPERATOR_CONFIRMS {
+            assert!(
+                operator_confirm_reason(t).contains("mcp.confirm_destructive"),
+                "{t} must say the toggle is not the answer"
+            );
+            assert!(operator_must_confirm(true, t), "{t}");
+            assert!(
+                !operator_must_confirm(false, t) || needs_confirmation(t),
+                "{t} must be ungated for a master caller unless it is confirm: true"
+            );
+        }
+    }
+
     #[test]
     fn orchestration_reads_are_readonly_and_mutations_are_not() {
         for t in [
@@ -1851,6 +2722,7 @@ mod tests {
             "dispatch_task",
             "cancel_task",
             "set_session_tags",
+            "decide_related_session",
         ] {
             assert!(!is_readonly_tool(t), "{t} must be mutating");
         }
@@ -1961,6 +2833,30 @@ mod tests {
     /// (one per source address), so the map must not grow for the life of the
     /// process: every call drops entries older than the longest interval ever
     /// passed to `check` — past that age an entry can refuse nothing.
+    /// A capped limiter never holds more than its cap: an unseen key is
+    /// refused (not stored) while that many are live, a known one is judged
+    /// as usual, and the room comes back as entries age out.
+    #[test]
+    fn a_capped_limiter_refuses_new_keys_at_its_cap() {
+        let rl = RateLimiter::new();
+        let t0 = Instant::now();
+        let s = Duration::from_secs(1);
+        assert!(rl.check_at_capped("a", t0, s, 2).is_ok());
+        assert!(rl.check_at_capped("b", t0, s, 2).is_ok());
+        assert!(rl.check_at_capped("c", t0, s, 2).is_err(), "full");
+        assert_eq!(rl.len(), 2);
+        let later = t0 + Duration::from_millis(1_500);
+        assert!(
+            rl.check_at_capped("a", later, s, 2).is_ok(),
+            "a known key's interval passed"
+        );
+        assert!(
+            rl.check_at_capped("c", later, s, 2).is_ok(),
+            "b aged out: room again"
+        );
+        assert_eq!(rl.len(), 2);
+    }
+
     #[test]
     fn rate_limiter_evicts_entries_older_than_the_longest_interval() {
         let rl = RateLimiter::new();
@@ -2027,6 +2923,23 @@ mod tests {
         );
         assert!(!pc.resolve("never-issued", true));
 
+        // The first answer wins: a second one (the other client, a stale
+        // card) is refused and changes nothing, either way round.
+        let first_yes = pc.request("set_clipboard", "", "master");
+        assert!(pc.resolve(&first_yes.nonce, true));
+        assert!(!pc.resolve(&first_yes.nonce, false));
+        assert_eq!(
+            pc.consume(&first_yes.nonce, "set_clipboard", ""),
+            ConfirmState::Approved
+        );
+        let first_no = pc.request("set_clipboard", "", "master");
+        assert!(pc.resolve(&first_no.nonce, false));
+        assert!(!pc.resolve(&first_no.nonce, true));
+        assert_eq!(
+            pc.consume(&first_no.nonce, "set_clipboard", ""),
+            ConfirmState::Denied
+        );
+
         let denied = pc.request("set_clipboard", "", "master");
         assert!(pc.resolve(&denied.nonce, false));
         assert_eq!(
@@ -2070,8 +2983,6 @@ mod tests {
     #[test]
     fn admin_tools_are_the_fleet_admin_set_and_mutating() {
         for t in [
-            "provision_hosts",
-            "add_host",
             "remove_host",
             "merge_host",
             "hide_host",
@@ -2082,10 +2993,18 @@ mod tests {
             "pair_client",
             "revoke_client",
             "set_client_trust",
-            // Trackers and their credentials (work graph M3).
-            "work_admin",
         ] {
             assert!(is_admin_tool(t), "{t}");
+            assert!(!is_readonly_tool(t), "{t}");
+        }
+        // Contract 13 (Martin, "Owner's phone"; trackers "Allow on phone"):
+        // the hub owner's own device reaches these past the gate, and the
+        // handler asks for a trusted `full` device (`owner_device_admin`).
+        // `provision_hosts` (mefistos, 2026-10-11): the handler narrows the
+        // device to one host's content refresh (`provision_scope_allowed`).
+        for t in ["add_host", "install_agent", "work_admin", "provision_hosts"] {
+            assert_eq!(policy(t).map(|p| p.access), Some(Access::Person), "{t}");
+            assert!(!is_admin_tool(t), "{t}");
             assert!(!is_readonly_tool(t), "{t}");
         }
         // Listing them is master-only too — it enumerates every paired
@@ -2111,6 +3030,9 @@ mod tests {
             "old".to_string(),
             Pending {
                 tool: "kill_session".into(),
+                caller: "master".into(),
+                operator: false,
+                asked_at: 0,
                 summary: String::new(),
                 created: now,
                 approved: None,
@@ -2118,6 +3040,54 @@ mod tests {
         );
         prune(&mut entries, now + CONFIRM_TTL);
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn prune_expired_counts_the_unanswered_requests_that_went() {
+        let pc = PendingConfirms::new();
+        let old = pc.request("kill_session", "name=x", "master");
+        let answered = pc.request("kill_session", "name=y", "master");
+        let fresh = pc.request("kill_session", "name=z", "master");
+        assert!(pc.resolve(&answered.nonce, true));
+        let Some(long_ago) = Instant::now().checked_sub(CONFIRM_TTL + Duration::from_secs(1))
+        else {
+            return;
+        };
+        {
+            let mut e = pc.entries.lock().unwrap();
+            e.get_mut(&old.nonce).unwrap().created = long_ago;
+        }
+        assert_eq!(pc.prune_expired(), 1);
+        assert_eq!(pc.prune_expired(), 0, "nothing left to expire");
+        assert_eq!(
+            pc.pending()
+                .iter()
+                .map(|r| r.nonce.clone())
+                .collect::<Vec<_>>(),
+            vec![fresh.nonce]
+        );
+    }
+
+    #[test]
+    fn an_answer_restarts_the_confirm_ttl() {
+        // Asked nearly a TTL ago, answered just now: the agent's retry must
+        // still find the approval, not an expired nonce and a second ask.
+        let pc = PendingConfirms::new();
+        let req = pc.request("kill_session", "name=x", "master");
+        let Some(long_ago) = Instant::now().checked_sub(CONFIRM_TTL - Duration::from_secs(1))
+        else {
+            return; // a clock this young cannot express the case
+        };
+        pc.entries
+            .lock()
+            .unwrap()
+            .get_mut(&req.nonce)
+            .unwrap()
+            .created = long_ago;
+        assert!(pc.resolve(&req.nonce, true));
+        let mut entries = pc.entries.lock().unwrap();
+        prune(&mut entries, Instant::now() + Duration::from_secs(2));
+        assert!(entries.contains_key(&req.nonce), "the answer kept it alive");
     }
 
     #[test]
@@ -2184,6 +3154,22 @@ mod tests {
     }
 
     #[test]
+    fn redact_args_never_keeps_an_api_key() {
+        let args = serde_json::json!({
+            "action": "api_key",
+            "api_key": "sk-ant-api03-secretsecretsecret",
+            "host_alias": "mercury",
+            "profile": "api",
+        });
+        let out = redact_args(args.as_object());
+        assert!(
+            !out.contains("sk-ant") && !out.contains("api_key="),
+            "{out}"
+        );
+        assert!(out.contains("host_alias=mercury"), "{out}");
+    }
+
+    #[test]
     fn redact_args_hides_free_text_and_keeps_identifiers() {
         let args = serde_json::json!({
             "prompt": "secret plan",
@@ -2226,6 +3212,10 @@ mod tests {
         // `work_admin`'s tracker credential: dropped entirely.
         let tracker = serde_json::json!({ "secret": "ATATT-unique-9", "tracker_id": 1 });
         assert_eq!(redact_args(tracker.as_object()), "tracker_id=1");
+        // `ask`'s `values` are person-typed answers (secret form fields):
+        // only the count is kept, no name and no value.
+        let ask = serde_json::json!({ "answer": "f_x", "values": { "pw": "hunter2-unique" } });
+        assert_eq!(redact_args(ask.as_object()), "answer=f_x values=<1 fields>");
     }
 
     /// The audit row is written before any tool validates its arguments, so

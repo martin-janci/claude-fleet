@@ -135,9 +135,12 @@ function newLineSink(): {
 // appending tokens to `out`. Spans are not nested — the first match wins.
 // Underscore emphasis requires non-word boundaries so `snake_case` identifiers
 // in prose are left alone (matching CommonMark's intraword `_` rule).
+// A link label holds no `[` and its target no parenthesis: otherwise every
+// `[` of an unclosed run scanned to the end of the line (quadratic; ~2 s on
+// 40k `[`).
 function mdInline(s: string, out: Tok[]): void {
   const re =
-    /(`+)([^`]*?)\1|(\*\*[^*]+?\*\*|\*[^*\s][^*]*?\*)|(?<![\w])(__?[^_]+?__?)(?![\w])|(!?)\[([^\]]*)\]\(([^)]*)\)/g;
+    /(`+)([^`]*?)\1|(\*\*[^*]+?\*\*|\*[^*\s][^*]*?\*)|(?<![\w])(__?[^_]+?__?)(?![\w])|(!?)\[([^[\]]*)\]\(([^()]*)\)/g;
   let last = 0;
   let m: RegExpExecArray | null;
   while ((m = re.exec(s)) !== null) {

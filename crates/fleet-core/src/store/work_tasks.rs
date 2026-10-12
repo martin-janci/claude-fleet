@@ -1,9 +1,14 @@
 //! Native work items (design 2026-09-29, shared work context): tasks and
 //! subtasks written in fleet (`origin = 'manual'`), agent proposals
 //! (`'proposed'`) and the mirror of a dispatched job (`'agent'`). Every one is
-//! a local item with a `TASK-<id>` key, so the key-driven start path and
-//! branch detection work on them unchanged. Depth is one: a native subtask
-//! is never a parent.
+//! a local item with a key — its project's next ticket key (`FLT-12`,
+//! `store::ticket_keys`), or `TASK-<id>` outside a project — so the key-driven start path and
+//! branch detection work on them unchanged. A chain of local items is at
+//! most [`LOCAL_DEPTH_MAX`] deep (epic → task → subtask; owner decision
+//! 2026-10-10), kept by `parent_for_new_child` and
+//! [`Store::set_local_parent`], and `Store::item_org` walks exactly that far.
+//! An epic (sprints design 2026-09-28 §3, `kind = 'epic'`) is a top-level
+//! local item.
 //!
 //! The only writers of `origin`, `project_id`, `notes`, `task_id` and the
 //! proposal columns, and (with `work_status.rs`) of `status_set_by`:
@@ -17,6 +22,20 @@ use rusqlite::OptionalExtension;
 use std::collections::HashMap;
 
 pub const TASK_KEY_PREFIX: &str = "TASK";
+/// The deepest a chain of local items goes: an epic, its task, the task's
+/// subtask. A tracker parent above them is not counted (its tracker owns
+/// that hierarchy).
+pub const LOCAL_DEPTH_MAX: usize = 3;
+
+/// `work_items.kind` of a local epic (sprints design 2026-09-28 §3, E2).
+pub const EPIC_KIND: &str = "epic";
+
+/// An epic: a local one, or a tracker's (Jira's issue type "Epic").
+pub fn is_epic(item: &WorkItemRow) -> bool {
+    item.kind
+        .as_deref()
+        .is_some_and(|k| k.eq_ignore_ascii_case(EPIC_KIND))
+}
 /// Open proposals one parent may hold (counter-review risk 2).
 pub const PROPOSALS_OPEN_CAP: usize = 10;
 
@@ -57,6 +76,213 @@ fn job_title(prompt: &str) -> String {
         .collect()
 }
 
+/// Most people one local item names as its assignees.
+pub const ASSIGNEES_MAX: usize = 10;
+/// Longest assignee name, in characters.
+pub const ASSIGNEE_MAX_CHARS: usize = 80;
+
+/// A person's edit of a local item: each field `None` is left as it is.
+/// `notes: Some("")`, `assignees: Some(&[])`, `due_at: Some("")`,
+/// `priority: Some("")`, `labels: Some(&[])` and `estimate: Some(0.0)`
+/// clear them.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ItemEdit<'a> {
+    pub title: Option<&'a str>,
+    pub notes: Option<&'a str>,
+    pub assignees: Option<&'a [String]>,
+    /// `YYYY-MM-DD` ([`validate_due_date`]).
+    pub due_at: Option<&'a str>,
+    /// One of [`PRIORITIES`] ([`validate_priority`]).
+    pub priority: Option<&'a str>,
+    /// [`validate_labels`].
+    pub labels: Option<&'a [String]>,
+    /// 0 to [`ESTIMATE_MAX`] ([`validate_estimate`]); 0 clears it and its
+    /// unit.
+    pub estimate: Option<f64>,
+    /// One of [`ESTIMATE_UNITS`]. Without `estimate` it re-units the one the
+    /// item has; with a new estimate and no unit, the item's unit stays (a
+    /// first estimate is in points).
+    pub estimate_unit: Option<&'a str>,
+}
+
+/// A task's priorities, most pressing first (migration 171).
+pub const PRIORITIES: [&str; 4] = ["urgent", "high", "medium", "low"];
+/// Most labels one item keeps.
+pub const LABELS_MAX: usize = 20;
+/// Longest label a person types, in characters.
+pub const LABEL_MAX_CHARS: usize = 40;
+/// Largest estimate a person types, in either unit.
+pub const ESTIMATE_MAX: f64 = 1000.0;
+/// What an estimate counts: story points or hours.
+pub const ESTIMATE_UNITS: [&str; 2] = ["points", "hours"];
+
+/// A priority a person chose: one of [`PRIORITIES`], trimmed and
+/// lowercased. `""` is no priority (`None`).
+pub fn validate_priority(raw: &str) -> Result<Option<String>, IpcError> {
+    let p = raw.trim().to_lowercase();
+    if p.is_empty() {
+        return Ok(None);
+    }
+    if PRIORITIES.contains(&p.as_str()) {
+        Ok(Some(p))
+    } else {
+        Err(IpcError::new(
+            codes::E_INVALID,
+            format!("priority {raw:?} is not one of urgent, high, medium, low"),
+        ))
+    }
+}
+
+/// Labels a person typed: trimmed, empty ones dropped, each once (first
+/// spelling wins, compared case-insensitively), at most [`LABELS_MAX`] of
+/// at most [`LABEL_MAX_CHARS`] characters, no control character.
+pub fn validate_labels(raw: &[String]) -> Result<Vec<String>, IpcError> {
+    let mut out: Vec<String> = Vec::new();
+    for l in raw.iter().map(|l| l.trim()).filter(|l| !l.is_empty()) {
+        if l.chars().count() > LABEL_MAX_CHARS {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!("a label is longer than {LABEL_MAX_CHARS} characters"),
+            ));
+        }
+        if l.chars().any(char::is_control) {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "a label must not contain control characters",
+            ));
+        }
+        if !out.iter().any(|o| o.to_lowercase() == l.to_lowercase()) {
+            out.push(l.to_string());
+        }
+    }
+    if out.len() > LABELS_MAX {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!("at most {LABELS_MAX} labels"),
+        ));
+    }
+    Ok(out)
+}
+
+/// A tracker's labels as fleet keeps them: trimmed, empty ones and repeats
+/// dropped, in order, the first [`LABELS_MAX`]. Never refused: the
+/// tracker's word is stored as far as it fits.
+pub fn tidy_labels(raw: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for l in raw {
+        let l = l.trim();
+        if l.is_empty() || out.iter().any(|o| o.to_lowercase() == l.to_lowercase()) {
+            continue;
+        }
+        out.push(l.to_string());
+        if out.len() == LABELS_MAX {
+            break;
+        }
+    }
+    out
+}
+
+/// An estimate a person typed: 0 to [`ESTIMATE_MAX`], rounded to two
+/// decimals. 0 is no estimate (`None`).
+pub fn validate_estimate(v: f64) -> Result<Option<super::Estimate>, IpcError> {
+    if !v.is_finite() || !(0.0..=ESTIMATE_MAX).contains(&v) {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!("an estimate is a number from 0 to {ESTIMATE_MAX} (0 clears it)"),
+        ));
+    }
+    Ok(super::Estimate::new(v))
+}
+
+/// An estimate's unit a person chose: one of [`ESTIMATE_UNITS`].
+pub fn validate_estimate_unit(raw: &str) -> Result<String, IpcError> {
+    let u = raw.trim().to_lowercase();
+    if ESTIMATE_UNITS.contains(&u.as_str()) {
+        Ok(u)
+    } else {
+        Err(IpcError::new(
+            codes::E_INVALID,
+            format!("estimate_unit {raw:?} is not points or hours"),
+        ))
+    }
+}
+
+/// A due date a person typed: `YYYY-MM-DD`, a real calendar day in years
+/// 1970–9999, trimmed. `""` is no date (`None`). Anything else is
+/// `E_INVALID` naming the format.
+pub fn validate_due_date(raw: &str) -> Result<Option<String>, IpcError> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    parse_due_date(raw)
+        .map(|_| Some(raw.to_string()))
+        .ok_or_else(|| {
+            IpcError::new(
+                codes::E_INVALID,
+                format!("due date {raw:?} is not a date: use YYYY-MM-DD"),
+            )
+        })
+}
+
+/// `(year, month, day)` of a `YYYY-MM-DD` calendar date, `None` for
+/// anything else (a time, a zone, a 31st of a 30-day month).
+pub fn parse_due_date(raw: &str) -> Option<(u32, u32, u32)> {
+    let b = raw.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| -> Option<u32> {
+        let part = raw.get(r)?;
+        part.bytes()
+            .all(|c| c.is_ascii_digit())
+            .then(|| part.parse().ok())
+            .flatten()
+    };
+    let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let days = match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return None,
+    };
+    ((1970..=9999).contains(&y) && (1..=days).contains(&d)).then_some((y, m, d))
+}
+
+/// Assignees a person typed: trimmed, empty ones dropped, each name once
+/// (first spelling wins, compared case-insensitively), at most
+/// [`ASSIGNEES_MAX`] of at most [`ASSIGNEE_MAX_CHARS`] characters, no
+/// control character.
+pub fn validate_assignees(raw: &[String]) -> Result<Vec<String>, IpcError> {
+    let mut out: Vec<String> = Vec::new();
+    for a in raw.iter().map(|a| a.trim()).filter(|a| !a.is_empty()) {
+        if a.chars().count() > ASSIGNEE_MAX_CHARS {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!("an assignee is longer than {ASSIGNEE_MAX_CHARS} characters"),
+            ));
+        }
+        if a.chars().any(char::is_control) {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "an assignee must not contain control characters",
+            ));
+        }
+        if !out.iter().any(|o| o.to_lowercase() == a.to_lowercase()) {
+            out.push(a.to_string());
+        }
+    }
+    if out.len() > ASSIGNEES_MAX {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!("at most {ASSIGNEES_MAX} assignees"),
+        ));
+    }
+    Ok(out)
+}
+
 /// An agent's proposed subtask.
 #[derive(Debug, Clone, Copy)]
 pub struct Proposal<'a> {
@@ -91,17 +317,66 @@ impl Store {
                 format!("work item {parent_id} not found"),
             )
         })?;
-        let native = matches!(p.origin.as_deref(), Some("manual" | "proposed" | "agent"));
-        if native && p.parent_id.is_some() {
+        // Every local item, not only a native one: `set_local_parent` can
+        // give a named piece of work a parent too.
+        if self.local_depth(parent_id)? >= LOCAL_DEPTH_MAX {
             return Err(IpcError::new(
                 codes::E_INVALID,
                 format!(
-                    "{} is itself a subtask; add the subtask to its parent instead",
+                    "{} is already {LOCAL_DEPTH_MAX} levels deep; add the subtask to its parent \
+                     instead",
                     p.key.as_deref().unwrap_or("that item")
                 ),
             ));
         }
         Ok(p)
+    }
+
+    /// How many local items stand in a row from `item_id` up (itself
+    /// included), stopping at a tracker item or the top: 0 for a tracker
+    /// item. Bounded one past [`LOCAL_DEPTH_MAX`].
+    pub fn local_depth(&self, item_id: i64) -> Result<usize, IpcError> {
+        let n: i64 = self.conn.query_row(
+            "WITH RECURSIVE up(id, parent_id, source, hop) AS ( \
+               SELECT id, parent_id, source, 0 FROM work_items WHERE id = ?1 AND source = 'local' \
+               UNION ALL \
+               SELECT w.id, w.parent_id, w.source, u.hop + 1 FROM work_items w \
+                 JOIN up u ON w.id = u.parent_id \
+                WHERE w.source = 'local' AND u.hop < ?2) \
+             SELECT COUNT(*) FROM up",
+            rusqlite::params![item_id, LOCAL_DEPTH_MAX as i64],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
+
+    /// How many levels hang from `item_id` (itself included): 1 for an item
+    /// with no children. Bounded one past [`LOCAL_DEPTH_MAX`].
+    pub fn subtree_height(&self, item_id: i64) -> Result<usize, IpcError> {
+        let n: i64 = self.conn.query_row(
+            "WITH RECURSIVE down(id, lvl) AS ( \
+               SELECT ?1, 1 \
+               UNION ALL \
+               SELECT w.id, d.lvl + 1 FROM work_items w JOIN down d ON w.parent_id = d.id \
+                WHERE d.lvl <= ?2) \
+             SELECT MAX(lvl) FROM down",
+            rusqlite::params![item_id, LOCAL_DEPTH_MAX as i64],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
+
+    /// Whether `ancestor` is `item_id` or above it.
+    fn is_ancestor_or_self(&self, ancestor: i64, item_id: i64) -> Result<bool, IpcError> {
+        let mut up = Some(item_id);
+        for _ in 0..=LOCAL_DEPTH_MAX + 1 {
+            match up {
+                Some(id) if id == ancestor => return Ok(true),
+                Some(id) => up = self.get_work_item(id)?.and_then(|r| r.parent_id),
+                None => return Ok(false),
+            }
+        }
+        Ok(false)
     }
 
     fn check_project(&self, project_id: Option<i64>) -> Result<(), IpcError> {
@@ -121,7 +396,7 @@ impl Store {
         Ok(())
     }
 
-    /// Insert one native row and give it its `TASK-<id>` key, in one
+    /// Insert one native row and give it its key (`FLT-12` or `TASK-<id>`), in one
     /// transaction; emits the row.
     pub(super) fn insert_native(&self, r: &NativeRow<'_>) -> Result<WorkItemRow, IpcError> {
         let now = now_unix();
@@ -148,10 +423,41 @@ impl Store {
             ],
         )?;
         let id = self.conn.last_insert_rowid();
-        self.conn.execute(
-            "UPDATE work_items SET key = ?1 WHERE id = ?2",
-            rusqlite::params![format!("{TASK_KEY_PREFIX}-{id}"), id],
-        )?;
+        // In a project it draws the project's next ticket key (`FLT-12`), a
+        // child outside one its parent's numbering; else it is the
+        // fleet-wide `TASK-<id>`.
+        let space = match (r.project_id, r.parent_id) {
+            (Some(pid), _) => Some(self.project_ticket_space(pid)?),
+            (None, Some(parent)) => {
+                let sid: Option<i64> = self
+                    .conn
+                    .query_row(
+                        "SELECT ticket_space_id FROM work_items WHERE id = ?1",
+                        rusqlite::params![parent],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                    .flatten();
+                sid.map(|sid| self.ticket_space(sid)).transpose()?.flatten()
+            }
+            (None, None) => None,
+        };
+        match space {
+            Some(space) => {
+                let (seq, key) = self.draw_ticket_number(&space)?;
+                self.conn.execute(
+                    "UPDATE work_items SET key = ?1, display_key = ?1, ticket_space_id = ?2, \
+                       ticket_seq = ?3 WHERE id = ?4",
+                    rusqlite::params![key, space.id, seq, id],
+                )?;
+            }
+            None => {
+                self.conn.execute(
+                    "UPDATE work_items SET key = ?1 WHERE id = ?2",
+                    rusqlite::params![format!("{TASK_KEY_PREFIX}-{id}"), id],
+                )?;
+            }
+        }
         tx.commit()?;
         self.emit_work_item(
             id,
@@ -193,6 +499,15 @@ impl Store {
     }
 
     /// Mirror a dispatched job as an `agent` subtask, once per job.
+    ///
+    /// **The mirror's `title` and `notes` are the dispatch PROMPT** — the
+    /// first line of it and the whole of it, respectively — which is what
+    /// makes them §4.3 content of both ends of the dispatch rather than
+    /// shared work structure (multi-user M1, T5's review). Any reader of a
+    /// mirror's text has to be fenced on the job itself; `Graph::job_states`
+    /// is where that fence is applied, and the `open_proposals` note beside
+    /// it records the reasoning that used to exempt "every item's title" and
+    /// should never have covered this one.
     pub fn create_agent_task_item(
         &self,
         task: &TaskRow,
@@ -253,11 +568,30 @@ impl Store {
         Ok(wrote)
     }
 
-    pub fn job_states_by_item(&self) -> Result<HashMap<i64, String>, IpcError> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT w.id, t.state FROM work_items w JOIN tasks t ON t.id = w.task_id")?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+    /// Every job-mirror item with the **whole `tasks` row** behind it, keyed
+    /// by the mirror item's id.
+    ///
+    /// It used to answer `(item id, state)` and nothing else, and that is why
+    /// it is written this way now (multi-user M1, the review of main's new
+    /// `Graph` fields). A `tasks` row is a DISPATCH: both its ends are
+    /// sessions, and whether a caller may read it is
+    /// `service::tasks::task_visible_in_scope_pure` — which needs the row,
+    /// not a state string. Answering the state alone made the fence
+    /// unaskable, so `Graph::build` served another person's job state (and,
+    /// through `JobView`, its `result`) to anyone who could see the work item.
+    ///
+    /// One query, as before: the fence is applied in memory by the caller.
+    pub fn job_tasks_by_item(&self) -> Result<HashMap<i64, TaskRow>, IpcError> {
+        // The task columns FIRST, because `map_task_row` reads them by index;
+        // the item id rides last, at `TASK_COLUMNS`'s length.
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {}, w.id FROM work_items w JOIN tasks t ON t.id = w.task_id",
+            super::rows::task_columns_t()
+        ))?;
+        let item_id = super::rows::TASK_COLUMNS.split(',').count();
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, i64>(item_id)?, super::rows::map_task_row(r)?))
+        })?;
         Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
     }
 
@@ -288,6 +622,9 @@ impl Store {
                 format!("\"{title}\" was already proposed here and rejected"),
             ));
         }
+        // A proposal under a mission's member joins the mission: refuse it
+        // before it is written when the mission has no room.
+        let mission = self.mission_for_new_proposal(p.parent_id)?;
         if open >= PROPOSALS_OPEN_CAP {
             return Err(IpcError::new(
                 codes::E_LIMIT,
@@ -310,7 +647,7 @@ impl Store {
             .filter(|c| !c.is_control())
             .take(120)
             .collect();
-        self.insert_native(&NativeRow {
+        let item = self.insert_native(&NativeRow {
             origin: "proposed",
             title: &title,
             parent_id: Some(p.parent_id),
@@ -322,7 +659,15 @@ impl Store {
             proposal_state: Some("proposed"),
             proposed_by: Some(&by),
             proposal_why: why.as_deref(),
-        })
+        })?;
+        match mission {
+            Some(m) => {
+                self.join_mission(m, item.id, &by)?;
+                self.get_work_item(item.id)?
+                    .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "proposal vanished"))
+            }
+            None => Ok(item),
+        }
     }
 
     /// A person decides a proposal, once.
@@ -357,7 +702,447 @@ impl Store {
             .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "work item vanished after update"))
     }
 
+    /// Redesign 6.9: a person's Merge on a proposal that duplicates
+    /// `into` (K4's "may duplicate"): what hangs on the proposal moves to
+    /// the task it duplicates, and the proposal is closed as rejected (its
+    /// archive). Its subtasks are re-parented under `into`, and its session
+    /// links (live and ended) point at `into` — a session already live on
+    /// `into` keeps that link and the proposal's one ends. One transaction.
+    /// Returns `into` as it is after the merge. `E_INVALID` for an item
+    /// that is not a proposal waiting for a decision, a merge into itself
+    /// or into one of its own subtasks, or subtasks that would land under a
+    /// subtask; `E_NOTFOUND` for an unknown id.
+    pub fn merge_proposal_into(
+        &self,
+        item_id: i64,
+        into: i64,
+    ) -> Result<(WorkItemRow, MergedProposal), IpcError> {
+        let now = now_unix();
+        let notfound =
+            |id: i64| IpcError::new(codes::E_NOTFOUND, format!("work item {id} not found"));
+        let proposal = self
+            .get_work_item(item_id)?
+            .ok_or_else(|| notfound(item_id))?;
+        if proposal.origin.as_deref() != Some("proposed")
+            || proposal.proposal_state.as_deref() != Some("proposed")
+        {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "that item is not a proposal waiting for a decision",
+            ));
+        }
+        let target = self.get_work_item(into)?.ok_or_else(|| notfound(into))?;
+        // Not into itself, nor into anything under it.
+        let mut up = Some(target.id);
+        while let Some(id) = up {
+            if id == item_id {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    "a proposal cannot be merged into itself or one of its own subtasks",
+                ));
+            }
+            up = self.get_work_item(id)?.and_then(|r| r.parent_id);
+        }
+        // Its subtasks move under `into`: the chain stays LOCAL_DEPTH_MAX deep.
+        let below = self.subtree_height(item_id)?.saturating_sub(1);
+        if below > 0 && self.local_depth(target.id)? + below > LOCAL_DEPTH_MAX {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!(
+                    "its subtasks would sit more than {LOCAL_DEPTH_MAX} levels deep; keep both \
+                     instead"
+                ),
+            ));
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let moved_subtasks = self.conn.execute(
+            "UPDATE work_items SET parent_id = ?1, updated_at = ?2 WHERE parent_id = ?3",
+            rusqlite::params![into, now, item_id],
+        )?;
+        // A participant already live on `into` keeps that link; the
+        // proposal's own live one ends rather than doubling it.
+        let ended_links = self.conn.execute(
+            "UPDATE work_links SET ended_at = ?1 \
+              WHERE item_id = ?2 AND ended_at IS NULL AND participant_id IN \
+                (SELECT participant_id FROM work_links \
+                  WHERE item_id = ?3 AND ended_at IS NULL AND participant_id IS NOT NULL)",
+            rusqlite::params![now, item_id, into],
+        )?;
+        let moved_links = self.conn.execute(
+            "UPDATE work_links SET item_id = ?1 WHERE item_id = ?2",
+            rusqlite::params![into, item_id],
+        )?;
+        self.conn.execute(
+            "UPDATE work_items SET proposal_state = 'rejected', updated_at = ?1 WHERE id = ?2",
+            rusqlite::params![now, item_id],
+        )?;
+        tx.commit()?;
+        self.emit_work_item(
+            item_id,
+            super::tracker_items::SessionChange {
+                primary: false,
+                suggested: false,
+                rejected: true,
+            },
+        )?;
+        self.emit_work_item(
+            into,
+            super::tracker_items::SessionChange {
+                primary: moved_links > 0,
+                suggested: false,
+                rejected: false,
+            },
+        )?;
+        let row = self
+            .get_work_item(into)?
+            .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "work item vanished after merge"))?;
+        Ok((
+            row,
+            MergedProposal {
+                subtasks: moved_subtasks,
+                links: moved_links,
+                ended_links,
+            },
+        ))
+    }
+
+    /// A person edits a LOCAL item's title, notes, assignees, due date,
+    /// priority, labels and estimate (task editing). `None` when `item_id` is not a local item: a tracker's
+    /// ticket is its tracker's to edit. A job mirror's notes are its
+    /// dispatch prompt ([`Self::create_agent_task_item`]), so editing them
+    /// is `E_INVALID`. Nothing changed answers the row as it is, unwritten.
+    pub fn edit_local_item(
+        &self,
+        item_id: i64,
+        edit: &ItemEdit<'_>,
+    ) -> Result<Option<WorkItemRow>, IpcError> {
+        let title = edit.title.map(validate_local_work_title).transpose()?;
+        let assignees = edit.assignees.map(validate_assignees).transpose()?;
+        let due_at = edit.due_at.map(validate_due_date).transpose()?;
+        let priority = edit.priority.map(validate_priority).transpose()?;
+        let labels = edit.labels.map(validate_labels).transpose()?;
+        let estimate_in = edit.estimate.map(validate_estimate).transpose()?;
+        let unit_in = edit.estimate_unit.map(validate_estimate_unit).transpose()?;
+        let Some(before) = self.get_work_item(item_id)? else {
+            return Ok(None);
+        };
+        if before.source != "local" {
+            return Ok(None);
+        }
+        let notes = edit.notes.map(|n| {
+            let n = n.trim();
+            (!n.is_empty()).then(|| cut_brief(n))
+        });
+        if notes.is_some() && before.origin.as_deref() == Some("agent") {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "a delegated job's notes are its prompt and cannot be edited",
+            ));
+        }
+        let title = title.filter(|t| *t != before.title);
+        let notes = notes.filter(|n| *n != before.notes);
+        let assignees = assignees.filter(|a| *a != before.assignees);
+        let due_at = due_at.filter(|d| *d != before.due_at);
+        let priority = priority.filter(|p| *p != before.priority);
+        let labels = labels.filter(|l| *l != before.labels);
+        // The estimate and its unit move together: set exactly when the
+        // estimate is.
+        let estimate = match (estimate_in, unit_in) {
+            (None, None) => None,
+            (None, Some(_)) if before.estimate.is_none() => {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    "estimate_unit needs an estimate: give both",
+                ));
+            }
+            (None, Some(u)) => Some((before.estimate, Some(u))),
+            (Some(None), _) => Some((None, None)),
+            (Some(Some(e)), u) => Some((
+                Some(e),
+                u.or_else(|| before.estimate_unit.clone())
+                    .or_else(|| Some(ESTIMATE_UNITS[0].to_string())),
+            )),
+        }
+        .filter(|(e, u)| *e != before.estimate || *u != before.estimate_unit);
+        if title.is_none()
+            && notes.is_none()
+            && assignees.is_none()
+            && due_at.is_none()
+            && priority.is_none()
+            && labels.is_none()
+            && estimate.is_none()
+        {
+            return Ok(Some(before));
+        }
+        self.conn.execute(
+            "UPDATE work_items SET title = COALESCE(?1, title), \
+                    notes = CASE WHEN ?2 THEN ?3 ELSE notes END, \
+                    assignees = CASE WHEN ?4 THEN ?5 ELSE assignees END, \
+                    due_at = CASE WHEN ?8 THEN ?9 ELSE due_at END, \
+                    priority = CASE WHEN ?10 THEN ?11 ELSE priority END, \
+                    labels = CASE WHEN ?12 THEN ?13 ELSE labels END, \
+                    estimate = CASE WHEN ?14 THEN ?15 ELSE estimate END, \
+                    estimate_unit = CASE WHEN ?14 THEN ?16 ELSE estimate_unit END, \
+                    updated_at = ?6 \
+              WHERE id = ?7 AND source = 'local'",
+            rusqlite::params![
+                title,
+                notes.is_some(),
+                notes.clone().flatten(),
+                assignees.is_some(),
+                assignees
+                    .as_ref()
+                    .filter(|a| !a.is_empty())
+                    .and_then(|a| serde_json::to_string(a).ok()),
+                now_unix(),
+                item_id,
+                due_at.is_some(),
+                due_at.clone().flatten(),
+                priority.is_some(),
+                priority.clone().flatten(),
+                labels.is_some(),
+                labels
+                    .as_ref()
+                    .filter(|l| !l.is_empty())
+                    .and_then(|l| serde_json::to_string(l).ok()),
+                estimate.is_some(),
+                estimate.as_ref().and_then(|(e, _)| e.map(|e| e.0)),
+                estimate.as_ref().and_then(|(_, u)| u.clone())
+            ],
+        )?;
+        // A title shows as a row's primary work and as its top suggestion,
+        // as for a rename; notes, assignees, the due date, priority, labels
+        // and estimate show on the item alone.
+        self.emit_work_item(
+            item_id,
+            super::tracker_items::SessionChange {
+                primary: title.is_some(),
+                suggested: title.is_some(),
+                rejected: false,
+            },
+        )?;
+        self.get_work_item(item_id)
+    }
+
+    /// A person files a local item under `parent` (`Some`), or takes it out
+    /// to the top (`None`) — sprints design 2026-09-28 §3. `None` when the
+    /// item is unknown or not local. Refused (`E_INVALID`, naming why):
+    /// a tracker's ticket (its tracker owns its parent); a delegated job or
+    /// an open proposal (their parent is what they were made for); an epic
+    /// (it sits at the top); a parent that would put the item, or what hangs
+    /// under it, more than [`LOCAL_DEPTH_MAX`] levels deep; the item itself or
+    /// one of its own subtasks (a cycle); a parent of another organisation
+    /// than the one the item is in now (`E_FORBIDDEN`). Taken out to the top, an item that read its org
+    /// from its parent keeps that org as its own, so it never turns
+    /// unassigned by moving.
+    pub fn set_local_parent(
+        &self,
+        item_id: i64,
+        parent: Option<i64>,
+    ) -> Result<Option<WorkItemRow>, IpcError> {
+        let Some(before) = self.get_work_item(item_id)? else {
+            return Ok(None);
+        };
+        if before.source != "local" {
+            return Ok(None);
+        }
+        let label = |i: &WorkItemRow| i.key.clone().unwrap_or_else(|| format!("item {}", i.id));
+        let invalid = |m: String| IpcError::new(codes::E_INVALID, m);
+        if before.origin.as_deref() == Some("agent") {
+            return Err(invalid(format!(
+                "{} is a delegated job; it stays under the task it runs for",
+                label(&before)
+            )));
+        }
+        if matches!(
+            before.proposal_state.as_deref(),
+            Some("proposed" | "rejected")
+        ) {
+            return Err(invalid(format!(
+                "{} is a proposal; accept it before you move it",
+                label(&before)
+            )));
+        }
+        if before.parent_id == parent {
+            return Ok(Some(before));
+        }
+        let own_org: Option<i64> = self.conn.query_row(
+            "SELECT org_id FROM work_items WHERE id = ?1",
+            [item_id],
+            |r| r.get(0),
+        )?;
+        let mut stamp_org = None;
+        match parent {
+            Some(pid) => {
+                if pid == item_id {
+                    return Err(invalid(format!(
+                        "{} cannot be its own parent",
+                        label(&before)
+                    )));
+                }
+                if is_epic(&before) {
+                    return Err(invalid(format!(
+                        "{} is an epic; an epic sits at the top",
+                        label(&before)
+                    )));
+                }
+                if self.is_ancestor_or_self(item_id, pid)? {
+                    return Err(invalid(format!(
+                        "{} cannot go under one of its own subtasks",
+                        label(&before)
+                    )));
+                }
+                let p = self.get_work_item(pid)?.ok_or_else(|| {
+                    IpcError::new(codes::E_NOTFOUND, format!("work item {pid} not found"))
+                })?;
+                if self.local_depth(pid)? + self.subtree_height(item_id)? > LOCAL_DEPTH_MAX {
+                    return Err(invalid(format!(
+                        "{} and what hangs under it would sit more than {LOCAL_DEPTH_MAX} \
+                         levels deep under {}",
+                        label(&before),
+                        label(&p)
+                    )));
+                }
+                let parent_org = self.item_org(pid)?;
+                // The org it has now, its own or read from its parent: a
+                // subtask moves between parents of one org only.
+                if let (Some(mine), Some(theirs)) = (self.item_org(item_id)?, parent_org) {
+                    if mine != theirs {
+                        return Err(IpcError::new(
+                            codes::E_FORBIDDEN,
+                            format!(
+                                "{} belongs to organisation {mine} and {} to organisation \
+                                 {theirs}; fleet does not file work across organisations",
+                                label(&before),
+                                label(&p)
+                            ),
+                        )
+                        .with_details(serde_json::json!({
+                            "work_org_id": mine, "parent_org_id": theirs, "cross_org": true
+                        })));
+                    }
+                }
+            }
+            None => {
+                if own_org.is_none() {
+                    stamp_org = self.item_org(item_id)?;
+                }
+            }
+        }
+        self.conn.execute(
+            "UPDATE work_items SET parent_id = ?1, org_id = COALESCE(org_id, ?2), updated_at = ?3 \
+              WHERE id = ?4 AND source = 'local'",
+            rusqlite::params![parent, stamp_org, now_unix(), item_id],
+        )?;
+        self.emit_work_item(item_id, super::tracker_items::SessionChange::default())?;
+        self.get_work_item(item_id)
+    }
+
+    /// A person marks a top-level local item an epic, or back a task.
+    /// `None` when the item is unknown or not local. An item under a parent
+    /// is refused: an epic sits at the top.
+    pub fn set_local_epic(
+        &self,
+        item_id: i64,
+        epic: bool,
+    ) -> Result<Option<WorkItemRow>, IpcError> {
+        let Some(before) = self.get_work_item(item_id)? else {
+            return Ok(None);
+        };
+        if before.source != "local" {
+            return Ok(None);
+        }
+        if is_epic(&before) == epic {
+            return Ok(Some(before));
+        }
+        if epic && before.parent_id.is_some() {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!(
+                    "{} is under another task; take it out to the top before you make it \
+                     an epic",
+                    before.key.as_deref().unwrap_or("this item")
+                ),
+            ));
+        }
+        self.conn.execute(
+            "UPDATE work_items SET kind = ?1, updated_at = ?2 WHERE id = ?3 AND source = 'local'",
+            rusqlite::params![epic.then_some(EPIC_KIND), now_unix(), item_id],
+        )?;
+        self.emit_work_item(item_id, super::tracker_items::SessionChange::default())?;
+        self.get_work_item(item_id)
+    }
+
+    /// A local task became `tracker_id`'s ticket (owner decision
+    /// 2026-10-11: promoting it): the SAME row, now that tracker's item —
+    /// keyed by `external_id` / `key`, its old fleet key kept as an alias so
+    /// it still resolves — and everything on it (sessions, comments,
+    /// subtasks, sprints, history) stays where it is. Its `origin` stays:
+    /// a person still made it in fleet, so it stays listed among its
+    /// parent's subtasks. The tracker's numbering takes over the key (an
+    /// Asana task draws its tracker's display key). `false`, and nothing
+    /// written, when the item is gone or no longer local, or when the
+    /// tracker's ticket is already cached as another row.
+    pub fn promote_local_item(
+        &self,
+        item_id: i64,
+        tracker_id: i64,
+        external_id: &str,
+        key: &str,
+        url: Option<&str>,
+    ) -> Result<bool, IpcError> {
+        let Some(before) = self.get_work_item(item_id)? else {
+            return Ok(false);
+        };
+        if before.source != "local" || external_id.is_empty() {
+            return Ok(false);
+        }
+        let taken: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM work_items WHERE tracker_id = ?1 AND external_id = ?2",
+                rusqlite::params![tracker_id, external_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if taken.is_some_and(|id| id != item_id) {
+            return Ok(false);
+        }
+        let key = super::work::canonical_key(key);
+        let mut aliases = before.aliases.clone();
+        aliases.extend(before.key.clone());
+        aliases.extend(before.display_key.clone());
+        aliases.sort();
+        aliases.dedup();
+        aliases.retain(|a| *a != key);
+        let aliases = (!aliases.is_empty())
+            .then(|| serde_json::to_string(&aliases).ok())
+            .flatten();
+        let now = now_unix();
+        let n = self.conn.execute(
+            "UPDATE work_items SET \
+               source = (SELECT provider FROM trackers WHERE id = ?1), tracker_id = ?1, \
+               external_id = ?2, key = ?3, url = ?4, aliases = ?5, display_key = NULL, \
+               ticket_space_id = NULL, ticket_seq = NULL, status_set_by = NULL, \
+               status_set_at = NULL, fetched_at = ?6, updated_at = ?6 \
+             WHERE id = ?7 AND source = 'local' \
+               AND EXISTS (SELECT 1 FROM trackers WHERE id = ?1)",
+            rusqlite::params![tracker_id, external_id, key, url, aliases, now, item_id],
+        )?;
+        if n == 0 {
+            return Ok(false);
+        }
+        self.ensure_tracker_ticket_key(item_id, tracker_id, Some(&key))?;
+        self.emit_work_item(item_id, super::tracker_items::SessionChange::ALL)?;
+        Ok(true)
+    }
+
     /// Every native child of `parent_id`, proposals included, oldest first.
+    ///
+    /// `origin = 'agent'` rows are JOB MIRRORS, and their title and notes are
+    /// the dispatch prompt ([`Self::create_agent_task_item`]). A caller that
+    /// serves a child's text must fence those on the job
+    /// (`Graph::job_states`); this query applies no fence of its own.
     pub fn native_children(&self, parent_id: i64) -> Result<Vec<WorkItemRow>, IpcError> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {ITEM_COLUMNS} FROM work_items \
@@ -367,6 +1152,20 @@ impl Store {
         let rows = stmt.query_map([parent_id], map_item)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
+}
+
+mod tree;
+pub use tree::{TreeEntry, TreeRef, ACCEPT_UNDO_SECS};
+
+/// What [`Store::merge_proposal_into`] moved.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MergedProposal {
+    /// Subtasks re-parented under the task merged into.
+    pub subtasks: usize,
+    /// Session links (live and ended) now pointing at it.
+    pub links: usize,
+    /// The proposal's live links that ended, their session already live on it.
+    pub ended_links: usize,
 }
 
 #[cfg(test)]

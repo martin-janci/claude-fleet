@@ -16,12 +16,18 @@
 
 pub mod actions;
 pub mod catalog;
+pub mod chat_blocks;
 pub mod flows;
+pub mod forms;
 pub mod model;
 pub mod resources;
 pub mod sources;
 pub mod validate;
 
+#[cfg(test)]
+mod chat_blocks_tests;
+#[cfg(test)]
+mod forms_tests;
 #[cfg(test)]
 mod tests;
 
@@ -92,6 +98,26 @@ pub const PAGE_FILES: &[(&str, &str)] = &[
         include_str!("../../pages/settings.orgs.json"),
     ),
     (
+        "settings.catalogs.json",
+        include_str!("../../pages/settings.catalogs.json"),
+    ),
+    (
+        "settings.devices.json",
+        include_str!("../../pages/settings.devices.json"),
+    ),
+    (
+        "settings.people.json",
+        include_str!("../../pages/settings.people.json"),
+    ),
+    (
+        "settings.federation.json",
+        include_str!("../../pages/settings.federation.json"),
+    ),
+    (
+        "settings.notifications.json",
+        include_str!("../../pages/settings.notifications.json"),
+    ),
+    (
         "settings.updates.json",
         include_str!("../../pages/settings.updates.json"),
     ),
@@ -132,6 +158,10 @@ pub const PAGE_FILES: &[(&str, &str)] = &[
     (
         "embed.status_footer.json",
         include_str!("../../pages/embed.status_footer.json"),
+    ),
+    (
+        "debug_devices.json",
+        include_str!("../../pages/debug_devices.json"),
     ),
 ];
 

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import Icon from './kit/Icon.svelte';
+  import { viewKey } from './shortcuts';
   // The Hosts view: a master–detail screen for every host, grouped by Claude
   // account with each account's usage shown once (spec:
   // docs/superpowers/specs/2026-09-13-hosts-view-and-account-usage-design.md,
@@ -10,7 +12,7 @@
   // while an input has focus, and no bound key is destructive — Rotate and
   // Remove are reachable only by Tab or pointer.
   import { isEditable } from './terminal_keys';
-  import { onMount } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { hosts } from './hosts';
   import { accounts, accountByUuid } from './accounts';
   import { sessions } from './sessions';
@@ -34,9 +36,15 @@
     sharedWith,
     type HostRowInfo,
   } from './hosts_view';
-  import AddHostPicker from './AddHostPicker.svelte';
+  import AddHostWizard from './AddHostWizard.svelte';
+  import HubAddHostDialog from './HubAddHostDialog.svelte';
   import HostsList from './HostsList.svelte';
   import HostDetail from './HostDetail.svelte';
+  import HostsTable from './HostsTable.svelte';
+  import { hostTidyHint, tableOrder } from './hosts_table';
+  import { refreshTidy, requestTidy, tidyReport } from './tidy';
+  import { requestCloseHosts } from './app_views';
+  import { attentionIdleMinutes } from './notify';
   import { hubStatus, hubBlock, hubActionBlocked, ownsTheFleet } from './hub';
   import { hubConnection, connectionBanner } from './hub_connection';
   import { fleetSettings, SETTING_KEYS, settingInt, settingSecs } from './fleet_settings';
@@ -89,19 +97,30 @@
   let refusal = $state<{ alias: string; nextTryAt: number } | null>(null);
   let copied = $state(false);
 
+  // Orbit Fleet 4.6: the view opens on the Hosts table, and Open (or Enter)
+  // shows a host in the master–detail below it. A preselected host opens
+  // straight in its detail.
+  let detailOpen = $state(untrack(() => preselect) !== null);
+  const showTable = $derived(!detailOpen);
+  let tableEl = $state<HTMLElement>();
+
   let listEl = $state<HTMLElement>();
   let filterEl = $state<HTMLInputElement>();
   let detailEl = $state<HTMLElement>();
 
   const allGroups = $derived(groupHostsByAccount($hosts, $accounts));
   const groups = $derived(filterGroups(allGroups, filter));
-  const ordered = $derived(groups.flatMap((g) => g.hosts));
+  const tableHosts = $derived(tableOrder($hosts));
+  // The order the keyboard walks: the table's when it shows, else the list's.
+  const ordered = $derived(showTable ? tableHosts : groups.flatMap((g) => g.hosts));
   const versionMaxAge = $derived(settingSecs($fleetSettings, SETTING_KEYS.healthVersionMaxAgeSecs));
   const diskLowPct = $derived(settingInt($fleetSettings, SETTING_KEYS.healthDiskLowPct));
   const newestClaude = $derived(newestClaudeVersion($hosts, now, versionMaxAge));
   /** The fleet's version (the hub's when paired): what an agent should match. */
   let hubVersion = $state<string | null>(null);
   onMount(async () => {
+    // The Tidy hint (G4.5) reads the last tidy report; read it fresh here.
+    void refreshTidy();
     const r = await healthCheck();
     if (r.ok && r.value?.version) hubVersion = r.value.version;
   });
@@ -170,7 +189,8 @@
   });
 
   onMount(() => {
-    listEl?.focus();
+    if (showTable) tableEl?.focus();
+    else listEl?.focus();
     // `list_host_tokens` and `refresh_account_usage` are both local-only in
     // remote mode (`host_tokens`, `refresh_account_usage` REASONS) — a hub
     // client must not fire either only to drop an E_LOCAL_ONLY each time.
@@ -208,7 +228,22 @@
     rows[next].focus();
   }
 
-  const focusList = () => listEl?.focus();
+  const focusList = () => (showTable ? tableEl : listEl)?.focus();
+
+  /** Table → the host's detail (Open, Enter, double-click). */
+  async function openHost(alias: string) {
+    select(alias);
+    detailOpen = true;
+    await tick();
+    focusDetail();
+  }
+
+  /** Detail → back to the table. */
+  async function backToTable() {
+    detailOpen = false;
+    await tick();
+    tableEl?.focus();
+  }
   const focusDetail = () => detailEl?.focus();
 
   // Gated in the handlers, not only on the buttons that call them: a
@@ -253,7 +288,7 @@
     // The `e` shortcut (below) reaches this directly, bypassing the
     // nickname button's own `disabled={blocked !== null}` — the same
     // non-button-path gap `r`/`u` had.
-    if (hubBlock('set_account_nickname', $hubStatus)) return;
+    if (hubActionBlocked('set_account_nickname', $hubStatus, $hubConnection)) return;
     if (uuid && $accountByUuid.has(uuid)) editing = { uuid, where };
   }
 
@@ -283,65 +318,84 @@
     // A dialog (confirm, add-host) owns its own keys.
     if (e.defaultPrevented || target?.closest?.('dialog')) return;
     if (target === filterEl) return onFilterKeydown(e);
-    if (e.metaKey || e.ctrlKey || e.altKey || isEditable(target)) return;
+    if (isEditable(target)) return;
+    // The keys are the registry's `hosts` rows (step 0.1).
+    const act = viewKey('hosts', e);
+    if (!act) return;
 
     const inDetail = !!detailEl && !!target && detailEl.contains(target);
     const alias = selectedAlias;
     let handled = true;
-    switch (e.key) {
-      case 'ArrowDown':
-      case 'j':
+    switch (act) {
+      case 'hosts.down':
         if (inDetail) moveInDetail(1);
         else move(1);
         break;
-      case 'ArrowUp':
-      case 'k':
+      case 'hosts.up':
         if (inDetail) moveInDetail(-1);
         else move(-1);
         break;
-      case 'Home':
+      case 'hosts.first':
         if (inDetail) moveInDetail('home');
         else move('home');
         break;
-      case 'End':
+      case 'hosts.last':
         if (inDetail) moveInDetail('end');
         else move('end');
         break;
-      case 'Enter':
-      case 'ArrowRight':
+      case 'hosts.detail':
         // Enter on a detail button activates it natively.
-        if (inDetail || target !== listEl) handled = false;
+        if (showTable) {
+          if (target === tableEl && alias) void openHost(alias);
+          else handled = false;
+        } else if (inDetail || target !== listEl) handled = false;
         else focusDetail();
         break;
-      case 'ArrowLeft':
+      case 'hosts.list':
         if (inDetail) focusList();
         else handled = false;
         break;
-      case 'Escape':
+      case 'hosts.close':
         if (legendOpen) legendOpen = false;
         else if (inDetail) focusList();
+        else if (detailOpen) void backToTable();
         else onClose();
         break;
-      case 'r':
+      case 'hosts.reprobe':
         if (alias) void reprobe(alias);
         break;
-      case 'u':
+      case 'hosts.usage':
         if (alias) void refreshUsage(alias);
         break;
-      case 's':
+      case 'hosts.filter-sidebar':
         if (alias) onFilterSidebar(alias);
         break;
-      case 'n':
+      case 'hosts.new-session':
         if (alias) onNewSession(alias);
         break;
-      case 'e':
+      case 'hosts.edit':
+        // Review r08: on the New table the legend's `e` and `/` open the
+        // list and detail first, then do what they do there.
+        if (showTable) {
+          if (!alias) {
+            handled = false;
+            break;
+          }
+          const uuid = selectedHost?.account_uuid;
+          detailOpen = true;
+          void tick().then(() => startEdit('detail', uuid));
+          break;
+        }
         startEdit(inDetail ? 'detail' : 'list', selectedHost?.account_uuid);
         break;
-      case '/':
+      case 'hosts.search':
         if (inDetail) handled = false;
-        else filterEl?.focus();
+        else if (showTable) {
+          detailOpen = true;
+          void tick().then(() => filterEl?.focus());
+        } else filterEl?.focus();
         break;
-      case '?':
+      case 'hosts.legend':
         legendOpen = !legendOpen;
         break;
       default:
@@ -350,10 +404,11 @@
     if (handled) e.preventDefault();
   }
 
-  // Adding a host is fleet administration: the hub refuses it to a paired
-  // client, and this app guards it with `E_LOCAL_ONLY`. Say so on the button
-  // rather than after the dialog has been filled in.
-  const addHostBlocked = $derived(hubBlock('add_host', $hubStatus));
+  // Adding a host routes to the hub's add_host on a paired desktop (contract
+  // 13: the hub owner's trusted full device), so the button is off only
+  // while the hub cannot be reached; the hub's own refusal names the trust
+  // step to any other device.
+  const addHostBlocked = $derived(hubActionBlocked('add_host', $hubStatus, $hubConnection));
   const usageRefreshBlocked = $derived(hubBlock('refresh_account_usage', $hubStatus));
 
   // Same honest-empty-state fix as HostsList's own list: while the hub's
@@ -373,7 +428,7 @@
   const LEGEND: [string, string][] = [
     ['↑ ↓  j k  Home End', 'move the selection (in the detail: between sessions)'],
     ['Enter  →', 'open the detail'],
-    ['←  Esc', 'back to the list (Esc in the list closes Hosts)'],
+    ['←  Esc', 'back to the list (Esc in the list closes Hosts; under Layout: New it goes back to the table first)'],
     ['r', 're-probe the host'],
     ['u', "refresh the account's usage (at most every 5 min)"],
     ['s', "view this host's sessions (closes Hosts)"],
@@ -388,17 +443,23 @@
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <section class="hosts-view" aria-label="Hosts" data-testid="hosts-view" onkeydown={onKeydown}>
   <header class="view-head">
+    {#if detailOpen}
+      <button type="button" class="head-btn" data-testid="hosts-back-to-table" onclick={() => void backToTable()}>← All hosts</button>
+    {/if}
     <h1>Hosts</h1>
     <span class="summary" data-testid="hosts-summary">{$hosts.length} · {onlineCount} online</span>
     <span class="cadence">usage every 5 min</span>
     <span class="grow"></span>
+    <!-- Redesign 1.5: the view's one primary. A host's own actions, in the
+         detail beside it, are plain; its destructive one is last, behind a
+         confirm (HostDetail's Danger section). -->
     <button
       type="button"
-      class="head-btn"
+      class="btn btn--primary"
       data-testid="hosts-add"
       disabled={addHostBlocked !== null}
       title={addHostBlocked ?? ''}
-      onclick={() => (showAddPicker = true)}>+ Add host</button>
+      onclick={() => (showAddPicker = true)}>+ Add host…</button>
     <button
       type="button"
       class="head-btn"
@@ -411,7 +472,7 @@
 
   {#if outage}
     <div class="banner" role="status" data-testid="usage-outage-banner">
-      <span class="banner-text"><span aria-hidden="true">⚠</span> {outage.text}</span>
+      <span class="banner-text"><Icon name="warning" size={12} /> {outage.text}</span>
       <button type="button" class="head-btn" data-testid="outage-copy" onclick={copyOutage}>{copied ? 'Copied' : 'Copy details'}</button>
       <button
         type="button"
@@ -442,6 +503,25 @@
     </p>
   {/if}
 
+  {#if showTable}
+    <HostsTable
+      hosts={tableHosts}
+      {rowInfo}
+      sessions={$sessions}
+      accountByUuid={$accountByUuid}
+      {newestClaude}
+      {selectedAlias}
+      {now}
+      idleSecs={$attentionIdleMinutes * 60}
+      emptyText={hubSkewEmptyMessage}
+      bind:tableEl
+      onselect={(a) => {
+        select(a);
+        tableEl?.focus();
+      }}
+      onopen={(a) => void openHost(a)}
+    />
+  {:else}
   <div class="panes">
     <div class="list-pane">
       <HostsList
@@ -463,6 +543,7 @@
         }}
         oneditstart={(uuid) => (editing = { uuid, where: 'list' })}
         oneditdone={endEdit}
+        onaddhost={addHostBlocked === null ? () => (showAddPicker = true) : null}
       />
     </div>
     <div class="detail-pane">
@@ -489,6 +570,13 @@
             oneditdone={endEdit}
             onreprobe={() => void reprobe(selectedHost.alias)}
             onrefreshusage={() => void refreshUsage(selectedHost.alias)}
+            onnewsession={() => onNewSession(selectedHost.alias)}
+            tidyHint={hostTidyHint($tidyReport.candidates, selectedHost.alias)}
+            onreviewtidy={(ids: number[]) => {
+              requestTidy(ids);
+              requestCloseHosts();
+            }}
+            {hubVersion}
           />
         {/key}
       {:else}
@@ -498,10 +586,17 @@
       {/if}
     </div>
   </div>
+  {/if}
 </section>
 
 {#if showAddPicker}
-  <AddHostPicker onClose={() => (showAddPicker = false)} />
+  {#if $hubStatus.remote}
+    <!-- Paired: the hub discovers, probes and adds (HubAddHostDialog). -->
+    <HubAddHostDialog onClose={() => (showAddPicker = false)} />
+  {:else}
+    <!-- The add-host wizard (4.9). -->
+    <AddHostWizard onClose={() => (showAddPicker = false)} {onNewSession} />
+  {/if}
 {/if}
 
 <style>
@@ -520,15 +615,15 @@
     padding: 0.6rem 1rem;
     border-bottom: 1px solid var(--border);
   }
-  h1 { margin: 0; font-size: 1rem; }
+  h1 { margin: 0; font-size: var(--text-md); }
   .summary { font-variant-numeric: tabular-nums; }
-  .cadence { color: var(--fg-muted); font-size: 0.75rem; }
+  .cadence { color: var(--fg-muted); font-size: var(--text-2xs); }
   .grow { flex: 1; }
   .head-btn {
-    font-size: 0.75rem;
+    font-size: var(--text-2xs);
     padding: 0.2rem 0.55rem;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: transparent;
     color: var(--fg);
     cursor: pointer;
@@ -542,13 +637,13 @@
     padding: 0.45rem 1rem;
     border-bottom: 1px solid var(--border);
     background: color-mix(in srgb, var(--usage-warn) 12%, transparent);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .banner-text { flex: 1; }
   .legend {
     padding: 0.5rem 1rem;
     border-bottom: 1px solid var(--border);
-    font-size: 0.75rem;
+    font-size: var(--text-2xs);
   }
   .legend dl {
     display: grid;
@@ -559,14 +654,14 @@
   }
   .legend dd { margin: 0; color: var(--fg-muted); }
   kbd {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.7rem;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
     white-space: pre;
   }
   .notice {
     margin: 0;
     padding: 0.3rem 1rem;
-    font-size: 0.75rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     border-bottom: 1px solid var(--border);
   }
@@ -578,5 +673,5 @@
     min-height: 0;
   }
   .detail-pane { flex: 1; min-width: 0; min-height: 0; }
-  .empty { margin: 1rem; color: var(--fg-muted); font-size: 0.85rem; }
+  .empty { margin: 1rem; color: var(--fg-muted); font-size: var(--text-xs); }
 </style>

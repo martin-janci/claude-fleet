@@ -92,6 +92,16 @@ fn sanitise(r: &mut Report) {
     }
 }
 
+/// `text` made safe for ONE log line. A report is any authenticated
+/// caller's text (a readonly phone, a host's agent): a `\n` in it started a
+/// forged line in the file log and journald — `… WARN fleet_core::mcp:
+/// [mcp] rejected request …` — and an escape or bidi control could hide one.
+/// The stored row keeps the text as sent; only the log line is neutralised.
+fn for_log(text: &str) -> String {
+    // U+FFFD is three bytes where a control is one: room for every one.
+    fleet_proto::sanitize_for_log(text, text.len().saturating_mul(3))
+}
+
 /// Store a batch under `origin`: validate, clamp, redact, rate-limit, insert,
 /// prune to `reports.max_rows`, and log one warn line per report.
 pub fn ingest(
@@ -127,8 +137,9 @@ pub fn ingest(
     for r in &batch.reports {
         tracing::warn!(
             target: "fleet_core::report",
-            origin, level = %r.level, component = %r.component, code = ?r.code,
-            "{}", r.message
+            origin, level = %r.level, component = %for_log(&r.component),
+            code = ?r.code.as_deref().map(for_log),
+            "{}", for_log(&r.message)
         );
     }
     if batch.dropped > 0 {
@@ -336,5 +347,19 @@ mod tests {
             })
             .unwrap();
         assert!(rows.iter().any(|r| r.message == "boom"));
+    }
+
+    #[test]
+    fn a_report_cannot_start_a_log_line_of_its_own() {
+        let forged =
+            "x\n2026-10-08T00:00:00Z  WARN fleet_core::mcp: [mcp] rejected\r\x1b[2K\u{202e}";
+        let line = for_log(forged);
+        assert!(!line.contains('\n') && !line.contains('\r') && !line.contains('\x1b'));
+        assert!(!line.contains('\u{202e}'));
+        assert!(
+            line.contains("rejected"),
+            "the text itself survives: {line}"
+        );
+        assert_eq!(for_log("plain"), "plain");
     }
 }

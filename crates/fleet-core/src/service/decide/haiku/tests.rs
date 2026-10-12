@@ -30,6 +30,7 @@ fn leaky_request() -> JevRequest {
             instructions: json!("Which item?"),
             criteria,
         },
+        order_salt: None,
     }
 }
 
@@ -94,12 +95,9 @@ fn the_prompt_is_the_redacted_state_and_the_options_only() {
     for (id, desc) in status_map::OPTIONS {
         assert!(p.contains(&format!("- {id}: {desc}")), "{id}: {p}");
     }
-    let mut want: Vec<String> = status_map::OPTIONS
-        .iter()
-        .map(|(k, _)| k.to_string())
-        .collect();
-    want.sort();
-    assert_eq!(ids, want);
+    // In the order Jev is sent: a permutation of the options.
+    assert_eq!(ids, req.redacted().option_order());
+    assert_eq!(ids.len(), status_map::OPTIONS.len());
     // And the reply format.
     assert!(p.starts_with(PREAMBLE) && p.ends_with(REPLY_FORMAT), "{p}");
     // Nothing else: the text is exactly the pieces above.
@@ -136,6 +134,7 @@ fn only_a_choice_is_asked() {
             instructions: json!("is it?"),
             criteria: None,
         },
+        order_salt: None,
     };
     assert!(prompt_for(&req).is_err());
 }
@@ -513,6 +512,7 @@ async fn a_prompt_over_the_cap_is_not_sent() {
             instructions: json!("which?"),
             criteria,
         },
+        order_salt: None,
     };
     let r = Haiku {
         exec: &fake,

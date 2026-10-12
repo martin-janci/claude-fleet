@@ -20,6 +20,7 @@
     type WorkRuleDraft,
   } from './work_view';
   import WorkConflictNotice from './WorkConflictNotice.svelte';
+  import Skeleton from './states/Skeleton.svelte';
 
   let { onclose }: { onclose: () => void } = $props();
 
@@ -78,6 +79,8 @@
       enabled: r.enabled,
       conditions: { ...r.conditions },
       group: r.group,
+      host_alias: r.host_alias ?? null,
+      profile: r.profile ?? null,
       expected_version: r.version,
       ...patch,
     };
@@ -103,6 +106,8 @@
       enabled: false,
       conditions: r.conditions,
       group: r.group,
+      host_alias: r.host_alias ?? null,
+      profile: r.profile ?? null,
       expected_version: r.version,
     });
     busy = false;
@@ -144,7 +149,7 @@
     {#if error}
       <p class="err" role="alert" data-testid="rules-error">{error}</p>
     {:else if !loaded}
-      <p class="muted">Loading…</p>
+      <Skeleton />
     {:else if rules.length === 0}
       <p class="muted" data-testid="rules-empty">No rules yet. “Place in group…” on a task offers one for similar tasks.</p>
     {:else}
@@ -153,7 +158,7 @@
           <li data-testid="rule-row" class:off={!r.enabled}>
             <div class="main">
               <span class="name">{r.name}</span>
-              <span class="muted">{conditionsText(r)} → <strong>{r.group}</strong></span>
+              <span class="muted">{conditionsText(r)} → <strong>{r.group}</strong>{#if r.host_alias || r.profile}<span data-testid="rule-starts"> · starts on {r.host_alias ?? "its usual host"}{r.profile ? ` · ${r.profile}` : ""}</span>{/if}</span>
             </div>
             <div class="actions">
               <button
@@ -195,18 +200,26 @@
       notice = `Saved “${r.name}”.`;
       void load();
     }}
+    ondeleted={(name) => {
+      notice = `Deleted “${name}”.`;
+      void load();
+    }}
+    onundone={() => {
+      notice = null;
+      void load();
+    }}
   />
 {/if}
 
 <style>
-  .rules { display: flex; flex-direction: column; gap: 0.5rem; font-size: 0.85rem; }
+  .rules { display: flex; flex-direction: column; gap: 0.5rem; font-size: var(--text-xs); }
   .bar { display: flex; gap: 0.4rem; }
   .bar input {
     flex: 1 1 auto;
     font: inherit;
     padding: 0.25rem 0.4rem;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: var(--bg);
     color: var(--fg);
   }
@@ -218,5 +231,5 @@
   .actions { display: flex; gap: 0.25rem; flex: 0 0 auto; }
   .muted { color: var(--fg-muted); margin: 0; }
   .notice { margin: 0; }
-  .err { color: #e64a4a; margin: 0; }
+  .err { color: var(--danger); margin: 0; }
 </style>

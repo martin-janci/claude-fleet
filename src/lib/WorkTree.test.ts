@@ -9,6 +9,10 @@ import { get } from 'svelte/store';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import WorkTree from './WorkTree.svelte';
+import { newTaskOwnsChord } from './new_task';
+import { detectMac } from './terminal_keys';
+import { expectAccessible } from './a11y_check';
+import { workBoardOpen } from './app_views';
 import { sessions } from './sessions';
 import { selectedSession, selectSession, clearSelection } from './selection';
 import { session } from './hosts_fixture';
@@ -131,10 +135,11 @@ describe('WorkTree', () => {
     await flush();
     const first = treeCalls()[0];
     expect(first).toEqual({ filters: { archived: false }, limit: 50, with_review_total: true });
-    const orgs = screen.getAllByTestId('work-org');
-    expect(orgs.map((o) => within(o).getByTestId('work-org-head').textContent?.replace(/\s+/g, ' ').trim())).toEqual([
-      '▸ Acme 5',
-      '▸ Unassigned 1',
+    // One flat list of sections, each named by its org and its group.
+    expect(screen.getAllByTestId('work-group-head').map((h) => h.textContent?.replace(/\s+/g, ' ').trim())).toEqual([
+      '▸ Acme · ABC 2',
+      '▸ Acme · Payments 3',
+      '▸ Unassigned · No group 1',
     ]);
     const counts = screen.getAllByTestId('work-group-count').map((c) => c.textContent);
     expect(counts).toEqual(['2', '3', '1']);
@@ -144,17 +149,65 @@ describe('WorkTree', () => {
     // Badges: needs you, review, unavailable struck through, tracker down.
     expect(within(tasks[0]).getByTestId('work-task-needs-you')).toBeTruthy();
     expect(within(tasks[1]).getByTestId('work-task-review').textContent).toBe('?');
-    expect(tasks[1].querySelector('.tlabel.unavailable')).toBeTruthy();
+    expect(tasks[1].querySelector('.title.unavailable')).toBeTruthy();
     expect(within(tasks[1]).getByTestId('work-task-tracker-down')).toBeTruthy();
-    expect(within(tasks[0]).getByTestId('work-task-counts').textContent).toBe('1 active · 2 past');
+    // Where it stands and why, in one line.
+    expect(within(tasks[0]).getByTestId('work-task-line').textContent).toBe('In progress · session needs you');
     // Tracker text is text, never markup.
     expect(screen.getByText('Logout <b>broken</b>')).toBeTruthy();
-    // Occurrence kinds: primary ★, suggested (dashed, "?"), past (ended).
+    // Its live session is a chip; suggested and past links are the task
+    // detail's.
     const occ = within(tasks[0]).getAllByTestId('work-occurrence');
-    expect(occ.map((o) => o.getAttribute('data-kind'))).toEqual(['primary', 'suggested', 'past']);
-    expect(occ[2].textContent).toContain('ended');
-    // The Review tab carries its count.
-    expect(screen.getByTestId('work-tab-review').textContent).toContain('4');
+    expect(occ.map((o) => o.getAttribute('data-kind'))).toEqual(['primary']);
+    // Review is a count beside Tasks.
+    expect(screen.getByTestId('work-review-count').textContent).toBe('4');
+  });
+
+  it('New layout: fixed tabs Tasks, Missions and Board, with Review as a count', async () => {
+    try {
+      render(WorkTree);
+      await flush();
+      expect(screen.getByTestId('work-tab-tasks')).toBeTruthy();
+      expect(screen.getByTestId('work-tab-missions')).toBeTruthy();
+      expect(screen.queryByTestId('work-tab-review')).toBeNull();
+      // Board is a tab, not a layout chip beside List and Grouped.
+      expect(screen.queryByTestId('work-layout-board')).toBeNull();
+      expect(screen.getByTestId('work-review-count').textContent).toBe('4');
+
+      await fireEvent.click(screen.getByTestId('work-review-count'));
+      await flush();
+      expect(screen.getByTestId('work-review-strip').textContent).toContain('Review: 4 waiting');
+      expect(screen.getByTestId('work-tab-tasks').getAttribute('aria-selected')).toBe('true');
+      await fireEvent.click(screen.getByTestId('work-review-strip-close'));
+      expect(screen.queryByTestId('work-review-strip')).toBeNull();
+
+      await fireEvent.click(screen.getByTestId('work-tab-board'));
+      expect(get(workBoardOpen)).toBe(true);
+      expect(screen.getByTestId('work-tab-board').getAttribute('aria-selected')).toBe('true');
+      expect(screen.getByTestId('work-tab-tasks').getAttribute('aria-selected')).toBe('false');
+      await fireEvent.click(screen.getByTestId('work-tab-missions'));
+      expect(get(workBoardOpen)).toBe(false);
+      expect(screen.getByTestId('work-tab-missions').getAttribute('aria-selected')).toBe('true');
+      // Pull requests (6.4) is the fourth tab, as on the Work board.
+      await fireEvent.click(screen.getByTestId('work-tab-prs'));
+      await flush();
+      expect(screen.getByTestId('work-prs')).toBeTruthy();
+      expect(screen.getByTestId('work-tab-prs').getAttribute('aria-selected')).toBe('true');
+    } finally {
+      workBoardOpen.set(false);
+    }
+  });
+
+  it('the Pull requests tab shows the PRs view beside Tasks, Missions and Board (6.4)', async () => {
+    render(WorkTree);
+    await flush();
+    expect(screen.queryByTestId('work-prs')).toBeNull();
+    await fireEvent.click(screen.getByTestId('work-tab-prs'));
+    await flush();
+    expect(screen.getByTestId('work-prs')).toBeTruthy();
+    expect(screen.queryByTestId('work-review')).toBeNull();
+    // Every earlier tab is still there.
+    for (const t of ['tasks', 'missions', 'board']) expect(screen.getByTestId(`work-tab-${t}`)).toBeTruthy();
   });
 
   it('opening a section loads it by itself; Load more pages with its own cursor', async () => {
@@ -189,17 +242,14 @@ describe('WorkTree', () => {
     expect(screen.getAllByTestId('work-task').filter((t) => t.classList.contains('lit'))).toHaveLength(2);
   });
 
-  it('an occurrence opens the same session; a past one opens the task', async () => {
+  it('a session chip opens the same session from every task it is under', async () => {
     render(WorkTree);
     await flush();
     const occ = screen.getAllByTestId('work-occurrence');
-    await fireEvent.click(occ[3]); // ABC-13's secondary link of session 7
+    await fireEvent.click(occ[1]); // ABC-13's secondary link of session 7
     expect(get(selectedSession)?.id).toBe(7);
     expect(get(selectedTaskId)).toBe('item:13');
     expect(get(taskDetailOpen)).toBe(false);
-    await fireEvent.click(occ[2]); // ended
-    expect(get(selectedTaskId)).toBe('item:12');
-    expect(get(taskDetailOpen)).toBe(true);
   });
 
   it('a task row selects it and opens its detail', async () => {
@@ -210,6 +260,50 @@ describe('WorkTree', () => {
     expect(get(taskDetailOpen)).toBe(true);
     await flush();
     expect(screen.getAllByTestId('work-task')[1].classList.contains('selected')).toBe(true);
+  });
+
+  // Review r13 D15 (the Work half): a first load shows nothing for 400 ms and
+  // then a skeleton, never a "Loading work…" line that flashes on a quick load.
+  it('the first load shows no text before 400 ms, then a skeleton', async () => {
+    vi.useFakeTimers();
+    try {
+      treeImpl = () => new Promise(() => {});
+      render(WorkTree);
+      await tick();
+      const box = screen.getByTestId('work-tree-loading');
+      expect(box.textContent?.trim()).toBe('');
+      expect(within(box).queryByTestId('skeleton')).toBeNull();
+      vi.advanceTimersByTime(400);
+      await tick();
+      expect(within(box).getByTestId('skeleton').getAttribute('aria-label')).toBe('Loading work');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The other Work views hold the same rule; the source says it.
+  it('no Work view writes a "Loading …" line of its own', async () => {
+    const { readFileSync } = await import('node:fs');
+    for (const f of ['WorkBoard', 'WorkTree', 'WorkPrs', 'WorkMissions']) {
+      const s = readFileSync(`src/lib/${f}.svelte`, 'utf8');
+      expect(s, f).not.toMatch(/>\s*Loading[^<]*…\s*</);
+    }
+  });
+
+  it('with no tracker connected, the empty state offers Create a task and Connect a tracker (G3.13)', async () => {
+    const { settingsOpen, settingsSection } = await import('./app_views');
+    treeImpl = () => ({ ...firstPage, tasks: [], groups: [], trackers: [], total: 0 });
+    render(WorkTree);
+    await flush();
+    expect(screen.getByTestId('work-tree-no-tracker').textContent).toContain('No tracker connected');
+    await fireEvent.click(screen.getByTestId('work-empty-connect'));
+    expect(get(settingsSection)).toBe('trackers');
+    expect(get(settingsOpen)).toBe(true);
+    settingsOpen.set(false);
+    settingsSection.set(null);
+    await fireEvent.click(screen.getByTestId('work-empty-create'));
+    await flush();
+    expect(screen.getByRole('dialog')).toBeTruthy();
   });
 
   it('empty, error with Retry, and an older hub', async () => {
@@ -416,7 +510,7 @@ describe('WorkTree', () => {
   it('a change while Review shows reads only its count; back on Tasks, the tree once', async () => {
     render(WorkTree, { debounceMs: 5 });
     await flush();
-    await fireEvent.click(screen.getByTestId('work-tab-review'));
+    await fireEvent.click(screen.getByTestId('work-review-count'));
     await flush();
     const trees = treeCalls().length;
     const reviews = reviewCalls();
@@ -429,7 +523,7 @@ describe('WorkTree', () => {
     await flush();
     expect(treeCalls()).toHaveLength(trees + 1);
     // Nothing changed since: switching back and forth reads nothing.
-    await fireEvent.click(screen.getByTestId('work-tab-review'));
+    await fireEvent.click(screen.getByTestId('work-review-count'));
     await flush();
     await fireEvent.click(screen.getByTestId('work-tab-tasks'));
     await flush();
@@ -465,7 +559,7 @@ describe('WorkTree', () => {
     ]);
     expect(reviewCalls()).toBe(0);
     expect(screen.getByText('Receipts')).toBeTruthy();
-    expect(screen.getByTestId('work-tab-review').textContent).toContain('2');
+    expect(screen.getByTestId('work-review-count').textContent).toBe('2');
     bumpWorkChanged('session');
     await new Promise((r) => setTimeout(r, 30));
     await flush();
@@ -558,7 +652,7 @@ describe('WorkTree', () => {
     await fireEvent.click(within(group()).getByTestId('work-load-more'));
     await flush();
     expect(within(group()).getAllByTestId('work-task')).toHaveLength(3);
-    await fireEvent.click(screen.getByTestId('work-tab-review'));
+    await fireEvent.click(screen.getByTestId('work-review-count'));
     await flush();
     const before = treeCalls().length;
     noteWorkChanged([{ what: 'resync' }]);
@@ -580,7 +674,7 @@ describe('WorkTree', () => {
     expect(treeCalls().filter((a) => a.filters?.group === 'label:Payments')).toHaveLength(1);
     expect(screen.getByText('Receipts')).toBeTruthy();
     expect(reviewCalls()).toBe(1);
-    expect(screen.getByTestId('work-tab-review').textContent).toContain('4');
+    expect(screen.getByTestId('work-review-count').textContent).toBe('4');
   });
 
   it('a steady stream of changes still refreshes within the max wait', async () => {
@@ -619,12 +713,13 @@ describe('WorkTree', () => {
     // One read (the list's, archived on); the header still has its filters.
     expect(treeCalls()).toHaveLength(1);
     expect(treeCalls()[0].filters?.archived).toBe(true);
-    expect(screen.getByTestId('work-tab-review').textContent).toContain('4');
-    expect(screen.getByTestId('work-layout-list').getAttribute('aria-pressed')).toBe('true');
-    await fireEvent.click(screen.getByTestId('work-layout-grouped'));
+    expect(screen.getByTestId('work-review-count').textContent).toBe('4');
+    const group = screen.getByTestId('work-group-select') as HTMLSelectElement;
+    expect(group.value).toBe('list');
+    await fireEvent.change(group, { target: { value: 'group' } });
     await flush();
     expect(screen.queryByTestId('task-list')).toBeNull();
-    expect(screen.getAllByTestId('work-org').length).toBeGreaterThan(0);
+    expect(screen.getAllByTestId('work-group').length).toBeGreaterThan(0);
     expect(get(workLayout)).toBe('grouped');
   });
 
@@ -645,5 +740,194 @@ describe('WorkTree', () => {
     expect(get(workLayout)).toBe('grouped');
     expect(screen.getByText('Receipts')).toBeTruthy();
     expect(get(revealTaskRequest)).toBeNull();
+  });
+
+  it('is accessible', async () => {
+    selectSession(get(sessions)[0]);
+    const { container } = render(WorkTree);
+    await flush();
+    await expectAccessible(container);
+    await fireEvent.click(screen.getByTestId('work-review-count'));
+    await flush();
+    await expectAccessible(container);
+    workLayout.set('list');
+    await flush();
+    await expectAccessible(container);
+  });
+  it('groups by sprint with its roll-up, and plans the selected tasks into a sprint', async () => {
+    const S24 = { id: 'sprint:4', label: 'Sprint 24', source: 'sprint' };
+    const sprints = [
+      { id: 4, kind: 'sprint', name: 'Sprint 24', state: 'active', total: 3, done: 1, created_at: 0, updated_at: 0, version: 1 },
+      { id: 5, kind: 'sprint', name: 'Sprint 25', state: 'planned', total: 0, done: 0, created_at: 0, updated_at: 0, version: 1 },
+      { id: 6, kind: 'sprint', name: 'Sprint 23', state: 'closed', total: 0, done: 0, created_at: 0, updated_at: 0, version: 2 },
+    ];
+    vi.mocked(invoke).mockImplementation(async (cmd: string, raw?: unknown) => {
+      const a = (raw as { args?: Record<string, unknown> } | undefined)?.args ?? {};
+      if (cmd === 'work_tree')
+        return {
+          ...firstPage,
+          tasks: [task({ task_id: 'item:20', item_id: 20, key: 'TASK-20', group: S24, org_id: 1, sessions: [] })],
+          groups: [{ org_id: 1, org_name: 'Acme', group: S24, count: 1 }],
+          next_cursor: null,
+        };
+      if (cmd === 'work_buckets') return sprints;
+      if (cmd === 'add_work_to_bucket') return { ...sprints[1], total: 1 };
+      if (cmd === 'work_review') return { items: [], total: 0, next_cursor: null };
+      void a;
+      return [];
+    });
+    workViewFilters.set({ group_by: 'sprint' });
+    render(WorkTree);
+    await flush();
+    expect(screen.getByTestId('work-group-bucket').textContent).toBe('Active · 1/3 done');
+
+    await fireEvent.click(screen.getByTestId('work-select-toggle'));
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-task-pick'));
+    const pick = screen.getByTestId('work-bulk-sprint') as HTMLSelectElement;
+    // A closed sprint is not offered.
+    expect(Array.from(pick.options).map((o) => o.textContent)).toEqual(['Add to sprint…', 'Sprint 24 (active)', 'Sprint 25 (planned)']);
+    pick.value = '5';
+    await fireEvent.change(pick);
+    await flush();
+    const adds = vi.mocked(invoke).mock.calls.filter((c) => c[0] === 'add_work_to_bucket');
+    expect(adds.map((c) => c[1])).toEqual([{ args: { bucket_id: 5, item_id: 20 } }]);
+    expect(screen.getByTestId('work-bulk-notice').textContent).toBe('Planned 1 task into “Sprint 25”.');
+  });
+
+  it('files the selected tasks under an epic (sprints design §3)', async () => {
+    const EPIC = { id: 'epic:9', label: 'TASK-9 · Login revamp', source: 'epic' };
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_tree')
+        return {
+          ...firstPage,
+          tasks: [task({ task_id: 'item:20', item_id: 20, key: 'TASK-20', group: NONE, org_id: 1, sessions: [] })],
+          groups: [
+            { org_id: 1, org_name: 'Acme', group: NONE, count: 1 },
+            { org_id: 1, org_name: 'Acme', group: EPIC, count: 1 },
+          ],
+          next_cursor: null,
+        };
+      if (cmd === 'set_work_parent') return { id: 20, source: 'local', title: 't', parent_id: 9 };
+      if (cmd === 'work_review') return { items: [], total: 0, next_cursor: null };
+      return [];
+    });
+    render(WorkTree);
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-select-toggle'));
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-task-pick'));
+    const pick = screen.getByTestId('work-bulk-epic') as HTMLSelectElement;
+    expect(Array.from(pick.options).map((o) => o.textContent)).toEqual([
+      'Under epic…',
+      'TASK-9 · Login revamp',
+      'Out of its epic (to the top)',
+    ]);
+    pick.value = '9';
+    await fireEvent.change(pick);
+    await flush();
+    expect(vi.mocked(invoke).mock.calls.filter((c) => c[0] === 'set_work_parent').map((c) => c[1])).toEqual([
+      { args: { item_id: 20, parent: 'item:9' } },
+    ]);
+    expect(screen.getByTestId('work-bulk-notice').textContent).toBe('Filed 1 task under “TASK-9 · Login revamp”.');
+  });
+});
+
+// G2.1 (FormsWork): ⌘N in Work makes a task; New session keeps it elsewhere.
+describe('WorkTree: New task on ⌘N', () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    workLayout.set('grouped');
+    treeImpl = () => firstPage;
+    mockHub();
+  });
+
+  it('opens New task from the chord and from +, and owns the chord only while mounted', async () => {
+    const isMac = detectMac(navigator);
+    const { unmount } = render(WorkTree);
+    await flush();
+    expect(newTaskOwnsChord()).toBe(true);
+    expect(screen.queryByTestId('new-task-dialog')).toBeNull();
+    window.dispatchEvent(
+      new KeyboardEvent('keydown', isMac ? { key: 'n', metaKey: true } : { key: 'N', ctrlKey: true, shiftKey: true }),
+    );
+    await flush();
+    expect(screen.getByTestId('new-task-dialog')).toBeTruthy();
+    await fireEvent.click(screen.getByTestId('sheet-cancel'));
+    await flush();
+    expect(screen.queryByTestId('new-task-dialog')).toBeNull();
+    await fireEvent.click(screen.getByTestId('work-new-task'));
+    await flush();
+    expect(screen.getByTestId('new-task-dialog')).toBeTruthy();
+    unmount();
+    expect(newTaskOwnsChord()).toBe(false);
+  });
+});
+
+describe('WorkTree tab counts and hidden rows (G3.3)', () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    activeWorkViewId.set(null);
+    workViewFilters.set({});
+    workExpanded.set({});
+    sessions.set([]);
+  });
+
+  function hub(page: WorkTreePage) {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_tree') return page;
+      if (cmd === 'work_review') return { items: [], total: 0, next_cursor: null };
+      if (cmd === 'work_missions')
+        return [
+          { id: 1, name: 'a', state: 'active' },
+          { id: 2, name: 'b', state: 'draft' },
+          { id: 3, name: 'c', state: 'completed' },
+        ];
+      if (cmd === 'list_pull_requests') return { items: [], total: 3 };
+      if (cmd === 'work_views') return [];
+      return null;
+    });
+  }
+
+  it('counts the tree’s tasks, the missions still moving and the open pull requests', async () => {
+    workLayout.set('grouped');
+    hub(firstPage);
+    render(WorkTree);
+    await flush();
+    expect(screen.getByTestId('work-tab-tasks-count').textContent).toBe('6');
+    expect(screen.getByTestId('work-tab-missions-count').textContent).toBe('2');
+    expect(screen.getByTestId('work-tab-prs-count').textContent).toBe('3');
+    expect(screen.getByTestId('work-tab-tasks').textContent).toBe('Tasks6');
+  });
+
+  it('a hub that refuses a list shows no number, not 0', async () => {
+    workLayout.set('grouped');
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_tree') return firstPage;
+      if (cmd === 'work_missions' || cmd === 'list_pull_requests') throw { code: 'E_INVALID', message: 'unknown command' };
+      return null;
+    });
+    render(WorkTree);
+    await flush();
+    expect(screen.queryByTestId('work-tab-missions-count')).toBeNull();
+    expect(screen.queryByTestId('work-tab-prs-count')).toBeNull();
+  });
+
+  it('List: counts the rows not done, and Hidden by filters clears the filters but archived', async () => {
+    workLayout.set('list');
+    workViewFilters.set({ status: 'open', query: 'pay' });
+    hub({
+      ...firstPage,
+      tasks: [task({ task_id: 'item:1', stage: 'in_progress' }), task({ task_id: 'item:2', stage: 'done', status_category: 'done' })],
+      hidden_by_filters: 31,
+    });
+    render(WorkTree);
+    await flush();
+    expect(screen.getByTestId('work-tab-tasks-count').textContent).toBe('1');
+    const row = screen.getByTestId('work-hidden-by-filters');
+    expect(row.textContent).toContain('Hidden by filters 31');
+    await fireEvent.click(row);
+    expect(get(workViewFilters).status).toBeUndefined();
+    expect(get(workViewFilters).query).toBeUndefined();
   });
 });

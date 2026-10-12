@@ -73,9 +73,9 @@ generated from it.
 
 5. Wait for the `release` workflow to finish (it starts on the tag push).
    `verify-release` goes red if anything is missing; when it passes, the
-   `publish` job publishes the release — all 11 assets, a `SHA256SUMS`
-   covering every one of them, and this version's CHANGELOG section as the
-   notes. A green run means the release is live.
+   `publish` job publishes the release — all 14 assets, including a
+   `SHA256SUMS` covering every other one, and this version's CHANGELOG
+   section as the notes. A green run means the release is live.
 
    **If the run is red**, the release is still a draft with whatever it
    managed to build. Nothing was published; fix the failing leg and re-run
@@ -90,11 +90,20 @@ generated from it.
 
    It tags [fleet-mobile](https://github.com/martin-janci/fleet-mobile)'s
    `main` head `v0.3.0` — refusing if claude-fleet's own `v0.3.0` is not on
-   GitHub yet, if fleet-mobile's CI has not passed on that commit, or if
+   GitHub yet, if that commit's `MIN_HUB_CONTRACT..MAX_HUB_CONTRACT`
+   (`shared/…/net/HubContract.kt`) does not cover the `CONTRACT_REVISION`
+   the claude-fleet tag ships (a hub contract bump needs a fleet-mobile PR
+   first — 0.4.8's phone refused its own hub as "too old"), if fleet-mobile's
+   CI has not passed on that commit, or if
    fleet-mobile already has `v0.3.0` somewhere else — and that tag starts
    fleet-mobile's `release.yml`: test, build, sign with the release key,
    publish a release with the APK. The claude-fleet release body already
    links to it. See [The phone app](#the-phone-app) below.
+
+   The contract rule is `scripts/check-mobile-contract.sh`, and `ci.yml`
+   runs it on every PR against fleet-mobile `main`: a PR that moves
+   `CONTRACT_REVISION` fails until fleet-mobile accepts the new revision;
+   any other PR only warns.
 
 ## The phone app
 
@@ -115,6 +124,20 @@ and the app reports that version in its Settings screen.
 - **versionCode** is fleet-mobile's release-workflow run number, so it only
   grows; `versionName` is the tag without the `v`.
 - **iOS** is not released: there is no signing identity for it yet.
+- **Its place in the update manifest** (update design §4, S8; owner's answer
+  to §13.2). fleet-mobile's release publishes a versioned
+  `fleet-mobile-<v>.apk` with a `SHA256SUMS`, then sends this repository a
+  `repository_dispatch` (`android-release`) with the APK's URL, sha256, size,
+  versionCode, its signing certificate's sha256 and the phone's contract
+  window. `android-amendment.yml` turns that into a signed amendment —
+  `amendments/<v>/android.json` + `.minisig` on the `update-channels`
+  branch, adding the `android` component to that release — and lists it on
+  every track that carries the release (`scripts/update-channels.sh amend`).
+  Hubs then offer the APK to paired phones. The dispatch needs a token that
+  can trigger workflows here: the fine-grained token in fleet-mobile's
+  `FLEET_DISPATCH_TOKEN` secret (Actions: write on claude-fleet only). Without
+  it the APK still ships; phones are just not offered it until someone runs
+  `android-amendment.yml` by hand with the same fields.
 
 ## Upgrading into the work graph
 
@@ -165,7 +188,7 @@ rows, one per session that had none. The rest are DDL, whose cost does not
 grow with the data. Re-run the numbers with:
 
 ```bash
-cargo test -p fleet-core --lib store::schema::tests_upgrade -- --nocapture --test-threads=1
+cargo fleet-test -- store::schema::tests_upgrade --nocapture --test-threads=1
 ```
 
 ## GitHub release job
@@ -183,7 +206,7 @@ The jobs, in order:
 | `version-consistency` | `scripts/check-version-consistency.sh --expect-tag` — the six carriers, the four `Cargo.lock` entries, the hub image pin and this tag must all agree | **no** — everything else `needs:` it |
 | `plan` | turns `scripts/release-assets.sh` into the two build matrices | **no** |
 | `create-release` | creates (or reuses) the one release, as a draft, with this version's CHANGELOG section as its notes and the build commit recorded | **no** |
-| `build` | three `tauri-action` legs; then renames the macOS updater bundle to carry the version | **no** |
+| `build` | four `tauri-action` legs (two macOS, Linux, Windows); then renames the macOS updater bundle to carry the version | **no** |
 | `agent-hub-binaries` | two native Linux legs → four tarballs | yes (`continue-on-error`) |
 | `manifest` | writes, signs and uploads the update manifest (`release-manifest.json` + `.minisig`, from 0.4.1) — see *Update manifest and channels* | yes (`continue-on-error`; `verify-release` requires its two assets) |
 | `checksums` | downloads every asset on the release, hashes it, uploads `SHA256SUMS` | yes (`continue-on-error`) |
@@ -234,7 +257,7 @@ before you do it:
 
 ### The assets
 
-12 per release from 0.3.4 (11 before it), every one version-bearing:
+14 per release from 0.4.1 (12 from 0.3.4, 11 before it), every one version-bearing:
 
 | asset | built by |
 |-------|----------|
@@ -244,6 +267,7 @@ before you do it:
 | `claude-fleet_<v>_x64-setup.exe` (from 0.3.4; bundles Microsoft's ConPTY, fetched and SHA-256-checked by `scripts/fetch-conpty.sh`) | `build`, `windows-latest` |
 | `fleet-agent-<v>-x86_64-unknown-linux-gnu.tar.gz`, `fleet-hub-<v>-…` | `agent-hub-binaries`, `ubuntu-22.04` |
 | `fleet-agent-<v>-aarch64-unknown-linux-gnu.tar.gz`, `fleet-hub-<v>-…` | `agent-hub-binaries`, `ubuntu-22.04-arm` |
+| `release-manifest.json`, `release-manifest.json.minisig` (from 0.4.1) | `manifest` |
 | `SHA256SUMS` | `checksums` |
 
 The two `.app.tar.gz` bundles are the exception that needed fixing:
@@ -333,7 +357,7 @@ tarball can always be traced back to a tree, even if the tag later moves.
 ### The RC channel
 
 A version with a pre-release suffix — `0.3.0-rc.1` — is a first-class
-release here, not a special case: same eleven assets, same checksums, same
+release here, not a special case: same assets, same checksums, same
 gate, same automatic publication. What differs is decided by the `-` in the
 tag and nothing else:
 
@@ -362,6 +386,31 @@ is a real section (it lands between released versions, which is why the rc
 line is worth keeping short), and `+build` metadata is refused outright —
 `+` is not a legal character in a Docker tag, so `hub-image.yml` could not
 publish an image for such a version.
+
+### Dev releases and nightlies
+
+`.github/workflows/nightly.yml` publishes the `dev` and `nightly` update
+tracks. Nobody runs anything by hand:
+
+- after **every** green CI run of a `main` push:
+  `X.Y.Z-dev.N.desktop.g<sha>` — the next patch after the newest stable tag,
+  `N` the commits since it — with every leg, the desktop bundles included.
+  It is listed on `dev.json`;
+- the same release is also listed on `nightly.json` when nightly last moved
+  two hours ago or more (`scripts/update-channels.sh add`, from the
+  `update-channels` branch's own history).
+
+`scripts/cut-nightly.sh` makes scripts/release.sh's release commit on top of
+that `main` commit, pushes **only the tag** (the commit is on no branch;
+`main` never carries a dev version), and dispatches `release.yml` and
+`hub-image.yml` at it, since a tag the workflow token pushes starts nothing
+by itself. From there it is an ordinary pre-release: same gate, same
+manifest (its `release.track` says `nightly`, which every hub reads),
+published, and listed by the `channel` job. The newest 15 dev releases are
+kept, plus whatever `nightly.json` still lists; older ones lose their
+release and their tag. `workflow_dispatch` cuts one now from the newest
+green `main`. A version without `.desktop.` (`scripts/release-assets.sh
+has-desktop`) still builds no desktop legs, for a cut by hand.
 
 ### The CI gate
 
@@ -415,7 +464,8 @@ exist. It reports:
 1. a `vX.Y.Z` tag with no release object — a release deleted by hand, or a
    tag whose workflow never ran (both have happened here: v0.2.22, v0.2.24
    and v0.2.25 have tags and no releases; v0.2.27 was bumped and never
-   tagged);
+   tagged). Tags with no release on purpose are listed in
+   `.github/release-drift-ignore`;
 2. a draft older than six hours — since publication is automatic, a
    lingering draft means a leg failed and nobody went back to it;
 3. the newest ten releases still carrying every asset, checked by
@@ -433,13 +483,16 @@ Everything lands in **one** issue labelled `release-drift`, rewritten in
 place. The report deliberately contains no timestamps, so an unchanged
 problem produces an identical body, the edit is skipped and nobody is
 notified again; when the drift clears, the issue is closed with a comment.
-*The issue create/update/close steps have never run against GitHub* — they
-are reviewed YAML, and the step that feeds them was verified by executing its
-body under `bash -e` (the Actions default shell) against the live script.
-Expect the first scheduled run to be the real test.
+The create step first ran against GitHub on 2026-09-27 and opened #322. The
+update and close steps have not run there yet; they are reviewed YAML, and the
+step that feeds them was verified by running its body under `bash -e` (the
+Actions default shell) against the live script.
 
 A tag that is *meant* to have no release goes in `.github/release-drift-ignore`
-with the reason in a `#` comment. That is the only way to silence a line.
+with the reason in a `#` comment. That is the only way to silence a
+missing-release line. The list does not cover drafts: a stale draft is
+published, or deleted and its tag then listed there (v0.2.28–v0.2.31,
+v0.2.36 and v0.2.37 went that way).
 
 Run it yourself any time — it writes nothing:
 
@@ -537,7 +590,11 @@ the operator's side is `docs/updates.md`). Two kinds of signed document:
 
 - **the release manifest** — `release-manifest.json` + `.minisig` on each
   release from 0.4.1: every component's artifacts by digest (the hub image
-  by `sha256:` digest, the tarballs, the desktop downloads) and the
+  by `sha256:` digest, the tarballs, the desktop downloads, and the
+  desktop's updater bundles — `.app.tar.gz`, AppImage, NSIS — each with a
+  `tauri_signature`: `release-manifest.sh` signs the bundle itself with the
+  same key, trusted comment `version:<v>`, for tauri-plugin-updater; no
+  `TAURI_SIGNING_PRIVATE_KEY` and no `.sig` asset) and the
   protocol windows the **released** fleet-hub states itself
   (`fleet-hub compat`). Immutable, like the release. Written by
   `scripts/release-manifest.sh` in the `manifest` job, before `checksums`,
@@ -550,8 +607,8 @@ the operator's side is `docs/updates.md`). Two kinds of signed document:
   started against the manifest (design §8.4); it never names a run, since
   the image is another run and a re-run job another attempt
   (`scripts/release-update-scripts-test.sh` holds the three to one form);
-- **the channel documents** — `stable.json`, `beta.json` (and later
-  `nightly.json`), each with its `.minisig`, on the orphan branch
+- **the channel documents** — `stable.json`, `beta.json` and
+  `nightly.json` (see *Nightlies*), each with its `.minisig`, on the orphan branch
   `update-channels`: what each track currently offers, recommends,
   requires, and rolls back to, with a `sequence` (a replayed older document
   is refused) and an `expires_at` 14 days out (an expired one is treated as
@@ -695,7 +752,7 @@ do not edit it by hand. After changing any `#[tool(...)]` description or the
 `generate_handler!` command list, regenerate and commit it, or CI fails:
 
 ```bash
-REGEN_DOCS=1 cargo test -p fleet-core reference_is_current
+REGEN_DOCS=1 cargo fleet-test -- reference_is_current
 ```
 
 ## Conventional Commits

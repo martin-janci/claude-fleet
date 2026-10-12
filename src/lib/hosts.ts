@@ -35,6 +35,23 @@ export interface HostRow {
   provisioned_at?: number | null;
   /** Provisioned, but with content older than this build ships (or unknown). */
   provision_stale?: boolean;
+  /**
+   * How many sessions on this host nobody has claimed (multi-user M1).
+   *
+   * An `unclaimed` session is one fleet did not start — a tmux session the
+   * reconcile pass found — and spec §4.3 says the only thing an out-of-scope
+   * caller may learn about one is a **count**. So this is the count, and there
+   * are deliberately no rows behind it anywhere: rendering them would be the
+   * metadata leak the number exists to avoid (rule 6).
+   *
+   * **Frequently absent, and `null` is not zero** (R5-d): on a hub with more
+   * than one person the backend serves `null` rather than a number, because a
+   * zero is itself a claim about the host that would let a second person infer
+   * one. A surface must render nothing at all for `null` — not `0`, not a dash
+   * — and `fleet-hub session unclaimed` is then the only way a human sees the
+   * counts. Absent, too, from a hub older than M1.
+   */
+  unclaimed_sessions?: number | null;
   /** Harnesses the asset catalog syncs here (multi-harness F3a): null or absent
    *  = auto (Claude, plus Codex where a scan finds it); a list always holds claude. */
   harnesses?: string[] | null;
@@ -42,6 +59,42 @@ export interface HostRow {
    *  degraded part way (the ag launcher did not install, say). Cleared by the
    *  next clean run; absent from an older hub. */
   provision_warning?: string | null;
+  /** Credential variables set on the host that outrank its /login, by name only
+   *  (ANTHROPIC_API_KEY, CLAUDE_CODE_USE_BEDROCK, …), in Claude Code's precedence
+   *  order. null or absent = unknown (never sampled, or an older hub); [] = none. */
+  auth_overrides?: string[] | null;
+  /** The host's Claude login profiles (`~/.claude-profiles/<name>`, docs/accounts.md),
+   *  each with the account it is logged into; account_uuid null = not logged in yet.
+   *  null or absent = never read (or an older hub). */
+  claude_profiles?: HostProfile[] | null;
+  /** Probe facts for the Hosts page (Orbit Fleet 4.6); all absent from an older hub. */
+  cpu_count?: number | null;
+  mem_total_kb?: number | null;
+  /** Boot time the host states, unix seconds. */
+  boot_at?: number | null;
+  /** Round trip of an empty command over SSH; null for `local` or when not timed. */
+  latency_ms?: number | null;
+  /** Disk fleet's worktrees hold on the host, and when that was last asked. */
+  worktree_kb?: number | null;
+  worktree_at?: number | null;
+  /** Which agent CLIs the host has on its PATH (Orbit Fleet 12.4), in the
+   *  health checklist's order; null when never sampled. Absent from an older hub. */
+  agents_on_path?: string[] | null;
+  /** When the host last answered a probe (review r13). Unlike `last_pinged_at`,
+   *  which a failed probe stamps too, it stays put while the host is offline.
+   *  null = never answered; absent from an older hub. */
+  last_reachable_at?: number | null;
+  /** Why the last probe failed: its IpcError code and a short message. Cleared
+   *  by the next probe the host answers; absent from an older hub. */
+  last_probe_error_code?: string | null;
+  last_probe_error?: string | null;
+}
+
+/** One login profile on a host. */
+export interface HostProfile {
+  name: string;
+  account_uuid?: string | null;
+  email?: string | null;
 }
 
 /** The volatile half of a host row, as `host:pinged` carries it. */
@@ -53,6 +106,16 @@ export interface HostHealth {
   mem_avail_kb: number | null;
   uptime_secs: number | null;
   health_at: number | null;
+  /** Absent from an older hub's ping (the row keeps what it had). */
+  auth_overrides?: string[] | null;
+  /** Orbit Fleet 4.6; absent from an older hub's ping. */
+  cpu_count?: number | null;
+  mem_total_kb?: number | null;
+  boot_at?: number | null;
+  latency_ms?: number | null;
+  worktree_kb?: number | null;
+  /** Orbit Fleet 12.4; absent from an older hub's ping. */
+  agents_on_path?: string[] | null;
 }
 
 export interface SshHost {
@@ -111,8 +174,10 @@ export function effectiveHostOf(filter: string, list: readonly Pick<HostRow, 'al
 export const effectiveHostFilter = derived([hostFilter, hosts], ([f, list]) => effectiveHostOf(f, list));
 
 export async function loadHosts(): Promise<Result<HostRow[]>> {
+  const token = rows.beginList();
   const r = await invokeCmd<HostRow[]>('list_hosts');
-  if (r.ok) hosts.set(r.value);
+  // A probe or a remove that landed while the list was in flight wins.
+  if (r.ok) rows.applyList(r.value, token);
   return r;
 }
 
@@ -224,6 +289,9 @@ export function applyHostEvents(events: readonly HostEvent[]): void {
           next = rows.mergeInto(next, {
             ...have,
             last_pinged_at: ev.last_pinged_at,
+            // A ping is a probe that changed nothing else: answered, it moved
+            // `last_reachable_at` with the stamp (store/reconcile.rs).
+            last_reachable_at: ev.reachable ? ev.last_pinged_at : have.last_reachable_at,
             claude_version_at: ev.claude_version_at ?? have.claude_version_at,
             reachable: ev.reachable,
             // The health sample rides the ping (it moves every pass).

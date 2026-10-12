@@ -74,6 +74,14 @@ impl Decider {
     }
 }
 
+/// What [`Store::decide_session_work_in_tx`] did with the target's link.
+enum Decided {
+    /// Nothing was written: a person's decision stands as it is.
+    Kept(i64),
+    /// The link was written (inserted or updated).
+    Wrote(i64),
+}
+
 /// What an agent's decision does to a live link a decision already settled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AgentOver {
@@ -208,6 +216,59 @@ pub struct WorkItemRow {
     pub proposed_by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposal_why: Option<String>,
+    /// When a person put the item on hold (orchestration O2): never READY
+    /// while set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_at: Option<i64>,
+    /// Its acceptance condition lines (orchestration O3), typed by prefix:
+    /// see `service::work::verify`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub done_when: Vec<String>,
+    /// The date the work is due, `YYYY-MM-DD` (migration 154): a person's
+    /// on a native item, the tracker's (Jira `duedate`) on a ticket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_at: Option<String>,
+    /// Its fleet ticket key (`FLT-12`, migration 169): a native item's in a
+    /// project (then the same as `key`), or a GitHub or Asana item's, whose
+    /// tracker key is no name for a person. The UI shows it in place of
+    /// `key`; a key lookup answers to it. `None` for an item that drew none
+    /// (a Jira key is human; a native item outside a project is `TASK-<id>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_key: Option<String>,
+    /// `urgent | high | medium | low` (migration 171): a person's on a
+    /// native item, the tracker's normalised on a ticket. `None` = none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
+    /// Its labels, in order, each once (migration 171).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    /// How big the work is, in [`Self::estimate_unit`] (migration 171).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate: Option<Estimate>,
+    /// `points | hours`; set exactly when `estimate` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate_unit: Option<String>,
+}
+
+/// A task's estimate (migration 171): a finite, positive number, rounded to
+/// two decimals by every writer ([`Estimate::new`]). A newtype so the rows
+/// that carry it stay `Eq`: a NaN never gets in, so equality is total.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct Estimate(pub f64);
+
+impl Eq for Estimate {}
+
+impl Estimate {
+    /// `v` rounded to two decimals; `None` for zero, a negative number or
+    /// anything not finite (no estimate).
+    pub fn new(v: f64) -> Option<Estimate> {
+        if !v.is_finite() {
+            return None;
+        }
+        let r = (v * 100.0).round() / 100.0;
+        (r > 0.0).then_some(Estimate(r))
+    }
 }
 
 /// One session ↔ work link. `participant_id` is `None` once the retired
@@ -302,6 +363,10 @@ pub struct WorkSummary {
     /// The item's key, else the link's `ref_key`.
     #[serde(default)]
     pub key: Option<String>,
+    /// The item's fleet ticket key (`FLT-12`, migration 169), which the UI
+    /// shows in place of `key`; absent when it drew none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_key: Option<String>,
     /// The item's title (empty for a bare key).
     #[serde(default)]
     pub title: String,
@@ -550,12 +615,13 @@ pub(super) const ITEM_COLUMNS: &str =
      tracker_id, external_id, aliases, kind, hierarchy_level, status_name, resolution, parent_id, \
      assignees, iteration, updated_ext, status_changed_at, fetched_at, unavailable_at, \
      unavailable_reason, status_set_by, status_set_at, origin, project_id, notes, task_id, \
-     proposal_state, proposed_by, proposal_why";
+     proposal_state, proposed_by, proposal_why, held_at, done_when, due_at, display_key, priority, \
+     labels, estimate, estimate_unit";
 
 /// How many columns [`ITEM_COLUMNS`] names. A query that appends its own
 /// columns after the list indexes them as `ITEM_COLUMN_COUNT + n` — never a
 /// literal, because a literal silently shifts when a column is added here.
-pub(super) const ITEM_COLUMN_COUNT: usize = 32;
+pub(super) const ITEM_COLUMN_COUNT: usize = 40;
 
 /// A JSON array column as a list; anything unreadable is empty.
 fn json_list(raw: Option<String>) -> Vec<String> {
@@ -597,10 +663,58 @@ pub(super) fn map_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkItemRow> {
         proposal_state: r.get(29)?,
         proposed_by: r.get(30)?,
         proposal_why: r.get(31)?,
+        held_at: r.get(32)?,
+        done_when: json_list(r.get(33)?),
+        due_at: r.get(34)?,
+        display_key: r.get(35)?,
+        priority: r.get(36)?,
+        labels: json_list(r.get(37)?),
+        estimate: r.get::<_, Option<f64>>(38)?.and_then(Estimate::new),
+        estimate_unit: r.get(39)?,
     })
 }
 
 impl Store {
+    /// Where shipped work came from (gap plan G3.2, Today's "from Morning
+    /// PR sweep"): the routine whose newest run started the participant's
+    /// session, else `mission <name>` when the item is a mission's task.
+    /// `None` for work a person started.
+    pub fn shipped_from(
+        &self,
+        participant_id: Option<i64>,
+        item_id: Option<i64>,
+    ) -> rusqlite::Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        if let Some(p) = participant_id {
+            let routine: Option<String> = self
+                .conn
+                .prepare_cached(
+                    "SELECT COALESCE(r.name, rr.routine_name) FROM participants p \
+                     JOIN routine_runs rr ON rr.session_id = p.session_id \
+                     LEFT JOIN routines r ON r.id = rr.routine_id \
+                     WHERE p.id = ?1 ORDER BY rr.id DESC LIMIT 1",
+                )?
+                .query_row([p], |r| r.get(0))
+                .optional()?;
+            if routine.is_some() {
+                return Ok(routine);
+            }
+        }
+        let Some(item) = item_id else {
+            return Ok(None);
+        };
+        let mission: Option<String> = self
+            .conn
+            .prepare_cached(
+                "SELECT m.name FROM work_items i \
+                 JOIN orchestration_projects m ON m.id = i.orchestration_project_id \
+                 WHERE i.id = ?1",
+            )?
+            .query_row([item], |r| r.get(0))
+            .optional()?;
+        Ok(mission.map(|m| format!("mission {m}")))
+    }
+
     /// Keyed local work items changed since `since` (unix seconds), newest
     /// first — the classification nudge's (work graph M4.6) local
     /// candidates. A keyless item cannot be named back by key, so it is not
@@ -613,6 +727,27 @@ impl Store {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {ITEM_COLUMNS} FROM work_items \
              WHERE source = 'local' AND key IS NOT NULL AND updated_at >= ?1 \
+             ORDER BY updated_at DESC, id DESC LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![since, limit as i64], map_item)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Open work items touched since `since`, newest first, at most `limit`:
+    /// not done, not resolved, still answering, and not a proposal nobody
+    /// decided (nor a rejected one). Where Jev's `duplicate` question picks
+    /// its candidates from ([`crate::service::decide::duplicate`]).
+    pub fn open_work_items_since(
+        &self,
+        since: i64,
+        limit: usize,
+    ) -> Result<Vec<WorkItemRow>, IpcError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ITEM_COLUMNS} FROM work_items \
+             WHERE status_category <> 'done' AND resolution IS NULL \
+               AND unavailable_at IS NULL \
+               AND (proposal_state IS NULL OR proposal_state = 'accepted') \
+               AND updated_at >= ?1 \
              ORDER BY updated_at DESC, id DESC LIMIT ?2"
         ))?;
         let rows = stmt.query_map(rusqlite::params![since, limit as i64], map_item)?;
@@ -677,17 +812,28 @@ impl Store {
     }
 
     /// The local item that carries `key` (normalised), if any.
+    /// A ticket key under a prefix a rename replaced finds the item under
+    /// its current one.
     pub fn local_work_item_by_key(&self, key: &str) -> Result<Option<WorkItemRow>, IpcError> {
-        self.conn
-            .query_row(
-                &format!(
-                    "SELECT {ITEM_COLUMNS} FROM work_items WHERE source = 'local' AND key = ?1"
-                ),
-                rusqlite::params![key],
-                map_item,
-            )
-            .optional()
-            .map_err(IpcError::from)
+        let find = |k: &str| {
+            self.conn
+                .query_row(
+                    &format!(
+                        "SELECT {ITEM_COLUMNS} FROM work_items WHERE source = 'local' AND key = ?1"
+                    ),
+                    rusqlite::params![k],
+                    map_item,
+                )
+                .optional()
+                .map_err(IpcError::from)
+        };
+        if let Some(item) = find(key)? {
+            return Ok(Some(item));
+        }
+        match self.current_ticket_key(key)? {
+            Some(k) => find(&k),
+            None => Ok(None),
+        }
     }
 
     /// Resolve a target to `(item_id, ref_key)`: an item must exist; a key
@@ -788,6 +934,40 @@ impl Store {
         take_primary: bool,
         expected: Option<i64>,
     ) -> Result<WorkLinkRow, IpcError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let id = match self.decide_session_work_in_tx(
+            session_id,
+            target,
+            state,
+            source,
+            take_primary,
+            expected,
+        )? {
+            Decided::Kept(id) => {
+                return self
+                    .get_work_link(id)?
+                    .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "work link vanished"))
+            }
+            Decided::Wrote(id) => id,
+        };
+        self.bump_session_for_work(session_id)?;
+        tx.commit()?;
+        self.emit_session(session_id)?;
+        self.get_work_link(id)?
+            .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "work link vanished after write"))
+    }
+
+    /// The writes of [`Self::decide_session_work_as`], inside a transaction
+    /// the caller holds (the switch's, P-2): no commit, no bump, no emit.
+    fn decide_session_work_in_tx(
+        &self,
+        session_id: i64,
+        target: WorkTarget<'_>,
+        state: &str,
+        source: &str,
+        take_primary: bool,
+        expected: Option<i64>,
+    ) -> Result<Decided, IpcError> {
         if !WORK_LINK_SOURCES.contains(&source) {
             return Err(IpcError::new(
                 codes::E_INVALID,
@@ -808,7 +988,6 @@ impl Store {
         )?;
         let primary = state == "confirmed" && (take_primary || !has_primary);
 
-        let tx = self.conn.unchecked_transaction()?;
         let existing: Option<(i64, String, String, i64)> = self
             .conn
             .query_row(
@@ -843,9 +1022,7 @@ impl Store {
         if let (AgentOver::KeepPersons, Some(id), false) = (keep, existing, primary) {
             // A person rejected it already (or confirmed it, and this
             // confirm takes no primary): nothing to write.
-            return self
-                .get_work_link(id)?
-                .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "work link vanished"));
+            return Ok(Decided::Kept(id));
         }
         if primary {
             self.conn.execute(
@@ -911,11 +1088,7 @@ impl Store {
                 self.conn.last_insert_rowid()
             }
         };
-        self.bump_session_for_work(session_id)?;
-        tx.commit()?;
-        self.emit_session(session_id)?;
-        self.get_work_link(id)?
-            .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "work link vanished after write"))
+        Ok(Decided::Wrote(id))
     }
 
     /// Say that `session_id` works on `target`; it becomes the session's
@@ -1106,6 +1279,105 @@ impl Store {
         tx.commit()?;
         self.emit_session(session_id)?;
         Ok(())
+    }
+
+    /// Move session `session_id` from the work of its live link `from` to
+    /// `to` in one step (task → session P-2): `from` ENDS (`end_reason =
+    /// 'switched'`, with the snapshot an ended link keeps, so Continue on the
+    /// old task resumes this session's conversation) and `to` becomes the
+    /// session's primary, as `link` would make it. A compare-and-set on the
+    /// primary the caller saw (`expected_primary`; `Some(0)`: none; `None`:
+    /// no check), so the link → set_primary → unlink sequence it replaces
+    /// can no longer half-fail, and two devices cannot both switch. `to`
+    /// already being `from`'s target is `E_INVALID`; `from` not a live
+    /// confirmed link of this session is `E_NOTFOUND`. The agent's rules are
+    /// [`Self::link_session_work`]'s: an agent never turns a person's
+    /// rejection of `to` into a link.
+    pub fn switch_session_work(
+        &self,
+        session_id: i64,
+        from: i64,
+        to: WorkTarget<'_>,
+        source: &str,
+        expected_primary: Option<i64>,
+    ) -> Result<WorkLinkRow, IpcError> {
+        let participant = self.work_participant(session_id)?;
+        let (to_item, to_ref) = self.resolve_work_target(to)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let current: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM work_links WHERE participant_id = ?1 AND ended_at IS NULL \
+                   AND is_primary = 1 AND state = 'confirmed' ORDER BY id LIMIT 1",
+                rusqlite::params![participant],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(expected) = expected_primary {
+            if current.unwrap_or(0) != expected {
+                return Err(primary_conflict(session_id, current));
+            }
+        }
+        let old: Option<(Option<i64>, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT item_id, ref_key FROM work_links WHERE id = ?1 AND participant_id = ?2 \
+                   AND ended_at IS NULL AND state = 'confirmed'",
+                rusqlite::params![from, participant],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((old_item, old_ref)) = old else {
+            return Err(IpcError::new(
+                codes::E_NOTFOUND,
+                format!("session {session_id} has no live confirmed work link {from}"),
+            ));
+        };
+        let same = |a: &Option<i64>, b: &Option<i64>| a.is_some() && a == b;
+        if same(&old_item, &to_item) || (old_ref.is_some() && old_ref == to_ref) {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!("work link {from} is already on that work: nothing to switch"),
+            ));
+        }
+        self.end_live_link(from, session_id, "switched", now_unix())?;
+        let id = match self.decide_session_work_in_tx(
+            session_id,
+            to,
+            "confirmed",
+            source,
+            true,
+            None,
+        )? {
+            Decided::Kept(id) | Decided::Wrote(id) => id,
+        };
+        self.bump_session_for_work(session_id)?;
+        tx.commit()?;
+        self.emit_session(session_id)?;
+        self.get_work_link(id)?
+            .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "work link vanished after write"))
+    }
+
+    /// The sessions with a live confirmed link to `target`, other than
+    /// `except` (task → session P-3: "this task is already open in …").
+    /// Ids only; the caller decides which of them it may name.
+    pub fn live_sessions_on_target(
+        &self,
+        target: WorkTarget<'_>,
+        except: i64,
+    ) -> Result<Vec<i64>, IpcError> {
+        let (item_id, ref_key) = self.resolve_work_target(target)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT p.session_id FROM work_links l \
+               JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
+             WHERE l.ended_at IS NULL AND l.state = 'confirmed' AND p.session_id IS NOT NULL \
+               AND p.session_id != ?3 \
+               AND ((?1 IS NOT NULL AND l.item_id = ?1) \
+                    OR (?2 IS NOT NULL AND l.item_id IS NULL AND l.ref_key = ?2)) \
+             ORDER BY p.session_id",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![item_id, ref_key, except], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<i64>>>()?)
     }
 
     /// Undo a person's decision (work graph M14.1c): a live confirmed or
@@ -1764,7 +2036,7 @@ impl Store {
                          ELSE 'local' END, \
                     CASE WHEN i.tracker_id IS NOT NULL THEN i.status_category END, \
                     {effective}, \
-                    i.status_name, i.url, i.unavailable_at IS NOT NULL \
+                    i.status_name, i.url, i.unavailable_at IS NOT NULL, i.display_key \
              FROM work_links l \
              JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
              LEFT JOIN work_items i ON i.id = l.item_id \
@@ -1787,6 +2059,7 @@ impl Store {
                     status_name: r.get(9)?,
                     url: r.get(10)?,
                     unavailable: r.get::<_, Option<bool>>(11)?.unwrap_or(false),
+                    display_key: r.get(12)?,
                     state: "confirmed".into(),
                     ..Default::default()
                 },
@@ -2477,5 +2750,66 @@ mod tests {
             "ITEM_COLUMN_COUNT must equal the columns ITEM_COLUMNS names, or every \
              query that appends its own columns decodes the wrong index"
         );
+    }
+}
+
+#[cfg(test)]
+mod shipped_from_tests {
+    use super::*;
+
+    /// Gap plan G3.2: Today's shipped line says which routine or mission
+    /// the work came from; a person's own work says nothing.
+    #[test]
+    fn shipped_work_names_its_routine_or_mission() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("h", None).unwrap();
+        let sid = s
+            .upsert_session("sweep", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        let c = s.conn_ref();
+        c.execute(
+            "INSERT INTO routines (name, trigger, host_alias, project_id, prompt, created_at, updated_at) \
+             VALUES ('Morning PR sweep', 'cron', 'h', 1, 'p', 1, 1)",
+            [],
+        )
+        .unwrap();
+        let rid = c.last_insert_rowid();
+        c.execute(
+            "INSERT INTO routine_runs (routine_id, trigger, state, session_id, started_at) \
+             VALUES (?1, 'cron', 'done', ?2, 1)",
+            rusqlite::params![rid, sid],
+        )
+        .unwrap();
+        let pid: i64 = c
+            .query_row(
+                "SELECT id FROM participants WHERE session_id = ?1",
+                [sid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            s.shipped_from(Some(pid), None).unwrap().as_deref(),
+            Some("Morning PR sweep")
+        );
+
+        let item = s.create_local_work_item(None, "Federation").unwrap();
+        c.execute(
+            "INSERT INTO orchestration_projects (name, goal, mode, state, created_at, updated_at) \
+             VALUES ('Hub federation v2', 'g', 'manual', 'active', 1, 1)",
+            [],
+        )
+        .unwrap();
+        let mid = c.last_insert_rowid();
+        c.execute(
+            "UPDATE work_items SET orchestration_project_id = ?1 WHERE id = ?2",
+            rusqlite::params![mid, item.id],
+        )
+        .unwrap();
+        assert_eq!(
+            s.shipped_from(None, Some(item.id)).unwrap().as_deref(),
+            Some("mission Hub federation v2")
+        );
+        let plain = s.create_local_work_item(None, "Mine").unwrap();
+        assert_eq!(s.shipped_from(None, Some(plain.id)).unwrap(), None);
     }
 }

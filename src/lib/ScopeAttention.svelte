@@ -5,6 +5,7 @@
   // scope. This is the view only: nothing here relaxes the hub's boundary.
   import { sessions } from './sessions';
   import { attentionIdleMinutes } from './notify';
+  import { attentionFacts } from './attention_facts';
   import { effectiveScope, scopes, scopeOf, scopeFilter, needsYouElsewhere } from './orgs';
 
   let nowSec = $state(Math.floor(Date.now() / 1000));
@@ -16,6 +17,7 @@
     needsYouElsewhere($sessions, $effectiveScope, $scopes, $scopeOf, {
       idleSecs: $attentionIdleMinutes * 60,
       now: nowSec,
+      facts: $attentionFacts,
     }),
   );
 </script>
@@ -42,16 +44,16 @@
     gap: 0.3rem;
   }
   .pill {
-    font-size: 0.72rem;
+    font-size: var(--text-2xs);
     padding: 0.1rem 0.45rem;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     border: 1px solid var(--border);
     background: transparent;
     color: var(--fg);
     cursor: pointer;
   }
   .pill.hot {
-    border-color: var(--warn, #f59e0b);
-    color: var(--warn, #f59e0b);
+    border-color: var(--status-waiting);
+    color: var(--status-waiting);
   }
 </style>

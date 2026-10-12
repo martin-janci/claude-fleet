@@ -1,0 +1,21 @@
+# fleet-updater without a long-running container holding the Docker socket:
+# one pass (`fleet-updater once`) from a timer, the socket mounted only for
+# that run. docs/updates.md → fleet-updater → "From a systemd timer".
+#
+#   sudo cp fleet-updater.service fleet-updater.timer /etc/systemd/system/
+#   # set WorkingDirectory to this compose directory, then:
+#   sudo systemctl daemon-reload && sudo systemctl enable --now fleet-updater.timer
+#
+# Do not also run the `auto-update` profile's long-running service.
+[Unit]
+Description=claude-fleet hub update pass (fleet-updater once)
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/fleet-hub
+ExecStart=/usr/bin/docker compose --profile auto-update run --rm --no-deps updater once
+# A pass that installs waits for readiness and the soak; give it room.
+TimeoutStartSec=30min

@@ -1,9 +1,9 @@
 // AgentPanel.test.ts mocks ConversationPanel down to a stub, which proves
 // AgentPanel's own frame but nothing about what happens when the two
 // components are actually stacked. This file mounts the REAL
-// ConversationPanel underneath AgentPanel — the arrangement App.svelte uses
-// — to prove that exactly one composer reaches the page and that it is
-// ConversationPanel's own, so everything the sheet sends goes through the
+// ConversationPanel underneath AgentPanel — the arrangement Control's chat
+// uses — to prove that exactly one composer reaches the page and that it is
+// ConversationPanel's own, so everything the panel sends goes through the
 // send path that owns the panel's live state.
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -28,8 +28,7 @@ vi.mock('./sessions', async () => {
 });
 
 import AgentPanel from './AgentPanel.svelte';
-import { get } from 'svelte/store';
-import { agentPanelOpen, operatorState, operatorSession } from './operator';
+import { operatorState, operatorSession } from './operator';
 import { sessionConversation, sessionActivity, listConversations, toolDetail } from './conversation';
 import { sendPrompt, sessions, applySessionEvents, type SessionRow } from './sessions';
 import { outbox } from './outbox';
@@ -85,6 +84,10 @@ function row(over: Partial<SessionRow> = {}): SessionRow {
 
 beforeEach(() => {
   invoke.mockReset();
+  // The panel wakes the agent on mount (Control, 9.1): it is there already.
+  invoke.mockImplementation(async (cmd: string) =>
+    cmd === 'operator_status' ? { ready: true, session: row(), blocked: null } : null,
+  );
   mockedConv.mockReset();
   mockedConv.mockReturnValue(
     Promise.resolve({ ok: true, value: { truncated: false, context: null, events: [], turns: [] } }),
@@ -95,7 +98,6 @@ beforeEach(() => {
   mockedList.mockResolvedValue({ ok: true, value: [] });
   mockedDetail.mockReset();
   mockedSend.mockReset();
-  agentPanelOpen.set(true);
   outbox.resetForTests();
   operatorState.set('ready');
   operatorSession.set(row());
@@ -139,7 +141,7 @@ describe('the agent sheet sends through ConversationPanel, not around it', () =>
     render(AgentPanel);
     await settle();
 
-    const box = screen.getByPlaceholderText(/send a prompt/i) as HTMLTextAreaElement;
+    const box = screen.getByPlaceholderText(/ask the fleet/i) as HTMLTextAreaElement;
     await fireEvent.input(box, { target: { value: 'co sa deje' } });
     await fireEvent.click(screen.getByTestId('conv-composer-send'));
     await waitFor(() => expect(screen.getByTestId('conv-outgoing')).toBeTruthy());
@@ -153,7 +155,7 @@ describe('the agent sheet sends through ConversationPanel, not around it', () =>
     });
     await settle();
 
-    const box = screen.getByPlaceholderText(/send a prompt/i) as HTMLTextAreaElement;
+    const box = screen.getByPlaceholderText(/ask the fleet/i) as HTMLTextAreaElement;
     await fireEvent.input(box, { target: { value: 'hello' } });
     await fireEvent.click(screen.getByTestId('conv-composer-send'));
     await waitFor(() => expect(mockedSend).toHaveBeenCalled());
@@ -169,7 +171,7 @@ describe('the agent sheet sends through ConversationPanel, not around it', () =>
     });
     await settle();
 
-    const box = screen.getByPlaceholderText(/send a prompt/i) as HTMLTextAreaElement;
+    const box = screen.getByPlaceholderText(/ask the fleet/i) as HTMLTextAreaElement;
     await fireEvent.input(box, { target: { value: '/clear' } });
     await fireEvent.click(screen.getByTestId('conv-composer-send'));
     await waitFor(() => expect(mockedSend).toHaveBeenCalled());
@@ -248,7 +250,7 @@ describe('the sheet feeds the one composer its live state', () => {
     await rerender({ contextInput: { view: 'hosts', session: null, hostAlias: 'beta', branch: null, friendly: true } });
     expect(screen.getByTestId('agent-context-chip').textContent).toContain('beta');
 
-    const box = screen.getByPlaceholderText(/send a prompt/i) as HTMLTextAreaElement;
+    const box = screen.getByPlaceholderText(/ask the fleet/i) as HTMLTextAreaElement;
     await fireEvent.input(box, { target: { value: 'hello' } });
     await fireEvent.click(screen.getByTestId('conv-composer-send'));
     await waitFor(() => expect(mockedSend).toHaveBeenCalled());
@@ -263,7 +265,7 @@ describe('the sheet feeds the one composer its live state', () => {
     await settle();
     await fireEvent.click(screen.getByTestId('agent-context-chip'));
 
-    const box = screen.getByPlaceholderText(/send a prompt/i) as HTMLTextAreaElement;
+    const box = screen.getByPlaceholderText(/ask the fleet/i) as HTMLTextAreaElement;
     await fireEvent.input(box, { target: { value: 'bare' } });
     await fireEvent.click(screen.getByTestId('conv-composer-send'));
     await waitFor(() => expect(mockedSend).toHaveBeenCalled());
@@ -283,7 +285,7 @@ describe('the sheet feeds the one composer its live state', () => {
     render(AgentPanel);
     await settle();
 
-    const box = screen.getByPlaceholderText(/send a prompt/i) as HTMLTextAreaElement;
+    const box = screen.getByPlaceholderText(/ask the fleet/i) as HTMLTextAreaElement;
     await fireEvent.input(box, { target: { value: 'druhy prompt' } });
     applySessionEvents([
       { type: 'updated', row: row({ claude_status: 'working', last_activity_at: 200 }) },
@@ -322,7 +324,7 @@ describe('the sheet feeds the one composer its live state', () => {
     ]);
     await waitFor(() => expect(screen.getByTestId('conv-composer-status')).toBeTruthy());
 
-    const box = screen.getByPlaceholderText(/send a prompt/i) as HTMLTextAreaElement;
+    const box = screen.getByPlaceholderText(/ask the fleet/i) as HTMLTextAreaElement;
     await fireEvent.input(box, { target: { value: 'ahoj' } });
     await fireEvent.keyDown(box, { key: 'Enter' });
     await settle();
@@ -352,12 +354,6 @@ describe('the sheet feeds the one composer its live state', () => {
     expect(mockedSend.mock.calls[0][2]).toBe('');
   });
 
-  it('closes on Escape from inside the composer, where a window-level handler would not', async () => {
-    render(AgentPanel);
-    await settle();
-    await fireEvent.keyDown(screen.getByPlaceholderText(/send a prompt/i), { key: 'Escape' });
-    expect(get(agentPanelOpen)).toBe(false);
-  });
 });
 
 // Work graph M9: operator commands fill the operator's composer, never send.
@@ -371,12 +367,129 @@ describe('operator commands', () => {
     const cmd = screen
       .getAllByTestId('agent-command')
       .find((b) => b.textContent === 'Tidy up done tickets')!;
+    // One row of chips above the box: the operator commands share it with
+    // the quick prompts, inside the composer form, so they must not submit.
+    expect(cmd.closest('[data-testid="conv-chips"]')).not.toBeNull();
+    expect(cmd.getAttribute('type')).toBe('button');
     await fireEvent.click(cmd);
     await tick();
     await tick();
-    const box = screen.getByPlaceholderText(/send a prompt/i) as HTMLTextAreaElement;
+    const box = screen.getByPlaceholderText(/ask the fleet/i) as HTMLTextAreaElement;
     expect(box.value).toContain('`work` tool, action `tidy`');
     expect(box.value).toContain('`tidy_apply`');
     expect(mockedSend).not.toHaveBeenCalled();
+  });
+});
+
+// Gap plan G3.9: Control runs /task, /done, /assign and /start itself, over
+// the backend actions Work uses; /plan and the built-ins reach the agent as
+// typed.
+describe("Control's own slash commands", () => {
+  async function settle() {
+    for (let i = 0; i < 6; i++) {
+      await tick();
+      await Promise.resolve();
+    }
+  }
+  const calls = (cmd: string) => invoke.mock.calls.filter((c) => c[0] === cmd).map((c) => c[1]);
+
+  async function type(text: string) {
+    const box = screen.getByPlaceholderText(/ask the fleet/i) as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: text } });
+    await fireEvent.click(screen.getByTestId('conv-composer-send'));
+    return box;
+  }
+
+  it('says what the box takes: # task, @ host, / command', async () => {
+    render(AgentPanel);
+    await settle();
+    expect(screen.getByTestId('conv-composer-hint').textContent).toBe('# task · @ host · / command · ↵ send');
+  });
+
+  it('/task creates the task with its owner and due date, and never reaches the agent', async () => {
+    const { resetCommandReceiptsForTests } = await import('./control_slash');
+    resetCommandReceiptsForTests();
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'operator_status') return { ready: true, session: row(), blocked: null };
+      if (cmd === 'create_work_task') return { id: 9, key: 'TASK-9', title: 'Rotate the NAS password', source: 'local', status_category: 'todo' };
+      if (cmd === 'edit_work_item') return { id: 9, key: 'TASK-9', title: 'Rotate the NAS password', source: 'local', status_category: 'todo' };
+      return null;
+    });
+    render(AgentPanel);
+    await settle();
+    const box = await type('/task Rotate the NAS password due:2026-10-16 @Martin');
+    await waitFor(() => expect(screen.getByTestId('control-command-receipt').dataset.state).toBe('done'));
+    expect(calls('create_work_task')).toEqual([{ args: { title: 'Rotate the NAS password' } }]);
+    expect(calls('edit_work_item')).toEqual([{ args: { item_id: 9, due_at: '2026-10-16', assignees: ['Martin'] } }]);
+    expect(screen.getByTestId('control-command-line').textContent).toContain('Created TASK-9');
+    expect(screen.getByTestId('control-command-open').textContent).toBe('Open in Work ↗');
+    expect(box.value).toBe('');
+    expect(mockedSend).not.toHaveBeenCalled();
+  });
+
+  it('a mistyped command shows its usage and sends nothing', async () => {
+    const { resetCommandReceiptsForTests } = await import('./control_slash');
+    resetCommandReceiptsForTests();
+    render(AgentPanel);
+    await settle();
+    await type('/done');
+    await waitFor(() => expect(screen.getByTestId('control-command-line').textContent).toBe('Usage: /done #KEY'));
+    expect(mockedSend).not.toHaveBeenCalled();
+  });
+
+  it('/plan goes to the agent exactly as typed', async () => {
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    render(AgentPanel);
+    await settle();
+    await type('/plan the Windows installer polish');
+    await waitFor(() => expect(mockedSend).toHaveBeenCalled());
+    expect(mockedSend.mock.calls[0][2]).toBe('/plan the Windows installer polish');
+  });
+
+  it('the menu lists each command with what it takes', async () => {
+    render(AgentPanel);
+    await settle();
+    const box = screen.getByPlaceholderText(/ask the fleet/i) as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: '/as' } });
+    await waitFor(() => expect(screen.getAllByTestId('conv-slash-item').length).toBeGreaterThan(0));
+    const item = screen.getAllByTestId('conv-slash-item').find((li) => li.textContent?.includes('/assign'));
+    expect(item?.querySelector('[data-testid="conv-slash-usage"]')?.textContent).toBe('#KEY @session');
+  });
+});
+
+// Gap plan G3.13 (board Finish, "Control · first run").
+describe('Control on its first run', () => {
+  async function settle() {
+    for (let i = 0; i < 6; i++) {
+      await tick();
+      await Promise.resolve();
+    }
+  }
+
+  it('an agent nobody wrote to opens on three first steps; they fill the box or open New session', async () => {
+    const { newSessionHostRequest } = await import('./app_views');
+    const { get } = await import('svelte/store');
+    render(AgentPanel);
+    await settle();
+    expect(screen.getByTestId('control-first-run').textContent).toContain('Ask Control about your fleet');
+    await fireEvent.click(screen.getByTestId('control-first-needs'));
+    await settle();
+    const box = screen.getByPlaceholderText(/ask the fleet/i) as HTMLTextAreaElement;
+    expect(box.value).toContain('What needs me?');
+    expect(mockedSend).not.toHaveBeenCalled();
+    await fireEvent.click(screen.getByTestId('control-first-start'));
+    expect(get(newSessionHostRequest)).toBe('local');
+    newSessionHostRequest.set(null);
+    await fireEvent.click(screen.getByTestId('control-first-close'));
+    await settle();
+    expect(screen.queryByTestId('control-first-run')).toBeNull();
+  });
+
+  it('is gone once the agent has been asked something', async () => {
+    operatorSession.set(row({ last_prompt: 'What needs me?' }));
+    sessions.set([row({ last_prompt: 'What needs me?' })]);
+    render(AgentPanel);
+    await settle();
+    expect(screen.queryByTestId('control-first-run')).toBeNull();
   });
 });

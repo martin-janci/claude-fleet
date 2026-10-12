@@ -1,12 +1,14 @@
 <script lang="ts">
   import { untrack } from 'svelte';
+  import Meter from './kit/Meter.svelte';
   // Sticky bar above the Conversations tab thread: conversation switcher,
   // context meter, model, status and last notable event (spec §6).
-  import type { SessionRow } from './sessions';
+  import { sessionAgent, type SessionRow } from './sessions';
   import {
     contextMeter,
     conversationTitle,
     relativeTime,
+    backgroundStatusWord,
     statusChip,
     switcherEntries,
     switcherLabel,
@@ -14,7 +16,7 @@
     type ConversationSummary,
   } from './conversation';
   import type { TurnIndexEntry } from './conversation_nav';
-  import { contextColor } from './attention';
+  import { claudeStatusLabel } from './attention';
 
   // The find and turn-index state lives in ConversationPanel (it owns the
   // thread and the scroller); the header only renders the controls and
@@ -104,17 +106,18 @@
   let button: HTMLButtonElement | undefined = $state();
 
   const entries = $derived(switcherEntries(conversations));
+  const agent = $derived(sessionAgent(session));
   const shown = $derived(
     viewing === null
       ? entries.find((c) => c.current)
       : entries.find((c) => c.claude_session_id === viewing),
   );
   const label = $derived(
-    shown ? switcherLabel(shown) : { when: viewing === null ? 'Current' : 'Earlier conversation', source: '' },
+    shown ? switcherLabel(shown, agent) : { when: viewing === null ? 'Current' : 'Earlier conversation', source: '' },
   );
   // The full title, turn count included, for the tooltip: the button drops
   // the source on a narrow header and never shows the count.
-  const title = $derived(shown ? conversationTitle(shown) : label.when);
+  const title = $derived(shown ? conversationTitle(shown, agent) : label.when);
   const meter = $derived(viewing === null ? contextMeter(session) : null);
   // An earlier conversation shows its own model; the current one prefers the
   // row's live value.
@@ -273,7 +276,7 @@
             onkeydown={(e) => onItemKey(e, c)}
             tabindex={i === focusIndex ? 0 : -1}
           >
-            <span class="t">{conversationTitle(c)}</span>
+            <span class="t">{conversationTitle(c, agent)}</span>
             {#if c.first_prompt}<span class="p">{c.first_prompt}</span>{/if}
           </li>
         {/each}
@@ -315,13 +318,12 @@
         aria-valuetext={meter.label}
         aria-label="context usage"
         title={meter.title}
-        style="--ctx-tone: {contextColor(meter.level)};"
-        ><span class="ctx-track" aria-hidden="true"><span class="ctx-fill" style="width: {Math.min(100, Math.max(0, meter.pct))}%;"></span></span
+        ><span class="ctx-track" aria-hidden="true"><Meter value={meter.pct / 100} level={meter.level ?? 'ok'} label={meter.label} /></span
         ><span class="ctx-pct">{meter.pctLabel}</span
         >{#if meter.tokensLabel}<span class="ctx-tokens">{meter.tokensLabel}</span>{/if}</span
       >
     {/if}
-    {#if status}<span class="tag status" data-testid="conv-status" data-status={status} title="Status: {status}"><span class="status-dot" aria-hidden="true"></span><span class="status-word">{status}</span></span>{/if}
+    {#if status}<span class="tag status" data-testid="conv-status" data-status={status} title="Status: {status}"><span class="status-dot" aria-hidden="true"></span><span class="status-word">{status === 'compacting' ? 'Working · compacting' : claudeStatusLabel(status)}</span></span>{/if}
     {#if model}<span class="tag tag--mono" data-testid="conv-model">{model}</span>{/if}
     {#if lastEvent}<span class="tag last-event" data-testid="conv-last-event">{lastEvent}</span>{/if}
     </div>
@@ -378,7 +380,7 @@
                   <li>
                     <button type="button" data-testid="conv-background-item" onclick={() => onPickBackground(e)}>
                       <span class="ti-label">{e.kind} · {e.label}</span>
-                      <span class="bg-item-status" data-status={e.status}>{e.status}</span>
+                      <span class="bg-item-status" data-status={e.status}>{backgroundStatusWord(e.status)}</span>
                     </button>
                   </li>
                 {/each}
@@ -443,7 +445,7 @@
   .caret {
     flex: 0 0 auto;
     color: var(--fg-muted);
-    font-size: 9px;
+    font-size: var(--text-2xs);
   }
   .dot {
     flex: 0 0 auto;
@@ -471,7 +473,7 @@
     padding: 0.25rem 0;
     list-style: none;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: var(--bg);
     box-shadow: 0 4px 16px color-mix(in srgb, var(--fg) 15%, transparent);
   }
@@ -481,7 +483,7 @@
     gap: 0.1rem;
     padding: 0.35rem 0.65rem;
     cursor: pointer;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .menu li:hover,
   .menu li.selected {
@@ -495,7 +497,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     color: var(--fg-muted);
-    font-size: 0.74rem;
+    font-size: var(--text-2xs);
   }
   .facts,
   .find-inline {
@@ -562,7 +564,7 @@
     padding: 0.25rem 0;
     list-style: none;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: var(--bg);
     box-shadow: 0 4px 14px color-mix(in srgb, var(--fg) 15%, transparent);
   }
@@ -579,7 +581,7 @@
     background: none;
     color: var(--fg);
     font: inherit;
-    font-size: 0.78rem;
+    font-size: var(--text-2xs);
     text-align: left;
     cursor: pointer;
   }
@@ -610,7 +612,7 @@
   }
   .bg-group {
     padding: 0.3rem 0.65rem 0.15rem;
-    font-size: 0.7rem;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--fg-muted);
@@ -622,7 +624,7 @@
   }
   .bg-item-status {
     margin-left: auto;
-    font-size: 0.72rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .bg-item-status[data-status='running'] {
@@ -698,36 +700,22 @@
   .ctx[data-stale='true'] {
     opacity: 0.55;
   }
+  /* The kit's Meter (manual: Meter), 44 px beside its number. A stale
+     reading dims the whole tag (above). */
   .ctx-track {
-    position: relative;
     flex: 0 0 auto;
     width: 44px;
-    height: 4px;
-    border-radius: 2px;
-    overflow: hidden;
-    background: var(--control-border);
-  }
-  .ctx-fill {
-    position: absolute;
-    inset: 0 auto 0 0;
-    border-radius: inherit;
-    background: var(--ctx-tone);
-  }
-  /* Stale: the fill is a guess until the next reply, so it is drawn as one. */
-  .ctx[data-stale='true'] .ctx-fill {
-    background: repeating-linear-gradient(
-      90deg,
-      var(--ctx-tone) 0 3px,
-      transparent 3px 5px
-    );
   }
   .ctx-pct {
     color: var(--control-fg);
     font-weight: 500;
   }
-  .ctx[data-level='warn'] .ctx-pct,
+  /* The number takes the Meter's level colour (manual: Meter). */
+  .ctx[data-level='warn'] .ctx-pct {
+    color: var(--status-waiting);
+  }
   .ctx[data-level='crit'] .ctx-pct {
-    color: var(--ctx-tone);
+    color: var(--status-failed);
   }
   .ctx-tokens {
     color: var(--control-fg-quiet);

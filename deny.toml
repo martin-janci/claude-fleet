@@ -47,6 +47,14 @@ allow = [
 ]
 confidence-threshold = 0.8
 
+# Mozilla's root certificates as data, under the Community Data License
+# Agreement (permissive): reqwest's platform verifier (rustls-platform-verifier)
+# carries them, through tauri-plugin-updater (update design S7). One crate,
+# not the license at large.
+[[licenses.exceptions]]
+crate = "webpki-root-certs"
+allow = ["CDLA-Permissive-2.0"]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "allow"

@@ -14,16 +14,19 @@
   // send-keys into the REPL), so anything typed here is what the terminal
   // would have received. bg / external rows have no REPL to type into, so
   // they stay read-only.
+  import { conversationFindRequest } from './search_api';
   import { untrack, tick, setContext, type Snippet } from 'svelte';
   import { requestOpenPath, OPEN_PATH_CONTEXT, type OpenPathFn } from './app_views';
-  import { sendPrompt, hasNoPane, sessions, type SessionRow } from './sessions';
+  import { sendPrompt, hasNoPane, sessions, sessionAgent, restartSession, type SessionRow } from './sessions';
   import AnswerPrompt from './AnswerPrompt.svelte';
+  import FormCard from './forms/FormCard.svelte';
+  import ChatWizards from './forms/ChatWizards.svelte';
   import { pendingInputFor } from './pending_input';
   import { hintAnchor } from './hints';
   import { composerPresets, presetSendsNow, type ComposerPreset } from './composer_presets';
-  import { needsMore, wrapsPastOneLine } from './composer_overflow';
+  import { chipsThatFit } from './composer_chips';
   import { contextLevel } from './attention';
-  import { timeAgo } from './session_status';
+  import { shortAge } from './session_status';
   import { onTimelineEvent, onConversationsChanged } from './live_events';
   import type { SessionEvent } from './timeline';
   import ConversationHeader from './ConversationHeader.svelte';
@@ -32,7 +35,12 @@
   import CopyButton from './CopyButton.svelte';
   import ReplyActions from './ReplyActions.svelte';
   import ForkSheet from './ForkSheet.svelte';
-  import { finalizeBranchSlug } from './branch-slug';
+  import SendLaterSheet from './SendLaterSheet.svelte';
+  import ContextHelp from './ContextHelp.svelte';
+  import { askComposerHelp, commandLine, helpModel } from './context_help';
+  import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
+  import Icon from './kit/Icon.svelte';
+  import { suggestedForkName } from './reply_actions';
   import {
     findMatches,
     turnIndex,
@@ -47,6 +55,7 @@
     adjacentTurn,
   } from './conversation_nav';
   import { detectMac, isEditable } from './terminal_keys';
+  import { matchShortcut } from './shortcuts';
   import {
     sessionConversation,
     listConversations,
@@ -57,8 +66,10 @@
     formatTokens,
     SOURCE_LABELS,
     sameConversation,
+    reuseTurns,
     isPinned,
     emptyStateText,
+    agentLabel,
     emptyStateHint,
     relativeTime,
     groupItems,
@@ -75,8 +86,11 @@
     carriedCount,
     matchSlashCommands,
     completeSlashCommand,
-    MODEL_OPTIONS,
-    EFFORT_OPTIONS,
+    newDividerAnchor,
+    turnAnchor,
+    agentModelProfile,
+    slashCommandsFor,
+    presetForAgent,
     pickerCommand,
     modelShortLabel,
     sessionActivity,
@@ -93,6 +107,7 @@
     CONV_MAX_TURNS,
     PROBE_TTL_MS,
     isQuietStatus,
+    daySeparator,
     shouldFetchTranscript,
     CONVERSATION_POLL_MS,
     ACTIVITY_POLL_MS,
@@ -109,11 +124,32 @@
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { pointInRect, dropPoint } from './geometry';
   import Markdown from './MarkdownView.svelte';
+  import RichText from './RichText.svelte';
   import BackgroundDetail from './BackgroundDetail.svelte';
-  import SpiralLoader from './SpiralLoader.svelte';
+  import Loader from './Loader.svelte';
+  import Skeleton from './states/Skeleton.svelte';
+  import type { LoaderName } from './loader-kit.generated';
+  import PulseSteps from './PulseSteps.svelte';
+  import { startingSessions } from './session_starting';
+  import { sessionPulse, thinkingLabel } from './session_loaders';
   import { selectSessionExplicitly } from './selection';
   import { tasks } from './tasks';
   import { outbox, isHeld, receipt, outboxBody } from './outbox';
+  import { hubStatus, hubActionBlocked } from './hub';
+  import { hubConnection } from './hub_connection';
+  import { sessionBlocked } from './share';
+  import { accessOf, myGrantInfo } from './access';
+  import { orgs as orgList } from './orgs';
+  import { isSharedAccess } from './session_scope';
+  import { readOnlyAnswerLine, sharerName } from './shared_view';
+  import { inboxQueue, nextInInbox } from './inbox';
+  import { push as pushToast } from './toasts';
+  import ConfirmDialog from './ConfirmDialog.svelte';
+  import { projectSkills } from './project_skills';
+  import { completeTaskLink, matchTaskLinks, taskLinkQuery, type TaskLink } from './control_task_link';
+  import { overflowMark } from './overflow_mark';
+  import AutoContinueBar from './AutoContinueBar.svelte';
+  import { recommendedPick } from './auto_continue';
 
   let {
     session,
@@ -149,12 +185,37 @@
     // restriction nobody asked for, so the scope is an explicit prop rather
     // than a rule this component invents for both surfaces.
     //
-    // A bare key press is never gated — see `sendText`.
+    // A bare key press is never held by THIS gate — see `sendText`. Access
+    // is a different question and bars it with everything else.
     blockWhileBusy = false,
     // Rendered directly above the composer, inside the panel's own layout
     // (AgentPanel's removable context chip). Only shown when there IS a
     // composer to sit above.
     composerAbove,
+    composerTools,
+    // The working indicator in another voice (redesign step
+    // 9.13): Control's chat reads the running turn itself and answers the
+    // loader and the line to show instead of the Atom's "Thinking · …".
+    thinkingAs,
+    // Gap plan G3.9: a host that runs some slash commands itself (Control's
+    // /task, /done, /assign, /start — `control_slash.ts`). Asked before a
+    // command goes into the outbox; `true` means it took the line, which
+    // then leaves the box and never reaches the REPL.
+    runCommand,
+    // The line under the box and the box's placeholder, in a host's words
+    // (Control: "# task · @ host · / command").
+    composerHint = '↵ send · ⇧↵ newline · ↑ history',
+    placeholder = 'Send a prompt…',
+    // Gap plan G7.8: "# link a task". A host that hands its tasks here
+    // (Control) gets a menu on `#` that puts a task's key in the box
+    // (`control_task_link.ts`). Read once, the first time `#` is typed.
+    linkTasks,
+    // Gap plan G7.8: a line naming the day ("Today", "Yesterday",
+    // "Thu 8 Oct") above the first row of each day (Control's chat).
+    daySeparators = false,
+    // Control's chat: send a `choices` card's recommended option when
+    // nobody answers in time (`auto_continue.ts`).
+    autoContinue = false,
   }: {
     session: SessionRow;
     visible: boolean;
@@ -164,9 +225,21 @@
     promptPrefix?: string | null;
     blockWhileBusy?: boolean;
     composerAbove?: Snippet;
+    /** Extra chips that join the quick-prompt row (Control's operator
+     *  commands), so one row of chips sits above the box, not two. */
+    composerTools?: Snippet;
+    thinkingAs?: (conv: Conversation | null) => { loader: LoaderName; label: string } | null;
+    runCommand?: (text: string) => boolean;
+    composerHint?: string;
+    placeholder?: string;
+    linkTasks?: () => Promise<TaskLink[]>;
+    daySeparators?: boolean;
+    autoContinue?: boolean;
   } = $props();
 
-  let conv = $state<Conversation | null>(null);
+  // Raw: replaced whole on each read and never mutated, so a deep proxy only
+  // costs every read of a turn a trap (review r16 D3).
+  let conv = $state.raw<Conversation | null>(null);
   // The conversation `conv` was read from (the id the fetch named). Tool
   // details are read from it, not from the row's id at click time: the row
   // can move on (/clear, /resume) before a reload replaces the view.
@@ -213,8 +286,6 @@
   let box: HTMLTextAreaElement | undefined = $state();
   // The chip row holds one line; whatever does not fit collapses behind
   // "More". Measured, not computed, since it depends on layout.
-  let chipsRow: HTMLDivElement | undefined = $state();
-  let chipsOverflow = $state(false);
   let chipsExpanded = $state(false);
   // Slash-command menu: highlighted row, and the draft the user dismissed
   // the menu for (Escape) so it stays hidden until the text changes.
@@ -326,8 +397,9 @@
       else inFlight.delete(id);
     }
     // Drop a stale response: either a newer fetch has started, or the
-    // session prop moved on while this one was in flight.
-    if (mine !== seq || session.id !== id) return;
+    // session prop moved on while this one was in flight (or went: the panel
+    // is torn down when the selection empties, its prop reading null).
+    if (mine !== seq || session?.id !== id) return;
     loading = false;
     if (r.ok) {
       // Stamped on success only: a failed read on a quiet session is retried
@@ -345,7 +417,7 @@
       if (!sameConversation(conv, r.value)) {
         // Older turns prepended by Load older are history, not news.
         if (!pinned && !opts.older) unseen += newItemCount(conv, r.value);
-        conv = r.value;
+        conv = reuseTurns(conv, r.value);
         // Pushed events the read now carries are the backend's to keep (or
         // age out); holding copies would grow `pushed` without bound.
         const carried = new Set((conv.events ?? []).map((e) => e.id));
@@ -365,7 +437,7 @@
     const id = session.id;
     const mine = ++listSeq;
     const r = await listConversations(id);
-    if (mine !== listSeq || session.id !== id) return;
+    if (mine !== listSeq || session?.id !== id) return;
     // A failed (or malformed) read keeps the list we had.
     if (r.ok && Array.isArray(r.value)) conversations = r.value;
   }
@@ -428,6 +500,12 @@
       conversations = [];
       draft = composerDrafts.get(session.id) ?? '';
       draftFor = session.id;
+      // What the person had seen before this visit (redesign 5.9): read
+      // once, before this visit's own stamp moves `last_viewed_at`.
+      seenAt = session.last_viewed_at ?? null;
+      dividerAnchor = null;
+      dividerSet = false;
+      projectCmds = [];
       histIndex = null;
       sendError = null;
       // The tray belongs to the session it was filled for. This panel is ONE
@@ -645,6 +723,30 @@
         }),
   );
 
+  // Chat forms: the form this session's agent waits on. `closedForm` keeps
+  // the last one for a line saying how it ended, once the row drops it.
+  const pendingForm = $derived(viewing === null ? (session.pending_form ?? null) : null);
+  let closedForm = $state<string | null>(null);
+  let lastFormId: string | null = null;
+  let lastFormSessionId: number | null = null;
+  $effect(() => {
+    const id = session.pending_form?.form_id ?? null;
+    if (session.id !== lastFormSessionId) {
+      // This panel is one instance across sessions: a different session is
+      // not a form that closed, and its predecessor's line does not follow.
+      lastFormSessionId = session.id;
+      closedForm = null;
+      lastFormId = id;
+      return;
+    }
+    if (lastFormId && id === null) closedForm = lastFormId;
+    if (id !== null) closedForm = null;
+    lastFormId = id;
+  });
+  const formBlocked = $derived(
+    hubActionBlocked('answer_form', $hubStatus, $hubConnection) ?? $sessionBlocked(session, 'answer_form'),
+  );
+
   // What the running turn is doing right now (the current conversation only:
   // an earlier one is read-only and never running).
   const doing = $derived(viewing === null && indicator?.kind === 'working' ? doingNow(conv, true, nowMs) : null);
@@ -657,12 +759,57 @@
         : indicator.label
       : null,
   );
+  // The loaders (redesign step 5.13): a session this window
+  // just started shows the Pulse sequence until its agent reports a status;
+  // a working agent gets the Atom beside what it is doing.
+  const starting = $derived($startingSessions.has(session.id));
+  const thinking = $derived(
+    indicator?.kind === 'working'
+      ? thinkingLabel(doing ? { label: doing.label, since: doing.sinceMs !== null ? formatDuration(doing.sinceMs) : null } : null)
+      : null,
+  );
+  const thinkingOwn = $derived(thinking && thinkingAs ? thinkingAs(viewing === null ? conv : null) : null);
   // In the template, `turnLive` marks the last turn of the current
   // conversation while the indicator shows anything (working, blocked on a
   // prompt in the terminal, or just sent): an unfinished tool call there is
   // pending, not dead, so it keeps its running clock.
   // The conversation tool details are read from: the one on screen.
   const detailCid = $derived(convCid);
+
+  // ─── The "New" divider (redesign 5.9) ──────────────────────────────────────
+  // Placed once per visit, on the first load of the current conversation:
+  // turns that start while the person is here are not news, so the line does
+  // not follow them down.
+  let seenAt: number | null = null;
+  let dividerAnchor = $state<string | null>(null);
+  let dividerSet = false;
+  $effect(() => {
+    const c = conv;
+    if (!c || dividerSet || viewing !== null) return;
+    untrack(() => {
+      if (convCid !== session.claude_session_id) return;
+      dividerSet = true;
+      dividerAnchor = newDividerAnchor(c.turns, seenAt);
+    });
+  });
+  const showDivider = $derived(viewing === null && dividerAnchor !== null);
+
+  // ─── After an answer (redesign 5.9) ────────────────────────────────────────
+  // An answered card moves you on to the next session that
+  // needs you, with Undo to come back. The answer itself has gone to the pane
+  // already; Undo takes you back to it, it cannot unsend a key.
+  function afterAnswer(label: string) {
+    const from = session;
+    const next = nextInInbox($inboxQueue, from.id);
+    if (!next) return;
+    const verb = /^(yes|approve|allow)\b/i.test(label.trim()) ? 'Approved' : `Answered “${label}”`;
+    selectSessionExplicitly(next);
+    pushToast({
+      kind: 'success',
+      message: `✓ ${verb} · moved to next: ${next.friendly_name ?? next.tmux_name}`,
+      action: { label: 'Undo', run: () => selectSessionExplicitly(from) },
+    });
+  }
 
   const thread = $derived(
     conv ? buildThread(conv.turns, events, { blocked: viewing === null && indicator?.kind === 'blocked' }, conv.truncated) : [],
@@ -764,6 +911,15 @@
     if (next && scrollToRow(next.rowKey)) currentTurnPos += delta;
   }
 
+  // ⌘K found this session by what was said in it: Find opens on the query.
+  $effect(() => {
+    const req = $conversationFindRequest;
+    if (!req || req.sessionId !== session.id || !visible || !threadShown) return;
+    conversationFindRequest.set(null);
+    findQuery = req.query;
+    findIndex = 0;
+    void openFind();
+  });
   async function openFind() {
     // Nothing to search while the thread is loading or empty. The shortcut
     // checks this too (it also owns preventDefault); the header's ⌕ button
@@ -818,20 +974,18 @@
       // `[` / `]` step the turn stepper — only away from any text entry
       // (the composer, the find box), same guard the terminal uses for its
       // own global shortcuts.
+      // The keys are the registry's `conversation` rows (step 0.1).
+      const act = matchShortcut('conversation', e, isMac);
       if (
-        (e.key === '[' || e.key === ']') &&
-        !e.metaKey &&
-        !e.ctrlKey &&
-        !e.altKey &&
+        (act === 'conversation.prev-turn' || act === 'conversation.next-turn') &&
         !isEditable(e.target as HTMLElement | null)
       ) {
         if (!threadShown) return;
         e.preventDefault();
-        stepTurn(e.key === '[' ? -1 : 1);
+        stepTurn(act === 'conversation.prev-turn' ? -1 : 1);
         return;
       }
-      const mod = isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
-      if (!mod || e.altKey || e.shiftKey || e.key.toLowerCase() !== 'f') return;
+      if (act !== 'conversation.find') return;
       // Nothing to search while the thread is loading or empty.
       if (!threadShown) return;
       e.preventDefault();
@@ -952,7 +1106,7 @@
     } finally {
       probing = false;
     }
-    if (session.id !== id || mine !== probeSeq) return;
+    if (session?.id !== id || mine !== probeSeq) return;
     if (!r.ok) {
       // A permanent refusal stops the loop instead of being repeated every
       // 2 s per open panel for as long as the panel is open. A transient one
@@ -1015,13 +1169,19 @@
     return () => clearInterval(t);
   });
 
+  // The row's agent, named in the panel's copy ("Codex is working").
+  const agent = $derived(sessionAgent(session));
+  const agentName = $derived(agentLabel(agent));
   const gone = $derived(viewing !== null && errorCode === 'E_NO_TRANSCRIPT');
-  const empty = $derived(gone ? 'Transcript no longer on host' : emptyStateText(errorCode, !!session.claude_session_id));
+  const empty = $derived(gone ? 'Transcript no longer on host' : emptyStateText(errorCode, !!session.claude_session_id, agent));
   const canPrompt = $derived(!hasNoPane(session));
+  // A reply's cards (rich_blocks.ts) act by filling this composer, so they
+  // act only where it is drawn and holds the conversation on screen.
+  const cardsAct = $derived(showComposer && canPrompt && bgEntry === null && viewing === null);
   const emptyHint = $derived(
     gone
       ? 'The host no longer keeps this conversation’s transcript file.'
-      : emptyStateHint(errorCode, !!session.claude_session_id, canPrompt),
+      : emptyStateHint(errorCode, !!session.claude_session_id, canPrompt, agent),
   );
   // The scroller (and so the thread) is on screen: find has something to search.
   const threadShown = $derived(!(empty && !(outgoing.length > 0 && viewing === null)) && !loading);
@@ -1057,47 +1217,81 @@
     if (!visible || !canPrompt) return;
     void tick().then(() => box?.focus());
   });
-  function measureChips() {
-    if (!chipsRow) return;
-    const row = chipsRow;
-    // Untracked: the effect below calls this, and reading `chipsExpanded`
-    // there would make every toggle re-create the observer.
-    const expanded = untrack(() => chipsExpanded);
-    chipsOverflow = expanded
-      ? wrapsPastOneLine(Array.from(row.children, (c) => (c as HTMLElement).offsetTop))
-      : needsMore(row.scrollWidth, row.clientWidth);
-    if (!chipsOverflow) chipsExpanded = false;
-  }
-  $effect(() => {
-    if (!chipsRow) return;
-    // The row's own border-box need not change when the preset count does,
-    // so a ResizeObserver on it alone can miss a preset-list change. Read
-    // the store here so the effect re-runs (and re-measures) whenever it does.
-    void $composerPresets;
-    measureChips();
-    // ResizeObserver is absent in jsdom; the resize listener is what the
-    // component test drives, and both paths call the same measurement.
-    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measureChips);
-    ro?.observe(chipsRow);
-    window.addEventListener('resize', measureChips);
-    return () => {
-      ro?.disconnect();
-      window.removeEventListener('resize', measureChips);
-    };
-  });
   // ONE signal, two uses: the sentence under the box, and — only where the
   // host asked for it — the gate that refuses the send. Both read this same
   // `$derived`, so they cannot disagree about whether the session is busy.
   // (The pre-refactor code claimed exactly that in a comment while the two
   // composers shared only the note; that is how the gate was lost. The
   // comment is true now because there is one expression, not two.)
-  const busyNote = $derived(composerStatus({ claude_status: liveStatus, stuck_kind: liveStuck }));
+  const busyNote = $derived(composerStatus({ claude_status: liveStatus, stuck_kind: liveStuck }, agent));
   // A gated composer also waits for its own last message to be taken: the
   // sheet is one-shot, and a second paste behind a first that Claude has not
   // read yet is the mangled line the gate exists to prevent.
   const outboxBusy = $derived(outgoing.some((m) => m.state === 'waiting' || m.state === 'sending' || m.state === 'sent'));
   const busyBlocked = $derived(blockWhileBusy && (busyNote !== null || outboxBusy));
-  const canSend = $derived(draft.trim().length > 0 && viewing === null && !busyBlocked);
+  const autoPick = $derived(autoContinue ? recommendedPick(conv) : null);
+
+  // ── May this client write into this session at all? (multi-user M1) ─────
+  //
+  // Two questions, deliberately kept apart, because they gate different
+  // controls:
+  //
+  //  - `shareBlocked` — this client's ACCESS to this row (`share.ts`): own,
+  //    drive, watch, or nothing. A `watch` grantee may not write to the
+  //    owner's REPL at all, and a paired desktop that does not yet know who
+  //    it is fails closed. Null for an owned row and null on a standalone
+  //    desktop (`access.ts::sessionAccess` rule 1), so a single-user install
+  //    is untouched.
+  //  - `writeBlocked` — that, plus what the hub refuses a client outright and
+  //    whether the link is even up, composed with `??` in the precedence
+  //    `share.ts` documents (refusal over "this session is not yours").
+  //
+  // The split matters for the attachment tray. Staging a file reads THIS
+  // machine's disk (`pick_attachments`, `attachment_describe`): pairing with
+  // a hub hands the hub the fleet's database and hosts, not this disk, so a
+  // blinking hub link must not take the tray away. Access must, and for a
+  // sharper reason than tidiness: the composer's second wire call is
+  // `upload_attachments` (`outbox.ts`), which `hub_verdicts.generated.json`
+  // lists under `same_in_both` — this desktop's own scp onto the OWNER's
+  // host with no hub in the path, the same unrevocable channel as
+  // TerminalView's drop handler and `pty_open` (spec §4.3 invariant 4). The
+  // outbox uploads BEFORE it calls the routed `send_prompt`, so a composer
+  // left open to a watcher would land the file in the owner's worktree and
+  // only then be refused the prompt. Hence every attach origin is gated
+  // below, not just Send.
+  //
+  // `send_prompt` is the action to ask about: it is `drive` in
+  // `share.ts::SESSION_TIER`, so a `drive` grantee keeps the whole composer
+  // and a `watch` grantee loses it.
+  const shareBlocked = $derived($sessionBlocked(session, 'send_prompt'));
+  /** The grant level this person holds on someone else's session, or null
+   *  for their own (gap plan G4.2: the answer card shows to a recipient). */
+  const recipientLevel = $derived.by(() => {
+    const a = $accessOf(session);
+    return isSharedAccess(a) ? a : null;
+  });
+  const writeBlocked = $derived(
+    hubActionBlocked('send_prompt', $hubStatus, $hubConnection) ?? shareBlocked,
+  );
+  /**
+   * The reply actions' own question, which is a DIFFERENT one: Fork, Rewind
+   * and Retry are `rewind_conversation`, which `share.ts::SESSION_TIER` puts
+   * in the `own` tier — each leaves a permanent verbatim copy of the owner's
+   * transcript behind, and a copy outlives the grant that allowed it. So they
+   * are barred for a `drive` grantee as well, not only a watcher, and asking
+   * `writeBlocked` (a `drive` question) would have let a driver through.
+   *
+   * `ReplyActions` composes the hub half itself; the access half has to be
+   * handed down, because it needs the session ROW and that component is given
+   * only an id, a host and a tmux name.
+   */
+  const rewindShareBlocked = $derived($sessionBlocked(session, 'rewind_conversation'));
+  const rewindBlocked = $derived(
+    hubActionBlocked('rewind_conversation', $hubStatus, $hubConnection) ?? rewindShareBlocked,
+  );
+  const canSend = $derived(
+    draft.trim().length > 0 && viewing === null && !busyBlocked && writeBlocked === null,
+  );
   // A one-gesture chip send is held while the session is waiting on an
   // answer: a permission or choice prompt (`blocked`) or any stuck screen.
   // What a chip types there lands in the prompt's menu, not in the REPL, and
@@ -1110,35 +1304,189 @@
     if (!chipHold) chipHeld = false;
   });
 
-  // Model / effort pickers: each sends `/model <v>` or `/effort <v>` through
-  // the same outbox as a typed slash command. The model shows from the row
-  // (the transcript's); effort is in no transcript, so the picker remembers
-  // what it last sent to each session and otherwise shows the row's, if any.
+  // Model / effort pickers, per agent (`agentModelProfile`). Claude Code's
+  // send `/model <v>` or `/effort <v>` through the same outbox as a typed
+  // slash command. Codex's `/model` takes no argument, so its pickers list
+  // Codex's own models and relaunch it on the same conversation under the
+  // pick, after a confirm (a turn in progress is lost). The model shows from
+  // the row (the transcript's); effort is in no Claude transcript, so the
+  // picker remembers what it last sent to each session and otherwise shows
+  // the row's, if any — a relaunch stores it on the row.
+  const modelProfile = $derived(agentModelProfile(agent));
+  /** A relaunch pick waiting on its confirm. */
+  let relaunchPick = $state<{ cmd: 'model' | 'effort'; value: string; label: string } | null>(null);
+  let relaunching = $state(false);
   let effortSent = $state<Record<number, string>>({});
   const currentModel = $derived(modelShortLabel(session.model));
-  const currentEffort = $derived(effortSent[session.id] ?? session.effort_level ?? '');
-  const pickersDisabled = $derived(viewing !== null || busyBlocked);
+  const currentEffort = $derived(
+    (modelProfile.mode === 'command' ? effortSent[session.id] : undefined) ?? session.effort_level ?? '',
+  );
+  // Each picker sends `/model` or `/effort` through the outbox, or restarts
+  // the pane, so it is a write like any other.
+  const pickersDisabled = $derived(viewing !== null || busyBlocked || writeBlocked !== null || relaunching);
+  const pickVerb = $derived(
+    modelProfile.mode === 'relaunch' ? `relaunch ${agentName} on it` : null,
+  );
   function pickSetting(cmd: 'model' | 'effort', e: Event) {
     const el = e.currentTarget as HTMLSelectElement;
-    const line = pickerCommand(cmd, el.value);
+    const value = el.value;
+    if (modelProfile.mode === 'relaunch') {
+      // The select snaps back to what the session runs; the confirm decides.
+      el.value = cmd === 'model' ? '' : currentEffort;
+      const opts = cmd === 'model' ? modelProfile.models : modelProfile.efforts;
+      const label = opts.find((o) => o.value === value)?.label ?? value;
+      if (value.trim()) relaunchPick = { cmd, value, label };
+      return;
+    }
+    const line = pickerCommand(cmd, value);
     if (cmd === 'model') el.value = '';
     if (!line) return;
-    if (cmd === 'effort') effortSent = { ...effortSent, [session.id]: el.value };
+    if (cmd === 'effort') effortSent = { ...effortSent, [session.id]: value };
     void sendText(line);
   }
+  async function confirmRelaunch() {
+    const pick = relaunchPick;
+    relaunchPick = null;
+    if (!pick || relaunching) return;
+    // A relaunch is `restart_session` (the `own` tier), not the
+    // `send_prompt` a `/model` line is, so it has its own gate.
+    const blocked =
+      hubActionBlocked('restart_session', $hubStatus, $hubConnection) ?? $sessionBlocked(session, 'restart_session');
+    if (blocked !== null) {
+      pushToast({ kind: 'error', message: blocked });
+      return;
+    }
+    relaunching = true;
+    const r = await restartSession(session.host_alias, session.tmux_name, undefined, { [pick.cmd]: pick.value });
+    relaunching = false;
+    if (!r.ok) {
+      pushToast({ kind: 'error', message: `Could not relaunch ${agentName}: ${r.error.message}` });
+      return;
+    }
+    {
+      pushToast({
+        kind: 'info',
+        message: `${agentName} relaunched on ${pick.cmd === 'model' ? pick.label : `${pick.label.toLowerCase()} effort`}`,
+      });
+    }
+  }
   const statusNote = $derived(
-    viewing !== null
-      ? 'Viewing an earlier conversation — go back to current to send.'
-      : chipHeld && chipHold
-        ? 'The session is waiting on an answer, so the chip filled the box instead of sending. Answer it in the terminal, then press Send.'
-        : busyNote,
+    // First: a composer that cannot send at all owes that sentence before any
+    // sentence about the turn in progress.
+    writeBlocked !== null
+      ? writeBlocked
+      : viewing !== null
+        ? 'Viewing an earlier conversation — go back to current to send.'
+        : chipHeld && chipHold
+          ? 'The session is waiting on an answer, so the chip filled the box instead of sending. Answer it in the terminal, then press Send.'
+          : busyNote,
   );
   // The context meter lives in the header; at warn/crit the Compact chip is
   // suggested, since that is the one-click remedy.
   const ctxLevel = $derived(contextLevel(session.context_pct));
   const suggestCompact = $derived(ctxLevel === 'warn' || ctxLevel === 'crit');
   const isCompactPreset = (p: ComposerPreset) => /^\/compact\b/.test(p.text.trim());
-  const slashMatches = $derived(slashDismissedFor === draft ? [] : matchSlashCommands(draft));
+  // The composer shows the quick prompts that fit on one line and puts the
+  // rest under ⋯ (redesign 5.9); a suggested Compact stays out in front.
+  // Three until the row has been measured (and always under jsdom, which
+  // lays nothing out).
+  const CHIPS_SHOWN = 3;
+  // Each chip as this agent takes it: a Codex session drops a chip for a
+  // Claude-only command and spells `/clear` as `/new` (`presetForAgent`).
+  const validPresets = $derived(
+    $composerPresets
+      .map((p) => presetForAgent(p, agent))
+      .filter((p): p is ComposerPreset => p !== null && !!p.label.trim() && !!p.text.trim()),
+  );
+  let chipsRow: HTMLDivElement | undefined = $state();
+  let chipsMeasure: HTMLSpanElement | undefined = $state();
+  let chipsSep: HTMLSpanElement | undefined = $state();
+  /** The indices of `validPresets` that fit on the collapsed row; null
+   *  until measured. */
+  let chipsFit = $state<number[] | null>(null);
+  const outerWidth = (el: Element) => {
+    const cs = getComputedStyle(el);
+    return el.getBoundingClientRect().width + (parseFloat(cs.marginLeft) || 0) + (parseFloat(cs.marginRight) || 0);
+  };
+  function measureChips() {
+    const row = chipsRow;
+    const m = chipsMeasure;
+    if (!row || !m) return;
+    const width = row.clientWidth;
+    const kids = Array.from(m.children);
+    let next: number[] | null = null;
+    if (width > 0 && kids.length === validPresets.length + 1) {
+      const gap = parseFloat(getComputedStyle(row).columnGap) || 0;
+      // The host's chips (Control's operator commands) share the line.
+      let tools = 0;
+      for (let el: Element | null = chipsSep ?? null; el; el = el.nextElementSibling) tools += gap + outerWidth(el);
+      const pinned = suggestCompact ? validPresets.flatMap((p, i) => (isCompactPreset(p) ? [i] : [])) : [];
+      next = chipsThatFit(
+        kids.slice(0, -1).map(outerWidth),
+        width - tools,
+        outerWidth(kids[kids.length - 1]),
+        gap,
+        pinned,
+      );
+    }
+    if (next?.join() !== chipsFit?.join()) chipsFit = next;
+  }
+  $effect(() => {
+    const row = chipsRow;
+    const m = chipsMeasure;
+    if (!row || !m) return;
+    const ro = new ResizeObserver(() => measureChips());
+    ro.observe(row);
+    ro.observe(m);
+    // A host chip coming or going changes the room left, not the row's size.
+    const mo = new MutationObserver(() => measureChips());
+    mo.observe(row, { childList: true });
+    return () => {
+      ro.disconnect();
+      mo.disconnect();
+    };
+  });
+  $effect(() => {
+    // Re-measure when the presets or the suggestion change.
+    void validPresets;
+    void suggestCompact;
+    untrack(measureChips);
+  });
+  const chipList = $derived(
+    chipsExpanded
+      ? validPresets
+      : chipsFit
+        ? validPresets.filter((_, i) => chipsFit!.includes(i))
+        : validPresets.filter((p, i) => i < CHIPS_SHOWN || (suggestCompact && isCompactPreset(p))),
+  );
+  const chipsHidden = $derived(!chipsExpanded ? validPresets.length - chipList.length : 0);
+  const chipsToggle = $derived(chipsExpanded || chipsHidden > 0);
+  /** ⋯ / Less. The toggle rides with the last chip, so expanding or
+   *  collapsing re-creates it: hand focus to the new one. */
+  async function toggleChips(e: MouseEvent) {
+    const hadFocus = document.activeElement === e.currentTarget;
+    preserveThread(() => (chipsExpanded = !chipsExpanded));
+    if (!hadFocus) return;
+    await tick();
+    chipsRow?.querySelector<HTMLButtonElement>('[data-testid="conv-chips-more"]')?.focus();
+  }
+  // The project's own skills and commands join the built-ins in the New
+  // layout (redesign 5.9), read once the draft starts a slash command.
+  let projectCmds = $state<SlashCommand[]>([]);
+  const slashDraft = $derived(draft.startsWith('/') && !/\s/.test(draft));
+  // A Codex session reads no `.claude/` commands, and runs a skill as
+  // `$name`, not `/name`, so only its built-ins are offered.
+  const builtinCmds = $derived(slashCommandsFor(agent));
+  $effect(() => {
+    if (!slashDraft || agent === 'codex') return;
+    const id = session.id;
+    void projectSkills(id).then((list) => {
+      if (session.id === id) projectCmds = list;
+    });
+  });
+  const slashMatches = $derived(
+    slashDismissedFor === draft ? [] : matchSlashCommands(draft, agent === 'codex' ? [] : projectCmds, builtinCmds),
+  );
   // Ids for the combobox wiring, per panel instance so two panels never hand
   // the same id to assistive tech.
   const SLASH_LIST_ID = `conv-slash-list-${hlSuffix}`;
@@ -1182,6 +1530,33 @@
     histIndex = null;
   }
   const slashOpen = $derived(slashMatches.length > 0);
+
+  // ── # link a task (G7.8) ──
+  let taskLinks = $state.raw<TaskLink[] | null>(null);
+  let taskIndex = $state(0);
+  let taskDismissedFor = $state<string | null>(null);
+  const taskQuery = $derived(linkTasks && !slashOpen ? taskLinkQuery(draft) : null);
+  $effect(() => {
+    if (taskQuery === null || taskLinks !== null || !linkTasks) return;
+    taskLinks = [];
+    void linkTasks().then((list) => (taskLinks = list));
+  });
+  const taskMatches = $derived(
+    taskQuery === null || taskDismissedFor === draft ? [] : matchTaskLinks(taskQuery, taskLinks ?? []),
+  );
+  const taskOpen = $derived(taskMatches.length > 0);
+  $effect(() => {
+    if (taskIndex >= taskMatches.length) taskIndex = 0;
+  });
+  const TASK_LIST_ID = `conv-task-list-${hlSuffix}`;
+  const taskOptionId = (i: number) => `conv-task-opt-${hlSuffix}-${i}`;
+
+  function acceptTask(t: TaskLink) {
+    draft = completeTaskLink(draft, t);
+    taskDismissedFor = draft;
+    histIndex = null;
+    box?.focus();
+  }
   // Keep the highlight inside the list as the prefix narrows it.
   $effect(() => {
     if (slashIndex >= slashMatches.length) slashIndex = 0;
@@ -1200,7 +1575,7 @@
     // The same degrade applies while the session waits on an answer (see
     // `chipHold`), on every composer: an auto-send chip must not type into a
     // permission prompt.
-    if (sendNow && !busyBlocked && !chipHold) {
+    if (sendNow && !busyBlocked && !chipHold && writeBlocked === null) {
       void sendText(p.text.trim() || p.text);
       return;
     }
@@ -1231,8 +1606,10 @@
    *
    *  - `key`     — a bare key press (the press_enter chip's `''`). Not a
    *                prompt at all: no prefix, no attachments, nothing pending,
-   *                and never gated, because it is the recovery path OUT of
-   *                the stuck state a gate would be reading.
+   *                and never held by the BUSY gate, because it is the
+   *                recovery path OUT of the stuck state that gate would be
+   *                reading. Access is not a busy state: a key press is a pane
+   *                write, so `writeBlocked` bars it like everything else.
    *  - `command` — a slash command. The REPL reads the line exactly as
    *                typed, so nothing may be glued to its nose.
    *  - `prompt`  — text Claude reads. The only kind the context prefix rides
@@ -1252,9 +1629,18 @@
    *  moment Enter is pressed. */
   async function sendText(text: string, opts: { fromDraft?: boolean } = {}) {
     if (viewing !== null) return;
+    // Before the key branch, not after it: every kind here ends in a pane
+    // write, and the outbox's upload runs ahead of the routed send.
+    if (writeBlocked !== null) return;
     const kind = sendKind(text);
     if (kind === 'key') {
       await sendKey();
+      return;
+    }
+    if (kind === 'command' && runCommand?.(text)) {
+      if (opts.fromDraft) draft = '';
+      histIndex = null;
+      box?.focus();
       return;
     }
     if (busyBlocked) return;
@@ -1304,13 +1690,17 @@
    *  bubble, never gated — it is the way out of the stuck state a gate
    *  would be reading. */
   async function sendKey() {
-    if (sending) return;
+    // `writeBlocked` is composed of the hub's half and the access half; the
+    // chip that calls this is disabled by it, and the keyboard path checks it
+    // too — but the write itself is here, so the re-ask is here (multi-user
+    // M1, F2b). A bare Enter into the pane is `send_prompt`, `drive`.
+    if (sending || writeBlocked !== null) return;
     sending = true;
     sendError = null;
     const id = session.id;
     const r = await sendPrompt(session.host_alias, session.tmux_name, '');
     sending = false;
-    if (session.id !== id) return;
+    if (session?.id !== id) return;
     if (!r.ok) sendError = r.error.message;
   }
 
@@ -1358,6 +1748,25 @@
     // WebKit fires the composition-confirming Enter with isComposing false
     // and keyCode 229; treat it as composition too.
     if (e.isComposing || e.keyCode === 229) return;
+    if (taskOpen) {
+      const highlighted = taskMatches[taskIndex] ?? taskMatches[0];
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        const n = taskMatches.length;
+        taskIndex = (taskIndex + (e.key === 'ArrowDown' ? 1 : n - 1)) % n;
+        return;
+      }
+      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !e.altKey)) {
+        e.preventDefault();
+        acceptTask(highlighted);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        taskDismissedFor = draft;
+        return;
+      }
+    }
     if (slashOpen) {
       const highlighted = slashMatches[slashIndex] ?? slashMatches[0];
       if (e.key === 'ArrowDown') {
@@ -1491,6 +1900,45 @@
   // anything). A pasted file has neither, and `addFiles` says so.
 
   let attachments = $state<Attachment[]>([]);
+  // Send later (gap plan G2.7, the FormsSession board's "composer › Send
+  // later"): the draft goes into the session's prompt queue with a time
+  // (G1.8). Its own question: `queue_prompt`, `drive` like a send. Text
+  // only, so a tray with files keeps them for a send now.
+  let sendLaterOpen = $state(false);
+  // Context help (`context_help.ts`): ask Haiku about the draft, with the
+  // earlier prompts (the ↑ recall list) and the commands the box accepts as
+  // context. `session_context_help` runs it on the hub when paired, so a
+  // session shared at `answer` or `drive` has it too; a watcher does not.
+  let helpOpen = $state(false);
+  /** Writing help's "Context help" toggle, off by default. */
+  const helpOn = $derived(settingBool($fleetSettings, SETTING_KEYS.workContextHelp));
+  let helpCommands = $state<string[]>([]);
+  const helpBlocked = $derived(
+    hubActionBlocked('session_context_help', $hubStatus, $hubConnection) ??
+      $sessionBlocked(session, 'session_context_help'),
+  );
+  function openHelp() {
+    helpOpen = true;
+    const id = session.id;
+    void projectSkills(id).then((list) => {
+      if (session.id === id) helpCommands = matchSlashCommands('/', list).map(commandLine);
+    });
+  }
+  function askHelp(question: string) {
+    // The grant can narrow while the panel is open: ask again at the call.
+    const blocked = $sessionBlocked(session, 'session_context_help');
+    if (blocked) return Promise.resolve({ ok: false as const, error: { code: 'E_FORBIDDEN', message: blocked } });
+    return askComposerHelp(session.id, { line: draft, history, commands: helpCommands }, question);
+  }
+  const sendLaterBlocked = $derived(
+    viewing !== null
+      ? 'Viewing an earlier conversation — go back to current to send.'
+      : (hubActionBlocked('queue_prompt', $hubStatus, $hubConnection) ?? $sessionBlocked(session, 'queue_prompt')),
+  );
+  const sendLaterWhy = $derived(
+    sendLaterBlocked ??
+      (attachments.length > 0 ? 'Send later carries text only: send the files now, or remove them first' : null),
+  );
   let attachErrors = $state<string[]>([]);
   /** dragleave fires for every child, so DOM nesting is counted, not flagged. */
   let dragDepth = $state(0);
@@ -1499,7 +1947,9 @@
    *  and neither can clear the other's state. */
   let dragOverShell = $state(false);
   let shellEl = $state<HTMLDivElement | null>(null);
-  const dragging = $derived(dragDepth > 0 || dragOverShell);
+  // `shareBlocked`, not `writeBlocked`: staging a file is local, and an
+  // offline hub link is no reason to refuse the drop (see the gate above).
+  const dragging = $derived(shareBlocked === null && (dragDepth > 0 || dragOverShell));
 
   /**
    * Every sentence the composer owes the user about attaching: the
@@ -1520,6 +1970,12 @@
   }
 
   async function attach(picked: PickedFile[]) {
+    // The one place the access gate has to hold for attachments: the OS
+    // picker, Tauri's drop and a paste all funnel through here. A file
+    // accepted into the tray is a file `outbox.ts` scps onto the owner's host
+    // with `upload_attachments` — no hub in the path — the moment anything is
+    // sent, so this is the gate, not the Send button (see `writeBlocked`).
+    if (shareBlocked !== null) return;
     const { next, rejected } = addFiles(attachments, picked);
     // Appended, not replaced: two gestures that each rejected a file owe the
     // user two sentences. `attachNotes` dedupes, so a repeat says it once,
@@ -1559,6 +2015,9 @@
   }
 
   async function pickFiles() {
+    // The button is disabled; this is the keyboard/programmatic path, kept
+    // from opening a native dialog whose result `attach` would then drop.
+    if (shareBlocked !== null) return;
     const r = await invokeCmd<PickedFile[]>('pick_attachments', {});
     if (r.ok) await attach(r.value ?? []);
     else attachErrors = [r.error.message];
@@ -1622,6 +2081,9 @@
 
   function onDroppedPaths(paths: string[]) {
     if (paths.length === 0) return;
+    // Ahead of `attachment_describe`: no veil was drawn for this drop (see
+    // `dragging`), so nothing should measure the files either.
+    if (shareBlocked !== null) return;
     // These paths are already on the Rust allow-list — `lib.rs` recorded them
     // from this very event before the webview heard about it.
     const real = paths.filter((p) => p !== '');
@@ -1669,6 +2131,10 @@
   function onComposerPaste(e: ClipboardEvent) {
     const dt = e.clipboardData;
     if (!dt || dt.files.length === 0) return;
+    // A file paste is an attach by another gesture. Returning before
+    // `preventDefault` leaves the event alone, which is right: the box is
+    // disabled in this state and a file paste puts no text in it anyway.
+    if (shareBlocked !== null) return;
     // A rich-text paste carries both; the text half wins.
     if (dt.getData('text/plain').trim().length > 0) return;
     e.preventDefault();
@@ -1733,17 +2199,14 @@
   let forkOpen = $state(false);
 
   function openForkSheet(anchor: string | null) {
+    // The sheet itself calls `rewind_conversation` (mode `fork`), so the gate
+    // belongs in front of it too and not only on the button that opens it: a
+    // sheet left open across a revoke would still have a live Fork in it.
+    if (rewindBlocked !== null) return;
     forkAnchor = anchor;
     forkOpen = true;
   }
 
-  /** `fork-of-<branch>`, slugified for use as a new worktree's name — the
-   *  branch/worktree's name when this session has one, else its tmux name,
-   *  which is what a `main`-checkout session forks from. */
-  function suggestedForkName(s: SessionRow): string {
-    const base = s.friendly_name?.trim() || s.tmux_name;
-    return finalizeBranchSlug(`fork-of-${base}`) || 'fork';
-  }
 </script>
 
 <div class="conversation-panel" data-testid="conversation-panel" bind:this={root}>
@@ -1792,15 +2255,25 @@
   <div class="thread-area">
   {#if bgEntry}
     <BackgroundDetail entry={bgEntry} onBack={() => (background = null)} onOpenSession={goToSession} />
+  {:else if starting && empty && !(outgoing.length > 0 && viewing === null)}
+    <div class="empty-state" data-testid="conv-starting">
+      <PulseSteps
+        pulse={sessionPulse(session)}
+        title="Starting {session.friendly_name ?? session.tmux_name} on {session.host_alias}"
+      />
+    </div>
   {:else if empty && !(outgoing.length > 0 && viewing === null)}
     <div class="empty-state" data-testid="conv-empty-state">
       <p class="empty-title" data-testid="conv-empty">{empty}</p>
       {#if emptyHint}<p class="empty-hint">{emptyHint}</p>{/if}
     </div>
   {:else if loading}
-    <p class="muted conv-loading" data-testid="conv-loading" role="status">
-      <SpiralLoader size={16} />Loading conversation…
-    </p>
+    <!-- Review r13 (step 10.6, MobileStates' conversation skeleton): nothing
+         for the first 400 ms, then a skeleton; the text no longer flashes on
+         every session switch. -->
+    <div class="conv-loading" data-testid="conv-loading">
+      <Skeleton rows={4} label="Loading conversation" />
+    </div>
   {:else}
     <!-- A scrollable region has to be in the tab order, or the transcript
          can only be scrolled with a pointer; being focusable is also what
@@ -1829,13 +2302,15 @@
             Older turns not shown{#if (turnsWanted ?? CONV_TURNS_STEP) < CONV_MAX_TURNS}
               ·
               <button type="button" class="linkish" data-testid="conv-load-older" disabled={loadingOlder} onclick={() => void loadOlder()}
-                >{#if loadingOlder}<SpiralLoader size={12} class="inline-spiral" />Loading…{:else}Load older{/if}</button
+                >{#if loadingOlder}<Loader name="comet" size={12} class="inline-loader" />Loading…{:else}Load older{/if}</button
               >{/if}
           </p>
         {/if}
         {#if conv}
-          {#each thread as row (rowKey(row))}
+          {#each thread as row, ri (rowKey(row))}
             {@const key = rowKey(row)}
+            {@const day = daySeparators ? daySeparator(thread, ri, nowMs) : null}
+            {#if day}<div class="day-sep" data-testid="conv-day-separator" role="separator" aria-label={day}><span>{day}</span></div>{/if}
             {#if row.kind === 'event'}
               <div
                 class="event"
@@ -1845,7 +2320,7 @@
                 data-match={matchKeys.has(key) || undefined}
                 data-current-match={currentMatch === key || undefined}
               >
-                <span class="label">{row.event.label}</span>{#if row.event.detail}<span class="detail">{row.event.detail}</span>{/if}<time datetime={new Date(row.event.at * 1000).toISOString()}>{timeAgo(row.event.at, nowMs)}</time>
+                <span class="label">{row.event.label}</span>{#if row.event.detail}<span class="detail">{row.event.detail}</span>{/if}<time datetime={new Date(row.event.at * 1000).toISOString()}>{shortAge(row.event.at, Math.floor(nowMs / 1000))}</time>
               </div>
             {:else}
             {@const turn = row.turn}
@@ -1856,6 +2331,9 @@
             {@const groups = groupItems(turn.items)}
             {@const replyText = groups.flatMap((x) => (x.kind === 'text' ? [x.text] : [])).join('\n\n')}
             {@const duration = turnRunning ? null : turnDuration(turn.at, turn.ended_at)}
+            {#if showDivider && turnAnchor(turn) === dividerAnchor}
+              <div class="new-divider" data-testid="conv-new-divider" role="separator" aria-label="New since you last looked"><span>New</span></div>
+            {/if}
             <section
               class="turn"
               data-row-key={key}
@@ -1904,7 +2382,7 @@
                 {#each groups as g, j (j)}
                   {#if g.kind === 'text'}
                     <div class="text" data-testid="conv-text">
-                      <Markdown source={g.text} />
+                      <RichText source={g.text} sessionId={cardsAct ? session.id : null} />
                     </div>
                   {:else if g.kind === 'tools'}
                     <!-- One structure for a lone call and a folded group, so a
@@ -2035,6 +2513,7 @@
                           hostAlias={session.host_alias}
                           tmuxName={session.tmux_name}
                           supported={viewing === null}
+                          accessBlocked={rewindShareBlocked}
                           onFork={(anchor) => openForkSheet(anchor)}
                         />
                       </div>
@@ -2067,7 +2546,7 @@
               </div>
               <div class="receipt" data-tone={r.tone} data-testid="conv-receipt" role="status" aria-live="polite">
                 {#if m.state === 'sending'}
-                  <SpiralLoader size={12} class="receipt-mark" />
+                  <Loader name="comet" size={12} class="receipt-mark" />
                 {:else}
                   <span class="receipt-mark" aria-hidden="true"
                     >{m.state === 'received' ? '✓✓' : m.state === 'sent' || m.state === 'queued' ? '✓' : m.state === 'failed' ? '!' : '·'}</span
@@ -2077,7 +2556,22 @@
                 {#if m.state === 'failed'}
                   <span class="receipt-actions">
                     {#if m.retryable}
-                      <button type="button" class="linkish" data-testid="conv-outgoing-retry" onclick={() => outbox.retry(session.id, m.id)}>Retry</button>
+                      <!-- Retry re-sends through the outbox, which is
+                           `send_prompt`, so it needs the same gate as the
+                           composer (multi-user M1, F2a): a drive→watch narrow
+                           with a failed message still in the outbox is exactly
+                           the state that reaches this button. Edit and Discard
+                           are local-only — one puts the text back in this
+                           client's composer, the other drops this client's own
+                           queue entry — so they stay live. -->
+                      <button
+                        type="button"
+                        class="linkish"
+                        data-testid="conv-outgoing-retry"
+                        disabled={writeBlocked !== null}
+                        title={writeBlocked ?? ''}
+                        onclick={() => writeBlocked === null && outbox.retry(session.id, m.id)}
+                        >Retry</button>
                     {/if}
                     <button type="button" class="linkish" data-testid="conv-outgoing-edit" onclick={() => editOutgoing(m.id)}>Edit</button>
                     <button type="button" class="linkish" data-testid="conv-outgoing-discard" onclick={() => outbox.discard(session.id, m.id)}>Discard</button>
@@ -2088,12 +2582,35 @@
           {/each}
         {/if}
         {#if viewing === null}
-        {#if answerView}
-          <AnswerPrompt {session} view={answerView} {onOpenTerminal} />
+        {#if pendingForm}
+          <FormCard
+            formId={pendingForm.form_id}
+            sessionName={session.friendly_name ?? session.tmux_name}
+            blocked={formBlocked} />
+        {:else if answerView && (writeBlocked === null || recipientLevel !== null)}
+          <!-- Hidden rather than disabled when this client may not write to
+               the session (multi-user M1), the same shape `SessionRowItem`
+               uses for the same card: it is a set of answer BUTTONS, each one
+               a pane write, and a watcher pressing one would only earn an
+               E_FORBIDDEN. The two surfaces rendered the same card with
+               different gating until this; the `blocked` notice below (and the
+               row's status chip) still says the session is waiting. -->
+          <!-- Gap plan G4.2: someone the session is shared with sees the
+               question too. At Answer its choices work (the card's own gate
+               is `answer_dialog`); at Read they are disabled and a line says
+               whose question it is. Typing an answer stays drive. -->
+          <AnswerPrompt
+            {session}
+            view={answerView}
+            onOpenTerminal={writeBlocked === null ? onOpenTerminal : undefined}
+            onAnswered={afterAnswer}
+            onOwnWords={showComposer && writeBlocked === null ? () => void tick().then(() => box?.focus()) : undefined}
+            readOnlyNote={recipientLevel === 'watch' ? readOnlyAnswerLine(sharerName(session, $myGrantInfo.get(session.id), $orgList)) : undefined}
+          />
         {:else if indicator?.kind === 'blocked'}
           <div class="blocked" data-testid="conv-blocked" role="status">
             <div class="blocked-text">
-              <strong>Claude is waiting for you in the terminal{indicator.waiting === 'permission' ? ' (permission)' : indicator.waiting === 'input' ? ' (input)' : ''}.</strong>
+              <strong>{agentName} is waiting for you in the terminal{indicator.waiting === 'permission' ? ' (permission)' : indicator.waiting === 'input' ? ' (input)' : ''}.</strong>
               {#if indicator.detail}<div class="blocked-detail">{indicator.detail}</div>{/if}
             </div>
             {#if onOpenTerminal}
@@ -2111,9 +2628,17 @@
             role={indicator ? 'status' : undefined}
             aria-hidden={indicator ? undefined : 'true'}
           >
-            <SpiralLoader size={16} paused={!indicator} class="indicator-spiral" />
-            <span class="indicator-label"
-              >{!indicator ? '\u00a0' : indicator.kind === 'sent' ? 'Waiting for Claude…' : indicatorLabel}</span
+            {#if thinkingOwn}
+              <Loader name={thinkingOwn.loader} size={20} stage={false} class="indicator-loader" testid="conv-{thinkingOwn.loader}" />
+            {:else if thinking}
+              <Loader name="atom" size={20} stage={false} class="indicator-loader" testid="conv-atom" />
+            {:else}
+              <Loader size={16} paused={!indicator} class="indicator-loader" />
+            {/if}
+            <!-- With nothing running in the transcript, "Thinking" keeps the
+                 pane's own spinner line ("Cooking… 3s") as its tooltip. -->
+            <span class="indicator-label" title={thinking && !doing && indicator?.kind === 'working' ? indicator.label : undefined}
+              >{!indicator ? '\u00a0' : indicator.kind === 'sent' ? `Waiting for ${agentName}…` : (thinkingOwn?.label ?? thinking ?? indicatorLabel)}</span
             >
           </div>
         {/if}
@@ -2129,6 +2654,10 @@
           </p>
         {/if}
         {/if}
+        {#if closedForm && !pendingForm}
+          <FormCard formId={closedForm} sessionName={session.friendly_name ?? session.tmux_name} blocked={null} closed ondismiss={() => (closedForm = null)} />
+        {/if}
+        <ChatWizards {session} {agentName} live={viewing === null} />
       </div>
     </div>
     {#if turnEntries.length > 1 || !atBottom}
@@ -2167,7 +2696,28 @@
   {/if}
   </div>
   {#if composerAbove && showComposer && canPrompt && bgEntry === null}
-    <div class="composer-above">{@render composerAbove()}</div>
+    <!-- Capped and scrolled on its own (Control chat UX, 2026-10-10): a
+         stack of task cards here used to take the whole pane and leave the
+         transcript with no height and nothing to scroll. -->
+    <div
+      class="composer-above"
+      role="region"
+      aria-label="Activity above the box"
+      tabindex="-1"
+      data-testid="conv-composer-above"
+      use:overflowMark
+    >
+      {@render composerAbove()}
+    </div>
+  {/if}
+  {#if autoContinue && showComposer && canPrompt && bgEntry === null}
+    <AutoContinueBar
+      sessionId={session.id}
+      pick={autoPick}
+      ready={busyNote === null && !outboxBusy && viewing === null && writeBlocked === null}
+      typing={draft.trim() !== ''}
+      onSend={(text) => void sendText(text)}
+    />
   {/if}
   {#if showComposer && canPrompt && bgEntry === null}
     <form
@@ -2180,7 +2730,7 @@
       }}
     >
       {#if slashOpen}
-        <ul class="slash-menu" role="listbox" id={SLASH_LIST_ID} aria-label="Claude Code commands" data-testid="conv-slash-menu">
+        <ul class="slash-menu" role="listbox" id={SLASH_LIST_ID} aria-label="{agentName} commands" data-testid="conv-slash-menu">
           {#each slashMatches as c, i (c.name)}
             <li role="presentation" class:active={i === slashIndex} data-testid="conv-slash-item">
               <!-- The button IS the option: role="option" must not wrap an
@@ -2197,11 +2747,51 @@
                 onmousedown={(e) => e.preventDefault()}
                 onclick={() => acceptSlash(c)}>
                 <span class="slash-name">/{c.name}</span>
+                {#if c.usage}<span class="slash-usage" data-testid="conv-slash-usage">{c.usage}</span>{/if}
                 <span class="slash-desc">{c.description}</span>
+                {#if c.source}<span class="slash-source" data-testid="conv-slash-source">{c.source === 'skill' ? 'Skill' : 'Command'}</span>{/if}
               </button>
             </li>
           {/each}
         </ul>
+      {/if}
+      {#if taskOpen}
+        <ul class="slash-menu" role="listbox" id={TASK_LIST_ID} aria-label="Link a task" data-testid="conv-task-menu">
+          {#each taskMatches as t, i (t.key)}
+            <li role="presentation" class:active={i === taskIndex} data-testid="conv-task-item">
+              <button
+                type="button"
+                role="option"
+                id={taskOptionId(i)}
+                aria-selected={i === taskIndex}
+                tabindex="-1"
+                onmousedown={(e) => e.preventDefault()}
+                onclick={() => acceptTask(t)}>
+                <span class="slash-name">#{t.key}</span>
+                <span class="slash-desc">{t.title}</span>
+                {#if t.status}<span class="slash-source">{t.status}</span>{/if}
+              </button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+      {#if helpOn && helpOpen}
+        <ContextHelp
+          model={helpModel($fleetSettings)}
+          line={draft}
+          what="your earlier prompts"
+          ask={askHelp}
+          insertLabel="Put in the box"
+          testid="conv-help"
+          oninsert={(c) => {
+            draft = c;
+            histIndex = null;
+          }}
+          onclose={() => {
+            helpOpen = false;
+            box?.focus();
+          }}
+        />
       {/if}
       {#if sendError}
         <div class="composer-error" data-testid="conv-composer-error">{sendError}</div>
@@ -2212,43 +2802,70 @@
             type="button"
             class="btn btn--chip btn--warn"
             data-testid="conv-chip-enter"
-            title="The session is waiting on a key press. Sends a bare Enter."
-            disabled={sending || viewing !== null}
+            title={writeBlocked ?? 'The session is waiting on a key press. Sends a bare Enter.'}
+            disabled={sending || viewing !== null || writeBlocked !== null}
             onclick={() => void sendText('')}>⏎ Press Enter</button>
         </div>
       {/if}
-      <div class="chips" data-testid="conv-chips" data-expanded={chipsExpanded} bind:this={chipsRow}>
-        {#each $composerPresets as p, i (i)}
-          {#if p.label.trim() && p.text.trim()}
-            {@const suggested = suggestCompact && isCompactPreset(p)}
-            <button
-              type="button"
-              class="btn btn--chip"
-              class:btn--warn={suggested}
-              data-testid="conv-chip"
-              data-suggested={suggested || undefined}
-              data-auto-send={p.auto_send || undefined}
-              title={`${suggested
-                ? `Context window is ${Math.round(session.context_pct ?? 0)}% used. Compacting frees space.`
-                : p.text}\n\n${p.auto_send
-                ? 'Click sends now; Shift+click fills the box.'
-                : 'Click fills the box; Shift+click sends now.'}`}
-              aria-label={p.auto_send ? `${p.label}, sends immediately` : undefined}
-              disabled={viewing !== null}
-              onclick={(e) => usePreset(p, presetSendsNow(p, e.shiftKey))}
-              >{p.label}{#if p.auto_send}<span class="chip-send" aria-hidden="true">&nbsp;↵</span>{/if}</button
+      <div class="chips" data-testid="conv-chips" bind:this={chipsRow}>
+        <!-- Every chip at its natural width, out of the flow, so the
+             collapsed row can tell how many fit (measureChips). -->
+        <span class="chips-measure" aria-hidden="true" bind:this={chipsMeasure}>
+          {#each validPresets as p, i (i)}
+            <span class="btn btn--chip"
+              >{p.label}{#if p.auto_send}<span class="chip-send">&nbsp;↵</span>{/if}</span
             >
+          {/each}
+          <span class="btn btn--chip">⋯</span>
+        </span>
+        {#snippet chipButton(p: ComposerPreset)}
+          {@const suggested = suggestCompact && isCompactPreset(p)}
+          <button
+            type="button"
+            class="btn btn--chip"
+            class:btn--warn={suggested}
+            data-testid="conv-chip"
+            data-suggested={suggested || undefined}
+            data-auto-send={p.auto_send || undefined}
+            title={`${suggested
+              ? `Context window is ${Math.round(session.context_pct ?? 0)}% used. Compacting frees space.`
+              : p.text}\n\n${p.auto_send
+              ? 'Click sends now; Shift+click fills the box.'
+              : 'Click fills the box; Shift+click sends now.'}`}
+            aria-label={p.auto_send ? `${p.label}, sends immediately` : undefined}
+            disabled={viewing !== null || shareBlocked !== null}
+            onclick={(e) => usePreset(p, presetSendsNow(p, e.shiftKey))}
+            >{p.label}{#if p.auto_send}<span class="chip-send" aria-hidden="true">&nbsp;↵</span>{/if}</button
+          >
+        {/snippet}
+        {#snippet moreToggle()}
+          <!-- Redesign 5.9: the chips that fit, the rest under ⋯. -->
+          <button
+            type="button"
+            class="btn btn--chip chips-more"
+            data-testid="conv-chips-more"
+            aria-expanded={chipsExpanded}
+            aria-label={chipsExpanded ? 'Fewer quick prompts' : `${chipsHidden} more quick prompts`}
+            title={chipsExpanded ? 'Fewer quick prompts' : `${chipsHidden} more quick prompts`}
+            onclick={toggleChips}>{chipsExpanded ? 'Less' : '⋯'}</button>
+        {/snippet}
+        {#each chipList as p, i (i)}
+          {#if chipsToggle && i === chipList.length - 1}
+            <!-- The toggle never wraps onto a line by itself: it rides with
+                 the last chip. -->
+            <span class="chips-tail">{@render chipButton(p)}{@render moreToggle()}</span>
+          {:else}
+            {@render chipButton(p)}
           {/if}
         {/each}
+        {#if chipsToggle && chipList.length === 0}
+          {@render moreToggle()}
+        {/if}
+        {#if composerTools}
+          <span class="chips-sep" aria-hidden="true" bind:this={chipsSep}></span>
+          {@render composerTools()}
+        {/if}
       </div>
-      {#if chipsOverflow}
-        <button
-          type="button"
-          class="btn btn--chip chips-more"
-          data-testid="conv-chips-more"
-          aria-expanded={chipsExpanded}
-          onclick={() => preserveThread(() => (chipsExpanded = !chipsExpanded))}>{chipsExpanded ? 'Less' : 'More'} ▾</button>
-      {/if}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="composer-shell"
@@ -2296,8 +2913,12 @@
           class="composer-input"
           data-testid="conv-composer-input"
           aria-label="Prompt"
-          aria-controls={slashOpen ? SLASH_LIST_ID : undefined}
-          aria-activedescendant={slashOpen ? slashOptionId(Math.min(slashIndex, slashMatches.length - 1)) : undefined}
+          aria-controls={slashOpen ? SLASH_LIST_ID : taskOpen ? TASK_LIST_ID : undefined}
+          aria-activedescendant={slashOpen
+            ? slashOptionId(Math.min(slashIndex, slashMatches.length - 1))
+            : taskOpen
+              ? taskOptionId(Math.min(taskIndex, taskMatches.length - 1))
+              : undefined}
           aria-describedby={COMPOSER_HINT_ID}
           bind:this={box}
           bind:value={draft}
@@ -2306,8 +2927,9 @@
           rows="2"
           use:autoGrow={draft}
           onpaste={onComposerPaste}
-          placeholder="Send a prompt…"
-          disabled={viewing !== null}
+          {placeholder}
+          title={shareBlocked ?? undefined}
+          disabled={viewing !== null || shareBlocked !== null}
         ></textarea>
         <div class="composer-actions">
           <button
@@ -2315,18 +2937,21 @@
             class="btn btn--icon btn--quiet"
             data-testid="conv-attach-button"
             aria-label="Attach files"
-            title="Attach files"
+            title={shareBlocked ?? 'Attach files'}
+            disabled={shareBlocked !== null}
             onclick={pickFiles}>⌾</button>
           <select
             class="composer-pick"
             data-testid="conv-model-pick"
             aria-label="Model"
-            title={currentModel ? `Model: ${currentModel}. Pick one to send /model.` : 'Pick a model to send /model.'}
+            title={currentModel
+              ? `Model: ${currentModel}. Pick one to ${pickVerb ?? 'send /model'}.`
+              : `Pick a model to ${pickVerb ?? 'send /model'}.`}
             value=""
             disabled={pickersDisabled}
             onchange={(e) => pickSetting('model', e)}>
             <option value="" disabled>{currentModel ?? 'Model'}</option>
-            {#each MODEL_OPTIONS as o (o.value)}
+            {#each modelProfile.models as o (o.value)}
               <option value={o.value}>{o.label}</option>
             {/each}
           </select>
@@ -2334,24 +2959,45 @@
             class="composer-pick"
             data-testid="conv-effort-pick"
             aria-label="Effort"
-            title={currentEffort ? `Effort: ${currentEffort}. Pick one to send /effort.` : 'Pick an effort level to send /effort.'}
+            title={currentEffort
+              ? `Effort: ${currentEffort}. Pick one to ${pickVerb ?? 'send /effort'}.`
+              : `Pick an effort level to ${pickVerb ?? 'send /effort'}.`}
             value={currentEffort}
             disabled={pickersDisabled}
             onchange={(e) => pickSetting('effort', e)}>
-            {#if !EFFORT_OPTIONS.some((o) => o.value === currentEffort)}
+            {#if !modelProfile.efforts.some((o) => o.value === currentEffort)}
               <option value={currentEffort} disabled>{currentEffort || 'Effort'}</option>
             {/if}
-            {#each EFFORT_OPTIONS as o (o.value)}
+            {#each modelProfile.efforts as o (o.value)}
               <option value={o.value}>{o.label}</option>
             {/each}
           </select>
-          <span class="composer-hint" id={COMPOSER_HINT_ID}>↵ send · ⇧↵ newline · ↑ history</span>
+          <span class="composer-hint" id={COMPOSER_HINT_ID} data-testid="conv-composer-hint">{composerHint}</span>
+          {#if helpOn}
+            <button
+              type="button"
+              class="btn btn--icon btn--quiet"
+              data-testid="conv-help-button"
+              aria-label="Ask {helpModel($fleetSettings)} about this prompt"
+              aria-expanded={helpOpen}
+              title={helpBlocked ?? `Ask ${helpModel($fleetSettings)} about this prompt, with your earlier prompts as context`}
+              disabled={helpBlocked !== null}
+              onclick={() => (helpOpen ? (helpOpen = false) : openHelp())}>?</button>
+          {/if}
+          <button
+            type="button"
+            class="btn btn--icon btn--quiet"
+            data-testid="conv-send-later"
+            aria-label="Send later…"
+            title={sendLaterWhy ?? 'Send later…'}
+            disabled={sendLaterWhy !== null}
+            onclick={() => (sendLaterOpen = true)}><Icon name="clock" size={14} /></button>
           <button
             type="submit"
             class="btn btn--icon btn--primary composer-send"
             data-testid="conv-composer-send"
             aria-label="Send prompt"
-            title="Send (Enter)"
+            title={writeBlocked ?? 'Send (Enter)'}
             aria-keyshortcuts="Enter"
             disabled={!canSend}>↑</button>
         </div>
@@ -2373,6 +3019,36 @@
   {/if}
 </div>
 
+{#if sendLaterOpen}
+  <SendLaterSheet
+    sessionId={session.id}
+    initial={draft}
+    blocked={sendLaterBlocked}
+    onscheduled={(m) => {
+      if (draft.trim() === m) draft = '';
+    }}
+    onclose={() => {
+      sendLaterOpen = false;
+      box?.focus();
+    }}
+  />
+{/if}
+
+{#if relaunchPick}
+  {@const pick = relaunchPick}
+  <ConfirmDialog
+    title={pick.cmd === 'model' ? `Switch ${agentName} to ${pick.label}?` : `Set ${agentName}'s effort to ${pick.label}?`}
+    confirmLabel="Relaunch"
+    onconfirm={confirmRelaunch}
+    oncancel={() => (relaunchPick = null)}
+    confirmTestId="conv-relaunch-confirm"
+  >
+    {agentName} picks its {pick.cmd === 'model' ? 'model' : 'reasoning effort'} when it starts, so this
+    relaunches <code>{session.tmux_name}</code> on the same conversation with
+    {pick.cmd === 'model' ? 'the new model' : 'the new effort'}. A turn in progress is lost.
+  </ConfirmDialog>
+{/if}
+
 {#if forkOpen}
   <ForkSheet
     sessionId={session.id}
@@ -2384,10 +3060,34 @@
 
 <style>
   .composer-above {
+    flex: 0 1 auto;
+    min-height: 0;
+    /* The transcript keeps the rest; the tray scrolls. */
+    max-height: min(40%, 22rem);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
     display: flex;
     flex-wrap: wrap;
+    align-content: flex-start;
     gap: 0.35rem;
-    padding: 0 var(--chat-inset);
+    padding: var(--space-1) var(--chat-inset);
+  }
+  /* Says there is more below while the tray overflows. */
+  .composer-above:global([data-overflow='true']) {
+    -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - var(--space-4)), transparent);
+    mask-image: linear-gradient(to bottom, #000 calc(100% - var(--space-4)), transparent);
+  }
+  .composer-above:global([data-overflow='true'][data-at-end='true']) {
+    -webkit-mask-image: none;
+    mask-image: none;
+  }
+  .composer-above:focus {
+    outline: none;
+  }
+  .composer-above:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+    outline-offset: calc(-1 * var(--ring-w));
   }
   .conversation-panel {
     /* The reading column every part of the thread lines up with: the turns,
@@ -2426,10 +3126,16 @@
   .scroller:focus {
     outline: none;
   }
+  /* A mouse click focuses the transcript with no ring; the keyboard gets
+     one (review r11). Drawn inward, as the scroller clips an outset ring. */
+  .scroller:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+    outline-offset: calc(-1 * var(--ring-w));
+  }
   [data-match] {
     outline: 1px dashed color-mix(in srgb, var(--accent) 55%, transparent);
     outline-offset: 3px;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
   }
   [data-current-match] {
     outline: 2px solid var(--accent);
@@ -2460,20 +3166,45 @@
     justify-content: flex-start;
   }
   .chips {
+    position: relative;
     display: flex;
+    align-items: center;
     gap: var(--control-gap);
     margin: 0 0 6px;
-    /* One row by default; growth is a deliberate toggle, not a reflow. */
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
+  }
+  /* Zero-sized and clipped, so it adds no scroll overflow; its chips keep
+     their natural width inside it (flex: none). */
+  .chips-measure {
+    position: absolute;
+    top: 0;
+    left: 0;
+    display: flex;
+    width: 0;
+    height: 0;
     overflow: hidden;
+    visibility: hidden;
+    pointer-events: none;
+  }
+  .chips-measure > :global(*) {
+    flex: none;
+  }
+  .chips-tail {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--control-gap);
+  }
+  /* Between the quick prompts and the chips a host adds (Control's
+     operator commands). */
+  .chips-sep {
+    align-self: stretch;
+    width: 1px;
+    margin: 2px var(--space-1);
+    background: var(--border);
   }
   /* Marks an auto-send chip: a click sends rather than fills. */
   .chip-send {
     opacity: 0.6;
-  }
-  .chips[data-expanded='true'] {
-    flex-wrap: wrap;
-    overflow: visible;
   }
   .composer-shell {
     position: relative;
@@ -2520,7 +3251,7 @@
   .attach-img { width: 100%; height: 100%; object-fit: cover; display: block; }
   .attach-ext {
     font-family: var(--mono);
-    font-size: 10px;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--control-fg-quiet);
@@ -2539,7 +3270,7 @@
     padding: 0;
     background: color-mix(in srgb, var(--bg) 78%, transparent);
     color: var(--fg);
-    font-size: 13px;
+    font-size: var(--text-sm);
     opacity: 0;
   }
   .attach:hover .attach-x,
@@ -2585,7 +3316,7 @@
     background: none;
     color: var(--fg);
     font: inherit;
-    font-size: 13px;
+    font-size: var(--text-sm);
     line-height: 1.45;
   }
   .composer-input:focus {
@@ -2610,13 +3341,27 @@
     height: var(--control-h);
     padding: 0 0.3rem;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: var(--bg);
     color: var(--control-fg-quiet);
     font-size: var(--control-font-sm);
   }
   .composer-pick:disabled {
     opacity: 0.5;
+  }
+  .day-sep {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin: var(--space-2) 0;
+    font-size: var(--text-2xs);
+    color: var(--fg-muted);
+  }
+  .day-sep::before,
+  .day-sep::after {
+    content: '';
+    flex: 1;
+    border-top: 1px solid var(--border);
   }
   .composer-hint {
     flex: 1 1 auto;
@@ -2638,9 +3383,9 @@
     margin: 0 0 0.4rem;
     padding: 0.25rem 0;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: var(--bg);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .slash-menu li.active,
   .slash-menu li:hover {
@@ -2664,6 +3409,37 @@
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
     color: var(--accent);
   }
+  .slash-source {
+    flex: none;
+    margin-left: auto;
+    padding: 0 6px;
+    border-radius: var(--radius-sm);
+    background: var(--chip-bg, color-mix(in srgb, currentColor 10%, transparent));
+    font-size: var(--text-2xs);
+    opacity: 0.85;
+  }
+  .new-divider {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 4px 0 8px;
+    color: var(--accent);
+    font-size: var(--text-2xs);
+    font-weight: 500;
+  }
+  .new-divider::before,
+  .new-divider::after {
+    content: '';
+    flex: 1 1 auto;
+    height: 1px;
+    background: color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+  .slash-usage {
+    color: var(--fg-muted);
+    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    font-size: var(--text-2xs);
+    white-space: nowrap;
+  }
   .slash-desc {
     flex: 1 1 auto;
     color: var(--fg-muted);
@@ -2674,13 +3450,13 @@
   .composer-error {
     margin: 0 0 0.35rem;
     color: var(--usage-crit);
-    font-size: 0.75rem;
+    font-size: var(--text-2xs);
   }
   .composer-status {
     margin: 0.35rem 0 0;
     color: var(--fg-muted);
-    font-size: 0.75rem;
-    transition: opacity 0.2s ease;
+    font-size: var(--text-2xs);
+    transition: opacity var(--dur-base) ease;
   }
   .composer-status.is-idle {
     opacity: 0;
@@ -2691,8 +3467,8 @@
     gap: 0.5rem;
     padding: 0.35rem 0 0.6rem;
     color: var(--fg-muted);
-    font-size: 0.8rem;
-    transition: opacity 0.2s ease;
+    font-size: var(--text-2xs);
+    transition: opacity var(--dur-base) ease;
   }
   .indicator.is-idle {
     opacity: 0;
@@ -2705,27 +3481,19 @@
     margin: 0;
     padding: 0.35rem 0 0.6rem;
     color: var(--fg-muted);
-    font-size: 0.75rem;
+    font-size: var(--text-2xs);
   }
   .probe-off code {
     font-size: inherit;
   }
-  .indicator :global(.indicator-spiral) {
-    color: var(--accent);
-  }
-  .conv-loading {
-    /* Fills the thread area and sits in its middle, where the transcript
-       (and the empty state) will be — not pinned to the top-left corner. */
+    .conv-loading {
+    /* Fills the thread area where the transcript will be; the skeleton's
+       bars take the thread's width (review r13). */
     flex: 1 1 auto;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.5rem;
     margin: 0;
     padding: 1.5rem 1.1rem;
-    color: var(--fg-muted);
   }
-  .linkish :global(.inline-spiral) {
+  .linkish :global(.inline-loader) {
     margin-right: 0.3em;
     vertical-align: -1px;
   }
@@ -2742,9 +3510,9 @@
     padding: 0.5rem 0.75rem;
     border: 1px solid var(--usage-warn);
     border-left-width: 3px;
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: color-mix(in srgb, var(--usage-warn) 10%, var(--bg-pane));
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .blocked-text {
     flex: 1 1 auto;
@@ -2754,7 +3522,7 @@
     margin-top: 0.2rem;
     color: var(--fg-muted);
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 0.74rem;
+    font-size: var(--text-2xs);
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
@@ -2762,10 +3530,10 @@
     flex: 0 0 auto;
     padding: 0.3rem 0.7rem;
     border: 1px solid var(--usage-warn);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: transparent;
     color: var(--fg);
-    font-size: 0.78rem;
+    font-size: var(--text-2xs);
     cursor: pointer;
   }
   .blocked-btn:hover {
@@ -2780,7 +3548,7 @@
        recipe. */
     padding: 1rem var(--chat-inset) 2.5rem;
   }
-  .muted { color: var(--fg-muted); font-style: italic; font-size: 0.8rem; margin: 0.6rem; }
+  .muted { color: var(--fg-muted); font-style: italic; font-size: var(--text-2xs); margin: 0.6rem; }
   .empty-state {
     flex: 1 1 auto;
     display: flex;
@@ -2794,13 +3562,13 @@
   .empty-title {
     margin: 0;
     color: var(--fg);
-    font-size: 0.9rem;
+    font-size: var(--text-sm);
   }
   .empty-hint {
     margin: 0;
     max-width: 44ch;
     color: var(--fg-muted);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     line-height: 1.5;
   }
   .truncated { text-align: center; margin: 0 0 1rem; }
@@ -2810,7 +3578,7 @@
     gap: 0.5rem;
     margin-bottom: 0.75rem;
   }
-  .err { color: var(--usage-crit); font-size: 0.8rem; }
+  .err { color: var(--usage-crit); font-size: var(--text-2xs); }
   .turn {
     padding: 0.2rem 0 1.1rem;
   }
@@ -2823,7 +3591,7 @@
     padding: 0.5rem 0.75rem 0.55rem;
     border: 1px solid var(--border);
     border-left: 3px solid var(--accent);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: color-mix(in srgb, var(--accent) 6%, var(--bg-pane));
   }
   .prompt-head {
@@ -2834,7 +3602,7 @@
     margin-bottom: 0.2rem;
   }
   .who {
-    font-size: 0.7rem;
+    font-size: var(--text-2xs);
     font-weight: 600;
     letter-spacing: 0.02em;
     text-transform: uppercase;
@@ -2843,14 +3611,15 @@
   time {
     flex: 0 0 auto;
     color: var(--fg-muted);
-    font-size: 0.7rem;
+    font-size: var(--text-2xs);
     white-space: nowrap;
   }
   .prompt-text {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-    font-size: 0.85rem;
-    line-height: 1.5;
+    /* The prompt is read like the reply, so it takes the same step. */
+    font-size: var(--text-md);
+    line-height: 1.55;
     color: var(--fg);
   }
   /* Outgoing: the prompt block while it is on its way, and its receipt. */
@@ -2872,7 +3641,7 @@
   .outgoing-files {
     margin-top: 0.25rem;
     color: var(--fg-muted);
-    font-size: 0.75rem;
+    font-size: var(--text-2xs);
   }
   .receipt {
     display: flex;
@@ -2881,7 +3650,7 @@
     gap: 0.35rem;
     padding-left: 0.2rem;
     color: var(--fg-muted);
-    font-size: 0.72rem;
+    font-size: var(--text-2xs);
   }
   .receipt[data-tone='ok'] {
     color: var(--usage-ok);
@@ -2920,17 +3689,23 @@
     background: none;
     border: none;
     color: var(--accent);
-    font-size: 0.75rem;
+    font-size: var(--text-2xs);
     cursor: pointer;
   }
   .reply {
-    font-size: 0.875rem;
+    /* The manual's step for the conversation and long prose (text-md,
+       tokens.json): the agent's words are what the pane is read for, so
+       they sit a step above the tool rows, receipts and footers around
+       them, which stay at text-2xs/xs. 1.6 rather than the token's 1.5:
+       a reply runs to many lines, and the extra lead keeps the eye on the
+       right one across the reading column (WCAG 1.4.12 asks for at least 1.5). */
+    font-size: var(--text-md);
     line-height: 1.6;
     color: var(--fg);
     overflow-wrap: break-word;
   }
   .text {
-    margin: 0.35rem 0 0.6rem;
+    margin: 0.4rem 0 0.75rem;
   }
   .reply-footer {
     display: flex;
@@ -2944,21 +3719,21 @@
   }
   .duration {
     color: var(--fg-muted);
-    font-size: 0.7rem;
+    font-size: var(--text-2xs);
   }
   .failed-count .pill {
     color: var(--usage-crit);
     background: color-mix(in srgb, var(--usage-crit) 14%, transparent);
-    border-radius: 9px;
+    border-radius: var(--radius-lg);
     padding: 0 6px;
-    font-size: 0.7rem;
+    font-size: var(--text-2xs);
   }
   .tools {
     margin: 0.3rem 0 0.5rem;
   }
   .tools summary {
     cursor: pointer;
-    font-size: 0.76rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     list-style: none;
     user-select: none;
@@ -2972,9 +3747,9 @@
     width: 0.7rem;
     margin-right: 0.4rem;
     text-align: center;
-    font-size: 1rem;
+    font-size: var(--text-md);
     line-height: 1;
-    transition: transform 0.12s ease;
+    transition: transform var(--dur-fast) ease;
   }
   .tools[open] summary::before {
     transform: rotate(90deg);
@@ -3005,7 +3780,7 @@
     border-bottom: 1px solid var(--border);
     background: color-mix(in srgb, var(--accent) 8%, var(--bg-pane));
     color: var(--fg-muted);
-    font-size: 0.78rem;
+    font-size: var(--text-2xs);
   }
   .viewing .linkish,
   .switch-notice .linkish {
@@ -3017,7 +3792,7 @@
     border: none;
     background: none;
     color: var(--fg-muted);
-    font-size: 0.95rem;
+    font-size: var(--text-sm);
     line-height: 1;
     cursor: pointer;
   }
@@ -3032,7 +3807,7 @@
     gap: 0.45rem;
     margin: 0.2rem 0 0.9rem;
     color: var(--fg-muted);
-    font-size: 0.74rem;
+    font-size: var(--text-2xs);
     text-align: center;
   }
   .event .detail {
@@ -3048,12 +3823,12 @@
     margin: 0.4rem 0 0.6rem;
     padding: 0.3rem 0.6rem;
     border: 1px dashed var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
   }
   .compact summary {
     cursor: pointer;
     color: var(--fg-muted);
-    font-size: 0.76rem;
+    font-size: var(--text-2xs);
     user-select: none;
   }
   .command {
@@ -3061,18 +3836,18 @@
   }
   .command code {
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 0.76rem;
+    font-size: var(--text-2xs);
     color: var(--accent);
   }
   .command-out {
     margin: 0.25rem 0 0;
     padding: 0.35rem 0.55rem;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: var(--bg-pane);
     color: var(--fg-muted);
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 0.72rem;
+    font-size: var(--text-2xs);
     line-height: 1.45;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
@@ -3096,7 +3871,7 @@
   .reminders,
   .harness {
     margin: 0.25rem 0 0.4rem;
-    font-size: 0.72rem;
+    font-size: var(--text-2xs);
   }
   .reminders > summary,
   .harness > summary {
@@ -3104,7 +3879,7 @@
     display: inline-block;
     padding: 0.05rem 0.4rem;
     border: 1px solid var(--border);
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     color: var(--fg-muted);
     background: var(--bg-pane);
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
@@ -3114,7 +3889,7 @@
     margin: 0.3rem 0 0;
     padding: 0.35rem 0.55rem;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: var(--bg-pane);
     color: var(--fg-muted);
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
@@ -3125,7 +3900,7 @@
   .interrupt {
     margin: 0.3rem 0 0.5rem;
     color: var(--usage-warn);
-    font-size: 0.76rem;
+    font-size: var(--text-2xs);
     font-style: italic;
   }
   .notification {
@@ -3135,8 +3910,8 @@
     margin: 0.3rem 0;
     padding: 0.2rem 0.5rem;
     border-left: 3px solid var(--border);
-    border-radius: 4px;
-    font-size: 0.82rem;
+    border-radius: var(--radius-sm);
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     background: var(--bg-pane);
   }
@@ -3166,7 +3941,7 @@
     flex: 0 0 auto;
     margin-left: auto;
     padding-left: 0.4rem;
-    font-size: 0.72rem;
+    font-size: var(--text-2xs);
   }
   .scroll-actions {
     position: absolute;
@@ -3184,10 +3959,10 @@
   .latest {
     padding: 0.3rem 0.7rem;
     border: 1px solid var(--border);
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     background: var(--bg-pane);
     color: var(--fg);
-    font-size: 0.75rem;
+    font-size: var(--text-2xs);
     cursor: pointer;
     box-shadow: 0 2px 8px color-mix(in srgb, var(--fg) 15%, transparent);
   }

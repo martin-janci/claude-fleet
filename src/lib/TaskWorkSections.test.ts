@@ -1,6 +1,6 @@
 // The task page's shared-work sections (design 2026-09-29 §4): notes,
 // subtasks, proposals, jobs and agent steps — text as text.
-import { render, screen, fireEvent } from '@testing-library/svelte';
+import { render, screen, fireEvent, within } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { tick } from 'svelte';
 
@@ -54,6 +54,17 @@ describe('TaskWorkSections', () => {
     expect(screen.getByTestId('task-steps').textContent).toContain('per the agent');
   });
 
+  it('counts subtasks done of all, "2 / 4", each with its ✓ ◐ ○ mark (G7.6)', () => {
+    const sub = (id: number, status: string) => ({ ...detail.subtasks![0], task_id: `item:${id}`, item_id: id, title: `S${id}`, status });
+    render(TaskWorkSections, {
+      detail: { ...detail, subtasks: [sub(1, 'done'), sub(2, 'done'), sub(3, 'in_progress'), sub(4, 'todo')] },
+    });
+    expect(screen.getByTestId('task-subtask-progress').textContent).toBe('2 / 4');
+    const marks = screen.getAllByTestId('task-subtask-mark');
+    expect(marks.map((m) => m.textContent)).toEqual(['✓', '✓', '◐', '○']);
+    expect(marks.map((m) => m.getAttribute('aria-label'))).toEqual(['done', 'done', 'in progress', 'to do']);
+  });
+
   it('accepts and rejects a proposal', async () => {
     render(TaskWorkSections, { detail });
     await fireEvent.click(screen.getByTestId('task-proposal-accept'));
@@ -64,11 +75,16 @@ describe('TaskWorkSections', () => {
     expect(calls('reject_work_proposal')[0][1]).toEqual({ args: { item_id: 44 } });
   });
 
-  it('starts a subtask and adds one under this task', async () => {
+  it('starts a subtask through its split button and adds one under this task', async () => {
+    (invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      // An older hub with no start preview: the button starts at once.
+      if (cmd === 'preview_start_work') throw { code: 'E_INVALID', message: 'unknown work_link action preview_start' };
+      return { id: 1, title: 'x', source: 'local' };
+    });
     render(TaskWorkSections, { detail });
-    await fireEvent.click(screen.getByTestId('task-subtask-start'));
+    await fireEvent.click(within(screen.getByTestId('task-subtasks')).getByTestId('work-button-primary'));
     await flush();
-    expect(calls('start_work')[0][1]).toEqual({ args: { item_id: 41, project_id: 3 } });
+    expect(calls('start_work')[0][1]).toMatchObject({ args: { item_id: 41, project_id: 3 } });
     await fireEvent.click(screen.getByTestId('task-add-subtask'));
     const input = screen.getByLabelText('Subtask title') as HTMLInputElement;
     await fireEvent.input(input, { target: { value: 'Follow-up' } });
@@ -97,5 +113,60 @@ describe('TaskWorkSections', () => {
     render(TaskWorkSections, { detail, part: 'steps' });
     expect(screen.getByTestId('task-steps')).toBeTruthy();
     expect(screen.queryByTestId('task-subtasks')).toBeNull();
+  });
+  describe('Jev\'s "may duplicate" (redesign 6.9, K4)', () => {
+    const dupDetail: TaskDetail = {
+      ...detail,
+      proposals: [
+        {
+          ...detail.proposals![0],
+          duplicate: { item_id: 36, task_id: 'item:36', key: 'TASK-36', title: 'Pick the P0 owner', source: 'jev', confidence_pct: 82, run_id: 9 },
+        },
+      ],
+    };
+
+    it('shows May duplicate with Merge and Keep both in the New layout', async () => {
+      render(TaskWorkSections, { detail: dupDetail });
+      const dup = screen.getByTestId('task-proposal-duplicate');
+      expect(dup.textContent).toContain('May duplicate TASK-36');
+      expect(screen.getByTestId('task-proposal-duplicate-by').textContent).toContain('likely');
+      expect(screen.queryByTestId('task-proposal-accept')).toBeNull();
+      await fireEvent.click(screen.getByTestId('task-proposal-merge'));
+      await flush();
+      // Merge carries the task it duplicates, so the backend moves what hangs on it.
+      expect(calls('reject_work_proposal')[0][1]).toEqual({ args: { item_id: 44, merge_into: 36 } });
+      await fireEvent.click(screen.getByTestId('task-proposal-keep-both'));
+      await flush();
+      expect(calls('accept_work_proposal')[0][1]).toEqual({ args: { item_id: 44 } });
+    });
+
+    it('shows Accept and Reject when Jev flagged nothing', () => {
+      render(TaskWorkSections, { detail });
+      expect(screen.queryByTestId('task-proposal-duplicate')).toBeNull();
+      expect(screen.getByTestId('task-proposal-accept')).toBeTruthy();
+    });
+  });
+});
+
+describe('TaskWorkSections in the New layout', () => {
+  it('+ Add subtask adds one under this task', async () => {
+    render(TaskWorkSections, { detail, part: 'work' });
+    await flush();
+    expect(screen.queryByTestId('task-subtask-start')).toBeNull(); // New starts through the split button
+    await fireEvent.click(screen.getByTestId('task-add-subtask'));
+    const input = screen.getByLabelText('Subtask title') as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: 'Follow-up' } });
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await flush();
+    expect(calls('create_work_task')[0][1]).toEqual({ args: { title: 'Follow-up', parent: 'item:110' } });
+  });
+
+  it('with no subtasks yet, + Add subtask stays a button', async () => {
+    render(TaskWorkSections, { detail: { ...detail, subtasks: [] }, part: 'work' });
+    await flush();
+    expect(screen.getByText('No subtasks yet.')).toBeTruthy();
+    expect(screen.getByTestId('task-add-subtask').tagName).toBe('BUTTON');
+    await fireEvent.click(screen.getByTestId('task-add-subtask'));
+    expect(screen.getByLabelText('Subtask title')).toBeTruthy();
   });
 });

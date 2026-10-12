@@ -7,6 +7,8 @@ use crate::service::account_usage_poll::{self, AccountUsagePoller};
 use crate::ssh::SshExec;
 use crate::store::{HostRow, Store};
 use crate::{service, ssh};
+use futures_util::FutureExt as _;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -129,9 +131,15 @@ fn unix_now() -> i64 {
 /// exit — it never starts another pass afterward. `biased` makes an
 /// already-cancelled token win over an already-elapsed tick, so cancelling
 /// before the loop ever runs means `on_tick` is never called at all. Shared
-/// by [`spawn_reconcile_tick`] and [`spawn_account_usage_tick`] so this
+/// by [`spawn_reconcile_tick`], [`spawn_account_usage_tick`] and the mission
+/// and routine loops (review r06 F7) so this
 /// behaviour — and its test coverage below — lives in one place.
-async fn run_cancellable_tick<F, Fut>(
+///
+/// A pass that panics is caught and logged, and the loop goes on to the next
+/// tick: uncaught, the panic ended the spawned task, whose `JoinHandle` is
+/// read only at shutdown, so reconcile stopped for good while the process
+/// (and its readiness heartbeat) stayed up.
+pub(crate) async fn run_cancellable_tick<F, Fut>(
     mut ticker: tokio::time::Interval,
     token: CancellationToken,
     mut on_tick: F,
@@ -148,7 +156,9 @@ async fn run_cancellable_tick<F, Fut>(
             }
             _ = ticker.tick() => {}
         }
-        on_tick().await;
+        if AssertUnwindSafe(on_tick()).catch_unwind().await.is_err() {
+            tracing::error!("tick pass panicked; continuing with the next tick");
+        }
     }
 }
 
@@ -171,6 +181,8 @@ pub fn spawn_reconcile_tick(
     ssh: std::sync::Arc<ssh::SshClient>,
     token: CancellationToken,
 ) -> Option<tokio::task::JoinHandle<()>> {
+    // The decision envelope's second opinion runs over the same SSH client.
+    service::decide::haiku_shadow::install(Arc::clone(&ssh) as Arc<dyn SshExec>);
     let interval_secs = {
         let raw = store
             .lock()
@@ -184,6 +196,11 @@ pub fn spawn_reconcile_tick(
     };
     tracing::info!("reconcile tick enabled every {}s", period.as_secs());
 
+    // J5 quick answer: after each pass, new agent questions are asked about
+    // in a task of their own (off by default; one short lock when off).
+    let quick = service::decide::quick_answer::QuickAnswerTrigger::new(
+        service::decide::DecideCtx::jev(std::sync::Arc::clone(&store)),
+    );
     Some(crate::rt::spawn(async move {
         let mut ticker = tokio::time::interval(period);
         // Drop missed ticks rather than firing them back-to-back after a slow
@@ -191,19 +208,24 @@ pub fn spawn_reconcile_tick(
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         run_cancellable_tick(ticker, token, || {
             let store = &store;
+            let quick = &quick;
             let ssh = &ssh;
             async move {
                 let stats = tick_stats();
                 let started = stats.begin(unix_now());
                 let outcome = service::sessions::reconcile_now(store, ssh).await;
                 match &outcome {
-                    Ok(true) => {}
+                    Ok(true) => {
+                        quick.after_pass();
+                    }
                     Ok(false) => {
                         tracing::debug!("a reconcile pass is already running; skipping tick")
                     }
                     Err(e) => tracing::warn!("reconcile tick: reconcile failed: {e}"),
                 }
-                stats.finish(started, unix_now(), outcome.map_err(|e| e.to_string()));
+                let outcome = outcome.map_err(|e| e.to_string());
+                service::loops::report("reconcile", outcome.clone().map(|_| ()), Some(period));
+                stats.finish(started, unix_now(), outcome);
                 // Lifecycle F2: a `working` row nothing has moved for
                 // `reconcile.stale_working_secs` becomes `idle` (+ the
                 // `stale_working` attention reason), before the playbooks
@@ -218,15 +240,56 @@ pub fn spawn_reconcile_tick(
                 if lifted > 0 {
                     tracing::debug!("reconcile tick: {lifted} stale working stamp(s) lifted");
                 }
+                service::loops::report("stale_working", Ok::<_, String>(()), Some(period));
+                // Chat forms: expire unanswered ones, drop old rows, and
+                // remove secret files nobody needs from their hosts.
+                let now = unix_now();
+                let forms = service::forms::expire_and_purge(store, now);
+                let swept = service::forms::sweep_secret_dirs(store, &**ssh, now).await;
+                if forms + swept > 0 {
+                    tracing::debug!(
+                        "reconcile tick: {forms} form row(s) aged, {swept} secret dir(s) removed"
+                    );
+                }
+                service::loops::report("forms", Ok::<_, String>(()), Some(period));
                 // Wave 2 Track D: lifecycle automation rides the same tick, after
                 // the pass so it sees fresh `stuck_kind` / `idle_since` stamps.
                 // Both are opt-in through settings and cheap when off. Their
                 // work is best-effort: a failure is logged inside and never
                 // stops the loop.
-                let n = service::playbooks::run(store, ssh).await;
-                if n > 0 {
-                    tracing::info!("reconcile tick: applied {n} stuck playbook(s)");
+                if service::loops::gate("playbooks", store, Some(period)) {
+                    let n = service::playbooks::run(store, ssh).await;
+                    if n > 0 {
+                        tracing::info!("reconcile tick: applied {n} stuck playbook(s)");
+                    }
+                    service::loops::report("playbooks", Ok::<_, String>(()), Some(period));
                 }
+                // PR shepherd: projects a person granted a rule for get their
+                // sessions' conflicting or red PRs recorded, and nudged at
+                // `nudge`. No rule, no work: one indexed read and out. Stops
+                // while `automation.paused` is on.
+                // Detached and single-flight: its `gh` calls must not hold the tick.
+                if service::loops::gate("pr_shepherd", store, Some(period)) {
+                    service::pr_shepherd::spawn_run(store, ssh, period);
+                }
+                // Agents (reviewer, support): each granted rule's poller finds
+                // work, and due jobs run. No rule, no work. Both stop while
+                // `automation.paused` is on; detached and single-flight, as a
+                // poll calls GitHub or Jira and a run takes minutes.
+                if service::loops::gate("agents_poll", store, Some(period)) {
+                    service::agents::spawn_poll(store, ssh, period);
+                }
+                if service::loops::gate("agents_run", store, Some(period)) {
+                    service::agents::spawn_run(store, ssh, period);
+                }
+                // Step 5.10: a prompt queued for a busy session goes in once the
+                // session is idle; the Stop hook delivers it first, this catches
+                // a hook that never came. Detached and single-flight.
+                service::sessions::deferred::spawn_deliver_all_due(store, ssh);
+                // A background agent's "stop after" limits (migration 149):
+                // stopped once past its deadline or spend cap. Detached and
+                // single-flight; one indexed read when none are live.
+                service::bg_sessions::spawn_enforce_stop_limits(store, ssh);
                 // Wave 5 G-hub-latency Task 1: single-flight, off the tick
                 // body — a slow sweep (it does SSH work) must not stretch
                 // the tick past its period. Mirrors `service::usage::spawn_collect`.
@@ -234,6 +297,9 @@ pub fn spawn_reconcile_tick(
                 // Wave 5 G1: per-session token usage, once per usage.interval_secs,
                 // in its own single-flight task so a slow host never stalls the tick.
                 service::usage::spawn_collect(store, ssh);
+                // Search phase 3: conversation text into the search index,
+                // only with `search.index_transcripts` on (off by default).
+                service::search_index::spawn_index(store, ssh);
                 // Wave 3 Track E: fail open tasks whose worker died or that
                 // outlived `tasks.max_age_secs` (also swept by list/wait calls).
                 if let Ok(s) = store.lock() {
@@ -241,13 +307,16 @@ pub fn spawn_reconcile_tick(
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs() as i64)
                         .unwrap_or(0);
-                    match service::tasks::sweep_open_tasks(&s, now) {
+                    let swept = service::tasks::sweep_open_tasks(&s, now);
+                    drop(s);
+                    match &swept {
                         Ok(failed) if !failed.is_empty() => {
                             tracing::info!("reconcile tick: failed {} stale task(s)", failed.len())
                         }
                         Ok(_) => {}
                         Err(e) => tracing::warn!("reconcile tick: task sweep failed: {e}"),
                     }
+                    service::loops::report("tasks", swept.map(|_| ()), Some(period));
                 }
                 // Error reports (spec 2026-09-21): the hub's own ERROR events
                 // join the table, and rows past `reports.max_age_secs` go.
@@ -258,6 +327,7 @@ pub fn spawn_reconcile_tick(
                     if swept > 0 {
                         tracing::info!("reconcile tick: swept {swept} old error report(s)");
                     }
+                    service::loops::report("reports", Ok::<_, String>(()), Some(period));
                 }
                 // Opt-in (`repair.auto_on_tick`): re-add vanished worktrees with
                 // the create-only automatic policy. Detached and rate-limited.
@@ -291,6 +361,11 @@ pub fn spawn_account_usage_tick(
     token: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     let poller = Arc::new(AccountUsagePoller::new());
+    // The last-known usage from before a restart, before the first poll.
+    let restored = account_usage_poll::restore_usage(&store, &cache);
+    // …and the limits in it, for `needs_attention`'s `account_limit` before
+    // the first poll answers (step 2.6).
+    bus.attention_seeded(&[], &restored);
     crate::rt::spawn(async move {
         let mut ticker = tokio::time::interval(USAGE_POLL_INTERVAL);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -301,6 +376,7 @@ pub fn spawn_account_usage_tick(
             let bus = &bus;
             let poller = &poller;
             async move {
+                let next = Some(USAGE_POLL_INTERVAL);
                 let hosts: Vec<HostRow> = match store.lock() {
                     Ok(s) => match s.list_hosts() {
                         // One hidden/local rule for every host loop (hub-ops F6).
@@ -310,11 +386,13 @@ pub fn spawn_account_usage_tick(
                         ),
                         Err(e) => {
                             tracing::warn!("account usage tick: list_hosts failed: {e}");
+                            service::loops::report("account_usage", Err(e), next);
                             return;
                         }
                     },
                     Err(e) => {
                         tracing::warn!("account usage tick: store mutex poisoned: {e}");
+                        service::loops::report("account_usage", Err(e.to_string()), next);
                         return;
                     }
                 };
@@ -327,17 +405,37 @@ pub fn spawn_account_usage_tick(
                     ssh_dyn,
                     Arc::clone(cache),
                     Arc::clone(bus),
+                    Some(Arc::clone(store)),
                 );
+                service::loops::report("account_usage", Ok::<_, String>(()), next);
             }
         })
         .await;
     })
 }
 
+/// The clock a lease is stamped with: read when the lease is taken, not
+/// the pass's start (review r06), so a routine or mission reached late in a long pass
+/// does not get a lease that is already near its end. Never before `now`,
+/// the pass's own clock.
+pub fn lease_clock(now: i64) -> i64 {
+    now.max(crate::store::now_unix())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Review r06: a lease is stamped with the clock when it is taken, not
+    /// the pass's start, and never before the pass's own clock.
+    #[test]
+    fn a_lease_is_stamped_with_a_fresh_clock() {
+        let pass_start = crate::store::now_unix() - 600;
+        assert!(super::lease_clock(pass_start) >= pass_start + 600);
+        let ahead = crate::store::now_unix() + 3600;
+        assert_eq!(super::lease_clock(ahead), ahead);
+    }
 
     /// (a) A token cancelled before the loop ever runs must exit without
     /// starting a single pass — not even the one a freshly constructed
@@ -360,6 +458,32 @@ mod tests {
             ran.load(Ordering::SeqCst),
             0,
             "a pre-cancelled token must not let a pass start"
+        );
+    }
+
+    /// A pass that panics must not end the loop: the next tick runs another.
+    #[tokio::test(start_paused = true)]
+    async fn a_panicking_pass_does_not_stop_the_loop() {
+        let token = CancellationToken::new();
+        let ticker = tokio::time::interval(Duration::from_millis(1));
+        let ran = Arc::new(AtomicUsize::new(0));
+        let ran2 = Arc::clone(&ran);
+        let token2 = token.clone();
+        run_cancellable_tick(ticker, token, move || {
+            let ran = Arc::clone(&ran2);
+            let token = token2.clone();
+            async move {
+                if ran.fetch_add(1, Ordering::SeqCst) == 0 {
+                    panic!("first pass fails");
+                }
+                token.cancel();
+            }
+        })
+        .await;
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            2,
+            "the pass after the panicking one must still run"
         );
     }
 

@@ -23,7 +23,7 @@ pub fn list_pages() -> pages::PagesBundle {
 
 /// Run one data source with a page's literal parameters. `E_INVALID` for an
 /// unknown source or a parameter it does not take.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn fetch_page_source(
     id: String,
     params: Option<serde_json::Map<String, serde_json::Value>>,
@@ -47,7 +47,7 @@ pub fn fetch_page_source(
 // tracker, fleet administration a paired desktop does not own.
 
 /// Open `flow`, prefilled from `prefill`.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn flow_start(
     flow: String,
     prefill: Option<std::collections::BTreeMap<String, String>>,
@@ -78,7 +78,7 @@ pub async fn flow_submit(
 }
 
 /// Back to the first step, what was entered kept.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn flow_back(
     flow_id: String,
     backend: State<'_, Arc<FleetBackend>>,

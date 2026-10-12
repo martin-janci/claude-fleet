@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { viewKey } from './shortcuts';
   // The Review tab of the Work view (work graph M14): link suggestions and
   // conflicts (a cross-org link, an unavailable ticket, a session with work
   // but no primary), each with its why. One at a time — Confirm / Reject /
@@ -15,6 +16,7 @@
   import { selectSessionExplicitly } from './selection';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
+  import { sessionIdBlocked } from './share';
   import {
     confirmSessionWork,
     linkSessionWork,
@@ -24,15 +26,18 @@
     type WorkRef,
   } from './work';
   import { workTickets, type TicketRow } from './trackers';
-  import { timeAgo } from './session_status';
+  import { shortAge } from './session_status';
   import {
     ackWorkLink,
     conflictNotice,
     decideWorkBatch,
+    isHighConfidence,
     openTask,
     readErrorText,
     reconsiderWorkLink,
     reviewKindLabel,
+    reviewDuplicateProposal,
+    reviewProposal,
     setPrimaryWork,
     taskLabel,
     undoOf,
@@ -46,6 +51,10 @@
     type SessionTaskLink,
   } from './work_view';
   import WorkConflictNotice from './WorkConflictNotice.svelte';
+  import ProposedBy from './ProposedBy.svelte';
+  import { aiChangeLine, confidenceWord, preselect, wordConfidenceIn } from './ai_proposal';
+  import { readPref, writePref } from './prefs';
+  import { addTally, andList, isReviewTally, reviewUnsure, tallyLine, type ReviewTally } from './review_tally';
   import type { IpcError, Result } from './result';
 
   let {
@@ -55,6 +64,44 @@
   }: { onchanged?: () => void; debounceMs?: number } = $props();
 
   const blocked = $derived(hubActionBlocked('decide_work_batch', $hubStatus, $hubConnection));
+  /**
+   * The access half (multi-user M1, F2a), per ITEM. A `ReviewItem` carries a
+   * `session_id` and a name, never the row's `owner_person_id`, so the row has
+   * to be resolved before the access half can be asked — the reason this
+   * surface was skipped by F2.
+   *
+   * Every decision here writes per session (`confirmSessionWork`,
+   * `rejectWorkLink`, `unlinkSessionWork`, `setPrimaryWork`, and the batch
+   * `decide_work_batch`), which `share.ts::SESSION_TIER` puts at `drive`. A
+   * list is narrowed per target rather than answered once: one review list
+   * mixes this person's sessions with the ones shared with them.
+   *
+   * ── Not knowing is not permission (F2d) ─────────────────────────────────
+   *
+   * F2a resolved the row by hand and let an item whose row this client does not
+   * hold through — `decidable` ended `|| !rowById.has(it.session_id)` — on the
+   * argument that the Review list and `$sessions` load independently. They do,
+   * and that is the hazard rather than the excuse: the Review read is the hub's
+   * own org-scoped one, so on a paired desktop an item here is not necessarily
+   * this person's, and an unresolvable row is *someone else's, or gone*.
+   *
+   * So it is `share.ts::sessionIdBlocked` that resolves now, once for the four
+   * surfaces that had hand-rolled it: it fails closed with
+   * `UNKNOWN_SESSION_REASON` on a fleet this client does not own and answers
+   * `null` on a standalone desktop, where the master owns everything
+   * (`access.ts::sessionAccess` rule 1), so a single-user install is untouched.
+   */
+  function accessBlocked(it: ReviewItem): string | null {
+    return $sessionIdBlocked(it.session_id, 'decide_work_batch');
+  }
+  /** One item's own gate: the hub's refusal first, then this client's access. */
+  function itemBlocked(it: ReviewItem): string | null {
+    return blocked ?? accessBlocked(it);
+  }
+  /** `list` narrowed to the items this client may decide, per target. */
+  function decidable(list: readonly ReviewItem[]): ReviewItem[] {
+    return list.filter((it) => accessBlocked(it) === null);
+  }
 
   let items = $state<ReviewItem[]>([]);
   let total = $state(0);
@@ -67,7 +114,19 @@
   // a conflict carries the current value and Reload.
   let failures = $state<Map<number, string | ConflictNotice>>(new Map());
   let summary = $state<string | null>(null);
-  let undo = $state<{ label: string; decisions: BatchDecision[] } | null>(null);
+  /** The last decision, undoable; `tally` is what it added to today's. */
+  let undo = $state<{ label: string; decisions: BatchDecision[]; tally?: { confirmed: number; rejected: number } } | null>(
+    null,
+  );
+  // "Done today: 4 confirmed · 1 rejected" (G7.7): this person's decisions
+  // in this tab today, on this device.
+  const TALLY_KEY = 'work.review.today';
+  let tally = $state<ReviewTally | null>(readPref<ReviewTally | null>(TALLY_KEY, null, (v): v is ReviewTally | null => v === null || isReviewTally(v)));
+  const today = $derived(tallyLine(tally));
+  function count(d: { confirmed?: number; rejected?: number }) {
+    tally = addTally(tally, d);
+    writePref(TALLY_KEY, tally);
+  }
   let focusIdx = $state(0);
   let changing = $state<string | null>(null);
 
@@ -124,7 +183,9 @@
   }
 
   async function run(it: ReviewItem, what: string, call: () => Promise<Result<unknown>>, undoable?: Decision) {
-    if (busy || blocked !== null) return;
+    // Per item, and re-asked at the call: a revoke can arrive while the list
+    // is on screen, and y/n decide the focused row without touching a button.
+    if (busy || itemBlocked(it) !== null) return;
     busy = true;
     summary = null;
     const r = await call();
@@ -135,7 +196,14 @@
       return;
     }
     cleared(it.link_id);
-    summary = `${what}: ${taskLabel(it.task)} · ${sessionName(it)}`;
+    const added = undoable === 'confirm' ? { confirmed: 1, rejected: 0 } : undoable === 'reject' ? { confirmed: 0, rejected: 1 } : null;
+    if (added) count(added);
+    // A confirmed suggestion of the decision model is an AI-caused change
+    // (G4.9): it reads as the AI patterns board's line, with its Undo.
+    const by = undoable === 'confirm' && it.kind === 'suggestion' ? reviewProposal(it) : null;
+    summary = by
+      ? `✓ ${aiChangeLine(`Linked ${sessionName(it)} to ${taskLabel(it.task)}`, by.source, true)}`
+      : `${what}: ${taskLabel(it.task)} · ${sessionName(it)}`;
     undo = null;
     if (undoable) {
       // The Undo is a compare-and-set too (M14.3): it names the version the
@@ -146,7 +214,8 @@
       const answered = (r.value as { link_version?: unknown } | null)?.link_version;
       const version = typeof answered === 'number' ? answered : await versionAfter(it, undoable);
       const d = undoOf({ session_id: it.session_id, link_id: it.link_id, decision: undoable }, version);
-      if (d?.expected_version != null) undo = { label: `${what} ${taskLabel(it.task)} for ${sessionName(it)}`, decisions: [d] };
+      if (d?.expected_version != null)
+        undo = { label: `${what} ${taskLabel(it.task)} for ${sessionName(it)}`, decisions: [d], tally: added ?? undefined };
     }
     await reload();
   }
@@ -253,6 +322,12 @@
     had: SessionTaskLink | null,
   ): Promise<string | null> {
     if (had && had.state !== 'suggested') return null; // it was already linked: nothing changed
+    // `takeBack` is reached from inside `run`'s thunk, so it is not lexically
+    // inside the gate `run` asked — and it writes (`reconsider` or `unlink`).
+    // Re-asked here with the session's own row (multi-user M1, F2b).
+    if ($sessionIdBlocked(sessionId, 'decide_work_batch') !== null) {
+      return 'this session is not yours to change';
+    }
     const now = await workSessionTasks(sessionId);
     if (!now.ok) return now.error.message;
     const l = linkTo(now.value?.links ?? [], to);
@@ -265,10 +340,22 @@
 
   // ── several at once ──
   const pickedItems = $derived(items.filter((x) => picked.has(x.review_id)));
-  const pickedSuggestions = $derived(pickedItems.filter((x) => x.kind === 'suggestion'));
-  const pickedConflicts = $derived(pickedItems.filter((x) => x.kind === 'cross_org' || x.kind === 'unavailable'));
+  // The bulk buttons count what they will actually send (multi-user M1): an
+  // item this client may not decide is not ticked in the first place (the
+  // checkbox is disabled), and the narrowing holds even so.
+  const pickedSuggestions = $derived(decidable(pickedItems.filter((x) => x.kind === 'suggestion')));
+  // "Confirm all high-confidence" (redesign 6.5): every suggestion this
+  // client may decide whose detection confidence clears the bar. It is still
+  // a person's click, with the batch's Undo.
+  const highConfidence = $derived(decidable(items.filter(isHighConfidence)));
+  const pickedConflicts = $derived(
+    decidable(pickedItems.filter((x) => x.kind === 'cross_org' || x.kind === 'unavailable')),
+  );
 
   function togglePick(it: ReviewItem) {
+    // x ticks the focused row from the keyboard, past the checkbox's own
+    // `disabled`, so the gate is here as well.
+    if (itemBlocked(it) !== null) return;
     const next = new Set(picked);
     if (next.has(it.review_id)) next.delete(it.review_id);
     else next.add(it.review_id);
@@ -276,7 +363,12 @@
   }
 
   async function batch(decision: Decision, list: ReviewItem[]) {
-    if (busy || blocked !== null || list.length === 0) return;
+    if (busy || blocked !== null) return;
+    // Narrowed per target, not answered once for the batch: `decide_work_batch`
+    // writes one decision per session, so a list mixing this person's sessions
+    // with ones shared at `watch` sends only the former.
+    list = decidable(list);
+    if (list.length === 0) return;
     // Only the first confirm of a session without a primary takes it.
     const tookPrimary = new Set<number>();
     const decisions: BatchDecision[] = list.map((it) => {
@@ -306,7 +398,17 @@
     }
     const verb = decision === 'confirm' ? 'confirmed' : decision === 'reject' ? 'rejected' : 'kept';
     summary = `${ok} ${verb}${failed > 0 ? ` · ${failed} failed` : ''}`;
-    undo = undos.length > 0 ? { label: `${undos.length} ${verb}`, decisions: undos } : null;
+    const added = { confirmed: decision === 'confirm' ? ok : 0, rejected: decision === 'reject' ? ok : 0 };
+    if (added.confirmed + added.rejected > 0) count(added);
+    // Undo takes back what it can: the tally loses those it undoes.
+    undo =
+      undos.length > 0
+        ? {
+            label: `${undos.length} ${verb}`,
+            decisions: undos,
+            tally: { confirmed: added.confirmed > 0 ? undos.length : 0, rejected: added.rejected > 0 ? undos.length : 0 },
+          }
+        : null;
     // What failed stays ticked, with its reason.
     const failedLinks = new Set(decisions.filter((d) => !byLink.get(d.link_id)?.ok).map((d) => d.link_id));
     picked = new Set(list.filter((x) => failedLinks.has(x.link_id)).map((x) => x.review_id));
@@ -316,14 +418,27 @@
   async function runUndo() {
     const u = undo;
     if (!u || busy) return;
+    // Narrowed per target, then re-asked (multi-user M1, F2b): the Undo offer
+    // outlives the batch that made it, so a grant narrowed while it is on
+    // screen must not be undone through it. Every decision in `u` is a write to
+    // one session, so each is checked against that session's own row.
+    const mine = u.decisions.filter(
+      (d) => $sessionIdBlocked(d.session_id, 'decide_work_batch') === null,
+    );
+    if (mine.length === 0) {
+      undo = null;
+      summary = 'Nothing left to undo: those sessions are not yours any more.';
+      return;
+    }
     busy = true;
-    if (u.decisions.length === 1) {
-      const d = u.decisions[0];
+    if (mine.length === 1) {
+      const d = mine[0];
       const r = await reconsiderWorkLink(d.session_id, d.link_id, d.expected_version);
       busy = false;
       undo = null;
       if (r.ok) {
         summary = `Undone: ${u.label} — back to suggestions`;
+        if (u.tally) count({ confirmed: -u.tally.confirmed, rejected: -u.tally.rejected });
       } else {
         summary = `Undo failed: ${readErrorText(r.error)}`;
         fail(d.link_id, r.error);
@@ -331,7 +446,7 @@
       await reload();
       return;
     }
-    const r = await decideWorkBatch(u.decisions);
+    const r = await decideWorkBatch(mine);
     busy = false;
     undo = null;
     if (!r.ok) {
@@ -340,7 +455,9 @@
       return;
     }
     // Each undo is checked on its own, like the batch it undoes.
-    const { ok, failed } = countBatch(u.decisions, r.value);
+    const { ok, failed } = countBatch(mine, r.value);
+    // A batch is one kind of decision: each undo that went through takes one off.
+    if (u.tally && ok > 0) count({ confirmed: u.tally.confirmed > 0 ? -ok : 0, rejected: u.tally.rejected > 0 ? -ok : 0 });
     summary =
       failed === 0
         ? `Undone: ${u.label} — back to suggestions`
@@ -374,31 +491,33 @@
   }
 
   function onKey(e: KeyboardEvent) {
-    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    // The keys are the registry's `work-review` rows (step 0.1).
+    const act = viewKey('work-review', e);
+    if (!act) return;
     const target = e.target as HTMLElement | null;
     if (target && target !== e.currentTarget && !target.classList.contains('item')) {
-      if (!['j', 'k', 'ArrowDown', 'ArrowUp'].includes(e.key)) return;
+      if (act !== 'work-review.down' && act !== 'work-review.up') return;
       if (target.tagName === 'INPUT' || target.tagName === 'SELECT') return;
     }
     const it = items[focusIdx];
-    switch (e.key) {
-      case 'j':
-      case 'ArrowDown':
+    switch (act) {
+      case 'work-review.down':
         focusIdx = Math.min(items.length - 1, focusIdx + 1);
         break;
-      case 'k':
-      case 'ArrowUp':
+      case 'work-review.up':
         focusIdx = Math.max(0, focusIdx - 1);
         break;
-      case 'y':
-        if (it?.kind === 'suggestion') void confirm(it);
+      case 'work-review.yes':
+        // Jev's unsure case pre-selects nothing: y opens the pick instead.
+        if (it?.kind === 'suggestion' && reviewUnsure(it)) openChange(it);
+        else if (it?.kind === 'suggestion') void confirm(it);
         else if (it && it.kind !== 'no_primary') void keep(it);
         else if (it) void makePrimary(it);
         break;
-      case 'n':
+      case 'work-review.no':
         if (it?.kind === 'suggestion') void reject(it);
         break;
-      case 'x':
+      case 'work-review.pick':
         if (it) togglePick(it);
         break;
       default:
@@ -421,6 +540,24 @@
           >Undo</button
         >
       {/if}
+    </div>
+  {/if}
+
+  {#if today}
+    <div class="today" role="status" data-testid="work-review-today">
+      <span>{today}</span>
+      {#if undo}
+        <span aria-hidden="true">·</span>
+        <button class="link" type="button" data-testid="work-review-undo-last" disabled={busy} onclick={() => void runUndo()}>Undo last</button>
+      {/if}
+    </div>
+  {/if}
+
+  {#if highConfidence.length > 0 && pickedItems.length === 0}
+    <div class="bulk" role="toolbar" aria-label="Confirm the high-confidence suggestions" data-testid="work-review-high">
+      <button class="btn" type="button" data-testid="work-review-confirm-high" disabled={busy || blocked !== null} onclick={() => void batch('confirm', highConfidence)}
+        >Confirm all high-confidence ({highConfidence.length})</button
+      >
     </div>
   {/if}
 
@@ -457,6 +594,8 @@
     <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
     <ul class="items" tabindex="0" aria-label="Review items (j/k move, y confirm, n reject, x tick)" onkeydown={onKey}>
       {#each items as it, i (it.review_id)}
+        {@const mine = itemBlocked(it)}
+        {@const unsure = reviewUnsure(it)}
         <li class="item" class:focused={i === focusIdx} data-testid="work-review-item" data-kind={it.kind} data-link-id={it.link_id}>
           <div class="head">
             <input
@@ -464,21 +603,67 @@
               aria-label={`Tick ${taskLabel(it.task)} for ${sessionName(it)}`}
               data-testid="work-review-pick"
               checked={picked.has(it.review_id)}
-              disabled={it.kind === 'no_primary'}
+              disabled={it.kind === 'no_primary' || mine !== null}
+              title={mine ?? ''}
               onchange={() => togglePick(it)}
             />
             <span class="kind kind--{it.kind}" data-testid="work-review-kind">{reviewKindLabel(it.kind)}</span>
-            <button class="link" type="button" title="Open the task" onclick={() => openTask(it.task.task_id)}>{taskLabel(it.task)}</button>
+            {#if unsure}
+              <strong data-testid="work-review-which">Which ticket?</strong>
+            {:else}
+              <button class="link" type="button" title="Open the task" onclick={() => openTask(it.task.task_id, [{ session_id: it.session_id }])}>{taskLabel(it.task)}</button>
+            {/if}
           </div>
+          {#if unsure}
+            <!-- G7.7: Jev could not tell the tasks apart. Nothing is
+                 pre-selected (rule 7); the person picks one, or none. -->
+            <p class="unsure" data-testid="work-review-unsure">
+              Jev is unsure: {andList(unsure.candidates)} {unsure.candidates.length === 2 ? 'both fit' : 'all fit'} · nothing pre-selected
+            </p>
+          {:else if it.kind === 'suggestion' && it.proposed_by}
+            <!-- Redesign 6.8: the decision model's suggestion (J1) says so,
+                 with its reason; Change opens the same panel as Change…. -->
+            <ProposedBy
+              proposal={reviewProposal(it)}
+              field="work_link"
+              testid="work-review-proposed-by"
+              onchange={mine === null && !busy ? () => openChange(it) : undefined}
+            />
+          {/if}
+          {#if it.kind === 'suggestion' && it.duplicate_of && preselect('tracker_duplicate', reviewDuplicateProposal(it)) != null}
+            {@const dup = it.duplicate_of}
+            {@const dupLabel = dup.key ?? taskLabel({ task_id: dup.task_id, title: dup.title })}
+            <!-- Redesign 6.8, J7: this local task may be the same work as a
+                 tracker ticket. Linking the ticket instead is a person's
+                 click (the same Change… as above); nothing merges. -->
+            <div class="dup" data-testid="work-review-duplicate">
+              <span>May duplicate {dupLabel}</span>
+              <ProposedBy
+                proposal={reviewDuplicateProposal(it)}
+                field="tracker_duplicate"
+                testid="work-review-duplicate-proposed-by"
+                onchange={mine === null && !busy ? () => openChange(it) : undefined}
+              />
+              <button
+                class="btn btn--quiet"
+                type="button"
+                data-testid="work-review-duplicate-link"
+                disabled={busy || mine !== null}
+                title={mine ?? ''}
+                onclick={() => void changeTo(it, { item_id: dup.item_id })}>Link {dupLabel} instead</button
+              >
+            </div>
+          {/if}
           <div class="sub">
             <button class="link muted" type="button" title="Open the session" onclick={() => openSession(it)}
               >{sessionName(it)}{#if it.host}&nbsp;· {it.host}{/if}</button
             >
+            {#if it.confidence != null}<span class="conf" class:conf--high={isHighConfidence(it)} title="Confidence from detection" data-testid="work-review-confidence">{confidenceWord(it.confidence)}</span>{/if}
             {#if it.strength}<span class="muted">· {it.strength}{#if it.rule}&nbsp;{it.rule}{/if}</span>{/if}
-            {#if it.created_at}<span class="muted">· {timeAgo(it.created_at)}</span>{/if}
+            {#if it.created_at}<span class="muted">· {shortAge(it.created_at)}</span>{/if}
           </div>
           {#each it.why ?? [] as w, wi (wi)}
-            <p class="why" data-testid="work-review-why">{w}</p>
+            <p class="why" data-testid="work-review-why">{wordConfidenceIn(w)}</p>
           {/each}
           {#if failures.get(it.link_id)}
             {@const f = failures.get(it.link_id)}
@@ -487,21 +672,30 @@
             </p>
           {/if}
           <div class="actions">
-            {#if it.kind === 'suggestion'}
-              <button class="btn btn--primary" type="button" data-testid="work-review-confirm" disabled={busy || blocked !== null} onclick={() => void confirm(it)}>Confirm</button>
-              <button class="btn" type="button" data-testid="work-review-reject" disabled={busy || blocked !== null} onclick={() => void reject(it)}>Reject</button>
-              <button class="btn btn--quiet" type="button" data-testid="work-review-change" aria-expanded={changing === it.review_id} disabled={busy || blocked !== null} onclick={() => openChange(it)}>Change…</button>
+            {#if mine}
+              <p class="muted" data-testid="work-review-item-not-mine">{mine}</p>
+            {/if}
+            {#if unsure}
+              <button class="btn" type="button" data-testid="work-review-pick-ticket" aria-expanded={changing === it.review_id} disabled={busy || mine !== null} title={mine ?? ''} onclick={() => openChange(it)}>Pick a ticket…</button>
+              <button class="btn btn--quiet" type="button" data-testid="work-review-no-ticket" disabled={busy || mine !== null} title={mine ?? 'Link no ticket to this session'} onclick={() => void reject(it)}>No ticket</button>
+            {:else if it.kind === 'suggestion'}
+              <button class="btn btn--primary" type="button" data-testid="work-review-confirm" disabled={busy || mine !== null} title={mine ?? ''} onclick={() => void confirm(it)}>Confirm</button>
+              <button class="btn" type="button" data-testid="work-review-reject" disabled={busy || mine !== null} title={mine ?? ''} onclick={() => void reject(it)}>Reject</button>
+              <button class="btn btn--quiet" type="button" data-testid="work-review-change" aria-expanded={changing === it.review_id} disabled={busy || mine !== null} title={mine ?? ''} onclick={() => openChange(it)}>Change…</button>
             {:else if it.kind === 'no_primary'}
-              <button class="btn btn--primary" type="button" data-testid="work-review-make-primary" disabled={busy || blocked !== null} onclick={() => void makePrimary(it)}>Make primary</button>
+              <button class="btn btn--primary" type="button" data-testid="work-review-make-primary" disabled={busy || mine !== null} title={mine ?? ''} onclick={() => void makePrimary(it)}>Make primary</button>
             {:else}
-              <button class="btn" type="button" data-testid="work-review-keep" title="Keep it on purpose" disabled={busy || blocked !== null} onclick={() => void keep(it)}>Keep</button>
-              <button class="btn btn--quiet" type="button" data-testid="work-review-remove" disabled={busy || blocked !== null} onclick={() => void remove(it)}>Remove</button>
+              <button class="btn" type="button" data-testid="work-review-keep" title={mine ?? 'Keep it on purpose'} disabled={busy || mine !== null} onclick={() => void keep(it)}>Keep</button>
+              <button class="btn btn--quiet" type="button" data-testid="work-review-remove" disabled={busy || mine !== null} title={mine ?? ''} onclick={() => void remove(it)}>Remove</button>
             {/if}
           </div>
           {#if changing === it.review_id}
             <div class="change" data-testid="work-review-change-panel">
+              {#if unsure}
+                <button class="btn btn--quiet" type="button" data-testid="work-review-pick-own" onclick={() => void confirm(it)}>{taskLabel(it.task)}</button>
+              {/if}
               {#if (it.alternatives ?? []).length > 0}
-                <p class="muted">Also suggested:</p>
+                <p class="muted">{unsure ? 'Or:' : 'Also suggested:'}</p>
                 {#each it.alternatives ?? [] as alt (alt.task_id)}
                   <button class="btn btn--quiet" type="button" data-testid="work-review-alt" onclick={() => void changeTo(it, { link_id: alt.link_id, key: alt.key ?? undefined })}
                     >{taskLabel(alt)}</button
@@ -540,11 +734,21 @@
 </section>
 
 <style>
+  .today {
+    display: flex;
+    gap: 0.3rem;
+    align-items: baseline;
+    color: var(--fg-muted);
+  }
+  .unsure {
+    margin: 0.15rem 0;
+    color: var(--fg-muted);
+  }
   .work-review {
     display: flex;
     flex-direction: column;
     gap: 0.4rem;
-    font-size: 0.82rem;
+    font-size: var(--text-2xs);
   }
   .items {
     list-style: none;
@@ -558,7 +762,7 @@
   .item {
     padding: 0.35rem 0.3rem;
     border-bottom: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
   }
   .item.focused {
     background: color-mix(in srgb, var(--accent) 8%, transparent);
@@ -574,16 +778,16 @@
     flex-wrap: wrap;
   }
   .kind {
-    font-size: 0.68rem;
+    font-size: var(--text-2xs);
     border: 1px solid var(--border);
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     padding: 0 0.35rem;
     color: var(--fg-muted);
   }
   .kind--cross_org,
   .kind--unavailable {
-    color: var(--usage-warn, #b45309);
-    border-color: var(--usage-warn, #b45309);
+    color: var(--usage-warn);
+    border-color: var(--usage-warn);
   }
   .link {
     background: none;
@@ -601,12 +805,12 @@
   .why {
     margin: 0.1rem 0 0 1.4rem;
     color: var(--fg-muted);
-    font-size: 0.75rem;
+    font-size: var(--text-2xs);
   }
   .fail {
     margin: 0.1rem 0 0 1.4rem;
-    color: var(--usage-crit, #c62828);
-    font-size: 0.75rem;
+    color: var(--usage-crit);
+    font-size: var(--text-2xs);
   }
   .actions {
     margin: 0.25rem 0 0 1.4rem;
@@ -621,7 +825,7 @@
     font: inherit;
     padding: 0.15rem 0.3rem;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: var(--bg);
     color: var(--fg);
   }
@@ -631,13 +835,28 @@
   .bulk {
     padding: 0.3rem;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: var(--bg-pane);
   }
   .muted {
     color: var(--fg-muted);
   }
+  .conf {
+    font-variant-numeric: tabular-nums;
+    color: var(--fg-muted);
+  }
+  .conf--high {
+    color: var(--fg);
+  }
   .error {
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
+  }
+  .dup {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--text-xs);
+    color: var(--fg-muted);
   }
 </style>

@@ -1,0 +1,18 @@
+# synthetic: hand-written for the repository from fleet's own test fixtures and
+# realistic made-up cases (LLM-written, D43). NOT recorded data: no verdict on this
+# set says anything about real use, and the bench never judges it.
+# One case per line: {id, input, label, by: rule|jev, never?, trap?, note?}.
+{"id": "billing", "input": {"title": "Retry failed card payments", "placements": ["Billing", "Billing", "Billing", "Infra", "Infra", "Docs"], "rules": ["Security"]}, "label": "Billing", "by": "jev"}
+{"id": "security-rule-group", "input": {"title": "Rotate the TLS certificates", "placements": ["Billing", "Billing", "Billing", "Infra", "Infra", "Docs"], "rules": ["Security"]}, "label": "Security", "by": "jev"}
+{"id": "docs", "input": {"title": "Write the onboarding guide", "placements": ["Billing", "Billing", "Billing", "Infra", "Infra", "Docs"], "rules": ["Security"]}, "label": "Docs", "by": "jev"}
+{"id": "infra", "input": {"title": "Upgrade the Kubernetes nodes", "placements": ["Billing", "Billing", "Billing", "Infra", "Infra", "Docs"], "rules": ["Security"]}, "label": "Infra", "by": "jev"}
+{"id": "no-group", "input": {"title": "Plan the team offsite", "placements": ["Billing", "Billing", "Billing", "Infra", "Infra", "Docs"], "rules": ["Security"]}, "label": "none", "by": "jev"}
+{"id": "subtask", "input": {"title": "Retry failed card payments: add a test", "placements": ["Billing", "Billing", "Billing", "Infra", "Infra", "Docs"], "rules": ["Security"], "subtask": true}, "label": "none", "by": "rule", "note": "a subtask sits under its parent"}
+{"id": "placed", "input": {"title": "Retry failed card payments", "placements": ["Billing", "Billing", "Billing", "Infra", "Infra", "Docs"], "rules": ["Security"], "placed": "Billing"}, "label": "Billing", "by": "rule", "note": "a person's or a rule's placement decides"}
+{"id": "no-groups-in-use", "input": {"title": "Retry failed card payments", "placements": [], "rules": []}, "label": "none", "by": "rule"}
+{"id": "unsure-pricing", "input": {"title": "Fix the typo on the pricing page", "placements": ["Billing", "Billing", "Billing", "Infra", "Infra", "Docs"], "rules": ["Security"]}, "label": "unsure", "by": "jev"}
+{"id": "billing-export", "input": {"title": "Add invoice CSV export", "placements": ["Billing", "Billing", "Billing", "Infra", "Infra", "Docs"], "rules": ["Security"], "key": "PAY-13"}, "label": "Billing", "by": "jev"}
+{"id": "infra-alerts", "input": {"title": "Set up Grafana alerts for disk usage", "placements": ["Billing", "Billing", "Billing", "Infra", "Infra", "Docs"], "rules": ["Security"]}, "label": "Infra", "by": "jev"}
+{"id": "docs-refund-api", "input": {"title": "Document the refund API", "placements": ["Billing", "Billing", "Billing", "Infra", "Infra", "Docs"], "rules": ["Security"]}, "label": "Docs", "by": "jev"}
+{"id": "trap-access", "input": {"title": "Audit who can access production", "placements": ["Billing", "Billing", "Billing", "Infra", "Infra", "Docs"], "rules": ["Security"]}, "label": "Security", "by": "jev", "trap": "access_level", "note": "a group, never an access decision"}
+{"id": "unsure-bump", "input": {"title": "Bump lodash", "placements": ["Billing", "Billing", "Billing", "Infra", "Infra", "Docs"], "rules": ["Security"]}, "label": "unsure", "by": "jev"}

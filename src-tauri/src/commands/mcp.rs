@@ -13,6 +13,7 @@ use crate::backend::FleetBackend;
 use fleet_core::cancel::CancellationRegistry;
 use fleet_core::ipc_error::lock;
 use fleet_core::ipc_error::{codes, IpcError};
+use fleet_core::mcp::guard::ConfirmRequest;
 use fleet_core::mcp::settings::{ensure_master_token, McpSettings};
 use fleet_core::mcp::{self, McpGuards, McpRuntime};
 use fleet_core::service::hooks_install;
@@ -78,7 +79,7 @@ fn status(store: &Mutex<Store>, runtime: &Mutex<McpRuntime>) -> Result<McpStatus
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn mcp_status(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
@@ -194,24 +195,20 @@ pub async fn mcp_configure(
 #[tauri::command]
 pub async fn provision_hosts(
     rotate: Option<bool>,
+    // Orbit Fleet 4.7: re-provision one host from its detail.
+    host: Option<String>,
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
     tunnels: State<'_, Arc<fleet_core::service::tunnel::TunnelSupervisor>>,
 ) -> Result<Vec<fleet_core::service::provision::HostProvisionResult>, IpcError> {
-    // Master-only on the hub too (`enforce_admin`), and provisioning from
-    // here would point every host's hooks at THIS app instead of the hub.
-    backend.refuse_local_only("provision_hosts")?;
-    let base = HubBase::read(&*lock(&store)?)?;
-    fleet_core::service::provision::provision_hosts(
+    routed::provision_hosts(
+        &backend,
+        rotate.unwrap_or(false),
+        host,
         &store,
-        &*ssh,
+        &ssh,
         &tunnels,
-        &base,
-        fleet_core::service::provision::ProvisionScope {
-            rotate: rotate.unwrap_or(false),
-            ..Default::default()
-        },
     )
     .await
 }
@@ -228,6 +225,12 @@ pub struct HostTokenInfo {
     /// `full` | `readonly`.
     pub mode: String,
     pub created_at: i64,
+    /// The last request the token authenticated, at minute grain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<i64>,
+    /// When a fresh token last replaced the host's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotated_at: Option<i64>,
     /// Set only by `rotate_host_token`: a non-fatal re-provision warning,
     /// e.g. a WSL distribution whose hooks cannot reach the desktop.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -240,12 +243,14 @@ impl From<fleet_core::store::HostTokenRow> for HostTokenInfo {
             host_alias: r.host_alias,
             mode: r.mode,
             created_at: r.created_at,
+            last_used_at: r.last_used_at,
+            rotated_at: r.rotated_at,
             warning: None,
         }
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_host_tokens(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
@@ -270,7 +275,7 @@ pub fn parse_mode(mode: &str) -> Result<&'static str, IpcError> {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_host_token_mode(
     host_alias: String,
     mode: String,
@@ -324,32 +329,140 @@ pub async fn rotate_host_token(
 // ---------------------------------------------------------------------------
 
 /// Answer a `mcp:confirm-required` prompt. Returns `false` when the nonce is
-/// unknown or expired (the agent will be handed a fresh one on retry).
+/// unknown or expired (the agent will be handed a fresh one on retry). On a
+/// hub-backed desktop the waiting call sits in the hub's queue, so the answer
+/// goes there (`answer_mcp_confirm`, redesign step 9.2).
 #[tauri::command]
-pub fn mcp_confirm(
+pub async fn mcp_confirm(
     nonce: String,
     approved: bool,
+    backend: State<'_, Arc<FleetBackend>>,
     guards: State<'_, McpGuards>,
 ) -> Result<bool, IpcError> {
-    Ok(guards.confirms.resolve(&nonce, approved))
+    routed::mcp_confirm(&backend, &guards, nonce, approved).await
 }
 
-#[derive(Serialize)]
-pub struct PendingConfirm {
-    pub nonce: String,
-    pub tool: String,
-}
-
-/// Outstanding confirmation requests (oldest first) — lets the desktop
-/// re-render its queue after a reload.
+/// Outstanding confirmation requests in full (oldest first): what the
+/// dialog and Control's confirm cards (redesign step 9.2) show after a
+/// reload or a `confirm:changed`, with the summary the person approves. The
+/// hub's queue on a hub-backed desktop (`mcp_confirms`).
 #[tauri::command]
-pub fn mcp_pending_confirms(guards: State<'_, McpGuards>) -> Result<Vec<PendingConfirm>, IpcError> {
-    Ok(guards
-        .confirms
-        .pending_tools()
-        .into_iter()
-        .map(|(nonce, tool)| PendingConfirm { nonce, tool })
-        .collect())
+pub async fn mcp_pending_confirms(
+    backend: State<'_, Arc<FleetBackend>>,
+    guards: State<'_, McpGuards>,
+) -> Result<Vec<ConfirmRequest>, IpcError> {
+    routed::mcp_pending_confirms(&backend, &guards).await
+}
+
+/// What Control's agent handed on, newest first (redesign step 9.3): the
+/// receipts Control draws its chips and cards from. The hub's on a
+/// hub-backed desktop (`control_handoffs`), where the agent runs.
+#[tauri::command]
+pub async fn control_handoffs(
+    limit: Option<i64>,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<fleet_core::store::ControlHandoffRow>, IpcError> {
+    routed::control_handoffs(&backend, &store, limit).await
+}
+
+pub(crate) mod routed {
+    use super::*;
+    use serde_json::json;
+
+    /// Paired with a hub, "Re-provision this host" asks the hub to refresh
+    /// that one host's content (skills, CLAUDE.md block, hooks), which the
+    /// hub's owner's device may do. Anything wider — every host, or a token
+    /// rotation — rewrites tokens and `~/.claude.json`, which stays the
+    /// hub operator's; so does any provisioning that would run from here and
+    /// point the hooks at this app instead of the hub.
+    pub async fn provision_hosts(
+        backend: &FleetBackend,
+        rotate: bool,
+        host: Option<String>,
+        store: &Mutex<Store>,
+        ssh: &SshClient,
+        tunnels: &Arc<fleet_core::service::tunnel::TunnelSupervisor>,
+    ) -> Result<Vec<fleet_core::service::provision::HostProvisionResult>, IpcError> {
+        if let Some(hub) = backend.hub() {
+            if let (Some(host), false) = (&host, rotate) {
+                return hub.reprovision_host(host).await;
+            }
+            backend.refuse_local_only("provision_hosts")?;
+        }
+        let base = HubBase::read(&*lock(store)?)?;
+        fleet_core::service::provision::provision_hosts(
+            store,
+            ssh,
+            tunnels,
+            &base,
+            fleet_core::service::provision::ProvisionScope {
+                rotate,
+                only_host: host,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    /// A hub from before the receipts (contract < 14) refuses the tool as a
+    /// protocol error, and it never wrote one: nothing to show.
+    pub async fn control_handoffs(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        limit: Option<i64>,
+    ) -> Result<Vec<fleet_core::store::ControlHandoffRow>, IpcError> {
+        match backend.hub() {
+            Some(hub) => older_hub(
+                hub.route("control_handoffs", &json!({ "limit": limit }))
+                    .await,
+                Vec::new(),
+            ),
+            None => fleet_core::service::control_handoffs::list(store, limit),
+        }
+    }
+
+    pub async fn mcp_confirm(
+        backend: &FleetBackend,
+        guards: &McpGuards,
+        nonce: String,
+        approved: bool,
+    ) -> Result<bool, IpcError> {
+        match backend.hub() {
+            Some(hub) => older_hub(
+                hub.route(
+                    "mcp_confirm",
+                    &json!({ "nonce": nonce, "approved": approved }),
+                )
+                .await,
+                false,
+            ),
+            None => Ok(guards.confirms.resolve(&nonce, approved)),
+        }
+    }
+
+    /// A hub from before the confirm tools (contract < 14) refuses them as a
+    /// protocol error. It also refused every call that needed a person, so
+    /// its queue is empty: answer what this desktop answered before routing.
+    fn older_hub<T>(r: Result<T, IpcError>, before: T) -> Result<T, IpcError> {
+        match r {
+            Err(e) if e.code == codes::E_HUB_PROTOCOL => Ok(before),
+            r => r,
+        }
+    }
+
+    pub async fn mcp_pending_confirms(
+        backend: &FleetBackend,
+        guards: &McpGuards,
+    ) -> Result<Vec<ConfirmRequest>, IpcError> {
+        match backend.hub() {
+            Some(hub) => older_hub(
+                hub.route("mcp_pending_confirms", &json!({})).await,
+                Vec::new(),
+            ),
+            None => Ok(guards.confirms.pending()),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -365,7 +478,7 @@ pub fn mcp_pending_confirms(guards: State<'_, McpGuards>) -> Result<Vec<PendingC
 ///
 /// Only supports `host_alias == "local"` — remote hosts get their hook block
 /// from `provision_hosts`, which also sets up the tunnel the hook needs.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn install_fleet_hook(
     host_alias: String,
     backend: State<'_, Arc<FleetBackend>>,
@@ -390,7 +503,7 @@ pub fn install_fleet_hook(
         if !rt.is_running() {
             return Err(IpcError::new(
                 codes::E_NOT_RUNNING,
-                "MCP server is not running — enable it in Settings > MCP first",
+                "MCP server is not running — enable it in Settings → Control API first",
             ));
         }
     }
@@ -430,6 +543,8 @@ mod tests {
             token: "s3cret".into(),
             created_at: 7,
             mode: "readonly".into(),
+            last_used_at: Some(9),
+            rotated_at: None,
         });
         let json = serde_json::to_string(&info).unwrap();
         assert!(!json.contains("s3cret"), "{json}");
@@ -439,6 +554,8 @@ mod tests {
                 host_alias: "mefistos".into(),
                 mode: "readonly".into(),
                 created_at: 7,
+                last_used_at: Some(9),
+                rotated_at: None,
                 warning: None,
             }
         );
@@ -455,6 +572,8 @@ mod tests {
                 token: "s3cret".into(),
                 created_at: 7,
                 mode: "full".into(),
+                last_used_at: None,
+                rotated_at: Some(8),
             })
         };
         let v = serde_json::to_value(&info).unwrap();

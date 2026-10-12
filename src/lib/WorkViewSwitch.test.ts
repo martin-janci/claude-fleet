@@ -10,7 +10,6 @@ import Details from './Details.svelte';
 import { sessions } from './sessions';
 import { clearSelection, selectSessionExplicitly } from './selection';
 import { session } from './hosts_fixture';
-import { todayOpen } from './today';
 import { openTask, selectedTaskId, sidebarView, taskDetailOpen } from './work_view';
 import { onboardingDismissed } from './onboarding';
 import { clearSessionFocus, focusSession } from './session_focus';
@@ -31,15 +30,19 @@ describe('Sessions | Work switch', () => {
     await flush();
     expect(screen.getByTestId('sidebar-search')).toBeTruthy();
     expect(screen.queryByTestId('work-tree')).toBeNull();
-    await fireEvent.click(screen.getByTestId('sidebar-view-work'));
+    // The rail picks the view (redesign 3.2); the list only names it.
+    expect(screen.queryByTestId('sidebar-view-switch')).toBeNull();
+    expect(screen.getByTestId('list-title').textContent).toBe('All sessions');
+    sidebarView.set('work');
     await flush();
-    expect(get(sidebarView)).toBe('work');
+    expect(screen.getByTestId('list-title').textContent).toBe('Work');
     expect(screen.getByTestId('work-tree')).toBeTruthy();
     expect(screen.queryByTestId('sidebar-search')).toBeNull();
     // The footer (New session) stays in both.
-    expect(screen.getByTestId('new-session-footer')).toBeTruthy();
-    // So does the global chrome: Refresh, Settings, collapse.
-    for (const id of ['sidebar-refresh', 'settings-open', 'sidebar-collapse']) {
+    expect(screen.getByTestId('new-session-head')).toBeTruthy();
+    // So does the global chrome: Refresh and collapse (Settings is on the rail, ⌘,).
+    expect(screen.queryByTestId('settings-open')).toBeNull();
+    for (const id of ['sidebar-refresh', 'sidebar-collapse']) {
       expect(screen.getByTestId(id)).toBeTruthy();
     }
     // The ☑ Tasks popover is gone: delegated jobs live in the Work list.
@@ -53,22 +56,24 @@ describe('Sessions | Work switch', () => {
     expect(screen.queryByTestId('work-refresh')).toBeNull();
     // One collapse control, not two.
     expect(screen.queryByTestId('work-collapse')).toBeNull();
-    await fireEvent.click(screen.getByTestId('sidebar-view-sessions'));
+    sidebarView.set('sessions');
     await flush();
     expect(screen.getByTestId('sidebar-search')).toBeTruthy();
     expect(screen.queryByTestId('work-tree')).toBeNull();
   });
 
-  it('the Sessions tab carries the Needs you count while the Work view is up', async () => {
+  it('the Needs you count is on the rail (Inbox) and in the filter panel, not on a list switch', async () => {
     sessions.set([session('mefistos', 'api', { id: 7, stuck_kind: 'oom' })]);
     sidebarView.set('work');
     render(Sidebar, { onCollapse: () => {} });
     await flush();
-    expect(screen.getByTestId('sessions-tab-needs-you').textContent).toBe('1');
-    await fireEvent.click(screen.getByTestId('sidebar-view-sessions'));
-    await flush();
     expect(screen.queryByTestId('sessions-tab-needs-you')).toBeNull();
-    expect(screen.getByTestId('needs-you-filter').textContent).toContain('Needs you 1');
+    sidebarView.set('sessions');
+    await flush();
+    // The Needs you pill lives in the filter panel (step 3.7).
+    await fireEvent.click(screen.getByTestId('filters-open'));
+    await flush();
+    expect(screen.getByTestId('needs-you-filter').textContent).toMatch(/Needs you\s1/);
   });
 
   it('a focused session brings the Sessions list back', async () => {
@@ -87,7 +92,6 @@ describe('Sessions | Work switch', () => {
 describe('Details with the Work view', () => {
   beforeEach(() => {
     clearSelection();
-    todayOpen.set(false);
     sidebarView.set('work');
     selectedTaskId.set(null);
     taskDetailOpen.set(false);

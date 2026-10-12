@@ -1,20 +1,28 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
+  import { get } from 'svelte/store';
   import {
     catalog, catalogConfig, loadCatalogConfig, configureCatalog, loadCatalog, loadAssets, loadInventory, scanHosts,
     planSync, lastSync, lastSyncRun,
     commitPending, pushCatalog, repoStatus, repoStatusStore,
     type HostScanResult, type SyncPlan, type SyncRunSummary, type AssetKind, type AssetIdentity,
   } from './assets';
-  import { hosts } from './hosts';
-  import AssetList from './AssetList.svelte';
-  import AssetDetail from './AssetDetail.svelte';
+  import AssetsWorkspace from './AssetsWorkspace.svelte';
+  import {
+    canWrite, catalogStatuses, keyOf, loadAllLayers, loadCatalogStatuses, loadChangesets, loadLayers, PERSONAL,
+    type WorkspaceView,
+  } from './assets_workspace';
+  import { proposeAndReload } from './assets_cards';
+  import { assetsViewRequest, type AssetsViewRequest } from './app_views';
+  import { push, pushError } from './toasts';
+  import { fleetSettings, loadFleetSettings, setFleetSetting, settingBool, SETTING_KEYS } from './fleet_settings';
+  import type { IpcError } from './result';
   import ImportDialog from './ImportDialog.svelte';
-  import SyncPlanDialog from './SyncPlanDialog.svelte';
   import SecretsPanel from './SecretsPanel.svelte';
   import NewAssetDialog from './NewAssetDialog.svelte';
+  import CommitAssetsDialog from './CommitAssetsDialog.svelte';
+  import AuthorSessionDialog from './AuthorSessionDialog.svelte';
   import LintAllDialog from './LintAllDialog.svelte';
-  import PromptDialog from './PromptDialog.svelte';
   import { authorSessionOpened, clearAuthorSessionOpened } from './AuthorSessionDialog.svelte';
   import { hubStatus, hubBlock, hubActionBlocked, ownsTheFleet } from './hub';
   import { hubConnection } from './hub_connection';
@@ -23,7 +31,14 @@
 
   let setupPath = $state('~/agent-assets');
   let setupRemote = $state('');
-  let busy = $state<'' | 'setup' | 'pull' | 'scan' | 'plan' | 'apply' | 'commit' | 'push'>('');
+  // Toolkit forms board: "Push after each change" in the setup form writes
+  // `catalog.auto_push`; it means something only with a remote to push to.
+  let setupAutoPush = $state<boolean | null>(null);
+  const autoPushOn = $derived(setupAutoPush ?? settingBool($fleetSettings, SETTING_KEYS.catalogAutoPush));
+  let busy = $state<'' | 'setup' | 'pull' | 'scan' | 'plan' | 'apply' | 'commit' | 'push' | 'propose'>('');
+  // The workspace's own card verbs (apply, dismiss, undo, admit, propose
+  // again), bound up so the switcher's commands wait for them too.
+  let cardBusy = $state('');
   // Per-ACTION error only (setup / scan / plan / commit / push). Four unrelated
   // toolbar handlers clear this on entry, so the catalog's own load state must
   // never be inferred from it — doing that made a successful Sync turn the
@@ -33,35 +48,53 @@
   let catalogLoad = $state<'idle' | 'loading' | 'loaded' | 'failed'>('idle');
   let catalogLoadError = $state<string | null>(null);
   let scanResults = $state<HostScanResult[] | null>(null);
-  let showProblems = $state(false);
   let showImport = $state(false);
   // Preset from clicking Import next to an unmanaged identity in AssetList:
   // which host to read and which single asset to limit the import to. Reset
   // to null (the dialog's own "local" / "everything" defaults) by the
-  // toolbar's own Import button and whenever the dialog closes.
+  // Library's own Import button and whenever the dialog closes.
   let importPreset = $state<{ host: string; only: string[] } | null>(null);
-  let filter = $state('');
-  let selected = $state<{ kind: string; name: string } | null>(null);
+  // The workspace's selection: one row key (`keyOf`), shared by every view
+  // and the Inspector.
+  let selectedKey = $state<string | null>(null);
+  // The workspace's view, bound so a switcher request can show the row it
+  // selects (`library`) or the cards it proposes (`inbox`).
+  let view = $state<WorkspaceView>('inbox');
   let syncPlan = $state<SyncPlan | null>(null);
-  // The filter `syncPlan` was computed from, so SyncPlanDialog's "Plan
+  // The filter `syncPlan` was computed from, so the plan view's "Plan
   // anyway" (on a skipped-unlayered host) can re-plan with the same scope
   // plus allowUnlayered.
   let syncFilter = $state<{ hostAlias?: string; kind?: string; name?: string }>({});
-  // The most recent plan computed (kept after the dialog closes) so the
+  // The most recent plan computed (kept after the plan view closes) so the
   // SecretsPanel can offer the names its blocked/missing-secret actions
   // named, without recomputing a plan just to open it.
   let lastPlan = $state<SyncPlan | null>(null);
   let showSecrets = $state(false);
   let showNewAsset = $state(false);
+  let newAssetKind = $state<AssetKind>('skill');
   let showLintAll = $state(false);
   let showCommitPrompt = $state(false);
-  // Set (once) to `<kind>::<name>` right before selecting a just-created
-  // asset, so the detail pane opens straight into edit mode for it. Never
-  // cleared: a later re-selection of the same asset re-opening the editor
-  // is a harmless edge case, not a bug worth the extra bookkeeping.
+  /** "Write it with Claude…" from New asset (G2.6): its seeded instructions. */
+  let authorNew = $state<string | null>(null);
+  // A just-created asset's key, set together with the selection so the
+  // Inspector opens it in Source, editing, and cleared once that happened:
+  // selecting the asset again later opens its Overview.
   let pendingAutoEdit = $state('');
 
+  async function openEditing(key: string) {
+    pendingAutoEdit = key;
+    selectedKey = key;
+    await tick();
+    if (pendingAutoEdit === key) pendingAutoEdit = '';
+  }
+
   async function refresh() {
+    // The workspace's own reads (R13, R14): best effort — a refusal shows
+    // less, never an error. The cards refresh with every panel refresh.
+    // Every loaded catalog's layers (R17) follow the statuses that name them.
+    void loadCatalogStatuses().then(() => loadAllLayers(get(catalogStatuses)));
+    void loadChangesets();
+    void loadLayers();
     const [a, i] = await Promise.all([loadAssets(), loadInventory()]);
     if (!a.ok) error = a.error.message;
     if (!i.ok) error = i.error.message;
@@ -69,15 +102,17 @@
 
   // Shared by every path that needs to re-read the catalog: `pull: false`
   // just reloads the working tree as-is (used after import, and on initial
-  // mount/setup); `pull: true` is only the explicit "Pull" button.
-  async function reload(pull: boolean) {
+  // mount/setup); `pull: true` is only the explicit "Pull" button. Answers
+  // the load's error, if any.
+  async function reload(pull: boolean): Promise<IpcError | null> {
     error = null;
     catalogLoad = 'loading';
     catalogLoadError = null;
     const l = await loadCatalog(pull);
-    if (!l.ok) { catalogLoad = 'failed'; catalogLoadError = l.error.message; return; }
+    if (!l.ok) { catalogLoad = 'failed'; catalogLoadError = l.error.message; return l.error; }
     catalogLoad = 'loaded';
     await refresh();
+    return null;
   }
 
   // Every authoring write (create/update/delete/resource/commit/push) goes
@@ -133,6 +168,8 @@
   // every other routed mutation gates on. "Open in session" stays this
   // machine's (see its REASONS entry).
   const importBlocked = $derived(hubActionBlocked('catalog_import_host', $hubStatus, $hubConnection));
+  // A session is this machine's (local-only): no "Write it with Claude" on a hub client.
+  const authorNewBlocked = $derived(hubBlock('catalog_spawn_author_session', $hubStatus));
 
   // ...but the list itself, and the scan that refreshes it, route for every
   // paired client: the read-only overview of the hub's catalog — which asset
@@ -149,6 +186,11 @@
     const r = await loadAssets();
     if (r.ok) {
       overviewLoad = 'loaded';
+      // An ungranted client may list catalogs and cards when unbound (M3
+      // PF15) and is refused otherwise; never `catalog_last_sync` or
+      // `catalog_load`.
+      void loadCatalogStatuses();
+      void loadChangesets();
       return;
     }
     overviewLoad = 'failed';
@@ -169,15 +211,87 @@
     await loadOverview();
   }
 
+  // Whether this machine's own catalog config has been read (the fleet owner's
+  // path); a hub client settles through the grant probe instead.
+  let configRead = $state(false);
   onMount(async () => {
-    if (!ownsTheFleet($hubStatus)) return;
+    // The footer's `auto: on|off`.
+    void loadFleetSettings();
+    if (!ownsTheFleet($hubStatus)) { configRead = true; return; }
     const c = await loadCatalogConfig();
+    configRead = true;
     if (c.ok && c.value) {
       await reload(false);
       void repoStatus();
     }
     void lastSync();
   });
+
+  // ── A request from the quick switcher (Assets M6, R19) ──────────────────
+  // The panel mounts only while the overlay is open, so a request made first
+  // is read here on mount; it waits until the panel knows what this client
+  // may do (the grant probe, the config read), then is taken once. A request
+  // left over when the panel goes away is dropped, not run at the next open.
+  const settled = $derived(hubUnavailable !== null || (hubOverview ? hubAdmin === 'granted' || hubAdmin === 'denied' : configRead));
+  // The workspace is on screen: the full one, or the hub's read-only overview.
+  const workspaceShown = $derived(catalogBlocked ? hubOverview : !!$catalogConfig);
+  $effect(() => {
+    const r = $assetsViewRequest;
+    if (!r || !settled) return;
+    untrack(() => {
+      assetsViewRequest.set(null);
+      void runAssetsRequest(r);
+    });
+  });
+  onDestroy(() => assetsViewRequest.set(null));
+
+  async function runAssetsRequest(r: AssetsViewRequest) {
+    // An open sync plan covers the list; it yields to what was asked for,
+    // except mid-apply.
+    const clearPlan = () => { if (busy !== 'apply') syncPlan = null; };
+    if (r.select && workspaceShown) {
+      clearPlan();
+      view = 'library';
+      selectedKey = r.select;
+    }
+    // "+ Add skill" (M15 G7.13): New asset on that kind, where a new asset
+    // could be made by hand here (the workspace's own New asset button).
+    if (r.newKind && workspaceShown && !catalogBlocked && busy === '') {
+      clearPlan();
+      newAssetKind = r.newKind;
+      showNewAsset = true;
+      return;
+    }
+    // Rescan, Sync and Propose change things: a client without the grant (the
+    // read-only overview) or without a catalog, or a panel or a card verb
+    // that is busy, does nothing.
+    if (!r.command || catalogBlocked || !$catalogConfig || busy !== '' || cardBusy !== '') return;
+    if (r.command === 'rescan') {
+      void scan();
+    } else if (r.command === 'sync') {
+      void requestSync({});
+    } else {
+      // The hub's propose needs the personal grant (final review minor 6).
+      const ctx = { readOnly: catalogBlocked, remote: $hubStatus.remote, clientName: $hubStatus.client_name, statuses: $catalogStatuses };
+      if (!canWrite(PERSONAL, ctx)) return;
+      clearPlan();
+      await proposeCards();
+    }
+  }
+
+  /** "Propose cards": the hub derives its cards from the hosts as they are. */
+  async function proposeCards() {
+    busy = 'propose';
+    let n;
+    try {
+      n = await proposeAndReload();
+    } finally {
+      busy = '';
+    }
+    if (n === null) return;
+    view = 'inbox';
+    push({ kind: 'info', message: `Proposed: ${n} open cards` });
+  }
 
   // Tab-focus reload: a session delegated via "Open in session" edits the
   // catalog repo directly, outside any authoring command, so nothing else
@@ -196,14 +310,23 @@
     busy = 'setup'; error = null;
     const c = await configureCatalog(setupPath, setupRemote);
     if (!c.ok) { error = c.error.message; busy = ''; return; }
+    const wantPush = setupRemote.trim() !== '' && autoPushOn;
+    if (wantPush !== settingBool($fleetSettings, SETTING_KEYS.catalogAutoPush)) {
+      const s = await setFleetSetting(SETTING_KEYS.catalogAutoPush, wantPush ? 'true' : 'false');
+      if (!s.ok) pushError(s.error, 'The catalog is set up, but "Push after each change" was not saved');
+    }
     await reload(false);
     busy = '';
   }
 
+  // The personal chip's Pull. A failed pull leaves the listing as it was,
+  // so its reason (git's own stderr) goes on the error line — the
+  // failed-load block shows only while there is no listing at all.
   async function pull() {
     busy = 'pull';
-    await reload(true);
+    const e = await reload(true);
     busy = '';
+    if (e) error = withGitStderr(e);
   }
 
   async function scan() {
@@ -225,15 +348,23 @@
     showImport = true;
   }
 
+  // The workspace's Import: the Library's button (no identity — the dialog's
+  // own defaults) or an identity row, its Inspector, or the `a` key.
+  function importFrom(identity: AssetIdentity | null) {
+    if (identity) return onImportUnmanaged(identity);
+    if (importBlocked) { error = importBlocked; return; }
+    importPreset = null;
+    showImport = true;
+  }
+
   function onAssetCreated(kind: AssetKind, name: string) {
     showNewAsset = false;
-    pendingAutoEdit = `${kind}::${name}`;
-    selected = { kind, name };
+    void openEditing(keyOf({ type: 'asset', catalog: PERSONAL, kind, name }));
     void afterWrite();
   }
 
   function onAssetDeleted() {
-    selected = null;
+    selectedKey = null;
     void afterWrite();
   }
 
@@ -251,13 +382,14 @@
     return `${err.message}: ${truncated}`;
   }
 
-  async function submitCommit(message: string) {
+  async function submitCommit(message: string, push = false) {
     showCommitPrompt = false;
     busy = 'commit'; error = null;
     const r = await commitPending(message);
     busy = '';
     if (!r.ok) { error = withGitStderr(r.error); return; }
     await afterWrite();
+    if (push) await doPush();
   }
 
   async function doPush() {
@@ -270,7 +402,7 @@
 
   function onLintAllSelect(kind: string, name: string) {
     showLintAll = false;
-    selected = { kind, name };
+    selectedKey = keyOf({ type: 'asset', catalog: PERSONAL, kind, name });
   }
 
   async function requestSync(filter: { hostAlias?: string; kind?: string; name?: string }) {
@@ -289,22 +421,14 @@
   }
 
   function onSyncApplied(summary: SyncRunSummary) {
-    // Keep the dialog mounted: it renders the per-action outcome badges and
+    // Keep the plan view open: it renders the per-action outcome badges and
     // the "restart Claude on <host>" strip from this same `summary`, and it
-    // now disables its own Apply button and relabels Close to "Done" once
-    // `summary` is set. The user dismisses it explicitly.
+    // now disables its own Apply button once `summary` is set. The user
+    // dismisses it with Back.
     lastSyncRun.set(summary);
     void refresh();
   }
 
-  function summarizeRun(run: SyncRunSummary): string {
-    const counts: Record<string, number> = {};
-    for (const h of run.hosts) counts[h.status] = (counts[h.status] ?? 0) + 1;
-    const parts = Object.entries(counts).map(([k, n]) => `${n} ${k}`);
-    return `${new Date(run.finished_at * 1000).toLocaleString()} — ${parts.join(', ') || 'no hosts'}`;
-  }
-
-  const shortHead = $derived(($catalogConfig?.head_commit ?? '').slice(0, 7));
   const secretNames = $derived(
     lastPlan
       ? Array.from(
@@ -322,52 +446,37 @@
         <p class="muted">Asking the hub…</p>
       </div>
     {:else if hubOverview}
-      <div class="hub-overview" data-testid="assets-remote">
-        <div class="toolbar">
-          <span class="path">Asset catalog on the hub{$hubStatus.url ? ` (${$hubStatus.url})` : ''}</span>
-          {#if $catalog}<span class="head" data-testid="assets-head">@ {$catalog.head.slice(0, 7) || '—'}</span>{/if}
-          <button onclick={() => void loadOverview()} disabled={busy !== '' || overviewLoad === 'loading'} data-testid="assets-hub-refresh">{overviewLoad === 'loading' ? 'Loading…' : 'Refresh'}</button>
-          <button onclick={scanOnHub} disabled={busy !== '' || overviewNotConfigured} data-testid="assets-scan">{busy === 'scan' ? 'Scanning…' : 'Scan hosts'}</button>
-          {#if $catalog && $catalog.problems.length > 0}
-            <button class="badge" onclick={() => (showProblems = !showProblems)} data-testid="assets-problems">{$catalog.problems.length} problems</button>
+      {#snippet hubFailed()}
+        <div class="load-failed pad" data-testid="assets-hub-failed">
+          {#if overviewNotConfigured}
+            <p class="muted">The hub has no asset catalog yet. It is a git checkout on the hub's machine, set there — then Refresh here:</p>
+            <pre class="cmd" data-testid="assets-hub-setup-cmd">fleet-hub catalog set ~/agent-assets --remote git@github.com:you/agent-assets.git</pre>
+            <p class="muted">The remote is cloned when the path is empty. In the Docker setup, prefix it with <code>docker compose exec fleet-hub</code> and keep the checkout on the data volume, e.g. <code>/var/lib/fleet-hub/agent-assets</code>.</p>
+          {:else}
+            <p class="muted">The hub's asset catalog could not be loaded.</p>
+            {#if overviewError}<p class="error">{overviewError}</p>{/if}
           {/if}
-          <input class="filter" placeholder="filter" bind:value={filter} />
         </div>
-        <p class="muted note" data-testid="assets-remote-note">
-          Read-only here: the hub has not granted this desktop the asset
-          catalog. To edit assets, Sync and manage Secrets from this window,
-          run on the hub's machine
-          <code data-testid="assets-grant-cmd">fleet-hub client grant &lt;this client's name&gt; assets</code>
-          (<code>fleet-hub client list</code> shows the name), then reopen
-          this tab.
-        </p>
-        {#if hubAdminError}<p class="error" data-testid="assets-grant-error">{hubAdminError}</p>{/if}
-        {#if error}<p class="error">{error}</p>{/if}
-        {#if scanResults}
-          <p class="scan-result" data-testid="assets-scan-result">{scanResults.map((r) => `${r.host}: ${r.status}${r.detail ? ` (${r.detail})` : ''}`).join(' · ')}</p>
-        {/if}
-        {#if showProblems && $catalog}
-          <ul class="problems">{#each $catalog.problems as p}<li><code>{p.path}</code> {p.message}</li>{/each}</ul>
-        {/if}
-        {#if overviewLoad === 'failed'}
-          <div class="load-failed" data-testid="assets-hub-failed">
-            {#if overviewNotConfigured}
-              <p class="muted">The hub has no asset catalog yet. It is a git checkout on the hub's machine, set there — then Refresh here:</p>
-              <pre class="cmd" data-testid="assets-hub-setup-cmd">fleet-hub catalog set ~/agent-assets --remote git@github.com:you/agent-assets.git</pre>
-              <p class="muted">The remote is cloned when the path is empty. In the Docker setup, prefix it with <code>docker compose exec fleet-hub</code> and keep the checkout on the data volume, e.g. <code>/var/lib/fleet-hub/agent-assets</code>.</p>
-            {:else}
-              <p class="muted">The hub's asset catalog could not be loaded.</p>
-              {#if overviewError}<p class="error">{overviewError}</p>{/if}
-            {/if}
-          </div>
-        {:else if $catalog}
-          <div class="overview-list">
-            <AssetList listing={$catalog} selected={null} {filter} readonly onselect={() => {}} onimport={() => {}} />
-          </div>
-        {:else}
-          <p class="muted">Loading…</p>
-        {/if}
-      </div>
+      {/snippet}
+      {#if hubAdminError}<p class="error" data-testid="assets-grant-error">{hubAdminError}</p>{/if}
+      <AssetsWorkspace
+        readOnly
+        readOnlyClient={$hubStatus.client_name}
+        {visible}
+        {busy}
+        {error}
+        {scanResults}
+        loading={overviewLoad === 'loading'}
+        scanDisabled={overviewNotConfigured}
+        failed={overviewLoad === 'failed' ? hubFailed : undefined}
+        bind:selectedKey
+        bind:view
+        bind:cardBusy
+        onscan={scanOnHub}
+        onsync={() => {}}
+        onimport={() => {}}
+        onrefresh={() => void loadOverview()}
+      />
     {:else}
       <div class="setup" data-testid="assets-remote">
         <h3>Asset catalog</h3>
@@ -380,85 +489,53 @@
       <p class="muted">Point fleet at a git repo of skills, agents, hooks, MCP servers and plugin refs. A remote URL is cloned into the path when the path is empty.{#if hubOverview} The path is on the hub's machine{$hubStatus.url ? ` (${$hubStatus.url})` : ''}, and the clone uses its git credentials.{/if}</p>
       <label>{hubOverview ? "Path on the hub's machine" : 'Local path'} <input bind:value={setupPath} data-testid="assets-setup-path" /></label>
       <label>Remote URL (optional) <input bind:value={setupRemote} placeholder="git@github.com:you/agent-assets.git" /></label>
+      <label class="check" title={setupRemote.trim() === '' ? 'Needs a remote URL to push to.' : undefined}>
+        <input type="checkbox" checked={setupRemote.trim() !== '' && autoPushOn} disabled={setupRemote.trim() === ''} onchange={(e) => (setupAutoPush = e.currentTarget.checked)} data-testid="assets-setup-auto-push" />
+        Push after each change
+      </label>
+      <p class="muted hint">{setupRemote.trim() === '' ? 'With a remote URL, fleet can push every applied change for you.' : 'Every applied change is committed and pushed to the remote; off, changes wait for your Push.'}</p>
       {#if error}<p class="error">{error}</p>{/if}
       <button class="primary" onclick={setup} disabled={busy !== ''} data-testid="assets-setup-submit">{busy === 'setup' ? 'Setting up…' : 'Use this catalog'}</button>
     </div>
   {:else}
-    <div class="toolbar">
-      <span class="path" title={$catalogConfig.repo_path}>{$catalogConfig.repo_path}</span>
-      <span class="head" data-testid="assets-head">@ {shortHead || '—'}</span>
-      <button onclick={pull} disabled={busy !== ''}>{busy === 'pull' ? 'Pulling…' : 'Pull'}</button>
-      <button onclick={scan} disabled={busy !== ''} data-testid="assets-scan">{busy === 'scan' ? 'Scanning…' : 'Scan hosts'}</button>
-      <button onclick={() => { importPreset = null; showImport = true; }} disabled={busy !== '' || importBlocked !== null} title={importBlocked ?? ''} data-testid="assets-import">Import from host</button>
-      <button onclick={() => requestSync({})} disabled={busy !== ''} data-testid="assets-sync">{busy === 'plan' ? 'Planning…' : 'Sync'}</button>
-      <button onclick={() => (showSecrets = true)} disabled={busy !== ''} data-testid="assets-secrets">Secrets</button>
-      <button onclick={() => (showNewAsset = true)} disabled={busy !== ''} data-testid="assets-new">New asset</button>
-      <button onclick={() => (showLintAll = true)} disabled={busy !== ''} data-testid="assets-lint-all">Lint all</button>
-      {#if $repoStatusStore && $repoStatusStore.dirty > 0}
-        <button onclick={() => (showCommitPrompt = true)} disabled={busy !== ''} data-testid="assets-commit-pending">{busy === 'commit' ? 'Committing…' : 'Commit pending'}</button>
-      {/if}
-      <button
-        onclick={doPush}
-        disabled={busy !== '' || !$repoStatusStore?.has_upstream}
-        data-testid="assets-push"
-        title={$repoStatusStore?.has_upstream ? '' : 'no upstream configured'}
-      >{busy === 'push' ? 'Pushing…' : `Push${$repoStatusStore?.ahead ? ` ↑${$repoStatusStore.ahead}` : ''}`}</button>
-      {#if $lastSyncRun}
-        <span class="last-sync" data-testid="assets-last-sync">{summarizeRun($lastSyncRun)}</span>
-      {/if}
-      {#if $catalog && $catalog.problems.length > 0}
-        <button class="badge" onclick={() => (showProblems = !showProblems)} data-testid="assets-problems">{$catalog.problems.length} problems</button>
-      {/if}
-      <input class="filter" placeholder="filter" bind:value={filter} />
-    </div>
-    {#if $repoStatusStore}
-      <p class="repo-status" data-testid="assets-repo-status">
-        {$repoStatusStore.head.slice(0, 7)} · {$repoStatusStore.dirty} dirty
-        {#if $repoStatusStore.has_upstream}· ↑{$repoStatusStore.ahead ?? 0} ↓{$repoStatusStore.behind ?? 0}{:else}· no upstream{/if}
-      </p>
-    {/if}
-    {#if error}<p class="error">{error}</p>{/if}
-    {#if scanResults}
-      <p class="scan-result" data-testid="assets-scan-result">{scanResults.map((r) => `${r.host}: ${r.status}${r.detail ? ` (${r.detail})` : ''}`).join(' · ')}</p>
-    {/if}
-    {#if showProblems && $catalog}
-      <ul class="problems">{#each $catalog.problems as p}<li><code>{p.path}</code> {p.message}</li>{/each}</ul>
-    {/if}
-    <div class="body">
-      <div class="left">
-        {#if $catalog}
-          <AssetList listing={$catalog} {selected} {filter} onselect={(kind, name) => (selected = { kind, name })} onimport={onImportUnmanaged} />
-        {:else if catalogLoad === 'failed'}
-          <!-- `catalog` is only ever set on success, so a failed load used to
-               render the error line AND a permanent "Loading…" side by side,
-               with no way to try again but the panel header's ↻. This keys off
-               the load's OWN state, not the shared per-action `error`. -->
-          <div class="load-failed" data-testid="assets-load-failed">
-            <p class="muted">The asset catalog could not be loaded.</p>
-            {#if catalogLoadError}<p class="error" data-testid="assets-load-error">{catalogLoadError}</p>{/if}
-            <button class="btn" onclick={() => void reload(false)} data-testid="assets-retry">Retry</button>
-          </div>
-        {:else}
-          <p class="muted">Loading…</p>
-        {/if}
+    {#snippet loadFailed()}
+      <!-- `catalog` is only ever set on success; this keys off the load's
+           OWN state, not the shared per-action `error`. -->
+      <div class="load-failed pad" data-testid="assets-load-failed">
+        <p class="muted">The asset catalog could not be loaded.</p>
+        {#if catalogLoadError}<p class="error" data-testid="assets-load-error">{catalogLoadError}</p>{/if}
+        <button class="btn" onclick={() => void reload(false)} data-testid="assets-retry">Retry</button>
       </div>
-      <div class="right">
-        {#if selected}
-          {#key `${selected.kind}::${selected.name}`}
-            <AssetDetail
-              kind={selected.kind}
-              name={selected.name}
-              hosts={$hosts}
-              onsync={requestSync}
-              ondeleted={onAssetDeleted}
-              startInEdit={pendingAutoEdit === `${selected.kind}::${selected.name}`}
-            />
-          {/key}
-        {:else}
-          <p class="muted empty">Select an asset.</p>
-        {/if}
-      </div>
-    </div>
+    {/snippet}
+    <AssetsWorkspace
+      {visible}
+      {busy}
+      {error}
+      {scanResults}
+      loading={catalogLoad === 'loading'}
+      {importBlocked}
+      failed={!$catalog && catalogLoad === 'failed' ? loadFailed : undefined}
+      bind:selectedKey
+      bind:view
+      bind:cardBusy
+      autoEditKey={pendingAutoEdit}
+      plan={syncPlan}
+      planFilter={syncFilter}
+      onplanclose={() => (syncPlan = null)}
+      onapplied={onSyncApplied}
+      onapplying={(a) => (busy = a ? 'apply' : '')}
+      onreplanned={onSyncReplanned}
+      onscan={scan}
+      onsync={requestSync}
+      onimport={importFrom}
+      onsecrets={() => (showSecrets = true)}
+      onnew={() => (showNewAsset = true)}
+      onlintall={() => (showLintAll = true)}
+      onpull={pull}
+      oncommit={() => (showCommitPrompt = true)}
+      onpush={doPush}
+      ondeleted={onAssetDeleted}
+    />
   {/if}
   {#if showImport}
     <ImportDialog
@@ -468,33 +545,35 @@
       ondone={() => { showImport = false; importPreset = null; reload(false); void repoStatus(); }}
     />
   {/if}
-  {#if syncPlan}
-    <SyncPlanDialog
-      plan={syncPlan}
-      filter={syncFilter}
-      onclose={() => (syncPlan = null)}
-      onapplied={onSyncApplied}
-      onopensecrets={() => (showSecrets = true)}
-      onapplying={(a) => (busy = a ? 'apply' : '')}
-      onreplanned={onSyncReplanned}
-    />
-  {/if}
   {#if showSecrets}
     <SecretsPanel names={secretNames} onclose={() => (showSecrets = false)} />
   {/if}
   {#if showNewAsset}
-    <NewAssetDialog onclose={() => (showNewAsset = false)} onsaved={onAssetCreated} />
+    <NewAssetDialog
+      initialKind={newAssetKind}
+      onclose={() => {
+        showNewAsset = false;
+        newAssetKind = 'skill';
+      }}
+      onsaved={onAssetCreated}
+      onwrite={authorNewBlocked === null
+        ? (instructions) => {
+            showNewAsset = false;
+            authorNew = instructions;
+          }
+        : undefined}
+    />
+  {/if}
+  {#if authorNew !== null}
+    <AuthorSessionDialog instructions={authorNew} onclose={() => (authorNew = null)} />
   {/if}
   {#if showLintAll}
     <LintAllDialog onclose={() => (showLintAll = false)} onselect={onLintAllSelect} />
   {/if}
   {#if showCommitPrompt}
-    <PromptDialog
-      title="Commit pending changes"
-      label="Commit message"
-      initialValue="catalog: commit pending changes"
-      confirmLabel="Commit"
-      onsubmit={submitCommit}
+    <CommitAssetsDialog
+      canPush={!!$catalogConfig?.remote_url || !!$repoStatusStore?.has_upstream}
+      oncommit={(message, push) => void submitCommit(message, push)}
       oncancel={() => (showCommitPrompt = false)}
     />
   {/if}
@@ -510,23 +589,11 @@
   }
   .assets-panel { display: flex; flex-direction: column; height: 100%; }
   .setup { max-width: 480px; margin: 40px auto; display: flex; flex-direction: column; gap: 10px; }
-  .setup label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
-  .toolbar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--border); font-size: 12px; }
-  .path { color: var(--fg-muted); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .head { font-family: ui-monospace, monospace; color: var(--fg-muted); }
-  .badge { color: #d97706; }
-  .last-sync { color: var(--fg-muted); font-size: 11px; white-space: nowrap; }
-  .repo-status { font-size: 11px; color: var(--fg-muted); margin: 0; padding: 2px 10px; font-family: ui-monospace, monospace; }
-  .filter { margin-left: auto; width: 160px; }
-  .hub-overview { display: flex; flex-direction: column; flex: 1; min-height: 0; }
-  .hub-overview .note { margin: 6px 10px; font-size: 12px; }
-  .cmd { margin: 0; padding: 6px 8px; font-family: ui-monospace, monospace; font-size: 12px; background: var(--bg-pane); border-radius: 4px; white-space: pre-wrap; word-break: break-all; user-select: text; }
-  .overview-list { flex: 1; min-height: 0; }
-  .body { display: grid; grid-template-columns: 300px 1fr; flex: 1; min-height: 0; }
-  .left { border-right: 1px solid var(--border); min-height: 0; overflow: auto; }
-  .right { min-height: 0; overflow: auto; }
-  .muted { color: var(--fg-muted); } .empty { padding: 14px; } .error { color: #dc2626; padding: 4px 10px; margin: 0; }
-  .scan-result { font-size: 12px; padding: 4px 10px; margin: 0; color: var(--fg-muted); }
-  .problems { font-size: 12px; margin: 0; padding: 4px 10px 4px 28px; }
-  .primary { background: var(--accent); color: white; border: 0; border-radius: 4px; padding: 6px 10px; }
+  .setup label { display: flex; flex-direction: column; gap: 4px; font-size: var(--text-xs); }
+  .setup label.check { flex-direction: row; align-items: center; gap: 6px; }
+  .setup .hint { margin: -6px 0 0; }
+  .cmd { margin: 0; padding: 6px 8px; font-family: var(--font-mono); font-size: var(--text-xs); background: var(--bg-pane); border-radius: var(--radius-sm); white-space: pre-wrap; word-break: break-all; user-select: text; }
+  .muted { color: var(--fg-muted); } .error { color: var(--usage-crit); padding: 4px 10px; margin: 0; }
+  .pad { padding: 14px; }
+  .primary { background: var(--accent); color: var(--accent-fg); border: 0; border-radius: var(--radius-sm); padding: 6px 10px; }
 </style>

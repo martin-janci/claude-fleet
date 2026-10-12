@@ -1,0 +1,39 @@
+{
+  "spec": "fleet.form/1",
+  "title": "New Control API token",
+  "intro": "Lets a script or another agent drive the fleet over the Control API.",
+  "submit": "Create token",
+  "steps": [
+    {
+      "title": "Token",
+      "fields": [
+        { "name": "name", "type": "text", "label": "Name", "required": true, "max_len": 64, "placeholder": "Grafana dashboard" },
+        {
+          "name": "scope",
+          "type": "select",
+          "label": "Can",
+          "required": true,
+          "value": "act",
+          "options": [["read", "Read"], ["act", "Act"], ["admin", "Admin"]],
+          "help": "Act: start, send, stop sessions. Admin also changes settings."
+        },
+        {
+          "name": "expires",
+          "type": "select",
+          "label": "Expires",
+          "required": true,
+          "value": "90",
+          "options": [["30", "In 30 days"], ["90", "In 90 days"], ["365", "In a year"], ["never", "Never"]]
+        },
+        {
+          "name": "hosts",
+          "type": "multiselect",
+          "label": "Hosts",
+          "options": [["mercury", "mercury"]],
+          "help": "None picked: all hosts.",
+          "when": { "not": { "field": "scope", "eq": "admin" } }
+        }
+      ]
+    }
+  ]
+}

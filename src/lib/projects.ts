@@ -1,5 +1,7 @@
-import { writable, derived } from 'svelte/store';
+import { writable, derived, type Readable } from 'svelte/store';
 import { invokeCmd, invokeCmdAbortable, type IpcError, type Result } from './result';
+import { createListRace, type ListToken } from './row_store';
+import { filterHubProjects, hubProjectFilter } from './hub_projects';
 
 export interface ProjectRow {
   id: number;
@@ -38,24 +40,54 @@ export interface ProjectTreeRow {
   worktrees: WorktreeRow[];
 }
 
-export const projects = writable<ProjectTreeRow[]>([]);
+const allProjectsStore = writable<ProjectTreeRow[]>([]);
+
+/** Every project the backend listed, before this desktop's pick of its
+ *  hub's projects (Settings › Hub & sync, G4.6). Only that picker reads it. */
+export const allProjects: Readable<ProjectTreeRow[]> = { subscribe: allProjectsStore.subscribe };
+
+const shownProjects = derived([allProjectsStore, hubProjectFilter], ([$all, $filter]) =>
+  filterHubProjects($all, $filter),
+);
+
+/** The projects this app lists and starts sessions in: every one, or on a
+ *  paired desktop the hub's projects it picked. `set` / `update` write the
+ *  full list. */
+export const projects = {
+  subscribe: shownProjects.subscribe,
+  set: allProjectsStore.set,
+  update: allProjectsStore.update,
+};
 
 /** O(1) project-id -> tree-row lookup, derived once per `projects` change. */
 export const projectById = derived(projects, ($p) => new Map($p.map((p) => [p.project.id, p])));
 
+// A project or worktree frame that lands while a list is in flight is newer
+// than that list: the project it touched keeps the store's entry, and an
+// older list never lands over a newer one (review r07).
+const race = createListRace<number>();
+
+function applyProjectList(listed: ProjectTreeRow[], token: ListToken): void {
+  if (!Array.isArray(listed)) return;
+  projects.update((cur) => race.mergeList(cur, listed, token, (p) => p.project.id) ?? cur);
+}
+
 export async function loadProjects(): Promise<Result<ProjectTreeRow[]>> {
+  const token = race.begin();
   const r = await invokeCmd<ProjectTreeRow[]>('list_projects');
-  if (r.ok) projects.set(r.value);
+  if (r.ok) applyProjectList(r.value, token);
   return r;
 }
 
 export async function refreshProjects(): Promise<Result<ProjectTreeRow[]>> {
+  const token = race.begin();
   const r = await invokeCmd<ProjectTreeRow[]>('refresh_projects');
-  if (r.ok) projects.set(r.value);
+  if (r.ok) applyProjectList(r.value, token);
   return r;
 }
 
 export function mergeProject(row: ProjectTreeRow): void {
+  race.touch(row.project.id);
   projects.update((arr) => {
     const i = arr.findIndex((p) => p.project.id === row.project.id);
     if (i === -1) return [...arr, row];
@@ -72,6 +104,7 @@ export function mergeProject(row: ProjectTreeRow): void {
  * the existing `worktrees` array. If it's new, seed an empty `worktrees: []`.
  */
 function mergeProjectRow(arr: ProjectTreeRow[], row: ProjectRow): ProjectTreeRow[] {
+  race.touch(row.id);
   const i = arr.findIndex((p) => p.project.id === row.id);
   if (i === -1) return [...arr, { project: row, worktrees: [] }];
   const next = arr.slice();
@@ -82,6 +115,7 @@ function mergeProjectRow(arr: ProjectTreeRow[], row: ProjectRow): ProjectTreeRow
 function mergeWorktreeRow(arr: ProjectTreeRow[], row: WorktreeRow): ProjectTreeRow[] {
   const idx = arr.findIndex((p) => p.project.id === row.project_id);
   if (idx === -1) return arr;
+  race.touch(row.project_id);
   const entry = arr[idx];
   const wts = entry.worktrees ?? [];
   const wIdx = wts.findIndex((w) => w.id === row.id);
@@ -96,12 +130,9 @@ function removeWorktreeRow(arr: ProjectTreeRow[], id: number): ProjectTreeRow[] 
   if (!arr.some((entry) => entry.worktrees?.some((w) => w.id === id))) return arr;
   return arr.map((entry) => {
     if (!entry.worktrees?.some((w) => w.id === id)) return entry;
+    race.touch(entry.project.id);
     return { ...entry, worktrees: entry.worktrees.filter((w) => w.id !== id) };
   });
-}
-
-function removeWorktree(id: number): void {
-  projects.update((arr) => removeWorktreeRow(arr, id));
 }
 
 /** One backend project/worktree event, as delivered by `events.ts`. Both
@@ -123,19 +154,6 @@ export function applyProjectEvents(events: readonly ProjectEvent[]): void {
     }
     return next;
   });
-}
-
-/** Delete a git worktree on its host and drop the fleet row. The backend
- *  refuses (`E_WORKTREE_BUSY`) when an alive session uses it unless `force`. */
-export async function deleteWorktree(
-  worktreeId: number,
-  force = false,
-): Promise<Result<void>> {
-  const r = await invokeCmd<void>('delete_worktree', {
-    args: { worktree_id: worktreeId, force },
-  });
-  if (r.ok) removeWorktree(worktreeId);
-  return r;
 }
 
 /** `list_host_worktrees` result: one project's worktrees as they exist on
@@ -161,7 +179,12 @@ export async function listHostWorktrees(
 /** Wire shape of `service::add_project::AddProjectArgs::source`
  *  (`#[serde(tag = "kind", rename_all = "snake_case")]`). */
 export type AddProjectSource =
-  | { kind: 'clone'; url: string }
+  | {
+      kind: 'clone';
+      url: string;
+      /** Already in the fleet: clone it onto this (remote) host too. */
+      existing?: boolean;
+    }
   | { kind: 'folder'; path: string }
   | { kind: 'new'; owner: string; repo: string; create_remote: boolean; confirm?: string };
 
@@ -171,6 +194,8 @@ export interface GithubRepo {
   description: string | null;
   is_private: boolean;
   updated_at: string | null;
+  /** Main language ("Rust"); absent from an older hub's answer. */
+  language?: string | null;
 }
 
 /**
@@ -196,8 +221,13 @@ export async function addProject(
 
 /** The repositories `gh` can see on `hostAlias`, for the Add-project
  *  dialog's browse mode. Read-only. */
-export async function listGithubRepos(hostAlias: string): Promise<Result<GithubRepo[]>> {
-  return invokeCmd<GithubRepo[]>('list_github_repos', { args: { host_alias: hostAlias } });
+/** `owner` lists that user's or organisation's repositories instead of the
+ *  host login's own; it is sent only when given, so the request is
+ *  byte-for-byte today's without one. */
+export async function listGithubRepos(hostAlias: string, owner?: string): Promise<Result<GithubRepo[]>> {
+  return invokeCmd<GithubRepo[]>('list_github_repos', {
+    args: owner ? { host_alias: hostAlias, owner } : { host_alias: hostAlias },
+  });
 }
 
 const CONFIRM_TOKEN_RE = /^[0-9a-f]{64}$/;

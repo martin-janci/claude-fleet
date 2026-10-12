@@ -1,6 +1,7 @@
 import { invokeCmd, type Result } from './result';
 import type { DecideHealth } from './decide_health';
 import type { TrackersHealth } from './tracker_health';
+import type { OrgBudgetAlert } from './org_budget';
 
 export interface Health {
   version: string;
@@ -13,6 +14,32 @@ export interface Health {
   /** The Jev decision envelope's last hour; absent when it is off, from an
    *  older hub, and for a scoped caller. */
   decide?: DecideHealth;
+  /** Org administration phase C: the orgs at or over a budget; absent when
+   *  none are, from an older hub, and for a caller that does not see every
+   *  session. */
+  org_budgets?: OrgBudgetAlert[];
+  /** Every background loop's last and next run (redesign 8.1); absent from
+   *  an older hub. */
+  loops?: LoopHealth[];
+  /** `automation.paused`: the pausable loops stand still. */
+  automation_paused?: boolean;
+}
+
+/** One background loop (`service::loops::LoopHealth`). */
+export interface LoopHealth {
+  name: string;
+  label: string;
+  /** Stops while `automation.paused` is on. */
+  pausable: boolean;
+  /** Why a loop that is not pausable keeps running on Pause all. */
+  keeps_running?: string | null;
+  last_run_at?: number | null;
+  next_run_at?: number | null;
+  /** `ok`, `error` or `paused`; absent before its first run. */
+  result?: 'ok' | 'error' | 'paused' | string | null;
+  last_error?: string | null;
+  runs: number;
+  failures: number;
 }
 
 /**

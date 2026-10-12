@@ -60,7 +60,7 @@ Tick each before starting.
   and [hub.md → Upgrade and rollback](hub.md#upgrade-and-rollback). Step 1
   takes them; keep them until the run is recorded.
 - [ ] **One hub**, reachable from the desktop and the phone, and a desktop
-  **paired with it** (Settings → Hub). `mcp.confirm_destructive` is **off**
+  **paired with it** (Settings → Hub & sync). `mcp.confirm_destructive` is **off**
   on the hub (its default; see [hub.md → Security notes](hub.md#security-notes)).
 - [ ] **At least two hosts** provisioned from the hub, each with tmux,
   git and Claude Code logged in. Call them *host A* and *host B* below.
@@ -147,7 +147,7 @@ Notes (time to healthy, the migration lines):
 **Action.** Install the release under test on the desktop and start it.
 
 **Expected.** It starts without a schema error and reconnects to the hub
-(Settings → Hub shows it connected).
+(Settings → Hub & sync shows it connected).
 
 Result: [ ] pass / [ ] fail
 
@@ -296,8 +296,10 @@ ambiguous, opens the New session dialog on T2), and selects it:
 - the session is named `T2-KEY title`;
 - its chip is solid (source `started`);
 - with **Brief Claude** on, a short start prompt is typed only once
-  Claude's REPL is ready (never into a trust dialog), and Claude's first
-  answer shows it knows the ticket.
+  Claude's REPL is ready (never into a trust dialog: it waits for the
+  dialog to be answered, then types), it is submitted (no prompt left
+  sitting in the input box), and Claude's first answer shows it knows the
+  ticket.
 
 Result: [ ] pass / [ ] fail
 
@@ -579,14 +581,14 @@ Notes:
 
 ## Part K: the operator's confirmations (M9.7)
 
-### Step 32: the operator cannot start or kill on a hub
+### Step 32: the operator's start and kill wait for you on a hub
 
 **Action.** In the agent panel, ask the operator: "Start work on T4" and
 then "Kill the session on T3".
 
-**Expected.** Both are refused (`E_FORBIDDEN`, no approver on a hub), and
-the operator says so and suggests doing it from the sidebar, or archive /
-snooze for a tidy. Nothing started or died.
+**Expected.** Both wait for your approval (`E_CONFIRM_REQUIRED`; redesign
+9.2): each shows as a card in Control's transcript, or in the dialog, on
+your paired device. Nothing starts or dies until you approve it there.
 
 Result: [ ] pass / [ ] fail
 

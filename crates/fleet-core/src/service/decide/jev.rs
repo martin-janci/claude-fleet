@@ -18,8 +18,10 @@
 use super::Fallback;
 use crate::net::https::{DirectTransport, HttpTransport, Request, TransportError};
 use crate::store::{is_decision_word, Secret};
+use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -171,11 +173,9 @@ pub(super) fn map_value(v: &Value, f: &dyn Fn(&str) -> String) -> Value {
     match v {
         Value::String(s) => Value::String(f(s)),
         Value::Array(a) => Value::Array(a.iter().map(|x| map_value(x, f)).collect()),
-        Value::Object(o) => Value::Object(
-            o.iter()
-                .map(|(k, x)| (k.clone(), map_value(x, f)))
-                .collect(),
-        ),
+        // Keys too: an adapter that keys its state by a URL or an address
+        // would otherwise send it as written (review r15 F08).
+        Value::Object(o) => Value::Object(o.iter().map(|(k, x)| (f(k), map_value(x, f))).collect()),
         other => other.clone(),
     }
 }
@@ -185,6 +185,13 @@ pub(super) fn map_value(v: &Value, f: &dyn Fn(&str) -> String) -> Value {
 pub struct JevRequest {
     pub state: Value,
     pub question: Question,
+    /// Mixed into [`Self::option_order`]'s key: the same request with its
+    /// options in another order. Only a benchmark sets it (the
+    /// `option-order` perturbation, which measures how much the order moves
+    /// an answer); nothing else of the request changes, and it is never
+    /// sent or fingerprinted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_salt: Option<String>,
 }
 
 impl JevRequest {
@@ -195,16 +202,65 @@ impl JevRequest {
         JevRequest {
             state: map_value(&self.state, &f),
             question: self.question.map_text(&f),
+            order_salt: self.order_salt.clone(),
         }
     }
 
-    /// The API body for `model`.
+    /// The API body for `model`, as JSON. Its objects are sorted (fleet
+    /// builds `serde_json` without `preserve_order`), so a choice's options
+    /// read here in key order; [`Self::wire_body`] is what is sent.
     pub fn api_body(&self, model: &str) -> Value {
         serde_json::json!({
             "state": self.state,
             "model": model,
             "questions": { QUESTION_ID: self.question },
         })
+    }
+
+    /// The bytes sent for `model`: [`Self::api_body`] with a choice's
+    /// options in [`Self::option_order`] instead of key order. Jev leans
+    /// toward the first option it reads (TypeSafe's jaggedness notes for
+    /// jev-1.13), and key order would put the same option first every time
+    /// (`done` for `status_map`, the lowest id for `work_link`).
+    pub fn wire_body(&self, model: &str) -> Vec<u8> {
+        let order = self.option_order();
+        let body = WireBody {
+            req: self,
+            model,
+            order: &order,
+        };
+        serde_json::to_vec(&body).expect("a JSON value always serializes")
+    }
+
+    /// PURE: a choice's option keys in the order they are offered — a
+    /// permutation keyed by the request itself (SHA-256 of its canonical
+    /// JSON), so the same request always reads the same way (a run can be
+    /// replayed, a benchmark repeated) while no option holds the first place
+    /// across requests. Empty for a noul or a score: their order means
+    /// something.
+    pub fn option_order(&self) -> Vec<String> {
+        let Question::Choice { criteria, .. } = &self.question else {
+            return Vec::new();
+        };
+        let v = serde_json::json!({ "state": self.state, "question": self.question });
+        let mut seed = Sha256::new();
+        seed.update(super::canonical_json(&v).as_bytes());
+        if let Some(salt) = &self.order_salt {
+            seed.update(b"\n");
+            seed.update(salt.as_bytes());
+        }
+        let seed = seed.finalize();
+        let mut keyed: Vec<([u8; 32], &String)> = criteria
+            .keys()
+            .map(|k| {
+                let mut h = Sha256::new();
+                h.update(seed);
+                h.update(k.as_bytes());
+                (h.finalize().into(), k)
+            })
+            .collect();
+        keyed.sort();
+        keyed.into_iter().map(|(_, k)| k.clone()).collect()
     }
 
     /// [`Question::check`] plus the size cap.
@@ -217,6 +273,90 @@ impl JevRequest {
             ));
         }
         Ok(())
+    }
+}
+
+/// [`JevRequest::wire_body`]'s shape: the API body written field by field,
+/// so a choice's options keep the order given.
+struct WireBody<'a> {
+    req: &'a JevRequest,
+    model: &'a str,
+    order: &'a [String],
+}
+
+impl Serialize for WireBody<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut m = s.serialize_map(Some(3))?;
+        m.serialize_entry("state", &self.req.state)?;
+        m.serialize_entry("model", self.model)?;
+        m.serialize_entry(
+            "questions",
+            &OneQuestion(WireQuestion {
+                q: &self.req.question,
+                order: self.order,
+            }),
+        )?;
+        m.end()
+    }
+}
+
+/// `{ QUESTION_ID: question }`.
+struct OneQuestion<'a>(WireQuestion<'a>);
+
+impl Serialize for OneQuestion<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut m = s.serialize_map(Some(1))?;
+        m.serialize_entry(QUESTION_ID, &self.0)?;
+        m.end()
+    }
+}
+
+/// A question as sent: a choice's options in `order`, anything else as
+/// [`Question`] serializes it.
+struct WireQuestion<'a> {
+    q: &'a Question,
+    order: &'a [String],
+}
+
+impl Serialize for WireQuestion<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let Question::Choice {
+            instructions,
+            criteria,
+        } = self.q
+        else {
+            return self.q.serialize(s);
+        };
+        let mut m = s.serialize_map(Some(3))?;
+        m.serialize_entry("type", "choice")?;
+        m.serialize_entry("instructions", instructions)?;
+        m.serialize_entry(
+            "criteria",
+            &Ordered {
+                criteria,
+                order: self.order,
+            },
+        )?;
+        m.end()
+    }
+}
+
+/// A choice's options in `order` (every key of `criteria` exactly once:
+/// [`JevRequest::option_order`] is a permutation of them).
+struct Ordered<'a> {
+    criteria: &'a BTreeMap<String, Option<Value>>,
+    order: &'a [String],
+}
+
+impl Serialize for Ordered<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut m = s.serialize_map(Some(self.order.len()))?;
+        for k in self.order {
+            if let Some(v) = self.criteria.get(k) {
+                m.serialize_entry(k, v)?;
+            }
+        }
+        m.end()
     }
 }
 
@@ -270,9 +410,31 @@ pub struct ValidAnswer {
     /// A choice's option, or a noul / score value as a number.
     pub value: String,
     pub probabilities: Option<BTreeMap<String, f64>>,
-    /// The model's confidence (a choice or score); for a noul, derived as
-    /// `max(p, 1 - p)`.
+    /// The answer's top probability ([`top_probability`]): what every floor
+    /// is compared with, what the run records and what a proposal shows.
+    /// For a noul, `max(p, 1 - p)`.
     pub confidence: Option<f64>,
+}
+
+/// PURE: how sure an answer is, as one number: the probability of the
+/// chosen option for a choice, the largest level probability for a score;
+/// the model's own `confidence` field only when it sent no distribution
+/// (or none for the option chosen). Independent tests of jev-1.13 found
+/// that field never better calibrated than the top probability, so it is
+/// not what a floor reads.
+pub fn top_probability(
+    q: &Question,
+    value: &str,
+    probabilities: Option<&BTreeMap<String, f64>>,
+    confidence: Option<f64>,
+) -> Option<f64> {
+    let p = probabilities.filter(|p| !p.is_empty());
+    let top = match q {
+        Question::Choice { .. } => p.and_then(|p| p.get(value).copied()),
+        Question::Score { .. } => p.and_then(|p| p.values().copied().reduce(f64::max)),
+        Question::Noul { .. } => None,
+    };
+    top.or(confidence)
 }
 
 /// PURE: `x` as a short decimal (`0.95`, `1.05`, `1`).
@@ -340,10 +502,11 @@ pub fn validate_answer(q: &Question, a: &Answer) -> Result<ValidAnswer, String> 
             if confidence.is_some_and(|c| !unit(c)) {
                 return Err("a confidence outside 0..1".into());
             }
+            let probabilities = check_distribution(probabilities, &offered)?;
             Ok(ValidAnswer {
+                confidence: top_probability(q, choice, probabilities.as_ref(), *confidence),
                 value: choice.clone(),
-                probabilities: check_distribution(probabilities, &offered)?,
-                confidence: *confidence,
+                probabilities,
             })
         }
         (
@@ -362,10 +525,12 @@ pub fn validate_answer(q: &Question, a: &Answer) -> Result<ValidAnswer, String> 
             if confidence.is_some_and(|c| !unit(c)) {
                 return Err("a confidence outside 0..1".into());
             }
+            let probabilities = check_distribution(probabilities, &offered)?;
+            let value = fmt_num(*score);
             Ok(ValidAnswer {
-                value: fmt_num(*score),
-                probabilities: check_distribution(probabilities, &offered)?,
-                confidence: *confidence,
+                confidence: top_probability(q, &value, probabilities.as_ref(), *confidence),
+                value,
+                probabilities,
             })
         }
         _ => Err(format!("a {} question answered as another type", q.kind())),
@@ -452,7 +617,7 @@ impl DecisionBackend for JevBackend {
         req: &JevRequest,
         timeout: Duration,
     ) -> Result<JevResponse, BackendError> {
-        let http = Request::post_json(JEV_URL, &req.api_body(model))
+        let http = Request::post_json_bytes(JEV_URL, req.wire_body(model))
             .header("Authorization", format!("Bearer {}", key.expose()))
             .header(
                 "User-Agent",

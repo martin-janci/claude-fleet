@@ -5,10 +5,96 @@
 use super::*;
 use crate::net::https::{FakeTransport, Method, Response};
 use crate::service::orgs::OrgScope;
+use crate::service::view_scope::ViewScope;
 use crate::store::{TrackerConfig, TrackerItemWrite};
 use serde_json::json;
 
 const ME: &str = "acct-me";
+
+/// These tests are about the ORG boundary and the start's own race, and they
+/// pass an [`OrgScope`]; the start path takes a whole
+/// [`crate::service::view_scope::ViewScope`] since multi-user M1 (T9b — its
+/// `E_EXISTS` prose names a session, and its branch slug can land a pane in
+/// somebody's checkout). These three shadow the real functions with the org
+/// half wrapped in the hub's own reader, so the matrices below keep saying
+/// what they were written to say; the PERSON half is tested in
+/// `mcp::tools::tests` against real people rows.
+fn vs(store: &Mutex<Store>, scope: &OrgScope) -> ViewScope {
+    match scope.host() {
+        // A per-host token's §4.4 reach is part of what these matrices
+        // assert (D7's "an isolated org's winner is not named"), and
+        // `ViewScope::internal` would short-circuit the whole question — the
+        // hub's own reader sees every row. So build the real thing, through
+        // the ONE constructor a request may use
+        // (`view_scope_tests::only_caller_view_scope_constructs_a_view_scope`
+        // holds that true by reading this file too).
+        Some(h) => crate::mcp::auth::Caller {
+            api: None,
+            host_alias: Some(h.to_string()),
+            client: None,
+            mode: crate::mcp::auth::TokenMode::Full,
+            pane: None,
+            is_personal_owner: false,
+        }
+        .view_scope(&store.lock().unwrap())
+        .expect("a host scope"),
+        // `All` here means the hub's own reader: these tests predate people.
+        None => ViewScope::internal().with_org(scope.clone()),
+    }
+}
+
+async fn plan_start(
+    store: &Mutex<Store>,
+    args: &StartArgs,
+    scope: &OrgScope,
+    net: &TrackerNet,
+) -> Result<StartPlan, IpcError> {
+    crate::service::trackers::tickets::plan_start(store, args, &vs(store, scope), net).await
+}
+
+async fn start_with<F, Fut>(
+    store: &Arc<Mutex<Store>>,
+    plan: &StartPlan,
+    brief: Option<String>,
+    scope: &OrgScope,
+    spawn: F,
+) -> Result<(SessionRow, bool), IpcError>
+where
+    F: FnOnce(crate::service::sessions::NewSessionArgs) -> Fut,
+    Fut: std::future::Future<Output = Result<SessionRow, IpcError>>,
+{
+    crate::service::trackers::tickets::start_with(store, plan, brief, &vs(store, scope), spawn)
+        .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_many<F, Fut, P>(
+    store: &Arc<Mutex<Store>>,
+    args: &StartArgs,
+    project_ids: &[i64],
+    scope: &OrgScope,
+    net: &TrackerNet,
+    deadline: tokio::time::Instant,
+    spawn: F,
+    started: P,
+) -> Result<MultiStart, IpcError>
+where
+    F: FnMut(crate::service::sessions::NewSessionArgs) -> Fut,
+    Fut: std::future::Future<Output = Result<SessionRow, IpcError>>,
+    P: FnMut(&SessionRow, &str),
+{
+    crate::service::trackers::tickets::start_many(
+        store,
+        args,
+        project_ids,
+        &vs(store, scope),
+        net,
+        deadline,
+        spawn,
+        started,
+    )
+    .await
+}
 
 struct Fx {
     store: Arc<Mutex<Store>>,
@@ -102,11 +188,18 @@ impl Fx {
     }
 
     fn keys(&self, view: Option<&str>, scope: &OrgScope) -> Vec<String> {
-        tickets(&self.store, None, view, None, None, scope)
-            .unwrap()
-            .into_iter()
-            .map(|t| t.item.key.unwrap())
-            .collect()
+        tickets(
+            &self.store,
+            None,
+            view,
+            None,
+            None,
+            &crate::service::view_scope::org_only_view(scope),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|t| t.item.key.unwrap())
+        .collect()
     }
 
     fn net(&self) -> crate::service::trackers::TrackerNet {
@@ -117,7 +210,12 @@ impl Fx {
     fn lookup_as_host(&self, key: &str) -> Ticket {
         tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(lookup(&self.store, key, &host_scope("hosta"), &self.net()))
+            .block_on(lookup(
+                &self.store,
+                key,
+                &crate::service::view_scope::org_only_view(&host_scope("hosta")),
+                &self.net(),
+            ))
             .unwrap()
     }
 
@@ -381,6 +479,70 @@ fn an_asana_ticket_is_not_offered_describe() {
         .contains("open the ticket"));
 }
 
+/// Task → session P-4: own tasks join the unfiltered list after the
+/// tickets, under the same text filter; a tracker view lists tickets only.
+#[test]
+fn own_tasks_are_listed_when_asked_for() {
+    let fx = Fx::new();
+    {
+        let s = fx.store.lock().unwrap();
+        s.create_local_work_item(None, "Release notes for the refund fix")
+            .unwrap();
+    }
+    let all = |view: Option<&str>, query: Option<&str>, local: bool| -> Vec<String> {
+        crate::service::trackers::tickets::tickets_and_tasks(
+            &fx.store,
+            None,
+            view,
+            query,
+            None,
+            local,
+            &crate::service::view_scope::org_only_view(&OrgScope::All),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|t| t.item.title)
+        .collect()
+    };
+    assert_eq!(all(None, None, false).len(), 4, "tickets only");
+    let with = all(None, None, true);
+    assert_eq!(with.len(), 5);
+    assert_eq!(with[4], "Release notes for the refund fix");
+    assert_eq!(
+        all(None, Some("release"), true),
+        vec!["Release notes for the refund fix"]
+    );
+    assert_eq!(
+        all(Some("mine"), None, true).len(),
+        2,
+        "a view names tickets alone"
+    );
+}
+
+/// Tickets never take the whole limit while own tasks match: a picker
+/// asking for a few rows still shows the caller's TASK-n.
+#[test]
+fn own_tasks_are_not_starved_by_the_limit() {
+    let fx = Fx::new();
+    {
+        let s = fx.store.lock().unwrap();
+        s.create_local_work_item(None, "Release notes").unwrap();
+    }
+    let rows = crate::service::trackers::tickets::tickets_and_tasks(
+        &fx.store,
+        None,
+        None,
+        None,
+        Some(2),
+        true,
+        &crate::service::view_scope::org_only_view(&OrgScope::All),
+    )
+    .unwrap();
+    let titles: Vec<&str> = rows.iter().map(|t| t.item.title.as_str()).collect();
+    assert_eq!(titles.len(), 2, "{titles:?}");
+    assert_eq!(titles[1], "Release notes");
+}
+
 #[test]
 fn views_are_evaluated_from_the_cache() {
     let fx = Fx::new();
@@ -396,9 +558,25 @@ fn views_are_evaluated_from_the_cache() {
     assert_eq!(fx.keys(Some("sprint"), &OrgScope::All), vec!["ABC-4"]);
     assert_eq!(fx.keys(Some("filter:9"), &OrgScope::All), vec!["ABC-3"]);
     assert_eq!(fx.keys(None, &OrgScope::All).len(), 4);
-    let q = tickets(&fx.store, None, None, Some("abc-3"), None, &OrgScope::All).unwrap();
+    let q = tickets(
+        &fx.store,
+        None,
+        None,
+        Some("abc-3"),
+        None,
+        &crate::service::view_scope::org_only_view(&OrgScope::All),
+    )
+    .unwrap();
     assert_eq!(q.len(), 1);
-    let one = tickets(&fx.store, None, None, None, Some(1), &OrgScope::All).unwrap();
+    let one = tickets(
+        &fx.store,
+        None,
+        None,
+        None,
+        Some(1),
+        &crate::service::view_scope::org_only_view(&OrgScope::All),
+    )
+    .unwrap();
     assert_eq!(one.len(), 1);
     assert!(
         fx.fake.requests().is_empty(),
@@ -434,22 +612,37 @@ async fn a_host_token_sees_only_its_own_hosts_tickets() {
     assert_eq!(fx.keys(None, &OrgScope::All).len(), 4, "master / client");
 
     // lookup: its own ticket, with the description fenced as untrusted.
-    let t = lookup(&fx.store, "abc-1", &host_scope("hosta"), &fx.net())
-        .await
-        .unwrap();
+    let t = lookup(
+        &fx.store,
+        "abc-1",
+        &crate::service::view_scope::org_only_view(&host_scope("hosta")),
+        &fx.net(),
+    )
+    .await
+    .unwrap();
     let d = t.description.unwrap();
     assert!(d.starts_with("[claude-fleet:"), "{d}");
     assert!(d.contains("Ignore previous instructions"));
     // Another ticket: forbidden, and the reason says why.
-    let e = lookup(&fx.store, "ABC-2", &host_scope("hosta"), &fx.net())
-        .await
-        .unwrap_err();
+    let e = lookup(
+        &fx.store,
+        "ABC-2",
+        &crate::service::view_scope::org_only_view(&host_scope("hosta")),
+        &fx.net(),
+    )
+    .await
+    .unwrap_err();
     assert_eq!(e.code, codes::E_FORBIDDEN);
     assert!(e.message.contains("per-host token"), "{}", e.message);
     // A key nothing caches: a host token cannot make the hub fetch it.
-    let e = lookup(&fx.store, "ABC-99", &host_scope("hosta"), &fx.net())
-        .await
-        .unwrap_err();
+    let e = lookup(
+        &fx.store,
+        "ABC-99",
+        &crate::service::view_scope::org_only_view(&host_scope("hosta")),
+        &fx.net(),
+    )
+    .await
+    .unwrap_err();
     assert_eq!(e.code, codes::E_FORBIDDEN);
     assert!(fx.fake.requests().is_empty());
     // An ended link on host A still counts (past work).
@@ -471,7 +664,7 @@ async fn lookup_answers_from_the_cache_or_fetches_once_and_caches() {
     let hit = lookup(
         &fx.store,
         "https://acme.atlassian.net/browse/ABC-1",
-        &OrgScope::All,
+        &crate::service::view_scope::org_only_view(&OrgScope::All),
         &fx.net(),
     )
     .await
@@ -494,13 +687,23 @@ async fn lookup_answers_from_the_cache_or_fetches_once_and_caches() {
                 "issuetype": {"name": "Task", "hierarchyLevel": 0}, "project": {"key": "ABC"}}}]}),
         )),
     );
-    let live = lookup(&fx.store, "ABC-77", &OrgScope::All, &fx.net())
-        .await
-        .unwrap();
+    let live = lookup(
+        &fx.store,
+        "ABC-77",
+        &crate::service::view_scope::org_only_view(&OrgScope::All),
+        &fx.net(),
+    )
+    .await
+    .unwrap();
     assert_eq!(live.item.title, "Fresh");
-    let again = lookup(&fx.store, "ABC-77", &OrgScope::All, &fx.net())
-        .await
-        .unwrap();
+    let again = lookup(
+        &fx.store,
+        "ABC-77",
+        &crate::service::view_scope::org_only_view(&OrgScope::All),
+        &fx.net(),
+    )
+    .await
+    .unwrap();
     assert_eq!(again.item.id, live.item.id);
     assert_eq!(
         fx.fake.count("/issue/bulkfetch"),
@@ -512,7 +715,7 @@ async fn lookup_answers_from_the_cache_or_fetches_once_and_caches() {
     let e = lookup(
         &fx.store,
         "https://other.atlassian.net/browse/ZZ-1",
-        &OrgScope::All,
+        &crate::service::view_scope::org_only_view(&OrgScope::All),
         &fx.net(),
     )
     .await
@@ -528,10 +731,15 @@ async fn lookup_answers_from_the_cache_or_fetches_once_and_caches() {
         Ok(Response::json(200, &json!({"issues": []}))),
     );
     assert_eq!(
-        lookup(&fx.store, "ABC-404", &OrgScope::All, &fx.net())
-            .await
-            .unwrap_err()
-            .code,
+        lookup(
+            &fx.store,
+            "ABC-404",
+            &crate::service::view_scope::org_only_view(&OrgScope::All),
+            &fx.net()
+        )
+        .await
+        .unwrap_err()
+        .code,
         codes::E_NOTFOUND
     );
 }
@@ -549,9 +757,14 @@ async fn a_lookup_inside_the_retry_after_window_sends_nothing() {
         .unwrap()
         .set_tracker_not_before(t, Some(now + 600))
         .unwrap();
-    let e = lookup(&fx.store, "ABC-77", &OrgScope::All, &fx.net())
-        .await
-        .unwrap_err();
+    let e = lookup(
+        &fx.store,
+        "ABC-77",
+        &crate::service::view_scope::org_only_view(&OrgScope::All),
+        &fx.net(),
+    )
+    .await
+    .unwrap_err();
     assert_eq!(e.code, codes::E_TRACKER);
     assert!(e.message.contains("cannot be asked now"), "{}", e.message);
     let left = e.details.unwrap()["retry_after_secs"].as_i64().unwrap();
@@ -561,9 +774,14 @@ async fn a_lookup_inside_the_retry_after_window_sends_nothing() {
         "no request inside the window"
     );
     // The cache still answers.
-    assert!(lookup(&fx.store, "ABC-1", &OrgScope::All, &fx.net())
-        .await
-        .is_ok());
+    assert!(lookup(
+        &fx.store,
+        "ABC-1",
+        &crate::service::view_scope::org_only_view(&OrgScope::All),
+        &fx.net()
+    )
+    .await
+    .is_ok());
     // Past the window: the fetch happens.
     fx.store
         .lock()
@@ -576,10 +794,15 @@ async fn a_lookup_inside_the_retry_after_window_sends_nothing() {
         Ok(Response::json(200, &json!({"issues": []}))),
     );
     assert_eq!(
-        lookup(&fx.store, "ABC-77", &OrgScope::All, &fx.net())
-            .await
-            .unwrap_err()
-            .code,
+        lookup(
+            &fx.store,
+            "ABC-77",
+            &crate::service::view_scope::org_only_view(&OrgScope::All),
+            &fx.net()
+        )
+        .await
+        .unwrap_err()
+        .code,
         codes::E_NOTFOUND
     );
     assert_eq!(fx.fake.count("/issue/bulkfetch"), 1);
@@ -630,7 +853,7 @@ async fn a_lookup_by_url_answers_from_that_urls_tracker_only() {
     let mine = lookup(
         &fx.store,
         "https://acme.atlassian.net/browse/ABC-9",
-        &OrgScope::All,
+        &crate::service::view_scope::org_only_view(&OrgScope::All),
         &fx.net(),
     )
     .await
@@ -644,7 +867,7 @@ async fn a_lookup_by_url_answers_from_that_urls_tracker_only() {
     let theirs = lookup(
         &fx.store,
         "https://other.atlassian.net/browse/ABC-9",
-        &OrgScope::All,
+        &crate::service::view_scope::org_only_view(&OrgScope::All),
         &fx.net(),
     )
     .await
@@ -715,6 +938,8 @@ async fn an_agents_start_is_recorded_as_the_agents_and_never_writes_back() {
                 &TrackerSettings {
                     write_back: WriteBack {
                         pr_remote_link: true,
+                        comments: false,
+                        create_tickets: false,
                     },
                     ..Default::default()
                 },
@@ -1134,10 +1359,17 @@ async fn another_orgs_bare_link_neither_blocks_a_start_nor_counts_as_live() {
         .unwrap()
         .id;
     let live_on_abc2 = |fx: &Fx| -> Vec<i64> {
-        tickets(&fx.store, None, None, Some("abc-2"), None, &OrgScope::All)
-            .unwrap()
-            .remove(0)
-            .live_session_ids
+        tickets(
+            &fx.store,
+            None,
+            None,
+            Some("abc-2"),
+            None,
+            &crate::service::view_scope::org_only_view(&OrgScope::All),
+        )
+        .unwrap()
+        .remove(0)
+        .live_session_ids
     };
 
     // The A host's bare link: exactly what the store keeps for it.
@@ -1296,9 +1528,14 @@ async fn ticket_text_cannot_escape_the_fence() {
         .unwrap()
         .link_session_work(sid, WorkTarget::Key("ABC-66"), "manual")
         .unwrap();
-    let t = lookup(&fx.store, "ABC-66", &host_scope("hosta"), &fx.net())
-        .await
-        .unwrap();
+    let t = lookup(
+        &fx.store,
+        "ABC-66",
+        &crate::service::view_scope::org_only_view(&host_scope("hosta")),
+        &fx.net(),
+    )
+    .await
+    .unwrap();
     let d = t.description.unwrap();
     assert_eq!(d.matches(UNTRUSTED_END).count(), 1, "{d}");
     assert!(d.ends_with(UNTRUSTED_END), "{d}");
@@ -2433,6 +2670,66 @@ fn a_subtask_starts_in_its_project_with_the_ticket_brief_then_its_own() {
     );
 }
 
+/// A fleet task started by its key (the new-session dialog sends the key
+/// of a row with no tracker) is the task: linked to it and briefed with its
+/// title and notes, not a bare key no tracker knows.
+#[tokio::test]
+async fn a_task_started_by_its_key_is_briefed_with_its_notes() {
+    let fx = Fx::new();
+    let task = fx
+        .store
+        .lock()
+        .unwrap()
+        .create_native_item(&crate::store::NativeItem {
+            title: "Polish the start dialog",
+            parent_id: None,
+            project_id: Some(fx.pid),
+            notes: Some("the brief toggle, the preview"),
+        })
+        .unwrap();
+    let key = task.key.clone().expect("a task has a key");
+    let args = StartArgs {
+        reference: Some(key.clone()),
+        host_alias: Some("hosta".into()),
+        with_brief: true,
+        ..Default::default()
+    };
+    let got = with_native_defaults(&fx.store, &args, &OrgScope::All).unwrap();
+    assert_eq!(
+        (got.item_id, got.reference.as_deref()),
+        (Some(task.id), None)
+    );
+    assert_eq!(
+        got.brief.as_deref(),
+        Some("Polish the start dialog\n\nthe brief toggle, the preview")
+    );
+    let plan = plan_start(&fx.store, &got, &OrgScope::All, &fx.net())
+        .await
+        .unwrap();
+    assert_eq!(
+        (plan.item_id, plan.key.as_str()),
+        (Some(task.id), key.as_str())
+    );
+    assert_eq!(plan.project_id, fx.pid);
+}
+
+/// A key a tracker holds stays the tracker's ticket.
+#[test]
+fn a_tracker_key_is_not_taken_for_a_task() {
+    let fx = Fx::new();
+    let args = StartArgs {
+        reference: Some("ABC-3".into()),
+        with_brief: true,
+        ..Default::default()
+    };
+    let got = with_native_defaults(&fx.store, &args, &OrgScope::All).unwrap();
+    assert_eq!(
+        (got.item_id, got.reference.as_deref()),
+        (None, Some("ABC-3"))
+    );
+    assert_eq!(got.brief, None);
+}
+
 #[tokio::test]
 async fn an_unaccepted_proposal_cannot_be_started() {
     let s = Store::open_in_memory().unwrap();
@@ -2453,7 +2750,7 @@ async fn an_unaccepted_proposal_cannot_be_started() {
             item_id: Some(p.id),
             ..Default::default()
         },
-        &OrgScope::All,
+        &vs(&store, &OrgScope::All),
         &crate::service::trackers::default_net(),
     )
     .await
@@ -2491,4 +2788,406 @@ fn a_subtask_start_never_carries_a_parent_the_caller_cannot_see() {
     assert!(!brief.contains("SECRET-1"), "{brief}");
     assert!(!brief.contains("Other org"), "{brief}");
     assert_eq!(brief, "Mine");
+}
+
+// --- start preview and parallel start (task → session spec P-1, P-8) --------
+
+async fn preview(
+    fx: &Fx,
+    args: &StartArgs,
+) -> Result<crate::service::trackers::tickets::StartPreview, IpcError> {
+    crate::service::trackers::tickets::preview_start(
+        &fx.store,
+        args,
+        &vs(&fx.store, &OrgScope::All),
+        &fx.net(),
+    )
+    .await
+}
+
+/// A spawn that names its session after the checkout it was asked for, so
+/// two starts of one key are two rows.
+fn spawn_named(
+    store: &Arc<Mutex<Store>>,
+) -> impl FnOnce(
+    crate::service::sessions::NewSessionArgs,
+) -> std::future::Ready<Result<SessionRow, IpcError>>
+       + '_ {
+    move |a| {
+        let s = store.lock().unwrap();
+        let name = a.new_worktree.clone().unwrap_or_else(|| "reused".into());
+        let id = s
+            .upsert_session(&name, &a.host_alias, None, None, 1, 1, "running", None)
+            .unwrap();
+        std::future::ready(Ok(s.get_session_by_id(id).unwrap().unwrap()))
+    }
+}
+
+/// With nothing to go on, a preview says what to pick and offers it, where
+/// a start would answer `E_AMBIGUOUS`; and it makes nothing.
+#[tokio::test]
+async fn a_preview_names_what_to_pick_and_makes_nothing() {
+    let fx = Fx::new();
+    let args = StartArgs {
+        reference: Some("ABC-1".into()),
+        ..Default::default()
+    };
+    let p = preview(&fx, &args).await.unwrap();
+    assert_eq!(p.missing.as_deref(), Some("project"));
+    assert_eq!(p.plan, None);
+    assert!(p.projects.iter().any(|c| c.id == fx.pid));
+    let hosts: Vec<&str> = p.hosts.iter().map(|h| h.alias.as_str()).collect();
+    assert!(
+        hosts.contains(&"hosta") && hosts.contains(&"hostb"),
+        "{hosts:?}"
+    );
+
+    let with_project = StartArgs {
+        project_id: Some(fx.pid),
+        ..args.clone()
+    };
+    let p = preview(&fx, &with_project).await.unwrap();
+    assert_eq!(p.missing.as_deref(), Some("host"));
+
+    let full = StartArgs {
+        host_alias: Some("hosta".into()),
+        ..with_project
+    };
+    let p = preview(&fx, &full).await.unwrap();
+    let plan = p.plan.expect("everything resolved");
+    assert_eq!(
+        (
+            plan.host_alias.as_str(),
+            plan.branch.as_str(),
+            plan.parallel
+        ),
+        ("hosta", "abc-1-abc-1-title", false)
+    );
+    assert!(p.conflicts.is_empty(), "{:?}", p.conflicts);
+    assert_eq!(p.checkout.map(|c| c.exists), Some(false));
+    assert!(fx
+        .store
+        .lock()
+        .unwrap()
+        .list_sessions_for_host("hosta")
+        .unwrap()
+        .is_empty());
+}
+
+/// The brief a start would queue is what the preview shows; a done ticket
+/// is flagged, not refused.
+#[tokio::test]
+async fn a_preview_shows_the_brief_and_flags_a_done_ticket() {
+    let fx = Fx::new();
+    let p = preview(
+        &fx,
+        &StartArgs {
+            reference: Some("ABC-2".into()),
+            project_id: Some(fx.pid),
+            host_alias: Some("hosta".into()),
+            with_brief: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(p.brief.as_deref().is_some_and(|b| b.contains("Do ABC-2.")));
+    assert_eq!(
+        p.conflicts
+            .iter()
+            .map(|c| c.kind.as_str())
+            .collect::<Vec<_>>(),
+        vec!["done"]
+    );
+}
+
+/// A key with a live session previews as a conflict naming it, planned as a
+/// parallel start in a checkout of its own; that start then goes through,
+/// where a plain one is `E_EXISTS`.
+#[tokio::test]
+async fn a_live_key_previews_and_starts_in_parallel_in_its_own_checkout() {
+    let fx = Fx::new();
+    let args = StartArgs {
+        reference: Some("ABC-1".into()),
+        project_id: Some(fx.pid),
+        host_alias: Some("hosta".into()),
+        ..Default::default()
+    };
+    let first = plan_start(&fx.store, &args, &OrgScope::All, &fx.net())
+        .await
+        .unwrap();
+    let (row, _) = start_with(
+        &fx.store,
+        &first,
+        None,
+        &OrgScope::All,
+        spawn_named(&fx.store),
+    )
+    .await
+    .unwrap();
+    // The first start's checkout exists now.
+    fx.store
+        .lock()
+        .unwrap()
+        .upsert_worktree_on(
+            "hosta",
+            fx.pid,
+            &first.branch,
+            "/p/acme/app-wt",
+            Some(&first.branch),
+        )
+        .unwrap();
+
+    let p = preview(&fx, &args).await.unwrap();
+    let live = p
+        .conflicts
+        .iter()
+        .find(|c| c.kind == "live_session")
+        .expect("the live session is a conflict");
+    assert_eq!(live.session_id, Some(row.id));
+    let plan = p.plan.expect("planned beside it");
+    assert!(plan.parallel);
+    assert_eq!(plan.branch, format!("{}-2", first.branch));
+    assert_eq!(plan.worktree_id, None, "never the live session's checkout");
+
+    let e = plan_start(&fx.store, &args, &OrgScope::All, &fx.net())
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_EXISTS);
+    let parallel = StartArgs {
+        parallel: true,
+        ..args.clone()
+    };
+    let second = plan_start(&fx.store, &parallel, &OrgScope::All, &fx.net())
+        .await
+        .unwrap();
+    let (other, _) = start_with(
+        &fx.store,
+        &second,
+        None,
+        &OrgScope::All,
+        spawn_named(&fx.store),
+    )
+    .await
+    .unwrap();
+    assert_ne!(other.id, row.id);
+    assert_eq!(other.work.and_then(|w| w.key).as_deref(), Some("ABC-1"));
+}
+
+/// The live-session warning says the key ONCE. A start from a ticket names
+/// its session after the key, so naming the session again read "ABC-1 is
+/// already open in ABC-1 on hosta" — one thing said twice. A session with a
+/// name of its own is still named, which is the whole point of naming it.
+#[tokio::test]
+async fn the_live_session_warning_does_not_name_the_key_twice() {
+    let fx = Fx::new();
+    let args = StartArgs {
+        reference: Some("ABC-1".into()),
+        project_id: Some(fx.pid),
+        host_alias: Some("hosta".into()),
+        ..Default::default()
+    };
+    let first = plan_start(&fx.store, &args, &OrgScope::All, &fx.net())
+        .await
+        .unwrap();
+    let (row, _) = start_with(
+        &fx.store,
+        &first,
+        None,
+        &OrgScope::All,
+        spawn_named(&fx.store),
+    )
+    .await
+    .unwrap();
+    let named = |name: &str| {
+        fx.store
+            .lock()
+            .unwrap()
+            .set_friendly_name("hosta", &row.tmux_name, Some(name))
+            .unwrap()
+            .expect("the live row is there to rename");
+    };
+    let warning = async |fx: &Fx| {
+        preview(fx, &args)
+            .await
+            .unwrap()
+            .conflicts
+            .iter()
+            .find(|c| c.kind == "live_session")
+            .expect("the live session is a conflict")
+            .message
+            .clone()
+    };
+
+    named("ABC-1");
+    assert_eq!(warning(&fx).await, "ABC-1 is already open on hosta.");
+    // Cased the other way it is still the same name.
+    named("abc-1");
+    assert_eq!(warning(&fx).await, "ABC-1 is already open on hosta.");
+    named("api");
+    assert_eq!(warning(&fx).await, "ABC-1 is already open in api on hosta.");
+    // A parallel start's own `-2` is a different session, and named.
+    named("ABC-1-2");
+    assert_eq!(
+        warning(&fx).await,
+        "ABC-1 is already open in ABC-1-2 on hosta."
+    );
+}
+
+/// An unaccepted proposal previews with a conflict instead of the start's
+/// refusal, so the button can offer Accept & start.
+#[tokio::test]
+async fn a_proposal_previews_as_a_conflict() {
+    let fx = Fx::new();
+    let item = {
+        let s = fx.store.lock().unwrap();
+        let parent = s
+            .create_native_item(&crate::store::NativeItem {
+                title: "Ship v1",
+                project_id: Some(fx.pid),
+                ..Default::default()
+            })
+            .unwrap();
+        s.propose_subtask(&crate::store::Proposal {
+            parent_id: parent.id,
+            title: "an idea",
+            notes: None,
+            why: None,
+            proposed_by: "dev",
+        })
+        .unwrap()
+    };
+    let args = StartArgs {
+        item_id: Some(item.id),
+        host_alias: Some("hosta".into()),
+        ..Default::default()
+    };
+    let p = preview(&fx, &args).await.unwrap();
+    assert!(
+        p.conflicts.iter().any(|c| c.kind == "proposal"),
+        "{:?}",
+        p.conflicts
+    );
+    assert_eq!(p.plan.map(|pl| pl.project_id), Some(fx.pid));
+    let e = plan_start(
+        &fx.store,
+        &with_native_defaults(&fx.store, &args, &OrgScope::All).unwrap(),
+        &OrgScope::All,
+        &fx.net(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.message, "accept the proposal first");
+}
+
+/// Task → session P-5 / P-6: a start writes its first progress steps on
+/// the new session's timeline — what it made, in which checkout, and
+/// whether a brief follows — and that record is what lets the start be
+/// cancelled: a checkout the start made can go, a reused one never.
+#[tokio::test]
+async fn a_start_records_its_steps_and_only_its_own_checkout_may_be_cancelled() {
+    use crate::service::work::abandon::plan_abandon;
+    let fx = Fx::new();
+    let args = StartArgs {
+        reference: Some("ABC-3".into()),
+        project_id: Some(fx.pid),
+        host_alias: Some("hosta".into()),
+        with_brief: true,
+        ..Default::default()
+    };
+    let plan = plan_start(&fx.store, &args, &OrgScope::All, &fx.net())
+        .await
+        .unwrap();
+    assert_eq!(plan.worktree_id, None, "a fresh key gets a new checkout");
+    let branch = plan.branch.clone();
+    let store = Arc::clone(&fx.store);
+    let (row, queued) = start_with(
+        &fx.store,
+        &plan,
+        Some("brief".into()),
+        &OrgScope::All,
+        move |a| {
+            let s = store.lock().unwrap();
+            let wt = s
+                .upsert_worktree_on(
+                    &a.host_alias,
+                    a.project_id,
+                    a.new_worktree.as_deref().unwrap(),
+                    "/p/acme/app/.worktrees/abc-3",
+                    a.new_worktree.as_deref(),
+                )
+                .unwrap();
+            let id = s
+                .upsert_session(
+                    "started",
+                    &a.host_alias,
+                    Some(a.project_id),
+                    Some(wt),
+                    1,
+                    1,
+                    "running",
+                    None,
+                )
+                .unwrap();
+            std::future::ready(Ok(s.get_session_by_id(id).unwrap().unwrap()))
+        },
+    )
+    .await
+    .unwrap();
+    assert!(queued);
+    let s = fx.store.lock().unwrap();
+    let ev = s
+        .newest_session_event_of(row.id, &[START_SPAWNED])
+        .unwrap()
+        .expect("start_spawned");
+    let spawned: StartSpawned = serde_json::from_str(ev.detail.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        spawned,
+        StartSpawned {
+            key: "ABC-3".into(),
+            worktree_id: row.worktree_id,
+            new_worktree: true,
+            branch: Some(branch.clone()),
+            brief: true,
+        }
+    );
+    assert!(s
+        .newest_session_event_of(row.id, &[WORKTREE_READY])
+        .unwrap()
+        .is_some());
+    let p = plan_abandon(&s, row.id).expect("the start's own checkout may go");
+    assert_eq!(p.branch, branch);
+    assert_eq!(p.worktree_path, "/p/acme/app/.worktrees/abc-3");
+    assert_eq!(p.project_base, "/p/acme/app");
+
+    // The same session, its record saying the checkout was reused.
+    let reused = StartSpawned {
+        new_worktree: false,
+        ..spawned
+    };
+    s.insert_session_event(
+        row.id,
+        START_SPAWNED,
+        Some(&serde_json::to_string(&reused).unwrap()),
+    )
+    .unwrap();
+    let e = plan_abandon(&s, row.id).unwrap_err();
+    assert_eq!(e.code, codes::E_DIRTY);
+    assert_eq!(e.details.unwrap()["reason"], "checkout_not_the_starts");
+
+    // A session no start made.
+    let other = s
+        .upsert_session(
+            "by-hand",
+            "hosta",
+            Some(fx.pid),
+            row.worktree_id,
+            1,
+            1,
+            "running",
+            None,
+        )
+        .unwrap();
+    let e = plan_abandon(&s, other).unwrap_err();
+    assert_eq!(e.details.unwrap()["reason"], "not_a_start");
 }

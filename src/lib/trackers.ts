@@ -8,7 +8,9 @@
 import { writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 import { acceptCommandRow, type SessionRow } from './sessions';
-import { bumpWorkChanged } from './work';
+import { bumpWorkChanged, type EstimateUnit, type WorkPriority } from './work';
+import { confidenceWord } from './ai_proposal';
+import { offerRuleAfterStart } from './rule_offer_toast';
 
 /** `trackers.state`. Anything else a newer hub sends is treated as not ok. */
 export type TrackerState =
@@ -53,8 +55,9 @@ export interface TrackerSettings {
   /** GitHub Enterprise Server (work graph M11.4): the instance `gh
    *  --hostname` is pointed at, `host[:port]`. Absent: github.com. */
   hostname?: string | null;
-  /** Jira (work graph M13.4e, D3): what fleet may write. Absent: nothing. */
-  write_back?: { pr_remote_link?: boolean };
+  /** What fleet may write (work graph M13.4e, D3): a PR link (Jira only)
+   *  and a person's comment (every provider). Absent: nothing. */
+  write_back?: { pr_remote_link?: boolean; comments?: boolean };
 }
 
 /** A tracker as every read returns it: never a secret, only a hint. */
@@ -85,6 +88,9 @@ export interface WorkItemRow {
   id: number;
   source: string;
   key?: string | null;
+  /** Its fleet ticket key (`FLT-12`), shown in place of `key`; absent when
+   *  it drew none (a Jira key, a hub older than migration 169). */
+  display_key?: string | null;
   title: string;
   url?: string | null;
   /** todo | in_progress | done */
@@ -101,6 +107,14 @@ export interface WorkItemRow {
   resolution?: string | null;
   parent_id?: number | null;
   assignees?: string[];
+  /** The date the work is due, `YYYY-MM-DD` (absent from an older hub). */
+  due_at?: string | null;
+  /** `urgent | high | medium | low` (absent from an older hub). */
+  priority?: WorkPriority | null;
+  labels?: string[];
+  /** How big the work is, in `estimate_unit`. */
+  estimate?: number | null;
+  estimate_unit?: EstimateUnit | null;
   iteration?: string | null;
   updated_ext?: number | null;
   status_changed_at?: number | null;
@@ -120,6 +134,10 @@ export interface WorkItemRow {
   proposed_by?: string | null;
   /** The agent's reason (plain text). */
   proposal_why?: string | null;
+  /** When a person put it on hold (orchestration O2). */
+  held_at?: number | null;
+  /** Its done_when condition lines (orchestration O3). */
+  done_when?: string[];
 }
 
 /** One `work:*` frame, as the batched handler receives it. */
@@ -160,6 +178,9 @@ export interface TicketsQuery {
   view?: string;
   query?: string;
   limit?: number;
+  /** Own tasks too, after the tickets (task → session P-4). An older hub
+   *  ignores it and lists tickets only. */
+  include_local?: boolean;
 }
 
 export function workTickets(q: TicketsQuery = {}): Promise<Result<TicketRow[]>> {
@@ -181,12 +202,17 @@ export interface StartWorkArgs {
   with_brief?: boolean;
   /** The brief as edited in the preview. */
   brief?: string;
+  /** The preview only: have a model draft the brief on the planned host
+   *  (redesign 6.10). A start never drafts; it sends `brief`. */
+  draft_brief?: boolean;
   /** The session name as edited. */
   name?: string;
   /** The worktree name as edited. */
   worktree?: string;
   /** Start across organisations anyway (work graph M5). */
   force_cross_org?: boolean;
+  /** Start beside a live session on the same key, in a checkout of its own. */
+  parallel?: boolean;
 }
 
 /** Start work on a ticket: one call, on the hub when paired. `E_EXISTS`
@@ -196,7 +222,26 @@ export async function startWork(args: StartWorkArgs): Promise<Result<SessionRow>
   if (r.ok) {
     acceptCommandRow(r.value);
     bumpWorkChanged();
+    // A start can be the one that makes fleet offer a start rule (8.11).
+    void offerRuleAfterStart(r.value.work?.key);
   }
+  return r;
+}
+
+/** What Cancel start undid (task → session P-6). */
+export interface AbandonOutcome {
+  session_id: number;
+  worktree_removed: boolean;
+  branch_deleted: boolean;
+}
+
+/** Cancel a start nobody has worked in yet: end the session, remove the
+ *  checkout and branch the start made. `E_DIRTY` (details.reason) when it
+ *  was not a start, the checkout is not the start's own, or it has work in
+ *  it — nothing is touched then. */
+export async function abandonStart(sessionId: number): Promise<Result<AbandonOutcome>> {
+  const r = await invokeCmd<AbandonOutcome>('abandon_start', { args: { session_id: sessionId } });
+  if (r.ok) bumpWorkChanged();
   return r;
 }
 
@@ -380,8 +425,13 @@ export function pendingProposals(tp: TrackerProposals | null | undefined): Secti
   return tp.proposals.filter((p) => !p.person && !p.followup);
 }
 
-/** A confidence as two decimals ("0.82"), or "–". */
+/** A confidence as a word ("likely"), never a number (G4.9), or "–". */
 export function formatConfidence(c: number | null | undefined): string {
+  return typeof c === 'number' && Number.isFinite(c) ? (confidenceWord(c <= 1 ? c * 100 : c) ?? '–') : '–';
+}
+
+/** A probability for the why line ("0.82"), or "–". */
+function formatProbability(c: number | null | undefined): string {
   return typeof c === 'number' && Number.isFinite(c) ? c.toFixed(2) : '–';
 }
 
@@ -389,7 +439,7 @@ export function formatConfidence(c: number | null | undefined): string {
 export function proposalWhy(p: SectionProposal): string {
   return (p.top ?? [])
     .slice(0, 2)
-    .map(([k, v]) => `${categoryLabel(k)} ${formatConfidence(v)}`)
+    .map(([k, v]) => `${categoryLabel(k)} ${formatProbability(v)}`)
     .join(' · ');
 }
 
@@ -682,11 +732,22 @@ function ghesFromUrl(
   };
 }
 
-/** A key as the UI shows it: an Asana task's opaque `asana:<gid>` becomes a
- *  short `Asana …123456` (never used for matching); every other key as is. */
-export function displayKey(key: string): string {
+/** A key as the UI shows it: the item's fleet ticket key (`FLT-12`,
+ *  `store::ticket_keys`) when it drew one — a GitHub issue's or an Asana
+ *  task's, whose own keys are no name for a person — else an Asana task's
+ *  opaque `asana:<gid>` as a short `Asana …123456` (never used for matching),
+ *  and every other key as is. */
+export function displayKey(key: string, ticketKey?: string | null): string {
+  if (ticketKey) return ticketKey;
   const gid = key.startsWith('asana:') ? key.slice('asana:'.length) : null;
   return gid ? `Asana …${gid.slice(-6)}` : key;
+}
+
+/** [`displayKey`] of a row that carries both (`WorkItemRow`, `WorkTask`,
+ *  a session's `work`); `null` when it has no key at all. */
+export function shownKey(row: { key?: string | null; display_key?: string | null }): string | null {
+  if (row.display_key) return row.display_key;
+  return row.key ? displayKey(row.key) : null;
 }
 
 /** `owner/repo#n` → the lower-case `owner/repo`; an enterprise
@@ -854,6 +915,20 @@ function trackerLine(text: string, max: number): string {
   return defuseMarkers(flat).slice(0, max);
 }
 
+/** A task written in fleet, not a tracker's ticket (the backend's
+ *  `with_native_defaults` test). */
+function isNativeTask(t: TicketRow): boolean {
+  return t.origin === 'manual' || t.origin === 'proposed' || t.origin === 'agent';
+}
+
+/** What a start names its ticket by: the work item when the row is one (a
+ *  tracker's cached ticket or a fleet task), else its key. A task started by
+ *  key resolved as a key no tracker knows: linked to the key alone, its
+ *  title and notes never reached Claude. */
+export function ticketRef(t: TicketRow): { item_id: number } | { reference: string } {
+  return t.id != null ? { item_id: t.id } : { reference: t.key ?? '' };
+}
+
 /** Same budget as the backend's `BRIEF_MAX_CHARS`. */
 export const BRIEF_MAX_CHARS = 4000;
 
@@ -862,6 +937,12 @@ export const BRIEF_MAX_CHARS = 4000;
  *  defused and the DESCRIPTION is what is cut to fit, so the end marker
  *  always survives. */
 export function ticketBriefPreview(t: TicketRow, branch: string): string {
+  // A fleet task's brief is its title and notes (the backend's
+  // `with_native_defaults`; a subtask's also leads with its parent's).
+  if (isNativeTask(t)) {
+    const notes = t.notes?.trim();
+    return notes ? `${t.title}\n\n${notes}` : t.title;
+  }
   let out = `You are starting work on ${t.key ?? ''}`;
   if (t.title) out += `: ${trackerLine(t.title, 200)}`;
   out += '\n';

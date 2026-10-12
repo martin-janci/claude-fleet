@@ -155,6 +155,19 @@ pub enum Artifact {
 }
 
 impl Artifact {
+    /// The sha256 (lowercase hex) and size of a file artifact; `None` for an
+    /// image (pulled by digest), `notify` and an unknown kind. What a mirror
+    /// may serve: the bytes are trusted by this hash, wherever they come from.
+    pub fn content(&self) -> Option<(&str, u64)> {
+        match self {
+            Artifact::Tarball { sha256, size, .. }
+            | Artifact::Tauri { sha256, size, .. }
+            | Artifact::Download { sha256, size, .. }
+            | Artifact::Apk { sha256, size, .. } => Some((sha256.as_str(), *size)),
+            Artifact::Oci { .. } | Artifact::Notify { .. } | Artifact::Unknown => None,
+        }
+    }
+
     /// Whether this artifact installs on `p`.
     pub fn matches(&self, p: &Platform) -> bool {
         let variant_ok = |v: &Option<String>| v.as_deref().is_none_or(|v| v == p.variant);
@@ -202,7 +215,44 @@ impl Artifact {
     }
 }
 
+/// A signed addition to one release's manifest (design §4): a component
+/// whose build is published after the release itself — the phone's APK,
+/// from fleet-mobile's own release. It may only ADD a component the manifest
+/// does not carry, never replace one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Amendment {
+    pub schema: u32,
+    /// The release it amends; must equal the manifest's.
+    pub version: Version,
+    /// The phone's hub-contract window, when the component is a phone's
+    /// (`compatibility.contract.mobile_accepts`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mobile_accepts: Option<Window>,
+    #[serde(default)]
+    pub components: BTreeMap<String, ComponentRelease>,
+}
+
 impl ReleaseManifest {
+    /// Fold a verified amendment in: components the manifest lacks, and the
+    /// phone's window when it has none. Nothing the manifest already says is
+    /// changed. `false` (and nothing folded) for another release's amendment.
+    pub fn amend(&mut self, a: &Amendment) -> bool {
+        if a.version != self.release.version {
+            return false;
+        }
+        for (k, c) in &a.components {
+            if c.version == a.version {
+                self.components
+                    .entry(k.clone())
+                    .or_insert_with(|| c.clone());
+            }
+        }
+        if self.compatibility.contract.mobile_accepts.is_none() {
+            self.compatibility.contract.mobile_accepts = a.mobile_accepts;
+        }
+        true
+    }
+
     pub fn component(&self, c: Component) -> Option<&ComponentRelease> {
         self.components.get(c.as_str())
     }

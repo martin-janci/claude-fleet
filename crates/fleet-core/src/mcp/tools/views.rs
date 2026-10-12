@@ -37,9 +37,9 @@ use serde_json::Value;
 /// The `list_sessions` fields `view: "phone"` keeps.
 ///
 /// Derived from what the phone actually reads, not from what its model
-/// declares: `SessionRow.kt` deserialises 28 fields, but `branch`, `pr_url`,
-/// `lost_at`, `created_at`, `worktree_id` and `parent_session_id` have no
-/// reader on any screen. The ones here each have one:
+/// declares: `SessionRow.kt` deserialises more fields than this, but
+/// `branch`, `pr_url`, `worktree_id` and `parent_session_id` have no reader
+/// on any screen. The ones here each have one:
 ///
 /// * `id` — the row key and every action's address;
 /// * `tmux_name`, `friendly_name`, `last_prompt` — `SessionRow.displayName`
@@ -85,6 +85,27 @@ use serde_json::Value;
 ///   org filter for a session with no work, which carries no `org_id` of its
 ///   own. An id only; the names come from `work { action: orgs }`. Absent
 ///   for a session no org claims. Added for fleet-mobile's M8.6.
+/// * `account_uuid` — the Claude account the session runs under: the row's
+///   account chip and a paused row's "Paused · limit on <account>". A uuid
+///   only; the labels come from `list_accounts`. Dropped by the first cut as
+///   a column no screen read (~39 B a row); added back for the redesign's
+///   step 4.10 on the phone.
+/// * `owner_person_id` — who owns the session: the phone's Share button
+///   (`MyAccess.owns`, redesign 11.10) and its Shared-with-me split. Projected
+///   away, every re-list hid Share from the owner until a `session:updated`
+///   frame carried the whole row back (review round 3, R3-1).
+/// * `work_rev`, `lost_at` — the work view's change signature
+///   (`workSignature`), which every `session:updated` frame carries in full.
+///   Without them a re-list read as a work change on the next frame, and a
+///   secondary link's change (`work_rev` alone moves) went unseen until then
+///   (review round 3, R3-2 and R3-4).
+/// * `created_at` — the Details sheet's "started" fallback for a session
+///   with no `started_at` (R3-3).
+///
+/// * `pr_url`, `pr_evidence`, `claude_profile` — the phone's PR fact, its
+///   CI check count and Switch account (fleet-mobile G5.5, M15). Projected
+///   away, each vanished on a full refresh until a `session:updated` frame
+///   carried the whole row back.
 ///
 /// Added 2026-09-23 when fleet-mobile's pager (its PR #19) began reading
 /// them: the first cut of this view was taken against the list screen alone.
@@ -94,9 +115,12 @@ use serde_json::Value;
 /// dropping an entry is a deliberate edit rather than a silent regression on
 /// a phone that then draws a blank column.
 pub(super) const PHONE_SESSION_FIELDS: &[&str] = &[
+    "account_uuid",
     "ci_status",
+    "claude_profile",
     "claude_status",
     "context_pct",
+    "created_at",
     "current_activity",
     "friendly_name",
     "host_alias",
@@ -107,9 +131,14 @@ pub(super) const PHONE_SESSION_FIELDS: &[&str] = &[
     "last_prompt",
     "last_stop_at",
     "last_turn_at",
+    "lost_at",
     "needs_attention",
     "org_id",
+    "owner_person_id",
+    "pending_form",
     "pending_input",
+    "pr_evidence",
+    "pr_url",
     "project_id",
     "safe_kill_state",
     "started_at",
@@ -121,6 +150,7 @@ pub(super) const PHONE_SESSION_FIELDS: &[&str] = &[
     "usage_cost_micros",
     "usage_model",
     "work",
+    "work_rev",
     "work_suggested",
 ];
 

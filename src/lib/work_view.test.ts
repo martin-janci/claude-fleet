@@ -243,6 +243,20 @@ describe('filters', () => {
     expect(activeFilterCount({ mine: true, status: 'open', group: 'none' })).toBe(2);
   });
 
+  it('keeps a named assignee, a tracker column and a grouping (step 6.2)', () => {
+    expect(normalizeFilters({ assignee: ' Ana ', status_name: 'QA Review', group_by: 'person' })).toEqual({
+      assignee: 'Ana',
+      status_name: 'QA Review',
+      group_by: 'person',
+    });
+    // The default grouping and an unknown one are no grouping.
+    expect(normalizeFilters({ group_by: 'group', assignee: '  ' })).toEqual({});
+    expect(normalizeFilters({ group_by: 'colour' })).toEqual({});
+    // A grouping arranges; it does not count as a filter.
+    expect(activeFilterCount({ assignee: 'Ana', status_name: 'QA', group_by: 'repo' })).toBe(2);
+    expect(sameFilters({ group_by: 'repo' }, {})).toBe(false);
+  });
+
   it('a section loads with its org and group on top of the view', () => {
     expect(sectionFilters({ status: 'open', org: 2 }, null, 'none')).toEqual({ status: 'open', org: 'none', group: 'none' });
     expect(sectionFilters({}, 1, 'tracker:1:ABC')).toEqual({ org: 1, group: 'tracker:1:ABC' });

@@ -96,6 +96,27 @@ describe('a row with a link suggestion', () => {
     expect(screen.queryByTestId('work-chip')).toBeNull();
   });
 
+  it("marks the decision model's suggestion with ✦ and names Jev, with its confidence in the evidence (6.8)", async () => {
+    const jev = { ...suggestion, source: 'jev', strength: 'inferred', rule: 'R12' };
+    vi.mocked(invoke).mockImplementation(async (cmd: string) =>
+      cmd === 'session_work_links'
+        ? [{ ...link, source: 'jev', rule: 'R12', evidence: [{ signal: 'jev', rule: 'R12', text: 'ABC-99', note: '82%', at: 1_790_000_000 }] }]
+        : null,
+    );
+    render(SessionRowItem, { props: props(row({ work_suggested: jev })) });
+    const chip = screen.getByTestId('work-suggestion');
+    expect(chip.dataset.proposed).toBe('jev');
+    expect(screen.getByTestId('work-suggestion-proposed').textContent).toBe('\u2726');
+    expect(chip.textContent).not.toContain('?');
+    expect(chip.title.startsWith('Proposed by Jev · ')).toBe(true);
+    expect(chip.title).toContain('proposed by Jev from the first prompt · rule R12');
+    await fireEvent.click(chip);
+    await tick();
+    await tick();
+    const ev = await screen.findByTestId('why-evidence');
+    expect(ev.textContent).toMatch(/Jev proposed ABC-99 from the first prompt at \d\d:\d\d \(82%\) · R12/);
+  });
+
   it('opens the evidence popover from the chip and confirms', async () => {
     const p = props(row());
     render(SessionRowItem, { props: p });

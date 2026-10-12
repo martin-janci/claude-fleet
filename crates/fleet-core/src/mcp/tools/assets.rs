@@ -11,10 +11,26 @@ impl FleetTools {
         the last scan, plus unmanaged assets on hosts and catalog parse \
         problems. E_CATALOG_NOT_CONFIGURED until a catalog is set (in the \
         app, or `fleet-hub catalog set` on a hub).")]
-    pub(super) async fn list_assets(&self) -> Result<CallToolResult, McpError> {
-        audit("list_assets", "");
-        catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
-        ok_json_compact(&catalog::list_assets(&self.store).map_err(to_mcp_err)?)
+    pub(super) async fn list_assets(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<ListAssetsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "list_assets",
+            &format!("all_catalogs={} caller={}", p.all_catalogs, caller.label()),
+        );
+        catalog::ensure_fresh_blocking(&self.store)
+            .await
+            .map_err(to_mcp_err)?;
+        // Fix round 1: personal-only unless asked — an older desktop keys
+        // its list by name and must never get a second catalog's asset.
+        let scope = if p.all_catalogs {
+            listing_scope(&caller)
+        } else {
+            catalog::ListingScope::Personal
+        };
+        ok_json_compact(&catalog::list_assets_in(&self.store, scope).map_err(to_mcp_err)?)
     }
 
     #[tool(description = "Scan hosts for installed skills/agents/hooks/MCP \
@@ -29,7 +45,9 @@ impl FleetTools {
             "scan_assets",
             &format!("host_alias={}", p.host_alias.as_deref().unwrap_or("*")),
         );
-        catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
+        catalog::ensure_fresh_blocking(&self.store)
+            .await
+            .map_err(to_mcp_err)?;
         let res = catalog::inventory::scan_hosts(&self.store, &self.ssh, p.host_alias.as_deref())
             .await
             .map_err(to_mcp_err)?;
@@ -122,7 +140,9 @@ impl FleetTools {
             name: p.name,
             allow_unlayered: p.allow_unlayered.unwrap_or(false),
         };
-        catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
+        catalog::ensure_fresh_blocking(&self.store)
+            .await
+            .map_err(to_mcp_err)?;
         let plan = catalog::sync::plan_sync(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
@@ -227,11 +247,8 @@ impl FleetTools {
             _ => None,
         };
         let allowed = match &touches {
-            // Every catalog's paths, remotes and grantees, across orgs: the
-            // master's, or a person's own unbound full device.
-            Touches::Nothing => {
-                caller.is_master() || (caller.is_person_device() && caller.mode == TokenMode::Full)
-            }
+            // Every catalog's paths, remotes and grantees, across orgs.
+            Touches::Nothing => may_list_every_catalog(&caller),
             Touches::MasterOnly(_) => caller.is_master(),
             Touches::Catalog(name) => {
                 may_admin_catalog_row(&caller, &self.store, name, target.as_ref())?
@@ -302,9 +319,10 @@ impl FleetTools {
 
     #[tool(description = "Changeset cards that adopt, sync and fix assets: \
         list (one in full with id), propose (rebuild from the last scan), \
-        apply (positions picks items; a drift card takes one), undo (the \
-        latest applied card per catalog), dismiss, reject_item. Mutating \
-        actions need a grant on every catalog the card names.")]
+        propose_layer (a layer change as a card), apply (positions picks \
+        items; a drift card takes one), undo (the latest applied card per \
+        catalog), dismiss, reject_item. Mutating actions need a grant on \
+        every catalog the card names.")]
     pub(super) async fn changesets(
         &self,
         Extension(caller): Extension<Caller>,
@@ -338,8 +356,26 @@ impl FleetTools {
                 if !may_admin_catalog(&caller, &self.store, personal)? {
                     return Err(changesets_forbidden("propose", Some(personal), &caller));
                 }
-                catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
+                catalog::ensure_fresh_blocking(&self.store)
+                    .await
+                    .map_err(to_mcp_err)?;
                 ok_json_compact(&cs::propose(&self.store).await.map_err(to_mcp_err)?)
+            }
+            "propose_layer" => {
+                let change = p.change.ok_or_else(|| {
+                    mcp_err(codes::E_INVALID, "propose_layer needs a change", None)
+                })?;
+                // Assets M6 (R5): a grant on the catalog the change names
+                // (an unknown name is "no" for a client, R22).
+                let name = change.catalog().to_string();
+                if !may_admin_catalog(&caller, &self.store, &name)? {
+                    return Err(changesets_forbidden("propose_layer", Some(&name), &caller));
+                }
+                ok_json(
+                    &cs::propose_layer(change, &self.store)
+                        .await
+                        .map_err(to_mcp_err)?,
+                )
             }
             "apply" | "undo" | "dismiss" | "reject_item" => {
                 let id = p.id.ok_or_else(|| {
@@ -402,7 +438,9 @@ impl FleetTools {
                         // and never takes it, so this cannot deadlock; a
                         // slow reload only delays other card actions (the
                         // tick `try_lock`s and skips).
-                        catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
+                        catalog::ensure_fresh_blocking(&self.store)
+                            .await
+                            .map_err(to_mcp_err)?;
                         let args = cs::apply::ApplyArgs {
                             id,
                             positions: p.positions,
@@ -431,7 +469,7 @@ impl FleetTools {
                 codes::E_INVALID,
                 format!(
                     "unknown changesets action {other}: \
-                     list|propose|apply|undo|dismiss|reject_item"
+                     list|propose|propose_layer|apply|undo|dismiss|reject_item"
                 ),
                 None,
             )),
@@ -479,7 +517,9 @@ impl FleetTools {
         catalog_configure + catalog_load in the app.")]
     pub(super) async fn list_layers(&self) -> Result<CallToolResult, McpError> {
         audit("list_layers", "");
-        catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
+        catalog::ensure_fresh_blocking(&self.store)
+            .await
+            .map_err(to_mcp_err)?;
         let out = catalog::list_layers(&self.store).map_err(to_mcp_err)?;
         ok_json_compact(&out)
     }
@@ -495,35 +535,15 @@ impl FleetTools {
         Parameters(p): Parameters<ResolvePreviewParams>,
     ) -> Result<CallToolResult, McpError> {
         audit("resolve_preview", &format!("host_alias={}", p.host_alias));
-        catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
+        catalog::ensure_fresh_blocking(&self.store)
+            .await
+            .map_err(to_mcp_err)?;
         let res = catalog::resolve_preview(&p.host_alias, &self.store).map_err(to_mcp_err)?;
-        // Project to a summary shape at the MCP boundary: `Resolution` is a
-        // full `Catalog`, and `Asset`'s serializer emits `body` in full plus
-        // every `Resource`'s base64 `bytes` — sending that uncapped over MCP
-        // blows past token caps on any fleet-sized catalog (see the same
-        // warning on `ok_json_compact` below). `list_assets` already returns
-        // a summary shape for the same reason; this mirrors it. The Tauri
-        // command for the desktop UI keeps the full `Resolution`.
-        let assets: Vec<serde_json::Value> = res
-            .catalog
-            .assets
-            .iter()
-            .map(|a| {
-                serde_json::json!({
-                    "kind": a.kind().as_str(),
-                    "name": a.header.name,
-                    "version": a.header.version,
-                })
-            })
-            .collect();
-        ok_json(&serde_json::json!({
-            "provenance": res.provenance,
-            "excluded": res.excluded,
-            "refused": res.refused,
-            "withheld": res.withheld,
-            "held_back": res.held_back,
-            "assets": assets,
-        }))
+        // `Resolution` is a full `Catalog` (every asset body and resource's
+        // base64 bytes), which blows past MCP token caps on a fleet-sized
+        // catalog; answer the summary view (`ResolutionView`), as
+        // `list_assets` does.
+        ok_json(&catalog::resolve::ResolutionView::of(&res))
     }
 
     #[tool(description = "Propose a layer split from the last scan, grouping \
@@ -532,7 +552,9 @@ impl FleetTools {
         Read-only.")]
     pub(super) async fn propose_layers(&self) -> Result<CallToolResult, McpError> {
         audit("propose_layers", "");
-        catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
+        catalog::ensure_fresh_blocking(&self.store)
+            .await
+            .map_err(to_mcp_err)?;
         let out = catalog::propose::propose_layers(&self.store).map_err(to_mcp_err)?;
         ok_json_compact(&out)
     }
@@ -564,7 +586,9 @@ impl FleetTools {
         // PF7: a host's layers wait for an apply in flight (a failed apply
         // restores its snapshot over them).
         let _busy = catalog::changesets::authoring_lock().await;
-        catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
+        catalog::ensure_fresh_blocking(&self.store)
+            .await
+            .map_err(to_mcp_err)?;
         let out = catalog::set_host_layers(
             &p.host_alias,
             p.role.as_deref(),
@@ -812,6 +836,28 @@ fn changesets_forbidden(action: &str, catalog: Option<&str>, caller: &Caller) ->
     mcp_err("E_FORBIDDEN", message, None)
 }
 
+/// Assets M5 (R11): every catalog's assets for the master and a person's own
+/// unbound full device — the `list_catalogs` audience (`Touches::Nothing` in
+/// `catalog_admin`); the personal catalog only, as before M5, for a per-host
+/// token and an org-bound, readonly or single-purpose client, so none of
+/// them learns an org catalog's name or assets from the listing.
+pub(crate) fn listing_scope(caller: &Caller) -> catalog::ListingScope {
+    if may_list_every_catalog(caller) {
+        catalog::ListingScope::Every
+    } else {
+        catalog::ListingScope::Personal
+    }
+}
+
+/// Who may see every catalog — its name, paths, remotes, grantees and
+/// assets, across orgs: the master, or a person's own unbound full device.
+/// The one rule behind both `list_catalogs` (`Touches::Nothing` in
+/// `catalog_admin`) and [`listing_scope`], so the two audiences cannot
+/// drift apart (final review, minor 3).
+pub(crate) fn may_list_every_catalog(caller: &Caller) -> bool {
+    caller.is_master() || (caller.is_person_device() && caller.mode == TokenMode::Full)
+}
+
 /// True when `caller` may touch the catalog `name` whose row the caller has
 /// already read (`row`; `None` for personal or an unknown name) — spec:
 /// `may_admin_catalog(caller, catalog_id)`. The master, or a live `full`
@@ -924,7 +970,7 @@ fn forbidden(touches: &catalog::admin::Touches, caller: &Caller) -> McpError {
 
 /// Parse an MCP `kind` filter string into a `Kind`, using the same
 /// snake_case names the JSON representation already uses elsewhere
-/// (`skill`, `agent`, `hook`, `mcp_server`, `plugin_ref`).
+/// (`skill`, `agent`, `hook`, `mcp_server`, `plugin_ref`, `command`).
 fn parse_kind(s: &str) -> Result<catalog::model::Kind, McpError> {
     serde_json::from_value(serde_json::Value::String(s.to_string()))
         .map_err(|_| mcp_err(codes::E_INVALID, format!("unknown asset kind '{s}'"), None))
@@ -946,6 +992,7 @@ mod confirm_summary_tests {
             commits: None,
             layers_snapshot: None,
             error: None,
+            withdrawn_at: None,
         }
     }
 
@@ -963,6 +1010,8 @@ mod confirm_summary_tests {
             )),
             decider: "rule".into(),
             state: "pending".into(),
+            decided_at: None,
+            outcome: None,
         }
     }
 

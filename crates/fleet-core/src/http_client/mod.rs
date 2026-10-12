@@ -4,11 +4,20 @@
 //! hub (federation). The desktop re-exports it; nothing about it changed in
 //! the move.
 
+mod client_header;
 pub mod http1;
+pub mod keep_alive;
 
 #[cfg(test)]
 #[path = "tests_transport.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests_keep_alive.rs"]
+mod tests_keep_alive;
+
+use client_header::client_header_line;
+pub use client_header::set_client_header;
 
 /// What the hub answered: the HTTP status and the body exactly as received,
 /// SSE framing still intact. Interpreting it is the job of the desktop's
@@ -66,9 +75,11 @@ impl HubTransport for NoTransport {
 // --- the real transport ------------------------------------------------------
 
 /// The hub over HTTP or HTTPS, written by hand onto a `TcpStream` — the same
-/// way `fleet-hub`'s own CLI talks to `/mcp`. One request, one response,
-/// `Connection: close`; there is no connection pool because a desktop makes a
-/// handful of calls a second at worst, and no *usable outbound HTTP client*
+/// way `fleet-hub`'s own CLI talks to `/mcp`. `POST /mcp` reuses kept-alive
+/// connections ([`keep_alive`]: a TLS handshake per call was one to three
+/// round trips in front of every answer); everything else is one request,
+/// one response, `Connection: close`. Written by hand because no *usable
+/// outbound HTTP client*
 /// crate is in this workspace's graph to borrow one from: `hyper` is present
 /// only as `axum`'s server side (via `fleet-core`'s embedded MCP server), and
 /// `reqwest` appears in `Cargo.lock` only through a target-specific `tauri`
@@ -185,8 +196,15 @@ pub async fn connect(at: &Endpoint) -> Result<HubStream, String> {
 
 /// Largest response read from the hub, so a stray listener cannot make the
 /// app buffer without bound. A full `list_sessions` on a large fleet is a few
-/// hundred kilobytes.
-const MAX_RESPONSE: u64 = 8 * 1024 * 1024;
+/// hundred kilobytes; the largest answer is `work { attachment }`, a task
+/// attachment as base64, so the bound is the larger of 8 MiB and an
+/// attachment at its ceiling on the wire
+/// ([`crate::store::ATTACHMENT_WIRE_BYTES`]).
+const MAX_RESPONSE: u64 = if crate::store::ATTACHMENT_WIRE_BYTES as u64 > 8 * 1024 * 1024 {
+    crate::store::ATTACHMENT_WIRE_BYTES as u64
+} else {
+    8 * 1024 * 1024
+};
 
 /// TCP connect, and separately the TLS handshake, each get this long. A
 /// black-holed hub then costs seconds, not the whole call bound.
@@ -201,22 +219,23 @@ impl HubTransport for TcpTransport {
         body: String,
     ) -> Result<HubResponse, String> {
         let at = Endpoint::parse(url)?;
+        check_bearer(bearer)?;
         // `Accept` carries both types because the transport answers
         // SSE-framed; rmcp refuses a request that does not accept
         // `text/event-stream`.
         let request = format!(
-            "POST {} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {bearer}\r\n\
+            "POST {} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {bearer}\r\n{}\
              Content-Type: application/json\r\nAccept: application/json, text/event-stream\r\n\
-             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+             Content-Length: {}\r\nConnection: keep-alive\r\n\r\n{body}",
             at.target(),
             at.authority(),
+            client_header_line(),
             body.len()
         );
         // Unbounded here on purpose: the caller that knows the tool
         // (`HubBackend::call_text`, in `src-tauri`) is the one that times
         // the exchange.
-        let raw = exchange(&at, &request).await?;
-        split_response(&raw)
+        post_kept_alive(&at, request.as_bytes()).await
     }
 
     async fn get_to_file(
@@ -227,6 +246,44 @@ impl HubTransport for TcpTransport {
         max: u64,
     ) -> Result<u64, String> {
         download_to(url, bearer, dest, max).await
+    }
+}
+
+/// Send `request` on a kept-alive connection to `at` ([`keep_alive`]),
+/// opening one when none is kept, and keep it again if the response allows.
+/// A kept connection that answers nothing at all (the server closed it while
+/// it sat idle) costs one retry on a fresh connection; nothing else is ever
+/// sent twice.
+async fn post_kept_alive(at: &Endpoint, request: &[u8]) -> Result<HubResponse, String> {
+    let key = format!(
+        "{}://{}",
+        if at.is_tls() { "https" } else { "http" },
+        at.authority()
+    );
+    let mut kept = keep_alive::take(&key);
+    loop {
+        let reused = kept.is_some();
+        let mut conn = match kept.take() {
+            Some(conn) => conn,
+            None => connect(at).await?,
+        };
+        match keep_alive::exchange(&mut conn, at.host(), at.port(), request, MAX_RESPONSE).await {
+            Ok((response, reusable)) => {
+                if reusable {
+                    keep_alive::put(&key, conn);
+                }
+                return Ok(response);
+            }
+            Err(keep_alive::Failure::NothingBack(why)) if reused => {
+                tracing::debug!(
+                    why,
+                    "[hub] a kept connection had gone; sending on a fresh one"
+                );
+            }
+            Err(keep_alive::Failure::NothingBack(why) | keep_alive::Failure::Other(why)) => {
+                return Err(why)
+            }
+        }
     }
 }
 
@@ -285,9 +342,44 @@ pub fn split_response(raw: impl AsRef<[u8]>) -> Result<HubResponse, String> {
 /// Largest response head [`download_to`] reads before the body.
 const MAX_HEAD: usize = 64 * 1024;
 
+/// How long a download may go without a single byte before it is abandoned.
+/// `download_to` has no caller that bounds it as a whole (a file may
+/// legitimately take minutes), so without this a hub or proxy that stalled
+/// mid-body held the save, and its open `.part` file, forever.
+pub const DOWNLOAD_IDLE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// One read, or an error once [`DOWNLOAD_IDLE`] passes with nothing.
+async fn read_or_stall<R: tokio::io::AsyncRead + Unpin>(
+    conn: &mut R,
+    buf: &mut [u8],
+    host: &str,
+    port: u16,
+) -> Result<std::io::Result<usize>, String> {
+    use tokio::io::AsyncReadExt;
+    tokio::time::timeout(DOWNLOAD_IDLE, conn.read(buf))
+        .await
+        .map_err(|_| {
+            format!(
+                "{host}:{port} sent nothing for {}s; the download stalled",
+                DOWNLOAD_IDLE.as_secs()
+            )
+        })
+}
+
+/// A bearer token is written into a request head by hand, so one carrying a
+/// CR/LF (or any control, space or non-ASCII byte) would add headers — or a
+/// second request — of its sender's choosing. A peer hub's `/pair` answer is
+/// where a token comes from that this process did not mint.
+pub fn check_bearer(bearer: &str) -> Result<(), String> {
+    if bearer.is_empty() || bearer.len() > 4096 || !bearer.bytes().all(|b| b.is_ascii_graphic()) {
+        return Err("the token is not one a request header can carry".to_string());
+    }
+    Ok(())
+}
+
 /// `GET url` and stream the body into `dest` — the bytes of a file download
 /// (`GET /downloads/<id>`), which may be far past [`MAX_RESPONSE`], so they
-/// are never buffered whole. Written to `<dest>.part` and renamed into place
+/// are never buffered whole. Written to `<dest>.<pid>-<random>.part` and renamed into place
 /// only once complete, so `dest` is either the whole file or untouched. The
 /// byte count on success; on a non-200, `Err("HTTP <status>: <body>")`.
 pub async fn download_to(
@@ -298,13 +390,15 @@ pub async fn download_to(
 ) -> Result<u64, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let at = Endpoint::parse(url)?;
+    check_bearer(bearer)?;
     let (host, port) = (at.host().to_string(), at.port());
     let mut conn = connect(&at).await?;
     let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {bearer}\r\n\
+        "GET {} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {bearer}\r\n{}\
          Accept: */*\r\nConnection: close\r\n\r\n",
         at.target(),
         at.authority(),
+        client_header_line(),
     );
     let io = |e: std::io::Error| format!("read from {host}:{port}: {e}");
     conn.write_all(request.as_bytes()).await.map_err(io)?;
@@ -319,7 +413,9 @@ pub async fn download_to(
         if raw.len() > MAX_HEAD {
             return Err(format!("{host}:{port} sent an oversized response head"));
         }
-        let n = conn.read(&mut buf).await.map_err(io)?;
+        let n = read_or_stall(&mut conn, &mut buf, &host, port)
+            .await?
+            .map_err(io)?;
         if n == 0 {
             return Err(format!("{host}:{port} closed before answering"));
         }
@@ -342,13 +438,24 @@ pub async fn download_to(
     if expected.is_some_and(|n| n > max) {
         return Err(too_large_download(max));
     }
-    let mut chunks = http1::Dechunker::new(http1::head_is_chunked(&head));
+    let chunked = http1::head_is_chunked(&head);
+    let mut chunks = http1::Dechunker::new(chunked);
+    // A name of this download's own, created new: a fixed `<dest>.part`
+    // truncated (and on failure deleted) a file the user already had under
+    // that name, and two saves to one destination wrote into one file.
     let part = {
         let mut p = dest.as_os_str().to_owned();
-        p.push(".part");
+        p.push(format!(
+            ".{}-{}.part",
+            std::process::id(),
+            &crate::mcp::generate_token()[..12]
+        ));
         std::path::PathBuf::from(p)
     };
-    let mut file = tokio::fs::File::create(&part)
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&part)
         .await
         .map_err(|e| format!("create {}: {e}", part.display()))?;
     let result: Result<u64, String> = async {
@@ -367,7 +474,7 @@ pub async fn download_to(
             if chunks.finished() || expected.is_some_and(|n| got >= n) {
                 break;
             }
-            match conn.read(&mut buf).await {
+            match read_or_stall(&mut conn, &mut buf, &host, port).await? {
                 Ok(0) => break,
                 Ok(n) => rest.extend_from_slice(&buf[..n]),
                 // The rustls close without `close_notify` [`speak`] forgives:
@@ -382,6 +489,14 @@ pub async fn download_to(
                     "{host}:{port} sent {got} of {n} bytes; the download is incomplete"
                 ));
             }
+        }
+        // A chunked body (a proxy in front of the hub re-chunks) carries no
+        // length: only its terminating chunk says it is whole. A connection
+        // cut before it is a partial file, not a download.
+        if chunked && !chunks.finished() {
+            return Err(format!(
+                "{host}:{port} closed mid-download before the last chunk; the download is incomplete"
+            ));
         }
         file.sync_all()
             .await

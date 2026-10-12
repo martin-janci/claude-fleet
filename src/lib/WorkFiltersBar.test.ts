@@ -29,6 +29,15 @@ async function flush() {
   for (let i = 0; i < 10; i++) await tick();
 }
 
+/** Saved views live in the Filters panel (step 3.7): open it if needed. */
+async function inPanel(testid: string): Promise<HTMLElement> {
+  if (!screen.queryByTestId('work-filter-panel')) {
+    await fireEvent.click(screen.getByTestId('work-filters-open'));
+    await tick();
+  }
+  return screen.getByTestId(testid);
+}
+
 describe('WorkFiltersBar', () => {
   beforeEach(() => {
     vi.mocked(invoke).mockReset();
@@ -71,36 +80,36 @@ describe('WorkFiltersBar', () => {
     render(WorkFiltersBar, { orgs, trackers, searchDebounceMs: 5 });
     await flush();
     await fireEvent.click(screen.getByTestId('work-filters-open'));
-    await fireEvent.click(screen.getByTestId('work-filter-org-none'));
-    await fireEvent.click(screen.getByTestId('work-filter-tracker-1'));
-    await fireEvent.click(screen.getByTestId('work-filter-status-in_progress'));
+    await fireEvent.click(screen.getByTestId(`work-filter-org-${orgs[0].id}`));
+    await fireEvent.change(screen.getByTestId('work-filter-tracker'), { target: { value: '1' } });
+    await fireEvent.click(screen.getByTestId('work-filter-stage-in_progress'));
     await fireEvent.click(screen.getByTestId('work-filter-has-past_only'));
-    await fireEvent.click(screen.getByTestId('work-filter-mine'));
+    await fireEvent.change(screen.getByTestId('work-filter-assignee'), { target: { value: 'me' } });
     await fireEvent.click(screen.getByTestId('work-filter-review'));
     await fireEvent.input(screen.getByTestId('work-search'), { target: { value: 'login' } });
     expect(get(workViewFilters).query).toBeUndefined();
     await new Promise((r) => setTimeout(r, 20));
     expect(get(workViewFilters)).toEqual({
-      org: 'none',
+      orgs: [orgs[0].id],
       tracker: 1,
-      status: 'in_progress',
+      stages: ['in_progress'],
       has: 'past_only',
       mine: true,
       review: true,
       query: 'login',
     });
-    // The panel counts what it holds; the strip names every filter.
-    expect(screen.getByTestId('work-filters-open')).toHaveAttribute('aria-label', 'Filters, 4 active');
-    expect(screen.getByTestId('facet-org')).toHaveTextContent('Org: Unassigned');
+    // The panel counts what it holds; closed, the strip names every filter.
+    expect(screen.getByTestId('work-filters-open')).toHaveAttribute('aria-label', 'Filters, 6 active');
+    await fireEvent.click(screen.getByTestId('work-filters-open'));
+    expect(screen.getByTestId('facet-orgs')).toHaveTextContent(`Org: ${orgs[0].name}`);
     expect(screen.getByTestId('facet-tracker')).toHaveTextContent('Tracker: Jira (acme)');
-    // Search and the two toggles show their own state: no chip for them.
+    expect(screen.getByTestId('facet-stages')).toHaveTextContent('Status: In progress');
+    // Search shows its own state: no chip for it.
     expect(screen.queryByTestId('facet-query')).toBeNull();
-    expect(screen.queryByTestId('facet-mine')).toBeNull();
-    await fireEvent.click(screen.getByTestId('work-filter-status-any'));
-    expect(get(workViewFilters).status).toBeUndefined();
+    expect(screen.getByTestId('facet-mine')).toBeTruthy();
     // A chip's × removes just that filter.
-    await fireEvent.click(screen.getByTestId('facet-org'));
-    expect(get(workViewFilters).org).toBeUndefined();
+    await fireEvent.click(screen.getByTestId('facet-orgs'));
+    expect(get(workViewFilters).orgs).toBeUndefined();
     expect(get(workViewFilters).tracker).toBe(1);
     await fireEvent.click(screen.getByTestId('work-filter-clear'));
     expect(get(workViewFilters)).toEqual({});
@@ -121,19 +130,27 @@ describe('WorkFiltersBar', () => {
     expect(input.value).toBe('log');
   });
 
+  it('a search typed but not yet applied when the bar goes is applied, not lost (review r07)', async () => {
+    const { unmount } = render(WorkFiltersBar, { orgs, trackers, searchDebounceMs: 10_000 });
+    await flush();
+    await fireEvent.input(screen.getByTestId('work-search'), { target: { value: 'login' } });
+    unmount();
+    expect(get(workViewFilters)).toEqual({ query: 'login' });
+  });
+
   it('applies a view; Update is offered once the filters differ, with the view’s version', async () => {
     handlers.save_work_view = (a) => ({ ...(a.view as object), version: 2 });
     render(WorkFiltersBar, { orgs, trackers });
     await flush();
-    await fireEvent.change(screen.getByTestId('work-view-select'), { target: { value: '1' } });
+    await fireEvent.change((await inPanel('work-view-select')), { target: { value: '1' } });
     await flush();
     expect(get(activeWorkViewId)).toBe(1);
     expect(get(workViewFilters)).toEqual({ mine: true, status: 'open' });
-    expect(screen.getByTestId('work-view-update').hasAttribute('disabled')).toBe(true);
+    expect((await inPanel('work-view-update')).hasAttribute('disabled')).toBe(true);
     await fireEvent.click(screen.getByTestId('work-filter-review'));
     await flush();
-    expect(screen.getByTestId('work-view-update').hasAttribute('disabled')).toBe(false);
-    await fireEvent.click(screen.getByTestId('work-view-update'));
+    expect((await inPanel('work-view-update')).hasAttribute('disabled')).toBe(false);
+    await fireEvent.click(await inPanel('work-view-update'));
     await flush();
     expect(calls('save_work_view')[0]).toEqual({
       view: { id: 1, name: 'My open work', filters: { status: 'open', mine: true, review: true }, expected_version: 1 },
@@ -149,9 +166,9 @@ describe('WorkFiltersBar', () => {
     workViewFilters.set({ has: 'none' });
     render(WorkFiltersBar, { orgs, trackers });
     await flush();
-    await fireEvent.click(screen.getByTestId('work-view-save-as'));
-    await fireEvent.input(screen.getByTestId('work-view-name'), { target: { value: 'Untouched' } });
-    await fireEvent.click(screen.getByTestId('work-view-save'));
+    await fireEvent.click(await inPanel('work-view-save-as'));
+    await fireEvent.input((await inPanel('work-view-name')), { target: { value: 'Untouched' } });
+    await fireEvent.click(await inPanel('work-view-save'));
     await flush();
     expect(calls('save_work_view')[0]).toEqual({ view: { name: 'Untouched', filters: { has: 'none' }, expected_version: 0 } });
     expect(get(activeWorkViewId)).toBe(2);
@@ -163,10 +180,10 @@ describe('WorkFiltersBar', () => {
     };
     render(WorkFiltersBar, { orgs, trackers });
     await flush();
-    await fireEvent.change(screen.getByTestId('work-view-select'), { target: { value: '1' } });
+    await fireEvent.change((await inPanel('work-view-select')), { target: { value: '1' } });
     await fireEvent.click(screen.getByTestId('work-filter-review'));
     await flush();
-    await fireEvent.click(screen.getByTestId('work-view-update'));
+    await fireEvent.click(await inPanel('work-view-update'));
     await flush();
     expect(screen.getByTestId('work-view-notice').textContent).toContain('changed elsewhere');
     expect(calls('work_views').length).toBe(2);
@@ -180,7 +197,7 @@ describe('WorkFiltersBar', () => {
     activeWorkViewId.set(1);
     render(WorkFiltersBar, { orgs, trackers });
     await flush();
-    await fireEvent.click(screen.getByTestId('work-view-delete'));
+    await fireEvent.click(await inPanel('work-view-delete'));
     await flush();
     // A compare-and-set on the version the person saw.
     expect(calls('delete_work_view')[0]).toEqual({ view_id: 1, expected_version: 1 });
@@ -195,7 +212,7 @@ describe('WorkFiltersBar', () => {
     activeWorkViewId.set(1);
     render(WorkFiltersBar, { orgs, trackers });
     await flush();
-    await fireEvent.click(screen.getByTestId('work-view-delete'));
+    await fireEvent.click(await inPanel('work-view-delete'));
     await flush();
     expect(get(activeWorkViewId)).toBe(1);
     const notice = screen.getByTestId('work-view-notice');
@@ -207,7 +224,7 @@ describe('WorkFiltersBar', () => {
     expect(calls('work_views').length).toBe(before + 1);
     // The next Delete names the version it now sees.
     handlers.delete_work_view = () => ({ deleted: true });
-    await fireEvent.click(screen.getByTestId('work-view-delete'));
+    await fireEvent.click(await inPanel('work-view-delete'));
     await flush();
     expect(calls('delete_work_view')[1]).toEqual({ view_id: 1, expected_version: 4 });
   });

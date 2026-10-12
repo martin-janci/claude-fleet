@@ -98,6 +98,11 @@ struct PartialRecord {
     step: Option<String>,
     to_host: Option<String>,
     from_host: Option<String>,
+    /// The source's tmux name as the move recorded it (multi-user M1, T9d).
+    /// `None` for a partial written before this field existed, which
+    /// [`refuse_if_differs`] treats as "nothing recorded, nothing to check"
+    /// — the same way it treats every other absent field.
+    from_tmux_name: Option<String>,
     from_session_id: Option<i64>,
     to_session_id: Option<i64>,
     cause_code: Option<String>,
@@ -109,6 +114,10 @@ struct PartialRecord {
     source_transcript_path: Option<String>,
     to_turn_seq: Option<i64>,
     to_last_turn_at: Option<i64>,
+    /// Whether the move was asked to keep its source (`keep_source`). Finish
+    /// honours it: a kept source is never killed. `None` for a partial
+    /// written before the field existed, which kept nothing.
+    kept_source: Option<bool>,
 }
 
 /// Walk `events` newest-first and return the newest unresolved partial:
@@ -296,17 +305,46 @@ fn source_id_for(target: &SessionRow, partial: &PartialRecord) -> Result<i64, Ip
     }
 }
 
-fn fetch_source(store: &Mutex<Store>, source_id: i64) -> Result<SessionRow, IpcError> {
+/// The source row, resolved by id and then CHECKED against the identifying
+/// fields the partial recorded.
+///
+/// **An id is not an identity** (multi-user M1, T9d). `sessions.id` is
+/// `INTEGER PRIMARY KEY` with no `AUTOINCREMENT` and reconcile hard-deletes
+/// a ghosted row, so a source ghosted and reaped between the partial and the
+/// resolution leaves its rowid to the next session created on that host.
+/// This used to cross-check `from_host` alone — true of any session on the
+/// machine — and `finish` then KILLED what it resolved while `undo` restored
+/// it. The target side was always held to id AND host AND tmux name; this is
+/// the same check on the other half, which is all it ever needed.
+fn fetch_source(
+    store: &Mutex<Store>,
+    target_id: i64,
+    source_id: i64,
+    partial: &PartialRecord,
+) -> Result<SessionRow, IpcError> {
     let row = {
         let s = lock(store)?;
         s.get_session_by_id(source_id)?
     };
-    row.ok_or_else(|| {
+    let source = row.ok_or_else(|| {
         IpcError::new(
             codes::E_NOTFOUND,
             format!("the source session {source_id} no longer exists"),
         )
-    })
+    })?;
+    refuse_if_differs(
+        target_id,
+        "from_host",
+        partial.from_host.as_deref(),
+        &source.host_alias,
+    )?;
+    refuse_if_differs(
+        target_id,
+        "from_tmux_name",
+        partial.from_tmux_name.as_deref(),
+        &source.tmux_name,
+    )?;
+    Ok(source)
 }
 
 /// Accept the move: kill the source, record it complete. See the module
@@ -350,13 +388,7 @@ async fn finish(
     })?;
 
     let source_id = source_id_for(&target, &partial)?;
-    let source = fetch_source(store, source_id)?;
-    refuse_if_differs(
-        target.id,
-        "from_host",
-        partial.from_host.as_deref(),
-        &source.host_alias,
-    )?;
+    let source = fetch_source(store, target.id, source_id, &partial)?;
 
     let claude_id = target
         .claude_session_id
@@ -386,7 +418,7 @@ async fn finish(
             stored_transcript: partial.source_transcript_path.as_deref(),
             copied: Located { size, mtime, path },
             transcript_bytes: size,
-            keep_source: false,
+            keep_source: partial.kept_source.unwrap_or(false),
             extra_detail: serde_json::json!({ "finished_from_partial": true }),
         },
         store,
@@ -461,13 +493,7 @@ async fn undo(
     }
 
     let source_id = source_id_for(&target, &partial)?;
-    let source = fetch_source(store, source_id)?;
-    refuse_if_differs(
-        target.id,
-        "from_host",
-        partial.from_host.as_deref(),
-        &source.host_alias,
-    )?;
+    let source = fetch_source(store, target.id, source_id, &partial)?;
 
     // The kill only — no worktree, transcript, carried file or script of any
     // kind touches the target.
@@ -551,6 +577,14 @@ mod tests {
     /// `unresolved = false` a later `session_moved` marks it already resolved.
     /// Uses the same `Store` calls as `mod.rs`'s `fixture_on`.
     fn partial_fixture(unresolved: bool) -> (Mutex<Store>, i64, i64) {
+        partial_fixture_with(unresolved, serde_json::json!({}))
+    }
+
+    /// [`partial_fixture`] with `extra` merged into the partial's detail.
+    fn partial_fixture_with(
+        unresolved: bool,
+        extra: serde_json::Value,
+    ) -> (Mutex<Store>, i64, i64) {
         let s = Store::open_in_memory().unwrap();
         for h in ["alpha", "beta"] {
             s.insert_host(h, None).unwrap();
@@ -598,6 +632,7 @@ mod tests {
             "step": "killing the source dev-o-r--feat on alpha",
             "to_host": "beta",
             "from_host": "alpha",
+            "from_tmux_name": "dev-o-r--feat",
             "from_session_id": source,
             "to_session_id": target,
             "cause_code": "E_SSH",
@@ -609,8 +644,12 @@ mod tests {
             "source_transcript_path": SRC_TRANSCRIPT_PATH,
             "to_turn_seq": 0,
             "to_last_turn_at": serde_json::Value::Null,
-        })
-        .to_string();
+        });
+        let mut detail = detail;
+        if let (Some(d), Some(x)) = (detail.as_object_mut(), extra.as_object()) {
+            d.extend(x.clone());
+        }
+        let detail = detail.to_string();
         for id in [source, target] {
             s.insert_session_event(id, EVENT_MOVE_PARTIAL, Some(&detail))
                 .unwrap();
@@ -677,6 +716,7 @@ mod tests {
             "step": "killing the source dev-o-r--feat on alpha",
             "to_host": "beta",
             "from_host": "alpha",
+            "from_tmux_name": "dev-o-r--feat",
             "from_session_id": source,
             "to_session_id": target,
             "cause_code": "E_SSH",
@@ -836,6 +876,36 @@ mod tests {
             let d: serde_json::Value = serde_json::from_str(e.detail.as_deref().unwrap()).unwrap();
             assert_eq!(d["finished_from_partial"], true);
         }
+    }
+
+    /// r18-M1: a move told to keep its source records `kept_source`; a
+    /// Finish from that partial must keep it too, never kill it.
+    #[tokio::test]
+    async fn finish_keeps_a_source_the_move_was_told_to_keep() {
+        let (store, _source_id, target_id) =
+            partial_fixture_with(true, serde_json::json!({ "kept_source": true }));
+        let fake = FakeSsh::new();
+        fake.on_host(
+            "alpha",
+            Match::script_contains("# cf-move:locate"),
+            Reply::ok(&format!(
+                "{TRANSCRIPT_LEN}\t{MTIME}\t{SRC_TRANSCRIPT_PATH}\n"
+            )),
+        );
+        let hooks = FakeHooks::new(&fake);
+        let rep = resolve_move_with(
+            ResolveMoveArgs {
+                session_id: target_id,
+                action: ResolveMoveAction::Finish,
+            },
+            &store,
+            &fake,
+            &hooks,
+        )
+        .await
+        .expect("finish");
+        assert!(!rep.source_killed, "a kept source stays");
+        assert!(!hooks.killed_any(), "nothing is killed");
     }
 
     /// A Finish never saw the carry: it runs from the recorded event alone,
@@ -1132,12 +1202,18 @@ mod tests {
         // handle they always agree with the live row. A disagreement (a
         // corrupted event, or one orphaned by a deleted-and-reused row id)
         // must refuse, not warn-and-proceed.
-        for bad_field in ["to_host", "to_tmux_name"] {
+        // T9d adds `from_tmux_name`: the SOURCE's identity was `(host,
+        // recyclable id)` and nothing else, while the target's was held to
+        // id AND host AND tmux name — so a reaped source's rowid, handed to
+        // the next session on that host, passed as "the source" and `Finish`
+        // killed it.
+        for bad_field in ["to_host", "to_tmux_name", "from_host", "from_tmux_name"] {
             let (store, source_id, target_id) = partial_fixture(true);
             let mut detail = serde_json::json!({
                 "step": "x",
                 "to_host": "beta",
                 "from_host": "alpha",
+                "from_tmux_name": "dev-o-r--feat",
                 "from_session_id": source_id,
                 "to_session_id": target_id,
                 "to_tmux_name": "dev-o-r--feat",

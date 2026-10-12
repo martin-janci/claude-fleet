@@ -1,10 +1,18 @@
 import { render, screen, waitFor, fireEvent } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, beforeAll, expect, beforeEach, vi } from 'vitest';
 import App from './App.svelte';
 import { onboardingDismissed } from './lib/onboarding';
-import { clearToasts } from './lib/toasts';
+import { clearToasts, toasts } from './lib/toasts';
+import { get } from 'svelte/store';
+import { catalog } from './lib/assets';
 import { hubStatus, STANDALONE, type HubStatus } from './lib/hub';
 import { hubConnection } from './lib/hub_connection';
+import { sessionsAnswered } from './lib/sessions';
+import { preloadLazyViews } from './lib/lazy_views';
+
+// The off-screen views load lazily in the app; here they are in place
+// before the first render, so a test sees them on the frame they open.
+beforeAll(() => preloadLazyViews());
 
 const remote: HubStatus = {
   remote: true,
@@ -58,7 +66,7 @@ describe('the hub badge', () => {
     const { restore } = await routeInvoke((cmd) => (cmd === 'hub_status' ? STANDALONE : undefined));
     try {
       render(App);
-      await waitFor(() => expect(screen.getByText(/schema/)).toBeInTheDocument());
+      await waitFor(() => expect(screen.getByText('All systems OK')).toBeInTheDocument());
       expect(screen.queryByTestId('hub-badge')).toBeNull();
     } finally {
       restore();
@@ -140,11 +148,9 @@ describe('health in remote mode', () => {
     try {
       render(App);
       // `0.0.0-test` is the `getVersion()` stand-in from `vitest.setup.ts`.
-      await waitFor(() =>
-        expect(screen.getByTestId('footer-version').textContent).toBe(
-          'app 0.0.0-test · hub 9.9.9 · db: ok · schema 41',
-        ),
-      );
+      // Redesign 1.4: the strip says how things are, the versions are on hover.
+      await waitFor(() => expect(screen.getByTestId('footer-version').textContent).toBe('All systems OK'));
+      expect(screen.getByTestId('footer-version').title).toContain('app 0.0.0-test · hub 9.9.9 · db: ok · schema 41');
       expect(screen.getByTestId('footer-version').title).toContain('hub 9.9.9 is https://fleet.example.com');
     } finally {
       restore();
@@ -166,10 +172,9 @@ describe('the footer’s version line', () => {
       // `0.0.0-test` is `getVersion()`'s stand-in (`vitest.setup.ts`); the
       // `0.4.5` the health mock answers is the SAME version standalone, and
       // the fallback that uses it is covered in `app_version.test.ts`.
-      await waitFor(() =>
-        expect(screen.getByTestId('footer-version').textContent).toBe('app 0.0.0-test · db: ok · schema 90'),
-      );
-      expect(screen.getByTestId('footer-version').textContent).not.toContain('hub');
+      await waitFor(() => expect(screen.getByTestId('footer-version').textContent).toBe('All systems OK'));
+      expect(screen.getByTestId('footer-version').title).toContain('app 0.0.0-test · db: ok · schema 90');
+      expect(screen.getByTestId('footer-version').title).not.toContain('hub 0.4.5');
       expect(screen.getByTestId('footer-version').title).toContain('This app owns the fleet');
     } finally {
       restore();
@@ -235,7 +240,7 @@ describe('the disconnected banner', () => {
     );
     try {
       render(App);
-      await waitFor(() => expect(screen.getByText(/schema/)).toBeInTheDocument());
+      await waitFor(() => expect(screen.getByText('All systems OK')).toBeInTheDocument());
       expect(inv.mock.calls.some((c) => c[0] === 'hub_connection')).toBe(false);
       expect(screen.queryByTestId('hub-connection-banner')).toBeNull();
     } finally {
@@ -377,6 +382,97 @@ describe('the commands the UI calls unprompted', () => {
   });
 });
 
+// Assets M6 (⌘K lists assets): the quick switcher reads the `catalog` store,
+// which only the Assets panel used to fill, so a fresh launch listed none.
+describe('the asset catalog at startup (the quick switcher)', () => {
+  const listing = { assets: [], unmanaged: [], problems: [], hosts: [] };
+  const cfg = { repo_path: '/c', remote_url: null, head_commit: null, last_loaded_at: null };
+
+  it('a hub client reads the hub listing at launch, and a refusal is silent', async () => {
+    const { inv, restore } = await routeInvoke((cmd) => {
+      if (cmd === 'hub_status') return remote;
+      if (cmd === 'catalog_list_assets') {
+        return Object.assign(new Error('refused'), { code: 'E_HUB_DENIED', message: 'no grant' });
+      }
+      return undefined;
+    });
+    try {
+      render(App);
+      await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'catalog_list_assets')).toBe(true));
+      await new Promise((r) => setTimeout(r, 0));
+      // The hub loaded its own catalog; this window loads nothing.
+      expect(inv.mock.calls.some((c) => c[0] === 'catalog_load')).toBe(false);
+      expect(get(toasts)).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it('a standalone window loads its configured catalog, then lists it', async () => {
+    const { inv, restore } = await routeInvoke((cmd) => {
+      if (cmd === 'hub_status') return STANDALONE;
+      if (cmd === 'catalog_config') return cfg;
+      if (cmd === 'catalog_load') return { head: 'abc', loaded_at: 1, asset_count: 0, problem_count: 0 };
+      if (cmd === 'catalog_list_assets') return listing;
+      return undefined;
+    });
+    try {
+      render(App);
+      await waitFor(() => expect(get(catalog)).toEqual(listing));
+      const names = inv.mock.calls.map((c) => c[0] as string);
+      expect(names.indexOf('catalog_load')).toBeGreaterThan(-1);
+      expect(names.indexOf('catalog_load')).toBeLessThan(names.indexOf('catalog_list_assets'));
+    } finally {
+      restore();
+      catalog.set(null);
+    }
+  });
+
+  it('a standalone window with no catalog configured asks for no listing', async () => {
+    const { inv, restore } = await routeInvoke((cmd) => {
+      if (cmd === 'hub_status') return STANDALONE;
+      if (cmd === 'catalog_config') return null;
+      return undefined;
+    });
+    try {
+      render(App);
+      await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'catalog_config')).toBe(true));
+      await new Promise((r) => setTimeout(r, 0));
+      expect(inv.mock.calls.some((c) => c[0] === 'catalog_load' || c[0] === 'catalog_list_assets')).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
+  // r13 D22: ⌘K and the status bar wait on sessionsAnswered; a window that
+  // will never list sessions must not say "still arriving" for ever.
+  it('a window whose hub is unusable counts its sessions as answered', async () => {
+    const unusable: HubStatus = { ...STANDALONE, configured_url: 'https://fleet.example.com', unavailable: 'no token' };
+    const { restore } = await routeInvoke((cmd) => (cmd === 'hub_status' ? unusable : undefined));
+    sessionsAnswered.set(false);
+    try {
+      render(App);
+      await screen.findByTestId('hub-unavailable');
+      await waitFor(() => expect(get(sessionsAnswered)).toBe(true));
+    } finally {
+      restore();
+    }
+  });
+
+  it('a window whose hub is unusable asks for nothing', async () => {
+    const unusable: HubStatus = { ...STANDALONE, configured_url: 'https://fleet.example.com', unavailable: 'no token' };
+    const { inv, restore } = await routeInvoke((cmd) => (cmd === 'hub_status' ? unusable : undefined));
+    try {
+      render(App);
+      await screen.findByTestId('hub-unavailable');
+      await new Promise((r) => setTimeout(r, 0));
+      expect(inv.mock.calls.some((c) => String(c[0]).startsWith('catalog_'))).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+});
+
 // F1 of the final review. A hub is configured (`hub.remote_url` is set) but
 // this launch could not use it: no stored token, a keychain that would not
 // open, plain http without the opt-in, a URL that does not parse. The backend
@@ -434,12 +530,132 @@ describe('a configured hub this launch cannot use', () => {
       const { restore } = await routeInvoke((cmd) => (cmd === 'hub_status' ? status : undefined));
       try {
         const { unmount } = render(App);
-        await waitFor(() => expect(screen.getByText(/schema|connecting/)).toBeInTheDocument());
+        await waitFor(() => expect(screen.getByText(/All systems OK|connecting/)).toBeInTheDocument());
         expect(screen.queryByTestId('hub-unavailable')).toBeNull();
         unmount();
       } finally {
         restore();
       }
+    }
+  });
+});
+
+// Multi-user M1 (R5-e): what the Session tab shows for a session somebody
+// SHARED with this person.
+//
+// There is no Attach button to hide — the terminal is a pane that attaches
+// automatically the moment a row is selected, so the gate is a mount
+// condition: TerminalView is not mounted at all for such a row, and the
+// read-only pane snapshot takes its place. Without that branch, DoD 3 and 4
+// have no UI deliverable and a watcher would be shown an empty row.
+describe('the Session tab for a shared session', () => {
+  const ME = 7;
+  const OTHER = 9;
+
+  const row = (over: Record<string, unknown> = {}) => ({
+    id: 70, tmux_name: 'dev-theirs', host_alias: 'trn', project_id: null, worktree_id: null,
+    created_at: 1, last_activity_at: 1, status: 'running', notes: null, account_uuid: null,
+    kind: 'work', reviews_session_id: null, worktree_key: null, lost_at: null,
+    claude_session_id: null, claude_status: null, effort_level: null, pr_url: null,
+    current_activity: null, friendly_name: null, safe_kill_state: null, safe_kill_nonce: null,
+    safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null,
+    idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null,
+    started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null,
+    parent_session_id: null, tags: [], model: null, context_tokens: null, context_window: null,
+    context_source: null, context_at: null, context_stale: false, tmux_pane_id: null,
+    pending_input: null, owner_person_id: OTHER, visibility: 'private',
+    ...over,
+  });
+
+  async function mount(answers: (cmd: string) => unknown | undefined) {
+    const { restore, inv } = await routeInvoke((cmd) => {
+      if (cmd === 'hub_status') return remote;
+      return answers(cmd);
+    });
+    const { selectSession, clearSelection } = await import('./lib/selection');
+    // The Terminal sub-view, so the assertions are about the pane slot itself
+    // rather than about the Conversation overlay that can cover it.
+    const { sessionView } = await import('./lib/prefs');
+    sessionView.set('terminal');
+    return { restore, inv, selectSession, clearSelection };
+  }
+
+  it('mounts no terminal and shows the read-only snapshot instead', async () => {
+    const theirs = row();
+    const { restore, inv, selectSession, clearSelection } = await mount((cmd) => {
+      if (cmd === 'list_sessions') return [theirs];
+      if (cmd === 'my_grants') return { person_id: ME, grants: [{ session_id: 70, level: 'watch' }] };
+      if (cmd === 'capture_session') return 'claude> …\n';
+      return undefined;
+    });
+    try {
+      render(App);
+      await waitFor(() => expect(screen.getAllByTestId('sess-row').length).toBeGreaterThan(0));
+      selectSession(theirs as never);
+      await screen.findByTestId('watch-view');
+      // The component that attaches is not in the DOM at all — not hidden,
+      // not disabled, not mounted. `pty_open` is therefore never reached.
+      expect(screen.queryByTestId('terminal-host')).toBeNull();
+      expect(inv.mock.calls.map((c) => c[0])).not.toContain('pty_open');
+      expect(screen.getByTestId('watch-reason').textContent).toContain('revoke');
+    } finally {
+      clearSelection();
+      restore();
+    }
+  });
+
+  it('mounts the real terminal for a session this person owns', async () => {
+    const mine = row({ id: 71, tmux_name: 'dev-mine', owner_person_id: ME });
+    const { restore, selectSession, clearSelection } = await mount((cmd) => {
+      if (cmd === 'list_sessions') return [mine];
+      if (cmd === 'my_grants') return { person_id: ME, grants: [] };
+      return undefined;
+    });
+    try {
+      render(App);
+      await waitFor(() => expect(screen.getAllByTestId('sess-row').length).toBeGreaterThan(0));
+      selectSession(mine as never);
+      await screen.findByTestId('terminal-host');
+      expect(screen.queryByTestId('watch-view')).toBeNull();
+    } finally {
+      clearSelection();
+      restore();
+    }
+  });
+
+  // The watcher's slot has to be REACHABLE, not merely mounted. A shared row
+  // that has not reported a `claude_session_id` yet is the case that gets this
+  // wrong: the missing-transcript fallback used to force Terminal, F1 made it
+  // return the stored preference instead — and if the preference is then not
+  // writable, a watcher whose last choice was Conversation can never get to
+  // the snapshot and ⌘J does nothing.
+  it('lets a watcher switch to the snapshot on a row with no transcript yet', async () => {
+    const theirs = row({ id: 72, tmux_name: 'dev-notyet' });
+    const { restore, selectSession, clearSelection } = await mount((cmd) => {
+      if (cmd === 'list_sessions') return [theirs];
+      if (cmd === 'my_grants')
+        return { person_id: ME, grants: [{ session_id: 72, level: 'watch' }] };
+      if (cmd === 'capture_session') return 'claude> …\n';
+      return undefined;
+    });
+    try {
+      const { sessionView } = await import('./lib/prefs');
+      sessionView.set('conversation');
+      render(App);
+      await waitFor(() => expect(screen.getAllByTestId('sess-row').length).toBeGreaterThan(0));
+      selectSession(theirs as never);
+      // The Agent tab is the terminal view (the snapshot, for a watcher).
+      await waitFor(() =>
+        expect(screen.getByTestId('stab-agent').getAttribute('aria-selected')).toBe('false'),
+      );
+      await fireEvent.click(screen.getByTestId('stab-agent'));
+      await waitFor(() =>
+        expect(screen.getByTestId('stab-agent').getAttribute('aria-selected')).toBe('true'),
+      );
+      expect(screen.queryByTestId('terminal-host')).toBeNull();
+    } finally {
+      clearSelection();
+      restore();
     }
   });
 });

@@ -346,6 +346,17 @@ export class Screen {
     for (let r = 0; r < this.rows; r++) this.rowVersion[r] = ++this.dirtyClock;
   }
 
+  /** Blank this side's copy of the screen only (a pop-out's "Clear view"):
+   *  nothing is sent to the program, and the cursor, the modes and a
+   *  half-read escape sequence stay as they were, so the next output lands
+   *  where the program means it to. What it repaints shows again. */
+  clearView(): void {
+    for (let r = 0; r < this.rows; r++) this.cells[r] = makeRow(this.cols);
+    this.wrapped.fill(false);
+    this.noteContentSwap();
+    this.markAll();
+  }
+
   /** Resize the buffer. Existing content is preserved by clamping or
    *  padding rows/cols; cursor is clamped to the new dimensions. If we're
    *  on the alt screen, the saved primary buffer is resized too so a

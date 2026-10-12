@@ -205,7 +205,7 @@ impl UnavailableHub {
     pub fn explain(&self) -> String {
         format!(
             "{} — this app is set to use a hub, so it is managing no fleet of its \
-             own until that is fixed: pair again, or Disconnect, in Settings → Hub",
+             own until that is fixed: pair again, or Disconnect, in Settings → Hub & sync",
             self.reason
         )
     }

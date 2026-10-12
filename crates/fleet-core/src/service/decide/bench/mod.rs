@@ -14,6 +14,13 @@
 //!   (`fleet-hub decide bench work-link`).
 //! - [`status_map`]: card J3, an Asana section's status category
 //!   (`fleet-hub decide bench status-map`).
+//! - [`turn_outcome`]: card J2, what a silent turn's end came to, from
+//!   labeled pane tails (`fleet-hub decide bench turn-outcome`).
+//! - [`choice`]: one labelled set per closed-choice use case — K2
+//!   control_route, K4 duplicate, N1 related_session, K5 work_placement,
+//!   N5 host_placement, N6 routine_run_outcome, N4 adopt_target, J10
+//!   restore_target, J6 main_ticket, J7 tracker_duplicate
+//!   (`fleet-hub decide bench <use-case>`). The built-in sets are synthetic.
 //!
 //! - [`perturb`]: perturbed variants (dataset C) and the paired comparison
 //!   datasets B and C are judged by; [`status_map_robust`] applies them to
@@ -23,13 +30,18 @@
 //! and Brier, test map §4) and the acceptance verdicts both benches print.
 
 pub mod bm25;
+pub mod choice;
+#[cfg(test)]
+mod choice_tests;
 pub mod perturb;
 pub mod status_map;
 pub mod status_map_robust;
 #[cfg(test)]
 mod status_map_robust_tests;
+pub mod status_map_split;
 #[cfg(test)]
 mod status_map_tests;
+pub mod turn_outcome;
 pub mod work_link;
 pub mod work_link_robust;
 #[cfg(test)]
@@ -107,6 +119,22 @@ pub fn mix(a: u64, b: u64) -> u64 {
 }
 
 /// PURE: the `p`-th percentile (0..=100, nearest rank) of `v`.
+/// PURE: what one right answer cost, in micro-USD (rounded up): every
+/// call's spend over the right answers the calls gave — what the test map's
+/// cost comparison reads, since a cheap model that abstains or errs more
+/// needs a person (or a second model) for the rest. `None` when nothing was
+/// right.
+pub fn cost_per_correct(cost_microusd: i64, correct: u64) -> Option<i64> {
+    let n = i64::try_from(correct).ok().filter(|n| *n > 0)?;
+    Some((cost_microusd.max(0) + n - 1) / n)
+}
+
+/// PURE: [`cost_per_correct`] for a report: `-` when there is none.
+pub fn fmt_cost_per_correct(c: Option<i64>) -> String {
+    c.map(crate::service::decide::fmt_usd)
+        .unwrap_or_else(|| "-".into())
+}
+
 pub fn percentile(v: &[i64], p: f64) -> Option<i64> {
     if v.is_empty() {
         return None;
@@ -410,6 +438,16 @@ pub(crate) fn gate_or_skip(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cost_per_correct_rounds_up_and_needs_a_right_answer() {
+        assert_eq!(cost_per_correct(10, 3), Some(4));
+        assert_eq!(cost_per_correct(9, 3), Some(3));
+        assert_eq!(cost_per_correct(0, 3), Some(0));
+        assert_eq!(cost_per_correct(10, 0), None);
+        assert_eq!(fmt_cost_per_correct(Some(1_500)), "$0.001500");
+        assert_eq!(fmt_cost_per_correct(None), "-");
+    }
 
     #[test]
     fn the_shared_metric_and_format_helpers() {

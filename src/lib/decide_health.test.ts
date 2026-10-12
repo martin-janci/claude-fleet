@@ -61,7 +61,7 @@ describe('TrackerAttention with the Jev item', () => {
     await refreshTrackersHealth();
     await tick();
     const item = screen.getByTestId('decide-attention-item');
-    expect(item.textContent?.trim()).toBe('⚠ Jev degraded →');
+    expect(item.textContent?.trim()).toBe('Jev degraded →');
     await fireEvent.click(item);
     expect(get(settingsOpen)).toBe(true);
     expect(get(settingsSection)).toBe('decide');

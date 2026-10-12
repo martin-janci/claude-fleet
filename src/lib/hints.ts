@@ -5,6 +5,7 @@ import { hosts } from './hosts';
 import { sessions, hasNoPane } from './sessions';
 
 export type HintId =
+  | 'board-move'
   | 'host-filter'
   | 'bg-session'
   | 'session-actions'
@@ -23,6 +24,13 @@ export interface HintDef {
 
 /** Ordered by priority — earlier hints win when several are eligible at once. */
 export const HINTS: HintDef[] = [
+  {
+    // First: it only registers while the Board is open, and it replaced the
+    // instruction the Board used to print on every visit (redesign 1.4).
+    id: 'board-move',
+    text: "Drag a task to set its status, or focus it and press ← →. The Work view's filters apply.",
+    placement: 'bottom',
+  },
   {
     id: 'host-filter',
     text: 'Filter sessions by machine — the dot shows reachability.',
@@ -54,9 +62,11 @@ export const HINTS: HintDef[] = [
     placement: 'top',
   },
   {
+    // Kept as `agent-fab` so a dismissal stored before 13.1 still holds; it
+    // anchors on the rail's Control item since the floating button went.
     id: 'agent-fab',
     text: 'Ask the agent to drive the fleet — it can do anything this app can.',
-    placement: 'left',
+    placement: 'right',
   },
 ];
 

@@ -85,7 +85,14 @@ check "it states the shipped hub's contract" test "$(json "$m" 'd["compatibility
 dmin="$(sed -n 's/^pub const MIN_HUB_CONTRACT: u32 = \([0-9]*\);.*/\1/p' "$root/src-tauri/src/backend/contract.rs")"
 check "and the desktop's window from contract.rs" test "$(json "$m" 'd["compatibility"]["contract"]["desktop_accepts"][0]')" = "$dmin"
 check "it carries the hub image by digest" test "$(json "$m" '[a["digest"] for a in d["components"]["hub"]["artifacts"] if a["kind"]=="oci"][0]')" = "$digest"
-check "desktop downloads, not the unsigned updater bundle" test "$(json "$m" 'len(d["components"]["desktop"]["artifacts"])')" = 5
+check "desktop: two dmgs and a deb to download, three updater bundles" test "$(json "$m" 'len(d["components"]["desktop"]["artifacts"])')" = 6
+check "the updater bundles are tauri artifacts" test "$(json "$m" 'sorted(a["name"] for a in d["components"]["desktop"]["artifacts"] if a["kind"]=="tauri")')" = \
+  "['claude-fleet_${v}_aarch64.app.tar.gz', 'claude-fleet_${v}_amd64.AppImage', 'claude-fleet_${v}_x64-setup.exe']"
+json "$m" '[a["tauri_signature"] for a in d["components"]["desktop"]["artifacts"] if a["name"].endswith(".app.tar.gz")][0]' \
+  | base64 -d >"$t/mac.minisig"
+check "whose signature is the release key's over the bundle" \
+  minisign -V -q -p "$t/test.pub" -m "$assets/claude-fleet_${v}_aarch64.app.tar.gz" -x "$t/mac.minisig"
+check "and names the version, as requireSignedVersion wants" grep -q "version:$v" "$t/mac.minisig"
 
 # Publish it, then run update-channels.sh against a local bare remote.
 mkdir -p "$t/published/v$v"
@@ -120,6 +127,66 @@ chan beta
 check "an rc lands on beta" test "$(json "$t/beta.json" 'd["current"]')" = "$rc"
 chan stable
 check "and not on stable" test "$(json "$t/stable.json" 'd["current"]')" = "$v"
+
+# A per-push dev release (nightly.yml): here the hub tarball only. It lands on
+# dev, and on nightly when nightly has not moved for two hours.
+nv="0.4.2-dev.7.gabc1234"
+check "a per-push nightly builds no desktop legs" test "$("$here/release-assets.sh" has-desktop "$nv")" = false
+check "a daily nightly does" test "$("$here/release-assets.sh" has-desktop "0.4.2-dev.8.desktop.gabc1234")" = true
+nassets="$t/assets-nightly"
+mkdir -p "$nassets" "$t/published/v$nv" "$t/pack/fleet-hub-$nv"
+cp "$FLEET_HUB" "$t/pack/fleet-hub-$nv/fleet-hub"
+tar -czf "$nassets/fleet-hub-${nv}-x86_64-unknown-linux-gnu.tar.gz" -C "$t/pack" "fleet-hub-$nv"
+(cd "$t" && DRY_RUN=1 TAG="v$nv" HUB_IMAGE_WAIT_SECS=0 ASSETS_DIR="$nassets" "$here/release-manifest.sh" 2>/dev/null)
+check "a nightly's manifest is on the nightly track" test "$(json "$t/release-manifest.json" 'd["release"]["track"]')" = nightly
+check "and carries no desktop artifact" test "$(json "$t/release-manifest.json" 'len(d["components"].get("desktop", {}).get("artifacts", []))')" = 0
+cp "$t/release-manifest.json" "$t/release-manifest.json.minisig" "$t/published/v$nv/"
+before_beta="$(git -C "$t/remote.git" show update-channels:beta.json)"
+uc add "v$nv"
+check "a dev release lands on dev" chan dev
+check "dev lists it as current" test "$(json "$t/dev.json" 'd["current"]')" = "$nv"
+check "the first one lands on nightly too" chan nightly
+check "nightly lists it as current" test "$(json "$t/nightly.json" 'd["current"]')" = "$nv"
+check "and beta did not move" test "$(git -C "$t/remote.git" show update-channels:beta.json)" = "$before_beta"
+
+# The next push, minutes later: dev moves, nightly waits for its two hours.
+nv2="0.4.2-dev.9.gabc1235"
+nassets2="$t/assets-nightly2"
+mkdir -p "$nassets2" "$t/published/v$nv2" "$t/pack/fleet-hub-$nv2"
+cp "$FLEET_HUB" "$t/pack/fleet-hub-$nv2/fleet-hub"
+tar -czf "$nassets2/fleet-hub-${nv2}-x86_64-unknown-linux-gnu.tar.gz" -C "$t/pack" "fleet-hub-$nv2"
+(cd "$t" && DRY_RUN=1 TAG="v$nv2" HUB_IMAGE_WAIT_SECS=0 ASSETS_DIR="$nassets2" "$here/release-manifest.sh" 2>/dev/null)
+cp "$t/release-manifest.json" "$t/release-manifest.json.minisig" "$t/published/v$nv2/"
+before_nightly2="$(git -C "$t/remote.git" show update-channels:nightly.json)"
+uc add "v$nv2"
+chan dev
+check "the next dev release is dev's current" test "$(json "$t/dev.json" 'd["current"]')" = "$nv2"
+check "and nightly did not move within two hours" test "$(git -C "$t/remote.git" show update-channels:nightly.json)" = "$before_nightly2"
+(cd "$t/repo" && NIGHTLY_EVERY_SECS=0 REPO=o/r "$here/update-channels.sh" add "v$nv2" 2>/dev/null)
+chan nightly
+check "once its interval is up, nightly takes the newest" test "$(json "$t/nightly.json" 'd["current"]')" = "$nv2"
+
+# The phone's amendment (android-amendment.yml, design §4 / §13.2): signed,
+# kept on the channel branch, listed on every track that carries the release.
+"$FLEET_RELEASE" amendment --version "$v" \
+  --apk-url "https://github.com/o/fleet-mobile/releases/download/v$v/fleet-mobile-$v.apk" \
+  --sha256 "$(printf 'apk' | sha256sum | cut -d' ' -f1)" --size 3 --version-code 41 \
+  --signer-sha256 "$(printf 'cert' | sha256sum | cut -d' ' -f1)" --mobile-accepts 0,14 \
+  --out "$t/android.json" >/dev/null 2>&1
+before_nightly="$(git -C "$t/remote.git" show update-channels:nightly.json)"
+uc amend "v$v" "$t/android.json"
+chan stable
+check "an amendment is listed on stable" test "$(json "$t/stable.json" '[r for r in d["releases"] if r["version"]=="'"$v"'"][0]["amendments"][0]["component"]')" = android
+chan beta
+check "and on beta, which carries the release too" test "$(json "$t/beta.json" 'len([r for r in d["releases"] if r.get("amendments")])')" = 1
+check "but not on nightly, which does not" test "$(git -C "$t/remote.git" show update-channels:nightly.json)" = "$before_nightly"
+git -C "$t/remote.git" show "update-channels:amendments/$v/android.json" >"$t/am.json"
+git -C "$t/remote.git" show "update-channels:amendments/$v/android.json.minisig" >"$t/am.json.minisig"
+check "the amendment is signed by the release key" \
+  "$FLEET_RELEASE" verify --keys-file "$t/pubkeys" --kind amendment --file "$t/am.json" --sig "$t/am.json.minisig"
+check "and its sha256 is the one the channel lists" test "$(sha256sum "$t/am.json" | cut -d' ' -f1)" = \
+  "$(json "$t/stable.json" '[r for r in d["releases"] if r["version"]=="'"$v"'"][0]["amendments"][0]["manifest_sha256"]')"
+check "a release no track carries cannot be amended" bash -c "! (cd '$t/repo' && REPO=o/r '$here/update-channels.sh' amend v9.9.9 '$t/android.json' >/dev/null 2>&1)"
 
 seq="$(json "$t/stable.json" 'd["sequence"]')"
 uc edit stable minimum "$v" hub

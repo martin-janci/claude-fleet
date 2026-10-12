@@ -169,7 +169,7 @@ the status probe always gets through. WSL hosts are not capped: their
 commands run `wsl.exe`, not an SSH connection.
 
 The fix is **hub-client mode**. Run `fleet-hub` on a Linux machine (see
-[hub.md](hub.md)) and pair the desktop with it in **Settings → Hub**. The
+[hub.md](hub.md)) and pair the desktop with it in **Settings → Hub & sync**. The
 hub does all the SSH work from Linux, with multiplexing. The Windows app
 then opens SSH only for the terminal you are looking at.
 
@@ -210,7 +210,7 @@ the move fails, nothing is moved, the app keeps using the old place, and
 the log says why.
 
 The hub client token never goes into the database. Disconnect in Settings →
-Hub removes it; you can also remove it from **Control Panel → Credential
+Hub & sync removes it; you can also remove it from **Control Panel → Credential
 Manager → Windows Credentials**.
 
 ## Known gaps

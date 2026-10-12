@@ -39,6 +39,12 @@ impl FleetTasks for Recorder {
     fn start_catalog_scan_tick(&self) {
         self.0.lock().unwrap().push("catalog_scan_tick");
     }
+    fn start_mission_tick(&self) {
+        self.0.lock().unwrap().push("mission_tick");
+    }
+    fn start_local_sync_tick(&self) {
+        self.0.lock().unwrap().push("local_sync_tick");
+    }
 }
 
 fn remote() -> Backend {
@@ -61,12 +67,13 @@ fn a_hub_client_starts_none_of_the_three() {
     start_background_tasks(&remote(), &recorder);
     assert_eq!(
         recorder.started(),
-        vec!["event_bridge", "report_flusher"],
+        vec!["event_bridge", "local_sync_tick", "report_flusher"],
         "a desktop pointed at a hub started a fleet-owning background task. \
          Two processes reconciling one fleet is the failure this whole mode \
          exists to prevent — and unlike most bugs it is silent, because both \
-         halves appear to work. The event bridge is the one task a client DOES \
-         run: it only reads the hub's stream."
+         halves appear to work. A client runs the event bridge, which only reads \
+         the hub's stream, and the local workspace sync, which is this \
+         machine's own folders over its own SSH."
     );
 }
 
@@ -115,6 +122,31 @@ fn a_paired_desktop_never_scans_the_catalog() {
     assert!(standalone.started().contains(&"catalog_scan_tick"));
 }
 
+/// Local workspace sync reaches hosts over this process's own SSH and binds
+/// this machine's folders: a paired desktop runs its tick too, one the hub
+/// cannot use does not.
+/// A paired desktop's missions are the hub's: running their loop here too
+/// would take every step twice.
+#[test]
+fn a_paired_desktop_never_runs_the_mission_loop() {
+    let recorder = Recorder::default();
+    start_background_tasks(&remote(), &recorder);
+    assert!(!recorder.started().contains(&"mission_tick"));
+    let standalone = Recorder::default();
+    start_background_tasks(&Backend::Local, &standalone);
+    assert!(standalone.started().contains(&"mission_tick"));
+}
+
+#[test]
+fn a_paired_desktop_runs_local_workspace_sync_too() {
+    let recorder = Recorder::default();
+    start_background_tasks(&remote(), &recorder);
+    assert!(recorder.started().contains(&"local_sync_tick"));
+    let standalone = Recorder::default();
+    start_background_tasks(&Backend::Local, &standalone);
+    assert!(standalone.started().contains(&"local_sync_tick"));
+}
+
 #[test]
 fn the_report_flusher_is_off_with_the_env_var() {
     assert!(report_flusher_wanted(None));
@@ -138,7 +170,9 @@ fn a_standalone_app_starts_all_three() {
             "reconcile_tick",
             "account_usage_tick",
             "tracker_sync",
-            "catalog_scan_tick"
+            "catalog_scan_tick",
+            "mission_tick",
+            "local_sync_tick"
         ],
         "standalone must keep its control API, its reconcile tick and its \
          usage poll — and must NOT start the hub event bridge, because there \
@@ -170,6 +204,8 @@ fn lib_rs_cannot_start_a_background_task_behind_this_modules_back() {
         "spawn_report_flusher(",
         "spawn_tracker_sync(",
         "spawn_catalog_scan_tick(",
+        "spawn_mission_tick(",
+        "spawn_local_sync_tick(",
     ] {
         assert!(
             !lib.contains(forbidden),
@@ -204,6 +240,8 @@ fn the_real_tasks_module_spawns_each_of_the_three_exactly_once() {
         ("spawn_report_flusher(", "the error-report flusher"),
         ("spawn_tracker_sync(", "the tracker sync"),
         ("spawn_catalog_scan_tick(", "the catalog scan tick"),
+        ("spawn_mission_tick(", "the missions' loop"),
+        ("spawn_local_sync_tick(", "the local workspace sync tick"),
     ] {
         assert_eq!(
             tasks.matches(call).count(),
@@ -368,7 +406,9 @@ fn with_no_hub_configured_the_resolved_app_still_starts_all_three() {
                     "reconcile_tick",
                     "account_usage_tick",
                     "tracker_sync",
-                    "catalog_scan_tick"
+                    "catalog_scan_tick",
+                    "mission_tick",
+                    "local_sync_tick"
                 ],
                 "standalone behaviour must not change: settings {settings:?}"
             );

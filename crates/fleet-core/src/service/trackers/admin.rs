@@ -20,7 +20,7 @@ use std::sync::Mutex;
 #[derive(Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "WorkAdminParams")]
 pub struct WorkAdminArgs {
-    /// list|add|update|set_credential|test|remove|status|list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker|assign_client|sweep_now|usage
+    /// list|add|update|set_credential|test|remove|status|list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker|assign_client|sweep_now|usage|bucket_create|bucket_update|bucket_close|bucket_delete|bucket_adopt|bucket_unadopt|ticket_prefixes|set_ticket_prefix
     pub action: String,
     /// Tracker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -85,12 +85,57 @@ pub struct WorkAdminArgs {
     /// Org Jev consent: on|off
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jev: Option<String>,
+    /// Org reply-text consent (D48, J2): on|off
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jev_reply: Option<String>,
     /// D31: bound clients see unassigned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bound_sees_unassigned: Option<bool>,
     /// usage window, 1-365 (30)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub days: Option<i64>,
+    /// Bucket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket_id: Option<i64>,
+    /// sprint|release
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Unix; 0 clears.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starts_at: Option<i64>,
+    /// End/target; 0 clears.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ends_at: Option<i64>,
+    /// Sprint goal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<String>,
+    /// active|released
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    /// Tag or URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shipped_ref: Option<String>,
+    /// Version seen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_version: Option<i64>,
+    /// Close: next sprint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carry_to: Option<i64>,
+    /// Close: items (all open).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carry: Option<Vec<i64>>,
+    /// Tracker's sprint/version name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_id: Option<String>,
+    /// Ticket space (set_ticket_prefix).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_id: Option<i64>,
+    /// Project (set_ticket_prefix).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<i64>,
+    /// Ticket key prefix, e.g. FLT.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
 }
 
 impl fmt::Debug for WorkAdminArgs {
@@ -120,8 +165,17 @@ impl fmt::Debug for WorkAdminArgs {
             .field("rule_id", &self.rule_id)
             .field("auto_tidy", &self.auto_tidy)
             .field("jev", &self.jev)
+            .field("jev_reply", &self.jev_reply)
             .field("bound_sees_unassigned", &self.bound_sees_unassigned)
             .field("days", &self.days)
+            .field("bucket_id", &self.bucket_id)
+            .field("kind", &self.kind)
+            .field("state", &self.state)
+            .field("carry_to", &self.carry_to)
+            .field("external_id", &self.external_id)
+            .field("space_id", &self.space_id)
+            .field("project_id", &self.project_id)
+            .field("prefix", &self.prefix)
             .finish()
     }
 }
@@ -133,7 +187,9 @@ impl WorkAdminArgs {
             "action={} tracker_id={:?} provider={:?} site_url={:?} auth_kind={:?} \
              credential_ref={:?} transport={:?} settings={} secret={} org_id={:?} \
              rule_id={:?} host_alias={:?} owner={:?} repo={:?} path_prefix={:?} \
-             isolate_sessions={:?} auto_tidy={:?} jev={:?} bound_sees_unassigned={:?} days={:?}",
+             isolate_sessions={:?} auto_tidy={:?} jev={:?} jev_reply={:?} bound_sees_unassigned={:?} days={:?} \
+             bucket_id={:?} kind={:?} state={:?} carry_to={:?} external_id={:?} \
+             space_id={:?} project_id={:?} prefix={:?}",
             self.action,
             self.tracker_id,
             self.provider,
@@ -160,8 +216,17 @@ impl WorkAdminArgs {
             self.isolate_sessions,
             self.auto_tidy,
             self.jev,
+            self.jev_reply,
             self.bound_sees_unassigned,
             self.days,
+            self.bucket_id,
+            self.kind,
+            self.state,
+            self.carry_to,
+            self.external_id,
+            self.space_id,
+            self.project_id,
+            self.prefix,
         )
     }
 
@@ -195,9 +260,27 @@ pub enum AdminAction {
     /// Work graph M13.2: counts of how the work graph is used over `days`
     /// (`service::work::usage`). Read-only.
     Usage,
+    /// Sprints and releases (design 2026-09-28 §7,
+    /// `service::work::buckets`).
+    Bucket(crate::service::work::buckets::BucketAction),
+    /// Fleet's ticket keys (`store::ticket_keys`): every space and project
+    /// with its prefix. Read-only.
+    TicketPrefixes,
+    /// Set or rename a space's (or a project's) prefix, Jira-like.
+    SetTicketPrefix,
 }
 
 impl AdminAction {
+    /// The actions on trackers themselves, which the hub owner's trusted
+    /// phone may take (`work_admin` from a device); the rest is the
+    /// operator's.
+    pub fn is_tracker_action(&self) -> bool {
+        matches!(
+            self,
+            Self::List | Self::Add | Self::Update | Self::SetCredential | Self::Test | Self::Remove
+        )
+    }
+
     /// Every action name `parse` accepts (aliases aside), for the isolation
     /// matrix and the error sentence.
     pub const NAMES: &'static [&'static str] = &[
@@ -220,6 +303,14 @@ impl AdminAction {
         "assign_client",
         "sweep_now",
         "usage",
+        "bucket_create",
+        "bucket_update",
+        "bucket_close",
+        "bucket_delete",
+        "bucket_adopt",
+        "bucket_unadopt",
+        "ticket_prefixes",
+        "set_ticket_prefix",
     ];
 
     /// Actions that destroy something and pass the confirmation gate.
@@ -229,12 +320,16 @@ impl AdminAction {
             AdminAction::Remove
                 | AdminAction::Org(crate::service::orgs::OrgAction::RemoveOrg)
                 | AdminAction::Org(crate::service::orgs::OrgAction::RemoveRule)
+                | AdminAction::Bucket(crate::service::work::buckets::BucketAction::Delete)
         )
     }
 
     pub fn parse(s: &str) -> Result<Self, IpcError> {
         if let Some(o) = crate::service::orgs::OrgAction::parse(s) {
             return Ok(AdminAction::Org(o));
+        }
+        if let Some(b) = crate::service::work::buckets::BucketAction::parse(s) {
+            return Ok(AdminAction::Bucket(b));
         }
         Ok(match s {
             "list" | "list_trackers" => AdminAction::List,
@@ -246,6 +341,8 @@ impl AdminAction {
             "status" | "sync_status" => AdminAction::Status,
             "sweep_now" => AdminAction::SweepNow,
             "usage" => AdminAction::Usage,
+            "ticket_prefixes" => AdminAction::TicketPrefixes,
+            "set_ticket_prefix" => AdminAction::SetTicketPrefix,
             other => {
                 return Err(IpcError::new(
                     codes::E_INVALID,
@@ -489,12 +586,22 @@ pub fn admin_sync(
             codes::E_INTERNAL,
             "test is asynchronous; use test_tracker",
         )),
+        AdminAction::TicketPrefixes => json(&s.ticket_prefix_overview()?),
+        AdminAction::SetTicketPrefix => {
+            let prefix = args
+                .prefix
+                .as_deref()
+                .ok_or_else(|| IpcError::new(codes::E_INVALID, "set_ticket_prefix needs prefix"))?;
+            s.set_ticket_prefix(args.space_id, args.project_id, prefix)?;
+            json(&s.ticket_prefix_overview()?)
+        }
         // One short lock per batch, never this whole function's.
         AdminAction::SweepNow => Err(IpcError::new(
             codes::E_INTERNAL,
             "retention runs outside the admin lock; use service::work::retention",
         )),
         AdminAction::Org(o) => crate::service::orgs::admin(o, args, &s),
+        AdminAction::Bucket(b) => crate::service::work::buckets::admin(b, args, &s),
     }
 }
 

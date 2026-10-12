@@ -8,44 +8,82 @@ use crate::events::{EventBus, RowChange};
 use rusqlite::{Connection, OptionalExtension, Result, TransactionBehavior};
 use std::sync::Arc;
 
+mod access_requests;
+mod account_usage_snapshots;
+mod agents;
+mod aux_usage;
 pub mod backup;
 mod bench_work_link;
 mod catalog;
 mod changesets;
 mod clients;
+mod control_handoffs;
+mod control_tokens;
 mod conversations;
+mod debug_devices;
 mod decisions;
+mod deferred_prompts;
 mod downloads;
+mod forms;
 mod guides;
+mod host_setup;
 mod hosts_accounts;
+mod identities;
+mod item_deps;
+mod item_verify;
 mod layers;
+mod library;
+mod local_workspaces;
+mod mission_loop;
 mod nl_census;
+mod orchestration;
+mod org_activity;
+mod org_members;
+mod org_projects;
 mod orgs;
 mod participants;
 mod peer_links;
+mod people;
+mod pinned_dashboards;
+mod pr_shepherd;
+mod project_picks;
 mod projects;
+mod pull_requests;
 mod read_cursors;
 mod read_pool;
 mod reconcile;
 mod reports;
+mod review_prs;
+mod routines;
 mod rows;
+mod runs;
 #[cfg(test)]
 pub(crate) mod scale_fixture;
 mod schema;
+mod search;
+mod session_grants;
 mod sessions;
 mod setting_review;
+mod start_rules;
+mod support_fingerprints;
+mod task_report;
 mod tasks;
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]
 pub(crate) mod testgen;
+mod ticket_keys;
 mod timeline;
 mod tracker_items;
 mod tracker_writes;
 mod trackers;
 mod update;
 mod usage;
+mod wizard_state;
 mod work;
+mod work_attachments;
+mod work_buckets;
+mod work_comments;
 mod work_describe;
 mod work_detect;
 mod work_journal;
@@ -57,30 +95,80 @@ mod work_tidy;
 mod work_usage;
 mod work_view;
 
+pub use access_requests::{AccessRequestRow, ACCESS_REQUEST_COOLDOWN_SECS};
+pub use account_usage_snapshots::{UsageSnapshotRow, USAGE_HISTORY_KEEP_SECS};
+pub use agents::{
+    AgentActionRow, AgentCursorRow, AgentJobEnd, AgentJobRow, AgentRuleRow, NewAgentJob,
+    NewAgentRule, AGENT_ACTION_STATES, AGENT_CONFIG_MAX_CHARS, AGENT_JOB_STATES, AGENT_KINDS,
+    AGENT_LEVELS, AGENT_SCOPE_MAX_CHARS,
+};
+pub use aux_usage::{
+    AuxUsageRow, NewAuxUsage, AUX_ORIGINS, AUX_ORIGIN_BRIEF, AUX_ORIGIN_COMMIT_MESSAGE,
+    AUX_ORIGIN_CONTEXT_HELP, AUX_ORIGIN_HEADLESS_CHECK, AUX_ORIGIN_MORNING_BRIEF,
+    AUX_ORIGIN_PLANNER, AUX_ORIGIN_RELEASE_NOTE, AUX_ORIGIN_SUMMARY, AUX_ORIGIN_TRIAGE,
+    AUX_ORIGIN_WATCH_SUMMARY,
+};
 pub use bench_work_link::{BenchHostLink, BenchItemRow, BenchLinkRow, BenchUnlinkedRow};
 pub use changesets::{
     AppliedRecord, ChangesetItemRow, ChangesetRow, NewChangesetItem, TriageVerdictRow,
 };
 pub use clients::{
-    breaks_a_line, validate_client_mode, validate_client_name, CLIENT_MODES, LINE_SEPARATORS,
+    breaks_a_line, validate_client_mode, validate_client_name, ClientBinding, CLIENT_MODES,
+    LINE_SEPARATORS, MAX_CLIENT_NAME_LEN,
 };
+pub use control_handoffs::{
+    handoff_preview, ControlHandoffRow, HandoffItem, NewHandoff, HANDOFFS_KEEP, HANDOFF_PREVIEW_MAX,
+};
+pub use control_tokens::{ApiScope, ControlTokenRow, NewControlToken};
 pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};
+pub use debug_devices::{DebugDeviceRow, DebugDeviceScan, DebugDeviceWaiter, SeenDevice};
 pub use decisions::{
     is_decision_word, DecisionKeyStatus, DecisionRunFilter, DecisionRunRow, DecisionStatRow,
     NewDecisionRun, RunScope, DECISION_BENCH_SUBJECT, DECISION_CALL_FAILURES, DECISION_FALLBACKS,
-    DECISION_FOLLOWUPS, DECISION_MAX_CANDIDATES, DECISION_MODES, DECISION_NO_BASELINE,
-    DECISION_PERSON_FOLLOWUPS, DECISION_SUBJECT_RUNS_MAX, DECISION_WORD_MAX_CHARS,
+    DECISION_FOLLOWUPS, DECISION_LABELLED_RUNS_MAX, DECISION_MAX_CANDIDATES, DECISION_MODES,
+    DECISION_NO_BASELINE, DECISION_PERSON_FOLLOWUPS, DECISION_SUBJECT_RUNS_MAX,
+    DECISION_WORD_MAX_CHARS,
 };
+pub use deferred_prompts::{DeferredPromptRow, DeferredTiming, DEFERRED_MAX_ATTEMPTS};
 pub use downloads::{DownloadRow, NewDownload};
+pub use forms::{FormFinish, FormRow, NewForm, FORM_STATES};
 pub use guides::{GuideProposalRow, NewGuideProposal, DECIDED_GUIDE_KEEP_SECS};
+pub use host_setup::{AgentInstallRow, HostSetupRow, SetupCheck};
+pub use identities::{normalize_issuer, IdentityRow, MAX_IDENTITY_FIELD_LEN};
+pub use item_deps::{ItemDepRow, DEP_SOURCES};
+pub use item_verify::{
+    normalize_done_when, VerificationRow, DONE_WHEN_LINE_MAX_CHARS, DONE_WHEN_MAX,
+    VERIFY_NOTE_MAX_CHARS,
+};
 pub use layers::HostLayerRow;
+pub use library::{LibraryItemRow, NewLibraryItem, KEEP as LIBRARY_KEEP};
+pub(crate) use local_workspaces::paths_overlap;
+pub use local_workspaces::{
+    BaseEntry, FileStat, LocalActivityRow, LocalConflictRow, LocalPassWrite, LocalWorkspaceRow,
+    LocalWorkspaceStatus, NewLocalConflict, NewLocalWorkspace, SideSeen, LOCAL_CONFLICT_KINDS,
+    LOCAL_WORKSPACE_DRIVERS, LOCAL_WORKSPACE_STATES,
+};
+pub use mission_loop::{
+    CardRow, GrantRow, MissionTaskCounts, NewCard, NewGrant, CARDS_OPEN_CAP, CARD_KINDS,
+    CARD_STATES, GRANT_MAX_SECS, MISSION_LEASE_SECS,
+};
 pub use nl_census::{
     CensusItem, CensusJournal, CensusPair, CensusPrompt, NL_CENSUS_JOURNAL_KINDS,
     NL_CENSUS_MIN_SCHEMA,
 };
+pub use orchestration::{
+    check_policy, mission_item_cap, mission_transition_allowed, mode_runs_loop, MissionEventRow,
+    MissionPatch, MissionPolicy, MissionRepoRow, MissionRow, NewMission, NewMissionEvent,
+    MISSION_FINAL_STATES, MISSION_ITEM_CAP, MISSION_MODES, MISSION_STATES, PLAN_MISSION_ITEM_CAP,
+};
+pub use org_members::{
+    effective_device, role_receives_shares, validate_org_role, DeviceOrg, OrgMemberRow, NO_ORG,
+    ORG_ROLES, ROLE_ADMIN, ROLE_MEMBER, ROLE_VIEWER,
+};
+pub use org_projects::{NewOrgProject, OrgProjectRow, ORG_PROJECT_NAME_MAX_CHARS};
 pub use orgs::{
     normalize_rule, org_of_session, validate_org_color, validate_org_name, OrgRow, OrgRuleRow,
-    SessionOrgFacts, ORG_NAME_MAX_CHARS,
+    SessionOrgFacts, ORG_JEV_REPLY_KEY, ORG_NAME_MAX_CHARS,
 };
 pub use participants::{ParticipantRow, PARTICIPANT_REMOTE, RETIRED_RETENTION_SECS};
 pub use peer_links::{
@@ -88,22 +176,65 @@ pub use peer_links::{
     LINK_REFUSED, LINK_RETRYING, LINK_ROLE_DIALER, LINK_ROLE_LISTENER, LISTENER_STALE_SECS,
     PEER_PENDING_MAX_SECS,
 };
+pub use people::{
+    machine_token_kind, validate_person_name, PersonRow, MAX_PERSON_NAME_LEN, PERSONAL_OWNER_NAME,
+};
+pub use pinned_dashboards::{PinnedDashboardRow, PinnedDashboardWrite};
+pub use pr_shepherd::{
+    ShepherdEpisodeRow, ShepherdMergeRow, ShepherdRuleRow, SHEPHERD_LEVELS,
+    SHEPHERD_RECIPES_MAX_CHARS,
+};
+pub use project_picks::{ProjectPickRow, PROJECT_GROUP_MAX_CHARS, PROJECT_VIS};
+pub use pull_requests::{
+    pr_events, repo_and_number, PrSeenBy, PullRequestRow, PR_EVENT_CI_FAILED, PR_EVENT_CI_PASSED,
+    PR_EVENT_MERGED, PR_EVENT_REVIEW,
+};
 pub use read_cursors::CursorRow;
 pub use read_pool::{read_via, ReadPool, READ_POOL_SIZE};
 pub use reports::{ReportFilter, ReportRow};
+pub use review_prs::{
+    NewReviewRecord, ReviewPrRow, ReviewRecordRow, TestExemptionRow, REVIEW_PR_STATUSES,
+    REVIEW_SKIP_REASONS,
+};
+pub use routines::{
+    NewRoutineRun, RoutineFields, RoutineRow, RoutineRunRow, ROUTINE_LEASE_SECS, ROUTINE_OVERLAPS,
+    ROUTINE_RUN_OUTCOMES, ROUTINE_RUN_OUTCOME_SOURCES, ROUTINE_RUN_STATES, ROUTINE_TRIGGERS,
+};
 pub use rows::*;
+pub use runs::{
+    RunRow, RunsFilter, RunsReach, MISSION_RUN_EVENTS, RUNS_DEFAULT_LIMIT, RUNS_MAX_LIMIT,
+    RUN_KINDS, RUN_OUTCOMES, RUN_SOURCES,
+};
 pub use schema::known_schema_version;
 #[cfg(test)]
 pub(crate) use schema::LATEST_SCHEMA_VERSION;
+pub use schema::{is_newer_schema_error, open_failure_advice};
+pub use search::{SearchDocHit, TranscriptChunk, MARK_CLOSE, MARK_OPEN};
+pub use session_grants::{
+    grant_generation, validate_grant_level, GrantDetail, GrantRecipient, SessionGrantRow,
+    GRANT_ANSWER, GRANT_DRIVE, GRANT_LEVELS, GRANT_WATCH,
+};
 pub use sessions::PromptAckState;
 pub use setting_review::{
     NewSettingProposal, SettingAuditRow, SettingProposalRow, DECIDED_PROPOSAL_KEEP_SECS,
     SETTING_AUDIT_KEEP,
 };
+pub use start_rules::{StartRuleLaunch, StartRuleRow, START_RULE_STATES};
+pub use support_fingerprints::SupportFingerprintRow;
+pub use task_report::{
+    EvidenceCommit, EvidenceFile, TaskEvidence, TaskReport, EVIDENCE_COMMITS_MAX,
+    EVIDENCE_FILES_MAX, REPORT_ENTRY_MAX_CHARS, REPORT_LIST_MAX, REPORT_OUTCOMES,
+};
+pub use tasks::TaskEnd;
+pub use ticket_keys::{
+    derive_ticket_prefix, parse_ticket_prefix, valid_ticket_prefix, TicketPrefixRow, TicketSpace,
+    TICKET_PREFIX_MAX, TICKET_PREFIX_MIN,
+};
 pub(crate) use tracker_items::ItemUpsertOutcome;
 pub use tracker_items::{github_covers, tracker_claims, ItemMeta, TrackerItemWrite, UpsertOutcome};
 pub use tracker_writes::{
-    NewTrackerWrite, TrackerWriteRow, WRITE_MAX_ATTEMPTS, WRITE_OP_PR_REMOTE_LINK,
+    comment_write_url, item_write_url, NewTrackerWrite, TrackerWriteRow, WRITE_MAX_ATTEMPTS,
+    WRITE_OP_COMMENT, WRITE_OP_CREATE_ITEM, WRITE_OP_PR_REMOTE_LINK,
 };
 pub use trackers::{
     ghes_host_ok, ghes_host_part, github_site, is_allowed_tracker_host, normalize_dc_site,
@@ -113,11 +244,26 @@ pub use trackers::{
     TRACKER_PROVIDERS, TRACKER_STATES,
 };
 pub use update::{
-    UpdateDesiredRow, UpdateDocRow, UpdateEventRow, UpdateObservedRow, UPDATE_EVENT_RETENTION_SECS,
+    UpdateDesiredRow, UpdateDocRow, UpdateEventRow, UpdateObservedRow, UpdateOrgPolicyRow,
+    UpdateRolloutRow, UPDATE_EVENT_RETENTION_SECS,
 };
+pub use wizard_state::{WizardStateRow, WizardStateWrite};
 pub use work::{
     canonical_key, github_ref, normalize_work_ref, primary_conflict, split_github_repo, Decider,
-    WorkItemRow, WorkLinkRow, WorkSummary, WorkTarget, PERSON_SOURCES, WORK_LINK_SOURCES,
+    Estimate, WorkItemRow, WorkLinkRow, WorkSummary, WorkTarget, PERSON_SOURCES, WORK_LINK_SOURCES,
+};
+pub use work_attachments::{
+    attachment_mime, sniff_mime, validate_attachment_name, AttachmentRow, NewAttachment,
+    ATTACHMENTS_SERVED_MAX, ATTACHMENT_MAX_MB_CEILING, ATTACHMENT_MIMES, ATTACHMENT_NAME_MAX_CHARS,
+    ATTACHMENT_WIRE_BYTES, OCTET_STREAM,
+};
+pub use work_buckets::{
+    bucket_states, BucketMemberRow, BucketMembership, BucketPatch, BucketRefRow, BucketRow,
+    ItemBucketRow, NewBucket, SprintClosed, BUCKET_KINDS,
+};
+pub use work_comments::{
+    posted_body, validate_comment, CommentPost, CommentRow, TrackerPost, COMMENTS_SERVED_MAX,
+    COMMENT_MAX_CHARS,
 };
 pub use work_detect::{
     DetectionState, WITHDRAWN_CARRIED, WITHDRAWN_DECAY, WITHDRAWN_REASONS, WITHDRAWN_WITHDRAW,
@@ -129,8 +275,14 @@ pub use work_journal::{
 };
 pub use work_local::{validate_local_work_title, LocalItemLink, LOCAL_WORK_TITLE_MAX_CHARS};
 pub use work_retention::{retention_cutoff, RetentionTable, WORK_EVENT_KINDS};
-pub use work_status::STATUS_CATEGORIES;
-pub use work_tasks::{job_status, NativeItem, Proposal, PROPOSALS_OPEN_CAP, TASK_KEY_PREFIX};
+pub use work_status::{StatusLogRow, STATUS_CATEGORIES};
+pub use work_tasks::{
+    is_epic, job_status, parse_due_date, tidy_labels, validate_assignees, validate_due_date,
+    validate_estimate, validate_estimate_unit, validate_labels, validate_priority, ItemEdit,
+    NativeItem, Proposal, TreeEntry, TreeRef, ACCEPT_UNDO_SECS, EPIC_KIND, ESTIMATE_MAX,
+    ESTIMATE_UNITS, LABELS_MAX, LABEL_MAX_CHARS, LOCAL_DEPTH_MAX, PRIORITIES, PROPOSALS_OPEN_CAP,
+    TASK_KEY_PREFIX,
+};
 pub use work_tidy::ReopenedWork;
 pub use work_usage::{DetectionCounts, JournalCounts};
 pub use work_view::{
@@ -165,6 +317,10 @@ pub struct Store {
     /// embedding and needs no new `RowChange` variant, so no contract golden
     /// or `events.ts` allowlist entry moves.
     message_notify: Arc<tokio::sync::Notify>,
+    /// Signalled after a `form_requests` change, so `ask`'s wait wakes on an
+    /// answer instead of polling. Not the event bus, for `message_notify`'s
+    /// reasons.
+    form_notify: Arc<tokio::sync::Notify>,
     /// Per hub link, the generation of its latest `peer_exchange` — so a
     /// parked listener handler a newer exchange superseded can return at
     /// once. Process-local on purpose, like `kills`: it only has to outlive
@@ -402,6 +558,7 @@ fn migrated_template_copy() -> Result<Connection> {
             bus: StoreBus::new(Arc::new(NoopEventBus)),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            form_notify: Arc::new(tokio::sync::Notify::new()),
             instance: next_instance(),
             peer_generations: Default::default(),
         };
@@ -437,6 +594,7 @@ impl Store {
             bus: StoreBus::new(bus),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            form_notify: Arc::new(tokio::sync::Notify::new()),
             instance: next_instance(),
             peer_generations: Default::default(),
         };
@@ -476,9 +634,25 @@ impl Store {
             bus: StoreBus::new(Arc::new(crate::events::NoopEventBus)),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            form_notify: Arc::new(tokio::sync::Notify::new()),
             instance: next_instance(),
             peer_generations: Default::default(),
         })
+    }
+
+    /// What the fleet knows beyond a session's own row — down hosts,
+    /// accounts at a limit or without a login — as this store's bus follows
+    /// it (step 2.6, [`EventBus::attention_facts`]). Empty off the hub, which
+    /// is the row-only classification. Every hub site that decides
+    /// `needs_attention` reads it here, beside `health.context_red_pct`.
+    pub fn attention_facts(&self) -> crate::service::attention::Facts {
+        self.bus.inner.attention_facts()
+    }
+
+    /// Each account's latest usage answer as this store's bus follows it
+    /// ([`EventBus::account_usage`]). Empty off the hub.
+    pub fn bus_account_usage(&self) -> Vec<crate::service::account_usage::AccountUsageSnapshot> {
+        self.bus.inner.account_usage()
     }
 
     /// An in-memory store for a test. Its database is a copy of one that went
@@ -503,6 +677,7 @@ impl Store {
             bus: StoreBus::new(bus),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            form_notify: Arc::new(tokio::sync::Notify::new()),
             instance: next_instance(),
             peer_generations: Default::default(),
         };
@@ -527,6 +702,7 @@ impl Store {
             bus: StoreBus::new(Arc::new(NoopEventBus)),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            form_notify: Arc::new(tokio::sync::Notify::new()),
             instance: next_instance(),
             peer_generations: Default::default(),
         };
@@ -735,6 +911,19 @@ impl Store {
         }
     }
 
+    /// A `BEGIN IMMEDIATE` transaction, for code that reads and then writes.
+    ///
+    /// A DEFERRED transaction that has read and then writes asks SQLite to
+    /// upgrade a read lock, and SQLite never runs the busy handler for that
+    /// upgrade: while another connection (the running hub, beside a
+    /// `fleet-hub guides …` CLI) holds the write lock, the write fails at
+    /// once with "database is locked", and a commit in between makes it
+    /// `SQLITE_BUSY_SNAPSHOT`. IMMEDIATE takes the write lock up front,
+    /// waiting the busy timeout for it; WAL readers never block it.
+    pub(crate) fn immediate_transaction(&self) -> Result<rusqlite::Transaction<'_>> {
+        rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+    }
+
     /// Run `f` inside a single `conn.transaction()`. Test-only since the
     /// reconcile write burst moved onto [`Store::in_savepoint`] (it now runs
     /// inside the per-host transaction and so cannot open its own).
@@ -931,6 +1120,45 @@ mod tests {
         // lose the last commits but never corrupts the database.
         assert_eq!(pragma::<i64>(&s, "synchronous"), 1);
         assert!(pragma::<i64>(&s, "busy_timeout") >= 1000);
+    }
+
+    /// A `fleet-hub guides …` / `settings …` CLI opens `state.db` with
+    /// `open_with_bus` while the hub runs and writes. A migrate transaction
+    /// that reads before it writes got SQLITE_BUSY at once whenever the hub
+    /// held the write lock at that moment: SQLite never runs the busy
+    /// handler for a read→write upgrade. A writer that keeps taking the lock
+    /// makes that moment likely; every open must still wait it out.
+    #[test]
+    fn opens_wait_out_another_connections_writes() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("state.db");
+        drop(Store::open_with_bus(&db, Arc::new(NoopEventBus)).unwrap());
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer = {
+            let (db, stop) = (db.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let conn = Connection::open(&db).unwrap();
+                conn.busy_timeout(BUSY_TIMEOUT).unwrap();
+                while !stop.load(Ordering::Relaxed) {
+                    conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                    conn.execute_batch("COMMIT").unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            })
+        };
+        let failed: Vec<String> = (0..40)
+            .filter_map(|_| Store::open_with_bus(&db, Arc::new(NoopEventBus)).err())
+            .map(|e| e.to_string())
+            .collect();
+        stop.store(true, Ordering::Relaxed);
+        writer.join().unwrap();
+        assert!(
+            failed.is_empty(),
+            "{} of 40 opens failed: {failed:?}",
+            failed.len()
+        );
     }
 
     /// The bearer tokens live in `state.db-wal` until a checkpoint, and

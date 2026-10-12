@@ -22,10 +22,14 @@ vi.mock('@tauri-apps/api/event', () => {
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import { emit } from '@tauri-apps/api/event';
 import McpConfirmDialog from './McpConfirmDialog.svelte';
+import { resetConfirmsForTests } from './confirms';
+import { expectAccessible } from './a11y_check';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
+  // The queue is module state shared with Control's cards (step 9.2).
+  resetConfirmsForTests();
   inv.mockReset();
   inv.mockImplementation(async (cmd: string) => {
     switch (cmd) {
@@ -139,5 +143,20 @@ describe('McpConfirmDialog', () => {
     render(McpConfirmDialog);
     await tick(); await tick();
     expect((await screen.findByTestId('mcp-confirm')).textContent).toContain('delete_worktree');
+  });
+});
+
+describe('McpConfirmDialog: accessibility', () => {
+  it('a pending request is accessible', async () => {
+    const { container } = render(McpConfirmDialog);
+    await tick();
+    await emit('mcp:confirm-required', {
+      nonce: 'n-a11y',
+      tool: 'kill_session',
+      summary: 'host=local name=dev-x',
+      caller: 'host:mefistos',
+    });
+    await screen.findByTestId('mcp-confirm');
+    await expectAccessible(container);
   });
 });

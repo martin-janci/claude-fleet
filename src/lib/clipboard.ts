@@ -1,6 +1,8 @@
 // Clipboard helpers. The terminal copy/paste helpers are pure (no DOM or Tauri
 // deps) so they can be unit-tested directly and reused by both the Cmd+V and
-// drag-drop paths. `copyText` wraps the web Clipboard API for Copy buttons.
+// drag-drop paths. `copyText` is what Copy buttons call: the native clipboard
+// in the desktop app, the web Clipboard API elsewhere.
+import { nativeWriteText } from './clipboard_native';
 
 /** Bracketed-paste markers (DEC mode 2004). */
 const PASTE_START = '\x1b[200~';
@@ -31,15 +33,34 @@ export function framePaste(text: string, bracketed: boolean): string {
   return bracketed ? `${PASTE_START}${text}${PASTE_END}` : text;
 }
 
-/** Copy text to the system clipboard via the web Clipboard API. Never throws:
- *  resolves true on success, or false when the clipboard is unavailable or the
- *  write is rejected — in which case `onError`, if given, receives the error. */
+/** True inside the desktop app (the Tauri webview), where the native
+ *  clipboard plugin is available. */
+function inTauri(): boolean {
+  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+}
+
+/** Copy text to the system clipboard. Never throws: resolves true on
+ *  success, or false when every route failed — in which case `onError`, if
+ *  given, receives the last error.
+ *
+ *  In the desktop app the native clipboard plugin goes first: WKWebView
+ *  rejects `navigator.clipboard.writeText` once the click's user activation
+ *  is spent, and most Copy buttons await a read (a transcript, a backend
+ *  call) before they write, so the web API alone failed with "Could not
+ *  write to the clipboard". The web API stays the fallback for a browser
+ *  client and for a plugin error. */
 export async function copyText(text: string, onError?: (e: unknown) => void): Promise<boolean> {
+  let lastError: unknown;
+  if (inTauri()) {
+    const r = await nativeWriteText(text);
+    if (r.ok) return true;
+    lastError = new Error(r.error.message);
+  }
   try {
     await navigator.clipboard.writeText(text);
     return true;
   } catch (e) {
-    onError?.(e);
+    onError?.(lastError ?? e);
     return false;
   }
 }

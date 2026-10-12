@@ -21,7 +21,7 @@ use super::{
 };
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::settings;
-use crate::service::tasks::{wait_for_session_probed, WaitCond, STALE_PANE_PROBE_EVERY};
+use crate::service::tasks::{wait_for_session_probed, NoRecheck, WaitCond, STALE_PANE_PROBE_EVERY};
 use crate::ssh::SshExec;
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
@@ -349,6 +349,9 @@ pub(super) async fn run_wait_with(
                 poll,
                 &probe,
                 STALE_PANE_PROBE_EVERY,
+                // A move is fleet's own engine, not a caller: there is no
+                // grant behind it to revoke (`tasks::NoRecheck`).
+                &NoRecheck,
             ) => r,
         };
         match idle {

@@ -215,8 +215,39 @@ pub async fn handle_hook(
                     _ => StatusCode::NO_CONTENT.into_response(),
                 };
             }
+            // The worker guard (orchestration §7.2): only a command the
+            // installed prefilter let through reaches here.
+            if event == "PreToolUse" {
+                return match crate::service::hooks::pre_tool_use_denial(
+                    &state.store,
+                    &payload,
+                    &ctx,
+                ) {
+                    Some(why) => axum::Json(serde_json::json!({
+                        "hookSpecificOutput": {
+                            "hookEventName": event,
+                            "permissionDecision": "deny",
+                            "permissionDecisionReason": why,
+                        }
+                    }))
+                    .into_response(),
+                    None => StatusCode::NO_CONTENT.into_response(),
+                };
+            }
             if event != "UserPromptSubmit" {
                 return StatusCode::NO_CONTENT.into_response();
+            }
+            // J1 (redesign 6.8): which work item this session is on, asked of
+            // the decision model off this path, and only when its gate is open.
+            if let Some(id) = crate::service::hooks::work_link_subject(&state.store, &payload, &ctx)
+            {
+                crate::service::decide::work_link::spawn_ask(&state.store, id);
+                // N1 (redesign 6.9): another of this person's sessions on the
+                // same work, asked the same way.
+                crate::service::decide::related_session::spawn_ask(&state.store, id);
+                // J6 (redesign 6.8): the main ticket among several suggested
+                // keys, asked the same way.
+                crate::service::decide::main_ticket::spawn_ask(&state.store, id);
             }
             // Mail, then the classification nudge (work graph M4.6) when it
             // fires and fits: see `prompt_submit_context`.
@@ -266,14 +297,18 @@ mod tests {
             ssh: Arc::new(SshClient::new()),
         };
         let client = Caller {
+            api: None,
             host_alias: None,
             client: Some(ClientRef {
                 id: 1,
                 name: "phone".into(),
                 trusted: false,
                 org_id: None,
+                person_id: None,
             }),
             mode: TokenMode::Full,
+            pane: None,
+            is_personal_owner: false,
         };
         let payload = HookPayload {
             session_id: Some("s1".into()),
@@ -625,14 +660,18 @@ mod tests {
             ssh: Arc::new(SshClient::new()),
         };
         let client = Caller {
+            api: None,
             host_alias: None,
             client: Some(ClientRef {
                 id: 1,
                 name: "phone".into(),
                 trusted: false,
                 org_id: None,
+                person_id: None,
             }),
             mode: TokenMode::Full,
+            pane: None,
+            is_personal_owner: false,
         };
         let res = handle_hook(
             State(state),

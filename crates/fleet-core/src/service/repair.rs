@@ -41,6 +41,7 @@
 //! A healthy workspace costs exactly one probe and no writes.
 //! Spec: `docs/specs/2026-09-11-session-worktree-repair.md`.
 
+use crate::events::RepairStep;
 use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
 use crate::shell::quote;
@@ -819,8 +820,8 @@ pub fn plan_with(
             codes::E_REPO_MISSING,
             format!(
                 "project repository is missing or not a git checkout at {} on {} — \
-                 it is never recreated by mkdir; restore or re-clone it (a new session \
-                 on a remote host clones automatically)",
+                 it is never recreated by mkdir; restore or re-clone it (on a remote host, \
+                 a new session or Recreate clones it automatically)",
                 spec.project_root, spec.host_alias
             ),
         ));
@@ -1720,6 +1721,121 @@ pub async fn ensure_workspace_with(
     exec: &dyn RepairExec,
     allow_auto_unregister: bool,
 ) -> Result<RepairReport, IpcError> {
+    let progress = RepairReporter::new(store, None);
+    ensure_workspace_reporting(
+        spec,
+        policy,
+        siblings,
+        store,
+        exec,
+        allow_auto_unregister,
+        &progress,
+    )
+    .await
+}
+
+/// Reports an explicit repair's four steps ([`RepairStep`]) as
+/// `repair:progress` frames under the caller's token (gap plan G7.3).
+/// `advance` closes the step in flight and every step it skips over as
+/// `done` (nothing to do there), then opens the next; `finish` closes the
+/// rest; `fail` marks the step in flight `failed`. Without a token every
+/// call is a no-op.
+pub(crate) struct RepairReporter<'a> {
+    store: &'a Mutex<Store>,
+    token: Option<String>,
+    /// 0 = nothing started yet, else `RepairStep::index()`.
+    at: std::sync::atomic::AtomicU8,
+}
+
+impl<'a> RepairReporter<'a> {
+    pub(crate) fn new(store: &'a Mutex<Store>, token: Option<String>) -> Self {
+        Self {
+            store,
+            token,
+            at: std::sync::atomic::AtomicU8::new(0),
+        }
+    }
+
+    fn emit(&self, step: RepairStep, state: crate::events::MoveStepState) {
+        let Some(token) = self.token.as_deref() else {
+            return;
+        };
+        // A poisoned lock loses a progress frame, never the repair.
+        if let Ok(s) = self.store.lock() {
+            s.bus_repair_progress(&crate::events::RepairProgress {
+                token: token.to_string(),
+                step,
+                index: step.index(),
+                total: RepairStep::ALL.len() as u8,
+                state,
+            });
+        }
+    }
+
+    fn at(&self) -> u8 {
+        self.at.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn step_at(&self, index: u8) -> Option<RepairStep> {
+        RepairStep::ALL.into_iter().find(|s| s.index() == index)
+    }
+
+    /// Close the step in flight and every step between it and `step` (each
+    /// had nothing to do), then open `step`. A step already passed is not
+    /// reopened.
+    pub(crate) fn advance(&self, step: RepairStep) {
+        use crate::events::MoveStepState::{Done, Started};
+        let at = self.at();
+        if step.index() <= at {
+            return;
+        }
+        if let Some(prev) = self.step_at(at) {
+            self.emit(prev, Done);
+        }
+        for skipped in RepairStep::ALL
+            .into_iter()
+            .filter(|s| s.index() > at && s.index() < step.index())
+        {
+            self.emit(skipped, Started);
+            self.emit(skipped, Done);
+        }
+        self.at
+            .store(step.index(), std::sync::atomic::Ordering::Relaxed);
+        self.emit(step, Started);
+    }
+
+    /// The repair succeeded: close the step in flight and any left.
+    pub(crate) fn finish(&self) {
+        let last = RepairStep::ALL[RepairStep::ALL.len() - 1];
+        if self.at() < last.index() {
+            self.advance(last);
+        }
+        if self.at() == last.index() {
+            self.emit(last, crate::events::MoveStepState::Done);
+        }
+        self.at.store(u8::MAX, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The repair failed in the step in flight.
+    pub(crate) fn fail(&self) {
+        if let Some(step) = self.step_at(self.at()) {
+            self.emit(step, crate::events::MoveStepState::Failed);
+        }
+        self.at.store(u8::MAX, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// [`ensure_workspace_with`], reporting its steps to `progress`.
+async fn ensure_workspace_reporting(
+    spec: &WorkspaceSpec,
+    policy: Policy,
+    siblings: Vec<i64>,
+    store: &Mutex<Store>,
+    exec: &dyn RepairExec,
+    allow_auto_unregister: bool,
+    progress: &RepairReporter<'_>,
+) -> Result<RepairReport, IpcError> {
+    progress.advance(RepairStep::Check);
     let probe = run_probe(exec, spec).await?;
     record_healthy_fingerprint(store, spec, &probe);
     // Read the rows under the store lock; canonicalize local paths only after
@@ -1803,6 +1919,7 @@ pub async fn ensure_workspace_with(
     let adopting = adopt_path.is_some();
 
     // ── apply git steps, then verify (adoption is verified too) ─────────
+    progress.advance(RepairStep::Fix);
     let mut dir_changed = false;
     let mut final_branch: Option<String> = fix.branch_drift.clone();
     if fix.has_git_steps() || adopting {
@@ -1883,6 +2000,7 @@ pub async fn ensure_workspace_with(
             w.path = fix.cwd.clone();
             w.path_is_guess = false;
         }
+        progress.advance(RepairStep::Verify);
         let after = run_probe(exec, &vspec)
             .await
             .map_err(|e| fail(store, spec, e))?;
@@ -1923,6 +2041,7 @@ pub async fn ensure_workspace_with(
     }
 
     // ── tmux ────────────────────────────────────────────────────────────
+    progress.advance(RepairStep::Pane);
     for step in &fix.steps {
         let res = match step {
             Step::TmuxCreate { cwd } => exec
@@ -1996,6 +2115,11 @@ pub async fn ensure_workspace_with(
         if let Some(sid) = spec.session_id {
             if report.tmux.as_deref() == Some("created") {
                 s.restore_session(sid)?;
+            }
+            // A created or respawned pane runs a fresh `claude`, which reads
+            // the host's login as it is NOW (`clear_host_login_account`).
+            if report.tmux.is_some() {
+                crate::service::sessions::record_relaunched_login(&s, sid, None)?;
             }
             if !report.actions.is_empty() {
                 if let Err(e) =
@@ -2176,6 +2300,21 @@ pub(crate) async fn resolve_remote_paths(
     ))
 }
 
+/// The checkout a linked worktree path sits in: `<checkout>` for
+/// `<checkout>/.worktrees/<name>` or `<checkout>/.claude/worktrees/<name>`
+/// (the two layouts fleet creates; `<name>` may hold a `/`). `None` for any
+/// other shape, which keeps the settings-derived root. PURE.
+pub(crate) fn checkout_of_worktree(path: &str) -> Option<&str> {
+    ["/.claude/worktrees/", "/.worktrees/"]
+        .iter()
+        .find_map(|marker| {
+            let at = path.find(marker)?;
+            let (checkout, name) = (&path[..at], &path[at + marker.len()..]);
+            (checkout.starts_with('/') && checkout.len() > 1 && !name.is_empty())
+                .then_some(checkout)
+        })
+}
+
 /// Snapshot taken under the store lock; finalized off-lock (remote `$HOME`).
 struct SpecSeed {
     row: SessionRow,
@@ -2187,7 +2326,8 @@ struct SpecSeed {
     /// the lock for `resolve_remote_paths`.
     projects_root: String,
     layout: crate::projects::Layout,
-    /// `(name, path-from-row, branch)` for a linked worktree.
+    /// `(name, path-from-row, branch)` for a linked worktree. For a remote
+    /// session the path is only ever a row of the session's own host.
     worktree: Option<(String, Option<String>, Option<String>)>,
     siblings: Vec<i64>,
 }
@@ -2212,7 +2352,15 @@ fn seed_for_session(s: &Store, row: &SessionRow) -> Result<SpecSeed, IpcError> {
     let base_path = s
         .project_base_path(pid)?
         .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("project {pid} not found")))?;
-    let rows = s.list_worktrees_for_project(pid)?;
+    let is_local = row.host_alias == crate::service::projects::LOCAL_HOST;
+    let rows = if is_local {
+        s.list_worktrees_for_project(pid)?
+    } else {
+        s.list_worktrees_on_host(&row.host_alias)?
+            .into_iter()
+            .filter(|w| w.project_id == pid)
+            .collect()
+    };
     // The FK wins; otherwise the portable key (set by reconcile).
     let wt_row = match row.worktree_id {
         Some(wid) => s.get_worktree_row(wid)?,
@@ -2238,11 +2386,14 @@ fn seed_for_session(s: &Store, row: &SessionRow) -> Result<SpecSeed, IpcError> {
             let by_key = wt_row
                 .clone()
                 .or_else(|| rows.iter().find(|w| w.name == n).cloned());
-            Some((
-                n,
-                by_key.as_ref().map(|w| w.path.clone()),
-                by_key.and_then(|w| w.branch),
-            ))
+            // A remote host's checkout is where that host recorded it, which
+            // the name alone cannot rebuild (`.worktrees/feat/imports`); a
+            // row of another host says nothing about this one.
+            let path = by_key
+                .as_ref()
+                .filter(|w| is_local || w.host_alias == row.host_alias)
+                .map(|w| w.path.clone());
+            Some((n, path, by_key.and_then(|w| w.branch)))
         }
         _ => None,
     };
@@ -2273,7 +2424,8 @@ fn seed_for_session(s: &Store, row: &SessionRow) -> Result<SpecSeed, IpcError> {
 /// Build the [`WorkspaceSpec`] for an existing session row: paths from the
 /// local `projects` / `worktrees` tables for `local`, from the
 /// host's `projects.*` root and layout (plus the remote `$HOME`)
-/// for any other host. Returns the spec and the ids of alive sibling
+/// for any other host, whose linked worktree is at the path its own
+/// `worktrees` row records when there is one. Returns the spec and the ids of alive sibling
 /// sessions sharing the workspace.
 ///
 /// Errors: `E_NOREPO` (orphan session), `E_BG_SESSION`, `E_INVALID_STATE`
@@ -2281,6 +2433,15 @@ fn seed_for_session(s: &Store, row: &SessionRow) -> Result<SpecSeed, IpcError> {
 pub async fn spec_for_session(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
+    session_id: i64,
+) -> Result<(WorkspaceSpec, Vec<i64>), IpcError> {
+    spec_for_session_with(store, &**ssh, session_id).await
+}
+
+/// [`spec_for_session`] over any [`SshExec`] (the remote `$HOME` lookup).
+pub(crate) async fn spec_for_session_with(
+    store: &Mutex<Store>,
+    ssh: &dyn SshExec,
     session_id: i64,
 ) -> Result<(WorkspaceSpec, Vec<i64>), IpcError> {
     let seed = {
@@ -2297,15 +2458,17 @@ pub async fn spec_for_session(
                 "sessions outside tmux have no worktree or tmux pane to repair",
             ));
         }
+        crate::service::sessions::refuse_unvalidated_agent(&row.agent)?;
         (
             seed_for_session(&s, &row)?,
-            crate::service::sessions::stored_launch(&s, row.id),
+            crate::service::sessions::stored_launch(&s, row.id)?,
         )
     };
     let (seed, launch) = seed;
     let row = &seed.row;
     let pane_cmd = crate::service::sessions::recreate_pane_command(
         &row.kind,
+        &row.agent,
         row.claude_session_id.as_deref(),
         &row.tmux_name,
         &launch,
@@ -2328,9 +2491,20 @@ pub async fn spec_for_session(
         });
         (root, wt)
     } else {
-        let wt_name = seed.worktree.as_ref().map(|(n, _, _)| n.as_str());
+        // The host's own row is trusted, as `spec_for_new_session` does:
+        // the probe's guess resolver only knows `<root>/.worktrees/<name>`
+        // and `<root>/.claude/worktrees/<name>`. Without one, the name is
+        // rebuilt into the conventional path (and validated as a component).
+        let recorded = seed.worktree.as_ref().and_then(|(_, p, _)| p.clone());
+        if let Some(p) = &recorded {
+            crate::validate::remote_worktree_path("worktree path", p)?;
+        }
+        let wt_name = match &recorded {
+            Some(_) => None,
+            None => seed.worktree.as_ref().map(|(n, _, _)| n.as_str()),
+        };
         let (root, cwd) = resolve_remote_paths(
-            &**ssh,
+            ssh,
             &row.host_alias,
             &seed.projects_root,
             seed.layout,
@@ -2344,11 +2518,22 @@ pub async fn spec_for_session(
             .as_ref()
             .map(|(name, _, branch)| WorktreeSpec {
                 name: name.clone(),
-                path: cwd.clone(),
+                path: recorded.clone().unwrap_or_else(|| cwd.clone()),
                 branch: branch.clone().unwrap_or_else(|| name.clone()),
-                path_is_guess: true,
+                path_is_guess: recorded.is_none(),
                 row_is_local: false,
             });
+        // A recorded worktree belongs to the checkout it sits in, whatever
+        // the host's layout says today: a worktree made under
+        // `<root>/github.com/<owner>/<repo>` stays that repo's after the
+        // layout changes, and probing (or re-cloning) the settings-derived
+        // root instead reported a missing repo and left the worktree's
+        // `.git` link pointing at a checkout git was never asked about.
+        let root = recorded
+            .as_deref()
+            .and_then(checkout_of_worktree)
+            .map(str::to_string)
+            .unwrap_or(root);
         (root, wt)
     };
     if let Some(w) = &worktree {
@@ -2503,6 +2688,44 @@ pub async fn repair_session(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
 ) -> Result<RepairReport, IpcError> {
+    repair_session_reporting(session_id, explicit, store, ssh, None).await
+}
+
+/// [`repair_session`] reporting its four steps as `repair:progress` frames
+/// under `progress_token` (gap plan G7.3: the phone's repair checklist).
+/// The token is checked like a `start_token`; without one nothing is sent.
+pub async fn repair_session_reporting(
+    session_id: i64,
+    explicit: bool,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    progress_token: Option<String>,
+) -> Result<RepairReport, IpcError> {
+    if let Some(t) = progress_token.as_deref() {
+        crate::service::sessions::validate_start_token(t).map_err(|e| {
+            IpcError::new(
+                &e.code,
+                e.message.replacen("start_token", "progress_token", 1),
+            )
+        })?;
+    }
+    let progress = RepairReporter::new(store, progress_token);
+    let out = repair_session_with(session_id, explicit, store, ssh, &progress).await;
+    match &out {
+        Ok(_) => progress.finish(),
+        Err(_) => progress.fail(),
+    }
+    out
+}
+
+async fn repair_session_with(
+    session_id: i64,
+    explicit: bool,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    progress: &RepairReporter<'_>,
+) -> Result<RepairReport, IpcError> {
+    progress.advance(RepairStep::Check);
     {
         let s = lock(store)?;
         let row = s
@@ -2528,7 +2751,18 @@ pub async fn repair_session(
     } else {
         Entry::Attach
     };
-    ensure_workspace(&spec, policy_for(entry), siblings, store, &exec).await
+    // Click-driven, so it may drop a stale registration of ours under the
+    // full guard, as [`ensure_workspace`] does.
+    ensure_workspace_reporting(
+        &spec,
+        policy_for(entry),
+        siblings,
+        store,
+        &exec,
+        true,
+        progress,
+    )
+    .await
 }
 
 /// The automatic pre-check for lifecycle callers that own tmux (restart,
@@ -3468,6 +3702,29 @@ mod tests {
         (Mutex::new(s), sid, pid)
     }
 
+    /// Link session `sid` to a seeded account `u1`.
+    fn link_account(store: &Mutex<Store>, sid: i64) {
+        let s = store.lock().unwrap();
+        s.upsert_account(&crate::store::AccountRow {
+            uuid: "u1".into(),
+            email: None,
+            display_name: None,
+            organization_name: None,
+            organization_uuid: None,
+            seat_tier: None,
+            last_seen_at: None,
+            nickname: None,
+            has_extra_usage: false,
+        })
+        .unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET account_uuid = 'u1' WHERE id = ?1",
+                [sid],
+            )
+            .unwrap();
+    }
+
     fn spec_with_ids(sid: i64, pid: i64) -> WorkspaceSpec {
         let mut s = spec(true);
         s.session_id = Some(sid);
@@ -3478,6 +3735,7 @@ mod tests {
     #[tokio::test]
     async fn healthy_workspace_runs_one_probe_and_writes_nothing() {
         let (store, sid, pid) = seeded_store("/repo/.claude/worktrees/feat");
+        link_account(&store, sid);
         let exec = FakeExec::new(vec![ok(HEALTHY_OUT)]);
         let rep = ensure_workspace(
             &spec_with_ids(sid, pid),
@@ -3497,11 +3755,18 @@ mod tests {
         let s = store.lock().unwrap();
         assert!(s.list_session_events(sid, 10).unwrap().is_empty());
         assert!(!rep.worktree_row_updated);
+        let row = s.get_session_by_id(sid).unwrap().unwrap();
+        assert_eq!(
+            row.account_uuid.as_deref(),
+            Some("u1"),
+            "no pane, no relink"
+        );
     }
 
     #[tokio::test]
     async fn dir_deleted_end_to_end_prunes_adds_verifies_respawns_and_records() {
         let (store, sid, pid) = seeded_store("/repo/.claude/worktrees/feat");
+        link_account(&store, sid);
         let exec = FakeExec::new(vec![
             ok(DIR_GONE_OUT),             // probe
             ok("outcome=branch_local\n"), // git steps
@@ -3554,6 +3819,9 @@ mod tests {
         let row = s.get_session_by_id(sid).unwrap().unwrap();
         assert_eq!(row.status, "running");
         assert!(row.worktree_id.is_some());
+        // Review r05 F1: the respawned `claude` reads the host's login
+        // afresh, so the row's old account link is dropped for reconcile.
+        assert_eq!(row.account_uuid, None);
     }
 
     #[tokio::test]
@@ -4030,6 +4298,105 @@ mod tests {
         assert!(spec.worktree.is_none());
     }
 
+    /// A worktree created for a branch-shaped name (`new_session {
+    /// new_worktree: "feat/imports" }`) lives at `.worktrees/feat/imports`.
+    /// Recreating its session must open that recorded checkout on its host,
+    /// not refuse it with "worktree name must not contain a path separator".
+    #[tokio::test]
+    async fn spec_for_remote_session_in_a_nested_worktree_uses_the_recorded_path() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("trn").unwrap();
+        let pid = s.upsert_project("o", "r", "/repo").unwrap();
+        let wt = "/home/dev/projects/github.com/o/r/.worktrees/feat/imports";
+        let wid = s
+            .upsert_worktree_on("trn", pid, "feat/imports", wt, Some("feat/imports"))
+            .unwrap();
+        let sid = s
+            .upsert_session(
+                "dev-r--feat/imports",
+                "trn",
+                Some(pid),
+                Some(wid),
+                1,
+                1,
+                "lost",
+                None,
+            )
+            .unwrap();
+        s.set_worktree_key(sid, Some("feat")).unwrap();
+        let store = Mutex::new(s);
+        let fake = crate::ssh_fake::FakeSsh::new();
+        fake.with_home("/home/dev");
+        let (spec, _) = spec_for_session_with(&store, &fake, sid).await.unwrap();
+        assert_eq!(spec.project_root, "/home/dev/projects/github.com/o/r");
+        let w = spec.worktree.unwrap();
+        assert_eq!(w.path, wt);
+        assert_eq!(w.branch, "feat/imports");
+        assert!(!w.path_is_guess, "the host's own row is trusted");
+    }
+
+    /// PD-2229: a worktree made under the github layout
+    /// (`~/projects/github.com/<owner>/<repo>/.worktrees/<name>`) on a host
+    /// later switched to the flat layout. Its checkout is the repo it sits
+    /// in, not `~/projects/<repo>`: probing that one reported "repository is
+    /// missing", and Recreate cloned a second copy beside it whose git never
+    /// knew the worktree.
+    #[tokio::test]
+    async fn a_recorded_remote_worktree_keeps_its_own_checkout_after_a_layout_change() {
+        let s = Store::open_in_memory().unwrap();
+        crate::service::settings::set(&s, crate::service::settings::PROJECTS_LAYOUT, "flat")
+            .unwrap();
+        s.upsert_host("trn").unwrap();
+        let pid = s
+            .upsert_project("papayapos", "pos-frontend", "/repo")
+            .unwrap();
+        let wt = "/home/dev/projects/github.com/papayapos/pos-frontend/.worktrees/lively-mercury";
+        let wid = s
+            .upsert_worktree_on("trn", pid, "lively-mercury", wt, Some("lively-mercury"))
+            .unwrap();
+        let sid = s
+            .upsert_session(
+                "dev-pos--lively-mercury",
+                "trn",
+                Some(pid),
+                Some(wid),
+                1,
+                1,
+                "lost",
+                None,
+            )
+            .unwrap();
+        let store = Mutex::new(s);
+        let fake = crate::ssh_fake::FakeSsh::new();
+        fake.with_home("/home/dev");
+        let (spec, _) = spec_for_session_with(&store, &fake, sid).await.unwrap();
+        assert_eq!(
+            spec.project_root,
+            "/home/dev/projects/github.com/papayapos/pos-frontend"
+        );
+        assert_eq!(spec.worktree.unwrap().path, wt);
+    }
+
+    #[test]
+    fn checkout_of_worktree_reads_both_layouts_and_nothing_else() {
+        assert_eq!(
+            checkout_of_worktree("/p/o/r/.worktrees/feat"),
+            Some("/p/o/r")
+        );
+        assert_eq!(
+            checkout_of_worktree("/p/o/r/.worktrees/feat/imports"),
+            Some("/p/o/r")
+        );
+        assert_eq!(
+            checkout_of_worktree("/p/r/.claude/worktrees/x"),
+            Some("/p/r")
+        );
+        assert_eq!(checkout_of_worktree("/p/r/.worktrees/"), None);
+        assert_eq!(checkout_of_worktree("/.worktrees/x"), None);
+        assert_eq!(checkout_of_worktree("relative/.worktrees/x"), None);
+        assert_eq!(checkout_of_worktree("/srv/elsewhere/feat"), None);
+    }
+
     /// The UX agent's operator dir is a system project: not a checkout, on
     /// whatever host it lives. Repair must say `E_NOREPO` — the answer the
     /// restart / recreate callers already treat as "keep the plain cwd" —
@@ -4404,7 +4771,9 @@ mod tests {
         assert!(commands.contains("repair::repair_session(args.session_id, args.explicit"));
         let tools_src = module_src("src/mcp/tools");
         let tools = tools_src.as_str();
-        assert!(tools.contains("repair::repair_session(id, true"));
+        assert!(
+            tools.contains("repair::repair_session_reporting(\n            id,\n            true,")
+        );
         assert!(tools.contains("\"repair_session\",\n            p.confirm_nonce.as_deref(),"));
         // Only the opt-in tick may drop a stale entry automatically.
         for (name, src) in [
@@ -6809,5 +7178,69 @@ mod tests {
             .output()
             .unwrap();
         String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+    use crate::events::RecordingEventBus;
+
+    fn store_with_bus() -> (Mutex<Store>, Arc<RecordingEventBus>) {
+        let bus = Arc::new(RecordingEventBus::new());
+        let s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+        bus.take();
+        (Mutex::new(s), bus)
+    }
+
+    /// The phone's repair checklist ticks every step once, in order: a step
+    /// with nothing to do (no git steps, so no fix or verify) reads done.
+    #[test]
+    fn a_repair_reports_every_step_once_in_order() {
+        let (store, bus) = store_with_bus();
+        let r = RepairReporter::new(&store, Some("rp-1".into()));
+        r.advance(RepairStep::Check);
+        r.advance(RepairStep::Check);
+        r.advance(RepairStep::Pane);
+        r.finish();
+        r.finish();
+        assert_eq!(
+            bus.take(),
+            vec![
+                "repair:progress:rp-1:check:started",
+                "repair:progress:rp-1:check:done",
+                "repair:progress:rp-1:fix:started",
+                "repair:progress:rp-1:fix:done",
+                "repair:progress:rp-1:verify:started",
+                "repair:progress:rp-1:verify:done",
+                "repair:progress:rp-1:pane:started",
+                "repair:progress:rp-1:pane:done",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failure_marks_the_step_in_flight_and_nothing_follows() {
+        let (store, bus) = store_with_bus();
+        let r = RepairReporter::new(&store, Some("rp-2".into()));
+        r.advance(RepairStep::Check);
+        r.advance(RepairStep::Fix);
+        r.fail();
+        r.finish();
+        let frames = bus.take();
+        assert_eq!(
+            frames.last().map(String::as_str),
+            Some("repair:progress:rp-2:fix:failed")
+        );
+        assert!(!frames.iter().any(|f| f.contains(":verify:")));
+    }
+
+    #[test]
+    fn without_a_token_nothing_is_emitted() {
+        let (store, bus) = store_with_bus();
+        let r = RepairReporter::new(&store, None);
+        r.advance(RepairStep::Check);
+        r.finish();
+        assert!(bus.take().is_empty());
     }
 }

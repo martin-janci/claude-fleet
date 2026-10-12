@@ -142,8 +142,8 @@ describe('formatting', () => {
 });
 
 describe('resources on a paired desktop', () => {
-  it('every resource update names a command the hub reasons explain', async () => {
-    const { hubBlock } = await import('../hub');
+  it('every resource but the company’s, debug devices and linked hubs names a command the hub reasons explain: its update, else its create or delete', async () => {
+    const { resourceBlock } = await import('../hub');
     const remote = {
       remote: true,
       url: 'https://fleet.example.com',
@@ -156,11 +156,22 @@ describe('resources on a paired desktop', () => {
       restart_required: false,
       unavailable: null,
     };
+    // Org administration phase B: orgs, devices and people route to the
+    // hub's `org_admin`, which decides per device (a trusted full one
+    // changes them), so a paired desktop edits them like a standalone one.
+    // Debug devices route to the hub's `debug_devices` the same way, and
+    // linked hubs (11.5) to `link_peer` / `unlink_peer`.
+    const routed = new Set(['org', 'device', 'person', 'debug_device', 'peer_link']);
     for (const r of bundle.resources) {
-      if (!r.update) continue;
-      const reason = hubBlock(r.update.command as Parameters<typeof hubBlock>[0], remote);
-      expect(reason, r.id).toBeTruthy();
+      const reason = resourceBlock(r, remote);
+      if (routed.has(r.id)) expect(reason, r.id).toBeNull();
+      else expect(reason, r.id).toBeTruthy();
+      // Standalone: nothing is blocked.
+      expect(resourceBlock(r, { ...remote, remote: false, url: null }), r.id).toBeNull();
     }
+    const catalog = bundle.resources.find((r) => r.id === 'catalog')!;
+    expect(catalog.update).toBeUndefined();
+    expect(resourceBlock(catalog, remote)).toContain('fleet-hub catalog add');
   });
 });
 

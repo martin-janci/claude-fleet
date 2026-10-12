@@ -1,0 +1,27 @@
+
+  >_ OpenAI Codex (v0.162.0)
+     /home/dev/repo
+
+› hello there
+
+• Done.
+
+  Worked for <1s • 9:53 PM
+
+› please run the check
+
+• Running curl -sI https://example.com
+
+  Would you like to run the following command?
+
+  Environment: local
+
+  Reason: Allow network access to check the site?
+
+  $ curl -sI https://example.com
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for commands that start with `curl -sI https://example.com` (p)
+  3. No, and tell Codex what to do differently (esc)
+
+  Press enter to confirm or esc to cancel

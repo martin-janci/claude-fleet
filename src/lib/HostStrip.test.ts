@@ -31,4 +31,18 @@ describe('HostStrip', () => {
     expect(dot?.className).toContain('absent');
     expect(dot?.className).not.toContain('differs');
   });
+
+  it('renders explicit per-host states with words for each', () => {
+    const { container } = render(HostStrip, {
+      order: ['local', 'mefistos', 'oci', 'trn', 'htz'],
+      states: { local: 'in_sync', mefistos: 'differs', oci: 'missing', trn: 'stale' },
+    });
+    const dots = Array.from(container.querySelectorAll('.dot'));
+    expect(dots.map((d) => Array.from(d.classList).find((c) => c !== 'dot' && !c.startsWith('svelte-')))).toEqual([
+      'in_sync', 'differs', 'missing', 'stale', 'na',
+    ]);
+    expect(container.querySelector('.strip')?.getAttribute('aria-label')).toBe(
+      'local: in sync, mefistos: differs, oci: missing, trn: stale scan, htz: not here',
+    );
+  });
 });

@@ -522,3 +522,98 @@ fn the_transport_reaches_the_trust_store_only_through_net_tls() {
          through `net::tls::tls_connector` (blocking pool, no cached failure): {body}"
     );
 }
+
+/// Serve one canned answer to one GET, then hang up.
+async fn one_shot_server(reply: &'static [u8]) -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut head = Vec::new();
+        let mut b = [0u8; 1024];
+        while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = sock.read(&mut b).await.unwrap();
+            if n == 0 {
+                return;
+            }
+            head.extend_from_slice(&b[..n]);
+        }
+        sock.write_all(reply).await.unwrap();
+    });
+    port
+}
+
+/// A chunked body cut before its terminating chunk is a partial file: the
+/// download fails and `dest` is left untouched, as the contract promises.
+#[tokio::test]
+async fn a_chunked_download_cut_before_the_last_chunk_is_incomplete() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("f");
+    let port =
+        one_shot_server(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n")
+            .await;
+    let url = format!("http://127.0.0.1:{port}/downloads/1");
+    let err = download_to(&url, "t", &dest, 1 << 20).await.unwrap_err();
+    assert!(err.contains("incomplete"), "{err}");
+    assert!(!dest.exists());
+
+    let port = one_shot_server(
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+    )
+    .await;
+    let url = format!("http://127.0.0.1:{port}/downloads/1");
+    assert_eq!(download_to(&url, "t", &dest, 1 << 20).await, Ok(5));
+    assert_eq!(std::fs::read(&dest).unwrap(), b"hello");
+}
+
+/// A download never touches a file already named `<dest>.part` (another
+/// tool's in-progress download, the user's own file), and leaves no part
+/// file of its own behind, whether it succeeds or fails.
+#[tokio::test]
+async fn a_download_never_touches_a_pre_existing_part_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("f");
+    std::fs::write(dir.path().join("f.part"), "mine").unwrap();
+    let ok = one_shot_server(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello").await;
+    let url = format!("http://127.0.0.1:{ok}/downloads/1");
+    assert_eq!(download_to(&url, "t", &dest, 1 << 20).await, Ok(5));
+    let cut = one_shot_server(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nhel").await;
+    let url = format!("http://127.0.0.1:{cut}/downloads/1");
+    assert!(download_to(&url, "t", &dest, 1 << 20).await.is_err());
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("f.part")).unwrap(),
+        "mine"
+    );
+    assert_eq!(std::fs::read(&dest).unwrap(), b"hello");
+    let left: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(left.len(), 2, "{left:?}");
+}
+
+#[test]
+fn a_bearer_that_would_break_the_request_head_is_refused() {
+    assert!(check_bearer("abc-DEF_123.~").is_ok());
+    for bad in ["", "a\r\nX-Evil: 1", "a b", "a\u{e9}", "a\0"] {
+        assert!(check_bearer(bad).is_err(), "{bad:?}");
+    }
+    assert!(check_bearer(&"a".repeat(5000)).is_err());
+}
+
+/// A download whose peer stops sending is abandoned after `DOWNLOAD_IDLE`
+/// rather than held open for ever. (`read_or_stall` on an in-memory pipe:
+/// paused time and a real socket would race the connect timeout.)
+#[tokio::test(start_paused = true)]
+async fn a_read_that_stalls_is_abandoned() {
+    let (mut near, far) = tokio::io::duplex(64);
+    let mut buf = [0u8; 16];
+    let started = tokio::time::Instant::now();
+    let err = read_or_stall(&mut near, &mut buf, "hub", 443)
+        .await
+        .unwrap_err();
+    assert!(err.contains("stalled"), "{err}");
+    assert!(started.elapsed() >= DOWNLOAD_IDLE);
+    drop(far);
+}

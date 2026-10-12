@@ -6,10 +6,12 @@
 // Nothing here acts on its own: every destructive action is a person's
 // confirm in the sheet (or the backend's opt-in auto-tidy).
 
-import { writable } from 'svelte/store';
+import { get, writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
-import { acceptCommandRow, type SessionRow } from './sessions';
+import { acceptCommandRow, dismissGhostSession, type SessionRow } from './sessions';
 import { ALL_SCOPES } from './orgs';
+import { sizeText } from './hosts_table';
+import { sessionIdBlocked } from './share';
 
 /** `service::gc::tidy::TidyReason` — tolerant of values a newer hub adds. */
 export type TidyReason =
@@ -17,6 +19,7 @@ export type TidyReason =
   | 'pr_merged_idle'
   | 'not_planned'
   | 'duplicate_worktree'
+  | 'same_work'
   | 'ghost_expiring'
   | 'idle_unlinked'
   | (string & {});
@@ -25,7 +28,7 @@ export type TidyReason =
 export type TidyAction = 'archive' | 'safe_kill' | 'kill' | 'resume_or_expire' | (string & {});
 
 /** The sheet's per-row choice: an action, or leaving the row alone. */
-export type TidyChoice = 'safe_kill' | 'kill' | 'archive' | 'snooze' | 'never' | 'keep';
+export type TidyChoice = 'safe_kill' | 'kill' | 'archive' | 'snooze' | 'never' | 'keep' | 'expire';
 
 /** Reason order: the backend's ranking, the sheet's group order. */
 export const TIDY_REASONS = [
@@ -33,13 +36,18 @@ export const TIDY_REASONS = [
   'pr_merged_idle',
   'not_planned',
   'duplicate_worktree',
+  'same_work',
   'ghost_expiring',
   'idle_unlinked',
 ] as const;
 
 /** Reasons auto-tidy never acts on, whatever the settings say (work graph
  *  M11.3, decision D19). */
-export const NEVER_AUTO_REASONS: ReadonlySet<string> = new Set(['idle_unlinked']);
+export const NEVER_AUTO_REASONS: ReadonlySet<string> = new Set(['idle_unlinked', 'same_work']);
+
+/** Reasons that rest on Jev's answer (redesign 6.9, Tidy › Duplicates): New
+ *  layout only, and never ticked for the person. */
+export const JEV_REASONS: ReadonlySet<string> = new Set(['same_work']);
 
 /** Days a "Keep" holds a session out of the sheet. */
 export const KEEP_DAYS = 7;
@@ -49,18 +57,57 @@ export const TIDY_REASON_LABELS: Record<string, string> = {
   pr_merged_idle: 'PR merged, idle',
   not_planned: "Won't do / duplicate",
   duplicate_worktree: 'Duplicate on one worktree',
+  same_work: 'Same work as another session',
   ghost_expiring: 'Lost session about to expire',
   idle_unlinked: 'Idle, no work linked',
 };
 
+/** The choice names the Tidy board uses (G3.12). Snooze (per link) and
+ *  Keep (per session) read the same to a person: never both on one row. */
 export const TIDY_CHOICE_LABELS: Record<TidyChoice, string> = {
-  safe_kill: 'Safe kill',
+  safe_kill: 'Clean up',
   kill: 'Kill',
-  archive: 'Archive only',
-  snooze: 'Snooze 7 d',
-  never: 'Never for this work',
-  keep: `Keep ${KEEP_DAYS} d`,
+  archive: 'Archive',
+  snooze: `Keep for ${KEEP_DAYS} days`,
+  never: 'Never',
+  keep: `Keep for ${KEEP_DAYS} days`,
+  expire: 'Expire',
 };
+
+/** What each choice does, in the words of the sheet's legend. They say what
+ *  the backend's `tidy_apply` does, not more: Archive only folds the session
+ *  into its work's Done section, a plain Kill removes no tree of its own. */
+export const TIDY_CHOICE_HELP: Record<TidyChoice, string> = {
+  safe_kill: 'Claude commits and pushes first; the worktree goes only if that succeeds',
+  kill: 'Ends the pane now; offered only where it has no worktree of its own to remove (a shared tree, a shell, a review)',
+  archive: "Folds it into its work's Done section; the pane, worktree and transcript stay",
+  snooze: 'Out of Tidy for a week',
+  never: 'Never suggest it again for this work',
+  keep: 'Out of Tidy for a week',
+  expire: 'Forgets a stopped session now instead of at the time shown; it can no longer be restored',
+};
+
+/** The legend's Restore line, shown when the sheet has stopped sessions. */
+export const TIDY_RESTORE_HELP =
+  'Brings the stopped sessions back, each resuming its Claude conversation; left alone, one expires at the time shown';
+
+/** The legend: one line per choice the shown rows offer, in the sheet's
+ *  order, a label once (Keep and Snooze read the same), and Restore when a
+ *  stopped session is among them. */
+export function tidyLegend(cands: readonly TidyCandidate[]): { label: string; help: string }[] {
+  const offered = new Set<TidyChoice>();
+  for (const c of cands) for (const ch of choicesFor(c)) offered.add(ch);
+  const order: TidyChoice[] = ['safe_kill', 'kill', 'archive', 'snooze', 'keep', 'never', 'expire'];
+  const out: { label: string; help: string }[] = [];
+  const seen = new Set<string>();
+  for (const ch of order) {
+    if (!offered.has(ch) || seen.has(TIDY_CHOICE_LABELS[ch])) continue;
+    seen.add(TIDY_CHOICE_LABELS[ch]);
+    out.push({ label: TIDY_CHOICE_LABELS[ch], help: TIDY_CHOICE_HELP[ch] });
+  }
+  if (cands.some((c) => c.reason === 'ghost_expiring')) out.push({ label: 'Restore all', help: TIDY_RESTORE_HELP });
+  return out;
+}
 
 export function tidyReasonLabel(r: string): string {
   return TIDY_REASON_LABELS[r] ?? r.replace(/_/g, ' ');
@@ -87,6 +134,14 @@ export interface TidyCandidate {
   archived?: boolean;
   /** Auto-tidy (when on) would act on it. */
   auto?: boolean;
+  /** `same_work`: the session Jev says does the same work (the one kept). */
+  same_as?: number | null;
+  /** A `safe_kill` row's own worktree size in kB, as the host probe last
+   *  measured it; absent when not measured (or from an older hub). */
+  worktree_kb?: number | null;
+  /** A `safe_kill` row's own worktree, the tree a clean up removes (G3.12);
+   *  absent without one (or from an older hub). */
+  worktree_path?: string | null;
 }
 
 /** `work { action: tidy }`. */
@@ -180,6 +235,9 @@ export function choicesFor(c: TidyCandidate): TidyChoice[] {
   } else if (c.action === 'safe_kill' || c.action === 'kill') {
     out.push('keep');
   }
+  // G7.9: a stopped session can be let go now (`dismiss_ghost_session`),
+  // last, so it is never the preselected choice of a linked row.
+  if (c.action === 'resume_or_expire') out.push('expire');
   return out;
 }
 
@@ -191,12 +249,123 @@ export function defaultChoice(c: TidyCandidate): TidyChoice | null {
   return choices[0] ?? null;
 }
 
+/** What the ticked rows free, in kB: the measured worktree of every ticked
+ *  row whose choice is a safe kill (the one that removes its tree). `null`
+ *  when none of them has a measured size, so the sheet says nothing rather
+ *  than "frees about 0 MB". */
+export function freedKb(
+  candidates: readonly TidyCandidate[],
+  ticked: ReadonlySet<number>,
+  choice: ReadonlyMap<number, TidyChoice>,
+): number | null {
+  let total: number | null = null;
+  for (const c of candidates) {
+    if (!ticked.has(c.session_id) || c.worktree_kb == null) continue;
+    if ((choice.get(c.session_id) ?? defaultChoice(c)) !== 'safe_kill') continue;
+    total = (total ?? 0) + c.worktree_kb;
+  }
+  return total;
+}
+
+/** What an applied tidy frees, in kB: the measured worktree of every row
+ *  whose safe kill went through. `null` when none of them was measured, so
+ *  the toast says nothing rather than "0 MB". */
+export function freedByResults(
+  candidates: readonly TidyCandidate[],
+  results: readonly TidyApplyResult[],
+): number | null {
+  const byId = new Map(candidates.map((c) => [c.session_id, c] as const));
+  let total: number | null = null;
+  for (const r of results) {
+    const kb = byId.get(r.session_id)?.worktree_kb;
+    if (!r.ok || r.action !== 'safe_kill' || kb == null) continue;
+    total = (total ?? 0) + kb;
+  }
+  return total;
+}
+
+/**
+ * The selected row's explanation (G3.12): why fleet suggests it, from what
+ * the candidate carries, then what the chosen action does to it — the tree
+ * a clean up removes, with its measured size. Whether that tree is clean or
+ * pushed is not known until the clean up inspects it, so it is not claimed.
+ */
+export function tidyDetail(
+  c: TidyCandidate,
+  choice: TidyChoice | null,
+  nowSecs: number = Math.floor(Date.now() / 1000),
+): string {
+  const facts: string[] = [];
+  if (c.reason === 'pr_merged_idle') facts.push('PR merged');
+  if (c.key && c.item_status) facts.push(`${c.key} is ${c.item_status}`);
+  if (c.branch) facts.push(`branch ${c.branch}`);
+  if (c.expires_at) facts.push(`stopped, expires in ${formatIdle(c.expires_at - nowSecs)}`);
+  else facts.push(tidyEvidence(c, nowSecs));
+  const why = `${tidyReasonLabel(c.reason)}: ${facts.join(', ')}.`;
+  let what: string;
+  switch (choice) {
+    case 'safe_kill': {
+      const tree = c.worktree_path
+        ? `${c.worktree_path}${c.worktree_kb != null ? ` (${sizeText(c.worktree_kb)})` : ''}`
+        : 'its worktree';
+      what =
+        c.reason === 'idle_unlinked'
+          ? `Clean up removes ${tree} only if it is clean and pushed; otherwise it is refused.`
+          : `Clean up has Claude commit and push first, then removes ${tree}.`;
+      break;
+    }
+    case 'kill':
+      what = 'Kill ends the pane now; no worktree of its own is removed.';
+      break;
+    case 'archive':
+      what = "Archive folds it into its work's Done section; nothing on the host changes.";
+      break;
+    case 'snooze':
+    case 'keep':
+      what = `Kept out of Tidy for ${KEEP_DAYS} days.`;
+      break;
+    case 'never':
+      what = 'Never suggested again for this work.';
+      break;
+    case 'expire':
+      what = 'Expire forgets the stopped session now; it can no longer be restored.';
+      break;
+    default:
+      what = c.action === 'resume_or_expire' ? 'Resume or Restore all brings it back.' : '';
+  }
+  return what ? `${why} ${what}` : why;
+}
+
+/** "Restore all" on the stopped group: the group's session ids by host (the
+ *  batch `restore_host_sessions` takes is per host), only those `allowed`. */
+export function restoreBatches(
+  cands: readonly TidyCandidate[],
+  allowed: (sessionId: number) => boolean = () => true,
+): { host: string; ids: number[] }[] {
+  const byHost = new Map<string, number[]>();
+  for (const c of cands) {
+    if (c.reason !== 'ghost_expiring' || !allowed(c.session_id)) continue;
+    const list = byHost.get(c.host_alias);
+    if (list) list.push(c.session_id);
+    else byHost.set(c.host_alias, [c.session_id]);
+  }
+  return [...byHost.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([host, ids]) => ({ host, ids }));
+}
+
 /** Whether a row starts ticked: every row whose default is an action,
  *  except a lost session (Resume is its own button) and a session with no
  *  work linked (M11.3: fleet cannot know what it was for, so a person ticks
- *  it, or uses its own Keep / Safe kill buttons). */
+ *  it, or uses its own Keep / Safe kill buttons), and Jev's `same_work`
+ *  (6.9: a model's answer is a suggestion, a person ticks it). */
 export function preselected(c: TidyCandidate): boolean {
-  return c.action !== 'resume_or_expire' && c.reason !== 'idle_unlinked' && defaultChoice(c) !== null;
+  return (
+    c.action !== 'resume_or_expire' &&
+    c.reason !== 'idle_unlinked' &&
+    !JEV_REASONS.has(c.reason) &&
+    defaultChoice(c) !== null
+  );
 }
 
 /** The evidence line of a candidate: "idle 9 d · no work linked" for an
@@ -256,15 +425,49 @@ export async function applyTidy(items: TidyApplyItem[]): Promise<Result<{ result
   return r;
 }
 
+/** Apply the sheet's items: the Expire ones through `dismiss_ghost_session`
+ *  (G7.9), one call each, the rest in one `tidy_apply`. Every item is
+ *  reported in the order given; an `expire` that fails is a failed result,
+ *  never a dropped one. Fails whole only when `tidy_apply` itself does. */
+export async function applyTidyChoices(items: TidyApplyItem[]): Promise<Result<{ results: TidyApplyResult[] }>> {
+  const expire = items.filter((i) => i.action === 'expire');
+  const rest = items.filter((i) => i.action !== 'expire');
+  const byId = new Map<number, TidyApplyResult>();
+  if (rest.length > 0) {
+    const r = await invokeCmd<{ results: TidyApplyResult[] }>('tidy_apply', { args: { items: rest } });
+    if (!r.ok) {
+      void refreshTidy();
+      return r;
+    }
+    for (const x of r.value.results) byId.set(x.session_id, x);
+  }
+  // The write's own gate (`dismiss_ghost_session` is `drive`): a session
+  // this client may not drive is refused here, whatever the sheet showed.
+  const $sessionIdBlocked = get(sessionIdBlocked);
+  for (const i of expire) {
+    const blocked = $sessionIdBlocked(i.session_id, 'dismiss_ghost_session');
+    if (blocked !== null) {
+      byId.set(i.session_id, { session_id: i.session_id, action: 'expire', ok: false, outcome: null, error: blocked });
+      continue;
+    }
+    const r = await dismissGhostSession(i.session_id);
+    byId.set(i.session_id, {
+      session_id: i.session_id,
+      action: 'expire',
+      ok: r.ok,
+      outcome: r.ok ? 'expired' : null,
+      error: r.ok ? null : (r.error.message ?? 'expire failed'),
+    });
+  }
+  void refreshTidy();
+  const results = items.map((i) => byId.get(i.session_id)).filter((x): x is TidyApplyResult => x !== undefined);
+  return { ok: true, value: { results } };
+}
+
 async function rowCmd(cmd: string, args: Record<string, unknown>): Promise<Result<SessionRow>> {
   const r = await invokeCmd<SessionRow>(cmd, { args });
   if (r.ok) acceptCommandRow(r.value);
   return r;
-}
-
-/** Collapse a live session into its group's Done (tmux keeps running). */
-export function archiveSession(sessionId: number): Promise<Result<SessionRow>> {
-  return rowCmd('archive_session_work', { session_id: sessionId });
 }
 
 /** Un-archive (one click) — also the touch an attach sends. */
@@ -372,7 +575,10 @@ export function requestedTicks(cands: readonly TidyCandidate[], r: TidyRequest):
   const want = new Set(r.sessionIds);
   return new Set(
     cands
-      .filter((c) => want.has(c.session_id) && choicesFor(c).length > 0 && c.reason !== 'idle_unlinked')
+      .filter(
+        (c) =>
+          want.has(c.session_id) && choicesFor(c).length > 0 && c.reason !== 'idle_unlinked' && !JEV_REASONS.has(c.reason),
+      )
       .map((c) => c.session_id),
   );
 }

@@ -61,7 +61,7 @@ describe('HostsList', () => {
     const trn = screen.getAllByTestId('host-row').find((r) => r.dataset.alias === 'claude-fleet-trn')!;
     await fireEvent.click(trn);
     expect(onselect).toHaveBeenCalledWith('claude-fleet-trn');
-    expect(within(trn).getByTestId('host-counts').textContent).toBe('14 ⚡2 ⏸1');
+    expect(within(trn).getByTestId('host-counts').textContent).toBe('14 · 2 working · 1 needs you');
     for (const row of screen.getAllByTestId('host-row')) expect(row.querySelector('button')).toBeNull();
   });
 
@@ -124,11 +124,32 @@ describe('HostsList: a hub contract skew', () => {
     hubStatus.set(remote);
     hubConnection.set({ state: 'connected' });
     mount({ hosts: [] });
-    expect(screen.getByTestId('hosts-empty').textContent).toContain('No hosts yet');
+    expect(screen.getByTestId('hosts-empty').textContent).toContain('Start with one host');
   });
 
   it('standalone mode is untouched', () => {
     mount({ hosts: [] });
-    expect(screen.getByTestId('hosts-empty').textContent).toContain('No hosts yet');
+    expect(screen.getByTestId('hosts-empty').textContent).toContain('Start with one host');
+  });
+});
+
+describe('the states kit (step 10.6)', () => {
+  it('a filter that matches nothing offers the way out', async () => {
+    mount({ hosts: [], filter: 'nope' });
+    const empty = screen.getByTestId('hosts-empty');
+    expect(empty.dataset.kind).toBe('none');
+    await fireEvent.click(screen.getByTestId('hosts-clear-filter'));
+    expect((screen.getByTestId('hosts-filter') as HTMLInputElement).value).toBe('');
+    expect(screen.getByTestId('hosts-empty').textContent).toContain('Start with one host');
+  });
+});
+
+describe('a first run (review r13)', () => {
+  it('offers Add a host… as the next step', async () => {
+    const onaddhost = vi.fn();
+    mount({ hosts: [], onaddhost });
+    expect(screen.getByTestId('hosts-empty').dataset.kind).toBe('first');
+    await fireEvent.click(screen.getByTestId('hosts-empty-add'));
+    expect(onaddhost).toHaveBeenCalledOnce();
   });
 });

@@ -18,8 +18,7 @@ use crate::cancel::CancellationRegistry;
 use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
 use crate::service::add_project::{add_project, AddProjectArgs, AddProjectSource};
-use crate::service::sessions::{new_session, send_prompt, NewSessionArgs, SendPromptArgs};
-use crate::service::tasks::wait_for_repl_ready;
+use crate::service::sessions::{new_session, NewSessionArgs};
 use crate::ssh::SshClient;
 use crate::store::{SessionRow, Store};
 use serde::Deserialize;
@@ -34,6 +33,12 @@ pub struct SpawnAuthorArgs {
     pub name: Option<String>,
     pub instructions: String,
     pub call_id: Option<u64>,
+    /// Where the session runs (gap plan G2.6, "Write it with Claude" with a
+    /// Host). Absent or `local`: the catalog checkout itself. Another host
+    /// clones the catalog's remote there, as any project session does, and
+    /// the prompt asks for a push so the catalog sees the change.
+    #[serde(default)]
+    pub host_alias: Option<String>,
 }
 
 /// The target asset `kind`/`name`, when both are present; `None` means
@@ -79,8 +84,8 @@ fn ir_rules_paragraph() -> String {
          {events}. Any string field may reference a fleet secret with a \
          `${{NAME}}` placeholder, resolved from the fleet's secrets at render \
          time. A skill's prose body lives in `body.md`; an agent's system \
-         prompt lives in `prompt.md`; every other kind is a single \
-         `asset.yaml`.",
+         prompt and a command's prompt live in `prompt.md`; every other kind \
+         is a single `asset.yaml`.",
         tools = super::model::TOOLS.join(" "),
         tiers = super::model::TIERS.join(" "),
         events = super::model::EVENTS.join(" "),
@@ -134,13 +139,13 @@ pub fn build_author_prompt(
     )
 }
 
-/// `body.md` for a skill, `prompt.md` for an agent; the empty string for a
+/// `body.md` for a skill, `prompt.md` for an agent or a command; the empty string for a
 /// single-file kind (never reached: `target_line` only calls this when
 /// `kind.is_folder()`).
 fn body_file(kind: Kind) -> &'static str {
     match kind {
         Kind::Skill => "body.md",
-        Kind::Agent => "prompt.md",
+        Kind::Agent | Kind::Command => "prompt.md",
         _ => "",
     }
 }
@@ -158,6 +163,15 @@ fn same_path(repo_path: &str, candidate: &str) -> bool {
         (Ok(a), Ok(b)) => a == b,
         _ => repo_path == candidate,
     }
+}
+
+/// On a host other than the catalog's own, the session works in a clone:
+/// its commit reaches the catalog only once pushed.
+pub fn remote_author_prompt(prompt: &str) -> String {
+    format!(
+        "{prompt}\n\nThis session runs in a clone of the catalog on another host: after \
+         committing, push to the catalog's remote so the catalog picks the change up."
+    )
 }
 
 /// Make sure the catalog repo at `repo_path` is a fleet project, adopting it
@@ -235,14 +249,29 @@ pub async fn spawn_author_session(
     }
     let repo_path = require_config(store)?.repo_path;
     let project_id = ensure_catalog_project(store, ssh, reg, &repo_path).await?;
+    let host = args
+        .host_alias
+        .as_deref()
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .unwrap_or("local")
+        .to_string();
 
     let (tmux_name, friendly_name) = session_name_for(args.kind, args.name.as_deref());
     let target = target_of(args.kind, args.name.as_deref());
-    let prompt = build_author_prompt(&repo_path, target, &args.instructions);
+    let prompt = if host == "local" {
+        build_author_prompt(&repo_path, target, &args.instructions)
+    } else {
+        remote_author_prompt(&build_author_prompt(
+            "the current directory",
+            target,
+            &args.instructions,
+        ))
+    };
 
     let row = new_session(
         NewSessionArgs {
-            host_alias: "local".to_string(),
+            host_alias: host,
             project_id,
             worktree_id: None,
             name: tmux_name,
@@ -255,6 +284,16 @@ pub async fn spawn_author_session(
             resume_claude_session_id: None,
             model: None,
             effort: None,
+            profile: None,
+            agent: None,
+            origin: None,
+            // Whose the authoring session is (multi-user M1, T5): the hub's
+            // own person — this is the desktop's own catalog work and there is
+            // no source row to inherit from. See
+            // `crate::service::sessions::hub_personal_owner`.
+            over_limit_ok: false,
+            owner_person_id: crate::service::sessions::hub_personal_owner(store),
+            start_token: None,
         },
         store,
         ssh,
@@ -262,27 +301,14 @@ pub async fn spawn_author_session(
     )
     .await?;
 
-    wait_for_repl_ready(ssh, "local", &row.tmux_name).await;
-    // Soft-fail: the session is already spawned and registered. If seeding
-    // the prompt fails, DON'T discard it — return it anyway so the user can
-    // type the authoring instructions manually. Mirrors `spawn_review`.
-    if let Err(e) = send_prompt(
-        SendPromptArgs {
-            host_alias: "local".to_string(),
-            tmux_name: row.tmux_name.clone(),
-            prompt,
-            submit: true,
-            keys: None,
-        },
-        store,
-        ssh,
-    )
-    .await
-    {
+    // Soft-fail: the session is already spawned and registered. If the
+    // prompt is not typed (the REPL did not come up, a dialog is up), DON'T
+    // discard it — return it anyway so the user can type the authoring
+    // instructions manually. Mirrors `spawn_review`.
+    if !crate::service::sessions::seed::seed_now(store, ssh, &row, &prompt).await {
         tracing::warn!(
             session = %row.tmux_name,
-            error = %e,
-            "[spawn_author_session] seeding the author prompt failed (the session is live; seed it manually)"
+            "[spawn_author_session] the author prompt was not typed (the session is live; seed it manually)"
         );
     }
 
@@ -339,6 +365,26 @@ mod tests {
     }
 
     // ------------------------------------------------------- prompt golden
+
+    #[test]
+    fn a_host_other_than_the_catalogs_works_in_a_clone_and_pushes() {
+        let args: SpawnAuthorArgs =
+            serde_json::from_value(serde_json::json!({"instructions": "x"})).unwrap();
+        assert_eq!(args.host_alias, None);
+        let args: SpawnAuthorArgs = serde_json::from_value(
+            serde_json::json!({"instructions": "x", "host_alias": "mercury", "kind": "command", "name": "ship"}),
+        )
+        .unwrap();
+        assert_eq!(args.host_alias.as_deref(), Some("mercury"));
+        let p = remote_author_prompt(&build_author_prompt(
+            "the current directory",
+            Some((Kind::Command, "ship")),
+            "Add a dry run.",
+        ));
+        assert!(p.contains("at `the current directory`"), "{p}");
+        assert!(p.contains("commands/ship/prompt.md"), "{p}");
+        assert!(p.ends_with("push to the catalog's remote so the catalog picks the change up."));
+    }
 
     #[test]
     fn build_author_prompt_names_an_existing_target() {

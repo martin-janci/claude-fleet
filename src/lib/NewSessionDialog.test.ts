@@ -96,6 +96,18 @@ describe('NewSessionDialog remote path preview (W5 G3)', () => {
 });
 
 describe('NewSessionDialog', () => {
+  // Moved from Sidebar.test.ts when the Sidebar's own mount went (redesign 1.9).
+  it('a native <dialog> close still closes it (Modal reopen only when the parent declines)', async () => {
+    const onCancel = vi.fn();
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel } });
+    await tick();
+    const dlg = screen.getByRole('dialog', { name: 'New session' }) as HTMLDialogElement;
+    dlg.removeAttribute('open');
+    dlg.dispatchEvent(new Event('close'));
+    await tick(); await tick();
+    expect(onCancel).toHaveBeenCalled();
+  });
+
   it('renders one host-pick button per non-hidden host', async () => {
     render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
     await tick();
@@ -131,6 +143,31 @@ describe('NewSessionDialog', () => {
     expect((newSessionCall![1] as any).args.host_alias).toBe('mefistos');
   });
 
+  // Step 5.13: while the create runs, the dialog shows the Pulse on its
+  // worktree step.
+  it('new layout: the create in flight shows the Pulse on the worktree step', async () => {
+    let finish!: () => void;
+    const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockImplementation(async (args) => {
+      // The backend's first frame: the worktree step started (start:progress).
+      sessionsModule.creatingStart.set({ host_alias: args.host_alias, name: args.name, kind: 'work', token: 't1', steps: { worktree: 'started', tmux: 'pending', agent: 'pending' } });
+      await new Promise<void>((r) => (finish = r));
+      sessionsModule.creatingStart.set(null);
+      return { ok: false, error: { code: 'E_INVALID', message: 'stop here' } } as never;
+    });
+    try {
+      render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+      await tick();
+      await fireEvent.click(screen.getByText('Create'));
+      await tick();
+      const pulse = await screen.findByTestId('new-session-pulse');
+      expect(pulse.textContent).toContain('Setting up worktree · 1 of 3');
+      finish();
+      await vi.waitFor(() => expect(screen.queryByTestId('new-session-pulse')).toBeNull());
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('sends the picked model and effort for a Claude session, nothing for a shell', async () => {
     const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({
       ok: false,
@@ -149,6 +186,31 @@ describe('NewSessionDialog', () => {
     await fireEvent.click(screen.getByText('Create'));
     await tick();
     expect(spy.mock.calls[1][0]).toMatchObject({ model: null, effort: null });
+    spy.mockRestore();
+  });
+
+  it('sends a typed login profile, refuses an invalid one, and none for a shell', async () => {
+    const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({
+      ok: false,
+      error: { code: 'E_INVALID', message: 'stop here' },
+    } as never);
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    const create = () => screen.getByTestId('create-btn') as HTMLButtonElement;
+    await fireEvent.input(screen.getByTestId('launch-profile'), { target: { value: '../etc' } });
+    await tick();
+    expect(create().disabled).toBe(true);
+    await fireEvent.input(screen.getByTestId('launch-profile'), { target: { value: ' work ' } });
+    await tick();
+    expect(create().disabled).toBe(false);
+    await fireEvent.click(create());
+    await tick();
+    expect(spy.mock.calls[0][0]).toMatchObject({ profile: 'work' });
+
+    await fireEvent.click(screen.getByTestId('kind-shell'));
+    await fireEvent.click(screen.getByText('Create'));
+    await tick();
+    expect(spy.mock.calls[1][0]).toMatchObject({ profile: null });
     spy.mockRestore();
   });
 
@@ -405,6 +467,7 @@ import { sessions } from './sessions';
 import { isGeneratedName } from './names';
 import { get } from 'svelte/store';
 import { selectedSession } from './selection';
+import { expectAccessible } from './a11y_check';
 
 function okRow(over: Partial<sessionsModule.SessionRow> = {}): sessionsModule.SessionRow {
   return {
@@ -501,7 +564,19 @@ describe('NewSessionDialog — generated names', () => {
     expect(screen.getByTestId('path-preview').textContent).toContain(`/r/cf/.worktrees/${slug}`);
   });
 
-  it('a second session on the same worktree gets a name-suffixed tmux name instead of a collision', async () => {
+  it('previews a branch-shaped worktree name in a flat directory', async () => {
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByTestId('new-worktree-chip'));
+    await tick();
+    const input = screen.getByTestId('new-worktree-name') as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: 'feat/imports' } });
+    await tick();
+    expect(input.value).toBe('feat/imports');
+    expect(screen.getByTestId('path-preview').textContent).toContain('/r/cf/.worktrees/feat-imports');
+  });
+
+    it('a second session on the same worktree gets a name-suffixed tmux name instead of a collision', async () => {
     (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
       if (cmd === 'list_host_worktrees') return { host_alias: 'mefistos', project_id: 1, cloned: true, worktrees: [remoteMain] };
       return null;
@@ -787,6 +862,35 @@ describe('NewSessionDialog host-scoped worktrees', () => {
     expect(screen.getByText('Create')).not.toBeDisabled();
   });
 
+  // Review r13 D19: a sentence, not the command's name or the raw SSH text
+  // (that sits under Details), and Scan again reruns the scan.
+  it('a failed scan says so in a sentence, keeps the detail under Details, and Scan again rescans', async () => {
+    let fail = true;
+    const calls: string[] = [];
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd !== 'list_host_worktrees') return null;
+      const a = (args as { args: { host_alias: string; project_id: number } }).args;
+      calls.push(a.host_alias);
+      if (fail) throw { code: 'E_SSH', message: 'ssh: connect to host mefistos: timed out' };
+      return { host_alias: a.host_alias, project_id: a.project_id, cloned: true, worktrees: [remoteMain] };
+    });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await pickHost('mefistos');
+    await vi.waitFor(() =>
+      expect(screen.getByTestId('wt-status-text')).toHaveTextContent(
+        "Couldn't list the worktrees on mefistos. Couldn't reach the host over SSH.",
+      ),
+    );
+    expect(screen.getByTestId('wt-status-text').textContent).not.toMatch(/list_host_worktrees|ssh:/);
+    expect(screen.getByTestId('wt-status-details')).toHaveTextContent('E_SSH: ssh: connect to host mefistos: timed out');
+    fail = false;
+    await fireEvent.click(screen.getByTestId('wt-scan-again'));
+    await vi.waitFor(() => expect(worktreeLabels()).toEqual(['main', '+ new worktree']));
+    expect(calls).toEqual(['mefistos', 'mefistos']);
+    expect(screen.queryByTestId('wt-status')).toBeNull();
+  });
+
   it('a slow earlier scan cannot overwrite a later host', async () => {
     hosts.update((h) => [...h, { alias: 'vps', ssh_alias: 'vps', reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' }]);
     let resolveMef!: (v: unknown) => void;
@@ -970,6 +1074,122 @@ describe('NewSessionDialog: Enter is gated the same as the Create button', () =>
     await tick();
     expect(spy).toHaveBeenCalledOnce();
     spy.mockRestore();
+  });
+});
+
+// The picker's ⌘↵ (project picker spec v2): `autostart` submits once with the
+// remembered choices, and leaves the dialog open when something needs a person.
+describe('NewSessionDialog autostart', () => {
+  const newSessionCalls = () =>
+    (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'new_session');
+
+  function answerNewSession() {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'new_session') return okRow();
+      if (cmd === 'list_sessions') return [];
+      return null;
+    });
+  }
+
+  it('submits once, on the remembered host and worktree', async () => {
+    localStorage.setItem(
+      'cf:pref:newsession.project.1',
+      JSON.stringify({ host: 'mefistos', worktrees: { mefistos: 502 }, kind: 'work' }),
+    );
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_host_worktrees')
+        return { host_alias: 'mefistos', project_id: 1, cloned: true, worktrees: [remoteMain, remoteFeat] };
+      if (cmd === 'new_session') return okRow();
+      if (cmd === 'list_sessions') return [];
+      return null;
+    });
+    render(NewSessionDialog, { props: { project, autostart: true, onCreate: () => {}, onCancel: () => {} } });
+    await vi.waitFor(() => expect(newSessionCalls()).toHaveLength(1));
+    await tick();
+    await tick();
+    expect(newSessionCalls()).toHaveLength(1);
+    const args = (newSessionCalls()[0][1] as any).args;
+    expect(args.host_alias).toBe('mefistos');
+    expect(args.worktree_id).toBe(502);
+  });
+
+  it('does nothing when the remote scan fails, and leaves the dialog open', async () => {
+    localStorage.setItem(
+      'cf:pref:newsession.project.1',
+      JSON.stringify({ host: 'mefistos', worktrees: { mefistos: 502 }, kind: 'work' }),
+    );
+    mockHostWorktrees(new Error('ssh down'), (cmd) => (cmd === 'new_session' ? okRow() : null));
+    render(NewSessionDialog, { props: { project, autostart: true, onCreate: () => {}, onCancel: () => {} } });
+    await vi.waitFor(() =>
+      expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.some((c) => c[0] === 'list_host_worktrees')).toBe(true),
+    );
+    await tick();
+    await tick();
+    await tick();
+    expect(newSessionCalls()).toHaveLength(0);
+    expect(screen.getByRole('dialog', { name: 'New session' })).toBeTruthy();
+  });
+
+  it('does nothing when a ticket is set', async () => {
+    answerNewSession();
+    const ticket = { key: 'ABC-1', title: 't' } as any;
+    render(NewSessionDialog, { props: { project, ticket, autostart: true, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await tick();
+    await tick();
+    expect(newSessionCalls()).toHaveLength(0);
+    expect(
+      (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'start_work'),
+    ).toHaveLength(0);
+  });
+
+  it('does nothing while a hub blocks new_session', async () => {
+    answerNewSession();
+    hubStatus.set({
+      remote: true,
+      url: 'https://fleet.example.com',
+      client_name: 'laptop',
+      client_mode: null,
+      configured_url: 'https://fleet.example.com',
+      configured_client_name: 'laptop',
+      allow_plaintext: false,
+      warning: null,
+      restart_required: false,
+      unavailable: null,
+    });
+    hubConnection.set({ state: 'reconnecting', attempt: 1, retry_in_secs: 3, reason: 'closed' });
+    render(NewSessionDialog, { props: { project, autostart: true, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await tick();
+    await tick();
+    expect(newSessionCalls()).toHaveLength(0);
+    expect(screen.getByRole('dialog', { name: 'New session' })).toBeTruthy();
+  });
+
+  it('gives up for good: a hub that comes back later does not fire a submit', async () => {
+    answerNewSession();
+    hubStatus.set({
+      remote: true,
+      url: 'https://fleet.example.com',
+      client_name: 'laptop',
+      client_mode: null,
+      configured_url: 'https://fleet.example.com',
+      configured_client_name: 'laptop',
+      allow_plaintext: false,
+      warning: null,
+      restart_required: false,
+      unavailable: null,
+    });
+    hubConnection.set({ state: 'reconnecting', attempt: 1, retry_in_secs: 3, reason: 'closed' });
+    render(NewSessionDialog, { props: { project, autostart: true, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await tick();
+    expect(newSessionCalls()).toHaveLength(0);
+    hubConnection.set({ state: 'connected' } as any);
+    await tick();
+    await tick();
+    await tick();
+    expect(newSessionCalls()).toHaveLength(0);
   });
 });
 
@@ -1193,6 +1413,57 @@ describe('NewSessionDialog: account headroom on the host chips', () => {
     await tick();
     expect(active()).toBe('claude-fleet-oci');
     expect(screen.getByTestId('host-usage-warning').textContent).toContain('Also used by mefistos.');
+  });
+
+  // Review r05 A8: the line and warning describe the account the picked
+  // login runs on, not the host's own login.
+  it('the host line follows the picked login\'s account', async () => {
+    const { NOW, ADMIN, GMAIL, inv } = await setup();
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd === 'refresh_account_usage') throw { code: 'E_RATE_LIMITED', message: 'floor' };
+      if (cmd === 'check_account_headroom') {
+        return {
+          pause_at_pct: 90,
+          chosen: null,
+          over: false,
+          suggestion: null,
+          logins: [
+            { profile: null, account_uuid: ADMIN.uuid, used_pct: 92 },
+            { profile: 'spare', account_uuid: GMAIL.uuid, used_pct: 9 },
+          ],
+        };
+      }
+      return null;
+    });
+    render(NewSessionDialog, {
+      props: { project, onCreate: () => {}, onCancel: () => {}, clock: () => NOW, initialHost: 'mefistos', ...USAGE },
+    });
+    await vi.waitFor(() => expect((screen.getByTestId('launch-account') as HTMLSelectElement).value).toBe('spare'));
+    await vi.waitFor(() =>
+      expect(screen.getByTestId('host-usage-line').textContent).toContain('mj-janci@users.noreply.github.com'),
+    );
+    expect(screen.queryByTestId('host-usage-warning')).toBeNull();
+    // Back to the host's own login: its low account warns again.
+    await fireEvent.change(screen.getByTestId('launch-account'), { target: { value: '' } });
+    await vi.waitFor(() =>
+      expect(screen.getByTestId('host-usage-warning').textContent).toContain('admin-janci@users.noreply.github.com'),
+    );
+  });
+
+  it('opening also refreshes the usage of the hosts\' profile accounts', async () => {
+    const fx = await import('./hosts_fixture');
+    const { NOW, inv } = await setup({
+      hosts: [
+        fx.host('local', {
+          account_uuid: fx.GMAIL.uuid,
+          claude_profiles: [{ name: 'spare', account_uuid: 'acc-profile', email: null }],
+        }),
+      ],
+    });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {}, clock: () => NOW, ...USAGE } });
+    await tick();
+    const refreshed = inv.mock.calls.filter((c) => c[0] === 'refresh_account_usage').map((c) => JSON.stringify(c[1]));
+    expect(refreshed.some((a) => a.includes('acc-profile'))).toBe(true);
   });
 
   it('a host whose account drops to low while the dialog is open stays chosen', async () => {
@@ -1627,6 +1898,41 @@ describe('NewSessionDialog, starting work on a ticket (work graph M3)', () => {
     projects.set([]);
   });
 
+  it("New layout: Jev's proposed sibling is pre-ticked with the chip, and Untick clears it (3.12 N3)", async () => {
+    const { projects } = await import('./projects');
+    projects.set([
+      project as never,
+      { project: { ...project.project, id: 2, repo: 'web', base_path: '/r/web' }, worktrees: [] } as never,
+    ]);
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'session_work_links')
+        return [{ id: 1, state: 'confirmed', source: 'manual', created_at: 1, ended_at: 5, snap_project_id: 2 }];
+      if (cmd === 'preview_start_work')
+        return {
+          key: 'ABC-7', title: 'Fix login', item_id: 42, missing: null, projects: [], hosts: [], conflicts: [],
+          plan: { key: 'ABC-7', title: 'Fix login', item_id: 42, project_id: 1, host_alias: 'local', branch: 'abc-7', name: 'ABC-7' },
+          suggested_sibling: { project_id: 2, confidence_pct: 81, run_id: 9 },
+        };
+      return null;
+    });
+    try {
+      render(NewSessionDialog, { props: { project, ticket, onCreate: () => {}, onCancel: () => {} } });
+      const also = (await screen.findByTestId('ticket-also-in-2')) as HTMLInputElement;
+      await vi.waitFor(() => expect(also.checked).toBe(true));
+      const chip = screen.getByTestId('ticket-also-in-proposed');
+      expect(chip.textContent).toContain('Proposed by Jev');
+      expect(chip.textContent).toContain('likely');
+      expect(also.closest('label')).toHaveClass('ai-pre');
+      await fireEvent.click(screen.getByTestId('ticket-also-in-proposed-change'));
+      await tick();
+      expect(also.checked).toBe(false);
+      expect(also.closest('label')).not.toHaveClass('ai-pre');
+      expect(screen.queryByTestId('ticket-also-in-proposed')).toBeNull();
+    } finally {
+      projects.set([]);
+    }
+  });
+
   it('forgets ticked repos when the ticket changes, and never starts in one not shown (M9.6)', async () => {
     const { projects } = await import('./projects');
     projects.set([
@@ -1674,6 +1980,72 @@ describe('NewSessionDialog, starting work on a ticket (work graph M3)', () => {
     }).args;
     expect(args.brief).toBe('my own words');
     expect(args.with_brief).toBe(true);
+  });
+
+  it('drafts the brief with Claude on the chosen host, sends the draft, and Clear goes back (redesign 6.10)', async () => {
+    fleetSettings.set({ ...SETTING_DEFAULTS, 'work.draft_briefs': 'true' });
+    const mock = mockedInvoke as ReturnType<typeof vi.fn>;
+    mock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'preview_start_work')
+        return {
+          key: 'ABC-7', title: 'Fix login', projects: [], hosts: [], conflicts: [], plan: null,
+          brief: 'Goal: stop the login loop.',
+          brief_draft: { model: 'haiku', host_alias: 'local', notes: 2 },
+        };
+      if (cmd === 'start_work') return started;
+      return null;
+    });
+    render(NewSessionDialog, {
+      props: { project, ticket, initialName: 'ABC-7 Fix login', onCreate: () => {}, onCancel: () => {} },
+    });
+    await tick();
+    await fireEvent.click(screen.getByTestId('ticket-brief-draft-ask'));
+    const field = (await screen.findByTestId('ticket-brief-draft-input')) as HTMLTextAreaElement;
+    await vi.waitFor(() => expect(field.value).toBe('Goal: stop the login loop.'));
+    expect(screen.getByTestId('ticket-brief-draft-meta').textContent).toContain(
+      'by haiku on local · from the ticket and 2 earlier notes',
+    );
+    // The last preview is the draft's (the sibling proposal previews first).
+    const ask = mock.mock.calls.filter((c) => c[0] === 'preview_start_work').at(-1)![1] as { args: Record<string, unknown> };
+    expect(ask.args).toMatchObject({ item_id: 42, project_id: 1, host_alias: 'local', with_brief: true, draft_brief: true });
+    // Nothing started by drafting; the person's edit of the draft is what goes.
+    expect(mock.mock.calls.some((c) => c[0] === 'start_work')).toBe(false);
+    await fireEvent.input(field, { target: { value: 'Goal: stop the loop. Start with Safari.' } });
+    await fireEvent.click(screen.getByTestId('create-btn'));
+    await vi.waitFor(() => expect(mock.mock.calls.some((c) => c[0] === 'start_work')).toBe(true));
+    const start = mock.mock.calls.find((c) => c[0] === 'start_work')![1] as { args: { brief?: string } };
+    expect(start.args.brief).toBe('Goal: stop the loop. Start with Safari.');
+  });
+
+  it('Clear drops the draft for the ticket brief, and a hub that cannot draft says so', async () => {
+    fleetSettings.set({ ...SETTING_DEFAULTS, 'work.draft_briefs': 'true' });
+    const mock = mockedInvoke as ReturnType<typeof vi.fn>;
+    let drafts = true;
+    mock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'preview_start_work')
+        return {
+          key: 'ABC-7', title: 'Fix login', projects: [], hosts: [], conflicts: [], plan: null,
+          brief: drafts ? 'Drafted.' : 'template',
+          ...(drafts ? { brief_draft: { model: 'haiku', host_alias: 'local', notes: 0 } } : {}),
+        };
+      return null;
+    });
+    render(NewSessionDialog, {
+      props: { project, ticket, initialName: 'ABC-7 Fix login', onCreate: () => {}, onCancel: () => {} },
+    });
+    await tick();
+    await fireEvent.click(screen.getByTestId('ticket-brief-draft-ask'));
+    await screen.findByTestId('ticket-brief-draft-input');
+    await vi.waitFor(() =>
+      expect(screen.getByTestId('ticket-brief-draft-meta').textContent).toContain('from the ticket'),
+    );
+    await fireEvent.click(screen.getByTestId('ticket-brief-draft-clear'));
+    const brief = (await screen.findByTestId('ticket-brief')) as HTMLTextAreaElement;
+    expect(brief.value.startsWith('You are starting work on ABC-7')).toBe(true);
+    drafts = false;
+    await fireEvent.click(screen.getByTestId('ticket-brief-draft-ask'));
+    const why = await screen.findByTestId('ticket-brief-draft-error');
+    expect(why.textContent).toContain('cannot draft a brief yet');
   });
 
   it('a live duplicate jumps to it instead of failing', async () => {
@@ -1727,4 +2099,322 @@ describe('NewSessionDialog, starting work on a ticket (work graph M3)', () => {
     sessionsModule.sessions.set([]);
     clearToasts();
   });
+});
+
+describe('NewSessionDialog accessibility (7.2)', () => {
+  it('passes the axe and audit checks; the agent picker is a named group of toggles', async () => {
+    const { container } = render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    const group = screen.getByRole('group', { name: 'Agent' });
+    expect(group.querySelectorAll('[aria-pressed="true"]')).toHaveLength(1);
+    await expectAccessible(container);
+  });
+});
+
+// Redesign step 4.4: a start on an account past `accounts.pause_at` asks
+// first and offers the login with the most headroom.
+describe('NewSessionDialog limit handling', () => {
+  const over = {
+    pause_at_pct: 90,
+    chosen: { profile: null, account_uuid: 'acc-own', used_pct: 95 },
+    over: true,
+    suggestion: { profile: 'spare', account_uuid: 'acc-spare', used_pct: 30 },
+    logins: [],
+  };
+  const created = () => (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'new_session');
+
+  function answer(headroom: unknown) {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'check_account_headroom') return headroom;
+      if (cmd === 'new_session') return { id: 1 };
+      if (cmd === 'list_sessions') return [];
+      return null;
+    });
+  }
+
+  it('asks before starting over the line, and starts on the suggested login', async () => {
+    answer(over);
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByText('Create'));
+    await vi.waitFor(() => expect(screen.getByTestId('limit-ask')).toBeTruthy());
+    expect(screen.getByTestId('limit-ask').textContent).toContain('95% of its');
+    expect(created()).toHaveLength(0);
+    expect(screen.getByTestId('limit-use-suggestion').textContent).toContain('spare');
+    await fireEvent.click(screen.getByTestId('limit-use-suggestion'));
+    await vi.waitFor(() => expect(created()).toHaveLength(1));
+    expect((created()[0][1] as any).args.profile).toBe('spare');
+  });
+
+  it('Start anyway keeps the chosen login', async () => {
+    answer(over);
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByText('Create'));
+    await vi.waitFor(() => expect(screen.getByTestId('limit-ask')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('limit-start-anyway'));
+    await vi.waitFor(() => expect(created()).toHaveLength(1));
+    expect((created()[0][1] as any).args.profile).toBeNull();
+    // The person's choice travels, so a hub does not refuse it (step 4.4).
+    expect((created()[0][1] as any).args.over_limit_ok).toBe(true);
+  });
+
+  it('under the line, or with no answer, starts straight away', async () => {
+    answer({ ...over, over: false, suggestion: null });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByText('Create'));
+    await vi.waitFor(() => expect(created()).toHaveLength(1));
+    expect(screen.queryByTestId('limit-ask')).toBeNull();
+    expect((created()[0][1] as any).args.over_limit_ok).toBeUndefined();
+  });
+});
+
+// Redesign step 4.5 (New layout): the agent picker, the account picker with
+// live usage defaulting to headroom, and "Run: in background".
+describe('NewSessionDialog in the New layout', () => {
+  const logins = {
+    pause_at_pct: 90,
+    chosen: null,
+    over: false,
+    suggestion: null,
+    logins: [
+      { profile: null, account_uuid: 'acc-own', used_pct: 80 },
+      { profile: 'spare', account_uuid: 'acc-spare', used_pct: 20 },
+      { profile: 'fresh', account_uuid: 'acc-fresh', used_pct: null },
+    ],
+  };
+  const calls = (cmd: string) => (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === cmd);
+
+  beforeEach(() => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'check_account_headroom') return logins;
+      if (cmd === 'new_session') return { id: 1 };
+      if (cmd === 'new_bg_session') return { claude_session_id: null, session: null };
+      if (cmd === 'list_sessions') return [];
+      return null;
+    });
+  });
+
+  it('offers Claude Code and Shell; Codex only where it is on the PATH, Agy as coming', async () => {
+    const { container } = render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await vi.waitFor(() => expect(screen.getByTestId('launch-account')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('run-background'));
+    await expectAccessible(container);
+    expect(screen.getByRole('group', { name: 'Agent' })).toBeTruthy();
+    expect(screen.getByTestId('kind-work').textContent).toContain('Claude Code');
+    // The fixture's hosts were never sampled for agents.
+    expect((screen.getByTestId('agent-codex') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId('agent-codex').textContent).toContain('not on local');
+    expect((screen.getByTestId('agent-agy') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId('agent-agy').textContent).toContain('coming');
+  });
+
+  // Orbit Fleet 12.4: Codex is offered on a host that has it on its PATH,
+  // and a Codex session takes none of Claude Code's launch options.
+  it('starts a Codex session on a host that has it, without Claude options', async () => {
+    hosts.update((hs) => hs.map((h) => (h.alias === 'local' ? { ...h, agents_on_path: ['claude', 'codex'] } : h)));
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await vi.waitFor(() => expect(screen.getByTestId('launch-account')).toBeTruthy());
+    const codex = screen.getByTestId('agent-codex') as HTMLButtonElement;
+    expect(codex.disabled).toBe(false);
+    await fireEvent.click(codex);
+    expect(codex.getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByTestId('kind-work').getAttribute('aria-pressed')).toBe('false');
+    // Codex's own models and efforts (`codex -m`), never Claude's aliases.
+    const model = screen.getByTestId('launch-model') as HTMLSelectElement;
+    const values = Array.from(model.options).map((o) => o.value);
+    expect(values).toContain('gpt-6-sol');
+    expect(values).not.toContain('opus');
+    expect(screen.queryByTestId('launch-account')).toBeNull();
+    expect(screen.queryByTestId('run-background')).toBeNull();
+    const checks = calls('check_account_headroom').length;
+    await fireEvent.click(screen.getByText('Create'));
+    await vi.waitFor(() => expect(calls('new_session')).toHaveLength(1));
+    const args = (calls('new_session')[0][1] as any).args;
+    expect(args).toMatchObject({ kind: 'work', agent: 'codex', model: null, effort: null, profile: null });
+    // No Claude account limit check stands between Create and a Codex start.
+    expect(calls('check_account_headroom')).toHaveLength(checks);
+  });
+
+  it('starts a Codex session on the Codex model and effort picked', async () => {
+    hosts.update((hs) => hs.map((h) => (h.alias === 'local' ? { ...h, agents_on_path: ['claude', 'codex'] } : h)));
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await vi.waitFor(() => expect(screen.getByTestId('launch-account')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('agent-codex'));
+    await fireEvent.change(screen.getByTestId('launch-model'), { target: { value: 'gpt-6-luna' } });
+    await fireEvent.change(screen.getByTestId('launch-effort'), { target: { value: 'high' } });
+    await fireEvent.click(screen.getByText('Create'));
+    await vi.waitFor(() => expect(calls('new_session')).toHaveLength(1));
+    const args = (calls('new_session')[0][1] as any).args;
+    expect(args).toMatchObject({ agent: 'codex', model: 'gpt-6-luna', effort: 'high', profile: null });
+  });
+
+  it('a Claude Code session sends no agent', async () => {
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await vi.waitFor(() => expect(screen.getByTestId('launch-account')).toBeTruthy());
+    await fireEvent.click(screen.getByText('Create'));
+    await vi.waitFor(() => expect(calls('new_session')).toHaveLength(1));
+    expect((calls('new_session')[0][1] as any).args.agent).toBeNull();
+  });
+
+  it('defaults the account to the login with the most headroom and starts on it', async () => {
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await vi.waitFor(() => expect(screen.getByTestId('launch-account')).toBeTruthy());
+    const sel = screen.getByTestId('launch-account') as HTMLSelectElement;
+    await vi.waitFor(() => expect(sel.value).toBe('spare'));
+    expect(sel.textContent).toContain('20% used');
+    expect(sel.textContent).toContain('no reading');
+    await fireEvent.click(screen.getByText('Create'));
+    await vi.waitFor(() => expect(calls('new_session')).toHaveLength(1));
+    expect((calls('new_session')[0][1] as any).args.profile).toBe('spare');
+  });
+
+  // Review r05 A4: a login belongs to its host, so moving to a host whose
+  // logins have no reading must not carry the last host's profile into Create.
+  it('a host change drops the last host\'s login', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, a?: any) => {
+      if (cmd === 'check_account_headroom') {
+        return a?.args?.host_alias === 'mefistos'
+          ? { ...logins, logins: [{ profile: null, account_uuid: 'acc-mef', used_pct: null }] }
+          : logins;
+      }
+      if (cmd === 'list_host_worktrees') return { host_alias: 'mefistos', project_id: 1, cloned: true, worktrees: [remoteMain] };
+      if (cmd === 'new_session') return { id: 1 };
+      if (cmd === 'list_sessions') return [];
+      return null;
+    });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await vi.waitFor(() => expect((screen.getByTestId('launch-account') as HTMLSelectElement).value).toBe('spare'));
+    const mef = Array.from(document.querySelectorAll('.host-pick')).find((p) => (p as HTMLElement).dataset.alias === 'mefistos') as HTMLButtonElement;
+    await fireEvent.click(mef);
+    await vi.waitFor(() => expect(calls('check_account_headroom').length).toBeGreaterThanOrEqual(2));
+    await vi.waitFor(() => expect((screen.getByTestId('launch-account') as HTMLSelectElement).value).toBe(''));
+    await vi.waitFor(() => expect(worktreeLabels()).toContain('main'));
+    await fireEvent.click(screen.getByText('Create'));
+    await vi.waitFor(() => expect(calls('new_session')).toHaveLength(1));
+    expect((calls('new_session')[0][1] as any).args.profile).toBeNull();
+  });
+
+  // Review r05: a profile typed while the headroom check is still out is
+  // not overwritten by the login with the most headroom when it answers.
+  it('a profile typed before the logins arrive is kept', async () => {
+    let answer: (v: unknown) => void = () => {};
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'check_account_headroom') return new Promise((r) => (answer = r));
+      if (cmd === 'new_session') return { id: 1 };
+      if (cmd === 'list_sessions') return [];
+      return null;
+    });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await vi.waitFor(() => expect(calls('check_account_headroom')).toHaveLength(1));
+    await fireEvent.input(screen.getByTestId('launch-profile'), { target: { value: 'work' } });
+    answer(logins);
+    await tick();
+    await tick();
+    expect(screen.queryByTestId('launch-account')).toBeNull();
+    expect((screen.getByTestId('launch-profile') as HTMLInputElement).value).toBe('work');
+  });
+
+  it('a pick sticks, and Other profile brings back the name field', async () => {
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await vi.waitFor(() => expect(screen.getByTestId('launch-account')).toBeTruthy());
+    const sel = screen.getByTestId('launch-account') as HTMLSelectElement;
+    await fireEvent.change(sel, { target: { value: '' } });
+    expect(sel.value).toBe('');
+    await fireEvent.change(sel, { target: { value: '\u0000other' } });
+    expect(screen.queryByTestId('launch-account')).toBeNull();
+    expect(screen.getByTestId('launch-profile')).toBeTruthy();
+  });
+
+  it('Run: in background starts a supervised session with its prompt', async () => {
+    const onCancel = vi.fn();
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel } });
+    await tick();
+    await fireEvent.click(screen.getByTestId('run-background'));
+    expect(screen.queryByTestId('launch-model')).toBeNull();
+    const btn = screen.getByTestId('create-btn') as HTMLButtonElement;
+    expect(btn.textContent).toBe('Start in background');
+    expect(btn.disabled).toBe(true);
+    await fireEvent.input(screen.getByTestId('bg-prompt'), { target: { value: 'fix the flaky test' } });
+    await fireEvent.click(btn);
+    await vi.waitFor(() => expect(calls('new_bg_session')).toHaveLength(1));
+    expect((calls('new_bg_session')[0][1] as any).args.prompt).toBe('fix the flaky test');
+    expect(calls('new_session')).toHaveLength(0);
+    await vi.waitFor(() => expect(onCancel).toHaveBeenCalled());
+  });
+
+});
+
+// Redesign step 4.11 (New layout): with no host the project's rule keeps,
+// Jev N5 may pre-select one of the online hosts under their limit, with the
+// shared ProposedBy chip; the start answers the proposal.
+describe('NewSessionDialog host placement', () => {
+  const calls = (cmd: string) => (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === cmd);
+  const active = () => document.querySelector(".host-pick[aria-pressed='true']")?.getAttribute('data-alias');
+
+  function answer(suggestion: unknown) {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'propose_host_placement') return suggestion;
+      if (cmd === 'list_host_worktrees') return { host_alias: 'mefistos', project_id: 1, cloned: true, worktrees: [remoteMain] };
+      if (cmd === 'check_account_headroom') return { pause_at_pct: 90, chosen: null, over: false, suggestion: null, logins: [] };
+      if (cmd === 'new_session') return { id: 1 };
+      if (cmd === 'record_host_placement') return true;
+      if (cmd === 'list_sessions') return [];
+      return null;
+    });
+  }
+
+  it('pre-selects the proposed host with the chip, and the start answers it', async () => {
+    answer({ host_alias: 'mefistos', confidence_pct: 80, run_id: 7 });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await vi.waitFor(() => expect(screen.getByTestId('new-session-host-proposed')).toBeTruthy());
+    expect(active()).toBe('mefistos');
+    expect(document.querySelector('[data-alias="mefistos"]')).toHaveClass('ai-pre');
+    expect(screen.getByTestId('new-session-host-proposed').textContent).toContain('Proposed by Jev');
+    expect(screen.getByTestId('new-session-host-proposed').textContent).toContain('likely');
+    await vi.waitFor(() => expect(worktreeLabels()).toContain('main'));
+    await fireEvent.click(screen.getByText('Create'));
+    await vi.waitFor(() => expect(calls('record_host_placement')).toHaveLength(1));
+    expect((calls('new_session')[0][1] as any).args.host_alias).toBe('mefistos');
+    expect((calls('record_host_placement')[0][1] as any).args).toEqual({ project_id: 1, host_alias: 'mefistos' });
+  });
+
+  it('Change goes back to the host it had, and the start then corrects the proposal', async () => {
+    answer({ host_alias: 'mefistos', confidence_pct: 80, run_id: 7 });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await vi.waitFor(() => expect(screen.getByTestId('new-session-host-proposed')).toBeTruthy());
+    await fireEvent.click(screen.getByText('Change'));
+    expect(active()).toBe('local');
+    expect(screen.queryByTestId('new-session-host-proposed')).toBeNull();
+    // The corrected state says what changed and that it is kept (G4.9).
+    expect(screen.getByTestId('new-session-host-corrected').textContent).toContain(
+      'You changed mefistos → local · recorded as a correction when you start',
+    );
+    await fireEvent.click(screen.getByText('Create'));
+    await vi.waitFor(() => expect(calls('record_host_placement')).toHaveLength(1));
+    expect((calls('record_host_placement')[0][1] as any).args.host_alias).toBe('local');
+  });
+
+  it('a host the project already keeps is never asked about', async () => {
+    answer({ host_alias: 'mefistos', confidence_pct: 80 });
+    render(NewSessionDialog, { props: { project, initialHost: 'local', onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await tick();
+    expect(calls('propose_host_placement')).toHaveLength(0);
+    expect(active()).toBe('local');
+  });
+
+  it('below the floor, nothing is pre-selected', async () => {
+    answer({ host_alias: 'mefistos', confidence_pct: 30 });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await vi.waitFor(() => expect(calls('propose_host_placement')).toHaveLength(1));
+    await tick();
+    expect(active()).toBe('local');
+    expect(screen.queryByTestId('new-session-host-proposed')).toBeNull();
+    await fireEvent.click(screen.getByText('Create'));
+    await vi.waitFor(() => expect(calls('new_session')).toHaveLength(1));
+    expect(calls('record_host_placement')).toHaveLength(0);
+  });
+
 });

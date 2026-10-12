@@ -28,21 +28,26 @@ pub fn parse_since(s: &str, now: i64) -> Result<i64, String> {
     if let Ok(unix) = s.parse::<i64>() {
         return Ok(unix);
     }
-    let (num, unit) = s.split_at(s.len().saturating_sub(1));
-    let n: i64 = num
-        .parse()
-        .map_err(|_| format!("--since {s:?}: use 30m, 2h, 3d or a unix timestamp"))?;
-    let secs = match unit {
-        "m" => 60,
-        "h" => 3600,
-        "d" => 86_400,
-        _ => {
-            return Err(format!(
-                "--since {s:?}: use 30m, 2h, 3d or a unix timestamp"
-            ))
-        }
+    let usage = || format!("--since {s:?}: use 30m, 2h, 3d or a unix timestamp");
+    // The unit is the last CHARACTER: splitting at a byte offset panics on
+    // `3é`. The count is unsigned (a negative one names the future) and the
+    // arithmetic is checked (`999999999999999d` overflows).
+    let mut chars = s.chars();
+    let secs: i64 = match chars.next_back() {
+        Some('m') => 60,
+        Some('h') => 3600,
+        Some('d') => 86_400,
+        _ => return Err(usage()),
     };
-    Ok(now - n * secs)
+    let num = chars.as_str();
+    if num.is_empty() || !num.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(usage());
+    }
+    num.parse::<i64>()
+        .ok()
+        .and_then(|n| n.checked_mul(secs))
+        .and_then(|d| now.checked_sub(d))
+        .ok_or_else(usage)
 }
 
 /// The `GET /reports` response: a JSON array on 200, the hub's own error
@@ -71,8 +76,13 @@ pub fn table(rows: &[serde_json::Value], width: usize) -> String {
     if rows.is_empty() {
         return "no error reports".to_string();
     }
+    // Every cell is text a reporter chose (any authenticated caller can POST
+    // `/report`), printed to the operator's terminal: no control characters,
+    // so no escape sequence (a cleared screen, an OSC 52 clipboard write)
+    // reaches it.
     let field = |r: &serde_json::Value, k: &str| {
-        r.get(k).and_then(|v| v.as_str()).unwrap_or("-").to_string()
+        let v = r.get(k).and_then(|v| v.as_str()).unwrap_or("-");
+        fleet_core::mcp::guard::scrub_line(v.lines().next().unwrap_or_default())
     };
     let header = [
         "RECEIVED",
@@ -91,11 +101,7 @@ pub fn table(rows: &[serde_json::Value], width: usize) -> String {
                 field(r, "level"),
                 field(r, "component"),
                 field(r, "code"),
-                field(r, "message")
-                    .lines()
-                    .next()
-                    .unwrap_or_default()
-                    .to_string(),
+                field(r, "message"),
             ]
         })
         .collect();
@@ -248,6 +254,34 @@ mod tests {
         assert_eq!(parse_since("1700000000", 0).unwrap(), 1_700_000_000);
         assert!(parse_since("soon", 0).is_err());
         assert!(parse_since("5w", 0).is_err());
+    }
+
+    #[test]
+    fn since_refuses_odd_input_without_panicking() {
+        for bad in [
+            "3é",
+            "é",
+            "5分",
+            "m",
+            "-5m",
+            "+5m",
+            "9223372036854775807d",
+            " d",
+        ] {
+            assert!(parse_since(bad, 1_000_000).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_table_prints_no_escape_sequences() {
+        let rows = vec![
+            serde_json::json!({ "received_at": 1_790_000_000, "origin": "host:box",
+            "level": "error", "component": "x\u{1b}[2J", "code": "E\u{7}",
+            "message": "\u{1b}]52;c;cm0gLXJmIH4=\u{7}hi" }),
+        ];
+        let t = table(&rows, 120);
+        assert!(!t.contains('\u{1b}') && !t.contains('\u{7}'), "{t:?}");
+        assert!(t.contains("hi"));
     }
 
     #[test]

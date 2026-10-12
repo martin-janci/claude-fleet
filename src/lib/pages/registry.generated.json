@@ -1,11 +1,30 @@
 {
-  "_generated": "from crates/fleet-core/src/pages; regenerate with REGEN_PAGE_DOCS=1 cargo test -p fleet-core page_docs_are_current",
+  "_generated": "from crates/fleet-core/src/pages; regenerate with REGEN_PAGE_DOCS=1 cargo fleet-test -- page_docs_are_current",
   "actions": [
     {
       "command": "work_retention_sweep",
       "help": "Delete what is past its window now, as the GC tick would: at most 2,000 rows per table, the rest over later sweeps.",
       "id": "work.retention_sweep",
       "label": "Sweep now"
+    },
+    {
+      "command": "repair_workspaces_now",
+      "help": "Re-add deleted worktree folders on every host now, as the automatic repair would: at most five per run, and an unmounted volume is never touched.",
+      "id": "repair.now",
+      "label": "Repair now"
+    },
+    {
+      "command": "restore_all_lost_sessions",
+      "confirm": "Resume every lost session on every host now? Each one starts its agent again on its host.",
+      "help": "Resume every host's lost sessions now, in batches with the pause between them set above.",
+      "id": "restore.lost",
+      "label": "Restore lost sessions"
+    },
+    {
+      "command": "scan_debug_devices",
+      "help": "Look for attached phones, emulators and simulators on every host now.",
+      "id": "debug_devices.scan_all",
+      "label": "Scan all hosts"
     }
   ],
   "descriptors": [
@@ -25,6 +44,7 @@
       "label": "Reconcile interval",
       "modified": false,
       "restart": "app",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -48,6 +68,7 @@
       "label": "Stale working timeout",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -71,6 +92,7 @@
       "label": "Stale mark lifts after",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -94,6 +116,7 @@
       "label": "Keep lost sessions",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "hours",
       "value": "1209600",
@@ -115,6 +138,7 @@
       "label": "Concurrent restores",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "count",
       "value": "4"
@@ -135,11 +159,181 @@
       "label": "Delay between restores",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
       "unit": "ms",
       "value": "3000"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "Stop every background job that acts on its own: missions, garbage collection, playbooks, repairs, tracker, catalog and folder syncs, and host refreshes. Reconcile, usage and update checks keep running, and health shows each job as paused.",
+      "key": "automation.paused",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Pause all automation",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "0",
+      "help": "What every routine's runs together may spend in one UTC day. Once they have spent it no routine starts a run, Run now included, until the next day. A run already going finishes.",
+      "key": "automation.daily_budget",
+      "kind": {
+        "max": 1000000,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Routines daily budget",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "usd",
+      "value": "0",
+      "zero": "none"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "true",
+      "help": "Let active missions take their next steps: keep their cards and brakes current and, under a person's grant, run what is ready. Off stops every mission's loop at once.",
+      "key": "orchestrator.enabled",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Mission loop",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "true"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "1",
+      "help": "The most any mission's loop may do on its own, whatever the mission asks and its grant signs. 0: the loop only keeps the cards; 1: it also asks the planner, and a person presses every step; 2: runs, retries, reviews and closes within a grant; 3: also creates the planner's tasks.",
+      "key": "orchestrator.max_level",
+      "kind": {
+        "max": 3,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Highest mission autonomy",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "count",
+      "value": "1"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "Run a mission's review and its test commands as one Claude run in the implementer's checkout, with read-only tools and only those commands, instead of opening a session for each. Falls back to a session when the checkout moved or a command is not a plain one.",
+      "key": "orchestrator.headless_checks",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Headless reviews and tests",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "sonnet",
+      "help": "The Claude model headless reviews and tests run.",
+      "key": "orchestrator.headless_model",
+      "kind": {
+        "options": [
+          "haiku",
+          "sonnet",
+          "opus"
+        ],
+        "type": "choice"
+      },
+      "label": "Headless check model",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "advanced"
+      ],
+      "unit": "none",
+      "value": "sonnet"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "true",
+      "help": "Control's chat sends the option its agent marked recommended once nobody has answered for the minutes below. Typing or Cancel stops it. Never for a push, a delete or another step hard to undo, and only while the app is open.",
+      "key": "control.auto_continue",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Go on with the recommended option",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "true"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "10",
+      "help": "How long Control's chat waits for your answer before it sends the recommended option.",
+      "key": "control.auto_continue_minutes",
+      "kind": {
+        "max": 1440,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Wait before going on",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "minutes",
+      "value": "10"
     },
     {
       "ai": "suggest",
@@ -155,6 +349,7 @@
       "label": "Press Enter when stuck",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "false"
@@ -173,6 +368,7 @@
       "label": "Recreate out-of-memory sessions",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "false"
@@ -193,10 +389,75 @@
       "label": "Out-of-memory budget",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "count",
       "value": "2",
       "zero": "never"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "300",
+      "help": "Seconds between two looks of one agent rule at what it watches (a repo's pull requests, a Jira project). An agent works only under a rule a person granted.",
+      "key": "agents.poll_interval_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Agents poll interval",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "seconds",
+      "value": "300",
+      "zero": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "3",
+      "help": "Agent jobs that run at the same time, every agent together. A pull request or a ticket never has two at once.",
+      "key": "agents.max_concurrent",
+      "kind": {
+        "max": 10,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Agents running at once",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "count",
+      "value": "3"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "3",
+      "help": "Runs one agent job may get. A failure worth retrying waits 1, 2, 4 … minutes; one that would fail the same way again ends the job at once.",
+      "key": "agents.max_retries",
+      "kind": {
+        "max": 10,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Agent job attempts",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "count",
+      "value": "3"
     },
     {
       "ai": "never",
@@ -213,6 +474,7 @@
       "label": "Garbage-collect idle sessions",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "false"
@@ -233,6 +495,7 @@
       "label": "Background agent idle limit",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "hours",
       "value": "86400",
@@ -254,6 +517,7 @@
       "label": "Shell idle limit",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "hours",
       "value": "604800",
@@ -275,6 +539,7 @@
       "label": "Work session idle limit",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "hours",
       "value": "0",
@@ -296,6 +561,7 @@
       "label": "GC sweep interval",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -319,6 +585,7 @@
       "label": "Keep lost outside sessions",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -340,6 +607,7 @@
       "label": "Projects roots",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "{}"
@@ -372,6 +640,7 @@
         ]
       ],
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "github"
@@ -392,6 +661,7 @@
       "label": "Task timeout",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "hours",
       "value": "86400",
@@ -411,6 +681,7 @@
       "label": "Re-create vanished worktrees",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "false"
@@ -431,6 +702,7 @@
       "label": "Workspace check interval",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -453,6 +725,7 @@
       "label": "Download: file cap",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "mib",
       "value": "100"
@@ -473,6 +746,7 @@
       "label": "Downloads: space",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "mib",
       "value": "2048"
@@ -493,10 +767,74 @@
       "label": "Keep downloads",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "days",
       "value": "604800",
       "zero": "until removed"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "Let Claude Code's /voice on a host record from the microphone of the app attached to it. The microphone opens only while you record, for a session you turned 🎤 on for.",
+      "key": "voice.enabled",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Voice relay",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "300",
+      "help": "A recording longer than this is cut off.",
+      "key": "voice.max_capture_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Voice: longest recording",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "seconds",
+      "value": "300",
+      "zero": "no limit"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "1800",
+      "help": "A session's 🎤 turns itself off after this long without a recording.",
+      "key": "voice.claim_ttl_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Voice: microphone idle release",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "seconds",
+      "value": "1800",
+      "zero": "never"
     },
     {
       "ai": "suggest",
@@ -514,6 +852,7 @@
       "label": "Move: transcript cap",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -536,6 +875,7 @@
       "label": "Move: git bundle cap",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -558,6 +898,7 @@
       "label": "Move: ignored entry cap",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -580,6 +921,7 @@
       "label": "Move: ignored total cap",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -602,6 +944,7 @@
       "label": "Move: session state cap",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -624,6 +967,7 @@
       "label": "Move: wait timeout",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "minutes",
       "value": "240"
@@ -642,9 +986,55 @@
       "label": "Collect token usage",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "true"
+    },
+    {
+      "ai": "never",
+      "danger": {
+        "level": "confirm",
+        "message": "Conversation text, which may hold secrets, will be stored in the hub's database."
+      },
+      "default": "false",
+      "help": "Copy what is said in each session into the hub's search index, so a search finds it in any conversation. Turning it off deletes the copied text.",
+      "key": "search.index_transcripts",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Search conversation text",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "30",
+      "help": "Days of conversation text the search index keeps.",
+      "key": "search.transcript_days",
+      "kind": {
+        "max": 365,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Conversation text kept",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "days",
+      "value": "30"
     },
     {
       "ai": "suggest",
@@ -662,12 +1052,34 @@
       "label": "Usage interval",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
       "unit": "seconds",
       "value": "300",
       "zero": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "90",
+      "help": "Used share of an account's 5-hour or weekly window at which starting a session on it asks first and offers the login with the most headroom.",
+      "key": "accounts.pause_at",
+      "kind": {
+        "max": 100,
+        "min": 50,
+        "type": "int"
+      },
+      "label": "Ask before starting at",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "percent",
+      "value": "90"
     },
     {
       "ai": "suggest",
@@ -683,6 +1095,7 @@
       "label": "Price overrides",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -705,6 +1118,7 @@
       "label": "Error reports kept",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -727,6 +1141,7 @@
       "label": "Error report age",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -750,6 +1165,7 @@
       "label": "Context red threshold",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "percent",
       "value": "85"
@@ -770,6 +1186,7 @@
       "label": "Trust a host's Claude version for",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -792,6 +1209,7 @@
       "label": "Disk low at",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "percent",
       "value": "90"
@@ -812,6 +1230,7 @@
       "label": "Claude behind after",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -834,6 +1253,7 @@
       "label": "Hooks silent after",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -847,7 +1267,7 @@
         "message": "Fleet will write its skills into a folder another git repository tracks."
       },
       "default": "false",
-      "help": "Write fleet's skills even when a host's ~/.claude/skills is inside a git work tree, such as a dotfiles checkout. Off: provisioning refuses such a host.",
+      "help": "Write fleet's skills even when a git work tree on the host, such as a dotfiles checkout, tracks files in fleet's two skill dirs. Off: provisioning refuses such a host; untracking or ignoring those two dirs is enough.",
       "key": "provision.force_git_tree",
       "kind": {
         "type": "bool"
@@ -855,6 +1275,7 @@
       "label": "Provision into git-tracked skills",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -875,6 +1296,7 @@
       "label": "Install the ag launcher",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -897,6 +1319,7 @@
       "label": "Retention: work journal",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "days",
       "value": "365",
@@ -918,6 +1341,7 @@
       "label": "Retention: done tickets",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "days",
       "value": "180",
@@ -939,6 +1363,7 @@
       "label": "Retention: work timeline",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "days",
       "value": "180",
@@ -960,6 +1385,7 @@
       "label": "Recent work",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "days",
       "value": "14"
@@ -980,6 +1406,7 @@
       "label": "Tracker sync interval",
       "modified": false,
       "restart": "app",
+      "scope": "fleet",
       "tags": [],
       "unit": "seconds",
       "value": "300",
@@ -1001,6 +1428,7 @@
       "label": "Asset scan check",
       "modified": false,
       "restart": "app",
+      "scope": "fleet",
       "tags": [],
       "unit": "minutes",
       "value": "3600",
@@ -1022,6 +1450,7 @@
       "label": "Asset scan age",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -1042,6 +1471,7 @@
       "label": "Asset cards and safe sync",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "true"
@@ -1060,6 +1490,7 @@
       "label": "Push applied cards",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "false"
@@ -1080,6 +1511,7 @@
       "label": "Ticket description cache",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -1101,6 +1533,7 @@
       "label": "Trusted branch projects",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "[]"
@@ -1119,6 +1552,7 @@
       "label": "Keep evidence snippets",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "true"
@@ -1137,6 +1571,7 @@
       "label": "Ticket context at session start",
       "modified": false,
       "restart": "hooks",
+      "scope": "fleet",
       "tags": [
         "experimental"
       ],
@@ -1156,11 +1591,33 @@
       },
       "label": "Classification nudge",
       "modified": false,
+      "per_org": true,
       "restart": "none",
+      "scope": "org",
       "tags": [
         "experimental",
         "ai"
       ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "Let an organisation's members, not only its admins, create and change its sprints and releases. Viewers never can; anyone can keep personal ones.",
+      "key": "work.members_plan_sprints",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Members plan sprints",
+      "modified": false,
+      "per_org": true,
+      "restart": "none",
+      "scope": "org",
+      "tags": [],
       "unit": "none",
       "value": "false"
     },
@@ -1182,12 +1639,166 @@
       },
       "label": "Summary model",
       "modified": false,
+      "per_org": true,
       "restart": "none",
+      "scope": "org",
       "tags": [
         "ai"
       ],
       "unit": "none",
       "value": "haiku"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "Terminal and composer: Ask asks a model about the line you are typing, with its history as context, on the session's host. A proposed command is put on the line, never run.",
+      "key": "work.context_help",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Context help",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "ai"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "haiku",
+      "help": "The model that answers a question asked at a terminal or composer prompt line, on the session's own host and account.",
+      "key": "work.help_model",
+      "kind": {
+        "options": [
+          "haiku",
+          "sonnet",
+          "opus"
+        ],
+        "type": "choice"
+      },
+      "label": "Context help model",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "ai"
+      ],
+      "unit": "none",
+      "value": "haiku"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "Files tab: Draft writes a commit message from the staged diff with claude -p on the session's host. A draft is text you edit and commit yourself.",
+      "key": "work.draft_commit_messages",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Draft commit messages",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "ai"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "Starting from a ticket: Draft writes the agent's brief from the ticket before the first prompt, on the planned host.",
+      "key": "work.draft_briefs",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Draft agent briefs",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "ai"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "Finish: Draft writes a finished mission's release note from its merged PRs, on the mission's planner host.",
+      "key": "work.draft_release_notes",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Draft release notes",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "ai"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "A watched session offers \"Since 13:20\": what it did since you last looked, summarised on its own host and account.",
+      "key": "work.catch_up_summaries",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Catch-up summaries",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "ai"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "10",
+      "help": "The largest file or image a task takes. At most 16 MiB: what one call between the desktop and the hub carries.",
+      "key": "work.attachment_max_mb",
+      "kind": {
+        "max": 16,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Largest attachment",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "mib",
+      "value": "10"
     },
     {
       "ai": "suggest",
@@ -1205,6 +1816,7 @@
       "label": "Tidy: done for",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "days",
       "value": "2"
@@ -1225,6 +1837,7 @@
       "label": "Tidy: idle for",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "hours",
       "value": "4"
@@ -1244,7 +1857,9 @@
       },
       "label": "Tidy: unlinked for",
       "modified": false,
+      "per_org": true,
       "restart": "none",
+      "scope": "org",
       "tags": [],
       "unit": "days",
       "value": "7"
@@ -1264,6 +1879,7 @@
       "label": "Auto-tidy",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "false"
@@ -1301,6 +1917,7 @@
         ]
       ],
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "done_idle,pr_merged_idle"
@@ -1311,18 +1928,21 @@
         "level": "none"
       },
       "default": "stable",
-      "help": "Which releases the hub follows for its fleet.",
+      "help": "Which releases the hub follows for its fleet: stable, beta (release candidates too), nightly (main, at most every two hours) or dev (every green push to main).",
       "key": "update.track",
       "kind": {
         "options": [
           "stable",
-          "beta"
+          "beta",
+          "nightly",
+          "dev"
         ],
         "type": "choice"
       },
       "label": "Release track",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "stable"
@@ -1346,6 +1966,7 @@
       "label": "Hub updates",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "notify"
@@ -1355,7 +1976,7 @@
       "danger": {
         "level": "none"
       },
-      "default": "notify",
+      "default": "automatic",
       "help": "The same choice for fleet-agent on hosts the hub cannot reach.",
       "key": "update.agent.mode",
       "kind": {
@@ -1369,9 +1990,10 @@
       "label": "Agent updates",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
-      "value": "notify"
+      "value": "automatic"
     },
     {
       "ai": "suggest",
@@ -1392,6 +2014,7 @@
       "label": "Desktop updates",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "notify"
@@ -1414,6 +2037,7 @@
       "label": "Phone updates",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "none",
       "value": "notify"
@@ -1434,9 +2058,69 @@
       "label": "Update check interval",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "hours",
       "value": "21600"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "",
+      "help": "A daily range in UTC, like 02:00-05:00, in which automatic updates install. Outside it they wait; an offer to a person is not held. Empty: any time.",
+      "key": "update.window",
+      "kind": {
+        "type": "time_range"
+      },
+      "label": "Maintenance window",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": ""
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "3600",
+      "help": "How long each wave of a staged rollout runs before the next opens, if its failure ratio stays under the rollout's halt ratio.",
+      "key": "update.rollout_wave_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 300,
+        "type": "secs"
+      },
+      "label": "Rollout wave soak",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "hours",
+      "value": "3600"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "Serve the agent and hub tarballs, desktop bundles and the phone's APK from this hub, for machines that cannot reach GitHub. Each file is fetched once and checked against the signed release.",
+      "key": "update.mirror",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Mirror release files",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "false"
     },
     {
       "ai": "never",
@@ -1453,6 +2137,7 @@
       "label": "Decisions (Jev)",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "experimental",
         "network",
@@ -1494,6 +2179,7 @@
         ]
       ],
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "experimental",
         "ai"
@@ -1534,6 +2220,745 @@
         ]
       ],
       "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Pre-selecting the repository of a task's first start. Shadow only records; assist suggests.",
+      "key": "decide.jev.start_project",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: start repository",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Pre-ticking the other repository a ticket start also needs. Shadow only records; assist suggests.",
+      "key": "decide.jev.sibling_repos",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: sibling repository",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Pre-selecting the host of a new session when no rule, limit or offline host decides. Shadow only records; assist suggests.",
+      "key": "decide.jev.host_placement",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: session host",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Showing the likely option first in an agent's question or a chat form. Never on a push, a permission or a risky option. Shadow only records; assist suggests.",
+      "key": "decide.jev.quick_answer",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: quick answer",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Prefilling the project when you adopt a pane fleet did not start. Shadow only records; assist suggests.",
+      "key": "decide.jev.adopt_target",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: adopt into",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Prefilling the project when you restore a conversation found on a host. Shadow only records; assist suggests.",
+      "key": "decide.jev.restore_target",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: restore into",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Flagging a proposed task that may duplicate an existing one. Shadow only records; assist suggests.",
+      "key": "decide.jev.duplicate",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: duplicate task",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Proposing a Work-view group for a new task no rule or person placed. Shadow only records; assist suggests.",
+      "key": "decide.jev.work_placement",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: task group",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Noticing another of your sessions working on the same thing. Shadow only records; assist suggests.",
+      "key": "decide.jev.related_session",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: related session",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Proposing which mission or session a message typed in Control is about. A short or unclear message gets a question instead. Shadow only records; assist suggests.",
+      "key": "decide.jev.control_route",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: Control routing",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Checking a watcher's summary of a session against its transcript. Shadow only records; assist hides a summary the transcript does not support.",
+      "key": "decide.jev.summary_check",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: summary check",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: check first"
+        ]
+      ],
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Reading what a turn came to (finished, a question, stuck) from the end of the screen when hooks say nothing. Shadow only records; assist sets the Inbox state, and any hook overrides it. Sends reply text only for organisations that allow it.",
+      "key": "decide.jev.turn_outcome",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: turn outcome",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: set the state"
+        ]
+      ],
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Proposing a stuck mission's outcome and next step. Never completes a mission or sets Verified. Shadow only records; assist suggests.",
+      "key": "decide.jev.mission_triage",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: mission triage",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Reading whether a routine run did work, found nothing to do or needs you, from the end of its screen. Shadow only records; assist sets the outcome, so a run with nothing to do stays out of the Inbox. A failed exit or a rule wins. Sends reply text only for organisations that allow it.",
+      "key": "decide.jev.routine_run_outcome",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: routine run outcome",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: set the outcome"
+        ]
+      ],
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Guessing what a stuck pull request needs (a fix, a regenerate, a base merge, a re-run, or a person) when the PR shepherd finds it conflicting or red. Sends the PR's check names and states, no code. Shadow only records; assist is recorded the same way for now.",
+      "key": "decide.jev.pr_triage",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: PR triage",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: record only"
+        ]
+      ],
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Proposing the main ticket in Review when a session's first prompt names several. A branch naming one decides without Jev. Shadow only records; assist suggests.",
+      "key": "decide.jev.main_ticket",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: main ticket",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Flagging in Review a new local task that may be the same work as an open tracker ticket. Shadow only records; assist suggests.",
+      "key": "decide.jev.tracker_duplicate",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: local task duplicates a ticket",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Proposing, in New session, whether to resume a past session of the same work or start fresh. A single recent past session decides without Jev. Shadow only records; assist suggests.",
+      "key": "decide.jev.resume_or_new",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: resume or start fresh",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "scope": "fleet",
       "tags": [
         "experimental",
         "ai"
@@ -1556,6 +2981,30 @@
       "label": "Jev: send unassigned",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "network"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "never",
+      "danger": {
+        "level": "confirm",
+        "message": "Claude's reply text from sessions outside every organisation will be sent to TypeSafe too."
+      },
+      "default": "false",
+      "help": "Also send the reply text of sessions that belong to no organisation (turn outcome), on top of sending unassigned sessions at all.",
+      "key": "decide.jev.unassigned_reply",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Jev: send unassigned replies",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
       "tags": [
         "experimental",
         "network"
@@ -1579,6 +3028,7 @@
       "label": "Jev: timeout",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -1601,6 +3051,7 @@
       "label": "Jev: breaker failures",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -1623,6 +3074,7 @@
       "label": "Jev: breaker pause",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
@@ -1645,6 +3097,7 @@
       "label": "Jev: daily token budget",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "tokens",
       "value": "2000000",
@@ -1668,11 +3121,109 @@
       "label": "Jev: model",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [
         "advanced"
       ],
       "unit": "none",
       "value": "jev-1.13.0"
+    },
+    {
+      "ai": "never",
+      "danger": {
+        "level": "confirm",
+        "message": "Each question's redacted state goes over SSH to the host below and on to Anthropic through that host's Claude account."
+      },
+      "default": "false",
+      "help": "Also ask Claude every question a Jev use case in shadow or assist asks, on the host below, and record its answer beside Jev's to compare them. Nothing acts on it.",
+      "key": "decide.haiku.shadow",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Second opinion from Claude",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "network"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "",
+      "help": "The host whose Claude account answers. Only questions about its own organisation are sent to it.",
+      "key": "decide.haiku.host",
+      "kind": {
+        "max": 64,
+        "type": "text"
+      },
+      "label": "Second opinion: host",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental"
+      ],
+      "unit": "none",
+      "value": ""
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "haiku",
+      "help": "The Claude model the second opinion asks.",
+      "key": "decide.haiku.model",
+      "kind": {
+        "options": [
+          "haiku",
+          "sonnet",
+          "opus"
+        ],
+        "type": "choice"
+      },
+      "label": "Second opinion: model",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "advanced"
+      ],
+      "unit": "none",
+      "value": "haiku"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "200",
+      "help": "Questions the second opinion may ask per UTC day. One at a time; a question that comes while one is running is not asked.",
+      "key": "decide.haiku.daily_calls",
+      "kind": {
+        "max": 10000,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Second opinion: calls a day",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "advanced"
+      ],
+      "unit": "count",
+      "value": "200",
+      "zero": "none"
     },
     {
       "ai": "suggest",
@@ -1690,10 +3241,33 @@
       "label": "Jev: keep runs",
       "modified": false,
       "restart": "none",
+      "scope": "fleet",
       "tags": [],
       "unit": "days",
       "value": "90",
       "zero": "forever"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "",
+      "help": "Per-feature confidence floors fitted from runs a person confirmed, corrected or rejected (fleet-hub decide floor fit). A fitted floor only raises a feature's built-in one, and only for the question version and model it was fitted against.",
+      "key": "decide.jev.floors",
+      "kind": {
+        "max": 8192,
+        "type": "text"
+      },
+      "label": "Jev: fitted floors",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "none",
+      "value": ""
     },
     {
       "ai": "never",
@@ -1711,6 +3285,7 @@
       "modified": false,
       "owned_by": "fleet-hub serve --bind",
       "restart": "none",
+      "scope": "process",
       "tags": [
         "network"
       ],
@@ -1733,6 +3308,7 @@
       "modified": false,
       "owned_by": "fleet-hub serve --public-url",
       "restart": "none",
+      "scope": "process",
       "tags": [
         "network"
       ],
@@ -1755,6 +3331,7 @@
       "modified": false,
       "owned_by": "fleet-hub serve --allowed-host",
       "restart": "none",
+      "scope": "process",
       "tags": [
         "network",
         "advanced"
@@ -1777,6 +3354,7 @@
       "modified": false,
       "owned_by": "fleet-hub serve --local-host",
       "restart": "none",
+      "scope": "process",
       "tags": [],
       "unit": "none",
       "value": "true"
@@ -1796,6 +3374,7 @@
       "modified": false,
       "owned_by": "fleet-hub serve --allow-plaintext",
       "restart": "none",
+      "scope": "process",
       "tags": [
         "network"
       ],
@@ -1831,6 +3410,7 @@
       ],
       "owned_by": "fleet-hub serve --tls",
       "restart": "none",
+      "scope": "process",
       "tags": [
         "network"
       ],
@@ -1852,6 +3432,7 @@
       "modified": false,
       "owned_by": "Settings → Control API",
       "restart": "none",
+      "scope": "process",
       "tags": [
         "ai"
       ],
@@ -1875,6 +3456,7 @@
       "modified": false,
       "owned_by": "Settings → Control API",
       "restart": "none",
+      "scope": "process",
       "tags": [],
       "unit": "count",
       "value": "4180"
@@ -1894,6 +3476,7 @@
       "modified": false,
       "owned_by": "Settings → Control API",
       "restart": "none",
+      "scope": "process",
       "tags": [],
       "unit": "none",
       "value": "false"
@@ -1915,11 +3498,269 @@
       "modified": false,
       "owned_by": "the settings table only",
       "restart": "none",
+      "scope": "process",
       "tags": [
         "advanced"
       ],
       "unit": "seconds",
       "value": "30"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "0",
+      "help": "Estimated spend an org's sessions may reach in one UTC day before fleet warns. Each org can set its own. Fleet only warns; it never stops a session.",
+      "key": "budget.org_daily_usd",
+      "kind": {
+        "max": 1000000,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Org daily budget",
+      "modified": false,
+      "per_org": true,
+      "restart": "none",
+      "scope": "org",
+      "tags": [],
+      "unit": "usd",
+      "value": "0",
+      "zero": "none"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "0",
+      "help": "Estimated spend an org's sessions may reach in one calendar month (UTC) before fleet warns. Each org can set its own. Fleet only warns; it never stops a session.",
+      "key": "budget.org_monthly_usd",
+      "kind": {
+        "max": 10000000,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Org monthly budget",
+      "modified": false,
+      "per_org": true,
+      "restart": "none",
+      "scope": "org",
+      "tags": [],
+      "unit": "usd",
+      "value": "0",
+      "zero": "none"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "needs_you,failed,blocked,routine_failed",
+      "help": "The session states the desktop shows a notification for.",
+      "key": "notify.desktop",
+      "kind": {
+        "options": [
+          "needs_you",
+          "failed",
+          "blocked",
+          "done",
+          "routine_failed"
+        ],
+        "type": "choice_set"
+      },
+      "label": "Desktop",
+      "modified": false,
+      "option_labels": [
+        [
+          "needs_you",
+          "Needs you"
+        ],
+        [
+          "failed",
+          "Failed"
+        ],
+        [
+          "blocked",
+          "Blocked"
+        ],
+        [
+          "done",
+          "Done"
+        ],
+        [
+          "routine_failed",
+          "Routine run failed"
+        ]
+      ],
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "needs_you,failed,blocked,routine_failed"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "needs_you,failed,blocked,routine_failed",
+      "help": "The session states the phone shows a notification for.",
+      "key": "notify.phone",
+      "kind": {
+        "options": [
+          "needs_you",
+          "failed",
+          "blocked",
+          "done",
+          "routine_failed"
+        ],
+        "type": "choice_set"
+      },
+      "label": "Phone",
+      "modified": false,
+      "option_labels": [
+        [
+          "needs_you",
+          "Needs you"
+        ],
+        [
+          "failed",
+          "Failed"
+        ],
+        [
+          "blocked",
+          "Blocked"
+        ],
+        [
+          "done",
+          "Done"
+        ],
+        [
+          "routine_failed",
+          "Routine run failed"
+        ]
+      ],
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "needs_you,failed,blocked,routine_failed"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "needs_you",
+      "help": "The session states whose notification also plays a sound.",
+      "key": "notify.sound",
+      "kind": {
+        "options": [
+          "needs_you",
+          "failed",
+          "blocked",
+          "done",
+          "routine_failed"
+        ],
+        "type": "choice_set"
+      },
+      "label": "Sound",
+      "modified": false,
+      "option_labels": [
+        [
+          "needs_you",
+          "Needs you"
+        ],
+        [
+          "failed",
+          "Failed"
+        ],
+        [
+          "blocked",
+          "Blocked"
+        ],
+        [
+          "done",
+          "Done"
+        ],
+        [
+          "routine_failed",
+          "Routine run failed"
+        ]
+      ],
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "needs_you"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "",
+      "help": "A daily range, like 22:00-07:30, in which no notification is shown or sounded, on each device's own clock. Empty: none.",
+      "key": "notify.quiet_hours",
+      "kind": {
+        "type": "time_range"
+      },
+      "label": "Quiet hours",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": ""
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "failed",
+      "help": "The states that still notify during quiet hours.",
+      "key": "notify.quiet_except",
+      "kind": {
+        "options": [
+          "needs_you",
+          "failed",
+          "blocked",
+          "done",
+          "routine_failed"
+        ],
+        "type": "choice_set"
+      },
+      "label": "Through quiet hours",
+      "modified": false,
+      "option_labels": [
+        [
+          "needs_you",
+          "Needs you"
+        ],
+        [
+          "failed",
+          "Failed"
+        ],
+        [
+          "blocked",
+          "Blocked"
+        ],
+        [
+          "done",
+          "Done"
+        ],
+        [
+          "routine_failed",
+          "Routine run failed"
+        ]
+      ],
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "failed"
     }
   ],
   "pages": [
@@ -1964,6 +3805,23 @@
         {
           "items": [
             {
+              "page": "settings.orgs",
+              "type": "link"
+            },
+            {
+              "page": "settings.devices",
+              "type": "link"
+            },
+            {
+              "page": "settings.people",
+              "type": "link"
+            }
+          ],
+          "title": "Company"
+        },
+        {
+          "items": [
+            {
               "page": "settings.trackers",
               "type": "link"
             },
@@ -1972,7 +3830,7 @@
               "type": "link"
             },
             {
-              "page": "settings.orgs",
+              "page": "settings.catalogs",
               "type": "link"
             },
             {
@@ -2013,6 +3871,24 @@
         {
           "items": [
             {
+              "key": "automation.paused",
+              "type": "field"
+            }
+          ],
+          "title": "Pause all"
+        },
+        {
+          "items": [
+            {
+              "key": "automation.daily_budget",
+              "type": "field"
+            }
+          ],
+          "title": "Routines"
+        },
+        {
+          "items": [
+            {
               "key": "playbooks.press_enter",
               "type": "field"
             },
@@ -2035,6 +3911,28 @@
             }
           ],
           "title": "Playbooks"
+        },
+        {
+          "items": [
+            {
+              "text": "The PR reviewer and the support agent work only under a rule a person grants: fleet-hub agents grant.",
+              "tone": "info",
+              "type": "notice"
+            },
+            {
+              "key": "agents.poll_interval_secs",
+              "type": "field"
+            },
+            {
+              "key": "agents.max_concurrent",
+              "type": "field"
+            },
+            {
+              "key": "agents.max_retries",
+              "type": "field"
+            }
+          ],
+          "title": "Agents"
         },
         {
           "items": [
@@ -2094,6 +3992,10 @@
                 "key": "repair.auto_on_tick",
                 "truthy": true
               }
+            },
+            {
+              "action": "repair.now",
+              "type": "action"
             }
           ],
           "title": "Workspace repair"
@@ -2210,6 +4112,10 @@
             {
               "key": "restore.stagger_ms",
               "type": "field"
+            },
+            {
+              "action": "restore.lost",
+              "type": "action"
             }
           ],
           "title": "Restoring lost sessions"
@@ -2264,11 +4170,44 @@
         {
           "items": [
             {
+              "key": "voice.enabled",
+              "type": "field"
+            },
+            {
+              "key": "voice.max_capture_secs",
+              "type": "field",
+              "when": {
+                "key": "voice.enabled",
+                "truthy": true
+              }
+            },
+            {
+              "key": "voice.claim_ttl_secs",
+              "type": "field",
+              "when": {
+                "key": "voice.enabled",
+                "truthy": true
+              }
+            }
+          ],
+          "title": "Voice"
+        },
+        {
+          "items": [
+            {
               "key": "usage.enabled",
               "type": "field"
             },
             {
               "key": "usage.interval_secs",
+              "type": "field",
+              "when": {
+                "key": "usage.enabled",
+                "truthy": true
+              }
+            },
+            {
+              "key": "accounts.pause_at",
               "type": "field",
               "when": {
                 "key": "usage.enabled",
@@ -2290,6 +4229,41 @@
             }
           ],
           "title": "Usage"
+        },
+        {
+          "items": [
+            {
+              "key": "search.index_transcripts",
+              "type": "field"
+            },
+            {
+              "key": "search.transcript_days",
+              "type": "field",
+              "when": {
+                "key": "search.index_transcripts",
+                "truthy": true
+              }
+            }
+          ],
+          "title": "Search"
+        },
+        {
+          "items": [
+            {
+              "key": "budget.org_daily_usd",
+              "type": "field"
+            },
+            {
+              "key": "budget.org_monthly_usd",
+              "type": "field"
+            },
+            {
+              "text": "Each org can set its own budget on its page in Settings → Organisations. Spend is the estimated cost of the org's sessions, counted from the day this version was installed.",
+              "tone": "info",
+              "type": "notice"
+            }
+          ],
+          "title": "Company budgets"
         },
         {
           "advanced": true,
@@ -2375,6 +4349,10 @@
                   "type": "field"
                 },
                 {
+                  "key": "work.members_plan_sprints",
+                  "type": "field"
+                },
+                {
                   "hint": "Set from the work popover; clear it here.",
                   "key": "work.trusted_branch_projects",
                   "type": "field"
@@ -2387,9 +4365,33 @@
                 {
                   "key": "work.summary_model",
                   "type": "field"
+                },
+                {
+                  "key": "work.context_help",
+                  "type": "field"
+                },
+                {
+                  "key": "work.help_model",
+                  "type": "field"
+                },
+                {
+                  "key": "work.draft_commit_messages",
+                  "type": "field"
+                },
+                {
+                  "key": "work.draft_briefs",
+                  "type": "field"
+                },
+                {
+                  "key": "work.draft_release_notes",
+                  "type": "field"
+                },
+                {
+                  "key": "work.catch_up_summaries",
+                  "type": "field"
                 }
               ],
-              "title": "Summaries"
+              "title": "Writing help"
             }
           ],
           "title": "Detection"
@@ -2476,9 +4478,56 @@
                 }
               ],
               "title": "How long work history is kept"
+            },
+            {
+              "items": [
+                {
+                  "key": "work.attachment_max_mb",
+                  "type": "field"
+                }
+              ],
+              "title": "Attachments"
             }
           ],
           "title": "Retention"
+        },
+        {
+          "sections": [
+            {
+              "items": [
+                {
+                  "key": "orchestrator.enabled",
+                  "type": "field"
+                },
+                {
+                  "key": "orchestrator.max_level",
+                  "type": "field",
+                  "when": {
+                    "key": "orchestrator.enabled",
+                    "truthy": true
+                  }
+                },
+                {
+                  "key": "orchestrator.headless_checks",
+                  "type": "field",
+                  "when": {
+                    "key": "orchestrator.enabled",
+                    "truthy": true
+                  }
+                },
+                {
+                  "key": "orchestrator.headless_model",
+                  "type": "field",
+                  "when": {
+                    "key": "orchestrator.headless_checks",
+                    "truthy": true
+                  }
+                }
+              ],
+              "title": "Mission loop"
+            }
+          ],
+          "title": "Missions"
         }
       ],
       "title": "Work graph"
@@ -2506,6 +4555,11 @@
         {
           "items": [
             {
+              "text": "Each use case is off, shadow or assist. Shadow only records; assist pre-selects an answer you confirm. There is no auto mode.",
+              "tone": "info",
+              "type": "notice"
+            },
+            {
               "hint": "An offline benchmark only until J1 passes its acceptance lines (D32).",
               "key": "decide.jev.work_link",
               "type": "field",
@@ -2516,11 +4570,165 @@
               "type": "field"
             },
             {
+              "hint": "Pre-selects the repository when a task's first start has none; you still press Start.",
+              "key": "decide.jev.start_project",
+              "type": "field"
+            },
+            {
+              "hint": "Pre-ticks the other repository a ticket start also needs; you still press Start.",
+              "key": "decide.jev.sibling_repos",
+              "type": "field"
+            },
+            {
+              "hint": "Pre-selects a new session's host when two or more online hosts under their limit are left; you press Create.",
+              "key": "decide.jev.host_placement",
+              "type": "field"
+            },
+            {
+              "hint": "Puts the likely option first in an agent's question or a form; you still answer. Never a push or a permission.",
+              "key": "decide.jev.quick_answer",
+              "type": "field"
+            },
+            {
+              "hint": "Prefills the project when you adopt a pane fleet did not start; you still press Adopt.",
+              "key": "decide.jev.adopt_target",
+              "type": "field"
+            },
+            {
+              "hint": "Prefills the project when you restore a conversation found on a host; you still press Restore.",
+              "key": "decide.jev.restore_target",
+              "type": "field"
+            },
+            {
+              "hint": "Marks a proposed task that may repeat an existing one; you still merge or keep both.",
+              "key": "decide.jev.duplicate",
+              "type": "field"
+            },
+            {
+              "hint": "Proposes a group for a new task nothing placed; you still place it.",
+              "key": "decide.jev.work_placement",
+              "type": "field"
+            },
+            {
+              "hint": "Marks another of your sessions that works on the same thing; nothing is stopped or merged.",
+              "key": "decide.jev.related_session",
+              "type": "field"
+            },
+            {
+              "hint": "Says which mission or session a message in Control is about; you can change it. A short message gets a question instead.",
+              "key": "decide.jev.control_route",
+              "type": "field"
+            },
+            {
+              "hint": "Checks a watcher's summary of a session against its transcript; in assist a summary it cannot confirm is not shown.",
+              "key": "decide.jev.summary_check",
+              "type": "field"
+            },
+            {
+              "hint": "Sends Claude's last reply, redacted, only for organisations that allow reply text. Hooks always win.",
+              "key": "decide.jev.turn_outcome",
+              "type": "field"
+            },
+            {
+              "hint": "Proposes a stuck mission's outcome and next step; you still choose. It never completes a mission or sets Verified.",
+              "key": "decide.jev.mission_triage",
+              "type": "field"
+            },
+            {
+              "hint": "Keeps runs with nothing to do out of the Inbox. Sends the run's last reply only for organisations that allow reply text.",
+              "key": "decide.jev.routine_run_outcome",
+              "type": "field"
+            },
+            {
+              "hint": "Asked once per PR shepherd episode. Sends check names and states, never code.",
+              "key": "decide.jev.pr_triage",
+              "type": "field"
+            },
+            {
+              "hint": "Marks the main ticket in Review when a session's first prompt names several; you still confirm it.",
+              "key": "decide.jev.main_ticket",
+              "type": "field"
+            },
+            {
+              "hint": "Marks a new local task in Review that may repeat a tracker ticket; linking the ticket instead is yours.",
+              "key": "decide.jev.tracker_duplicate",
+              "type": "field"
+            },
+            {
+              "hint": "In New session, proposes resuming a past session of the same work or starting fresh; you still press Resume or Create.",
+              "key": "decide.jev.resume_or_new",
+              "type": "field"
+            },
+            {
               "key": "decide.jev.unassigned",
+              "type": "field"
+            },
+            {
+              "key": "decide.jev.unassigned_reply",
               "type": "field"
             }
           ],
-          "title": "Features",
+          "title": "Use cases",
+          "when": {
+            "key": "decide.jev.enabled",
+            "truthy": true
+          }
+        },
+        {
+          "advanced": true,
+          "collapsible": true,
+          "items": [
+            {
+              "text": "Asks Claude the same questions as the use cases that are on, on one of your hosts, and records its answer beside Jev's to compare them. Nothing acts on it.",
+              "tone": "info",
+              "type": "notice"
+            },
+            {
+              "key": "decide.haiku.shadow",
+              "type": "field"
+            },
+            {
+              "key": "decide.haiku.host",
+              "type": "field",
+              "when": {
+                "key": "decide.haiku.shadow",
+                "truthy": true
+              }
+            },
+            {
+              "key": "decide.haiku.model",
+              "type": "field",
+              "when": {
+                "key": "decide.haiku.shadow",
+                "truthy": true
+              }
+            },
+            {
+              "key": "decide.haiku.daily_calls",
+              "type": "field",
+              "when": {
+                "key": "decide.haiku.shadow",
+                "truthy": true
+              }
+            }
+          ],
+          "title": "Second opinion"
+        },
+        {
+          "items": [
+            {
+              "source": {
+                "id": "decide.today"
+              },
+              "type": "record"
+            },
+            {
+              "label": "Choose which organisations allow Jev",
+              "page": "settings.orgs",
+              "type": "link"
+            }
+          ],
+          "title": "Today",
           "when": {
             "key": "decide.jev.enabled",
             "truthy": true
@@ -2532,6 +4740,10 @@
           "items": [
             {
               "key": "decide.jev.model",
+              "type": "field"
+            },
+            {
+              "key": "decide.jev.floors",
               "type": "field"
             },
             {
@@ -2607,7 +4819,7 @@
     },
     {
       "id": "settings.control_api",
-      "intro": "The embedded MCP server an AI assistant drives the fleet through. Read-only here.",
+      "intro": "The embedded MCP server an AI assistant drives the fleet through (read-only here), and how Control's chat goes on when you do not answer.",
       "layout": "category",
       "parent": "settings",
       "sections": [
@@ -2631,6 +4843,19 @@
             }
           ],
           "title": "Server"
+        },
+        {
+          "items": [
+            {
+              "key": "control.auto_continue",
+              "type": "field"
+            },
+            {
+              "key": "control.auto_continue_minutes",
+              "type": "field"
+            }
+          ],
+          "title": "Chat"
         }
       ],
       "spec": "fleet.page/1",
@@ -2766,17 +4991,33 @@
           "items": [
             {
               "key": "pr_remote_link",
+              "type": "field",
+              "when": {
+                "in": [
+                  "jira",
+                  "jira_dc"
+                ],
+                "key": "provider"
+              }
+            },
+            {
+              "key": "post_comments",
               "type": "field"
+            },
+            {
+              "key": "create_tickets",
+              "type": "field",
+              "when": {
+                "in": [
+                  "jira",
+                  "jira_dc",
+                  "asana"
+                ],
+                "key": "provider"
+              }
             }
           ],
-          "title": "Write-back",
-          "when": {
-            "in": [
-              "jira",
-              "jira_dc"
-            ],
-            "key": "provider"
-          }
+          "title": "Write-back"
         },
         {
           "items": [
@@ -2793,7 +5034,7 @@
     },
     {
       "id": "settings.orgs",
-      "intro": "Optional. Name an org to merge or split GitHub owners, to attach a tracker, or to make it a boundary for its hosts.",
+      "intro": "Optional. Name an org to merge or split GitHub owners, to attach a tracker or a catalog, or to make it a boundary for its hosts and devices. Each org's page shows what belongs to it.",
       "layout": "master_detail",
       "list_items": [
         {
@@ -2803,6 +5044,266 @@
       ],
       "parent": "settings",
       "resource": "org",
+      "spec": "fleet.page/1",
+      "tabs": [
+        {
+          "sections": [
+            {
+              "items": [
+                {
+                  "key": "name",
+                  "type": "field"
+                },
+                {
+                  "key": "color",
+                  "type": "field"
+                },
+                {
+                  "key": "my_role",
+                  "type": "field"
+                }
+              ],
+              "title": "Organisation"
+            },
+            {
+              "items": [
+                {
+                  "key": "spent_today_micros",
+                  "type": "field"
+                },
+                {
+                  "key": "spent_month_micros",
+                  "type": "field"
+                },
+                {
+                  "key": "spent_week_micros",
+                  "type": "field"
+                },
+                {
+                  "key": "session_count",
+                  "type": "field"
+                },
+                {
+                  "key": "member_count",
+                  "type": "field"
+                }
+              ],
+              "tiles": true,
+              "title": "Overview"
+            },
+            {
+              "items": [
+                {
+                  "key": "needs_admin",
+                  "type": "field"
+                },
+                {
+                  "key": "needs_you",
+                  "type": "field"
+                }
+              ],
+              "title": "Needs an admin"
+            },
+            {
+              "items": [
+                {
+                  "key": "rules",
+                  "type": "field"
+                },
+                {
+                  "key": "projects",
+                  "type": "field"
+                },
+                {
+                  "key": "accounts",
+                  "type": "field"
+                },
+                {
+                  "key": "hosts",
+                  "type": "field"
+                },
+                {
+                  "key": "trackers",
+                  "type": "field"
+                },
+                {
+                  "key": "catalogs",
+                  "type": "field"
+                }
+              ],
+              "title": "What belongs to it"
+            }
+          ],
+          "title": "Overview"
+        },
+        {
+          "sections": [
+            {
+              "items": [
+                {
+                  "key": "members",
+                  "type": "field"
+                },
+                {
+                  "key": "removed_members",
+                  "type": "field"
+                },
+                {
+                  "text": "A member's devices are fenced to the org: they see its work and what is shared with it, and their own sessions. Adding a member offers a pairing code for their device; Pair a device mints another.",
+                  "tone": "info",
+                  "type": "notice"
+                }
+              ],
+              "title": "Members"
+            }
+          ],
+          "title": "Members"
+        },
+        {
+          "sections": [
+            {
+              "items": [
+                {
+                  "key": "team",
+                  "type": "field"
+                }
+              ],
+              "title": "Team"
+            },
+            {
+              "items": [
+                {
+                  "key": "shares",
+                  "type": "field"
+                },
+                {
+                  "text": "An admin takes a share back or narrows it to watch; only a session's owner shares or widens.",
+                  "tone": "info",
+                  "type": "notice"
+                }
+              ],
+              "title": "Sharing"
+            }
+          ],
+          "title": "Sharing"
+        },
+        {
+          "sections": [
+            {
+              "items": [
+                {
+                  "key": "devices",
+                  "type": "field"
+                },
+                {
+                  "text": "Pair a new phone, browser or desktop in Settings → Devices, and bind it to this org there or here.",
+                  "tone": "info",
+                  "type": "notice"
+                }
+              ],
+              "title": "Devices"
+            }
+          ],
+          "title": "Devices"
+        },
+        {
+          "sections": [
+            {
+              "items": [
+                {
+                  "key": "spend_series",
+                  "type": "field"
+                },
+                {
+                  "key": "spend_by_person",
+                  "type": "field"
+                },
+                {
+                  "text": "Spend by person is shown only to an admin who sees every session; otherwise it is hidden whole, never in part. Fleet warns at a budget; it never stops a session.",
+                  "tone": "info",
+                  "type": "notice"
+                }
+              ],
+              "title": "Spend"
+            }
+          ],
+          "title": "Spend"
+        },
+        {
+          "sections": [
+            {
+              "items": [
+                {
+                  "key": "isolate_sessions",
+                  "type": "field"
+                },
+                {
+                  "text": "Hosts outside this org can no longer list or message its sessions, and its hosts cannot see other orgs' sessions. Work data is fenced either way.",
+                  "tone": "warn",
+                  "type": "notice"
+                },
+                {
+                  "key": "members_own_sessions_only",
+                  "type": "field"
+                },
+                {
+                  "key": "bound_sees_unassigned",
+                  "type": "field"
+                },
+                {
+                  "key": "owns_hub",
+                  "type": "field"
+                },
+                {
+                  "key": "admins_see_unclaimed",
+                  "type": "field"
+                }
+              ],
+              "title": "Boundary"
+            },
+            {
+              "items": [
+                {
+                  "key": "auto_tidy",
+                  "type": "field"
+                },
+                {
+                  "key": "jev_allowed",
+                  "type": "field"
+                },
+                {
+                  "key": "jev_reply_allowed",
+                  "type": "field"
+                }
+              ],
+              "title": "Automation"
+            },
+            {
+              "items": [
+                {
+                  "key": "settings",
+                  "type": "field"
+                },
+                {
+                  "text": "The fleet-wide values are in Settings → Limits and Settings → Work; what is set here applies to this org's sessions only.",
+                  "tone": "info",
+                  "type": "notice"
+                }
+              ],
+              "title": "Its own settings"
+            }
+          ],
+          "title": "Settings"
+        }
+      ],
+      "title": "Organisations"
+    },
+    {
+      "id": "settings.catalogs",
+      "intro": "Git repos of assets fleet syncs to hosts. A GitHub org with SSO must allow a catalog's deploy key; an org admin does that once in the org's settings. Which device may change a catalog is set in Settings → Devices.",
+      "layout": "master_detail",
+      "parent": "settings",
+      "resource": "catalog",
       "sections": [
         {
           "items": [
@@ -2811,63 +5312,288 @@
               "type": "field"
             },
             {
-              "key": "color",
+              "key": "state",
+              "type": "field"
+            },
+            {
+              "key": "repo_path",
+              "type": "field"
+            },
+            {
+              "key": "remote_url",
+              "type": "field"
+            },
+            {
+              "key": "org",
               "type": "field"
             }
           ],
-          "title": "Organisation"
+          "title": "Where it lives"
         },
         {
           "items": [
             {
-              "key": "rules",
+              "key": "admitted",
               "type": "field"
             },
             {
-              "key": "hosts",
-              "type": "field"
-            },
-            {
-              "key": "trackers",
+              "key": "granted",
               "type": "field"
             }
           ],
-          "title": "What belongs to it"
-        },
-        {
-          "items": [
-            {
-              "key": "isolate_sessions",
-              "type": "field"
-            },
-            {
-              "text": "Hosts outside this org can no longer list or message its sessions, and its hosts cannot see other orgs' sessions. Work data is fenced either way.",
-              "tone": "warn",
-              "type": "notice"
-            },
-            {
-              "key": "bound_sees_unassigned",
-              "type": "field"
-            }
-          ],
-          "title": "Boundary"
-        },
-        {
-          "items": [
-            {
-              "key": "auto_tidy",
-              "type": "field"
-            },
-            {
-              "key": "jev_allowed",
-              "type": "field"
-            }
-          ],
-          "title": "Automation"
+          "title": "Who receives and changes it"
         }
       ],
       "spec": "fleet.page/1",
-      "title": "Organisations"
+      "title": "Catalogs"
+    },
+    {
+      "id": "settings.devices",
+      "intro": "Every phone, browser and desktop paired to the hub: pair a new one, trust it, bind it to an org, hand it to a person, let it change a catalog, or revoke it. Changes need this device to be trusted.",
+      "layout": "master_detail",
+      "parent": "settings",
+      "resource": "device",
+      "sections": [
+        {
+          "items": [
+            {
+              "key": "name",
+              "type": "field"
+            },
+            {
+              "key": "mode",
+              "type": "field"
+            },
+            {
+              "key": "this_device",
+              "type": "field"
+            },
+            {
+              "key": "kind",
+              "type": "field"
+            },
+            {
+              "key": "app",
+              "type": "field"
+            },
+            {
+              "key": "last_seen_at",
+              "type": "field"
+            },
+            {
+              "key": "created_at",
+              "type": "field"
+            }
+          ],
+          "title": "Device"
+        },
+        {
+          "items": [
+            {
+              "key": "trusted",
+              "type": "field"
+            },
+            {
+              "key": "org",
+              "type": "field"
+            },
+            {
+              "key": "person",
+              "type": "field"
+            },
+            {
+              "key": "catalogs",
+              "type": "field"
+            }
+          ],
+          "title": "What it may do"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "table": {
+        "columns": [
+          "person",
+          "name",
+          "org",
+          "mode",
+          "trusted",
+          "last_seen_at"
+        ],
+        "filters": [
+          "org",
+          "person"
+        ],
+        "group_by": "person",
+        "subtitle": "app",
+        "title": "People & devices"
+      },
+      "title": "Devices"
+    },
+    {
+      "id": "settings.people",
+      "intro": "The people this hub knows. Add one with + Person, or they are added when a device is paired or handed to them. Disabling someone revokes their devices and the shares made to them.",
+      "layout": "master_detail",
+      "parent": "settings",
+      "resource": "person",
+      "sections": [
+        {
+          "items": [
+            {
+              "key": "name",
+              "type": "field"
+            },
+            {
+              "key": "display_name",
+              "type": "field"
+            },
+            {
+              "key": "owner",
+              "type": "field"
+            }
+          ],
+          "title": "Person"
+        },
+        {
+          "items": [
+            {
+              "key": "devices",
+              "type": "field"
+            },
+            {
+              "key": "created_at",
+              "type": "field"
+            },
+            {
+              "key": "disabled_at",
+              "type": "field"
+            }
+          ],
+          "title": "Access"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "title": "People"
+    },
+    {
+      "graph": {
+        "center": "This hub",
+        "facts": [
+          "latency",
+          "messages_today"
+        ],
+        "state": "state",
+        "up": [
+          "connected"
+        ]
+      },
+      "id": "settings.federation",
+      "intro": "Other fleets' hubs this hub is linked to. Sessions on both sides can message each other through the link. Linking and unlinking need this device to be trusted.",
+      "layout": "master_detail",
+      "parent": "settings",
+      "resource": "peer_link",
+      "sections": [
+        {
+          "items": [
+            {
+              "key": "title",
+              "type": "field"
+            },
+            {
+              "key": "state",
+              "type": "field"
+            },
+            {
+              "key": "role",
+              "type": "field"
+            },
+            {
+              "key": "url",
+              "type": "field"
+            },
+            {
+              "key": "last_error",
+              "type": "field"
+            },
+            {
+              "key": "retry",
+              "type": "field"
+            }
+          ],
+          "title": "Link"
+        },
+        {
+          "items": [
+            {
+              "key": "sync",
+              "type": "field"
+            },
+            {
+              "key": "latency",
+              "type": "field"
+            },
+            {
+              "key": "messages_today",
+              "type": "field"
+            },
+            {
+              "key": "messages_total",
+              "type": "field"
+            },
+            {
+              "key": "pending",
+              "type": "field"
+            },
+            {
+              "key": "last_exchange_at",
+              "type": "field"
+            }
+          ],
+          "title": "Traffic"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "title": "Federation"
+    },
+    {
+      "id": "settings.notifications",
+      "intro": "What reaches you, and where. The hub keeps these, so the desktop and the phone follow the same matrix and the same quiet hours.",
+      "layout": "category",
+      "parent": "settings",
+      "sections": [
+        {
+          "items": [
+            {
+              "key": "notify.desktop",
+              "type": "field"
+            },
+            {
+              "key": "notify.phone",
+              "type": "field"
+            },
+            {
+              "key": "notify.sound",
+              "type": "field"
+            }
+          ],
+          "matrix": true,
+          "title": "Where each state reaches you"
+        },
+        {
+          "items": [
+            {
+              "key": "notify.quiet_hours",
+              "type": "field"
+            },
+            {
+              "key": "notify.quiet_except",
+              "type": "field"
+            }
+          ],
+          "title": "Quiet hours"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "title": "Notifications"
     },
     {
       "id": "settings.updates",
@@ -2886,7 +5612,19 @@
               "type": "field"
             },
             {
-              "text": "Nothing installs itself yet: fleet-updater, the desktop and the phone arrive in later slices (S6–S8), so on a standalone desktop these rows have no effect. There is no nightly track until it is published (S2b).",
+              "key": "update.window",
+              "type": "field"
+            },
+            {
+              "key": "update.rollout_wave_secs",
+              "type": "field"
+            },
+            {
+              "key": "update.mirror",
+              "type": "field"
+            },
+            {
+              "text": "This desktop updates itself (paired, its hub decides; standalone, these rows do), only to a release the release key signed. The Docker hub updates itself through fleet-updater (opt-in). nightly: the hub on each green main push, the desktop once a day.",
               "tone": "info",
               "type": "notice"
             }
@@ -2896,7 +5634,7 @@
         {
           "items": [
             {
-              "text": "This desktop installs nothing yet: these rows say what the fleet follows, and the desktop updater is slice S6. See docs/updates.md.",
+              "text": "The desktop row is also this desktop's own: notify offers a restart to update, automatic installs at the next launch, manual installs only a pin. See docs/updates.md.",
               "tone": "info",
               "type": "notice"
             },
@@ -2918,6 +5656,17 @@
             }
           ],
           "title": "Per component"
+        },
+        {
+          "items": [
+            {
+              "source": {
+                "id": "updates.targets"
+              },
+              "type": "table"
+            }
+          ],
+          "title": "What runs where"
         }
       ],
       "spec": "fleet.page/1",
@@ -3131,6 +5880,113 @@
       ],
       "spec": "fleet.page/1",
       "title": "Claude accounts"
+    },
+    {
+      "id": "debug_devices",
+      "intro": "Phones, emulators and simulators on your hosts. Set one up once where it is plugged in; sessions use it through fleet's control API (debug_devices), and a shared one from every host of its org.",
+      "layout": "master_detail",
+      "list_items": [
+        {
+          "action": "debug_devices.scan_all",
+          "type": "action"
+        }
+      ],
+      "resource": "debug_device",
+      "sections": [
+        {
+          "items": [
+            {
+              "key": "title",
+              "type": "field"
+            },
+            {
+              "key": "label",
+              "type": "field"
+            },
+            {
+              "key": "state",
+              "type": "field"
+            },
+            {
+              "key": "host",
+              "type": "field"
+            },
+            {
+              "key": "shared",
+              "type": "field"
+            }
+          ],
+          "title": "Device"
+        },
+        {
+          "items": [
+            {
+              "key": "claimed_by",
+              "type": "field"
+            },
+            {
+              "key": "claim_note",
+              "type": "field"
+            },
+            {
+              "key": "claimed_until",
+              "type": "field"
+            },
+            {
+              "key": "waiting",
+              "type": "field"
+            }
+          ],
+          "title": "In use"
+        },
+        {
+          "collapsible": true,
+          "items": [
+            {
+              "key": "platform",
+              "type": "field"
+            },
+            {
+              "key": "kind",
+              "type": "field"
+            },
+            {
+              "key": "os_version",
+              "type": "field"
+            },
+            {
+              "key": "model",
+              "type": "field"
+            },
+            {
+              "key": "serial",
+              "type": "field"
+            },
+            {
+              "key": "last_seen_at",
+              "type": "field"
+            }
+          ],
+          "title": "Hardware"
+        },
+        {
+          "items": [
+            {
+              "text": "Live screen and input: watch the device and tap on it from here. Screenshot and Logs are what there is today.",
+              "tone": "later",
+              "type": "notice"
+            },
+            {
+              "text": "A device on another host: reach a phone plugged into one host from a session on another. Share it with its org, and sessions on its own host use it.",
+              "tone": "later",
+              "type": "notice"
+            }
+          ],
+          "title": "Not built yet"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "title": "Debug devices"
     }
   ],
   "resources": [
@@ -3150,6 +6006,13 @@
             {
               "from": "param",
               "name": "color"
+            }
+          ],
+          [
+            "isolate_sessions",
+            {
+              "from": "param",
+              "name": "isolate_sessions"
             }
           ]
         ],
@@ -3171,6 +6034,13 @@
             "name": "color",
             "required": false,
             "type": "color"
+          },
+          {
+            "default": false,
+            "label": "Its sessions are visible only to its members",
+            "name": "isolate_sessions",
+            "required": false,
+            "type": "toggle"
           }
         ],
         "report": false
@@ -3211,6 +6081,139 @@
           "type": "color"
         },
         {
+          "help": "Its live sessions that you can see.",
+          "id": "session_count",
+          "label": "Live sessions",
+          "sub": {
+            "field": "needs_you",
+            "text": "need you",
+            "type": "count"
+          },
+          "type": "count"
+        },
+        {
+          "help": "Of those, the ones waiting on a person: a question, a permission, a stop.",
+          "id": "needs_you",
+          "label": "Need you",
+          "type": "count"
+        },
+        {
+          "help": "Who is in it, by role. Shown to its own people and the fleet's administrator.",
+          "id": "member_count",
+          "label": "Members",
+          "sub": {
+            "field": "members",
+            "type": "roles"
+          },
+          "type": "count"
+        },
+        {
+          "help": "Estimated cost of its sessions today (UTC). Shown when you can see every session.",
+          "id": "spent_today_micros",
+          "label": "Spent today",
+          "sub": {
+            "field": "budget_daily_usd",
+            "type": "budget"
+          },
+          "type": "money"
+        },
+        {
+          "help": "Estimated cost of its sessions over the last 7 days.",
+          "id": "spent_week_micros",
+          "label": "Last 7 days",
+          "type": "money"
+        },
+        {
+          "help": "Estimated cost of its sessions this calendar month (UTC).",
+          "id": "spent_month_micros",
+          "label": "This month",
+          "sub": {
+            "field": "budget_monthly_usd",
+            "type": "budget"
+          },
+          "type": "money"
+        },
+        {
+          "help": "Estimated cost of its sessions on each of the last 14 days (UTC), today last.",
+          "id": "spend_series",
+          "label": "Last 14 days",
+          "type": "money_series"
+        },
+        {
+          "add": [],
+          "help": "Whose sessions spent it: today, the last 7 days and this month (UTC). Shown only to an admin who sees every session; otherwise it is hidden whole, never in part.",
+          "id": "spend_by_person",
+          "item_label": {
+            "type": "person_spend"
+          },
+          "label": "By person",
+          "type": "items"
+        },
+        {
+          "add": [],
+          "help": "What its admins should look at: a budget at 80% or past it (Fleet only warns; it never stops a session), a device that may prompt but is not trusted yet (trust it in Settings → Devices), sessions on its hosts nobody has claimed.",
+          "id": "needs_admin",
+          "item_label": {
+            "type": "admin_need"
+          },
+          "label": "Needs an admin",
+          "type": "items"
+        },
+        {
+          "help": "Settings this org may set for itself; the rest of the fleet keeps its value. Inherit takes the fleet's again.",
+          "id": "settings",
+          "label": "Its own settings",
+          "set": {
+            "bind": [
+              [
+                "org_id",
+                {
+                  "from": "record",
+                  "name": "id"
+                }
+              ],
+              [
+                "key",
+                {
+                  "from": "param",
+                  "name": "key"
+                }
+              ],
+              [
+                "value",
+                {
+                  "from": "param",
+                  "name": "value"
+                }
+              ]
+            ],
+            "command": "set_org_setting",
+            "envelope": "args",
+            "id": "org.set_setting",
+            "label": "Set",
+            "params": [
+              {
+                "label": "Setting",
+                "max": 128,
+                "name": "key",
+                "placeholder": "",
+                "required": true,
+                "type": "text"
+              },
+              {
+                "label": "Value",
+                "max": 4096,
+                "name": "value",
+                "placeholder": "",
+                "required": false,
+                "type": "text"
+              }
+            ],
+            "report": false
+          },
+          "type": "settings"
+        },
+        {
           "add": [
             {
               "bind": [
@@ -3222,108 +6225,59 @@
                   }
                 ],
                 [
-                  "owner",
+                  "match_by",
                   {
                     "from": "param",
-                    "name": "owner"
+                    "name": "match_by"
                   }
                 ],
                 [
-                  "repo",
+                  "value",
                   {
                     "from": "param",
-                    "name": "repo"
+                    "name": "value"
                   }
                 ]
               ],
               "command": "add_org_rule",
               "envelope": "args",
-              "id": "org.add_owner_rule",
-              "label": "Add owner rule",
+              "id": "org.add_rule",
+              "label": "Add rule",
               "params": [
                 {
-                  "label": "GitHub owner",
-                  "max": 100,
-                  "name": "owner",
-                  "placeholder": "acme",
+                  "label": "Match by",
+                  "name": "match_by",
+                  "options": [
+                    [
+                      "repository",
+                      "Repository"
+                    ],
+                    [
+                      "path",
+                      "Path"
+                    ],
+                    [
+                      "host",
+                      "Host"
+                    ],
+                    [
+                      "owner",
+                      "Owner"
+                    ]
+                  ],
                   "required": true,
-                  "type": "text"
+                  "type": "choice"
                 },
                 {
-                  "label": "Repository (optional)",
-                  "max": 100,
-                  "name": "repo",
-                  "placeholder": "api",
-                  "required": false,
-                  "type": "text"
-                }
-              ],
-              "report": false
-            },
-            {
-              "bind": [
-                [
-                  "org_id",
-                  {
-                    "from": "record",
-                    "name": "id"
-                  }
-                ],
-                [
-                  "path_prefix",
-                  {
-                    "from": "param",
-                    "name": "path_prefix"
-                  }
-                ]
-              ],
-              "command": "add_org_rule",
-              "envelope": "args",
-              "id": "org.add_path_rule",
-              "label": "Add path rule",
-              "params": [
-                {
-                  "label": "Path prefix",
+                  "label": "Matches",
                   "max": 1024,
-                  "name": "path_prefix",
-                  "placeholder": "/home/me/work/acme",
+                  "name": "value",
+                  "placeholder": "acme/api · /home/me/work/acme · hetzner-a · acme",
                   "required": true,
                   "type": "text"
                 }
               ],
-              "report": false
-            },
-            {
-              "bind": [
-                [
-                  "org_id",
-                  {
-                    "from": "record",
-                    "name": "id"
-                  }
-                ],
-                [
-                  "host_alias",
-                  {
-                    "from": "param",
-                    "name": "host_alias"
-                  }
-                ]
-              ],
-              "command": "add_org_rule",
-              "envelope": "args",
-              "id": "org.add_host_rule",
-              "label": "Add host rule",
-              "params": [
-                {
-                  "label": "Host",
-                  "max": 100,
-                  "name": "host_alias",
-                  "placeholder": "hetzner-a",
-                  "required": true,
-                  "type": "text"
-                }
-              ],
+              "preview": "org_rule_preview",
               "report": false
             }
           ],
@@ -3347,6 +6301,112 @@
             "envelope": "args",
             "id": "org.remove_rule",
             "label": "Remove rule",
+            "params": [],
+            "report": false
+          },
+          "type": "items"
+        },
+        {
+          "add": [
+            {
+              "bind": [
+                [
+                  "org_id",
+                  {
+                    "from": "record",
+                    "name": "id"
+                  }
+                ],
+                [
+                  "name",
+                  {
+                    "from": "param",
+                    "name": "name"
+                  }
+                ],
+                [
+                  "remote",
+                  {
+                    "from": "param",
+                    "name": "remote"
+                  }
+                ],
+                [
+                  "path",
+                  {
+                    "from": "param",
+                    "name": "path"
+                  }
+                ],
+                [
+                  "hosts",
+                  {
+                    "from": "param",
+                    "name": "hosts"
+                  }
+                ]
+              ],
+              "command": "add_org_project",
+              "envelope": "args",
+              "id": "org.add_project",
+              "label": "Add project",
+              "params": [
+                {
+                  "label": "Name",
+                  "max": 80,
+                  "name": "name",
+                  "placeholder": "api",
+                  "required": true,
+                  "type": "text"
+                },
+                {
+                  "label": "Remote (optional)",
+                  "max": 1024,
+                  "name": "remote",
+                  "placeholder": "git@github.com:acme/api.git",
+                  "required": false,
+                  "type": "text"
+                },
+                {
+                  "label": "Path on hosts (optional)",
+                  "max": 1024,
+                  "name": "path",
+                  "placeholder": "~/src/api",
+                  "required": false,
+                  "type": "text"
+                },
+                {
+                  "label": "Hosts allowed (optional; every host of the org when empty)",
+                  "max": 1024,
+                  "name": "hosts",
+                  "placeholder": "hetzner-a, hetzner-b",
+                  "required": false,
+                  "type": "text"
+                }
+              ],
+              "report": false
+            }
+          ],
+          "help": "The org's project catalog: a project its people work on, with its remote, where it is checked out and the hosts it may run on (none: every host of the org).",
+          "id": "projects",
+          "item_label": {
+            "type": "org_project"
+          },
+          "label": "Projects",
+          "remove": {
+            "bind": [
+              [
+                "project_id",
+                {
+                  "from": "item_field",
+                  "name": "id"
+                }
+              ]
+            ],
+            "command": "remove_org_project",
+            "envelope": "args",
+            "id": "org.remove_project",
+            "label": "Remove the project",
             "params": [],
             "report": false
           },
@@ -3485,6 +6545,338 @@
           "type": "items"
         },
         {
+          "add": [],
+          "help": "The Claude accounts its hosts are signed in to. Add or switch one on Settings → Hosts.",
+          "id": "accounts",
+          "item_label": {
+            "type": "org_account"
+          },
+          "label": "Accounts",
+          "type": "items"
+        },
+        {
+          "add": [],
+          "help": "Asset catalogs this org owns; its hosts receive them. Add or remove one in Settings → Catalogs.",
+          "id": "catalogs",
+          "item_label": {
+            "type": "plain"
+          },
+          "label": "Catalogs",
+          "type": "items"
+        },
+        {
+          "add": [
+            {
+              "bind": [
+                [
+                  "device",
+                  {
+                    "from": "param",
+                    "name": "device"
+                  }
+                ],
+                [
+                  "org_id",
+                  {
+                    "from": "record",
+                    "name": "id"
+                  }
+                ]
+              ],
+              "command": "bind_device_org",
+              "envelope": "args",
+              "id": "org.bind_device",
+              "label": "Bind a device",
+              "params": [
+                {
+                  "label": "Device",
+                  "name": "device",
+                  "required": true,
+                  "source": "devices",
+                  "type": "options"
+                }
+              ],
+              "report": false
+            }
+          ],
+          "help": "Phones, browsers and desktops bound to this org: they see only its work (and unassigned work, if allowed below). Pair a new one in Settings → Devices. Shown to the hub's operator only.",
+          "id": "devices",
+          "item_label": {
+            "type": "device"
+          },
+          "label": "Devices",
+          "remove": {
+            "bind": [
+              [
+                "device",
+                {
+                  "from": "item_field",
+                  "name": "name"
+                }
+              ]
+            ],
+            "command": "bind_device_org",
+            "envelope": "args",
+            "id": "org.unbind_device",
+            "label": "Unbind the device",
+            "params": [],
+            "report": false
+          },
+          "type": "items"
+        },
+        {
+          "add": [
+            {
+              "bind": [
+                [
+                  "org_id",
+                  {
+                    "from": "record",
+                    "name": "id"
+                  }
+                ],
+                [
+                  "person",
+                  {
+                    "from": "param",
+                    "name": "person"
+                  }
+                ],
+                [
+                  "role",
+                  {
+                    "from": "param",
+                    "name": "role"
+                  }
+                ]
+              ],
+              "command": "set_org_member",
+              "envelope": "args",
+              "id": "org.set_member",
+              "label": "Add or change a member",
+              "params": [
+                {
+                  "label": "Person",
+                  "max": 64,
+                  "name": "person",
+                  "placeholder": "jane",
+                  "required": true,
+                  "source": "people",
+                  "type": "suggest"
+                },
+                {
+                  "label": "Role",
+                  "name": "role",
+                  "options": [
+                    [
+                      "member",
+                      "Member — sees its work and what is shared with it"
+                    ],
+                    [
+                      "admin",
+                      "Admin — administers the org"
+                    ],
+                    [
+                      "viewer",
+                      "Viewer — reads only"
+                    ]
+                  ],
+                  "required": true,
+                  "type": "choice"
+                }
+              ],
+              "report": false
+            }
+          ],
+          "help": "Who is in the company. An admin administers it (its settings, members and their devices); a member sees its work and what is shared with it; a viewer only reads. Nobody sees another person's private sessions.",
+          "id": "members",
+          "item_label": {
+            "type": "member"
+          },
+          "label": "Members",
+          "remove": {
+            "bind": [
+              [
+                "org_id",
+                {
+                  "from": "record",
+                  "name": "id"
+                }
+              ],
+              [
+                "person_id",
+                {
+                  "from": "item_field",
+                  "name": "person_id"
+                }
+              ]
+            ],
+            "command": "remove_org_member",
+            "confirm": "What was shared with them on this org's sessions is taken back too. Their own sessions stay theirs; if this was their last org, their devices see nothing of any org.",
+            "envelope": "args",
+            "id": "org.remove_member",
+            "label": "Remove from the org",
+            "params": [],
+            "report": false
+          },
+          "type": "items"
+        },
+        {
+          "add": [],
+          "each": [
+            {
+              "bind": [
+                [
+                  "org_id",
+                  {
+                    "from": "record",
+                    "name": "id"
+                  }
+                ],
+                [
+                  "person_id",
+                  {
+                    "from": "item_field",
+                    "name": "person_id"
+                  }
+                ]
+              ],
+              "command": "revoke_org_member_grants",
+              "confirm": "Every share they still hold on this org's sessions is taken back. The sessions' owners can share again.",
+              "envelope": "args",
+              "id": "org.revoke_former_grants",
+              "label": "Take back their shares",
+              "params": [],
+              "report": false
+            }
+          ],
+          "help": "Who left the company, and the shares on its sessions they still hold. Take those back here. Shown to its admins.",
+          "id": "removed_members",
+          "item_label": {
+            "type": "removed_member"
+          },
+          "label": "Removed members",
+          "type": "items"
+        },
+        {
+          "add": [],
+          "help": "Who is working on what: each member's live sessions in this org that you can see, with their state, and how many more are private.",
+          "id": "team",
+          "item_label": {
+            "type": "team_member"
+          },
+          "label": "Team",
+          "type": "items"
+        },
+        {
+          "add": [],
+          "each": [
+            {
+              "bind": [
+                [
+                  "org_id",
+                  {
+                    "from": "record",
+                    "name": "id"
+                  }
+                ],
+                [
+                  "grant_id",
+                  {
+                    "from": "item_field",
+                    "name": "id"
+                  }
+                ]
+              ],
+              "command": "narrow_org_share",
+              "confirm": "They keep reading the session and can no longer answer or drive it.",
+              "envelope": "args",
+              "id": "org.narrow_share",
+              "label": "Narrow to watch",
+              "params": [],
+              "report": false
+            }
+          ],
+          "help": "Every share on this org's sessions: whose session, with whom, at what level, since when. An admin can take one back or narrow it to watch, never widen it. A session you cannot see reads \"a private session\".",
+          "id": "shares",
+          "item_label": {
+            "type": "org_share"
+          },
+          "label": "Sharing",
+          "remove": {
+            "bind": [
+              [
+                "org_id",
+                {
+                  "from": "record",
+                  "name": "id"
+                }
+              ],
+              [
+                "grant_id",
+                {
+                  "from": "item_field",
+                  "name": "id"
+                }
+              ]
+            ],
+            "command": "revoke_org_share",
+            "confirm": "They lose this session at once. Its owner can share it again.",
+            "envelope": "args",
+            "id": "org.revoke_share",
+            "label": "Revoke",
+            "params": [],
+            "report": false
+          },
+          "type": "items"
+        },
+        {
+          "badge": {
+            "text": "owns the hub {hub}",
+            "when": "true"
+          },
+          "confirm": "This org's admins will administer every host on the hub.",
+          "default": false,
+          "edit": "owns_hub",
+          "help": "This company owns the hub: its admins administer hosts — route them into orgs and see how many sessions on them nobody has claimed. One org at most. Only the hub's owner changes it.",
+          "id": "owns_hub",
+          "label": "Owns this hub",
+          "on_off": false,
+          "type": "bool"
+        },
+        {
+          "badge": {
+            "when": "label"
+          },
+          "help": "What you may do in it: an admin administers it, a member works in it, a viewer reads.",
+          "id": "my_role",
+          "label": "Your role",
+          "options": [
+            [
+              "admin",
+              "you are an admin"
+            ],
+            [
+              "member",
+              "you are a member"
+            ],
+            [
+              "viewer",
+              "you are a viewer"
+            ]
+          ],
+          "type": "choice"
+        },
+        {
+          "default": false,
+          "edit": "admins_see_unclaimed",
+          "help": "Its admins see how many sessions on its hosts nobody has claimed — a count, never the sessions. Off by default; only the hub's owner changes it.",
+          "id": "admins_see_unclaimed",
+          "label": "Admins see unclaimed sessions",
+          "on_off": false,
+          "type": "bool"
+        },
+        {
           "badge": {
             "text": "isolates sessions",
             "when": "true"
@@ -3495,6 +6887,20 @@
           "help": "Also hide this org's sessions from other orgs' hosts, and theirs from its hosts: list, peer status, messages. Work data is fenced either way.",
           "id": "isolate_sessions",
           "label": "Isolate sessions",
+          "on_off": false,
+          "type": "bool"
+        },
+        {
+          "badge": {
+            "text": "members see the team's sessions",
+            "when": "false"
+          },
+          "confirm": "Its members will watch each other's sessions in this org: what each one's Claude is doing and has said. They still cannot answer or drive them without a share.",
+          "default": true,
+          "edit": "members_own_sessions_only",
+          "help": "On (the default): a member sees their own sessions and what is shared with them. Off: the org's members also watch each other's sessions in it — read only; answering or driving one still needs a share. Only the hub's owner turns it off; an org admin can turn it back on.",
+          "id": "members_own_sessions_only",
+          "label": "Members see only their own sessions",
           "on_off": false,
           "type": "bool"
         },
@@ -3519,7 +6925,21 @@
           "edit": "jev",
           "help": "Let this org's redacted prompts and ticket titles go to TypeSafe's decision model when Decisions (Jev) is on. Only ids and numbers are recorded; an answer is at most a suggestion.",
           "id": "jev_allowed",
-          "label": "Send to Jev",
+          "label": "Allow Jev (decision model) for {title}'s work",
+          "on_off": true,
+          "type": "bool"
+        },
+        {
+          "badge": {
+            "text": "sends replies to Jev",
+            "when": "true"
+          },
+          "confirm": "The end of this org's sessions' screens (Claude's reply text, redacted) will be sent to TypeSafe when Decisions (Jev) and its turn outcome use case are on.",
+          "default": false,
+          "edit": "jev_reply",
+          "help": "On top of Jev above: let the end of this org's sessions' screens — Claude's last reply, redacted, code replaced by placeholders, a few lines — go to TypeSafe's decision model, so Jev can tell a finished turn from a question when hooks say nothing. Off by default (D48).",
+          "id": "jev_reply_allowed",
+          "label": "Also allow Claude's reply text (turn outcome)",
           "on_off": true,
           "type": "bool"
         },
@@ -3816,6 +7236,34 @@
           ],
           "on_off": false,
           "type": "bool"
+        },
+        {
+          "confirm": "Fleet will write to this tracker: a comment a person posts from fleet appears on the ticket under this credential's account.",
+          "default": false,
+          "edit": "settings",
+          "help": "Let a person who comments on a ticket in fleet also post the comment to it, signed with their name. Only when they tick it; agents never post. The token needs permission to comment.",
+          "id": "post_comments",
+          "label": "Post comments",
+          "merge_path": [
+            "write_back",
+            "comments"
+          ],
+          "on_off": false,
+          "type": "bool"
+        },
+        {
+          "confirm": "Fleet will write to this tracker: each task a person promotes is created as a ticket under this credential's account.",
+          "default": false,
+          "edit": "settings",
+          "help": "Let a person promote a task made in fleet to a ticket here: a subtask of a ticket becomes that ticket's subtask, a task goes into the project they pick. Agents never create one. The token needs permission to create issues.",
+          "id": "create_tickets",
+          "label": "Create tickets",
+          "merge_path": [
+            "write_back",
+            "create_tickets"
+          ],
+          "on_off": false,
+          "type": "bool"
         }
       ],
       "help": "Trackers add a ticket's title and status to the sessions working on it, and list your tickets in ⌘K. Nothing needs one: keys in branch names group sessions without any tracker.",
@@ -3843,6 +7291,1369 @@
         "report": false
       },
       "variant_by": "provider"
+    },
+    {
+      "create": {
+        "bind": [
+          [
+            "name",
+            {
+              "from": "param",
+              "name": "name"
+            }
+          ],
+          [
+            "repo_path",
+            {
+              "from": "param",
+              "name": "repo_path"
+            }
+          ],
+          [
+            "remote_url",
+            {
+              "from": "param",
+              "name": "remote_url"
+            }
+          ],
+          [
+            "org",
+            {
+              "from": "param",
+              "name": "org"
+            }
+          ]
+        ],
+        "command": "catalog_add_catalog",
+        "envelope": "args",
+        "id": "catalog.add",
+        "label": "Add catalog",
+        "params": [
+          {
+            "label": "Name",
+            "max": 64,
+            "name": "name",
+            "placeholder": "papayapos",
+            "required": true,
+            "type": "text"
+          },
+          {
+            "label": "Checkout path",
+            "max": 512,
+            "name": "repo_path",
+            "placeholder": "~/catalogs/papayapos",
+            "required": true,
+            "type": "text"
+          },
+          {
+            "label": "Remote URL (optional)",
+            "max": 512,
+            "name": "remote_url",
+            "placeholder": "git@github.com:org/catalog.git",
+            "required": false,
+            "type": "text"
+          },
+          {
+            "label": "Org",
+            "name": "org",
+            "required": true,
+            "source": "orgs",
+            "type": "options"
+          }
+        ],
+        "report": false
+      },
+      "delete": {
+        "bind": [
+          [
+            "name",
+            {
+              "from": "record",
+              "name": "name"
+            }
+          ]
+        ],
+        "command": "catalog_remove_catalog",
+        "confirm": "Removes the catalog from fleet's config. Its checkout stays on disk; open cards on it are withdrawn.",
+        "envelope": "args",
+        "id": "catalog.remove",
+        "label": "Remove",
+        "params": [],
+        "report": false
+      },
+      "empty": "No catalogs yet. Add an org's catalog by its checkout path.",
+      "fields": [
+        {
+          "help": "What hosts, grants and cards call it; fixed once added.",
+          "id": "name",
+          "label": "Name",
+          "max": 64,
+          "type": "text"
+        },
+        {
+          "badge": {
+            "when": "label"
+          },
+          "help": "Whether fleet could read the catalog's repo the last time it looked.",
+          "id": "state",
+          "label": "State",
+          "options": [
+            [
+              "loaded",
+              "Loaded"
+            ],
+            [
+              "problem",
+              "Could not load"
+            ],
+            [
+              "not_loaded",
+              "Not loaded"
+            ]
+          ],
+          "type": "choice"
+        },
+        {
+          "help": "Where the catalog's git repo is on this machine.",
+          "id": "repo_path",
+          "label": "Checkout",
+          "max": 512,
+          "type": "text"
+        },
+        {
+          "help": "Its git remote, if any.",
+          "id": "remote_url",
+          "label": "Remote",
+          "max": 512,
+          "type": "text"
+        },
+        {
+          "help": "The org whose hosts receive it; none for personal.",
+          "id": "org",
+          "label": "Org",
+          "max": 128,
+          "type": "text"
+        },
+        {
+          "add": [
+            {
+              "bind": [
+                [
+                  "host_alias",
+                  {
+                    "from": "param",
+                    "name": "host"
+                  }
+                ],
+                [
+                  "catalog",
+                  {
+                    "from": "record",
+                    "name": "name"
+                  }
+                ]
+              ],
+              "command": "catalog_admit_catalog",
+              "envelope": "args",
+              "id": "catalog.admit",
+              "label": "Admit a host",
+              "params": [
+                {
+                  "label": "Host",
+                  "name": "host",
+                  "required": true,
+                  "source": "hosts",
+                  "type": "options"
+                }
+              ],
+              "report": false
+            }
+          ],
+          "help": "Hosts with no org that receive this catalog. Hosts of its org always do.",
+          "id": "admitted",
+          "item_label": {
+            "type": "plain"
+          },
+          "label": "Admitted by",
+          "remove": {
+            "bind": [
+              [
+                "host_alias",
+                {
+                  "from": "item"
+                }
+              ],
+              [
+                "catalog",
+                {
+                  "from": "record",
+                  "name": "name"
+                }
+              ]
+            ],
+            "command": "catalog_unadmit_catalog",
+            "envelope": "args",
+            "id": "catalog.unadmit",
+            "label": "Remove",
+            "params": [],
+            "report": false
+          },
+          "type": "items"
+        },
+        {
+          "add": [],
+          "help": "Paired desktops that may change this catalog. Granted in Settings → Devices.",
+          "id": "granted",
+          "item_label": {
+            "type": "plain"
+          },
+          "label": "Granted to",
+          "type": "items"
+        }
+      ],
+      "help": "Git repos of assets fleet syncs to hosts. `personal` is yours; an org's catalog reaches that org's hosts and the org-less hosts that admit it. A GitHub org with SSO must allow the catalog's deploy key — an org admin does that once in the org's settings. Which device may change a catalog is set in Settings → Devices.",
+      "id": "catalog",
+      "id_field": "name",
+      "label": "Catalog",
+      "list": "catalog_list_catalogs",
+      "plural": "Catalogs",
+      "title_field": "name"
+    },
+    {
+      "create": {
+        "bind": [
+          [
+            "device",
+            {
+              "from": "param",
+              "name": "device"
+            }
+          ],
+          [
+            "mode",
+            {
+              "from": "param",
+              "name": "mode"
+            }
+          ],
+          [
+            "org",
+            {
+              "from": "param",
+              "name": "org"
+            }
+          ],
+          [
+            "person",
+            {
+              "from": "param",
+              "name": "person"
+            }
+          ]
+        ],
+        "command": "pair_device",
+        "envelope": "args",
+        "id": "device.pair",
+        "label": "Pair a device",
+        "params": [
+          {
+            "label": "Name",
+            "max": 64,
+            "name": "device",
+            "placeholder": "ada-phone",
+            "required": true,
+            "type": "text"
+          },
+          {
+            "label": "Mode",
+            "name": "mode",
+            "options": [
+              [
+                "full",
+                "Full"
+              ],
+              [
+                "answer",
+                "Answer only"
+              ],
+              [
+                "readonly",
+                "Watch only"
+              ]
+            ],
+            "required": true,
+            "type": "choice"
+          },
+          {
+            "label": "Bind to org (optional)",
+            "name": "org",
+            "required": false,
+            "source": "orgs",
+            "type": "options"
+          },
+          {
+            "label": "Belongs to (optional; you when empty)",
+            "max": 64,
+            "name": "person",
+            "placeholder": "jane",
+            "required": false,
+            "source": "people",
+            "type": "suggest"
+          }
+        ],
+        "report": false,
+        "result": "pairing"
+      },
+      "delete": {
+        "bind": [
+          [
+            "device",
+            {
+              "from": "record",
+              "name": "name"
+            }
+          ]
+        ],
+        "command": "revoke_device",
+        "confirm": "Its next request is refused and the name is free again. Pair it again to bring it back.",
+        "envelope": "args",
+        "id": "device.revoke",
+        "label": "Revoke",
+        "params": [],
+        "report": false
+      },
+      "empty": "No paired devices. Pair a phone or a browser with Pair a device.",
+      "fields": [
+        {
+          "edit": "name",
+          "help": "How the apps and the audit name it. Its grants, catalogs and person follow a new name.",
+          "id": "name",
+          "label": "Name",
+          "max": 64,
+          "type": "text"
+        },
+        {
+          "badge": {
+            "when": "label"
+          },
+          "edit": "mode",
+          "help": "Full drives sessions; answer only answers their questions and permission prompts and never types a prompt; watch only reads. A viewer's device watches only whatever it says here.",
+          "id": "mode",
+          "label": "Mode",
+          "options": [
+            [
+              "full",
+              "Full"
+            ],
+            [
+              "answer",
+              "Answer only"
+            ],
+            [
+              "readonly",
+              "Watch only"
+            ]
+          ],
+          "type": "choice"
+        },
+        {
+          "badge": {
+            "text": "this device",
+            "when": "true"
+          },
+          "default": false,
+          "help": "The device you are using now. It cannot revoke, untrust, bind, hand over or make itself read-only.",
+          "id": "this_device",
+          "label": "This device",
+          "on_off": false,
+          "type": "bool"
+        },
+        {
+          "badge": {
+            "text": "trusted",
+            "when": "true"
+          },
+          "confirm": "Its prompts will reach agents unmarked, and it will be able to change the company's orgs, devices and settings.",
+          "default": false,
+          "edit": "trusted",
+          "help": "Its prompts and messages reach agents unmarked, and it may change the company's orgs, devices and settings. Trust a device you type on, never an agent's.",
+          "id": "trusted",
+          "label": "Trusted",
+          "on_off": false,
+          "type": "bool"
+        },
+        {
+          "confirm": "From its next request it sees only the org picked here (every org, with none).",
+          "edit": "org",
+          "help": "The org it is bound to; none sees every org.",
+          "id": "org",
+          "label": "Org",
+          "none": "No org — every org",
+          "source": "orgs",
+          "type": "pick"
+        },
+        {
+          "confirm": "From its next request it sees that person's sessions and the ones shared with them, and no others.",
+          "edit": "person",
+          "help": "Whose device it is: it sees their sessions and the ones shared with them.",
+          "id": "person",
+          "label": "Belongs to",
+          "source": "people",
+          "type": "pick"
+        },
+        {
+          "help": "A desktop or a phone, as its app last said.",
+          "id": "kind",
+          "label": "Kind",
+          "options": [
+            [
+              "desktop",
+              "Desktop"
+            ],
+            [
+              "phone",
+              "Phone"
+            ]
+          ],
+          "type": "choice"
+        },
+        {
+          "help": "What it runs, as its app last said; nothing until it has called the hub.",
+          "id": "app",
+          "label": "App",
+          "max": 80,
+          "type": "text"
+        },
+        {
+          "add": [
+            {
+              "bind": [
+                [
+                  "device",
+                  {
+                    "from": "record",
+                    "name": "name"
+                  }
+                ],
+                [
+                  "catalog",
+                  {
+                    "from": "param",
+                    "name": "catalog"
+                  }
+                ],
+                [
+                  "on",
+                  {
+                    "from": "true"
+                  }
+                ]
+              ],
+              "command": "grant_device_catalog",
+              "envelope": "args",
+              "id": "device.grant_catalog",
+              "label": "Grant a catalog",
+              "params": [
+                {
+                  "label": "Catalog",
+                  "name": "catalog",
+                  "required": true,
+                  "source": "catalogs",
+                  "type": "options"
+                }
+              ],
+              "report": false
+            }
+          ],
+          "help": "Asset catalogs it may edit and sync. Only a full device bound to no org can hold one.",
+          "id": "catalogs",
+          "item_label": {
+            "type": "plain"
+          },
+          "label": "May change catalogs",
+          "remove": {
+            "bind": [
+              [
+                "device",
+                {
+                  "from": "record",
+                  "name": "name"
+                }
+              ],
+              [
+                "catalog",
+                {
+                  "from": "item"
+                }
+              ],
+              [
+                "on",
+                {
+                  "from": "false"
+                }
+              ]
+            ],
+            "command": "grant_device_catalog",
+            "envelope": "args",
+            "id": "device.ungrant_catalog",
+            "label": "Take the catalog back",
+            "params": [],
+            "report": false
+          },
+          "type": "items"
+        },
+        {
+          "help": "Its last request to the hub.",
+          "id": "last_seen_at",
+          "label": "Last seen",
+          "type": "time"
+        },
+        {
+          "help": "When it was paired.",
+          "id": "created_at",
+          "label": "Paired",
+          "type": "time"
+        }
+      ],
+      "help": "The phones, browsers and desktops paired to the hub. A device bound to an org sees only that org's work; a trusted one's prompts reach agents unmarked, and it may change these settings. Links to other fleets' hubs are under Federation; updater tokens are managed on the hub.",
+      "id": "device",
+      "id_field": "name",
+      "label": "Device",
+      "list": "list_devices",
+      "plural": "Devices",
+      "title_field": "name",
+      "update": {
+        "bind": [
+          [
+            "device",
+            {
+              "from": "record",
+              "name": "name"
+            }
+          ]
+        ],
+        "command": "update_device",
+        "envelope": "args",
+        "id": "device.update",
+        "label": "Apply",
+        "params": [],
+        "report": false
+      }
+    },
+    {
+      "create": {
+        "bind": [
+          [
+            "name",
+            {
+              "from": "param",
+              "name": "name"
+            }
+          ],
+          [
+            "display_name",
+            {
+              "from": "param",
+              "name": "display_name"
+            }
+          ]
+        ],
+        "command": "add_person",
+        "envelope": "args",
+        "id": "person.add",
+        "label": "+ Person",
+        "params": [
+          {
+            "label": "Name",
+            "max": 64,
+            "name": "name",
+            "placeholder": "jana",
+            "required": true,
+            "type": "text"
+          },
+          {
+            "label": "Shown as (optional)",
+            "max": 80,
+            "name": "display_name",
+            "placeholder": "Jana Nováková",
+            "required": false,
+            "type": "text"
+          }
+        ],
+        "report": false
+      },
+      "delete": {
+        "bind": [
+          [
+            "person_id",
+            {
+              "from": "record",
+              "name": "id"
+            }
+          ]
+        ],
+        "command": "disable_person",
+        "confirm": "Revokes every device of theirs and every share made to them, at once. Their own sessions stay private and theirs. There is no re-enable.",
+        "envelope": "args",
+        "id": "person.disable",
+        "label": "Disable",
+        "params": [],
+        "report": false
+      },
+      "empty": "Nobody yet. Add a person, or pair a device to them.",
+      "fields": [
+        {
+          "edit": "name",
+          "help": "What grants and devices are addressed to.",
+          "id": "name",
+          "label": "Name",
+          "max": 64,
+          "type": "text"
+        },
+        {
+          "edit": "display_name",
+          "help": "How the apps show them; empty shows the name.",
+          "id": "display_name",
+          "label": "Shown as",
+          "max": 80,
+          "type": "text"
+        },
+        {
+          "badge": {
+            "text": "owner",
+            "when": "true"
+          },
+          "default": false,
+          "help": "This hub's own owner.",
+          "id": "owner",
+          "label": "Owner",
+          "on_off": false,
+          "type": "bool"
+        },
+        {
+          "add": [],
+          "help": "Their live paired devices. Manage them in Settings → Devices.",
+          "id": "devices",
+          "item_label": {
+            "type": "plain"
+          },
+          "label": "Devices",
+          "type": "items"
+        },
+        {
+          "help": "When the hub first heard of them.",
+          "id": "created_at",
+          "label": "Added",
+          "type": "time"
+        },
+        {
+          "help": "When their devices and the shares made to them were revoked.",
+          "id": "disabled_at",
+          "label": "Disabled",
+          "type": "time"
+        }
+      ],
+      "help": "The people this hub knows. A session belongs to the person whose device started it and is private to them unless they share it. The hub's owner cannot be disabled.",
+      "id": "person",
+      "id_field": "id",
+      "label": "Person",
+      "list": "list_people",
+      "plural": "People",
+      "title_field": "name",
+      "update": {
+        "bind": [
+          [
+            "person_id",
+            {
+              "from": "record",
+              "name": "id"
+            }
+          ]
+        ],
+        "command": "rename_person",
+        "envelope": "args",
+        "id": "person.update",
+        "label": "Apply",
+        "params": [],
+        "report": false
+      }
+    },
+    {
+      "actions": [
+        {
+          "bind": [
+            [
+              "host",
+              {
+                "from": "record",
+                "name": "host"
+              }
+            ]
+          ],
+          "command": "scan_debug_devices",
+          "envelope": "args",
+          "id": "debug_device.rescan",
+          "label": "Rescan host",
+          "params": [],
+          "report": false
+        },
+        {
+          "bind": [
+            [
+              "id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ],
+            [
+              "note",
+              {
+                "from": "param",
+                "name": "note"
+              }
+            ],
+            [
+              "queue",
+              {
+                "from": "param",
+                "name": "queue"
+              }
+            ]
+          ],
+          "command": "claim_debug_device",
+          "envelope": "args",
+          "id": "debug_device.claim",
+          "label": "Claim",
+          "params": [
+            {
+              "label": "For (optional)",
+              "max": 200,
+              "name": "note",
+              "placeholder": "testing the login flow",
+              "required": false,
+              "type": "text"
+            },
+            {
+              "default": false,
+              "label": "Wait in line if someone holds it",
+              "name": "queue",
+              "required": false,
+              "type": "toggle"
+            }
+          ],
+          "report": false
+        },
+        {
+          "bind": [
+            [
+              "id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ],
+            [
+              "path",
+              {
+                "from": "param",
+                "name": "path"
+              }
+            ],
+            [
+              "host",
+              {
+                "from": "param",
+                "name": "host"
+              }
+            ],
+            [
+              "claim",
+              {
+                "from": "param",
+                "name": "claim"
+              }
+            ],
+            [
+              "note",
+              {
+                "from": "param",
+                "name": "note"
+              }
+            ]
+          ],
+          "command": "install_debug_device",
+          "envelope": "args",
+          "id": "debug_device.install",
+          "label": "Install app…",
+          "params": [
+            {
+              "label": "App (.apk, .app or .ipa)",
+              "max": 1024,
+              "name": "path",
+              "placeholder": "~/app/build/outputs/apk/debug/app-debug.apk",
+              "required": true,
+              "type": "text"
+            },
+            {
+              "label": "On host (optional; the device's own when empty)",
+              "name": "host",
+              "required": false,
+              "source": "hosts",
+              "type": "options"
+            },
+            {
+              "default": true,
+              "label": "Claim it while installing (others see it in use)",
+              "name": "claim",
+              "required": false,
+              "type": "toggle"
+            },
+            {
+              "label": "For (optional)",
+              "max": 200,
+              "name": "note",
+              "placeholder": "testing the login flow",
+              "required": false,
+              "type": "text"
+            }
+          ],
+          "report": false,
+          "result": "output"
+        },
+        {
+          "bind": [
+            [
+              "id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ]
+          ],
+          "command": "debug_device_logs",
+          "envelope": "args",
+          "id": "debug_device.logs",
+          "label": "Logs",
+          "params": [],
+          "report": false,
+          "result": "output"
+        },
+        {
+          "bind": [
+            [
+              "id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ]
+          ],
+          "command": "debug_device_screenshot",
+          "envelope": "args",
+          "id": "debug_device.screenshot",
+          "label": "Screenshot",
+          "params": [],
+          "report": false,
+          "result": "image"
+        },
+        {
+          "bind": [
+            [
+              "id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ]
+          ],
+          "command": "start_device_mirror",
+          "envelope": "args",
+          "id": "debug_device.mirror",
+          "label": "Mirror",
+          "params": [],
+          "report": false,
+          "result": "output",
+          "variants": [
+            "physical",
+            "emulator"
+          ]
+        },
+        {
+          "bind": [
+            [
+              "id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ]
+          ],
+          "command": "stop_device_mirror",
+          "envelope": "args",
+          "id": "debug_device.mirror_stop",
+          "label": "Stop mirror",
+          "params": [],
+          "report": false,
+          "variants": [
+            "physical",
+            "emulator"
+          ]
+        },
+        {
+          "bind": [
+            [
+              "id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ]
+          ],
+          "command": "release_debug_device",
+          "confirm": "Whoever holds it loses the claim and the next in line gets it, or another session may then use it. If you wait in its line, you only leave the line.",
+          "envelope": "args",
+          "id": "debug_device.release",
+          "label": "Release claim",
+          "params": [],
+          "report": false
+        },
+        {
+          "bind": [
+            [
+              "id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ]
+          ],
+          "command": "boot_debug_device",
+          "envelope": "args",
+          "id": "debug_device.boot",
+          "label": "Start",
+          "params": [],
+          "report": false,
+          "variants": [
+            "emulator",
+            "simulator"
+          ]
+        },
+        {
+          "bind": [
+            [
+              "id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ]
+          ],
+          "command": "shutdown_debug_device",
+          "confirm": "Anything running on it stops.",
+          "envelope": "args",
+          "id": "debug_device.shutdown",
+          "label": "Stop",
+          "params": [],
+          "report": false,
+          "variants": [
+            "emulator",
+            "simulator"
+          ]
+        }
+      ],
+      "delete": {
+        "bind": [
+          [
+            "id",
+            {
+              "from": "record",
+              "name": "id"
+            }
+          ]
+        ],
+        "command": "forget_debug_device",
+        "confirm": "It leaves the list with its label and sharing. A device still attached comes back on the next scan.",
+        "envelope": "args",
+        "id": "debug_device.forget",
+        "label": "Forget",
+        "params": [],
+        "report": false
+      },
+      "empty": "No debug devices yet. Plug a phone into a host (USB debugging on), start an emulator or boot a simulator; hosts are scanned every few minutes, or rescan one now.",
+      "fields": [
+        {
+          "help": "Its label, or the name it reports.",
+          "id": "title",
+          "label": "Device",
+          "max": 128,
+          "type": "text"
+        },
+        {
+          "edit": "label",
+          "help": "Your name for it, used by sessions to pick it; empty uses its own name.",
+          "id": "label",
+          "label": "Label",
+          "max": 64,
+          "type": "text"
+        },
+        {
+          "help": "The host it is attached to; every command runs there.",
+          "id": "host",
+          "label": "Host",
+          "max": 128,
+          "type": "text"
+        },
+        {
+          "badge": {
+            "when": "label"
+          },
+          "help": "Android or iOS.",
+          "id": "platform",
+          "label": "Platform",
+          "options": [
+            [
+              "android",
+              "Android"
+            ],
+            [
+              "ios",
+              "iOS"
+            ]
+          ],
+          "type": "choice"
+        },
+        {
+          "help": "A physical device, an Android emulator or an iOS simulator.",
+          "id": "kind",
+          "label": "Kind",
+          "options": [
+            [
+              "physical",
+              "Device"
+            ],
+            [
+              "emulator",
+              "Emulator"
+            ],
+            [
+              "simulator",
+              "Simulator"
+            ]
+          ],
+          "type": "choice"
+        },
+        {
+          "badge": {
+            "when": "label"
+          },
+          "help": "What the host's last scan saw.",
+          "id": "state",
+          "label": "State",
+          "options": [
+            [
+              "online",
+              "Online"
+            ],
+            [
+              "booted",
+              "Booted"
+            ],
+            [
+              "booting",
+              "Starting"
+            ],
+            [
+              "offline",
+              "Offline"
+            ],
+            [
+              "unauthorized",
+              "Not authorized"
+            ],
+            [
+              "shutdown",
+              "Stopped"
+            ],
+            [
+              "missing",
+              "Missing"
+            ]
+          ],
+          "type": "choice"
+        },
+        {
+          "help": "The version it runs.",
+          "id": "os_version",
+          "label": "OS",
+          "max": 64,
+          "type": "text"
+        },
+        {
+          "help": "The hardware model it reports.",
+          "id": "model",
+          "label": "Model",
+          "max": 128,
+          "type": "text"
+        },
+        {
+          "help": "What adb, simctl or devicectl address it by.",
+          "id": "serial",
+          "label": "Serial",
+          "max": 256,
+          "type": "text"
+        },
+        {
+          "badge": {
+            "text": "shared",
+            "when": "true"
+          },
+          "confirm": "Sessions on every host of its org will be able to install and launch apps on it, and on a simulator that runs them on its Mac.",
+          "default": false,
+          "edit": "shared",
+          "help": "Sessions on other hosts of this host's org may use it; off, only sessions on its own host do.",
+          "id": "shared",
+          "label": "Shared",
+          "on_off": false,
+          "type": "bool"
+        },
+        {
+          "help": "Who is using it now; nobody else may until the claim ends.",
+          "id": "claimed_by",
+          "label": "Claimed by",
+          "max": 256,
+          "type": "text"
+        },
+        {
+          "help": "What the claim says it is for.",
+          "id": "claim_note",
+          "label": "For",
+          "max": 200,
+          "type": "text"
+        },
+        {
+          "help": "When the claim lapses unless its holder keeps using it.",
+          "id": "claimed_until",
+          "label": "Claim ends",
+          "type": "time"
+        },
+        {
+          "help": "Sessions and people in line for it; each gets the claim in turn when the one before releases it or lets it lapse.",
+          "id": "waiting",
+          "label": "Waiting",
+          "type": "count"
+        },
+        {
+          "help": "When a scan last found it.",
+          "id": "last_seen_at",
+          "label": "Last seen",
+          "type": "time"
+        }
+      ],
+      "help": "Phones, emulators and simulators plugged into or running on your hosts. Each is used where it is attached; a shared one can be used by sessions on every host of its org through fleet's control API.",
+      "id": "debug_device",
+      "id_field": "id",
+      "label": "Debug device",
+      "list": "list_debug_devices",
+      "plural": "Debug devices",
+      "title_field": "title",
+      "update": {
+        "bind": [
+          [
+            "id",
+            {
+              "from": "record",
+              "name": "id"
+            }
+          ]
+        ],
+        "command": "update_debug_device",
+        "envelope": "args",
+        "id": "debug_device.update",
+        "label": "Apply",
+        "params": [],
+        "report": false
+      },
+      "variant_by": "kind"
+    },
+    {
+      "create": {
+        "bind": [
+          [
+            "url",
+            {
+              "from": "param",
+              "name": "url"
+            }
+          ],
+          [
+            "code",
+            {
+              "from": "param",
+              "name": "code"
+            }
+          ]
+        ],
+        "busy": "counter-orbit",
+        "command": "link_peer_hub",
+        "envelope": "args",
+        "id": "peer_link.add",
+        "label": "Link a hub",
+        "params": [
+          {
+            "label": "Hub address",
+            "max": 512,
+            "name": "url",
+            "placeholder": "https://hub.example.com",
+            "required": true,
+            "type": "text"
+          },
+          {
+            "label": "Link code",
+            "name": "code",
+            "required": true,
+            "type": "secret"
+          }
+        ],
+        "report": false
+      },
+      "delete": {
+        "bind": [
+          [
+            "id",
+            {
+              "from": "record",
+              "name": "id"
+            }
+          ]
+        ],
+        "command": "unlink_peer_hub",
+        "confirm": "Sessions here can no longer message that fleet, and messages waiting for it fail back to their senders. Linking again needs a new code.",
+        "envelope": "args",
+        "id": "peer_link.remove",
+        "label": "Unlink",
+        "params": [],
+        "report": false
+      },
+      "empty": "No linked hubs. Ask the other fleet's owner for a link code (fleet-hub pair --mode peer --name <label> on their hub), then Link a hub.",
+      "fields": [
+        {
+          "help": "The other fleet's id once it has answered, else its hub's address.",
+          "id": "title",
+          "label": "Fleet",
+          "max": 256,
+          "type": "text"
+        },
+        {
+          "badge": {
+            "when": "label"
+          },
+          "help": "How the last exchange went.",
+          "id": "state",
+          "label": "State",
+          "options": [
+            [
+              "connected",
+              "Connected"
+            ],
+            [
+              "retrying",
+              "Retrying"
+            ],
+            [
+              "refused",
+              "Refused"
+            ],
+            [
+              "incompatible",
+              "Incompatible"
+            ]
+          ],
+          "type": "choice"
+        },
+        {
+          "help": "Which hub opens the connection: this one dials out, or the other dials in.",
+          "id": "role",
+          "label": "Direction",
+          "options": [
+            [
+              "dialer",
+              "We dial"
+            ],
+            [
+              "listener",
+              "They dial"
+            ]
+          ],
+          "type": "choice"
+        },
+        {
+          "help": "The hub this one dials; a link the other side dials has none.",
+          "id": "url",
+          "label": "Address",
+          "max": 512,
+          "type": "text"
+        },
+        {
+          "help": "Messages carried today against those still queued, while the queue drains.",
+          "id": "sync",
+          "label": "Syncing",
+          "type": "sync",
+          "unit": "messages"
+        },
+        {
+          "help": "The round trip of the last exchange this hub dialed.",
+          "id": "latency",
+          "label": "Latency",
+          "max": 32,
+          "type": "text"
+        },
+        {
+          "help": "Carried either way since midnight (UTC).",
+          "id": "messages_today",
+          "label": "Messages today",
+          "type": "count"
+        },
+        {
+          "help": "Carried either way since the link was made.",
+          "id": "messages_total",
+          "label": "Messages in all",
+          "type": "count"
+        },
+        {
+          "help": "Messages queued for the other fleet.",
+          "id": "pending",
+          "label": "Waiting",
+          "type": "count"
+        },
+        {
+          "help": "When the hubs last traded messages.",
+          "id": "last_exchange_at",
+          "label": "Last exchange",
+          "type": "time"
+        },
+        {
+          "help": "Why the last exchange failed, while it is failing.",
+          "id": "last_error",
+          "label": "Last error",
+          "max": 512,
+          "type": "text"
+        },
+        {
+          "help": "How often this hub tries the link again while it is down (it backs off to once a minute).",
+          "id": "retry",
+          "label": "Retrying",
+          "max": 32,
+          "type": "text"
+        }
+      ],
+      "help": "Other fleets' hubs this hub exchanges messages with: sessions here can message sessions there, and back. Each link shows how it is doing and what it carried.",
+      "id": "peer_link",
+      "id_field": "id",
+      "label": "Linked hub",
+      "list": "list_peer_links",
+      "plural": "Linked hubs",
+      "title_field": "title"
     }
   ],
   "sources": [
@@ -3856,6 +8667,49 @@
       },
       "params": [],
       "shape": "account_usage"
+    },
+    {
+      "columns": [
+        {
+          "id": "device",
+          "label": "Device",
+          "ty": "text"
+        },
+        {
+          "id": "part",
+          "label": "Part",
+          "ty": "text"
+        },
+        {
+          "id": "version",
+          "label": "Version",
+          "ty": "text"
+        },
+        {
+          "id": "update",
+          "label": "Update",
+          "ty": "text"
+        },
+        {
+          "id": "offers",
+          "label": "Offered",
+          "ty": "text"
+        },
+        {
+          "id": "reported_at",
+          "label": "Reported",
+          "ty": "time"
+        }
+      ],
+      "help": "The hub, every host's agent, each desktop and the phone: the version each runs and what the hub would tell it now (`update_status`).",
+      "id": "updates.targets",
+      "label": "What runs where",
+      "live": {
+        "command": "list_update_targets",
+        "event": "update"
+      },
+      "params": [],
+      "shape": "rows"
     },
     {
       "fields": [
@@ -4115,6 +8969,45 @@
       "help": "When the last sweep ran and what it deleted.",
       "id": "work.retention_last",
       "label": "Last retention sweep",
+      "params": [],
+      "shape": "record"
+    },
+    {
+      "fields": [
+        {
+          "id": "input_tokens",
+          "label": "Used today",
+          "ty": "tokens"
+        },
+        {
+          "id": "budget",
+          "label": "Daily budget",
+          "ty": "tokens"
+        },
+        {
+          "id": "cost_micros",
+          "label": "Cost today",
+          "ty": "usd_micros"
+        },
+        {
+          "id": "breaker",
+          "label": "Breaker",
+          "ty": "text"
+        },
+        {
+          "id": "key",
+          "label": "Key",
+          "ty": "text"
+        },
+        {
+          "id": "orgs_allowed",
+          "label": "Orgs that allow Jev",
+          "ty": "text"
+        }
+      ],
+      "help": "Today's use of the decision model (Jev): input tokens against the daily budget, the breaker, the key and the organisations that allow it (`fleet-hub decide status`).",
+      "id": "decide.today",
+      "label": "Decision model today",
       "params": [],
       "shape": "record"
     }

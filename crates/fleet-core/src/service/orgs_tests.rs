@@ -1,6 +1,13 @@
 use super::*;
 use crate::store::{WorkSummary, WorkTarget};
 
+/// The hub's own reader with one org half substituted: these tests are about
+/// the ORG boundary, and the person half (multi-user M1) is tested where it
+/// is implemented.
+fn vs(scope: &OrgScope) -> crate::service::view_scope::ViewScope {
+    crate::service::view_scope::ViewScope::internal().with_org(scope.clone())
+}
+
 fn host(org: Option<i64>, isolated: &[i64]) -> OrgScope {
     OrgScope::Host {
         alias: "h-a".into(),
@@ -27,26 +34,69 @@ fn work_data_is_visible_in_the_hosts_org_and_unassigned_only() {
     }
 }
 
+/// The ORG half of a session read, and only that half (multi-user M1): the
+/// person half is `service::view_scope`'s, and its own table test is beside
+/// it.
+///
+/// The host arm no longer has three unconditional wins. It used to read
+/// `row_host == alias || row_org.is_none() || row_org == *org` with a
+/// permissive fall-through under it — which let a host token in org X read
+/// every session of org X on every host in the fleet. It is now the rule a
+/// machine's token is supposed to have: its own host's rows, and nothing
+/// else. D7's `isolate_sessions` is subsumed rather than dropped — it only
+/// ever hid OTHER hosts' rows from a host token, and those are now hidden
+/// whatever any org says.
 #[test]
-fn sessions_are_fenced_only_between_isolating_orgs() {
+fn a_host_token_sees_its_own_hosts_sessions_and_nothing_else() {
     // (scope, row host, row org, visible)
     let table = [
         (OrgScope::All, "h-b", Some(2), true),
-        // Off everywhere: sessions are not fenced (D7 default).
-        (host(Some(1), &[]), "h-b", Some(2), true),
-        // B isolates: A's host cannot see B's sessions …
+        // Its own host's rows, whatever org they are placed in …
+        (host(Some(1), &[]), "h-a", Some(1), true),
+        (host(Some(1), &[]), "h-a", Some(2), true),
+        (host(Some(1), &[]), "h-a", None, true),
+        (host(None, &[]), "h-a", Some(1), true),
+        // … and no other host's, however the orgs line up. Each of the
+        // three rows below was a WIN before M1: the same org, no org, and
+        // (with D7 off) simply "nobody isolates".
+        (host(Some(1), &[]), "h-b", Some(1), false),
+        (host(Some(1), &[]), "h-b", None, false),
+        (host(Some(1), &[]), "h-b", Some(2), false),
+        (host(None, &[]), "h-b", None, false),
+        // D7 on changes none of these answers any more.
         (host(Some(1), &[2]), "h-b", Some(2), false),
-        // … nor can an unplaced host.
-        (host(None, &[2]), "h-b", Some(2), false),
-        // A isolates: its hosts see only A and unassigned.
-        (host(Some(1), &[1]), "h-b", Some(2), false),
-        (host(Some(1), &[1]), "h-b", None, true),
-        (host(Some(1), &[1, 2]), "h-a2", Some(1), true),
-        // Its own host's sessions, always.
-        (host(Some(1), &[2]), "h-a", Some(2), true),
+        (host(Some(1), &[1, 2]), "h-a", Some(1), true),
     ];
     for (scope, h, org, want) in table {
-        assert_eq!(scope.sees_session(h, org), want, "{scope:?} {h} {org:?}");
+        assert_eq!(
+            scope.sees_session_org_only(h, org),
+            want,
+            "{scope:?} {h} {org:?}"
+        );
+    }
+}
+
+/// A bound client (M14) is unchanged: strictly its own org's sessions, plus
+/// unassigned ones while D31 is on. It has no host fence — a phone is not a
+/// host.
+#[test]
+fn a_bound_client_sees_its_own_orgs_sessions_on_any_host() {
+    let bound = |org: i64, unassigned: bool| OrgScope::Org {
+        org,
+        sees_unassigned: unassigned,
+    };
+    let table = [
+        (bound(1, true), "h-b", Some(1), true),
+        (bound(1, true), "h-b", Some(2), false),
+        (bound(1, true), "h-b", None, true),
+        (bound(1, false), "h-b", None, false),
+    ];
+    for (scope, h, org, want) in table {
+        assert_eq!(
+            scope.sees_session_org_only(h, org),
+            want,
+            "{scope:?} {h} {org:?}"
+        );
     }
 }
 
@@ -55,6 +105,7 @@ fn summary(org: Option<i64>) -> WorkSummary {
         link_id: 1,
         item_id: None,
         key: Some("ABC-1".into()),
+        display_key: None,
         title: "Secret title".into(),
         source: "manual".into(),
         kind: String::new(),
@@ -93,11 +144,11 @@ fn a_row_loses_the_work_its_reader_may_not_see() {
     let a = host(Some(1), &[]);
     // A session of org 2: all of its work goes.
     let mut r = row(Some(2), Some(2));
-    a.redact_row(&mut r);
+    a.redact_row_org_only(&mut r);
     assert!(r.work.is_none() && r.work_suggested.is_none() && r.work_rejected.is_empty());
     // A session of org 1 with a link to org 2's ticket: that link goes.
     let mut r = row(Some(1), Some(2));
-    a.redact_row(&mut r);
+    a.redact_row_org_only(&mut r);
     assert!(r.work.is_none());
     assert!(r.work_rejected.is_empty(), "bare keys never reach a host");
     assert_eq!(
@@ -106,11 +157,11 @@ fn a_row_loses_the_work_its_reader_may_not_see() {
     );
     // Its own org's work stays; the master keeps everything.
     let mut r = row(Some(1), Some(1));
-    a.redact_row(&mut r);
+    a.redact_row_org_only(&mut r);
     assert!(r.work.is_some());
     assert_eq!(r.work_rev, 0);
     let mut r = row(Some(2), Some(2));
-    OrgScope::All.redact_row(&mut r);
+    OrgScope::All.redact_row_org_only(&mut r);
     assert!(r.work.is_some());
     assert_eq!(r.work_rev, 42);
 }
@@ -171,7 +222,7 @@ fn scopes_list_orgs_then_uncovered_owners_then_the_rest() {
             .unwrap();
     }
     // Zero config: one pseudo-scope per owner, then the unassigned rest.
-    let got = scopes(&st, &OrgScope::All).unwrap();
+    let got = scopes(&st, &vs(&OrgScope::All)).unwrap();
     let labels: Vec<(&str, usize, usize)> = got
         .iter()
         .map(|e| (e.label.as_str(), e.session_count, e.needs_you))
@@ -192,20 +243,22 @@ fn scopes_list_orgs_then_uncovered_owners_then_the_rest() {
         .unwrap();
         a
     };
-    let got = scopes(&st, &OrgScope::All).unwrap();
+    let got = scopes(&st, &vs(&OrgScope::All)).unwrap();
     assert_eq!(got[0].id, Some(a.id));
     assert_eq!(got[0].session_count, 1);
     assert_eq!(got[1].owner.as_deref(), Some("beta"));
     // A host outside Company A sees no Company A scope.
     let outsider = host(None, &[]);
-    assert!(scopes(&st, &outsider)
+    assert!(scopes(&st, &vs(&outsider))
         .unwrap()
         .iter()
         .all(|e| e.id != Some(a.id)));
     // Details carry the rules; out-of-scope orgs are not listed.
-    let d = org_details(&st, &OrgScope::All).unwrap();
+    let d = org_details(&st, &vs(&OrgScope::All), AdminView::Other).unwrap();
     assert_eq!(d[0].rules.len(), 1);
-    assert!(org_details(&st, &outsider).unwrap().is_empty());
+    assert!(org_details(&st, &vs(&outsider), AdminView::Other)
+        .unwrap()
+        .is_empty());
     let _ = WorkTarget::Key("unused");
 }
 
@@ -380,7 +433,10 @@ fn org_admin_crud_refusals_and_row_announcements() {
         let a = AdminAction::parse(name).unwrap();
         assert_eq!(
             a.is_removal(),
-            matches!(*name, "remove" | "remove_org" | "remove_rule"),
+            matches!(
+                *name,
+                "remove" | "remove_org" | "remove_rule" | "bucket_delete"
+            ),
             "{name}"
         );
     }
@@ -401,7 +457,7 @@ fn suggestions_come_from_uncovered_owners_and_tracker_sites() {
                 .unwrap();
         }
     }
-    let got = org_suggestions(&st, &OrgScope::All).unwrap();
+    let got = org_suggestions(&st, &vs(&OrgScope::All)).unwrap();
     let names: Vec<(&str, Option<&str>, usize)> = got
         .iter()
         .map(|g| (g.name.as_str(), g.owner.as_deref(), g.sessions))
@@ -418,7 +474,7 @@ fn suggestions_come_from_uncovered_owners_and_tracker_sites() {
         .add_tracker("jira", "Acme Jira", "https://acme.atlassian.net")
         .unwrap()
         .id;
-    let got = org_suggestions(&st, &OrgScope::All).unwrap();
+    let got = org_suggestions(&st, &vs(&OrgScope::All)).unwrap();
     assert_eq!(got[0].tracker_id, Some(tid));
     assert_eq!(got[0].owner.as_deref(), Some("acme"));
     assert!(got[0].reason.contains("share a name"), "{}", got[0].reason);
@@ -434,10 +490,12 @@ fn suggestions_come_from_uncovered_owners_and_tracker_sites() {
         })
         .unwrap();
     }
-    let got = org_suggestions(&st, &OrgScope::All).unwrap();
+    let got = org_suggestions(&st, &vs(&OrgScope::All)).unwrap();
     assert!(got.iter().all(|g| g.owner.as_deref() != Some("beta")));
     // A per-host token gets nothing to act on.
-    assert!(org_suggestions(&st, &host(None, &[])).unwrap().is_empty());
+    assert!(org_suggestions(&st, &vs(&host(None, &[])))
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -450,7 +508,9 @@ fn a_single_owner_fleet_gets_no_suggestions() {
         s.upsert_session("a", "h", Some(p), None, 1, 1, "running", None)
             .unwrap();
     }
-    assert!(org_suggestions(&st, &OrgScope::All).unwrap().is_empty());
+    assert!(org_suggestions(&st, &vs(&OrgScope::All))
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -462,4 +522,441 @@ fn cross_org_links_need_force_and_unassigned_never_conflicts() {
     assert_eq!(e.code, codes::E_FORBIDDEN);
     assert!(e.message.contains("force_cross_org"), "{}", e.message);
     assert!(check_cross_org(Some(2), Some(1), "X-1", true).is_ok());
+}
+
+/// **An ended link with NOTHING recorded is withheld, not shared** (multi-user
+/// M1, T9c — arm 3 of [`link_person_visible`]).
+///
+/// `link_person_visible_memo` used to end in a `for` loop over the link's
+/// conversation ids and then `Ok(true)`. With no live participant AND no
+/// conversation id the body never ran, so the function answered "visible" for
+/// the one shape it has nothing at all to judge — fail-OPEN. The shape is
+/// reachable on a fleet running M1: `work_links.claude_session_id` is NULL for
+/// a session that never had a conversation (`new_shell_session`, or a Claude
+/// session reaped before its first SessionStart hook), and migration 046's
+/// retire trigger fills `snap_claude_ids` only `HAVING COUNT(*) > 0`. What
+/// leaked was the snapshot — `snap_host`, `snap_tmux`, `snap_name`,
+/// `snap_branch`, `snap_pr_url` — through `work { links }`, `today`, `tree`
+/// and `resume_plan`.
+///
+/// Rule 7 is kept exactly where it is about rule 7: the single-person hub
+/// still sees it (`ViewScope::is_sole_person`), and a per-host token still
+/// does (§4.4 gives it a HOST's reach, with no person dimension). On a hub
+/// with two people it is nobody's — not even the OWNER's, because there is no
+/// record left that says it was hers. That is the fail-closed direction the
+/// `None => false` arm above already takes for a participant naming a row
+/// that is gone.
+#[test]
+fn an_ended_link_with_no_conversation_recorded_is_withheld() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("h").unwrap();
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
+    let bob = s.create_person("bob", None).unwrap().id;
+    assert!(s.sole_enabled_person().unwrap().is_none(), "two people");
+    let pid = s.upsert_project("o", "r", "/p").unwrap();
+    // A shell session: no Claude conversation, ever.
+    let sid = s
+        .upsert_session("dev-ada-shell", "h", Some(pid), None, 1, 1, "running", None)
+        .unwrap();
+    assert!(s.claim_if_unclaimed(sid, Some(ada)).unwrap());
+    let item = s
+        .name_session_work(sid, Some("LOC-9"), "Ada's")
+        .unwrap()
+        .0
+        .id;
+    s.delete_session(sid).unwrap();
+    // Belt and braces: the retire trigger wrote no ids, and neither did the
+    // insert. This is the shape under test.
+    s.conn_ref()
+        .execute(
+            "UPDATE work_links SET claude_session_id = NULL, snap_claude_ids = NULL, \
+             ended_at = ?2 WHERE item_id = ?1",
+            rusqlite::params![item, crate::store::now_unix()],
+        )
+        .unwrap();
+    let link = s
+        .ended_work_links_for_key("LOC-9")
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("the link survives its session");
+    assert!(
+        link.claude_session_id.is_none() && link.snap_claude_ids.is_none(),
+        "nothing recorded: {link:?}"
+    );
+
+    for (who, person) in [("Bob", bob), ("Ada", ada)] {
+        let view = crate::mcp::auth::device_view(&s, person);
+        assert!(
+            !link_person_visible(&s, &view, &link).unwrap(),
+            "{who} was handed an ended link nothing can attribute"
+        );
+    }
+    // The hub's own readers keep it (the GC has to see every link), and so
+    // does a per-host token, whose fence is the host's.
+    assert!(link_person_visible(
+        &s,
+        &crate::service::view_scope::ViewScope::internal(),
+        &link
+    )
+    .unwrap());
+    assert!(link_person_visible(
+        &s,
+        &crate::service::view_scope::org_only_view(&OrgScope::Host {
+            alias: "h".into(),
+            org: None,
+            isolated: Default::default(),
+        }),
+        &link
+    )
+    .unwrap());
+}
+
+/// The other half of the rule above: on a hub with ONE person, nothing
+/// narrows (rule 7). The same link the test above withholds from everybody is
+/// still that person's.
+#[test]
+fn a_single_person_hub_still_sees_an_ended_link_with_nothing_recorded() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("h").unwrap();
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
+    assert_eq!(
+        s.sole_enabled_person().unwrap(),
+        Some(ada),
+        "one person, so the carve-out applies"
+    );
+    let pid = s.upsert_project("o", "r", "/p").unwrap();
+    let sid = s
+        .upsert_session("dev-shell", "h", Some(pid), None, 1, 1, "running", None)
+        .unwrap();
+    assert!(s.claim_if_unclaimed(sid, Some(ada)).unwrap());
+    let item = s
+        .name_session_work(sid, Some("LOC-9"), "work")
+        .unwrap()
+        .0
+        .id;
+    s.delete_session(sid).unwrap();
+    s.conn_ref()
+        .execute(
+            "UPDATE work_links SET claude_session_id = NULL, snap_claude_ids = NULL, \
+             ended_at = ?2 WHERE item_id = ?1",
+            rusqlite::params![item, crate::store::now_unix()],
+        )
+        .unwrap();
+    let link = s
+        .ended_work_links_for_key("LOC-9")
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let view = crate::mcp::auth::device_view(&s, ada);
+    assert!(
+        link_person_visible(&s, &view, &link).unwrap(),
+        "the hub's only person could see it yesterday"
+    );
+}
+
+/// Org administration phase A: an org's overview carries its catalogs, its
+/// session counts (as `scopes` counts them) and — for the administrator
+/// only — its bound devices.
+#[test]
+fn org_details_carry_the_overview_and_devices_only_for_the_administrator() {
+    let st = Mutex::new(Store::open_in_memory().unwrap());
+    let (a, b) = {
+        let s = st.lock().unwrap();
+        s.upsert_host("h").unwrap();
+        let acme = s.upsert_project("acme", "api", "/src/api").unwrap();
+        s.upsert_session("a1", "h", Some(acme), None, 1, 1, "running", None)
+            .unwrap();
+        let blocked = s
+            .upsert_session("a2", "h", Some(acme), None, 1, 1, "running", None)
+            .unwrap();
+        s.set_session_claude_status_for_test(blocked, "blocked");
+        let a = s.add_org("Company A", None, false).unwrap();
+        let b = s.add_org("Company B", None, false).unwrap();
+        s.add_org_rule(OrgRuleRow {
+            org_id: a.id,
+            owner: Some("acme".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        s.upsert_catalog("acme-assets", "/c/acme", None, Some(a.id))
+            .unwrap();
+        s.insert_client_token("acme-phone", "digest-1", "readonly")
+            .unwrap();
+        s.set_client_org("acme-phone", Some(a.id)).unwrap();
+        s.set_client_trust("acme-phone", true).unwrap();
+        s.insert_client_token("loose", "digest-2", "full").unwrap();
+        (a, b)
+    };
+    let d = org_details(&st, &vs(&OrgScope::All), AdminView::Admin).unwrap();
+    let (da, db) = (&d[0], &d[1]);
+    assert_eq!((da.org.id, db.org.id), (a.id, b.id));
+    assert_eq!(da.catalogs, vec!["acme-assets".to_string()]);
+    assert!(db.catalogs.is_empty());
+    assert_eq!((da.session_count, da.needs_you), (2, 1));
+    assert_eq!((db.session_count, db.needs_you), (0, 0));
+    assert_eq!(
+        da.devices.as_deref(),
+        Some(
+            &[OrgDevice {
+                name: "acme-phone".into(),
+                mode: "readonly".into(),
+                trusted: true,
+                last_seen_at: None,
+            }][..]
+        )
+    );
+    // An unbound device belongs to no org's list.
+    assert_eq!(db.devices.as_deref(), Some(&[][..]));
+
+    // Anyone else: the same orgs and counts, and no `devices` key at all.
+    let hidden = org_details(&st, &vs(&OrgScope::All), AdminView::Other).unwrap();
+    assert!(hidden.iter().all(|o| o.devices.is_none()));
+    let json = serde_json::to_value(&hidden[0]).unwrap();
+    assert!(json.get("devices").is_none(), "{json}");
+    assert_eq!(json["session_count"], 2);
+
+    // A host in no org counts none of Company A's sessions.
+    assert!(org_details(&st, &vs(&host(None, &[])), AdminView::Other)
+        .unwrap()
+        .is_empty());
+}
+
+/// An older hub answers `orgs` without the overview fields: they read empty.
+#[test]
+fn an_org_detail_from_an_older_hub_reads_an_empty_overview() {
+    let old = serde_json::json!({
+        "id": 1, "name": "A", "isolate_sessions": false, "created_at": 1,
+        "rules": [], "hosts": ["h"], "trackers": []
+    });
+    let d: OrgDetail = serde_json::from_value(old).unwrap();
+    assert!(d.catalogs.is_empty() && d.devices.is_none());
+    assert_eq!((d.session_count, d.needs_you), (0, 0));
+}
+
+/// Org administration phase C: the administrator reads an org's own
+/// settings, spend and budget; nobody else does, and a caller that does not
+/// see every session gets no spend even as the administrator.
+#[test]
+fn an_orgs_spend_settings_and_budget_are_the_administrators_only() {
+    let st = Mutex::new(Store::open_in_memory().unwrap());
+    let org = {
+        let s = st.lock().unwrap();
+        let org = s.add_org("Acme", None, false).unwrap().id;
+        crate::service::settings::set_for_org(
+            &s,
+            org,
+            crate::service::settings::BUDGET_ORG_DAILY_USD,
+            Some("5"),
+            crate::service::settings::Actor::Person,
+        )
+        .unwrap();
+        org
+    };
+    let d = &org_details(&st, &vs(&OrgScope::All), AdminView::Admin).unwrap()[0];
+    assert_eq!(d.org.id, org);
+    assert_eq!(
+        (d.spent_today_micros, d.budget_daily_usd),
+        (Some(0), Some(5))
+    );
+    assert!(d.over_budget.is_empty());
+    let settings = d.settings.as_ref().expect("the administrator reads them");
+    assert!(settings
+        .iter()
+        .any(|v| v["setting"]["key"] == "budget.org_daily_usd" && v["own"] == "5"));
+    let other = &org_details(&st, &vs(&OrgScope::All), AdminView::Other).unwrap()[0];
+    assert!(other.settings.is_none() && other.spent_today_micros.is_none());
+    let json = serde_json::to_value(other).unwrap();
+    for k in [
+        "settings",
+        "spent_today_micros",
+        "budget_daily_usd",
+        "over_budget",
+    ] {
+        assert!(json.get(k).is_none(), "{k}: {json}");
+    }
+}
+
+/// Redesign 11.1: the overview's 14-day spend series and its "Needs an
+/// admin" list — an untrusted device that may prompt is in it, a read-only
+/// or trusted one is not — and neither reaches anyone who is not an admin.
+#[test]
+fn an_orgs_overview_carries_its_spend_series_and_what_needs_an_admin() {
+    use crate::service::org_needs::AdminNeed;
+    use crate::store::{UsageDelta, UsageTotals};
+    let st = Mutex::new(Store::open_in_memory().unwrap());
+    let now = crate::service::catalog::now_secs();
+    let today = now.div_euclid(86_400);
+    let org = {
+        let s = st.lock().unwrap();
+        s.insert_host("a", Some("a")).unwrap();
+        let org = s.add_org("Acme", None, false).unwrap().id;
+        s.set_host_org("a", Some(org)).unwrap();
+        let id = s
+            .upsert_session("x", "a", None, None, 1, 1, "running", None)
+            .unwrap();
+        for (day, micros) in [
+            (today - 20, 9_000_000),
+            (today - 13, 2_000_000),
+            (today, 3_000_000),
+        ] {
+            s.apply_usage(
+                id,
+                "a",
+                &UsageDelta {
+                    reset: false,
+                    totals: UsageTotals {
+                        cost_micros: micros,
+                        input_tokens: 1,
+                        ..Default::default()
+                    },
+                    model: None,
+                    offset: day + micros,
+                    source: "s.jsonl".into(),
+                    last_msg_id: None,
+                    last_msg_usage: None,
+                    now: day * 86_400 + 10,
+                    by_day: Vec::new(),
+                    backfill_until: None,
+                },
+            )
+            .unwrap();
+        }
+        for (name, mode, trusted) in [
+            ("peters-iphone", "full", false),
+            ("ada-mac", "full", true),
+            ("wall-tv", "readonly", false),
+        ] {
+            s.insert_client_token(name, &format!("digest-{name}"), mode)
+                .unwrap();
+            s.set_client_org(name, Some(org)).unwrap();
+            s.set_client_trust(name, trusted).unwrap();
+        }
+        org
+    };
+    let d = &org_details(&st, &vs(&OrgScope::All), AdminView::Admin).unwrap()[0];
+    assert_eq!(d.org.id, org);
+    let series = d
+        .spend_series
+        .as_ref()
+        .expect("the administrator sees spend");
+    assert_eq!(series.len(), 14);
+    assert_eq!(
+        series.first().map(|p| (p.day.clone(), p.cost_micros)),
+        Some((crate::service::usage::day_string(today - 13), 2_000_000)),
+        "the oldest day is 13 days back; older spend is out"
+    );
+    assert_eq!(series.last().map(|p| p.cost_micros), Some(3_000_000));
+    assert_eq!(series.iter().map(|p| p.cost_micros).sum::<i64>(), 5_000_000);
+    let needs = d
+        .needs_admin
+        .as_ref()
+        .expect("the administrator gets the list");
+    let untrusted: Vec<&str> = needs
+        .iter()
+        .filter_map(|n| match n {
+            AdminNeed::UntrustedDevice { device, .. } => Some(device.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(untrusted, vec!["peters-iphone"]);
+    assert!(
+        !needs.iter().any(|n| matches!(n, AdminNeed::Budget { .. })),
+        "no budget, no budget line"
+    );
+
+    let other = &org_details(&st, &vs(&OrgScope::All), AdminView::Other).unwrap()[0];
+    assert!(other.spend_series.is_none() && other.needs_admin.is_none());
+    let json = serde_json::to_value(other).unwrap();
+    assert!(json.get("spend_series").is_none() && json.get("needs_admin").is_none());
+}
+
+/// Redesign 11.2: a member's row says since when an org share reaches them
+/// (none for a viewer), and their devices — to whoever administers the org.
+#[test]
+fn members_carry_shares_since_and_their_devices_for_an_administrator() {
+    let st = Mutex::new(Store::open_in_memory().unwrap());
+    let (acme, jane, ann) = {
+        let s = st.lock().unwrap();
+        let acme = s.add_org("Acme", None, false).unwrap().id;
+        let jane = s.create_person("jane", None).unwrap().id;
+        let ann = s.create_person("ann", None).unwrap().id;
+        s.set_org_member(acme, jane, "member", None).unwrap();
+        s.set_org_member(acme, ann, "viewer", None).unwrap();
+        s.insert_client_token("jane-phone", "digest-1", "full")
+            .unwrap();
+        s.set_client_person("jane-phone", Some(jane)).unwrap();
+        (acme, jane, ann)
+    };
+    let d = org_details(&st, &vs(&OrgScope::All), AdminView::Admin).unwrap();
+    let members = d[0]
+        .members
+        .as_ref()
+        .expect("the administrator sees members");
+    let jane_row = members.iter().find(|m| m.person_id == jane).unwrap();
+    assert!(jane_row.added_at.is_some());
+    assert_eq!(jane_row.shares_since, jane_row.added_at);
+    assert_eq!(
+        jane_row.devices.as_deref(),
+        Some(&["jane-phone".to_string()][..])
+    );
+    let ann_row = members.iter().find(|m| m.person_id == ann).unwrap();
+    assert_eq!(ann_row.shares_since, None, "a viewer receives no shares");
+    assert_eq!(ann_row.devices.as_deref(), Some(&[][..]));
+
+    // A plain member sees who is in the org, never anyone's devices.
+    let member = AdminView::Person {
+        roles: [(acme, "member".to_string())].into_iter().collect(),
+    };
+    let d = org_details(&st, &vs(&OrgScope::All), member).unwrap();
+    let members = d[0].members.as_ref().expect("a member sees the members");
+    assert!(members.iter().all(|m| m.devices.is_none()));
+    let json = serde_json::to_value(&members[0]).unwrap();
+    assert!(json.get("devices").is_none(), "{json}");
+    assert!(json.get("shares_since").is_some(), "{json}");
+}
+
+/// Redesign 11.8: spend by person is all or nothing. The fleet's
+/// administrator who sees every session gets the table; an org's own admin
+/// (who does not see every session on the hub) and anyone else get no key
+/// at all, never a cut-down table.
+#[test]
+fn spend_by_person_goes_only_to_an_administrator_who_sees_every_session() {
+    let st = Mutex::new(Store::open_in_memory().unwrap());
+    let org = {
+        let s = st.lock().unwrap();
+        s.add_org("Acme", None, false).unwrap().id
+    };
+    let d = &org_details(&st, &vs(&OrgScope::All), AdminView::Admin).unwrap()[0];
+    assert_eq!(d.spend_by_person.as_deref(), Some(&[][..]));
+
+    // An org admin sees the org's own figures but not this table: with a
+    // second org's session on the hub, they do not see every session.
+    {
+        let s = st.lock().unwrap();
+        let beta = s.add_org("Beta", None, false).unwrap().id;
+        s.upsert_host("h").unwrap();
+        s.set_host_org("h", Some(beta)).unwrap();
+        s.upsert_session("other", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+    }
+    let org_admin = AdminView::Person {
+        roles: [(org, "admin".to_string())].into_iter().collect(),
+    };
+    let scope = OrgScope::Host {
+        alias: "elsewhere".into(),
+        org: Some(org),
+        isolated: Default::default(),
+    };
+    for (view, who) in [
+        (org_admin, "an org admin"),
+        (AdminView::Other, "anyone else"),
+    ] {
+        let all = org_details(&st, &vs(&scope), view).unwrap();
+        let d = all.iter().find(|d| d.org.id == org).expect(who);
+        assert!(d.spend_by_person.is_none(), "{who}");
+        let json = serde_json::to_value(d).unwrap();
+        assert!(json.get("spend_by_person").is_none(), "{who}: {json}");
+    }
 }

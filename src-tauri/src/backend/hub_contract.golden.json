@@ -1,6 +1,17 @@
 {
-  "revision": 7,
+  "revision": 17,
   "types": {
+    "AccessRequestView": [
+      "id",
+      "level",
+      "person_display_name",
+      "person_id",
+      "person_name",
+      "requested_at",
+      "resolution",
+      "session_id",
+      "session_name"
+    ],
     "AccountRow": [
       "display_name",
       "email",
@@ -12,18 +23,51 @@
       "seat_tier",
       "uuid"
     ],
+    "AccountUsageSnapshot": [
+      "account_uuid",
+      "detail",
+      "fetched_at",
+      "next_try_at",
+      "source_host",
+      "status",
+      "subscription",
+      "usage"
+    ],
+    "BlameHunk": [
+      "author",
+      "hash",
+      "lines",
+      "start",
+      "summary",
+      "time",
+      "uncommitted"
+    ],
     "Branch": [
       "ahead",
       "behind",
       "isCurrent",
       "isRemote",
+      "merged",
       "name",
       "tipHash",
       "upstream"
     ],
+    "BranchDiff": [
+      "aheadOfBase",
+      "base",
+      "baseFiles",
+      "behindBase",
+      "branch",
+      "truncated",
+      "unpushed",
+      "unpushedFiles",
+      "upstream"
+    ],
     "ChangedFile": [
+      "added",
       "orig_path",
       "path",
+      "removed",
       "staged",
       "status"
     ],
@@ -42,7 +86,36 @@
       "date",
       "files",
       "hash",
+      "pushed",
       "subject"
+    ],
+    "ConfirmRequest": [
+      "asked_at",
+      "caller",
+      "nonce",
+      "operator",
+      "summary",
+      "tool"
+    ],
+    "ControlHandoffRow": [
+      "at",
+      "id",
+      "item",
+      "items",
+      "kind",
+      "mission_id",
+      "mission_name",
+      "mission_state",
+      "preview",
+      "session_id",
+      "task_id",
+      "tool"
+    ],
+    "ControlRoute": [
+      "outcome",
+      "run_id",
+      "target",
+      "targets"
     ],
     "ConvItem::Bash": [
       "command",
@@ -150,7 +223,9 @@
     ],
     "DecidedRow": [
       "account_uuid",
+      "agent",
       "ci_status",
+      "claude_profile",
       "claude_session_id",
       "claude_status",
       "context_at",
@@ -162,6 +237,7 @@
       "created_at",
       "current_activity",
       "effort_level",
+      "form_draft",
       "friendly_name",
       "host_alias",
       "id",
@@ -172,17 +248,23 @@
       "last_prompt",
       "last_stop_at",
       "last_turn_at",
+      "last_viewed_at",
       "link_version",
       "lost_at",
       "lost_reason",
       "model",
       "notes",
       "org_id",
+      "origin",
+      "origin_ref",
+      "owner_person_id",
       "parent_session_id",
+      "pending_form",
       "pending_input",
       "pr_url",
       "project_id",
       "prompt_submit_seq",
+      "proposals",
       "reviews_session_id",
       "row_version",
       "safe_kill_detail",
@@ -197,6 +279,7 @@
       "tags",
       "tmux_name",
       "tmux_pane_id",
+      "turn_outcome",
       "turn_seq",
       "usage_cache_read_tokens",
       "usage_cache_write_tokens",
@@ -205,12 +288,33 @@
       "usage_model",
       "usage_output_tokens",
       "usage_updated_at",
+      "visibility",
       "work",
       "work_rejected",
       "work_rev",
       "work_suggested",
       "worktree_id",
       "worktree_key"
+    ],
+    "DeferredPromptRow": [
+      "attempts",
+      "body",
+      "cancelled_at",
+      "created_at",
+      "delivered_at",
+      "error",
+      "failed_at",
+      "id",
+      "not_before",
+      "session_id",
+      "skip_if_archived",
+      "skipped_at",
+      "until_limit_reset"
+    ],
+    "FileBlame": [
+      "hunks",
+      "path",
+      "truncated"
     ],
     "FileContent": [
       "binary",
@@ -233,8 +337,23 @@
     "GithubRepo": [
       "description",
       "is_private",
+      "language",
       "name_with_owner",
       "updated_at"
+    ],
+    "HandoffItem": [
+      "accepted_at",
+      "id",
+      "proposal_state",
+      "status",
+      "title"
+    ],
+    "Headroom": [
+      "chosen",
+      "logins",
+      "over",
+      "pause_at_pct",
+      "suggestion"
     ],
     "Health": [
       "by_status",
@@ -247,6 +366,7 @@
       "hosts_reachable",
       "hosts_total",
       "hub",
+      "org_budgets",
       "peer_links_down",
       "peer_links_total",
       "schema_version",
@@ -310,12 +430,22 @@
       "tracker_id",
       "write_failures"
     ],
+    "HostLogin": [
+      "account_uuid",
+      "profile",
+      "used_pct"
+    ],
     "HostRow": [
       "account_uuid",
       "agent_version",
+      "agents_on_path",
       "alias",
+      "auth_overrides",
+      "boot_at",
+      "claude_profiles",
       "claude_version",
       "claude_version_at",
+      "cpu_count",
       "disk_home_free_kb",
       "disk_home_total_kb",
       "disk_tmp_free_kb",
@@ -324,8 +454,13 @@
       "hidden",
       "last_hook_at",
       "last_pinged_at",
+      "last_probe_error",
+      "last_probe_error_code",
+      "last_reachable_at",
+      "latency_ms",
       "load_1m",
       "mem_avail_kb",
+      "mem_total_kb",
       "org_id",
       "provision_stale",
       "provision_warning",
@@ -335,13 +470,125 @@
       "ssh_alias",
       "tmux_version",
       "transport",
-      "uptime_secs"
+      "unclaimed_sessions",
+      "uptime_secs",
+      "worktree_at",
+      "worktree_kb"
     ],
     "HostWorktrees": [
       "cloned",
       "host_alias",
       "project_id",
       "worktrees"
+    ],
+    "LibraryItemRow": [
+      "at",
+      "host_alias",
+      "id",
+      "kind",
+      "name",
+      "path",
+      "session_id",
+      "session_name",
+      "size"
+    ],
+    "LostTarget": [
+      "confidence_pct",
+      "project_id",
+      "reason",
+      "run_id",
+      "source",
+      "ticket",
+      "unsure"
+    ],
+    "MissionRow": [
+      "budget_micros",
+      "cost_micros",
+      "created_at",
+      "done",
+      "done_when",
+      "finished_at",
+      "goal",
+      "id",
+      "level",
+      "mode",
+      "name",
+      "next_wake_at",
+      "non_goals",
+      "org_id",
+      "owner_person_id",
+      "plan_version",
+      "policy",
+      "repos",
+      "root_item_id",
+      "started_at",
+      "state",
+      "total",
+      "updated_at",
+      "version",
+      "waiting_on"
+    ],
+    "MyGrants": [
+      "grants",
+      "person_id",
+      "requests"
+    ],
+    "MyGrants.grants": [
+      "granted_at",
+      "level",
+      "session_id",
+      "shared_by",
+      "shared_by_name",
+      "via_org"
+    ],
+    "MyGrants.requests": [
+      "id",
+      "level",
+      "requested_at",
+      "session_id"
+    ],
+    "PeerLinkSummary": [
+      "fleet_id",
+      "id",
+      "last_error",
+      "last_exchange_at",
+      "latency_ms",
+      "messages_today",
+      "messages_total",
+      "pending",
+      "retry_every_s",
+      "revoked_at",
+      "role",
+      "state",
+      "url"
+    ],
+    "PlacedTranscript": [
+      "copied",
+      "project_id",
+      "tmux_name"
+    ],
+    "PrList": [
+      "items",
+      "total"
+    ],
+    "PresenceView": [
+      "heartbeat_secs",
+      "session_id",
+      "viewers"
+    ],
+    "PresenceView.viewers": [
+      "device",
+      "name",
+      "person_id",
+      "since",
+      "you"
+    ],
+    "ProjectPickRow": [
+      "grp",
+      "owner",
+      "pinned",
+      "repo",
+      "vis"
     ],
     "ProjectRow": [
       "adopted",
@@ -356,12 +603,48 @@
       "project",
       "worktrees"
     ],
+    "PullRequestRow": [
+      "ci_status",
+      "draft",
+      "first_seen_at",
+      "head_ref",
+      "host_alias",
+      "id",
+      "merge_state",
+      "merged_at",
+      "number",
+      "project_id",
+      "repo",
+      "review_decision",
+      "session_id",
+      "session_name",
+      "state",
+      "title",
+      "updated_at",
+      "url"
+    ],
     "PurgeImpact": [
       "keys"
+    ],
+    "QueuePromptResult": [
+      "delivered",
+      "queued_id",
+      "session_id"
     ],
     "RepoTree": [
       "entries",
       "truncated"
+    ],
+    "ResumeOrNew": [
+      "confidence_pct",
+      "link_id",
+      "name",
+      "reason",
+      "run_id",
+      "session_id",
+      "source",
+      "unsure",
+      "value"
     ],
     "ResumePlan": [
       "branch",
@@ -402,6 +685,34 @@
       "ok",
       "reason"
     ],
+    "RunEstimate": [
+      "basis",
+      "micros",
+      "runs"
+    ],
+    "RunRow": [
+      "cost_micros",
+      "duration_ms",
+      "ended_at",
+      "error",
+      "host",
+      "id",
+      "kind",
+      "mission_id",
+      "model",
+      "org_id",
+      "outcome",
+      "owner",
+      "routine_id",
+      "session_ids",
+      "source",
+      "started_at",
+      "summary"
+    ],
+    "RunsPage": [
+      "runs",
+      "total"
+    ],
     "SessionEvent": [
       "at",
       "claude_session_id",
@@ -410,9 +721,22 @@
       "kind",
       "session_id"
     ],
+    "SessionGrantView": [
+      "granted_at",
+      "granted_by",
+      "level",
+      "org_id",
+      "org_name",
+      "person_display_name",
+      "person_id",
+      "person_name",
+      "session_id"
+    ],
     "SessionRow": [
       "account_uuid",
+      "agent",
       "ci_status",
+      "claude_profile",
       "claude_session_id",
       "claude_status",
       "context_at",
@@ -424,6 +748,7 @@
       "created_at",
       "current_activity",
       "effort_level",
+      "form_draft",
       "friendly_name",
       "host_alias",
       "id",
@@ -434,16 +759,22 @@
       "last_prompt",
       "last_stop_at",
       "last_turn_at",
+      "last_viewed_at",
       "lost_at",
       "lost_reason",
       "model",
       "notes",
       "org_id",
+      "origin",
+      "origin_ref",
+      "owner_person_id",
       "parent_session_id",
+      "pending_form",
       "pending_input",
       "pr_url",
       "project_id",
       "prompt_submit_seq",
+      "proposals",
       "reviews_session_id",
       "row_version",
       "safe_kill_detail",
@@ -458,6 +789,7 @@
       "tags",
       "tmux_name",
       "tmux_pane_id",
+      "turn_outcome",
       "turn_seq",
       "usage_cache_read_tokens",
       "usage_cache_write_tokens",
@@ -466,12 +798,43 @@
       "usage_model",
       "usage_output_tokens",
       "usage_updated_at",
+      "visibility",
       "work",
       "work_rejected",
       "work_rev",
       "work_suggested",
       "worktree_id",
       "worktree_key"
+    ],
+    "SessionRow.proposals": [
+      "at",
+      "confidence_pct",
+      "feature",
+      "reason",
+      "run_id",
+      "source",
+      "value"
+    ],
+    "ShellTerminalsResult": [
+      "host_alias",
+      "opened",
+      "session_id",
+      "terminals"
+    ],
+    "ShellTerminalsResult.terminals": [
+      "command",
+      "n",
+      "tmux_name"
+    ],
+    "ShepherdRuleView": [
+      "active",
+      "expires_at",
+      "granted_at",
+      "granted_by",
+      "level",
+      "project",
+      "project_id",
+      "recipes"
     ],
     "TaskRow": [
       "created_at",
@@ -491,6 +854,15 @@
       "cost_micros",
       "input_tokens",
       "output_tokens"
+    ],
+    "WatchSummary": [
+      "at",
+      "check",
+      "host_alias",
+      "model",
+      "since",
+      "text",
+      "turns"
     ],
     "WorkLinkRow": [
       "claude_session_id",
@@ -526,6 +898,7 @@
     ],
     "WorktreeOccupant": [
       "host_alias",
+      "session_id",
       "tmux_name"
     ],
     "WorktreeRow": [

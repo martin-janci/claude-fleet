@@ -107,6 +107,83 @@ pub struct Health {
     /// default: an older hub omits it.
     #[serde(default)]
     pub decide: Option<crate::service::decide::DecideHealth>,
+    /// Org administration phase C: the orgs at or over a budget
+    /// (`service::org_spend::alerts`). Only for a caller that sees every
+    /// session — the master, the desktop, a one-person fleet's owner — since
+    /// an org's spend sums other people's private sessions; empty (and not
+    /// sent) otherwise and from an older hub.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub org_budgets: Vec<crate::service::org_spend::OrgBudgetAlert>,
+    /// Every background loop's last run, next run and result
+    /// (`service::loops`, redesign 8.1), in this process. Not sent when
+    /// empty (an unready store, an older hub); no client reads it yet, so it
+    /// is not in the desktop's wire contract.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loops: Vec<crate::service::loops::LoopHealth>,
+    /// `automation.paused`: the pausable loops are standing still. Not sent
+    /// while false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub automation_paused: bool,
+    /// The devices paired to this hub that the caller may count, and when
+    /// the caller's own device last reached it (Settings › Hub, gap plan
+    /// G7.3). Filled by `fleet_health` for a paired device and the master;
+    /// `None` (not sent) for a per-host token and from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devices: Option<PairedDevices>,
+    /// Stuck-session playbooks that acted over the last seven days, per
+    /// `stuck_kind` (`press_enter`, `oom`, …), over the sessions the caller
+    /// sees: "Ran 3 times this week" (gap plan G7.3). Refusals are not
+    /// runs. Not sent when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub playbooks_week: BTreeMap<String, u32>,
+}
+
+/// [`Health::devices`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairedDevices {
+    /// Live (not revoked) paired devices: the caller's person's own, or
+    /// every one for the master.
+    pub paired: u32,
+    /// When the calling device last reached the hub, before this call
+    /// (`client_tokens.last_seen_at`, stamped at most once a minute).
+    /// `None` for the master token.
+    #[serde(default)]
+    pub last_seen_at: Option<i64>,
+    /// When the hub's last clean reconcile pass finished: what "last sync"
+    /// reads. Same value as `hub.reconcile.last_ok_at`.
+    #[serde(default)]
+    pub last_sync_at: Option<i64>,
+}
+
+/// What [`Health::playbooks_week`] counts over.
+pub const PLAYBOOK_WEEK_SECS: i64 = 7 * 86_400;
+
+/// [`Health::playbooks_week`] over `sessions`: the `playbook_applied`
+/// entries since `since` of the rows a playbook touched in that window
+/// (`last_playbook_at`, so a quiet fleet costs no event reads), keyed by the
+/// stuck kind before the detail's first `:`. A `…:skipped:…` refusal is not
+/// a run.
+pub fn playbooks_since(
+    s: &Store,
+    sessions: &[crate::store::SessionRow],
+    since: i64,
+) -> BTreeMap<String, u32> {
+    let mut out = BTreeMap::new();
+    for row in sessions
+        .iter()
+        .filter(|r| r.last_playbook_at.is_some_and(|t| t >= since))
+    {
+        for detail in s.playbook_details_since(row.id, since).unwrap_or_default() {
+            if detail.contains(":skipped:") {
+                continue;
+            }
+            let kind = detail.split(':').next().unwrap_or_default();
+            if !kind.is_empty() {
+                *out.entry(kind.to_string()).or_insert(0) += 1;
+            }
+        }
+    }
+    out
 }
 
 /// `fleet_health.hub`: this process's uptime and its last reconcile pass.
@@ -180,6 +257,12 @@ pub struct HostHealthRow {
     /// a degraded host indefinitely with nothing saying why.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provision_warning: Option<String>,
+    /// Credential variables on the host that outrank its `/login`, by name
+    /// (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_USE_BEDROCK`, …): sessions there
+    /// bill that credential, not the account fleet shows. Empty when none
+    /// are set or the host could not tell.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auth_overrides: Vec<String>,
 }
 
 /// The `health.*` thresholds [`hosts_health`] judges against.
@@ -281,6 +364,7 @@ pub fn hosts_health(
                     && h.last_hook_at
                         .is_none_or(|at| now - at > t.hooks_silent_secs),
                 provision_warning: h.provision_warning.clone(),
+                auth_overrides: h.auth_overrides.clone().unwrap_or_default(),
             }
         })
         .collect()
@@ -531,6 +615,10 @@ pub fn tracker_health(
 /// tracker's name and error describe another team's setup, not work.
 pub fn scope_sees_tracker(scope: &OrgScope, tracker_org: Option<i64>) -> bool {
     match scope {
+        // This is the org boundary, not a privacy fence: a tracker belongs
+        // to a COMPANY, and `TrackerHealth` carries its name, its site and
+        // its last sync error — never a session. The person dimension has
+        // nothing to say about whose Jira this is.
         OrgScope::All => true,
         OrgScope::Host { org, .. } => tracker_org == *org,
         // A bound client (work graph M14): its own org's trackers only.
@@ -715,15 +803,81 @@ pub enum HealthView {
     },
     /// An org-bound client (work graph M14): every roll-up that sums across
     /// hosts is over the hosts it sees ([`hosts_in_scope`]) — host counts,
-    /// the tunnels and `hosts[]`; session counts over the sessions it may
-    /// list ([`OrgScope::sees_row`]); per-host spend over those sessions on
-    /// those hosts; the daily spend over those hosts' `usage_daily` rows;
-    /// its org's trackers. `peer_links_down` is the hub's own links, not a
-    /// sum over hosts, and stays.
-    Org(OrgScope),
+    /// the tunnels and `hosts[]`; the daily spend over those hosts'
+    /// `usage_daily` rows; its org's trackers. `peer_links_down` is the
+    /// hub's own links, not a sum over hosts, and stays.
+    ///
+    /// **It carries the WHOLE [`ViewScope`], not its org half** (multi-user
+    /// M1, T10). An org-bound client is still somebody's DEVICE: `view_scope`
+    /// reads its `person_id` exactly as it does for an unbound one, and this
+    /// arm's session roll-ups — `sessions_total`, `by_status`, `ghosts`,
+    /// `context_red`, `stuck`, `usage_by_host`, and `hosts[]`'
+    /// `hooks_silent` — were summed over every session in the org, i.e. over
+    /// a colleague's private sessions, polled once a second. Rule 2 (privacy
+    /// holds against the org admin, with no override) does not stop at the
+    /// org boundary, and M1's own [`Self::Person`] arm already did this one
+    /// predicate better. The org half is still asked, by name
+    /// ([`ViewScope::org`]), for the three questions that ARE org questions:
+    /// which hosts this client sees, which trackers, and which hosts'
+    /// `usage_daily` rows.
+    ///
+    /// [`ViewScope`]: crate::service::view_scope::ViewScope
+    /// [`ViewScope::org`]: crate::service::view_scope::ViewScope::org
+    Org(crate::service::view_scope::ViewScope),
+    /// A PERSON's own device — a paired client bound to no org (multi-user
+    /// M1, T8d).
+    ///
+    /// The arm this enum was missing. Such a caller used to fall through to
+    /// [`Self::Fleet`], because the handler's only other test was
+    /// `caller.is_scoped()`, which `mcp/auth.rs` documents as **not** "is this
+    /// caller restricted at all": it is false for the master and for every
+    /// paired client bound to no org alike. So a second person's phone was
+    /// told `sessions_total`, `by_status`, `ghosts`, `context_red`, `stuck`
+    /// and `usage_by_host` summed over everybody's sessions — how many
+    /// sessions a colleague is running, how many are blocked or stuck, and the
+    /// dollars their work cost.
+    ///
+    /// These are counts and sums rather than rows, so it was never a row leak;
+    /// what makes it worth an arm is that the whole-fleet answer was reached
+    /// through exactly the predicate spec §3.6 forbids using as a fence, and
+    /// the next field somebody adds to [`FleetSummary`] will not be a count.
+    ///
+    /// What it narrows and what it does not: the SESSION roll-ups and
+    /// `usage_by_host` are summed over the rows
+    /// [`crate::service::view_scope::ViewScope::sees_session_row`] keeps —
+    /// the same split `service::hosts::list_hosts` already makes for
+    /// `unclaimed_sessions`. `usage_by_day` is withheld entirely, because
+    /// `usage_daily` is keyed by `(day, host_alias, backfill)` and has no
+    /// session to fence by: a per-host total is money attributable to other
+    /// people's work. Hosts, tunnels, `hosts[]` and the trackers are NOT
+    /// narrowed — a person's device is unbound, so its org half is `All`, and
+    /// "is this host reachable, is its disk full" is fleet operations rather
+    /// than anybody's session. `decide` stays [`Self::Fleet`]-only.
+    ///
+    /// The master token keeps [`Self::Fleet`]: §4.5 puts the hub OPERATOR
+    /// deliberately out of scope, and narrowing the operator's own roll-up
+    /// would be a different decision from this one.
+    Person(crate::service::view_scope::ViewScope),
     /// A scoped caller whose scope could not be read: it is told nothing
     /// rather than the whole fleet ([`blank_rollups`]).
     Blank,
+}
+
+/// `usage_by_day` for a person's own device (multi-user M1, T8d).
+///
+/// `usage_daily` is keyed by `(day, host_alias, backfill)`: there is no
+/// session on a row of it, so it cannot be fenced the way `usage_by_host`
+/// can — it is summed from the session rows themselves. So the rule is all or
+/// nothing, and the condition is exactly "does this caller see every session
+/// row there is". That keeps a one-person install whole (rule 7: the upgrade
+/// must not narrow it) and withholds the series the moment a second person's
+/// work is inside it.
+fn person_usage_by_day(s: &Store, now: i64, sees_every_session: bool) -> Vec<usage::DayUsage> {
+    if sees_every_session {
+        usage::recent_days(s, now, usage::HEALTH_DAYS, None)
+    } else {
+        Vec::new()
+    }
 }
 
 pub fn health_from_store(s: &Store) -> Health {
@@ -739,10 +893,20 @@ pub fn health_for(
     view: &HealthView,
     tunnels: std::collections::HashMap<String, crate::service::tunnel::TunnelHealth>,
 ) -> Health {
+    health_at(s, view, tunnels, now_unix())
+}
+
+/// [`health_for`] at a given clock, so two roll-ups compared in a test read
+/// the same `now` (a second boundary between them changed ages and windows).
+fn health_at(
+    s: &Store,
+    view: &HealthView,
+    tunnels: std::collections::HashMap<String, crate::service::tunnel::TunnelHealth>,
+    now: i64,
+) -> Health {
     // TODO(T3): once IpcError exists, surface the failure reason here
     // instead of silently falling back to schema_version=0 / db_ready=false.
     let schema_version = s.schema_version().unwrap_or(0);
-    let now = now_unix();
     // Cached reconcile state only — no network / reconcile here. On a read
     // error, fall back to empty slices so health still reports core fields.
     let (sessions, hosts) = if matches!(view, HealthView::Blank) {
@@ -767,17 +931,24 @@ pub fn health_for(
         now,
     );
     let metrics = &tracker_sync::metrics_for;
-    let (summary, usage_by_day, trackers, tunnels) = match view {
+    let week = now - PLAYBOOK_WEEK_SECS;
+    let (summary, usage_by_day, trackers, tunnels, playbooks_week) = match view {
         HealthView::Fleet => (
             summarize(&sessions, &hosts, red),
             usage::recent_days(s, now, usage::HEALTH_DAYS, None),
             trackers_scoped(s, &OrgScope::All, metrics, now, &[]),
             tunnels,
+            playbooks_since(s, &sessions, week),
         ),
         HealthView::Host { alias, trackers } => {
             host_rows.retain(|r| &r.alias == alias);
             let mut summary = summarize(&sessions, &hosts, red);
             summary.usage_by_host.retain(|k, _| k == alias);
+            let own: Vec<SessionRow> = sessions
+                .iter()
+                .filter(|r| &r.host_alias == alias)
+                .cloned()
+                .collect();
             (
                 summary,
                 usage::recent_days(s, now, usage::HEALTH_DAYS, Some(alias.as_str())),
@@ -786,23 +957,59 @@ pub fn health_for(
                     .map(|scope| trackers_scoped(s, scope, metrics, now, &[]))
                     .unwrap_or_default(),
                 tunnels,
+                playbooks_since(s, &own, week),
             )
         }
-        HealthView::Org(scope) => {
-            // [`hosts_in_scope`] over the host list already read.
-            let hosts: Vec<HostRow> = hosts
-                .into_iter()
+        HealthView::Org(view) => {
+            // This is the org boundary, not a privacy fence: which HOSTS an
+            // org-bound client sees — [`hosts_in_scope`] over the host list
+            // already read. The SESSION roll-ups below take the whole
+            // `view` (multi-user M1, T10).
+            let scope = &view.org;
+            let all_hosts = hosts;
+            let hosts: Vec<HostRow> = all_hosts
+                .iter()
                 .filter(|h| scope.sees_org(h.org_id))
+                .cloned()
                 .collect();
             let visible: std::collections::BTreeSet<String> =
                 hosts.iter().map(|x| x.alias.clone()).collect();
+            // WHOSE sessions, not only which org's (multi-user M1, T10):
+            // `sees_session_row` composes the org answer this arm used to
+            // ask alone with ownership, grants and §4.4's host clauses.
+            let sessions: Vec<SessionRow> = sessions
+                .into_iter()
+                .filter(|r| view.sees_session_row(r).is_visible())
+                .collect();
+            // `hooks_silent` is computed from `has_live_session` — "does
+            // ANYBODY have a live session on this host" — so the rows are
+            // rebuilt over the sessions this caller may see, exactly as the
+            // `Person` arm does. Rebuilt over EVERY host (`all_hosts`) and
+            // narrowed afterwards, which is the order the pass at the top
+            // of this function uses and the reason it gives: the newest
+            // Claude is the FLEET's, so `claude_behind` must not be judged
+            // against one org's hosts alone.
+            host_rows = hosts_health(
+                &all_hosts,
+                &sessions,
+                &host_thresholds(s),
+                &[],
+                crate::app_version::get(),
+                now,
+            );
             host_rows.retain(|r| visible.contains(&r.alias));
-            let sessions: Vec<SessionRow> =
-                sessions.into_iter().filter(|r| scope.sees_row(r)).collect();
             let mut summary = summarize(&sessions, &hosts, red);
             summary
                 .usage_by_host
                 .retain(|host, _| visible.contains(host));
+            // `usage_by_day` stays the ORG's figure, over the hosts this
+            // client sees, and is deliberately NOT narrowed to the person the
+            // way `Person`'s `person_usage_by_day` is: `usage_daily` has no
+            // session on it to fence by, and a company's daily spend on its
+            // own hosts is an org figure. It is the same residual recorded as
+            // an owner decision at `usage::report_on`'s `by_day`
+            // (`scope_guard_tests::OPEN_QUESTIONS`); if the answer there is
+            // "fence it", this line follows it.
             let usage_by_day =
                 usage::recent_days_on(s, now, usage::HEALTH_DAYS, &|host| visible.contains(host));
             let aliases: Vec<String> = visible.iter().cloned().collect();
@@ -811,13 +1018,44 @@ pub fn health_for(
                 .into_iter()
                 .filter(|(host, _)| visible.contains(host))
                 .collect();
-            (summary, usage_by_day, trackers, tunnels)
+            let playbooks = playbooks_since(s, &sessions, week);
+            (summary, usage_by_day, trackers, tunnels, playbooks)
+        }
+        HealthView::Person(person) => {
+            let total = sessions.len();
+            let sessions: Vec<SessionRow> = sessions
+                .into_iter()
+                .filter(|r| person.sees_session_row(r).is_visible())
+                .collect();
+            // `hosts[]` is a fleet operation and is not narrowed — but
+            // `hooks_silent` is computed from `has_live_session`, i.e. "does
+            // ANYBODY have a live session on this host", which is one bit
+            // wider than rule 6's per-host count of `unclaimed` rows. Rebuild
+            // the rows over the sessions this person may see (multi-user M1,
+            // T9b); every other field of a `HostHealthRow` comes from the
+            // host row itself.
+            host_rows = hosts_health(
+                &hosts,
+                &sessions,
+                &host_thresholds(s),
+                &[],
+                crate::app_version::get(),
+                now,
+            );
+            (
+                summarize(&sessions, &hosts, red),
+                person_usage_by_day(s, now, sessions.len() == total),
+                trackers_scoped(s, &OrgScope::All, metrics, now, &[]),
+                tunnels,
+                playbooks_since(s, &sessions, week),
+            )
         }
         HealthView::Blank => (
             FleetSummary::default(),
             Vec::new(),
             TrackersHealth::default(),
             Default::default(),
+            BTreeMap::new(),
         ),
     };
     let mut h = Health {
@@ -851,11 +1089,25 @@ pub fn health_for(
         hosts: host_rows,
         // The decision envelope is the hub's own business: a scoped view
         // gets none of it (`fleet_health` also drops it for those callers).
-        decide: if matches!(view, HealthView::Fleet) {
+        // The decision envelope is the HUB's own health, not anybody's
+        // session: the master and a person's device read it, a per-host token
+        // and an org-bound client do not.
+        decide: if matches!(view, HealthView::Fleet | HealthView::Person(_)) {
             crate::service::decide::health(s, now)
         } else {
             None
         },
+        org_budgets: match view {
+            HealthView::Fleet => crate::service::org_spend::alerts(s, now),
+            HealthView::Person(person) if crate::service::org_spend::sees_all_spend(s, person) => {
+                crate::service::org_spend::alerts(s, now)
+            }
+            _ => Vec::new(),
+        },
+        loops: crate::service::loops::registry().snapshot(),
+        automation_paused: crate::service::loops::paused(s),
+        devices: None,
+        playbooks_week,
     };
     h.set_tunnels(tunnels);
     if matches!(view, HealthView::Blank) {
@@ -893,6 +1145,7 @@ pub fn blank_rollups(h: &mut Health) {
     h.trackers = Default::default();
     h.hosts.clear();
     h.decide = None;
+    h.org_budgets.clear();
 }
 
 fn now_unix() -> i64 {
@@ -938,6 +1191,11 @@ pub fn unready_health() -> Health {
         updates: None,
         hosts: Vec::new(),
         decide: None,
+        org_budgets: Vec::new(),
+        loops: Vec::new(),
+        automation_paused: false,
+        devices: None,
+        playbooks_week: BTreeMap::new(),
     }
 }
 
@@ -997,6 +1255,17 @@ mod tests {
             work_rev: 0,
             pr_evidence: None,
             pr_checked_at: None,
+            owner_person_id: None,
+            visibility: crate::store::VISIBILITY_UNCLAIMED.into(),
+            claude_profile: None,
+            agent: crate::store::AGENT_CLAUDE.into(),
+            origin: None,
+            origin_ref: None,
+            last_viewed_at: None,
+            turn_outcome: None,
+            proposals: Vec::new(),
+            pending_form: None,
+            form_draft: None,
             parent_session_id: None,
             tags: Vec::new(),
             usage: Default::default(),
@@ -1039,7 +1308,20 @@ mod tests {
             agent_version: None,
             provisioned_at: None,
             provision_stale: false,
+            unclaimed_sessions: None,
             provision_warning: None,
+            auth_overrides: None,
+            claude_profiles: None,
+            cpu_count: None,
+            mem_total_kb: None,
+            boot_at: None,
+            latency_ms: None,
+            worktree_kb: None,
+            worktree_at: None,
+            agents_on_path: None,
+            last_reachable_at: None,
+            last_probe_error_code: None,
+            last_probe_error: None,
             harnesses: None,
         }
     }
@@ -1164,10 +1446,10 @@ mod tests {
         s: &Store,
         view: &HealthView,
         tunnels: HashMap<String, TunnelHealth>,
+        now: i64,
     ) -> Health {
-        let now = now_unix();
         let metrics = &tracker_sync::metrics_for;
-        let mut h = health_for(s, &HealthView::Fleet, Default::default());
+        let mut h = health_at(s, &HealthView::Fleet, Default::default(), now);
         h.set_tunnels(tunnels);
         match view {
             HealthView::Fleet => {}
@@ -1181,17 +1463,29 @@ mod tests {
                     None => Default::default(),
                 };
             }
-            HealthView::Org(scope) => {
+            HealthView::Org(view) => {
+                let scope = &view.org;
                 let hosts = hosts_in_scope(s, scope);
                 let visible: std::collections::BTreeSet<String> =
                     hosts.iter().map(|x| x.alias.clone()).collect();
-                h.hosts.retain(|r| visible.contains(&r.alias));
                 let sessions: Vec<SessionRow> = s
                     .list_all_sessions()
                     .unwrap()
                     .into_iter()
-                    .filter(|r| scope.sees_row(r))
+                    .filter(|r| view.sees_session_row(r).is_visible())
                     .collect();
+                // The person fence narrows `hooks_silent` too (multi-user
+                // M1, T10): rebuilt over every host, then narrowed to the
+                // ones this client sees.
+                h.hosts = hosts_health(
+                    &s.list_hosts().unwrap(),
+                    &sessions,
+                    &host_thresholds(s),
+                    &[],
+                    crate::app_version::get(),
+                    now,
+                );
+                h.hosts.retain(|r| visible.contains(&r.alias));
                 let summary = summarize(&sessions, &hosts, context_red_pct(s));
                 h.hosts_reachable = summary.hosts_reachable;
                 h.hosts_total = summary.hosts_total;
@@ -1218,6 +1512,27 @@ mod tests {
                     .iter()
                     .map(|x| s.detection_backlog(before, Some(&x.alias)).unwrap())
                     .sum();
+            }
+            HealthView::Person(person) => {
+                let hosts = s.list_hosts().unwrap();
+                let sessions: Vec<SessionRow> = s
+                    .list_all_sessions()
+                    .unwrap()
+                    .into_iter()
+                    .filter(|r| person.sees_session_row(r).is_visible())
+                    .collect();
+                let summary = summarize(&sessions, &hosts, context_red_pct(s));
+                h.sessions_total = summary.sessions_total;
+                h.by_status = summary.by_status;
+                h.ghosts = summary.ghosts;
+                h.context_red = summary.context_red;
+                h.stuck = summary.stuck;
+                h.usage_by_host = summary.usage_by_host;
+                h.usage_by_day = person_usage_by_day(
+                    s,
+                    now,
+                    sessions.len() == s.list_all_sessions().unwrap().len(),
+                );
             }
             HealthView::Blank => blank_rollups(&mut h),
         }
@@ -1323,6 +1638,8 @@ mod tests {
                 link_id: None,
                 claude_session_id: None,
                 session_org_id: None,
+                body: None,
+                external_id: None,
             })
             .unwrap();
             let id = s
@@ -1350,6 +1667,27 @@ mod tests {
                 .collect()
         };
 
+        // A person who owns none of the fixture's rows, as an ORG-BOUND
+        // device: the T10 Org arm narrows to zero sessions for them, and the
+        // reference must agree. Built through `Caller::view_scope`, which is
+        // the one constructor (`view_scope_tests::only_caller_view_scope_constructs_a_view_scope`).
+        let nobodys_person = s.create_person("nobody", None).unwrap().id;
+        let nobodys_scope = crate::mcp::auth::Caller {
+            api: None,
+            host_alias: None,
+            client: Some(crate::mcp::auth::ClientRef {
+                id: 99,
+                name: "nobodys-bound-phone".into(),
+                trusted: false,
+                org_id: Some(a.id),
+                person_id: Some(nobodys_person),
+            }),
+            mode: crate::mcp::auth::TokenMode::Full,
+            pane: None,
+            is_personal_owner: false,
+        }
+        .view_scope(&s)
+        .unwrap();
         let views = [
             HealthView::Fleet,
             HealthView::Host {
@@ -1364,19 +1702,32 @@ mod tests {
                 alias: "h-b".into(),
                 trackers: None,
             },
-            HealthView::Org(OrgScope::Org {
+            // `org_only_view` is internal + this org, so these two cases
+            // prove the arm's PLUMBING against the reference exactly as the
+            // `Person` case below does; the case after them narrows BY
+            // PERSON as well, so the T10 fence is in the parity too.
+            HealthView::Org(crate::service::view_scope::org_only_view(&OrgScope::Org {
                 org: a.id,
                 sees_unassigned: true,
-            }),
-            HealthView::Org(OrgScope::Org {
+            })),
+            HealthView::Org(crate::service::view_scope::org_only_view(&OrgScope::Org {
                 org: b.id,
                 sees_unassigned: false,
-            }),
+            })),
+            HealthView::Org(nobodys_scope.clone()),
             HealthView::Blank,
+            // Multi-user M1 (T8d). `internal()` sees every row, so this case
+            // proves the arm's PLUMBING is equivalent to the reference; the
+            // person fence itself is pinned behaviourally in
+            // `mcp::tools::tests`.
+            HealthView::Person(crate::service::view_scope::ViewScope::internal()),
         ];
         for view in &views {
-            let one = health_for(&s, view, tunnels());
-            let two = two_pass_reference(&s, view, tunnels());
+            // One clock for both: a second ticking between them is not a
+            // difference between the two codes.
+            let at = now_unix();
+            let one = health_at(&s, view, tunnels(), at);
+            let two = two_pass_reference(&s, view, tunnels(), at);
             assert_eq!(comparable(&one), comparable(&two), "{view:?}");
         }
 
@@ -1387,10 +1738,10 @@ mod tests {
         assert_eq!(fleet.trackers.trackers[0].write_failures, 2);
         let org_a = health_for(
             &s,
-            &HealthView::Org(OrgScope::Org {
+            &HealthView::Org(crate::service::view_scope::org_only_view(&OrgScope::Org {
                 org: a.id,
                 sees_unassigned: true,
-            }),
+            })),
             tunnels(),
         );
         assert_eq!(
@@ -1482,6 +1833,46 @@ mod tests {
         let s = summarize(&sessions, &[], 85.0);
         assert_eq!(s.ghosts, 2);
         assert_eq!(s.sessions_total, 4);
+    }
+
+    /// "Ran 3 times this week" (gap plan G7.3): the playbook runs per stuck
+    /// kind over the sessions in view; a refusal is not a run, and a row no
+    /// playbook touched this week is not read.
+    #[test]
+    fn playbook_runs_this_week_count_per_kind_without_refusals() {
+        let store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let a = store
+            .upsert_session("a", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        let b = store
+            .upsert_session("b", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        let now = now_unix();
+        store
+            .mark_playbook_applied(a, now, "press_enter:press_enter")
+            .unwrap();
+        store.mark_playbook_applied(a, now, "oom:recreate").unwrap();
+        store
+            .mark_playbook_applied(b, now, "press_enter:press_enter")
+            .unwrap();
+        store
+            .mark_playbook_applied(b, now, "oom:recreate:skipped:working")
+            .unwrap();
+        let rows = store.list_all_sessions().unwrap();
+        let week = playbooks_since(&store, &rows, now - PLAYBOOK_WEEK_SECS);
+        assert_eq!(
+            week,
+            BTreeMap::from([("oom".to_string(), 1), ("press_enter".to_string(), 2)])
+        );
+        // Only `a` in view: `b`'s runs are not counted.
+        let only_a: Vec<_> = rows.into_iter().filter(|r| r.id == a).collect();
+        assert_eq!(
+            playbooks_since(&store, &only_a, now - PLAYBOOK_WEEK_SECS),
+            BTreeMap::from([("oom".to_string(), 1), ("press_enter".to_string(), 1)])
+        );
+        // Nothing this week (the rows' last run is older): nothing read.
+        assert!(playbooks_since(&store, &only_a, now + 10).is_empty());
     }
 
     #[test]
@@ -1713,6 +2104,11 @@ mod tests {
             updates: None,
             hosts: Vec::new(),
             decide: None,
+            org_budgets: Vec::new(),
+            loops: Vec::new(),
+            automation_paused: false,
+            devices: None,
+            playbooks_week: BTreeMap::new(),
         })
         .expect("Health serialises");
         let back: Health = serde_json::from_str(&whole).expect("a whole Health parses");
@@ -2156,6 +2552,8 @@ mod tests {
             link_id: None,
             claude_session_id: None,
             session_org_id: None,
+            body: None,
+            external_id: None,
         })
         .unwrap();
         let id = s.due_tracker_writes(t.id, i64::MAX, 1).unwrap()[0].id;

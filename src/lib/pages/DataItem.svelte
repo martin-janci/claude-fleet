@@ -5,7 +5,10 @@
   // (`list_pages` carries the shapes).
   import { untrack } from 'svelte';
   import Chart from './Chart.svelte';
+  import TransferMark from '../TransferMark.svelte';
+  import { rowTransfer } from '../transfer_loader';
   import { copyText } from '../clipboard';
+  import { subscribeToRowEvents } from '../events';
   import {
     fetchSource,
     formatCell,
@@ -44,7 +47,7 @@
   async function read(ref: SourceRef) {
     const mine = ++reads;
     copied = false;
-    const r = await fetchSource(ref);
+    const r = await fetchSource(ref, spec);
     if (mine !== reads) return;
     loaded = true;
     error = null;
@@ -58,6 +61,21 @@
   $effect(() => {
     void readKey;
     untrack(() => void read(source));
+  });
+
+  // A live `update` source re-reads on every `update:changed`.
+  $effect(() => {
+    if (spec?.live?.event !== 'update') return;
+    let stop: (() => void) | null = null;
+    let gone = false;
+    void subscribeToRowEvents({ onUpdateChanged: () => void read(untrack(() => source)) }).then((u) => {
+      if (gone) u();
+      else stop = u;
+    });
+    return () => {
+      gone = true;
+      stop?.();
+    };
   });
 
   async function copy() {
@@ -125,7 +143,15 @@
           {#each rows as row, i (i)}
             <tr>
               {#each tableColumns as c (c.id)}
-                <td class:num={c.ty !== 'text' && c.ty !== 'day'}>{formatCell(c.ty, row[c.id])}</td>
+                {@const moving = rowTransfer(row, c.id)}
+                <td class:num={c.ty !== 'text' && c.ty !== 'day'}
+                  >{#if moving}<span class="moving"
+                      ><TransferMark fraction={moving.fraction} label={formatCell(c.ty, row[c.id])} testid={`${testid}-transfer`} />{formatCell(
+                        c.ty,
+                        row[c.id],
+                      )}</span
+                    >{:else}{formatCell(c.ty, row[c.id])}{/if}</td
+                >
               {/each}
             </tr>
           {/each}
@@ -148,6 +174,7 @@
 {/if}
 
 <style>
+  .moving { display: inline-flex; align-items: center; gap: var(--space-1, 4px); }
   .stat {
     display: flex;
     flex-direction: column;
@@ -155,11 +182,11 @@
     min-width: 8rem;
   }
   .stat-label {
-    font-size: 0.72rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .stat-value {
-    font-size: 1.35rem;
+    font-size: var(--text-xl);
     font-weight: 600;
     font-variant-numeric: proportional-nums;
   }
@@ -167,7 +194,7 @@
     display: grid;
     grid-template-columns: auto 1fr;
     gap: 0.15rem 0.75rem;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     margin: 0;
   }
   .record dt {
@@ -180,7 +207,7 @@
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     margin: 0 0 0.25rem;
   }
   .caption p {
@@ -188,12 +215,12 @@
   }
   .copy {
     font: inherit;
-    font-size: 0.72rem;
+    font-size: var(--text-2xs);
   }
   table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 0.78rem;
+    font-size: var(--text-2xs);
   }
   th,
   td {
@@ -210,12 +237,12 @@
     font-variant-numeric: tabular-nums;
   }
   .empty {
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     margin: 0;
   }
   .err {
-    font-size: 0.78rem;
+    font-size: var(--text-2xs);
     color: var(--usage-crit);
   }
 </style>

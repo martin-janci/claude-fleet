@@ -22,13 +22,40 @@ pub struct PageAction {
 }
 
 /// Every page action.
-pub const PAGE_ACTIONS: &[PageAction] = &[PageAction {
-    id: "work.retention_sweep",
-    label: "Sweep now",
-    command: "work_retention_sweep",
-    help: "Delete what is past its window now, as the GC tick would: at most 2,000 rows per table, the rest over later sweeps.",
-    confirm: None,
-}];
+pub const PAGE_ACTIONS: &[PageAction] = &[
+    PageAction {
+        id: "work.retention_sweep",
+        label: "Sweep now",
+        command: "work_retention_sweep",
+        help: "Delete what is past its window now, as the GC tick would: at most 2,000 rows per table, the rest over later sweeps.",
+        confirm: None,
+    },
+    // Gap plan G4.6: the repair buttons Settings shows beside their
+    // settings.
+    PageAction {
+        id: "repair.now",
+        label: "Repair now",
+        command: "repair_workspaces_now",
+        help: "Re-add deleted worktree folders on every host now, as the automatic repair would: at most five per run, and an unmounted volume is never touched.",
+        confirm: None,
+    },
+    PageAction {
+        id: "restore.lost",
+        label: "Restore lost sessions",
+        command: "restore_all_lost_sessions",
+        help: "Resume every host's lost sessions now, in batches with the pause between them set above.",
+        confirm: Some("Resume every lost session on every host now? Each one starts its agent again on its host."),
+    },
+    // Gap plan G4.5: Debug devices' list, every host at once (a record's
+    // own "Rescan host" scans one).
+    PageAction {
+        id: "debug_devices.scan_all",
+        label: "Scan all hosts",
+        command: "scan_debug_devices",
+        help: "Look for attached phones, emulators and simulators on every host now.",
+        confirm: None,
+    },
+];
 
 pub fn action(id: &str) -> Option<&'static PageAction> {
     PAGE_ACTIONS.iter().find(|a| a.id == id)

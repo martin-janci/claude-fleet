@@ -5,7 +5,8 @@ use fleet_core::service::add_project::GithubRepo;
 use fleet_core::service::health::{Health, HubHealth, TrackerHealth, TrackersHealth};
 use fleet_core::service::projects::ProjectTreeRow;
 use fleet_core::service::repo_read::{
-    Branch, ChangedFile, Commit, CommitDetail, FileContent, FileDiff, GitRef, RepoTree,
+    BlameHunk, Branch, ChangedFile, Commit, CommitDetail, FileBlame, FileContent, FileDiff, GitRef,
+    RepoTree,
 };
 use fleet_core::service::tick::ReconcileStats;
 use fleet_core::service::transcript::{ContextView, ConvItem, ConvTurn, Conversation};
@@ -15,9 +16,9 @@ use fleet_core::service::work::resume::{LiveWork, ResumeCandidate, ResumeMode, R
 use fleet_core::service::work::PurgeImpact;
 use fleet_core::service::worktrees::{HostWorktrees, WorktreeOccupancy, WorktreeOccupant};
 use fleet_core::store::{
-    AccountRow, ConversationRow, HostRow, PendingInput, PendingOption, ProjectRow, SessionContext,
-    SessionEvent, SessionRow, SessionUsage, TaskRow, UsageTotals, WorkLinkRow, WorkSummary,
-    WorktreeRow,
+    AccountRow, ConversationRow, HostRow, PendingInput, PendingOption, ProjectPickRow, ProjectRow,
+    SessionContext, SessionEvent, SessionRow, SessionUsage, TaskRow, UsageTotals, WorkLinkRow,
+    WorkSummary, WorktreeRow,
 };
 use std::collections::BTreeMap;
 
@@ -83,6 +84,46 @@ pub(crate) fn sample_session() -> SessionRow {
         work_rev: 17,
         pr_evidence: None,
         pr_checked_at: None,
+        // Multi-user M1: BOTH non-`None`, deliberately. The invariant at the
+        // top of this file is that no key may be missing from the contract
+        // for want of a value, and the privacy-critical pair must not join
+        // `pr_evidence` / `pr_checked_at` in escaping it — a desktop that
+        // silently defaults `visibility` defaults it to the one value that
+        // means "anybody may look".
+        owner_person_id: Some(9),
+        visibility: fleet_core::store::VISIBILITY_PRIVATE.into(),
+        // Some, so the golden pins the name the sidebar reads.
+        claude_profile: Some("work".into()),
+        // Always on the wire, so the golden pins the name the phone and the
+        // agent tab read.
+        agent: fleet_core::store::AGENT_CLAUDE.into(),
+        // Some, so the golden pins both names the origin chip reads.
+        origin: Some("mission".into()),
+        origin_ref: Some("7".into()),
+        // Some, so the golden pins the name the unread state reads.
+        last_viewed_at: Some(1_700_000_100),
+        // Some, so the golden pins the name J2's answer reads.
+        turn_outcome: Some("finished".into()),
+        // One, so the golden pins the proposal shape every row carries.
+        proposals: vec![fleet_core::store::DecisionProposal {
+            feature: "turn_outcome".into(),
+            value: "finished".into(),
+            source: "jev".into(),
+            reason: Some("no output for 2 min after the prompt".into()),
+            confidence_pct: Some(82),
+            run_id: Some(41),
+            at: Some(1_700_000_200),
+            linked: None,
+        }],
+        pending_form: Some(fleet_core::store::PendingForm {
+            form_id: "f_x".into(),
+            title: "T".into(),
+        }),
+        form_draft: Some(fleet_core::store::FormDraft {
+            draft: "{\"spec\": \"fleet.form/1\"".into(),
+            why: Some("reading your hosts".into()),
+            updated_at: 1_700_000_300,
+        }),
         parent_session_id: Some(5),
         tags: vec!["tag-a".into(), "tag-b".into()],
         row_version: 12,
@@ -104,7 +145,10 @@ pub(crate) fn sample_session() -> SessionRow {
                 n: 1,
                 label: "Yes".into(),
                 selected: true,
+                checked: false,
             }],
+            multi: false,
+            detail: None,
         }),
         work: Some(WorkSummary {
             link_id: 5,
@@ -158,11 +202,34 @@ pub(crate) fn sample_host() -> HostRow {
         agent_version: Some("0.3.1".into()),
         provisioned_at: Some(1_725_000_000),
         provision_stale: true,
+        // Non-`None` on purpose: the key is only pinned by a sample that
+        // actually serialises it, and this one is the shape a one-person
+        // fleet sends (multi-user M1).
+        unclaimed_sessions: Some(3),
         harnesses: Some(vec!["claude".into(), "codex".into()]),
         // Some, so the golden records the field name: this sample exists to
         // pin every name the desktop reads, and the field is
         // `skip_serializing_if = "Option::is_none"`.
         provision_warning: Some("ag launcher not installed".into()),
+        // Some, so the golden pins the name the Hosts view reads.
+        auth_overrides: Some(vec!["ANTHROPIC_API_KEY".into()]),
+        claude_profiles: Some(vec![fleet_core::store::HostProfileRow {
+            name: "work".into(),
+            account_uuid: Some("acct-work".into()),
+            email: Some("work@example.com".into()),
+        }]),
+        cpu_count: Some(16),
+        mem_total_kb: Some(65_842_312),
+        boot_at: Some(1_687_558_400),
+        latency_ms: Some(18),
+        worktree_kb: Some(9_400_000),
+        worktree_at: Some(1_700_000_000),
+        // Some, so the golden pins the name the New session picker reads.
+        agents_on_path: Some(vec!["claude".into(), "codex".into()]),
+        // Some, so the golden pins the names HostOffline reads (review r13).
+        last_reachable_at: Some(1_700_000_000),
+        last_probe_error_code: Some("E_SSH_TIMEOUT".into()),
+        last_probe_error: Some("ssh timed out".into()),
     }
 }
 
@@ -205,6 +272,12 @@ pub(crate) fn sample_task() -> TaskRow {
         finished_at: Some(1_725_000_200),
         nonce: "secret-nonce".into(),
         worker_claude_session_id: Some("claude-uuid".into()),
+        detached_at: None,
+        work_item_id: None,
+        attempt: None,
+        role: None,
+        report: None,
+        evidence: None,
     }
 }
 
@@ -238,12 +311,24 @@ fn sample_project_tree() -> ProjectTreeRow {
     }
 }
 
+/// `vis` / `grp` are `Option`s: filled, so a renamed key shows.
+fn sample_project_pick() -> ProjectPickRow {
+    ProjectPickRow {
+        owner: "martin-janci".into(),
+        repo: "claude-fleet".into(),
+        pinned: true,
+        vis: Some("keep".into()),
+        grp: Some("tools".into()),
+    }
+}
+
 fn sample_occupancy() -> WorktreeOccupancy {
     WorktreeOccupancy {
         worktree: sample_worktree_row(),
         occupants: vec![WorktreeOccupant {
             host_alias: "trn".into(),
             tmux_name: "fleet-demo".into(),
+            session_id: 1,
         }],
     }
 }
@@ -263,6 +348,8 @@ fn sample_github_repo() -> GithubRepo {
         description: Some("w".into()),
         is_private: true,
         updated_at: Some("2026-09-01T10:00:00Z".into()),
+        // Some, so the golden pins the name the From GitHub rows read.
+        language: Some("Rust".into()),
     }
 }
 
@@ -331,12 +418,30 @@ fn sample_health() -> Health {
             // `hub_contract.golden.json` — the golden tracks `HostRow` only —
             // so nothing here pins the name.
             provision_warning: Some("ag launcher not installed".into()),
+            auth_overrides: vec!["ANTHROPIC_API_KEY".into()],
         }],
         hub: Some(sample_hub_health()),
         tunnels_mode: Some("none".into()),
         peer_links_total: 2,
         updates: None,
         decide: Some(sample_decide_health()),
+        // Org administration phase C: an org over its daily budget, which the
+        // desktop raises as an Attention item.
+        org_budgets: vec![fleet_core::service::org_spend::OrgBudgetAlert {
+            org_id: 1,
+            org: "Acme".into(),
+            period: fleet_core::service::org_spend::Period::Daily,
+            spent_micros: 31_000_000,
+            budget_micros: 30_000_000,
+        }],
+        // Redesign 8.1: no client reads the loop registry yet, so it stays
+        // out of the contract (empty and false are not sent).
+        loops: Vec::new(),
+        automation_paused: false,
+        // Gap plan G7.3: the phone's Settings › Hub and playbook counts; no
+        // desktop reads them, so they stay out of the contract.
+        devices: None,
+        playbooks_week: Default::default(),
     }
 }
 
@@ -354,6 +459,8 @@ fn sample_decide_health() -> fleet_core::service::decide::DecideHealth {
         budget_spent: true,
         degraded: true,
         reason: Some("breaker_open".into()),
+        // Gap plan G7.3: the phone's decision stats; not read on a desktop.
+        week: None,
     }
 }
 
@@ -554,6 +661,9 @@ fn sample_changed_file() -> ChangedFile {
         status: "renamed".into(),
         staged: true,
         orig_path: Some("src/old.rs".into()),
+        // Set, so the golden pins the Files tab's +/- names (M15 G1.10).
+        added: Some(1),
+        removed: Some(1),
     }
 }
 
@@ -574,6 +684,12 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
         c.insert(name.to_string(), keys);
     };
     put("SessionRow", wire_keys(&sample_session()));
+    // The one proposal shape every row carries (redesign 2.8), with every
+    // optional key set.
+    put(
+        "SessionRow.proposals",
+        wire_keys(&sample_session().proposals[0]),
+    );
     put("WorkLinkRow", wire_keys(&sample_work_link()));
     // `confirm_session_work` / `reject_session_work`: the row plus the
     // decided link's version.
@@ -599,17 +715,83 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
     put("AccountRow", wire_keys(&sample_account()));
     put("SessionEvent", wire_keys(&sample_event()));
     put("TaskRow", wire_keys(&sample_task()));
+    // Control's Library (9.7): `library`'s rows, every optional key set.
+    put(
+        "LibraryItemRow",
+        wire_keys(&fleet_core::store::LibraryItemRow {
+            id: 3,
+            at: 1,
+            kind: "upload".into(),
+            host_alias: "trn".into(),
+            session_id: Some(4),
+            session_name: Some("demo".into()),
+            org_id: Some(2),
+            owner_person_id: Some(1),
+            path: "/w/.claude-fleet-attachments/a.pdf".into(),
+            name: "a.pdf".into(),
+            size: Some(3),
+        }),
+    );
     put("ProjectTreeRow", wire_keys(&sample_project_tree()));
     put("ProjectRow", wire_keys(&sample_project_row()));
+    // The New session picker's choices (`project_picks` / `set_project_pick`).
+    put("ProjectPickRow", wire_keys(&sample_project_pick()));
     put("WorktreeRow", wire_keys(&sample_worktree_row()));
     put("WorktreeOccupancy", wire_keys(&sample_occupancy()));
     put("HostWorktrees", wire_keys(&sample_host_worktrees()));
     put("GithubRepo", wire_keys(&sample_github_repo()));
+    // Multi-user M1 (T13): the two answers the sharing commands deserialise.
+    // `SessionGrantView`'s three `Option`s are `skip_serializing_if`, so the
+    // sample fills every one — a key the hub stops sending is the ordinary
+    // "no grant row for that person" case, while a key it RENAMES is what
+    // this file exists to catch.
+    put(
+        "SessionGrantView",
+        wire_keys(&fleet_core::service::sessions::SessionGrantView {
+            session_id: 7,
+            person_id: Some(3),
+            person_name: Some("jane".into()),
+            person_display_name: Some("Jane Q".into()),
+            // Org administration phase D: an org recipient (additive).
+            org_id: Some(2),
+            org_name: Some("acme".into()),
+            level: "watch".into(),
+            granted_by: 1,
+            granted_at: 1_700_000_000,
+        }),
+    );
+    // `person_id: None` is a caller that proves no person, which answers an
+    // EMPTY grant list — so the key must be present and null, not absent.
+    put(
+        "MyGrants",
+        wire_keys(&fleet_core::service::sessions::MyGrants {
+            person_id: Some(1),
+            grants: vec![sample_my_grant()],
+            requests: vec![sample_my_request()],
+        }),
+    );
+    put("MyGrants.grants", wire_keys(&sample_my_grant()));
+    put("MyGrants.requests", wire_keys(&sample_my_request()));
+    put(
+        "AccessRequestView",
+        wire_keys(&fleet_core::service::sessions::AccessRequestView {
+            id: 3,
+            session_id: 7,
+            session_name: Some("work".into()),
+            person_id: 2,
+            person_name: Some("bob".into()),
+            person_display_name: Some("Bob".into()),
+            level: "answer".into(),
+            requested_at: 1_700_000_000,
+            resolution: Some("granted".into()),
+        }),
+    );
     put(
         "WorktreeOccupant",
         wire_keys(&WorktreeOccupant {
             host_alias: "trn".into(),
             tmux_name: "fleet-demo".into(),
+            session_id: 1,
         }),
     );
     put("Health", wire_keys(&sample_health()));
@@ -620,6 +802,323 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
     let hub = sample_hub_health();
     put("Health.hub", wire_keys(&hub));
     put("Health.hub.reconcile", wire_keys(&hub.reconcile));
+    // Revision 12: the answers of the tools the desktop routes since 11.
+    let pr = fleet_core::store::PullRequestRow {
+        id: 1,
+        url: "https://github.com/o/r/pull/7".into(),
+        repo: Some("o/r".into()),
+        number: Some(7),
+        title: Some("t".into()),
+        head_ref: Some("feat".into()),
+        state: "OPEN".into(),
+        draft: false,
+        ci_status: Some("passing".into()),
+        review_decision: Some("APPROVED".into()),
+        merge_state: Some("CLEAN".into()),
+        merged_at: Some(1),
+        session_id: Some(1),
+        session_name: Some("dev".into()),
+        host_alias: Some("trn".into()),
+        project_id: Some(1),
+        first_seen_at: 1,
+        updated_at: 2,
+        additions: None,
+        deletions: None,
+        mission_id: None,
+        mission_name: None,
+    };
+    put("PullRequestRow", wire_keys(&pr));
+    put(
+        "PrList",
+        wire_keys(&fleet_core::service::prs::PrList {
+            items: vec![pr],
+            total: 1,
+        }),
+    );
+    let viewer = fleet_core::service::presence::Viewer {
+        person_id: 1,
+        name: "jane".into(),
+        device: Some("phone".into()),
+        since: 1,
+        you: true,
+    };
+    put("PresenceView.viewers", wire_keys(&viewer));
+    put(
+        "PresenceView",
+        wire_keys(&fleet_core::service::presence::PresenceView {
+            session_id: 1,
+            viewers: vec![viewer],
+            heartbeat_secs: 30,
+        }),
+    );
+    put(
+        "ConfirmRequest",
+        wire_keys(&fleet_core::mcp::guard::ConfirmRequest {
+            nonce: "n".into(),
+            tool: "kill_session".into(),
+            summary: "s".into(),
+            caller: "master".into(),
+            operator: true,
+            asked_at: 1,
+        }),
+    );
+    put(
+        "PeerLinkSummary",
+        wire_keys(&fleet_core::store::PeerLinkSummary {
+            id: 1,
+            fleet_id: Some("f".into()),
+            role: "dialer".into(),
+            url: Some("https://peer".into()),
+            state: "linked".into(),
+            last_exchange_at: Some(1),
+            last_error: Some("e".into()),
+            pending: 0,
+            revoked_at: Some(1),
+            latency_ms: Some(5),
+            messages_today: 1,
+            messages_total: 2,
+            retry_every_s: Some(30),
+        }),
+    );
+    put(
+        "QueuePromptResult",
+        wire_keys(&fleet_core::service::sessions::QueuePromptResult {
+            session_id: 1,
+            delivered: false,
+            queued_id: Some(1),
+        }),
+    );
+    put(
+        "DeferredPromptRow",
+        wire_keys(&fleet_core::store::DeferredPromptRow {
+            id: 1,
+            session_id: 1,
+            body: "b".into(),
+            created_at: 1,
+            delivered_at: Some(1),
+            attempts: 1,
+            failed_at: Some(1),
+            error: Some("e".into()),
+            cancelled_at: Some(1),
+            // Set, so the golden pins Send later's names (M15 G1.8).
+            not_before: Some(1),
+            until_limit_reset: true,
+            skip_if_archived: true,
+            skipped_at: Some(1),
+        }),
+    );
+    put(
+        "BranchDiff",
+        wire_keys(&fleet_core::service::repo_read::BranchDiff {
+            branch: Some("feat".into()),
+            upstream: Some("origin/feat".into()),
+            unpushed: vec![],
+            unpushed_files: vec![],
+            truncated: false,
+            base: Some("origin/main".into()),
+            ahead_of_base: 1,
+            base_files: vec![],
+            behind_base: Some(1),
+        }),
+    );
+    let terms = fleet_core::service::sessions::ShellTerminalsResult {
+        session_id: 1,
+        host_alias: "trn".into(),
+        terminals: vec![fleet_core::service::sessions::ShellTerminal {
+            n: 1,
+            tmux_name: "fleet-dev-t1".into(),
+            // Some, so the golden pins the name the strip reads (M15 G4.4).
+            command: Some("node".into()),
+        }],
+        opened: Some(1),
+    };
+    put(
+        "ShellTerminalsResult.terminals",
+        wire_keys(&terms.terminals[0]),
+    );
+    put("ShellTerminalsResult", wire_keys(&terms));
+    let run = fleet_core::store::RunRow {
+        id: "task:1".into(),
+        source: "task".into(),
+        kind: "task".into(),
+        owner: "dev".into(),
+        started_at: 1,
+        ended_at: Some(2),
+        duration_ms: Some(1000),
+        outcome: "ok".into(),
+        error: Some("e".into()),
+        cost_micros: Some(5),
+        model: Some("m".into()),
+        host: Some("trn".into()),
+        org_id: Some(1),
+        mission_id: Some(1),
+        session_ids: vec![1],
+        summary: Some("s".into()),
+        routine_id: Some(1),
+    };
+    put("RunRow", wire_keys(&run));
+    put(
+        "RunsPage",
+        wire_keys(&fleet_core::service::runs::RunsPage {
+            runs: vec![run],
+            total: 1,
+        }),
+    );
+    let item = fleet_core::store::HandoffItem {
+        id: 1,
+        title: "t".into(),
+        status: "todo".into(),
+        proposal_state: Some("accepted".into()),
+        accepted_at: Some(1),
+        done_when: Vec::new(),
+        depends_on: Vec::new(),
+    };
+    put("HandoffItem", wire_keys(&item));
+    put(
+        "ControlHandoffRow",
+        wire_keys(&fleet_core::store::ControlHandoffRow {
+            id: 1,
+            at: 1,
+            kind: "tree".into(),
+            tool: "propose_tree".into(),
+            session_id: Some(1),
+            task_id: Some(1),
+            mission_id: Some(1),
+            mission_name: Some("m".into()),
+            mission_state: Some("running".into()),
+            item: Some(item.clone()),
+            items: vec![item],
+            preview: Some("p".into()),
+        }),
+    );
+    // Revision 13.
+    put(
+        "ControlRoute",
+        wire_keys(&fleet_core::service::decide::control_route::ControlRoute {
+            outcome: "proposed".into(),
+            target: Some("m1".into()),
+            proposal: None,
+            targets: vec![],
+            run_id: Some(1),
+        }),
+    );
+    put(
+        "LostTarget",
+        wire_keys(&fleet_core::service::decide::lost_target::LostTarget {
+            project_id: Some(1),
+            source: Some("rule".into()),
+            reason: Some("r".into()),
+            confidence_pct: Some(90),
+            run_id: Some(1),
+            unsure: false,
+            ticket: Some(fleet_core::service::decide::lost_target::LostTicket {
+                key: "PD-1".into(),
+                title: Some("t".into()),
+                source: "rule".into(),
+                reason: "r".into(),
+            }),
+        }),
+    );
+    // Gap plan G7.10 (additive at revision 16: a hub without the tool
+    // answers E_HUB_PROTOCOL and the dialog keeps its plain notice).
+    put(
+        "ResumeOrNew",
+        wire_keys(&fleet_core::service::decide::resume_or_new::ResumeOrNew {
+            value: Some("l7".into()),
+            link_id: Some(7),
+            session_id: Some(3),
+            name: Some("receipt-totals".into()),
+            source: Some("jev".into()),
+            reason: Some("r".into()),
+            confidence_pct: Some(82),
+            run_id: Some(1),
+            unsure: false,
+        }),
+    );
+    put(
+        "PlacedTranscript",
+        wire_keys(&fleet_core::service::sessions::PlacedTranscript {
+            project_id: 1,
+            tmux_name: "fleet-dev".into(),
+            copied: true,
+        }),
+    );
+    put(
+        "WatchSummary",
+        wire_keys(&fleet_core::service::watch_summary::WatchSummary {
+            text: Some("Fixed the flake.".into()),
+            check: fleet_core::service::decide::summary_check::Check::Passed,
+            since: 1,
+            turns: 2,
+            turns_capped: false,
+            model: "haiku".into(),
+            host_alias: "mefistos".into(),
+            at: 3,
+        }),
+    );
+    // Revision 14.
+    let login = fleet_core::service::account_limits::HostLogin {
+        profile: Some("work".into()),
+        account_uuid: "u".into(),
+        used_pct: Some(40.0),
+    };
+    put("HostLogin", wire_keys(&login));
+    put(
+        "Headroom",
+        wire_keys(&fleet_core::service::account_limits::Headroom {
+            pause_at_pct: 90.0,
+            chosen: Some(login.clone()),
+            over: false,
+            suggestion: Some(login.clone()),
+            logins: vec![login],
+        }),
+    );
+    put(
+        "ShepherdRuleView",
+        wire_keys(&fleet_core::service::pr_shepherd::admin::RuleView {
+            rule: fleet_core::store::ShepherdRuleRow {
+                project_id: 1,
+                level: "nudge".into(),
+                granted_by: "person:1".into(),
+                granted_at: 1,
+                expires_at: Some(2),
+                recipes: Some("r".into()),
+            },
+            project: "acme/app".into(),
+            active: true,
+        }),
+    );
+    let mut mission: fleet_core::store::MissionRow = serde_json::from_value(serde_json::json!({
+        "id": 1, "org_id": 1, "owner_person_id": 1, "root_item_id": 1, "name": "m",
+        "goal": "g", "non_goals": "n", "mode": "finite", "state": "active", "level": 2,
+        "plan_version": 1, "created_at": 1, "updated_at": 1, "started_at": 1,
+        "finished_at": 1, "version": 1, "next_wake_at": 1
+    }))
+    .unwrap();
+    mission.cost_micros = Some(31_800_000);
+    mission.budget_micros = Some(40_000_000);
+    // Revision 15 (G1.6): a mission waiting on a person says why.
+    mission.waiting_on = Some(fleet_core::service::attention::MissionWait {
+        reason: fleet_core::service::attention::MissionWaitReason::SignGrant,
+        since: 1,
+        open_cards: 0,
+    });
+    put("MissionRow", wire_keys(&mission));
+    put(
+        "RunEstimate",
+        wire_keys(&fleet_core::service::work::orchestrate::RunEstimate {
+            micros: 3_000_000,
+            runs: 2,
+            basis: "mission".into(),
+        }),
+    );
+    let mut usage = fleet_core::service::account_usage::AccountUsageSnapshot::never_fetched("a");
+    usage.usage = Some(Default::default());
+    usage.subscription = Some("max".into());
+    usage.fetched_at = Some(1);
+    usage.source_host = Some("trn".into());
+    usage.detail = Some("d".into());
+    put("AccountUsageSnapshot", wire_keys(&usage));
     put("UsageTotals", wire_keys(&sample_totals()));
     put(
         "DayUsage",
@@ -743,6 +1242,25 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
             ahead: 1,
             behind: 2,
             tip_hash: "abc123".into(),
+            merged: true,
+        }),
+    );
+    let hunk = BlameHunk {
+        start: 1,
+        lines: 2,
+        hash: "abc123".into(),
+        author: "a".into(),
+        time: 1,
+        summary: "s".into(),
+        uncommitted: false,
+    };
+    put("BlameHunk", wire_keys(&hunk));
+    put(
+        "FileBlame",
+        wire_keys(&FileBlame {
+            path: "a.rs".into(),
+            hunks: vec![hunk],
+            truncated: false,
         }),
     );
     put("GitRef", wire_keys(&sample_git_ref()));
@@ -767,6 +1285,7 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
             author: "A Person".into(),
             date: "2026-09-18".into(),
             files: vec![sample_changed_file()],
+            pushed: Some(true),
         }),
     );
     c
@@ -856,7 +1375,7 @@ fn the_hubs_field_names_are_the_ones_the_desktop_reads() {
         fleet_core::wire_contract::CONTRACT_REVISION,
         "{GOLDEN_PATH} was generated at wire-contract revision {}, but \
          fleet_core::wire_contract::CONTRACT_REVISION is now {} — regenerate \
-         with `{REGEN_ENV}=1 cargo test -p claude-fleet --lib contract` so \
+         with `{REGEN_ENV}=1 cargo fleet-test -- the_hubs_field_names_are_the_ones_the_desktop_reads` so \
          the golden's recorded revision matches, and read the diff",
         golden.revision,
         fleet_core::wire_contract::CONTRACT_REVISION,
@@ -897,21 +1416,23 @@ fn the_hubs_field_names_are_the_ones_the_desktop_reads() {
          None, and the desktop renders plausible wrong data with nothing in \
          the log. If \
          the rename is deliberate, regenerate with \
-         `{REGEN_ENV}=1 cargo test -p claude-fleet --lib contract` and read the \
+         `{REGEN_ENV}=1 cargo fleet-test -- the_hubs_field_names_are_the_ones_the_desktop_reads` and read the \
          diff.",
         complaints.join("\n\n")
     );
 }
 
 /// `SessionRow` is the type the whole sidebar is made of, and the one whose
-/// sixty-one keys nothing else would notice losing. Its list is a literal here,
-/// not only in the golden, so that a regenerate cannot quietly accept a
+/// seventy-two keys nothing else would notice losing. Its list is a literal
+/// here, not only in the golden, so that a regenerate cannot quietly accept a
 /// change to it.
 #[test]
-fn a_session_rows_wire_names_are_these_exact_sixty_one() {
+fn a_session_rows_wire_names_are_these_exact_seventy_two() {
     let expected = [
         "account_uuid",
+        "agent",
         "ci_status",
+        "claude_profile",
         "claude_session_id",
         "claude_status",
         "context_at",
@@ -923,6 +1444,7 @@ fn a_session_rows_wire_names_are_these_exact_sixty_one() {
         "created_at",
         "current_activity",
         "effort_level",
+        "form_draft",
         "friendly_name",
         "host_alias",
         "id",
@@ -933,16 +1455,22 @@ fn a_session_rows_wire_names_are_these_exact_sixty_one() {
         "last_prompt",
         "last_stop_at",
         "last_turn_at",
+        "last_viewed_at",
         "lost_at",
         "lost_reason",
         "model",
         "notes",
         "org_id",
+        "origin",
+        "origin_ref",
+        "owner_person_id",
         "parent_session_id",
+        "pending_form",
         "pending_input",
         "pr_url",
         "project_id",
         "prompt_submit_seq",
+        "proposals",
         "reviews_session_id",
         "row_version",
         "safe_kill_detail",
@@ -957,6 +1485,7 @@ fn a_session_rows_wire_names_are_these_exact_sixty_one() {
         "tags",
         "tmux_name",
         "tmux_pane_id",
+        "turn_outcome",
         "turn_seq",
         "usage_cache_read_tokens",
         "usage_cache_write_tokens",
@@ -965,6 +1494,7 @@ fn a_session_rows_wire_names_are_these_exact_sixty_one() {
         "usage_model",
         "usage_output_tokens",
         "usage_updated_at",
+        "visibility",
         "work",
         "work_rejected",
         "work_rev",
@@ -973,7 +1503,7 @@ fn a_session_rows_wire_names_are_these_exact_sixty_one() {
         "worktree_key",
     ];
     let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-    assert_eq!(expected.len(), 61, "the list above lost or gained a line");
+    assert_eq!(expected.len(), 72, "the list above lost or gained a line");
     assert_eq!(wire_keys(&sample_session()), expected);
 }
 
@@ -983,6 +1513,15 @@ fn a_session_rows_wire_names_are_these_exact_sixty_one() {
 /// This is deliberately separate from the whole-contract test above: those
 /// three names must fail their own test with their own message, so whoever
 /// sees it red reads what breaks rather than a diff of forty keys.
+///
+/// Multi-user M1's two fields are deliberately NOT in this list, and the
+/// reason is worth writing down because a reader will reach for them: their
+/// absent-key default is the REFUSING one. A missing `visibility` reads
+/// `unclaimed` (`store/rows.rs::visibility_unclaimed`) and a missing
+/// `owner_person_id` reads `None`, which no ownership predicate matches — so
+/// a rename there hides sessions loudly instead of exposing them quietly.
+/// That is the whole design: spec §3.7 picked the NOT NULL column as the
+/// fence's key precisely so the failure mode would be this way round.
 #[test]
 fn the_three_fields_where_absent_means_fine_keep_their_names() {
     let keys = wire_keys(&sample_session());
@@ -1403,4 +1942,24 @@ fn an_older_hubs_tool_item_still_parses_with_defaults() {
             done: true,
         }
     );
+}
+
+fn sample_my_grant() -> fleet_core::service::sessions::MyGrant {
+    fleet_core::service::sessions::MyGrant {
+        session_id: 7,
+        level: "drive".into(),
+        shared_by: Some(1),
+        shared_by_name: Some("Martin".into()),
+        granted_at: Some(1_700_000_000),
+        via_org: Some("acme".into()),
+    }
+}
+
+fn sample_my_request() -> fleet_core::service::sessions::MyAccessRequest {
+    fleet_core::service::sessions::MyAccessRequest {
+        id: 3,
+        session_id: 7,
+        level: "answer".into(),
+        requested_at: 1_700_000_000,
+    }
 }

@@ -35,19 +35,21 @@ use fleet_core::ipc_error::{codes, IpcError};
 use fleet_core::service::bg_sessions::{
     self, DismissAgentArgs, NewBgSessionArgs, PurgeProjectArgs,
 };
+use fleet_core::service::decide::lost_target::LostTarget;
 use fleet_core::service::repair::{self, RepairReport};
 use fleet_core::service::rewind::{self, RewindArgs};
 use fleet_core::service::safe_kill::{
     self, DiscardKillSessionArgs, InspectSafeKillArgs, SafeKillInspection, SafeKillSessionArgs,
 };
 use fleet_core::service::sessions::{
-    self, DiscoverLostSessionsArgs, DismissGhostSessionArgs, KillSessionArgs, LostCandidate,
-    NewSessionArgs, RecreateSessionArgs, RelatedSessionsArgs, RenameSessionArgs,
-    RestartSessionArgs, RestoreHostSessionsArgs, RestoreReport, SendPromptArgs,
-    SetFriendlyNameArgs, SpawnReviewArgs,
+    self, AdoptSessionArgs, DiscoverLostSessionsArgs, DismissGhostSessionArgs, KillSessionArgs,
+    LostCandidate, LostTargetArgs, NewSessionArgs, PlaceTranscriptArgs, PlacedTranscript,
+    RecreateSessionArgs, RenameSessionArgs, RestartSessionArgs, RestoreHostSessionsArgs,
+    RestoreReport, SendPromptArgs, SetFriendlyNameArgs, SetSessionTagsArgs, SpawnReviewArgs,
+    TouchSessionViewedArgs,
 };
 use fleet_core::ssh::SshClient;
-use fleet_core::store::{SessionRow, Store};
+use fleet_core::store::{DeferredPromptRow, SessionRow, Store};
 use std::sync::{Arc, Mutex};
 use tauri::State;
 
@@ -62,15 +64,6 @@ pub async fn list_sessions(
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<Vec<SessionRow>, IpcError> {
     routed::list_sessions(&backend, force, &store, &ssh).await
-}
-
-#[tauri::command]
-pub async fn related_sessions(
-    args: RelatedSessionsArgs,
-    backend: State<'_, Arc<FleetBackend>>,
-    store: State<'_, Arc<Mutex<Store>>>,
-) -> Result<Vec<SessionRow>, IpcError> {
-    routed::related_sessions(&backend, args, &store).await
 }
 
 #[tauri::command]
@@ -153,6 +146,36 @@ pub async fn set_session_friendly_name(
     routed::set_session_friendly_name(&backend, args, &store).await
 }
 
+/// A session's tags, written as one list (the Label field, M15 G2.7).
+#[tauri::command]
+pub async fn set_session_tags(
+    args: SetSessionTagsArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<SessionRow, IpcError> {
+    routed::set_session_tags(&backend, args, &store).await
+}
+
+/// Link or Not related on a session's related-session proposal (M15 G4.3).
+#[tauri::command]
+pub async fn decide_related_session(
+    args: fleet_core::service::decide::related_session::DecideRelatedSessionArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<SessionRow, IpcError> {
+    routed::decide_related_session(&backend, args, &store).await
+}
+
+/// The session on screen (redesign 2.3): its finished turns read as seen.
+#[tauri::command]
+pub async fn touch_session_viewed(
+    args: TouchSessionViewedArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<SessionRow, IpcError> {
+    routed::touch_session_viewed(&backend, args, &store).await
+}
+
 #[tauri::command]
 pub async fn restart_session(
     args: RestartSessionArgs,
@@ -189,7 +212,58 @@ pub async fn send_prompt(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
-    routed::send_prompt(&backend, args, &store, &ssh).await
+    // A key into a standalone session (a dialog answer): re-read just that
+    // pane afterwards, as the hub's own `send_prompt` does, so the answered
+    // dialog leaves the row now rather than on the next tick.
+    let key_target = (args.keys.is_some() && backend.hub().is_none())
+        .then(|| (args.host_alias.clone(), args.tmux_name.clone()));
+    routed::send_prompt(&backend, args, &store, &ssh).await?;
+    if let Some((host, name)) = key_target {
+        let id = store.lock().ok().and_then(|s| {
+            s.find_sessions_by_tmux_name(&name, Some(&host))
+                .ok()
+                .and_then(|rows| rows.first().map(|r| r.id))
+        });
+        if let Some(id) = id {
+            fleet_core::service::sessions::spawn_dialog_followup(
+                Arc::clone(&*store),
+                Arc::clone(&*ssh),
+                id,
+                fleet_core::service::sessions::DialogFollowup::Answered,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Send prompt's "busy sessions get it when they are idle" (step 5.10).
+#[tauri::command]
+pub async fn queue_prompt(
+    args: sessions::QueuePromptArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<sessions::QueuePromptResult, IpcError> {
+    routed::queue_prompt(&backend, args, &store, &ssh).await
+}
+
+#[tauri::command]
+pub async fn queued_prompts(
+    args: sessions::QueuedPromptsArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<DeferredPromptRow>, IpcError> {
+    routed::queued_prompts(&backend, args, &store).await
+}
+
+/// Take back a waiting prompt; answers what is still waiting.
+#[tauri::command]
+pub async fn cancel_queued_prompt(
+    args: sessions::CancelQueuedPromptArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<DeferredPromptRow>, IpcError> {
+    routed::cancel_queued_prompt(&backend, args, &store).await
 }
 
 #[tauri::command]
@@ -245,9 +319,43 @@ pub async fn dismiss_ghost_session(
     routed::dismiss_ghost_session(&backend, args, &store).await
 }
 
+/// Adopt a live tmux session fleet did not start (Lost and found, step 4.8).
+#[tauri::command]
+pub async fn adopt_session(
+    args: AdoptSessionArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<SessionRow, IpcError> {
+    routed::adopt_session(&backend, args, &store).await
+}
+
+/// The project a Lost and found entry would go into, to prefill Adopt or
+/// Restore (step 4.12). Read-only.
+#[tauri::command]
+pub async fn lost_target(
+    args: LostTargetArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<LostTarget, IpcError> {
+    routed::lost_target(&backend, args, &store, &ssh).await
+}
+
+/// Restore into a project: copy a found conversation where `claude
+/// --resume` in the project's root finds it (step 4.12).
+#[tauri::command]
+pub async fn place_transcript(
+    args: PlaceTranscriptArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<PlacedTranscript, IpcError> {
+    routed::place_transcript(&backend, args, &store, &ssh).await
+}
+
 /// Remove an inactive background agent (`kind='bg'`, not working) from the
 /// list. Frontend-only; logic lives in `service::bg_sessions`.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dismiss_agent_session(
     args: DismissAgentArgs,
     backend: State<'_, Arc<FleetBackend>>,
@@ -289,8 +397,9 @@ pub async fn new_bg_session(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
+    reg: State<'_, Arc<CancellationRegistry>>,
 ) -> Result<bg_sessions::NewBgSessionResult, IpcError> {
-    routed::new_bg_session(&backend, args, &store, &ssh).await
+    routed::new_bg_session(&backend, args, &store, &ssh, &reg).await
 }
 
 /// Delete all Claude Code state for a project and remove it from the fleet database.
@@ -434,6 +543,251 @@ pub async fn session_activity(
     routed::session_activity(&backend, args, &store, &ssh).await
 }
 
+// ── sharing a session, and the watcher's pane (multi-user M1, T13) ──────────
+//
+// Six commands, each routed to the hub tool T12 added for it, each argument
+// struct a field-for-field twin of that tool's params — which is what lets
+// them route at all (*parity or refusal*, in `backend::routing`'s header).
+//
+// **What is NOT here, and why.** `session_claim` has no desktop command:
+// parity fails on the CALLER, not the arguments — the tool is
+// `Access::HostToken`, and a desktop's client token can never satisfy it —
+// and spec §4.3 states the prohibition in words ("a UI 'claim' button for an
+// arbitrary org member is exactly what must not exist"). The operator claims
+// with `fleet-hub session claim <id> --person <name>`, or the agent in the
+// session claims through its own per-host token. There is likewise no
+// desktop `session_transcript`: the Conversation tab already reads four
+// routed, richer sources, and a second transcript path would be a second
+// thing to gate.
+//
+// **Sharing never confers a terminal** (spec §4.3 invariant 5), which is why
+// `capture_session` is here: a watcher gets a read-only pane SNAPSHOT, a
+// routed read the hub re-gates on every poll and can revoke between two of
+// them, where `pty_open` would be a direct SSH into the owner's pane that no
+// revoke could reach.
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct CaptureSessionArgs {
+    pub session_id: i64,
+    /// Scrollback rows above the visible pane; `None` = the visible pane.
+    /// Clamped by the service (`clamp_scrollback`), on either arm.
+    #[serde(default)]
+    pub scrollback_lines: Option<u32>,
+    /// Keep the last n lines; `None` = `CAPTURE_DEFAULT_MAX_LINES`, `0` = no
+    /// cap. A cut adds one note line.
+    #[serde(default)]
+    pub max_lines: Option<u32>,
+}
+
+/// A read-only snapshot of a session's tmux pane, as plain text.
+///
+/// Added for the WATCHER (multi-user M1, R5-e): this is what a `watch` grant
+/// gives back after the live terminal is taken away. The hub gates it per
+/// request at `Reach::Read`, so a revoked grant stops the next poll; the
+/// owner does not use it, they attach.
+///
+/// Errors: `E_NOTFOUND`, `E_INVALID_STATE` (no tmux pane), transport codes.
+#[tauri::command]
+pub async fn capture_session(
+    args: CaptureSessionArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<String, IpcError> {
+    routed::capture_session(&backend, args, &store, &ssh).await
+}
+
+/// `session_summary_since`'s arguments — `SessionSummarySinceParams`
+/// field for field.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct SessionSummarySinceArgs {
+    pub session_id: i64,
+    /// Unix seconds: the turns that ended at or after it are summarised.
+    pub since: i64,
+}
+
+/// A short summary of what a session did since a time (Orbit Fleet 11.11),
+/// for its watcher or its owner: drafted on the session's host under its
+/// account, only with its org's consent, and hidden when the Jev check
+/// (`decide.jev.summary_check`) cannot confirm it.
+///
+/// Errors: `E_FORBIDDEN` (no consent), `E_NOTFOUND`, `E_CLAUDE_CLI`,
+/// `E_TIMEOUT`, transport codes.
+#[tauri::command]
+pub async fn session_summary_since(
+    args: SessionSummarySinceArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<fleet_core::service::watch_summary::WatchSummary, IpcError> {
+    routed::session_summary_since(&backend, args, &store, &ssh).await
+}
+
+/// `session_share`'s arguments — `SessionShareParams` field for field.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct SessionShareArgs {
+    pub session_id: i64,
+    /// The recipient, by person name …
+    #[serde(default)]
+    pub person: String,
+    /// … or an org, by name (org administration phase D): its members and
+    /// admins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org: Option<String>,
+    /// `watch` or `drive`. Passed through as the string the user chose: the
+    /// store is the one validator, so a level this build has never heard of
+    /// is refused there rather than silently coerced here.
+    pub level: String,
+}
+
+/// `session_unshare`'s and `session_narrow`'s arguments —
+/// `SessionGrantParams` field for field.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct SessionGrantArgs {
+    pub session_id: i64,
+    #[serde(default)]
+    pub person: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org: Option<String>,
+}
+
+/// `session_access`'s arguments — `SessionAccessParams` field for field.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct SessionAccessArgs {
+    pub session_id: i64,
+}
+
+/// Share a session you own with one person, at `watch` or `drive`.
+///
+/// Owner only, and the refusal is the store's own `WHERE owner_person_id =
+/// ?granter` on either arm — so the rule holds standalone, where no reach
+/// gate runs. Returns the session row for the optimistic patch.
+/// Errors: `E_NOTFOUND`, `E_FORBIDDEN`, `E_VALIDATE`, `E_EXISTS`.
+#[tauri::command]
+pub async fn session_share(
+    args: SessionShareArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<SessionRow, IpcError> {
+    routed::session_share(&backend, args, &store).await
+}
+
+/// Revoke one person's grant on a session you own. Owner only; the grant row
+/// is kept, revoked, for the audit trail.
+#[tauri::command]
+pub async fn session_unshare(
+    args: SessionGrantArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<SessionRow, IpcError> {
+    routed::session_unshare(&backend, args, &store).await
+}
+
+/// Lower one person's grant from `drive` to `watch`. Owner only.
+///
+/// There is deliberately no twin that raises one, here or on the hub or in
+/// the store: a grant moves downward only (spec §4.3 invariant 3), and
+/// widening is the owner revoking and sharing again.
+#[tauri::command]
+pub async fn session_narrow(
+    args: SessionGrantArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<SessionRow, IpcError> {
+    routed::session_narrow(&backend, args, &store).await
+}
+
+/// Who holds a live grant on a session you own — the Share sheet's list.
+///
+/// Owner only on the hub (`Reach::Own`, not `Read`: the answer names OTHER
+/// people, which is not part of what a `watch` grant promised).
+#[tauri::command]
+pub async fn session_access(
+    args: SessionAccessArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<sessions::SessionGrantView>, IpcError> {
+    routed::session_access(&backend, args, &store).await
+}
+
+/// Who this client is on this fleet, and every live grant TO it.
+///
+/// The one place a client learns its own person id: with each row's
+/// `owner_person_id` and `visibility` (which arrive on every row already) and
+/// T9's `grant:changed` to keep the set current, this is what
+/// `src/lib/access.ts` derives a row's access from. No arguments on purpose —
+/// "whose grants" is the connection's own identity, never an argument a
+/// caller could point at someone else.
+#[tauri::command]
+pub async fn my_grants(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<sessions::MyGrants, IpcError> {
+    routed::my_grants(&backend, &store).await
+}
+
+/// `session_ask_access`'s arguments — `SessionAskAccessParams` field for
+/// field.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct SessionAskAccessArgs {
+    pub session_id: i64,
+    /// `answer` or `drive`; the store is the one validator.
+    pub level: String,
+}
+
+/// `access_requests`' arguments — `AccessRequestsParams` field for field.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct AccessRequestsArgs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<i64>,
+}
+
+/// What `access_requests` answers: the list, or the one ask it resolved.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum AccessRequestsAnswer {
+    List(Vec<sessions::AccessRequestView>),
+    One(sessions::AccessRequestView),
+}
+
+/// Ask the owner of a session shared with you for a wider level (gap plan
+/// G4.2). Confers nothing until they grant it.
+#[tauri::command]
+pub async fn session_ask_access(
+    args: SessionAskAccessArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<sessions::AccessRequestView, IpcError> {
+    routed::session_ask_access(&backend, args, &store).await
+}
+
+/// The open asks on your sessions, or grant / decline one (gap plan G4.2).
+#[tauri::command]
+pub async fn access_requests(
+    args: AccessRequestsArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<AccessRequestsAnswer, IpcError> {
+    routed::access_requests(&backend, args, &store).await
+}
+
+/// A session's shell terminals (step 5.3): list, open or close one. The
+/// terminal pane then attaches to the `tmux_name` it answers with, through
+/// `pty_open`, like the agent's.
+#[tauri::command]
+pub async fn shell_terminals(
+    args: sessions::ShellTerminalsArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<sessions::ShellTerminalsResult, IpcError> {
+    routed::shell_terminals(&backend, args, &store, &ssh).await
+}
+
 /// The routing, away from `tauri::State` so the tests can drive it.
 pub(crate) mod routed {
     use super::*;
@@ -454,27 +808,27 @@ pub(crate) mod routed {
         }
     }
 
-    pub async fn related_sessions(
-        backend: &FleetBackend,
-        args: RelatedSessionsArgs,
-        store: &Mutex<Store>,
-    ) -> Result<Vec<SessionRow>, IpcError> {
-        match backend.hub() {
-            Some(hub) => hub.route("related_sessions", &args).await,
-            None => sessions::related_sessions(args, store),
-        }
-    }
-
     pub async fn new_session(
         backend: &FleetBackend,
-        args: NewSessionArgs,
+        mut args: NewSessionArgs,
         store: &Mutex<Store>,
         ssh: &Arc<SshClient>,
         reg: &Arc<CancellationRegistry>,
     ) -> Result<SessionRow, IpcError> {
         match backend.hub() {
+            // The hub derives the owner from the connection's own person, and
+            // `HubBackend::new_session` deliberately does not send one — see
+            // `NewSessionArgs::owner_person_id`.
             Some(hub) => hub.new_session(&args).await,
-            None => sessions::new_session(args, store, ssh, reg).await,
+            // Standalone: the person behind the window is this fleet's own
+            // personal owner (multi-user M1, T5). The field arrives empty
+            // whatever the frontend sent — it is `skip_deserializing` — so
+            // this is the only place it can be filled, and the session the
+            // user just started is theirs rather than `unclaimed`.
+            None => {
+                args.owner_person_id = fleet_core::service::sessions::hub_personal_owner(store);
+                sessions::new_session(args, store, ssh, reg).await
+            }
         }
     }
 
@@ -528,6 +882,41 @@ pub(crate) mod routed {
         }
     }
 
+    pub async fn set_session_tags(
+        backend: &FleetBackend,
+        args: SetSessionTagsArgs,
+        store: &Mutex<Store>,
+    ) -> Result<SessionRow, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("set_session_tags", &args).await,
+            None => sessions::set_session_tags(args, store),
+        }
+    }
+
+    pub async fn decide_related_session(
+        backend: &FleetBackend,
+        args: fleet_core::service::decide::related_session::DecideRelatedSessionArgs,
+        store: &Mutex<Store>,
+    ) -> Result<SessionRow, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("decide_related_session", &args).await,
+            None => {
+                fleet_core::service::decide::related_session::decide_related_session(args, store)
+            }
+        }
+    }
+
+    pub async fn touch_session_viewed(
+        backend: &FleetBackend,
+        args: TouchSessionViewedArgs,
+        store: &Mutex<Store>,
+    ) -> Result<SessionRow, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("touch_session_viewed", &args).await,
+            None => sessions::touch_session_viewed(args, store),
+        }
+    }
+
     pub async fn restart_session(
         backend: &FleetBackend,
         args: RestartSessionArgs,
@@ -575,6 +964,53 @@ pub(crate) mod routed {
                 Ok(())
             }
             None => sessions::send_prompt(args, store, ssh).await,
+        }
+    }
+
+    pub async fn queue_prompt(
+        backend: &FleetBackend,
+        args: sessions::QueuePromptArgs,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<sessions::QueuePromptResult, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("queue_prompt", &args).await,
+            None => sessions::queue_prompt(args, store, ssh).await,
+        }
+    }
+
+    pub async fn queued_prompts(
+        backend: &FleetBackend,
+        args: sessions::QueuedPromptsArgs,
+        store: &Mutex<Store>,
+    ) -> Result<Vec<DeferredPromptRow>, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("queued_prompts", &args).await,
+            None => sessions::queued_prompts(args, store),
+        }
+    }
+
+    /// The hub's `queued_prompts { cancel }` takes the prompt back and lists
+    /// what is left; standalone does the same two steps.
+    pub async fn cancel_queued_prompt(
+        backend: &FleetBackend,
+        args: sessions::CancelQueuedPromptArgs,
+        store: &Mutex<Store>,
+    ) -> Result<Vec<DeferredPromptRow>, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                // The command's row names the `queued_prompts` tool.
+                hub.route(
+                    "cancel_queued_prompt",
+                    &serde_json::json!({ "session_id": args.session_id, "cancel": args.id }),
+                )
+                .await
+            }
+            None => {
+                let session_id = args.session_id;
+                sessions::cancel_queued_prompt(args, store)?;
+                sessions::queued_prompts(sessions::QueuedPromptsArgs { session_id }, store)
+            }
         }
     }
 
@@ -626,6 +1062,34 @@ pub(crate) mod routed {
         }
     }
 
+    pub async fn lost_target(
+        backend: &FleetBackend,
+        args: LostTargetArgs,
+        store: &Arc<Mutex<Store>>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<LostTarget, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("lost_target", &args).await,
+            None => {
+                let ctx = fleet_core::service::decide::DecideCtx::jev(Arc::clone(store));
+                sessions::lost_target_over_ssh(args, store, ssh, &ctx).await
+            }
+        }
+    }
+
+    pub async fn place_transcript(
+        backend: &FleetBackend,
+        args: PlaceTranscriptArgs,
+        store: &Arc<Mutex<Store>>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<PlacedTranscript, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("place_transcript", &args).await,
+            // The desktop's commands are a person's.
+            None => sessions::place_transcript_over_ssh(args, store, ssh, true).await,
+        }
+    }
+
     pub async fn dismiss_ghost_session(
         backend: &FleetBackend,
         args: DismissGhostSessionArgs,
@@ -640,6 +1104,23 @@ pub(crate) mod routed {
                 Ok(())
             }
             None => sessions::dismiss_ghost_session(args, store),
+        }
+    }
+
+    pub async fn adopt_session(
+        backend: &FleetBackend,
+        mut args: AdoptSessionArgs,
+        store: &Mutex<Store>,
+    ) -> Result<SessionRow, IpcError> {
+        match backend.hub() {
+            // The hub makes the connection's own person the owner; the field
+            // is `skip_deserializing`, so it is never on the wire.
+            Some(hub) => hub.route("adopt_session", &args).await,
+            // Standalone: the person behind the window, as in `new_session`.
+            None => {
+                args.owner_person_id = fleet_core::service::sessions::hub_personal_owner(store);
+                sessions::adopt_session(args, store)
+            }
         }
     }
 
@@ -668,10 +1149,19 @@ pub(crate) mod routed {
         args: NewBgSessionArgs,
         store: &Mutex<Store>,
         ssh: &Arc<SshClient>,
+        reg: &Arc<CancellationRegistry>,
     ) -> Result<bg_sessions::NewBgSessionResult, IpcError> {
         match backend.hub() {
             Some(hub) => hub.route("new_bg_session", &args).await,
-            None => bg_sessions::new_bg_session_tracked(args, store, ssh).await,
+            // Multi-user M1 (T5): on a standalone desktop the person behind
+            // the window is this fleet's own personal owner (migration 098
+            // gives a standalone hub one), so the agent's row is theirs. Routed
+            // to a hub instead, the hub resolves the owner from the connection
+            // and this arm is not reached.
+            None => {
+                let owner = fleet_core::service::sessions::hub_personal_owner(store);
+                bg_sessions::new_bg_session_tracked(args, store, ssh, reg, owner).await
+            }
         }
     }
 
@@ -789,6 +1279,221 @@ pub(crate) mod routed {
         }
     }
 
+    // ── sharing, and the watcher's pane (multi-user M1, T13) ────────────────
+    //
+    // **The `None` arm of all six is the same service call the hub makes, not
+    // `E_UNSUPPORTED`.** Migration 086 gives a standalone fleet a personal
+    // owner, so ownership and grants are meaningful locally: the person
+    // behind a standalone window IS that owner (the rule `new_session`'s own
+    // `None` arm already applies), and the ordinary answer is "this is mine,
+    // shared with nobody".
+    //
+    // **The owner-only rule still holds on the standalone arm**, and not
+    // because this layer checks it: the three mutations go through the
+    // store's own statements, whose `WHERE` carries
+    // `sessions.owner_person_id = ?granter`, so a row that is not this
+    // person's is refused there. `hub_personal_owner` answering `None` (a
+    // fleet with no personal owner at all) is refused too —
+    // `sharing::require_granter` turns it into `E_FORBIDDEN` rather than
+    // letting a caller who proves no person write a grant.
+
+    pub async fn session_summary_since(
+        backend: &FleetBackend,
+        args: SessionSummarySinceArgs,
+        store: &Arc<Mutex<Store>>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<fleet_core::service::watch_summary::WatchSummary, IpcError> {
+        if let Some(hub) = backend.hub() {
+            return hub.route("session_summary_since", &args).await;
+        }
+        let row = {
+            let s = lock(store)?;
+            s.get_session_by_id(args.session_id)?.ok_or_else(|| {
+                IpcError::new(
+                    codes::E_NOTFOUND,
+                    format!("session {} not found", args.session_id),
+                )
+            })?
+        };
+        let decide = fleet_core::service::decide::DecideCtx::jev(Arc::clone(store));
+        fleet_core::service::watch_summary::summarize_since(store, ssh, &decide, &row, args.since)
+            .await
+    }
+
+    pub async fn capture_session(
+        backend: &FleetBackend,
+        args: CaptureSessionArgs,
+        store: &Arc<Mutex<Store>>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<String, IpcError> {
+        match backend.hub() {
+            // `route_text`, not `route`: the tool answers a pane as prose,
+            // and a JSON-encoded string would turn every newline into `\n`.
+            Some(hub) => hub.route_text("capture_session", &args).await,
+            None => {
+                let text = sessions::capture_session_output(
+                    args.session_id,
+                    store,
+                    ssh,
+                    args.scrollback_lines,
+                )
+                .await?;
+                // The SAME shaper the tool uses, so a watcher's pane does not
+                // read differently on a standalone desktop: the blank-pane
+                // line and the truncation note are one implementation in
+                // `service::sessions`.
+                Ok(sessions::shape_capture(&text, args.max_lines))
+            }
+        }
+    }
+
+    pub async fn session_share(
+        backend: &FleetBackend,
+        args: SessionShareArgs,
+        store: &Arc<Mutex<Store>>,
+    ) -> Result<SessionRow, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("session_share", &args).await,
+            None => {
+                // Read the owner BEFORE taking the lock: `hub_personal_owner`
+                // takes it itself.
+                let granter = sessions::hub_personal_owner(store);
+                let s = lock(store)?;
+                let to = sessions::ShareTo::from_fields(&args.person, args.org.as_deref())?;
+                sessions::share_session_to(&s, args.session_id, to, &args.level, granter)
+            }
+        }
+    }
+
+    pub async fn session_unshare(
+        backend: &FleetBackend,
+        args: SessionGrantArgs,
+        store: &Arc<Mutex<Store>>,
+    ) -> Result<SessionRow, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("session_unshare", &args).await,
+            None => {
+                let granter = sessions::hub_personal_owner(store);
+                let s = lock(store)?;
+                let to = sessions::ShareTo::from_fields(&args.person, args.org.as_deref())?;
+                sessions::unshare_session_to(&s, args.session_id, to, granter)
+            }
+        }
+    }
+
+    pub async fn session_narrow(
+        backend: &FleetBackend,
+        args: SessionGrantArgs,
+        store: &Arc<Mutex<Store>>,
+    ) -> Result<SessionRow, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("session_narrow", &args).await,
+            None => {
+                let granter = sessions::hub_personal_owner(store);
+                let s = lock(store)?;
+                let to = sessions::ShareTo::from_fields(&args.person, args.org.as_deref())?;
+                sessions::narrow_session_share_to(&s, args.session_id, to, granter)
+            }
+        }
+    }
+
+    pub async fn session_access(
+        backend: &FleetBackend,
+        args: SessionAccessArgs,
+        store: &Arc<Mutex<Store>>,
+    ) -> Result<Vec<sessions::SessionGrantView>, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("session_access", &args).await,
+            None => {
+                // No reach gate on this arm, which is the standing rule for
+                // every standalone read in this file: a standalone desktop is
+                // `ViewScope::internal()`, the fleet's own reader, holding
+                // the sqlite file itself. The hub arm is where `Reach::Own`
+                // keeps one person's grant list away from another's device.
+                let s = lock(store)?;
+                sessions::session_access(&s, args.session_id)
+            }
+        }
+    }
+
+    pub async fn my_grants(
+        backend: &FleetBackend,
+        store: &Arc<Mutex<Store>>,
+    ) -> Result<sessions::MyGrants, IpcError> {
+        match backend.hub() {
+            // No arguments: the hub answers for the CONNECTION's own person.
+            Some(hub) => hub.route("my_grants", &serde_json::json!({})).await,
+            None => {
+                let who = sessions::hub_personal_owner(store);
+                let s = lock(store)?;
+                // `who == None` answers an EMPTY grant set, never every
+                // grant — `sharing::my_grants`' own first line.
+                sessions::my_grants(&s, who)
+            }
+        }
+    }
+
+    pub async fn session_ask_access(
+        backend: &FleetBackend,
+        args: SessionAskAccessArgs,
+        store: &Arc<Mutex<Store>>,
+    ) -> Result<sessions::AccessRequestView, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("session_ask_access", &args).await,
+            None => {
+                // Standalone, the caller is the fleet's owner, who owns every
+                // row it holds: the store refuses the ask ("there is nobody to
+                // ask"), as it should.
+                let who = sessions::hub_personal_owner(store);
+                let s = lock(store)?;
+                sessions::ask_access(&s, args.session_id, &args.level, who)
+            }
+        }
+    }
+
+    pub async fn access_requests(
+        backend: &FleetBackend,
+        args: AccessRequestsArgs,
+        store: &Arc<Mutex<Store>>,
+    ) -> Result<AccessRequestsAnswer, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("access_requests", &args).await,
+            None => {
+                let owner = sessions::hub_personal_owner(store);
+                let s = lock(store)?;
+                match args.action.as_deref().unwrap_or("list") {
+                    "list" => sessions::access_requests(&s, owner, args.session_id)
+                        .map(AccessRequestsAnswer::List),
+                    action @ ("grant" | "decline") => {
+                        let id = args.id.ok_or_else(|| {
+                            IpcError::new(codes::E_VALIDATE, format!("{action} needs the ask's id"))
+                        })?;
+                        sessions::resolve_access_request(&s, id, action == "grant", owner)
+                            .map(AccessRequestsAnswer::One)
+                    }
+                    other => Err(IpcError::new(
+                        codes::E_VALIDATE,
+                        format!(
+                            "access_requests action must be list, grant or decline, not {other:?}"
+                        ),
+                    )),
+                }
+            }
+        }
+    }
+
+    pub async fn shell_terminals(
+        backend: &FleetBackend,
+        args: sessions::ShellTerminalsArgs,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<sessions::ShellTerminalsResult, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("shell_terminals", &args).await,
+            None => sessions::shell_terminals(args, store, ssh).await,
+        }
+    }
+
     pub async fn session_conversations(
         backend: &FleetBackend,
         args: SessionConversationsArgs,
@@ -824,4 +1529,29 @@ mod history_tests {
         assert_eq!(a.session_id, 7);
         assert!(a.limit.is_none());
     }
+}
+
+/// Settings › Repair workspace › Repair now (gap plan G4.6): one run of the
+/// tick's automatic, create-only workspace repair across the fleet, even
+/// with `repair.auto_on_tick` off.
+#[tauri::command]
+pub async fn repair_workspaces_now(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<fleet_core::service::repair_tick::RepairNow, IpcError> {
+    backend.refuse_local_only("repair_workspaces_now")?;
+    fleet_core::service::repair_tick::run_now(&store, &ssh).await
+}
+
+/// Settings › Restore lost sessions › Restore (gap plan G4.6): every host's
+/// lost sessions, host after host, each as Restore on its Hosts page would.
+#[tauri::command]
+pub async fn restore_all_lost_sessions(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<fleet_core::service::sessions::RestoreAll, IpcError> {
+    backend.refuse_local_only("restore_all_lost_sessions")?;
+    fleet_core::service::sessions::restore_all_lost(&store, &ssh).await
 }

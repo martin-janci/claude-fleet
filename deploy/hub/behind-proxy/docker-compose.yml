@@ -41,6 +41,53 @@ services:
       - ./data:/var/lib/fleet-hub
       - ./ssh:/home/fleet/.ssh
       - ./logs:/var/lib/fleet-hub/logs
+  # Automatic updates — OFF unless you opt in (docs/updates.md → fleet-updater):
+  #
+  #   docker compose exec fleet-hub fleet-hub pair --name updater --mode updater
+  #   docker compose --profile auto-update run --rm updater pair '<the URL it printed>'
+  #   docker compose --profile auto-update up -d
+  #
+  # The updater asks the hub what to run (update.hub.mode; `notify` installs
+  # only what an operator pins), pulls that signed release BY DIGEST, takes a
+  # backup, swaps the hub container, and keeps the new one only if it comes up
+  # ready as the right build and stays so for the soak; otherwise it brings
+  # the old one back, with the backup when the new one migrated the database.
+  #
+  # It mounts the Docker socket, which is root on this machine. The other way,
+  # with no long-running container holding the socket, is the systemd timer in
+  # fleet-updater.service / fleet-updater.timer (one pass every 6 h).
+  #
+  # Once it has updated the hub, FLEET_HUB_TAG is no longer what runs:
+  # set FLEET_HUB_TAG in .env to what `docker compose run --rm updater status` reports before the
+  # next `docker compose up -d`, or compose puts the older build back — on a
+  # database it may have migrated, which that build refuses to open.
+  updater:
+    image: ghcr.io/martin-janci/fleet-updater:latest
+    profiles: [auto-update]
+    restart: unless-stopped
+    # An install in flight finishes (or rolls back) before the updater stops.
+    stop_grace_period: 5m
+    env_file:
+      # FLEET_HUB_PUBLIC_URL: the updater sends its host as `Host:`, the one
+      # name the hub's DNS-rebinding guard always accepts.
+      - path: fleet-hub.env
+        required: false
+      - path: fleet-updater.env
+        required: false
+    depends_on: [fleet-hub]
+    networks: [proxy]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # The hub's data volume: the pre-update backup is read, and restored,
+      # through it.
+      - ./data:/hub-data
+      - ./updater:/var/lib/fleet-updater
+
 networks:
   proxy:
     external: true

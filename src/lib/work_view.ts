@@ -16,13 +16,23 @@
  * whatever the hub answered.
  */
 
+import { errorText } from './error_copy';
+import type { ProposalLike, ProposalSource } from './ai_proposal';
 import { derived, get, writable, type Readable } from 'svelte/store';
 import { invokeCmd, type IpcError, type Result } from './result';
 import { readPref, writePref } from './prefs';
-import { acceptCommandRow, sessions, type SessionEvent, type SessionRow } from './sessions';
-import { bumpWorkChanged, workChanged, type WorkChangeKind, type WorkEvidence } from './work';
-import { onSessionOpened } from './selection';
-import { todayOpen } from './today';
+import { uncoverWork } from './destination';
+import type { DecisionProposal } from './proposals';
+import { acceptCommandRow, formatCostMicros, sessions, type SessionEvent, type SessionRow } from './sessions';
+import {
+  bumpWorkChanged,
+  workChanged,
+  type EstimateUnit,
+  type WorkChangeKind,
+  type WorkEvidence,
+  type WorkPriority,
+} from './work';
+import { pickTask, selectedTaskId, taskFocused, type TaskSessionLink } from './selection';
 import { trackerStateBadge } from './trackers';
 import { knownProviderShort } from './tracker_health';
 import { classify, type TriageBucket } from './attention';
@@ -43,7 +53,8 @@ export interface WorkTreeFilters {
   has?: WorkHasFilter;
   /** Only tasks with something to review. */
   review?: boolean;
-  /** Case-insensitive substring of key or title. */
+  /** Words of the key or title: every one, in any order, case and
+   *  accents ignored. */
   query?: string;
   /** One group only (a section being expanded). */
   group?: string;
@@ -52,7 +63,61 @@ export interface WorkTreeFilters {
    *  (`archived_hidden`); absent shows them (a client from before the
    *  archive). `workTree` always sends it. An older hub ignores it. */
   archived?: boolean;
+  /** One person it is assigned to in its tracker, by name (redesign 6.2). */
+  assignee?: string;
+  /** One tracker column, the tracker's own status name ("QA Review"). */
+  status_name?: string;
+  /** What a section under each org is; absent is `group`. */
+  group_by?: WorkGroupBy;
+  /** Any of these orgs (ids, or `none`): the panel's organisation chips,
+   *  several at once. An older hub ignores it. */
+  orgs?: (number | 'none')[];
+  /** Any of these stages (`WorkTask.stage`): the panel's status chips,
+   *  several at once. An older hub ignores it. */
+  stages?: WorkStage[];
+  /** The sprint (iteration, cycle): `current`, `none` or a sprint's name.
+   *  An older hub ignores it (search phase 2). */
+  iteration?: string;
+  /** Under one epic: its key or `item:<id>`; the epic itself too. */
+  epic?: string;
+  /** The tracker's type name (Story, Bug …). */
+  item_type?: string;
+  /** The order inside each section; absent is `activity`. */
+  sort?: WorkSort;
 }
+
+/** `filters.sort`: needing you then the latest activity (the default), the
+ *  tracker's last change, the key's number, the title or the due date. */
+export const WORK_SORTS = ['activity', 'updated', 'key', 'title', 'due'] as const;
+export type WorkSort = (typeof WORK_SORTS)[number];
+export const WORK_SORT_LABELS: Record<WorkSort, string> = {
+  activity: 'Activity',
+  updated: 'Last updated',
+  key: 'Key',
+  title: 'Title',
+  due: 'Due date',
+};
+
+/** `WorkTask.stage`, in board order (the Work board's status chips). */
+export const WORK_STAGES = ['backlog', 'in_progress', 'in_review', 'blocked', 'done'] as const;
+export type WorkStage = (typeof WORK_STAGES)[number];
+// A blocked stage reads Needs you, one of the six status words; the
+// task line says what it is blocked on (step 6.3).
+export const WORK_STAGE_LABELS: Record<WorkStage, string> = {
+  backlog: 'Backlog',
+  in_progress: 'In progress',
+  in_review: 'In review',
+  blocked: 'Needs you',
+  done: 'Done',
+};
+
+/** `filters.group_by` (redesign step 6.2): the task's own group (a person,
+ *  rule, tracker container, repo or key), one section per org, or its
+ *  assignee, mission, account, repo, sprint, release or epic. An older hub
+ *  refuses `sprint` / `release` / `epic` (`E_INVALID`, it lists what it
+ *  knows). */
+export const WORK_GROUP_BY = ['group', 'org', 'person', 'mission', 'account', 'repo', 'sprint', 'release', 'epic'] as const;
+export type WorkGroupBy = (typeof WORK_GROUP_BY)[number];
 
 export const STATUS_FILTERS = ['any', 'open', 'todo', 'in_progress', 'done'] as const;
 export type WorkStatusFilter = (typeof STATUS_FILTERS)[number];
@@ -136,6 +201,8 @@ export interface WorkTask {
   title?: string | null;
   url?: string | null;
   kind: WorkTaskKind | string;
+  /** Its fleet ticket key (`FLT-12`), shown in place of `key`. */
+  display_key?: string | null;
   tracker_id?: number | null;
   tracker_name?: string | null;
   provider?: string | null;
@@ -147,6 +214,14 @@ export interface WorkTask {
   unavailable?: boolean;
   unavailable_reason?: string | null;
   assignees?: string[];
+  /** The date the work is due, `YYYY-MM-DD` (absent from an older hub). */
+  due_at?: string | null;
+  /** `urgent | high | medium | low` (absent from an older hub). */
+  priority?: WorkPriority | null;
+  labels?: string[];
+  /** How big the work is, in `estimate_unit`. */
+  estimate?: number | null;
+  estimate_unit?: EstimateUnit | null;
   mine?: boolean;
   org_id?: number | null;
   org_source?: OrgSource | string;
@@ -172,12 +247,33 @@ export interface WorkTask {
   project_label?: string | null;
   /** A native subtask's parent (`item:<id>`); nested under it when listed. */
   parent_task_id?: string | null;
+  /** An epic: a local item marked one, or a tracker's Epic (sprints design §3). */
+  epic?: boolean;
+  /** How deep a local item sits: 1 at the top, at most 3 (epic → task →
+   *  subtask). Absent for a ticket or a bare key. */
+  level?: number;
+  /** Its children (proposals and jobs aside) and how many are done: the
+   *  roll-up. Absent when it has none. */
+  children_total?: number;
+  children_done?: number;
   /** A job mirror's state (the delegated job's `state`). */
   job_state?: string | null;
   /** The title is borrowed from the first session's name (the item has none). */
   title_derived?: boolean;
   /** Agent proposals under this task waiting for a person's decision. */
   open_proposals?: number;
+  /** It waits for work that is not done (a dependency edge), and is not done
+   *  itself. Absent when false. */
+  blocked?: boolean;
+  /** What it waits for (`item:<id>`), only the items this reader may see. */
+  blocked_by?: string[];
+  /** Spend of its sessions in micro-USD, each session once. Absent when 0. */
+  cost_micros?: number;
+  /** Where it stands (`WORK_STAGES`); absent from an older hub. */
+  stage?: WorkStage | string;
+  /** What a rule, Jev or an LLM proposes about the task (redesign 2.8).
+   *  Absent when nothing proposes anything. */
+  proposals?: DecisionProposal[];
   last_activity_at?: number | null;
   repos?: string[];
   /** 0 = no placement. */
@@ -185,6 +281,44 @@ export interface WorkTask {
   /** Active (primary first), suggested, ended newest first. */
   sessions?: WorkTaskLink[];
   sessions_more?: number;
+  /** Its acceptance lines, the Board's "Finishes when …" (G7.6). Absent
+   *  when none, and from an older hub. */
+  done_when?: string[];
+  /** Its mission and wave, on a read that asked (`with_missions`). */
+  mission?: TaskMission | null;
+  /** The tracker's type name (Story, Bug, Epic …). */
+  item_type?: string | null;
+  /** 1 an epic, 0 a standard item, -1 a subtask. */
+  hierarchy_level?: number | null;
+  /** The sprint it is in, and whether that is the active one. */
+  iteration?: string | null;
+  iteration_active?: boolean;
+  /** Its nearest epic-level ancestor, else its top-most one. */
+  in_epic?: WorkTaskRef | null;
+  /** The tracker's last change (else the item's), unix seconds. */
+  updated_at?: number | null;
+}
+
+/** `WorkTask.mission`: the mission and the wave the task sits in (W1 first). */
+export interface TaskMission {
+  id: number;
+  name: string;
+  wave?: number | null;
+}
+
+/** Another task named from one (its epic). */
+export interface WorkTaskRef {
+  task_id: string;
+  key?: string | null;
+  title: string;
+}
+
+/** `WorkTreePage.facets`: what the sprint, epic and type pickers offer,
+ *  over every task the caller sees (absent from an older hub). */
+export interface WorkTreeFacets {
+  iterations?: { name: string; active?: boolean; count: number }[];
+  epics?: (WorkTaskRef & { count: number })[];
+  item_types?: string[];
 }
 
 /** A section header: every group of the whole filtered result. */
@@ -193,6 +327,8 @@ export interface WorkTreeGroup {
   org_name?: string | null;
   group: GroupRef;
   count: number;
+  /** Spend of the tasks it counts, in micro-USD. Absent when 0. */
+  cost_micros?: number;
 }
 
 export interface WorkTreeOrg {
@@ -218,6 +354,9 @@ export interface WorkTreePage {
   /** Tasks that passed every other filter but were hidden as archived
    *  (absent from an older hub, which hides none). */
   archived_hidden?: number;
+  /** Tasks the filters hide that would show with none set (the archived
+   *  switch kept): the "Hidden by filters" row (absent from an older hub). */
+  hidden_by_filters?: number;
   next_cursor?: string | null;
   generated_at?: number;
   /** The sections `WorkTreeQuery.sections` asked for, paged from the same
@@ -225,6 +364,7 @@ export interface WorkTreePage {
   sections?: WorkTreeSection[];
   /** The review inbox's total, when asked (absent from an older hub). */
   review_total?: number;
+  facets?: WorkTreeFacets;
 }
 
 /** A section to page in the same read: exactly what a read of that
@@ -291,6 +431,123 @@ export interface TaskDetail {
   jobs?: JobView[];
   /** The steps agents took, per conversation. */
   steps?: StepGroup[];
+  /** What people and agents said about the task in fleet, oldest first,
+   *  each with its post to the tracker when one was asked for. */
+  comments?: TaskComment[];
+  /** The task's tracker by name, when fleet reads its comments
+   *  (`work_tracker_comments`). Absent: fleet's own work, or a provider that
+   *  serves none. */
+  comments_tracker?: string | null;
+  /** The reader may also post a comment to that tracker (its admin turned
+   *  "Post comments" on). */
+  can_post_to_tracker?: boolean;
+  /** Files and images on the task, newest first: metadata only (the bytes
+   *  are `work_attachment`'s). */
+  attachments?: TaskAttachment[];
+  /** The task's promotion to a tracker while it is sent, or why it was not.
+   *  Absent once the task is the ticket (and from an older hub). */
+  promotion?: PromotionView | null;
+  /** Where this reader may promote a task of fleet's own. Empty: a
+   *  tracker's ticket, an agent, or no tracker takes new tickets. */
+  promote_targets?: PromoteTarget[];
+}
+
+/** `service::work::promote::PromotionView`. */
+export interface PromotionView {
+  state: 'pending' | 'failed';
+  /** The tracker, by its Settings name. */
+  tracker: string;
+  error?: string | null;
+}
+
+/** `service::work::promote::PromoteTarget`: a tracker a task may become a
+ *  ticket in. */
+export interface PromoteTarget {
+  tracker_id: number;
+  tracker: string;
+  provider: string;
+  /** A subtask's parent ticket: it is created under it. */
+  parent_key?: string | null;
+  /** `[id, name]`: Jira project keys, Asana projects. */
+  containers?: [string, string][];
+  /** One must be picked (Jira). */
+  container_required?: boolean;
+}
+
+/** One file on a task (`store::AttachmentRow`). Kept in fleet, never a tracker's. */
+export interface TaskAttachment {
+  id: number;
+  item_id: number;
+  name: string;
+  mime: string;
+  /** Bytes. */
+  size: number;
+  sha256: string;
+  /** Who added it (`client:<name>`, `host:<alias>`, `desktop`); empty when withheld. */
+  author: string;
+  comment_id?: number | null;
+  source?: string;
+  created_at: number;
+  /** This reader added it, so may delete it. */
+  mine?: boolean;
+}
+
+/** One comment on a task (`store::CommentRow`), written in fleet. */
+export interface TaskComment {
+  id: number;
+  item_id: number;
+  /** Who wrote it (`client:<name>`, `host:<alias>`, `desktop`); empty when withheld. */
+  author: string;
+  /** Plain text: rendered as text, never as markup. */
+  body: string;
+  created_at: number;
+  /** This reader wrote it, so may delete it. */
+  mine?: boolean;
+  /** Its post to the tracker, when one was asked for. */
+  tracker_post?: TrackerPost | null;
+}
+
+/** A fleet comment's post to its tracker (`store::TrackerPost`). */
+export interface TrackerPost {
+  state: 'pending' | 'done' | 'failed';
+  /** Why the last attempt failed. */
+  error?: string | null;
+  /** Where the tracker shows it, once sent. */
+  url?: string | null;
+}
+
+/** One comment as the tracker holds it (`trackers::TrackerComment`). */
+export interface TrackerComment {
+  id: string;
+  /** The author's name at the tracker. */
+  author: string;
+  /** Plain text (Jira's rich text flattened). */
+  body: string;
+  created_at: number;
+  url?: string | null;
+}
+
+/** `work_tracker_comments`'s answer. */
+export interface TrackerComments {
+  key: string;
+  /** The tracker's name, as Settings shows it. */
+  tracker: string;
+  provider: string;
+  /** The newest 50, oldest first, without the ones fleet posted. */
+  comments: TrackerComment[];
+  /** The ticket's attachments, oldest first (Asana; absent elsewhere). */
+  attachments?: TrackerAttachment[];
+  can_post?: boolean;
+}
+
+/** One file attached to a ticket, as its tracker lists it. */
+export interface TrackerAttachment {
+  id: string;
+  name: string;
+  /** Opens in the tracker, behind its own sign-in. */
+  url?: string | null;
+  size?: number | null;
+  created_at?: number | null;
 }
 
 /** A native subtask on a task page. */
@@ -315,6 +572,21 @@ export interface ProposalView {
   notes?: string | null;
   proposed_by?: string | null;
   at: number;
+  /** Jev's "may duplicate" (redesign 6.9, K4): an open task this proposal
+   *  may repeat. Only a live assist answer; absent from an older hub. */
+  duplicate?: DuplicateHint | null;
+}
+
+/** The existing task a proposal may duplicate, as Jev proposed it. */
+export interface DuplicateHint {
+  item_id: number;
+  /** `item:<id>`, the task page to open. */
+  task_id: string;
+  key?: string | null;
+  title: string;
+  source: ProposalSource;
+  confidence_pct?: number | null;
+  run_id?: number | null;
 }
 
 /** A delegated job under a task. `result` is agent text: render as text. */
@@ -348,6 +620,8 @@ export interface StepLine {
 export interface SessionTaskRef {
   task_id: string;
   key?: string | null;
+  /** Its fleet ticket key (`FLT-12`), shown in place of `key`. */
+  display_key?: string | null;
   title?: string | null;
   kind?: string;
   status_category?: string | null;
@@ -373,6 +647,18 @@ export interface SessionTasks {
 /** `suggestion` | `cross_org` | `unavailable` | `no_primary`. */
 export type ReviewKind = 'suggestion' | 'cross_org' | 'unavailable' | 'no_primary';
 
+/**
+ * A suggestion at or above this confidence is "high confidence": Review's
+ * "Confirm all high-confidence" ticks exactly these. Mirrors
+ * `work::confidence::HIGH_CONFIDENCE` in fleet-core.
+ */
+export const HIGH_CONFIDENCE_PCT = 85;
+
+/** A review item's suggestion clears the high-confidence bar. */
+export function isHighConfidence(it: Pick<ReviewItem, 'kind' | 'confidence'>): boolean {
+  return it.kind === 'suggestion' && (it.confidence ?? 0) >= HIGH_CONFIDENCE_PCT;
+}
+
 export interface ReviewItem {
   review_id: string;
   kind: ReviewKind | string;
@@ -381,13 +667,92 @@ export interface ReviewItem {
   host?: string | null;
   link_id: number;
   link_version?: number;
-  task: { task_id: string; key?: string | null; title?: string | null; org_id?: number | null };
+  task: {
+    task_id: string;
+    key?: string | null;
+    display_key?: string | null;
+    title?: string | null;
+    org_id?: number | null;
+  };
   why?: string[];
   strength?: string | null;
   rule?: string | null;
+  /** 0–100, from detection (`work::confidence`); absent from an older hub. */
+  confidence?: number | null;
   preselected?: boolean;
-  alternatives?: { link_id?: number | null; task_id: string; key?: string | null; title?: string | null }[];
+  alternatives?: {
+    link_id?: number | null;
+    task_id: string;
+    key?: string | null;
+    display_key?: string | null;
+    title?: string | null;
+  }[];
   created_at?: number;
+  /** Who proposed it when no rule read it off a signal: the decision
+   *  model's suggestion (J1, rule R12, redesign 6.8). Absent otherwise, and
+   *  from an older hub. */
+  proposed_by?: ReviewProposer | null;
+  /** The tracker ticket this suggestion's LOCAL task may duplicate (J7
+   *  `tracker_duplicate`, redesign 6.8): a live Jev proposal only. Absent
+   *  otherwise, and from an older hub. */
+  duplicate_of?: ReviewDuplicate | null;
+}
+
+/** `ReviewItem.duplicate_of` (`work::view::ReviewDuplicate`). */
+export interface ReviewDuplicate {
+  task_id: string;
+  item_id: number;
+  key?: string | null;
+  title: string;
+  source: 'jev' | 'rule' | 'llm';
+  confidence_pct?: number | null;
+}
+
+/** The proposal `ProposedBy` shows beside a Review item's "May duplicate"
+ *  (J7), or null when nothing is flagged. */
+export function reviewDuplicateProposal(it: Pick<ReviewItem, 'duplicate_of'>): ProposalLike | null {
+  const d = it.duplicate_of;
+  if (!d) return null;
+  return {
+    value: d.key ?? d.task_id,
+    source: d.source,
+    reason: 'same work as a tracker ticket',
+    confidence_pct: d.confidence_pct ?? null,
+  };
+}
+
+/** `ReviewItem.proposed_by` (`work::view::ReviewProposer`). */
+export interface ReviewProposer {
+  source: 'jev' | 'rule' | 'llm';
+  /** Why, in fleet's words ("from the first prompt"). */
+  reason: string;
+  confidence_pct?: number | null;
+}
+
+/** The proposal `ProposedBy` shows for a Review item, or null for a rule's
+ *  own reading. */
+export function reviewProposal(it: Pick<ReviewItem, 'proposed_by' | 'task'>): ProposalLike | null {
+  const p = it.proposed_by;
+  if (!p) return null;
+  return {
+    value: it.task.key ?? it.task.task_id,
+    source: p.source,
+    reason: p.reason,
+    confidence_pct: p.confidence_pct ?? null,
+  };
+}
+
+/** The proposal `ProposedBy` shows beside a proposal's "May duplicate", or
+ *  null when Jev flagged nothing. */
+export function duplicateProposal(p: Pick<ProposalView, 'duplicate'>): ProposalLike | null {
+  const d = p.duplicate;
+  if (!d) return null;
+  return {
+    value: d.key ?? d.task_id,
+    source: d.source,
+    reason: 'alike title',
+    confidence_pct: d.confidence_pct ?? null,
+  };
 }
 
 export interface ReviewPage {
@@ -411,6 +776,11 @@ export interface WorkRule {
   version: number;
   conditions: WorkRuleConditions;
   group: string;
+  /** "Its sessions start here" (G7.1): the host a start of a matching task
+   *  lands on when no start rule names one. */
+  host_alias?: string | null;
+  /** The account (credential profile) those sessions bill. */
+  profile?: string | null;
   created_at?: number;
   updated_at?: number;
 }
@@ -422,6 +792,8 @@ export interface WorkRuleDraft {
   enabled: boolean;
   conditions: WorkRuleConditions;
   group: string;
+  host_alias?: string | null;
+  profile?: string | null;
   expected_version?: number;
 }
 
@@ -430,6 +802,11 @@ export interface RulePreview {
   total: number;
   /** Tasks placed by a person that the rule leaves where they are. */
   kept_manual: number;
+  /** Open tasks the draft's conditions match now, moved or not (G2.2);
+   *  absent from an older hub. */
+  matched?: number;
+  /** The first few of them, by key (else title). */
+  matched_sample?: string[];
 }
 
 export interface WorkView {
@@ -462,6 +839,10 @@ export interface OrgImpact {
   hosts_gaining: string[];
   bound_clients_losing: number;
   bound_clients_gaining: number;
+  /** People whose org-bound devices lose / gain the task (G2.2); absent
+   *  when none, or from an older hub. */
+  people_losing?: string[];
+  people_gaining?: string[];
   journal_entries: number;
   summaries: number;
   impact_token?: string | null;
@@ -510,6 +891,8 @@ export interface WorkTreeQuery {
   sections?: WorkTreeSectionAsk[];
   /** Add `review_total` from the same read. */
   with_review_total?: boolean;
+  /** Name each task's mission and wave (`WorkTask.mission`, the Board). */
+  with_missions?: boolean;
 }
 
 /** `archived` always goes on the wire: the hub hides archived tasks only
@@ -526,6 +909,7 @@ export function workTree(q: WorkTreeQuery = {}): Promise<Result<WorkTreePage>> {
       per_task: q.per_task,
       sections: q.sections && q.sections.length > 0 ? q.sections : undefined,
       with_review_total: q.with_review_total || undefined,
+      with_missions: q.with_missions || undefined,
     }),
   });
 }
@@ -654,6 +1038,8 @@ export function ruleWire(d: WorkRuleDraft): WorkRuleDraft {
       repo: s(c.repo),
     },
     group: d.group.trim(),
+    host_alias: s(d.host_alias) ?? undefined,
+    profile: s(d.profile) ?? undefined,
     expected_version: d.expected_version,
   }) as unknown as WorkRuleDraft;
 }
@@ -774,7 +1160,7 @@ export function isOlderHub(e: IpcError | null | undefined): boolean {
 
 /** The error line a read shows. */
 export function readErrorText(e: IpcError): string {
-  return isOlderHub(e) ? NEWER_HUB : e.message;
+  return isOlderHub(e) ? NEWER_HUB : errorText(e);
 }
 
 // ---------------------------------------------------------------------------
@@ -804,10 +1190,52 @@ export function normalizeFilters(v: unknown): WorkTreeFilters {
   if (typeof v.query === 'string' && v.query.trim() !== '') out.query = v.query.trim();
   if (typeof v.group === 'string' && v.group !== '') out.group = v.group;
   if (v.archived === true) out.archived = true;
+  if (typeof v.assignee === 'string' && v.assignee.trim() !== '') out.assignee = v.assignee.trim();
+  if (typeof v.status_name === 'string' && v.status_name.trim() !== '') out.status_name = v.status_name.trim();
+  if (typeof v.group_by === 'string' && (WORK_GROUP_BY as readonly string[]).includes(v.group_by) && v.group_by !== 'group') {
+    out.group_by = v.group_by as WorkGroupBy;
+  }
+  // Sets, kept in a stable order so equal choices compare equal.
+  if (Array.isArray(v.orgs)) {
+    const ids = v.orgs.filter((o): o is number => typeof o === 'number' && Number.isInteger(o) && o > 0);
+    const orgs: (number | 'none')[] = [...new Set(ids)].sort((a, b) => a - b);
+    if (v.orgs.includes('none')) orgs.push('none');
+    if (orgs.length > 0) out.orgs = orgs;
+  }
+  if (Array.isArray(v.stages)) {
+    const stages = WORK_STAGES.filter((st) => (v.stages as unknown[]).includes(st));
+    if (stages.length > 0) out.stages = stages;
+  }
+  for (const k of ['iteration', 'epic', 'item_type'] as const) {
+    const x = v[k];
+    if (typeof x === 'string' && x.trim() !== '') out[k] = x.trim();
+  }
+  if (typeof v.sort === 'string' && (WORK_SORTS as readonly string[]).includes(v.sort) && v.sort !== 'activity') {
+    out.sort = v.sort as WorkSort;
+  }
   return out;
 }
 
-const FILTER_ORDER: (keyof WorkTreeFilters)[] = ['org', 'tracker', 'status', 'mine', 'has', 'review', 'query', 'group', 'archived'];
+const FILTER_ORDER: (keyof WorkTreeFilters)[] = [
+  'org',
+  'orgs',
+  'tracker',
+  'status',
+  'stages',
+  'status_name',
+  'mine',
+  'assignee',
+  'has',
+  'review',
+  'iteration',
+  'epic',
+  'item_type',
+  'query',
+  'group',
+  'archived',
+  'group_by',
+  'sort',
+];
 
 /** A stable string for a filters object (equal filters, equal keys). */
 export function filtersKey(f: WorkTreeFilters): string {
@@ -819,11 +1247,13 @@ export function sameFilters(a: WorkTreeFilters, b: WorkTreeFilters): boolean {
   return filtersKey(a) === filtersKey(b);
 }
 
-/** How many filters are on (the chip's count); `group` is navigation, and
- *  showing archived tasks widens the view rather than narrowing it. */
+/** How many filters are on (the chip's count); `group` is navigation,
+ *  `group_by` and `sort` arrange rather than narrow, and showing archived tasks
+ *  widens the view. */
 export function activeFilterCount(f: WorkTreeFilters): number {
   const n = normalizeFilters(f);
-  return FILTER_ORDER.filter((k) => k !== 'group' && k !== 'archived' && n[k] !== undefined).length;
+  return FILTER_ORDER.filter((k) => k !== 'group' && k !== 'archived' && k !== 'group_by' && k !== 'sort' && n[k] !== undefined)
+    .length;
 }
 
 // ---------------------------------------------------------------------------
@@ -865,6 +1295,8 @@ export interface GroupSection {
   tasks: WorkTask[];
   /** More tasks exist than are loaded. */
   more: boolean;
+  /** Spend of the tasks it counts, micro-USD (redesign 6.3); 0 when none. */
+  cost: number;
 }
 
 export interface OrgSection {
@@ -873,6 +1305,8 @@ export interface OrgSection {
   name: string;
   color: string | null;
   count: number;
+  /** Spend of its groups' tasks, micro-USD (redesign 6.3 "spend on org rows"). */
+  cost: number;
   groups: GroupSection[];
 }
 
@@ -936,6 +1370,7 @@ export function buildSections(
         name: g.org_id == null ? 'Unassigned' : (meta?.name ?? g.org_name ?? `Organisation ${g.org_id}`),
         color: meta?.color ?? null,
         count: 0,
+        cost: 0,
         groups: [],
       };
       byOrg.set(ok, o);
@@ -945,11 +1380,13 @@ export function buildSections(
     const st = states.get(k);
     const tasks = st?.tasks ?? [];
     o.count += g.count;
+    o.cost += g.cost_micros ?? 0;
     o.groups.push({
       key: k,
       orgId: g.org_id ?? null,
       group: g.group,
       count: g.count,
+      cost: g.cost_micros ?? 0,
       tasks,
       more: st?.own ? st.cursor != null : tasks.length < g.count,
     });
@@ -1004,11 +1441,49 @@ export function taskStatus(t: Pick<WorkTask, 'status_name' | 'status_category'>)
   }
 }
 
+/** A task's spend ("$3.20"), or null when its sessions cost nothing yet
+ *  (redesign 6.3: summed from its sessions, each once). */
+export function taskSpend(t: Pick<WorkTask, 'cost_micros'>): string | null {
+  return (t.cost_micros ?? 0) > 0 ? formatCostMicros(t.cost_micros) : null;
+}
+
+/** How a task a blocked one waits for reads: its key, else its title, else
+ *  "task 212" from its id (one this view has not loaded). */
+export function dependencyName(id: string, known?: Pick<WorkTask, 'key' | 'title'> | null): string {
+  if (known?.key) return known.key;
+  const title = (known?.title ?? '').trim();
+  if (title) return title;
+  const m = /^item:(\d+)$/.exec(id);
+  return m ? `task ${m[1]}` : id;
+}
+
+/** The reason line of a blocked task: "Blocked on TASK-212", two named,
+ *  then "+N more". The plan's status-word decision shows a blocked task
+ *  as Needs you with this line; null for a task that waits for nothing. */
+export function blockedOnLine(
+  t: Pick<WorkTask, 'blocked' | 'blocked_by'>,
+  lookup: (id: string) => Pick<WorkTask, 'key' | 'title'> | null | undefined = () => null,
+): string | null {
+  if (!t.blocked) return null;
+  const deps = t.blocked_by ?? [];
+  if (deps.length === 0) return 'Blocked on another task';
+  const names = deps.slice(0, 2).map((id) => dependencyName(id, lookup(id)));
+  const more = deps.length > 2 ? ` +${deps.length - 2} more` : '';
+  return `Blocked on ${names.join(', ')}${more}`;
+}
+
 /** `KEY title`, or the title alone, or the task id. */
-export function taskLabel(t: { key?: string | null; title?: string | null; task_id: string }): string {
+export function taskLabel(t: {
+  key?: string | null;
+  display_key?: string | null;
+  title?: string | null;
+  task_id: string;
+}): string {
   const title = (t.title ?? '').trim();
-  if (t.key && title) return `${t.key} ${title}`;
-  return t.key || title || t.task_id;
+  // The fleet ticket key (`FLT-12`) reads in place of a tracker's own id.
+  const key = t.display_key || t.key;
+  if (key && title) return `${key} ${title}`;
+  return key || title || t.task_id;
 }
 
 /** Where a task's org comes from, as a sentence. */
@@ -1161,10 +1636,24 @@ export function groupSessionLinks<T extends Pick<WorkTaskLink, 'state' | 'primar
 // Stores
 
 /** Which tree the sidebar shows. */
-export type SidebarView = 'sessions' | 'work';
-const isSidebarView = (v: unknown): v is SidebarView => v === 'sessions' || v === 'work';
+/** `inbox` is the Inbox (redesign step 3.3): the Sessions list narrowed to
+ *  what needs you. */
+export type SidebarView = 'sessions' | 'work' | 'inbox';
+const isSidebarView = (v: unknown): v is SidebarView => v === 'sessions' || v === 'work' || v === 'inbox';
+/** The sprints, epics and types of the last tree read that carried them
+ *  (`WorkTreePage.facets`): ⌘K's Planning rows. */
+export const knownWorkFacets = writable<WorkTreeFacets | null>(null);
+
 export const sidebarView = writable<SidebarView>(readPref('sidebar.view', 'sessions', isSidebarView));
 sidebarView.subscribe((v) => writePref('sidebar.view', v));
+
+/** The Work view on show: the sidebar on Work, and off a page that covers
+ *  it (Control, Files, a fleet page). Every "open in Work" goes through
+ *  this; the sidebar alone changes nothing a person sees from Control. */
+export function showWorkView(): void {
+  sidebarView.set('work');
+  uncoverWork();
+}
 
 export function toggleSidebarView(): void {
   sidebarView.update((v) => (v === 'work' ? 'sessions' : 'work'));
@@ -1211,8 +1700,13 @@ const isSelMap = (v: unknown): v is Record<string, string> =>
 const selectedByView = writable<Record<string, string>>(readPref('work.selected', {}, isSelMap));
 selectedByView.subscribe((v) => writePref('work.selected', v));
 
-/** The task selected in the Work view (its id), kept per view. */
-export const selectedTaskId = writable<string | null>(get(selectedByView)[get(workViewKey)] ?? null);
+/** The task selected in the Work view (its id), kept per view. The selection
+ *  itself lives in `selection.ts` (one store for sessions and tasks). */
+export { selectedTaskId };
+/** Whether Details shows the selected task (until a session is opened). */
+export const taskDetailOpen = taskFocused;
+// Start from the stored pick, before the write-back below can see an empty one.
+selectedTaskId.set(get(selectedByView)[get(workViewKey)] ?? null);
 let restoring = false;
 selectedTaskId.subscribe((id) => {
   if (restoring) return;
@@ -1226,19 +1720,18 @@ selectedTaskId.subscribe((id) => {
 });
 workViewKey.subscribe((k) => {
   restoring = true;
-  selectedTaskId.set(get(selectedByView)[k] ?? null);
+  const id = get(selectedByView)[k] ?? null;
+  // A view switch while a task has the focus picks the view's task, so its
+  // detail never sits beside the other view's session.
+  if (id && get(taskDetailOpen)) pickTask(id);
+  else selectedTaskId.set(id);
   restoring = false;
 });
 
-/** Whether Details shows the selected task (until a session is opened). */
-export const taskDetailOpen = writable(false);
-onSessionOpened(() => taskDetailOpen.set(false));
-
-/** Select a task and show it in Details. */
-export function openTask(taskId: string): void {
-  selectedTaskId.set(taskId);
-  taskDetailOpen.set(true);
-  todayOpen.set(false);
+/** Select a task and show it in Details; the center pane follows it
+ *  (`pickTask`). Pass the task's session links when the caller has them. */
+export function openTask(taskId: string, links?: readonly TaskSessionLink[]): void {
+  pickTask(taskId, links);
 }
 
 /** A request to scroll the Work tree to a task (and load its section). */
@@ -1246,9 +1739,9 @@ export const revealTaskRequest = writable<{ taskId: string; seq: number } | null
 let revealSeqN = 0;
 
 /** "Show in Work view": switch the sidebar, select the task, reveal it. */
-export function showTaskInWorkView(taskId: string): void {
-  sidebarView.set('work');
-  openTask(taskId);
+export function showTaskInWorkView(taskId: string, links?: readonly TaskSessionLink[]): void {
+  showWorkView();
+  openTask(taskId, links);
   revealTaskRequest.set({ taskId, seq: ++revealSeqN });
 }
 

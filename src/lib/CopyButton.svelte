@@ -8,7 +8,7 @@
   // tech ("Copy prompt"); `copiedNote` qualifies the copy in the tooltip
   // ("Copied (truncated at 8 000 chars)").
   import { copyText } from './clipboard';
-  import Icon from './Icon.svelte';
+  import Icon from './kit/Icon.svelte';
 
   let {
     text,

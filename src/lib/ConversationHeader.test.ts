@@ -29,7 +29,7 @@ describe('ConversationHeader', () => {
     expect(ctx.textContent).toContain('42k / 200k');
     expect(ctx.getAttribute('aria-valuetext')).toBe('42k / 200k · 21%');
     expect(screen.getByTestId('conv-model').textContent).toContain('opus-5');
-    expect(screen.getByTestId('conv-status').textContent).toContain('idle');
+    expect(screen.getByTestId('conv-status').textContent).toContain('Idle');
     expect(screen.getByTestId('conv-last-event').textContent).toContain('/compact 3m ago');
   });
 

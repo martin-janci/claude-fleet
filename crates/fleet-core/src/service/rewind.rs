@@ -242,7 +242,8 @@ pub const BAD_BRANCH: &str = "__CF_BAD_BRANCH__";
 /// branch's tip, or at a detached source's commit) and the repo root (the
 /// first entry of `git worktree list`, the main checkout, so the new tree is
 /// never nested inside the source's). The directory convention is
-/// `new_session`'s own ([`crate::service::sessions::WORKTREE_BASE_SNIPPET`]).
+/// `new_session`'s own ([`crate::service::sessions::WORKTREE_BASE_SNIPPET`],
+/// in [`crate::projects::worktree_dir_name`]'s flattened directory).
 /// A name the host's git refuses as a branch exits 7 with [`BAD_BRANCH`]
 /// before anything else runs. Unlike `worktree_add_script` it never adopts
 /// an existing directory or branch: either one exits 6 with [`WT_EXISTS`]. The only stdout is the
@@ -266,7 +267,7 @@ if [ -z "$src" ]; then echo "no checkout to fork from" >&2; exit 1; fi
 head=$(git -C "$src" rev-parse --verify HEAD)
 root=$(git -C "$src" worktree list --porcelain | sed -n '1s/^worktree //p')
 cd -- "$root"
-{snippet}wt="$base/$name"
+{snippet}wt="$base/"{wtdir_q}
 if [ -e "$wt" ] || git show-ref --verify --quiet "refs/heads/$name"; then
   printf '{WT_EXISTS} %s
 ' "$name" >&2
@@ -277,6 +278,7 @@ git worktree add "$wt" -b "$name" "$head" 1>&2
 "#,
         name_q = quote(name),
         dir_q = quote(src_dir.unwrap_or("")),
+        wtdir_q = quote(&crate::projects::worktree_dir_name(name)),
         snippet = crate::service::sessions::WORKTREE_BASE_SNIPPET,
     )
 }
@@ -638,7 +640,7 @@ async fn rewind_conversation_with(
         };
         // A fork opens on the source's model / effort, as recreate, repair
         // and move do; a rewind keeps them through `restart_session`.
-        let launch = crate::service::sessions::stored_launch(&s, sess.id);
+        let launch = crate::service::sessions::stored_launch(&s, sess.id)?;
         (
             sess,
             claude_id,
@@ -767,6 +769,9 @@ async fn rewind_conversation_with(
                     host_alias: sess.host_alias.clone(),
                     name: sess.tmux_name.clone(),
                     force: false,
+                    profile: None,
+                    model: None,
+                    effort: None,
                 })
                 .await;
             // The rebind is committed before the restart can be attempted at
@@ -819,7 +824,7 @@ async fn rewind_conversation_with(
                     s.upsert_worktree_on(
                         &sess.host_alias,
                         wt.project_id,
-                        &wt.name,
+                        &crate::projects::worktree_dir_name(&wt.name),
                         &wt.path,
                         Some(&wt.name),
                     )
@@ -848,6 +853,21 @@ async fn rewind_conversation_with(
                     resume_claude_session_id: Some(new_id.clone()),
                     model: launch.model.clone(),
                     effort: launch.effort.clone(),
+                    profile: launch.profile.clone(),
+                    agent: None,
+                    origin: None,
+                    // Multi-user M1 (T5, spec §4.3 invariant 6): a fork
+                    // inherits the SOURCE's owner, never the forker's. The
+                    // fork is a permanent verbatim copy of the source's
+                    // transcript, so an owner whose session was forked by
+                    // somebody else would have no way to revoke it — and
+                    // `RewindArgs` carries no forker identity anyway, so
+                    // source-inheritance is both the safe answer and the only
+                    // expressible one. Forking a session you do not own is
+                    // refused at the gate: it is an `own` operation.
+                    over_limit_ok: false,
+                    owner_person_id: sess.owner_person_id,
+                    start_token: None,
                 })
                 .await;
             // A failed start leaves nothing a new-worktree fork made: the
@@ -909,6 +929,7 @@ async fn rewind_conversation_with(
 /// A fork's freshly created worktree, carried through the steps after it so
 /// any failure can undo it ([`undo_new_worktree`]).
 struct NewWorktree {
+    /// The branch; the row and directory are `projects::worktree_dir_name` of it.
     name: String,
     /// Physical path on the host (`pwd -P`).
     path: String,
@@ -961,7 +982,27 @@ async fn copy_transcript(
             format!("rewind failed: {}", stderr.trim()),
         ));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    copy_path_from_stdout(&out.stdout)
+}
+
+/// The copy's path from [`rewind_script`]'s stdout: its LAST non-empty line.
+/// The script runs under `bash -lc`, so a login banner prints ahead of it;
+/// taken whole, the banner became part of the transcript path the session
+/// was rebound to, and the cleanup's `rm` named a file that does not exist.
+fn copy_path_from_stdout(stdout: &[u8]) -> Result<String, IpcError> {
+    let text = String::from_utf8_lossy(stdout);
+    let path = text
+        .lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty())
+        .unwrap_or_default();
+    if !path.ends_with(".jsonl") {
+        return Err(IpcError::new(
+            codes::E_SHELL,
+            format!("rewind did not report the copy's path: {path:?}"),
+        ));
+    }
+    Ok(path.to_string())
 }
 
 /// Remove the transcript copy this call wrote, after a later step failed.
@@ -975,7 +1016,7 @@ async fn remove_copy(
     new_id: &str,
     session_id: i64,
 ) {
-    if !new_path.ends_with(&format!("/{new_id}.jsonl")) {
+    if new_path.contains('\n') || !new_path.ends_with(&format!("/{new_id}.jsonl")) {
         return;
     }
     let rm = format!("rm -f -- {}", quote(new_path));
@@ -1031,6 +1072,19 @@ async fn undo_new_worktree(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_login_banner_never_becomes_the_copy_s_path() {
+        assert_eq!(
+            copy_path_from_stdout(b"Welcome\n/h/.claude/projects/p/abc.jsonl\n").unwrap(),
+            "/h/.claude/projects/p/abc.jsonl"
+        );
+        assert_eq!(
+            copy_path_from_stdout(b"Welcome\n").unwrap_err().code,
+            codes::E_SHELL
+        );
+        assert!(copy_path_from_stdout(b"").is_err());
+    }
 
     /// Run a generated script against a real file in a temp dir. `bash` in a
     /// test is established here (`crate::shell::tests`, `crate::tmux::tests`).
@@ -2717,6 +2771,25 @@ mod tests {
         assert!(git(&repo, &["branch", "--list", "fork-x"]).is_empty());
         assert!(src.exists(), "the source is untouched");
         assert_eq!(git(&src, &["rev-parse", "HEAD"]), head);
+
+        // A branch-shaped name: the tree is one flat directory (the name its
+        // row gets), the branch keeps its `/`.
+        let out = run(&fork_worktree_script(
+            None,
+            Some(src.to_str().unwrap()),
+            "fork/y",
+        ));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let flat = repo.canonicalize().unwrap().join(".worktrees/fork-y");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            flat.to_str().unwrap()
+        );
+        assert_eq!(git(&flat, &["rev-parse", "--abbrev-ref", "HEAD"]), "fork/y");
         std::fs::remove_dir_all(&d).ok();
     }
 
@@ -2771,7 +2844,15 @@ mod tests {
             return;
         }
         let d = tmp();
-        let sock = d.join("tmux");
+        // The server's socket is `$TMUX_TMPDIR/tmux-<uid>/default`, and a
+        // unix socket path is capped at 104 bytes on macOS (108 on Linux).
+        // Under a long TMPDIR (macOS's /var/folders/…, a deep worktree) the
+        // test dir alone is past that and tmux fails to start, so the socket
+        // gets a short dir of its own under /tmp.
+        let sock = std::path::PathBuf::from(format!(
+            "/tmp/cf-rw-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        ));
         std::fs::create_dir_all(&sock).unwrap();
         let repo = d.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
@@ -2828,5 +2909,6 @@ mod tests {
             assert!(!wt.exists(), "{dir}: no pane: the tree goes");
         }
         std::fs::remove_dir_all(&d).ok();
+        std::fs::remove_dir_all(&sock).ok();
     }
 }

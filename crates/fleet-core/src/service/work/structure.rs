@@ -57,6 +57,15 @@ pub struct RuleInput {
     /// The group label.
     #[serde(default)]
     pub group: String,
+    /// "Its sessions start here" (gap plan G7.1): the host a start of a
+    /// matching task lands on when no start rule names one. Absent or empty
+    /// = none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_alias: Option<String>,
+    /// The account (credential profile on the host) those sessions bill.
+    /// Absent or empty = the host's own login.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_version: Option<i64>,
 }
@@ -181,32 +190,73 @@ fn unbound_only(scope: &OrgScope, what: &str) -> Result<(), IpcError> {
 
 // --- placement ----------------------------------------------------------------
 
-/// `work_link { action: place, task_id, group, note?, expected_version }`:
-/// put a task in a group (empty `group` and no `note`: back to where it
-/// would sit by itself). Navigation only, never a boundary; a
-/// tracker-controlled value is never written back. `expected_version` is
-/// the placement version the person saw (`0`: none). Answers the task as
-/// it now reads.
+/// `work_link { action: place, task_id | item_id, group, note?,
+/// expected_version }`: put a task in a group. Navigation only, never a
+/// boundary; a tracker-controlled value is never written back.
+/// `expected_version` is the placement version the person saw (`0`: none).
+/// Answers the task as it now reads.
+///
+/// - the task is `task_id` (`item:<id>` / `ref:<KEY>`) or `item_id`, as
+///   `create`, `run` and `bucket_add` take it; one missing-argument error
+///   names everything that is missing, so `item_id` alone does not cost two
+///   round trips to learn about the sentinel.
+/// - `group` may be an existing group's id — see [`group_value`] — which
+///   puts the task in THAT section rather than in a new one named after the
+///   id.
+/// - `action: unplace` (or an empty `group` with no `note`) clears the
+///   placement: the task goes back to where it would sit by itself.
+///
+/// **It takes the WHOLE scope** (multi-user M1, T9b), because what it ANSWERS
+/// is a `WorkTask`, whose `sessions: Vec<TaskLink>` is every link of the task
+/// — `{ session_id, name, host, branch, claude_status, needs_you, resumable }`
+/// per link. The table's old exemption read "a task's group (`task_id`): the
+/// work item, not a session", which is true of the write and false of the
+/// answer; `Graph::load` is `OrgScope::All` for every paired client bound to
+/// no org, and T8's result gate cannot net a `TaskLink` (it spells the host
+/// `host` and carries no `tmux_name`). Same defect as `org_impact`'s, in the
+/// sibling arm.
+// Eight: the task by either name, the group, the note, the version seen
+// and the actor. `PlaceInput` would be the other way; the call sites are
+// the dispatcher, the desktop command and the tests.
+#[allow(clippy::too_many_arguments)]
 pub fn place(
     store: &Mutex<Store>,
-    scope: &OrgScope,
-    task_id: &str,
+    view: &crate::service::view_scope::ViewScope,
+    task_id: Option<&str>,
+    item_id: Option<i64>,
     group: Option<&str>,
     note: Option<&str>,
     expected_version: Option<i64>,
     by: &str,
 ) -> Result<WorkTask, IpcError> {
+    let scope = &view.org;
     no_host(scope, "place")?;
-    let expected = expected_version.ok_or_else(|| {
-        invalid("place needs expected_version (0 when the task has no placement)")
-    })?;
+    // Both complaints at once. `item_id` is how `create`, `run` and
+    // `bucket_add` name a task, and `expected_version`'s 0 is not
+    // guessable, so sending `item_id` alone used to cost two round trips to
+    // learn two things — and the first answer never mentioned the second.
+    let target = task_id
+        .map(str::to_string)
+        .or_else(|| item_id.map(|id| format!("item:{id}")));
+    let mut missing = Vec::new();
+    if target.is_none() {
+        missing.push("task_id (item:<id> or ref:<KEY>) or item_id");
+    }
+    if expected_version.is_none() {
+        missing.push("expected_version (0 when the task has no placement)");
+    }
+    if !missing.is_empty() {
+        return Err(invalid(format!("place needs {}", missing.join(" and "))));
+    }
+    let (target, expected) = (target.unwrap_or_default(), expected_version.unwrap_or(0));
     let group = clean_text(group.unwrap_or_default(), "group", LABEL_MAX_CHARS, true)?;
     let note = clean_text(note.unwrap_or_default(), "note", NOTE_MAX_CHARS, true)?;
     let s = lock(store)?;
-    let mut g = Graph::load(&s, scope)?;
+    let mut g = Graph::load_for(&s, view)?;
+    let group = group_value(&g, group.as_deref())?;
     // Visibility first: a task out of scope answers as an unknown one, and
     // its placement's version is never compared (no oracle).
-    let (task, _) = find_task(&g, scope, task_id, false)?;
+    let (task, _) = find_task(&g, scope, &target, false)?;
     let placement = s.set_work_placement(
         &task.task_id,
         group.as_deref(),
@@ -214,6 +264,21 @@ pub fn place(
         expected,
         by,
     )?;
+    // K5's follow-up: a person's placement confirms or corrects Jev's
+    // proposed group. Never fails the placement.
+    if let (Some(item_id), Some(label)) = (task.item_id, group.as_deref()) {
+        if let Err(e) = crate::service::decide::work_placement::record_place(
+            &s,
+            item_id,
+            label,
+            crate::service::catalog::now_secs(),
+        ) {
+            tracing::warn!(
+                "[decide] work_placement follow-up not recorded: {}",
+                e.message
+            );
+        }
+    }
     drop(s);
     // Only the placement changed: patch it into the graph already loaded
     // rather than reading every item, link and session again.
@@ -222,6 +287,74 @@ pub fn place(
         None => g.placements.remove(&task.task_id),
     };
     Ok(find_task(&g, scope, &task.task_id, false)?.0)
+}
+
+/// What a `group` is STORED as: an existing group's id as given, free text
+/// as itself.
+///
+/// A `<kind>:` prefix is taken at its word, so `place { group:
+/// "repo:martin-janci/claude-fleet" }` puts the task in THAT repo's section
+/// instead of a new one named after the id — and an id naming nothing is
+/// refused rather than opening the ghost section that taught us this. A key
+/// prefix is stored upper-cased, because that is the spelling
+/// `view::group_of` derives (`key:ABC` of `ABC-12`) and an id has to match
+/// it exactly to land in the same bucket.
+///
+/// Free text that is already a derived group's NAME is refused, naming the
+/// id to pass instead: a section is bucketed by its id and ordered by its
+/// label, so `group: "martin-janci/claude-fleet"` beside the derived
+/// `repo:martin-janci/claude-fleet` rendered one name over two sections.
+/// `label:<that name>` is the way to insist on a group of one's own.
+///
+/// A manual placement OUTRANKS every rule and every derived grouping until
+/// it is cleared, so pinning a task to the repo it happens to sit in today
+/// keeps it there after its session moves to another one. That is the
+/// nature of a pin, not a defect, and `unplace` undoes it.
+fn group_value(g: &Graph, group: Option<&str>) -> Result<Option<String>, IpcError> {
+    let Some(raw) = group else {
+        return Ok(None);
+    };
+    let shapes = "repo:<owner>/<repo>, tracker:<tracker id>:<container>, key:<PREFIX> or \
+                  label:<text> — or a label of your own, with no colon-prefix";
+    match crate::service::work::view::parse_group_id(raw) {
+        Some(crate::service::work::view::GroupId::Repo(r)) => {
+            if !g.repo_groups().any(|own| own.eq_ignore_ascii_case(r)) {
+                return Err(invalid(format!(
+                    "no repo group {r}: a group id must name a group that exists ({shapes})"
+                )));
+            }
+            Ok(Some(raw.to_string()))
+        }
+        Some(crate::service::work::view::GroupId::Tracker(tid, _)) => {
+            if !g.has_tracker(tid) {
+                return Err(invalid(format!(
+                    "no tracker {tid}: a group id must name a group that exists ({shapes})"
+                )));
+            }
+            Ok(Some(raw.to_string()))
+        }
+        Some(crate::service::work::view::GroupId::Key(p)) => {
+            Ok(Some(format!("key:{}", p.to_ascii_uppercase())))
+        }
+        // A `label:` id is the person's own words, deliberately — a group
+        // they named after a repository is theirs to name.
+        Some(crate::service::work::view::GroupId::Label(_)) => Ok(Some(raw.to_string())),
+        // Free text, which is a `label:` group of its own — unless it is
+        // the NAME of a group that already exists. A section is bucketed by
+        // its id and ordered by its label, so the two would render as one
+        // name over two sections, which is the whole complaint this
+        // grammar answers; naming the id is the way to mean that group.
+        None => {
+            if let Some(id) = g.derived_group_labels().get(&raw.to_lowercase()) {
+                return Err(invalid(format!(
+                    "\"{raw}\" is already the name of the {id} group: pass group: \"{id}\" to put \
+                     the task THERE, \"label:{raw}\" for a group of your own with that name, or \
+                     pick another name"
+                )));
+            }
+            Ok(Some(raw.to_string()))
+        }
+    }
 }
 
 // --- rules --------------------------------------------------------------------
@@ -259,6 +392,9 @@ fn clean_rule(r: &RuleInput) -> Result<(String, RuleConditions, String), IpcErro
 /// to learn.
 pub fn rules(store: &Mutex<Store>, scope: &OrgScope) -> Result<Vec<WorkRule>, IpcError> {
     match scope {
+        // This is the org boundary, not a privacy fence: a placement RULE is
+        // a company's own configuration (its tracker, its project keys, its
+        // repositories) and names no session.
         OrgScope::All => lock(store)?.work_rules(),
         OrgScope::Host { .. } => Ok(Vec::new()),
         OrgScope::Org { .. } => {
@@ -305,10 +441,21 @@ pub struct RulePreview {
     pub total: u32,
     /// Tasks it matches that a person placed: they stay where they are.
     pub kept_manual: u32,
+    /// Open tasks (not done, not archived) the draft's conditions match now,
+    /// whether or not it moves them and whether or not it is enabled: the
+    /// editor's live "Matches 6 open tasks now" (gap plan G2.2). `0` from an
+    /// older hub.
+    #[serde(default)]
+    pub matched: u32,
+    /// The first [`MATCHED_SAMPLE`] of them, each its key, else its title.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matched_sample: Vec<String>,
 }
 
 /// Most affected tasks one preview lists.
 pub const PREVIEW_MAX: usize = 200;
+/// Most matched tasks one preview names.
+pub const MATCHED_SAMPLE: usize = 3;
 
 /// `work { action: rule_preview, rule }`: which of the caller's tasks the
 /// rule — as drafted, in its place among the others — would move, before
@@ -332,6 +479,8 @@ pub fn rule_preview(
         version: 0,
         conditions,
         group,
+        host_alias: None,
+        profile: None,
         created_at: 0,
         updated_at: 0,
     };
@@ -343,11 +492,22 @@ pub fn rule_preview(
     let after = view::all_tasks(&g, scope, 0);
     let mut affected = Vec::new();
     let mut kept_manual = 0;
+    let mut matched = 0u32;
+    let mut matched_sample = Vec::new();
     for t in &after {
         let Some(b) = before.iter().find(|x| x.task_id == t.task_id) else {
             continue;
         };
         let item = t.item_id.and_then(|i| g.items.get(&i));
+        if !t.archived
+            && t.stage != "done"
+            && rule_matches(&draft, item, t.key.as_deref(), &t.title, &t.repos)
+        {
+            matched += 1;
+            if matched_sample.len() < MATCHED_SAMPLE {
+                matched_sample.push(t.key.clone().unwrap_or_else(|| t.title.clone()));
+            }
+        }
         if draft.enabled
             && t.group.source == "manual"
             && rule_matches(&draft, item, t.key.as_deref(), &t.title, &t.repos)
@@ -370,6 +530,8 @@ pub fn rule_preview(
         affected,
         total,
         kept_manual,
+        matched,
+        matched_sample,
     })
 }
 
@@ -384,6 +546,11 @@ pub fn rule_save(
     unbound_only(scope, "rule_save")?;
     let (name, conditions, group) = clean_rule(rule)?;
     let s = lock(store)?;
+    let (host, profile) = crate::service::start_rules::check_host_and_profile(
+        &s,
+        rule.host_alias.as_deref(),
+        rule.profile.as_deref(),
+    )?;
     if let Some(t) = conditions.tracker_id {
         if s.get_tracker(t)?.is_none() {
             return Err(IpcError::new(
@@ -398,6 +565,7 @@ pub fn rule_save(
         rule.enabled.unwrap_or(true),
         &conditions,
         &group,
+        (host.as_deref(), profile.as_deref()),
         rule.expected_version,
     )
 }
@@ -420,6 +588,9 @@ pub fn rule_delete(
 /// views saved under that org. A host keeps none.
 fn view_owner(scope: &OrgScope) -> Option<Option<i64>> {
     match scope {
+        // This is the org boundary, not a privacy fence: a saved VIEW is
+        // stored under an org and is that org's configuration. It is a set
+        // of filters, not any session's data.
         OrgScope::All => None,
         OrgScope::Org { org, .. } => Some(Some(*org)),
         OrgScope::Host { .. } => Some(Some(i64::MIN)),
@@ -439,6 +610,8 @@ pub fn views(store: &Mutex<Store>, scope: &OrgScope) -> Result<Vec<WorkView>, Ip
 /// the unknown id it is to it (work graph M14.1c).
 fn check_view_filters(s: &Store, scope: &OrgScope, f: &WorkTreeFilters) -> Result<(), IpcError> {
     check_filters(f)?;
+    // This is the org boundary, not a privacy fence: a filter may name only an org or tracker ID
+    // this caller sees.
     if scope.is_all() {
         return Ok(());
     }
@@ -538,6 +711,15 @@ pub struct OrgImpact {
     /// Paired clients bound to an org that would stop / start seeing it.
     pub bound_clients_losing: u32,
     pub bound_clients_gaining: u32,
+    /// The people whose org-bound devices are among those: who loses /
+    /// gains access to the task by the move (gap plan G2.2's "Ondrej loses
+    /// access"), by display name, sorted. A device that belongs to someone
+    /// who keeps access on another of theirs still counts them: the line
+    /// names what the device sees. Empty from an older hub.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub people_losing: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub people_gaining: Vec<String>,
     /// Journal rows (conversations, notes, handovers) and summaries of
     /// this work whose readers change with it.
     pub journal_entries: u32,
@@ -589,6 +771,18 @@ fn impact_of(
         .iter()
         .filter(|l| item_id.is_some() && l.link.item_id == item_id)
     {
+        // The PERSON fence, before anything is read off the link (multi-user
+        // M1, T8d; its ENDED half T9b): a link whose session this reader may
+        // not see is not listed, its host is not added to `ran_on`, and its
+        // conversations are not counted. It must NOT fall through to the
+        // snapshot arms below, which would name the session by `snap_name`
+        // and its machine by `snap_host` — exactly what the fence withholds.
+        // `Graph::link_hidden` is the one clause, shared with
+        // `Graph::link_visible`, applied here because `impact_of` projects
+        // the links itself rather than going through it.
+        if g.link_hidden(l) {
+            continue;
+        }
         // The view's own state (a rejection moves no one), name and org.
         let Some(state) = g.state_of(l).filter(|s| *s != "rejected") else {
             continue;
@@ -615,6 +809,9 @@ fn impact_of(
         // What the caller may not see of the link is not listed (an
         // unrestricted caller — the only one that may move an org — sees
         // all of it).
+        // This is the org boundary, not a privacy fence: which orgs' links a move's preview
+        // lists. `Graph::load_for` has already emptied the person-invisible rows out of the
+        // graph, and `Graph::link_hidden` keeps their snapshots out.
         if !scope.is_all() && !scope.sees_org(session_org) {
             continue;
         }
@@ -653,6 +850,14 @@ fn impact_of(
     // only while its org's `bound_sees_unassigned` is on (D31). One scope
     // per org, read once.
     let mut client_scopes: HashMap<i64, OrgScope> = HashMap::new();
+    let mut people_losing: BTreeSet<String> = BTreeSet::new();
+    let mut people_gaining: BTreeSet<String> = BTreeSet::new();
+    let person_name = |id: Option<i64>| -> Result<Option<String>, IpcError> {
+        Ok(match id {
+            Some(p) => s.get_person(p)?.map(|p| p.display_name.unwrap_or(p.name)),
+            None => None,
+        })
+    };
     for c in s.active_client_tokens()? {
         let Some(o) = c.org_id else {
             continue;
@@ -662,8 +867,14 @@ fn impact_of(
             Entry::Vacant(e) => e.insert(OrgScope::for_client(s, o)?),
         };
         match (cs.sees_org(from), cs.sees_org(to)) {
-            (true, false) => bound_clients_losing += 1,
-            (false, true) => bound_clients_gaining += 1,
+            (true, false) => {
+                bound_clients_losing += 1;
+                people_losing.extend(person_name(c.person_id)?);
+            }
+            (false, true) => {
+                bound_clients_gaining += 1;
+                people_gaining.extend(person_name(c.person_id)?);
+            }
             _ => {}
         }
     }
@@ -688,6 +899,8 @@ fn impact_of(
         hosts_gaining,
         bound_clients_losing,
         bound_clients_gaining,
+        people_losing: people_losing.into_iter().collect(),
+        people_gaining: people_gaining.into_iter().collect(),
         journal_entries,
         summaries,
         impact_token: token,
@@ -696,15 +909,26 @@ fn impact_of(
 
 /// `work { action: org_impact, task_id, org_id }` (`0`: no org): exactly
 /// what moving a local task to another org changes, before it does.
+/// Multi-user M1 (T8d): it takes the WHOLE scope. `is_all()` below is the
+/// AUTHORITY check it was always meant to be — only a caller that may move an
+/// org may preview the move — and is not, and never was, a privacy fence:
+/// `OrgScope::All` is what the master and every paired client bound to no org
+/// alike resolve to, so on a two-person hub the old `Graph::load` handed an
+/// ordinary person's laptop an `ImpactLink { session_id, name, host }` for
+/// every session on the task, whoever owned it. `Graph::load_for` empties the
+/// invisible rows out of the graph first, and `impact_of`'s own
+/// `Graph::link_hidden` skip keeps their snapshots out too.
 pub fn org_impact(
     store: &Mutex<Store>,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
     task_id: &str,
     org_id: Option<i64>,
 ) -> Result<OrgImpact, IpcError> {
+    let scope = &view.org;
     // Only a caller that may move an org reads what a move would change
-    // (D33): the impact names every host and bound client of both orgs, and
-    // the journal of sessions a scoped caller does not see.
+    // (D33): the impact names every host and bound client of both orgs.
+    // This is the org boundary, not a privacy fence: it is the AUTHORITY to move an org (D33),
+    // which the doc above has said since T8d.
     if !scope.is_all() {
         return Err(forbidden(
             "org_impact is not available to a per-host token or an org-bound client: it may \
@@ -713,7 +937,7 @@ pub fn org_impact(
     }
     let to = org_arg(org_id)?;
     let s = lock(store)?;
-    let g = Graph::load(&s, scope)?;
+    let g = Graph::load_for(&s, view)?;
     impact_of(&s, &g, scope, task_id, to)
 }
 
@@ -727,17 +951,22 @@ pub fn org_impact(
 /// task from its next read or frame.
 pub fn assign_org(
     store: &Mutex<Store>,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
     task_id: &str,
     org_id: Option<i64>,
     impact_token: Option<&str>,
 ) -> Result<WorkTask, IpcError> {
+    let scope = &view.org;
     unbound_only(scope, "assign_org")?;
     let to = org_arg(org_id)?;
     let token = impact_token
         .ok_or_else(|| invalid("assign_org needs the impact_token of a fresh org_impact"))?;
     let s = lock(store)?;
-    let mut g = Graph::load(&s, scope)?;
+    // The same load as `org_impact`, and that is load-bearing rather than
+    // tidiness: `impact_token` is a hash OVER `impact.links`, so a move
+    // previewed through the person-fenced graph can only be confirmed
+    // against the same one (T8d).
+    let mut g = Graph::load_for(&s, view)?;
     let impact = impact_of(&s, &g, scope, task_id, to)?;
     if !impact.allowed {
         return Err(match impact.reason.as_deref() {

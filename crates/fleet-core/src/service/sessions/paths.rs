@@ -25,6 +25,8 @@ pub(super) fn extract_owner_repo(path: &str) -> Option<(String, String)> {
 /// Derive a portable worktree name from a session's cwd. Host-path-independent:
 ///   - <repo>/.claude/worktrees/<name>[/…]  → Some("<name>")
 ///   - <repo>/.worktrees/<name>[/…]         → Some("<name>")
+///     (a nested checkout such as `.worktrees/feat/imports` is named by its
+///     row, `feat-imports`: see [`worktree_key_for_host`])
 ///   - <repo> root or any other subdir       → Some("main")
 ///   - path without a github.com repo segment → None (orphan)
 ///
@@ -71,12 +73,18 @@ pub(super) fn worktree_key_from_remainder(remainder: &str) -> String {
 /// `git worktree list` (which lists linked worktrees wherever they live), for
 /// a remote host what its EnterWorktree hooks reported. A cwd in a linked
 /// worktree OUTSIDE the root layout, such as a sibling folder of the repo,
-/// still resolves to the repo's project through them.
+/// still resolves to the repo's project through them. `named` holds the same
+/// rows' linked worktrees (not `main`) as `(path, name)`, which name a cwd's
+/// worktree where its path cannot ([`worktree_key_for_host`]).
 #[derive(Debug, Clone)]
 pub(crate) struct HostPaths {
     pub(super) root: String,
     pub(super) layout: crate::projects::Layout,
     pub(super) worktrees: Vec<(String, i64)>,
+    pub(super) named: Vec<(String, String)>,
+    /// The tmux names of this host's Codex rows, whose conversation the
+    /// probe looks up (`codex::rollouts_script`).
+    pub(super) codex_panes: Vec<String>,
 }
 
 impl HostPaths {
@@ -91,16 +99,21 @@ impl HostPaths {
         } else {
             project_base_for(s, alias)
         };
-        let worktrees = s
-            .list_worktrees_on_host(alias)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|w| (w.path, w.project_id))
+        let rows = s.list_worktrees_on_host(alias).unwrap_or_default();
+        let named = rows
+            .iter()
+            .filter(|w| w.name != "main")
+            .map(|w| (w.path.clone(), w.name.clone()))
             .collect();
+        let worktrees = rows.into_iter().map(|w| (w.path, w.project_id)).collect();
         HostPaths {
             root,
             layout: layout(s),
             worktrees,
+            named,
+            codex_panes: s
+                .pane_names_running(alias, crate::store::AGENT_CODEX)
+                .unwrap_or_default(),
         }
     }
 
@@ -197,11 +210,45 @@ pub(super) fn below_home(path: &str) -> Option<&str> {
 
 /// `worktree_key_for_path` for a cwd on a host with a (possibly custom)
 /// projects root / layout. The github.com regex stays the fallback.
+///
+/// A cwd in a linked worktree takes the name of the host's recorded checkout
+/// that contains it (the longest), so the key matches the row: a path cannot
+/// tell `.worktrees/feat/imports/src` (row `feat-imports`) from
+/// `.worktrees/feat` with a subdir `imports/src`. Without such a row it is
+/// the first component below the marker, as before.
 pub(super) fn worktree_key_for_host(path: &str, paths: &HostPaths) -> Option<String> {
-    match paths.locate(path) {
-        Some((_, _, remainder)) => Some(worktree_key_from_remainder(&remainder)),
-        None => worktree_key_for_path(path),
+    let key = match paths.locate(path) {
+        Some((_, _, remainder)) => worktree_key_from_remainder(&remainder),
+        None => worktree_key_for_path(path)?,
+    };
+    if key == "main" {
+        return Some(key);
     }
+    let recorded = paths
+        .named
+        .iter()
+        .filter(|(wt, _)| {
+            !wt.is_empty() && crate::service::projects::strip_root(path, wt).is_some()
+        })
+        .max_by_key(|(wt, _)| wt.len())
+        .map(|(_, name)| name.clone());
+    Some(recorded.unwrap_or(key))
+}
+
+/// [`find_project_id_for_path`] for a directory on `local` with no worktree
+/// rows: the project whose base contains `cwd` (the longest wins). The Lost
+/// and found rule as the decide benches replay it (`decide::bench::choice`),
+/// with no store at hand.
+#[cfg(feature = "nl-detect")]
+pub(crate) fn project_for_local_path(projects: &[ProjectRow], cwd: &str) -> Option<i64> {
+    let paths = HostPaths {
+        root: String::new(),
+        layout: crate::projects::Layout::Github,
+        worktrees: Vec::new(),
+        named: Vec::new(),
+        codex_panes: Vec::new(),
+    };
+    find_project_id_for_path(projects, "local", std::path::Path::new(cwd), &paths)
 }
 
 /// Match a session's cwd to a known project id. `projects` is passed in by the
@@ -564,6 +611,51 @@ pub(super) enum CwdSource {
         repo: String,
         wt_name: Option<String>,
     },
+}
+
+/// Where a background agent launched into `project_id` on `host` starts:
+/// the project's main checkout there (a system project's `base_path`
+/// verbatim, the project's own `base_path` on `local`, else the host's
+/// projects root + `owner/repo`, expanded against the remote `$HOME`). The
+/// lookup holds the store lock; the `$HOME` round trip runs after it is
+/// released.
+pub(crate) async fn project_cwd_on_host(
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    host: &str,
+    project_id: i64,
+) -> Result<String, IpcError> {
+    let src = {
+        let s = crate::ipc_error::lock(store)?;
+        project_cwd_source(&s, host, project_id)?
+    };
+    resolve_cwd_source(src, host, ssh).await
+}
+
+fn project_cwd_source(s: &Store, host: &str, project_id: i64) -> Result<CwdSource, IpcError> {
+    crate::service::hub::ensure_local_allowed(host)?;
+    if let Some(fixed) = fetch_system_base_path(s, project_id)? {
+        return Ok(CwdSource::Fixed(fixed));
+    }
+    let (owner, repo) = fetch_owner_repo(s, project_id)?;
+    if host == "local" {
+        return s
+            .project_base_path(project_id)?
+            .map(CwdSource::Local)
+            .ok_or_else(|| {
+                IpcError::new(
+                    codes::E_NOREPO,
+                    format!("project {project_id} has no checkout on this machine"),
+                )
+            });
+    }
+    Ok(CwdSource::Remote {
+        root: crate::service::projects::project_base_for(s, host),
+        layout: crate::service::projects::layout(s),
+        owner,
+        repo,
+        wt_name: None,
+    })
 }
 
 /// Pick the cwd-resolution strategy for `row` while holding the store lock.

@@ -2,6 +2,8 @@ import { writable } from 'svelte/store';
 import { createRowStore } from './row_store';
 import { invokeCmd, invokeCmdAbortable, type Result } from './result';
 import { readPref, writePref } from './prefs';
+import type { DecisionProposal } from './proposals';
+import { foldStartProgress, newStartToken, NO_START_STEPS, type StartProgressFrame, type StartSteps } from './start_steps';
 
 /** The `claude_status` vocabulary (pane_intel `ClaudeStatus`). Anything the
  *  backend has not classified arrives as `null`. */
@@ -57,6 +59,25 @@ export interface PrEvidence {
   /** OPEN | CLOSED | MERGED; absent from readings stored before it was added. */
   state?: string;
   checks: CheckSummary;
+}
+
+/** `sessions.turn_outcome` (migration 129). */
+export type TurnOutcome = 'finished' | 'asked' | 'stuck' | 'working' | 'unsure';
+
+/** `sessions.origin` (migration 124). */
+export type SessionOrigin = 'person' | 'operator' | 'mission' | 'background' | 'token' | 'routine';
+
+/** `sessions.agent` (migration 121). */
+export type SessionAgent = 'claude' | 'codex' | 'agy' | 'shell';
+
+/** The agent a row runs, reading an older hub's missing field as Claude
+ *  Code (a shell row there still says `kind: 'shell'`). */
+export function sessionAgent(row: Pick<SessionRow, 'agent' | 'kind'>): SessionAgent {
+  // Kind wins for a shell: the desktop reads a hub's rows through the Rust
+  // `SessionRow`, whose serde default fills `agent: "claude"` when an older
+  // hub sends none, so a shell row would otherwise read as Claude Code.
+  if (row.kind === 'shell') return 'shell';
+  return row.agent ?? 'claude';
 }
 
 export interface SessionRow {
@@ -170,8 +191,23 @@ export interface SessionRow {
   pending_input: {
     kind: 'permission' | 'input';
     question: string | null;
-    options: { n: number; label: string; selected: boolean }[];
+    /** `checked`: ticked, on a multi-select (absent = false, and from a hub
+     *  older than multi-select support). The label never carries the box. */
+    options: { n: number; label: string; selected: boolean; checked?: boolean }[];
+    /** A multi-select question: a digit TOGGLES an option, `Tab` moves on
+     *  with the ticks kept (see `AnswerPrompt.svelte`). Absent = false. */
+    multi?: boolean;
+    /** What a permission dialog asks to run, from the tool-call line above
+     *  it (`Bash(git push …)`). Absent when the pane shows none, and from a
+     *  hub older than redesign 5.9. */
+    detail?: string;
   } | null;
+  // Chat forms (migration 119): the form this session's agent asked and is
+  // waiting on. Optional: an older hub sends none.
+  pending_form?: { form_id: string; title: string } | null;
+  /** The form this session's agent is still writing (`ask { draft }`,
+   *  redesign 10.12): the JSON so far, drawn in by ChatWizards. */
+  form_draft?: { draft: string; why: string | null; updated_at: number } | null;
   /** The session's primary work link (migration 046), set through the work
    *  commands (`work.ts`). Absent from a hub older than the work graph. */
   work?: SessionWork | null;
@@ -184,6 +220,48 @@ export interface SessionRow {
   /** The session's org (work graph M5): the most specific org rule, else
    *  its host's org. Absent = unassigned (or a hub older than M5). */
   org_id?: number | null;
+  // ── Multi-user M1: who owns the row, and who may be shown it ────────────
+  // Both are caller-INDEPENDENT facts about the session, which is the whole
+  // reason they are on the row at all: the event bus serialises a bare
+  // `SessionRow` with no caller, and `row_store.ts` replaces a held row
+  // wholesale, so a per-caller field here would be erased by the next
+  // routine `session:updated` (R6-j). What this client may DO with the row
+  // is derived from these two plus its own identity, in `access.ts`.
+  /** The person who started the session, absent on an `unclaimed` row and on
+   *  a hub older than M1. Absent is NOT ownership: `strip_nulls` removes a
+   *  null on the way out, so absent and unowned are indistinguishable here
+   *  and `access.ts` treats both as "not mine". */
+  owner_person_id?: number | null;
+  /** `private` — the default for anything a person starts through fleet — or
+   *  `unclaimed`, the safe holding state for a row fleet did not create (a
+   *  tmux session reconcile found). There is deliberately **no `'org'`** in
+   *  M1: team sharing needs memberships and arrives in M2, and a third value
+   *  here would be a reader nobody defined. Absent from a hub older than M1. */
+  visibility?: 'private' | 'unclaimed';
+  /** The credential profile the session runs under (`CLAUDE_CONFIG_DIR` =
+   *  `~/.claude-profiles/<name>` on its host, docs/accounts.md); absent =
+   *  the host's own login. */
+  claude_profile?: string | null;
+  /** Which agent runs in the pane (migration 121): Claude Code, Codex, Agy,
+   *  or none for a plain shell (`kind: 'shell'`). Absent from a hub older
+   *  than the column, whose sessions all run Claude Code. */
+  agent?: SessionAgent;
+  /** Who or what started the session (migration 124); absent for a row
+   *  fleet did not start (found on a host) or one older than the column. */
+  origin?: SessionOrigin | null;
+  /** What `origin` points at: a person id (`person`), a session id
+   *  (`operator`, `background`, `token`), a mission id (`mission`). */
+  origin_ref?: string | null;
+  /** When a person last looked at the session (migration 125), unix
+   *  seconds. A turn that ended after it is unread; absent for a row nobody
+   *  has opened since fleet found it. */
+  last_viewed_at?: number | null;
+  /** What a finished turn came to when hooks said nothing (migration 129,
+   *  J2 in step 5.11); a hook event always wins over it. */
+  turn_outcome?: TurnOutcome | null;
+  /** What a rule, Jev or an LLM proposes about the session, one per
+   *  feature (redesign 2.8). Absent when nothing proposes anything. */
+  proposals?: DecisionProposal[];
   /** A digest of the versions and ids of the session's live (non-ended)
    *  work links (work graph M14): it moves whenever any of them changes —
    *  added, removed, primary, state — a secondary link too. Absent = 0 (no
@@ -197,6 +275,9 @@ export interface SessionWork {
   link_id: number;
   item_id: number | null;
   key: string | null;
+  /** The item's fleet ticket key (`FLT-12`), shown in place of `key`;
+   *  absent when it drew none or from a hub older than migration 169. */
+  display_key?: string | null;
   title: string;
   /** `manual` | `started` | `agent` | `agent_started` … — tolerant: a newer hub may add more. */
   source: string;
@@ -264,10 +345,12 @@ export function sessionUsageTokens(s: UsageFields): number {
 export function formatTokens(n: number | null | undefined): string {
   if (n == null || !Number.isFinite(n) || n <= 0) return '0';
   if (n < 1_000) return String(Math.round(n));
-  if (n < 10_000) return `${(n / 1_000).toFixed(1)}k`;
-  if (n < 1_000_000) return `${Math.round(n / 1_000)}k`;
-  if (n < 10_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
-  if (n < 1_000_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  // Each step's bound is where its ROUNDED value would reach the next
+  // format, so 999_600 reads "1.00M", never "1000k" (or 9_999 "10.0k").
+  if (n < 9_950) return `${(n / 1_000).toFixed(1)}k`;
+  if (n < 999_500) return `${Math.round(n / 1_000)}k`;
+  if (n < 9_995_000) return `${(n / 1_000_000).toFixed(2)}M`;
+  if (n < 999_950_000) return `${(n / 1_000_000).toFixed(1)}M`;
   return `${(n / 1_000_000_000).toFixed(2)}B`;
 }
 
@@ -316,6 +399,10 @@ const rows = createRowStore<SessionRow, number>({
   // otherwise re-insert the dead row ("ghost session").
   tombstoneMs: 5000,
   isStale: sessionIsStale,
+  // `sessions.id` is an INTEGER PRIMARY KEY without AUTOINCREMENT, so a killed
+  // highest id is handed to the next insert. A `session:created` whose row is
+  // not the killed one gets past that id's tombstone (`mergeCreatedInto`).
+  identity: (s) => `${s.host_alias}\u0000${s.tmux_name}\u0000${s.created_at}`,
 });
 export const sessions = rows.store;
 export const resetTombstonesForTests = rows.resetTombstonesForTests;
@@ -325,6 +412,12 @@ export const resetTombstonesForTests = rows.resetTombstonesForTests;
  *  before this as baseline, so a launch never replays every already-stuck
  *  row as a fresh alert. */
 export const sessionsLoaded = writable<boolean>(false);
+
+/** True once the first `list_sessions` has answered, either way. Until then
+ *  the fleet is still arriving (redesign step 3.13: the empty pane shows the
+ *  Particle swarm and ⌘K says which hosts it is still hearing from); a
+ *  failed first load ends the wait too, so a loader never outlives it. */
+export const sessionsAnswered = writable<boolean>(false);
 
 // Sidebar filter — when false, background (`kind === 'bg'`) sessions are
 // hidden from the tree. Defaults to true (shown). Persisted across restarts.
@@ -349,8 +442,12 @@ showRowDetails.subscribe((v) => writePref('rows.details', v));
 // Sidebar grouping — `project` (the tree by repository) or `work` (sessions
 // that carry a work key grouped by it first, the rest still under their
 // project; see work_keys.ts). Persisted across restarts.
-export type SidebarGroupBy = 'project' | 'work';
-const isGroupBy = (v: unknown): v is SidebarGroupBy => v === 'project' || v === 'work';
+/** Project and work are trees with their own headers; state, host, agent
+ *  (redesign step 3.6) and organisation (the Sessions board) are flat
+ *  groups, `row_groups.ts`. */
+export type SidebarGroupBy = 'project' | 'work' | 'state' | 'host' | 'agent' | 'org';
+const isGroupBy = (v: unknown): v is SidebarGroupBy =>
+  v === 'project' || v === 'work' || v === 'state' || v === 'host' || v === 'agent' || v === 'org';
 export const sidebarGroupBy = writable<SidebarGroupBy>(readPref('sidebar.group', 'project', isGroupBy));
 sidebarGroupBy.subscribe((v) => writePref('sidebar.group', v));
 
@@ -358,23 +455,17 @@ sidebarGroupBy.subscribe((v) => writePref('sidebar.group', v));
 // reconcile pass now; the default returns stored rows while the last pass is
 // within the configured interval, so window-focus reloads stay cheap.
 export async function loadSessions(opts: { force?: boolean } = {}): Promise<Result<SessionRow[]>> {
+  const token = rows.beginList();
   const r = await invokeCmd<SessionRow[]>('list_sessions', { force: opts.force ?? false });
+  sessionsAnswered.set(true);
   if (r.ok) {
     // The list owns ORDER (the backend's `ORDER BY last_activity_at DESC`);
     // events own CONTENT. Rebuilding from the current store's position would
     // freeze every row at wherever it first landed — position has to be
     // taken from the list every time, and content still has to lose to a
-    // `session:updated` that raced this call and is strictly newer.
-    sessions.update((cur) => {
-      const byId = new Map(cur.map((s) => [s.id, s] as const));
-      const next: SessionRow[] = [];
-      for (const listed of r.value) {
-        if (rows.isTombstoned(listed.id)) continue;
-        const current = byId.get(listed.id);
-        next.push(current && sessionIsStale(listed, current) ? current : listed);
-      }
-      return next;
-    });
+    // `session:updated` that raced this call and is strictly newer, and a
+    // session created or killed while it was in flight keeps that state.
+    rows.applyList(r.value, token);
     sessionsLoaded.set(true);
   }
   return r;
@@ -474,10 +565,60 @@ export async function setFriendlyName(
   return r;
 }
 
-export async function restartSession(hostAlias: string, name: string): Promise<Result<SessionRow>> {
-  const r = await invokeCmd<SessionRow>('restart_session', {
-    args: { host_alias: hostAlias, name },
+/** Replace the session's tags (the Label field, M15 G2.7): the whole
+ *  list, empty clears. Validated again by the backend (1–32 characters of
+ *  letters, digits, `_ . : -`, at most 16). */
+export async function setSessionTags(sessionId: number, tags: readonly string[]): Promise<Result<SessionRow>> {
+  const r = await invokeCmd<SessionRow>('set_session_tags', {
+    args: { session_id: sessionId, tags: [...tags] },
   });
+  if (r.ok) acceptCommandRow(r.value);
+  return r;
+}
+
+/** Link or Not related on the session's `related_session` proposal (M15
+ *  G4.3): Link keeps the other session listed as linked, Not related
+ *  withdraws it. Answers the session's row. */
+export async function decideRelatedSession(sessionId: number, runId: number, linked: boolean): Promise<Result<SessionRow>> {
+  const r = await invokeCmd<SessionRow>('decide_related_session', {
+    args: { session_id: sessionId, run_id: runId, linked },
+  });
+  if (r.ok) acceptCommandRow(r.value);
+  return r;
+}
+
+/** Mark the session viewed now (redesign 2.3): its finished turns read as
+ *  seen and it leaves the `done_unread` bucket. A watcher's call is refused
+ *  by the hub (the stamp is one per row); that is not an error to show. */
+export async function touchSessionViewed(sessionId: number): Promise<Result<SessionRow>> {
+  const r = await invokeCmd<SessionRow>('touch_session_viewed', {
+    args: { session_id: sessionId },
+  });
+  if (r.ok) acceptCommandRow(r.value);
+  return r;
+}
+
+/** Restart the session in place. With `profile`, resume its conversation
+ *  under that credential profile instead (`''` = the host's own login): a
+ *  running `claude` cannot change its login, so a switch is a restart.
+ *  `launch.model` / `launch.effort` do the same for the model and reasoning
+ *  effort (`''` = the host's default) — how a Codex session, whose `/model`
+ *  takes no argument, changes model. */
+export async function restartSession(
+  hostAlias: string,
+  name: string,
+  profile?: string,
+  launch: { model?: string; effort?: string } = {},
+  opts: { force?: boolean } = {},
+): Promise<Result<SessionRow>> {
+  const args: Record<string, unknown> = { host_alias: hostAlias, name };
+  // Only ever set by the "Restart anyway" a person clicks after the backend
+  // refused the registered fleet controller (`restart.ts`).
+  if (opts.force) args.force = true;
+  if (profile !== undefined) args.profile = profile;
+  if (launch.model !== undefined) args.model = launch.model;
+  if (launch.effort !== undefined) args.effort = launch.effort;
+  const r = await invokeCmd<SessionRow>('restart_session', { args });
   if (r.ok) acceptCommandRow(r.value);
   return r;
 }
@@ -581,6 +722,155 @@ export async function repairSession(
   });
 }
 
+/**
+ * A read-only snapshot of a session's tmux pane, as plain text.
+ *
+ * Added to the desktop for the WATCHER (multi-user M1, R5-e): sharing never
+ * confers a terminal, so a person a session is shared with has no `pty_open`
+ * and needs some view of the live pane that the hub can actually revoke. This
+ * is it — a routed read, enforced on the hub per request, with no SSH of its
+ * own from this machine. The owner does not use it: they attach.
+ *
+ * `scrollback_lines` asks for history above the visible pane; the backend
+ * clamps it and caps the reply, prefixing a `[capture_session: showing the
+ * last N of M lines …]` note when it had to cut.
+ */
+export async function captureSession(
+  sessionId: number,
+  opts: { scrollback_lines?: number; max_lines?: number } = {},
+): Promise<Result<string>> {
+  const args: { session_id: number; scrollback_lines?: number; max_lines?: number } = {
+    session_id: sessionId,
+  };
+  if (opts.scrollback_lines !== undefined) args.scrollback_lines = opts.scrollback_lines;
+  if (opts.max_lines !== undefined) args.max_lines = opts.max_lines;
+  return invokeCmd<string>('capture_session', { args });
+}
+
+// ── sharing a session (multi-user M1) ───────────────────────────────────────
+//
+// Three mutations and one read, all four routed to the hub's own tools. They
+// live here, beside the other mutation wrappers, because three of them answer
+// with the session row and so go through `acceptCommandRow` like every other
+// mutation — the optimistic patch that keeps a surface from waiting a reconcile
+// tick for its own click.
+//
+// What they deliberately do NOT patch is the GRANT LIST: that is
+// `session_access`'s answer (for the owner, in the Share sheet) and
+// `access.ts`'s own map (for the recipient, patched by `grant:changed`), and
+// neither of those lives on a row. A grant mutates no `sessions` column, which
+// is the whole reason `grant:changed` exists.
+//
+// `my_grants` is deliberately **not** here: it belongs to `src/lib/access.ts`,
+// which owns this client's own identity and grant set and patches no row.
+
+/**
+ * One live grant on a session, as `session_access` lists them — the sharer's
+ * view of who they have shared with.
+ *
+ * `level` is read as a plain string on purpose: a level this build does not
+ * know must still be *shown* (the owner has to be able to see and revoke it),
+ * which is the opposite of `access.ts`'s rule for the client's OWN grants,
+ * where an unknown level is dropped so it can never be acted on.
+ */
+export interface SessionGrant {
+  session_id: number;
+  /** The recipient: a person, or (org administration phase D) an org. */
+  person_id: number | null;
+  /** The recipient's name, when the hub sends one; the id is the fallback. */
+  person_name?: string | null;
+  person_display_name?: string | null;
+  /** An org recipient: its members and admins from when it was shared. */
+  org_id?: number | null;
+  org_name?: string | null;
+  /** `watch` | `drive`, tolerantly. */
+  level: string;
+  /** The person who granted it, and when (unix seconds). */
+  granted_by?: number | null;
+  granted_at?: number | null;
+}
+
+/** Who a share is addressed to: a person's name, or an org's (org
+ *  administration phase D — its members and admins from now on). */
+export type ShareTo = string | { org: string };
+
+function recipientArgs(to: ShareTo): { person: string } | { person: string; org: string } {
+  return typeof to === 'string' ? { person: to } : { person: '', org: to.org };
+}
+
+/**
+ * Share this session with one person, or an org you are in, at `watch`,
+ * `answer` (Orbit Fleet 11.7: also answer its questions) or `drive`.
+ *
+ * Owner only, enforced on the hub (and in the store, against the row's own
+ * `owner_person_id`); the Share sheet's own gate is the UI half of the same
+ * rule. An org share reaches the members and admins who are in the org when
+ * it is made — never someone who joins later, never a viewer.
+ */
+export async function shareSession(
+  sessionId: number,
+  to: ShareTo,
+  level: 'watch' | 'answer' | 'drive',
+): Promise<Result<SessionRow | null>> {
+  const r = await invokeCmd<SessionRow | null>('session_share', {
+    args: { session_id: sessionId, ...recipientArgs(to), level },
+  });
+  if (r.ok) acceptCommandRow(r.value);
+  return r;
+}
+
+/** Revoke one person's (or org's) grant on this session. Owner only. */
+export async function unshareSession(
+  sessionId: number,
+  to: ShareTo,
+): Promise<Result<SessionRow | null>> {
+  const r = await invokeCmd<SessionRow | null>('session_unshare', {
+    args: { session_id: sessionId, ...recipientArgs(to) },
+  });
+  if (r.ok) acceptCommandRow(r.value);
+  return r;
+}
+
+/**
+ * Lower one person's grant to `watch`, from `drive` or `answer`.
+ *
+ * There is deliberately no wrapper that raises one, because there is no tool
+ * that raises one: a grant only ever moves downward (spec §4.3 invariant 3),
+ * and "re-home the grant to me" is a privacy bypass wearing a grant's clothes.
+ * Widening is done by revoking and sharing again, which is a decision the
+ * owner takes explicitly.
+ */
+export async function narrowShare(
+  sessionId: number,
+  to: ShareTo,
+): Promise<Result<SessionRow | null>> {
+  const r = await invokeCmd<SessionRow | null>('session_narrow', {
+    args: { session_id: sessionId, ...recipientArgs(to) },
+  });
+  if (r.ok) acceptCommandRow(r.value);
+  return r;
+}
+
+/**
+ * The live grants on one session — the Share sheet's list.
+ *
+ * Named `fetchSessionAccess`, not `sessionAccess`: `access.ts` already exports
+ * a `sessionAccess`, the pure per-row derivation, and the two are imported
+ * into the same components. One is "what may I do with this row", the other is
+ * "who has this owner shared it with"; sharing a name between them would be a
+ * reader's trap and, in `SessionDetails.svelte`, an actual collision.
+ *
+ * Answers an array, never null: "shared with nobody" is the ordinary case and
+ * an empty list is how it reads.
+ */
+export async function fetchSessionAccess(sessionId: number): Promise<Result<SessionGrant[]>> {
+  const r = await invokeCmd<SessionGrant[] | null>('session_access', {
+    args: { session_id: sessionId },
+  });
+  if (!r.ok) return r;
+  return { ok: true, value: r.value ?? [] };
+}
+
 export interface NewSessionArgs {
   host_alias: string;
   project_id: number;
@@ -611,14 +901,77 @@ export interface NewSessionArgs {
   /** `claude --effort` for the first launch (low … max); null = the host's
    *  default. Rejected for a shell session. */
   effort?: string | null;
+  /** Credential profile for the first launch (`~/.claude-profiles/<name>`
+   *  on the host, with its own `/login`); null = the host's login. Rejected
+   *  for a shell session. */
+  profile?: string | null;
+  /** Which agent runs in the pane: `claude` (default), `codex`, or `shell`
+   *  (the same as `kind: 'shell'`). `agy` is refused until fleet can launch
+   *  it. A Codex session takes no `profile`. */
+  agent?: SessionAgent | null;
+  /** Opaque id the start reports its steps under (`start:progress`, step
+   *  5.13); `newSessionAbortable` mints it. */
+  start_token?: string | null;
+  /** The person was asked about `accounts.pause_at` (step 4.4) and chose to
+   *  start anyway; without it a hub refuses such a start (`E_ACCOUNT_LIMIT`). */
+  over_limit_ok?: boolean;
+}
+
+/** A ⌘N start whose create command is in flight (redesign step 5.13): the
+ *  Pulse sequence's worktree and tmux steps run inside it. */
+export interface CreatingStart {
+  host_alias: string;
+  /** Empty when the backend mints the name. */
+  name: string;
+  kind: 'work' | 'shell';
+  /** The `start_token` the command carries. */
+  token: string;
+  /** What the backend has reported so far (`start:progress`). */
+  steps: StartSteps;
+}
+
+export const creatingStart = writable<CreatingStart | null>(null);
+
+/** `start:progress` (step 5.13): move the in-flight start's step, if the
+ *  frame is this window's own start. Frames of other starts — another
+ *  window's, another device's on the same hub — are ignored. */
+export function applyStartProgress(f: StartProgressFrame): void {
+  creatingStart.update((c) => (c && c.token === f.token ? { ...c, steps: foldStartProgress(c.steps, f) } : c));
+}
+
+/** Rows a create returned before their agent was up; `session_starting.ts`
+ *  follows them until it is. */
+export const startedIds = writable<ReadonlySet<number>>(new Set());
+
+function markStarting(row: Pick<SessionRow, 'id' | 'kind' | 'claude_status'> | null): void {
+  if (!row || row.kind === 'shell' || row.claude_status !== null) return;
+  startedIds.update((s) => new Set([...s, row.id]));
 }
 
 export async function newSessionAbortable(
   args: NewSessionArgs,
   signal?: AbortSignal,
 ): Promise<Result<SessionRow>> {
-  const r = await invokeCmdAbortable<SessionRow>('new_session', { args }, signal);
-  if (r.ok) acceptCommandRow(r.value);
+  // The Pulse sequence (5.13) follows the start: the command in flight is
+  // its worktree and tmux steps, the row it returns waits on the agent.
+  const token = args.start_token || newStartToken();
+  creatingStart.set({
+    host_alias: args.host_alias,
+    name: args.name ?? '',
+    kind: args.kind === 'shell' || args.agent === 'shell' ? 'shell' : 'work',
+    token,
+    steps: NO_START_STEPS,
+  });
+  let r: Result<SessionRow>;
+  try {
+    r = await invokeCmdAbortable<SessionRow>('new_session', { args: { ...args, start_token: token } }, signal);
+  } finally {
+    creatingStart.set(null);
+  }
+  if (r.ok) {
+    acceptCommandRow(r.value);
+    markStarting(r.value);
+  }
   return r;
 }
 
@@ -673,7 +1026,9 @@ export function applySessionEvents(events: readonly SessionEvent[]): void {
   sessions.update((arr) => {
     let next = arr;
     for (const ev of events) {
-      next = ev.type === 'killed' ? rows.removeFrom(next, ev.id) : rows.mergeInto(next, ev.row);
+      if (ev.type === 'killed') next = rows.removeFrom(next, ev.id);
+      else if (ev.type === 'created') next = rows.mergeCreatedInto(next, ev.row);
+      else next = rows.mergeInto(next, ev.row);
     }
     return next;
   });
@@ -681,7 +1036,10 @@ export function applySessionEvents(events: readonly SessionEvent[]): void {
 
 /** Apply a row returned by a mutation command (rename/restart/new). Unlike an
  *  event, a command result is the authoritative response to a request the
- *  user just made, so it clears any tombstone for that id before merging. */
+ *  user just made, so it clears any tombstone for that id before merging —
+ *  except a live tombstone for this same row (same host, tmux name and
+ *  created_at): a command that resolved after `session:killed` does not
+ *  resurrect the killed row (review r06). A new row reusing the id passes. */
 export function acceptCommandRow(row: SessionRow | null | undefined): void {
   rows.accept(row);
 }
@@ -689,8 +1047,9 @@ export function acceptCommandRow(row: SessionRow | null | undefined): void {
 /**
  * Type `prompt` into a session's REPL and submit it.
  *
- * `opts.keys` presses one key instead — `Enter`, `Escape`, `C-c`, or a digit
- * `1`-`9` that picks that option of a `pending_input` dialog. A key is never
+ * `opts.keys` presses one key instead — `Enter`, `Escape`, `Tab`, `C-c`, or a
+ * digit `1`-`9` that picks that option of a `pending_input` dialog (toggles
+ * it, on a multi-select). A key is never
  * marked untrusted and is never recorded as a prompt, and `prompt` must be
  * empty alongside it (the backend refuses the pair with `E_VALIDATE`).
  * Answering a dialog has to go this way. The text path pastes through
@@ -709,22 +1068,125 @@ export async function sendPrompt(
   });
 }
 
+/**
+ * Press one of a dialog's own keys (a numbered option, Enter, Escape, Tab) —
+ * the `answer` tier's one write (Orbit Fleet 11.7). It is `send_prompt` with
+ * an empty prompt and a key, which is the shape the hub admits at `answer`
+ * (after a fresh read of the pane shows a dialog); any prompt text would make
+ * it `drive`. Kept apart from {@link sendPrompt} so the share sweep can hold a
+ * key-only write to the `answer` gate and every other `send_prompt` to
+ * `drive`.
+ */
+export async function answerDialog(
+  hostAlias: string,
+  tmuxName: string,
+  key: string,
+  expect?: ExpectDialog,
+): Promise<Result<void>> {
+  return invokeCmd<void>('send_prompt', {
+    args: { host_alias: hostAlias, tmux_name: tmuxName, prompt: '', keys: key, ...(expect ? { expect } : {}) },
+  });
+}
+
+/**
+ * The dialog an answer is for, sent with its key: the backend re-reads the
+ * pane and presses only while it still shows this (`E_CONFLICT` otherwise),
+ * in one step rather than a read here and a press a round trip later. A
+ * backend too old to know the field ignores it, and the caller's own re-read
+ * still stands.
+ */
+export interface ExpectDialog {
+  kind: string;
+  question: string | null;
+  options: { n: number; label: string }[];
+  detail: string | null;
+  /** For Enter: the option that must still be highlighted. */
+  selected: number | null;
+}
+
+/** What `queue_prompt` did with one prompt (step 5.10). */
+export interface QueuePromptResult {
+  session_id: number;
+  /** Typed now: the session was idle. */
+  delivered: boolean;
+  /** Kept until the session is idle; `null` when delivered. */
+  queued_id?: number | null;
+}
+
+/** A prompt waiting for its session to be idle, or one whose typing failed. */
+export interface QueuedPrompt {
+  id: number;
+  session_id: number;
+  body: string;
+  created_at: number;
+  delivered_at?: number | null;
+  attempts?: number;
+  failed_at?: number | null;
+  error?: string | null;
+  cancelled_at?: number | null;
+  /** Send later: not typed before this unix second. */
+  not_before?: number | null;
+  /** Held while the session's account is at its usage limit. */
+  until_limit_reset?: boolean;
+  /** Dropped instead if the session is archived first. */
+  skip_if_archived?: boolean;
+  skipped_at?: number | null;
+}
+
+/** Send later's time choices (M15 G1.8). Every field is optional: none set
+ *  is the plain "when it is idle". */
+export interface SendLaterTiming {
+  /** Unix seconds before which the prompt is not typed. */
+  notBefore?: number;
+  /** Wait until the session's account is under its usage limit again. */
+  untilLimitReset?: boolean;
+  /** Skip it if the session is archived first. */
+  skipIfArchived?: boolean;
+}
+
+/** Send a prompt as a new turn: now when the session is idle, else once its
+ *  turn ends (never into a dialog). `timing` holds it for later. */
+export function queuePrompt(
+  sessionId: number,
+  prompt: string,
+  timing: SendLaterTiming = {},
+): Promise<Result<QueuePromptResult>> {
+  const args: Record<string, unknown> = { session_id: sessionId, prompt };
+  // Only what is set goes on the wire, so an older hub reads the call it knows.
+  if (timing.notBefore !== undefined) args.not_before = Math.floor(timing.notBefore);
+  if (timing.untilLimitReset) args.until_limit_reset = true;
+  if (timing.skipIfArchived) args.skip_if_archived = true;
+  return invokeCmd<QueuePromptResult>('queue_prompt', { args });
+}
+
+export function queuedPrompts(sessionId: number): Promise<Result<QueuedPrompt[]>> {
+  return invokeCmd<QueuedPrompt[]>('queued_prompts', { args: { session_id: sessionId } });
+}
+
+/** Take back a waiting prompt; answers what is still waiting. */
+export function cancelQueuedPrompt(sessionId: number, id: number): Promise<Result<QueuedPrompt[]>> {
+  return invokeCmd<QueuedPrompt[]>('cancel_queued_prompt', { args: { session_id: sessionId, id } });
+}
+
 export const DEFAULT_REVIEW_PROMPT = `Review the work in this worktree. Run \`git diff\` and \`git log\` against the base branch to see what changed.
 
 Pass 1 — correctness: does the code do what it should? Any bugs?
 Pass 2 — code quality: clarity, structure, test coverage.
 Pass 3 — risk: anything dangerous, security-sensitive, or destructive?
 
-Cite file:line for every point. End with an overall verdict: approve / approve-with-fixes / needs-rework.`;
+Cite file:line for every point. End with one line in this form: \`Verdict: approve | approve-with-fixes | needs-rework · <N> blocking · <M> nits\`.`;
 
 export async function spawnReview(
   sourceSessionId: number,
   prompt: string,
   signal?: AbortSignal,
+  agent: 'claude' | 'codex' = 'claude',
 ): Promise<Result<SessionRow>> {
   const r = await invokeCmdAbortable<SessionRow>(
     'spawn_review',
-    { args: { source_session_id: sourceSessionId, prompt } },
+    // M15 G7.12: Codex as the reviewer; Claude Code stays the default and
+    // is not named, so an older hub reads the same call.
+    { args: agent === 'claude' ? { source_session_id: sourceSessionId, prompt } : { source_session_id: sourceSessionId, prompt, agent } },
     signal,
   );
   if (r.ok) mergeSession(r.value);
@@ -832,6 +1294,18 @@ export async function dismissGhostSession(sessionId: number): Promise<Result<voi
     args: { session_id: sessionId },
   });
   if (r.ok) removeSession(sessionId);
+  return r;
+}
+
+/** Adopt a live tmux session fleet did not start (`started_at` null): fleet
+ *  runs it from now on and the caller owns it when nobody did (Lost and
+ *  found, redesign step 4.8). `projectId` adopts it into that project
+ *  (Adopt into, step 4.12); omitted keeps the one reconcile found. */
+export async function adoptSession(sessionId: number, projectId?: number | null): Promise<Result<SessionRow>> {
+  const r = await invokeCmd<SessionRow>('adopt_session', {
+    args: projectId == null ? { session_id: sessionId } : { session_id: sessionId, project_id: projectId },
+  });
+  if (r.ok) acceptCommandRow(r.value);
   return r;
 }
 

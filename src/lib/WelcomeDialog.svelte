@@ -2,14 +2,15 @@
   // One-time welcome shown on first run. The parent owns visibility and the
   // `onboarding-welcomed` flag; this component just renders + emits intent.
   import Modal from './Modal.svelte';
+  import OrbitMark from './kit/OrbitMark.svelte';
   let { onstart, onskip }: { onstart: () => void; onskip: () => void } = $props();
 </script>
 
 <!-- Escape and backdrop click both mean "skip for now" (handled by Modal). -->
-<Modal label="Welcome to claude-fleet" onclose={onskip} width="380px">
+<Modal label="Welcome to Orbit Fleet" onclose={onskip} width="380px">
   <div class="panel">
-    <div class="logo" aria-hidden="true"></div>
-    <h2>Welcome to claude-fleet</h2>
+    <OrbitMark size={40} label={null} />
+    <h2>Welcome to Orbit Fleet</h2>
     <p>
       Run long-lived Claude Code sessions in tmux across your machines. Let's get
       you set up — add a host, pick a project, and start your first session.
@@ -26,23 +27,17 @@
   .panel {
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    padding: 8px;
-  }
-  .logo {
-    width: 40px;
-    height: 40px;
-    border-radius: 10px;
-    background: linear-gradient(135deg, #2563eb, #60a5fa);
+    gap: var(--space-3);
+    padding: var(--space-2);
   }
   h2 {
     margin: 0;
-    font-size: 1.2rem;
+    font-size: var(--text-lg);
   }
   p {
     margin: 0;
-    color: var(--fg-muted, #777);
-    font-size: 0.9rem;
+    color: var(--fg-muted);
+    font-size: var(--text-sm);
     line-height: 1.5;
   }
   .actions {
@@ -52,18 +47,18 @@
   }
   button {
     padding: 8px 14px;
-    border-radius: 7px;
-    font-size: 0.9rem;
+    border-radius: var(--radius-md);
+    font-size: var(--text-sm);
     cursor: pointer;
   }
   .primary {
     background: var(--accent);
-    color: #fff;
+    color: var(--accent-fg);
     border: none;
   }
   .ghost {
     background: transparent;
-    color: var(--fg-muted, #777);
+    color: var(--fg-muted);
     border: 1px solid var(--border);
   }
 </style>

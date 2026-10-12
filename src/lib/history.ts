@@ -28,6 +28,17 @@ export interface Branch {
   ahead: number;
   behind: number;
   tipHash: string;
+  /** The base branch (origin/HEAD, else main or master) already contains
+   *  this tip, so deleting it loses nothing. Never set on the base, its
+   *  local twin or the checked-out branch. */
+  merged: boolean;
+}
+
+/** What "Delete merged" did: each name re-checked on the host first. */
+export interface DeleteMergedResult {
+  deleted: string[];
+  /** Asked for but kept (no longer merged, checked out somewhere, gone). */
+  kept: string[];
 }
 
 export interface CommitDetail {
@@ -37,6 +48,8 @@ export interface CommitDetail {
   author: string;
   date: string;
   files: ChangedFile[];
+  /** A remote-tracking branch contains it; absent from an older hub. */
+  pushed?: boolean;
 }
 
 export function repoLog(
@@ -106,12 +119,39 @@ export function repoDeleteBranch(
   });
 }
 
+/** Delete merged branches: `names` are local, `remotes` (`origin/feat`) are
+ *  deleted on their remote. Each is re-checked against the base first. */
+export function repoDeleteMergedBranches(
+  sessionId: number,
+  names: string[],
+  remotes: string[] = [],
+): Promise<Result<DeleteMergedResult>> {
+  return invokeCmd<DeleteMergedResult>('repo_delete_merged_branches', {
+    args: { session_id: sessionId, names, remotes },
+  });
+}
+
 export function repoStage(sessionId: number, paths: string[]): Promise<Result<null>> {
   return invokeCmd<null>('repo_stage', { args: { session_id: sessionId, paths } });
 }
 
 export function repoUnstage(sessionId: number, paths: string[]): Promise<Result<null>> {
   return invokeCmd<null>('repo_unstage', { args: { session_id: sessionId, paths } });
+}
+
+/** A commit message drafted from the staged changes (redesign 5.12). */
+export interface CommitDraft {
+  message: string;
+  model: string;
+  host_alias: string;
+  /** How many staged files it was written from. */
+  files: number;
+}
+
+/** Draft a commit message on the session's own host and account; nothing
+ *  is committed. */
+export function draftCommitMessage(sessionId: number): Promise<Result<CommitDraft>> {
+  return invokeCmd<CommitDraft>('draft_commit_message', { args: { session_id: sessionId } });
 }
 
 export function repoCommitCreate(

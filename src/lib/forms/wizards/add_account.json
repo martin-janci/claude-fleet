@@ -1,0 +1,48 @@
+{
+  "spec": "fleet.form/1",
+  "title": "Add an account",
+  "intro": "A new login on a host, for sessions to bill. Each account is a login profile there (~/.claude-profiles/<name>).",
+  "submit": "Add account",
+  "steps": [
+    {
+      "title": "Account",
+      "fields": [
+        { "name": "host", "type": "select", "label": "Host", "required": true, "options": [["mercury", "mercury"]] },
+        {
+          "name": "kind",
+          "type": "select",
+          "label": "Sign in with",
+          "required": true,
+          "value": "subscription",
+          "options": [["subscription", "Claude subscription"], ["api_key", "API key"]]
+        },
+        {
+          "name": "profile",
+          "type": "text",
+          "label": "Name",
+          "required": true,
+          "max_len": 32,
+          "placeholder": "work",
+          "help": "Letters, digits, _ or -. New sessions pick the account by this name."
+        },
+        {
+          "name": "api_key",
+          "type": "secret",
+          "label": "API key",
+          "required": true,
+          "secret_note": "sk-ant-…, checked with Anthropic, then written to the host only. Fleet keeps no copy.",
+          "when": { "field": "kind", "eq": "api_key" }
+        },
+        {
+          "name": "daily_limit",
+          "type": "number",
+          "label": "Daily limit (USD)",
+          "min": 0,
+          "max": 100000,
+          "help": "Empty: no limit. Past it, no session starts on this account until midnight UTC.",
+          "when": { "field": "kind", "eq": "api_key" }
+        }
+      ]
+    }
+  ]
+}

@@ -2,7 +2,6 @@
 
 use super::*;
 use crate::ipc_error::lock;
-use crate::service::orgs::OrgScope;
 
 #[tool_router(router = fleet_router, vis = "pub(super)")]
 impl FleetTools {
@@ -15,10 +14,13 @@ impl FleetTools {
         detection_backlog: suggestions undecided for detection_backlog_days). \
         A per-host token sees its own host's usage and its org's trackers. \
         hub: uptime and last reconcile pass; tunnels_mode none|reverse; \
-        peer_links_total. \
+        peer_links_total. devices: {paired, last_seen_at, last_sync_at}. \
+        playbooks_week: runs per kind. \
         hosts[]: per host disk_home_pct/disk_low, claude_behind, \
         agent_behind, hooks_silent. decide (master only): Jev's last \
-        hour, degraded if its breaker is open or >20% failed.")]
+        hour, degraded if its breaker is open or >20% failed; week: 7 days' answers. loops[]: \
+        each background job's last and next run and result \
+        (ok/error/paused); automation_paused.")]
     pub(super) async fn fleet_health(
         &self,
         Extension(caller): Extension<Caller>,
@@ -38,15 +40,37 @@ impl FleetTools {
                         alias: host.to_string(),
                         trackers: caller.org_scope(&s).ok(),
                     }
+                // This is the org boundary, not a privacy fence: it asks which org a caller is
+                // BOUND to, so as to pick that org's HealthView. The person's own view is the
+                // next arm (`HealthView::Person`).
                 } else if caller.is_scoped() {
                     // Work graph M14: a client bound to an org sees its org's
                     // trackers only, as a host token does, and every roll-up
                     // that sums across hosts is over the hosts it sees.
-                    match caller.org_scope(&s) {
-                        Ok(scope) => health::HealthView::Org(scope),
+                    //
+                    // Multi-user M1 (T10): with the caller's WHOLE scope, not
+                    // its org half. An org-bound client is somebody's device
+                    // too, and `HealthView::Org`'s session roll-ups were summed
+                    // over every session in the org — a colleague's private
+                    // ones included. The org half it still asks is
+                    // `ViewScope::org`, which `org_scope` built here before.
+                    match caller.view_scope(&s) {
+                        Ok(view) => health::HealthView::Org(view),
+                        Err(_) => health::HealthView::Blank,
+                    }
+                } else if caller.client.is_some() {
+                    // Multi-user M1 (T8d): a paired client bound to no org is
+                    // a PERSON's own device, and it used to fall through to
+                    // `Fleet` because `is_scoped()` is false for it — the
+                    // predicate spec §3.6 names as a leak class. Its session
+                    // roll-ups and per-host spend are now its own.
+                    match caller.view_scope(&s) {
+                        Ok(view) => health::HealthView::Person(view),
                         Err(_) => health::HealthView::Blank,
                     }
                 } else {
+                    // The master token and the standalone desktop: §4.5's hub
+                    // operator, deliberately not fenced.
                     health::HealthView::Fleet
                 };
                 health::health_for(&s, &view, tunnels)
@@ -55,6 +79,8 @@ impl FleetTools {
                 let mut h = health::unready_health();
                 // An org-bound client is told nothing of another org's
                 // hosts, tunnels included.
+                // This is the org boundary, not a privacy fence: an org-bound client is told
+                // nothing of another org's hosts, tunnels included.
                 if caller.host_alias.is_some() || !caller.is_scoped() {
                     h.set_tunnels(tunnels);
                 }
@@ -80,6 +106,8 @@ impl FleetTools {
         }
         // The last reconcile error is the hub's own text about any host —
         // another org's too; a scoped caller gets that it failed, not why.
+        // This is the org boundary, not a privacy fence: the reconcile error is the hub's own
+        // text about any host, another ORG's included.
         if caller.is_scoped() {
             if let Some(r) = h.hub.as_mut().map(|hub| &mut hub.reconcile) {
                 if r.last_error.is_some() {
@@ -100,8 +128,43 @@ impl FleetTools {
         });
         // The decision envelope is the hub's own business: a per-host token
         // or an org-bound client gets none of it.
+        // This is the org boundary, not a privacy fence: whether this caller is inside an org
+        // boundary at all, and the decision envelope is outside every one of them.
+        // So is a background loop's error (redesign 8.1), the hub's own
+        // text about any host or tracker: such a caller gets that it failed.
         if caller.host_alias.is_some() || caller.is_scoped() {
             h.decide = None;
+            for l in &mut h.loops {
+                if l.last_error.is_some() {
+                    l.last_error = Some("failed (details on the hub)".into());
+                }
+            }
+        }
+        // Settings › Hub (gap plan G7.3): how many devices are paired and
+        // when this one last reached the hub. A person's device counts its
+        // person's own; the master every live one; a per-host token none.
+        if caller.host_alias.is_none() {
+            h.devices = self.reader().lock().ok().and_then(|s| {
+                let live = s.active_client_tokens().ok()?;
+                let me = caller.client.as_ref();
+                let paired = match me {
+                    Some(c) => live
+                        .iter()
+                        .filter(|t| c.person_id.is_some() && t.person_id == c.person_id)
+                        .count(),
+                    None if caller.is_master() => live.len(),
+                    None => return None,
+                };
+                Some(health::PairedDevices {
+                    paired: paired as u32,
+                    last_seen_at: me.and_then(|c| {
+                        live.iter()
+                            .find(|t| t.id == c.id)
+                            .and_then(|t| t.last_seen_at)
+                    }),
+                    last_sync_at: h.hub.as_ref().and_then(|hub| hub.reconcile.last_ok_at),
+                })
+            });
         }
         // An agent reads it: a tracker's error is the tracker's text.
         h.trackers.fence_errors();
@@ -136,11 +199,20 @@ impl FleetTools {
             // and hosts only, as in `fleet_health`; a host outside them
             // answers as an unknown one. (A per-host token is pinned to its
             // host by `usage_scope`.)
-            let scope = if caller.is_scoped() && caller.host_alias.is_none() {
-                caller.org_scope(&s).map_err(to_mcp_err)?
-            } else {
-                OrgScope::All
-            };
+            //
+            // Multi-user M1 (T7): and WHOSE sessions, which `is_scoped()`
+            // cannot ask — it is false for the master and for every paired
+            // client bound to no org, so the old `if caller.is_scoped()` here
+            // handed a second person `OrgScope::All` and `report_on` returned
+            // every private session's tmux name, friendly name, model and
+            // per-session spend. `Caller::view_scope` is the predicate that
+            // means "restricted"; its `.org` is the org half this host check
+            // still asks.
+            let view = caller.view_scope(&s).map_err(to_mcp_err)?;
+            let scope = view.org.clone();
+            // This is the org boundary, not a privacy fence: whether a named HOST exists for
+            // this caller, and a host belongs to an org. The report's own session rows are
+            // fenced by `view` (the whole scope), inside `report_on`.
             if let (Some(h), false) = (host.as_deref(), scope.is_all()) {
                 if !health::hosts_in_scope(&s, &scope)
                     .iter()
@@ -149,7 +221,7 @@ impl FleetTools {
                     return Err(mcp_err("E_NOTFOUND", format!("no host {h:?}"), None));
                 }
             }
-            usage::report_on(&s, host.as_deref(), p.since_secs, now, &scope).map_err(to_mcp_err)?
+            usage::report_on(&s, host.as_deref(), p.since_secs, now, &view).map_err(to_mcp_err)?
         };
         ok_json_compact(&report)
     }
@@ -157,10 +229,21 @@ impl FleetTools {
     // ---- hosts ----
 
     #[tool(description = "Registered hosts: reachability, claude/tmux \
-        versions, linked account.")]
-    pub(super) async fn list_hosts(&self) -> Result<CallToolResult, McpError> {
+        versions, linked account. unclaimed_sessions is how many sessions \
+        on that host nobody owns, served to a one-person fleet and to who \
+        administers the host: null means not told, 0 means none.")]
+    pub(super) async fn list_hosts(
+        &self,
+        Extension(caller): Extension<Caller>,
+    ) -> Result<CallToolResult, McpError> {
         audit("list_hosts", "");
-        ok_json_compact(&hosts::list_hosts(self.reader()).map_err(to_mcp_err)?)
+        // Scope and rows off the same handle: `list_hosts` takes the lock
+        // itself, so the scope is built here against the same reader.
+        let scope = {
+            let s = lock(self.reader()).map_err(to_mcp_err)?;
+            caller.view_scope(&s).map_err(to_mcp_err)?
+        };
+        ok_json_compact(&hosts::list_hosts(self.reader(), &scope).map_err(to_mcp_err)?)
     }
 
     #[tool(description = "Which agent hosts (transport \"agent\") have a \
@@ -185,6 +268,74 @@ impl FleetTools {
     pub(super) async fn list_accounts(&self) -> Result<CallToolResult, McpError> {
         audit("list_accounts", "");
         ok_json_compact(&hosts::list_accounts(&self.store).map_err(to_mcp_err)?)
+    }
+
+    #[tool(description = "Name a Claude account (≤ 32 characters; empty \
+        or null clears). Returns the account row.")]
+    pub(super) async fn set_account_nickname(
+        &self,
+        Parameters(args): Parameters<hosts::SetAccountNicknameArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("set_account_nickname", &format!("uuid={}", args.uuid));
+        ok_json(&hosts::set_account_nickname(args, &self.store).map_err(to_mcp_err)?)
+    }
+
+    #[tool(description = "Each Claude account's latest plan usage: 5-hour \
+        and weekly utilization with reset times, status, fetched_at. Never \
+        fetches.")]
+    pub(super) async fn account_usage(&self) -> Result<CallToolResult, McpError> {
+        audit("account_usage", "");
+        ok_json_compact(
+            &crate::service::account_usage_poll::served_account_usage(self.reader())
+                .map_err(to_mcp_err)?,
+        )
+    }
+
+    #[tool(description = "Whether starting or switching a session on \
+        host_alias under login `profile` (a profile name; omitted or \"\" for \
+        the host's own) crosses accounts.pause_at, and the login on that host \
+        with the most headroom: {pause_at_pct, chosen?, over, suggestion?, \
+        logins:[{profile?, account_uuid, used_pct?}]}. From the usage \
+        account_usage serves; never fetches. Errors: E_NOTFOUND (no such \
+        host), E_INVALID.")]
+    pub(super) async fn check_account_headroom(
+        &self,
+        Parameters(p): Parameters<crate::service::account_limits::CheckAccountHeadroomArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("check_account_headroom", &p.host_alias);
+        let now = crate::store::now_unix();
+        ok_json_compact(
+            &crate::service::account_limits::served_check_account_headroom(&p, self.reader(), now)
+                .map_err(to_mcp_err)?,
+        )
+    }
+
+    #[tool(description = "Jev's host for a new session of project_id: \
+        {host_alias, confidence_pct, run_id}, or null (off, one candidate, \
+        unsure). E_FORBIDDEN for an org-bound client.")]
+    pub(super) async fn propose_host_placement(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<crate::service::decide::host_placement::ProposeHostArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "propose_host_placement",
+            &format!("project={}", p.project_id),
+        );
+        // The proposal weighs every host and every account's use; a client
+        // bound to an org sees its own org's hosts only, so it is not asked.
+        if caller.client.as_ref().is_some_and(|c| c.org_id.is_some()) {
+            return Err(to_mcp_err(IpcError::new(
+                codes::E_FORBIDDEN,
+                "the host proposal weighs every host; a client bound to an org picks its host",
+            )));
+        }
+        let ctx = crate::service::decide::DecideCtx::jev(Arc::clone(&self.store));
+        ok_json_compact(
+            &crate::service::decide::host_placement::propose_served(&ctx, &p)
+                .await
+                .map_err(to_mcp_err)?,
+        )
     }
 
     #[tool(description = "Read or replace the fleet's quick replies: the \
@@ -218,6 +369,19 @@ impl FleetTools {
                 "quick replies are the person's: an agent token may read them, not replace them",
             )));
         }
+        // The list is fleet-wide (`ui.quick_replies`), so it is the hub
+        // owner's, like every fleet-wide setting since M1: a second
+        // person's device or an org-bound one reads it, never replaces it
+        // (review r04 F4).
+        if p.set.is_some()
+            && !(caller.is_master() || (caller.is_personal_owner && caller.is_person_device()))
+        {
+            return Err(to_mcp_err(IpcError::new(
+                codes::E_FORBIDDEN,
+                "quick replies are the hub owner's: another person's or an org's device \
+                 may read them, not replace them",
+            )));
+        }
         let entries = match p.set {
             Some(entries) => {
                 quick_replies::replace(&self.store, entries, p.expected).map_err(to_mcp_err)?
@@ -234,13 +398,49 @@ impl FleetTools {
         agent-token <alias>` on the hub). Returns the host row.")]
     pub(super) async fn add_host(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(args): Parameters<hosts::AddHostArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit("add_host", &add_host_audit_detail(&args));
+        owner_device_admin(&caller, "adding a host")?;
         let row = hosts::add_host(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
         ok_json(&row)
+    }
+
+    #[tool(description = "Install fleet-agent on a host this hub reaches \
+        over SSH and move the host onto it. Returns the job at once (see \
+        agent_installs): target, download (SHA256SUMS-checked), start, \
+        connect (no hello in 120 s: back on SSH). Hub only.")]
+    pub(super) async fn install_agent(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<agent_install::InstallAgentArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("install_agent", &format!("alias={}", args.alias));
+        owner_device_admin(&caller, "installing fleet-agent")?;
+        let ssh: Arc<dyn crate::ssh::SshExec> = self.ssh.clone();
+        let row = agent_install::start(
+            Arc::clone(&self.store),
+            ssh,
+            self.ssh.agent_registry().cloned(),
+            args,
+        )
+        .map_err(to_mcp_err)?;
+        ok_json(&row)
+    }
+
+    #[tool(description = "fleet-agent install jobs, newest first: state, \
+        step, detail.")]
+    pub(super) async fn agent_installs(
+        &self,
+        Parameters(args): Parameters<agent_install::AgentInstallsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("agent_installs", "");
+        ok_json_compact(
+            &agent_install::list(&self.store, args.alias.as_deref()).map_err(to_mcp_err)?,
+        )
     }
 
     #[tool(description = "Re-probe a host's reachability and versions. \
@@ -254,6 +454,42 @@ impl FleetTools {
             .await
             .map_err(to_mcp_err)?;
         ok_json(&row)
+    }
+
+    #[tool(description = "A host's health checklist over SSH: tmux, the \
+        agents on PATH, fleet's hooks and worker guard in \
+        ~/.claude/settings.json; base_path: whether it exists and is \
+        writable. Reads only.")]
+    pub(super) async fn check_host(
+        &self,
+        Parameters(args): Parameters<crate::service::host_check::CheckHostArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("check_host", &format!("alias={}", args.alias));
+        crate::validate::host_alias(&args.alias).map_err(to_mcp_err)?;
+        // Only a host of this fleet: the checklist is about one, and an
+        // arbitrary alias would make the hub SSH wherever it was told.
+        if lock(&self.store)
+            .map_err(to_mcp_err)?
+            .get_host_row(&args.alias)
+            .map_err(|e| to_mcp_err(e.into()))?
+            .is_none()
+        {
+            return Err(mcp_err(
+                codes::E_NOTFOUND,
+                format!("host {} not found", args.alias),
+                None,
+            ));
+        }
+        let now = crate::service::catalog::now_secs();
+        let check = crate::service::host_check::check_host_with(
+            &self.ssh,
+            &args.alias,
+            args.base_path.as_deref(),
+            now,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&check)
     }
 
     #[tool(description = "Remove a host; its sessions are orphaned. Returns \
@@ -310,9 +546,11 @@ impl FleetTools {
         (per-host bearer token) into every reachable host's ~/.claude.json \
         (a reverse SSH tunnel when the hub is loopback-only). Returns \
         per-host status; each host must restart Claude to load it. host: \
-        one alias; content_only: skills, CLAUDE.md and hooks only, no token.")]
+        one alias; content_only: skills, CLAUDE.md and hooks only, no token. \
+        The hub owner's device may run content_only for one host only.")]
     pub(super) async fn provision_hosts(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<ProvisionHostsParams>,
     ) -> Result<CallToolResult, McpError> {
         audit(
@@ -322,6 +560,7 @@ impl FleetTools {
                 p.rotate, p.host, p.content_only
             ),
         );
+        provision_scope_allowed(&caller, &p)?;
         let base = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             crate::service::hub::HubBase::read(&s).map_err(to_mcp_err)?
@@ -353,14 +592,28 @@ impl FleetTools {
         hub's link (see peer_exchange), updater is fleet-updater's (/update \
         only); fleet-admin tools stay out of a \
         client's reach. Codes are in memory only: a hub restart voids them. \
-        org_id binds it to one org (its work and sessions only). Master token \
-        only. Returns { url, code, expires_in_s, name, mode, trusted, org_id }.")]
+        org_id binds it to one org (its work and sessions only). person names \
+        whose device it is; the default is this hub's owner, and its sessions \
+        are private to that person. Master token \
+        only. Returns { url, code, expires_in_s, name, mode, trusted, org_id, \
+        person }.")]
     // The master-only gate is `enforce_admin` in `call_tool` (`pair_client`
     // is in `guard::ADMIN_TOOLS`), so no caller extractor is needed here.
     pub(super) async fn pair_client(
         &self,
         Parameters(p): Parameters<PairClientParams>,
     ) -> Result<CallToolResult, McpError> {
+        ok_json(&self.mint_pairing(p, "pair_client")?)
+    }
+
+    /// Mint a pairing code: `pair_client`'s body, shared with `org_admin {
+    /// pair_device }` (org administration phase B), which narrows the modes
+    /// before it gets here. `tool` names the audit line.
+    pub(super) fn mint_pairing(
+        &self,
+        p: PairClientParams,
+        tool: &str,
+    ) -> Result<serde_json::Value, McpError> {
         // Validate BEFORE auditing: the name reaches a `tracing` line, and a
         // refused mint must not be able to put a line break (or an ANSI
         // escape) into the hub's log through it. The validator also returns
@@ -382,6 +635,17 @@ impl FleetTools {
                 None,
             ));
         }
+        // A hub link and an updater token are nobody's device: binding
+        // either to a person would make it a reader of that person's private
+        // sessions. `Store::set_client_person` refuses both at the write, and
+        // this is the same rule at the mint, where the operator sees it.
+        if p.person.is_some() && (mode == "peer" || mode == "updater") {
+            return Err(mcp_err(
+                codes::E_VALIDATE,
+                format!("a {mode} token is not a person's device; drop person"),
+                None,
+            ));
+        }
         // `fleet-updater` sends no prompts and belongs to no org.
         if mode == "updater" && (p.trusted || p.org_id.is_some()) {
             return Err(mcp_err(
@@ -390,16 +654,29 @@ impl FleetTools {
                 None,
             ));
         }
+        // The person's NAME is validated here, at the mint, rather than at
+        // redemption: the row is created when the phone redeems the code
+        // (see `pairing::MintRequest::person`), and an operator must read a
+        // bad name at their own terminal, not minutes later on a device.
+        let person = p
+            .person
+            .as_deref()
+            .map(crate::store::validate_person_name)
+            .transpose()
+            .map_err(to_mcp_err)?;
         audit(
-            "pair_client",
+            tool,
             &format!(
-                "name={name} mode={mode} trusted={} ttl_s={:?} org_id={:?}",
-                p.trusted, p.ttl_s, p.org_id
+                "name={name} mode={mode} trusted={} ttl_s={:?} org_id={:?} person={}",
+                p.trusted,
+                p.ttl_s,
+                p.org_id,
+                person.as_deref().unwrap_or("-").escape_debug()
             ),
         );
         let ttl = pair_ttl(p.ttl_s);
-        // Both reads under one lock, released before the mint.
-        let base = {
+        // Every read under one lock, released before the mint.
+        let (base, person) = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             // A code minted for a name a live client already holds could only
             // ever fail at redemption (the partial unique index), wasting the
@@ -428,13 +705,43 @@ impl FleetTools {
                     ));
                 }
             }
-            crate::service::hub::HubBase::read(&s).map_err(to_mcp_err)?
+            // A device belongs to somebody or it is not minted at all
+            // (multi-user M1): with no `person` named, the code is for THIS
+            // HUB'S OWNER, by the owner's current name — the flag, not the
+            // name, is what `people` keys the owner on, so a renamed owner
+            // still pairs their own devices. A hub that cannot say whose it
+            // is refuses rather than minting a person-less token, which is
+            // the privilege level the milestone exists to remove.
+            //
+            // A `peer` / `updater` code is the exception and stays `None`:
+            // neither is anybody's device, and both were refused a `person`
+            // above.
+            let person = match (person, mode.as_str()) {
+                (some @ Some(_), _) => some,
+                (None, "peer" | "updater") => None,
+                (None, _) => Some(owner_name(&s).ok_or_else(|| {
+                    mcp_err(
+                        codes::E_PROVISION,
+                        "this hub has no personal owner, so a device cannot be paired to \
+                         anybody; run fleet-hub init (or name a person explicitly)",
+                        None,
+                    )
+                })?),
+            };
+            (
+                crate::service::hub::HubBase::read(&s).map_err(to_mcp_err)?,
+                person,
+            )
         };
-        let req = self
-            .guards
-            .pairings
-            .mint_bound(&name, &mode, p.trusted, p.org_id, ttl);
-        ok_json(&serde_json::json!({
+        let req = self.guards.pairings.mint(crate::mcp::pairing::MintRequest {
+            name: &name,
+            mode: &mode,
+            trusted: p.trusted,
+            org_id: p.org_id,
+            person: person.as_deref(),
+            ttl,
+        });
+        Ok(serde_json::json!({
             "url": crate::mcp::pair_url(&base.url, &req.code),
             "code": req.code,
             "expires_in_s": ttl.as_secs(),
@@ -442,6 +749,7 @@ impl FleetTools {
             "mode": req.mode,
             "trusted": req.trusted,
             "org_id": req.org_id,
+            "person": req.person,
         }))
     }
 
@@ -449,7 +757,7 @@ impl FleetTools {
         The token digest is never returned: a token exists in plaintext only \
         in the /pair response that minted it. Read-only but master token \
         only (it names every paired device). Rows: { id, name, mode, \
-        created_at, last_seen_at, revoked_at, trusted_at }.")]
+        created_at, last_seen_at, revoked_at, trusted_at, org_id, person_id }.")]
     pub(super) async fn list_clients(
         &self,
         Parameters(p): Parameters<ListClientsParams>,
@@ -636,11 +944,328 @@ impl FleetTools {
         ok_json_compact(&out)
     }
 
+    // ---- confirmations on the owner's device (redesign step 9.2) ----
+    //
+    // A call that must wait for a person (the operator's starts and kills,
+    // M9.7) parks a nonce in `guards.confirms`. On a desktop its own dialog
+    // and Control's cards answer it; on a hub nobody was there to, so these
+    // two let the owner's paired device list and answer the hub's queue.
+    // The operator never answers its own request.
+
+    #[tool(description = "Calls waiting for your OK (the agent's starts \
+        and kills), oldest first.")]
+    pub(super) async fn mcp_confirms(
+        &self,
+        Extension(caller): Extension<Caller>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("mcp_confirms", "");
+        refuse_operator_answer(&caller)?;
+        ok_json_compact(&self.guards.confirms.pending())
+    }
+
+    #[tool(description = "Approve or deny one waiting call by nonce; \
+        false if already answered or expired.")]
+    pub(super) async fn answer_mcp_confirm(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<AnswerMcpConfirmParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("answer_mcp_confirm", &format!("approved={}", p.approved));
+        refuse_operator_answer(&caller)?;
+        let answered = self.guards.confirms.resolve(&p.nonce, p.approved);
+        if answered {
+            if let Ok(s) = lock(&self.store) {
+                s.bus_confirm_changed();
+            }
+        }
+        ok_json_compact(&answered)
+    }
+
+    #[tool(description = "What the agent handed on, newest first: \
+        prompts and tasks sent to sessions, new sessions, missions, tasks \
+        and proposed trees, each with its target's state now.")]
+    pub(super) async fn control_handoffs(
+        &self,
+        Parameters(p): Parameters<ControlHandoffsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("control_handoffs", "");
+        ok_json_compact(
+            &crate::service::control_handoffs::list(&self.store, p.limit).map_err(to_mcp_err)?,
+        )
+    }
+
+    // ---- Control routing (redesign step 9.9, Jev K2) ----
+
+    #[tool(description = "Where a message just sent in Control goes \
+        (propose {text}), or record the person's pick (follow {run_id, \
+        chosen}).")]
+    pub(super) async fn control_route(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<ControlRouteParams>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::service::decide::{control_route, DecideCtx};
+        audit(
+            "control_route",
+            &format!("action={}", p.action.escape_debug()),
+        );
+        refuse_operator_answer(&caller)?;
+        match p.action.as_str() {
+            "propose" => {
+                let text = p.text.unwrap_or_default();
+                let scope = {
+                    let s = lock(&self.store).map_err(to_mcp_err)?;
+                    caller.view_scope(&s).map_err(to_mcp_err)?
+                };
+                let ctx = DecideCtx::jev(std::sync::Arc::clone(&self.store));
+                ok_json_compact(&control_route::propose(&ctx, &scope, &text).await)
+            }
+            "follow" => {
+                let (Some(run_id), Some(chosen)) = (p.run_id, p.chosen) else {
+                    return Err(mcp_err("E_INVALID", "follow needs run_id and chosen", None));
+                };
+                let s = lock(&self.store).map_err(to_mcp_err)?;
+                let scope = caller.view_scope(&s).map_err(to_mcp_err)?;
+                let marked =
+                    control_route::follow(&s, &scope, run_id, &chosen, crate::store::now_unix())
+                        .map_err(to_mcp_err)?;
+                ok_json_compact(&marked)
+            }
+            other => Err(mcp_err(
+                "E_INVALID",
+                format!("control_route's action is propose or follow, not {other:?}"),
+                None,
+            )),
+        }
+    }
+
+    // ---- New session: resume or start fresh (gap plan G7.10, Jev N2) ----
+
+    #[tool(description = "Whether a new session on a work key should \
+        resume a past session or start fresh (propose {key}), or record \
+        the person's pick (follow {key, chosen}).")]
+    pub(super) async fn resume_or_new(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<ResumeOrNewParams>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::service::decide::{resume_or_new, DecideCtx};
+        audit(
+            "resume_or_new",
+            &format!("action={}", p.action.escape_debug()),
+        );
+        refuse_operator_answer(&caller)?;
+        let scope = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            caller.view_scope(&s).map_err(to_mcp_err)?
+        };
+        match p.action.as_str() {
+            "propose" => {
+                let ctx = DecideCtx::jev(std::sync::Arc::clone(&self.store));
+                ok_json_compact(
+                    &resume_or_new::propose_for_key(&ctx, &scope, &p.key)
+                        .await
+                        .map_err(to_mcp_err)?,
+                )
+            }
+            "follow" => {
+                let Some(chosen) = p.chosen else {
+                    return Err(mcp_err("E_INVALID", "follow needs chosen", None));
+                };
+                let marked = resume_or_new::follow_for_key(
+                    &self.store,
+                    &scope,
+                    &p.key,
+                    &chosen,
+                    crate::store::now_unix(),
+                )
+                .map_err(to_mcp_err)?;
+                ok_json_compact(&marked)
+            }
+            other => Err(mcp_err(
+                "E_INVALID",
+                format!("resume_or_new's action is propose or follow, not {other:?}"),
+                None,
+            )),
+        }
+    }
+
     #[tool(description = "The settings page specs, data source shapes, \
         resources and page actions a device renders.")]
     pub(super) async fn list_pages(&self) -> Result<CallToolResult, McpError> {
         audit("list_pages", "");
         ok_json_compact(&crate::pages::bundle())
+    }
+
+    // ---- organisation administration (phase B) ----
+
+    #[tool(description = "Administer the company: orgs (work_admin's org \
+        actions), devices (list, pair_device → code + QR, revoke, trust, bind, \
+        hand over, grant a catalog), people and members (roles, a member's \
+        grants). Hub owner's device: all; an org admin's: their org. Changes \
+        need a trusted full device, never locking out the one in use.")]
+    pub(super) async fn org_admin(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<crate::service::org_admin::OrgAdminArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::service::org_admin::{self as oa, Action, Me};
+        audit("org_admin", &args.audit_summary());
+        let action = Action::parse(&args.action).map_err(to_mcp_err)?;
+        if !action.is_read() {
+            org_admin_writer(&caller)?;
+        }
+        // Phase D: whose authority this device carries — the hub owner's
+        // unbound device for the fleet, an org admin's for their org.
+        let authority = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            oa::authority_for(
+                &s,
+                caller.is_personal_owner && caller.is_person_device(),
+                caller.person(),
+                caller.client.as_ref().and_then(|c| c.org_id),
+            )
+            .map_err(to_mcp_err)?
+        }
+        .ok_or_else(|| {
+            mcp_err(
+                "E_FORBIDDEN",
+                "org_admin is for the hub owner's own device, or an org admin's for \
+                 their org; this device administers no org",
+                None,
+            )
+        })?;
+        let me = Me {
+            device: caller.client.as_ref().map(|c| c.name.as_str()),
+            person: caller.person(),
+            authority,
+        };
+        if action == Action::PairDevice {
+            return ok_json(&self.pair_device(args, authority)?);
+        }
+        let out = oa::run(&args, &self.store, me).map_err(to_mcp_err)?;
+        ok_json_compact(&out)
+    }
+
+    /// `org_admin { pair_device }`: a person's device only — never a peer
+    /// link or an updater token, which stay `fleet-hub pair --mode …` — and
+    /// the answer carries the URL's QR as rows of `1` (dark) and `0`, so the
+    /// desktop draws it without a QR library of its own.
+    fn pair_device(
+        &self,
+        args: crate::service::org_admin::OrgAdminArgs,
+        authority: crate::service::org_admin::Authority,
+    ) -> Result<serde_json::Value, McpError> {
+        let mode = args.mode.clone().unwrap_or_else(|| "full".into());
+        if !matches!(mode.as_str(), "full" | "answer" | "readonly") {
+            return Err(mcp_err(
+                codes::E_VALIDATE,
+                format!(
+                    "pair_device pairs a person's device (full, answer or readonly), not {mode:?}; \
+                     a peer link or an updater token is paired on the hub (fleet-hub pair --mode)"
+                ),
+                None,
+            ));
+        }
+        let org_id = match (args.org_id, args.org.as_deref()) {
+            (Some(id), _) => Some(id),
+            (None, Some(name)) if !name.trim().is_empty() => {
+                let s = lock(&self.store).map_err(to_mcp_err)?;
+                Some(
+                    s.list_orgs()
+                        .map_err(to_mcp_err)?
+                        .into_iter()
+                        .find(|o| o.name == name.trim())
+                        .ok_or_else(|| {
+                            mcp_err(codes::E_NOTFOUND, format!("no org named {name:?}"), None)
+                        })?
+                        .id,
+                )
+            }
+            _ => None,
+        };
+        // Phase D: an org admin pairs a device for a member of their org, and
+        // it is fenced to that org.
+        let org_id = match authority {
+            crate::service::org_admin::Authority::Fleet => org_id,
+            crate::service::org_admin::Authority::Org { org, .. } => {
+                if org_id.is_some_and(|o| o != org) {
+                    return Err(mcp_err(
+                        "E_FORBIDDEN",
+                        "an org admin pairs devices for their own org only",
+                        None,
+                    ));
+                }
+                let person = args
+                    .person
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                    .ok_or_else(|| {
+                        mcp_err(
+                            codes::E_INVALID,
+                            "pair_device needs person: whose device, a member of your org",
+                            None,
+                        )
+                    })?;
+                let s = lock(&self.store).map_err(to_mcp_err)?;
+                let found = s.get_person_by_name(person).map_err(to_mcp_err)?;
+                let member = match &found {
+                    Some(p) => {
+                        s.personal_owner_id().map_err(to_mcp_err)? != Some(p.id)
+                            && s.org_role(org, p.id).map_err(to_mcp_err)?.is_some()
+                    }
+                    None => false,
+                };
+                // An org admin pairs a member's first device. A second
+                // device of someone who already has one would be a token
+                // that is that person, their private sessions included;
+                // that is the hub owner's (review r04 F1).
+                if let Some(p) = found.filter(|_| member) {
+                    if crate::service::org_admin::has_identity_beyond(&s, p.id, org)
+                        .map_err(to_mcp_err)?
+                    {
+                        return Err(mcp_err(
+                            "E_FORBIDDEN",
+                            format!(
+                                "{person:?} already has a device or belongs to another org; \
+                                 the hub owner pairs their next device"
+                            ),
+                            None,
+                        ));
+                    }
+                }
+                if !member {
+                    return Err(mcp_err(
+                        "E_FORBIDDEN",
+                        format!(
+                            "{person:?} is not a member of your org; add them first (set_member)"
+                        ),
+                        None,
+                    ));
+                }
+                Some(org)
+            }
+        };
+        let name = args
+            .device
+            .clone()
+            .or(args.name.clone())
+            .ok_or_else(|| mcp_err(codes::E_INVALID, "pair_device needs device", None))?;
+        let mut out = self.mint_pairing(
+            PairClientParams {
+                name,
+                mode: Some(mode),
+                ttl_s: args.ttl_s,
+                trusted: args.trusted.unwrap_or(false),
+                org_id,
+                person: args.person.clone().filter(|p| !p.trim().is_empty()),
+            },
+            "org_admin",
+        )?;
+        let url = out["url"].as_str().unwrap_or_default().to_string();
+        out["qr"] = qr_rows(&url)?;
+        Ok(out)
     }
 
     // ---- guides (declarative pages, layout guide) ----
@@ -749,6 +1374,85 @@ impl SettingsWho {
     }
 }
 
+/// WHOSE a thing this caller creates is (multi-user M1): the `people` row id
+/// to stamp on a session it starts, a grant it makes, a claim it files.
+///
+/// A paired device carries its person on the connection
+/// ([`Caller::person`]); the MASTER does not, because the master token is
+/// not a device — its person is whoever owns this hub, which is a store
+/// read. This is the one place that mapping is made, so "the master is the
+/// owner" is written down once rather than re-derived per call site.
+///
+/// `None` has exactly one meaning everywhere it is returned — **nobody** —
+/// and it is never a substitute for somebody:
+///
+/// - a per-host token is an agent on a machine, not a person;
+/// - a device the migration's backfill did not reach is bound to nobody;
+/// - a hub whose `people` row is missing cannot say who its owner is
+///   (`Store::personal_owner_id`'s fail-closed rule, T1).
+///
+/// The create paths leave the row UNCLAIMED on `None` rather than
+/// attributing it to a guess: an unowned row leaks no metadata and can be
+/// claimed later, while a row attributed to the wrong person cannot be taken
+/// back.
+/// Callers: the create paths (`new_session`, `new_shell_session`,
+/// `new_bg_session`, `dispatch_task`'s fallback worker owner, `work_link`'s
+/// `start` and `resume`) and `orchestration::require_conversation_person`,
+/// the gate that stands in front of `work_link { resume | summarize }`.
+pub(super) fn owner_for(caller: &Caller, s: &Store) -> Option<i64> {
+    match caller.person() {
+        some @ Some(_) => some,
+        // Not `is_master()` alone: a per-host token also carries no person,
+        // and it must stay `None` rather than inherit the hub's owner.
+        // A named token (G2.8) is the owner's too, whatever its scope.
+        None if caller.speaks_for_owner() => s.personal_owner_id().ok().flatten(),
+        None => None,
+    }
+}
+
+/// Who or what a start over this connection records as the session's
+/// origin (migration 124): the operator's own client, a per-host token
+/// (with the session its pane proves, when it proves one), or else the
+/// person behind the connection, as [`owner_for`] resolves them.
+///
+/// A store read that fails degrades the REFERENCE, never the kind: the
+/// origin of an operator start is `operator` even when its row cannot be
+/// read.
+pub(super) fn origin_for(caller: &Caller, s: &Store) -> crate::store::SessionOrigin {
+    use crate::store::SessionOrigin;
+    if caller.is_operator() {
+        let id = crate::service::operator::operator_ref(s).and_then(|r| {
+            s.get_session(&r.tmux_name, &r.host_alias)
+                .ok()
+                .flatten()
+                .map(|row| row.id)
+        });
+        return SessionOrigin::operator(id);
+    }
+    if let Some(alias) = caller.host_alias.as_deref() {
+        let proven = caller.pane.as_deref().and_then(|pane| {
+            s.find_session_by_pane(alias, pane)
+                .ok()
+                .flatten()
+                .map(|row| row.id)
+        });
+        return SessionOrigin::token(proven);
+    }
+    SessionOrigin::person(owner_for(caller, s))
+}
+
+/// The hub's personal owner by NAME, or `None` when it has none.
+///
+/// `pair_client` needs the name rather than the id because a pairing code
+/// carries a person's name (the row is created at redemption — see
+/// `pairing::MintRequest::person`), and it must be the owner's CURRENT name:
+/// `people.is_personal_owner` is the flag the owner is keyed on, and the
+/// name beside it is explicitly renameable.
+fn owner_name(s: &Store) -> Option<String> {
+    let id = s.personal_owner_id().ok().flatten()?;
+    Some(s.get_person(id).ok().flatten()?.name)
+}
+
 pub(super) fn settings_actor(caller: &Caller) -> SettingsWho {
     if caller.is_master() {
         return SettingsWho::ControlApi;
@@ -765,6 +1469,21 @@ pub(super) fn settings_actor(caller: &Caller) -> SettingsWho {
 /// proposal) is the master's, or a trusted device's (declarative pages P6):
 /// trust is the operator vouching that the device is a person's own
 /// (`fleet-hub client trust`). An agent's client proposes instead.
+/// The operator asks; a person answers. `Access::PersonDevice` already
+/// keeps the operator's token out (it has no person), and this says so
+/// where the rule matters, so a later access change cannot let the agent
+/// approve itself.
+fn refuse_operator_answer(caller: &Caller) -> Result<(), McpError> {
+    if caller.is_operator() {
+        return Err(mcp_err(
+            "E_FORBIDDEN",
+            "the agent asks for confirmation; a person answers it",
+            None,
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn settings_writer(caller: &Caller, who: &SettingsWho) -> Result<(), McpError> {
     match who {
         SettingsWho::ControlApi => Ok(()),
@@ -804,6 +1523,89 @@ pub(super) fn settings_writer(caller: &Caller, who: &SettingsWho) -> Result<(), 
     }
 }
 
+/// An `org_admin` change: the master, or a trusted `full` device — the
+/// tool's `Access::PersonDevice` row already made it the hub owner's own
+/// device bound to no org. A readonly or untrusted device lists.
+pub(super) fn org_admin_writer(caller: &Caller) -> Result<(), McpError> {
+    if caller.is_master() || (caller.is_trusted_client() && caller.mode == TokenMode::Full) {
+        return Ok(());
+    }
+    Err(mcp_err(
+        "E_FORBIDDEN",
+        format!(
+            "this device may read the company's orgs, devices and people; to change them, \
+             the hub's operator trusts it (a full device): fleet-hub client trust {}",
+            caller.client.as_ref().map_or("<name>", |c| c.name.as_str())
+        ),
+        None,
+    ))
+}
+
+/// `provision_hosts` reaches the hub owner's own device (`Access::Person`)
+/// for one thing: refreshing ONE host's content, the secret-free pass the hub
+/// also runs by itself for every stale host. A provisioning of every host,
+/// or one that mints tokens (a full run, or `rotate`), stays the master's.
+pub(super) fn provision_scope_allowed(
+    caller: &Caller,
+    p: &ProvisionHostsParams,
+) -> Result<(), McpError> {
+    if caller.is_master() || (p.content_only && !p.rotate && p.host.is_some()) {
+        return Ok(());
+    }
+    Err(mcp_err(
+        "E_FORBIDDEN",
+        "a device may only refresh one host's content (host + content_only); provisioning \
+         every host, minting tokens or rotating them is the hub operator's: fleet-hub \
+         provision [--host <alias>] [--rotate]",
+        None,
+    ))
+}
+
+/// Fleet administration from the owner's phone (Martin, 2026-10-08:
+/// "Owner's phone"; trackers "Allow on phone"): `add_host`,
+/// `install_agent` and `work_admin`'s tracker actions. Their
+/// `Access::Person` row already made the caller the master or the hub
+/// owner's own device bound to no org; a device must also be trusted and
+/// `full`, as for `org_admin`. Credentials it sends are stored on the hub
+/// and never answered back.
+pub(super) fn owner_device_admin(caller: &Caller, what: &str) -> Result<(), McpError> {
+    if caller.is_master() || (caller.is_trusted_client() && caller.mode == TokenMode::Full) {
+        return Ok(());
+    }
+    Err(mcp_err(
+        "E_FORBIDDEN",
+        format!(
+            "{what} from a device needs the hub's operator to trust it (a full device): \
+             fleet-hub client trust {}",
+            caller.client.as_ref().map_or("<name>", |c| c.name.as_str())
+        ),
+        None,
+    ))
+}
+
+/// A QR code of `text` as rows of `1` (dark) / `0`, no quiet zone: the
+/// desktop draws it as an SVG of squares.
+fn qr_rows(text: &str) -> Result<serde_json::Value, McpError> {
+    let code = qrcode::QrCode::new(text.as_bytes()).map_err(|e| {
+        mcp_err(
+            codes::E_INTERNAL,
+            format!("could not encode the pairing URL as a QR code: {e}"),
+            None,
+        )
+    })?;
+    let width = code.width();
+    let rows: Vec<String> = code
+        .to_colors()
+        .chunks(width)
+        .map(|row| {
+            row.iter()
+                .map(|c| if *c == qrcode::Color::Dark { '1' } else { '0' })
+                .collect()
+        })
+        .collect();
+    Ok(serde_json::json!(rows))
+}
+
 /// Deciding or removing a guide is a person's, as a settings write is:
 /// the master or a trusted device. An agent — a host's own session with
 /// the fleet-guides skill — is told what it may do instead.
@@ -834,15 +1636,16 @@ fn pair_ttl(ttl_s: Option<u64>) -> std::time::Duration {
 
 /// The `add_host` audit line's identifying detail. A transport change is
 /// exactly the kind of thing the audit trail should carry, so it rides
-/// alongside `alias`/`ssh_alias` — defaulted the same way `add_host` itself
-/// resolves an unset transport, so the log always names the effective value.
+/// alongside `alias`/`ssh_alias` — but only when the caller named one: an
+/// unset transport writes none (a new row takes the column's `ssh`, a re-add
+/// keeps the row's own, possibly `agent`), so naming `ssh` there would log a
+/// change that did not happen (r18).
 fn add_host_audit_detail(args: &hosts::AddHostArgs) -> String {
-    format!(
-        "alias={} ssh_alias={} transport={}",
-        args.alias,
-        args.ssh_alias,
-        args.transport.as_deref().unwrap_or("ssh")
-    )
+    let mut detail = format!("alias={} ssh_alias={}", args.alias, args.ssh_alias);
+    if let Some(t) = args.transport.as_deref() {
+        detail.push_str(&format!(" transport={t}"));
+    }
+    detail
 }
 
 #[cfg(test)]
@@ -877,15 +1680,14 @@ mod tests {
     }
 
     #[test]
-    fn add_host_audit_detail_names_the_default_transport_when_unset() {
+    fn add_host_audit_detail_names_no_transport_when_unset() {
+        // Unset keeps the row's transport (a re-add of an agent host stays
+        // agent), so the line must not claim `transport=ssh`.
         let args = hosts::AddHostArgs {
             alias: "h".into(),
             ssh_alias: "h.example".into(),
             transport: None,
         };
-        assert_eq!(
-            add_host_audit_detail(&args),
-            "alias=h ssh_alias=h.example transport=ssh"
-        );
+        assert_eq!(add_host_audit_detail(&args), "alias=h ssh_alias=h.example");
     }
 }

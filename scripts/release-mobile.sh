@@ -14,6 +14,10 @@
 # It refuses, rather than tagging something it cannot vouch for, when:
 #   - claude-fleet has no tag vX.Y.Z on GitHub yet (push it first — the
 #     phone release follows the fleet one, never leads it);
+#   - fleet-mobile's `main` head does not accept the hub wire-contract
+#     revision the claude-fleet tag ships (its MIN/MAX_HUB_CONTRACT must
+#     cover CONTRACT_REVISION) — fleet-mobile 0.4.8 went out at MAX 7
+#     beside a revision-8 hub and refused it as "this app is too old";
 #   - fleet-mobile's CI has not passed on its `main` head;
 #   - fleet-mobile already has vX.Y.Z at a DIFFERENT commit. The same
 #     commit is a no-op, so a re-run after a network hiccup is safe.
@@ -57,6 +61,12 @@ if [[ -n "$EXISTING" ]]; then
   echo "$MOBILE_REPO $TAG already points at main ${HEAD_SHA:0:12}; nothing to do"
   exit 0
 fi
+
+# The phone must accept the hub this release ships. Both numbers are read at
+# the exact refs being paired — the claude-fleet tag and the fleet-mobile
+# commit about to be tagged — never from a local checkout, which can be on
+# any branch.
+bash "$(dirname "${BASH_SOURCE[0]}")/check-mobile-contract.sh" --hub-ref "$TAG" --mobile-ref "$HEAD_SHA"
 
 # The newest CI run for exactly this commit — an older green run on another
 # commit says nothing about this one.

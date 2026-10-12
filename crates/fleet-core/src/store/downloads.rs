@@ -22,6 +22,11 @@ pub struct DownloadRow {
     /// the session row is gone. Never on the wire.
     #[serde(skip)]
     pub org_id: Option<i64>,
+    /// Whose file it is: the session's owner when it was sent (migration
+    /// 148), what the scope check reads once the session row is gone.
+    /// Never on the wire.
+    #[serde(skip)]
+    pub owner_person_id: Option<i64>,
     pub path: String,
     pub name: String,
     pub size: i64,
@@ -43,6 +48,16 @@ pub struct DownloadRow {
     /// by the service, never stored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<i64>,
+    /// Bytes copied so far while `fetching`; filled in by the service from
+    /// the copy in flight, never stored. Absent from a hub that predates it,
+    /// and then a client shows the copy without a count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetched_bytes: Option<i64>,
+    /// A person paused the copy (gap plan G7.15, Toasts board "Pause"):
+    /// filled in by the service while `fetching`, never stored. Absent when
+    /// it runs, and from a hub that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused: Option<bool>,
 }
 
 /// A download to insert, in state `fetching`.
@@ -59,7 +74,7 @@ pub struct NewDownload<'a> {
 }
 
 const COLS: &str = "id, at, host_alias, session_id, session_name, org_id, path, name, size, \
-                    state, error, sha256, source, note, ready_at, downloaded_at";
+                    state, error, sha256, source, note, ready_at, downloaded_at, owner_person_id";
 
 fn row(r: &rusqlite::Row<'_>) -> Result<DownloadRow> {
     Ok(DownloadRow {
@@ -79,7 +94,10 @@ fn row(r: &rusqlite::Row<'_>) -> Result<DownloadRow> {
         note: r.get(13)?,
         ready_at: r.get(14)?,
         downloaded_at: r.get(15)?,
+        owner_person_id: r.get(16)?,
         expires_at: None,
+        fetched_bytes: None,
+        paused: None,
     })
 }
 
@@ -91,8 +109,9 @@ impl Store {
     pub fn insert_download(&self, d: &NewDownload<'_>) -> Result<DownloadRow> {
         self.conn.execute(
             "INSERT INTO downloads (at, host_alias, session_id, session_name, org_id, path,
-                                    name, size, source, note)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                                    name, size, source, note, owner_person_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                     (SELECT owner_person_id FROM sessions WHERE id = ?3))",
             rusqlite::params![
                 now_unix(),
                 d.host_alias,
@@ -142,6 +161,12 @@ impl Store {
             self.download_changed(id);
         }
         Ok(n == 1)
+    }
+
+    /// A `fetching` row copied another slice: the row did not change, but
+    /// its `fetched_bytes` did, so clients re-read it.
+    pub fn note_download_progress(&self, id: i64) {
+        self.download_changed(id);
     }
 
     /// A `fetching` row failed with `error`.

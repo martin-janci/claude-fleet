@@ -63,6 +63,14 @@ describe('hostChipUsage', () => {
     expect(hostChipUsage(hostBy('mefistos'), ADMIN, fiveLeft(ADMIN.uuid, 8), NOW, L, TZ)).toBe('▲ 8% left · resets 15:10');
   });
 
+  // Review r05: LIMIT on the raw figure, as the pill, the header and the
+  // Blocked classifier decide it. 99.6% used rounds to 0% left but is low.
+  it('99.6% used reads 0% left and low, never LIMIT; 100% reads LIMIT', () => {
+    expect(hostChipUsage(hostBy('mefistos'), ADMIN, fiveLeft(ADMIN.uuid, 0.4), NOW, L, TZ)).toBe('▲ 0% left · resets 15:10');
+    expect(hostChipUsage(hostBy('mefistos'), ADMIN, fiveLeft(ADMIN.uuid, 0), NOW, L, TZ)).toBe('■ LIMIT · resets 15:10');
+    expect(lowHeadroomWarning(hostBy('mefistos'), hostsAll, ADMIN, fiveLeft(ADMIN.uuid, 0.4), NOW, L, TZ)).toMatch(/^▲ .* has 0% of its 5-hour window left/);
+  });
+
   it('a host with no account says so; an offline host keeps offline', () => {
     expect(hostChipUsage(host('nas'), null, null, NOW)).toBe('no account');
     expect(hostChipUsage(hostBy('claude-fleet-htz'), WORK, snapshot(WORK.uuid), NOW)).toBe('offline');

@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Accounts forms</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0;background:#0f0f0f}
+a{color:var(--accent,#60a5fa);text-decoration:none}a:hover{color:#93c5fd}
+.app{--bg:#0f0f0f;--pane:#161616;--raise:#1c1c1c;--hover:#232323;--fg:#ededed;--fg2:#b4b4b4;--muted:#8f8f8f;--line:#2a2a2a;--line2:#3a3a3a;--accent:#60a5fa;--accent-soft:#1c2735;--working:#7fa3ff;--waiting:#d29b4a;--failed:#ef5350;--done:#5dd17a;--idle:#a09fa8;--waiting-soft:color-mix(in srgb,var(--waiting) 13%,transparent);--waiting-faint:color-mix(in srgb,var(--waiting) 7%,transparent);--waiting-line:color-mix(in srgb,var(--waiting) 45%,transparent);--failed-soft:color-mix(in srgb,var(--failed) 12%,transparent);--failed-line:color-mix(in srgb,var(--failed) 35%,transparent);--done-soft:color-mix(in srgb,var(--done) 12%,transparent);--danger-fill:#c62828;--on-danger:#ffffff;--on-waiting:#1a1205;--on-accent:#0b1220;--code:#56b6c2;--syn-str:#98c379;--syn-kw:#c678dd;--chip-bg:#232323;--count-bg:#262626;--track:#2a2a2a;--sunk:#202020;--org-1:#60a5fa;--org-2:#5dd17a;--org-3:#c084fc;--org-4:#a09fa8;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;color:var(--fg);background:var(--bg);font-size:13px;line-height:18px}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+.meta{font-size:12px;line-height:16px;color:var(--muted)}
+.tnum{font-variant-numeric:tabular-nums}
+.btn{height:24px;padding:0 8px;border-radius:4px;border:1px solid var(--line2);background:var(--raise);color:var(--fg);font:inherit;font-size:12px;display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+.btn.quiet{background:transparent;border-color:transparent;color:var(--fg2)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:500}
+.btn.danger{background:transparent;border-color:transparent;color:var(--failed)}
+.kbd{font-size:11px;line-height:14px;padding:0 4px;border-radius:3px;border:1px solid var(--line2);color:var(--muted)}
+.chip{height:20px;padding:0 6px;border-radius:4px;font-size:11px;font-weight:500;display:inline-flex;align-items:center;gap:4px;background:var(--chip-bg);color:var(--fg2)}
+.dot{width:8px;height:8px;border-radius:50%;flex:none}
+.sec{font-size:11px;font-weight:500;color:var(--muted);display:flex;align-items:center;gap:6px;padding:12px 12px 4px}
+.count{font-size:11px;font-weight:500;padding:0 5px;border-radius:4px;background:var(--count-bg);color:var(--fg2);line-height:16px}
+.row{display:flex;gap:10px;padding:7px 12px;border-radius:6px;margin:0 6px;align-items:flex-start}
+.row:hover{background:var(--hover)}
+.rtitle{font-size:13px;line-height:18px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rline{font-size:12px;line-height:16px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rail a{display:flex;flex-direction:column;align-items:center;gap:3px;padding:8px 0;border-radius:6px;color:var(--muted);font-size:11px;line-height:14px;position:relative}
+.rail a:hover{background:var(--hover);color:var(--fg)}
+.tab{font-size:13px;color:var(--muted);padding:10px 0;border-bottom:2px solid transparent}
+.tab.on{color:var(--fg);border-bottom-color:var(--accent);font-weight:500}
+.kv{display:grid;grid-template-columns:84px minmax(0,1fr);gap:6px 10px;font-size:12px;line-height:16px}
+.kv dt{color:var(--muted)}.kv dd{margin:0;color:var(--fg);min-width:0}
+.bar{height:4px;border-radius:2px;background:var(--track);overflow:hidden}
+.bar span{display:block;height:100%;border-radius:2px}
+
+:focus-visible{outline:2px solid var(--accent);outline-offset:1px;border-radius:4px}
+.btn.sm{height:22px;padding:0 6px}.btn.lg{height:28px;padding:0 10px}
+.btn.danger-fill{background:var(--danger-fill);border-color:var(--danger-fill);color:var(--on-danger);font-weight:500}
+.chip.waiting{background:var(--waiting-soft);color:var(--waiting)}.chip.done{background:var(--done-soft);color:var(--done)}
+.chip.failed{background:var(--failed-soft);color:var(--failed)}.chip.accent{background:var(--accent-soft);color:var(--fg)}
+.banner{border:1px solid var(--line);border-radius:6px;padding:10px 12px;display:flex;gap:10px;align-items:center}
+.banner.failed{background:var(--failed-soft);border-color:var(--failed-line)}.banner.waiting{background:var(--waiting-faint);border-color:var(--waiting-line)}
+.row[aria-selected="true"]{box-shadow:inset 2px 0 0 var(--accent)}
+.swatch{width:8px;height:8px;border-radius:50%;flex:none;display:inline-block}
+.st{display:inline-flex;width:8px;height:8px;flex:none}
+.ai{display:inline-flex;align-items:center;gap:4px;font-size:11px;line-height:16px;font-weight:500;color:var(--accent);padding:0 6px;border-radius:4px;background:var(--accent-soft);white-space:nowrap}
+.ai::before{content:"✦";font-size:10px}
+.ai.draft{color:var(--fg2);background:var(--chip-bg)}.ai.draft::before{content:"✎"}
+.why{font-size:12px;line-height:16px;color:var(--muted);display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.why a{color:var(--accent)}
+.ai-pre{box-shadow:inset 0 0 0 1px var(--accent);border-radius:4px}
+
+.fx .dlg{background:var(--raise);border:1px solid var(--line2);border-radius:10px;box-shadow:0 16px 50px rgba(0,0,0,.55);overflow:hidden;display:flex;flex-direction:column;min-width:0}
+.fx .dlg.inl{box-shadow:none;background:var(--pane);border-color:var(--line)}
+.fx .dh{padding:12px 14px;border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:4px}
+.fx .dh strong{font-size:13px;font-weight:600}
+.fx .db{padding:12px 14px;display:flex;flex-direction:column;gap:10px}
+.fx .df{display:flex;gap:8px;padding:10px 14px;border-top:1px solid var(--line);align-items:center;flex-wrap:wrap}
+.fx .df .sp{flex:1 1 auto}
+.fx .cell{display:flex;flex-direction:column;gap:6px;min-width:0}
+.fx .caph{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.fx .caph b{font-size:13px;font-weight:600}
+.fx .where{font-size:11px;line-height:16px;padding:0 6px;border-radius:4px;background:var(--chip-bg);color:var(--fg2);white-space:nowrap}
+.fx .where.new{background:var(--accent-soft);color:var(--accent)}
+.fx .capn{font-size:12px;line-height:16px;color:var(--muted)}
+.fx label.f,.fx .f{display:flex;flex-direction:column;gap:4px;font-size:12px;line-height:16px;color:var(--fg2);min-width:0}
+.fx .f .fl{display:flex;align-items:baseline;gap:6px}
+.fx .f .opt-l{color:var(--muted);font-size:11px}
+.fx .inp{height:28px;border:1px solid var(--line2);border-radius:4px;background:var(--pane);color:var(--fg);font:inherit;font-size:13px;padding:0 8px;width:100%;box-sizing:border-box;display:flex;align-items:center;gap:6px}
+.fx textarea.inp{height:auto;padding:6px 8px;resize:none;line-height:18px;display:block}
+.fx .inp.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+.fx .inp.ph{color:var(--muted)}
+.fx .inp.err{border-color:var(--failed)}
+.fx .inp.focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft)}
+.fx .inp[disabled]{opacity:.55}
+.fx .help{font-size:12px;line-height:16px;color:var(--muted)}
+.fx .errt{font-size:12px;line-height:16px;color:var(--failed)}
+.fx .okt{font-size:12px;line-height:16px;color:var(--done)}
+.fx .sel{width:100%;justify-content:space-between;height:28px;font-size:13px;background:var(--pane)}
+.fx .seg{display:flex;gap:6px;flex-wrap:wrap}
+.fx .opt{height:24px;padding:0 8px;border-radius:4px;border:1px solid var(--line2);font:inherit;font-size:12px;display:inline-flex;align-items:center;gap:6px;color:var(--fg2);background:transparent;cursor:pointer}
+.fx .opt.on{border-color:var(--accent);background:var(--accent-soft);color:var(--fg)}
+.fx .tgr{display:flex;align-items:center;gap:10px;font-size:13px;color:var(--fg)}
+.fx .tgr .tl{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:2px}
+.fx .tg{width:28px;height:16px;border-radius:8px;background:var(--accent);position:relative;flex:none;border:0;padding:0;cursor:pointer}
+.fx .tg::after{content:"";position:absolute;right:2px;top:2px;width:12px;height:12px;border-radius:50%;background:var(--on-accent)}
+.fx .tg.off{background:var(--track)}.fx .tg.off::after{right:auto;left:2px;background:var(--muted)}
+.fx .ck{display:flex;align-items:flex-start;gap:8px;font-size:13px;color:var(--fg);line-height:18px}
+.fx .ck input{accent-color:var(--accent);margin:2px 0 0;flex:none}
+.fx .ck .meta{display:block}
+.fx .two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.fx .three{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.fx .stp{display:flex;gap:4px}.fx .stp i{height:3px;flex:1 1 0;border-radius:2px;background:var(--track)}.fx .stp i.on{background:var(--accent)}.fx .stp i.ok{background:var(--done)}
+.fx .note{font-size:12px;line-height:16px;color:var(--fg2);background:var(--sunk);border-radius:6px;padding:8px 10px}
+.fx .bnr{border-radius:6px;padding:8px 10px;font-size:12px;line-height:16px;display:flex;gap:8px;align-items:flex-start}
+.fx .bnr.f{background:var(--failed-soft);border:1px solid var(--failed-line);color:var(--fg)}
+.fx .bnr.w{background:var(--waiting-faint);border:1px solid var(--waiting-line);color:var(--fg)}
+.fx .bnr.ok{background:var(--done-soft);border:1px solid color-mix(in srgb,var(--done) 35%,transparent);color:var(--fg)}
+.fx .bnr.i{background:var(--accent-soft);border:1px solid color-mix(in srgb,var(--accent) 35%,transparent);color:var(--fg)}
+.fx .lst{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.fx .lst>div{display:flex;gap:8px;align-items:center;padding:6px 8px;font-size:12px;border-top:1px solid var(--line)}
+.fx .lst>div:first-child{border-top:0}
+.fx .lst>div.on{background:var(--accent-soft)}
+.fx .cm{display:inline-block;width:12px;height:12px;border-radius:50%;background:conic-gradient(from 0deg,transparent 0deg,transparent 40deg,currentColor 300deg);-webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 2px),#000 calc(100% - 1px));mask:radial-gradient(farthest-side,transparent calc(100% - 2px),#000 calc(100% - 1px));animation:fxspin .9s linear infinite;flex:none}
+@keyframes fxspin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion: reduce){.fx .cm{animation-duration:2.4s}}
+.fx .grid4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px 16px;align-items:start}
+.fx .span2{grid-column:span 2}
+.fx .pill{font-size:11px;line-height:16px;padding:0 6px;border-radius:8px;background:var(--chip-bg);color:var(--fg2)}
+.fx kbd{font:inherit;font-size:11px;line-height:14px;padding:0 4px;border-radius:3px;border:1px solid currentColor;opacity:.75}
+</style>
+</helmet>
+<div class="app fx" style="width: 100%; min-height: 1300px; display: flex; flex-direction: column; background: var(--bg);">
+<div style="padding: 20px 28px 10px; display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;"><svg width="28" height="28" viewBox="0 0 108 108" aria-hidden="true"><rect width="108" height="108" rx="24" fill="#1B2430"/><circle cx="54" cy="54" r="24" fill="none" stroke="#F2F4F7" stroke-opacity="0.5" stroke-width="5"/><circle cx="54" cy="54" r="10" fill="#F2F4F7"/><circle cx="54" cy="30" r="7.5" fill="#F2F4F7"/><circle cx="74.78" cy="66" r="7.5" fill="#D29B4A"/><circle cx="33.22" cy="66" r="7.5" fill="#F2F4F7"/></svg><h1 style="margin: 0; font-size: 18px; line-height: 24px; font-weight: 600;">Forms · Accounts, tokens, hosts and projects</h1><span class="meta">adding an account and creating a token are new; the rest replaces bare settings fields</span></div>
+<div class="grid4" style="padding: 6px 28px 28px; "><div class="cell"><div class="caph"><b>Add an account · step 1</b><span class="where new">Accounts › + Add account</span></div><span class="capn">New: no desktop form adds an account today</span><div class="dlg"><div class="dh"><div style="display: flex; align-items: baseline; gap: 8px;"><strong>Add an account</strong><span class="meta" style="margin-left: auto;">Step 1 of 2</span></div><div class="meta">Signs a Claude account in on a host. Fleet never sees the password.</div><div class="stp"><i class="on"></i><i class=""></i></div></div><div class="db"><div class="f"><span class="fl">Host</span><button class="btn sel" aria-label="mercury"><span>mercury</span><span aria-hidden="true">▾</span></button></div><div class="f"><span class="fl">Account type</span><div class="seg" role="group" aria-label="Account type"><button class="opt on" aria-pressed="true">Claude subscription</button><button class="opt">API key</button><button class="opt">Bedrock or Vertex</button></div></div><div class="f"><span class="fl">Nickname<span class="opt-l">optional</span></span><input class="inp" type="text" value="" placeholder="e.g. work Max" aria-label="Nickname"></div></div><div class="df"><span class="sp"></span><button class="btn quiet">Cancel</button><button class="btn primary">Next</button></div></div></div><div class="cell"><div class="caph"><b>Add an account · step 2</b><span class="where new">waiting on the person</span></div><span class="capn">Device code; no spinner, the verb waits for the host</span><div class="dlg"><div class="dh"><div style="display: flex; align-items: baseline; gap: 8px;"><strong>Add an account</strong><span class="meta" style="margin-left: auto;">Step 2 of 2</span></div><div class="meta">Finish the sign-in in your browser.</div><div class="stp"><i class="ok"></i><i class="on"></i></div></div><div class="db"><div style="display: flex; flex-direction: column; gap: 6px; align-items: flex-start;"><span class="meta">mercury is waiting for you to sign in at</span><a href="#" class="mono">claude.ai/oauth/device</a><span class="meta">and type this code</span><span class="mono" style="font-size: 20px; line-height: 28px; letter-spacing: 3px; color: var(--fg);">QZRT-8KLM</span><button class="btn sm">Copy code</button></div><div class="bnr w"><span>Waiting for you in the browser. The code works for 10 minutes.</span></div></div><div class="df"><button class="btn quiet">Back</button><span class="sp"></span><button class="btn quiet">Cancel</button><button class="btn primary" disabled style="opacity:.45">Done</button><span class="meta" style="width: 100%; text-align: right;">Turns on when mercury reports the sign-in.</span></div></div></div><div class="cell"><div class="caph"><b>Add an account · API key</b><span class="where new">Accounts › + Add account</span></div><span class="capn">Error from the provider shown on the field</span><div class="dlg"><div class="dh"><strong>Add an account</strong><div class="meta">API key on mercury.</div></div><div class="db"><div class="f"><span class="fl">Host</span><button class="btn sel" aria-label="mercury"><span>mercury</span><span aria-hidden="true">▾</span></button></div><div class="f"><span class="fl">Account type</span><div class="seg" role="group" aria-label="Account type"><button class="opt">Claude subscription</button><button class="opt on" aria-pressed="true">API key</button><button class="opt">Bedrock or Vertex</button></div></div><div class="f"><span class="fl">API key</span><input class="inp mono err" type="password" value="sk-ant-xxxxxx" aria-label="API key"><span class="errt">Anthropic rejected this key (401). Check that it is not revoked.</span></div><div class="f"><span class="fl">Spend limit per day<span class="opt-l">optional</span></span><input class="inp" type="text" value="$25.00" placeholder="" aria-label="Spend limit"></div></div><div class="df"><span class="sp"></span><button class="btn quiet">Cancel</button><button class="btn primary">Add account</button></div></div></div><div class="cell"><div class="caph"><b>New Control API token</b><span class="where new">Settings › Control API › + Token</span></div><span class="capn">New: tokens could only be rotated or revoked</span><div class="dlg"><div class="dh"><strong>New Control API token</strong><div class="meta">Lets a script or another agent drive the fleet over the Control API.</div></div><div class="db"><div class="f"><span class="fl">Name</span><input class="inp" type="text" value="ci-release-bot" placeholder="" aria-label="Name"></div><div class="f"><span class="fl">Can</span><div class="seg" role="group" aria-label="Scope"><button class="opt">Read</button><button class="opt on" aria-pressed="true">Act</button><button class="opt">Admin</button></div><span class="help">Act: start, send, stop sessions. Admin also changes settings.</span></div><div class="two"><div class="f"><span class="fl">Expires</span><button class="btn sel" aria-label="In 90 days"><span>In 90 days</span><span aria-hidden="true">▾</span></button></div><div class="f"><span class="fl">Hosts</span><button class="btn sel" aria-label="All hosts"><span>All hosts</span><span aria-hidden="true">▾</span></button></div></div></div><div class="df"><span class="sp"></span><button class="btn quiet">Cancel</button><button class="btn primary">Create token</button></div></div></div><div class="cell"><div class="caph"><b>Token created</b><span class="where new">after Create token</span></div><span class="capn">Shown once, then only its name and last use</span><div class="dlg"><div class="dh"><strong>Token created</strong><div class="meta">Copy it now. It is not shown again.</div></div><div class="db"><div class="inp mono" style="height: auto; padding: 8px; word-break: break-all;">flt_live_7Hq2Xc9mR4…k9P</div><div style="display: flex; gap: 8px;"><button class="btn">Copy token</button><button class="btn quiet">Copy as env line</button></div></div><div class="df"><span class="sp"></span><button class="btn primary">Done</button></div></div></div><div class="cell"><div class="caph"><b>Projects layout</b><span class="where">Settings › Projects</span></div><span class="capn">Layout and base paths per host, checked on the host</span><div class="dlg"><div class="dh"><strong>Projects layout</strong><div class="meta">Where new projects are cloned on each host.</div></div><div class="db"><div class="f"><span class="fl">Layout</span><button class="btn sel" aria-label="github: root/owner/repo"><span>github: root/owner/repo</span><span aria-hidden="true">▾</span></button></div><div class="f"><span class="fl">Base path per host</span><div class="lst"><div><span style="width: 120px; flex: none;">mac</span><input class="inp mono" type="text" value="~/projects/github.com" placeholder="" aria-label="mac base path"></div><div><span style="width: 120px; flex: none;">mercury</span><input class="inp mono" type="text" value="~/projects" placeholder="" aria-label="mercury base path"></div><div><span style="width: 120px; flex: none;">claude-fleet-trn</span><input class="inp mono err" type="text" value="/srv/work" placeholder="" aria-label="trn base path"></div></div><span class="errt">claude-fleet-trn: /srv/work is not writable by user dev.</span></div></div><div class="df"><span class="sp"></span><button class="btn quiet">Discard</button><button class="btn primary">Save</button></div></div></div><div class="cell"><div class="caph"><b>Start rules</b><span class="where">Settings › Projects</span></div><span class="capn">StartRules inline list</span><div class="dlg"><div class="dh"><strong>Start rules</strong><div class="meta">A ticket key decides the project and host a session starts in.</div></div><div class="db"><div class="lst"><div><span class="mono" style="width: 70px; flex: none;">PD-*</span><button class="btn sel" aria-label="PD-* project"><span>papaya-pos</span><span aria-hidden="true">▾</span></button><button class="btn sel" aria-label="PD-* host"><span>claude-fleet-trn</span><span aria-hidden="true">▾</span></button><button class="btn quiet sm" aria-label="Remove PD-*">✕</button></div><div><span class="mono" style="width: 70px; flex: none;">TASK-*</span><button class="btn sel" aria-label="TASK-* project"><span>claude-fleet</span><span aria-hidden="true">▾</span></button><button class="btn sel" aria-label="TASK-* host"><span>mac</span><span aria-hidden="true">▾</span></button><button class="btn quiet sm" aria-label="Remove TASK-*">✕</button></div><div><span class="mono" style="width: 70px; flex: none;">FM-*</span><button class="btn sel" aria-label="FM-* project"><span>fleet-mobile</span><span aria-hidden="true">▾</span></button><button class="btn sel" aria-label="FM-* host"><span>mercury</span><span aria-hidden="true">▾</span></button><button class="btn quiet sm" aria-label="Remove FM-*">✕</button></div></div><div style="display: flex; gap: 6px; align-items: center;"><input class="inp mono focus" type="text" value="SAL-*" placeholder="" aria-label="New pattern"><button class="btn sel" aria-label="New rule project"><span>Pick a project</span><span aria-hidden="true">▾</span></button></div></div><div class="df"><button class="btn quiet">+ Rule</button><span class="sp"></span><button class="btn quiet">Discard</button><button class="btn primary">Save</button></div></div></div><div class="cell"><div class="caph"><b>Group a project</b><span class="where">project › Group…</span></div><span class="capn">ProjectActionsMenu</span><div class="dlg"><div class="dh"><strong>Group papaya-pos</strong><div class="meta">Groups gather projects in the left panel and in New session.</div></div><div class="db"><div class="f"><span class="fl">Group</span><div class="inp focus">Papaya</div><div class="lst"><div class="on">Papaya <span class="meta" style="margin-left: auto;">3 projects</span></div><div>32bit <span class="meta" style="margin-left: auto;">5</span></div><div>+ New group "Pap"</div></div></div></div><div class="df"><button class="btn quiet">Remove from group</button><span class="sp"></span><button class="btn quiet">Cancel</button><button class="btn primary">Save</button></div></div></div><div class="cell"><div class="caph"><b>Host integrations</b><span class="where">host detail</span></div><span class="capn">HostDetail settings</span><div class="dlg inl"><div class="dh"><strong>mercury · integrations</strong><div class="meta">What fleet installs or syncs on this host.</div></div><div class="db"><div class="tgr"><span class="tl"><span>Codex assets</span><span class="meta">Sync skills and MCP servers for Codex too</span></span><div style="width: 110px;"><button class="btn sel" aria-label="Auto"><span>Auto</span><span aria-hidden="true">▾</span></button></div></div><div class="tgr"><span class="tl"><span>Fleet agent</span><span class="meta">Runs on the host; needed when the hub cannot reach it</span></span><button class="tg" role="switch" aria-checked="true" aria-label="Fleet agent"></button></div><div class="tgr"><span class="tl"><span>Debug devices</span><span class="meta">Look for Android phones on USB</span></span><button class="tg off" role="switch" aria-checked="false" aria-label="Debug devices"></button></div></div><div class="df"><span class="sp"></span><button class="btn quiet">Discard</button><button class="btn primary">Save</button></div></div></div><div class="cell"><div class="caph"><b>Sign in to a tracker</b><span class="where">Settings › Trackers</span></div><span class="capn">tracker resource: sign in, replace credential</span><div class="dlg"><div class="dh"><strong>Sign in to Jira PD</strong><div class="meta">Your token is stored on the hub, encrypted, and used only for this tracker.</div></div><div class="db"><div class="f"><span class="fl">Atlassian email</span><input class="inp" type="text" value="m.janci@32bit.sk" placeholder="" aria-label="Email"></div><div class="f"><span class="fl">API token</span><div class="inp" style="justify-content: space-between;"><span style="color: var(--muted); letter-spacing: 2px;">••••••••••••</span><span class="meta">stored on the hub</span></div><span class="help"><a href="#">Create a token at id.atlassian.com</a></span></div><label class="ck"><input type="checkbox"><span>Trust a private certificate<span class="meta"> · for a self-hosted Jira with its own CA</span></span></label></div><div class="df"><button class="btn quiet">Replace credential</button><span class="sp"></span><button class="btn quiet">Cancel</button><button class="btn primary">Sign in</button></div></div></div></div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1300}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>

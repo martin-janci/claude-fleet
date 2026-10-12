@@ -219,3 +219,44 @@ fn set_friendly_name_rejects_invalid_input() {
         .expect_err("bad alias");
     assert_eq!(err.code, "E_INVALID");
 }
+
+#[test]
+fn set_session_tags_replaces_validates_and_clears() {
+    // The desktop's Label (M15 G2.7): one validated write of the whole list.
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("h").unwrap();
+        s.upsert_session("dev-x", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.get_session("dev-x", "h").unwrap().unwrap().id
+    };
+    let args = |tags: &[&str]| SetSessionTagsArgs {
+        session_id: id,
+        tags: tags.iter().map(|t| t.to_string()).collect(),
+    };
+    let row = set_session_tags(args(&[" release ", "wip", "release"]), &store).expect("set");
+    assert_eq!(row.tags, vec!["release".to_string(), "wip".to_string()]);
+    // A bad tag writes nothing.
+    let err = set_session_tags(args(&["has space"]), &store).expect_err("space");
+    assert_eq!(err.code, "E_VALIDATE");
+    let kept = store
+        .lock()
+        .unwrap()
+        .get_session_by_id(id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(kept.tags, vec!["release".to_string(), "wip".to_string()]);
+    // Empty clears.
+    let row = set_session_tags(args(&[]), &store).expect("clear");
+    assert!(row.tags.is_empty());
+    let err = set_session_tags(
+        SetSessionTagsArgs {
+            session_id: id + 1000,
+            tags: vec![],
+        },
+        &store,
+    )
+    .expect_err("missing");
+    assert_eq!(err.code, "E_NOTFOUND");
+}

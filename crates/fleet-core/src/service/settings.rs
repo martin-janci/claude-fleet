@@ -53,6 +53,9 @@ pub enum Kind {
     PriceMap,
     /// One line of text, at most `max` bytes, no control characters.
     Text { max: usize },
+    /// A daily time range `HH:MM-HH:MM` (24-hour, local to whoever reads
+    /// it; it may run past midnight), or `""` for none.
+    TimeRange,
 }
 
 /// Upper bound for `Kind::Secs` (ten years): keeps every `secs as i64`
@@ -95,6 +98,9 @@ pub struct Spec {
     /// Display labels for a `Choice` / `ChoiceSet`'s options, `(value,
     /// label)`, covering every option when set; empty shows the raw values.
     pub option_labels: &'static [(&'static str, &'static str)],
+    /// An org may set its own value (org administration phase C): a session
+    /// of that org reads it instead of the fleet's ([`get_string_for`]).
+    pub per_org: bool,
 }
 
 /// The unit a setting's value is shown in (see [`Spec::unit`]).
@@ -112,6 +118,8 @@ pub enum Unit {
     Mib,
     Tokens,
     Count,
+    /// Whole US dollars.
+    Usd,
 }
 
 impl Unit {
@@ -129,6 +137,7 @@ impl Unit {
             Unit::Mib => "MiB",
             Unit::Tokens => "tokens",
             Unit::Count => "",
+            Unit::Usd => "USD",
         }
     }
 }
@@ -167,6 +176,34 @@ pub enum Restart {
     Hooks,
 }
 
+/// Where a setting's value lives, as a settings row's scope pill says it
+/// (Orbit Fleet G1.5). Derived from the spec ([`Spec::scope`]), never set on
+/// its own, so it cannot disagree with [`Spec::per_org`] or
+/// [`Spec::owned_by`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Scope {
+    /// One value for the whole fleet, kept where the fleet lives: on the hub
+    /// when this app is paired with one, else in this app.
+    Fleet,
+    /// A fleet value that an org may override with its own.
+    Org,
+    /// The running process's own value (the hub daemon's serve flags, the
+    /// control API): each app or hub keeps its own, nothing shares it.
+    Process,
+}
+
+impl Scope {
+    /// The scope in words, for the generated docs.
+    pub fn word(self) -> &'static str {
+        match self {
+            Scope::Fleet => "fleet",
+            Scope::Org => "fleet, per org",
+            Scope::Process => "per process",
+        }
+    }
+}
+
 /// What an agent may do with a setting (design D-P4): propose a value for a
 /// person to accept, fill it inside a flow a person started, or nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -178,6 +215,17 @@ pub enum AiPolicy {
 }
 
 impl Spec {
+    /// Where the value lives (see [`Scope`]).
+    pub const fn scope(&self) -> Scope {
+        if self.owned_by.is_some() {
+            Scope::Process
+        } else if self.per_org {
+            Scope::Org
+        } else {
+            Scope::Fleet
+        }
+    }
+
     /// A setting with no unit, tags, danger or restart, that an agent may
     /// only suggest.
     pub const fn new(
@@ -201,6 +249,14 @@ impl Spec {
             ai: AiPolicy::Suggest,
             owned_by: None,
             option_labels: &[],
+            per_org: false,
+        }
+    }
+    /// An org may set its own value of it.
+    pub const fn per_org(self) -> Self {
+        Spec {
+            per_org: true,
+            ..self
         }
     }
     pub const fn unit(self, unit: Unit) -> Self {
@@ -278,9 +334,9 @@ pub const HEALTH_CLAUDE_MAX_BEHIND: &str = "health.claude_max_behind";
 /// Seconds without an accepted hook from a reachable host that has a live
 /// session before it reads as `hooks_silent` (hosts F9). Default 1 h.
 pub const HEALTH_HOOKS_SILENT_SECS: &str = "health.hooks_silent_secs";
-/// Write fleet's two skill dirs even when `~/.claude/skills` is inside a
-/// git work tree (a dotfiles checkout, hosts F2). Off: provisioning
-/// refuses such a host with `E_INVALID` (decision B-2).
+/// Write fleet's two skill dirs even when a git work tree (a dotfiles
+/// checkout, hosts F2) tracks files in them. Off: provisioning refuses such
+/// a host with `E_INVALID` (decision B-2); untracked or ignored dirs pass.
 pub const PROVISION_FORCE_GIT_TREE: &str = "provision.force_git_tree";
 /// Install fleet's `ag` launcher on every provisioned host (F2): the
 /// embedded tools/ag tree into ~/.local/share/ag and a `cl` command
@@ -294,11 +350,40 @@ pub const RESTORE_BATCH_SIZE: &str = "restore.batch_size";
 /// Read by Task 3's restore path via `get_setting` + `settings::resolve`.
 pub const RESTORE_STAGGER_MS: &str = "restore.stagger_ms";
 pub const PLAYBOOK_PRESS_ENTER: &str = "playbooks.press_enter";
+/// Pause all (redesign 8.1): every loop that acts on its own skips its
+/// passes while on (`service::loops`); the loops that only observe go on.
+pub const AUTOMATION_PAUSED: &str = "automation.paused";
+/// M15 G3.8: whole USD every routine's runs may spend in one UTC day
+/// before no new run starts; `0` is none.
+pub const AUTOMATION_DAILY_BUDGET: &str = "automation.daily_budget";
+/// Orchestration O4–O6: the missions' loop runs at all (the kill switch).
+pub const ORCHESTRATOR_ENABLED: &str = "orchestrator.enabled";
+/// Orchestration O6: the highest autonomy any mission's loop may take,
+/// whatever a mission asks and a grant signs (design §7.1).
+pub const ORCHESTRATOR_MAX_LEVEL: &str = "orchestrator.max_level";
+/// F3: a mission's review and test runs as one headless `claude -p` run in
+/// the implementer's checkout (read-only tools, the test commands only)
+/// instead of an interactive session. Off by default.
+pub const ORCHESTRATOR_HEADLESS_CHECKS: &str = "orchestrator.headless_checks";
+/// The model [`ORCHESTRATOR_HEADLESS_CHECKS`] runs (one of [`SUMMARY_MODELS`]).
+pub const ORCHESTRATOR_HEADLESS_MODEL: &str = "orchestrator.headless_model";
+/// Control's chat sends the option an agent's `choices` card marks
+/// `recommended` once nobody has answered for
+/// [`CONTROL_AUTO_CONTINUE_MINUTES`] (`src/lib/auto_continue.ts`).
+pub const CONTROL_AUTO_CONTINUE: &str = "control.auto_continue";
+pub const CONTROL_AUTO_CONTINUE_MINUTES: &str = "control.auto_continue_minutes";
 pub const PLAYBOOK_OOM_RECREATE: &str = "playbooks.oom_recreate";
 /// Recreates the `oom` playbook may run on one session per 24 h
 /// (`service::playbooks::OOM_ATTEMPT_WINDOW_SECS`). `0` refuses every
 /// recreate while keeping the refusals on the timeline.
 pub const PLAYBOOK_OOM_MAX_ATTEMPTS: &str = "playbooks.oom_max_attempts";
+/// Agents (`service::agents`): seconds between two polls of one rule;
+/// `0` stops every agent's polling.
+pub const AGENTS_POLL_INTERVAL_SECS: &str = "agents.poll_interval_secs";
+/// Agents: jobs that run at once, every agent together.
+pub const AGENTS_MAX_CONCURRENT: &str = "agents.max_concurrent";
+/// Agents: runs one job may get before a failure is final.
+pub const AGENTS_MAX_RETRIES: &str = "agents.max_retries";
 pub const GC_ENABLED: &str = "gc.enabled";
 pub const GC_BG_IDLE_SECS: &str = "gc.bg_idle_secs";
 pub const GC_SHELL_IDLE_SECS: &str = "gc.shell_idle_secs";
@@ -351,6 +436,12 @@ pub const DOWNLOADS_MAX_FILE_MB: &str = "downloads.max_file_mb";
 pub const DOWNLOADS_MAX_TOTAL_MB: &str = "downloads.max_total_mb";
 pub const DOWNLOADS_KEEP_SECS: &str = "downloads.keep_secs";
 
+/// Voice relay: the master switch, the longest recording, and how long a
+/// session's microphone claim idles before it releases itself.
+pub const VOICE_ENABLED: &str = "voice.enabled";
+pub const VOICE_MAX_CAPTURE_SECS: &str = "voice.max_capture_secs";
+pub const VOICE_CLAIM_TTL_SECS: &str = "voice.claim_ttl_secs";
+
 /// Upper bound for [`MOVE_MAX_BUNDLE_MB`]: the bundle is relayed through the
 /// orchestrator in 8 MiB chunks via a private temp file, so this bounds relay
 /// time and temp-disk use on the orchestrator and both hosts, not memory.
@@ -383,7 +474,18 @@ pub const MOVE_MAX_SESSION_STATE_MB: &str =
 pub const MOVE_WAIT_MAX_MINS: &str = "move.wait_max_mins";
 
 /// Collect per-session token usage from Claude transcripts (Wave 5 G1).
+/// Percent used of an account's tighter window at which starting a session
+/// on it asks first and offers the login with headroom (redesign step 4.4,
+/// `service::account_limits`).
+pub const ACCOUNTS_PAUSE_AT: &str = "accounts.pause_at";
 pub const USAGE_ENABLED: &str = "usage.enabled";
+/// Copy conversation text into the hub's search index, so a search finds
+/// what was said in any session (search phase 3, `service::search_index`).
+/// Off by default: it stores transcript text on the hub, which nothing else
+/// does.
+pub const SEARCH_INDEX_TRANSCRIPTS: &str = "search.index_transcripts";
+/// Days of conversation text the search index keeps.
+pub const SEARCH_TRANSCRIPT_DAYS: &str = "search.transcript_days";
 /// Seconds between usage passes (one batched script per host). `0` stops
 /// collection.
 pub const USAGE_INTERVAL_SECS: &str = "usage.interval_secs";
@@ -446,12 +548,51 @@ pub const WORK_SESSION_START_CONTEXT: &str = "work.session_start_context";
 /// (`work_link { source: agent_inferred }` — only ever a suggestion). Off by
 /// default: it spends context on a guess. Read on every prompt.
 pub const WORK_CLASSIFY_NUDGE: &str = "work.classify_nudge";
+/// Whether an organisation's plain members (not only its admins) create and
+/// change the team's sprints and releases (owner decision 2026-10-10). Off by
+/// default; a viewer never does, and anyone may keep personal ones.
+pub const WORK_MEMBERS_PLAN_SPRINTS: &str = "work.members_plan_sprints";
 /// The model a dead session's on-demand summary runs on (work graph M13.4c,
 /// decisions D10 / D27), on the session's own host and account. A choice of
 /// Claude Code's model aliases, never free text: it ends up in a command.
 pub const WORK_SUMMARY_MODEL: &str = "work.summary_model";
 /// The aliases [`WORK_SUMMARY_MODEL`] accepts.
 pub const SUMMARY_MODELS: &[&str] = &["haiku", "sonnet", "opus"];
+/// The model context help runs on (`service::context_help`): a person's
+/// question at a shell or composer prompt line, answered on the session's
+/// own host and account. One of [`SUMMARY_MODELS`]; Haiku by default.
+pub const WORK_HELP_MODEL: &str = "work.help_model";
+
+// ── writing help (gap plan G4.6): each LLM draft is off until turned on ──
+/// Files › Changed drafts a commit message from the staged diff
+/// (`service::drafts`).
+pub const WORK_DRAFT_COMMIT_MESSAGES: &str = "work.draft_commit_messages";
+/// A start drafts the agent's brief from its ticket
+/// (`work::brief_draft`).
+pub const WORK_DRAFT_BRIEFS: &str = "work.draft_briefs";
+/// Finish drafts a mission's release note from its merged PRs
+/// (`work::orchestrate::drafts::release_note`).
+pub const WORK_DRAFT_RELEASE_NOTES: &str = "work.draft_release_notes";
+/// A watched session's "Since 13:20" catch-up summary
+/// (`service::watch_summary`).
+pub const WORK_CATCH_UP_SUMMARIES: &str = "work.catch_up_summaries";
+/// Context help at a shell or composer prompt line
+/// (`service::context_help`).
+pub const WORK_CONTEXT_HELP: &str = "work.context_help";
+
+/// Task attachments: the largest file a task takes, in MiB (at most
+/// [`crate::store::ATTACHMENT_MAX_MB_CEILING`], what the desktop↔hub
+/// transport carries).
+pub const WORK_ATTACHMENT_MAX_MB: &str = "work.attachment_max_mb";
+
+/// [`WORK_ATTACHMENT_MAX_MB`] in bytes.
+pub fn attachment_max_bytes(s: &Store) -> usize {
+    let mb = get_string(s, WORK_ATTACHMENT_MAX_MB)
+        .parse::<u64>()
+        .unwrap_or(10)
+        .clamp(1, crate::store::ATTACHMENT_MAX_MB_CEILING);
+    (mb as usize) * 1024 * 1024
+}
 
 /// Tidy-up (work graph M7): a session whose linked item has been done at
 /// least this many days (and that is idle, below) is suggested for tidying.
@@ -497,6 +638,60 @@ pub const DECIDE_JEV_ENABLED: &str = "decide.jev.enabled";
 pub const DECIDE_JEV_STATUS_MAP: &str = "decide.jev.status_map";
 /// `work_link`'s mode (choosing a work item for an unlinked session).
 pub const DECIDE_JEV_WORK_LINK: &str = "decide.jev.work_link";
+/// `start_project`'s mode (pre-selecting the repository of a task's first
+/// start, K1).
+pub const DECIDE_JEV_START_PROJECT: &str = "decide.jev.start_project";
+/// `sibling_repos`' mode (pre-ticking the sibling repository a ticket start
+/// also needs, N3).
+pub const DECIDE_JEV_SIBLING_REPOS: &str = "decide.jev.sibling_repos";
+/// `host_placement`'s mode (pre-selecting the host of a project's new
+/// session when no rule or number decides, N5).
+pub const DECIDE_JEV_HOST_PLACEMENT: &str = "decide.jev.host_placement";
+/// `quick_answer`'s mode (J5: the likely option first in an agent's
+/// question or a chat form, redesign step 10.9).
+pub const DECIDE_JEV_QUICK_ANSWER: &str = "decide.jev.quick_answer";
+/// `adopt_target`'s mode (prefilling the project of a pane fleet did not
+/// start, N4).
+pub const DECIDE_JEV_ADOPT_TARGET: &str = "decide.jev.adopt_target";
+/// `restore_target`'s mode (prefilling the project of a found
+/// conversation, J10).
+pub const DECIDE_JEV_RESTORE_TARGET: &str = "decide.jev.restore_target";
+/// `duplicate`'s mode (flagging a proposed task that may duplicate an
+/// existing one, K4).
+pub const DECIDE_JEV_DUPLICATE: &str = "decide.jev.duplicate";
+/// `work_placement`'s mode (proposing a Work-view group for a task nobody
+/// placed, K5).
+pub const DECIDE_JEV_WORK_PLACEMENT: &str = "decide.jev.work_placement";
+/// `related_session`'s mode (noticing another session of the same person
+/// on the same work, N1).
+pub const DECIDE_JEV_RELATED_SESSION: &str = "decide.jev.related_session";
+/// `control_route`'s mode (K2: where a message typed in Control goes,
+/// redesign step 9.9).
+pub const DECIDE_JEV_CONTROL_ROUTE: &str = "decide.jev.control_route";
+/// `summary_check`'s mode (checking a watcher's summary against the
+/// transcript before it shows, J9).
+pub const DECIDE_JEV_SUMMARY_CHECK: &str = "decide.jev.summary_check";
+/// `turn_outcome`'s mode (J2: what a turn came to when hooks said nothing,
+/// read from the pane tail). Needs the reply-text consent (D48) on top.
+pub const DECIDE_JEV_TURN_OUTCOME: &str = "decide.jev.turn_outcome";
+/// `mission_triage`'s mode (K3: a stuck mission's outcome and next step,
+/// redesign step 9.10).
+pub const DECIDE_JEV_MISSION_TRIAGE: &str = "decide.jev.mission_triage";
+/// `routine_run_outcome`'s mode (N6: what a finished routine run came to
+/// when its exit and the rules say nothing, read from the pane tail). Needs
+/// the reply-text consent (D48) on top.
+pub const DECIDE_JEV_ROUTINE_RUN_OUTCOME: &str = "decide.jev.routine_run_outcome";
+/// `pr_triage`'s mode (what a PR shepherd episode most likely needs).
+pub const DECIDE_JEV_PR_TRIAGE: &str = "decide.jev.pr_triage";
+/// `main_ticket`'s mode (J6: the main ticket among several keys a
+/// session's prompt names, redesign step 6.8).
+pub const DECIDE_JEV_MAIN_TICKET: &str = "decide.jev.main_ticket";
+/// `tracker_duplicate`'s mode (J7: a local task that may be the same work
+/// as a tracker ticket, redesign step 6.8).
+pub const DECIDE_JEV_TRACKER_DUPLICATE: &str = "decide.jev.tracker_duplicate";
+/// `resume_or_new`'s mode (N2: resume a past session of the work key the
+/// New session dialog plans, or start fresh; gap plan G7.10).
+pub const DECIDE_JEV_RESUME_OR_NEW: &str = "decide.jev.resume_or_new";
 /// What a feature's mode may be: the store's `decision_runs.mode` words
 /// (one list; `decide::FeatureMode` and the TS mirror are tied to it by
 /// `the_mode_vocabulary_is_the_stores`). `auto` is not offered: no feature
@@ -506,9 +701,10 @@ pub const DECIDE_MODES: &[&str] = crate::store::DECISION_MODES;
 // ── update.* (application updates, update-channel design §7.3) ──
 /// The release track the hub follows for its fleet.
 pub const UPDATE_TRACK: &str = "update.track";
-/// `nightly` joins when S2b publishes it (`src/lib/fleet_settings.ts` keeps
-/// the same list).
-pub const UPDATE_TRACKS: &[&str] = &["stable", "beta"];
+/// `dev` is every green `main` push, the desktop too; `nightly` is those of
+/// them at most one every two hours (nightly.yml); `src/lib/fleet_settings.ts`
+/// keeps the same list.
+pub const UPDATE_TRACKS: &[&str] = &["stable", "beta", "nightly", "dev"];
 /// Per component: `manual` (only pins), `notify` (offer), `automatic`
 /// (install at the next quiet point).
 pub const UPDATE_HUB_MODE: &str = "update.hub.mode";
@@ -518,11 +714,43 @@ pub const UPDATE_DESKTOP_MODE: &str = "update.desktop.mode";
 pub const UPDATE_MOBILE_MODE: &str = "update.mobile.mode";
 pub const UPDATE_MODES: &[&str] = &["manual", "notify", "automatic"];
 pub const UPDATE_MOBILE_MODES: &[&str] = &["manual", "notify"];
+
+/// The notifications matrix (Orbit Fleet 11.9): for each channel, the
+/// session states that reach it. Stored on the hub so the desktop and the
+/// phone read the same answer.
+pub const NOTIFY_DESKTOP: &str = "notify.desktop";
+pub const NOTIFY_PHONE: &str = "notify.phone";
+pub const NOTIFY_SOUND: &str = "notify.sound";
+/// Quiet hours: no notification on any channel inside this daily range
+/// except for the states in `notify.quiet_except`.
+pub const NOTIFY_QUIET_HOURS: &str = "notify.quiet_hours";
+pub const NOTIFY_QUIET_EXCEPT: &str = "notify.quiet_except";
+/// The states a notification is about, in the matrix's row order.
+pub const NOTIFY_STATES: &[&str] = &["needs_you", "failed", "blocked", "done", "routine_failed"];
+pub const NOTIFY_STATE_LABELS: &[(&str, &str)] = &[
+    ("needs_you", "Needs you"),
+    ("failed", "Failed"),
+    ("blocked", "Blocked"),
+    ("done", "Done"),
+    ("routine_failed", "Routine run failed"),
+];
 /// How often the hub re-reads the channel, and clients re-check.
 pub const UPDATE_CHECK_INTERVAL_SECS: &str = "update.check_interval_secs";
 pub const UPDATE_CHECK_INTERVAL_MIN_SECS: u64 = 900;
+/// A daily `HH:MM-HH:MM` range in UTC inside which an `automatic` component
+/// installs (decide rule 6); `""` = any time. An offer to a person is not held.
+pub const UPDATE_WINDOW: &str = "update.window";
+/// How long a rollout wave soaks before the next one opens (S9).
+pub const UPDATE_ROLLOUT_WAVE_SECS: &str = "update.rollout_wave_secs";
+pub const UPDATE_ROLLOUT_WAVE_MIN_SECS: u64 = 300;
+/// Serve the release files the hub's verified manifests list at
+/// `/update/artifact/<sha256>` (S9), for targets that cannot reach GitHub.
+pub const UPDATE_MIRROR: &str = "update.mirror";
 /// Sessions and items with no org may be sent too (D31). Off by default.
 pub const DECIDE_JEV_UNASSIGNED: &str = "decide.jev.unassigned";
+/// D48: sessions with no org may send reply text (J2) too, on top of
+/// [`DECIDE_JEV_UNASSIGNED`]. Off by default.
+pub const DECIDE_JEV_UNASSIGNED_REPLY: &str = "decide.jev.unassigned_reply";
 /// One call's whole budget, in milliseconds.
 pub const DECIDE_JEV_TIMEOUT_MS: &str = "decide.jev.timeout_ms";
 /// Consecutive failed calls that open the circuit breaker.
@@ -531,6 +759,11 @@ pub const DECIDE_JEV_BREAKER_FAILURES: &str = "decide.jev.breaker_failures";
 pub const DECIDE_JEV_BREAKER_OPEN_SECS: &str = "decide.jev.breaker_open_secs";
 /// Input tokens the decision model may be sent per UTC day (`0` = none).
 pub const DECIDE_JEV_DAILY_TOKEN_BUDGET: &str = "decide.jev.daily_token_budget";
+/// Org administration phase C: the estimated spend (whole USD) an org's
+/// sessions may reach in a UTC day / calendar month before fleet warns; `0`
+/// is none. Per org.
+pub const BUDGET_ORG_DAILY_USD: &str = "budget.org_daily_usd";
+pub const BUDGET_ORG_MONTHLY_USD: &str = "budget.org_monthly_usd";
 /// The model version a request names. Pinned by default: TypeSafe advises
 /// pinning when thresholds are tuned against a version.
 pub const DECIDE_JEV_MODEL: &str = "decide.jev.model";
@@ -538,6 +771,23 @@ pub const DECIDE_JEV_MODEL: &str = "decide.jev.model";
 pub const DECIDE_JEV_MODELS: &[&str] = &["jev-1.13.0", "jev-latest"];
 /// Days a `decision_runs` row is kept (`0` = forever).
 pub const DECIDE_RETENTION_DAYS: &str = "decide.retention_days";
+/// A second opinion: every question a use case in `shadow` or `assist`
+/// asks Jev is also asked of Claude in print mode on
+/// [`DECIDE_HAIKU_HOST`], and its answer recorded beside Jev's (provider
+/// `haiku`, mode `shadow`). Nothing acts on it. Off by default.
+pub const DECIDE_HAIKU_SHADOW: &str = "decide.haiku.shadow";
+/// The host whose Claude account answers the second opinion (`""`: none,
+/// so nothing is asked).
+pub const DECIDE_HAIKU_HOST: &str = "decide.haiku.host";
+/// The model the second opinion asks (one of [`SUMMARY_MODELS`]).
+pub const DECIDE_HAIKU_MODEL: &str = "decide.haiku.model";
+/// Second-opinion calls per UTC day (`0` = none).
+pub const DECIDE_HAIKU_DAILY_CALLS: &str = "decide.haiku.daily_calls";
+/// Per-feature confidence floors fitted from person-labelled runs
+/// (`service::decide::floor`), as JSON; `""` = none. Written by `fleet-hub
+/// decide floor fit --apply`; a value `decide::floor::parse` refuses is
+/// refused.
+pub const DECIDE_JEV_FLOORS: &str = "decide.jev.floors";
 
 /// What `hub.tls` holds (`fleet-hub`'s `TlsMode`).
 pub const HUB_TLS_MODES: &[&str] = &["off", "cert"];
@@ -602,6 +852,71 @@ pub const SPECS: &[Spec] = &[
     .unit(Unit::Ms)
     .tags(&[Tag::Advanced]),
     Spec::new(
+        AUTOMATION_PAUSED,
+        "false",
+        Kind::Bool,
+        "Pause all automation",
+        "Stop every background job that acts on its own: missions, garbage collection, playbooks, repairs, tracker, catalog and folder syncs, and host refreshes. Reconcile, usage and update checks keep running, and health shows each job as paused.",
+    ),
+    Spec::new(
+        AUTOMATION_DAILY_BUDGET,
+        "0",
+        Kind::Int {
+            min: 0,
+            max: 1_000_000,
+        },
+        "Routines daily budget",
+        "What every routine's runs together may spend in one UTC day. Once they have spent it no routine starts a run, Run now included, until the next day. A run already going finishes.",
+    )
+    .unit(Unit::Usd)
+    .zero("none"),
+    Spec::new(
+        ORCHESTRATOR_ENABLED,
+        "true",
+        Kind::Bool,
+        "Mission loop",
+        "Let active missions take their next steps: keep their cards and brakes current and, under a person's grant, run what is ready. Off stops every mission's loop at once.",
+    ),
+    Spec::new(
+        ORCHESTRATOR_MAX_LEVEL,
+        "1",
+        Kind::Int { min: 0, max: 3 },
+        "Highest mission autonomy",
+        "The most any mission's loop may do on its own, whatever the mission asks and its grant signs. 0: the loop only keeps the cards; 1: it also asks the planner, and a person presses every step; 2: runs, retries, reviews and closes within a grant; 3: also creates the planner's tasks.",
+    )
+    .unit(Unit::Count),
+    Spec::new(
+        ORCHESTRATOR_HEADLESS_CHECKS,
+        "false",
+        Kind::Bool,
+        "Headless reviews and tests",
+        "Run a mission's review and its test commands as one Claude run in the implementer's checkout, with read-only tools and only those commands, instead of opening a session for each. Falls back to a session when the checkout moved or a command is not a plain one.",
+    )
+    .tags(&[Tag::Experimental]),
+    Spec::new(
+        ORCHESTRATOR_HEADLESS_MODEL,
+        "sonnet",
+        Kind::Choice(SUMMARY_MODELS),
+        "Headless check model",
+        "The Claude model headless reviews and tests run.",
+    )
+    .tags(&[Tag::Experimental, Tag::Advanced]),
+    Spec::new(
+        CONTROL_AUTO_CONTINUE,
+        "true",
+        Kind::Bool,
+        "Go on with the recommended option",
+        "Control's chat sends the option its agent marked recommended once nobody has answered for the minutes below. Typing or Cancel stops it. Never for a push, a delete or another step hard to undo, and only while the app is open.",
+    ),
+    Spec::new(
+        CONTROL_AUTO_CONTINUE_MINUTES,
+        "10",
+        Kind::Int { min: 1, max: 1440 },
+        "Wait before going on",
+        "How long Control's chat waits for your answer before it sends the recommended option.",
+    )
+    .unit(Unit::Minutes),
+    Spec::new(
         PLAYBOOK_PRESS_ENTER,
         "false",
         Kind::Bool,
@@ -624,6 +939,31 @@ pub const SPECS: &[Spec] = &[
     )
     .unit(Unit::Count)
     .zero("never"),
+    Spec::new(
+        AGENTS_POLL_INTERVAL_SECS,
+        "300",
+        Kind::Secs,
+        "Agents poll interval",
+        "Seconds between two looks of one agent rule at what it watches (a repo's pull requests, a Jira project). An agent works only under a rule a person granted.",
+    )
+    .unit(Unit::Seconds)
+    .zero("off"),
+    Spec::new(
+        AGENTS_MAX_CONCURRENT,
+        "3",
+        Kind::Int { min: 1, max: 10 },
+        "Agents running at once",
+        "Agent jobs that run at the same time, every agent together. A pull request or a ticket never has two at once.",
+    )
+    .unit(Unit::Count),
+    Spec::new(
+        AGENTS_MAX_RETRIES,
+        "3",
+        Kind::Int { min: 1, max: 10 },
+        "Agent job attempts",
+        "Runs one agent job may get. A failure worth retrying waits 1, 2, 4 … minutes; one that would fail the same way again ends the job at once.",
+    )
+    .unit(Unit::Count),
     Spec::new(
         GC_ENABLED,
         "false",
@@ -748,6 +1088,31 @@ pub const SPECS: &[Spec] = &[
     .unit(Unit::Days)
     .zero("until removed"),
     Spec::new(
+        VOICE_ENABLED,
+        "false",
+        Kind::Bool,
+        "Voice relay",
+        "Let Claude Code's /voice on a host record from the microphone of the app attached to it. The microphone opens only while you record, for a session you turned 🎤 on for.",
+    ),
+    Spec::new(
+        VOICE_MAX_CAPTURE_SECS,
+        "300",
+        Kind::Secs,
+        "Voice: longest recording",
+        "A recording longer than this is cut off.",
+    )
+    .unit(Unit::Seconds)
+    .zero("no limit"),
+    Spec::new(
+        VOICE_CLAIM_TTL_SECS,
+        "1800",
+        Kind::Secs,
+        "Voice: microphone idle release",
+        "A session's 🎤 turns itself off after this long without a recording.",
+    )
+    .unit(Unit::Seconds)
+    .zero("never"),
+    Spec::new(
         MOVE_MAX_TRANSCRIPT_MB,
         "200",
         Kind::Int {
@@ -826,6 +1191,24 @@ pub const SPECS: &[Spec] = &[
         "Sum each session's token usage from its Claude transcript and show an estimated cost.",
     ),
     Spec::new(
+        SEARCH_INDEX_TRANSCRIPTS,
+        "false",
+        Kind::Bool,
+        "Search conversation text",
+        "Copy what is said in each session into the hub's search index, so a search finds it in any conversation. Turning it off deletes the copied text.",
+    )
+    .danger("Conversation text, which may hold secrets, will be stored in the hub's database.")
+    .tags(&[Tag::Experimental]),
+    Spec::new(
+        SEARCH_TRANSCRIPT_DAYS,
+        "30",
+        Kind::Int { min: 1, max: 365 },
+        "Conversation text kept",
+        "Days of conversation text the search index keeps.",
+    )
+    .unit(Unit::Days)
+    .tags(&[Tag::Advanced]),
+    Spec::new(
         USAGE_INTERVAL_SECS,
         "300",
         Kind::Secs,
@@ -835,6 +1218,14 @@ pub const SPECS: &[Spec] = &[
     .unit(Unit::Seconds)
     .zero("off")
     .tags(&[Tag::Advanced]),
+    Spec::new(
+        ACCOUNTS_PAUSE_AT,
+        "90",
+        Kind::Int { min: 50, max: 100 },
+        "Ask before starting at",
+        "Used share of an account's 5-hour or weekly window at which starting a session on it asks first and offers the login with the most headroom.",
+    )
+    .unit(Unit::Percent),
     Spec::new(
         USAGE_PRICES_JSON,
         "{}",
@@ -913,7 +1304,7 @@ pub const SPECS: &[Spec] = &[
         "false",
         Kind::Bool,
         "Provision into git-tracked skills",
-        "Write fleet's skills even when a host's ~/.claude/skills is inside a git work tree, such as a dotfiles checkout. Off: provisioning refuses such a host.",
+        "Write fleet's skills even when a git work tree on the host, such as a dotfiles checkout, tracks files in fleet's two skill dirs. Off: provisioning refuses such a host; untracking or ignoring those two dirs is enough.",
     )
     .danger("Fleet will write its skills into a folder another git repository tracks.")
     .tags(&[Tag::Advanced]),
@@ -1043,7 +1434,16 @@ pub const SPECS: &[Spec] = &[
         "Classification nudge",
         "After three prompts with no ticket, ask Claude once which of your few open tickets it is on. Its answer is only ever a suggestion.",
     )
-    .tags(&[Tag::Experimental, Tag::Ai]),
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .per_org(),
+    Spec::new(
+        WORK_MEMBERS_PLAN_SPRINTS,
+        "false",
+        Kind::Bool,
+        "Members plan sprints",
+        "Let an organisation's members, not only its admins, create and change its sprints and releases. Viewers never can; anyone can keep personal ones.",
+    )
+    .per_org(),
     Spec::new(
         WORK_SUMMARY_MODEL,
         "haiku",
@@ -1051,7 +1451,67 @@ pub const SPECS: &[Spec] = &[
         "Summary model",
         "The model Summarise runs on for a past session, on that session's own host and account.",
     )
+    .tags(&[Tag::Ai])
+    .per_org(),
+    Spec::new(
+        WORK_CONTEXT_HELP,
+        "false",
+        Kind::Bool,
+        "Context help",
+        "Terminal and composer: Ask asks a model about the line you are typing, with its history as context, on the session's host. A proposed command is put on the line, never run.",
+    )
     .tags(&[Tag::Ai]),
+    Spec::new(
+        WORK_HELP_MODEL,
+        "haiku",
+        Kind::Choice(SUMMARY_MODELS),
+        "Context help model",
+        "The model that answers a question asked at a terminal or composer prompt line, on the session's own host and account.",
+    )
+    .tags(&[Tag::Ai]),
+    Spec::new(
+        WORK_DRAFT_COMMIT_MESSAGES,
+        "false",
+        Kind::Bool,
+        "Draft commit messages",
+        "Files tab: Draft writes a commit message from the staged diff with claude -p on the session's host. A draft is text you edit and commit yourself.",
+    )
+    .tags(&[Tag::Ai]),
+    Spec::new(
+        WORK_DRAFT_BRIEFS,
+        "false",
+        Kind::Bool,
+        "Draft agent briefs",
+        "Starting from a ticket: Draft writes the agent's brief from the ticket before the first prompt, on the planned host.",
+    )
+    .tags(&[Tag::Ai]),
+    Spec::new(
+        WORK_DRAFT_RELEASE_NOTES,
+        "false",
+        Kind::Bool,
+        "Draft release notes",
+        "Finish: Draft writes a finished mission's release note from its merged PRs, on the mission's planner host.",
+    )
+    .tags(&[Tag::Ai]),
+    Spec::new(
+        WORK_CATCH_UP_SUMMARIES,
+        "false",
+        Kind::Bool,
+        "Catch-up summaries",
+        "A watched session offers \"Since 13:20\": what it did since you last looked, summarised on its own host and account.",
+    )
+    .tags(&[Tag::Ai]),
+    Spec::new(
+        WORK_ATTACHMENT_MAX_MB,
+        "10",
+        Kind::Int {
+            min: 1,
+            max: crate::store::ATTACHMENT_MAX_MB_CEILING,
+        },
+        "Largest attachment",
+        "The largest file or image a task takes. At most 16 MiB: what one call between the desktop and the hub carries.",
+    )
+    .unit(Unit::Mib),
     Spec::new(
         WORK_TIDY_DONE_DAYS,
         "2",
@@ -1075,7 +1535,8 @@ pub const SPECS: &[Spec] = &[
         "Tidy: unlinked for",
         "Days a session with no work linked must sit idle and unprompted before Tidy up suggests it. Only ever suggested, never auto-tidied.",
     )
-    .unit(Unit::Days),
+    .unit(Unit::Days)
+    .per_org(),
     Spec::new(
         WORK_AUTO_TIDY,
         "false",
@@ -1097,7 +1558,7 @@ pub const SPECS: &[Spec] = &[
         "stable",
         Kind::Choice(UPDATE_TRACKS),
         "Release track",
-        "Which releases the hub follows for its fleet.",
+        "Which releases the hub follows for its fleet: stable, beta (release candidates too), nightly (main, at most every two hours) or dev (every green push to main).",
     ),
     Spec::new(
         UPDATE_HUB_MODE,
@@ -1108,7 +1569,7 @@ pub const SPECS: &[Spec] = &[
     ),
     Spec::new(
         UPDATE_AGENT_MODE,
-        "notify",
+        "automatic",
         Kind::Choice(UPDATE_MODES),
         "Agent updates",
         "The same choice for fleet-agent on hosts the hub cannot reach.",
@@ -1135,6 +1596,28 @@ pub const SPECS: &[Spec] = &[
         "How often the hub re-reads the release channel, and clients check again.",
     )
     .unit(Unit::Hours),
+    Spec::new(
+        UPDATE_WINDOW,
+        "",
+        Kind::TimeRange,
+        "Maintenance window",
+        "A daily range in UTC, like 02:00-05:00, in which automatic updates install. Outside it they wait; an offer to a person is not held. Empty: any time.",
+    ),
+    Spec::new(
+        UPDATE_ROLLOUT_WAVE_SECS,
+        "3600",
+        Kind::SecsMin(UPDATE_ROLLOUT_WAVE_MIN_SECS),
+        "Rollout wave soak",
+        "How long each wave of a staged rollout runs before the next opens, if its failure ratio stays under the rollout's halt ratio.",
+    )
+    .unit(Unit::Hours),
+    Spec::new(
+        UPDATE_MIRROR,
+        "false",
+        Kind::Bool,
+        "Mirror release files",
+        "Serve the agent and hub tarballs, desktop bundles and the phone's APK from this hub, for machines that cannot reach GitHub. Each file is fetched once and checked against the signed release.",
+    ),
     Spec::new(
         DECIDE_JEV_ENABLED,
         "false",
@@ -1163,6 +1646,168 @@ pub const SPECS: &[Spec] = &[
     .tags(&[Tag::Experimental, Tag::Ai])
     .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
     Spec::new(
+        DECIDE_JEV_START_PROJECT,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: start repository",
+        "Pre-selecting the repository of a task's first start. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_SIBLING_REPOS,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: sibling repository",
+        "Pre-ticking the other repository a ticket start also needs. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_HOST_PLACEMENT,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: session host",
+        "Pre-selecting the host of a new session when no rule, limit or offline host decides. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_QUICK_ANSWER,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: quick answer",
+        "Showing the likely option first in an agent's question or a chat form. Never on a push, a permission or a risky option. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_ADOPT_TARGET,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: adopt into",
+        "Prefilling the project when you adopt a pane fleet did not start. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_RESTORE_TARGET,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: restore into",
+        "Prefilling the project when you restore a conversation found on a host. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_DUPLICATE,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: duplicate task",
+        "Flagging a proposed task that may duplicate an existing one. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_WORK_PLACEMENT,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: task group",
+        "Proposing a Work-view group for a new task no rule or person placed. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_RELATED_SESSION,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: related session",
+        "Noticing another of your sessions working on the same thing. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_CONTROL_ROUTE,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: Control routing",
+        "Proposing which mission or session a message typed in Control is about. A short or unclear message gets a question instead. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_SUMMARY_CHECK,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: summary check",
+        "Checking a watcher's summary of a session against its transcript. Shadow only records; assist hides a summary the transcript does not support.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: check first")]),
+    Spec::new(
+        DECIDE_JEV_TURN_OUTCOME,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: turn outcome",
+        "Reading what a turn came to (finished, a question, stuck) from the end of the screen when hooks say nothing. Shadow only records; assist sets the Inbox state, and any hook overrides it. Sends reply text only for organisations that allow it.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: set the state")]),
+    Spec::new(
+        DECIDE_JEV_MISSION_TRIAGE,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: mission triage",
+        "Proposing a stuck mission's outcome and next step. Never completes a mission or sets Verified. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_ROUTINE_RUN_OUTCOME,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: routine run outcome",
+        "Reading whether a routine run did work, found nothing to do or needs you, from the end of its screen. Shadow only records; assist sets the outcome, so a run with nothing to do stays out of the Inbox. A failed exit or a rule wins. Sends reply text only for organisations that allow it.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: set the outcome")]),
+    Spec::new(
+        DECIDE_JEV_PR_TRIAGE,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: PR triage",
+        "Guessing what a stuck pull request needs (a fix, a regenerate, a base merge, a re-run, or a person) when the PR shepherd finds it conflicting or red. Sends the PR's check names and states, no code. Shadow only records; assist is recorded the same way for now.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: record only")]),
+    Spec::new(
+        DECIDE_JEV_MAIN_TICKET,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: main ticket",
+        "Proposing the main ticket in Review when a session's first prompt names several. A branch naming one decides without Jev. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_TRACKER_DUPLICATE,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: local task duplicates a ticket",
+        "Flagging in Review a new local task that may be the same work as an open tracker ticket. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_RESUME_OR_NEW,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: resume or start fresh",
+        "Proposing, in New session, whether to resume a past session of the same work or start fresh. A single recent past session decides without Jev. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
         DECIDE_JEV_UNASSIGNED,
         "false",
         Kind::Bool,
@@ -1171,6 +1816,15 @@ pub const SPECS: &[Spec] = &[
     )
     .tags(&[Tag::Experimental, Tag::Network])
     .danger("Sessions and tickets outside every organisation will be sent to TypeSafe too."),
+    Spec::new(
+        DECIDE_JEV_UNASSIGNED_REPLY,
+        "false",
+        Kind::Bool,
+        "Jev: send unassigned replies",
+        "Also send the reply text of sessions that belong to no organisation (turn outcome), on top of sending unassigned sessions at all.",
+    )
+    .tags(&[Tag::Experimental, Tag::Network])
+    .danger("Claude's reply text from sessions outside every organisation will be sent to TypeSafe too."),
     Spec::new(
         DECIDE_JEV_TIMEOUT_MS,
         "1500",
@@ -1225,6 +1879,44 @@ pub const SPECS: &[Spec] = &[
     )
     .tags(&[Tag::Advanced]),
     Spec::new(
+        DECIDE_HAIKU_SHADOW,
+        "false",
+        Kind::Bool,
+        "Second opinion from Claude",
+        "Also ask Claude every question a Jev use case in shadow or assist asks, on the host below, and record its answer beside Jev's to compare them. Nothing acts on it.",
+    )
+    .tags(&[Tag::Experimental, Tag::Network])
+    .danger("Each question's redacted state goes over SSH to the host below and on to Anthropic through that host's Claude account."),
+    Spec::new(
+        DECIDE_HAIKU_HOST,
+        "",
+        Kind::Text { max: 64 },
+        "Second opinion: host",
+        "The host whose Claude account answers. Only questions about its own organisation are sent to it.",
+    )
+    .tags(&[Tag::Experimental]),
+    Spec::new(
+        DECIDE_HAIKU_MODEL,
+        "haiku",
+        Kind::Choice(SUMMARY_MODELS),
+        "Second opinion: model",
+        "The Claude model the second opinion asks.",
+    )
+    .tags(&[Tag::Experimental, Tag::Advanced]),
+    Spec::new(
+        DECIDE_HAIKU_DAILY_CALLS,
+        "200",
+        Kind::Int {
+            min: 0,
+            max: 10_000,
+        },
+        "Second opinion: calls a day",
+        "Questions the second opinion may ask per UTC day. One at a time; a question that comes while one is running is not asked.",
+    )
+    .unit(Unit::Count)
+    .tags(&[Tag::Experimental, Tag::Advanced])
+    .zero("none"),
+    Spec::new(
         DECIDE_RETENTION_DAYS,
         "90",
         Kind::Int { min: 0, max: 3650 },
@@ -1233,6 +1925,14 @@ pub const SPECS: &[Spec] = &[
     )
     .unit(Unit::Days)
     .zero("forever"),
+    Spec::new(
+        DECIDE_JEV_FLOORS,
+        "",
+        Kind::Text { max: 8192 },
+        "Jev: fitted floors",
+        "Per-feature confidence floors fitted from runs a person confirmed, corrected or rejected (fleet-hub decide floor fit). A fitted floor only raises a feature's built-in one, and only for the question version and model it was fitted against.",
+    )
+    .tags(&[Tag::Advanced]),
     // ── read-only: owned and written elsewhere (D-P7) ──
     Spec::new(
         crate::service::hub::SETTING_BIND,
@@ -1327,6 +2027,74 @@ pub const SPECS: &[Spec] = &[
     .unit(Unit::Seconds)
     .owned_by("the settings table only")
     .tags(&[Tag::Advanced]),
+    Spec::new(
+        BUDGET_ORG_DAILY_USD,
+        "0",
+        Kind::Int {
+            min: 0,
+            max: 1_000_000,
+        },
+        "Org daily budget",
+        "Estimated spend an org's sessions may reach in one UTC day before fleet warns. Each org can set its own. Fleet only warns; it never stops a session.",
+    )
+    .unit(Unit::Usd)
+    .zero("none")
+    .per_org(),
+    Spec::new(
+        BUDGET_ORG_MONTHLY_USD,
+        "0",
+        Kind::Int {
+            min: 0,
+            max: 10_000_000,
+        },
+        "Org monthly budget",
+        "Estimated spend an org's sessions may reach in one calendar month (UTC) before fleet warns. Each org can set its own. Fleet only warns; it never stops a session.",
+    )
+    .unit(Unit::Usd)
+    .zero("none")
+    .per_org(),
+    Spec::new(
+        NOTIFY_DESKTOP,
+        "needs_you,failed,blocked,routine_failed",
+        Kind::ChoiceSet(NOTIFY_STATES),
+        "Desktop",
+        "The session states the desktop shows a notification for.",
+    )
+    .labels(NOTIFY_STATE_LABELS),
+    Spec::new(
+        NOTIFY_PHONE,
+        // Blocked too: before the matrix a phone announced a stuck session,
+        // a host down and an account at its limit, and still does unless
+        // someone unticks it (Martin, 2026-10-09).
+        "needs_you,failed,blocked,routine_failed",
+        Kind::ChoiceSet(NOTIFY_STATES),
+        "Phone",
+        "The session states the phone shows a notification for.",
+    )
+    .labels(NOTIFY_STATE_LABELS),
+    Spec::new(
+        NOTIFY_SOUND,
+        "needs_you",
+        Kind::ChoiceSet(NOTIFY_STATES),
+        "Sound",
+        "The session states whose notification also plays a sound.",
+    )
+    .labels(NOTIFY_STATE_LABELS),
+    Spec::new(
+        NOTIFY_QUIET_HOURS,
+        "",
+        Kind::TimeRange,
+        "Quiet hours",
+        "A daily range, like 22:00-07:30, in which no notification is shown or sounded, on each device's own clock. Empty: none.",
+    ),
+    Spec::new(
+        NOTIFY_QUIET_EXCEPT,
+        "failed",
+        Kind::ChoiceSet(NOTIFY_STATES),
+        "Through quiet hours",
+        "The states that still notify during quiet hours.",
+    )
+    .labels(NOTIFY_STATE_LABELS),
 ];
 
 /// Parse + validate a `Kind::ChoiceSet` value into the chosen options, in
@@ -1469,12 +2237,45 @@ pub fn validate(key: &str, value: &str) -> Result<(), IpcError> {
             .map(|_| ())
             .map_err(|e| IpcError::new(codes::E_INVALID, format!("{key} {}", e.message))),
         Kind::PriceMap => crate::service::usage::parse_price_overrides(v).map(|_| ()),
-        Kind::Text { max } if v.len() <= max && !v.chars().any(char::is_control) => Ok(()),
+        Kind::Text { max } if v.len() <= max && !v.chars().any(char::is_control) => {
+            if key == DECIDE_JEV_FLOORS {
+                crate::service::decide::floor::parse(v)
+                    .map_err(|e| IpcError::new(codes::E_INVALID, format!("{key}: {e}")))?;
+            }
+            Ok(())
+        }
         Kind::Text { max } => Err(IpcError::new(
             codes::E_INVALID,
             format!("{key} must be one line of at most {max} characters"),
         )),
+        Kind::TimeRange => parse_time_range(v).map(|_| ()).ok_or_else(|| {
+            IpcError::new(
+                codes::E_INVALID,
+                format!("{key} must be a time range like 22:00-07:30, or empty for none"),
+            )
+        }),
     }
+}
+
+/// `"22:00-07:30"` → minutes of the day `(1320, 450)`; `""` → `Some(None)`;
+/// anything else → `None`. A range whose ends are equal is refused: it
+/// would mean either nothing or the whole day.
+pub fn parse_time_range(v: &str) -> Option<Option<(u16, u16)>> {
+    let v = v.trim();
+    if v.is_empty() {
+        return Some(None);
+    }
+    let minute = |t: &str| -> Option<u16> {
+        let (h, m) = t.trim().split_once(':')?;
+        if h.is_empty() || h.len() > 2 || m.len() != 2 {
+            return None;
+        }
+        let (h, m) = (h.parse::<u16>().ok()?, m.parse::<u16>().ok()?);
+        (h < 24 && m < 60).then_some(h * 60 + m)
+    };
+    let (from, until) = v.split_once('-')?;
+    let (from, until) = (minute(from)?, minute(until)?);
+    (from != until).then_some(Some((from, until)))
 }
 
 /// Pure: resolve a raw stored value (or `None`) against its spec, falling
@@ -1493,6 +2294,20 @@ pub fn get_bool(s: &Store, key: &str) -> bool {
     get_string(s, key) == "true"
 }
 
+/// Writing help (gap plan G4.6): `E_INVALID_STATE` naming the toggle when
+/// the draft `key` gates is off, so a caller that skipped the UI's check
+/// learns where to turn it on.
+pub fn require_writing_help(s: &Store, key: &str) -> Result<(), IpcError> {
+    if get_bool(s, key) {
+        return Ok(());
+    }
+    let label = spec(key).map_or(key, |sp| sp.label);
+    Err(IpcError::new(
+        codes::E_INVALID_STATE,
+        format!("{label} is off. Turn it on in Settings › Work & trackers › Writing help."),
+    ))
+}
+
 pub fn get_secs(s: &Store, key: &str) -> u64 {
     get_string(s, key).parse().unwrap_or(0)
 }
@@ -1501,6 +2316,98 @@ pub fn get_secs(s: &Store, key: &str) -> u64 {
 pub fn get_string(s: &Store, key: &str) -> String {
     let raw = s.get_setting(key).ok().flatten();
     resolve(key, raw.as_deref())
+}
+
+/// The value `key` has for a session or host of `org` (org administration
+/// phase C): the org's own value when the key is [`Spec::per_org`] and the
+/// org set a valid one, else the fleet's ([`get_string`]).
+pub fn get_string_for(s: &Store, key: &str, org: Option<i64>) -> String {
+    if let (Some(org), Some(sp)) = (org, spec(key)) {
+        if sp.per_org {
+            if let Ok(Some(v)) = s.org_setting(org, key) {
+                if validate(key, v.trim()).is_ok() {
+                    return v.trim().to_string();
+                }
+            }
+        }
+    }
+    get_string(s, key)
+}
+
+pub fn get_bool_for(s: &Store, key: &str, org: Option<i64>) -> bool {
+    get_string_for(s, key, org) == "true"
+}
+
+/// Every org's own valid value of the per-org `key`, as `org id → value`:
+/// for a pass that reads the key for many sessions at once.
+pub fn org_values(s: &Store, key: &str) -> std::collections::HashMap<i64, String> {
+    if !spec(key).is_some_and(|sp| sp.per_org) {
+        return Default::default();
+    }
+    s.org_settings_for_key(key)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, v)| validate(key, v.trim()).is_ok())
+        .map(|(o, v)| (o, v.trim().to_string()))
+        .collect()
+}
+
+/// One per-org setting as an org's page shows it: the setting described
+/// with the FLEET's value, and the org's own value when it set one.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OrgSetting {
+    pub setting: Descriptor,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub own: Option<String>,
+}
+
+/// Every per-org setting for org `org`, in display order.
+pub fn org_settings(s: &Store, org: i64) -> Vec<OrgSetting> {
+    let own = s.org_settings(org).unwrap_or_default();
+    SPECS
+        .iter()
+        .filter(|sp| sp.per_org)
+        .map(|sp| OrgSetting {
+            setting: sp.describe(effective(s, sp)),
+            own: own
+                .get(sp.key)
+                .map(|v| v.trim().to_string())
+                .filter(|v| validate(sp.key, v).is_ok()),
+        })
+        .collect()
+}
+
+/// Set org `org`'s own value of the per-org `key`, or clear it (`None`:
+/// inherit the fleet's), on behalf of `actor`. Validated and stored as a
+/// fleet write is; audited under `<key>@org:<id>`.
+pub fn set_for_org(
+    s: &Store,
+    org: i64,
+    key: &str,
+    value: Option<&str>,
+    actor: Actor<'_>,
+) -> Result<(), IpcError> {
+    let Some(sp) = spec(key).filter(|sp| sp.per_org) else {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!("{key} is not a setting an org can set for itself"),
+        ));
+    };
+    let stored = value.map(|v| normalize(sp.key, v)).transpose()?;
+    let before = s.org_setting(org, key)?;
+    s.set_org_setting(org, key, stored.as_deref())?;
+    if before != stored {
+        s.insert_setting_audit(
+            &format!("{key}@org:{org}"),
+            before.as_deref(),
+            stored.as_deref().unwrap_or(""),
+            actor.word(),
+            actor.detail(),
+            None,
+        )?;
+    }
+    s.emit_settings_changed(key);
+    Ok(())
 }
 
 /// What a page shows for `spec`: the resolved value of an editable setting,
@@ -1556,6 +2463,7 @@ pub enum KindDesc {
     IdSet,
     PriceMap,
     Text { max: usize },
+    TimeRange,
 }
 
 impl From<Kind> for KindDesc {
@@ -1574,6 +2482,7 @@ impl From<Kind> for KindDesc {
             Kind::IdSet => KindDesc::IdSet,
             Kind::PriceMap => KindDesc::PriceMap,
             Kind::Text { max } => KindDesc::Text { max },
+            Kind::TimeRange => KindDesc::TimeRange,
         }
     }
 }
@@ -1605,6 +2514,23 @@ pub struct Descriptor {
     pub owned_by: Option<&'static str>,
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     pub option_labels: &'static [(&'static str, &'static str)],
+    /// An org may set its own value.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub per_org: bool,
+    /// Where the value lives: what the row's scope pill says.
+    pub scope: Scope,
+    /// The orgs that set their own value of a per-org setting, by name: the
+    /// pill says they override the fleet's. Only [`describe`] fills it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub org_values: Vec<OrgValue>,
+}
+
+/// One org's own value of a per-org setting, as a fleet page shows it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct OrgValue {
+    pub org_id: i64,
+    pub org: String,
+    pub value: String,
 }
 
 impl Spec {
@@ -1626,6 +2552,9 @@ impl Spec {
             ai: self.ai,
             owned_by: self.owned_by,
             option_labels: self.option_labels,
+            per_org: self.per_org,
+            scope: self.scope(),
+            org_values: Vec::new(),
         }
     }
 }
@@ -1634,10 +2563,42 @@ impl Spec {
 /// read-only `projects.*` previews of [`read_all`] are not settings and are
 /// left out.
 pub fn describe(s: &Store) -> Vec<Descriptor> {
+    // Org names once, for the per-org settings an org overrides. A store
+    // that cannot list them shows no overrides rather than no settings.
+    let orgs: BTreeMap<i64, String> = s
+        .list_orgs()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|o| (o.id, o.name))
+        .collect();
     SPECS
         .iter()
-        .map(|spec| spec.describe(effective(s, spec)))
+        .map(|spec| {
+            let mut d = spec.describe(effective(s, spec));
+            if spec.per_org && !orgs.is_empty() {
+                d.org_values = overrides(s, spec, &orgs);
+            }
+            d
+        })
         .collect()
+}
+
+/// The orgs that set their own valid value of `spec`, in org name order.
+fn overrides(s: &Store, spec: &Spec, orgs: &BTreeMap<i64, String>) -> Vec<OrgValue> {
+    let mut out: Vec<OrgValue> = org_values(s, spec.key)
+        .into_iter()
+        .filter_map(|(org_id, value)| {
+            let org = orgs.get(&org_id)?.clone();
+            Some(OrgValue { org_id, org, value })
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        a.org
+            .to_lowercase()
+            .cmp(&b.org.to_lowercase())
+            .then(a.org_id.cmp(&b.org_id))
+    });
+    out
 }
 
 /// Who wrote a setting, as the audit trail records it (design §5).
@@ -1753,6 +2714,29 @@ pub fn set_by(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 11.9: quiet hours are a range of minutes that may wrap past
+    /// midnight; empty means none.
+    #[test]
+    fn a_time_range_is_two_clock_times_or_nothing() {
+        assert_eq!(parse_time_range(""), Some(None));
+        assert_eq!(parse_time_range("22:00-07:30"), Some(Some((1320, 450))));
+        assert_eq!(parse_time_range(" 9:05 - 17:00 "), Some(Some((545, 1020))));
+        for bad in [
+            "22:00",
+            "24:00-07:00",
+            "22:60-07:00",
+            "7-8",
+            "08:00-08:00",
+            "a:bc-07:00",
+        ] {
+            assert_eq!(parse_time_range(bad), None, "{bad}");
+        }
+        assert!(validate(NOTIFY_QUIET_HOURS, "22:00-07:00").is_ok());
+        assert!(validate(NOTIFY_QUIET_HOURS, "late").is_err());
+        assert!(validate(NOTIFY_QUIET_EXCEPT, "failed,needs_you").is_ok());
+        assert!(validate(NOTIFY_DESKTOP, "nonsense").is_err());
+    }
 
     /// `text` with its comments removed: whole `//` lines, and `/* … */` and
     /// `<!-- … -->` blocks (also across lines). Line structure is kept.
@@ -2187,6 +3171,31 @@ mod tests {
         assert_eq!(resolve(DECIDE_JEV_UNASSIGNED, None), "false");
         assert_eq!(resolve(DECIDE_JEV_STATUS_MAP, None), "off");
         assert_eq!(resolve(DECIDE_JEV_WORK_LINK, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_START_PROJECT, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_SIBLING_REPOS, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_DUPLICATE, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_WORK_PLACEMENT, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_RELATED_SESSION, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_CONTROL_ROUTE, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_SUMMARY_CHECK, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_TURN_OUTCOME, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_UNASSIGNED_REPLY, None), "false");
+        assert!(validate(DECIDE_JEV_TURN_OUTCOME, "auto").is_err());
+        assert_eq!(resolve(DECIDE_JEV_MISSION_TRIAGE, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_ROUTINE_RUN_OUTCOME, None), "off");
+        assert!(validate(DECIDE_JEV_ROUTINE_RUN_OUTCOME, "auto").is_err());
+        assert!(validate(DECIDE_JEV_SIBLING_REPOS, "assist").is_ok());
+        assert!(validate(DECIDE_JEV_SIBLING_REPOS, "auto").is_err());
+        assert_eq!(resolve(DECIDE_JEV_HOST_PLACEMENT, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_QUICK_ANSWER, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_ADOPT_TARGET, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_RESTORE_TARGET, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_MAIN_TICKET, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_TRACKER_DUPLICATE, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_RESUME_OR_NEW, None), "off");
+        assert!(validate(DECIDE_JEV_RESUME_OR_NEW, "auto").is_err());
+        assert!(validate(DECIDE_JEV_MAIN_TICKET, "auto").is_err());
+        assert!(validate(DECIDE_JEV_RESTORE_TARGET, "auto").is_err());
         assert_eq!(resolve(DECIDE_JEV_MODEL, None), "jev-1.13.0");
         assert_eq!(resolve(DECIDE_RETENTION_DAYS, None), "90");
         // `auto` is not offered yet (D36), nor is a free-text model.
@@ -2201,6 +3210,104 @@ mod tests {
     /// `2026-09-28-declarative-pages-design.md`): a label and help for every
     /// setting, a unit that fits its kind, `zero` only where 0 is allowed,
     /// and no agent write where a change needs confirming.
+    /// Org administration phase C: a per-org key reads the org's own valid
+    /// value, else the fleet's; a key that is not per-org ignores any row;
+    /// the write is validated and audited under `<key>@org:<id>`.
+    #[test]
+    fn describe_says_where_each_value_lives_and_which_orgs_override_it() {
+        let s = Store::open_in_memory().unwrap();
+        let zeta = s.add_org("zeta", None, false).unwrap().id;
+        let acme = s.add_org("Acme", None, false).unwrap().id;
+        s.add_org("Idle", None, false).unwrap();
+        set_for_org(&s, zeta, WORK_SUMMARY_MODEL, Some("opus"), Actor::Person).unwrap();
+        set_for_org(&s, acme, WORK_SUMMARY_MODEL, Some("sonnet"), Actor::Person).unwrap();
+        // A stored value the gate would refuse is not shown as an override.
+        s.set_org_setting(acme, BUDGET_ORG_DAILY_USD, Some("lots"))
+            .unwrap();
+        let all = describe(&s);
+        let of = |key: &str| all.iter().find(|d| d.key == key).unwrap();
+
+        let summary = of(WORK_SUMMARY_MODEL);
+        assert_eq!(summary.scope, Scope::Org);
+        let names: Vec<(&str, &str)> = summary
+            .org_values
+            .iter()
+            .map(|o| (o.org.as_str(), o.value.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            [("Acme", "sonnet"), ("zeta", "opus")],
+            "by name, any case"
+        );
+        assert!(of(BUDGET_ORG_DAILY_USD).org_values.is_empty());
+        assert_eq!(of(GC_ENABLED).scope, Scope::Fleet);
+        assert_eq!(of(crate::mcp::SETTING_PORT).scope, Scope::Process);
+
+        let json = serde_json::to_value(of(GC_ENABLED)).unwrap();
+        assert_eq!(json["scope"], "fleet");
+        assert!(
+            json.get("org_values").is_none(),
+            "absent when no org overrides"
+        );
+        let json = serde_json::to_value(summary).unwrap();
+        assert_eq!(json["scope"], "org");
+        assert_eq!(json["org_values"][0]["org"], "Acme");
+    }
+
+    #[test]
+    fn every_owned_key_is_a_process_s_own() {
+        for sp in SPECS.iter().filter(|sp| sp.owned_by.is_some()) {
+            assert!(
+                sp.key.starts_with("hub.") || sp.key.starts_with("mcp."),
+                "{}: an owned key outside hub.* / mcp.* is not a process's own; give Scope a case for it",
+                sp.key
+            );
+            assert!(!sp.per_org, "{}", sp.key);
+        }
+    }
+
+    #[test]
+    fn a_per_org_setting_reads_the_orgs_own_value_else_the_fleets() {
+        let s = Store::open_in_memory().unwrap();
+        let org = s.add_org("Acme", None, false).unwrap().id;
+        set(&s, WORK_SUMMARY_MODEL, "sonnet").unwrap();
+        assert_eq!(get_string_for(&s, WORK_SUMMARY_MODEL, Some(org)), "sonnet");
+        set_for_org(&s, org, WORK_SUMMARY_MODEL, Some("opus"), Actor::Person).unwrap();
+        assert_eq!(get_string_for(&s, WORK_SUMMARY_MODEL, Some(org)), "opus");
+        assert_eq!(get_string_for(&s, WORK_SUMMARY_MODEL, None), "sonnet");
+        assert!(
+            set_for_org(&s, org, WORK_SUMMARY_MODEL, Some("gpt"), Actor::Person).is_err(),
+            "validated like a fleet write"
+        );
+        assert!(
+            set_for_org(&s, org, GC_ENABLED, Some("false"), Actor::Person).is_err(),
+            "not a per-org key"
+        );
+        let views = org_settings(&s, org);
+        let summary = views
+            .iter()
+            .find(|v| v.setting.key == WORK_SUMMARY_MODEL)
+            .unwrap();
+        assert_eq!(
+            (summary.setting.value.as_str(), summary.own.as_deref()),
+            ("sonnet", Some("opus"))
+        );
+        assert!(views.iter().all(|v| v.setting.per_org));
+        assert_eq!(
+            org_values(&s, WORK_SUMMARY_MODEL)
+                .get(&org)
+                .map(String::as_str),
+            Some("opus")
+        );
+        // Clearing inherits again.
+        set_for_org(&s, org, WORK_SUMMARY_MODEL, None, Actor::Person).unwrap();
+        assert_eq!(get_string_for(&s, WORK_SUMMARY_MODEL, Some(org)), "sonnet");
+        let audit = s
+            .setting_audit(&format!("{WORK_SUMMARY_MODEL}@org:{org}"), 10)
+            .unwrap();
+        assert_eq!(audit.len(), 2, "{audit:?}");
+    }
+
     #[test]
     fn every_spec_has_consistent_metadata() {
         let mut labels = std::collections::BTreeSet::new();

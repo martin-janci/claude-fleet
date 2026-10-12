@@ -9,6 +9,7 @@
 // deterministic; the frontend's wall clock is for display only, the backend
 // owns scheduling. Formatters take an optional `locale` and `timeZone`
 // (defaults: the system's).
+import type { OfIconName } from './kit/icons';
 import type { AccountUsage, AccountUsageSnapshot, UsageStatus, UsageWindow } from './account_usage_store';
 import type { AccountRow } from './accounts';
 
@@ -39,6 +40,16 @@ export const LOCAL_HOST = 'local';
 export function leftPct(w: UsageWindow): number {
   const u = Number.isFinite(w.utilization) ? w.utilization : 100;
   return Math.min(100, Math.max(0, Math.round(100 - u)));
+}
+
+/**
+ * The % left a window's severity is judged on: 0 only when the raw figure
+ * says the window is used up (as `attention_facts.ts` decides Blocked), so
+ * 99.6% used, which rounds to 0% left, is low and never LIMIT (review r05).
+ */
+export function severityLeft(w: UsageWindow): number {
+  const u = Number.isFinite(w.utilization) ? w.utilization : 100;
+  return u >= 100 ? 0 : Math.max(1, leftPct(w));
 }
 
 /** % used as displayed: always `100 - leftPct`, so the two never disagree. */
@@ -111,10 +122,20 @@ export function severityBadge(
   }
 }
 
-/** The window with fewer % left (5-hour on a tie); `null` with neither. */
-export function bindingWindow(usage: AccountUsage | null): UsageWindowKind | null {
-  const five = usage?.five_hour ?? null;
-  const week = usage?.seven_day ?? null;
+/**
+ * The window with fewer % left (5-hour on a tie); `null` with neither. Given
+ * `now`, a window whose reset has passed no longer binds while the other has
+ * not (as `used_pct_of` in fleet-core's `account_limits.rs`): its number is
+ * gone, and the other window's may still stop the account.
+ */
+export function bindingWindow(usage: AccountUsage | null, now?: number): UsageWindowKind | null {
+  let five = usage?.five_hour ?? null;
+  let week = usage?.seven_day ?? null;
+  if (now !== undefined && five && week) {
+    const past = (w: UsageWindow) => w.resets_at != null && w.resets_at <= now;
+    if (past(five) && !past(week)) five = null;
+    else if (past(week) && !past(five)) week = null;
+  }
   if (five && week) return leftPct(week) < leftPct(five) ? 'weekly' : '5h';
   if (five) return '5h';
   if (week) return 'weekly';
@@ -279,13 +300,13 @@ export function chipLabel(
   timeZone?: string,
 ): string {
   if (!snapshot || (snapshot.status === 'never_fetched' && !snapshot.usage)) return 'checking…';
-  const kind = bindingWindow(snapshot.usage);
+  const kind = bindingWindow(snapshot.usage, now);
   const w = windowOf(snapshot.usage, kind ?? '5h');
   if (!kind || !w) return '? left';
   const fr = freshness(kind, snapshot.fetched_at, w.resets_at, now);
   if (fr === 'expired') return '? left';
   const left = leftPct(w);
-  const level = severity(kind, left, w.resets_at, now, hasExtraUsage);
+  const level = severity(kind, severityLeft(w), w.resets_at, now, hasExtraUsage);
   const name = kind === 'weekly' ? 'weekly ' : '';
   const reset = w.resets_at === null ? '' : ` · ${formatResetShort(kind, w.resets_at, now, locale, timeZone)}`;
   if (fr === 'stale') {
@@ -320,9 +341,10 @@ export type MessageKind =
 export interface UsageMessageLine {
   kind: MessageKind;
   tone: MessageTone;
-  /** Leading glyph (`◷`, `⏸`, `⚠`, `🔑`, `○`), or `''`. */
-  glyph: string;
-  /** Plain text without the glyph. Never raw `detail`. */
+  /** Leading icon from the manual's set (kit/icons.ts: clock, pause,
+   *  warning, key, circle), or null. */
+  glyph: OfIconName | null;
+  /** Plain text without the icon. Never raw `detail`. */
   text: string;
   /** Set on a line about one window (`past_reset`). */
   window?: UsageWindowKind;
@@ -419,7 +441,7 @@ export function statusMessage(
   if (!account) {
     return {
       lines: [
-        { kind: 'no_account', tone: 'muted', glyph: '', text: 'Not logged in to Claude on this host — no usage to show.' },
+        { kind: 'no_account', tone: 'muted', glyph: null, text: 'Not logged in to Claude on this host — no usage to show.' },
       ],
       checking: false,
       copyDetail: null,
@@ -432,7 +454,7 @@ export function statusMessage(
         {
           kind: 'first_load',
           tone: 'muted',
-          glyph: '',
+          glyph: null,
           text: host ? `Asking ${host} for usage…` : "Asking this account's hosts for usage…",
         },
       ],
@@ -456,7 +478,7 @@ export function statusMessage(
     case 'rate_limited':
       reason = 'rate-limited';
       statusCarriesNextTry = true;
-      lines.push({ kind: 'rate_limited', tone: 'warn', glyph: '⏸', text: `Anthropic is rate-limiting usage checks.${nextTry}` });
+      lines.push({ kind: 'rate_limited', tone: 'warn', glyph: 'pause', text: `Anthropic is rate-limiting usage checks.${nextTry}` });
       break;
     case 'unavailable': {
       const hint = httpHint(snapshot.detail);
@@ -465,7 +487,7 @@ export function statusMessage(
       lines.push({
         kind: 'unavailable',
         tone: 'warn',
-        glyph: '⚠',
+        glyph: 'warning',
         text: `Usage unavailable. Anthropic's usage endpoint returned an unexpected response${hint ? ` (${hint})` : ''}. It's undocumented and may have changed. Sessions are unaffected.${nextTry}`,
       });
       break;
@@ -475,7 +497,7 @@ export function statusMessage(
       lines.push({
         kind: 'access_token_expired',
         tone: 'muted',
-        glyph: '🔑',
+        glyph: 'key',
         text: `Usage checks are paused until Claude Code refreshes its token on ${host}; it does so the next time it runs there.`,
       });
       break;
@@ -484,7 +506,7 @@ export function statusMessage(
       lines.push({
         kind: 'login_expired',
         tone: 'alarm',
-        glyph: '🔑',
+        glyph: 'key',
         text: `Claude login expired on ${host} — usage can't be checked from it. Run claude /login there.`,
       });
       break;
@@ -493,7 +515,7 @@ export function statusMessage(
       lines.push({
         kind: 'token_rejected',
         tone: 'alarm',
-        glyph: '🔑',
+        glyph: 'key',
         text: `Anthropic rejected the Claude token on ${host} — usage can't be checked from it.`,
       });
       break;
@@ -503,7 +525,7 @@ export function statusMessage(
       lines.push({
         kind: 'host_unsupported',
         tone: 'warn',
-        glyph: '⚠',
+        glyph: 'warning',
         text: `${missingToolText(note, host)} — usage can't be checked from it.`,
       });
       break;
@@ -514,7 +536,7 @@ export function statusMessage(
         lines.push({
           kind: 'no_credentials',
           tone: 'muted',
-          glyph: '○',
+          glyph: 'circle',
           text:
             'Usage is read through another host on this account.' +
             (sharedWith.length === 0
@@ -526,7 +548,7 @@ export function statusMessage(
         lines.push({
           kind: 'no_credentials',
           tone: 'warn',
-          glyph: '🔑',
+          glyph: 'key',
           text: `No Claude credentials on ${host} — usage can't be checked from it.`,
         });
       }
@@ -535,13 +557,13 @@ export function statusMessage(
       const unreachable = notes.filter((n) => n.problem === 'unreachable').map((n) => n.host);
       if (unreachable.length > 0) {
         reason = `couldn't reach ${unreachable.join(', ')}`;
-        lines.push({ kind: 'unreachable', tone: 'warn', glyph: '○', text: `Couldn't reach ${unreachable.join(', ')} to check usage.` });
+        lines.push({ kind: 'unreachable', tone: 'warn', glyph: 'circle', text: `Couldn't reach ${unreachable.join(', ')} to check usage.` });
       } else {
         reason = 'no online host';
         lines.push({
           kind: 'no_online_host',
           tone: 'warn',
-          glyph: '○',
+          glyph: 'circle',
           text: `No online host is logged in to this account${via ? ` (${via} offline)` : ''}.`,
         });
       }
@@ -571,7 +593,7 @@ export function statusMessage(
           default:
             text = `Couldn't reach ${n.host}${tail}`;
         }
-        if (text) lines.push({ kind: 'host_note', tone: 'muted', glyph: '', text });
+        if (text) lines.push({ kind: 'host_note', tone: 'muted', glyph: null, text });
       }
       break;
   }
@@ -587,7 +609,7 @@ export function statusMessage(
       lines.push({
         kind: 'past_reset',
         tone: 'muted',
-        glyph: '',
+        glyph: null,
         window: kind,
         text: `Window reset at ${at} after the last check. Last known: ${leftPct(w)}% left at ${clock(fetchedAt, locale, timeZone)}.`,
       });
@@ -597,9 +619,44 @@ export function statusMessage(
       const ageText = `${formatDuration(age)} old`;
       const tailNext = statusCarriesNextTry ? '' : nextTry;
       const text = failed ? `${ageText} — last check failed: ${reason}.${tailNext}` : `${ageText}.${tailNext}`;
-      lines.unshift({ kind: 'age', tone: 'muted', glyph: '◷', text });
+      lines.unshift({ kind: 'age', tone: 'muted', glyph: 'clock', text });
     }
   }
 
   return { lines, checking: false, copyDetail: snapshot.detail };
+}
+
+// ── a login's headroom, in one line ──
+
+/**
+ * What a login choice says about its account (gap plan step G2.7, the
+ * FormsSession board's Switch login): `5h 75% · week 85% left`, `85% left`
+ * with one window, or `weekly limit until Fri 11:00` once a window is used
+ * up. A window whose reset has passed says nothing (its number is gone).
+ * Null with no reading at all.
+ */
+export function loginHeadroomText(
+  snapshot: AccountUsageSnapshot | null | undefined,
+  now: number,
+  locale?: string,
+  timeZone?: string,
+): string | null {
+  const usage = snapshot?.usage ?? null;
+  if (!usage || snapshot?.fetched_at == null) return null;
+  const live = (w: UsageWindow | null): UsageWindow | null =>
+    w && !(w.resets_at != null && w.resets_at <= now) ? w : null;
+  const five = live(usage.five_hour);
+  const week = live(usage.seven_day);
+  const spent = (w: UsageWindow | null) => w !== null && severityLeft(w) === 0;
+  if (spent(week)) {
+    const at = week!.resets_at;
+    return at == null ? 'weekly limit reached' : `weekly limit until ${weekdayClock(at, locale, timeZone)}`;
+  }
+  if (spent(five)) {
+    const at = five!.resets_at;
+    return at == null ? '5-hour limit reached' : `5-hour limit until ${clock(at, locale, timeZone)}`;
+  }
+  if (five && week) return `5h ${leftPct(five)}% · week ${leftPct(week)}% left`;
+  const one = five ?? week;
+  return one ? `${leftPct(one)}% left` : null;
 }

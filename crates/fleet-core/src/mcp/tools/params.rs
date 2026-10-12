@@ -59,8 +59,10 @@ pub struct ListSessionsParams {
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct WhoamiParams {
-    /// Your tmux session name — `tmux display-message -p '#S'`.
-    pub tmux_name: String,
+    /// Your tmux session name — `tmux display-message -p '#S'`. Omit it
+    /// from inside a fleet session: your pane (`X-Fleet-Pane`) names you.
+    #[serde(default)]
+    pub tmux_name: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -103,6 +105,18 @@ pub struct NewSessionParams {
     /// low|medium|high|xhigh|max.
     #[serde(default)]
     pub effort: Option<String>,
+    /// Login profile (~/.claude-profiles/<name>).
+    #[serde(default)]
+    pub profile: Option<String>,
+    /// claude (default), codex or shell.
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// Opaque id (1–64 of A-Za-z0-9_-) its `start:progress` events carry.
+    #[serde(default)]
+    pub start_token: Option<String>,
+    /// The person chose a login past `accounts.pause_at`.
+    #[serde(default)]
+    pub over_limit_ok: Option<bool>,
     /// Approved confirmation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_nonce: Option<String>,
@@ -132,6 +146,22 @@ pub struct NewShellSessionParams {
     /// Approved confirmation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_nonce: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ShellTerminalsParams {
+    /// The session whose terminals to list, open or close.
+    pub session_id: i64,
+    /// list (default), open or close.
+    #[serde(default)]
+    pub action: crate::service::sessions::ShellTerminalAction,
+    /// The terminal's number, 1 to 9: close needs it; open without it
+    /// takes the lowest free one.
+    #[serde(default)]
+    pub n: Option<u32>,
+    /// open only: worktree (default) or home.
+    #[serde(default)]
+    pub at: crate::service::sessions::ShellTerminalStart,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -245,6 +275,15 @@ pub struct RestartSessionParams {
     /// Restart even the fleet controller.
     #[serde(default)]
     pub force: bool,
+    /// Switch login profile ("" = host login).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// Relaunch under this model ("" = host default); how a Codex session changes model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Relaunch at this reasoning effort ("" = host default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     /// Approved confirmation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_nonce: Option<String>,
@@ -317,6 +356,38 @@ fn default_true() -> bool {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct QueuePromptParams {
+    /// Fleet session id.
+    pub session_id: i64,
+    /// Text typed as a new turn.
+    pub prompt: String,
+    /// Omit the untrusted-input marker line. Master token only.
+    #[serde(default)]
+    pub raw: bool,
+    /// Operator only: the nonce a person approved.
+    #[serde(default)]
+    pub confirm_nonce: Option<String>,
+    /// Send later: not typed before this unix second.
+    #[serde(default)]
+    pub not_before: Option<i64>,
+    /// Hold it while the session's account is at or past accounts.pause_at.
+    #[serde(default)]
+    pub until_limit_reset: bool,
+    /// Drop it instead if the session is archived before it goes out.
+    #[serde(default)]
+    pub skip_if_archived: bool,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct QueuedPromptsParams {
+    /// Fleet session id.
+    pub session_id: i64,
+    /// Take back this waiting prompt instead of listing.
+    #[serde(default)]
+    pub cancel: Option<i64>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct SendPromptParams {
     /// Fleet session id, or host_alias + tmux_name.
     #[serde(default)]
@@ -345,10 +416,21 @@ pub struct SendPromptParams {
     /// session.
     #[serde(default)]
     pub client_msg_id: Option<String>,
-    /// Press a key instead: `Enter`, `Escape`, `C-c`, or `1`-`9` (that
-    /// `pending_input` option). Unmarked, not recorded; `prompt` must be empty.
+    /// Press a key instead; `1`-`9` picks that `pending_input` option
+    /// (toggles if `multi`). `prompt` must be empty.
     #[serde(default)]
+    #[schemars(extend("enum" = crate::tmux::NamedKey::all_names()))]
     pub keys: Option<String>,
+    /// With `keys`: its `pending_input`; E_CONFLICT if it moved.
+    // Advertised as a bare object: the nested `ExpectDialog` schema cost
+    // every client ~500 bytes of tool definitions on every connect
+    // (`the_served_definition_budget_stays_bounded`). Still parsed strictly.
+    #[serde(default)]
+    #[schemars(with = "Option<serde_json::Map<String, serde_json::Value>>")]
+    pub expect: Option<crate::service::sessions::ExpectDialog>,
+    /// Operator only: the nonce a person approved.
+    #[serde(default)]
+    pub confirm_nonce: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -541,6 +623,9 @@ pub struct AddProjectParams {
 pub struct ListGithubReposParams {
     /// Host whose `gh` login lists the repositories.
     pub host_alias: String,
+    /// A GitHub user or organisation to list instead of the login's own.
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -658,6 +743,34 @@ pub struct SessionConversationParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionSummarySinceParams {
+    /// Fleet session id.
+    pub session_id: i64,
+    /// The start of the window, unix seconds: the turns that ended at or
+    /// after it are summarised.
+    pub since: i64,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionContextHelpParams {
+    /// Fleet session id.
+    pub session_id: i64,
+    /// The question; empty asks about `line` alone.
+    #[serde(default)]
+    pub question: String,
+    /// What is in the composer now.
+    #[serde(default)]
+    pub line: String,
+    /// The composer's earlier prompts, oldest first.
+    #[serde(default)]
+    pub history: Vec<String>,
+    /// The commands the composer accepts, one per entry
+    /// (`/plan #KEY or a goal — Plan subtasks…`).
+    #[serde(default)]
+    pub commands: Vec<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct SessionToolDetailParams {
     /// Fleet session id.
     pub session_id: i64,
@@ -684,6 +797,9 @@ pub struct RunPromptParams {
     /// Omit the untrusted-input marker (master token only).
     #[serde(default)]
     pub raw: bool,
+    /// Operator only: the nonce a person approved.
+    #[serde(default)]
+    pub confirm_nonce: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -733,6 +849,15 @@ pub struct ListTasksParams {
     /// Only tasks dispatched by this session.
     #[serde(default)]
     pub requester_session_id: Option<i64>,
+    /// Only tasks given to this session to do (it is their worker).
+    #[serde(default)]
+    pub worker_session_id: Option<i64>,
+    /// Only YOUR tasks: the ones your own session dispatched or works on.
+    /// Needs a call from inside a fleet session (its per-host token and
+    /// `X-Fleet-Pane`); each row then says `is_self_requester` /
+    /// `is_self_worker`.
+    #[serde(default)]
+    pub mine: Option<bool>,
     /// queued | running | done | failed | cancelled.
     #[serde(default)]
     pub state: Option<String>,
@@ -763,6 +888,16 @@ pub struct SetSessionTagsParams {
     pub tmux_name: Option<String>,
     /// The full list (replaces; empty clears).
     pub tags: Vec<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct DecideRelatedSessionParams {
+    /// The session whose `related_session` proposal this answers.
+    pub session_id: i64,
+    /// The proposal's `run_id`.
+    pub run_id: i64,
+    /// true: Link (same work, stays listed); false: Not related.
+    pub linked: bool,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -856,9 +991,19 @@ pub struct RepairSessionParams {
     /// Nonce from an approved `E_CONFIRM_REQUIRED`.
     #[serde(default)]
     pub confirm_nonce: Option<String>,
+    /// 1–64 of A-Za-z0-9_-.
+    #[serde(default)]
+    pub progress_token: Option<String>,
 }
 
 // --- asset catalog ---------------------------------------------------------
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ListAssetsParams {
+    /// Every catalog, not only personal (master/unbound full only).
+    #[serde(default)]
+    pub all_catalogs: bool,
+}
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct ScanAssetsParams {
@@ -872,7 +1017,7 @@ pub struct PlanSyncParams {
     /// Only this host; omit for every reachable one.
     #[serde(default)]
     pub host_alias: Option<String>,
-    /// Only this kind: skill | agent | hook | mcp_server | plugin_ref.
+    /// Only this kind: skill | agent | hook | mcp_server | plugin_ref | command.
     #[serde(default)]
     pub kind: Option<String>,
     /// Only this asset.
@@ -927,6 +1072,9 @@ pub struct PairClientParams {
     /// Bind to this org: it reads only that org's and unassigned work.
     #[serde(default)]
     pub org_id: Option<i64>,
+    /// Whose device it is. Default: this hub's owner.
+    #[serde(default)]
+    pub person: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -964,6 +1112,47 @@ pub struct SettingHistoryParams {
     /// Newest first, 1-100; 20 when unset.
     #[serde(default)]
     pub limit: Option<i64>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ControlHandoffsParams {
+    /// How many, newest first (default 50, at most 500).
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ControlRouteParams {
+    /// propose | follow
+    pub action: String,
+    /// propose: the message just sent in Control.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// follow: the run the receipt came from.
+    #[serde(default)]
+    pub run_id: Option<i64>,
+    /// follow: the option kept or picked (m<id>, s<id>, control).
+    #[serde(default)]
+    pub chosen: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ResumeOrNewParams {
+    /// propose | follow
+    pub action: String,
+    /// The work key a new session plans (PD-2412).
+    pub key: String,
+    /// follow: the person's pick, new or l<link id>.
+    #[serde(default)]
+    pub chosen: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct AnswerMcpConfirmParams {
+    /// The confirm_nonce the waiting call was handed.
+    pub nonce: String,
+    /// true runs the call on its retry; false refuses it.
+    pub approved: bool,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -1006,6 +1195,55 @@ pub struct GuideParams {
     /// remove: guide id.
     #[serde(default)]
     pub page_id: Option<String>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize, schemars::JsonSchema, Default)]
+pub struct AskListFilter {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<i64>,
+    /// pending, answered, declined, cancelled or expired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct AskParams {
+    /// A fleet.form/1 form for your own session's chat (docs/forms.md).
+    #[serde(default)]
+    pub form: Option<serde_json::Value>,
+    /// form / draft: why you ask (≤500 chars).
+    #[serde(default)]
+    pub why: Option<String>,
+    /// The form's JSON so far (≤16 KiB), drawn in until `form`; "" drops it.
+    #[serde(default)]
+    pub draft: Option<String>,
+    /// Wait again on this pending form_id.
+    #[serde(default)]
+    pub wait: Option<String>,
+    /// Withdraw this form_id.
+    #[serde(default)]
+    pub cancel: Option<String>,
+    /// List forms: {session_id?, state?}.
+    #[serde(default)]
+    pub list: Option<AskListFilter>,
+    /// Read this form_id.
+    #[serde(default)]
+    pub get: Option<String>,
+    /// Answer this form_id with `values`.
+    #[serde(default)]
+    pub answer: Option<String>,
+    /// answer: field name → value.
+    #[serde(default)]
+    pub values: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Decline this form_id, with an optional `note`.
+    #[serde(default)]
+    pub decline: Option<String>,
+    /// decline: a short reason.
+    #[serde(default)]
+    pub note: Option<String>,
+    /// form / wait: default and max 600.
+    #[serde(default)]
+    pub timeout_s: Option<u64>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -1056,7 +1294,7 @@ pub struct CatalogAdminParams {
     /// apply_sync|last_sync|list_secrets|set_secret|delete_secret|
     /// list_layers|resolve_preview|propose_layers|set_host_layers|set_host_harnesses|
     /// layer_template|write_layer|delete_layer|list_catalogs|add_catalog|
-    /// remove_catalog|admit_catalog|unadmit_catalog
+    /// remove_catalog|admit_catalog|unadmit_catalog|asset_history|drift_diff
     pub action: String,
     /// The desktop command's own argument object.
     #[serde(default)]
@@ -1074,7 +1312,7 @@ pub struct CatalogAdminParams {
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct ChangesetsParams {
-    /// list|propose|apply|undo|dismiss|reject_item
+    /// list|propose|propose_layer|apply|undo|dismiss|reject_item
     pub action: String,
     /// The card: list shows it in full; apply|undo|dismiss|reject_item need it.
     #[serde(default)]
@@ -1086,6 +1324,9 @@ pub struct ChangesetsParams {
     /// apply of a rollout or restore: nonce of an approved E_CONFIRM_REQUIRED.
     #[serde(default)]
     pub confirm_nonce: Option<String>,
+    /// propose_layer: {op: create|rename|move, catalog?, layer, to?, member?, axis?, description?, members?}.
+    #[serde(default)]
+    pub change: Option<crate::service::catalog::changesets::LayerChange>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema, Default)]
@@ -1095,9 +1336,40 @@ pub struct UpdateStatusParams {
     pub target: Option<String>,
 }
 
+#[derive(serde::Deserialize, schemars::JsonSchema, Clone)]
+pub struct UpdatePolicyParams {
+    /// list | set | clear.
+    pub action: String,
+    /// Defaults to this device's org.
+    #[serde(default)]
+    pub org_id: Option<i64>,
+    /// set, clear: hub | agent | desktop | android | ios.
+    #[serde(default)]
+    pub component: Option<String>,
+    /// set: manual | notify | automatic.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// set: the org's floor version.
+    #[serde(default)]
+    pub minimum: Option<String>,
+    /// set: HH:MM-HH:MM UTC, "" = any time.
+    #[serde(default)]
+    pub window: Option<String>,
+    /// set: pin the org to this release.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// set: the pin is required.
+    #[serde(default)]
+    pub mandatory: Option<bool>,
+    /// set: why, for the dashboard.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct UpdateAdminParams {
-    /// pin | unpin | refresh.
+    /// pin | unpin | update_now | refresh | rollout_start | rollout_pause | rollout_resume |
+    /// rollout_abort | set_policy | clear_policy.
     pub action: String,
     /// hub | agent | desktop | android | ios.
     #[serde(default)]
@@ -1111,13 +1383,258 @@ pub struct UpdateAdminParams {
     /// pin: required, not merely offered.
     #[serde(default)]
     pub mandatory: Option<bool>,
-    /// pin: why, for the dashboard.
+    /// pin, rollout_pause: why, for the dashboard.
     #[serde(default)]
     pub reason: Option<String>,
+    /// rollout_start: percents ending at 100 (default [10,50,100]).
+    #[serde(default)]
+    pub waves: Option<Vec<u8>>,
+    /// rollout_start: failure ratio that pauses it (default 0.2).
+    #[serde(default)]
+    pub halt_failure_ratio: Option<f64>,
+    /// set_policy, clear_policy.
+    #[serde(default)]
+    pub org_id: Option<i64>,
+    /// set_policy: manual | notify | automatic.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// set_policy: the org's floor version.
+    #[serde(default)]
+    pub minimum: Option<String>,
+    /// set_policy: HH:MM-HH:MM UTC, "" = any time.
+    #[serde(default)]
+    pub window: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RoutinesParams {
+    /// list | get | runs | failing | budget | save | preview | delete | set_enabled | skip_next | run_now | set_run_outcome.
+    pub action: String,
+    /// Every action but list, and save or preview of a change.
+    #[serde(default)]
+    pub routine_id: Option<i64>,
+    /// save, preview: the whole routine.
+    #[serde(default)]
+    pub routine: Option<crate::service::routines::RoutineInput>,
+    /// set_enabled.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// skip_next: false takes the skip back (default true).
+    #[serde(default)]
+    pub skip: Option<bool>,
+    /// runs: how many, newest first (default 20, at most 200).
+    #[serde(default)]
+    pub limit: Option<i64>,
+    /// set_run_outcome: the run, one of this routine's.
+    #[serde(default)]
+    pub run_id: Option<i64>,
+    /// set_run_outcome: did_work | nothing | needs_person.
+    #[serde(default)]
+    pub outcome: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct LibraryParams {
+    /// list | add | remove.
+    pub action: String,
+    /// list: only this session's files; add: the session they were put beside.
+    #[serde(default)]
+    pub session_id: Option<i64>,
+    /// list: only this host's files.
+    #[serde(default)]
+    pub host_alias: Option<String>,
+    /// list: at most this many, newest first (default and cap 200).
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// add: upload | attachment.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// add: the files, already on the session's host.
+    #[serde(default)]
+    pub files: Option<Vec<crate::service::library::LibraryFile>>,
+    /// remove: the row's id.
+    #[serde(default)]
+    pub id: Option<i64>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct RemoveDownloadParams {
     /// The download's id (`list_downloads`).
     pub id: i64,
+}
+
+// --- sharing a session (multi-user M1, T12) --------------------------------
+//
+// **Every one of these addresses the session by ROW ID and by nothing else.**
+// No `host_alias` + `tmux_name` fallback, which every other session-addressed
+// tool offers: that pair is REUSABLE — a killed session's tmux name is taken
+// by the next one started on that host — so a share or a claim resolved by
+// name could be written against a different session than the one the caller
+// read. An id names one row for the life of the row.
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionShareParams {
+    /// The session to share, by fleet row id.
+    pub session_id: i64,
+    /// A person's name, or none with `org` (an org's name).
+    #[serde(default)]
+    pub person: String,
+    /// Or an org.
+    #[serde(default)]
+    pub org: Option<String>,
+    /// watch (read it), answer (also answer its dialogs) or drive (also
+    /// prompt it). Nothing else — "own" is not a grantable level.
+    pub level: String,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionGrantParams {
+    /// The session, by fleet row id.
+    pub session_id: i64,
+    /// A person's name, or none with `org`.
+    #[serde(default)]
+    pub person: String,
+    /// Or an org.
+    #[serde(default)]
+    pub org: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionAccessParams {
+    /// The session, by fleet row id.
+    pub session_id: i64,
+}
+
+/// `session_ask_access` (gap plan G4.2).
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionAskAccessParams {
+    /// The session shared with you, by fleet row id.
+    pub session_id: i64,
+    /// The level to ask for: answer or drive.
+    pub level: String,
+}
+
+/// `access_requests` (gap plan G4.2).
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct AccessRequestsParams {
+    /// list (default), grant or decline.
+    #[serde(default)]
+    pub action: Option<String>,
+    /// list: only this session's asks.
+    #[serde(default)]
+    pub session_id: Option<i64>,
+    /// grant / decline: the ask's id.
+    #[serde(default)]
+    pub id: Option<i64>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionClaimParams {
+    /// The session to claim, by fleet row id (`fleet-hub session unclaimed`
+    /// counts them per host).
+    pub session_id: i64,
+    /// Whose it becomes, by person name. The person must already exist.
+    pub person: String,
+}
+
+/// `debug_devices`: one tool, by `action`, so the served definition stays
+/// one entry.
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct DebugDevicesParams {
+    /// list | scan | claim | release (in a line: leaves it) | run | install |
+    /// logs | screenshot | boot | shutdown | configure | forget (configure,
+    /// forget: a person).
+    pub action: String,
+    /// An id, label, name or serial (`host/<that>`).
+    #[serde(default)]
+    pub device: Option<String>,
+    /// scan: one host. boot: `name`'s host. install: where `path` is.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// boot: a stopped device from scan's `bootable`.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// list: scan first.
+    #[serde(default)]
+    pub refresh: Option<bool>,
+    /// run: e.g. ["shell","pm","list","packages"].
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    /// run: ≤ 600 s.
+    #[serde(default)]
+    pub timeout_s: Option<u64>,
+    /// install: .apk, .app or .ipa.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// install: allow an Android downgrade.
+    #[serde(default)]
+    pub downgrade: Option<bool>,
+    /// logs: ≤ 2000.
+    #[serde(default)]
+    pub lines: Option<u32>,
+    /// logs (simulator).
+    #[serde(default)]
+    pub since_s: Option<u32>,
+    /// logs: logcat filterspec or simulator predicate.
+    #[serde(default)]
+    pub filter: Option<String>,
+    /// logs: only lines holding this.
+    #[serde(default)]
+    pub contains: Option<String>,
+    /// claim: seconds (1800).
+    #[serde(default)]
+    pub claim_s: Option<i64>,
+    /// claim: what for.
+    #[serde(default)]
+    pub note: Option<String>,
+    /// claim: when someone else holds it, wait in line (answers your
+    /// `queue_place`); the claim passes to you when your turn comes.
+    #[serde(default)]
+    pub queue: Option<bool>,
+    /// configure: "" clears.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// configure: other hosts of its org may use it.
+    #[serde(default)]
+    pub shared: Option<bool>,
+}
+
+/// `runs`: one tool, by `action` (only `list` today), so the Automation
+/// screen's later actions stay one entry.
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RunsParams {
+    /// list.
+    pub action: String,
+    /// Started at or after (unix s).
+    #[serde(default)]
+    pub since: Option<i64>,
+    /// Started before (unix s).
+    #[serde(default)]
+    pub until: Option<i64>,
+    /// operator | task | mission | jev | routine, or a fleet `claude -p`
+    /// run: planner | summary | commit_message | release_note |
+    /// morning_brief | brief | watch_summary | triage.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// ok | failed | needs_person | nothing_to_do | running.
+    #[serde(default)]
+    pub outcome: Option<String>,
+    /// Only this org's.
+    #[serde(default)]
+    pub org_id: Option<i64>,
+    /// Only this mission's.
+    #[serde(default)]
+    pub mission_id: Option<i64>,
+    /// Runs that ran in or acted on it.
+    #[serde(default)]
+    pub session_id: Option<i64>,
+    /// One routine's fires.
+    #[serde(default)]
+    pub routine_id: Option<i64>,
+    /// ≤ 200 (50).
+    #[serde(default)]
+    pub limit: Option<i64>,
+    /// Rows to skip.
+    #[serde(default)]
+    pub offset: Option<i64>,
 }

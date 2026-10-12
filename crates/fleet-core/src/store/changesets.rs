@@ -3,8 +3,9 @@
 //! `service::catalog::changesets`; this is the rows.
 
 use super::{now_unix, Store};
+use crate::service::catalog::changesets::WITHDRAWN_PREFIX;
 use rusqlite::{OptionalExtension, Result};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// One card (`changesets` row).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -26,6 +27,10 @@ pub struct ChangesetRow {
     /// JSON `[HostLayerRow]`: the touched catalogs' `host_layers` before apply.
     pub layers_snapshot: Option<String>,
     pub error: Option<String>,
+    /// Assets M6 (migration 103, R3): when the system withdrew the card,
+    /// Unix seconds; `None` otherwise and for cards withdrawn before 103.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withdrawn_at: Option<i64>,
 }
 
 /// One item of a card (`changeset_items` row).
@@ -44,6 +49,17 @@ pub struct ChangesetItemRow {
     pub decider: String,
     /// pending | applied | skipped | rejected
     pub state: String,
+    /// Assets M5 (migration 097, R8): when it left `pending`, Unix ms;
+    /// `None` while pending and on items decided before 097 (absent on the
+    /// wire then, as before).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_at: Option<i64>,
+    /// Assets M6 (migration 102, R1): JSON `ItemOutcome` — what a
+    /// host-writing card left undone on this item's host; `None` when it
+    /// applied cleanly, and on items recorded before 102 (absent on the
+    /// wire then, as before).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
 }
 
 /// An item to insert; its position is its index. `state` is always
@@ -88,10 +104,37 @@ pub struct TriageVerdictRow {
     pub decided_at: i64,
 }
 
+/// What an item is across a refresh — `(grp, kind, name, action,
+/// catalog_id)` — for carrying a person's decision time (Assets M5, R8).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ItemIdentity(String, String, String, String, Option<i64>);
+
+impl ItemIdentity {
+    fn of(r: &ChangesetItemRow) -> Self {
+        ItemIdentity(
+            r.grp.clone(),
+            r.kind.clone(),
+            r.name.clone(),
+            r.action.clone(),
+            r.catalog_id,
+        )
+    }
+
+    fn of_new(n: &NewChangesetItem) -> Self {
+        ItemIdentity(
+            n.grp.clone(),
+            n.kind.clone(),
+            n.name.clone(),
+            n.action.clone(),
+            n.catalog_id,
+        )
+    }
+}
+
 const CARD_COLS: &str =
-    "id, kind, summary, state, created_at, applied_at, commits, layers_snapshot, error";
+    "id, kind, summary, state, created_at, applied_at, commits, layers_snapshot, error, withdrawn_at";
 const ITEM_COLS: &str =
-    "changeset_id, position, grp, catalog_id, kind, name, action, params, decider, state";
+    "changeset_id, position, grp, catalog_id, kind, name, action, params, decider, state, decided_at, outcome";
 
 fn card_row(r: &rusqlite::Row<'_>) -> Result<ChangesetRow> {
     Ok(ChangesetRow {
@@ -104,6 +147,7 @@ fn card_row(r: &rusqlite::Row<'_>) -> Result<ChangesetRow> {
         commits: r.get(6)?,
         layers_snapshot: r.get(7)?,
         error: r.get(8)?,
+        withdrawn_at: r.get(9)?,
     })
 }
 
@@ -119,6 +163,8 @@ fn item_row(r: &rusqlite::Row<'_>) -> Result<ChangesetItemRow> {
         params: r.get(7)?,
         decider: r.get(8)?,
         state: r.get(9)?,
+        decided_at: r.get(10)?,
+        outcome: r.get(11)?,
     })
 }
 
@@ -144,6 +190,9 @@ fn insert_items(conn: &rusqlite::Connection, id: i64, items: &[NewChangesetItem]
     Ok(())
 }
 
+/// The one item-state writer (with the re-reject in
+/// [`Store::replace_changeset_items_keeping`]). Assets M5 (R8): leaving
+/// `pending` is a decision, stamped in Unix ms; going back clears it.
 fn set_item_states(
     conn: &rusqlite::Connection,
     id: i64,
@@ -151,10 +200,13 @@ fn set_item_states(
     state: &str,
 ) -> Result<()> {
     let mut stmt = conn.prepare(
-        "UPDATE changeset_items SET state = ?3 WHERE changeset_id = ?1 AND position = ?2",
+        "UPDATE changeset_items SET state = ?3, \
+           decided_at = CASE WHEN ?3 = 'pending' THEN NULL ELSE ?4 END \
+         WHERE changeset_id = ?1 AND position = ?2",
     )?;
+    let at = super::now_unix_ms();
     for p in positions {
-        stmt.execute(rusqlite::params![id, p, state])?;
+        stmt.execute(rusqlite::params![id, p, state, at])?;
     }
     Ok(())
 }
@@ -301,15 +353,29 @@ impl Store {
             .query_map([id], item_row)?
             .collect::<Result<_>>()?;
         let keep = rejected(&old);
+        // Assets M5 (R8): a re-rejected item keeps when the person decided
+        // it — matched on what the item is, since positions change across a
+        // refresh. One it cannot match (or decided before 097) is stamped now.
+        let decided: BTreeMap<ItemIdentity, i64> = old
+            .iter()
+            .filter(|i| i.state == "rejected")
+            .filter_map(|i| Some((ItemIdentity::of(i), i.decided_at?)))
+            .collect();
+        let now = super::now_unix_ms();
         tx.execute("DELETE FROM changeset_items WHERE changeset_id = ?1", [id])?;
         insert_items(&tx, id, items)?;
         {
             let mut stmt = tx.prepare(
-                "UPDATE changeset_items SET state = 'rejected' \
+                "UPDATE changeset_items SET state = 'rejected', decided_at = ?3 \
                  WHERE changeset_id = ?1 AND position = ?2",
             )?;
             for p in keep {
-                stmt.execute(rusqlite::params![id, p])?;
+                let at = usize::try_from(p)
+                    .ok()
+                    .and_then(|p| items.get(p))
+                    .and_then(|it| decided.get(&ItemIdentity::of_new(it)).copied())
+                    .unwrap_or(now);
+                stmt.execute(rusqlite::params![id, p, at])?;
             }
         }
         tx.commit()?;
@@ -386,11 +452,42 @@ impl Store {
     /// dismissed meanwhile stays as it is. `true` when it was withdrawn.
     pub fn withdraw_changeset(&self, id: i64, error: &str) -> Result<bool> {
         let n = self.conn.execute(
-            "UPDATE changesets SET state = 'dismissed', error = ?2 \
+            "UPDATE changesets SET state = 'dismissed', error = ?2, withdrawn_at = ?3 \
              WHERE id = ?1 AND state IN ('proposed', 'failed')",
-            rusqlite::params![id, error],
+            rusqlite::params![id, error, now_unix()],
         )?;
         Ok(n > 0)
+    }
+
+    /// Assets M5 (R9): delete the cards the system withdrew — `dismissed`
+    /// with an error starting `withdrawn:` (the reconcile pass's R2, an
+    /// undo's or a catalog removal's) — that were withdrawn before
+    /// `withdrawn_before` (Unix seconds; a card withdrawn before migration 103
+    /// has no `withdrawn_at`, so its `created_at` stands in) and of which no item ever left
+    /// `pending`: no apply, no skip, no person's rejection, so nothing undo,
+    /// `rejected_rollouts` or `rolled_out_layers` reads. Their items go
+    /// with them, explicitly (the FK cascade needs `foreign_keys = ON`).
+    /// One transaction; answers how many cards went.
+    pub fn prune_withdrawn_changesets(&self, withdrawn_before: i64) -> Result<usize> {
+        const PRUNABLE: &str = "SELECT c.id FROM changesets c \
+             WHERE c.state = 'dismissed' AND c.error GLOB ?2 \
+               AND COALESCE(c.withdrawn_at, c.created_at) < ?1 \
+               AND NOT EXISTS (SELECT 1 FROM changeset_items i \
+                               WHERE i.changeset_id = c.id AND i.state <> 'pending')";
+        let tx = self.conn.unchecked_transaction()?;
+        let ids: Vec<i64> = tx
+            .prepare(PRUNABLE)?
+            .query_map(
+                rusqlite::params![withdrawn_before, format!("{}*", WITHDRAWN_PREFIX)],
+                |r| r.get(0),
+            )?
+            .collect::<Result<_>>()?;
+        for id in &ids {
+            tx.execute("DELETE FROM changeset_items WHERE changeset_id = ?1", [id])?;
+            tx.execute("DELETE FROM changesets WHERE id = ?1", [id])?;
+        }
+        tx.commit()?;
+        Ok(ids.len())
     }
 
     pub fn get_changeset(&self, id: i64) -> Result<Option<ChangesetRow>> {
@@ -452,6 +549,25 @@ impl Store {
         tx.commit()
     }
 
+    /// Assets M6 (R1): each `(position, outcome JSON)` onto card `id`'s
+    /// item, in one transaction; `None` clears it (a retried item that now
+    /// applies cleanly must not keep the last attempt's outcome). A position
+    /// the card does not have is a no-op.
+    pub fn set_changeset_item_outcomes(
+        &self,
+        id: i64,
+        outcomes: &[(i64, Option<String>)],
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        for (position, json) in outcomes {
+            tx.execute(
+                "UPDATE changeset_items SET outcome = ?3 WHERE changeset_id = ?1 AND position = ?2",
+                rusqlite::params![id, position, json],
+            )?;
+        }
+        tx.commit()
+    }
+
     /// Record a verdict on `(kind, name, content_hash)`. A `person` verdict
     /// is never replaced by another decider's (spec: "an agent never
     /// overturns a person's verdict", Rulings R10); a person may replace
@@ -481,9 +597,13 @@ impl Store {
     }
 
     /// `(catalog_id, layer)` of every layer some rollout card has applied a
-    /// `sync` item for (Rulings R16) — on an applied or a failed card.
+    /// `sync` item for (Rulings R16) — on an applied or a failed card. A
+    /// layer an applied (not undone) layer card renamed since is rolled out
+    /// under its new name too, through any chain of renames (final review
+    /// I2), so SB6 keeps treating it as rolled out.
     pub fn rolled_out_layers(&self) -> Result<BTreeSet<(i64, String)>> {
-        self.conn
+        let mut out: BTreeSet<(i64, String)> = self
+            .conn
             .prepare(
                 "SELECT DISTINCT i.catalog_id, json_extract(i.params, '$.layer') \
                  FROM changeset_items i JOIN changesets c ON c.id = i.changeset_id \
@@ -491,7 +611,33 @@ impl Store {
                    AND i.catalog_id IS NOT NULL AND json_extract(i.params, '$.layer') IS NOT NULL",
             )?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect()
+            .collect::<Result<_>>()?;
+        let renames: Vec<(i64, String, String)> = self
+            .conn
+            .prepare(
+                "SELECT i.catalog_id, i.name, json_extract(i.params, '$.to') \
+                 FROM changeset_items i JOIN changesets c ON c.id = i.changeset_id \
+                 WHERE c.kind = 'layer' AND c.state = 'applied' \
+                   AND i.action = 'rename_layer' AND i.state = 'applied' \
+                   AND i.catalog_id IS NOT NULL AND json_extract(i.params, '$.to') IS NOT NULL",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<Result<_>>()?;
+        // Follow renames to a fixed point: each pass adds at least one name,
+        // so it ends after at most `renames.len()` passes.
+        loop {
+            let more: Vec<(i64, String)> = renames
+                .iter()
+                .filter(|(cid, old, new)| {
+                    out.contains(&(*cid, old.clone())) && !out.contains(&(*cid, new.clone()))
+                })
+                .map(|(cid, _, new)| (*cid, new.clone()))
+                .collect();
+            if more.is_empty() {
+                return Ok(out);
+            }
+            out.extend(more);
+        }
     }
 }
 
@@ -523,6 +669,45 @@ mod tests {
         s.set_catalog_config("/p", None).unwrap();
         let personal = s.personal_catalog().unwrap().unwrap().id;
         (s, personal)
+    }
+
+    fn sync_item(layer: &str, host: &str) -> NewChangesetItem {
+        NewChangesetItem {
+            grp: layer.into(),
+            catalog_id: None,
+            kind: "host".into(),
+            name: host.into(),
+            action: "sync".into(),
+            params: None,
+            decider: "rule".into(),
+        }
+    }
+
+    #[test]
+    fn item_outcomes_are_written_by_position_and_read_back() {
+        let s = Store::open_in_memory().unwrap();
+        let card = s
+            .insert_changeset(
+                "rollout",
+                "Roll out core to oci, htz",
+                &[sync_item("core", "oci"), sync_item("core", "htz")],
+            )
+            .unwrap();
+        s.set_changeset_item_outcomes(
+            card.id,
+            &[(1, Some(r#"{"note":"htz: unreachable"}"#.into()))],
+        )
+        .unwrap();
+        let items = s.changeset_items(card.id).unwrap();
+        assert_eq!(items[0].outcome, None);
+        assert_eq!(
+            items[1].outcome.as_deref(),
+            Some(r#"{"note":"htz: unreachable"}"#)
+        );
+        // A retry that now applies cleanly clears it.
+        s.set_changeset_item_outcomes(card.id, &[(1, None), (7, None)])
+            .unwrap();
+        assert_eq!(s.changeset_items(card.id).unwrap()[1].outcome, None);
     }
 
     #[test]
@@ -823,6 +1008,67 @@ mod tests {
         );
     }
 
+    /// Final review I2(c): an applied rename carries "rolled out" to the new
+    /// name — through a chain of renames too — so SB6 keeps treating the
+    /// renamed layer as rolled out; an undone rename carries nothing.
+    #[test]
+    fn a_rolled_out_layer_stays_rolled_out_under_its_new_name() {
+        let (s, p) = store();
+        let rollout = s
+            .insert_changeset(
+                "rollout",
+                "Roll out core to oci",
+                &[NewChangesetItem {
+                    grp: "core".into(),
+                    catalog_id: Some(p),
+                    kind: "host".into(),
+                    name: "oci".into(),
+                    action: "sync".into(),
+                    params: Some(r#"{"layer":"core","assets":["skill/w"]}"#.into()),
+                    decider: "rule".into(),
+                }],
+            )
+            .unwrap();
+        s.set_changeset_item_states(rollout.id, &[0], "applied")
+            .unwrap();
+        s.mark_changeset_applied(rollout.id, 1, "{}", "[]", None)
+            .unwrap();
+        let rename = |old: &str, to: &str, state: &str| {
+            let c = s
+                .insert_changeset(
+                    "layer",
+                    &format!("Rename layer {old} to {to} in personal"),
+                    &[NewChangesetItem {
+                        grp: old.into(),
+                        catalog_id: Some(p),
+                        kind: "layer".into(),
+                        name: old.into(),
+                        action: "rename_layer".into(),
+                        params: Some(format!(r#"{{"to":"{to}"}}"#)),
+                        decider: "person".into(),
+                    }],
+                )
+                .unwrap();
+            s.set_changeset_item_states(c.id, &[0], "applied").unwrap();
+            s.mark_changeset_applied(c.id, 2, "{}", "[]", None).unwrap();
+            if state != "applied" {
+                s.set_changeset_state(c.id, state, None).unwrap();
+            }
+        };
+        rename("core", "base", "applied");
+        rename("base", "edge", "applied");
+        rename("other", "gone", "applied");
+        rename("core", "undone-name", "undone");
+        assert_eq!(
+            s.rolled_out_layers().unwrap(),
+            BTreeSet::from([
+                (p, "core".to_string()),
+                (p, "base".to_string()),
+                (p, "edge".to_string()),
+            ])
+        );
+    }
+
     /// Rulings R26: removing a catalog withdraws the open cards that name it
     /// and clears its items' catalog; applied history stays.
     #[test]
@@ -949,5 +1195,168 @@ mod tests {
             ("failed", Some("core: boom"))
         );
         assert_eq!(s.changeset_items(other.id).unwrap()[0].state, "pending");
+    }
+
+    /// Assets M5 (R8): an item's decision time is stamped when it leaves
+    /// pending, kept when a refresh re-rejects it, cleared when it goes back.
+    #[test]
+    fn item_decision_times_are_stamped_kept_and_cleared() {
+        let (s, p) = store();
+        let items = [
+            item("core", "set_scope", Some(p), None),
+            item("core", "assign_layer", Some(p), None),
+        ];
+        let card = s.insert_changeset("bootstrap", "Adopt 2", &items).unwrap();
+        assert!(s
+            .changeset_items(card.id)
+            .unwrap()
+            .iter()
+            .all(|i| i.decided_at.is_none()));
+
+        s.set_changeset_item_states(card.id, &[1], "rejected")
+            .unwrap();
+        let at = s.changeset_items(card.id).unwrap()[1]
+            .decided_at
+            .expect("stamped when rejected");
+        s.conn
+            .execute(
+                "UPDATE changeset_items SET decided_at = ?2 WHERE changeset_id = ?1 AND position = 1",
+                rusqlite::params![card.id, at - 60_000],
+            )
+            .unwrap();
+        // The refresh moves the rejected item to position 0 (PF14): its
+        // time follows what it is, not where it sat.
+        let moved = [items[1].clone(), items[0].clone()];
+        assert!(s
+            .replace_changeset_items_keeping(card.id, "Adopt 2", &moved, |_| vec![0])
+            .unwrap());
+        let now = s.changeset_items(card.id).unwrap();
+        assert_eq!(now[0].state, "rejected");
+        assert_eq!(
+            now[0].decided_at,
+            Some(at - 60_000),
+            "a refresh keeps when the person decided"
+        );
+        assert_eq!(now[1].decided_at, None, "a pending item has no time");
+
+        s.set_changeset_item_states(card.id, &[0], "pending")
+            .unwrap();
+        assert_eq!(s.changeset_items(card.id).unwrap()[0].decided_at, None);
+
+        s.record_changeset_applied(
+            card.id,
+            &AppliedRecord {
+                applied_at: 5,
+                commits: "{}",
+                layers_snapshot: "[]",
+                applied: &[0],
+                skipped: &[1],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            s.changeset_items(card.id)
+                .unwrap()
+                .iter()
+                .all(|i| i.decided_at.is_some()),
+            "an apply stamps what it applied and what it skipped"
+        );
+    }
+
+    /// Assets M5 (R9): only withdrawn cards that are old and that nobody
+    /// ever decided an item of are pruned, with their items — never an
+    /// open card, a person's dismissal, or a card dismissed for another
+    /// reason.
+    #[test]
+    fn only_old_untouched_withdrawn_cards_are_pruned() {
+        let (s, p) = store();
+        let mk = || {
+            s.insert_changeset(
+                "new",
+                "New on oci",
+                &[item("core", "import", Some(p), None)],
+            )
+            .unwrap()
+            .id
+        };
+        let (old, touched, open, fresh, by_person, other) = (mk(), mk(), mk(), mk(), mk(), mk());
+        for id in [old, touched, fresh] {
+            assert!(s
+                .withdraw_changeset(id, "withdrawn: no longer applies")
+                .unwrap());
+        }
+        assert!(s.withdraw_changeset(other, "gone").unwrap());
+        s.set_changeset_item_states(touched, &[0], "rejected")
+            .unwrap();
+        s.reject_changeset_items(by_person, &[0], &[], true)
+            .unwrap();
+        s.conn
+            .execute(
+                "UPDATE changesets SET created_at = 1, withdrawn_at = 1 WHERE id <> ?1",
+                [fresh],
+            )
+            .unwrap();
+        assert_eq!(s.prune_withdrawn_changesets(100).unwrap(), 1);
+        assert!(s.get_changeset(old).unwrap().is_none());
+        assert!(
+            s.changeset_items(old).unwrap().is_empty(),
+            "items go with it"
+        );
+        for id in [touched, open, fresh, by_person, other] {
+            assert!(s.get_changeset(id).unwrap().is_some(), "card {id} stays");
+            assert_eq!(
+                s.changeset_items(id).unwrap().len(),
+                1,
+                "card {id}'s items stay"
+            );
+        }
+        assert_eq!(s.prune_withdrawn_changesets(100).unwrap(), 0, "idempotent");
+    }
+
+    /// Assets M6 (R3): a card is pruned a week after its withdrawal, however
+    /// long ago it was created.
+    #[test]
+    fn a_withdrawn_card_is_pruned_a_week_after_its_withdrawal_not_its_creation() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s
+            .insert_changeset("new", "New on oci", &[sync_item("core", "oci")])
+            .unwrap()
+            .id;
+        // Created long ago, withdrawn just now.
+        s.conn
+            .execute("UPDATE changesets SET created_at = 1 WHERE id = ?1", [id])
+            .unwrap();
+        assert!(s
+            .withdraw_changeset(id, "withdrawn: no longer applies")
+            .unwrap());
+        let row = s.get_changeset(id).unwrap().unwrap();
+        assert!(row.withdrawn_at.is_some_and(|t| t > 1));
+        let week_ago = now_unix() - 7 * 24 * 3600;
+        assert_eq!(
+            s.prune_withdrawn_changesets(week_ago).unwrap(),
+            0,
+            "withdrawn today"
+        );
+        assert_eq!(s.prune_withdrawn_changesets(now_unix() + 1).unwrap(), 1);
+    }
+
+    /// A card withdrawn before 103 has no `withdrawn_at`; its creation
+    /// stands in.
+    #[test]
+    fn a_card_withdrawn_before_103_is_pruned_by_its_creation() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s
+            .insert_changeset("new", "New on oci", &[sync_item("core", "oci")])
+            .unwrap()
+            .id;
+        s.conn
+            .execute(
+                "UPDATE changesets SET created_at = 1, state = 'dismissed', \
+                 error = 'withdrawn: no longer applies', withdrawn_at = NULL WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        assert_eq!(s.prune_withdrawn_changesets(100).unwrap(), 1);
     }
 }

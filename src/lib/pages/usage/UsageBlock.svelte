@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from '../../kit/Icon.svelte';
   // The usage detail block for one Claude account (spec: "Showing usage" and
   // "Staleness and failure"). Header, the 5-hour and weekly rows, the
   // per-model disclosure, every status message from `statusMessage`, and the
@@ -107,7 +108,7 @@
     <ul class="messages">
       {#each generalLines as line, i (i)}
         <li class="msg tone-{line.tone}" data-testid="usage-message" data-kind={line.kind}>
-          {#if line.glyph}<span class="glyph" aria-hidden="true">{line.glyph}</span>{/if}
+          {#if line.glyph}<span class="glyph"><Icon name={line.glyph} size={12} /></span>{/if}
           {line.text}
         </li>
       {/each}
@@ -191,7 +192,7 @@
     display: flex;
     flex-direction: column;
     gap: 0.4rem;
-    font-size: 0.75rem;
+    font-size: var(--text-2xs);
   }
   header {
     display: flex;
@@ -200,7 +201,7 @@
     gap: 0.35rem;
   }
   .title {
-    font-size: 0.7rem;
+    font-size: var(--text-2xs);
     letter-spacing: 0.04em;
     color: var(--fg-muted);
   }
@@ -208,10 +209,10 @@
   .meta { color: var(--fg-muted); }
   .refresh {
     margin-left: auto;
-    font-size: 0.7rem;
+    font-size: var(--text-2xs);
     padding: 0.1rem 0.45rem;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: transparent;
     color: var(--fg);
     cursor: pointer;
@@ -219,11 +220,11 @@
   }
   .refresh:disabled { color: var(--fg-muted); cursor: default; }
   kbd {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.65rem;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
     padding: 0 0.2rem;
     border: 1px solid var(--border);
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
   }
   .messages {
     list-style: none;
@@ -234,7 +235,7 @@
     gap: 0.2rem;
   }
   .msg { line-height: 1.35; }
-  .glyph { margin-right: 0.25rem; }
+  .glyph { display: inline-flex; vertical-align: -2px; margin-right: var(--space-1); }
   .tone-muted { color: var(--fg-muted); }
   .tone-warn { color: var(--usage-warn); }
   .tone-alarm { color: var(--usage-crit); }
@@ -248,10 +249,10 @@
     border: none;
     background: none;
     padding: 0;
-    font-size: 0.7rem;
+    font-size: var(--text-2xs);
     color: var(--accent);
     cursor: pointer;
   }
   .disclosure { color: var(--fg-muted); }
-  footer { color: var(--fg-muted); font-size: 0.7rem; }
+  footer { color: var(--fg-muted); font-size: var(--text-2xs); }
 </style>

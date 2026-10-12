@@ -43,17 +43,45 @@
             },
             {
               "type": "field",
+              "key": "work.members_plan_sprints"
+            },
+            {
+              "type": "field",
               "key": "work.trusted_branch_projects",
               "hint": "Set from the work popover; clear it here."
             }
           ]
         },
         {
-          "title": "Summaries",
+          "title": "Writing help",
           "items": [
             {
               "type": "field",
               "key": "work.summary_model"
+            },
+            {
+              "type": "field",
+              "key": "work.context_help"
+            },
+            {
+              "type": "field",
+              "key": "work.help_model"
+            },
+            {
+              "type": "field",
+              "key": "work.draft_commit_messages"
+            },
+            {
+              "type": "field",
+              "key": "work.draft_briefs"
+            },
+            {
+              "type": "field",
+              "key": "work.draft_release_notes"
+            },
+            {
+              "type": "field",
+              "key": "work.catch_up_summaries"
             }
           ]
         }
@@ -140,6 +168,53 @@
             {
               "type": "action",
               "action": "work.retention_sweep"
+            }
+          ]
+        },
+        {
+          "title": "Attachments",
+          "items": [
+            {
+              "type": "field",
+              "key": "work.attachment_max_mb"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Missions",
+      "sections": [
+        {
+          "title": "Mission loop",
+          "items": [
+            {
+              "type": "field",
+              "key": "orchestrator.enabled"
+            },
+            {
+              "type": "field",
+              "key": "orchestrator.max_level",
+              "when": {
+                "key": "orchestrator.enabled",
+                "truthy": true
+              }
+            },
+            {
+              "type": "field",
+              "key": "orchestrator.headless_checks",
+              "when": {
+                "key": "orchestrator.enabled",
+                "truthy": true
+              }
+            },
+            {
+              "type": "field",
+              "key": "orchestrator.headless_model",
+              "when": {
+                "key": "orchestrator.headless_checks",
+                "truthy": true
+              }
             }
           ]
         }

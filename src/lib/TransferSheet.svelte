@@ -1,6 +1,7 @@
 <script lang="ts">
   import { fmtBytes } from './attachments';
   import Modal from './Modal.svelte';
+  import HostStream from './HostStream.svelte';
   import { hosts } from './hosts';
   import { hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
@@ -25,7 +26,10 @@
   } from './moves';
   import { formatDuration } from './account_usage';
   import { selectSessionExplicitly } from './selection';
+  import { sessionBlocked, sessionIdBlocked } from './share';
   import { sessions } from './sessions';
+  import { moveTargetFacts } from './hosts_table';
+  import { attentionFacts } from './attention_facts';
 
   // One sheet for the whole app. Which view shows is a function of the run:
   // none → setup, running → progress, done → result, failed/partial → failure.
@@ -33,7 +37,38 @@
   const run = $derived(id === null ? undefined : $moves.get(id));
   const session = $derived(id === null ? undefined : $sessions.find((s) => s.id === id));
   const targets = $derived(session ? moveTargetsFor(session, $hosts) : []);
-  const blocked = $derived(moveBlockedReason($hubStatus, $hubConnection));
+  // Both halves, in the order `share.ts` documents: the hub's own refusal (or
+  // a link that is down), then who this client is on THIS row — the move
+  // lifecycle is spec §4.3's `own` tier (multi-user M1), so a `watch` or
+  // `drive` grantee may not start, finish or undo the owner's move. The chip
+  // and the details panel that open this sheet compose exactly the same pair;
+  // the sheet itself is where the `startMove` call actually happens, so the
+  // gate has to hold here too and not only on the controls in front of it.
+  // Asked by ID rather than with the row (F2d): the sheet outlives the row it
+  // is open on — a `partial` adopted after a restart (`adoptPartial`), a run
+  // whose session a reconcile dropped — and `$sessionBlocked(undefined, …)`
+  // answers `null`, so every button in the failure view was live and the write
+  // behind it then refused silently at `moves.ts`' funnel. `$sessionIdBlocked`
+  // gives the control the same answer the funnel will give: fail closed on a
+  // fleet this client does not own, `null` on a standalone desktop.
+  const blocked = $derived(
+    moveBlockedReason($hubStatus, $hubConnection) ?? $sessionIdBlocked(id, 'move_session'),
+  );
+  /**
+   * The wait view's own answer (multi-user M1, F2b). A waiting run outlives its
+   * session row in this sheet — `session` is found by `$transferSheetFor`, and
+   * the run carries its own `sessionId` — so "Cancel" and "Transfer again"
+   * were the two controls `blocked` could not speak for.
+   *
+   * F2b resolved the run's row and let a missing one answer the hub half alone,
+   * on the argument that "there is nothing left to own". That is the hatch F2d
+   * closed everywhere else: on a paired desktop a row that is not in `$sessions`
+   * is one the hub fenced off the stream, which is *someone else's*, not *gone*.
+   */
+  const runBlocked = $derived(
+    moveBlockedReason($hubStatus, $hubConnection) ??
+      $sessionIdBlocked(run ? run.sessionId : null, 'move_session'),
+  );
   /** A refusal from the last Finish/Undo attempt, carried on the run itself
    *  (`moves.ts`'s `settleResolve`) rather than local component state, so it
    *  is naturally per-session: switching the sheet to another run's `id`
@@ -96,7 +131,11 @@
   // `requestPreflight` itself, so a burst of target changes collapses to one
   // call. Transfer's own `disabled` never reads any of this — see `transfer`.
   $effect(() => {
-    if (id !== null && !run && target && preflightAllowed) requestPreflight(id, target);
+    // `blocked` too, not only the link: a preflight is `move_session { preview:
+    // true }` on someone else's session, which the hub refuses — so a watcher
+    // opening this sheet used to fire a refused call per target change
+    // (multi-user M1, F2b).
+    if (id !== null && !run && target && preflightAllowed && blocked === null) requestPreflight(id, target);
   });
   // The age ticker: the setup view's preflight age, and a waiting run's
   // countdown to its deadline — both live displays, nothing else needs it.
@@ -251,24 +290,45 @@
     if (newSession) selectSessionExplicitly(newSession);
     done();
   }
+  // Every one of these is the move LIFECYCLE, which spec §4.3 puts in the
+  // `own` tier — so each asks `blocked`, exactly as `transfer()` already did.
+  // `moveBack` reads the TARGET row's access, not the sheet's: that is the
+  // session being moved this time.
   function moveBack(): void {
     if (!moveBackTarget || !run) return;
+    if (moveBlockedReason($hubStatus, $hubConnection) !== null) return;
+    if ($sessionBlocked(moveBackTarget, 'move_session') !== null) return;
     startMove(moveBackTarget, run.fromHost, { keepSource: false });
   }
+  const moveBackBlocked = $derived(
+    moveBlockedReason($hubStatus, $hubConnection) ??
+      (moveBackTarget ? $sessionBlocked(moveBackTarget, 'move_session') : null),
+  );
+  /** The wait view's two writes, each re-asking `runBlocked` at the call: this
+   *  view can sit on screen for the length of a wait, which is exactly the
+   *  window a revoke arrives in. */
+  function cancelTheWait(): void {
+    if (!run || runBlocked !== null) return;
+    cancelWait(run.sessionId);
+  }
+  function retryTheWait(): void {
+    if (!run || runBlocked !== null) return;
+    retryMove(run.sessionId);
+  }
   function retry(cleanTarget: boolean): void {
-    if (id === null) return;
+    if (id === null || blocked !== null) return;
     confirming = null;
     retryMove(id, { cleanTarget });
   }
   /** "Move anyway": the same move, carrying its links across the org
    *  boundary with a warning instead of the refusal. */
   function moveAnyway(): void {
-    if (id === null) return;
+    if (id === null || blocked !== null) return;
     confirming = null;
     retryMove(id, { forceCrossOrg: true });
   }
   function resolve(action: ResolveAction): void {
-    if (id === null) return;
+    if (id === null || blocked !== null) return;
     confirming = null;
     // `resolveMoveRun` clears any stale `resolveError` on the run itself
     // before making a fresh attempt.
@@ -313,7 +373,8 @@
           <span class="key">To</span>
           <select bind:value={target} data-testid="move-target">
             {#each targets as h (h.alias)}
-              <option value={h.alias}>{h.alias}</option>
+              {@const facts = moveTargetFacts(h, $attentionFacts?.limited_accounts, Math.floor(now / 1000))}
+              <option value={h.alias}>{facts ? `${h.alias} · ${facts}` : h.alias}</option>
             {/each}
           </select>
         </label>
@@ -436,6 +497,7 @@
       {:else if run.origin === 'observed'}
         <p class="note">Started elsewhere — this window is following along.</p>
       {/if}
+      <HostStream from={run.fromHost} to={run.toHost} paused={!!run.error} />
       {@render steps()}
       <div class="buttons">
         {#if run.origin === 'observed'}
@@ -529,7 +591,11 @@
           <button onclick={openTarget} data-testid="transfer-open-target">Open on {run.toHost}</button>
         {/if}
         {#if run.fromHost && moveBackTarget}
-          <button onclick={moveBack} data-testid="transfer-move-back">Move back to {run.fromHost}</button>
+          <button
+            onclick={moveBack}
+            disabled={moveBackBlocked !== null}
+            title={moveBackBlocked ?? ''}
+            data-testid="transfer-move-back">Move back to {run.fromHost}</button>
         {/if}
         <button onclick={done} data-testid="transfer-done">Done</button>
       </div>
@@ -547,14 +613,24 @@
                later Transfer of this session. -->
           <button onclick={done} data-testid="transfer-wait-dismiss">Stop following</button>
         {/if}
-        <button onclick={() => cancelWait(run.sessionId)} data-testid="transfer-cancel-wait">Cancel</button>
+        <button
+          onclick={() => cancelTheWait()}
+          disabled={runBlocked !== null}
+          title={runBlocked ?? ''}
+          data-testid="transfer-cancel-wait">Cancel</button
+        >
       </div>
     {:else if run && waitEndedText}
       <div data-testid="transfer-wait-ended">
         <p class="what">{waitEndedText}</p>
       </div>
       <div class="buttons">
-        <button onclick={() => retryMove(run.sessionId)} data-testid="transfer-wait-retry">
+        <button
+          onclick={() => retryTheWait()}
+          disabled={runBlocked !== null}
+          title={runBlocked ?? ''}
+          data-testid="transfer-wait-retry"
+        >
           Transfer again
         </button>
         <button onclick={done} data-testid="transfer-done">Done</button>
@@ -603,7 +679,11 @@
                 Kill {run.sessionName} on {run.fromHost}
               </button>
             {:else}
-              <button onclick={() => (confirming = 'finish')} data-testid="transfer-finish">Finish the move</button>
+              <button
+                onclick={() => (confirming = 'finish')}
+                disabled={blocked !== null}
+                title={blocked ?? ''}
+                data-testid="transfer-finish">Finish the move</button>
             {/if}
             {#if confirming === 'undo'}
               <button
@@ -615,23 +695,50 @@
                 Kill the new session on {run.toHost}
               </button>
             {:else}
-              <button onclick={() => (confirming = 'undo')} data-testid="transfer-undo">Undo</button>
+              <button
+                onclick={() => (confirming = 'undo')}
+                disabled={blocked !== null}
+                title={blocked ?? ''}
+                data-testid="transfer-undo">Undo</button>
             {/if}
           {/if}
         {:else if cleanAction}
+          <!-- Both of these end in `retryMove`, which is the same
+               `move_session` the sheet's other controls are gated on — the
+               `own` tier (multi-user M1). They were the two left live when F2
+               disabled Finish, Undo and Retry. -->
           {#if confirming === 'clean'}
-            <button class="danger" onclick={() => retry(true)} data-testid="transfer-clean-confirm">
+            <button
+              class="danger"
+              onclick={() => retry(true)}
+              disabled={blocked !== null}
+              title={blocked ?? ''}
+              data-testid="transfer-clean-confirm"
+            >
               Replace {cleanAction.paths.length + cleanAction.more} file(s) on {run.toHost} and retry
             </button>
           {:else}
-            <button onclick={() => (confirming = 'clean')} data-testid="transfer-clean">
+            <button
+              onclick={() => (confirming = 'clean')}
+              disabled={blocked !== null}
+              title={blocked ?? ''}
+              data-testid="transfer-clean"
+            >
               Clean up {run.toHost} and retry
             </button>
           {/if}
         {:else if failure.action?.kind === 'force_cross_org'}
-          <button onclick={moveAnyway} data-testid="transfer-force-cross-org">Move anyway</button>
+          <button
+            onclick={moveAnyway}
+            disabled={blocked !== null}
+            title={blocked ?? ''}
+            data-testid="transfer-force-cross-org">Move anyway</button>
         {:else if failure.action?.kind === 'retry'}
-          <button onclick={() => retry(false)} data-testid="transfer-retry">Retry</button>
+          <button
+            onclick={() => retry(false)}
+            disabled={blocked !== null}
+            title={blocked ?? ''}
+            data-testid="transfer-retry">Retry</button>
         {/if}
         <button onclick={done} data-testid="transfer-done">Done</button>
       </div>
@@ -640,32 +747,32 @@
 {/if}
 
 <style>
-  .field { display: flex; align-items: center; gap: 0.5rem; margin: 0.35rem 0; font-size: 0.85rem; }
+  .field { display: flex; align-items: center; gap: 0.5rem; margin: 0.35rem 0; font-size: var(--text-xs); }
   .key { width: 3rem; color: var(--fg-muted); }
   .field select { flex: 1; }
-  .note, .muted { color: var(--fg-muted); font-size: 0.8rem; }
-  .what { font-size: 0.9rem; margin: 0 0 0.35rem; }
-  .steps, .summary { list-style: none; margin: 0.5rem 0; padding: 0; font-size: 0.85rem; }
+  .note, .muted { color: var(--fg-muted); font-size: var(--text-2xs); }
+  .what { font-size: var(--text-sm); margin: 0 0 0.35rem; }
+  .steps, .summary { list-style: none; margin: 0.5rem 0; padding: 0; font-size: var(--text-xs); }
   .steps li { display: flex; align-items: baseline; gap: 0.5rem; padding: 0.15rem 0; }
   .steps li[data-state='pending'] { color: var(--fg-muted); }
-  .steps li[data-state='failed'] .label { color: #e64a4a; }
-  .steps li[data-state='warned'] .label { color: #d29b4a; }
+  .steps li[data-state='failed'] .label { color: var(--danger); }
+  .steps li[data-state='warned'] .label { color: var(--status-waiting); }
   .mark { width: 1rem; text-align: center; }
   .steps li[data-state='pending'] .mark::before { content: '○'; }
   .steps li[data-state='started'] .mark::before { content: '◌'; }
   .steps li[data-state='done'] .mark::before { content: '✓'; }
   .steps li[data-state='warned'] .mark::before { content: '!'; }
   .steps li[data-state='failed'] .mark::before { content: '✕'; }
-  .detail { margin-left: auto; color: var(--fg-muted); font-size: 0.75rem; }
+  .detail { margin-left: auto; color: var(--fg-muted); font-size: var(--text-2xs); }
   .summary li { padding: 0.15rem 0; }
   .warnings { border-top: 1px solid var(--border); margin-top: 0.5rem; padding-top: 0.4rem; }
-  .warn-head { color: #d29b4a; font-size: 0.85rem; margin: 0; }
-  .warn, .details p { font-size: 0.8rem; color: var(--fg-muted); margin: 0.15rem 0; }
+  .warn-head { color: var(--status-waiting); font-size: var(--text-xs); margin: 0; }
+  .warn, .details p { font-size: var(--text-2xs); color: var(--fg-muted); margin: 0.15rem 0; }
   .details { border-top: 1px solid var(--border); margin-top: 0.5rem; padding-top: 0.4rem; }
-  pre { white-space: pre-wrap; font-size: 0.75rem; }
-  .clean-paths { list-style: none; margin: 0.4rem 0; padding: 0; font-size: 0.8rem; max-height: 8rem; overflow-y: auto; }
+  pre { white-space: pre-wrap; font-size: var(--text-2xs); }
+  .clean-paths { list-style: none; margin: 0.4rem 0; padding: 0; font-size: var(--text-2xs); max-height: 8rem; overflow-y: auto; }
   .clean-paths li { padding: 0.1rem 0; }
-  .clean-paths code { font-size: 0.75rem; }
+  .clean-paths code { font-size: var(--text-2xs); }
   .buttons { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.75rem; }
-  .buttons .danger { color: #e64a4a; }
+  .buttons .danger { color: var(--danger); }
 </style>

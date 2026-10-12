@@ -35,6 +35,7 @@ fn config() -> TrackerConfig {
         key_prefixes: vec!["ABC".into(), "TEAM".into()],
         sprint_projects: vec!["ABC".into()],
         sprint_field: Some("customfield_10020".into()),
+        points_field: Some("customfield_10016".into()),
         ..Default::default()
     }
 }
@@ -83,6 +84,11 @@ async fn probe_learns_identity_site_prefixes_the_sprint_field_and_sprint_project
         c.sprint_field.as_deref(),
         Some("customfield_10020"),
         "found by schema.custom, not by the field named Sprint"
+    );
+    assert_eq!(
+        c.points_field.as_deref(),
+        Some("customfield_10016"),
+        "the number field, not the text one named Story Points"
     );
     assert_eq!(c.sprint_projects, vec!["ABC"], "sprints are per project");
     // Every request carried Basic auth and nothing was sent anywhere else.
@@ -982,6 +988,9 @@ impl crate::service::trackers::conformance::Harness for JiraHarness {
     fn describe_ref(&self) -> &'static str {
         "ABC-101"
     }
+    fn version(&self) -> Option<(&'static str, &'static str)> {
+        Some(("10101", "0.3.0"))
+    }
 }
 
 crate::conformance_suite!(JiraHarness);
@@ -1032,4 +1041,250 @@ async fn a_via_host_tracker_is_read_through_curl_on_its_host() {
         t.send(evil).await,
         Err(TransportError::Refused(_))
     ));
+}
+
+#[test]
+fn jira_priority_names_map_onto_fleets_four() {
+    for (name, want) in [
+        ("Highest", Some("urgent")),
+        ("Blocker", Some("urgent")),
+        ("Critical", Some("urgent")),
+        ("High", Some("high")),
+        ("Major", Some("high")),
+        ("Medium", Some("medium")),
+        (" medium ", Some("medium")),
+        ("Low", Some("low")),
+        ("Lowest", Some("low")),
+        ("Minor", Some("low")),
+        ("Trivial", Some("low")),
+        ("P1", None),
+        ("", None),
+    ] {
+        assert_eq!(
+            crate::service::trackers::jira_common::priority(&json!({ "name": name })).as_deref(),
+            want,
+            "{name:?}"
+        );
+    }
+    assert_eq!(
+        crate::service::trackers::jira_common::priority(&Value::Null),
+        None
+    );
+}
+
+#[test]
+fn priority_labels_and_estimate_are_asked_for_and_read() {
+    let f = FakeTransport::new();
+    let j = jira(&f);
+    for want in [
+        "priority",
+        "labels",
+        "timeoriginalestimate",
+        "customfield_10016",
+    ] {
+        assert!(j.fields().iter().any(|x| x == want), "{want}");
+    }
+    let page = fixture("search_mine_p1.json");
+    let s = |i: usize| j.snapshot(&page["issues"][i]).unwrap();
+    // ABC-101: High, its labels, and story points over its time estimate.
+    let story = s(1);
+    assert_eq!(story.priority.as_deref(), Some("high"));
+    assert_eq!(story.labels, vec!["billing", " ledger ", "billing", ""]);
+    assert_eq!(
+        (story.estimate.map(|e| e.0), story.estimate_unit.as_deref()),
+        (Some(5.0), Some("points"))
+    );
+    // Stored tidied: trimmed, each once, nothing empty.
+    let w = crate::service::trackers::sync::to_write(story);
+    assert_eq!(w.labels, vec!["billing", "ledger"]);
+    // ABC-100: Highest, no points, 28800 s of original estimate = 8 h.
+    let epic = s(0);
+    assert_eq!(epic.priority.as_deref(), Some("urgent"));
+    assert!(epic.labels.is_empty());
+    assert_eq!(
+        (epic.estimate.map(|e| e.0), epic.estimate_unit.as_deref()),
+        (Some(8.0), Some("hours"))
+    );
+    // ABC-102 has none of them.
+    let done = s(2);
+    assert_eq!(
+        (done.priority, done.estimate, done.estimate_unit),
+        (None, None, None)
+    );
+}
+
+#[test]
+fn the_due_date_is_asked_for_and_read_as_a_calendar_date() {
+    let f = FakeTransport::new();
+    let j = jira(&f);
+    assert!(j.fields().iter().any(|x| x == "duedate"));
+    let issue = |due: Value| {
+        json!({ "id": "10101", "key": "ABC-101",
+                "fields": { "summary": "S", "duedate": due,
+                            "status": { "name": "To Do", "statusCategory": { "key": "new" } } } })
+    };
+    let due = |v: Value| j.snapshot(&issue(v)).unwrap().due_at;
+    assert_eq!(due(json!("2026-10-16")).as_deref(), Some("2026-10-16"));
+    assert_eq!(due(Value::Null), None);
+    // Third-party text that is not a date is dropped, not stored.
+    assert_eq!(due(json!("next Friday")), None);
+    assert_eq!(due(json!("2026-02-30")), None);
+}
+
+#[tokio::test]
+async fn issue_threads_read_each_issue_with_its_comments_as_text() {
+    let f = FakeTransport::new();
+    let page = serde_json::json!({
+        "isLast": true,
+        "issues": [{
+            "key": "L2S-7",
+            "fields": {
+                "summary": "Payments fail",
+                "description": {"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"Since 9:00"}]}]},
+                "assignee": {"accountId": "bot-1"},
+                "status": {"name": "Open"},
+                "updated": "2026-10-11T09:30:00.000+0200",
+                "comment": {"comments": [
+                    {"id": "100", "author": {"accountId": "ann", "displayName": "Ann"},
+                     "body": {"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"Tech help!"}]}]},
+                     "created": "2026-10-11T09:31:00.000+0200"},
+                    {"author": {"displayName": "no id"}, "body": "x"}
+                ]}
+            }
+        }, {"fields": {"summary": "no key"}}]
+    });
+    f.once(Method::Post, "/search/jql", Ok(Response::json(200, &page)));
+    let threads = jira(&f).issue_threads("project = L2S", 10).await.unwrap();
+    assert_eq!(threads.len(), 1);
+    let t = &threads[0];
+    assert_eq!(
+        (t.key.as_str(), t.summary.as_str()),
+        ("L2S-7", "Payments fail")
+    );
+    assert_eq!(t.description, "Since 9:00");
+    assert_eq!(
+        (t.assignee_id.as_deref(), t.status.as_str()),
+        (Some("bot-1"), "Open")
+    );
+    assert_eq!(t.updated, Some(1_791_703_800));
+    assert_eq!(t.comments.len(), 1, "a comment without an id is dropped");
+    let c = &t.comments[0];
+    assert_eq!(
+        (c.id.as_str(), c.author_id.as_deref(), c.body.as_str()),
+        ("100", Some("ann"), "Tech help!")
+    );
+    let body = f.requests()[0].json_body().unwrap();
+    assert_eq!(body["jql"], "project = L2S");
+    assert!(body["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v == "comment"));
+}
+
+#[tokio::test]
+async fn the_support_agents_writes_create_link_and_comment_in_adf() {
+    let f = FakeTransport::new();
+    f.once(
+        Method::Post,
+        "/rest/api/3/issueLink",
+        Ok(Response::new(201, "")),
+    );
+    f.once(
+        Method::Post,
+        "/rest/api/3/issue/L2S-7/comment",
+        Ok(Response::json(201, &serde_json::json!({ "id": "300" }))),
+    );
+    f.once(
+        Method::Post,
+        "/rest/api/3/issue",
+        Ok(Response::json(
+            201,
+            &serde_json::json!({ "id": "1", "key": "PD-12" }),
+        )),
+    );
+    let adf = serde_json::json!({ "type": "doc", "version": 1, "content": [] });
+    let j = jira(&f);
+    let created = j
+        .write(&WriteOp::CreateIssue {
+            project: "PD".into(),
+            issue_type: "Bug".into(),
+            summary: "[payments] NPE".into(),
+            adf: adf.clone(),
+            wiki: "h2. x".into(),
+            labels: vec!["payments".into()],
+        })
+        .await
+        .unwrap();
+    assert_eq!(created.remote_id.as_deref(), Some("PD-12"));
+    assert!(created.url.unwrap().ends_with("/browse/PD-12"));
+    j.write(&WriteOp::LinkIssues {
+        link_type: "Causes".into(),
+        inward: "PD-12".into(),
+        outward: "l2s-7".into(),
+    })
+    .await
+    .unwrap();
+    let posted = j
+        .write(&WriteOp::RichComment {
+            key: "L2S-7".into(),
+            adf: adf.clone(),
+            wiki: "h3. x".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(posted.remote_id.as_deref(), Some("300"));
+    let sent = f.requests();
+    let issue = sent[0].json_body().unwrap();
+    assert_eq!(issue["fields"]["project"]["key"], "PD");
+    assert_eq!(issue["fields"]["description"], adf);
+    assert_eq!(issue["fields"]["labels"][0], "payments");
+    let link = sent[1].json_body().unwrap();
+    assert_eq!(
+        (
+            &link["type"]["name"],
+            &link["inwardIssue"]["key"],
+            &link["outwardIssue"]["key"]
+        ),
+        (
+            &Value::from("Causes"),
+            &Value::from("PD-12"),
+            &Value::from("L2S-7")
+        )
+    );
+    assert_eq!(
+        sent[2].json_body().unwrap()["body"],
+        adf,
+        "Cloud gets the ADF"
+    );
+}
+
+#[tokio::test]
+async fn a_bad_project_summary_or_key_is_refused_before_sending() {
+    let f = FakeTransport::new();
+    let j = jira(&f);
+    let create = |project: &str, summary: &str| WriteOp::CreateIssue {
+        project: project.into(),
+        issue_type: "Bug".into(),
+        summary: summary.into(),
+        adf: Value::Null,
+        wiki: String::new(),
+        labels: vec![],
+    };
+    for op in [
+        create("pd", "x"),
+        create("PD", "two\nlines"),
+        create("PD", " "),
+        WriteOp::LinkIssues {
+            link_type: "Causes".into(),
+            inward: "PD-1".into(),
+            outward: "nope".into(),
+        },
+    ] {
+        assert!(
+            matches!(j.write(&op).await, Err(TrackerError::Invalid(_))),
+            "{op:?}"
+        );
+    }
+    assert!(f.requests().is_empty());
 }

@@ -8,7 +8,7 @@
 //! steps in that tail (design 2026-09-29 §2).
 
 use crate::ipc_error::lock;
-use crate::service::transcript::{parse_conversation, ConvItem};
+use crate::service::transcript::ConvItem;
 use crate::ssh::SshClient;
 use crate::store::{Store, COMPACT_SUMMARY_MAX_CHARS};
 use std::sync::{Arc, Mutex};
@@ -21,7 +21,7 @@ const COMPACT_READ_BYTES: usize = 262_144;
 /// capped at [`COMPACT_SUMMARY_MAX_CHARS`]. `None` when the tail has no
 /// compaction, or its summary entry is not written yet.
 pub fn last_compact_summary(jsonl: &str) -> Option<String> {
-    let turns = parse_conversation(jsonl);
+    let turns = crate::agent_adapter::claude().parse_transcript(jsonl);
     let summary = turns
         .iter()
         .flat_map(|t| t.items.iter())

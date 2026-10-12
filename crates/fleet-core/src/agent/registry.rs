@@ -255,6 +255,21 @@ impl AgentRegistry {
         frame: HubFrame,
         timeout: Duration,
     ) -> Result<AgentFrame, IpcError> {
+        self.request_after(alias, Vec::new(), frame, timeout).await
+    }
+
+    /// [`Self::request`], with `before` sent first down the SAME connection —
+    /// an upload's chunks ahead of its final `upload`. Queued together on one
+    /// channel, so nothing routed meanwhile lands between them and a replaced
+    /// connection cannot get the final frame without its chunks (the agent
+    /// would refuse it anyway: the final frame counts them).
+    pub async fn request_after(
+        &self,
+        alias: &str,
+        before: Vec<HubFrame>,
+        frame: HubFrame,
+        timeout: Duration,
+    ) -> Result<AgentFrame, IpcError> {
         let id = frame_id(&frame).to_string();
         let conn = self.live_current(alias).ok_or_else(|| offline(alias))?;
         let (tx, rx) = oneshot::channel();
@@ -281,6 +296,11 @@ impl AgentRegistry {
             conn: Arc::clone(&conn),
             id: id.clone(),
         };
+        for piece in before {
+            if conn.outbound.send(piece).is_err() {
+                return Err(offline(alias));
+            }
+        }
         if conn.outbound.send(frame).is_err() {
             // The owner dropped the receiver: the socket is already gone.
             return Err(offline(alias));
@@ -406,6 +426,7 @@ pub(crate) fn frame_id(frame: &HubFrame) -> &str {
     match frame {
         HubFrame::Exec { id, .. }
         | HubFrame::Upload { id, .. }
+        | HubFrame::UploadChunk { id, .. }
         | HubFrame::Cancel { id }
         | HubFrame::Ping { id } => id,
         // `welcome` carries no id: it is a one-way broadcast `ws.rs` writes
@@ -431,7 +452,11 @@ pub(crate) fn frame_id(frame: &HubFrame) -> &str {
 fn agent_frame_id(frame: &AgentFrame) -> Option<&str> {
     match frame {
         AgentFrame::Result { id, .. } | AgentFrame::Pong { id } => Some(id),
-        AgentFrame::Hello { .. } | AgentFrame::Report { .. } => None,
+        // A piece of an answer, reassembled by `ws.rs` before anything is
+        // delivered: never an answer on its own.
+        AgentFrame::ResultChunk { .. } | AgentFrame::Hello { .. } | AgentFrame::Report { .. } => {
+            None
+        }
     }
 }
 
@@ -462,6 +487,7 @@ mod tests {
 
     fn ok_result(id: &str) -> AgentFrame {
         AgentFrame::Result {
+            chunks: 0,
             id: id.into(),
             exit_code: 0,
             stdout_b64: encode_b64(b""),
@@ -552,6 +578,7 @@ mod tests {
                 truncated,
                 ..
             } => AgentFrame::Result {
+                chunks: 0,
                 id,
                 exit_code: code,
                 stdout_b64,
@@ -881,6 +908,7 @@ mod tests {
                     _ => return None,
                 };
                 Some(AgentFrame::Result {
+                    chunks: 0,
                     id: id.clone(),
                     exit_code: 0,
                     stdout_b64: encode_b64(id.as_bytes()),
@@ -898,6 +926,7 @@ mod tests {
 
     fn stdout_of(id: &str) -> AgentFrame {
         AgentFrame::Result {
+            chunks: 0,
             id: id.into(),
             exit_code: 0,
             stdout_b64: encode_b64(id.as_bytes()),

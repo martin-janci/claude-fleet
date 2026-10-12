@@ -96,6 +96,33 @@ fn a_first_prompt_reference_is_a_preselected_suggestion_that_never_regroups() {
         .contains("see ABC-99 for context"));
 }
 
+/// The operator names every task while it coordinates them, so no trigger
+/// hangs a suggestion on it: not a prompt, not its own inference, not a
+/// re-resolve. An ordinary session given the same prompt still gets one.
+#[test]
+fn the_operator_is_never_a_detection_subject() {
+    let f = fx();
+    let op = session(&f, crate::service::operator::OPERATOR_TMUX_NAME, "c-op");
+    crate::service::operator::set_operator_ref(
+        &f.s,
+        &crate::service::operator::OperatorRef {
+            host_alias: "h".into(),
+            tmux_name: crate::service::operator::OPERATOR_TMUX_NAME.into(),
+        },
+    )
+    .unwrap();
+    assert!(!on_prompt(&f.s, op, "start ABC-99 and ABC-7 in parallel", true).unwrap());
+    assert!(!on_agent_inference(&f.s, op, "ABC-99", None).unwrap());
+    assert!(!resolve_session(&f.s, op).unwrap());
+    assert!(f.s.session_work_links(op).unwrap().is_empty());
+    let row = f.s.get_session_by_id(op).unwrap().unwrap();
+    assert_eq!(row.work_suggested, None);
+
+    let dev = session(&f, "dev", "c-dev");
+    assert!(on_prompt(&f.s, dev, "start ABC-99 and ABC-7 in parallel", true).unwrap());
+    assert!(!f.s.session_work_links(dev).unwrap().is_empty());
+}
+
 #[test]
 fn not_this_is_final_for_every_signal() {
     let f = fx();

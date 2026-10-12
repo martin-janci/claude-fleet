@@ -89,9 +89,9 @@ describe('groupHostsByAccount', () => {
 describe('sessionCounts', () => {
   it('counts total, working and blocked, omitting zero parts', () => {
     const rows = fleetSessions();
-    expect(sessionCounts('mefistos', rows).text).toBe('6 ⚡2 ⏸1');
-    expect(sessionCounts('claude-fleet-trn', rows).text).toBe('14 ⚡2 ⏸1');
-    expect(sessionCounts('local', rows)).toMatchObject({ text: '0', title: '0 sessions, 0 working, 0 blocked' });
+    expect(sessionCounts('mefistos', rows).text).toBe('6 · 2 working · 1 needs you');
+    expect(sessionCounts('claude-fleet-trn', rows).text).toBe('14 · 2 working · 1 needs you');
+    expect(sessionCounts('local', rows)).toMatchObject({ text: '0', title: '0 sessions, 0 working, 0 need you' });
   });
 
   it('ignores external rows (sessions running outside fleet)', () => {
@@ -104,7 +104,7 @@ describe('sessionCounts', () => {
       claude_status,
     });
     const counts = sessionCounts('mefistos', [...rows, ext(1, 'working'), ext(2, 'blocked')]);
-    expect(counts.text).toBe('6 ⚡2 ⏸1');
+    expect(counts.text).toBe('6 · 2 working · 1 needs you');
     expect(counts.total).toBe(6);
   });
 });
@@ -228,6 +228,32 @@ describe('host health helpers', () => {
     expect(hostAttention({ ...base, host: host('ok', {}) })).toBeNull();
   });
 
+  it('auth_override names the variables that outrank the login and outranks disk_low', () => {
+    const base = {
+      hasToken: true,
+      tokensLoaded: true,
+      hook: { state: 'seen' as const, lastAt: NOW },
+      sessionCount: 1,
+      newestClaude: null,
+      now: NOW,
+      versionMaxAgeSecs: 86400,
+      diskLowPct: 90,
+      hubVersion: null,
+    };
+    const keyed = host('mef', {
+      auth_overrides: ['ANTHROPIC_API_KEY'],
+      disk_home_free_kb: 3_600_000,
+      disk_home_total_kb: 150_000_000,
+      health_at: NOW,
+    });
+    const a = hostAttention({ ...base, host: keyed });
+    expect(a?.kind).toBe('auth_override');
+    expect(a?.title).toContain('ANTHROPIC_API_KEY is set');
+    // none set, or unknown (older hub), earns no mark
+    expect(hostAttention({ ...base, host: host('ok', { auth_overrides: [] }) })).toBeNull();
+    expect(hostAttention({ ...base, host: host('old', { auth_overrides: null }) })).toBeNull();
+  });
+
   it('disk_low outranks claude_old; agent_old fires when the agent is older than the hub version', () => {
     const base = {
       hasToken: true,
@@ -274,7 +300,7 @@ describe('host health helpers', () => {
     expect(healthSampleFresh(host('x', { health_at: null }), NOW)).toBe(false);
   });
 
-  it('provision_stale outranks disk_low and names the content-only refresh', () => {
+  it('provision_stale outranks disk_low and says fleet refreshes it by itself', () => {
     const base = {
       hasToken: true,
       tokensLoaded: true,
@@ -289,7 +315,8 @@ describe('host health helpers', () => {
     const stale = host('x', { provision_stale: true, disk_home_free_kb: 3_600_000, disk_home_total_kb: 150_000_000 });
     const mark = hostAttention({ ...base, host: stale });
     expect(mark?.kind).toBe('provision_stale');
-    expect(mark?.title).toContain('fleet-hub provision --host x --content-only');
+    expect(mark?.title).toContain('Fleet refreshes it by itself');
+    expect(mark?.title).toContain('Re-provision this host');
   });
 });
 

@@ -6,6 +6,7 @@
   // source's declared shape.
   import { tick } from 'svelte';
   import FieldRow from './FieldRow.svelte';
+  import MatrixSection from './MatrixSection.svelte';
   import DataItem from './DataItem.svelte';
   import Disclosure from './Disclosure.svelte';
   import Tabs from './Tabs.svelte';
@@ -14,6 +15,12 @@
   import ReviewApply from './ReviewApply.svelte';
   import GuideReview from './GuideReview.svelte';
   import PageActionButton from './PageActionButton.svelte';
+  import Button from '../kit/Button.svelte';
+  import { SettingDrafts } from './drafts.svelte';
+  import { guideChanges, guideSnapshot, type GuideChange } from './guide_changes';
+  import { guideApprovals, guideProvenance } from './guides';
+  import { pushError } from '../toasts';
+  import { setFleetSetting, type SettingKey } from '../fleet_settings';
   import AccountsUsage from './usage/AccountsUsage.svelte';
   import type { SettingProposal } from './review';
   import type { ResourceType } from './resources';
@@ -42,6 +49,7 @@
     resources = [],
     actions = [],
     focusKey = null,
+    section = null,
     readonly = false,
     remote = false,
     reason = null,
@@ -61,6 +69,9 @@
     reason?: string | null;
     /** A setting to bring into view and highlight (a search hit). */
     focusKey?: string | null;
+    /** Show only the section with this title (a Settings tree leaf, step
+     *  7.1), headed by that title, with a link to the whole page. */
+    section?: string | null;
     /** Show every field without editing (a hub client). */
     readonly?: boolean;
     /** A paired desktop (P6): the fields are the hub's, but data items,
@@ -76,27 +87,49 @@
   } = $props();
 
   const proposalOf = $derived(new Map(proposals.map((p) => [p.key, p])));
+  /** G1.5: the typed values not saved yet, written together by the Save
+   *  bar. A read-only page stages nothing. */
+  const drafts = new SettingDrafts();
+  const saveDrafts = () =>
+    void drafts.save((key, value) => setFleetSetting(key as SettingKey, value));
   /** Bumped after a page action ran: every data item re-reads. */
   let dataTick = $state(0);
 
-  const tabs = $derived((page.tabs ?? []).filter((t) => evalCondition(t.when, values)));
+  /** The one section a tree leaf shows, wherever it sits (tabs included). */
+  const only = $derived(section ? sectionsOf(page).find((s) => s.section.title === section)?.section : undefined);
+  const tabs = $derived(only ? [] : (page.tabs ?? []).filter((t) => evalCondition(t.when, values)));
   let tab = $state(0);
 
   const visibleSections = $derived<Section[]>(
-    (tabs.length ? (tabs[Math.min(tab, tabs.length - 1)]?.sections ?? []) : (page.sections ?? [])).filter(
+    (only ? [only] : tabs.length ? (tabs[Math.min(tab, tabs.length - 1)]?.sections ?? []) : (page.sections ?? [])).filter(
       (s) => evalCondition(s.when, values),
     ),
   );
 
   const modifiedCount = $derived(
-    sectionsOf(page)
-      .flatMap(({ section }) => section.items)
+    (only ? [only] : sectionsOf(page).map((s) => s.section))
+      .flatMap((s) => s.items)
       .filter((i) => i.type === 'field')
       .filter((i) => {
         const d = descs.get(i.key);
         return d !== undefined && d.owned_by === undefined && (values[i.key] ?? d.value) !== d.default;
       }).length,
   );
+
+  // G7.15 (Guide board): where the guide came from, and every setting it
+  // changed since it opened, each with the value before and an Undo.
+  const provenance = $derived(page.layout === 'guide' ? guideProvenance($guideApprovals.get(page.id)) : null);
+  // svelte-ignore state_referenced_locally
+  const openedWith = page.layout === 'guide' ? guideSnapshot(page, descs, values) : {};
+  const changes = $derived(page.layout === 'guide' && !readonly ? guideChanges(page, descs, openedWith, values) : []);
+  let undoing = $state<string | null>(null);
+  async function undoChange(c: GuideChange) {
+    if (undoing) return;
+    undoing = c.key;
+    const r = await setFleetSetting(c.key as SettingKey, c.before);
+    undoing = null;
+    if (!r.ok) pushError(r.error, `Could not undo ${c.label}`);
+  }
 
   const titleOf = (id: string) => pages.find((p) => p.id === id)?.title ?? id;
   const sourceOf = (id: string) => sources.find((s) => s.id === id);
@@ -110,12 +143,18 @@
   const summary = $derived(filterSummary(page, filterValues));
   /** Data items read this app's store: a paired desktop shows none. */
   const showData = $derived(!readonly && !remote);
+  /** A live source reads through its own command, which routes to the hub
+   *  (11.9b): its items show on a paired desktop too. */
+  const isLive = (i: Section['items'][number]) =>
+    (i.type === 'stat' || i.type === 'record' || i.type === 'table' || i.type === 'chart') &&
+    sourceOf(i.source.id)?.live !== undefined;
   const isData = (i: Section['items'][number]) =>
-    i.type === 'stat' ||
-    i.type === 'record' ||
-    i.type === 'table' ||
-    i.type === 'chart' ||
-    i.type === 'account_usage';
+    (i.type === 'stat' ||
+      i.type === 'record' ||
+      i.type === 'table' ||
+      i.type === 'chart' ||
+      i.type === 'account_usage') &&
+    !isLive(i);
 
   let root = $state<HTMLElement>();
 
@@ -144,10 +183,15 @@
 
 <div class="page" class:cards={page.layout === 'cards'} class:data={page.layout === 'data_page'} bind:this={root} data-testid={`page-${page.id}`}>
   <header>
-    <h4>{page.title}</h4>
+    <h4>{only ? only.title : page.title}</h4>
     {#if modifiedCount > 0}<span class="tag" data-testid="page-modified-count">{modifiedCount} changed</span>{/if}
   </header>
-  {#if page.intro}<p class="intro">{page.intro}</p>{/if}
+  {#if provenance}<p class="provenance" data-testid="guide-provenance">{provenance}</p>{/if}
+  {#if only}
+    <button type="button" class="link" data-testid="page-whole-link" onclick={() => onnavigate(page.id)}
+      >All settings in {page.title} ›</button
+    >
+  {:else if page.intro}<p class="intro">{page.intro}</p>{/if}
 
   {#if page.layout === 'data_page' && !showData}
     <p class="notice" data-testid="page-data-remote">
@@ -188,7 +232,7 @@
   {#if page.layout === 'master_detail'}
     {@const res = resources.find((r) => r.id === page.resource)}
     {#if res}
-      <ResourcePage {page} resource={res} {readonly} {reason} />
+      <ResourcePage {page} resource={res} {readonly} {reason} {actions} />
     {/if}
   {:else if tabs.length > 0}
     <Tabs tabs={tabs.map((t) => t.title)} bind:selected={tab} label={page.title} testidPrefix={`page-${page.id}-tab`} />
@@ -211,6 +255,20 @@
         {@render sectionBody(current)}
       </section>
     {/if}
+    {#if changes.length > 0}
+      <section class="changes" data-testid="guide-changes" aria-label="What this guide changed">
+        <h5>Changed by this guide</h5>
+        <ul>
+          {#each changes as c (c.key)}
+            <li data-testid={`guide-change-${c.key}`}>
+              <span class="what">{c.label}</span>
+              <span class="muted">{c.words}</span>
+              <Button size="sm" variant="quiet" busy={undoing === c.key} busyLabel="Undoing" disabled={undoing !== null} testid={`guide-change-undo-${c.key}`} onclick={() => void undoChange(c)}>Undo</Button>
+            </li>
+          {/each}
+        </ul>
+      </section>
+    {/if}
     <div class="guide-nav">
       <button type="button" class="btn" data-testid="guide-back" disabled={stepAt === 0} onclick={() => (step = stepAt - 1)}>← Back</button>
       {#if lastStep}
@@ -221,7 +279,13 @@
     </div>
   {:else if page.layout !== 'master_detail'}
   {#each shownSections as section (section.title)}
-    {#if section.collapsible || section.advanced}
+    {#if only}
+      <!-- A tree leaf: the header above is this section's title, and a
+           section of its own is never folded away. -->
+      <section class="section only" data-testid={`section-${section.title}`}>
+        {@render sectionBody(section)}
+      </section>
+    {:else if section.collapsible || section.advanced}
       <Disclosure title={section.title} open={!section.advanced} badge={section.advanced ? 'Advanced' : undefined} testid={`section-${section.title}`}>
         {@render sectionBody(section)}
       </Disclosure>
@@ -233,10 +297,24 @@
     {/if}
   {/each}
   {/if}
+
+  {#if drafts.count > 0}
+    <div class="save-bar" role="region" aria-label="Unsaved changes" data-testid="page-save-bar">
+      <span class="save-count" data-testid="page-save-count">{drafts.count} {drafts.count === 1 ? 'change' : 'changes'}</span>
+      <Button variant="quiet" disabled={drafts.saving} testid="page-discard" onclick={() => drafts.discard()}>Discard</Button>
+      <Button variant="primary" busy={drafts.saving} busyLabel="Saving" testid="page-save" onclick={saveDrafts}>Save</Button>
+    </div>
+  {/if}
 </div>
 
 {#snippet sectionBody(section: Section)}
   {#if section.intro}<p class="intro">{section.intro}</p>{/if}
+  {#if section.matrix}
+    <MatrixSection
+      descs={section.items.flatMap((i) => (i.type === 'field' ? (descs.get(i.key) ?? []) : []))}
+      {values}
+      {readonly} />
+  {:else}
   <div class="items">
     {#each section.items as item, i (i)}
       {#if item.type === 'field'}
@@ -249,10 +327,14 @@
             hint={item.hint}
             highlighted={focusKey === item.key}
             proposal={proposalOf.get(item.key)}
+            drafts={readonly ? undefined : drafts}
+            {remote}
             {readonly} />
         {/if}
       {:else if item.type === 'notice'}
-        <p class={`notice ${item.tone}`} role={item.tone === 'info' ? undefined : 'note'}>{item.text}</p>
+        <p class={`notice ${item.tone}`} role={item.tone === 'info' ? undefined : 'note'}>
+          {#if item.tone === 'later'}<span class="later-tag">Not built yet</span>{/if}{item.text}
+        </p>
       {:else if item.type === 'link'}
         <button type="button" class="link" data-testid={`page-link-${item.page}`} onclick={() => onnavigate(item.page)}
           >{item.label ?? titleOf(item.page)} →</button
@@ -268,7 +350,7 @@
         {#if action && !readonly && !remote}<PageActionButton {action} onran={() => dataTick++} />{/if}
       {:else if item.type === 'account_usage'}
         {#if showData}<AccountsUsage view={item.view} />{/if}
-      {:else if showData}
+      {:else if showData || isLive(item)}
         {@const spec = sourceOf(item.source.id)}
         <DataItem
           {item}
@@ -279,6 +361,7 @@
       {/if}
     {/each}
   </div>
+  {/if}
 {/snippet}
 
 <style>
@@ -289,17 +372,43 @@
   }
   h4 {
     margin: 0;
-    font-size: 1rem;
+    font-size: var(--text-md);
   }
-  h5 {
-    margin: 0 0 0.35rem;
-    font-size: 0.75rem;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
+  .provenance {
+    margin: 0.15rem 0 0;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
+  .changes {
+    border-top: 1px solid var(--border);
+    padding: 0.5rem 0 0.2rem;
+  }
+  .changes ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+  .changes li {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: var(--text-xs);
+  }
+  .changes .muted {
+    color: var(--fg-muted);
+  }
+  /* UX audit S2: section headings in sentence case, not uppercase labels. */
+  h5 {
+    margin: 0 0 0.35rem;
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--fg);
+  }
   .intro {
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     margin: 0.25rem 0 0.75rem;
     line-height: 1.4;
@@ -334,14 +443,14 @@
     display: flex;
     align-items: center;
     gap: 0.35rem;
-    font-size: 0.78rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .filters select {
     font: inherit;
   }
   .notice {
-    font-size: 0.78rem;
+    font-size: var(--text-2xs);
     margin: 0.2rem 0;
     padding: 0.4rem 0.6rem;
     border-radius: var(--radius-sm);
@@ -355,13 +464,24 @@
   .notice.danger {
     border-left-color: var(--usage-crit);
   }
+  /* M15 G7.14: what the page will offer and does not yet, greyed. */
+  .notice.later {
+    opacity: 0.55;
+    border-left-style: dashed;
+  }
+  .later-tag {
+    font-weight: 600;
+    margin-right: 0.4rem;
+  }
+  /* A link on its own line, not in a sentence: it keeps the 24 px target. */
   .link {
+    min-block-size: var(--control-h);
     background: none;
     border: none;
     padding: 0.2rem 0;
     color: var(--accent);
     font: inherit;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     cursor: pointer;
     text-align: left;
   }
@@ -376,7 +496,7 @@
     counter-reset: step;
     margin: 0 0 0.5rem;
     padding: 0;
-    font-size: 0.78rem;
+    font-size: var(--text-2xs);
   }
   .steps li {
     counter-increment: step;
@@ -401,6 +521,23 @@
   }
   .steps button:focus-visible {
     outline: var(--ring-w) solid var(--ring);
+  }
+  .save-bar {
+    position: sticky;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-top: var(--space-3);
+    padding: var(--space-2) 0;
+    border-top: 1px solid var(--border);
+    background: var(--bg);
+  }
+  .save-count {
+    flex: 1 1 auto;
+    font-size: var(--text-xs);
+    color: var(--fg-muted);
+    font-variant-numeric: tabular-nums;
   }
   .guide-nav {
     display: flex;

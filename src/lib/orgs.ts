@@ -11,8 +11,11 @@
 // with one owner sees no new chrome — and a persisted scope that no longer
 // exists (or a single-scope fleet) reads as "all", never as a filter nobody
 // can see.
+import type { Descriptor } from './pages/pages';
+import type { AdminNeed, OrgAccount, OrgShare, PersonSpend, RemovedMember, TeamMember } from './pages/resources';
 import { writable, derived, get } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
+import type { Pairing } from './devices';
 import { readPref, writePref } from './prefs';
 import { sessions, type SessionRow } from './sessions';
 import { projects, type ProjectTreeRow } from './projects';
@@ -31,6 +34,10 @@ export interface OrgRow {
    *  to the decision model (docs/decisions.md). Off by default; absent from
    *  an older hub. */
   jev_allowed?: boolean;
+  /** Jev evaluation (D48): this org also consented to Claude's reply text
+   *  (a pane tail at a turn's end, J2) going to the decision model, on top
+   *  of `jev_allowed`. Off by default; absent from an older hub. */
+  jev_reply_allowed?: boolean;
   /** D31 (work graph M14): devices bound to this org (`fleet-hub pair
    *  --org`) also see unassigned work and sessions, as a host does. On by
    *  default; absent from an older hub, which has no bound devices. */
@@ -53,11 +60,117 @@ export interface OrgRuleRow {
   host_alias?: string | null;
 }
 
-/** `list_orgs`: an org with its rules, hosts and trackers. */
+/** `list_orgs`: an org with its rules, hosts and trackers, and its overview
+ *  (org administration phase A; absent from an older hub). */
 export interface OrgDetail extends OrgRow {
   rules: OrgRuleRow[];
   hosts: string[];
   trackers: { id: number; name: string }[];
+  /** The asset catalogs it owns, by name. */
+  catalogs?: string[];
+  /** Its live sessions the caller may count, and those waiting on a person. */
+  session_count?: number;
+  needs_you?: number;
+  /** Its bound paired devices — present only for the fleet's administrator. */
+  devices?: { name: string; mode: string; trusted: boolean; last_seen_at?: number }[];
+  /** Phase C, administrator only: its per-org settings. */
+  settings?: OrgSettingRow[];
+  /** Phase C, administrator only, when the caller sees every session. */
+  spent_today_micros?: number;
+  spent_week_micros?: number;
+  spent_month_micros?: number;
+  budget_daily_usd?: number;
+  budget_monthly_usd?: number;
+  over_budget?: ('daily' | 'monthly')[];
+  /** Redesign 11.1, with the spend: each of the last 14 UTC days, today last. */
+  spend_series?: { day: string; cost_micros: number }[];
+  /** Redesign 11.8, all or nothing: the spend by person, to an admin who
+   *  sees every session. */
+  spend_by_person?: PersonSpend[];
+  /** Redesign 11.1, for its admins: what they should look at. */
+  needs_admin?: AdminNeed[];
+  /** Phase D: who is in the company, for its people and the hub's owner. */
+  members?: OrgMember[];
+  /** Phase D: the caller's own role in it. */
+  my_role?: 'admin' | 'member' | 'viewer';
+  /** M15 G7.14, with `members`: how many there are. */
+  member_count?: number;
+  /** Phase D: this company owns the hub. */
+  owns_hub?: boolean;
+  /** Phase D: its admins see the unclaimed count on its hosts. */
+  admins_see_unclaimed?: boolean;
+  /** M15 G4.7, for its admins: every live share on its sessions. */
+  shares?: OrgShare[];
+  /** M15 G4.7: who is working on what. */
+  team?: TeamMember[];
+  /** M15 G4.7, for its admins: former members and the shares they hold. */
+  removed_members?: RemovedMember[];
+  /** M15 G4.7: the Claude accounts its hosts use. */
+  accounts?: OrgAccount[];
+}
+
+/** One member of an org, as its page lists them. */
+export interface OrgMember {
+  person_id: number;
+  name: string;
+  display_name?: string;
+  role: string;
+  /** Redesign 11.2: when they joined (absent from an older hub). */
+  added_at?: number;
+  /** Redesign 11.2: since when an org share reaches them; absent for a
+   *  viewer, who receives none. */
+  shares_since?: number;
+  /** Redesign 11.2, for whoever administers the org: their devices. */
+  devices?: string[];
+  /** M15 G7.14, with `devices`: the ones not trusted yet. */
+  untrusted_devices?: string[];
+  /** Redesign 11.7c: their live sessions in this org (absent when none, or
+   *  from an older hub). */
+  live_sessions?: number;
+  /** Of those, how many you may not open: shown as existing, never named. */
+  private_sessions?: number;
+}
+
+/** A member's live sessions in words (redesign 11.7c), or '—' for none. A
+ *  private one is only counted: you see that it exists, not what it is. */
+export function memberSessionsWord(m: Pick<OrgMember, 'live_sessions' | 'private_sessions'>): string {
+  const live = m.live_sessions ?? 0;
+  const priv = Math.min(m.private_sessions ?? 0, live);
+  if (live === 0) return '—';
+  if (priv === 0) return `${live} live`;
+  if (priv === live) return `${live} live, private`;
+  return `${live} live, ${priv} private`;
+}
+
+/** How many live shares TO a member stand on the org's sessions. */
+export interface MemberGrants {
+  watch: number;
+  drive: number;
+}
+
+/** What happens to those shares when the member leaves: taken back, each
+ *  Drive narrowed to Watch, or left as they are. */
+export type GrantsOnRemove = 'revoke' | 'narrow' | 'keep';
+
+export function orgMemberGrants(orgId: number, personId: number): Promise<Result<MemberGrants>> {
+  return invokeCmd<MemberGrants>('org_member_grants', { args: { org_id: orgId, person_id: personId } });
+}
+
+/** Mint a one-time pairing code for a member's new device, fenced to the
+ *  org and theirs. A standalone desktop refuses: a code is the hub's. */
+export function pairMemberDevice(orgId: number, person: string, device: string): Promise<Result<Pairing>> {
+  return invokeCmd<Pairing>('pair_device', { args: { device, mode: 'full', org_id: orgId, person } });
+}
+
+/** A member's pairing in progress on an org's page. Kept here, not in the
+ *  editor, because the editor is rebuilt on every re-read of the list. */
+export const memberPairing = writable<{ org_id: number; person: string; pairing?: Pairing } | null>(null);
+
+/** One per-org setting on an org's page: the setting described with the
+ *  fleet's value, and the org's own when it set one. */
+export interface OrgSettingRow {
+  setting: Descriptor;
+  own?: string;
 }
 
 /** `org_suggestions`: create org `name` from `owner/*` and/or for a tracker. */
@@ -246,6 +359,7 @@ export function updateOrg(
     isolate_sessions?: boolean;
     auto_tidy?: OrgAutoTidy;
     jev?: 'on' | 'off';
+    jev_reply?: 'on' | 'off';
     bound_sees_unassigned?: boolean;
   },
 ) {

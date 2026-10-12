@@ -31,6 +31,7 @@
           "key": "PLAT"
         },
         "description": null,
+        "priority": { "id": "1", "name": "Blocker" },
         "customfield_10100": null,
         "customfield_10101": null
       }
@@ -57,11 +58,15 @@
           "key": "JIRAUSER10100",
           "displayName": "Dana Dev"
         },
+        "fixVersions": [ { "id": "20100", "name": "2026.10", "released": false }, { "id": "20101", "name": "2026.11", "released": false } ],
         "updated": "2026-09-21T10:15:30.000+0200",
         "project": {
           "key": "PLAT"
         },
         "description": "Export invoices as CSV.\r\nPlain text on Data Center.",
+        "priority": { "id": "4", "name": "Minor" },
+        "labels": [ "export" ],
+        "customfield_10106": 3.0,
         "customfield_10100": [
           "com.atlassian.greenhopper.service.sprint.Sprint@3c4d[id=5,rapidViewId=1,state=ACTIVE,name=PLAT Sprint 3,startDate=2026-09-15T09:00:00.000+02:00,endDate=2026-09-29T09:00:00.000+02:00,completeDate=<null>,sequence=5,goal=]"
         ],

@@ -12,7 +12,7 @@
 //! link, never from a filter):
 //!
 //! * a link is visible when its org is ([`OrgScope::sees_org`]) and so is
-//!   its session: the live row ([`OrgScope::sees_row`]), or for a past
+//!   its session: the live row ([`OrgScope::sees_row_org_only`]), or for a past
 //!   session its snapshot's host and org — for a per-host token only its own
 //!   host's past sessions (M2's fence);
 //! * a task with an org of its own (a tracker's, or a local item's, M14) is
@@ -49,6 +49,12 @@ pub const REVIEW_DEFAULT_LIMIT: usize = 50;
 pub const DESCRIPTION_MAX_CHARS: usize = 600;
 /// A last-outcome summary, in characters.
 pub const OUTCOME_MAX_CHARS: usize = 600;
+/// What a job mirror's title reads as when the reader may not read the
+/// dispatch behind it (multi-user M1, T5's review). Deliberately the same
+/// words `Store::job_title` falls back to for a prompt with no first line, so
+/// a withheld title is indistinguishable from an unremarkable one and the
+/// fence leaks nothing by its own shape.
+pub const JOB_TITLE_WITHHELD: &str = "Delegated job";
 
 // ---------------------------------------------------------------------------
 // Wire types
@@ -88,7 +94,7 @@ pub struct WorkTreeFilters {
     /// Something to review.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<bool>,
-    /// Key or title text.
+    /// Key or title text: every word, in any order, case and accents ignored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
     /// One group id.
@@ -98,6 +104,62 @@ pub struct WorkTreeFilters {
     /// active) into archived_hidden; absent shows them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived: Option<bool>,
+    /// One person the task is assigned to in its tracker, by name (any
+    /// case).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    /// One tracker column: the tracker's own status name ("QA Review"),
+    /// any case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_name: Option<String>,
+    /// Section per org: group (default), org, person, mission, account,
+    /// repo, sprint, release or epic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_by: Option<String>,
+    /// Any of these orgs (ids, or "none" for unassigned): the Work panel's
+    /// organisation chips, several at once. Applies with `org` when both
+    /// are set. An older hub ignores it and shows every org.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub orgs: Vec<IdOrWord>,
+    /// Any of these stages ([`STAGE_VALUES`], what [`WorkTask::stage`]
+    /// says): the Work panel's status chips, several at once. Applies with
+    /// `status` when both are set. An older hub ignores it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stages: Vec<String>,
+    /// The sprint (iteration, cycle): `current` (the tracker's active
+    /// one), `none` (in no sprint) or a sprint's name, any case. An older
+    /// hub ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iteration: Option<String>,
+    /// Under one epic (or any ancestor): its task id (`item:<id>`) or key.
+    /// The epic itself is listed too. An older hub ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epic: Option<String>,
+    /// The tracker's type name (Story, Bug …), any case. An older hub
+    /// ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_type: Option<String>,
+    /// The order inside each section, one of [`SORT_VALUES`]: `activity`
+    /// (the default: needing you first, then the latest activity),
+    /// `updated` (the tracker's last change), `key`, `title` or `due`. An
+    /// older hub ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<String>,
+}
+
+/// [`WorkTreeFilters::sort`]'s values.
+pub const SORT_VALUES: [&str; 5] = ["activity", "updated", "key", "title", "due"];
+
+/// [`WorkTask::stage`]'s values, in board order.
+pub const STAGE_VALUES: [&str; 5] = ["backlog", "in_progress", "in_review", "blocked", "done"];
+
+/// [`WorkTreeFilters::group_by`]'s values.
+pub const GROUP_BY_VALUES: [&str; 9] = [
+    "group", "org", "person", "mission", "account", "repo", "sprint", "release", "epic",
+];
+
+fn is_zero_u32(n: &u32) -> bool {
+    *n == 0
 }
 
 /// Where a task sits and why.
@@ -164,6 +226,11 @@ pub struct TaskLink {
     /// A person kept this conflict on purpose (`work_link { ack }`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_ack_at: Option<i64>,
+    /// The link's session is the CALLER's own (an agent in its pane, proven
+    /// by its per-host token and `X-Fleet-Pane`). Set by the tool layer,
+    /// never by the graph: the graph does not know who asks.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_self: bool,
 }
 
 /// A task's counts.
@@ -183,6 +250,10 @@ pub struct WorkTask {
     pub item_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// The item's fleet ticket key (`FLT-12`, migration 169), shown in
+    /// place of `key`; absent when it drew none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_key: Option<String>,
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
@@ -208,6 +279,19 @@ pub struct WorkTask {
     pub unavailable_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assignees: Vec<String>,
+    /// The date the work is due, `YYYY-MM-DD` (the Board card's "You · Fri").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_at: Option<String>,
+    /// `urgent | high | medium | low` (migration 171).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    /// How big the work is, in `estimate_unit` (`points | hours`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate: Option<crate::store::Estimate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate_unit: Option<String>,
     pub mine: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<i64>,
@@ -247,9 +331,25 @@ pub struct WorkTask {
     /// That project as `owner/repo` (or `repo` for a local owner).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_label: Option<String>,
-    /// A native subtask's parent (`item:<id>`).
+    /// A local item's parent (`item:<id>`): a native subtask's, or the
+    /// epic or task a person filed it under.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_task_id: Option<String>,
+    /// An epic: a local item marked one, or a tracker's Epic (sprints design
+    /// 2026-09-28 §3).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub epic: bool,
+    /// How deep a local item sits: 1 at the top, at most
+    /// `LOCAL_DEPTH_MAX`. Absent for a ticket or a bare key.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub level: u32,
+    /// Its children (proposals and delegated jobs aside), and how many of
+    /// them are done: an epic's roll-up, computed and never stored. A done
+    /// set does not close the parent.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub children_total: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub children_done: u32,
     /// A job mirror's state (the delegated job's `state`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_state: Option<String>,
@@ -260,6 +360,135 @@ pub struct WorkTask {
     /// Agent proposals under this task waiting for a person's decision.
     #[serde(default)]
     pub open_proposals: u32,
+    /// The task waits for another work item that is not done (a
+    /// `work_item_deps` edge, inside a mission or not), and is not done
+    /// itself. Derived on every read, never stored (redesign step 6.3).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blocked: bool,
+    /// What it waits for, as task ids (`item:<id>`): only the items this
+    /// caller may see, so `blocked` can be true with this empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_by: Vec<String>,
+    /// What its sessions have spent, in micro-USD: the usage of every
+    /// distinct session this caller sees on an active or ended link. A
+    /// session that worked on two tasks counts in both.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cost_micros: i64,
+    /// Where the task stands, one word of [`STAGE_VALUES`]: `done`, then
+    /// `blocked` (it waits for another task), `in_review` (its tracker
+    /// column says review, or a live session has a pull request),
+    /// `in_progress` (its tracker says so, or a session works on it), else
+    /// `backlog`. Derived on every read; empty from an older hub.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stage: String,
+    /// What a rule, Jev or an LLM proposes about this task, one per
+    /// feature (step 2.8): the same shape as `SessionRow::proposals`. Empty,
+    /// and absent on the wire, when nothing proposes anything.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proposals: Vec<crate::store::DecisionProposal>,
+    /// Its acceptance lines (orchestration O3, the Board's "Finishes when
+    /// …", Orbit Fleet G7.6). Absent when it has none, and from an older hub.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub done_when: Vec<String>,
+    /// The mission it belongs to and its wave there (the Board card's chip,
+    /// G7.6): only on a tree read that asked ([`TreeArgs::with_missions`])
+    /// or groups by mission, and only for a mission this caller may read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mission: Option<TaskMission>,
+    /// The tracker's type name (Story, Bug, Epic …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_type: Option<String>,
+    /// 1 an epic, 0 a standard item, -1 a subtask (the tracker's level).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hierarchy_level: Option<i64>,
+    /// The sprint (iteration, cycle) the item is in, by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iteration: Option<String>,
+    /// That sprint is the tracker's active one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub iteration_active: bool,
+    /// The epic it sits under: its nearest ancestor at epic level, else
+    /// its top-most ancestor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_epic: Option<TaskRef>,
+    /// The tracker's own last change (else the item's), unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<i64>,
+    /// Every ancestor, nearest first: what `filters.epic` matches. Not on
+    /// the wire.
+    #[serde(skip)]
+    pub ancestors: Vec<TaskRef>,
+}
+
+/// [`WorkTask::mission`]: a mission's id and name, and the wave of the
+/// mission's dependency graph the task sits in (W1 first).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskMission {
+    pub id: i64,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wave: Option<u32>,
+}
+
+/// Another task named from this one (its epic, an ancestor).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskRef {
+    /// `item:<id>`.
+    pub task_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    pub title: String,
+}
+
+impl TaskRef {
+    /// Named by `v`: its task id, or its key in any case.
+    fn named(&self, v: &str) -> bool {
+        self.task_id == v
+            || self
+                .key
+                .as_deref()
+                .is_some_and(|k| k.eq_ignore_ascii_case(v))
+    }
+}
+
+/// How deep [`ancestors_of`] climbs: epic → story → subtask is three.
+const ANCESTOR_DEPTH: usize = 6;
+
+/// `item`'s ancestors, nearest first, through `parent_id` (a cycle or a
+/// parent the graph does not hold ends the climb).
+fn ancestors_of(g: &Graph, item: &ViewItem) -> Vec<(TaskRef, Option<i64>)> {
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::from([item.item.id]);
+    let mut next = item.item.parent_id;
+    while let Some(id) = next {
+        if out.len() >= ANCESTOR_DEPTH || !seen.insert(id) {
+            break;
+        }
+        let Some(p) = g.items.get(&id) else { break };
+        let title = if g.mirror_text_hidden(&p.item) {
+            JOB_TITLE_WITHHELD.to_string()
+        } else {
+            p.item.title.clone()
+        };
+        out.push((
+            TaskRef {
+                task_id: format!("item:{id}"),
+                key: p.item.key.clone(),
+                title,
+            },
+            p.item.hierarchy_level,
+        ));
+        next = p.item.parent_id;
+    }
+    out
+}
+
+/// A section header while a tree read counts it: the group, how many tasks,
+/// the smallest sort key among them and their summed cost.
+type GroupAcc = (GroupRef, u32, SortKey, i64);
+
+fn is_zero(v: &i64) -> bool {
+    *v == 0
 }
 
 /// A native subtask on a task page.
@@ -296,6 +525,52 @@ pub struct ProposalView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposed_by: Option<String>,
     pub at: i64,
+    /// Jev's "may duplicate" (K4, `decide::duplicate`): an open task this
+    /// reader sees that the proposal may repeat. Only a live assist answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicate: Option<DuplicateHint>,
+}
+
+/// The existing task a proposal may duplicate, as Jev proposed it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DuplicateHint {
+    pub item_id: i64,
+    /// `item:<id>`, the task page to open.
+    pub task_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    pub title: String,
+    /// Always `jev` today.
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_pct: Option<u8>,
+    /// The recorded run, which a person's Merge or Keep both marks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<i64>,
+}
+
+/// The [`DuplicateHint`] proposal `item_id` carries: its `duplicate`
+/// proposal names an item of the graph, open, whose org `scope` sees.
+fn duplicate_hint(g: &Graph, scope: &OrgScope, item_id: i64) -> Option<DuplicateHint> {
+    let p = g
+        .item_proposals
+        .get(&item_id)?
+        .iter()
+        .find(|p| p.feature == crate::service::decide::Feature::Duplicate.as_str())?;
+    let target = crate::service::decide::duplicate::item_of(&p.value)?;
+    let v = g.items.get(&target)?;
+    if target == item_id || v.item.status_category == "done" || !scope.sees_org(g.item_org(v)) {
+        return None;
+    }
+    Some(DuplicateHint {
+        item_id: target,
+        task_id: format!("item:{target}"),
+        key: v.item.key.clone(),
+        title: v.item.title.clone(),
+        source: p.source.clone(),
+        confidence_pct: p.confidence_pct,
+        run_id: p.run_id,
+    })
 }
 
 /// A delegated job under a task. `result` is agent text.
@@ -344,6 +619,10 @@ pub struct TreeGroup {
     pub org_name: Option<String>,
     pub group: GroupRef,
     pub count: u32,
+    /// The spend of its tasks: the sum of their [`WorkTask::cost_micros`]
+    /// over every task the header counts (redesign step 6.3).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cost_micros: i64,
 }
 
 /// An org the caller sees.
@@ -378,6 +657,11 @@ pub struct TreePage {
     /// (over the whole result, not the page).
     #[serde(default)]
     pub archived_hidden: u32,
+    /// Tasks the view's filters hide that would show with none set (the
+    /// archived switch kept): the "Hidden by filters" row. 0 for a
+    /// section's read (`filters.group`).
+    #[serde(default)]
+    pub hidden_by_filters: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
     pub generated_at: i64,
@@ -390,6 +674,116 @@ pub struct TreePage {
     /// [`TreeArgs::with_review_total`] asked (absent from an older hub).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_total: Option<u32>,
+    /// What the sprint, epic and type pickers offer: every value among the
+    /// tasks the caller sees, whatever the filters (so a picker is not
+    /// limited to the loaded page). Empty on a section's read
+    /// (`filters.group`) and from an older hub.
+    #[serde(default, skip_serializing_if = "Facets::is_empty")]
+    pub facets: Facets,
+}
+
+/// [`TreePage::facets`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Facets {
+    /// Sprints, the active ones first, then by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub iterations: Vec<IterationFacet>,
+    /// Epics (and other parents at the top of a chain), by key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub epics: Vec<EpicFacet>,
+    /// The trackers' type names, by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub item_types: Vec<String>,
+}
+
+impl Facets {
+    fn is_empty(&self) -> bool {
+        self.iterations.is_empty() && self.epics.is_empty() && self.item_types.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IterationFacet {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub active: bool,
+    /// Tasks in it.
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EpicFacet {
+    #[serde(flatten)]
+    pub epic: TaskRef,
+    /// Tasks under it.
+    pub count: u32,
+}
+
+/// At most this many values per facet: a picker, not a report.
+const FACET_MAX: usize = 200;
+
+fn facets_of(tasks: &[&WorkTask]) -> Facets {
+    let mut iterations: BTreeMap<String, (bool, u32)> = BTreeMap::new();
+    let mut epics: BTreeMap<String, (TaskRef, u32)> = BTreeMap::new();
+    let mut types: BTreeMap<String, String> = BTreeMap::new();
+    for t in tasks {
+        if let Some(i) = t
+            .iteration
+            .as_deref()
+            .map(str::trim)
+            .filter(|i| !i.is_empty())
+        {
+            let e = iterations.entry(i.to_string()).or_default();
+            e.0 |= t.iteration_active;
+            e.1 += 1;
+        }
+        if let Some(e) = &t.in_epic {
+            epics
+                .entry(e.task_id.clone())
+                .or_insert_with(|| (e.clone(), 0))
+                .1 += 1;
+        }
+        if let Some(ty) = t
+            .item_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            types
+                .entry(crate::search_text::fold(ty))
+                .or_insert_with(|| ty.to_string());
+        }
+    }
+    let mut iterations: Vec<IterationFacet> = iterations
+        .into_iter()
+        .map(|(name, (active, count))| IterationFacet {
+            name,
+            active,
+            count,
+        })
+        .collect();
+    iterations.sort_by(|a, b| b.active.cmp(&a.active).then_with(|| a.name.cmp(&b.name)));
+    iterations.truncate(FACET_MAX);
+    let mut epics: Vec<EpicFacet> = epics
+        .into_values()
+        .map(|(epic, count)| EpicFacet { epic, count })
+        .collect();
+    epics.sort_by(|a, b| {
+        let ka = a.epic.key.as_deref().map(key_parts);
+        let kb = b.epic.key.as_deref().map(key_parts);
+        ka.is_none()
+            .cmp(&kb.is_none())
+            .then_with(|| ka.cmp(&kb))
+            .then_with(|| a.epic.title.cmp(&b.epic.title))
+    });
+    epics.truncate(FACET_MAX);
+    let mut item_types: Vec<String> = types.into_values().collect();
+    item_types.truncate(FACET_MAX);
+    Facets {
+        iterations,
+        epics,
+        item_types,
+    }
 }
 
 /// One section a tree read pages besides its first page: exactly what a
@@ -487,6 +881,35 @@ pub struct TaskDetail {
     /// conversation, newest conversation first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<StepGroup>,
+    /// What people and agents said about the task in fleet, oldest first
+    /// (the newest `COMMENTS_SERVED_MAX`), each with its post to the
+    /// tracker when one was asked for. The tracker's own comments are
+    /// `work { tracker_comments }`'s, read on demand.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<crate::store::CommentRow>,
+    /// The task's tracker, by the name Settings gives it, when its provider
+    /// reads comments (`work { tracker_comments }` answers for it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comments_tracker: Option<String>,
+    /// The reader may ask for a comment to be posted to that tracker too:
+    /// its admin turned `write_back.comments` on and the reader is a person.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_post_to_tracker: bool,
+    /// Files and images on the task in fleet, newest first (at most
+    /// `ATTACHMENTS_SERVED_MAX`): metadata only, the bytes are
+    /// `work { attachment }`'s.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<crate::store::AttachmentRow>,
+    /// The task's promotion to a tracker while it is being sent, or why it
+    /// was not (owner decision 2026-10-11). Absent once it is the ticket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promotion: Option<super::promote::PromotionView>,
+    /// Where the reader may promote this task of fleet's own: its parent's
+    /// tracker for a subtask of a ticket, every tracker that takes new
+    /// tickets for a task at the top. Empty for an agent, a tracker's
+    /// ticket, or where no tracker's admin turned creating on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub promote_targets: Vec<super::promote::PromoteTarget>,
 }
 
 /// The task one of a session's links points at, briefly.
@@ -495,6 +918,9 @@ pub struct TaskBrief {
     pub task_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// The item's fleet ticket key (`FLT-12`), shown in place of `key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_key: Option<String>,
     pub title: String,
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -527,6 +953,9 @@ pub struct SessionTasks {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub primary_link_id: Option<i64>,
     pub links: Vec<SessionTaskLink>,
+    /// `session_id` is the caller's own session (see [`TaskLink::is_self`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_self: bool,
 }
 
 /// One item of the review inbox.
@@ -548,10 +977,92 @@ pub struct ReviewItem {
     pub strength: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule: Option<String>,
+    /// 0–100, read off the rule, strength and evidence
+    /// (`work::confidence`); `None` from a hub older than step 6.5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<u8>,
     pub preselected: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alternatives: Vec<ReviewAlternative>,
     pub created_at: i64,
+    /// Who proposed it, when it is not a rule's reading of a signal: the
+    /// decision model's suggestion (J1, rule R12, redesign 6.8). Absent for
+    /// every other item, and from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_by: Option<ReviewProposer>,
+    /// The tracker ticket the decision model proposes this suggestion's
+    /// LOCAL task duplicates (J7 `tracker_duplicate`, redesign 6.8): a live
+    /// assist answer only. Absent otherwise, and from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicate_of: Option<ReviewDuplicate>,
+}
+
+/// [`ReviewItem::duplicate_of`]: "May duplicate PAY-88 · Proposed by Jev ·
+/// 74%".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewDuplicate {
+    /// The ticket, `item:<id>`.
+    pub task_id: String,
+    pub item_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    pub title: String,
+    /// `jev`.
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_pct: Option<u8>,
+}
+
+/// PURE: the J6 proposer of suggestion `link_id` of a session whose row
+/// carries `proposals`: the live `main_ticket` proposal naming it, among
+/// `keys` suggestions. `None` for any other link.
+pub fn main_ticket_proposer(
+    proposals: &[crate::store::DecisionProposal],
+    link_id: i64,
+    keys: usize,
+) -> Option<ReviewProposer> {
+    use crate::service::decide::{main_ticket, Feature};
+    let p = proposals
+        .iter()
+        .find(|p| p.feature == Feature::MainTicket.as_str())?;
+    (main_ticket::link_of(&p.value) == Some(link_id)).then(|| ReviewProposer {
+        source: p.source.clone(),
+        reason: main_ticket::reason(keys),
+        confidence_pct: p.confidence_pct,
+    })
+}
+
+/// [`ReviewItem::proposed_by`]: "Proposed by Jev · from the first prompt ·
+/// 82%".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewProposer {
+    /// `jev`.
+    pub source: String,
+    /// Why, in fleet's words.
+    pub reason: String,
+    /// The model's confidence, in whole percent, when it gave one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_pct: Option<u8>,
+}
+
+/// PURE: who proposed a link that carries `rule` and `evidence`: the
+/// decision model for an R12 suggestion, with the confidence its evidence
+/// note holds (`82%`); `None` for a rule's own reading.
+pub fn proposer_of(rule: Option<&str>, evidence: &[serde_json::Value]) -> Option<ReviewProposer> {
+    if rule != Some(crate::service::decide::work_link::RULE) {
+        return None;
+    }
+    let confidence_pct = evidence
+        .iter()
+        .filter(|e| e.get("signal").and_then(|s| s.as_str()) == Some("jev"))
+        .filter_map(|e| e.get("note").and_then(|n| n.as_str()))
+        .filter_map(|n| n.trim_end_matches('%').parse::<u8>().ok())
+        .next_back();
+    Some(ReviewProposer {
+        source: "jev".into(),
+        reason: "from the first prompt".into(),
+        confidence_pct,
+    })
 }
 
 /// Another suggestion of the same session, for *Change…*.
@@ -561,6 +1072,9 @@ pub struct ReviewAlternative {
     pub task_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// The item's fleet ticket key (`FLT-12`), shown in place of `key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_key: Option<String>,
     pub title: String,
 }
 
@@ -590,6 +1104,9 @@ pub(crate) struct Graph {
     pub(crate) rules: Vec<WorkRule>,
     /// `health.context_red_pct`: `needs_you` agrees with `list_sessions`.
     pub(crate) context_red_pct: f64,
+    /// What the fleet knows beyond the rows (step 2.6): `needs_you` counts a
+    /// Blocked session as `list_sessions` does.
+    pub(crate) facts: attention::Facts,
     /// Item ids with a live confirmed link whose session is presently
     /// working (native item status §2 rule 3) — one join for the whole
     /// page, looked up per task instead of queried per row. Fenced by the
@@ -598,21 +1115,172 @@ pub(crate) struct Graph {
     /// "someone is working on this" never leaks through a task the caller
     /// can otherwise see.
     pub(crate) working_session_items: BTreeSet<i64>,
+    /// Session rows that EXIST and this reader may not see (multi-user M1,
+    /// T7) — the ids [`Self::load_for`] took out of [`Self::sessions`].
+    ///
+    /// Kept as a set rather than simply dropped, because "no row" and "a row
+    /// you may not see" answer differently: a link whose live session is
+    /// merely absent from the graph is judged by its snapshot (`snap_host`,
+    /// `snap_org_id`) and would be shown with a name out of the snapshot,
+    /// which is the leak this fence exists to close. [`Self::link_visible`]
+    /// refuses such a link outright.
+    pub(crate) hidden_sessions: BTreeSet<i64>,
+    /// `work_links.id` of every link this reader may not see **whose live
+    /// participant is gone** (multi-user M1, T9b) — the ENDED half of
+    /// [`Self::hidden_sessions`].
+    ///
+    /// It exists because [`Self::hidden_sessions`] could only ever answer for
+    /// a link that still names a row. `ViewLink.session_id` is NULL for every
+    /// link of a reaped session (`store/work_view.rs`'s `LEFT JOIN
+    /// participants p … AND p.retired_at IS NULL`), so such a link skipped
+    /// the fence, fell through to the snapshot arm and was then passed by
+    /// `scope.is_all()` — i.e. served, by its `snap_name` / `snap_host` /
+    /// `snap_branch`, to every paired client bound to no org. Both sets are
+    /// filled by [`crate::service::orgs::link_person_visible_at`], which is
+    /// the one statement of the rule, so the Work view and `work { links }`
+    /// cannot answer differently for the same link.
+    pub(crate) hidden_links: BTreeSet<i64>,
     /// A job mirror's item id → its job's `state`.
     pub(crate) job_states: HashMap<i64, String>,
     /// A task's item id → its proposals waiting for a decision.
     pub(crate) open_proposals: HashMap<i64, u32>,
+    /// Item id → (children, done children): the roll-up (sprints design §3).
+    /// Counts of ITEMS, as `open_proposals` is.
+    pub(crate) children: HashMap<i64, (u32, u32)>,
+    /// A task's item id → what a rule, Jev or an LLM proposes about it
+    /// (step 2.8, `WorkTask::proposals`).
+    pub(crate) item_proposals: HashMap<i64, Vec<crate::store::DecisionProposal>>,
+    /// The [`proposer_label`] of every session row that SURVIVED the person
+    /// fence, or `None` on the ORG-only load — the text half of
+    /// [`Self::hidden_sessions`], for `work_items.proposed_by` (multi-user
+    /// M1). See [`Self::proposer_visible`].
+    pub(crate) visible_proposers: Option<BTreeSet<String>>,
+    /// Every `work_item_deps` edge out of an item in [`Self::items`]: item
+    /// id → the items it waits for (redesign step 6.3).
+    pub(crate) deps: HashMap<i64, Vec<i64>>,
+    /// The scope the graph was loaded for, so a task's `blocked_by` names
+    /// only items this caller may see.
+    pub(crate) scope: OrgScope,
+    /// Item id → the mission it belongs to, `(id, name)`, for the missions
+    /// this caller may read: filled by [`tree`] only for a group by mission
+    /// (redesign step 6.2), so every other read pays nothing for it.
+    pub(crate) missions_by_item: HashMap<i64, (i64, String)>,
+    /// Item id → its wave in its mission's dependency graph, for the items
+    /// in [`Self::missions_by_item`] ([`fill_mission_waves`]).
+    pub(crate) mission_waves: HashMap<i64, u32>,
+    /// Item id → its sprint or release, `(id, name)`, for the buckets this
+    /// caller may see: filled by [`tree`] only for a group by sprint or
+    /// release (sprints design 2026-09-28 §6a).
+    pub(crate) buckets_by_item: HashMap<i64, (i64, String)>,
+    /// Account uuid → how it is named (nickname, else email), filled by
+    /// [`tree`] only for a group by account.
+    pub(crate) account_labels: HashMap<String, String>,
 }
 
+/// How a session is named when an agent proposes a subtask in its name:
+/// `"<friendly name, else tmux name> · <host alias>"`.
+///
+/// **One spelling, two readers** (multi-user M1): `work_link { propose }`
+/// writes it into `work_items.proposed_by`, and [`Graph::build`] computes it
+/// again for the rows the person fence hides, so that
+/// [`Graph::proposer_hidden`] can recognise one. The two were the same
+/// `format!` in two files, which is how the fence would have drifted into
+/// passing everything the first time somebody added a space.
+pub(crate) fn proposer_label(row: &SessionRow) -> String {
+    let name = row.friendly_name.as_deref().unwrap_or(&row.tmux_name);
+    format!("{name}{SEPARATOR}{}", row.host_alias)
+}
+
+/// What a [`proposer_label`] puts between the session and its host, and
+/// therefore the one mark that says a stored `proposed_by` is a SESSION's
+/// label rather than a caller's (`master`, `client:phone`).
+const SEPARATOR: &str = " · ";
+
 impl Graph {
+    /// The ORG-only load: for the reads and writes that answer a TASK and
+    /// never a session row — `service::work::structure`'s rules, saved
+    /// views, placements and org moves, whose exemptions are written down in
+    /// `mcp::tools::tests`'s `WORK_ACTION_NO_GATE`.
+    ///
+    /// Every Work-view read that answers session rows takes
+    /// [`Self::load_for`] instead.
     pub(crate) fn load(s: &Store, scope: &OrgScope) -> Result<Graph, IpcError> {
-        let sessions: HashMap<i64, SessionRow> = s
+        Self::build(s, scope, None)
+    }
+
+    /// The load every Work-view READ uses: the caller's WHOLE scope, so a
+    /// session this person may not see is not in the graph at all and no
+    /// projection built off the graph can carry it (multi-user M1, T7) —
+    /// **for both shapes a session reaches a projection in**: a LIVE row
+    /// (taken out of [`Graph::sessions`] into [`Graph::hidden_sessions`]) and
+    /// an ENDED link whose participant has been reaped, which has no live row
+    /// to take out and is listed in [`Graph::hidden_links`] instead (T9b).
+    ///
+    /// The second half was missing, and the doc promised it anyway: `tree`,
+    /// `task`, `review` and `org_impact` all rest on this sentence.
+    pub(crate) fn load_for(
+        s: &Store,
+        view: &crate::service::view_scope::ViewScope,
+    ) -> Result<Graph, IpcError> {
+        Self::build(s, &view.org, Some(view))
+    }
+
+    fn build(
+        s: &Store,
+        scope: &OrgScope,
+        view: Option<&crate::service::view_scope::ViewScope>,
+    ) -> Result<Graph, IpcError> {
+        let mut sessions: HashMap<i64, SessionRow> = s
             .list_all_sessions()?
             .into_iter()
             .map(|r| (r.id, r))
             .collect();
+        // The PERSON fence, before anything is derived from a row: whose row
+        // it is, what was shared with this caller, and §4.4's host clauses —
+        // none of which an `OrgScope` can express (it is `All` for the master
+        // and for every paired client bound to no org alike).
+        let hidden_sessions: BTreeSet<i64> = match view {
+            Some(v) => {
+                let hidden: BTreeSet<i64> = sessions
+                    .values()
+                    .filter(|r| !v.sees_session_row(r).is_visible())
+                    .map(|r| r.id)
+                    .collect();
+                sessions.retain(|id, _| !hidden.contains(id));
+                hidden
+            }
+            None => BTreeSet::new(),
+        };
+        let sessions = sessions;
+        let links = s.work_view_links()?;
+        // The ENDED half of the same fence, through the one predicate
+        // (multi-user M1, T9b). A link whose participant has been reaped has
+        // no live row above to take out of the graph, so it is named here;
+        // `link_visible` and `impact_of` test both sets before the snapshot
+        // arm. The memo makes a page cost one lookup per distinct
+        // conversation, and `is_internal` keeps the hub's own readers (and
+        // the scale fixture, which loads with `ViewScope::internal`) on the
+        // old cost.
+        let hidden_links: BTreeSet<i64> = match view {
+            Some(v) if !v.is_internal() => {
+                let mut seen: std::collections::BTreeMap<String, bool> = Default::default();
+                let mut hidden = BTreeSet::new();
+                for l in &links {
+                    if l.session_id.is_some() {
+                        continue;
+                    }
+                    if !crate::service::orgs::link_person_visible_memo(
+                        s, v, &l.link, None, &mut seen,
+                    )? {
+                        hidden.insert(l.link.id);
+                    }
+                }
+                hidden
+            }
+            _ => BTreeSet::new(),
+        };
         // Fence the live signal by scope: a pair whose session this scope
-        // cannot see (`OrgScope::sees_row`, the same check `link_visible`
+        // cannot see (`OrgScope::sees_row_org_only`, the same check `link_visible`
         // uses) does not lift its item, even though the raw query found it.
         let working_session_items: BTreeSet<i64> = s
             .work_items_with_working_session()?
@@ -620,7 +1288,12 @@ impl Graph {
             .filter(|(_, session_id)| {
                 sessions
                     .get(session_id)
-                    .is_some_and(|row| scope.sees_row(row))
+                    // `hidden_sessions` above has already emptied every
+                    // person-invisible row out of `sessions` when a
+                    // `ViewScope` was supplied; this clause is what still
+                    // fences the org-only `Graph::load` path, whose readers
+                    // answer tasks and never a session row.
+                    .is_some_and(|row| scope.sees_row_org_only(row))
             })
             .map(|(item_id, _)| item_id)
             .collect();
@@ -629,49 +1302,243 @@ impl Graph {
             .into_iter()
             .map(|i| (i.item.id, i))
             .collect();
+        // Machine proposals about an item are about the ITEM (its org's
+        // work data, fenced with the item itself), and carry only ids and
+        // vocabulary words.
+        let item_proposals: HashMap<i64, Vec<crate::store::DecisionProposal>> = s
+            .current_proposals(crate::store::PROPOSAL_SUBJECT_WORK_ITEM)?
+            .into_iter()
+            .filter_map(|(id, v)| Some((id.parse::<i64>().ok()?, v)))
+            .filter(|(id, _)| items.contains_key(id))
+            .collect();
         let mut open_proposals: HashMap<i64, u32> = HashMap::new();
+        let mut children: HashMap<i64, (u32, u32)> = HashMap::new();
         for i in items.values() {
+            let counted = i.item.origin.as_deref() != Some("agent")
+                && !matches!(
+                    i.item.proposal_state.as_deref(),
+                    Some("proposed" | "rejected")
+                );
+            if let (true, Some(parent)) = (counted, i.item.parent_id) {
+                let e = children.entry(parent).or_default();
+                e.0 += 1;
+                e.1 += u32::from(i.item.status_category == "done");
+            }
             if let (Some("proposed"), Some(parent)) =
                 (i.item.proposal_state.as_deref(), i.item.parent_id)
             {
                 *open_proposals.entry(parent).or_default() += 1;
             }
         }
+        // A job mirror's state is the state of a DISPATCH, and both ends of a
+        // dispatch are sessions (multi-user M1, the review of main's new
+        // `Graph` fields). `work { task }` served it — and `JobView.result`,
+        // the worker's own output — to anyone who could see the work item,
+        // with no fence of any kind: `job_states_by_item` answered a state
+        // string, so the one predicate that judges a task
+        // (`tasks::task_visible_in_scope_pure`) could not even be asked. The
+        // store now hands over the `tasks` row and the predicate runs here,
+        // against the ALREADY person-filtered `sessions` map — so an end this
+        // reader cannot see resolves to `None` and the predicate fails closed
+        // on it, which is its documented behaviour for an unreadable end.
+        //
+        // `view: None` is the ORG-only load, whose readers answer tasks and
+        // never a session row (`Graph::load`'s doc, and the
+        // `WORK_ACTION_NO_GATE` rows it names); it keeps every state, as it
+        // keeps every session row.
+        // The labels of the rows that SURVIVED the fence, so
+        // `proposer_visible` can recognise one (multi-user M1). `None` is the
+        // ORG-only load, which applies no person fence anywhere.
+        let visible_proposers: Option<BTreeSet<String>> =
+            view.map(|_| sessions.values().map(proposer_label).collect());
+        let job_states = job_states_from(s, &sessions, view)?;
+        let item_ids: Vec<i64> = items.keys().copied().collect();
+        let mut deps: HashMap<i64, Vec<i64>> = HashMap::new();
+        for e in s.item_deps(&item_ids)? {
+            deps.entry(e.item_id).or_default().push(e.depends_on);
+        }
+        let placements: HashMap<String, Placement> = s
+            .work_placements()?
+            .into_iter()
+            .map(|p| (p.task_id.clone(), p))
+            .collect();
+        let rules = s.work_rules()?;
+        // K5: a `work_placement` proposal names its group by label here.
+        let item_proposals = crate::service::decide::work_placement::label_proposals(
+            s,
+            item_proposals,
+            &placements,
+            &rules,
+        )?;
         Ok(Graph {
             now: crate::service::catalog::now_secs(),
             items,
-            links: s.work_view_links()?,
+            // M1 reads `links` above, to build `hidden_links`, so the local
+            // is used here rather than a second `work_view_links` query.
+            links,
             sessions,
             trackers: s.list_trackers()?.into_iter().map(|t| (t.id, t)).collect(),
             orgs: s.list_orgs()?,
             projects: s.list_projects()?.into_iter().map(|p| (p.id, p)).collect(),
-            placements: s
-                .work_placements()?
-                .into_iter()
-                .map(|p| (p.task_id.clone(), p))
-                .collect(),
-            rules: s.work_rules()?,
+            placements,
+            rules,
             context_red_pct: crate::service::health::context_red_pct(s),
+            facts: s.attention_facts(),
             working_session_items,
-            job_states: s.job_states_by_item()?,
+            hidden_sessions,
+            hidden_links,
+            job_states,
+            // NOT fenced, and that is the judgement rather than an omission:
+            // this is a count of ITEMS (the `proposed` children of one
+            // parent), not of sessions. A proposal's own session metadata is
+            // its `proposed_by`, which `hidden_proposers` withholds; what is
+            // left — its title and `why` — is text a person wrote into the
+            // shared graph for the people who decide it, and the count
+            // carries none of it anyway.
+            //
+            // **The reason stops at proposals, and used to be written as
+            // though it covered every item** (multi-user M1, T5's review).
+            // It does not cover a JOB MIRROR: `create_agent_task_item` fills
+            // an `agent` child's title from the first line of the dispatch
+            // PROMPT and its notes from the prompt itself, so a mirror's text
+            // is one session's instruction to another — §4.3 content of both
+            // ends, not shared work structure. Mirrors are fenced on
+            // `g.job_states` wherever their text is served (`JobView`, and
+            // `SubtaskView.title` in `native_work`); they are not counted
+            // here, since a mirror is never `proposal_state = 'proposed'`.
             open_proposals,
+            children,
+            item_proposals,
+            visible_proposers,
+            deps,
+            scope: scope.clone(),
+            missions_by_item: HashMap::new(),
+            mission_waves: HashMap::new(),
+            buckets_by_item: HashMap::new(),
+            account_labels: HashMap::new(),
         })
+    }
+
+    /// Is this item a JOB MIRROR whose dispatch the reader may not read — so
+    /// its title and notes must be withheld (multi-user M1, T5's review)?
+    ///
+    /// A mirror's `title` is the first line of the dispatch PROMPT and its
+    /// `notes` are the prompt itself (`Store::create_agent_task_item`), so a
+    /// mirror's text is one session's instruction to another: §4.3 content of
+    /// both ends of the dispatch, not shared work structure. The reasoning
+    /// that let it through — "its title and `why` are item data in the shared
+    /// graph, as every other item's are" — is true of a PROPOSAL and false of
+    /// a mirror; the `open_proposals` note in [`Graph::build`] records that.
+    ///
+    /// The fence is [`Graph::job_states`], the map already filtered by
+    /// `tasks::task_visible_in_scope_pure` (which fails closed on a dispatch
+    /// end this reader cannot resolve). Asking it here rather than
+    /// re-deriving the predicate is what keeps every surface of one mirror —
+    /// its own page, its row in the tree, its row among a parent's subtasks,
+    /// and `JobView` — from disagreeing about the same job.
+    ///
+    /// `job_states` is unfiltered for the ORG-only load (`Graph::load`, whose
+    /// readers answer tasks and never a session row), so this is `false`
+    /// there, exactly as every other person fence is.
+    /// Takes the ROW, not a [`ViewItem`], so the one predicate serves both
+    /// readers: the graph's own items and the children `native_children`
+    /// reads straight from the store (which are not all in
+    /// [`Graph::items`]).
+    pub(crate) fn mirror_text_hidden(&self, item: &crate::store::WorkItemRow) -> bool {
+        item.origin.as_deref() == Some("agent") && !self.job_states.contains_key(&item.id)
+    }
+
+    /// Is this link one the reader may not see — its LIVE row fenced, or (for
+    /// a link whose participant is gone) its recorded conversations fenced?
+    ///
+    /// **The one clause every projection built off a link must ask first**
+    /// (multi-user M1, T9b). It must run before the snapshot arms, which
+    /// would otherwise name the session by `snap_name` and its machine by
+    /// `snap_host` — exactly what the fence withholds.
+    pub(crate) fn link_hidden(&self, l: &ViewLink) -> bool {
+        l.session_id
+            .is_some_and(|id| self.hidden_sessions.contains(&id))
+            || self.hidden_links.contains(&l.link.id)
+    }
+
+    /// May this reader be told that `proposed_by` proposed a subtask?
+    ///
+    /// `work_items.proposed_by` is the [`proposer_label`] of the session an
+    /// agent proposed in the name of — its name and its machine, stored as
+    /// TEXT when the proposal was written, with no session id beside it. It
+    /// is session metadata by §4.3's definition, exactly as a link's
+    /// `snap_name` / `snap_host` are, and it was served to every reader of
+    /// the parent item.
+    ///
+    /// The rule is **allow-list, not deny-list**, and that is the whole of
+    /// why this is written the way it is:
+    ///
+    /// * a label that matches a row which survived the fence is served — the
+    ///   reader can see that session anyway;
+    /// * a session-shaped label that matches nothing is WITHHELD. A deny-list
+    ///   against the hidden rows would have passed exactly the case that
+    ///   needs it most: a reaped session leaves no row to hide, so its name
+    ///   would have become readable by everybody the moment it died — which
+    ///   is the same hole `Graph::hidden_links` exists to close for an ended
+    ///   link (T9b). The cost is that an attribution fades when its session
+    ///   is reaped, for its owner too;
+    /// * a label that is not session-shaped passes: `master`,
+    ///   `client:phone`, and every caller label `work_link { propose }`
+    ///   records when it names no session, carry no [`SEPARATOR`] and are
+    ///   not sessions at all.
+    ///
+    /// `None` is the ORG-only load ([`Graph::load`]), which applies no person
+    /// fence anywhere and must not start here.
+    pub(crate) fn proposer_visible(&self, proposed_by: &str) -> bool {
+        match &self.visible_proposers {
+            None => true,
+            Some(ok) => !proposed_by.contains(SEPARATOR) || ok.contains(proposed_by),
+        }
     }
 
     /// An item's own org: its tracker's, or a local item's (M14), or — for a
     /// native subtask, which `insert_native` leaves with no `org_id` — its
     /// parent's. `Store::item_org` in memory (a test holds the two equal).
     ///
-    /// One level only, matching the SQL: `parent_for_new_child` refuses a
-    /// native parent that is itself a subtask, so there is no deeper chain to
-    /// walk and no cycle to guard against.
+    /// Up through local items with no org of their own, at most
+    /// `LOCAL_DEPTH_MAX` hops, exactly as the SQL walks: the first item that
+    /// answers wins — a tracker item with its tracker's org (unassigned
+    /// included), a local item with its own.
+    ///
+    /// **It asks no person fence, and that was checked rather than assumed**
+    /// (multi-user M1, the review of main's new `Graph` fields). Everything
+    /// it reads is item data — `work_items.tracker_id`, a tracker's `org_id`,
+    /// a local item's own org, and the PARENT item's same two fields: no
+    /// link, no session, nothing [`Self::link_hidden`] could be asked about.
+    /// The parent fallback cannot widen the answer either, because a native
+    /// subtask's real org IS its parent's (`insert_native` leaves the column
+    /// NULL and the SQL `Store::item_org` reads it the same way) — so this
+    /// reports the org such an item already belongs to rather than lending it
+    /// one.
     pub(crate) fn item_org(&self, item: &ViewItem) -> Option<i64> {
-        self.own_item_org(item).or_else(|| {
-            item.item
-                .parent_id
-                .and_then(|p| self.items.get(&p))
-                .and_then(|p| self.own_item_org(p))
-        })
+        let mut cur = item;
+        for _ in 0..=crate::store::LOCAL_DEPTH_MAX {
+            if cur.item.tracker_id.is_some() || cur.own_org.is_some() {
+                return self.own_item_org(cur);
+            }
+            cur = self.items.get(&cur.item.parent_id?)?;
+        }
+        None
+    }
+
+    /// How many local items stand in a row from `item` up (itself
+    /// included): `Store::local_depth` in memory.
+    pub(crate) fn local_depth(&self, item: &ViewItem) -> usize {
+        let mut n = 0;
+        let mut cur = Some(item);
+        while let Some(i) = cur {
+            if i.item.source != "local" || n > crate::store::LOCAL_DEPTH_MAX {
+                break;
+            }
+            n += 1;
+            cur = i.item.parent_id.and_then(|p| self.items.get(&p));
+        }
+        n
     }
 
     /// The org an item carries itself, with no parent fallback.
@@ -745,25 +1612,42 @@ impl Graph {
 
     /// May `scope` see this link (its org and its session)?
     fn link_visible(&self, scope: &OrgScope, l: &ViewLink) -> bool {
+        // The person fence first, and before the `is_all()` shortcut: a link
+        // whose session this reader may not see is refused whatever its org
+        // says, and must NOT fall through to the snapshot arm below, which
+        // would judge it by `snap_host` and show it by its snapshot name
+        // (multi-user M1, T7; the ENDED half is T9b's `hidden_links`).
+        if self.link_hidden(l) {
+            return false;
+        }
+        // This is the org boundary, not a privacy fence: and it is deliberately placed AFTER
+        // `link_hidden`, so the person fence runs first and this shortcut can never skip it.
         if scope.is_all() {
             return true;
         }
         if !scope.sees_org(self.link_org(l)) {
             return false;
         }
+        // Each arm below is the ORG half only; `link_hidden` at the top of
+        // this function is the person half, and it runs before the
+        // `is_all()` shortcut precisely so it cannot be skipped.
         match self.row_of(l) {
             Some(row) => match scope {
                 // M2's fence: a host's past work is its own host's.
                 OrgScope::Host { alias, .. } if l.link.ended_at.is_some() => {
-                    row.host_alias == *alias && scope.sees_row(row)
+                    // Org half; `link_hidden` is the person half.
+                    row.host_alias == *alias && scope.sees_row_org_only(row)
                 }
-                _ => scope.sees_row(row),
+                // Org half; `link_hidden` is the person half.
+                _ => scope.sees_row_org_only(row),
             },
             None => {
                 let host = l.link.snap_host.as_deref().unwrap_or_default();
                 match scope {
                     OrgScope::Host { alias, .. } => host == alias,
-                    _ => scope.sees_session(host, l.link.org_id),
+                    // The snapshot arm's org half; `link_hidden`'s
+                    // `hidden_links` half covers exactly this shape.
+                    _ => scope.sees_session_org_only(host, l.link.org_id),
                 }
             }
         }
@@ -774,6 +1658,47 @@ impl Graph {
             return false;
         };
         t.config.account_id.is_some() && t.config.account_id == item.assignee_id
+    }
+
+    /// Every `owner/repo` a `repo:` group can be derived for — the same
+    /// projects [`Self::repo_of`] answers with, so a placement into
+    /// `repo:o/r` is refused exactly when no task could ever land there.
+    pub(crate) fn repo_groups(&self) -> impl Iterator<Item = String> + '_ {
+        self.projects
+            .values()
+            .filter(|p| p.owner != "local" && !p.owner.is_empty())
+            .map(|p| format!("{}/{}", p.owner, p.repo))
+    }
+
+    /// Whether a `tracker:<id>:…` group id names a tracker this graph has.
+    pub(crate) fn has_tracker(&self, id: i64) -> bool {
+        self.trackers.contains_key(&id)
+    }
+
+    /// Every group [`group_of`] DERIVES, as lower-cased label → its id.
+    ///
+    /// A section is bucketed by its id (`tree`'s `groups.entry`) and ordered
+    /// by its LABEL ([`sort_key`]), so two groups that merely share a label
+    /// render as two sections with one name. Free text equal to a derived
+    /// group's name is the way left into that, and `structure::group_value`
+    /// refuses it by naming the id to pass instead — which is why this
+    /// answers the id and not just the names.
+    pub(crate) fn derived_group_labels(&self) -> HashMap<String, String> {
+        let mut out: HashMap<String, String> = HashMap::new();
+        for repo in self.repo_groups() {
+            out.insert(repo.to_lowercase(), format!("repo:{repo}"));
+        }
+        for i in self.items.values() {
+            if let (Some(tid), Some(c)) = (i.item.tracker_id, i.containers.first()) {
+                let label =
+                    container_label(self.trackers.get(&tid).map(|t| t.provider.as_str()), c);
+                out.insert(label.to_lowercase(), format!("tracker:{tid}:{c}"));
+            }
+            if let Some(p) = i.item.key.as_deref().and_then(key_prefix) {
+                out.insert(p.to_lowercase(), format!("key:{p}"));
+            }
+        }
+        out
     }
 
     fn repo_of(&self, l: &ViewLink) -> Option<String> {
@@ -891,6 +1816,10 @@ fn build_tasks<'g>(g: &'g Graph, scope: &OrgScope) -> Vec<Built<'g>> {
 }
 
 fn task_visible(g: &Graph, scope: &OrgScope, b: &Built<'_>) -> bool {
+    // This is the org boundary, not a privacy fence: it decides whether the TASK appears, and a
+    // task's key and title are work data — the same answer `local.rs::person_visible_links`
+    // writes down for a local item. Every link and session UNDER the task is person-fenced
+    // (`b.visible`, built from `link_visible`).
     if scope.is_all() {
         return true;
     }
@@ -900,6 +1829,11 @@ fn task_visible(g: &Graph, scope: &OrgScope, b: &Built<'_>) -> bool {
     }
     let shown = b.visible.iter().any(|(_, st)| *st != "rejected");
     match scope {
+        // This is the org boundary, not a privacy fence: the same answer as
+        // this function's first guard, in its other spelling — whether the
+        // TASK appears. A task's key and title are work data and survive the
+        // person fence exactly as a local item's do, while every link and
+        // session under it is person-fenced by `Graph::build`.
         OrgScope::All => true,
         // M3's fence: a host reads only work its own host did.
         OrgScope::Host { .. } => b.on_own_host,
@@ -946,10 +1880,18 @@ fn why_of(e: &Evidence) -> String {
         Some("prompt_key") => "mentioned in a prompt",
         Some("prompt_issue") => "issue number in a prompt",
         Some("agent_inferred") => "Claude named it",
+        Some("jev") => "Jev proposed",
         _ => "seen",
     };
     let text: String = e.text.chars().take(60).collect();
-    format!("{what} {text} · {}", e.rule).trim().to_string()
+    // The decision model's confidence rides the note (`82%`).
+    let note = match (e.signal, e.note.as_deref()) {
+        (super::resolve::Signal::Jev, Some(n)) => format!(" ({n})"),
+        _ => String::new(),
+    };
+    format!("{what} {text}{note} · {}", e.rule)
+        .trim()
+        .to_string()
 }
 
 fn strength_rank(s: Option<&str>) -> u8 {
@@ -970,6 +1912,88 @@ fn state_rank(st: &str) -> u8 {
     }
 }
 
+/// A group id, parsed — the kinds [`group_of`] derives below.
+///
+/// It exists so a person's `place` (and a rule's group) can name an
+/// EXISTING section instead of minting a second one beside it: `group:
+/// "repo:martin-janci/claude-fleet"` used to become
+/// `label:repo:martin-janci/claude-fleet`, with the prefix showing in the
+/// visible text, and `group: "martin-janci/claude-fleet"` became a
+/// different section carrying the repo group's own words. Neither is what
+/// anybody meant by either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GroupId<'a> {
+    Repo(&'a str),
+    Tracker(i64, &'a str),
+    Key(&'a str),
+    Label(&'a str),
+}
+
+/// `repo:<owner>/<repo>`, `tracker:<tracker id>:<container>`,
+/// `key:<PREFIX>` or `label:<text>`; `None` for free text, which is what a
+/// person typing "Payroll" means and gets a `label:` group of its own.
+///
+/// `none` (the fallback bucket's id) is deliberately NOT a form here: it
+/// carries no `<kind>:` prefix, so a group a person actually called "none"
+/// stays their own label.
+pub(crate) fn parse_group_id(raw: &str) -> Option<GroupId<'_>> {
+    let (kind, rest) = raw.split_once(':')?;
+    if rest.trim().is_empty() {
+        return None;
+    }
+    match kind {
+        "repo" => Some(GroupId::Repo(rest)),
+        "tracker" => {
+            // The container may itself hold colons: tracker:<id>:<rest>.
+            let (tid, container) = rest.split_once(':')?;
+            Some(GroupId::Tracker(tid.parse().ok()?, container))
+        }
+        "key" => Some(GroupId::Key(rest)),
+        "label" => Some(GroupId::Label(rest)),
+        _ => None,
+    }
+}
+
+/// The words a tracker group shows: an Asana project id is a number nobody
+/// reads, so it is shortened to its last six digits. One statement, three
+/// readers — the derived group, a placement into it and a rule's.
+fn container_label(provider: Option<&str>, container: &str) -> String {
+    if provider != Some("asana") {
+        return container.to_string();
+    }
+    let tail: String = container
+        .chars()
+        .rev()
+        .take(6)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("Asana project …{tail}")
+}
+
+/// The id and the words a stored group VALUE stands for: an existing
+/// group's id names that group, anything else is a label of its own.
+///
+/// Both writers go through it — a person's placement and a rule's group —
+/// so a rule that says `repo:o/r` cannot land its tasks in a ghost section
+/// while a placement with the same words lands in the real one.
+fn group_ref_for(g: &Graph, raw: &str) -> (String, String) {
+    match parse_group_id(raw) {
+        Some(GroupId::Repo(r)) => (format!("repo:{r}"), r.to_string()),
+        Some(GroupId::Tracker(tid, c)) => (
+            format!("tracker:{tid}:{c}"),
+            container_label(g.trackers.get(&tid).map(|t| t.provider.as_str()), c),
+        ),
+        Some(GroupId::Key(p)) => {
+            let p = p.to_ascii_uppercase();
+            (format!("key:{p}"), p)
+        }
+        Some(GroupId::Label(t)) => (format!("label:{t}"), t.to_string()),
+        None => (format!("label:{raw}"), raw.to_string()),
+    }
+}
+
 /// The group a task sits in, and why.
 fn group_of(
     g: &Graph,
@@ -982,14 +2006,15 @@ fn group_of(
     let tracker_value = item
         .filter(|i| i.item.tracker_id.is_some())
         .and_then(|i| i.containers.first().cloned());
-    if let Some(label) = g
+    if let Some(stored) = g
         .placements
         .get(task_id)
         .and_then(|p| p.group.clone())
         .filter(|l| !l.trim().is_empty())
     {
+        let (id, label) = group_ref_for(g, &stored);
         return GroupRef {
-            id: format!("label:{label}"),
+            id,
             label,
             source: "manual".into(),
             rule_id: None,
@@ -1001,9 +2026,10 @@ fn group_of(
         .iter()
         .find(|r| r.enabled && rule_matches(r, item, key, title, repos))
     {
+        let (id, label) = group_ref_for(g, &r.group);
         return GroupRef {
-            id: format!("label:{}", r.group),
-            label: r.group.clone(),
+            id,
+            label,
             source: "rule".into(),
             rule_id: Some(r.id),
             tracker_value,
@@ -1011,20 +2037,7 @@ fn group_of(
     }
     if let (Some(i), Some(c)) = (item, tracker_value.clone()) {
         let tid = i.item.tracker_id.unwrap_or_default();
-        let provider = g.trackers.get(&tid).map(|t| t.provider.as_str());
-        let label = if provider == Some("asana") {
-            let tail: String = c
-                .chars()
-                .rev()
-                .take(6)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect();
-            format!("Asana project …{tail}")
-        } else {
-            c.clone()
-        };
+        let label = container_label(g.trackers.get(&tid).map(|t| t.provider.as_str()), &c);
         return GroupRef {
             id: format!("tracker:{tid}:{c}"),
             label,
@@ -1149,7 +2162,7 @@ pub(crate) fn task_kind(item: Option<&ViewItem>) -> &'static str {
 
 /// Does this live session need a person (`list_sessions`' judgement)?
 fn needs_you_of(g: &Graph, row: Option<&SessionRow>) -> bool {
-    row.is_some_and(|r| attention::needs_attention_with(r, g.context_red_pct).is_some())
+    row.is_some_and(|r| attention::needs_attention_in(r, g.context_red_pct, &g.facts).is_some())
 }
 
 /// One session a task counts: the live session, else the participant it
@@ -1218,6 +2231,7 @@ fn task_link(
             t.iter().filter(|x| x.as_str() != task_id).count() as u32
         }),
         review_ack_at: l.review_ack_at,
+        is_self: false,
     }
 }
 
@@ -1292,12 +2306,73 @@ fn with_sessions(
     task
 }
 
+/// The job mirrors this reader may read, as item id → job state — the ONE
+/// place the dispatch fence is written (multi-user M1, T5's review).
+///
+/// `sessions` must already be the PERSON-filtered map
+/// ([`Graph::hidden_sessions`] has been taken out of it), because that is
+/// what makes `task_visible_in_scope_pure` fail closed: an end this reader
+/// cannot see resolves to `None`, which is its documented refusal.
+///
+/// `view: None` is the ORG-only load ([`Graph::load`], whose readers answer
+/// tasks and never a session row): every job is kept, as every session row
+/// is.
+fn job_states_from(
+    s: &Store,
+    sessions: &HashMap<i64, SessionRow>,
+    view: Option<&crate::service::view_scope::ViewScope>,
+) -> Result<HashMap<i64, String>, IpcError> {
+    Ok(s.job_tasks_by_item()?
+        .into_iter()
+        .filter(|(_, t)| match view {
+            Some(v) => crate::service::tasks::task_visible_in_scope_pure(
+                t,
+                t.requester_session_id.and_then(|id| sessions.get(&id)),
+                t.worker_session_id.and_then(|id| sessions.get(&id)),
+                v,
+            ),
+            None => true,
+        })
+        .map(|(item_id, t)| (item_id, t.state))
+        .collect())
+}
+
+/// [`job_states_from`] for a reader that has no [`Graph`] to hand — it reads
+/// and filters the session map itself (`work::local::local_items`).
+///
+/// Separate from the `Graph` path rather than the other way round so a pass
+/// that already holds the sessions map does not read `sessions` twice.
+pub(crate) fn visible_job_states(
+    s: &Store,
+    view: &crate::service::view_scope::ViewScope,
+) -> Result<HashMap<i64, String>, IpcError> {
+    let sessions: HashMap<i64, SessionRow> = s
+        .list_all_sessions()?
+        .into_iter()
+        .filter(|r| view.sees_session_row(r).is_visible())
+        .map(|r| (r.id, r))
+        .collect();
+    job_states_from(s, &sessions, Some(view))
+}
+
 fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'g> {
     let item = b.item;
     let key = item
         .and_then(|i| i.item.key.clone())
         .or_else(|| b.ref_key.clone());
-    let title = item.map(|i| i.item.title.clone()).unwrap_or_default();
+    // A job mirror's title is the dispatch prompt's first line, withheld from
+    // a reader of neither end (`Graph::mirror_text_hidden`). Fenced HERE, the
+    // first time the title is read, so neither the group label nor the
+    // derived-title fallback below can carry it.
+    let title = item
+        .map(|i| {
+            if g.mirror_text_hidden(&i.item) {
+                JOB_TITLE_WITHHELD.to_string()
+            } else {
+                i.item.title.clone()
+            }
+        })
+        .unwrap_or_default();
     let tracker = item
         .and_then(|i| i.item.tracker_id)
         .and_then(|t| g.trackers.get(&t));
@@ -1336,12 +2411,18 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
     let mut suggested_sessions = BTreeSet::new();
     let mut needs_you = false;
     let mut review = false;
+    let mut live_pr = false;
     let mut last: Option<i64> = None;
     let mut repos: Vec<String> = Vec::new();
     let mut link_orgs: BTreeSet<Option<i64>> = BTreeSet::new();
+    // Session id -> its spend, once per session however many links it has.
+    let mut spent: BTreeMap<i64, i64> = BTreeMap::new();
     let mut listed = Vec::with_capacity(links.len());
     for (l, st) in links {
         let row = g.session_of(l);
+        if let (Some(r), "active" | "ended") = (row, st) {
+            spent.insert(r.id, r.usage.usage_cost_micros);
+        }
         let link_needs_you = needs_you_of(g, row);
         listed.push((l, st, link_needs_you));
         match st {
@@ -1361,6 +2442,14 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
         }
         if st == "active" && link_needs_you {
             needs_you = true;
+        }
+        if st == "active"
+            && row
+                .and_then(|r| r.pr_url.as_deref())
+                .or(l.link.snap_pr_url.as_deref())
+                .is_some_and(|u| !u.trim().is_empty())
+        {
+            live_pr = true;
         }
         if needs_review(g, l, st) {
             review = true;
@@ -1396,6 +2485,19 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
     // host or in an org it cannot see still keeps the task in work.
     let archived = !b.all.iter().any(|(_, st)| *st == "active")
         && (status_category.as_deref() == Some("done") || all_links_archived(&b.all));
+    let (blocked, blocked_by) = match item {
+        Some(i) if status_category.as_deref() != Some("done") => blocked_on(g, i.item.id),
+        _ => (false, Vec::new()),
+    };
+    let cost_micros = spent.values().sum();
+    let status_name = item.and_then(|i| i.item.status_name.clone());
+    let stage = stage_of(
+        status_category.as_deref(),
+        status_name.as_deref(),
+        blocked,
+        live_pr,
+        counts.active,
+    );
     if let Some(i) = item {
         let ext = i.item.updated_ext.unwrap_or(i.item.updated_at);
         last = Some(last.map_or(ext, |x| x.max(ext)));
@@ -1429,13 +2531,21 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
     let project_id = item.and_then(|i| i.item.project_id);
     let project_label = project_id.and_then(|p| project_label(g, p));
     let parent_task_id = item
-        .filter(|i| is_native(&i.item))
+        .filter(|i| i.item.source == "local")
         .and_then(|i| i.item.parent_id)
         .map(|p| format!("item:{p}"));
+    let epic = item.is_some_and(|i| crate::store::is_epic(&i.item));
+    let level = item.map_or(0, |i| g.local_depth(i) as u32);
+    let (children_total, children_done) = item
+        .and_then(|i| g.children.get(&i.item.id).copied())
+        .unwrap_or_default();
     let job_state = item.and_then(|i| g.job_states.get(&i.item.id).cloned());
     let open_proposals = item
         .and_then(|i| g.open_proposals.get(&i.item.id).copied())
         .unwrap_or(0);
+    let proposals = item
+        .and_then(|i| g.item_proposals.get(&i.item.id).cloned())
+        .unwrap_or_default();
     let (title, title_derived) = match listed
         .iter()
         .find(|(_, st, _)| *st != "rejected")
@@ -1444,10 +2554,17 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
         Some((l, _, _)) if title.trim().is_empty() => (link_name(g.row_of(l), l), true),
         _ => (title, false),
     };
+    let ancestors = item.map(|i| ancestors_of(g, i)).unwrap_or_default();
+    let in_epic = ancestors
+        .iter()
+        .find(|(_, level)| level.is_some_and(|l| l >= 1))
+        .or(ancestors.last())
+        .map(|(r, _)| r.clone());
     let task = WorkTask {
         task_id: b.task_id.clone(),
         item_id: item.map(|i| i.item.id),
         key,
+        display_key: item.and_then(|i| i.item.display_key.clone()),
         title,
         url: item.and_then(|i| i.item.url.clone()),
         kind: task_kind(item).into(),
@@ -1456,11 +2573,16 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
         provider: tracker.map(|t| t.provider.clone()),
         tracker_state: tracker.map(|t| t.state.clone()),
         status_category,
-        status_name: item.and_then(|i| i.item.status_name.clone()),
+        status_name,
         resolution: item.and_then(|i| i.item.resolution.clone()),
         unavailable: item.is_some_and(|i| i.item.unavailable_at.is_some()),
         unavailable_reason: item.and_then(|i| i.item.unavailable_reason.clone()),
         assignees: item.map(|i| i.item.assignees.clone()).unwrap_or_default(),
+        due_at: item.and_then(|i| i.item.due_at.clone()),
+        priority: item.and_then(|i| i.item.priority.clone()),
+        labels: item.map(|i| i.item.labels.clone()).unwrap_or_default(),
+        estimate: item.and_then(|i| i.item.estimate),
+        estimate_unit: item.and_then(|i| i.item.estimate_unit.clone()),
         mine: item.is_some_and(|i| g.is_mine(i)),
         org_id,
         org_source: org_source.into(),
@@ -1480,9 +2602,34 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
         project_id,
         project_label,
         parent_task_id,
+        epic,
+        level,
+        children_total,
+        children_done,
         job_state,
         title_derived,
         open_proposals,
+        blocked,
+        blocked_by,
+        cost_micros,
+        stage: stage.into(),
+        proposals,
+        done_when: item.map(|i| i.item.done_when.clone()).unwrap_or_default(),
+        mission: item.and_then(|i| {
+            let (id, name) = g.missions_by_item.get(&i.item.id)?;
+            Some(TaskMission {
+                id: *id,
+                name: name.clone(),
+                wave: g.mission_waves.get(&i.item.id).copied(),
+            })
+        }),
+        item_type: item.and_then(|i| i.item.kind.clone()),
+        hierarchy_level: item.and_then(|i| i.item.hierarchy_level),
+        iteration: item.and_then(|i| i.item.iteration.clone()),
+        iteration_active: item.is_some_and(|i| i.iteration_active),
+        in_epic,
+        updated_at: item.map(|i| i.item.updated_ext.unwrap_or(i.item.updated_at)),
+        ancestors: ancestors.into_iter().map(|(r, _)| r).collect(),
     };
     TaskSummary {
         task,
@@ -1490,19 +2637,62 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
     }
 }
 
+/// [`WorkTask::stage`]: the first of done, blocked, in review, in progress
+/// that holds, else backlog.
+fn stage_of(
+    status_category: Option<&str>,
+    status_name: Option<&str>,
+    blocked: bool,
+    live_pr: bool,
+    active: u32,
+) -> &'static str {
+    if status_category == Some("done") {
+        "done"
+    } else if blocked {
+        "blocked"
+    } else if live_pr || status_name.is_some_and(|n| n.to_lowercase().contains("review")) {
+        "in_review"
+    } else if status_category == Some("in_progress") || active > 0 {
+        "in_progress"
+    } else {
+        "backlog"
+    }
+}
+
+/// Whether item `id` waits for work that is not done, and which of those
+/// items the caller may see (as `item:<id>`). An item missing from the graph
+/// still blocks; so does one the caller may not see, which is then left out
+/// of the list (it would otherwise name work outside the caller's orgs).
+fn blocked_on(g: &Graph, id: i64) -> (bool, Vec<String>) {
+    let Some(deps) = g.deps.get(&id) else {
+        return (false, Vec::new());
+    };
+    let mut blocked = false;
+    let mut named = Vec::new();
+    for dep in deps {
+        let item = g.items.get(dep);
+        if item.and_then(|i| item_status(g, i)).as_deref() == Some("done") {
+            continue;
+        }
+        blocked = true;
+        let visible = item.is_some_and(|i| {
+            // This is the org boundary, not a privacy fence: whether a scoped
+            // caller is told the id of a work item in another org. Items are
+            // the org's work data; nothing about a person is named here.
+            g.scope.is_all() || g.item_org(i).is_some_and(|o| g.scope.sees_org(Some(o)))
+        });
+        if visible {
+            named.push(format!("item:{dep}"));
+        }
+    }
+    (blocked, named)
+}
+
 /// An item's origin; a row an older hub wrote (and a bare key) reads as
 /// `detected`.
 fn origin_of(item: Option<&crate::store::WorkItemRow>) -> String {
     item.and_then(|i| i.origin.clone())
         .unwrap_or_else(|| "detected".into())
-}
-
-/// A native item: a person's, an agent's proposal, or a job mirror.
-fn is_native(item: &crate::store::WorkItemRow) -> bool {
-    matches!(
-        item.origin.as_deref(),
-        Some("manual" | "proposed" | "agent")
-    )
 }
 
 /// A project as `owner/repo`, or `repo` for a local (or empty) owner.
@@ -1575,6 +2765,25 @@ pub fn check_filters(f: &WorkTreeFilters) -> Result<(), IpcError> {
             )));
         }
     }
+    for o in &f.orgs {
+        if let IdOrWord::Word(w) = o {
+            if w != "none" {
+                return Err(bad(format!(
+                    "filters.orgs holds org ids or \"none\", not {w:?}"
+                )));
+            }
+        }
+    }
+    if f.orgs.len() > 100 {
+        return Err(bad("filters.orgs names more than 100 orgs"));
+    }
+    for s in &f.stages {
+        if !STAGE_VALUES.contains(&s.as_str()) {
+            return Err(bad(format!(
+                "filters.stages holds backlog, in_progress, in_review, blocked or done, not {s:?}"
+            )));
+        }
+    }
     if let Some(h) = f.has.as_deref() {
         if !matches!(h, "any" | "active" | "past_only" | "none" | "suggested") {
             return Err(bad(format!(
@@ -1584,6 +2793,42 @@ pub fn check_filters(f: &WorkTreeFilters) -> Result<(), IpcError> {
     }
     if f.query.as_deref().is_some_and(|q| q.chars().count() > 200) {
         return Err(bad("filters.query is longer than 200 characters"));
+    }
+    if f.assignee
+        .as_deref()
+        .is_some_and(|q| q.chars().count() > 200)
+    {
+        return Err(bad("filters.assignee is longer than 200 characters"));
+    }
+    if f.status_name
+        .as_deref()
+        .is_some_and(|q| q.chars().count() > 200)
+    {
+        return Err(bad("filters.status_name is longer than 200 characters"));
+    }
+    for (name, v) in [
+        ("iteration", &f.iteration),
+        ("epic", &f.epic),
+        ("item_type", &f.item_type),
+    ] {
+        if v.as_deref().is_some_and(|q| q.chars().count() > 200) {
+            return Err(bad(format!("filters.{name} is longer than 200 characters")));
+        }
+    }
+    if let Some(sort) = f.sort.as_deref() {
+        if !SORT_VALUES.contains(&sort) {
+            return Err(bad(format!(
+                "filters.sort is activity, updated, key, title or due, not {sort:?}"
+            )));
+        }
+    }
+    if let Some(by) = f.group_by.as_deref() {
+        if !GROUP_BY_VALUES.contains(&by) {
+            return Err(bad(format!(
+                "filters.group_by is group, org, person, mission, account, repo, sprint, \
+                 release or epic, not {by:?}"
+            )));
+        }
     }
     Ok(())
 }
@@ -1599,6 +2844,17 @@ fn matches_filters(t: &WorkTask, f: &WorkTreeFilters, with_group: bool) -> bool 
         Some(IdOrWord::Word(w)) if w != &t.kind => return false,
         _ => {}
     }
+    if !f.orgs.is_empty()
+        && !f.orgs.iter().any(|o| match o {
+            IdOrWord::Id(id) => t.org_id == Some(*id),
+            IdOrWord::Word(_) => t.org_id.is_none(),
+        })
+    {
+        return false;
+    }
+    if !f.stages.is_empty() && !f.stages.contains(&t.stage) {
+        return false;
+    }
     let status = t.status_category.as_deref();
     let ok = match f.status.as_deref() {
         None | Some("any") => true,
@@ -1610,6 +2866,34 @@ fn matches_filters(t: &WorkTask, f: &WorkTreeFilters, with_group: bool) -> bool 
     }
     if f.mine == Some(true) && !t.mine {
         return false;
+    }
+    if let Some(who) = f
+        .assignee
+        .as_deref()
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+    {
+        if !t
+            .assignees
+            .iter()
+            .any(|a| a.trim().eq_ignore_ascii_case(who))
+        {
+            return false;
+        }
+    }
+    if let Some(col) = f
+        .status_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+    {
+        if !t
+            .status_name
+            .as_deref()
+            .is_some_and(|n| n.trim().eq_ignore_ascii_case(col))
+        {
+            return false;
+        }
     }
     let c = t.counts;
     let ok = match f.has.as_deref() {
@@ -1626,10 +2910,50 @@ fn matches_filters(t: &WorkTask, f: &WorkTreeFilters, with_group: bool) -> bool 
     if f.review == Some(true) && !t.review {
         return false;
     }
+    if let Some(it) = f
+        .iteration
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        let ok = match it {
+            "current" => t.iteration_active && t.iteration.is_some(),
+            "none" => t.iteration.is_none(),
+            name => t.iteration.as_deref().is_some_and(|i| {
+                crate::search_text::fold(i.trim()) == crate::search_text::fold(name)
+            }),
+        };
+        if !ok {
+            return false;
+        }
+    }
+    if let Some(e) = f.epic.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        let itself = t.task_id == e || t.key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(e));
+        if !itself && !t.ancestors.iter().any(|a| a.named(e)) {
+            return false;
+        }
+    }
+    if let Some(ty) = f
+        .item_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        if !t
+            .item_type
+            .as_deref()
+            .is_some_and(|k| crate::search_text::fold(k.trim()) == crate::search_text::fold(ty))
+        {
+            return false;
+        }
+    }
     if let Some(q) = f.query.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
-        let q = q.to_lowercase();
-        let hay = format!("{} {}", t.key.as_deref().unwrap_or_default(), t.title).to_lowercase();
-        if !hay.contains(&q) {
+        let hay = crate::search_text::fold(&format!(
+            "{} {}",
+            t.key.as_deref().unwrap_or_default(),
+            t.title
+        ));
+        if !crate::search_text::matches_words(&hay, q) {
             return false;
         }
     }
@@ -1647,13 +2971,108 @@ fn matches_filters(t: &WorkTask, f: &WorkTreeFilters, with_group: bool) -> bool 
 /// (`archived: false`): a client from before the archive (a fleet-mobile
 /// that never sends it and has no "N hidden" row) keeps seeing every task.
 /// An explicit Done filter, or "past only" (past work is archived work),
-/// shows them anyway. Only the tree hides: a direct read (`task`,
+/// shows them anyway (a Done stage chip too). Only the tree hides: a direct read (`task`,
 /// `session_tasks`, `review`) answers archived tasks as any other.
 fn hidden_as_archived(t: &WorkTask, f: &WorkTreeFilters) -> bool {
     t.archived
         && f.archived == Some(false)
         && f.status.as_deref() != Some("done")
+        && !f.stages.iter().any(|s| s == "done")
         && f.has.as_deref() != Some("past_only")
+}
+
+/// The section a task sits in under [`WorkTreeFilters::group_by`]
+/// (redesign step 6.2), under its org as always: one section per org
+/// (`org`), its first assignee (`person`), its mission (`mission`), the
+/// account its sessions run on (`account`, an active one first) or its repo
+/// (`repo`), its current sprint (`sprint`) or its release (`release`).
+/// `None` keeps its own group (`group`, the default). A task with
+/// nothing to group by sits in `none`, last.
+fn regroup(g: &Graph, s: &TaskSummary<'_>, by: &str) -> Option<GroupRef> {
+    let t = &s.task;
+    let mk = |id: String, label: String, source: &str| GroupRef {
+        id,
+        label,
+        source: source.into(),
+        rule_id: None,
+        tracker_value: None,
+    };
+    let none = |label: &str| mk("none".into(), label.into(), "none");
+    Some(match by {
+        "org" => mk("org".into(), "All tasks".into(), "org"),
+        "person" => match t.assignees.iter().map(|a| a.trim()).find(|a| !a.is_empty()) {
+            Some(a) => mk(
+                format!("person:{}", a.to_lowercase()),
+                a.to_string(),
+                "person",
+            ),
+            None => none("No assignee"),
+        },
+        "mission" => match t.item_id.and_then(|i| g.missions_by_item.get(&i)) {
+            Some((id, name)) => mk(format!("mission:{id}"), name.clone(), "mission"),
+            None => none("No mission"),
+        },
+        "account" => {
+            let account_of = |want_active: bool| {
+                s.links.iter().find_map(|(l, st, _)| {
+                    if want_active && *st != "active" {
+                        return None;
+                    }
+                    let row = g.sessions.get(&l.session_id?)?;
+                    row.account_uuid.clone().filter(|u| !u.is_empty())
+                })
+            };
+            match account_of(true).or_else(|| account_of(false)) {
+                Some(uuid) => {
+                    let label = g.account_labels.get(&uuid).cloned().unwrap_or_else(|| {
+                        format!("Account {}", uuid.chars().take(8).collect::<String>())
+                    });
+                    mk(format!("account:{uuid}"), label, "account")
+                }
+                None => none("No account"),
+            }
+        }
+        "repo" => match t.repos.first().or(t.project_label.as_ref()) {
+            Some(r) => mk(format!("repo:{r}"), r.clone(), "repo"),
+            None => none("No repo"),
+        },
+        "epic" => {
+            let item = t.item_id.and_then(|i| g.items.get(&i));
+            // The nearest epic at or above the task. Its title names the
+            // section: only an epic of an org this caller sees (a child reads
+            // its org from it).
+            let epic = item.and_then(|i| {
+                let mut cur = i;
+                for _ in 0..=crate::store::LOCAL_DEPTH_MAX {
+                    if crate::store::is_epic(&cur.item) {
+                        return (std::ptr::eq(cur, i) || g.scope.sees_org(g.item_org(cur)))
+                            .then_some(cur);
+                    }
+                    cur = g.items.get(&cur.item.parent_id?)?;
+                }
+                None
+            });
+            match epic {
+                Some(e) => {
+                    let label = match e.item.key.as_deref() {
+                        Some(k) if !e.item.title.trim().is_empty() => {
+                            format!("{k} · {}", e.item.title)
+                        }
+                        Some(k) => k.to_string(),
+                        None => e.item.title.clone(),
+                    };
+                    mk(format!("epic:{}", e.item.id), label, "epic")
+                }
+                None => none("No epic"),
+            }
+        }
+        "sprint" | "release" => match t.item_id.and_then(|i| g.buckets_by_item.get(&i)) {
+            Some((id, name)) => mk(format!("{by}:{id}"), name.clone(), by),
+            None if by == "sprint" => none("No sprint"),
+            None => none("No release"),
+        },
+        _ => return None,
+    })
 }
 
 /// A task's place in the order: named orgs by name then unassigned, groups
@@ -1662,20 +3081,58 @@ fn hidden_as_archived(t: &WorkTask, f: &WorkTreeFilters) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 struct SortKey(u8, String, u8, String, u8, i64, String);
 
-fn sort_key(t: &WorkTask, org_names: &HashMap<i64, String>) -> SortKey {
+fn sort_key(t: &WorkTask, org_names: &HashMap<i64, String>, sort: Option<&str>) -> SortKey {
     let (org_rank, org_name) = match t.org_id.and_then(|o| org_names.get(&o)) {
         Some(n) => (0, n.to_lowercase()),
         None => (1, String::new()),
+    };
+    // The last three fields order the tasks inside a section; the task id
+    // ends every one of them, so the order is total and a cursor exact.
+    let (rank, number, tail) = match sort {
+        Some("updated") => (0, -t.updated_at.unwrap_or(0), t.task_id.clone()),
+        Some("key") => match t.key.as_deref() {
+            Some(k) => {
+                let (prefix, n) = key_parts(k);
+                (0, n, format!("{prefix}\u{0}{}", t.task_id))
+            }
+            None => (1, 0, t.task_id.clone()),
+        },
+        Some("title") => (
+            0,
+            0,
+            format!("{}\u{0}{}", crate::search_text::fold(&t.title), t.task_id),
+        ),
+        // `YYYY-MM-DD` sorts as text; no date last.
+        Some("due") => match t.due_at.as_deref() {
+            Some(d) => (0, 0, format!("{d}\u{0}{}", t.task_id)),
+            None => (1, 0, t.task_id.clone()),
+        },
+        _ => (
+            u8::from(!t.needs_you),
+            -t.last_activity_at.unwrap_or(0),
+            t.task_id.clone(),
+        ),
     };
     SortKey(
         org_rank,
         org_name,
         u8::from(t.group.source == "none"),
         t.group.label.to_lowercase(),
-        u8::from(!t.needs_you),
-        -t.last_activity_at.unwrap_or(0),
-        t.task_id.clone(),
+        rank,
+        number,
+        tail,
     )
+}
+
+/// `ABC-12` → (`abc`, 12), so ABC-9 sorts before ABC-10; a key with no
+/// number after its last `-` (`owner/repo#12` is read the same way) sorts
+/// by its text, at 0.
+fn key_parts(key: &str) -> (String, i64) {
+    let cut = key.rfind(['-', '#']).map_or(key.len(), |i| i + 1);
+    match key[cut..].parse::<i64>() {
+        Ok(n) => (key[..cut].to_lowercase(), n),
+        Err(_) => (key.to_lowercase(), 0),
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1733,6 +3190,9 @@ pub struct TreeArgs {
     pub sections: Vec<SectionAsk>,
     /// Add `review_total`, from the same read.
     pub with_review_total: bool,
+    /// Name each task's mission and wave ([`WorkTask::mission`], the
+    /// Board, G7.6). Off, a read pays nothing for it.
+    pub with_missions: bool,
 }
 
 /// The most sections one tree read pages.
@@ -1756,6 +3216,9 @@ fn visible_trackers(g: &Graph, scope: &OrgScope, tasks: &[WorkTask]) -> Vec<Trac
         .trackers
         .values()
         .filter(|t| match scope {
+            // This is the org boundary, not a privacy fence: which COMPANIES'
+            // trackers a brief names. A `TrackerBrief` is a tracker's id,
+            // name and kind — org configuration, no session.
             OrgScope::All => true,
             OrgScope::Org { .. } => scope.sees_org(t.org_id),
             // A host names only the trackers of the work it reads.
@@ -1809,14 +3272,35 @@ pub(crate) fn tree_of(g: &Graph, scope: &OrgScope, args: &TreeArgs) -> Result<Tr
         ..args.filters.clone()
     };
     let mut archived_hidden = 0u32;
+    // The view with no filter but the archived switch (and the grouping):
+    // a task it shows that this read's filters hide is "hidden by filters".
+    let unfiltered = WorkTreeFilters {
+        archived: args.filters.archived,
+        group_by: args.filters.group_by.clone(),
+        ..WorkTreeFilters::default()
+    };
+    let count_hidden = args.filters.group.is_none() && unfiltered != args.filters;
+    let mut hidden_by_filters = 0u32;
     // Section headers count every task under the filters but the group
     // one, so every section of the view has its header and count.
-    let mut groups: BTreeMap<(Option<i64>, String), (GroupRef, u32, SortKey)> = BTreeMap::new();
-    let summaries: Vec<TaskSummary<'_>> = built.iter().map(|b| summarize(g, b, false)).collect();
+    let mut groups: BTreeMap<(Option<i64>, String), GroupAcc> = BTreeMap::new();
+    let mut summaries: Vec<TaskSummary<'_>> =
+        built.iter().map(|b| summarize(g, b, false)).collect();
+    // Before any filter: `filters.group` names a section of this grouping.
+    if let Some(by) = args.filters.group_by.as_deref() {
+        for summary in &mut summaries {
+            if let Some(group) = regroup(g, summary, by) {
+                summary.task.group = group;
+            }
+        }
+    }
     let mut matching: Vec<(SortKey, usize)> = Vec::new();
     for (i, summary) in summaries.iter().enumerate() {
         let t = &summary.task;
         if !matches_filters(t, &with_archived, false) {
+            if count_hidden && matches_filters(t, &unfiltered, false) {
+                hidden_by_filters += 1;
+            }
             continue;
         }
         if hidden_as_archived(t, &args.filters) {
@@ -1830,11 +3314,12 @@ pub(crate) fn tree_of(g: &Graph, scope: &OrgScope, args: &TreeArgs) -> Result<Tr
             }
             continue;
         }
-        let key = sort_key(t, &org_names);
+        let key = sort_key(t, &org_names, args.filters.sort.as_deref());
         let e = groups
             .entry((t.org_id, t.group.id.clone()))
-            .or_insert_with(|| (t.group.clone(), 0, key.clone()));
+            .or_insert_with(|| (t.group.clone(), 0, key.clone(), 0));
         e.1 += 1;
+        e.3 += t.cost_micros;
         if key < e.2 {
             e.2 = key.clone();
         }
@@ -1881,7 +3366,7 @@ pub(crate) fn tree_of(g: &Graph, scope: &OrgScope, args: &TreeArgs) -> Result<Tr
     };
     let mut group_list: Vec<(SortKey, TreeGroup)> = groups
         .into_iter()
-        .map(|((org, _), (group, count, key))| {
+        .map(|((org, _), (group, count, key, cost_micros))| {
             (
                 SortKey(key.0, key.1, key.2, key.3, 0, 0, String::new()),
                 TreeGroup {
@@ -1889,12 +3374,18 @@ pub(crate) fn tree_of(g: &Graph, scope: &OrgScope, args: &TreeArgs) -> Result<Tr
                     org_name: org.and_then(|o| org_names.get(&o).cloned()),
                     group,
                     count,
+                    cost_micros,
                 },
             )
         })
         .collect();
     group_list.sort_by(|a, b| a.0.cmp(&b.0));
     let trackers = visible_trackers(g, scope, &tasks);
+    let facets = if args.filters.group.is_none() {
+        facets_of(&summaries.iter().map(|s| &s.task).collect::<Vec<_>>())
+    } else {
+        Facets::default()
+    };
     Ok(TreePage {
         tasks,
         groups: group_list.into_iter().map(|(_, g)| g).collect(),
@@ -1902,10 +3393,12 @@ pub(crate) fn tree_of(g: &Graph, scope: &OrgScope, args: &TreeArgs) -> Result<Tr
         trackers,
         total,
         archived_hidden,
+        hidden_by_filters,
         next_cursor,
         generated_at: g.now,
         sections,
         review_total,
+        facets,
     })
 }
 
@@ -1947,7 +3440,7 @@ fn section_pages(
             buckets
                 .entry((t.org_id, t.group.id.as_str()))
                 .or_default()
-                .push((sort_key(t, org_names), i));
+                .push((sort_key(t, org_names, args.filters.sort.as_deref()), i));
         }
     }
     for bucket in buckets.values_mut() {
@@ -1983,13 +3476,170 @@ fn section_pages(
         .collect()
 }
 
+/// [`Graph::mission_waves`]: each mission member's wave, the topological
+/// depth over the `work_item_deps` edges between members of the same
+/// mission, W1 first; the same depth [`super::graph::build`] gives a
+/// mission's page. An edge out of the mission does not count; the store
+/// refuses a cycle, and the depth bound is a second net.
+fn fill_mission_waves(g: &mut Graph) {
+    fn depth(id: i64, g: &Graph, mission: i64, memo: &mut HashMap<i64, u32>, guard: usize) -> u32 {
+        if let Some(w) = memo.get(&id) {
+            return *w;
+        }
+        let w = if guard == 0 {
+            1
+        } else {
+            1 + g
+                .deps
+                .get(&id)
+                .map(|ds| {
+                    ds.iter()
+                        .filter(|d| g.missions_by_item.get(d).map(|m| m.0) == Some(mission))
+                        .map(|d| depth(*d, g, mission, memo, guard - 1))
+                        .max()
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0)
+        };
+        memo.insert(id, w);
+        w
+    }
+    let mut memo = HashMap::new();
+    let guard = g.missions_by_item.len() + 1;
+    let ids: Vec<(i64, i64)> = g.missions_by_item.iter().map(|(i, m)| (*i, m.0)).collect();
+    for (item, mission) in ids {
+        depth(item, g, mission, &mut memo, guard);
+    }
+    g.mission_waves = memo;
+}
+
 /// `work { action: tree, filters?, cursor?, limit?, per_task? }`.
-pub fn tree(store: &Mutex<Store>, scope: &OrgScope, args: &TreeArgs) -> Result<TreePage, IpcError> {
+///
+/// Takes the caller's whole [`ViewScope`] (multi-user M1, T7): the tree names
+/// every session of every task, which spec §4.3 calls content.
+pub fn tree(
+    store: &Mutex<Store>,
+    view: &crate::service::view_scope::ViewScope,
+    args: &TreeArgs,
+) -> Result<TreePage, IpcError> {
+    let g = load_tree_graph(store, view, &args.filters, args.with_missions)?;
+    tree_of(&g, &view.org, args)
+}
+
+/// The graph a tree read over `filters` needs: the caller's, plus the
+/// missions, buckets or account names its grouping names.
+fn load_tree_graph(
+    store: &Mutex<Store>,
+    view: &crate::service::view_scope::ViewScope,
+    filters: &WorkTreeFilters,
+    with_missions: bool,
+) -> Result<Graph, IpcError> {
+    let scope = &view.org;
+    // A group by mission names only the missions this caller may read
+    // (`missions::sees_mission`); read before the graph, which takes the
+    // lock itself.
+    let by_mission = with_missions || filters.group_by.as_deref() == Some("mission");
+    let readable_missions: HashMap<i64, String> = if by_mission {
+        super::missions::missions(store, view)?
+            .into_iter()
+            .map(|m| (m.id, m.name))
+            .collect()
+    } else {
+        HashMap::new()
+    };
     let g = {
         let s = lock(store)?;
-        Graph::load(&s, scope)?
+        let mut g = Graph::load_for(&s, view)?;
+        if by_mission {
+            for (item, mission) in s.mission_membership()? {
+                if let Some(name) = readable_missions.get(&mission) {
+                    g.missions_by_item.insert(item, (mission, name.clone()));
+                }
+            }
+            fill_mission_waves(&mut g);
+        }
+        if let Some(kind @ ("sprint" | "release")) = filters.group_by.as_deref() {
+            // A personal bucket shows to its person alone, and wins over
+            // the team's: the reader's own plan is the one they group by.
+            let (mine, team): (Vec<_>, Vec<_>) = s
+                .bucket_membership(kind)?
+                .into_iter()
+                .partition(|m| m.owner_person_id.is_some());
+            for m in mine {
+                if view.may_own_person_row(m.org_id, m.owner_person_id) {
+                    g.buckets_by_item
+                        .entry(m.item_id)
+                        .or_insert((m.bucket_id, m.name));
+                }
+            }
+            for m in team {
+                if scope.sees_org(m.org_id) {
+                    g.buckets_by_item
+                        .entry(m.item_id)
+                        .or_insert((m.bucket_id, m.name));
+                }
+            }
+        }
+        if filters.group_by.as_deref() == Some("account") {
+            for a in s.list_accounts()? {
+                let label = a
+                    .nickname
+                    .clone()
+                    .or(a.email.clone())
+                    .or(a.display_name.clone());
+                if let Some(label) = label.filter(|l| !l.trim().is_empty()) {
+                    g.account_labels.insert(a.uuid, label);
+                }
+            }
+        }
+        g
     };
-    tree_of(&g, scope, args)
+    Ok(g)
+}
+
+/// Every task `view` sees that matches `filters` (the tree's own filtering:
+/// the grouping, the archived switch and `filters.group`), unpaged, each
+/// with its group set by `filters.group_by` and no sessions. What a
+/// dashboard counts, so its numbers agree with the Work board's.
+pub(crate) fn matching_tasks(
+    store: &Mutex<Store>,
+    view: &crate::service::view_scope::ViewScope,
+    filters: &WorkTreeFilters,
+) -> Result<(Vec<WorkTask>, i64), IpcError> {
+    check_filters(filters)?;
+    let g = load_tree_graph(store, view, filters, false)?;
+    Ok((matching_of(&g, &view.org, filters), g.now))
+}
+
+/// [`matching_tasks`] over a graph already loaded.
+pub(crate) fn matching_of(g: &Graph, scope: &OrgScope, filters: &WorkTreeFilters) -> Vec<WorkTask> {
+    let with_archived = WorkTreeFilters {
+        archived: Some(true),
+        ..filters.clone()
+    };
+    let built = build_tasks(g, scope);
+    let mut out = Vec::new();
+    for b in &built {
+        let mut summary = summarize(g, b, false);
+        if let Some(by) = filters.group_by.as_deref() {
+            if let Some(group) = regroup(g, &summary, by) {
+                summary.task.group = group;
+            }
+        }
+        let t = summary.task;
+        if !matches_filters(&t, &with_archived, false) || hidden_as_archived(&t, filters) {
+            continue;
+        }
+        if filters
+            .group
+            .as_deref()
+            .is_some_and(|gid| gid != t.group.id)
+        {
+            continue;
+        }
+        out.push(t);
+    }
+    out
 }
 
 /// Parse a task id: `item:<n>` or `ref:<KEY>` (normalised).
@@ -2053,10 +3703,18 @@ pub(crate) fn find_task(
 }
 
 /// `work { action: task, task_id }`.
-pub fn task(store: &Mutex<Store>, scope: &OrgScope, task_id: &str) -> Result<TaskDetail, IpcError> {
+///
+/// The whole [`ViewScope`] (multi-user M1, T7): one task's detail lists every
+/// session of that task.
+pub fn task(
+    store: &Mutex<Store>,
+    view: &crate::service::view_scope::ViewScope,
+    task_id: &str,
+) -> Result<TaskDetail, IpcError> {
+    let scope = &view.org;
     let g = {
         let s = lock(store)?;
-        Graph::load(&s, scope)?
+        Graph::load_for(&s, view)?
     };
     let (task, aliases) = find_task(&g, scope, task_id, true)?;
     let item = task.item_id.and_then(|i| g.items.get(&i));
@@ -2076,18 +3734,31 @@ pub fn task(store: &Mutex<Store>, scope: &OrgScope, task_id: &str) -> Result<Tas
     // that journal; its native children, their jobs, live sessions and
     // the steps of every conversation of the task and its subtasks: a
     // second, short lock.
-    let (meta, journal, work) = {
+    let (meta, journal, work, comments, attachments) = {
         let s = lock(store)?;
         let meta = item
             .map(|i| s.work_item_meta(i.item.id))
             .transpose()?
             .unwrap_or_default();
+        // Inside that link's window (P-7): a session switched away kept its
+        // conversation, and what it did after the switch is the next task's.
         let journal = match last {
-            Some(_) => s.journal_for_conversations(&conversations)?,
+            Some(l) => s.journal_for_conversations_within(
+                &conversations,
+                s.link_journal_window(l.link_id)?,
+            )?,
             None => Vec::new(),
         };
         let work = native_work(&s, &g, scope, item, task.key.as_deref())?;
-        (meta, journal, work)
+        let comments = match item {
+            Some(i) => s.item_comments(i.item.id)?,
+            None => Vec::new(),
+        };
+        let attachments = match item {
+            Some(i) => s.item_attachments(i.item.id)?,
+            None => Vec::new(),
+        };
+        (meta, journal, work, comments, attachments)
     };
     // The tracker that might serve the whole description, and the key to name
     // it by — flattened as every other `fence_ticket` call site flattens it
@@ -2099,6 +3770,24 @@ pub fn task(store: &Mutex<Store>, scope: &OrgScope, task_id: &str) -> Result<Tas
     let flat_key = item
         .and_then(|i| i.item.key.as_deref())
         .map(|k| k.split_whitespace().collect::<Vec<_>>().join(" "));
+    // Whose comments the Comments tab may read beside fleet's, and whether
+    // this reader may post there.
+    let comments_tracker = tracker.filter(|t| crate::service::trackers::provider_caps(t).comments);
+    let can_post_to_tracker = comments_tracker.is_some_and(|t| {
+        crate::service::work::tracker_comments::may_post(scope)
+            && crate::service::trackers::write_back::writes_comments(t)
+    });
+    let comments_tracker = comments_tracker.map(|t| t.name.clone());
+    let (promotion, promote_targets) = match item {
+        Some(i) if i.item.source == "local" => {
+            let s = lock(store)?;
+            (
+                super::promote::promotion_view(&s, i.item.id, &g.trackers)?,
+                super::promote::targets(&s, scope, &i.item, &g.trackers)?,
+            )
+        }
+        _ => (None, Vec::new()),
+    };
     let excerpt = meta.description.clone().filter(|d| !d.trim().is_empty());
     // The full length and whether the answer shows less of it, for every
     // caller: a person's screen has no fence notice to read it from. The
@@ -2167,11 +3856,14 @@ pub fn task(store: &Mutex<Store>, scope: &OrgScope, task_id: &str) -> Result<Tas
         })
         .map(|r| r.id)
         .collect();
-    // Who placed it is the unrestricted caller's to read: a device name is
-    // not a scoped caller's to learn (an unassigned task is placed by
-    // bound clients of several orgs, M14.1c).
+    // A device name is its person's (owner decision 2026-10-10: one
+    // person does not learn another's device names). Who placed a task is
+    // a device label with no person beside it, so only a reader every
+    // device is known to be theirs sees it: the hub itself (a standalone
+    // desktop) and the one person of a one-person hub.
+    let sees_any_device = view.is_unrestricted() || view.is_sole_person();
     let placement = g.placements.get(&task.task_id).cloned().map(|mut p| {
-        if !scope.is_all() {
+        if !sees_any_device {
             p.updated_by = None;
         }
         p
@@ -2184,7 +3876,10 @@ pub fn task(store: &Mutex<Store>, scope: &OrgScope, task_id: &str) -> Result<Tas
         }
         _ => x,
     };
+    // A job mirror's notes ARE the dispatch prompt, so they go the same way
+    // as its title and its result (`Graph::mirror_text_hidden`).
     let notes = item
+        .filter(|i| !g.mirror_text_hidden(&i.item))
         .and_then(|i| i.item.notes.clone())
         .filter(|n| !n.trim().is_empty())
         .map(|n| fence(n, "a task's notes"));
@@ -2214,6 +3909,34 @@ pub fn task(store: &Mutex<Store>, scope: &OrgScope, task_id: &str) -> Result<Tas
             grp
         })
         .collect();
+    // Who wrote a comment is a device label: its author's own devices read
+    // it (and the readers above, who see every device), nobody else does.
+    // The text is fenced for an agent.
+    let comments = comments
+        .into_iter()
+        .map(|mut c| {
+            let own = matches!((c.author_person_id, view.person), (Some(a), Some(p)) if a == p);
+            if !(sees_any_device || own) {
+                c.author = String::new();
+                c.author_person_id = None;
+            }
+            c.body = fence(c.body, "a comment");
+            c
+        })
+        .collect();
+    // An attachment's author is the same device label, withheld the same
+    // way; the bytes are never in this answer.
+    let attachments = attachments
+        .into_iter()
+        .map(|mut a| {
+            let own = matches!((a.author_person_id, view.person), (Some(x), Some(p)) if x == p);
+            if !(sees_any_device || own) {
+                a.author = String::new();
+                a.author_person_id = None;
+            }
+            a
+        })
+        .collect();
     Ok(TaskDetail {
         task,
         aliases,
@@ -2230,6 +3953,12 @@ pub fn task(store: &Mutex<Store>, scope: &OrgScope, task_id: &str) -> Result<Tas
         rejected_proposals,
         jobs,
         steps,
+        comments,
+        comments_tracker,
+        can_post_to_tracker,
+        attachments,
+        promotion,
+        promote_targets,
     })
 }
 
@@ -2249,6 +3978,12 @@ struct NativeWork {
 /// conversation of the task and its subtasks. A child whose own org the
 /// caller cannot see is left out; a scoped caller reads only the steps of
 /// conversations it sees a link through, and a worker it sees.
+///
+/// Every session this reads comes out of `g.sessions`, which `Graph::load_for`
+/// has already emptied of every person-invisible row into `hidden_sessions`
+/// (multi-user M1, T7) — so the two `scope.sees_row_org_only` calls below are
+/// the ORG half alone, and `hidden_sessions` is the person half that finishes
+/// them (their rows in `ORG_HALF_SITES` say the same).
 fn native_work(
     s: &Store,
     g: &Graph,
@@ -2264,7 +3999,22 @@ fn native_work(
             .map(Option::flatten)
     };
     if let Some(i) = item {
-        out.own_result = job_of(i.item.task_id)?.and_then(|t| t.result);
+        // The SAME fence as `JobView.result` sixty lines below, and for the
+        // same reason (multi-user M1, T5's review found this half still
+        // open): `own_result` is the result of the dispatch THIS item mirrors
+        // — the worker session's own output, the most private thing a
+        // dispatch produces — and the reader of the task page is not
+        // necessarily a reader of either end of that dispatch.
+        //
+        // `g.job_states` is the fenced map (`Graph::build`): a job whose
+        // `tasks` row this reader may not see is not in it, and
+        // `task_visible_in_scope_pure` has already failed closed on an end it
+        // cannot resolve. Asking the already-applied fence, rather than
+        // re-deriving one here, is what keeps this answer and the `JobView`
+        // block from disagreeing about the same job.
+        if !g.mirror_text_hidden(&i.item) {
+            out.own_result = job_of(i.item.task_id)?.and_then(|t| t.result);
+        }
     }
     let children: Vec<crate::store::WorkItemRow> = match item {
         Some(i) => s
@@ -2277,7 +4027,15 @@ fn native_work(
             .collect(),
         None => Vec::new(),
     };
-    let sees_session = |sid: i64| g.sessions.get(&sid).is_some_and(|r| scope.sees_row(r));
+    // `native_work` is only reached from `task`, which builds the graph with
+    // `Graph::load_for`: `hidden_sessions` has already emptied every
+    // person-invisible row out of `g.sessions`, so this is the ORG half
+    // alone (multi-user M1, T10 — the two rows in `ORG_HALF_SITES`).
+    let sees_session = |sid: i64| {
+        g.sessions
+            .get(&sid)
+            .is_some_and(|r| scope.sees_row_org_only(r))
+    };
     let mut item_ids: BTreeSet<i64> = item.map(|i| i.item.id).into_iter().collect();
     let mut keys: Vec<String> = key.map(str::to_string).into_iter().collect();
     for c in children {
@@ -2287,8 +4045,15 @@ fn native_work(
             title: c.title.clone(),
             why: c.proposal_why.clone(),
             notes: c.notes.clone(),
-            proposed_by: c.proposed_by.clone(),
+            // The attribution is session metadata — a name and a machine —
+            // so it goes only to a reader who may see that session
+            // (multi-user M1; `Graph::proposer_hidden`). The proposal itself
+            // stays: its title and `why` are item data.
+            proposed_by: c.proposed_by.clone().filter(|by| g.proposer_visible(by)),
             at: c.created_at,
+            duplicate: (c.proposal_state.as_deref() == Some("proposed"))
+                .then(|| duplicate_hint(g, scope, c.id))
+                .flatten(),
         };
         match c.proposal_state.as_deref() {
             Some("proposed") => {
@@ -2311,7 +4076,23 @@ fn native_work(
             .get(&c.id)
             .and_then(|v| item_status(g, v))
             .or_else(|| Some(c.status_category.clone()));
-        if c.origin.as_deref() == Some("agent") {
+        // `g.job_states` is the FENCED map (`Graph::build`): a job whose
+        // `tasks` row this reader may not see is not in it, and this is the
+        // gate on the whole `JobView` — its `result` is the worker session's
+        // own output, the single most private thing a dispatch produces.
+        // Asking the already-applied fence rather than re-deriving it is what
+        // keeps the two answers (`SubtaskView.job_state` below and this
+        // block) from disagreeing about the same job.
+        // Is this child a job mirror whose dispatch the reader may not read?
+        // Its TITLE is the first line of the dispatch prompt and its notes
+        // are the prompt (`Store::create_agent_task_item`), so a mirror's
+        // text is one session's instruction to another — not shared work
+        // structure, whatever the shape of the row carrying it (multi-user
+        // M1, T5's review; the `open_proposals` note in `Graph::build` says
+        // where that reasoning went wrong). Same fence as `JobView` below,
+        // asked once here so the title and the view cannot disagree.
+        let mirror_fenced = g.mirror_text_hidden(&c);
+        if c.origin.as_deref() == Some("agent") && g.job_states.contains_key(&c.id) {
             if let Some(job) = job_of(c.task_id)? {
                 out.jobs.push(JobView {
                     item_id: c.id,
@@ -2321,7 +4102,7 @@ fn native_work(
                     worker: job
                         .worker_session_id
                         .and_then(|w| g.sessions.get(&w))
-                        .filter(|r| scope.sees_row(r))
+                        .filter(|r| scope.sees_row_org_only(r))
                         .map(|r| {
                             r.friendly_name
                                 .clone()
@@ -2347,7 +4128,16 @@ fn native_work(
             project_id: c.project_id,
             live_sessions,
             job_state: g.job_states.get(&c.id).cloned(),
-            title: c.title,
+            // The row stays — it is structure, and the tree that shows the
+            // same children would otherwise disagree about how many there
+            // are — but its text does not. `JOB_TITLE_WITHHELD` is the label
+            // `job_title` itself falls back to for a prompt with no first
+            // line, so the answer stays well-formed and says nothing.
+            title: if mirror_fenced {
+                JOB_TITLE_WITHHELD.to_string()
+            } else {
+                c.title
+            },
         });
     }
     // Every conversation of the task and its subtasks, deduplicated.
@@ -2369,6 +4159,9 @@ fn native_work(
     let mut groups: Vec<(i64, StepGroup)> = Vec::new();
     for st in s.current_steps(&convs)? {
         let label = labels.get(&st.claude_session_id);
+        // This is the org boundary, not a privacy fence: whether a scoped
+        // caller is told the PROJECT a subtask sits in. This function's
+        // session half is person-fenced by `hidden_sessions`, above.
         if !scope.is_all() && !label.is_some_and(|(_, visible)| *visible) {
             continue;
         }
@@ -2456,6 +4249,7 @@ fn brief_of(g: &Graph, task_id: &str, item: Option<&ViewItem>, ref_key: Option<&
         key: item
             .and_then(|i| i.item.key.clone())
             .or_else(|| ref_key.map(str::to_string)),
+        display_key: item.and_then(|i| i.item.display_key.clone()),
         title: item.map(|i| i.item.title.clone()).unwrap_or_default(),
         kind: task_kind(item).into(),
         // The same live precedence `to_task` projects (§2, fix round 1):
@@ -2491,17 +4285,25 @@ fn item_status(g: &Graph, i: &ViewItem) -> Option<String> {
 /// with its task.
 pub fn session_tasks(
     store: &Mutex<Store>,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
     session_id: i64,
 ) -> Result<SessionTasks, IpcError> {
+    let scope = &view.org;
     let g = {
         let s = lock(store)?;
-        Graph::load(&s, scope)?
+        Graph::load_for(&s, view)?
     };
+    // `Graph::load_for` empties the person-invisible rows out of
+    // `g.sessions`. The org half still has to be asked here, and T10 proved
+    // it by deleting the call: `ViewScope::sees_session_facts` returns at its
+    // first clause for the hub's own reader, before the org boundary, so an
+    // internal-and-narrowed scope is fenced by this and nothing else.
     let row = g
         .sessions
         .get(&session_id)
-        .filter(|r| scope.sees_row(r))
+        // Org half; the person half is `Graph::load_for`'s `hidden_sessions`,
+        // which has already emptied this map of rows this caller may not see.
+        .filter(|r| scope.sees_row_org_only(r))
         .ok_or_else(|| crate::service::orgs::not_found("session", session_id))?;
     let built = build_tasks(&g, scope);
     let others = active_tasks_by_session(&built);
@@ -2553,6 +4355,7 @@ pub fn session_tasks(
         org_id: row.org_id,
         primary_link_id: primary,
         links,
+        is_self: false,
     })
 }
 
@@ -2566,6 +4369,28 @@ fn review_rank(kind: &str) -> u8 {
         "no_primary" => 2,
         _ => 3,
     }
+}
+
+/// The J7 ticket a local item `item_id` may duplicate: its live
+/// `tracker_duplicate` proposal, when it names a ticket the graph holds.
+fn tracker_duplicate_of(g: &Graph, item_id: Option<i64>) -> Option<ReviewDuplicate> {
+    use crate::service::decide::{tracker_duplicate, Feature};
+    let id = item_id?;
+    let p = g
+        .item_proposals
+        .get(&id)?
+        .iter()
+        .find(|p| p.feature == Feature::TrackerDuplicate.as_str())?;
+    let ticket = tracker_duplicate::item_of(&p.value)?;
+    let t = g.items.get(&ticket)?;
+    Some(ReviewDuplicate {
+        task_id: format!("item:{ticket}"),
+        item_id: ticket,
+        key: t.item.key.clone(),
+        title: t.item.title.clone(),
+        source: p.source.clone(),
+        confidence_pct: p.confidence_pct,
+    })
 }
 
 /// [`review`] over a loaded graph.
@@ -2635,9 +4460,21 @@ pub(crate) fn review_of(
             why,
             strength: l.link.strength.clone(),
             rule: l.link.rule.clone(),
+            confidence: Some(super::confidence::confidence(
+                &l.link.source,
+                l.link.strength.as_deref(),
+                l.link.rule.as_deref(),
+                &l.link.evidence,
+            )),
             preselected: l.link.preselected,
             alternatives: alts,
             created_at: l.link.decided_at.unwrap_or(l.link.created_at),
+            proposed_by: (kind == "suggestion")
+                .then(|| proposer_of(l.link.rule.as_deref(), &l.link.evidence))
+                .flatten(),
+            duplicate_of: (kind == "suggestion")
+                .then(|| tracker_duplicate_of(g, l.link.item_id))
+                .flatten(),
         }
     };
     for (sid, links) in &by_session {
@@ -2692,6 +4529,7 @@ pub(crate) fn review_of(
                                 .item
                                 .and_then(|i| i.item.key.clone())
                                 .or_else(|| b.ref_key.clone()),
+                            display_key: b.item.and_then(|i| i.item.display_key.clone()),
                             title: b.item.map(|i| i.item.title.clone()).unwrap_or_default(),
                         })
                     })
@@ -2707,7 +4545,11 @@ pub(crate) fn review_of(
                     _ => why_line(&l.link.source, &[]),
                 });
             }
-            let it = make(kind, l, row, w, alts);
+            let mut it = make(kind, l, row, w, alts);
+            // J6 (redesign 6.8): the main ticket among several suggestions.
+            if kind == "suggestion" && it.proposed_by.is_none() && suggestions.len() > 1 {
+                it.proposed_by = main_ticket_proposer(&row.proposals, l.link.id, suggestions.len());
+            }
             items.push((
                 ReviewKey(review_rank(kind), -it.created_at, it.review_id.clone()),
                 it,
@@ -2775,13 +4617,14 @@ pub(crate) fn review_of(
 /// the caller may decide.
 pub fn review(
     store: &Mutex<Store>,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
     cursor: Option<&str>,
     limit: Option<usize>,
 ) -> Result<ReviewPage, IpcError> {
+    let scope = &view.org;
     let g = {
         let s = lock(store)?;
-        Graph::load(&s, scope)?
+        Graph::load_for(&s, view)?
     };
     review_of(&g, scope, cursor, limit)
 }

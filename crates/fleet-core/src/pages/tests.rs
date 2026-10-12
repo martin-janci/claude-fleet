@@ -523,7 +523,7 @@ fn render_catalog() -> String {
         })
         .collect();
     let v = json!({
-        "_generated": "from crates/fleet-core/src/pages; regenerate with REGEN_PAGE_DOCS=1 cargo test -p fleet-core page_docs_are_current",
+        "_generated": "from crates/fleet-core/src/pages; regenerate with REGEN_PAGE_DOCS=1 cargo fleet-test -- page_docs_are_current",
         "spec": super::model::SPEC_VERSION,
         "layouts": layouts,
         "widgets": widgets,
@@ -545,7 +545,7 @@ fn render_catalog() -> String {
 /// first frame without waiting on `list_pages`, which never carries them.
 fn render_embeds() -> String {
     let v = json!({
-        "_generated": "from crates/fleet-core/pages (layout embed); regenerate with REGEN_PAGE_DOCS=1 cargo test -p fleet-core page_docs_are_current",
+        "_generated": "from crates/fleet-core/pages (layout embed); regenerate with REGEN_PAGE_DOCS=1 cargo fleet-test -- page_docs_are_current",
         "pages": super::embeds().collect::<Vec<_>>(),
     });
     serde_json::to_string_pretty(&v).unwrap() + "\n"
@@ -562,7 +562,7 @@ fn render_schema() -> String {
 fn render_frontend_fixture() -> String {
     let s = crate::store::Store::open_in_memory().unwrap();
     let v = json!({
-        "_generated": "from crates/fleet-core/src/pages; regenerate with REGEN_PAGE_DOCS=1 cargo test -p fleet-core page_docs_are_current",
+        "_generated": "from crates/fleet-core/src/pages; regenerate with REGEN_PAGE_DOCS=1 cargo fleet-test -- page_docs_are_current",
         "pages": super::navigable(),
         "sources": SOURCES,
         "resources": super::resources::RESOURCES,
@@ -595,7 +595,7 @@ fn page_docs_are_current() {
     assert!(
         stale.is_empty(),
         "\n\n{} out of date with crates/fleet-core/src/pages. Regenerate with:\n  \
-REGEN_PAGE_DOCS=1 cargo test -p fleet-core page_docs_are_current\n",
+REGEN_PAGE_DOCS=1 cargo fleet-test -- page_docs_are_current\n",
         stale.join(", ")
     );
 }
@@ -717,4 +717,151 @@ fn a_guide_is_a_short_list_of_distinct_steps() {
         "tabs": [{ "title": "A", "sections": [{ "title": "S", "items": notice }] }]
     }));
     assert!(messages(&[tabs]).contains("steps are sections, not tabs"));
+}
+
+fn matrix(items: Value) -> Page {
+    page(json!({
+        "spec": "fleet.page/1", "id": "t", "title": "T", "layout": "category",
+        "sections": [{ "title": "S", "matrix": true, "items": items }]
+    }))
+}
+
+/// 11.9: a matrix is choice-set settings over one set of options, at least
+/// two of them, each with its default widget.
+#[test]
+fn a_matrix_holds_choice_sets_over_the_same_options() {
+    let ok = matrix(json!([
+        { "type": "field", "key": "notify.desktop" },
+        { "type": "field", "key": "notify.phone" }
+    ]));
+    assert_eq!(messages(&[ok]), "");
+    for (items, want) in [
+        (
+            json!([{ "type": "field", "key": "notify.desktop" }]),
+            "at least two columns",
+        ),
+        (
+            json!([
+                { "type": "field", "key": "notify.desktop" },
+                { "type": "field", "key": "gc.enabled" }
+            ]),
+            "choice-set settings fields only",
+        ),
+        (
+            json!([
+                { "type": "field", "key": "notify.desktop" },
+                { "type": "field", "key": "notify.phone", "widget": "text" }
+            ]),
+            "choice-set settings fields only",
+        ),
+    ] {
+        let got = messages(&[matrix(items)]);
+        assert!(got.contains(want), "{got}");
+    }
+}
+
+/// Federation's graph (`Page::graph`): a master_detail page's, its state a
+/// choice field with some values up, its facts plain fields.
+#[test]
+fn a_graph_follows_a_choice_field_of_the_resource() {
+    let fields = |r: &str| -> Value {
+        json!(super::resources::resource(r)
+            .unwrap()
+            .fields
+            .iter()
+            .map(|f| json!({ "type": "field", "key": f.id }))
+            .collect::<Vec<_>>())
+    };
+    let peers = |graph: Value| {
+        page(json!({
+            "spec": "fleet.page/1", "id": "p", "title": "P", "layout": "master_detail",
+            "resource": "peer_link", "graph": graph,
+            "sections": [{ "title": "All", "items": fields("peer_link") }]
+        }))
+    };
+    let ok = json!({ "center": "This hub", "state": "state", "up": ["connected"], "facts": ["latency", "messages_today"] });
+    assert_eq!(messages(&[peers(ok)]), "");
+    for (graph, want) in [
+        (
+            json!({ "center": "C", "state": "url", "up": ["x"] }),
+            "not a choice field",
+        ),
+        (
+            json!({ "center": "C", "state": "state", "up": ["up"] }),
+            "is not one of",
+        ),
+        (
+            json!({ "center": "C", "state": "state", "up": [] }),
+            "not none and not all",
+        ),
+        (
+            json!({ "center": "C", "state": "state", "up": ["connected", "retrying", "refused", "incompatible"] }),
+            "not none and not all",
+        ),
+        (
+            json!({ "center": "C", "state": "state", "up": ["connected"], "facts": ["sync"] }),
+            "not a plain field",
+        ),
+        (
+            json!({ "center": "C", "state": "state", "up": ["connected"], "facts": ["nope"] }),
+            "not a field of",
+        ),
+    ] {
+        let got = messages(&[peers(graph.clone())]);
+        assert!(
+            got.contains(want),
+            "{graph}\n  wanted: {want}\n  got: {got}"
+        );
+    }
+    let mut cat = category(json!([{ "type": "notice", "tone": "info", "text": "x" }]));
+    cat.graph =
+        serde_json::from_value(json!({ "center": "C", "state": "state", "up": ["connected"] }))
+            .unwrap();
+    assert!(messages(&[cat]).contains("a graph belongs to a master_detail page"));
+}
+
+/// People & devices (`Page::table`, M15 step G4.7): a master_detail page's,
+/// its columns plain fields, its filters and grouping among them.
+#[test]
+fn a_table_shows_plain_fields_and_filters_its_own_columns() {
+    let fields = json!(super::resources::resource("device")
+        .unwrap()
+        .fields
+        .iter()
+        .map(|f| json!({ "type": "field", "key": f.id }))
+        .collect::<Vec<_>>());
+    let devices = |table: Value| {
+        page(json!({
+            "spec": "fleet.page/1", "id": "p", "title": "P", "layout": "master_detail",
+            "resource": "device", "table": table,
+            "sections": [{ "title": "All", "items": fields.clone() }]
+        }))
+    };
+    let ok = json!({ "title": "People & devices", "columns": ["person", "name", "mode", "trusted", "last_seen_at"], "filters": ["person"], "group_by": "person" });
+    assert_eq!(messages(&[devices(ok)]), "");
+    for (table, want) in [
+        (json!({ "title": "T", "columns": [] }), "1 to 6 columns"),
+        (
+            json!({ "title": "T", "columns": ["name", "catalogs"] }),
+            "not a plain field",
+        ),
+        (json!({ "title": "T", "columns": ["nope"] }), "has no field"),
+        (
+            json!({ "title": "T", "columns": ["name"], "filters": ["mode"] }),
+            "is not a column",
+        ),
+        (
+            json!({ "title": "T", "columns": ["name"], "group_by": "person" }),
+            "is not a column",
+        ),
+    ] {
+        let got = messages(&[devices(table.clone())]);
+        assert!(
+            got.contains(want),
+            "{table}\n  wanted: {want}\n  got: {got}"
+        );
+    }
+    let mut cat = category(json!([{ "type": "notice", "tone": "info", "text": "x" }]));
+    cat.table = serde_json::from_value(json!({ "title": "T", "columns": ["name"] })).unwrap();
+    assert!(messages(&[cat]).contains("a table belongs to a master_detail page"));
 }

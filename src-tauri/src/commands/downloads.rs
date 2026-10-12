@@ -2,7 +2,7 @@
 //! session sent from its host, kept on the machine that owns the fleet —
 //! this one standalone, the hub when paired.
 //!
-//! `list_downloads`, `send_file` and `remove_download` route to the hub
+//! `list_downloads`, `send_file`, `pause_download` and `remove_download` route to the hub
 //! tools of the same name. `save_download` routes its check (the row,
 //! through `list_downloads`) and then streams the bytes from the hub's
 //! `GET /downloads/<id>`; standalone it copies them out of this machine's
@@ -11,8 +11,10 @@
 
 use crate::backend::FleetBackend;
 use fleet_core::ipc_error::{codes, IpcError};
-use fleet_core::service::downloads::{self, DownloadList, ListDownloadsArgs, SendFileArgs};
-use fleet_core::service::orgs::OrgScope;
+use fleet_core::service::downloads::{
+    self, DownloadList, ListDownloadsArgs, PauseDownloadArgs, SendFileArgs,
+};
+use fleet_core::service::view_scope::ViewScope;
 use fleet_core::ssh::{SshClient, SshExec};
 use fleet_core::store::{DownloadRow, Store};
 use std::path::PathBuf;
@@ -39,6 +41,17 @@ pub async fn send_file(
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<DownloadRow, IpcError> {
     routed::send_file(&backend, args, &store, &ssh).await
+}
+
+/// Pause a copy in flight, or let it go on (gap plan G7.15). Answers the
+/// row as `list_downloads` shows it.
+#[tauri::command]
+pub async fn pause_download(
+    args: PauseDownloadArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<DownloadRow, IpcError> {
+    routed::pause_download(&backend, args, &store).await
 }
 
 /// Remove a download and its copy.
@@ -95,7 +108,7 @@ pub(crate) mod routed {
             Some(hub) => hub.list_downloads(&args).await,
             None => {
                 let s = fleet_core::ipc_error::lock(store)?;
-                downloads::list(&s, &OrgScope::All, &args)
+                downloads::list(&s, &ViewScope::internal(), &args)
             }
         }
     }
@@ -112,7 +125,7 @@ pub(crate) mod routed {
         let row = downloads::send(
             store,
             &**ssh,
-            &OrgScope::All,
+            &ViewScope::internal(),
             downloads::SOURCE_PERSON,
             &args,
         )
@@ -120,6 +133,20 @@ pub(crate) mod routed {
         let exec: Arc<dyn SshExec> = ssh.clone();
         downloads::spawn_fetch(store.clone(), exec, row.clone());
         Ok(row)
+    }
+
+    pub async fn pause_download(
+        backend: &FleetBackend,
+        args: PauseDownloadArgs,
+        store: &Mutex<Store>,
+    ) -> Result<DownloadRow, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.pause_download(&args).await,
+            None => {
+                let s = fleet_core::ipc_error::lock(store)?;
+                downloads::pause(&s, &ViewScope::internal(), &args)
+            }
+        }
     }
 
     pub async fn remove_download(
@@ -131,7 +158,7 @@ pub(crate) mod routed {
             Some(hub) => hub.remove_download(id).await,
             None => {
                 let s = fleet_core::ipc_error::lock(store)?;
-                downloads::remove(&s, &OrgScope::All, id)
+                downloads::remove(&s, &ViewScope::internal(), id)
             }
         }
     }
@@ -162,7 +189,7 @@ pub(crate) mod routed {
             None => {
                 let (row, src) = {
                     let s = fleet_core::ipc_error::lock(store)?;
-                    downloads::open_ready(&s, &OrgScope::All, id)?
+                    downloads::open_ready(&s, &ViewScope::internal(), id)?
                 };
                 let Some(dest) = pick(row.name.clone()).await else {
                     return Ok(None);

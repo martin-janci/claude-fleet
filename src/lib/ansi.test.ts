@@ -133,6 +133,24 @@ describe('ansi.Screen — erase operations', () => {
     expect(rowText(s, 1)).toBe('    ');
   });
 
+  it("clearView blanks this side only: the cursor and a half-read sequence survive (pop-out 'Clear view')", () => {
+    const s = new Screen(2, 4);
+    s.write('\x1b[44mhello\r\nwo');
+    // The chunk ends inside a cursor move; the rest arrives after the clear.
+    s.write('\x1b[1;');
+    const v = s.rowVersion.slice();
+    s.clearView();
+    expect(rowText(s, 0)).toBe('    ');
+    expect(rowText(s, 1)).toBe('    ');
+    expect(s.cells[0][0].bg).toBe(COLOR_DEFAULT);
+    expect(s.cursorRow).toBe(1);
+    expect(s.cursorCol).toBe(2);
+    expect(s.rowVersion.every((n, i) => n > v[i])).toBe(true);
+    expect(s.takeReplies()).toBe('');
+    s.write('3Hx');
+    expect(rowText(s, 0)).toBe('  x ');
+  });
+
   it('ESC[J (no param) clears from cursor to end of screen', () => {
     const s = new Screen(3, 4);
     s.write('aaaa\r\nbbbb\r\ncccc\x1b[2;2H\x1b[J');

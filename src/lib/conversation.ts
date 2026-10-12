@@ -1,7 +1,7 @@
 import { writable } from 'svelte/store';
 import { timeAgo } from './session_status';
 import { invokeCmd, type Result } from './result';
-import type { ClaudeStatus, StuckKind, SessionRow } from './sessions';
+import type { ClaudeStatus, StuckKind, SessionAgent, SessionRow } from './sessions';
 import { stuckKindLabel, contextLevel, type ContextLevel } from './attention';
 import type { SessionEvent } from './timeline';
 import { promptFirstLine, type TaskRow } from './tasks';
@@ -175,9 +175,39 @@ export function toolDetail(
 }
 
 /** Deep (JSON) equality — used to decide whether a poll result actually changed. */
+// Each object's JSON, kept for as long as the object lives. The panel polls
+// every few seconds and keeps the previous read, so the side already on
+// screen is serialised once rather than on every poll (review r16 D3).
+const jsonOf = new WeakMap<object, string>();
+function json(o: object): string {
+  let s = jsonOf.get(o);
+  if (s === undefined) {
+    s = JSON.stringify(o);
+    jsonOf.set(o, s);
+  }
+  return s;
+}
+
 export function sameConversation(a: Conversation | null, b: Conversation): boolean {
   if (a === null) return false;
-  return JSON.stringify(a) === JSON.stringify(b);
+  return a === b || json(a) === json(b);
+}
+
+/** `next` with every turn that is deep-equal to one of `prev`'s replaced by
+ *  `prev`'s object, so a read that only grew the last turn hands the thread
+ *  the same objects for every other turn and their rows are left alone. */
+export function reuseTurns(prev: Conversation | null, next: Conversation): Conversation {
+  if (prev === null || prev.turns.length === 0) return next;
+  const old = new Map<string, ConvTurn>();
+  for (const t of prev.turns) old.set(json(t), t);
+  let reused = 0;
+  const turns = next.turns.map((t) => {
+    const same = old.get(json(t));
+    if (same === undefined) return t;
+    reused++;
+    return same;
+  });
+  return reused === 0 ? next : { ...next, turns };
 }
 
 export function isPinned(scrollTop: number, clientHeight: number, scrollHeight: number): boolean {
@@ -189,20 +219,41 @@ export function isPinned(scrollTop: number, clientHeight: number, scrollHeight: 
  * rendered instead. Missing Claude session id takes priority over any error
  * code (there was nothing to fetch in the first place).
  */
-export function emptyStateText(code: string | null, hasId: boolean): string | null {
-  if (!hasId) return 'No Claude session id yet';
+export function emptyStateText(code: string | null, hasId: boolean, agent: SessionAgent = 'claude'): string | null {
+  // Agy keeps its conversations in its own database, which nothing reads yet:
+  // say so rather than wait on a transcript that never comes.
+  if (agent === 'agy') return 'Agy conversations can’t be shown yet';
+  if (!hasId) return agent === 'claude' ? 'No Claude session id yet' : 'No conversation yet';
   if (code === 'E_NO_TRANSCRIPT') return 'No conversation yet';
   return null;
 }
 
 /** The second line of an empty state: what the user can do about it. Null
  *  wherever `emptyStateText` is null, so the two stay in step. */
-export function emptyStateHint(code: string | null, hasId: boolean, canPrompt: boolean): string | null {
-  if (!hasId) return 'It starts one as soon as Claude runs in this session.';
+export function emptyStateHint(
+  code: string | null,
+  hasId: boolean,
+  canPrompt: boolean,
+  agent: SessionAgent = 'claude',
+): string | null {
+  if (agent === 'agy') return 'Its terminal tab shows the session live.';
+  // Codex picks its conversation's id itself and writes it on the first prompt.
+  if (!hasId && agent === 'codex') {
+    return canPrompt
+      ? 'Codex starts a conversation on its first prompt. Send one below.'
+      : 'Codex starts a conversation on its first prompt.';
+  }
+  if (!hasId) return `It starts one as soon as ${agentLabel(agent)} runs in this session.`;
   if (code !== 'E_NO_TRANSCRIPT') return null;
   return canPrompt
     ? 'Send a prompt below to start it.'
     : 'This agent runs outside tmux, so it can only be prompted where it was started.';
+}
+
+/** The agent's name in conversation copy ("Codex is working"), as the agent
+ *  tab spells it (`row_groups.ts` AGENT_LABELS). */
+export function agentLabel(agent: SessionAgent): string {
+  return agent === 'codex' ? 'Codex' : agent === 'agy' ? 'Agy' : agent === 'shell' ? 'The shell' : 'Claude Code';
 }
 
 /** Pure relative-time formatter for an ISO timestamp against a reference clock. */
@@ -367,6 +418,19 @@ export function notificationLabel(n: { summary: string | null; event: string | n
  *  a fleet child that is neither working nor finished: it has nothing to
  *  report, and calling it `done` would be a lie. */
 export type BackgroundStatus = 'running' | 'done' | 'failed' | 'stopped' | 'idle';
+
+const BACKGROUND_WORD: Record<BackgroundStatus, string> = {
+  running: 'Working',
+  done: 'Done',
+  failed: 'Failed',
+  stopped: 'Idle',
+  idle: 'Idle',
+};
+
+/** A background job's status in the manual's words ("Working", not "running"). */
+export function backgroundStatusWord(s: BackgroundStatus): string {
+  return BACKGROUND_WORD[s] ?? 'Idle';
+}
 
 /** One report a background task filed. A resumed agent files several. */
 export interface BackgroundReport {
@@ -619,6 +683,7 @@ const TOOL_VERBS: Record<string, string> = {
   WebFetch: 'Fetch',
   WebSearch: 'Search web',
   TodoWrite: 'Update todos',
+  'mcp__claude-fleet__ask': 'Form',
 };
 
 /** The short verb a tool line leads with; `mcp__srv__tool` → `srv · tool`. */
@@ -728,6 +793,51 @@ export function splitMarker(prompt: string): { from: string | null; text: string
   return m ? { from: m[1], text: prompt.slice(m[0].length) } : { from: null, text: prompt };
 }
 
+/**
+ * A conversation as Markdown, for Copy transcript (gap plan G1.11): each
+ * turn's prompt under "You" (without the hub's untrusted-client marker or
+ * the harness's reminders) and the reply's text under "Claude", with tool
+ * calls, commands and compactions as one line each. `title` heads it; a
+ * conversation whose older turns were not read says so at the top.
+ */
+export function transcriptMarkdown(conv: Pick<Conversation, 'turns' | 'truncated'>, title: string): string {
+  const out: string[] = [`# ${title}`];
+  if (conv.truncated) out.push('_Older turns are not included._');
+  for (const t of conv.turns) {
+    if (t.prompt != null && t.prompt.trim() !== '') out.push(`## You\n\n${splitMarker(t.prompt).text.trim()}`);
+    const reply: string[] = [];
+    for (const it of t.items) {
+      switch (it.kind) {
+        case 'text':
+          if (it.text.trim()) reply.push(it.text.trim());
+          break;
+        case 'tool':
+          reply.push(`- ${it.name}${it.target ? `: ${it.target}` : ''}${it.error ? ' (failed)' : ''}`);
+          break;
+        case 'subagent':
+          reply.push(`- Agent ${it.name}${it.description ? `: ${it.description}` : ''}`);
+          break;
+        case 'command':
+          reply.push(`- /${it.name.replace(/^\//, '')}${it.args ? ` ${it.args}` : ''}`);
+          break;
+        case 'bash':
+          reply.push(`- ! ${it.command}`);
+          break;
+        case 'compact':
+          reply.push('- (conversation compacted)');
+          break;
+        case 'interrupt':
+          reply.push('- (interrupted)');
+          break;
+        default:
+          break;
+      }
+    }
+    if (reply.length > 0) out.push(`## Claude\n\n${reply.join('\n\n').replace(/\n\n(?=- )/g, '\n')}`);
+  }
+  return `${out.join('\n\n')}\n`;
+}
+
 /** A prompt as the composer would have written it: no hub marker, LF line
  *  ends, no surrounding whitespace (the transcript parser trims too). */
 export function normalizePrompt(prompt: string): string {
@@ -751,9 +861,12 @@ export function carriedCount(conv: Conversation | null, text: string): number {
 /** The note under the composer's Send button, or null when the session is
  *  ready to take a prompt. A stuck session may never read what is typed; a
  *  working one queues it until the turn ends. */
-export function composerStatus(s: { claude_status: string | null; stuck_kind: string | null }): string | null {
+export function composerStatus(
+  s: { claude_status: string | null; stuck_kind: string | null },
+  agent: SessionAgent = 'claude',
+): string | null {
   if (s.stuck_kind) return `Session is stuck (${stuckKindLabel(s.stuck_kind as StuckKind) || s.stuck_kind}). The prompt may not be read until that is cleared.`;
-  if (s.claude_status === 'working') return 'Claude is working. The prompt is queued until the current turn ends.';
+  if (s.claude_status === 'working') return `${agentLabel(agent)} is working. The prompt is queued until the current turn ends.`;
   return null;
 }
 
@@ -763,6 +876,12 @@ export interface SlashCommand {
   description: string;
   /** Completes with a trailing space so the user can type the argument. */
   args?: boolean;
+  /** Where it comes from when it is not a built-in (redesign 5.9): a skill
+   *  or command in the project's `.claude/` folder. */
+  source?: 'skill' | 'command';
+  /** What the argument looks like ("#KEY @session"), shown after the name
+   *  (gap plan G3.9, Control's commands). */
+  usage?: string;
 }
 
 /**
@@ -801,10 +920,97 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
  * whole draft is one token that begins with `/` (no spaces or newlines): once
  * an argument or a second line is being typed, the menu gets out of the way.
  */
-export function matchSlashCommands(draft: string): SlashCommand[] {
+export function matchSlashCommands(
+  draft: string,
+  extra: readonly SlashCommand[] = [],
+  builtins: readonly SlashCommand[] = SLASH_COMMANDS,
+): SlashCommand[] {
   if (!draft.startsWith('/') || /\s/.test(draft)) return [];
   const prefix = draft.slice(1).toLowerCase();
-  return SLASH_COMMANDS.filter((c) => c.name.startsWith(prefix));
+  // A project skill named like a built-in is not offered twice: the REPL
+  // runs the built-in.
+  const builtin = new Set(builtins.map((c) => c.name));
+  return [...builtins, ...extra.filter((c) => !builtin.has(c.name))].filter((c) =>
+    c.name.toLowerCase().startsWith(prefix),
+  );
+}
+
+/**
+ * Codex's built-in commands worth offering from the composer (its `/` menu
+ * lists about fifty), as the adapter lists them
+ * (`crates/fleet-core/src/agent_adapter/codex.rs` SLASH). None takes an
+ * argument on the same line except `/mention` and `/rename`.
+ */
+export const CODEX_SLASH_COMMANDS: readonly SlashCommand[] = [
+  { name: 'model', description: 'Choose the model and reasoning effort' },
+  { name: 'permissions', description: 'Choose what Codex is allowed to do' },
+  { name: 'new', description: 'Start a new chat' },
+  { name: 'compact', description: 'Summarise the conversation to free context' },
+  { name: 'status', description: 'Show the configuration and token usage' },
+  { name: 'diff', description: 'Show the git diff, untracked files included' },
+  { name: 'review', description: 'Review the current changes' },
+  { name: 'plan', description: 'Switch to Plan mode' },
+  { name: 'mention', description: 'Mention a file', args: true },
+  { name: 'resume', description: 'Resume a saved chat' },
+  { name: 'fork', description: 'Fork the current chat' },
+  { name: 'rename', description: 'Rename the current thread', args: true },
+  { name: 'init', description: 'Write an AGENTS.md for this project' },
+  { name: 'skills', description: 'Use skills' },
+  { name: 'mcp', description: 'List MCP tools' },
+  { name: 'hooks', description: 'View and manage lifecycle hooks' },
+  { name: 'memories', description: 'Configure memory use and generation' },
+  { name: 'copy', description: 'Copy the last response' },
+  { name: 'export', description: 'Export the conversation as markdown' },
+  { name: 'exit', description: 'Quit Codex (the tmux session stays)' },
+];
+
+/** The built-in slash commands the composer offers for `agent`'s session. */
+export function slashCommandsFor(agent: SessionAgent): readonly SlashCommand[] {
+  return agent === 'codex' ? CODEX_SLASH_COMMANDS : SLASH_COMMANDS;
+}
+
+/** Claude Code commands Codex runs under another name: a `/clear` chip in
+ *  a Codex session starts a new chat, as it does in Claude Code. */
+const CODEX_SLASH_ALIASES: Readonly<Record<string, string>> = { clear: 'new' };
+
+/**
+ * A quick-action chip as `agent`'s session can take it: the same chip, a
+ * slash command renamed to the agent's own spelling, or `null` when it names
+ * a command the agent does not have (Claude's `/context` typed into Codex
+ * would be sent as a prompt). Only Codex is narrowed: a Claude session may
+ * run a project skill no list here knows of.
+ */
+export function presetForAgent<P extends { text: string }>(p: P, agent: SessionAgent): P | null {
+  if (agent !== 'codex') return p;
+  const m = /^\/([A-Za-z][\w:-]*)(.*)$/s.exec(p.text.trim());
+  if (!m) return p;
+  const name = m[1].toLowerCase();
+  if (CODEX_SLASH_COMMANDS.some((c) => c.name === name)) return p;
+  const alias = CODEX_SLASH_ALIASES[name];
+  return alias ? { ...p, text: `/${alias}${m[2]}` } : null;
+}
+
+/** What identifies a turn across reloads and "Load older": its prompt's
+ *  uuid, else its start time. */
+export function turnAnchor(t: Pick<ConvTurn, 'prompt_uuid' | 'at' | 'ended_at'>): string | null {
+  return t.prompt_uuid ?? t.at ?? t.ended_at ?? null;
+}
+
+/**
+ * Where the "New" divider goes (redesign 5.9, from 2.3's `last_viewed_at`):
+ * the anchor of the first turn that started or answered after the person
+ * last looked, or `null` when nothing did or nobody has looked yet.
+ * `seenAt` is unix seconds.
+ */
+export function newDividerAnchor(turns: readonly ConvTurn[], seenAt: number | null | undefined): string | null {
+  if (seenAt == null) return null;
+  const after = (iso: string | null) => {
+    if (!iso) return false;
+    const ms = Date.parse(iso);
+    return !Number.isNaN(ms) && ms / 1000 > seenAt;
+  };
+  const t = turns.find((x) => after(x.at) || after(x.ended_at));
+  return t ? turnAnchor(t) : null;
 }
 
 /** The draft text that accepting a menu item yields. */
@@ -851,6 +1057,70 @@ export const EFFORT_OPTIONS: readonly PickerOption[] = [
   ...LAUNCH_EFFORT_OPTIONS,
 ];
 
+/** The models Codex lists (`codex debug models`), newest first as its
+ *  `/model` picker orders them — the adapter's MODELS
+ *  (`crates/fleet-core/src/agent_adapter/codex.rs`). */
+export const CODEX_MODEL_OPTIONS: readonly PickerOption[] = [
+  { value: 'gpt-6.1-sol', label: 'GPT-6.1-Sol' },
+  { value: 'gpt-6-astra', label: 'GPT-6-Astra' },
+  { value: 'gpt-6-sol', label: 'GPT-6-Sol' },
+  { value: 'gpt-6-luna', label: 'GPT-6-Luna' },
+  { value: 'gpt-5.6-sol', label: 'GPT-5.6-Sol' },
+  { value: 'gpt-5.6-terra', label: 'GPT-5.6-Terra' },
+  { value: 'gpt-5.6-luna', label: 'GPT-5.6-Luna' },
+  { value: 'gpt-5.5', label: 'GPT-5.5' },
+];
+
+/** The reasoning levels Codex takes as `model_reasoning_effort` that a
+ *  session stores (the adapter's EFFORTS). Codex has no `auto`. */
+export const CODEX_EFFORT_OPTIONS: readonly PickerOption[] = [
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+  { value: 'xhigh', label: 'Extra high' },
+  { value: 'max', label: 'Max' },
+];
+
+/**
+ * How `agent` changes its model or effort mid-session. Claude Code reads
+ * `/model <alias>` and `/effort <level>` from the prompt line (`'command'`).
+ * Codex's `/model` takes no argument — it opens a picker in the terminal —
+ * so fleet relaunches it on the same conversation with `-m` and
+ * `model_reasoning_effort` instead (`'relaunch'`, `restart_session`'s
+ * `model` / `effort`).
+ */
+export type ModelSwitchMode = 'command' | 'relaunch';
+
+/** What a session of `agent` offers in its model / effort pickers and how a
+ *  pick reaches it. `models` and `efforts` are what the composer's pickers
+ *  list mid-session; `launchModels` / `launchEfforts` what a start takes. */
+export interface AgentModelProfile {
+  mode: ModelSwitchMode;
+  models: readonly PickerOption[];
+  efforts: readonly PickerOption[];
+  launchModels: readonly PickerOption[];
+  launchEfforts: readonly PickerOption[];
+}
+
+export function agentModelProfile(agent: SessionAgent): AgentModelProfile {
+  if (agent === 'codex') {
+    return {
+      mode: 'relaunch',
+      models: CODEX_MODEL_OPTIONS,
+      efforts: CODEX_EFFORT_OPTIONS,
+      launchModels: CODEX_MODEL_OPTIONS,
+      launchEfforts: CODEX_EFFORT_OPTIONS,
+    };
+  }
+  return {
+    mode: 'command',
+    models: MODEL_OPTIONS,
+    efforts: EFFORT_OPTIONS,
+    launchModels: MODEL_OPTIONS.filter((o) => o.value !== 'default'),
+    launchEfforts: LAUNCH_EFFORT_OPTIONS,
+  };
+}
+
 /** The line a picker sends: `/model opus`, `/effort high`. `null` for an
  *  empty or multi-word value, which the REPL would not read as one argument. */
 export function pickerCommand(cmd: 'model' | 'effort', value: string): string | null {
@@ -860,9 +1130,13 @@ export function pickerCommand(cmd: 'model' | 'effort', value: string): string | 
 }
 
 /** Short label for a transcript model id: `claude-opus-5-5` → `opus 5.5`,
- *  `claude-sonnet-5[1m]` → `sonnet 5 [1m]`. Anything else is returned as-is. */
+ *  `claude-sonnet-5[1m]` → `sonnet 5 [1m]`, a Codex model by its picker
+ *  label (`GPT-6-Sol`). Anything else is returned as-is. */
 export function modelShortLabel(model: string | null): string | null {
   if (!model) return null;
+  // A Codex model reads as Codex's own picker names it: `gpt-6-sol` → `GPT-6-Sol`.
+  const codex = CODEX_MODEL_OPTIONS.find((o) => o.value === model.trim().toLowerCase());
+  if (codex) return codex.label;
   const m = /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?(\[1m\])?$/i.exec(model.trim());
   if (!m) return model;
   const ver = m[3] ? `${m[2]}.${m[3]}` : m[2];
@@ -1028,7 +1302,8 @@ export function promptHistory(conv: Conversation | null, outgoing: string[] = []
 
 export function formatTokens(n: number): string {
   if (n < 1000) return String(n);
-  if (n < 1_000_000) return `${Math.round(n / 1000)}k`;
+  // The unit follows the ROUNDED value: 999_600 is "1M", not "1000k".
+  if (n < 999_500) return `${Math.round(n / 1000)}k`;
   const m = n / 1_000_000;
   return `${Number.isInteger(m) ? m : m.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')}M`;
 }
@@ -1093,14 +1368,22 @@ function clock(unixSecs: number): string {
  *  (dropped first on a narrow header). No turn count — the header's turn
  *  index already states it, and two counts side by side read as a
  *  contradiction whenever they disagree. The menu keeps the full title. */
-export function switcherLabel(c: ConversationSummary): { when: string; source: string } {
-  return { when: c.current ? 'Current' : clock(c.started_at), source: SOURCE_LABELS[c.start_source] };
+export function switcherLabel(c: ConversationSummary, agent: SessionAgent = 'claude'): { when: string; source: string } {
+  return { when: c.current ? 'Current' : clock(c.started_at), source: sourceLabel(c, agent) };
 }
 
-export function conversationTitle(c: ConversationSummary): string {
+export function conversationTitle(c: ConversationSummary, agent: SessionAgent = 'claude'): string {
   const when = c.current ? 'Current' : clock(c.started_at);
   const turns = `${c.turns} turn${c.turns === 1 ? '' : 's'}`;
-  return `${when} · ${SOURCE_LABELS[c.start_source]} · ${turns}`;
+  return `${when} · ${sourceLabel(c, agent)} · ${turns}`;
+}
+
+/** How a conversation started. Codex has no hooks to say so: fleet finds
+ *  its conversation from the rollout, so every one reads `unknown`, which
+ *  is simply "started" there, not something gone wrong. */
+export function sourceLabel(c: Pick<ConversationSummary, 'start_source'>, agent: SessionAgent = 'claude'): string {
+  if (c.start_source === 'unknown' && agent === 'codex') return SOURCE_LABELS.startup;
+  return SOURCE_LABELS[c.start_source];
 }
 
 export function statusChip(s: Pick<SessionRow, 'claude_status' | 'current_activity'>): string | null {
@@ -1164,6 +1447,40 @@ export type ThreadRow =
   | { kind: 'turn'; turn: ConvTurn; index: number }
   | { kind: 'event'; event: InlineEvent };
 
+/** A row's time, unix seconds, or null when it has none. */
+function rowSecs(r: ThreadRow): number | null {
+  if (r.kind === 'event') return r.event.at;
+  const ms = r.turn.at ? Date.parse(r.turn.at) : NaN;
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
+}
+
+function localDay(secs: number): string {
+  const d = new Date(secs * 1000);
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+}
+
+/**
+ * The day separator above row `i` (gap plan G7.8, Control board: "Today"
+ * between the days of the chat): "Today", "Yesterday" or "Thu 8 Oct" when
+ * the row is the first of its local day, else null. The first row gets one
+ * too, so a chat always says which day it starts on. A row with no time
+ * never starts a day.
+ */
+export function daySeparator(rows: readonly ThreadRow[], i: number, nowMs: number = Date.now()): string | null {
+  const at = rowSecs(rows[i]);
+  if (at === null) return null;
+  for (let j = i - 1; j >= 0; j--) {
+    const prev = rowSecs(rows[j]);
+    if (prev === null) continue;
+    if (localDay(prev) === localDay(at)) return null;
+    break;
+  }
+  const now = Math.floor(nowMs / 1000);
+  if (localDay(at) === localDay(now)) return 'Today';
+  if (localDay(at) === localDay(now - 86_400)) return 'Yesterday';
+  return new Date(at * 1000).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' }).replace(',', '');
+}
+
 /** Interleave turns (ISO `at`) and inline events (unix secs) by time. An
  *  event goes after the last turn that started at or before it. When the
  *  tail is truncated, events older than the first loaded turn are dropped
@@ -1208,6 +1525,8 @@ const LAST_EVENT_KINDS: Record<string, (d: string | null) => string | null> = {
   compact_done: () => '/compact',
   compact_started: () => 'compacting',
   stop_failure: (d) => humanError(d).head,
+  // J8 (step 5.11): the pane rules read nothing at a turn's end.
+  pane_unreadable: () => 'screen not read',
   notification: (d) => (d && PERMISSION_KINDS.has(d) ? 'permission asked' : null),
   conversation_started: (d) => (d === 'resume' ? '/resume' : d === 'clear' ? '/clear' : null),
 };

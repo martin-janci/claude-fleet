@@ -24,6 +24,191 @@ pub fn pr_remote_link_body(url: &str, title: &str) -> Value {
     })
 }
 
+/// PURE: plain text as an Atlassian Document (Jira Cloud's comment body):
+/// a paragraph per blank-line-separated block, a hard break per single
+/// newline. No markup is read: the text is posted as written.
+pub fn text_to_adf(text: &str) -> Value {
+    let text = text.replace("\r\n", "\n");
+    let mut paragraphs = Vec::new();
+    for block in text.split("\n\n") {
+        let block = block.trim_matches('\n');
+        if block.trim().is_empty() {
+            continue;
+        }
+        let mut content = Vec::new();
+        for (i, line) in block.split('\n').enumerate() {
+            if i > 0 {
+                content.push(serde_json::json!({ "type": "hardBreak" }));
+            }
+            if !line.is_empty() {
+                content.push(serde_json::json!({ "type": "text", "text": line }));
+            }
+        }
+        paragraphs.push(serde_json::json!({ "type": "paragraph", "content": content }));
+    }
+    serde_json::json!({ "type": "doc", "version": 1, "content": paragraphs })
+}
+
+/// A Jira comment listing (`GET …/issue/{key}/comment`, API v2 or v3) as
+/// fleet's comments: the body is ADF (v3) or a string (v2), flattened by
+/// the same walk as a description. `key` must already be a validated key:
+/// the URL to each comment is built from it on `site`, never read from the
+/// answer.
+pub(crate) fn comments_of(v: &Value, site: &str, key: &str) -> Vec<super::TrackerComment> {
+    v["comments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| {
+            let id = match &c["id"] {
+                Value::String(s) => s.clone(),
+                Value::Number(n) => n.to_string(),
+                _ => return None,
+            };
+            let body = adf_capped(&c["body"], super::TRACKER_COMMENT_MAX_CHARS)
+                .map(|(t, _)| t)
+                .unwrap_or_default();
+            let url = format!("{site}/browse/{key}?focusedCommentId={id}");
+            super::TrackerComment::from_parts(
+                &id,
+                c["author"]["displayName"].as_str().unwrap_or_default(),
+                &body,
+                c["created"].as_str().unwrap_or_default(),
+                Some(&url),
+                site,
+            )
+        })
+        .collect()
+}
+
+/// The new comment's id and URL from a `POST …/comment` answer.
+pub(crate) fn posted_comment(v: &Value, site: &str, key: &str) -> super::WriteOutcome {
+    let id = match &v["id"] {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+    .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()));
+    super::WriteOutcome {
+        url: id
+            .as_ref()
+            .map(|id| format!("{site}/browse/{key}?focusedCommentId={id}")),
+        remote_id: id,
+        key: None,
+    }
+}
+
+/// The longest summary Jira takes, in characters.
+pub const SUMMARY_MAX_CHARS: usize = 255;
+
+/// PURE: a fleet title as a Jira summary: one line, at most
+/// [`SUMMARY_MAX_CHARS`] characters.
+pub fn summary_of(title: &str) -> String {
+    title
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(SUMMARY_MAX_CHARS)
+        .collect()
+}
+
+/// PURE: `s` is a Jira project key (the prefix of a ticket key).
+pub fn is_project_key(s: &str) -> bool {
+    s.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && (2..=KEY_PREFIX_MAX_CHARS).contains(&s.len())
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// PURE: the issue type a ticket fleet creates takes, from a project's
+/// create metadata (`GET …/issue/createmeta/{project}/issuetypes`: the
+/// list is `issueTypes` on Cloud and `values` on Data Center). A subtask
+/// takes the first sub-task type; a task the one named "Task", else the
+/// first standard type (hierarchy level 0), else the first that is not a
+/// sub-task. `None` when the project offers no such type.
+pub fn pick_issue_type(meta: &Value, subtask: bool) -> Option<String> {
+    let types = meta["issueTypes"]
+        .as_array()
+        .or_else(|| meta["values"].as_array())?;
+    let id = |t: &Value| match &t["id"] {
+        Value::String(s) if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) => {
+            Some(s.clone())
+        }
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    };
+    let is_sub = |t: &Value| t["subtask"].as_bool().unwrap_or(false);
+    let pick = if subtask {
+        types.iter().find(|t| is_sub(t))
+    } else {
+        types
+            .iter()
+            .find(|t| {
+                !is_sub(t)
+                    && t["name"]
+                        .as_str()
+                        .is_some_and(|n| n.eq_ignore_ascii_case("task"))
+            })
+            .or_else(|| {
+                types
+                    .iter()
+                    .find(|t| !is_sub(t) && t["hierarchyLevel"].as_i64() == Some(0))
+            })
+            .or_else(|| types.iter().find(|t| !is_sub(t)))
+    };
+    pick.and_then(id)
+}
+
+/// The `fields` of `POST …/issue` for a ticket fleet creates. `description`
+/// is the API version's own shape (ADF on Cloud, a string on Data Center).
+pub fn create_issue_body(
+    project: &str,
+    issue_type: &str,
+    title: &str,
+    description: Value,
+    parent: Option<&str>,
+) -> Value {
+    let mut fields = serde_json::json!({
+        "project": { "key": project },
+        "issuetype": { "id": issue_type },
+        "summary": summary_of(title),
+    });
+    if !description.is_null() {
+        fields["description"] = description;
+    }
+    if let Some(p) = parent {
+        fields["parent"] = serde_json::json!({ "key": p });
+    }
+    serde_json::json!({ "fields": fields })
+}
+
+/// What `POST …/issue` answered (`{"id","key","self"}`) as the outcome:
+/// the issue id, its key, and its page on `site`. An answer without a
+/// valid id and key is `Invalid`: the ticket may exist, but fleet cannot
+/// tell which one it is.
+pub(crate) fn created_issue(v: &Value, site: &str) -> Result<super::WriteOutcome, TrackerError> {
+    let id = match &v["id"] {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+    .filter(|id| !id.is_empty() && id.len() <= 24 && id.bytes().all(|b| b.is_ascii_digit()));
+    let key = v["key"]
+        .as_str()
+        .filter(|k| is_key(k))
+        .map(str::to_ascii_uppercase);
+    match (id, key) {
+        (Some(id), Some(key)) => Ok(super::WriteOutcome {
+            url: Some(format!("{site}/browse/{key}")),
+            remote_id: Some(id),
+            key: Some(key),
+        }),
+        _ => Err(TrackerError::Invalid(
+            "Jira created the issue but did not say which one".into(),
+        )),
+    }
+}
+
 /// The sprint field's `schema.custom`.
 pub const SPRINT_FIELD_SCHEMA: &str = "com.pyxis.greenhopper.jira:gh-sprint";
 /// The Epic Link field's `schema.custom` (Data Center; Cloud uses `parent`).
@@ -98,6 +283,103 @@ pub fn normalize_resolution(name: &str) -> String {
         "not_planned".into()
     } else {
         "completed".into()
+    }
+}
+
+/// The `fixVersions` field → the version names, in the tracker's order.
+/// Cloud and Data Center send the same shape (`[{ id, name, released, … }]`).
+pub(crate) fn fix_versions(v: &Value) -> Vec<String> {
+    v.as_array()
+        .map(|vs| {
+            vs.iter()
+                .filter_map(|v| v["name"].as_str())
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The `duedate` field → the due date, `YYYY-MM-DD`. Cloud and Data Center
+/// both send a bare date string (or null); anything not a calendar date is
+/// dropped rather than stored as third-party text.
+pub(crate) fn due_date(v: &Value) -> Option<String> {
+    v.as_str()
+        .map(str::trim)
+        .filter(|d| crate::store::parse_due_date(d).is_some())
+        .map(str::to_string)
+}
+
+/// Jira's priority (`fields.priority`, `{ "name": "High", … }`) → fleet's
+/// `urgent | high | medium | low`. The names of Jira's default schemes and
+/// of the older Data Center one; a site's own names (`P1`) are `None`
+/// rather than a guess.
+pub(crate) fn priority(v: &Value) -> Option<String> {
+    let name = v["name"].as_str()?.trim().to_ascii_lowercase();
+    let p = match name.as_str() {
+        "highest" | "blocker" | "critical" => "urgent",
+        "high" | "major" => "high",
+        "medium" => "medium",
+        "low" | "lowest" | "minor" | "trivial" => "low",
+        _ => return None,
+    };
+    Some(p.to_string())
+}
+
+/// `fields.labels` (an array of strings) → the label names, in order.
+pub(crate) fn labels(v: &Value) -> Vec<String> {
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
+/// The names a story-points field goes by: company-managed projects'
+/// "Story Points", team-managed ones' "Story point estimate".
+const STORY_POINTS_NAMES: [&str; 2] = ["story points", "story point estimate"];
+
+/// The story-points custom field's id among `/field`'s answer: a number
+/// field named as [`STORY_POINTS_NAMES`] (a `…:float` custom field, or
+/// Jira Software's own `jsw-story-points`), the first name winning when a
+/// site has both. `None` when the site has none.
+pub(crate) fn story_points_field(fields: &Value) -> Option<String> {
+    let fs = fields.as_array()?;
+    STORY_POINTS_NAMES.iter().find_map(|want| {
+        fs.iter()
+            .find(|f| {
+                let custom = f["schema"]["custom"].as_str().unwrap_or_default();
+                let number = f["schema"]["type"] == "number" || custom.ends_with(":float");
+                f["custom"] != false
+                    && number
+                    && f["name"]
+                        .as_str()
+                        .is_some_and(|n| n.trim().eq_ignore_ascii_case(want))
+            })
+            .and_then(|f| f["id"].as_str())
+            .map(str::to_string)
+    })
+}
+
+/// The estimate: the story points when the field has a number, else the
+/// original time estimate (`timeoriginalestimate`, seconds) in hours.
+/// `(None, None)` when neither is set.
+pub(crate) fn estimate(
+    points: &Value,
+    original_secs: &Value,
+) -> (Option<crate::store::Estimate>, Option<String>) {
+    use crate::store::Estimate;
+    if let Some(p) = points.as_f64().and_then(Estimate::new) {
+        return (Some(p), Some("points".into()));
+    }
+    match original_secs
+        .as_f64()
+        .and_then(|s| Estimate::new(s / 3600.0))
+    {
+        Some(h) => (Some(h), Some("hours".into())),
+        None => (None, None),
     }
 }
 

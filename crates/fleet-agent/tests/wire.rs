@@ -23,6 +23,7 @@ fn the_agent_decodes_a_hub_frame_and_answers_with_a_result() {
         stdout_b64: encode_b64(b"hi\n"),
         stderr_b64: String::new(),
         truncated: false,
+        chunks: 0,
     };
     assert!(encode_agent_frame(&reply)
         .expect("encodes")

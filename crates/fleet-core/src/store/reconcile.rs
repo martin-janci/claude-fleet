@@ -35,6 +35,52 @@ const KILL_MEMORY_SECS: i64 = 2
     * (crate::service::sessions::HOST_PROBE_TIMEOUT.as_secs()
         + crate::service::sessions::PR_PROBE_TIMEOUT.as_secs()) as i64;
 
+/// How much of a failed probe's message the host row keeps.
+const PROBE_ERROR_CHARS: usize = 200;
+
+/// The one write of a probe's outcome to its host row (`update_host_probe`
+/// and the reconcile burst both use it). `last_pinged_at` moves on every
+/// probe, failed ones too (down_hosts and the event diff rely on it);
+/// `last_reachable_at` moves only when the host answered, and the last probe
+/// error is set by a failed probe and cleared by an answered one (migration
+/// 150, review r13). A failed probe with no error to name keeps whatever
+/// error was recorded before.
+pub(super) fn write_host_probe(
+    conn: &rusqlite::Connection,
+    alias: &str,
+    reachable: bool,
+    claude_version: Option<&str>,
+    tmux_version: Option<&str>,
+    last_pinged_at: i64,
+    probe_error: Option<(&str, &str)>,
+) -> Result<usize, rusqlite::Error> {
+    let (code, message) = match probe_error {
+        Some((code, message)) => (
+            Some(code),
+            Some(message.chars().take(PROBE_ERROR_CHARS).collect::<String>()),
+        ),
+        None => (None, None),
+    };
+    conn.execute(
+        "UPDATE hosts SET reachable=?1, claude_version=?2, tmux_version=?3, last_pinged_at=?4, \
+             last_reachable_at = CASE WHEN ?1 = 1 THEN ?4 ELSE last_reachable_at END, \
+             last_probe_error_code = CASE WHEN ?1 = 1 THEN NULL \
+                 ELSE COALESCE(?6, last_probe_error_code) END, \
+             last_probe_error = CASE WHEN ?1 = 1 THEN NULL \
+                 WHEN ?6 IS NOT NULL THEN ?7 ELSE last_probe_error END \
+         WHERE alias=?5",
+        rusqlite::params![
+            if reachable { 1 } else { 0 },
+            claude_version,
+            tmux_version,
+            last_pinged_at,
+            alias,
+            code,
+            message,
+        ],
+    )
+}
+
 type KillMap = std::collections::HashMap<(String, String), i64>;
 
 /// The sessions fleet itself killed recently: `(host_alias, tmux_name)` →
@@ -65,6 +111,41 @@ impl KillMemory {
         kills
     }
 }
+
+// **There is deliberately no owner intent here, and there must not be one
+// again** (multi-user M1, T5 and its review).
+//
+// The shape that kept being reached for: a create path says, before
+// `tmux new-session` runs, whose the next `sessions` row under
+// `(host_alias, tmux_name)` will be, and whichever reconcile pass inserts
+// the row stamps that owner on it. It is tempting because no create path
+// inserts a row of its own — `service::sessions::new_session` starts tmux and
+// lets the reconcile upsert create the row, the SAME statement that creates a
+// row for a session somebody started by hand (spec §3.1 / §3.2) — so at the
+// moment of writing, a name is the only thing the create path and the pass
+// share.
+//
+// **A name is not an identity.** Three successive attempts guarded that
+// mechanism and each one moved the hole instead of closing it, because a tmux
+// name is reused and re-usable by anyone with host access:
+//
+// * the upsert applied the intent on its `DO UPDATE` branch as well as on
+//   INSERT, so an intent filed for a name that already had an `unclaimed`
+//   row was stamped onto THAT row by the next pass — somebody else's session
+//   acquired by asking to start one under its name, no race needed;
+// * refusing a name that already has a row leaves the case with no row YET —
+//   a live, hand-started tmux session that reconcile has not reached — still
+//   claimable by naming it;
+// * the map is one slot per `(host, name)`, so two concurrent creates of one
+//   name cross-stamp, last writer wins.
+//
+// So reconcile names no owner at all. Every row this upsert inserts is
+// `owner_person_id = NULL` / `unclaimed` (spec §4.3, the safe holding
+// state), and the ONE mechanism that stamps an owner is
+// [`Store::claim_if_unclaimed`], keyed on the row id and refusing a row that
+// is already somebody else's — `service::sessions::finalize_new_session`
+// calls it once the row exists. What that trades, and why the trade is
+// right, is written on `finalize_new_session`.
 
 /// Whether an observation whose probe started at `probe_started_at` may
 /// INSERT a row for a name fleet killed at `killed_at` (`None` = not killed
@@ -227,6 +308,7 @@ impl Store {
         Ok(deleted)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn update_host_probe_in_tx(
         tx: &rusqlite::Connection,
         alias: &str,
@@ -234,20 +316,20 @@ impl Store {
         claude_version: Option<&str>,
         tmux_version: Option<&str>,
         last_pinged_at: i64,
+        probe_error: Option<(&str, &str)>,
         out: &mut Vec<RowChange>,
     ) -> Result<(), rusqlite::Error> {
         // Read before the write, so the emit below can tell a probe that found
         // something new from one that found the host exactly as it was.
         let prior = fetch_host(tx, alias)?;
-        tx.execute(
-            "UPDATE hosts SET reachable=?1, claude_version=?2, tmux_version=?3, last_pinged_at=?4 WHERE alias=?5",
-            rusqlite::params![
-                if reachable { 1 } else { 0 },
-                claude_version,
-                tmux_version,
-                last_pinged_at,
-                alias
-            ],
+        write_host_probe(
+            tx,
+            alias,
+            reachable,
+            claude_version,
+            tmux_version,
+            last_pinged_at,
+            probe_error,
         )?;
         if let Some(row) = fetch_host(tx, alias)? {
             // Reconcile probes every host every pass, and `last_pinged_at`
@@ -260,6 +342,9 @@ impl Store {
             let only_the_stamp_moved = prior.is_some_and(|before| {
                 HostRow {
                     last_pinged_at: row.last_pinged_at,
+                    // Moves with the ping while the host answers; the ping
+                    // handlers derive it from `reachable` (hosts.ts).
+                    last_reachable_at: row.last_reachable_at,
                     claude_version_at: row.claude_version_at,
                     disk_home_free_kb: row.disk_home_free_kb,
                     disk_home_total_kb: row.disk_home_total_kb,
@@ -268,6 +353,11 @@ impl Store {
                     mem_avail_kb: row.mem_avail_kb,
                     uptime_secs: row.uptime_secs,
                     health_at: row.health_at,
+                    cpu_count: row.cpu_count,
+                    mem_total_kb: row.mem_total_kb,
+                    boot_at: row.boot_at,
+                    latency_ms: row.latency_ms,
+                    worktree_kb: row.worktree_kb,
                     ..before
                 } == row
             });
@@ -442,6 +532,14 @@ impl Store {
         // The INSERT path has the same guard against the remembered kill
         // (`killed_at` above), for the case where the row is already gone.
         const NOT_STALE: &str = "lost_at IS NULL OR (?20 > 0 AND ?20 > lost_at)";
+        // Ownership (multi-user M1, T5, and its review). Reconcile NAMES NO
+        // OWNER: every row it inserts is `owner_person_id = NULL` /
+        // `unclaimed` (spec §4.3), and the `DO UPDATE` branch below touches
+        // neither column, so no reconcile pass can stamp, re-home, un-own or
+        // widen a session. The one mechanism that writes an owner is
+        // `Store::claim_if_unclaimed`, keyed on a row id; the name-keyed
+        // intent this statement used to read is gone for good, and the long
+        // note above it says why it must not come back.
         // A hook/transcript context value younger than 120 s outranks the
         // pane footer (spec §1.5) — unless it belongs to the conversation
         // this pass moves the row away from.
@@ -454,7 +552,8 @@ impl Store {
                                    claude_session_id, claude_status, effort_level, pr_url, current_activity,
                                    context_pct, stuck_kind, ci_status, idle_since, stuck_since,
                                    tmux_pane_id, context_source, context_at, pending_input,
-                                   last_reconciled_at, pane_working_at, pr_evidence, pr_checked_at)
+                                   last_reconciled_at, pane_working_at, pr_evidence, pr_checked_at,
+                                   owner_person_id, visibility)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', ?7, ?8, NULL, {guarded_id}, ?10, ?11, ?12, ?13,
                      ?14, ?15, ?17,
                      CASE WHEN ?10 IN ('idle','completed','stopped') THEN ?19 ELSE NULL END,
@@ -466,9 +565,15 @@ impl Store {
                      ?23,
                      CASE WHEN ?25 THEN ?19 ELSE NULL END,
                      CASE WHEN ?18 THEN ?26 ELSE NULL END,
-                     CASE WHEN ?18 AND ?12 IS NOT NULL THEN ?19 ELSE NULL END)
+                     CASE WHEN ?18 AND ?12 IS NOT NULL THEN ?19 ELSE NULL END,
+                     NULL,
+                     'unclaimed')
              ON CONFLICT(host_alias, tmux_name) DO UPDATE SET
-               project_id=excluded.project_id,
+               -- A pane whose directory is in no project keeps the project
+               -- a fleet-run row already has: a person adopted it into one
+               -- (Lost and found, step 4.12), or it cd'd out of its checkout.
+               project_id=CASE WHEN excluded.project_id IS NULL AND started_at IS NOT NULL
+                               THEN project_id ELSE excluded.project_id END,
                last_activity_at=excluded.last_activity_at,
                account_uuid=COALESCE(excluded.account_uuid, account_uuid),
                worktree_key=COALESCE(excluded.worktree_key, worktree_key),
@@ -560,6 +665,9 @@ impl Store {
                -- `last_reconciled_at`: not a `SessionRow` field, not watched
                -- by the row_version trigger, so stamping it never emits.
                pane_working_at=CASE WHEN ?25 THEN ?19 ELSE pane_working_at END
+               -- `owner_person_id` and `visibility` are deliberately ABSENT
+               -- from this SET list (T5's review): a pass must never be able
+               -- to touch either. See the ownership note above.
              WHERE {not_stale}",
             new_stuck = NEW_STUCK,
             new_pending = NEW_PENDING,
@@ -610,9 +718,48 @@ impl Store {
                 // `eq_ignoring_row_version`; since migration 063 a no-op pass
                 // leaves it alone too) ⇒ a no-op pass; emit nothing.
                 Some(ref before) if before.eq_ignoring_row_version(&row) => {}
-                Some(_) => out.push(RowChange::SessionUpdated(row)),
+                Some(before) => {
+                    // Its PR's checks moved: the missions it works for
+                    // look now (orchestration O8), not at their timer.
+                    if before.ci_status != row.ci_status {
+                        super::mission_loop::wake_session_missions_in_tx(tx, row.id)?;
+                    }
+                    out.push(RowChange::SessionUpdated(row))
+                }
             }
         }
+        Ok(())
+    }
+
+    /// Upsert the PR one session's probe saw (redesign 6.4). The session's
+    /// row was written just before, so its id and name are read back here; a
+    /// row the stale-sighting guard refused to revive records nothing.
+    fn record_session_pr_in_tx(
+        tx: &rusqlite::Connection,
+        host_alias: &str,
+        sess: &ReconcileSession<'_>,
+        url: &str,
+    ) -> Result<(), rusqlite::Error> {
+        let Some(row) = fetch_session(tx, sess.tmux_name, host_alias)? else {
+            return Ok(());
+        };
+        if row.lost_at.is_some() {
+            return Ok(());
+        }
+        let name = row.friendly_name.as_deref().unwrap_or(&row.tmux_name);
+        Self::upsert_pull_request_in_tx(
+            tx,
+            url,
+            sess.ci_status.as_deref(),
+            sess.pr_evidence.as_ref(),
+            super::PrSeenBy {
+                session_id: row.id,
+                session_name: name,
+                host_alias,
+                project_id: row.project_id,
+            },
+            now_unix(),
+        )?;
         Ok(())
     }
 
@@ -775,6 +922,9 @@ impl Store {
 
         // ── Phase 2: hard-delete sessions that were already ghost before this cycle
         if !pre_ghost_ids.is_empty() {
+            // Their facts, before the `DELETE` below: `session:killed` is
+            // fenced by them (`store::sessions::killed_payloads`).
+            let killed = super::sessions::killed_payloads(tx, &pre_ghost_ids)?;
             let phs = in_clause(pre_ghost_ids.len());
             // No FK cascade on session_events — delete them with the row or
             // they linger as orphans forever.
@@ -796,8 +946,8 @@ impl Store {
                 &format!("DELETE FROM sessions WHERE id IN ({phs})"),
                 rusqlite::params_from_iter(&pre_ghost_ids),
             )?;
-            for id in &pre_ghost_ids {
-                out.push(RowChange::SessionKilled(*id));
+            for k in killed {
+                out.push(RowChange::SessionKilled(k));
             }
         }
 
@@ -828,6 +978,25 @@ impl Store {
         &self,
         spec: HostReconcile<'_>,
     ) -> Result<(), rusqlite::Error> {
+        self.apply_host_reconcile_with_error(spec, None)
+    }
+
+    /// [`Self::apply_host_reconcile`] for a probe that failed: `error`
+    /// (code, message) is kept on the host row as its last probe error
+    /// (migration 150) so the offline state can say why.
+    pub fn apply_host_reconcile_failed(
+        &mut self,
+        spec: HostReconcile<'_>,
+        error: (&str, &str),
+    ) -> Result<(), rusqlite::Error> {
+        self.apply_host_reconcile_with_error(spec, Some(error))
+    }
+
+    fn apply_host_reconcile_with_error(
+        &self,
+        spec: HostReconcile<'_>,
+        probe_error: Option<(&str, &str)>,
+    ) -> Result<(), rusqlite::Error> {
         // What this host's names were killed at (#171). Not a
         // check-then-insert window: the caller holds the one `Mutex<Store>`
         // for this whole call, and `mark_session_killed` — the only writer of
@@ -844,6 +1013,7 @@ impl Store {
                 spec.claude_version,
                 spec.tmux_version,
                 spec.last_pinged_at,
+                probe_error,
                 &mut out,
             )?;
             // Only a reachable probe rewrites the session set. An unreachable
@@ -889,6 +1059,11 @@ impl Store {
                         pr_evidence_json.as_deref(),
                         &mut out,
                     )?;
+                    // Redesign 6.4: the PR this pass saw on the session's
+                    // branch, kept in `pull_requests` past the session.
+                    if let (true, Some(url)) = (sess.pr_observed, sess.pr_url.as_deref()) {
+                        Self::record_session_pr_in_tx(tx, spec.alias, sess, url)?;
+                    }
                     if let Some(pid) = sess.project_id {
                         let latest = project_touch.entry(pid).or_insert(0);
                         *latest = (*latest).max(sess.last_activity_at);
@@ -938,11 +1113,11 @@ impl Store {
                             "[session] {kind}"
                         );
                     }
-                    RowChange::SessionKilled(id) => {
+                    RowChange::SessionKilled(k) => {
                         tracing::info!(
                             lifecycle = kind,
                             host_alias = %spec.alias,
-                            session_id = id,
+                            session_id = k.id,
                             "[session] {kind}"
                         );
                     }
@@ -1071,6 +1246,17 @@ mod tests {
             work_rev: 0,
             pr_evidence: None,
             pr_checked_at: None,
+            owner_person_id: None,
+            visibility: crate::store::VISIBILITY_UNCLAIMED.into(),
+            claude_profile: None,
+            agent: crate::store::AGENT_CLAUDE.into(),
+            origin: None,
+            origin_ref: None,
+            last_viewed_at: None,
+            turn_outcome: None,
+            proposals: Vec::new(),
+            pending_form: None,
+            form_draft: None,
             parent_session_id: None,
             tags: Vec::new(),
             usage: Default::default(),
@@ -1108,7 +1294,20 @@ mod tests {
             agent_version: None,
             provisioned_at: None,
             provision_stale: false,
+            unclaimed_sessions: None,
             provision_warning: None,
+            auth_overrides: None,
+            claude_profiles: None,
+            cpu_count: None,
+            mem_total_kb: None,
+            boot_at: None,
+            latency_ms: None,
+            worktree_kb: None,
+            worktree_at: None,
+            agents_on_path: None,
+            last_reachable_at: None,
+            last_probe_error_code: None,
+            last_probe_error: None,
             harnesses: None,
         }
     }
@@ -1124,7 +1323,7 @@ mod tests {
             Some("lost")
         );
         assert_eq!(
-            lifecycle_kind(&RowChange::SessionKilled(1)),
+            lifecycle_kind(&RowChange::SessionKilled(1.into())),
             Some("deleted")
         );
     }
@@ -1277,6 +1476,76 @@ mod tests {
         }
     }
 
+    /// Redesign 6.4: reconcile records the PR a session's probe saw in
+    /// `pull_requests`, marks it merged when the probe says so, and the row
+    /// outlives the session.
+    #[test]
+    fn reconcile_marks_a_pr_merged_and_keeps_it_past_the_session() {
+        let (mut store, _bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        let pid = store.upsert_project("o", "r", "/base/r").unwrap();
+        let url = "https://github.com/o/r/pull/9";
+        let ev = |state: &str, merged_at: Option<i64>| crate::service::outcome::PrEvidence {
+            state: Some(state.into()),
+            title: Some("Add PRs view".into()),
+            head_ref: Some("feat/prs".into()),
+            merged_at,
+            ..Default::default()
+        };
+        let pass = |store: &mut Store, ts: i64, sessions: &[ReconcileSession<'_>]| {
+            let keep: Vec<String> = sessions.iter().map(|s| s.tmux_name.to_string()).collect();
+            store
+                .apply_host_reconcile(HostReconcile {
+                    sessions,
+                    keep: &keep,
+                    ..empty_probe("alpha", ts)
+                })
+                .unwrap();
+        };
+        let open = vec![ReconcileSession {
+            pr_url: Some(url.into()),
+            ci_status: Some("pending".into()),
+            pr_observed: true,
+            pr_evidence: Some(ev("OPEN", None)),
+            ..live_session("s1", pid, 10)
+        }];
+        pass(&mut store, 1, &open);
+        let sid = store.get_session("s1", "alpha").unwrap().unwrap().id;
+        let rows = store.list_pull_requests(&["OPEN"]).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].session_id, Some(sid), "the session that opened it");
+        assert_eq!(rows[0].project_id, Some(pid));
+        assert_eq!(rows[0].number, Some(9));
+        assert_eq!(rows[0].title.as_deref(), Some("Add PRs view"));
+        assert_eq!(rows[0].merged_at, None);
+
+        // A pass that did not probe the PR changes nothing.
+        let unprobed = vec![live_session("s1", pid, 11)];
+        pass(&mut store, 2, &unprobed);
+        assert_eq!(store.list_pull_requests(&["OPEN"]).unwrap().len(), 1);
+
+        let merged = vec![ReconcileSession {
+            pr_url: Some(url.into()),
+            ci_status: Some("passing".into()),
+            pr_observed: true,
+            pr_evidence: Some(ev("MERGED", Some(1_791_460_800))),
+            ..live_session("s1", pid, 12)
+        }];
+        pass(&mut store, 3, &merged);
+        assert!(store.list_pull_requests(&["OPEN"]).unwrap().is_empty());
+        let m = store.list_pull_requests(&["MERGED"]).unwrap();
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].merged_at, Some(1_791_460_800));
+        assert_eq!(m[0].ci_status.as_deref(), Some("passing"));
+
+        // The session goes; the merged PR stays listed.
+        store
+            .conn_ref()
+            .execute("DELETE FROM sessions WHERE id = ?1", [sid])
+            .unwrap();
+        assert_eq!(store.list_pull_requests(&["MERGED"]).unwrap().len(), 1);
+    }
+
     /// `stale_demoted_at` is a server-only `SessionRow` field (migration
     /// 080): a pass whose only change is lifting it (the row reads
     /// `working`) is not a client-visible change and emits no
@@ -1323,6 +1592,92 @@ mod tests {
             bus.take(),
             vec!["host:pinged:alpha".to_string()],
             "a veto-only change must emit no session event"
+        );
+    }
+
+    /// Migration 099's conversation-owner triggers have to survive the
+    /// RECONCILE path, and the first version of them did not.
+    ///
+    /// `INSERT OR IGNORE` and `ON CONFLICT … DO NOTHING` mean the same thing
+    /// in a statement run on its own — and NOT inside a trigger body, when
+    /// the statement that FIRES the trigger carries its own conflict clause:
+    /// SQLite lets the outer one override an `OR` clause in the body, and
+    /// `upsert_session_in_tx` writes `… ON CONFLICT(host_alias, tmux_name)
+    /// DO UPDATE SET …`. So the IGNORE was silently an ABORT on exactly this
+    /// path, and a second row resuming a conversation another row had
+    /// already recorded failed the WHOLE pass with
+    /// `UNIQUE constraint failed: conversation_owners.claude_session_id`.
+    ///
+    /// Nothing in this crate caught it: every other test of those triggers
+    /// writes `sessions` with a plain statement, which honours `OR IGNORE`.
+    /// `scripts/hub-e2e.sh`'s work-graph block did, 33 failed checks deep in
+    /// a cascade from one root failure — which is the argument for keeping
+    /// that block gated-but-run in CI rather than trusting the unit suite.
+    #[test]
+    fn a_reconcile_pass_may_reuse_a_claude_session_id_and_the_first_owner_stands() {
+        let (mut store, _bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        let pid = store.upsert_project("o", "r", "/base/r").unwrap();
+        let ada = store.create_person("ada", None).unwrap().id;
+        let bob = store.create_person("bob", None).unwrap().id;
+        assert_ne!(ada, bob, "two distinct owners, or this measures nothing");
+        let keep = vec!["a".to_string(), "b".to_string()];
+
+        // Two live rows on one host, one owned by each person.
+        store
+            .apply_host_reconcile(HostReconcile {
+                sessions: &[live_session("a", pid, 10), live_session("b", pid, 10)],
+                keep: &keep,
+                ..empty_probe("alpha", 1)
+            })
+            .unwrap();
+        let a = store.get_session("a", "alpha").unwrap().unwrap().id;
+        let b = store.get_session("b", "alpha").unwrap().unwrap().id;
+        store.claim_if_unclaimed(a, Some(ada)).unwrap();
+        store.claim_if_unclaimed(b, Some(bob)).unwrap();
+
+        // Ada's row picks up a conversation: the trigger records it as hers.
+        store
+            .apply_host_reconcile(HostReconcile {
+                sessions: &[
+                    ReconcileSession {
+                        claude_session_id: Some("conv-x".to_string()),
+                        ..live_session("a", pid, 11)
+                    },
+                    live_session("b", pid, 11),
+                ],
+                keep: &keep,
+                ..empty_probe("alpha", 2)
+            })
+            .unwrap();
+        assert_eq!(store.conversation_owner("conv-x").unwrap(), Some(ada));
+
+        // Bob's row now resumes the SAME conversation. This is the pass that
+        // used to abort — and the one the e2e hit, because a resume, a
+        // recreate and `resume_claude_session_id` all reach it.
+        store
+            .apply_host_reconcile(HostReconcile {
+                sessions: &[
+                    ReconcileSession {
+                        claude_session_id: Some("conv-x".to_string()),
+                        ..live_session("a", pid, 12)
+                    },
+                    ReconcileSession {
+                        claude_session_id: Some("conv-x".to_string()),
+                        ..live_session("b", pid, 12)
+                    },
+                ],
+                keep: &keep,
+                ..empty_probe("alpha", 3)
+            })
+            .expect("a reused claude_session_id must not fail the reconcile pass");
+
+        assert_eq!(
+            store.conversation_owner("conv-x").unwrap(),
+            Some(ada),
+            "first writer wins: Bob's row resuming the conversation must not \
+             re-home who it belonged to — that record is what the resume gate \
+             and the summary fence both ask about"
         );
     }
 
@@ -1373,6 +1728,7 @@ mod tests {
         let first = upsert(&mut store, 10);
         assert_eq!(first.len(), 1);
         assert!(matches!(first[0], RowChange::SessionCreated(_)));
+
         let second = upsert(&mut store, 10);
         assert!(
             second.is_empty(),
@@ -1382,6 +1738,169 @@ mod tests {
         let third = upsert(&mut store, 11);
         assert_eq!(third.len(), 1);
         assert!(matches!(third[0], RowChange::SessionUpdated(_)));
+    }
+
+    /// Ownership (multi-user M1, T5 and its review): **reconcile names no
+    /// owner.** The upsert takes no owner argument any more — the name-keyed
+    /// reservation it used to read is deleted — so this pins the two
+    /// statements that are left: every row it INSERTS is nobody's, and its
+    /// `DO UPDATE` branch cannot touch either ownership column, in any
+    /// direction, for any row.
+    #[test]
+    fn a_reconcile_pass_never_writes_ownership() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let upsert = |store: &mut Store, activity: i64, probe: i64| {
+            store
+                .with_transaction(|tx| {
+                    let mut out = Vec::new();
+                    Store::upsert_session_in_tx(
+                        tx,
+                        "s1",
+                        "alpha",
+                        None,
+                        None,
+                        1,
+                        activity,
+                        None,
+                        Some("main"),
+                        None,
+                        Some("idle"),
+                        None,
+                        None,
+                        None,
+                        Some(12.5),
+                        None,
+                        true,
+                        None,
+                        false,
+                        probe,
+                        None,
+                        None,
+                        None,
+                        None,
+                        false,
+                        None,
+                        &mut out,
+                    )?;
+                    Ok(out)
+                })
+                .unwrap()
+        };
+        upsert(&mut store, 10, 0);
+        // The INSERT: nobody's, and `unclaimed` — the safe holding state
+        // (spec §4.3), which is the answer for a session reconcile merely
+        // found on the host AND for one fleet is in the middle of creating.
+        let discovered = store.get_session("s1", "alpha").unwrap().unwrap();
+        assert_eq!(discovered.owner_person_id, None);
+        assert_eq!(discovered.visibility, crate::store::VISIBILITY_UNCLAIMED);
+
+        // The claim is somebody else's job, keyed on the row id.
+        let ann = store.create_person("ann", None).unwrap().id;
+        assert!(store.claim_if_unclaimed(discovered.id, Some(ann)).unwrap());
+        let claimed = store.get_session("s1", "alpha").unwrap().unwrap();
+        assert_eq!(claimed.owner_person_id, Some(ann));
+        assert_eq!(claimed.visibility, crate::store::VISIBILITY_PRIVATE);
+
+        // And no number of later passes moves it — neither un-owning the row
+        // nor widening its visibility, the two things a pass could break.
+        for activity in 11..15 {
+            upsert(&mut store, activity, 0);
+            let kept = store.get_session("s1", "alpha").unwrap().unwrap();
+            assert_eq!(kept.owner_person_id, Some(ann), "pass {activity} re-owned");
+            assert_eq!(kept.visibility, crate::store::VISIBILITY_PRIVATE);
+        }
+
+        // A row explicitly made somebody's PRIVATE stays private across a
+        // resurrect, too: ghost the row, then let a pass revive it.
+        store
+            .conn_ref()
+            .execute(
+                "UPDATE sessions SET status='ghost', lost_at=10 WHERE tmux_name='s1'",
+                [],
+            )
+            .unwrap();
+        // A probe that started AFTER the loss, or `NOT_STALE` refuses the
+        // whole `DO UPDATE` and there is no resurrect to judge.
+        upsert(&mut store, 20, 11);
+        let revived = store.get_session("s1", "alpha").unwrap().unwrap();
+        assert_eq!(revived.status, "running", "the resurrect still happens");
+        assert_eq!(revived.owner_person_id, Some(ann));
+        assert_eq!(revived.visibility, crate::store::VISIBILITY_PRIVATE);
+    }
+
+    #[test]
+    fn a_failed_probe_keeps_its_error_and_the_last_reachable_stamp() {
+        // Review r13: `last_pinged_at` moves on a failed probe (down_hosts
+        // and the event diff rely on it), so "last answered" needs its own
+        // stamp, and the offline state needs the reason.
+        let (mut store, bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        store
+            .apply_host_reconcile(empty_probe("alpha", 100))
+            .unwrap();
+        let up = store.get_host_row("alpha").unwrap().unwrap();
+        assert_eq!(up.last_reachable_at, Some(100));
+        assert_eq!(up.last_probe_error_code, None);
+
+        let down = || HostReconcile {
+            reachable: false,
+            ..empty_probe("alpha", 200)
+        };
+        bus.take();
+        store
+            .apply_host_reconcile_failed(down(), ("E_SSH_TIMEOUT", "ssh timed out"))
+            .unwrap();
+        let h = store.get_host_row("alpha").unwrap().unwrap();
+        assert!(!h.reachable);
+        assert_eq!(h.last_pinged_at, Some(200), "the ping still moves");
+        assert_eq!(h.last_reachable_at, Some(100), "last answered stays put");
+        assert_eq!(h.last_probe_error_code.as_deref(), Some("E_SSH_TIMEOUT"));
+        assert_eq!(h.last_probe_error.as_deref(), Some("ssh timed out"));
+        assert_eq!(bus.names(), vec!["host:probed"], "the error is news");
+
+        // The same failure again is only a ping.
+        bus.take();
+        store
+            .apply_host_reconcile_failed(
+                HostReconcile {
+                    last_pinged_at: 300,
+                    ..down()
+                },
+                ("E_SSH_TIMEOUT", "ssh timed out"),
+            )
+            .unwrap();
+        assert_eq!(bus.names(), vec!["host:pinged"]);
+
+        // A long message is cut short.
+        let long = "x".repeat(1000);
+        store
+            .apply_host_reconcile_failed(down(), ("E_SSH", &long))
+            .unwrap();
+        let h = store.get_host_row("alpha").unwrap().unwrap();
+        assert_eq!(
+            h.last_probe_error.unwrap().chars().count(),
+            PROBE_ERROR_CHARS
+        );
+
+        // The next answered probe clears the error and moves the stamp.
+        store
+            .apply_host_reconcile(empty_probe("alpha", 400))
+            .unwrap();
+        let h = store.get_host_row("alpha").unwrap().unwrap();
+        assert_eq!(h.last_reachable_at, Some(400));
+        assert_eq!(h.last_probe_error_code, None);
+        assert_eq!(h.last_probe_error, None);
+
+        // update_host_probe shares the write.
+        store
+            .update_host_probe("alpha", false, None, None, 500)
+            .unwrap();
+        let h = store.get_host_row("alpha").unwrap().unwrap();
+        assert_eq!(
+            (h.last_pinged_at, h.last_reachable_at),
+            (Some(500), Some(400))
+        );
     }
 
     #[test]
@@ -1666,7 +2185,10 @@ mod tests {
                 n: 1,
                 label: "Yes".into(),
                 selected: true,
+                checked: false,
             }],
+            multi: false,
+            detail: None,
         };
         let pass = |store: &mut Store, pending: Option<PendingInput>, observed: bool| {
             let sessions = vec![ReconcileSession {
@@ -2223,6 +2745,27 @@ mod tests {
         // A pass that started after the submit is authoritative.
         let row = pass(&mut s, hook_at + 3);
         assert_eq!(row.claude_status.as_deref(), Some("idle"));
+    }
+
+    /// Adopt into (step 4.12): a fleet-run row keeps the project a person
+    /// put it in while its pane's directory is in no project; a row fleet
+    /// does not run follows the observation as before.
+    #[test]
+    fn a_fleet_run_row_keeps_its_project_when_the_pane_is_in_none() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let pid = s
+            .upsert_project("acme", "papaya-pos", "/p/acme/papaya-pos")
+            .unwrap();
+        let r = reconcile_one(&mut s, "scratch", None, None, None);
+        s.set_session_project(r.id, pid).unwrap();
+        let r = reconcile_one(&mut s, "scratch", None, None, None);
+        assert_eq!(r.project_id, None, "not fleet's: the observation wins");
+
+        s.set_session_project(r.id, pid).unwrap();
+        s.set_started_at(r.id, 5).unwrap();
+        let r = reconcile_one(&mut s, "scratch", None, None, None);
+        assert_eq!(r.project_id, Some(pid), "adopted into it: kept");
     }
 
     #[test]
@@ -3752,9 +4295,17 @@ mod tests {
             .rename_session_row("alpha", "dev-a", "dev-b", t)
             .unwrap_err();
         assert_eq!(err.code, crate::ipc_error::codes::E_EXISTS);
+        // Multi-user M1 (T10): the lost row's id is NOT in the message — it
+        // may be another person's row, and `dev-b` is the caller's own
+        // argument. What the refusal must still say is which name is taken.
         assert!(
-            err.message.contains(&format!("id {lost}")),
+            err.message.contains("dev-b belongs to a lost session"),
             "{}",
+            err.message
+        );
+        assert!(
+            !err.message.contains(&format!("id {lost}")),
+            "no row id: {}",
             err.message
         );
         assert_eq!(

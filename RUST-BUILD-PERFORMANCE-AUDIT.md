@@ -16,8 +16,10 @@ A/B benchmark says so.
 > O3, toolchain pin), D (#425: SQLite memstatus off, template test DB),
 > E (#428: contract tests out of fleet-core's build inputs, the agent e2e
 > crate), F (#429: `fleet-fast-check`), G (the test-target split
-> experiment), H (cargo-nextest, partitions and build-once/run-many) and I
-> (a persistent Linux builder simulated on 4 vCPU, and a Buildkite POC).
+> experiment), H (cargo-nextest, partitions and build-once/run-many), I
+> (a persistent Linux builder simulated on 4 vCPU, and a Buildkite POC),
+> J (the macOS runner's memory, and what a test-target split would free)
+> and K (the agent's verification loop end to end, and `scripts/verify.sh`).
 > Where a later measurement overturns a recommendation below,
 > that passage carries an *Update* note. For a fleet-core edit on the same
 > 4 vCPU machine, the numbers today are:
@@ -29,7 +31,7 @@ A/B benchmark says so.
 > | test build after the edit | 39 s | 27–30 s |
 > | `.ts` mirror / `lib.rs` / doc edit, test build | 29–34 s | **0.4 s / 4.8 s / 0.4 s** |
 > | `cargo test --workspace`, warm | 16 min 14 s | **2 min 26 s** |
-> | CI wall per run | 35.5 min | 11–18 min (the Windows leg) |
+> | CI wall per run | 35.5 min | **6:52** (main after #438; J) |
 
 ## 1. Executive dashboard
 
@@ -101,6 +103,8 @@ TARGET SIZE                     after build 9.9 GB · + test 21 GB · + check/cl
 | 6 | **Split fleet-core** along store / trackers / MCP / base, and move cross-crate e2e/contract tests into their own test crate | An integration edit stops recompiling 155k LOC. Agent/`lib.rs`/`.ts` edits stop rebuilding the 326k-LOC test target (−29–34 s each, measured as current cost). **Needs per-step A/B** | High (module cycles) | Medium |
 
 *Update (Appendices E, G):* the contract/e2e half of row 6 is done (PR #428). The split half was measured and is **not** worth doing for build speed. Taking every test out of fleet-core's test target at once saves at most 8.5 s of test build and 6.6 s of check, and `fleet-fast-check` already reaches that check ceiling. No single module saves more than 4.4 s, and the one that does needs ≥ 59 private items.
+
+*Update (Appendix J):* the same holds for memory. Taking every test out would cut fleet-core's test-target peak from 5.98 to 3.42 GiB, but the groups that can move cleanly take off only 0.65 GiB (−11 %). The library and its test target compile at the same time, so the macOS runner still needs ≈ 8.4 GiB against 7 GiB.
 
 ## 4. Verified architecture
 
@@ -2522,3 +2526,165 @@ therefore test a higher-core persistent Linux builder; source-level build
 optimisations are no longer the primary lever. The build-performance audit
 is complete enough for the work to move from finding optimisations to
 designing the real Buildkite infrastructure.
+
+## Appendix J — macOS memory and the fleet-core test-target split (2026-10-04)
+
+Question: after PRs #435–#439 (Windows bundle in its own job, docs-only
+PRs skip the Rust jobs, the test-suite tails, clippy in its own job, the
+Windows upgrade-test budget), main's CI run is 6:52 and the macOS `rust`
+leg 5:54. Is its compile memory-bound on the 7 GB runner, and would
+splitting fleet-core's tests out of its test target fix that? Both halves
+are measurements only: the probe ran on draft PR #440 (closed unmerged),
+and the split was simulated in a scratch tree. No code changed.
+
+Units below are GiB (2^30 bytes).
+
+### J.1 The macOS runner under the workspace build (PR #440)
+
+* **Runner**: `macos-latest` (image `macos-26-arm64`), Apple M1 (Virtual),
+  3 CPUs, 7.0 GiB, **no swap configured** (`vm.swapusage` total 0).
+* **Method**: CI settings (`CARGO_INCREMENTAL=0`). `cargo test --workspace
+  --no-run` once to warm dependencies, then `cargo clean -p` on the seven
+  workspace crates and the same command again, measured under
+  `/usr/bin/time -l`. A sampler logged `vm_stat`, `vm.swapusage` and
+  `memory_pressure` every 2 s. Two legs, one sample each: cargo's default
+  jobs (3) and `-j 1`.
+
+| | default (3 jobs) | `-j 1` |
+|---|---:|---:|
+| wall | **361 s** | **509 s** (+41 %) |
+| user + sys | 590 + 114 = 704 s | 443 + 49 = 492 s |
+| max RSS (largest child) | 2.98 | 2.98 |
+| compressor, peak (16 KiB pages) | 226k pages ≈ 3.45 | 180k pages ≈ 2.74 |
+| lowest free % (`memory_pressure`) | 38 % | 47 % |
+| page-outs during the build | 2.4k | 4.8k |
+| swap used / swap-outs | 0 / 0 | 0 / 0 |
+
+What it shows:
+
+1. **The build is memory-bound, and macOS absorbs it by compression.**
+   Free pages sat at 2–5k through the heavy phase, and the compressor
+   grew to ≈ 3.45 GiB. Nothing was swapped: the runner has no swap.
+2. **The pressure comes from one unit, not from parallelism.** Under `-j 1`
+   the compressor stays near 50k pages for the first ~290 s, climbs to 180k
+   during the last and longest unit (by duration, fleet-core's test
+   target), and drops back to ~68k when it finishes.
+3. **Serialising is the wrong fix.** The default leg pays for compression
+   (sys 114 s against 49 s; 212 s more CPU in all) and is still 148 s
+   faster. Keep cargo's default parallelism.
+
+### J.2 How much a split would take off (4 vCPU Linux)
+
+* **Method**: CI settings (`CARGO_INCREMENTAL=0`) and `CARGO_BUILD_JOBS=3`,
+  as on the macOS runner. Each variant: `cargo clean -p` on the seven
+  workspace crates, then `cargo test --workspace --no-run`. A
+  `RUSTC_WORKSPACE_WRAPPER` ran every workspace rustc under GNU
+  `/usr/bin/time` for that unit's wall, CPU and peak RSS.
+* **Exclusion** works as in Appendix G: `#[cfg(any())]` in front of a
+  test module's `#[cfg(test)]`. The test helpers (`testkit`, `testgen`,
+  `test_support`, `test_git`, `fake`, `fake_exec`, `ssh_fake`, `fixtures`,
+  `scale_fixture`, `repo_files`, `conformance`) are kept, and so are the
+  three cross-referenced `tests` modules (G.1). The result is an upper
+  bound: moved tests would still compile in another crate.
+* **Samples**: V0 and V1 ran twice. Their repeats agree within 2 s and
+  0.01 GiB, and V3's within 2 s. V0's first run (3:15, sys 2.5× the
+  repeat) followed a tree rewrite with a cold page cache, so V0's repeat
+  is the baseline.
+
+| Variant | wall | user + sys (workspace units) | fleet-core test target: wall / peak RSS | fleet-core lib: peak RSS |
+|---|---:|---:|---:|---:|
+| **V0** `main` | **2:19** | 354 s | 136 s / **5.98** | 3.08 |
+| **V3** the movable groups out (`service/decide`, `work`, `trackers`, `catalog`; 68 modules) | 2:06 (−13 s) | 327 s | 122 s / 5.33 (−11 %) | 3.06 |
+| **V1** all test modules out (255) | 1:49 (−30 s) | 267 s | 86 s / 3.42 (−43 %) | 3.05 |
+| **V2** V0 + `profile.dev.package.fleet-core.codegen-units = 16` | 2:16 | 349 s | 132 s / 6.13 | 3.07 |
+
+For scale, a small test crate that depends on fleet-core
+(`fleet-agent-e2e`'s test target) costs 1.4 s and 0.80 GiB.
+
+What it shows:
+
+1. **cargo compiles fleet-core twice, at the same time.** One copy is the
+   library the app, hub and agent link (3.08 GiB). The other is the test
+   target, the same library plus its tests (5.98 GiB). The two start
+   together once `fleet-proto` and `fleet-update` are built, so the runner holds ≈ 9.1 GiB of
+   rustc at the peak against 7.0 GiB. That is where J.1's compressor
+   growth comes from.
+2. **Only the impossible split gets under the limit.** With every test
+   out (V1), the pair needs ≈ 6.5 GiB. With the movable groups out (V3),
+   it still needs ≈ 8.4 GiB. The rest are white-box tests needing ≥ 59
+   private items (G.2), and while any unit test stays in fleet-core, the
+   library is compiled twice.
+3. **The realistic split is worth ~13 s, before its own cost.** V3 saves
+   13 s of wall, 27 s of CPU and 0.65 GiB of peak on this build. The
+   moved tests would compile again in their new crate (≥ 1.4 s and
+   0.8 GiB each, plus the moved code).
+4. **`codegen-units` is not a memory lever.** The peak comes from the
+   rustc stages before LLVM, not from codegen.
+
+**Conclusion.** The macOS compile is memory-bound, but the cause is
+fleet-core's double compile (library and test target together), not too
+much parallelism. No reachable split of fleet-core's tests fixes it:
+the movable groups take off 11 % of one unit's peak, and Appendix G's
+conclusion (do not split for build speed) holds for memory too. The levers
+left for macOS are a runner with more memory, or a persistent Mac builder
+(Appendix I.5), which avoids most of this rebuild. After #438 the macOS
+leg is no longer clearly the slowest, and most of what it runs now is
+test execution, so neither is urgent.
+
+## Appendix K — The agent's verification loop, end to end (2026-10-04)
+
+Question: what does an agent pay to verify one change, following CLAUDE.md's
+validation ladder step by step, and how much of it is repeated work? Method:
+4 vCPU Linux, warm `target/`. One private fn was added to
+`service/health.rs`, then every ladder step ran in order. Two rounds; the
+spread between them was under 2 s per step.
+
+### K.1 The ladder as written (before this change)
+
+| Step | Time | Note |
+|---|---:|---|
+| `cargo fleet-fast-check` | 15 s | |
+| `cargo fleet-check` | 22 s | |
+| `cargo fleet-test -- service::health` | 36 s | |
+| `cargo fmt --all --check` | 3.5 s | |
+| `cargo fleet-lint` (the pre-commit hook's clippy) | 25 s | compiles separately from `fleet-check`, so it reuses none of it |
+| `cargo test --workspace` | 118 s | build 1.4 s; fleet-core's unit tests 98 s |
+| `scripts/ci-local.sh --rust-only` | ~145 s more | runs the suite again (118 s), plus `cargo build -p fleet-hub` (21 s, another feature world of fleet-core); summed from its measured steps, since cargo-deny was not installed |
+
+Check and clippy never evict each other (a check after a lint took 0.4 s),
+so the cost is duplicated work, not thrashing. Two steps repeat another:
+`fleet-check` before `fleet-lint` (clippy reports everything check does,
+test code included), and `cargo test --workspace` before `ci-local.sh`,
+which runs it again. In a new worktree the first round paid 3:05
+(`fleet-fast-check`), 1:50 (`fleet-check`), 2:53 (the targeted test), 1:38
+(lint) and 1:50 (the hub build): about 13 minutes and ~22 GB before the
+first verified commit.
+
+On macOS, the pre-commit hook and `ci-local.sh` also fell back to their
+headless `-p` selection, because `pkg-config --exists gtk+-3.0` fails
+there. Only Linux needs those libraries. The fallback linted another
+feature world of fleet-core on every commit.
+
+### K.2 `scripts/verify.sh`
+
+One command that runs each needed check once, in the ladder's package
+selection. `quick` (the default, before a commit) runs fmt, `fleet-lint`
+and the unit tests of the modules the change touches. The filter comes from
+the changed paths: `service/work/view.rs` → `service::work::view`, and a
+crate root, a Cargo file or a file outside `src/` runs every unit test. A
+file that Rust tests read by its repo path (a `src/lib/*.ts` mirror, a
+`docs/*.md` guide) adds the modules that name it. A frontend change runs
+`pnpm run check` and `vitest related`. `full` (before a push) is
+`ci-local.sh`, narrowed to the jobs the change touches. The pre-commit hook
+and `ci-local.sh` fall back to the headless selection on Linux only.
+`scripts/verify-test.sh` holds the path → plan mapping in CI.
+
+| Same fleet-core edit | Before | `verify.sh` |
+|---|---:|---:|
+| before a commit (fmt, check/lint, tests) | 86.5 s | **63–64 s** (fmt 3, lint 27–28, tests 32–34) |
+| the pre-commit hook after it | 25 s | ~1 s (no-op) |
+| before a push | 118 s + ~145 s | ~145 s (`ci-local.sh` once) |
+
+Not addressed here: the cold start of a new worktree (K.1), and the
+full-suite run time (98 s on 4 vCPU). Both are what a persistent builder
+(Appendix I.5) takes off the agent's machine.

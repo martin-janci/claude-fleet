@@ -1,6 +1,7 @@
 import { afterEach, describe, it, expect } from 'vitest';
 import {
   byTriage,
+  jevOutcome,
   ciStatusLabel,
   classify,
   claudeStatusColor,
@@ -11,6 +12,7 @@ import {
   displayName,
   formatElapsed,
   isClaudeStatus,
+  isUnread,
   isStuckKind,
   needsYou,
   newlyStuck,
@@ -22,12 +24,18 @@ import {
   setContextRedPct,
   severity,
   TRIAGE_BUCKETS,
+  ATTENTION_STATES,
+  attentionState,
+  bucketState,
+  countsTowardBadge,
   stuckKindLabel,
   stuckMessage,
   stuckSnapshot,
   worstSeverityByProject,
+  type AttentionFacts,
 } from './attention';
 import { CLAUDE_STATUSES, STUCK_KINDS, type SessionRow } from './sessions';
+import attentionTable from './attention_states.json';
 
 let nextId = 1;
 function row(over: Partial<SessionRow> = {}): SessionRow {
@@ -234,6 +242,11 @@ describe('outcome display', () => {
 describe('triage rank', () => {
   const opts = { idleSecs: 1800, now: 10_000 };
 
+  it('a session waiting on a form is waiting, even while its tool call runs', () => {
+    const r = row({ claude_status: 'working', pending_form: { form_id: 'f_a', title: 'T' } });
+    expect(classify(r, opts)).toBe('waiting');
+  });
+
   it('classifies every bucket reachable from today\'s fields', () => {
     expect(classify(row({ claude_status: 'blocked' }), opts)).toBe('waiting');
     expect(classify(row({ stuck_kind: 'oom' }), opts)).toBe('stuck');
@@ -269,14 +282,39 @@ describe('triage rank', () => {
     expect(classify(row({ idle_since: 0 }), { idleSecs: 0, now: 10_000 })).toBe('idle');
   });
 
-  it('leaves done_unread empty until A2 lands last_viewed_at', () => {
-    for (const s of [row({ last_stop_at: 9_999 }), row({ last_turn_at: 9_999 }), row()]) {
-      expect(classify(s, opts)).not.toBe('done_unread');
-    }
+  it('done_unread: a finished turn nobody has viewed (redesign 2.3)', () => {
+    const done = { claude_status: 'idle' as const, last_stop_at: 9_000 };
+    // Viewed before the turn ended, or never viewed since fleet started it.
+    expect(classify(row({ ...done, last_viewed_at: 8_000 }), opts)).toBe('done_unread');
+    expect(classify(row({ ...done, started_at: 5_000 }), opts)).toBe('done_unread');
+    expect(classify(row({ ...done, claude_status: 'completed', last_viewed_at: 1 }), opts)).toBe(
+      'done_unread',
+    );
+    // Viewed since (the same second counts as seen).
+    expect(classify(row({ ...done, last_viewed_at: 9_000 }), opts)).not.toBe('done_unread');
+    // A row fleet only found on a host has no stamp to compare: never unread.
+    expect(classify(row(done), opts)).not.toBe('done_unread');
+    // Still working, or a dead row: not "done".
+    expect(classify(row({ ...done, claude_status: 'working', last_viewed_at: 1 }), opts)).toBe(
+      'working',
+    );
+    expect(classify(row({ ...done, status: 'ghost', last_viewed_at: 1 }), opts)).toBe('lifecycle');
+    // A failing CI is the more urgent reason for the same row.
+    expect(classify(row({ ...done, ci_status: 'failing', last_viewed_at: 1 }), opts)).toBe(
+      'ci_failing',
+    );
+  });
+
+  it('isUnread compares the last turn with the last view, else the start', () => {
+    expect(isUnread({ last_stop_at: 10, last_viewed_at: 9, started_at: null })).toBe(true);
+    expect(isUnread({ last_stop_at: 10, last_viewed_at: 10, started_at: 1 })).toBe(false);
+    expect(isUnread({ last_stop_at: 10, last_viewed_at: null, started_at: 5 })).toBe(true);
+    expect(isUnread({ last_stop_at: null, last_viewed_at: null, started_at: 5 })).toBe(false);
+    expect(isUnread({ last_stop_at: 10, last_viewed_at: undefined, started_at: null })).toBe(false);
   });
 
   it('needsYou covers every bucket above working, and nothing below', () => {
-    expect([...NEEDS_YOU_BUCKETS]).toEqual([...TRIAGE_BUCKETS].slice(0, 10));
+    expect([...NEEDS_YOU_BUCKETS]).toEqual([...TRIAGE_BUCKETS].slice(0, 14).filter((b) => b !== 'probably_waiting'));
     expect(needsYou(row({ claude_status: 'blocked' }), opts)).toBe(true);
     expect(needsYou(row({ stuck_kind: 'oom' }), opts)).toBe(true);
     expect(needsYou(row({ idle_since: 0 }), opts)).toBe(true);
@@ -284,14 +322,16 @@ describe('triage rank', () => {
     expect(needsYou(row(), opts)).toBe(false);
     expect(
       countNeedsYou([row({ stuck_kind: 'oom' }), row({ claude_status: 'working' }), row({ status: 'ghost' })], opts),
-    ).toBe(2);
+    ).toBe(1);
   });
 
   // The pill and the filter answer different questions, so they cover
   // different buckets. If this test ever "fails" because the two were made to
   // agree, read NEEDS_YOU_COUNTED_BUCKETS before changing it.
-  it('counts one bucket narrower than it filters: idle_long is shown, not counted', () => {
-    expect([...NEEDS_YOU_COUNTED_BUCKETS]).toEqual([...TRIAGE_BUCKETS].slice(0, 9));
+  it('counts narrower than it filters: idle_long and lifecycle are shown, not counted', () => {
+    expect([...NEEDS_YOU_COUNTED_BUCKETS]).toEqual(
+      [...TRIAGE_BUCKETS].slice(0, 13).filter((b) => b !== 'done_unread' && b !== 'lifecycle' && b !== 'probably_waiting'),
+    );
     const idleRows = Array.from({ length: 6 }, () => row({ idle_since: 0 }));
     const blocked = row({ claude_status: 'blocked' });
     const rows = [...idleRows, blocked];
@@ -340,5 +380,49 @@ describe('triage rank', () => {
     }
     expect(classify(row({ kind: 'external', claude_status: 'working' }), opts)).toBe('working');
     expect(countNeedsYou([row({ kind: 'external', stuck_kind: 'oom' }), row({ stuck_kind: 'oom' })], opts)).toBe(1);
+  });
+});
+
+// Redesign step 0.4: the shared attention table. attention.rs checks the same
+// file against its own `State` / `BUCKET_STATES` and runs the same cases.
+describe('the seven attention states (shared fixture with attention.rs)', () => {
+  const opts = { idleSecs: 0, now: 1000 };
+
+  it('maps every triage bucket, in order, to one of eight states', () => {
+    expect(attentionTable.buckets.map(([b]) => b)).toEqual([...TRIAGE_BUCKETS]);
+    expect(ATTENTION_STATES).toEqual(['action_required', 'failed', 'blocked', 'proposed', 'working', 'paused', 'done', 'idle']);
+    for (const b of TRIAGE_BUCKETS) expect(ATTENTION_STATES).toContain(bucketState(b));
+  });
+
+  it('the badge counts only Action required, Failed and Blocked', () => {
+    expect(ATTENTION_STATES.filter(countsTowardBadge)).toEqual(['action_required', 'failed', 'blocked']);
+  });
+
+  for (const c of attentionTable.cases) {
+    it(c.name, () => {
+      const r = row({
+        claude_status: 'working',
+        last_activity_at: 100,
+        host_alias: 'alpha',
+        ...(c.row as Partial<SessionRow>),
+      });
+      const o = { ...opts, facts: (c as { facts?: AttentionFacts }).facts };
+      expect(classify(r, o)).toBe(c.bucket);
+      expect(attentionState(r, o)).toBe(c.state);
+      expect(countNeedsYou([r], o)).toBe(c.counted ? 1 : 0);
+    });
+  }
+});
+
+describe('G1.6: Jev\'s "probably waiting"', () => {
+  const opts = { idleSecs: 0, now: 1000 };
+  it('is its own bucket and state, out of the Needs you filter and the count', () => {
+    const r = row({ claude_status: 'idle', turn_outcome: 'asked', host_alias: 'alpha' });
+    expect(classify(r, opts)).toBe('probably_waiting');
+    expect(attentionState(r, opts)).toBe('proposed');
+    expect(needsYou(r, opts)).toBe(false);
+    expect(countNeedsYou([r], opts)).toBe(0);
+    // Jev's reading still says who read it.
+    expect(jevOutcome(r)).toBe('asked');
   });
 });

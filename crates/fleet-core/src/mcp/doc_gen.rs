@@ -3,7 +3,7 @@
 //! The committed `docs/control-api-reference.md` must equal `render_reference()`;
 //! the `reference_is_current` test enforces it (and so does CI via `cargo test`).
 //! Regenerate after changing any tool with:
-//!   REGEN_DOCS=1 cargo test -p fleet-core reference_is_current
+//!   REGEN_DOCS=1 cargo fleet-test -- reference_is_current
 //!
 //! Entirely `#[cfg(test)]`: it touches no production code path and adds no
 //! public API surface.
@@ -11,7 +11,7 @@
 use crate::mcp::FleetTools;
 
 const HEADER: &str = "<!-- GENERATED FILE — do not edit by hand.\n     \
-Regenerate with: REGEN_DOCS=1 cargo test -p fleet-core reference_is_current -->\n";
+Regenerate with: REGEN_DOCS=1 cargo fleet-test -- reference_is_current -->\n";
 
 /// Render the full reference markdown.
 pub(crate) fn render_reference() -> String {
@@ -155,7 +155,7 @@ mod tests {
         assert_eq!(
             actual, expected,
             "\n\ndocs/control-api-reference.md is stale. Regenerate with:\n  \
-REGEN_DOCS=1 cargo test -p fleet-core reference_is_current\n"
+REGEN_DOCS=1 cargo fleet-test -- reference_is_current\n"
         );
     }
 }

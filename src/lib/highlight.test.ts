@@ -75,3 +75,16 @@ describe('highlight', () => {
     expect(highlight('hello world', '')).toEqual([[{ text: 'hello world', cls: 'txt' }]]);
   });
 });
+
+describe('highlight md links', () => {
+  it('stays fast on an unclosed run of brackets and still colours links', () => {
+    const t0 = performance.now();
+    highlight('['.repeat(40000), 'md');
+    highlight('[a]('.repeat(10000), 'md');
+    expect(performance.now() - t0).toBeLessThan(100);
+    expect(highlight('[t](u)', 'md')[0]).toEqual([
+      { text: '[t]', cls: 'str' },
+      { text: '(u)', cls: 'com' },
+    ]);
+  });
+});

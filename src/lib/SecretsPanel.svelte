@@ -3,6 +3,7 @@
   import Modal from './Modal.svelte';
   import { listSecrets, setSecret, deleteSecret, type SecretRow } from './assets';
   import { hosts } from './hosts';
+  import { savedWithUndo } from './forms/form_frame';
 
   // `names` is the union of names collected from the last computed sync
   // plan's actions (`secrets` + `missing_secrets`) — stored names come from
@@ -59,19 +60,84 @@
     newName = '';
   }
 
+  /** Whether `name` already has a value at `host` (absent: every host). */
+  function isSet(name: string, host: string | undefined): boolean {
+    return rows.some((r) => r.name === name && r.host_alias === (host ?? null));
+  }
+
+  /** "Saved", with Undo for the places that had no value before: those can
+   *  be put back by deleting it again. A value that replaced another has no
+   *  Undo, since the old one was never read and cannot be written back. */
+  function savedToast(name: string, fresh: (string | undefined)[], replaced: (string | undefined)[]) {
+    const where = (t: string | undefined) => t ?? 'every host';
+    const undo =
+      fresh.length > 0 && replaced.length === 0
+        ? async () => {
+            for (const t of fresh) {
+              const r = await deleteSecret(name, t);
+              if (!r.ok) error = `Undo: ${name} is still on ${where(t)}: ${r.error.message}`;
+            }
+            await reload();
+          }
+        : undefined;
+    savedWithUndo(`${name} set for ${[...fresh, ...replaced].map(where).join(', ')}.`, undo);
+  }
+
   async function set(name: string) {
     const value = draftValue(name);
     if (value === '') return;
     const hostAlias = draftHost(name);
+    const target = hostAlias === '' ? undefined : hostAlias;
+    const fresh = !isSet(name, target);
     busy = name;
     error = null;
-    const r = await setSecret(name, value, hostAlias === '' ? undefined : hostAlias);
+    const r = await setSecret(name, value, target);
     busy = null;
     if (!r.ok) {
       error = r.error.message;
       return;
     }
     valueDrafts = { ...valueDrafts, [name]: '' };
+    savedToast(name, fresh ? [target] : [], fresh ? [] : [target]);
+    await reload();
+  }
+
+  // ── Add a secret (G2.6): one value, written to several hosts at once ──
+  // The value lives only in this input until Add writes it; it is cleared
+  // after, and never kept anywhere else in the app.
+  let secretName = $state('');
+  let addValue = $state('');
+  let addGlobal = $state(true);
+  let addHosts = $state<Record<string, 'write' | 'skip'>>({});
+  let adding = $state(false);
+  const NAME_OK = /^[A-Z0-9_]+$/;
+  const addNameNorm = $derived(secretName.trim().toUpperCase());
+  const writeHosts = $derived(visibleHosts.filter((h) => addHosts[h.alias] === 'write').map((h) => h.alias));
+  const canAdd = $derived(NAME_OK.test(addNameNorm) && addValue !== '' && (addGlobal || writeHosts.length > 0) && !adding);
+
+  async function addSecret() {
+    if (!canAdd) return;
+    adding = true;
+    error = null;
+    const name = addNameNorm;
+    const value = addValue;
+    const targets: (string | undefined)[] = [...(addGlobal ? [undefined] : []), ...writeHosts];
+    const failed: string[] = [];
+    const fresh: (string | undefined)[] = [];
+    const replaced: (string | undefined)[] = [];
+    for (const t of targets) {
+      const was = isSet(name, t);
+      const r = await setSecret(name, value, t);
+      if (!r.ok) failed.push(`${t ?? 'every host'}: ${r.error.message}`);
+      else if (was) replaced.push(t);
+      else fresh.push(t);
+    }
+    adding = false;
+    addValue = '';
+    if (failed.length > 0) error = `${name} was not written to ${failed.join('; ')}`;
+    else secretName = '';
+    if (fresh.length + replaced.length > 0) savedToast(name, fresh, replaced);
+    if (!visibleNames.includes(name)) extraNames = [...extraNames, name];
     await reload();
   }
 
@@ -92,6 +158,31 @@
 <Modal title="Secrets" onclose={onclose} width="580px" testid="secrets-panel">
   <p class="muted">Values are write-only: fleet never reads or displays a secret once it is set.</p>
   {#if error}<p class="error" data-testid="secrets-error">{error}</p>{/if}
+  <form class="add-secret" data-testid="secrets-add" onsubmit={(e) => { e.preventDefault(); void addSecret(); }}>
+    <p class="muted">Assets read it as ${'{'}NAME{'}'}. Its value goes to hosts and is never shown again.</p>
+    <div class="add-row">
+      <input placeholder="NAME" bind:value={secretName} aria-label="Name" autocomplete="off" data-testid="secrets-add-secret-name" />
+      <input type="password" placeholder="value" bind:value={addValue} aria-label="Value" autocomplete="off" data-testid="secrets-add-secret-value" />
+    </div>
+    <p class="muted small">Write-only. To change it, paste a new value.</p>
+    <div class="add-hosts" role="group" aria-label="Hosts">
+      <label class="host"><input type="checkbox" bind:checked={addGlobal} data-testid="secrets-add-global" /> Every host</label>
+      {#each visibleHosts as h (h.alias)}
+        <label class="host">
+          <span>{h.alias}</span>
+          <select
+            value={addHosts[h.alias] ?? 'skip'}
+            onchange={(e) => (addHosts = { ...addHosts, [h.alias]: (e.currentTarget as HTMLSelectElement).value as 'write' | 'skip' })}
+            data-testid={`secrets-add-host-${h.alias}`}
+          >
+            <option value="write">Write</option>
+            <option value="skip">Skip</option>
+          </select>
+        </label>
+      {/each}
+    </div>
+    <button type="submit" disabled={!canAdd} data-testid="secrets-add-secret">{adding ? 'Adding…' : 'Add secret'}</button>
+  </form>
   <div class="add-name">
     <input placeholder="NAME" bind:value={newName} data-testid="secrets-add-name" />
     <button onclick={addName} data-testid="secrets-add-name-submit">Add</button>
@@ -107,11 +198,12 @@
           <input
             type="password"
             placeholder="value"
+            aria-label={`Value of ${name}`}
             value={draftValue(name)}
             oninput={(e) => onValueInput(name, e)}
             data-testid={`secret-value-${name}`}
           />
-          <select value={draftHost(name)} onchange={(e) => onHostChange(name, e)} data-testid={`secret-host-${name}`}>
+          <select aria-label={`Where ${name} applies`} value={draftHost(name)} onchange={(e) => onHostChange(name, e)} data-testid={`secret-host-${name}`}>
             <option value="">global</option>
             {#each visibleHosts as h (h.alias)}
               <option value={h.alias}>{h.alias} ({hostStatus(name, h.alias)})</option>
@@ -130,18 +222,26 @@
 </Modal>
 
 <style>
-  .muted { color: var(--fg-muted); font-size: 12px; margin: 0 0 6px; }
-  .error { color: #dc2626; }
+  .muted { color: var(--fg-muted); font-size: var(--text-xs); margin: 0 0 6px; }
+  .error { color: var(--usage-crit); }
   .add-name { display: flex; gap: 6px; margin-bottom: 8px; }
+  .add-secret { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--border); border-radius: var(--radius-md); padding: 8px; margin-bottom: 10px; }
+  .add-row { display: flex; gap: 6px; }
+  .add-row input { flex: 1; min-width: 0; }
+  .small { font-size: var(--text-2xs); margin: 0; }
+  .add-hosts { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: var(--text-xs); }
+  .add-hosts .host { display: inline-flex; align-items: center; gap: 6px; }
+  .add-secret button { align-self: flex-end; font-size: var(--text-xs); padding: 0.3rem 0.8rem; border: 1px solid var(--accent); background: transparent; color: var(--fg); border-radius: var(--radius-sm); cursor: pointer; }
+  .add-secret button:disabled { opacity: 0.5; cursor: not-allowed; }
   .add-name input { flex: 1; }
   .rows { display: flex; flex-direction: column; gap: 8px; max-height: 50vh; overflow: auto; }
-  .secret-row { border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; }
-  .head { display: flex; justify-content: space-between; align-items: center; font-size: 12px; margin-bottom: 4px; }
-  .name { font-family: ui-monospace, monospace; }
+  .secret-row { border: 1px solid var(--border); border-radius: var(--radius-md); padding: 6px 8px; }
+  .head { display: flex; justify-content: space-between; align-items: center; font-size: var(--text-xs); margin-bottom: 4px; }
+  .name { font-family: var(--font-mono); }
   .status { color: var(--fg-muted); }
   .controls { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
   .controls input { flex: 1; min-width: 100px; }
   .actions { display: flex; gap: 8px; justify-content: flex-end; }
-  .actions button, .controls button { font-size: 0.85rem; padding: 0.3rem 0.8rem; border: 1px solid var(--border); background: transparent; color: var(--fg); border-radius: 4px; cursor: pointer; }
+  .actions button, .controls button { font-size: var(--text-xs); padding: 0.3rem 0.8rem; border: 1px solid var(--border); background: transparent; color: var(--fg); border-radius: var(--radius-sm); cursor: pointer; }
   .actions button:disabled, .controls button:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>

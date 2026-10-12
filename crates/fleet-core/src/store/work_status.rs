@@ -82,7 +82,7 @@ pub const STATUS_CATEGORIES: [&str; 3] = ["todo", "in_progress", "done"];
 /// (`SESSION_COLUMNS`'s `work`/`work_suggested`, and
 /// `Store::primary_work_by_session`) build a `SessionRow` with no
 /// `OrgScope` in hand — `list_all_sessions`/`get_session` are used by many
-/// callers, scoped afterward by `OrgScope::redact_row`, which only ever
+/// callers, scoped afterward by `OrgScope::redact_row_org_only`, which only ever
 /// looks at the row's own link/session org, never at another session
 /// working the same item. Fencing this properly would need either (a)
 /// threading `OrgScope` through every caller of those two methods (well
@@ -92,14 +92,14 @@ pub const STATUS_CATEGORIES: [&str; 3] = ["todo", "in_progress", "done"];
 /// hottest read in the app) without discussion first. Left open; a
 /// batch-style fix mirroring `Graph::load`'s (fetch
 /// `Store::work_items_with_working_session`'s pairs ONCE per list, then
-/// filter in `redact_row` using the already-fetched `SessionRow`s) is the
-/// likely shape of a real fix, at the cost of complicating `redact_row`'s
+/// filter in `redact_row_org_only` using the already-fetched `SessionRow`s) is the
+/// likely shape of a real fix, at the cost of complicating `redact_row_org_only`'s
 /// per-row signature into a per-list one.
 ///
 /// `card.rs` does NOT use this macro: it is a single-item lookup, so it
 /// calls `Store::work_items_with_working_session` and
 /// `service::work::status::effective_status` directly and fences the
-/// result itself with `OrgScope::sees_row` — cheap for one item, unlike
+/// result itself with `OrgScope::sees_row_org_only` — cheap for one item, unlike
 /// the per-row cost the same fence would add here.
 #[macro_export]
 macro_rules! effective_status_sql {
@@ -266,6 +266,41 @@ impl Store {
             }
         }
         Ok(wrote)
+    }
+}
+
+/// One change of an item's stored status (`work_status_log`, migration
+/// 170): written by triggers, read by dashboards.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StatusLogRow {
+    pub item_id: i64,
+    pub at: i64,
+    /// todo | in_progress | done
+    pub category: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_name: Option<String>,
+    /// NULL (a sync or the default) | person | derived
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set_by: Option<String>,
+}
+
+impl Store {
+    /// An item's status history, oldest first.
+    pub fn status_log(&self, item_id: i64) -> Result<Vec<StatusLogRow>, IpcError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT item_id, at, category, status_name, set_by FROM work_status_log \
+             WHERE item_id = ?1 ORDER BY at, id",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![item_id], |r| {
+            Ok(StatusLogRow {
+                item_id: r.get(0)?,
+                at: r.get(1)?,
+                category: r.get(2)?,
+                status_name: r.get(3)?,
+                set_by: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 }
 

@@ -1,12 +1,15 @@
 <script lang="ts">
+  import Loader from './Loader.svelte';
   import { untrack } from 'svelte';
-  import { open } from '@tauri-apps/plugin-dialog';
+  import { invokeCmd } from './result';
+  import type { PickedFile } from './attachments';
   import {
     updateAsset, addResource, removeResource, lintAsset, getAsset, resourceSize,
-    TOOLS, TIERS, EVENTS, KIND_FIELDS,
+    TOOLS, TIERS, EVENTS, KIND_FIELDS, HARNESSES, harnessOn, withHarness,
     type EditableAsset, type LintReport, type WriteResult,
   } from './assets';
   import ConfirmDialog from './ConfirmDialog.svelte';
+  import { savedWithUndo } from './forms/form_frame';
 
   // Header/body/kind-field edits are staged locally and only committed by
   // Save (`updateAsset`). Resource add/remove are separate backend
@@ -53,6 +56,33 @@
     });
   });
 
+  // Toolkit forms board: Lint runs the server lint now, on the stored asset
+  // (the draft is linted by Save), and says what it found.
+  let linting = $state(false);
+  let lintNote = $state<string | null>(null);
+  async function runLint() {
+    linting = true;
+    lintNote = null;
+    const r = await lintAsset(draft.kind, draft.name);
+    linting = false;
+    if (!r.ok) {
+      lintNote = r.error.message;
+      return;
+    }
+    serverLint = r.value;
+    const e = r.value.errors.length, w = r.value.warnings.length;
+    const found = e + w === 0 ? 'No problems found' : `${e} error${e === 1 ? '' : 's'}, ${w} warning${w === 1 ? '' : 's'}`;
+    lintNote = changed ? `${found} in the saved version. Save to lint your changes.` : `${found}.`;
+  }
+
+  // Discard drops the staged edits and goes back to what the editor opened
+  // with (resources already committed stay as they are).
+  function discard() {
+    const resources = draft.resources;
+    draft = { ...clone(initial), resources };
+    saveError = null;
+  }
+
   // Compares everything except the resources' base64 `bytes` payloads: those
   // can be multi-MB, and `changed` is a `$derived` that re-stringifies on
   // every reactive update (including each keystroke in the body textarea).
@@ -76,7 +106,7 @@
   // agent, mcp_server) — mirrors `Header::validate`'s allow-list. `hook` and
   // `plugin_ref` derive their host key from other fields and reject
   // `install_as` outright, so the editor never renders the field for them.
-  const INSTALL_AS_KINDS = new Set(['skill', 'agent', 'mcp_server']);
+  const INSTALL_AS_KINDS = new Set(['skill', 'agent', 'command', 'mcp_server']);
   // Mirrors `is_valid_install_name` in `service/catalog/model.rs`: non-empty
   // after trim, every character in `[A-Za-z0-9._-]`, not `.`/`..`.
   const INSTALL_AS_RE = /^[A-Za-z0-9._-]+$/;
@@ -198,6 +228,14 @@
     draft.env = env;
   }
 
+  // ── Harness boxes (G2.6) ─────────────────────────────────────────────
+  // Which harnesses receive the asset: `targets.<harness>.enabled`. Only
+  // the harnesses that can render this kind are offered.
+  const harnesses = $derived(HARNESSES.filter((h) => h.kinds.includes(draft.kind)));
+  function setHarness(id: string, on: boolean) {
+    draft.targets = withHarness(draft.targets, id, on);
+  }
+
   // ── Resources ────────────────────────────────────────────────────────
   const resources = $derived(draft.resources ?? []);
 
@@ -214,20 +252,22 @@
 
   async function addResourceFile() {
     resourceError = null;
-    let picked: unknown;
-    try {
-      picked = await open({ multiple: false });
-    } catch (e) {
-      resourceError = e instanceof Error ? e.message : String(e);
+    // The picker runs in Rust, which authorises what the user chose; the
+    // webview never names a path the backend will read (SEC-9).
+    const pickedR = await invokeCmd<PickedFile[]>('pick_attachments', {});
+    if (!pickedR.ok) {
+      resourceError = pickedR.error.message;
       return;
     }
-    if (typeof picked !== 'string') return;
-    resourceBusy = picked;
-    const r = await addResource(draft.kind, draft.name, picked);
-    resourceBusy = null;
-    if (!r.ok) {
-      resourceError = r.error.message;
-      return;
+    if (pickedR.value.length === 0) return;
+    for (const file of pickedR.value) {
+      resourceBusy = file.path;
+      const r = await addResource(draft.kind, draft.name, file.path);
+      resourceBusy = null;
+      if (!r.ok) {
+        resourceError = r.error.message;
+        break;
+      }
     }
     await refreshResources();
   }
@@ -276,7 +316,16 @@
       saveError = r.error.message;
       return;
     }
+    // Undo writes back the header, body and fields the editor opened with.
+    // Resources are not part of it: each add or remove already committed on
+    // its own, so they are sent as they are now.
+    const before = clone(initial);
+    const now = draft.resources ?? [];
     onsaved(r.value);
+    savedWithUndo(`Saved ${draft.name}.`, async () => {
+      const back = await updateAsset({ ...before, resources: now });
+      if (back.ok) onsaved(back.value);
+    });
   }
 </script>
 
@@ -419,8 +468,56 @@
       {/if}
       {#if fields.includes('env')}
         <label class="field" data-testid="editor-field-env">
-          Env (KEY=VALUE per line)
+          Environment (KEY=VALUE per line)
           <textarea value={envText()} oninput={onEnvInput} rows="3"></textarea>
+          <span class="help">Use ${'{'}NAME{'}'} for values from Secrets; they are filled on the host.</span>
+        </label>
+      {/if}
+    {:else if draft.kind === 'command'}
+      {#if fields.includes('allowed_tools')}
+        <div class="field" data-testid="editor-field-allowed_tools">
+          <span class="field-label">Allowed tools</span>
+          <div class="tool-list">
+            {#each TOOLS as t (t)}
+              <label class="tool">
+                <input
+                  type="checkbox"
+                  checked={strArr('allowed_tools').includes(t)}
+                  onchange={() => toggleTool('allowed_tools', t)}
+                  data-testid={`editor-tool-allowed_tools-${t}`}
+                />{t}
+              </label>
+            {/each}
+          </div>
+        </div>
+      {/if}
+      {#if fields.includes('argument_hint')}
+        <label class="field" data-testid="editor-field-argument_hint">
+          Arguments
+          <input
+            value={strField('argument_hint')}
+            placeholder="[ticket] [branch]"
+            oninput={(e) => {
+              const v = (e.currentTarget as HTMLInputElement).value;
+              draft.argument_hint = v.trim() === '' ? undefined : v;
+            }}
+          />
+          <span class="help">What follows /{draft.name}; the prompt reads it as $ARGUMENTS.</span>
+        </label>
+      {/if}
+      {#if fields.includes('model')}
+        <label class="field" data-testid="editor-field-model">
+          Model
+          <select
+            value={strField('model')}
+            onchange={(e) => {
+              const v = (e.currentTarget as HTMLSelectElement).value;
+              draft.model = v === '' ? undefined : v;
+            }}
+          >
+            <option value="">Inherit</option>
+            {#each TIERS as t (t)}<option value={t}>{t}</option>{/each}
+          </select>
         </label>
       {/if}
     {:else if draft.kind === 'plugin_ref'}
@@ -445,9 +542,26 @@
         </label>
       {/if}
     {/if}
+    {#if harnesses.length > 1}
+      <div class="field" role="group" aria-label="Harness" data-testid="editor-field-harnesses">
+        <span class="field-label">Harness</span>
+        <div class="tool-list">
+          {#each harnesses as h (h.id)}
+            <label class="tool">
+              <input
+                type="checkbox"
+                checked={harnessOn(draft, h.id)}
+                onchange={(e) => setHarness(h.id, (e.currentTarget as HTMLInputElement).checked)}
+                data-testid={`editor-harness-${h.id}`}
+              />{h.label}
+            </label>
+          {/each}
+        </div>
+      </div>
+    {/if}
   </div>
 
-  <label>Body
+  <label>{draft.kind === 'command' ? 'Prompt' : 'Body'}
     <textarea bind:value={draft.body} rows="10" class="body" data-testid="editor-body"></textarea>
   </label>
 
@@ -463,7 +577,7 @@
           onclick={() => requestRemoveResource(r.rel_path)}
           disabled={resourceBusy === r.rel_path}
           data-testid={`editor-resource-remove-${r.rel_path}`}
-        >Remove</button>
+        >Remove…</button>
       </div>
     {/each}
     {#if resources.length === 0}<p class="muted">No resources.</p>{/if}
@@ -482,10 +596,14 @@
     </div>
   {/if}
   {#if saveError}<p class="error" data-testid="editor-save-error">{saveError}</p>{/if}
+  {#if lintNote}<p class="muted lint-note" data-testid="editor-lint-note" role="status">{lintNote}</p>{/if}
 
   <div class="actions">
+    <button type="button" onclick={runLint} disabled={linting || saving} data-testid="editor-lint-run">{linting ? 'Linting…' : 'Lint'}</button>
+    <button type="button" onclick={discard} disabled={!changed || saving} data-testid="editor-discard">Discard</button>
+    <span class="spacer"></span>
     <button type="button" onclick={oncancel} disabled={saving} data-testid="editor-cancel">Cancel</button>
-    <button type="button" class="primary" onclick={save} disabled={!canSave} data-testid="editor-save">{saving ? 'Saving…' : 'Save'}</button>
+    <button type="button" class="primary" onclick={save} disabled={!canSave} data-testid="editor-save">{#if saving}<Loader name="comet" size={12} class="btn-loader" />{/if}{saving ? 'Saving…' : 'Save'}</button>
   </div>
 </div>
 
@@ -504,29 +622,32 @@
 {/if}
 
 <style>
-  .editor { display: flex; flex-direction: column; gap: 10px; font-size: 13px; }
+  .help { color: var(--fg-muted); font-size: var(--text-2xs); }
+  .editor { display: flex; flex-direction: column; gap: 10px; font-size: var(--text-sm); }
   .row { display: flex; gap: 10px; }
   .row label { flex: 1; }
-  label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--fg-muted); }
-  input, select, textarea { font: inherit; padding: 4px 6px; border: 1px solid var(--border); background: var(--bg-pane); color: var(--fg); border-radius: 4px; }
-  textarea.body { font-family: ui-monospace, monospace; }
-  .kind-fields { display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--border); border-radius: 6px; padding: 8px; }
+  label { display: flex; flex-direction: column; gap: 3px; font-size: var(--text-xs); color: var(--fg-muted); }
+  input, select, textarea { font: inherit; padding: 4px 6px; border: 1px solid var(--border); background: var(--bg-pane); color: var(--fg); border-radius: var(--radius-sm); }
+  textarea.body { font-family: var(--font-mono); }
+  .kind-fields { display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--border); border-radius: var(--radius-md); padding: 8px; }
   .field { display: flex; flex-direction: column; gap: 4px; }
-  .field-label { font-size: 11px; text-transform: uppercase; color: var(--fg-muted); }
+  .field-label { font-size: var(--text-2xs); text-transform: uppercase; color: var(--fg-muted); }
   .tool-list { display: flex; flex-wrap: wrap; gap: 6px; }
-  .tool { flex-direction: row; align-items: center; gap: 4px; font-size: 12px; }
+  .tool { flex-direction: row; align-items: center; gap: 4px; font-size: var(--text-xs); }
   .resources { border-top: 1px solid var(--border); padding-top: 8px; }
-  .resources h4 { margin: 0 0 6px; font-size: 11px; text-transform: uppercase; color: var(--fg-muted); }
-  .resource-row { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 2px 0; }
-  .resource-row .rel { font-family: ui-monospace, monospace; }
+  .resources h4 { margin: 0 0 6px; font-size: var(--text-2xs); text-transform: uppercase; color: var(--fg-muted); }
+  .resource-row { display: flex; align-items: center; gap: 8px; font-size: var(--text-xs); padding: 2px 0; }
+  .resource-row .rel { font-family: var(--font-mono); }
   .resource-row .size { color: var(--fg-muted); }
   .lint { display: flex; flex-direction: column; gap: 2px; }
-  .lint-error { color: #dc2626; margin: 0; font-size: 12px; }
-  .lint-warn { color: #d97706; margin: 0; font-size: 12px; }
-  .error { color: #dc2626; margin: 0; }
-  .muted { color: var(--fg-muted); font-size: 12px; }
+  .lint-error { color: var(--usage-crit); margin: 0; font-size: var(--text-xs); }
+  .lint-warn { color: var(--usage-warn); margin: 0; font-size: var(--text-xs); }
+  .error { color: var(--usage-crit); margin: 0; }
+  .muted { color: var(--fg-muted); font-size: var(--text-xs); }
   .actions { display: flex; gap: 8px; justify-content: flex-end; }
-  .actions button { font-size: 0.85rem; padding: 0.3rem 0.8rem; border: 1px solid var(--border); background: transparent; color: var(--fg); border-radius: 4px; cursor: pointer; }
+  .actions .spacer { flex: 1; }
+  .lint-note { margin: 0; }
+  .actions button { font-size: var(--text-xs); padding: 0.3rem 0.8rem; border: 1px solid var(--border); background: transparent; color: var(--fg); border-radius: var(--radius-sm); cursor: pointer; }
   .actions button:disabled { opacity: 0.5; cursor: not-allowed; }
   .actions button.primary { border-color: var(--accent); }
 </style>

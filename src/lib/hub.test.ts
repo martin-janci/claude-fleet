@@ -15,6 +15,7 @@ import {
   hubActionBlocked,
   HUB_ACTIONS,
   ROUTED_ACTIONS,
+  plainUnavailableReason,
   type HubStatus,
 } from './hub';
 import type { HubConnection } from './hub_connection';
@@ -95,7 +96,7 @@ describe('hubBlock', () => {
   });
 
   it('the fleet-administration actions say a client is not the administrator', () => {
-    for (const action of ['add_host', 'remove_host', 'hide_host', 'provision_hosts'] as const) {
+    for (const action of ['remove_host', 'hide_host'] as const) {
       expect(hubBlock(action, remote)!.toLowerCase(), action).toContain('client');
     }
   });
@@ -253,9 +254,9 @@ describe('hubActionBlocked', () => {
   // the connection, and says the REASONS sentence, not an offline one.
   it('a refused action is blocked the same way whatever the connection is doing', () => {
     for (const conn of [CONNECTING, CONNECTED, RECONNECTING, OFFLINE, TOO_OLD, TOO_NEW]) {
-      const why = hubActionBlocked('add_host', remote, conn);
+      const why = hubActionBlocked('remove_host', remote, conn);
       expect(why, conn.state).not.toBeNull();
-      expect(why, conn.state).toBe(hubBlock('add_host', remote));
+      expect(why, conn.state).toBe(hubBlock('remove_host', remote));
       expect(why!.toLowerCase(), conn.state).toContain('client');
     }
   });
@@ -358,5 +359,26 @@ describe('hubActionBlocked', () => {
     for (const action of HUB_ACTIONS) {
       expect(hubActionBlocked(action, remote, CONNECTED), action).not.toBeNull();
     }
+  });
+});
+
+describe('plainUnavailableReason', () => {
+  // The raw reasons Backend::resolve produces (src-tauri/src/backend/mod.rs).
+  it.each([
+    ['https://h is configured but no client token is stored', 'no saved pairing'],
+    ['cannot read the client token for https://h (keychain locked)', 'could not be read'],
+    ['hub.remote_url is not a usable hub address (relative URL)', 'not a valid URL'],
+    [
+      'http://h is plain http to a host that is not loopback, so … Use https://, or set hub.client_plaintext_token=true if …',
+      'use https://',
+    ],
+  ])('says %j without setting keys', (raw, want) => {
+    const got = plainUnavailableReason(raw);
+    expect(got).toContain(want);
+    expect(got).not.toMatch(/hub\.[a-z_]+|client token/);
+  });
+
+  it('falls back to a generic sentence, never the raw text', () => {
+    expect(plainUnavailableReason('hub.weird_key broke')).not.toContain('hub.weird_key');
   });
 });

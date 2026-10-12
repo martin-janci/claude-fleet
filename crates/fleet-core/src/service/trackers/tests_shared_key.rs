@@ -115,20 +115,43 @@ async fn every_single_item_reader_answers_with_the_callers_own_item() {
         ("org-A bound client", &client_a, f.item_a, "Refund (A)"),
     ];
     for (who, scope, want_id, want_title) in cases {
-        let c = card::card(&f.store, "ABC-1", scope)
-            .unwrap_or_else(|e| panic!("{who}: card refused: {e:?}"));
+        let c = card::card(
+            &f.store,
+            "ABC-1",
+            &crate::service::view_scope::org_only_view(scope),
+        )
+        .unwrap_or_else(|e| panic!("{who}: card refused: {e:?}"));
         assert_eq!(c.title, want_title, "{who}: card");
 
-        let t = tickets::lookup(&f.store, "ABC-1", scope, &net())
-            .await
-            .unwrap_or_else(|e| panic!("{who}: lookup refused: {e:?}"));
+        let t = tickets::lookup(
+            &f.store,
+            "ABC-1",
+            &crate::service::view_scope::org_only_view(scope),
+            &net(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{who}: lookup refused: {e:?}"));
         assert_eq!(t.item.id, want_id, "{who}: lookup");
 
         let s = f.store.lock().unwrap();
-        let g = handover::gather_stored(&s, "ABC-1", None, scope).unwrap();
+        let g = handover::gather_stored(
+            &s,
+            "ABC-1",
+            None,
+            &crate::service::view_scope::ViewScope::internal().with_org(scope.clone()),
+        )
+        .unwrap();
         assert_eq!(g.input.title.as_deref(), Some(want_title), "{who}: brief");
 
-        let plan = resume::plan_resume(&s, "ABC-1", None, None, scope).unwrap();
+        let plan = resume::plan_resume(
+            &s,
+            "ABC-1",
+            None,
+            None,
+            scope,
+            &crate::service::view_scope::ViewScope::internal(),
+        )
+        .unwrap();
         assert_eq!(
             plan.title.as_deref(),
             Some(want_title),
@@ -142,7 +165,12 @@ async fn every_single_item_reader_answers_with_the_callers_own_item() {
 #[tokio::test]
 async fn an_unscoped_caller_keeps_the_stores_answer() {
     let f = shared_key();
-    let c = card::card(&f.store, "ABC-1", &OrgScope::All).unwrap();
+    let c = card::card(
+        &f.store,
+        "ABC-1",
+        &crate::service::view_scope::org_only_view(&OrgScope::All),
+    )
+    .unwrap();
     assert_eq!(c.title, "Refund (A)");
     assert!(
         f.store
@@ -187,7 +215,14 @@ async fn a_url_is_never_answered_with_another_sites_item() {
             "https://linear.app/acme/issue/ABC-1",
         ] {
             let want = crate::service::orgs::not_visible_to(scope, "ABC-1");
-            match tickets::lookup(&f.store, url, scope, &net()).await {
+            match tickets::lookup(
+                &f.store,
+                url,
+                &crate::service::view_scope::org_only_view(scope),
+                &net(),
+            )
+            .await
+            {
                 Ok(t) => panic!("{who}: {url} answered with item {}", t.item.id),
                 Err(e) => assert_eq!(
                     (e.code.as_str(), e.message.as_str()),
@@ -200,7 +235,7 @@ async fn a_url_is_never_answered_with_another_sites_item() {
         let t = tickets::lookup(
             &f.store,
             "https://beta.atlassian.net/browse/ABC-1",
-            scope,
+            &crate::service::view_scope::org_only_view(scope),
             &net(),
         )
         .await
@@ -219,10 +254,20 @@ async fn a_host_with_no_work_on_the_key_is_still_refused() {
         s.set_host_org("hostc", Some(f.org_b)).unwrap();
         OrgScope::for_host(&s, "hostc").unwrap()
     };
-    assert!(card::card(&f.store, "ABC-1", &host_c).is_err());
-    assert!(tickets::lookup(&f.store, "ABC-1", &host_c, &net())
-        .await
-        .is_err());
+    assert!(card::card(
+        &f.store,
+        "ABC-1",
+        &crate::service::view_scope::org_only_view(&host_c)
+    )
+    .is_err());
+    assert!(tickets::lookup(
+        &f.store,
+        "ABC-1",
+        &crate::service::view_scope::org_only_view(&host_c),
+        &net()
+    )
+    .await
+    .is_err());
 }
 
 #[test]

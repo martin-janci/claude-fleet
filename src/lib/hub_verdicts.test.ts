@@ -54,6 +54,39 @@ describe('ROUTED_ACTIONS against the generated routed/routed_unless commands', (
     expect(allCommands.has('set_friendly_name')).toBe(false);
     expect(routedCommands.has('set_session_friendly_name')).toBe(true);
   });
+
+  // Multi-user M1 (F3): the sharing commands this file had to wait for.
+  // `session_share` / `session_unshare` / `session_narrow` are the three
+  // WRITES and are `ROUTED_ACTIONS` entries (checked above, like every other
+  // one). The three routed READS are not, by `ROUTED_ACTIONS`' own rule — a
+  // read has no control to disable — so this pins that they really are
+  // routed commands that were deliberately left out rather than names
+  // nobody noticed: `my_grants`'s failure is `access.ts`'s fail-closed arm,
+  // and `session_access` / `capture_session` are a list and a snapshot that
+  // simply show their error.
+  it('the routed sharing READS are real commands, left out of ROUTED_ACTIONS on purpose', () => {
+    const routedSet = new Set<string>(ROUTED_ACTIONS);
+    for (const command of ['session_access', 'my_grants', 'capture_session']) {
+      expect(routedCommands.has(command), `${command} is routed`).toBe(true);
+      expect(routedSet.has(command), `${command} is not a ROUTED_ACTIONS entry`).toBe(false);
+    }
+  });
+
+  // `claim_session` is the one M1 command the desktop does NOT have. The hub
+  // has the tool (an operator claims an unowned session), but T13 added no
+  // `#[tauri::command]` for it on purpose: F2 made the unclaimed surface a
+  // per-host COUNT with no rows and no expand, so there is no session id for
+  // a desktop command to pass, and spec §4.3 forbids the button that would
+  // supply one. The plan's revision 4 called it "UI-reachable" and would have
+  // had it allowlisted below as a `local_only` command the UI can reach —
+  // which would fail, because a command with no handler has no verdict row at
+  // all. This is the pin on that: if a `claim_session` command is ever added,
+  // this line fails, and whoever added it has to decide how it is gated — a
+  // `REASONS` entry, an allowlist line, or a `ROUTED_ACTIONS` entry if it
+  // routes — instead of inheriting a stale note either way.
+  it('claim_session has no desktop command at all, so there is nothing to gate', () => {
+    expect(allCommands.has('claim_session')).toBe(false);
+  });
 });
 
 // REASONS keys that name something other than a single Tauri command: each
@@ -62,15 +95,22 @@ describe('ROUTED_ACTIONS against the generated routed/routed_unless commands', (
 // REASONS (a typo, or a command that got renamed on one side and not the
 // other) — see the "every other REASONS key is a command name" test below.
 //
-//   repo_write  -> the ten git-write commands FilesPanel.svelte fans
+//   repo_write  -> the eleven git-write commands FilesPanel.svelte fans
 //                  `hubBlock('repo_write', …)` out to (FileList,
 //                  RemoteToolbar, BranchList, CommitGraph)
+//   catalog_registry -> catalog_add_catalog / catalog_remove_catalog, which
+//                  ROUTE (master-only on the hub): Settings → Catalogs shows
+//                  this reason to a paired desktop through `resourceBlock`
 //   host_tokens -> list_host_tokens / set_host_token_mode / rotate_host_token
 //                  (HostDetail.svelte's per-host token controls)
+//   provision_all -> provision_hosts for every host (Settings → Control API);
+//                  one host's refresh routes (`routed_unless`)
 const REASONS_KEYS_THAT_ARE_NOT_COMMANDS: ReadonlySet<string> = new Set([
   'repo_write',
+  'provision_all',
   'fleet_settings',
   'host_tokens',
+  'catalog_registry',
 ]);
 
 describe('REASONS against the generated local_only commands', () => {
@@ -137,6 +177,10 @@ const LOCAL_ONLY_WITH_NO_DIRECT_REASONS_ENTRY = {
     // it stays a command for work_admin's status on a standalone desktop.
     'work_retention_status',
     'work_retention_sweep',
+    // G4.6: Repair now and Restore lost sessions are page actions, which a
+    // read-only (paired) page does not show.
+    'repair_workspaces_now',
+    'restore_all_lost_sessions',
   ],
   // (`pty_open` and `upload_to_session` used to be listed here, gated by
   // TerminalView's `ownsTheFleet` check. They are `same_in_both` now: both
@@ -151,9 +195,11 @@ const LOCAL_ONLY_WITH_NO_DIRECT_REASONS_ENTRY = {
     'repo_checkout_commit',
     'repo_create_branch',
     'repo_delete_branch',
+    'repo_delete_merged_branches',
     'repo_stage',
     'repo_unstage',
     'repo_commit_create',
+    'draft_commit_message',
     'repo_fetch',
     'repo_pull',
     'repo_push',
@@ -161,7 +207,7 @@ const LOCAL_ONLY_WITH_NO_DIRECT_REASONS_ENTRY = {
   // Gated by HostDetail.svelte's own `host_tokens` gate (see the
   // REASONS_KEYS_THAT_ARE_NOT_COMMANDS comment above).
   gatedByHostDetail: ['list_host_tokens', 'set_host_token_mode', 'rotate_host_token'],
-  // AddHostPicker.svelte only mounts inside the Add-host dialog, whose
+  // AddHostWizard.svelte only mounts inside the Add-host dialog, whose
   // opener (`+ Add host`) is disabled via `hubBlock('add_host', …)`.
   gatedByAddHostDialog: ['probe_ssh_alias'],
 } as const;

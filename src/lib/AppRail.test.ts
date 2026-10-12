@@ -1,0 +1,97 @@
+import { render, fireEvent } from '@testing-library/svelte';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import AppRail from './AppRail.svelte';
+import { destination } from './destination';
+import { settingsOpen } from './app_views';
+import { sidebarView } from './work_view';
+import { expectAccessible } from './a11y_check';
+import { workspace, workspaceLanding } from './workspace';
+import { tick } from 'svelte';
+
+afterEach(() => {
+  workspace.set('developer');
+  workspaceLanding.set(null);
+  destination.set('session');
+  settingsOpen.set(false);
+  sidebarView.set('sessions');
+});
+
+describe('AppRail', () => {
+  it('names each shortcut in its title, per platform', () => {
+    const mac = render(AppRail, { isMac: true, onselect: () => {} });
+    expect(mac.getByTestId('rail-sessions').title).toBe('Sessions  ⌘⇧W');
+    expect(mac.getByTestId('rail-accounts').title).toBe('Accounts & hosts  ⌘I');
+    expect(mac.getByTestId('rail-settings').title).toBe('Settings  ⌘,');
+    expect(mac.getByTestId('rail-control').title).toBe('Control  ⌘E');
+    mac.unmount();
+    const other = render(AppRail, { isMac: false, onselect: () => {} });
+    expect(other.getByTestId('rail-work').title).toBe('Work  Ctrl+Shift+W');
+    expect(other.getByTestId('rail-accounts').title).toBe('Accounts & hosts  Ctrl+Shift+H');
+  });
+
+  it('marks the current item and hands a click to its owner', async () => {
+    const onselect = vi.fn();
+    const { getByTestId, queryByTestId } = render(AppRail, { isMac: true, onselect });
+    expect(queryByTestId('rail-automation')).not.toBeNull();
+    expect(getByTestId('rail-sessions').getAttribute('aria-current')).toBe('page');
+    destination.set('control');
+    await Promise.resolve();
+    expect(getByTestId('rail-control').getAttribute('aria-current')).toBe('page');
+    destination.set('automation');
+    await Promise.resolve();
+    expect(getByTestId('rail-automation').getAttribute('aria-current')).toBe('page');
+    destination.set('hosts');
+    await Promise.resolve();
+    expect(getByTestId('rail-accounts').getAttribute('aria-current')).toBe('page');
+    settingsOpen.set(true);
+    await Promise.resolve();
+    expect(getByTestId('rail-settings').getAttribute('aria-current')).toBe('page');
+    expect(getByTestId('rail-accounts').getAttribute('aria-current')).toBeNull();
+    await fireEvent.click(getByTestId('rail-work'));
+    expect(onselect).toHaveBeenCalledWith('work');
+  });
+
+  it('anchors the agent hint on Control, where the floating button used to be (13.1)', async () => {
+    const { anchorEl } = await import('./hints');
+    const { getByTestId } = render(AppRail, { isMac: true, onselect: () => {} });
+    expect(anchorEl('agent-fab')).toBe(getByTestId('rail-control'));
+  });
+});
+
+describe('AppRail accessibility (7.2)', () => {
+  it('passes the axe and audit checks', async () => {
+    const { container } = render(AppRail, { isMac: true, onselect: () => {} });
+    await expectAccessible(container);
+  });
+
+  it('the workspace tile switches workspace and reorders the rail, hiding nothing', async () => {
+    const r = render(AppRail, { isMac: true, onselect: () => {} });
+    const order = () => Array.from(r.container.querySelectorAll('[data-rail]')).map((a) => a.getAttribute('data-rail'));
+    expect(order()[0]).toBe('control');
+    expect(r.getByTestId('workspace-tile').textContent).toContain('Dev');
+    await fireEvent.click(r.getByTestId('workspace-tile'));
+    expect(r.getByTestId('workspace-menu')).toBeTruthy();
+    await expectAccessible(r.container);
+    await fireEvent.click(r.getByTestId('workspace-po'));
+    await tick();
+    expect(r.queryByTestId('workspace-menu')).toBeNull();
+    expect(r.getByTestId('workspace-tile').textContent).toContain('PO');
+    expect(order().slice(0, 3)).toEqual(['inbox', 'dashboards', 'work']);
+    expect(order()).toHaveLength(9);
+  });
+
+  it('opens the workspace menu beside the tile, outside the rail that clips it', async () => {
+    const r = render(AppRail, { isMac: true, onselect: () => {} });
+    const tile = r.getByTestId('workspace-tile');
+    vi.spyOn(tile, 'getBoundingClientRect').mockReturnValue(new DOMRect(8, 60, 110, 90));
+    const focus = vi.spyOn(HTMLElement.prototype, 'focus');
+    await fireEvent.click(tile);
+    await tick();
+    const menu = r.getByTestId('workspace-menu');
+    expect(menu.style.left).toBe('128px');
+    expect(menu.style.top).toBe('58px');
+    // Focusing the checked item must not scroll the clipping rail sideways.
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+    focus.mockRestore();
+  });
+});

@@ -92,6 +92,14 @@ pub struct OrgRow {
     /// calls (`service::decide`). Off by default; absent from an older hub.
     #[serde(default)]
     pub jev_allowed: bool,
+    /// Jev evaluation (D48): this org ALSO consented to sending Claude's
+    /// reply text (a session's pane tail at a turn's end, J2
+    /// `turn_outcome`). Separate from [`Self::jev_allowed`] and required on
+    /// top of it. Off by default; absent from an older hub. Kept as the
+    /// org's [`ORG_JEV_REPLY_KEY`] row in `org_settings` (no column of its
+    /// own), read here in SQL.
+    #[serde(default)]
+    pub jev_reply_allowed: bool,
 
     /// D31 (work graph M14.1b, migration 067): the org's bound paired
     /// clients also see unassigned work and sessions (the default), as a
@@ -99,9 +107,27 @@ pub struct OrgRow {
     /// hub, which has no bound client.
     #[serde(default = "bound_sees_unassigned_default")]
     pub bound_sees_unassigned: bool,
+    /// Org administration phase D (migration 107): this company owns the
+    /// hub, so its admins administer hosts. At most one org.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owns_hub: bool,
+    /// Phase D: its admins see the count of unclaimed sessions on its hosts
+    /// (the hub owner's switch, off by default).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub admins_see_unclaimed: bool,
+    /// M15 step G2.10 (migration 158): its members see only their own
+    /// sessions and what is shared with them (the default). Off, they also
+    /// watch each other's sessions in it (`ViewScope`'s team reach). Absent
+    /// from an older hub, which has no team reach.
+    #[serde(default = "members_own_sessions_only_default")]
+    pub members_own_sessions_only: bool,
 }
 
 fn bound_sees_unassigned_default() -> bool {
+    true
+}
+
+fn members_own_sessions_only_default() -> bool {
     true
 }
 
@@ -280,7 +306,17 @@ pub fn normalize_rule(mut r: OrgRuleRow) -> Result<OrgRuleRow, IpcError> {
 }
 
 const ORG_COLUMNS: &str = "id, name, color, isolate_sessions, created_at, auto_tidy, jev_allowed, \
-                           bound_sees_unassigned";
+                           bound_sees_unassigned, owns_hub, admins_see_unclaimed, \
+                           EXISTS (SELECT 1 FROM org_settings os WHERE os.org_id = orgs.id \
+                                   AND os.key = 'decide.jev.reply_consent' AND os.value = 'true'), \
+                           members_own_sessions_only";
+
+/// `org_settings.key` of an org's reply-text consent (D48, J2): `true` =
+/// consented. NOT a settings spec on purpose: a consent is never inherited
+/// from the fleet's value, so only an org's own explicit row counts.
+/// Spelled out in [`ORG_COLUMNS`] too (`concat!` takes literals);
+/// `the_reply_consent_key_is_the_one_in_the_columns` keeps them equal.
+pub const ORG_JEV_REPLY_KEY: &str = "decide.jev.reply_consent";
 const RULE_COLUMNS: &str = "id, org_id, owner, repo, path_prefix, host_alias";
 
 fn map_org(r: &rusqlite::Row<'_>) -> rusqlite::Result<OrgRow> {
@@ -293,6 +329,10 @@ fn map_org(r: &rusqlite::Row<'_>) -> rusqlite::Result<OrgRow> {
         auto_tidy: r.get::<_, Option<i64>>(5)?.map(|v| v != 0),
         jev_allowed: r.get::<_, i64>(6)? != 0,
         bound_sees_unassigned: r.get::<_, i64>(7)? != 0,
+        owns_hub: r.get::<_, i64>(8)? != 0,
+        admins_see_unclaimed: r.get::<_, i64>(9)? != 0,
+        jev_reply_allowed: r.get::<_, i64>(10)? != 0,
+        members_own_sessions_only: r.get::<_, i64>(11)? != 0,
     })
 }
 
@@ -412,6 +452,19 @@ impl Store {
         self.get_org(id)?.ok_or_else(|| org_not_found(id))
     }
 
+    /// Set an org's "members see only their own sessions" switch (M15 step
+    /// G2.10). Off lets its members watch each other's sessions in it.
+    pub fn set_org_members_own_sessions_only(&self, id: i64, on: bool) -> Result<OrgRow, IpcError> {
+        let n = self.conn.execute(
+            "UPDATE orgs SET members_own_sessions_only = ?2 WHERE id = ?1",
+            rusqlite::params![id, on as i64],
+        )?;
+        if n == 0 {
+            return Err(org_not_found(id));
+        }
+        self.get_org(id)?.ok_or_else(|| org_not_found(id))
+    }
+
     /// Set an org's consent to decision-model calls (Jev evaluation, D31 /
     /// D36). Only the master's org admin path (`work_admin`, `fleet-hub org
     /// set --jev`, the standalone desktop's Organisations) reaches here.
@@ -423,6 +476,15 @@ impl Store {
         if n == 0 {
             return Err(org_not_found(id));
         }
+        self.get_org(id)?.ok_or_else(|| org_not_found(id))
+    }
+
+    /// Set an org's consent to sending reply text to the decision model
+    /// (D48, J2 `turn_outcome`), on top of [`Self::set_org_jev_allowed`].
+    /// The same admin paths reach here.
+    pub fn set_org_jev_reply_allowed(&self, id: i64, on: bool) -> Result<OrgRow, IpcError> {
+        // Off is no row at all: the default, and what a removed org leaves.
+        self.set_org_setting(id, ORG_JEV_REPLY_KEY, on.then_some("true"))?;
         self.get_org(id)?.ok_or_else(|| org_not_found(id))
     }
 
@@ -454,6 +516,13 @@ impl Store {
             .is_some_and(|v| v != 0))
     }
 
+    /// Whether org `id` consented to sending reply text (D48). Only the
+    /// second consent: [`crate::service::decide`] asks it on top of
+    /// [`Self::org_jev_allowed`]. `false` for an org that does not exist.
+    pub fn org_jev_reply_allowed(&self, id: i64) -> Result<bool, IpcError> {
+        Ok(self.org_setting(id, ORG_JEV_REPLY_KEY)?.as_deref() == Some("true"))
+    }
+
     /// org id → its auto-tidy override, for the orgs that set one.
     pub fn org_auto_tidy_overrides(
         &self,
@@ -463,6 +532,73 @@ impl Store {
             .prepare("SELECT id, auto_tidy FROM orgs WHERE auto_tidy IS NOT NULL")?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? != 0)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// One org's own value of setting `key` (migration 106), or `None` when
+    /// it inherits the fleet's.
+    pub fn org_setting(&self, org_id: i64, key: &str) -> Result<Option<String>, IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT value FROM org_settings WHERE org_id = ?1 AND key = ?2",
+                rusqlite::params![org_id, key],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Every org's own value of `key`: `org id → value`, for the orgs that
+    /// set one.
+    pub fn org_settings_for_key(
+        &self,
+        key: &str,
+    ) -> Result<std::collections::HashMap<i64, String>, IpcError> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT org_id, value FROM org_settings WHERE key = ?1")?;
+        let rows = stmt.query_map(rusqlite::params![key], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// One org's own values, by key.
+    pub fn org_settings(
+        &self,
+        org_id: i64,
+    ) -> Result<std::collections::BTreeMap<String, String>, IpcError> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT key, value FROM org_settings WHERE org_id = ?1")?;
+        let rows = stmt.query_map(rusqlite::params![org_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Set org `org_id`'s own value of `key`, or clear it (`None`: inherit
+    /// the fleet's). The caller validated the value against the key's spec.
+    /// `E_NOTFOUND` for an unknown org.
+    pub fn set_org_setting(
+        &self,
+        org_id: i64,
+        key: &str,
+        value: Option<&str>,
+    ) -> Result<(), IpcError> {
+        if self.get_org(org_id)?.is_none() {
+            return Err(IpcError::new(
+                codes::E_NOTFOUND,
+                format!("org {org_id} not found"),
+            ));
+        }
+        match value {
+            Some(v) => self.conn.execute(
+                "INSERT INTO org_settings (org_id, key, value, set_at) VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT(org_id, key) DO UPDATE SET value = excluded.value, set_at = excluded.set_at",
+                rusqlite::params![org_id, key, v, now_unix()],
+            )?,
+            None => self.conn.execute(
+                "DELETE FROM org_settings WHERE org_id = ?1 AND key = ?2",
+                rusqlite::params![org_id, key],
+            )?,
+        };
+        Ok(())
     }
 
     /// Delete an org: its rules go with it, its hosts become unassigned, and
@@ -486,8 +622,80 @@ impl Store {
             "DELETE FROM org_rules WHERE org_id = ?1",
             rusqlite::params![id],
         )?;
+        // M15 step G2.10 (migration 158): its project catalog.
+        tx.execute(
+            "DELETE FROM org_projects WHERE org_id = ?1",
+            rusqlite::params![id],
+        )?;
+        // Org administration phase C (migration 106): its own settings and
+        // its spend roll-up go with it.
+        tx.execute(
+            "DELETE FROM org_settings WHERE org_id = ?1",
+            rusqlite::params![id],
+        )?;
+        tx.execute(
+            "DELETE FROM usage_daily_org WHERE org_id = ?1",
+            rusqlite::params![id],
+        )?;
+        tx.execute(
+            "DELETE FROM usage_daily_person WHERE org_id = ?1",
+            rusqlite::params![id],
+        )?;
+        // Phase D (migration 107): its members become FORMER members — the
+        // row stays, so a person whose last company this was reads nothing
+        // of any org rather than every org's work — and what was shared with
+        // the org reaches nobody.
+        let now = now_unix();
+        tx.execute(
+            "UPDATE org_members SET removed_at = ?2 WHERE org_id = ?1 AND removed_at IS NULL",
+            rusqlite::params![id, now],
+        )?;
+        let revoked = tx.execute(
+            "UPDATE session_grants SET revoked_at = ?2 WHERE org_id = ?1 AND revoked_at IS NULL",
+            rusqlite::params![id, now],
+        )?;
+        // Its sprints and releases become unassigned like its hosts. One
+        // whose name an unassigned bucket of the same kind already has gets
+        // a free ` (#id)` / ` (#id-n)` suffix within the name cap: the FK's
+        // SET NULL alone would hit the name index and refuse the whole delete.
+        let buckets: Vec<(i64, String, String)> = {
+            let mut stmt =
+                tx.prepare("SELECT id, kind, name FROM work_buckets WHERE org_id = ?1")?;
+            let rows = stmt.query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let taken = |kind: &str, name: &str| -> rusqlite::Result<bool> {
+            tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM work_buckets \
+                 WHERE org_id IS NULL AND kind = ?1 AND name = ?2)",
+                rusqlite::params![kind, name],
+                |r| r.get(0),
+            )
+        };
+        for (bid, kind, name) in buckets {
+            let mut free = name.clone();
+            let mut n = 1;
+            while taken(&kind, &free)? {
+                let suffix = if n == 1 {
+                    format!(" (#{bid})")
+                } else {
+                    format!(" (#{bid}-{n})")
+                };
+                let keep = super::work_buckets::BUCKET_NAME_MAX_CHARS
+                    .saturating_sub(suffix.chars().count());
+                free = name.chars().take(keep).collect::<String>() + &suffix;
+                n += 1;
+            }
+            tx.execute(
+                "UPDATE work_buckets SET org_id = NULL, name = ?2 WHERE id = ?1",
+                rusqlite::params![bid, free],
+            )?;
+        }
         let removed = tx.execute("DELETE FROM orgs WHERE id = ?1", rusqlite::params![id])? > 0;
         tx.commit()?;
+        if revoked > 0 {
+            super::session_grants::bump_grant_generation();
+        }
         Ok(removed)
     }
 
@@ -640,25 +848,29 @@ impl Store {
         // native subtask reads as unassigned and the org gates on a start
         // (`check_cross_org`, `brief_visible_on`) pass everything.
         //
-        // One level is the whole hierarchy: `parent_for_new_child` refuses a
-        // native parent that is itself a subtask, and a tracker parent's org
-        // comes from its tracker, so no further walk is possible.
+        // The walk goes up through local items with no org of their own, at
+        // most `LOCAL_DEPTH_MAX` hops (epic → task → subtask, then a tracker
+        // parent above them), and stops at the first item that answers: a
+        // tracker item answers with its tracker's org (unassigned included),
+        // a local item with its own. `set_local_parent` / `parent_for_new_child`
+        // keep a local chain that deep and refuse a cycle, and the hop cap
+        // bounds the walk even if one existed.
         Ok(self
             .conn
             .query_row(
-                "SELECT CASE \
-                   WHEN i.tracker_id IS NOT NULL \
-                     THEN (SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id) \
-                   WHEN i.org_id IS NOT NULL THEN i.org_id \
-                   WHEN i.parent_id IS NOT NULL \
-                     THEN (SELECT CASE WHEN p.tracker_id IS NOT NULL \
-                                         THEN (SELECT t.org_id FROM trackers t \
-                                                WHERE t.id = p.tracker_id) \
-                                         ELSE p.org_id END \
-                             FROM work_items p WHERE p.id = i.parent_id) \
-                   ELSE NULL END \
-                 FROM work_items i WHERE i.id = ?1",
-                rusqlite::params![item_id],
+                "WITH RECURSIVE chain(id, parent_id, tracker_id, org_id, hop) AS ( \
+                   SELECT id, parent_id, tracker_id, org_id, 0 FROM work_items WHERE id = ?1 \
+                   UNION ALL \
+                   SELECT w.id, w.parent_id, w.tracker_id, w.org_id, c.hop + 1 \
+                     FROM work_items w JOIN chain c ON w.id = c.parent_id \
+                    WHERE c.tracker_id IS NULL AND c.org_id IS NULL AND c.hop < ?2) \
+                 SELECT CASE WHEN c.tracker_id IS NOT NULL \
+                               THEN (SELECT t.org_id FROM trackers t WHERE t.id = c.tracker_id) \
+                             ELSE c.org_id END \
+                   FROM chain c \
+                  WHERE c.tracker_id IS NOT NULL OR c.org_id IS NOT NULL \
+                  ORDER BY c.hop LIMIT 1",
+                rusqlite::params![item_id, super::LOCAL_DEPTH_MAX as i64],
                 |r| r.get::<_, Option<i64>>(0),
             )
             .optional()?

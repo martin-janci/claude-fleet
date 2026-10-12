@@ -57,6 +57,13 @@ pub enum HubConnection {
     /// The hub did not accept a connection at all.
     Offline {
         attempt: u32,
+        /// Connects that failed in a row, counting no reconnect after a
+        /// stream that ended: what the call breaker (`remote.rs`
+        /// `offline_error`) arms on. `attempt` is the banner's count since
+        /// the stream last worked, which a stream ending also bumps, so one
+        /// failed connect after a blip already reads `attempt: 2`.
+        #[serde(skip)]
+        refused: u32,
         retry_in_secs: u64,
         reason: String,
     },
@@ -172,6 +179,9 @@ pub struct HubConnectionStatus {
     sink: Option<Arc<dyn RemoteEventSink>>,
     /// Only ever used to blank itself out of a reason.
     token: String,
+    /// The banner's "Retry now": wakes the bridge out of its backoff wait
+    /// (`hub_retry_now`). See [`super::events::EventBridge::waking_on`].
+    retry: Arc<tokio::sync::Notify>,
 }
 
 /// Hand-written: the token is here only to be redacted, and a `{:?}` must not
@@ -194,6 +204,7 @@ impl HubConnectionStatus {
             confirmed: std::sync::atomic::AtomicBool::new(false),
             sink: None,
             token: String::new(),
+            retry: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -205,6 +216,7 @@ impl HubConnectionStatus {
             confirmed: std::sync::atomic::AtomicBool::new(false),
             sink: Some(sink),
             token: token.to_string(),
+            retry: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -214,6 +226,19 @@ impl HubConnectionStatus {
             .lock()
             .map(|c| c.clone())
             .unwrap_or(HubConnection::Connecting)
+    }
+
+    /// What the bridge waits on beside its backoff, so a person can cut the
+    /// wait short.
+    pub fn retry_handle(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.retry)
+    }
+
+    /// Try the hub again now instead of when the backoff says. Wakes only a
+    /// bridge that is waiting: pressed while connected, it does nothing, and
+    /// it leaves no permit behind to cut a later wait short.
+    pub fn retry_now(&self) {
+        self.retry.notify_waiters();
     }
 
     /// The skew a `ready` frame last judged this hub to be in, if it still
@@ -278,10 +303,12 @@ impl ConnectionReporter for HubConnectionStatus {
             },
             HubConnection::Offline {
                 attempt,
+                refused,
                 retry_in_secs,
                 reason,
             } => HubConnection::Offline {
                 attempt,
+                refused,
                 retry_in_secs,
                 reason: self.scrub(reason),
             },

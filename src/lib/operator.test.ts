@@ -5,19 +5,20 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...
 
 import { get } from 'svelte/store';
 import {
-  agentPanelOpen,
   operatorState,
   operatorSession,
   operatorRow,
-  openAgent,
-  closeAgent,
-  toggleAgent,
   restartOperator,
+  replaceOperator,
+  ensureAgent,
   refreshOperator,
+  operatorError,
   operatorHost,
+  operatorFallback,
   blockedCopy,
 } from './operator';
 import { sessions, applySessionEvents, type SessionRow } from './sessions';
+import { toasts, clearToasts, runToastAction } from './toasts';
 
 const row = (over = {}) =>
   ({
@@ -33,30 +34,70 @@ const row = (over = {}) =>
 
 beforeEach(() => {
   invoke.mockReset();
-  agentPanelOpen.set(false);
+  operatorError.set(null);
   operatorState.set('unknown');
   operatorSession.set(null);
   sessions.set([]);
 });
 
-describe('openAgent', () => {
-  it('opens the panel, wakes the agent, and ends ready', async () => {
+describe('ensureAgent: waking the agent', () => {
+  it('wakes the agent and ends ready', async () => {
     invoke.mockResolvedValueOnce({ ready: false, session: null, blocked: 'absent' });
     invoke.mockResolvedValueOnce({ id: 7, tmux_name: 'fleet-operator', host_alias: 'local' });
-    await openAgent();
-    expect(get(agentPanelOpen)).toBe(true);
+    await ensureAgent();
     expect(get(operatorState)).toBe('ready');
     expect(get(operatorSession)?.id).toBe(7);
   });
 
   it('a blocked agent does not get woken, and the reason survives', async () => {
     invoke.mockResolvedValueOnce({ ready: false, session: null, blocked: 'no_mcp' });
-    await openAgent();
-    expect(get(agentPanelOpen)).toBe(true);
+    await ensureAgent();
     expect(get(operatorState)).toBe('no_mcp');
     // Only the status call — ensure_operator must not run when the control
     // API is off: it would create a session that cannot reach any tool.
     expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('an agent stranded on a host that went down is started on the fallback', async () => {
+    invoke.mockResolvedValueOnce({
+      ready: false,
+      session: { id: 3, tmux_name: 'fleet-operator', host_alias: 'mefistos' },
+      blocked: 'host_down',
+      host: 'mefistos',
+      fallback: 'oci',
+    });
+    invoke.mockResolvedValueOnce({ id: 9, tmux_name: 'fleet-operator', host_alias: 'oci' });
+    await ensureAgent();
+    expect(invoke).toHaveBeenNthCalledWith(2, 'ensure_operator', undefined);
+    expect(get(operatorState)).toBe('ready');
+    expect(get(operatorSession)?.host_alias).toBe('oci');
+    expect(get(operatorFallback)).toBeNull();
+  });
+
+  it('a stranded agent with nowhere to go stays host_down, and nothing is started', async () => {
+    invoke.mockResolvedValueOnce({
+      ready: false,
+      session: { id: 3, tmux_name: 'fleet-operator', host_alias: 'mefistos' },
+      blocked: 'host_down',
+      host: 'mefistos',
+      fallback: null,
+    });
+    await ensureAgent();
+    expect(get(operatorState)).toBe('host_down');
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('a failed move keeps host_down, so its button can try again', async () => {
+    invoke.mockResolvedValueOnce({
+      ready: false,
+      session: null,
+      blocked: 'host_down',
+      host: 'mefistos',
+      fallback: 'oci',
+    });
+    invoke.mockRejectedValueOnce({ code: 'E_SSH', message: 'oci went away too' });
+    await ensureAgent();
+    expect(get(operatorState)).toBe('host_down');
   });
 
   it('a ready agent is not re-created', async () => {
@@ -65,29 +106,29 @@ describe('openAgent', () => {
       session: { id: 3, tmux_name: 'fleet-operator', host_alias: 'local' },
       blocked: null,
     });
-    await openAgent();
+    await ensureAgent();
     expect(get(operatorState)).toBe('ready');
     expect(invoke).toHaveBeenCalledTimes(1);
   });
 });
 
 describe('blockedCopy', () => {
-  // RULING (overrides the original brief): only `absent` and `lost` are
-  // recoverable from this panel without either calling a LocalOnly command
-  // (`no_mcp` → `mcp_configure`) or doing nothing (`token_revoked` → the
-  // session is alive, so `ensure_operator` would no-op). Those two states
-  // get a title-only explanation and no button.
-  it('absent and lost offer a button; no_mcp, token_revoked and no_host do not', () => {
-    expect(blockedCopy('absent').action).toBe('Wake the agent');
-    expect(blockedCopy('lost').action).toBe('Restart the agent');
-    expect(blockedCopy('no_mcp').action).toBeNull();
-    expect(blockedCopy('token_revoked').action).toBeNull();
-    // The operator runs on the `local` host. A hub with `hub.local_host=false`
-    // has none, so there is nowhere to start it and no press that could help
-    // — reporting `absent` there offered a button that silently did nothing.
-    expect(blockedCopy('no_host').action).toBeNull();
-    for (const b of ['no_mcp', 'lost', 'token_revoked', 'absent', 'no_host'] as const) {
+  // Redesign step 9.1 (the AgentStates board): every blocked state has a
+  // next step. None of them is a LocalOnly command: `no_mcp` opens Settings
+  // rather than calling `mcp_configure`, and `token_revoked` replaces the
+  // agent (kill, after a confirm, then a fresh start) rather than calling
+  // `ensure_operator` on a live session, which would no-op.
+  it('every blocked state offers a next step', () => {
+    expect(blockedCopy('absent')).toMatchObject({ action: 'Wake the agent', next: 'wake' });
+    expect(blockedCopy('lost')).toMatchObject({ action: 'Restart the agent', next: 'restart' });
+    expect(blockedCopy('no_mcp')).toMatchObject({ action: 'Open Settings › Control API', next: 'control_api' });
+    expect(blockedCopy('token_revoked')).toMatchObject({ action: 'Replace the agent', next: 'replace' });
+    expect(blockedCopy('no_host')).toMatchObject({ action: 'Add a host', next: 'add_host' });
+    expect(blockedCopy('host_down', 'mercury', 'mac').next).toBe('move');
+    expect(blockedCopy('host_down', 'mercury').next).toBe('open_host');
+    for (const b of ['no_mcp', 'lost', 'token_revoked', 'absent', 'no_host', 'host_down'] as const) {
       expect(blockedCopy(b).title.length).toBeGreaterThan(0);
+      expect(blockedCopy(b).action.length).toBeGreaterThan(0);
     }
   });
 
@@ -108,7 +149,23 @@ describe('blockedCopy', () => {
     expect(onGhost).toContain('mefistos');
     expect(onGhost).toContain('not in this fleet');
     expect(onGhost).not.toContain('hub.local_host');
-    expect(blockedCopy('no_host', 'mefistos').action).toBeNull();
+    expect(blockedCopy('no_host', 'mefistos').action).toBe('Add a host');
+  });
+});
+
+describe('host_down', () => {
+  it('offers to start the agent on the fallback, and names both hosts', () => {
+    const c = blockedCopy('host_down', 'mefistos', 'oci');
+    expect(c.action).toContain('oci');
+    expect(c.title).toContain('mefistos');
+    expect(c.title).toContain('oci');
+  });
+
+  it('with no fallback, says what a host needs and opens that host', () => {
+    const c = blockedCopy('host_down', 'mefistos');
+    expect(c.action).toBe('Open mefistos');
+    expect(c.title).toContain('mefistos');
+    expect(c.title).toContain('no other host');
   });
 });
 
@@ -120,7 +177,7 @@ describe('operatorHost', () => {
       blocked: 'no_host',
       host: 'mefistos',
     });
-    await openAgent();
+    await ensureAgent();
     expect(get(operatorState)).toBe('no_host');
     expect(get(operatorHost)).toBe('mefistos');
     // An older hub answers without the field.
@@ -131,10 +188,65 @@ describe('operatorHost', () => {
 });
 
 describe('restartOperator', () => {
-  it('does nothing when there is no operator session in the store', async () => {
+  it('calls nothing when there is no operator session in the store, and says so', async () => {
     operatorSession.set(null);
     await restartOperator();
     expect(invoke).not.toHaveBeenCalled();
+    expect(get(operatorError)).toMatch(/not known yet/);
+  });
+
+  // 2026-10-06: after mefistos rebooted the `lost` button answered
+  // E_SELF_TARGET, and the panel looked exactly as it did before the click.
+  it('a failed restart says why under the button and leaves the state lost', async () => {
+    operatorState.set('lost');
+    operatorSession.set(row({ host_alias: 'mefistos' }));
+    invoke.mockRejectedValueOnce({
+      code: 'E_SELF_TARGET',
+      message: 'fleet-operator on mefistos is the registered fleet controller',
+    });
+    await restartOperator();
+    const cmds = invoke.mock.calls.map((c) => c[0]);
+    expect(cmds[0]).toBe('restart_session');
+    // No status refresh after a failure: the state stays what the panel shows.
+    expect(cmds).not.toContain('operator_status');
+    expect(get(operatorState)).toBe('lost');
+    expect(get(operatorError)).toBe(
+      'Restart failed: fleet-operator on mefistos is the registered fleet controller',
+    );
+  });
+
+  // 2026-10-11: the same refusal, with no way past it. The toast now offers
+  // "Restart anyway"; clicking it forces the restart and the panel recovers.
+  it('E_SELF_TARGET offers Restart anyway, which forces the restart and recovers the panel', async () => {
+    clearToasts();
+    operatorState.set('lost');
+    operatorSession.set(row({ host_alias: 'mefistos' }));
+    invoke.mockRejectedValueOnce({
+      code: 'E_SELF_TARGET',
+      message: 'fleet-operator on mefistos is the registered fleet controller',
+    });
+    await restartOperator();
+    const toast = get(toasts).find((t) => t.action?.label === 'Restart anyway');
+    expect(toast).toBeDefined();
+    invoke.mockResolvedValueOnce(row({ host_alias: 'mefistos' })); // restart_session, forced
+    invoke.mockResolvedValueOnce({ ready: true, session: row({ host_alias: 'mefistos' }), blocked: null });
+    runToastAction(toast!.id);
+    await vi.waitFor(() => expect(get(operatorState)).toBe('ready'));
+    expect(invoke.mock.calls[1]).toEqual([
+      'restart_session',
+      { args: { host_alias: 'mefistos', name: 'fleet-operator', force: true } },
+    ]);
+    expect(get(operatorError)).toBeNull();
+  });
+
+  it('a successful restart clears the previous failure', async () => {
+    operatorError.set('Restart failed: earlier');
+    operatorSession.set(row());
+    invoke.mockResolvedValueOnce(row()); // restart_session
+    invoke.mockResolvedValueOnce({ ready: true, session: row(), blocked: null }); // operator_status
+    await restartOperator();
+    expect(get(operatorError)).toBeNull();
+    expect(get(operatorState)).toBe('ready');
   });
 
   it('restarts the operator session and refreshes status', async () => {
@@ -157,36 +269,44 @@ describe('restartOperator', () => {
   });
 });
 
-describe('closing the panel', () => {
-  // The panel is `position: fixed` over the bottom-right corner of every
-  // view. Before this, `agentPanelOpen` was written `true` in one place and
-  // `false` nowhere in production code — the first press pinned the sheet
-  // for the life of the process.
-  it('toggleAgent closes an open panel without touching the backend', async () => {
-    agentPanelOpen.set(true);
-    await toggleAgent();
-    expect(get(agentPanelOpen)).toBe(false);
-    expect(invoke).not.toHaveBeenCalled();
-  });
-
-  it('toggleAgent opens a closed panel', async () => {
-    invoke.mockResolvedValueOnce({ ready: true, session: row(), blocked: null });
-    await toggleAgent();
-    expect(get(agentPanelOpen)).toBe(true);
-    expect(invoke).toHaveBeenCalledWith('operator_status', undefined);
-  });
-
-  it('closeAgent leaves the agent itself alone — the panel is a window, not the session', () => {
-    agentPanelOpen.set(true);
-    operatorState.set('ready');
-    closeAgent();
-    expect(get(agentPanelOpen)).toBe(false);
+describe('replaceOperator (token_revoked, step 9.1)', () => {
+  it('kills the agent\'s session, then starts a new one', async () => {
+    operatorState.set('token_revoked');
+    // An id of its own: a kill leaves a tombstone that later tests' row 7
+    // events would hit.
+    operatorSession.set(row({ id: 70 }));
+    invoke.mockResolvedValueOnce(70); // kill_session
+    invoke.mockResolvedValueOnce({ ready: false, session: null, blocked: 'absent' }); // operator_status
+    invoke.mockResolvedValueOnce(row({ id: 8 })); // ensure_operator
+    await replaceOperator();
+    expect(invoke.mock.calls.map((c) => c[0])).toEqual(['kill_session', 'operator_status', 'ensure_operator']);
+    expect(invoke.mock.calls[0][1]).toEqual({ args: { host_alias: 'local', name: 'fleet-operator' } });
     expect(get(operatorState)).toBe('ready');
-    expect(invoke).not.toHaveBeenCalled();
+    expect(get(operatorSession)?.id).toBe(8);
+  });
+
+  it('a failed kill says why and starts nothing', async () => {
+    operatorState.set('token_revoked');
+    operatorSession.set(row());
+    invoke.mockRejectedValueOnce({ code: 'E_TMUX', message: 'no server running' });
+    await replaceOperator();
+    const cmds = invoke.mock.calls.map((c) => c[0]).filter((c) => c !== 'report_client_error');
+    expect(cmds).toEqual(['kill_session']);
+    expect(get(operatorError)).toBe('Kill failed: no server running');
+    expect(get(operatorState)).toBe('token_revoked');
   });
 });
 
-describe('openAgent re-entrancy', () => {
+describe('ensureAgent (Control, step 9.1)', () => {
+  it('wakes the agent', async () => {
+    invoke.mockResolvedValueOnce({ ready: false, session: null, blocked: 'absent' });
+    invoke.mockResolvedValueOnce(row());
+    await ensureAgent();
+    expect(get(operatorState)).toBe('ready');
+  });
+});
+
+describe('ensureAgent re-entrancy', () => {
   // Two overlapping presses each minted a token and revoked the other's, and
   // because the DB write and the `.mcp.json` write are separately ordered the
   // host could end up on a token the database had revoked — every call 401s
@@ -199,8 +319,8 @@ describe('openAgent re-entrancy', () => {
     invoke.mockResolvedValueOnce({ ready: false, session: null, blocked: 'absent' });
     invoke.mockResolvedValueOnce(row());
 
-    const first = openAgent();
-    const second = openAgent();
+    const first = ensureAgent();
+    const second = ensureAgent();
     expect(second).toBe(first);
     releaseStatus({ ready: false, session: null, blocked: 'absent' });
     await Promise.all([first, second]);
@@ -210,40 +330,10 @@ describe('openAgent re-entrancy', () => {
     expect(get(operatorState)).toBe('ready');
   });
 
-  it('a joiner opens the panel too — closing mid-birth must not wedge the button', async () => {
-    // Opening is what EVERY caller wants, whether it starts the birth or
-    // joins one already running. With `agentPanelOpen.set(true)` inside the
-    // work function only, a press after closing mid-birth returned the
-    // in-flight promise (already past that line) and the sheet stayed shut
-    // until the birth resolved — the button doing nothing, visibly.
-    let releaseEnsure: (v: unknown) => void = () => {};
-    invoke.mockResolvedValueOnce({ ready: false, session: null, blocked: 'absent' });
-    invoke.mockImplementationOnce(
-      () => new Promise((res) => { releaseEnsure = res; }),
-    );
-
-    const birth = openAgent();
-    await vi.waitFor(() => expect(get(operatorState)).toBe('waking'));
-
-    closeAgent();
-    expect(get(agentPanelOpen)).toBe(false);
-
-    // Press again while the birth is STILL in flight.
-    const joined = openAgent();
-    expect(joined).toBe(birth);
-    expect(get(agentPanelOpen)).toBe(true);
-
-    releaseEnsure(row());
-    await Promise.all([birth, joined]);
-    expect(get(agentPanelOpen)).toBe(true);
-    expect(invoke.mock.calls.filter((c) => c[0] === 'ensure_operator')).toHaveLength(1);
-  });
-
   it('a later press is a fresh call, not the stale promise', async () => {
     invoke.mockResolvedValue({ ready: true, session: row(), blocked: null });
-    await openAgent();
-    agentPanelOpen.set(false);
-    await openAgent();
+    await ensureAgent();
+    await ensureAgent();
     expect(invoke.mock.calls.filter((c) => c[0] === 'operator_status')).toHaveLength(2);
   });
 });

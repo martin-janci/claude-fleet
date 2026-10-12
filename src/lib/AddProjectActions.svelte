@@ -9,6 +9,7 @@
     remote,
     note,
     canCreate,
+    verb = 'Add project',
     oncreate,
     onclose,
     onstop,
@@ -21,6 +22,8 @@
     /** What stopping cannot undo for this request, or null. */
     note: string | null;
     canCreate: boolean;
+    /** The action, as the board words it ("Add project", "Add 2 projects"). */
+    verb?: string;
     oncreate: () => void;
     onclose: () => void;
     onstop: () => void;
@@ -39,7 +42,7 @@
       >{stopping ? 'Stopping…' : remote ? 'Stop waiting' : 'Cancel'}</button>
     {:else}
       <button type="button" onclick={onclose}>Cancel</button>
-      <button type="button" class="primary" data-testid="add-create" onclick={oncreate} disabled={!canCreate}>Create</button>
+      <button type="button" class="primary" data-testid="add-create" onclick={oncreate} disabled={!canCreate}>{verb}</button>
     {/if}
   </div>
   {#if busy && note}
@@ -51,15 +54,15 @@
   .bar { flex: 0 0 auto; display: flex; flex-direction: column; gap: 0.3rem; padding-top: 0.2rem; border-top: 1px solid var(--border); }
   .actions { display: flex; gap: 0.4rem; justify-content: flex-end; align-items: center; }
   .actions button {
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     padding: 0.3rem 0.8rem;
     border: 1px solid var(--border);
     background: transparent;
     color: var(--fg);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
   }
   .actions button.primary { border-color: var(--accent); }
   .actions button:disabled { opacity: 0.5; cursor: not-allowed; }
-  .note { margin: 0; font-size: 0.75rem; color: var(--fg-muted); text-align: right; }
+  .note { margin: 0; font-size: var(--text-2xs); color: var(--fg-muted); text-align: right; }
 </style>

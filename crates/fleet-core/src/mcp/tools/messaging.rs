@@ -5,11 +5,10 @@ use crate::ipc_error::lock;
 
 #[tool_router(router = messaging_router, vis = "pub(super)")]
 impl FleetTools {
-    #[tool(description = "Send and SUBMIT a prompt to a running Claude \
+    #[tool(description = "Send and SUBMIT a prompt to a Claude \
         session's REPL (pasted, then one Enter); the first prompt to an \
         unnamed session also names it. Marked untrusted unless raw=true \
-        (master only) or a trusted client. keys presses a key instead. \
-        Returns { delivered, session_id, turn_seq_before, queued, acked }: \
+        (master only) or a trusted client. Returns { delivered, session_id, turn_seq_before, queued, acked }: \
         pass turn_seq_before to wait_for_session { until: \"turn_gt\" } or \
         session_transcript { since_turn } for the reply (run_prompt does all \
         three). Refuses a blocked or stuck session (E_INVALID_STATE) unless \
@@ -20,6 +19,15 @@ impl FleetTools {
         Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<SendPromptParams>,
     ) -> Result<CallToolResult, McpError> {
+        // An answer-only device (M15 step G2.10) presses a dialog key and
+        // never types: refused before the target is even resolved.
+        if caller.mode == TokenMode::Answer && p.keys.is_none() {
+            return Err(mcp_err(
+                codes::E_FORBIDDEN,
+                "an answer-only device answers a dialog (keys) and never sends a prompt",
+                None,
+            ));
+        }
         // Prompt body intentionally not logged.
         audit(
             "send_prompt",
@@ -33,7 +41,23 @@ impl FleetTools {
             p.session_id,
             p.host_alias.as_deref(),
             p.tmux_name.as_deref(),
+            // `drive`: a pane write is exactly what a `drive` grant is for (spec
+            // §4.3, invariant 5's closing paragraph). A key alone is `answer`
+            // (Orbit Fleet 11.7), narrowed below for a caller who cannot drive.
+            if p.keys.is_some() {
+                Reach::Answer
+            } else {
+                Reach::Drive
+            },
             "the session to prompt",
+        )?;
+        // The operator's text (or key) reaches the session only once a
+        // person approves it (F21); for any other caller this is a no-op.
+        self.confirm_gate(
+            "send_prompt",
+            p.confirm_nonce.as_deref(),
+            &prompt_summary(&row, &p.prompt, p.keys.as_deref(), p.submit, p.force, p.raw),
+            &caller,
         )?;
         if let Some(k) = p.keys.as_deref() {
             let key = crate::tmux::NamedKey::parse(k).ok_or_else(|| {
@@ -53,9 +77,45 @@ impl FleetTools {
                     None,
                 ));
             }
+            // An answer-only device is held to the answer rule on its own
+            // sessions too: the key must answer the dialog on screen.
+            let drives = caller.mode != TokenMode::Answer && {
+                let s = lock(&self.store).map_err(to_mcp_err)?;
+                reaches_row(&s, &caller, &row, Reach::Drive)?
+            };
+            if !drives {
+                // An `answer` grant: the key must answer the dialog a FRESH
+                // read of the pane shows, not the row's (up to a tick old).
+                // The dialog can still close between this read and the press,
+                // exactly as it can for the owner's card; what the read rules
+                // out is pressing into a pane that shows no dialog at all.
+                answer_key_kind(key).map_err(|why| mcp_err(codes::E_FORBIDDEN, why, None))?;
+                let probe = sessions::session_activity(&self.store, &self.ssh, row.id)
+                    .await
+                    .map_err(to_mcp_err)?;
+                answer_key_allowed(key, probe.pending_input.as_ref())
+                    .map_err(|why| mcp_err(codes::E_FORBIDDEN, why, None))?;
+            }
+            // The client's check and its press, made one step here: the pane
+            // is re-read now and the key goes out right after, with no round
+            // trip to the client in between.
+            if let Some(expect) = &p.expect {
+                sessions::check_expected_dialog(&self.store, &self.ssh, row.id, expect, key)
+                    .await
+                    .map_err(to_mcp_err)?;
+            }
             sessions::send_keys(&row.host_alias, &row.tmux_name, key, &self.store, &self.ssh)
                 .await
                 .map_err(to_mcp_err)?;
+            // Re-read just this pane so the answered dialog leaves the row
+            // (and a following one comes up) now, not on the next tick: an
+            // answer mid-turn fires no hook.
+            sessions::spawn_dialog_followup(
+                Arc::clone(&self.store),
+                Arc::clone(&self.ssh),
+                row.id,
+                sessions::DialogFollowup::Answered,
+            );
             return ok_json(&serde_json::json!({
                 "delivered": true,
                 "session_id": row.id,
@@ -68,7 +128,14 @@ impl FleetTools {
         // that gives up and retries does so DURING that window — which a
         // write-on-success cache does not cover at all: both calls miss, both
         // deliver, and the session gets the prompt twice.
-        let dedupe_id = p.client_msg_id.clone();
+        // The key names the TARGET as well as the id: the label is shared by
+        // every agent behind one host token, so a bare id reused for another
+        // session answered the first call's cached result and never sent.
+        // The `send_prompt:` prefix keeps it apart from `send_message`'s.
+        let dedupe_id = p
+            .client_msg_id
+            .as_deref()
+            .map(|id| format!("send_prompt:{}:{id}", row.id));
         if let Some(id) = dedupe_id.as_deref() {
             match lock_sends(&self.recent_sends).reserve(&label, id) {
                 Reservation::Fresh => {}
@@ -107,6 +174,94 @@ impl FleetTools {
             lock_sends(&self.recent_sends).complete(&label, id, out.clone());
         }
         ok_json(&out)
+    }
+
+    #[tool(description = "Send a prompt as a new turn when the session is \
+        idle: typed now if it is, else kept and typed once its turn ends \
+        (never into a dialog). Send later: not_before (unix secs) holds it \
+        until then, until_limit_reset while the account is at its limit, \
+        skip_if_archived drops it if the session is archived first. Marked \
+        untrusted unless raw=true (master only). Returns { session_id, \
+        delivered, queued_id }.")]
+    pub(super) async fn queue_prompt(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<QueuePromptParams>,
+    ) -> Result<CallToolResult, McpError> {
+        // Prompt body intentionally not logged.
+        audit("queue_prompt", &format!("session_id={}", p.session_id));
+        let row = self.resolve_target_row(
+            &caller,
+            Some(p.session_id),
+            None,
+            None,
+            // `drive`, as `send_prompt`: it ends as a pane write.
+            Reach::Drive,
+            "the session to prompt",
+        )?;
+        // As `send_prompt`: the operator's text waits for a person (F21).
+        self.confirm_gate(
+            "queue_prompt",
+            p.confirm_nonce.as_deref(),
+            &prompt_summary(&row, &p.prompt, None, true, false, p.raw),
+            &caller,
+        )?;
+        let prompt = apply_marker(p.prompt, &marker_origin(&caller), &caller, p.raw)?;
+        let out = sessions::queue_prompt(
+            sessions::QueuePromptArgs {
+                session_id: row.id,
+                prompt,
+                not_before: p.not_before,
+                until_limit_reset: p.until_limit_reset,
+                skip_if_archived: p.skip_if_archived,
+            },
+            &self.store,
+            &self.ssh,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&out)
+    }
+
+    #[tool(description = "A session's prompts from queue_prompt still \
+        waiting, and any whose typing failed. cancel=<id> takes one back \
+        instead.")]
+    pub(super) async fn queued_prompts(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<QueuedPromptsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "queued_prompts",
+            &format!("session_id={} cancel={:?}", p.session_id, p.cancel),
+        );
+        let row = self.resolve_target_row(
+            &caller,
+            Some(p.session_id),
+            None,
+            None,
+            // Taking a prompt back changes what the pane will get: `drive`.
+            // A list is the session's own pending input, read at `drive`
+            // too, so a watcher never reads what an owner is about to send.
+            Reach::Drive,
+            "the session whose prompts to list",
+        )?;
+        if let Some(id) = p.cancel {
+            sessions::cancel_queued_prompt(
+                sessions::CancelQueuedPromptArgs {
+                    session_id: row.id,
+                    id,
+                },
+                &self.store,
+            )
+            .map_err(to_mcp_err)?;
+        }
+        let rows = sessions::queued_prompts(
+            sessions::QueuedPromptsArgs { session_id: row.id },
+            &self.store,
+        )
+        .map_err(to_mcp_err)?;
+        ok_json(&rows)
     }
 
     #[tool(description = "Send one prompt to every matching work session \
@@ -162,12 +317,33 @@ impl FleetTools {
                 Some(serde_json::json!({ "retry_after_secs": secs })),
             ));
         }
-        let scope = self.org_scope(&caller)?;
+        // Who is broadcasting (multi-user M1, T7). The view scope is NOT
+        // optional for a caller: a fan-out reaches only the sessions this
+        // caller could have prompted one at a time, and a `None` here would
+        // mean "every session in the fleet", which is the shape the whole
+        // milestone exists to remove. Work graph M5's separate org scope is
+        // gone with T10 — `view.org` is the same answer, and `may_drive`
+        // already composes it.
+        let view = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            caller.view_scope(&s).map_err(to_mcp_err)?
+        };
         let filter = sessions::BroadcastFilter {
             host: p.host,
             project_id: p.project_id,
             status: p.status,
-            scope: (!scope.is_all()).then_some(scope),
+            // `BroadcastFilter.view` is the whole fence THIS layer applies:
+            // it composes the org boundary (`may_drive` ->
+            // `sees_session_row`) with the person half, so the `scope` field
+            // M5 kept beside it is gone (multi-user M1, T10).
+            //
+            // It is not the whole fence the broadcast applies, and this
+            // comment used to claim it was. The scope judges a snapshot
+            // here; `service::sessions::broadcast_prompt` re-reads each
+            // target's row by id and re-asks `may_drive` immediately before
+            // that target's send, because delivery is one SSH round trip per
+            // session and a tmux name is reusable (the T7 review).
+            view,
         };
         let submit = p.submit.unwrap_or(true);
         let prompt = apply_marker(p.prompt, &marker_origin(&caller), &caller, p.raw)?;
@@ -190,13 +366,22 @@ impl FleetTools {
             "session_history",
             &format!("session_id={} fresh_for={:?}", p.session_id, p.fresh_for),
         );
-        self.require_visible_session(&caller, p.session_id)?;
-        let limit = p.limit.unwrap_or(50);
+        // `watch`: a session's recorded timeline is one of the four reads
+        // the spec calls the substance of a watch grant. Until multi-user
+        // M1's T7 this was `require_visible_session`, whose first line
+        // (`if !caller.is_scoped()`) let every paired client past without a
+        // check — so a second person's phone read anybody's timeline.
+        self.resolve_row_person_gated(
+            &caller,
+            p.session_id,
+            Reach::Read,
+            "the session whose history to read",
+        )?;
+        let limit = bounded_limit(p.limit, 50);
 
-        // fresh_for absent: today's default, byte-identical, no cursor
-        // touched — `limit` reaches the store exactly as it always has
-        // (0 => [], negative => SQLite's own "no limit"), so the clamp
-        // below must never run on this path.
+        // fresh_for absent: no cursor touched, and 0 => [] as always. A
+        // negative or huge `limit` no longer reaches SQLite as "no limit":
+        // see `bounded_limit`.
         let Some(reader) = p.fresh_for else {
             let events = {
                 let s = lock(&self.store).map_err(to_mcp_err)?;
@@ -287,8 +472,16 @@ impl FleetTools {
             "session_conversations",
             &format!("session_id={} limit={:?}", p.session_id, p.limit),
         );
-        let row =
-            self.resolve_target_row(&caller, Some(p.session_id), None, None, "the session")?;
+        // `watch`: the conversation list is a read of the session's own
+        // history.
+        let row = self.resolve_target_row(
+            &caller,
+            Some(p.session_id),
+            None,
+            None,
+            Reach::Read,
+            "the session",
+        )?;
         let limit = p.limit.unwrap_or(20).clamp(1, 500);
         let rows = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
@@ -315,22 +508,47 @@ impl FleetTools {
                 p.from_session_id, p.to_session_id, p.to_addr, p.kind, p.deliver, p.wake
             ),
         );
-        // The sender must exist and, for a per-host caller, live on that
-        // host — otherwise any agent could spoof any `from_session_id`.
-        let from_host = {
-            let s = lock(&self.store).map_err(to_mcp_err)?;
-            s.get_session_by_id(p.from_session_id)
-                .map_err(|e| to_mcp_err(IpcError::from(e)))?
-                .ok_or_else(|| {
-                    mcp_err(
-                        "E_NOTFOUND",
-                        format!("from session {} not found", p.from_session_id),
-                        None,
-                    )
-                })?
-                .host_alias
-        };
-        require_host(&caller, &from_host, "from_session_id")?;
+        // The SENDER, through the same gate as the recipient (multi-user M1,
+        // T7). It must exist and, for a per-host caller, live on that host —
+        // otherwise any agent could spoof any `from_session_id` — and it must
+        // be a session this caller may speak IN. The bare `get_session_by_id`
+        // this replaces was both halves of the hole at once: an existence
+        // oracle over the whole `sessions` table (an unknown id answered
+        // `E_NOTFOUND` while another person's real one passed), and a way for
+        // B to write an inbox row and a `"session <A's id> on <A's host>"`
+        // marker line attributed to A's private session.
+        //
+        // `drive`, like the recipient: a proven pane `may_drive`, so the
+        // in-pane agent still speaks for its own session, while a watcher is
+        // refused the right to speak in the owner's name. `Reach::Read`
+        // would close the oracle and leave the spoof standing.
+        let from_host = self
+            .resolve_target_row(
+                &caller,
+                Some(p.from_session_id),
+                None,
+                None,
+                Reach::Drive,
+                "from_session_id",
+            )?
+            .host_alias;
+        // The RECIPIENT, gated here (multi-user M1, T7). Until this task the
+        // only check on the far end lived inside `service/messages.rs`'s
+        // `if !scope.is_all()` blocks — which never run for a person's
+        // device, so `send_message { deliver: true, submit: true }` typed
+        // arbitrary text into any session's pane and pressed Enter. That is
+        // a watch grant silently conferring drive, by a route revision 3's
+        // deny list did not list at all.
+        //
+        // `drive`, not `own`: `send_message { deliver, submit }` IS
+        // `send_prompt` by another route, and the spec settles it in
+        // invariant 5's closing paragraph ("a pane write … sits at `drive`,
+        // not at `own` … refusing it to a driver while allowing
+        // `send_prompt` would be theatre"). `wake` is the same pane write
+        // with a fixed nudge for a body, so it takes the same level. What
+        // none of them may do is reach a caller with only `watch`, and
+        // `Reach::Drive` is exactly that refusal.
+        self.require_message_recipient(&caller, &p)?;
         let body = apply_marker(
             p.body,
             &format!("session {} on {from_host}", p.from_session_id),
@@ -349,7 +567,17 @@ impl FleetTools {
         // of the shared map instead; `send_prompt`'s own key stays bare so
         // its behaviour and tests are untouched.
         let dedupe_id = p.client_msg_id.clone();
-        let dedupe_key = dedupe_id.as_deref().map(|id| format!("send_message:{id}"));
+        // Sender and recipient are in the key too (see `send_prompt`): the
+        // same id from another agent on this host, or to another recipient,
+        // is another message.
+        let dedupe_key = dedupe_id.as_deref().map(|id| {
+            format!(
+                "send_message:{}:{}:{}:{id}",
+                p.from_session_id,
+                p.to_session_id,
+                p.to_addr.as_deref().unwrap_or("")
+            )
+        });
         if let Some(key) = dedupe_key.as_deref() {
             match lock_sends(&self.recent_sends).reserve(&label, key) {
                 Reservation::Fresh => {}
@@ -437,17 +665,38 @@ impl FleetTools {
                 p.session_id, p.after_message_id, p.timeout_s
             ),
         );
-        let row =
-            self.resolve_target_row(&caller, Some(p.session_id), None, None, "the session")?;
+        // `watch`: a bounded wait over the session's inbox returns the
+        // message, which is a read of what was sent TO it.
+        let row = self.resolve_target_row(
+            &caller,
+            Some(p.session_id),
+            None,
+            None,
+            Reach::Read,
+            "the session",
+        )?;
         let _permit = self.long_poll_permit(&caller, "wait_for_reply")?;
+        // T11, and the highest-value of the four re-checks: the payload
+        // here IS content — the text another session sent this one. The
+        // wait asks `recheck` in the same lock window it reads the inbox
+        // in, so a revoke lands before the body is ever loaded; the call
+        // below covers the gap between the last wake and `ok_json`.
+        let recheck = SessionRecheck {
+            caller: &caller,
+            session_id: row.id,
+            reach: Reach::Read,
+            what: "the session",
+        };
         let got = crate::service::messages::wait_for_reply(
             &self.store,
             row.id,
             p.after_message_id,
             tasks::wait_timeout(p.timeout_s),
+            &recheck,
         )
         .await
         .map_err(to_mcp_err)?;
+        self.recheck_now(&recheck)?;
         ok_json(&serde_json::json!({
             "status": if got.is_some() { "satisfied" } else { "timeout" },
             "message": got,
@@ -470,33 +719,56 @@ impl FleetTools {
                 p.session_id, p.unread_only, p.mark_read, p.summary, p.fresh_for
             ),
         );
-        // Master skips the lookup; a per-host token is gated to its own host
-        // by `require_host` inside. A paired client also lands here and, like
-        // the master, carries no host binding, so the gate passes — the
-        // lookup only costs it an `E_NOTFOUND` on an unknown session. Reading
-        // any session's inbox is what a paired phone is for; the tools it
-        // must NOT reach are gated by `enforce_admin`, not here.
-        if !caller.is_master() {
-            self.resolve_target_row(
-                &caller,
-                Some(p.session_id),
-                None,
-                None,
-                "the inbox's session",
-            )?;
-        }
-        let limit = p.limit.unwrap_or(50);
+        // Unconditional, the master included (multi-user M1, T7). The
+        // `if !caller.is_master()` this replaces was pre-M1 code and it was
+        // the company admin's override on a live tool: the master token read
+        // the message bodies sent to any person's private session, which is
+        // rule 2 ("privacy holds against the company admin too — no
+        // override, audited or not"). The master pays one row lookup now,
+        // which every other session-addressed tool already charges it, and
+        // the gate lets it through on the rows its person owns.
+        //
+        // `watch` to read, `drive` to MARK READ. The cursor `mark_read`
+        // advances is migration 044's, on somebody else's row: a watcher who
+        // reads an inbox would otherwise blank the owner's unread view, and
+        // T7's own rule is that anything writing to a row is `drive`. (The
+        // `readonly` flag in TOOL_POLICIES says `true` here and is wrong
+        // about the write — one more reason it cannot stand in for the
+        // reach.)
+        //
+        // The write DEGRADES, it does not refuse. `InboxParams::mark_read` is
+        // `#[serde(default = "default_true")]`, so `inbox { session_id }` — the
+        // documented shape, and what every pre-M1 client sends — asks for the
+        // write without naming it. Refusing that would leave a `watch` grant
+        // unable to read an inbox at all, which is not what rule 3 promises;
+        // so a caller who may read but not drive gets the rows and the owner's
+        // cursor stays where the owner left it.
+        let row = self.resolve_target_row(
+            &caller,
+            Some(p.session_id),
+            None,
+            None,
+            Reach::Read,
+            "the inbox's session",
+        )?;
+        // A readonly token reads the inbox (`inbox` is a readonly tool) but
+        // stamping `read_at` is a write, so it is served as a watcher is.
+        let mark_read =
+            p.mark_read && !matches!(caller.mode, TokenMode::Readonly | TokenMode::Answer) && {
+                let s = lock(&self.store).map_err(to_mcp_err)?;
+                super::support::reaches_row(&s, &caller, &row, Reach::Drive)?
+            };
+        let limit = bounded_limit(p.limit, 50);
 
-        // fresh_for absent: today's default, byte-identical, no cursor
-        // touched — `limit` reaches `list_inbox` exactly as it always has
-        // (0 => [], negative => SQLite's own "no limit"), so the clamp
-        // below must never run on this path.
+        // fresh_for absent: no cursor touched, and 0 => [] as always. A
+        // negative or huge `limit` no longer reaches SQLite as "no limit":
+        // see `bounded_limit`.
         let Some(reader) = p.fresh_for else {
             let msgs = crate::service::messages::list_inbox(
                 p.session_id,
                 p.unread_only,
                 limit,
-                p.mark_read,
+                mark_read,
                 &self.store,
             )
             .map_err(to_mcp_err)?;
@@ -554,7 +826,7 @@ impl FleetTools {
             // list_inbox's own newest-first fetch. Best-effort, matching
             // `service::messages::list_inbox`: a failure here must not fail
             // the read that already succeeded.
-            if p.mark_read {
+            if mark_read {
                 let ids: Vec<i64> = rows
                     .iter()
                     .filter(|m| m.read_at.is_none())
@@ -604,6 +876,16 @@ impl FleetTools {
         Parameters(p): Parameters<PeerStatusParams>,
     ) -> Result<CallToolResult, McpError> {
         audit("peer_status", &format!("session_id={}", p.session_id));
+        // It reads a LOCAL row and answers its host, tmux name, status,
+        // `claude_status`, `current_activity`, `stuck_kind` and
+        // `context_pct` — so it is gated like every other read of one named
+        // row (multi-user M1, T9b). Its table row used to say "`session_id`
+        // names a session on the PEER fleet … there is no local row to gate",
+        // which `service::messages::peer_status` contradicts on its first
+        // statement; nothing leaked only because `PeerStatus` happens to
+        // carry the three keys `looks_like_session_row` recognises, i.e. the
+        // NET was the whole of the fence.
+        self.resolve_row_person_gated(&caller, p.session_id, Reach::Read, "the peer status")?;
         let scope = self.org_scope(&caller)?;
         let status = crate::service::messages::peer_status(p.session_id, &self.store, &scope)
             .map_err(to_mcp_err)?;
@@ -647,4 +929,144 @@ fn page_inbox(
     let more = rows.len() as i64 > limit;
     rows.truncate(limit as usize);
     Ok((rows, more))
+}
+
+/// The most rows `session_history` / `inbox` answer in one call.
+pub(super) const READ_LIMIT_MAX: i64 = 500;
+
+/// A caller's `limit`, bounded. A negative one used to reach SQLite as `LIMIT
+/// -1`, i.e. no limit at all: any reader (a readonly phone included) could
+/// dump a long-lived session's whole timeline, or its whole inbox with full
+/// bodies, built and serialised under the one store lock every other caller
+/// waits on — and with `mark_read`, stamp all of it read at once. Negative
+/// and over-large both mean "as many as allowed"; 0 still answers nothing.
+pub(super) fn bounded_limit(limit: Option<i64>, default: i64) -> i64 {
+    match limit.unwrap_or(default) {
+        n if n < 0 => READ_LIMIT_MAX,
+        n => n.min(READ_LIMIT_MAX),
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    #[test]
+    fn a_limit_is_bounded_both_ways() {
+        assert_eq!(bounded_limit(None, 50), 50);
+        assert_eq!(bounded_limit(Some(0), 50), 0);
+        assert_eq!(bounded_limit(Some(7), 50), 7);
+        assert_eq!(bounded_limit(Some(-1), 50), READ_LIMIT_MAX);
+        assert_eq!(bounded_limit(Some(i64::MIN), 50), READ_LIMIT_MAX);
+        assert_eq!(bounded_limit(Some(i64::MAX), 50), READ_LIMIT_MAX);
+    }
+}
+
+/// May an `answer` grantee press `key` on a pane showing `dialog` (Orbit
+/// Fleet 11.7)? PURE, so the rule is tested without a pane.
+///
+/// Only while a dialog is on screen, and only a key that answers one: a
+/// digit the dialog numbers, Enter (the highlighted option), Escape (cancel)
+/// and Tab (a multi-select question's next step). Never `C-c`, which
+/// interrupts the session rather than answering it.
+pub(crate) fn answer_key_allowed(
+    key: crate::tmux::NamedKey,
+    dialog: Option<&crate::service::pane_intel::PendingInput>,
+) -> Result<(), String> {
+    use crate::tmux::NamedKey;
+    answer_key_kind(key)?;
+    let Some(dialog) = dialog else {
+        return Err("an answer grant only answers a dialog, and the pane shows none".into());
+    };
+    match key {
+        NamedKey::Digit(d) if !dialog.options.iter().any(|o| o.n == d.get()) => {
+            Err(format!("the dialog on the pane has no option {}", d.get()))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The half of [`answer_key_allowed`] that needs no pane: refused before the
+/// pane is read, so a key no dialog takes costs no round trip.
+fn answer_key_kind(key: crate::tmux::NamedKey) -> Result<(), String> {
+    use crate::tmux::NamedKey;
+    match key {
+        // A dialog's keys: its options, its cursor, confirm and cancel.
+        NamedKey::Enter
+        | NamedKey::Escape
+        | NamedKey::Tab
+        | NamedKey::Up
+        | NamedKey::Down
+        | NamedKey::Digit(_) => Ok(()),
+        // Interrupting, editing the input line or switching modes drives
+        // the session; it answers nothing.
+        NamedKey::CtrlC
+        | NamedKey::Ctrl(_)
+        | NamedKey::Meta(_)
+        | NamedKey::Left
+        | NamedKey::Right
+        | NamedKey::BackTab => Err(format!(
+            "an answer grant presses a dialog's keys, not {}",
+            key.tmux_name()
+        )),
+    }
+}
+
+#[cfg(test)]
+mod answer_key_tests {
+    use super::answer_key_allowed;
+    use crate::service::pane_intel::{PendingInput, PendingOption};
+    use crate::tmux::NamedKey;
+
+    fn dialog(n: u8) -> PendingInput {
+        PendingInput {
+            kind: "permission".into(),
+            question: Some("Do you want to proceed?".into()),
+            options: (1..=n)
+                .map(|i| PendingOption {
+                    n: i,
+                    label: format!("option {i}"),
+                    selected: i == 1,
+                    checked: false,
+                })
+                .collect(),
+            multi: false,
+            detail: None,
+        }
+    }
+
+    fn key(s: &str) -> NamedKey {
+        NamedKey::parse(s).expect("a key")
+    }
+
+    #[test]
+    fn an_answer_grant_presses_the_dialogs_own_keys() {
+        let d = dialog(3);
+        for k in ["1", "2", "3", "Enter", "Escape", "Tab", "Up", "Down"] {
+            assert_eq!(answer_key_allowed(key(k), Some(&d)), Ok(()), "{k}");
+        }
+    }
+
+    #[test]
+    fn an_answer_grant_presses_nothing_else() {
+        let d = dialog(3);
+        assert!(
+            answer_key_allowed(key("4"), Some(&d)).is_err(),
+            "no option 4"
+        );
+        assert!(
+            answer_key_allowed(key("C-c"), Some(&d)).is_err(),
+            "C-c interrupts"
+        );
+        // The phone key bar's driving keys (14.14) are not a dialog's.
+        for k in ["C-r", "C-u", "Left", "Right", "BTab"] {
+            assert!(answer_key_allowed(key(k), Some(&d)).is_err(), "{k}");
+        }
+        for k in ["1", "Enter", "Escape", "Tab"] {
+            assert!(
+                answer_key_allowed(key(k), None).is_err(),
+                "{k} with no dialog"
+            );
+        }
+    }
 }

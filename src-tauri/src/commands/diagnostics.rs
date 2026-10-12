@@ -69,6 +69,7 @@ fn connection_line(c: &HubConnection) -> String {
             attempt,
             retry_in_secs,
             reason,
+            ..
         } => format!("offline attempt={attempt} retry_in={retry_in_secs}s reason={reason}"),
         HubConnection::HubTooOld {
             hub_contract,
@@ -195,6 +196,7 @@ pub async fn collect_diagnostics(
     );
     // The hub client token lives in the OS keychain, not the store, so the
     // bundle's own pass does not know it. Mask it here, over everything.
+    let hub_owns_fleet = !matches!(*backend, Backend::Local);
     let client_token: Vec<String> = backend
         .remote()
         .map(|c| c.token.clone())
@@ -210,6 +212,7 @@ pub async fn collect_diagnostics(
                 tunnels,
                 mcp_running,
                 mcp_bind_error,
+                hub_owns_fleet,
             },
         )?;
         insert_before_log_tail(&mut bundle.text, &hub_text);
@@ -305,6 +308,7 @@ mod tests {
             &backend,
             &HubConnection::Offline {
                 attempt: 4,
+                refused: 4,
                 retry_in_secs: 16,
                 reason: "connection refused".into(),
             },
@@ -435,6 +439,7 @@ mod tests {
                 tunnels: Default::default(),
                 mcp_running: false,
                 mcp_bind_error: None,
+                hub_owns_fleet: false,
             },
         )
         .unwrap();

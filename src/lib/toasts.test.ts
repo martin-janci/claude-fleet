@@ -79,8 +79,21 @@ describe('toasts store', () => {
   });
 
   it('pushError keeps the IpcError code and prefixes the context', () => {
-    pushError({ code: 'E_SSH', message: 'connection refused' }, 'Kill failed');
-    expect(get(toasts)[0]).toMatchObject({ kind: 'error', code: 'E_SSH', message: 'Kill failed: connection refused' });
+    pushError({ code: 'E_NOTFOUND', message: 'no such session' }, 'Kill failed');
+    expect(get(toasts)[0]).toMatchObject({ kind: 'error', code: 'E_NOTFOUND', message: 'Kill failed: no such session' });
+  });
+
+  // Review r13: transport noise is a sentence in the line and the backend's
+  // words under Details; Retry re-runs what failed.
+  it('pushError says a transport failure in a sentence and offers Retry', () => {
+    const retry = vi.fn();
+    pushError({ code: 'E_SSH', message: 'ssh: connect to host mercury port 22: Connection refused' }, 'Kill failed', retry);
+    const t = get(toasts)[0];
+    expect(t.message).toBe("Kill failed: Couldn't reach the host over SSH");
+    expect(t.detail).toBe('E_SSH: ssh: connect to host mercury port 22: Connection refused');
+    expect(t.action?.label).toBe('Retry');
+    runToastAction(t.id);
+    expect(retry).toHaveBeenCalledOnce();
   });
 
   it('pushError also reports to the hub error channel', () => {

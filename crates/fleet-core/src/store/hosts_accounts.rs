@@ -29,7 +29,8 @@ impl Store {
     /// runs through a SQL string comparison.
     pub fn list_host_tokens(&self) -> Result<Vec<HostTokenRow>, crate::ipc_error::IpcError> {
         let mut stmt = self.conn.prepare(
-            "SELECT host_alias, token, created_at, mode FROM host_tokens ORDER BY host_alias",
+            "SELECT host_alias, token, created_at, mode, last_used_at, rotated_at \
+             FROM host_tokens ORDER BY host_alias",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(HostTokenRow {
@@ -37,6 +38,8 @@ impl Store {
                 token: row.get(1)?,
                 created_at: row.get(2)?,
                 mode: row.get(3)?,
+                last_used_at: row.get(4)?,
+                rotated_at: row.get(5)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -54,19 +57,51 @@ impl Store {
     }
 
     /// Insert or replace a host's token, keeping its mode when the row
-    /// already exists. `created_at` is stamped now.
+    /// already exists. A new row's `created_at` is stamped now; replacing an
+    /// existing row's token with a different one keeps `created_at` and
+    /// stamps `rotated_at` instead (writing the same token back changes
+    /// nothing), and `last_used_at` starts over, since the new token has
+    /// not been used yet.
     pub fn upsert_host_token(
         &self,
         host_alias: &str,
         token: &str,
     ) -> Result<(), crate::ipc_error::IpcError> {
-        let at = now_unix();
+        self.upsert_host_token_at(host_alias, token, now_unix())
+    }
+
+    /// [`Self::upsert_host_token`] at `at` (unix seconds).
+    pub fn upsert_host_token_at(
+        &self,
+        host_alias: &str,
+        token: &str,
+        at: i64,
+    ) -> Result<(), crate::ipc_error::IpcError> {
         self.conn.execute(
             "INSERT INTO host_tokens (host_alias, token, created_at, mode) \
                  VALUES (?1, ?2, ?3, 'full') \
                  ON CONFLICT(host_alias) DO UPDATE SET \
-                   token = excluded.token, created_at = excluded.created_at",
+                   rotated_at = excluded.created_at, last_used_at = NULL, \
+                   token = excluded.token \
+                 WHERE host_tokens.token IS NOT excluded.token",
             rusqlite::params![host_alias, token, at],
+        )?;
+        Ok(())
+    }
+
+    /// Stamp `last_used_at` on `host_alias`'s token at `now`, but only when
+    /// the stored value is unset or more than 60 seconds stale, so a busy
+    /// host writes at most once a minute. Liveness only: it does not move
+    /// `auth_epoch` (migration 126).
+    pub fn touch_host_token(
+        &self,
+        host_alias: &str,
+        now: i64,
+    ) -> Result<(), crate::ipc_error::IpcError> {
+        self.conn.execute(
+            "UPDATE host_tokens SET last_used_at = ?2 \
+             WHERE host_alias = ?1 AND (last_used_at IS NULL OR last_used_at <= ?2 - 60)",
+            rusqlite::params![host_alias, now],
         )?;
         Ok(())
     }
@@ -176,6 +211,15 @@ impl Store {
         })
     }
 
+    /// Every host on the agent transport, by alias.
+    pub fn agent_host_aliases(&self) -> Result<Vec<String>, rusqlite::Error> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT alias FROM hosts WHERE transport = 'agent' ORDER BY alias")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.collect()
+    }
+
     pub fn insert_host(&self, alias: &str, ssh_alias: Option<&str>) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "INSERT INTO hosts (alias, ssh_alias, reachable, hidden) VALUES (?1, ?2, 0, 0)
@@ -193,15 +237,14 @@ impl Store {
         tmux_version: Option<&str>,
         last_pinged_at: i64,
     ) -> Result<(), rusqlite::Error> {
-        self.conn.execute(
-            "UPDATE hosts SET reachable=?1, claude_version=?2, tmux_version=?3, last_pinged_at=?4 WHERE alias=?5",
-            rusqlite::params![
-                if reachable { 1 } else { 0 },
-                claude_version,
-                tmux_version,
-                last_pinged_at,
-                alias
-            ],
+        super::reconcile::write_host_probe(
+            &self.conn,
+            alias,
+            reachable,
+            claude_version,
+            tmux_version,
+            last_pinged_at,
+            None,
         )?;
         self.emit_host(alias, |bus, row| bus.host_probed(row))
     }
@@ -232,7 +275,8 @@ impl Store {
         self.conn.execute(
             "UPDATE hosts SET disk_home_free_kb = ?1, disk_home_total_kb = ?2, \
              disk_tmp_free_kb = ?3, load_1m = ?4, mem_avail_kb = ?5, uptime_secs = ?6, \
-             health_at = ?7 WHERE alias = ?8",
+             health_at = ?7, auth_overrides = ?8, cpu_count = ?9, mem_total_kb = ?10, \
+             boot_at = ?11, latency_ms = ?12, agents_on_path = ?14 WHERE alias = ?13",
             rusqlite::params![
                 h.disk_home_free_kb,
                 h.disk_home_total_kb,
@@ -241,8 +285,36 @@ impl Store {
                 h.mem_avail_kb,
                 h.uptime_secs,
                 at,
-                alias
+                h.auth_overrides
+                    .as_ref()
+                    .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".into())),
+                h.cpu_count,
+                h.mem_total_kb,
+                h.boot_at,
+                h.latency_ms,
+                alias,
+                h.agents_on_path
+                    .as_ref()
+                    .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".into())),
             ],
+        )?;
+        Ok(())
+    }
+
+    /// Record a worktree-size read (Orbit Fleet 4.6, migration 123). The
+    /// stamp moves on every ask so a `du` that timed out waits the full
+    /// interval before the next try; the size moves only on an answer.
+    /// No event: the reconcile pass's ping carries it.
+    pub fn set_host_worktree_size(
+        &self,
+        alias: &str,
+        kb: Option<i64>,
+        at: i64,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE hosts SET worktree_kb = COALESCE(?1, worktree_kb), worktree_at = ?2 \
+             WHERE alias = ?3",
+            rusqlite::params![kb, at, alias],
         )?;
         Ok(())
     }
@@ -370,7 +442,7 @@ impl Store {
         Ok(())
     }
 
-    pub(super) fn get_account_by_uuid(
+    pub(crate) fn get_account_by_uuid(
         &self,
         uuid: &str,
     ) -> Result<Option<AccountRow>, rusqlite::Error> {
@@ -428,6 +500,24 @@ impl Store {
             rusqlite::params![account_uuid, alias],
         )?;
         self.emit_host(alias, |bus, row| bus.host_probed(row))
+    }
+
+    /// Record a host's login profiles (migration 114). Emits `host:probed`
+    /// only when the list changed, so a steady host costs no event per pass.
+    pub fn set_host_profiles(
+        &self,
+        alias: &str,
+        profiles: &[crate::store::HostProfileRow],
+    ) -> Result<(), rusqlite::Error> {
+        let json = serde_json::to_string(profiles).unwrap_or_else(|_| "[]".into());
+        let n = self.conn.execute(
+            "UPDATE hosts SET claude_profiles = ?1 WHERE alias = ?2 AND claude_profiles IS NOT ?1",
+            rusqlite::params![json, alias],
+        )?;
+        if n > 0 {
+            self.emit_host(alias, |bus, row| bus.host_probed(row))?;
+        }
+        Ok(())
     }
 
     /// Set a host's transport (migration 034): `"ssh"` (the default, reached
@@ -670,6 +760,9 @@ impl Store {
                 .collect::<Result<Vec<_>, _>>()?;
             ids
         };
+        // Their facts, while the rows are still there: `session:killed` is
+        // fenced by them (`store::sessions::killed_payloads`).
+        let dropped_killed = super::sessions::killed_payloads(&tx, &dropped)?;
         for id in &dropped {
             tx.execute("DELETE FROM session_events WHERE session_id = ?1", [id])?;
             tx.execute(
@@ -691,6 +784,11 @@ impl Store {
             rusqlite::params![from, into],
         )?;
         tx.execute("DELETE FROM host_tokens WHERE host_alias = ?1", [from])?;
+        // Routines follow the host to its new name (review r02).
+        tx.execute(
+            "UPDATE routines SET host_alias = ?2 WHERE host_alias = ?1",
+            [from, into],
+        )?;
         // Asset inventory (migrations 030/031): `into`'s own scan wins a
         // clash on (harness, kind, name); the rest move.
         tx.execute(
@@ -736,8 +834,8 @@ impl Store {
         )?;
         tx.execute("DELETE FROM hosts WHERE alias = ?1", [from])?;
         tx.commit()?;
-        for id in &dropped {
-            self.bus.session_killed(*id);
+        for killed in dropped_killed {
+            self.bus.session_killed(killed);
         }
         self.emit_sessions_updated(&moved);
         self.bus.host_removed(from);
@@ -768,6 +866,8 @@ impl Store {
                 .collect::<Result<Vec<_>, _>>()?;
             ids
         };
+        // Their facts, read before the rows go (see `killed_payloads`).
+        let orphan_killed = super::sessions::killed_payloads(&tx, &orphan_ids)?;
         // What dies with the sessions (as `delete_session` does): their
         // timeline.
         tx.execute(
@@ -841,9 +941,16 @@ impl Store {
             "DELETE FROM update_desired WHERE target = 'agent:' || ?1",
             rusqlite::params![alias],
         )?;
+        // A routine that starts its sessions here can no longer fire; it
+        // stops with the reason (review r02).
+        tx.execute(
+            "UPDATE routines SET enabled = 0, paused_reason = ?2, next_run_at = NULL, \
+               updated_at = ?3 WHERE host_alias = ?1 AND enabled = 1",
+            rusqlite::params![alias, super::routines::PAUSED_HOST_REMOVED, now_unix()],
+        )?;
         tx.commit()?;
-        for id in &orphan_ids {
-            self.bus.session_killed(*id);
+        for killed in orphan_killed {
+            self.bus.session_killed(killed);
         }
         self.emit_sessions_updated(&cleared);
         self.bus.host_removed(alias);
@@ -929,6 +1036,61 @@ mod tests {
         let all = s.list_host_tokens().unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].host_alias, "local", "alias-ordered");
+    }
+
+    /// Orbit Fleet 11.4, the rotate test: a rotation keeps when the host's
+    /// first token was minted, says when it was replaced, and starts "last
+    /// used" over; writing the same token back is no rotation. Use is
+    /// stamped at most once a minute and never moves the auth epoch, which
+    /// a rotation does.
+    #[test]
+    fn a_rotation_keeps_created_stamps_rotated_and_use_is_liveness_only() {
+        let s = Store::open_in_memory().expect("open");
+        s.upsert_host_token_at("mercury", "tok-1", 1_000).unwrap();
+        let row = s.get_host_token("mercury").unwrap().unwrap();
+        assert_eq!(
+            (row.created_at, row.rotated_at, row.last_used_at),
+            (1_000, None, None)
+        );
+
+        let epoch = s.auth_epoch().unwrap();
+        s.touch_host_token("mercury", 2_000).unwrap();
+        s.touch_host_token("mercury", 2_030).unwrap(); // inside the minute: ignored
+        assert_eq!(
+            s.get_host_token("mercury").unwrap().unwrap().last_used_at,
+            Some(2_000)
+        );
+        s.touch_host_token("mercury", 2_100).unwrap();
+        assert_eq!(
+            s.get_host_token("mercury").unwrap().unwrap().last_used_at,
+            Some(2_100)
+        );
+        assert_eq!(
+            s.auth_epoch().unwrap(),
+            epoch,
+            "liveness rebuilds no token cache"
+        );
+
+        s.upsert_host_token_at("mercury", "tok-1", 3_000).unwrap();
+        let same = s.get_host_token("mercury").unwrap().unwrap();
+        assert_eq!(
+            (same.rotated_at, same.last_used_at),
+            (None, Some(2_100)),
+            "the same token is no rotation"
+        );
+        assert_eq!(s.auth_epoch().unwrap(), epoch);
+
+        s.upsert_host_token_at("mercury", "tok-2", 4_000).unwrap();
+        let row = s.get_host_token("mercury").unwrap().unwrap();
+        assert_eq!(row.token, "tok-2");
+        assert_eq!(
+            (row.created_at, row.rotated_at, row.last_used_at),
+            (1_000, Some(4_000), None)
+        );
+        assert!(
+            s.auth_epoch().unwrap() > epoch,
+            "a rotation changes what a token resolves to"
+        );
     }
 
     #[test]
@@ -1021,6 +1183,25 @@ mod tests {
     }
 
     #[test]
+    fn a_worktree_size_moves_on_an_answer_and_its_stamp_on_every_ask() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("h", Some("h")).unwrap();
+        s.set_host_worktree_size("h", Some(9_400_000), 100).unwrap();
+        let row = s.get_host_row("h").unwrap().unwrap();
+        assert_eq!(
+            (row.worktree_kb, row.worktree_at),
+            (Some(9_400_000), Some(100))
+        );
+        // A `du` that did not answer keeps the last size, but not its stamp.
+        s.set_host_worktree_size("h", None, 200).unwrap();
+        let row = s.get_host_row("h").unwrap().unwrap();
+        assert_eq!(
+            (row.worktree_kb, row.worktree_at),
+            (Some(9_400_000), Some(200))
+        );
+    }
+
+    #[test]
     fn set_host_health_writes_every_column_and_the_stamp() {
         let s = Store::open_in_memory().unwrap();
         s.insert_host("h", Some("h")).unwrap();
@@ -1031,15 +1212,43 @@ mod tests {
             load_1m: Some(5.25),
             mem_avail_kb: Some(1_234_567),
             uptime_secs: Some(144 * 86400),
+            cpu_count: Some(16),
+            mem_total_kb: Some(65_842_312),
+            boot_at: Some(1_687_558_400),
+            latency_ms: Some(18),
+            auth_overrides: Some(vec!["CLAUDE_CODE_USE_BEDROCK".into()]),
+            agents_on_path: Some(vec!["claude".into(), "codex".into()]),
         };
         s.set_host_health("h", &sample, 1_700_000_000).unwrap();
         let row = s.get_host_row("h").unwrap().unwrap();
+        assert_eq!(row.cpu_count, Some(16));
+        assert_eq!(row.mem_total_kb, Some(65_842_312));
+        assert_eq!(row.boot_at, Some(1_687_558_400));
+        assert_eq!(row.latency_ms, Some(18));
+        let ping = crate::store::HostHealth::of(&row);
+        assert_eq!((ping.cpu_count, ping.latency_ms), (Some(16), Some(18)));
+        let agents = Some(vec!["claude".to_string(), "codex".to_string()]);
+        assert_eq!(row.agents_on_path, agents);
+        assert_eq!(ping.agents_on_path, agents, "the ping carries it");
         assert_eq!(row.disk_home_free_kb, Some(3_600_000));
         assert_eq!(row.disk_home_total_kb, Some(150_000_000));
         assert_eq!(row.disk_tmp_free_kb, Some(5_900_000));
         assert_eq!(row.load_1m, Some(5.25));
         assert_eq!(row.mem_avail_kb, Some(1_234_567));
         assert_eq!(row.uptime_secs, Some(144 * 86400));
+        assert_eq!(
+            row.auth_overrides,
+            Some(vec!["CLAUDE_CODE_USE_BEDROCK".to_string()])
+        );
+        // A sample that could not tell clears the column to "unknown".
+        s.set_host_health(
+            "h",
+            &crate::tmux::HostHealthSample::default(),
+            1_700_000_001,
+        )
+        .unwrap();
+        assert_eq!(s.get_host_row("h").unwrap().unwrap().auth_overrides, None);
+        assert_eq!(s.get_host_row("h").unwrap().unwrap().agents_on_path, None);
         assert_eq!(row.health_at, Some(1_700_000_000));
         s.set_host_last_hook_at("h", 1_700_000_100).unwrap();
         s.set_host_agent_version("h", "0.2.26").unwrap();

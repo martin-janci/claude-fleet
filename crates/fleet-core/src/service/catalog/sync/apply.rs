@@ -111,6 +111,12 @@ pub struct ActionResult {
     /// `done` | `conflict` | `failed` | `blocked` | `skipped`.
     pub outcome: String,
     pub detail: Option<String>,
+    /// The catalog the planned action came from (Assets M6), so a blocked
+    /// asset is told apart from a same-named one in another catalog.
+    /// `#[serde(default)]` because the summary is stored as JSON and travels
+    /// the wire: rows and hubs older than M6 never carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<String>,
 }
 
 /// What the applier did about one host. `Deserialize` for the same reason
@@ -139,7 +145,7 @@ pub struct ApplyCtx<'a> {
 /// shell script unquoted? Only `[A-Za-z0-9._/-]`, no empty or `..` segment.
 /// Asset names are validated kebab-case and every directory is a constant,
 /// so a path that fails this has no business being written at all.
-fn is_safe_path(p: &str) -> bool {
+pub(crate) fn is_safe_path(p: &str) -> bool {
     let Some(rest) = p.strip_prefix("~/") else {
         return false;
     };
@@ -487,6 +493,7 @@ fn plugin_entry(
         }],
         synced_at: now,
         catalog: catalog.to_string(),
+        file_hashes: BTreeMap::new(),
     }
 }
 
@@ -750,6 +757,7 @@ fn result_of(action: &Action, outcome: &str, detail: Option<String>) -> ActionRe
         op: action.op,
         outcome: outcome.to_string(),
         detail,
+        catalog: action.catalog.clone(),
     }
 }
 
@@ -1796,6 +1804,10 @@ mod tests {
         let res = apply_host(&ctx, &Claude, &create).await;
         assert_eq!(res.status, "applied", "{res:?}");
         assert_eq!(res.actions[0].outcome, DONE);
+        // The result names the catalog the planned action came from (M6),
+        // so the Inbox can key a blocked asset by it.
+        assert!(create.actions[0].catalog.is_some(), "{create:?}");
+        assert_eq!(res.actions[0].catalog, create.actions[0].catalog);
         assert!(!res.restart_required, "a skill needs no restart");
         let written = std::fs::read_to_string(&skill_file).expect("skill written");
         assert!(written.contains("first body"));
@@ -2280,8 +2292,10 @@ mod tests {
                 merges: Vec::new(),
                 synced_at: 1,
                 catalog: "personal".into(),
+                file_hashes: BTreeMap::new(),
             }),
             plugin: None,
+            host_copy: None,
         };
         let plan = HostPlan {
             host_alias: "local".into(),
@@ -2624,6 +2638,7 @@ mod tests {
             secret_files: BTreeSet::new(),
             remove_entry: None,
             plugin: None,
+            host_copy: None,
         };
         let plan = HostPlan {
             host_alias: "local".into(),
@@ -2709,6 +2724,7 @@ mod tests {
                 secret_files: BTreeSet::new(),
                 remove_entry: None,
                 plugin: None,
+                host_copy: None,
             }],
             snapshot: HostSnapshot::default(),
             manifest: Manifest::default(),

@@ -2,11 +2,17 @@
   // One setting on a generated page. Everything shown comes from the
   // registry's descriptor — label, help, bounds, unit, danger, restart,
   // owner — so a page spec only says *where* the setting goes. Writes go
-  // through `set_fleet_setting` (the same validated path as before) and are
-  // saved as they change; the backend's E_INVALID message is what the row
-  // shows when it refuses.
+  // through `set_fleet_setting` (the same validated path as before); the
+  // backend's E_INVALID message is what the row shows when it refuses.
+  //
+  // G1.5: on a page with a draft (`drafts`), a typed value — a number, a
+  // duration, a choice, a line of text — is staged and written by the
+  // page's Save bar; a switch or other toggle still saves at once and offers
+  // Undo in a toast. Under the help, a scope pill says where the value lives
+  // and, when it differs from the default, what it was changed from.
   import ConfirmDialog from '../ConfirmDialog.svelte';
   import { setFleetSetting, type SettingKey } from '../fleet_settings';
+  import type { Result } from '../result';
   import {
     fromDisplay,
     optionLabel,
@@ -17,6 +23,9 @@
     type Widget,
   } from './pages';
   import { ago } from './resources';
+  import { scopeWords } from './pages';
+  import type { SettingDrafts } from './drafts.svelte';
+  import { push } from '../toasts';
   import {
     decideProposals,
     settingHistory,
@@ -34,6 +43,9 @@
     highlighted = false,
     readonly: forceReadonly = false,
     proposal,
+    save,
+    drafts,
+    remote = false,
     now = () => Math.floor(Date.now() / 1000),
   }: {
     d: Descriptor;
@@ -46,6 +58,15 @@
     /** An agent's pending proposal for this setting (P5): shown as a
      *  suggestion the person applies or rejects, never applied by itself. */
     proposal?: SettingProposal;
+    /** Write somewhere else than the fleet's setting (an org's own value,
+     *  org administration phase C). The row then has no History or Reset:
+     *  its owner offers Inherit instead. */
+    save?: (next: string) => Promise<Result<unknown>>;
+    /** The page's unsaved typed values (G1.5): a typed widget stages into
+     *  it instead of writing. Absent: every change writes at once. */
+    drafts?: SettingDrafts;
+    /** A paired desktop: the value lives on the hub (the scope pill). */
+    remote?: boolean;
     now?: () => number;
   } = $props();
 
@@ -59,21 +80,34 @@
     id_set: 'id_list',
     price_map: 'textarea',
     text: 'text',
+    time_range: 'text',
   };
 
   /** Widgets whose control is one input a <label for> can point at. */
   const LABELLED_INPUTS = new Set<Widget>(['switch', 'number', 'duration', 'select', 'text', 'textarea']);
 
   const readonly = $derived(forceReadonly || d.owned_by !== undefined);
+  // UX audit S2: a row is name and help on the left, the control on the
+  // right (Settings board); these widgets need the row's width instead.
+  const WIDE = new Set<Widget>(['text', 'textarea', 'key_value_table', 'multiselect']);
   const w = $derived<Widget>(readonly ? 'readonly' : (widget ?? DEFAULT_WIDGET[d.kind.type]));
   const modified = $derived(value !== d.default);
+  /** Widgets that stage into the page's draft; the rest are toggles that
+   *  write at once with Undo. */
+  const BATCHED = new Set<Widget>(['number', 'duration', 'select', 'text', 'textarea', 'key_value_table']);
+  const batched = $derived(drafts !== undefined && !save && BATCHED.has(w));
+  /** What the control shows: the staged value while there is one. */
+  const current = $derived(batched && drafts ? drafts.valueOf(d.key, value) : value);
+  const staged = $derived(batched && drafts !== undefined && drafts.has(d.key));
+  const scope = $derived(save ? null : scopeWords(d, remote));
+  const draftError = $derived(drafts?.errors[d.key] ?? null);
   const id = $derived(`setting-${d.key.replace(/[^a-z0-9]+/gi, '-')}`);
   const range = $derived(rangeText(d));
   const unitWord = $derived(UNIT_WORDS[d.unit]);
   const options = $derived(
     d.kind.type === 'choice' || d.kind.type === 'choice_set' ? d.kind.options : [],
   );
-  const chosen = $derived(new Set(value.split(',').map((s) => s.trim()).filter(Boolean)));
+  const chosen = $derived(new Set(current.split(',').map((s) => s.trim()).filter(Boolean)));
 
   /** A read-only value in words: On / Off, an option's label, a number in
    *  its unit. */
@@ -93,21 +127,41 @@
     return d.danger.level === 'confirm' && next !== d.default;
   }
 
-  async function commit(next: string) {
+  async function commit(next: string): Promise<boolean> {
     busy = true;
     error = null;
-    const r = await setFleetSetting(d.key as SettingKey, next);
+    const r = save ? await save(next) : await setFleetSetting(d.key as SettingKey, next);
     busy = false;
     if (!r.ok) error = r.error.message;
+    return r.ok;
+  }
+
+  /** Write a toggle at once, then offer to put the old value back. */
+  async function commitWithUndo(next: string) {
+    const before = value;
+    if (!(await commit(next))) return;
+    push({
+      kind: 'success',
+      message: `${d.label}: ${valueInWords(d, next)}`,
+      action: { label: 'Undo', run: () => void commit(before) },
+    });
+  }
+
+  /** Stage a typed value, or write a toggle. */
+  function apply(next: string) {
+    if (batched && drafts) {
+      error = null;
+      drafts.stage(d.key, next, value);
+    } else void commitWithUndo(next);
   }
 
   function write(next: string) {
-    if (next === value) return;
+    if (next === current) return;
     if (needsConfirm(next)) {
       pending = next;
       return;
     }
-    void commit(next);
+    apply(next);
   }
 
   function onNumber(e: Event) {
@@ -144,7 +198,7 @@
   // key_value_table: an alias → path map, edited as rows.
   const entries = $derived.by<[string, string][]>(() => {
     try {
-      const v: unknown = JSON.parse(value || '{}');
+      const v: unknown = JSON.parse(current || '{}');
       return v && typeof v === 'object' && !Array.isArray(v)
         ? Object.entries(v as Record<string, string>)
         : [];
@@ -192,7 +246,9 @@
 
 <div
   class="field"
+  class:wide={WIDE.has(w)}
   class:modified
+  class:staged
   class:highlighted
   data-testid={`setting-row-${d.key}`}
   data-setting-key={d.key}>
@@ -205,7 +261,7 @@
     {#if d.tags.includes('experimental')}<span class="tag">experimental</span>{/if}
     {#if d.restart === 'app'}<span class="tag" title="Read once at launch">applies after a restart</span>{/if}
     {#if d.restart === 'hooks'}<span class="tag" title="Takes effect on each host's next hook install">applies when hooks are reinstalled</span>{/if}
-    {#if !readonly && d.owned_by === undefined}
+    {#if !readonly && !save && d.owned_by === undefined}
       <button
         type="button"
         class="btn btn--quiet history-btn"
@@ -214,16 +270,7 @@
         onclick={() => void toggleHistory()}>History</button
       >
     {/if}
-    {#if modified && !readonly}
-      <button
-        type="button"
-        class="btn btn--quiet reset"
-        data-testid={`setting-reset-${d.key}`}
-        disabled={busy}
-        title={`Reset to the default (${d.default === '' ? 'empty' : d.default})`}
-        onclick={() => write(d.default)}>Reset</button
-      >
-    {/if}
+    {#if staged}<span class="tag unsaved" data-testid={`setting-unsaved-${d.key}`}>not saved</span>{/if}
   </div>
 
   <div class="control">
@@ -251,7 +298,7 @@
         type="number"
         min="0"
         step="any"
-        value={toDisplay(d, value)}
+        value={toDisplay(d, current)}
         disabled={busy}
         aria-describedby={`${id}-help`}
         data-testid={id}
@@ -260,14 +307,14 @@
     {:else if w === 'select'}
       <select
         {id}
-        {value}
+        value={current}
         disabled={busy}
         aria-describedby={`${id}-help`}
         data-testid={id}
         onchange={(e) => {
           const el = e.currentTarget as HTMLSelectElement;
           const next = el.value;
-          el.value = value;
+          el.value = current;
           write(next);
         }}>
         {#each options as o (o)}<option value={o}>{optionLabel(d, o)}</option>{/each}
@@ -316,7 +363,7 @@
         {id}
         class="text"
         type="text"
-        {value}
+        value={current}
         disabled={busy}
         aria-describedby={`${id}-help`}
         data-testid={id}
@@ -325,7 +372,7 @@
       <textarea
         {id}
         rows="3"
-        {value}
+        value={current}
         disabled={busy}
         aria-describedby={`${id}-help`}
         data-testid={id}
@@ -423,7 +470,29 @@
     {#if hint}<span class="hint">{hint}</span>{/if}
     {#if d.owned_by}<span class="owner">Change it with {d.owned_by}.</span>{/if}
   </p>
-  {#if error}<p class="err" role="alert" data-testid={`setting-error-${d.key}`}>{error}</p>{/if}
+  {#if scope}
+    <p class="scope" data-testid={`setting-scope-${d.key}`}>
+      <span class="pill" title={scope.title} data-testid={`setting-scope-pill-${d.key}`}>{scope.pill}</span>
+      {#if scope.note}<span>{scope.note}</span>{/if}
+      {#if modified}
+        {#if scope.note}<span aria-hidden="true">·</span>{/if}
+        <span data-testid={`setting-changed-${d.key}`}>changed from {valueInWords(d, d.default)}</span>
+        {#if !readonly}
+          <span aria-hidden="true">·</span>
+          <button
+            type="button"
+            class="reset"
+            data-testid={`setting-reset-${d.key}`}
+            disabled={busy}
+            onclick={() => write(d.default)}>Reset</button
+          >
+        {/if}
+      {:else if !scope.note}
+        <span>default</span>
+      {/if}
+    </p>
+  {/if}
+  {#if error ?? draftError}<p class="err" role="alert" data-testid={`setting-error-${d.key}`}>{error ?? draftError}</p>{/if}
   {#if historyOpen}
     <div class="history" data-testid={`setting-history-list-${d.key}`}>
       {#if history === null}
@@ -454,16 +523,30 @@
     onconfirm={() => {
       const next = pending;
       pending = null;
-      if (next !== null) void commit(next);
+      if (next !== null) apply(next);
     }}
     oncancel={() => (pending = null)} />
 {/if}
 
 <style>
   .field {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    column-gap: var(--space-4);
+    align-items: center;
     border-left: 2px solid transparent;
-    padding: 0.35rem 0 0.35rem 0.6rem;
+    border-bottom: 1px solid var(--border);
+    padding: var(--space-3) 0 var(--space-3) 0.6rem;
     margin-left: -0.6rem;
+  }
+  .field > * { grid-column: 1 / -1; }
+  .field:not(.wide) > .head { grid-column: 1; grid-row: 1; }
+  .field:not(.wide) > .help { grid-column: 1; grid-row: 2; }
+  .field:not(.wide) > .control {
+    grid-column: 2;
+    grid-row: 1 / span 3;
+    justify-self: end;
+    margin-top: 0;
   }
   .field.modified {
     border-left-color: var(--accent);
@@ -478,18 +561,14 @@
     flex-wrap: wrap;
   }
   .label {
-    font-size: 0.85rem;
+    font-size: var(--text-sm);
     font-weight: 500;
   }
-  .reset,
   .history-btn {
     margin-left: auto;
   }
-  .history-btn ~ .reset {
-    margin-left: 0;
-  }
   .history-btn {
-    font-size: 0.72rem;
+    font-size: var(--text-2xs);
   }
   .control {
     display: flex;
@@ -498,6 +577,18 @@
     margin-top: 0.25rem;
     flex-wrap: wrap;
   }
+  .control input:not([type='checkbox']):not([type='radio']),
+  .control select,
+  .control textarea {
+    min-height: var(--control-h);
+    padding: 0 var(--control-px);
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-sm);
+    background: var(--control-bg);
+    color: var(--control-fg);
+    font-size: var(--control-font);
+  }
+  .control textarea { padding: 4px var(--control-px); }
   .num {
     width: 7rem;
   }
@@ -521,7 +612,7 @@
     display: flex;
     align-items: center;
     gap: 0.3rem;
-    font-size: 0.82rem;
+    font-size: var(--text-2xs);
   }
   .kv {
     display: flex;
@@ -545,17 +636,53 @@
     display: flex;
     gap: 0.5rem;
     align-items: center;
-    font-size: 0.82rem;
+    font-size: var(--text-2xs);
   }
   .readonly {
     font-family: var(--mono);
     font-size: var(--control-font);
   }
   .help {
-    margin: 0.2rem 0 0;
-    font-size: 0.75rem;
+    margin: 0.15rem 0 0;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     line-height: 1.4;
+  }
+  .field.staged {
+    border-left-color: var(--accent);
+    border-left-style: dashed;
+  }
+  .unsaved {
+    color: var(--fg-muted);
+  }
+  .scope {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.3rem;
+    margin: 0.15rem 0 0;
+    font-size: var(--text-2xs);
+    color: var(--fg-muted);
+  }
+  .field:not(.wide) > .scope { grid-column: 1; grid-row: 3; }
+  .pill {
+    padding: 0 0.35rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-sunk);
+    color: var(--fg-2);
+  }
+  .scope .reset {
+    min-block-size: var(--control-h);
+    padding: 0;
+    border: none;
+    background: none;
+    color: var(--accent);
+    font: inherit;
+    cursor: pointer;
+  }
+  .scope .reset:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
   }
   .range,
   .hint,
@@ -564,7 +691,7 @@
   }
   .err {
     margin: 0.2rem 0 0;
-    font-size: 0.75rem;
+    font-size: var(--text-2xs);
     color: var(--usage-crit);
   }
   .suggestion {
@@ -576,7 +703,7 @@
     padding: 0.3rem 0.5rem;
     border: 1px dashed var(--accent);
     border-radius: var(--radius-sm);
-    font-size: 0.78rem;
+    font-size: var(--text-2xs);
   }
   .suggestion .chip {
     color: var(--accent);
@@ -591,7 +718,7 @@
     color: var(--fg-muted);
   }
   .history {
-    font-size: 0.75rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     margin-top: 0.25rem;
   }
