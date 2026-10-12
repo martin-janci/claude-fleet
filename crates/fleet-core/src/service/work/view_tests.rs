@@ -969,6 +969,42 @@ fn a_hidden_primary_is_neither_named_nor_reported_missing_to_a_bound_client() {
     assert_eq!(all.primary_link_id, Some(hidden));
 }
 
+/// The status filter places a task where the Board and the List do: a bare
+/// key with a live session is in progress (it has no status of its own), and
+/// a ticket keeps its own status whatever its sessions are doing.
+#[test]
+fn the_status_filter_places_a_live_bare_key_in_progress() {
+    let w = world();
+    {
+        let s = w.st.lock().unwrap();
+        s.link_session_work(w.s2, WorkTarget::Ref("FREE-7"), "manual")
+            .unwrap();
+    }
+    // TK-1 is To do in its tracker, with a live session on it.
+    link(&w, w.s1, w.t1, true);
+    let with = |status: &str| -> BTreeSet<String> {
+        page(
+            &w,
+            &OrgScope::All,
+            WorkTreeFilters {
+                status: Some(status.into()),
+                ..Default::default()
+            },
+        )
+        .tasks
+        .iter()
+        .filter_map(|t| t.key.clone())
+        .collect()
+    };
+    let doing = with("in_progress");
+    assert!(doing.contains("FREE-7"), "{doing:?}");
+    assert!(!doing.contains("TK-1"), "{doing:?}");
+    let todo = with("todo");
+    assert!(!todo.contains("FREE-7") && todo.contains("TK-1"), "{todo:?}");
+    assert!(with("open").contains("FREE-7"));
+    assert!(!with("done").contains("FREE-7"));
+}
+
 /// D31: an org's bound clients see unassigned work and sessions while its
 /// `bound_sees_unassigned` is on (the default), and only rows assigned to
 /// the org while it is off — never another org's either way.
