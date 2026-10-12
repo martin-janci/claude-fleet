@@ -1481,12 +1481,16 @@ mod tests {
                 v
             };
             let pair = ("pair".to_string(), "device".to_string());
-            assert_eq!(of("kiosk"), [pair.clone()]);
+            assert_eq!(of("kiosk"), std::slice::from_ref(&pair));
             assert_eq!(
                 of("desk"),
                 [pair.clone(), ("set_client_trust".into(), "device".into())]
             );
-            assert_eq!(of("orphan"), [pair.clone()], "the failed attempt left none");
+            assert_eq!(
+                of("orphan"),
+                std::slice::from_ref(&pair),
+                "the failed attempt left none"
+            );
             let ada = s.get_person_by_name("ada").unwrap().unwrap();
             let laptop = s
                 .active_client_tokens()
@@ -1504,7 +1508,11 @@ mod tests {
                 .iter()
                 .find(|e| e.action == "pair" && e.resource_id == "ada-laptop")
                 .unwrap();
-            assert_eq!(paired.actor_person, Some(ada.id), "the device is its own actor");
+            assert_eq!(
+                paired.actor_person,
+                Some(ada.id),
+                "the device is its own actor"
+            );
             assert_eq!(paired.actor_device, Some(laptop.id));
             assert!(
                 ev.iter().all(|e| e.representation.get("token").is_none()

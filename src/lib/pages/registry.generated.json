@@ -7925,7 +7925,7 @@
           ]
         ],
         "command": "disable_person",
-        "confirm": "Revokes every device of theirs and every share made to them, at once. Their own sessions stay private and theirs. There is no re-enable.",
+        "confirm": "Revokes every device of theirs and every share made to them, at once. Their own sessions stay private and theirs. They can be re-enabled later (org_admin enable_person, or fleet-hub person enable), but nothing revoked comes back.",
         "envelope": "args",
         "id": "person.disable",
         "label": "Disable",

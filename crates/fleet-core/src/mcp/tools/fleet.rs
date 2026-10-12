@@ -1164,7 +1164,11 @@ impl FleetTools {
         };
         if action == Action::PairDevice {
             let rep = serde_json::to_value(&args).unwrap_or_default();
-            let device = args.device.clone().or(args.name.clone()).unwrap_or_default();
+            let device = args
+                .device
+                .clone()
+                .or(args.name.clone())
+                .unwrap_or_default();
             let out = self.pair_device(args, authority)?;
             // The code lives in memory until it is redeemed; minting it is
             // still an administrative act, recorded with who minted it (the

@@ -1453,9 +1453,14 @@ mod tests {
             .collect();
         assert_eq!(
             on,
-            [("grant_catalog", "desk", false), ("grant_catalog", "desk", true)]
+            [
+                ("grant_catalog", "desk", false),
+                ("grant_catalog", "desk", true)
+            ]
         );
-        assert!(ev.iter().all(|e| e.actor_person.is_none() && e.resource_type == "device"));
+        assert!(ev
+            .iter()
+            .all(|e| e.actor_person.is_none() && e.resource_type == "device"));
     }
 
     /// `client bind-person` to a new name records the person it creates and

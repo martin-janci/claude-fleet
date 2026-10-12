@@ -624,7 +624,11 @@ pub async fn handle_pair(
             // its own pairing; who minted the code is not carried on it (the
             // `org_admin { pair_device }` event records that).
             let device_id = row.id;
-            let event = |action: &str, resource_type: &str, resource_id: &str, actor: Option<i64>, rep: serde_json::Value| {
+            let event = |action: &str,
+                         resource_type: &str,
+                         resource_id: &str,
+                         actor: Option<i64>,
+                         rep: serde_json::Value| {
                 s.record_admin_event(&crate::store::AdminEvent {
                     actor_person: actor,
                     actor_device: Some(device_id),
