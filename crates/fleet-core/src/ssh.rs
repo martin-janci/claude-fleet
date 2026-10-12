@@ -540,10 +540,11 @@ impl SshClient {
     /// `run_bounded_capped` with `stdin` written to the remote command and
     /// then closed (see [`SshExec::run_with_stdin`]). Not retried on a mux
     /// failure: the bytes may already have been consumed. A fleet-agent host
-    /// is refused (`E_UNSUPPORTED`): its exec frames carry no stdin. The
-    /// `local` host is a local spawn under [`ensure_local_allowed`], as in
-    /// [`run_shell`] — never `ssh local`, which resolves nothing (or, with an
-    /// `~/.ssh/config` entry of that name, the wrong machine).
+    /// takes it through its exec frame (text only; see
+    /// `AgentTransport::run_with_stdin`). The `local` host is a local spawn
+    /// under [`ensure_local_allowed`], as in [`run_shell`] — never
+    /// `ssh local`, which resolves nothing (or, with an `~/.ssh/config`
+    /// entry of that name, the wrong machine).
     ///
     /// [`ensure_local_allowed`]: crate::service::hub::ensure_local_allowed
     pub async fn run_with_stdin(
@@ -559,11 +560,11 @@ impl SshClient {
             crate::service::hub::ensure_local_allowed(host)?;
             return run_local_with_stdin(args, stdin, wall_clock, max_output).await;
         }
-        if self.agent_route(host).is_some() {
-            return Err(IpcError::new(
-                codes::E_UNSUPPORTED,
-                format!("{host} is reached through fleet-agent, which cannot pipe stdin"),
-            ));
+        if let Some(alias) = self.agent_route(host) {
+            return self
+                .agent()
+                .run_with_stdin(&alias, args, stdin, connect_timeout, wall_clock, max_output)
+                .await;
         }
         let mux_opts = self.prepare(host, connect_timeout).await;
         let cmd = self.remote_command(host, &mux_opts, args);
@@ -1458,7 +1459,8 @@ pub trait SshExec: Send + Sync {
     /// graph M6: a tracker request body, or a token for a `curl` header,
     /// which must never be in argv). The bytes are written once and the
     /// pipe closed. The default refuses (`E_UNSUPPORTED`): only transports
-    /// that can pipe stdin opt in.
+    /// that can pipe stdin opt in — `SshClient`, `LocalExec`, `FakeSsh` and
+    /// `AgentTransport` do.
     async fn run_with_stdin(
         &self,
         host: &str,
