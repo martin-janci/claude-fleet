@@ -130,6 +130,7 @@ impl Store {
             Vec<ClientTokenRow>,
             Vec<super::ControlTokenRow>,
             (Vec<i64>, Vec<i64>, Vec<i64>),
+            crate::mcp::auth::DeviceTokenPolicy,
         ),
         crate::ipc_error::IpcError,
     > {
@@ -144,8 +145,38 @@ impl Store {
         // Who holds the realm roles (identity sub-project 1): every realm
         // table moves the epoch, so the sets are the ones at this epoch too.
         let realm = self.realm_sets()?;
+        // When a device token expires: the `auth.device_token_%` settings
+        // move the epoch too (migration 182).
+        let device_policy = self.device_token_policy()?;
         tx.commit()?;
-        Ok((epoch, hosts, clients, controls, realm))
+        Ok((epoch, hosts, clients, controls, realm, device_policy))
+    }
+
+    /// When a paired device's token expires (identity sub-project 1, spec
+    /// §3): `auth.device_token_ttl_days` and `auth.device_token_max_age_days`
+    /// as their effective values (stored, else the registered default; `0`
+    /// is off), and `auth.device_token_ttl_since`, which migration 182
+    /// writes (missing or unreadable: `0`, no floor).
+    pub fn device_token_policy(
+        &self,
+    ) -> Result<crate::mcp::auth::DeviceTokenPolicy, crate::ipc_error::IpcError> {
+        use crate::service::settings;
+        let secs = |key: &str| -> Result<Option<i64>, crate::ipc_error::IpcError> {
+            let raw = self.get_setting(key)?;
+            let days = settings::resolve(key, raw.as_deref())
+                .parse::<i64>()
+                .unwrap_or(0);
+            Ok((days > 0).then(|| days.saturating_mul(86_400)))
+        };
+        let since = self
+            .get_setting(settings::DEVICE_TOKEN_TTL_SINCE)?
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .unwrap_or(0);
+        Ok(crate::mcp::auth::DeviceTokenPolicy {
+            ttl_secs: secs(settings::DEVICE_TOKEN_TTL_DAYS)?,
+            max_age_secs: secs(settings::DEVICE_TOKEN_MAX_AGE_DAYS)?,
+            since,
+        })
     }
 }
 
@@ -238,7 +269,7 @@ mod tests {
         s.insert_client_token("old", &"c".repeat(64), "full")
             .unwrap();
         s.revoke_client_token("old").unwrap();
-        let (epoch, hosts, clients, _, _) = s.auth_snapshot().unwrap();
+        let (epoch, hosts, clients, _, _, _) = s.auth_snapshot().unwrap();
         assert_eq!(epoch, s.auth_epoch().unwrap());
         assert_eq!(hosts.len(), 1);
         let names: Vec<_> = clients.iter().map(|c| c.name.as_str()).collect();

@@ -1078,7 +1078,7 @@ into `state.db` beside the data it guards.
 | `FLEET_HUB_OIDC_CLIENT_ID` | — (required) | The Keycloak client's id. |
 | `FLEET_HUB_OIDC_CLIENT_SECRET` | unset | A confidential client's secret. Unset: a public client, PKCE alone. |
 | `FLEET_HUB_OIDC_ALLOWED_ROLES` | empty (any account) | Comma-separated realm roles, client roles or groups; a sign-in holding none is refused. `/team` and `team` match each other. |
-| `FLEET_HUB_OIDC_AUTO_PROVISION` | `true` | An account's first sign-in creates its person. `false`: only accounts the operator linked get in. |
+| `FLEET_HUB_OIDC_AUTO_PROVISION` | `false` | `false`: only an account the operator linked (`fleet-hub person link-sso <person> --subject <sub>`) gets in — the refusal page prints that command with the account's `sub`. `true`: an unknown account's first sign-in creates its person. |
 | `FLEET_HUB_OIDC_USERNAME_CLAIM` | `preferred_username` | The ID-token claim a new person is named after. |
 | `FLEET_HUB_OIDC_MODE` | `full` | `full` or `readonly`: what a device paired this way may do. |
 | `FLEET_HUB_OIDC_SCOPES` | `openid profile email` | Requested scopes (`openid` is always added). |
@@ -1112,8 +1112,14 @@ username or e-mail, which the provider may let its owner change:
 
 - An account already linked pairs as that person — refused if the person is
   disabled (`person disable` ends SSO reach too).
-- An account seen for the first time creates a person named after its
-  username, when auto-provisioning is on and no live person holds the name.
+- An account seen for the first time is refused by default, and the page
+  prints the `fleet-hub person link-sso <person> --subject <sub>` command
+  that invites it. The person must exist first; a new colleague's is
+  created by naming them (`fleet-hub pair --person <name>`,
+  `client bind-person`). Only when the operator turned
+  auto-provisioning on (`FLEET_HUB_OIDC_AUTO_PROVISION=true`) does a first
+  sign-in create a person named after its username, and then only when no
+  live person holds the name.
 - It is **never** linked to an existing person by name: anybody who can set
   their username at the provider could otherwise become a colleague. So
   that sign-in is refused, and the page prints the command for the

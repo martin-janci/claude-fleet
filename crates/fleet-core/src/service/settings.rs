@@ -774,6 +774,16 @@ pub const DECIDE_RETENTION_DAYS: &str = "decide.retention_days";
 /// Days an admin event (`store::admin_events`, the identity audit log) is
 /// kept (`0` = forever); swept by `service::gc`.
 pub const AUDIT_RETENTION_DAYS: &str = "auth.audit_retention_days";
+/// Days a paired device may go unused before its token stops resolving
+/// (`0` = never; identity sub-project 1). Peer and updater tokens never
+/// expire. Decided per request in `mcp::authorize`.
+pub const DEVICE_TOKEN_TTL_DAYS: &str = "auth.device_token_ttl_days";
+/// Days after pairing a device's token stops resolving, used or not
+/// (`0` = off).
+pub const DEVICE_TOKEN_MAX_AGE_DAYS: &str = "auth.device_token_max_age_days";
+/// Not a registered setting: the Unix second migration 182 started every
+/// existing token's idle clock, so the upgrade signs nobody out.
+pub const DEVICE_TOKEN_TTL_SINCE: &str = "auth.device_token_ttl_since";
 /// A second opinion: every question a use case in `shadow` or `assist`
 /// asks Jev is also asked of Claude in print mode on
 /// [`DECIDE_HAIKU_HOST`], and its answer recorded beside Jev's (provider
@@ -1937,6 +1947,24 @@ pub const SPECS: &[Spec] = &[
     )
     .unit(Unit::Days)
     .zero("forever"),
+    Spec::new(
+        DEVICE_TOKEN_TTL_DAYS,
+        "90",
+        Kind::Int { min: 0, max: 3650 },
+        "Devices: sign out after idle days",
+        "Days a paired device may go unused before it is signed out and must be paired again. Peer hubs and updaters are never signed out.",
+    )
+    .unit(Unit::Days)
+    .zero("never"),
+    Spec::new(
+        DEVICE_TOKEN_MAX_AGE_DAYS,
+        "0",
+        Kind::Int { min: 0, max: 3650 },
+        "Devices: sign out after days, used or not",
+        "Days after pairing a device is signed out, however often it is used. Peer hubs and updaters are never signed out.",
+    )
+    .unit(Unit::Days)
+    .zero("off"),
     Spec::new(
         DECIDE_JEV_FLOORS,
         "",

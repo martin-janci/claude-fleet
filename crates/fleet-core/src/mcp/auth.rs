@@ -652,6 +652,40 @@ pub fn apply_realm(caller: &mut Caller, realm: &RealmSets) {
     }
 }
 
+/// When a paired device's token stops resolving (identity sub-project 1,
+/// spec §3): `auth.device_token_ttl_days` / `auth.device_token_max_age_days`
+/// in seconds (`None` = off) and `auth.device_token_ttl_since`, the moment
+/// migration 182 started every existing token's idle clock. The `Default`
+/// — everything off — is what a hub with no such settings means.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DeviceTokenPolicy {
+    /// The sliding idle limit: a token unused this long is expired.
+    pub ttl_secs: Option<i64>,
+    /// The absolute limit from `created_at`, used or not.
+    pub max_age_secs: Option<i64>,
+    /// The idle clock never starts before this (Unix seconds), so the
+    /// upgrade signs nobody out.
+    pub since: i64,
+}
+
+/// Whether `row`'s token has expired at `now` under `p`. Machine tokens — a
+/// peer hub's link and an updater — never expire this way: they are not a
+/// person's device, and nobody would be there to pair them again.
+pub fn device_token_expired(row: &ClientTokenRow, p: &DeviceTokenPolicy, now: i64) -> bool {
+    if matches!(row.mode.as_str(), "peer" | "updater") {
+        return false;
+    }
+    if p.max_age_secs.is_some_and(|max| now - row.created_at > max) {
+        return true;
+    }
+    let anchor = row
+        .last_seen_at
+        .unwrap_or(0)
+        .max(row.created_at)
+        .max(p.since);
+    p.ttl_secs.is_some_and(|ttl| now - anchor > ttl)
+}
+
 /// Whether a paired device's `person_id` is the hub's personal owner.
 ///
 /// Spelled out rather than written `person_id == personal_owner`, because two
@@ -902,6 +936,69 @@ mod tests {
             assets_admin_at: None,
             person_id: None,
         }
+    }
+
+    /// A live `full` device of person `person`, created and last seen at 0.
+    fn client_row_full(name: &str, person: Option<i64>) -> ClientTokenRow {
+        ClientTokenRow {
+            person_id: person,
+            ..client_row(1, name, &format!("tok-{name}"), "full")
+        }
+    }
+
+    #[test]
+    fn an_idle_device_token_expires_but_the_upgrade_signs_nobody_out() {
+        let p = DeviceTokenPolicy {
+            ttl_secs: Some(90 * 86_400),
+            max_age_secs: None,
+            since: 1_000_000,
+        };
+        let mut row = client_row_full("t", Some(1));
+        row.created_at = 10;
+        row.last_seen_at = Some(20);
+        // Idle since long before the upgrade: the clock starts at `since`.
+        assert!(!device_token_expired(&row, &p, 1_000_000 + 89 * 86_400));
+        assert!(device_token_expired(&row, &p, 1_000_000 + 91 * 86_400));
+        row.last_seen_at = Some(1_000_000 + 80 * 86_400);
+        assert!(
+            !device_token_expired(&row, &p, 1_000_000 + 91 * 86_400),
+            "used recently"
+        );
+        // Off: nothing expires.
+        assert!(!device_token_expired(
+            &row,
+            &DeviceTokenPolicy::default(),
+            i64::MAX / 2
+        ));
+    }
+
+    #[test]
+    fn max_age_counts_from_creation_and_machine_tokens_never_expire() {
+        let p = DeviceTokenPolicy {
+            ttl_secs: None,
+            max_age_secs: Some(100),
+            since: 0,
+        };
+        let mut row = client_row_full("t", Some(1));
+        row.created_at = 0;
+        assert!(!device_token_expired(&row, &p, 100));
+        assert!(device_token_expired(&row, &p, 101));
+        // Used a moment ago changes nothing: max age is not idle time.
+        row.last_seen_at = Some(100);
+        assert!(device_token_expired(&row, &p, 101));
+        row.mode = "peer".into();
+        assert!(!device_token_expired(&row, &p, 101));
+        row.mode = "updater".into();
+        assert!(!device_token_expired(&row, &p, 101));
+        // An idle limit spares machine tokens too.
+        let idle = DeviceTokenPolicy {
+            ttl_secs: Some(10),
+            max_age_secs: None,
+            since: 0,
+        };
+        assert!(!device_token_expired(&row, &idle, 1_000));
+        row.mode = "readonly".into();
+        assert!(device_token_expired(&row, &idle, 1_000));
     }
 
     #[test]

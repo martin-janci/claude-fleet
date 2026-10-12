@@ -38,6 +38,7 @@
 //! closed meanwhile (T1).
 
 use crate::ipc_error::{codes, lock, IpcError};
+use crate::mcp::auth::DeviceTokenPolicy;
 use crate::store::{ClientTokenRow, ControlTokenRow, HostTokenRow, ReadPool};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
@@ -73,6 +74,7 @@ struct Snapshot {
     clients: Arc<Vec<ClientTokenRow>>,
     controls: Arc<Vec<ControlTokenRow>>,
     realm: RealmSets,
+    device_policy: DeviceTokenPolicy,
 }
 
 /// Everything `authorize` matches a bearer token against, as of one auth
@@ -86,6 +88,9 @@ pub struct AuthRows {
     pub personal_owner: Option<i64>,
     /// The realm's role holders at the same epoch as the rows.
     pub realm: RealmSets,
+    /// When a device token expires (identity sub-project 1), at the same
+    /// epoch: every `auth.device_token_%` setting moves it (migration 182).
+    pub device_policy: DeviceTokenPolicy,
 }
 
 /// How often, at most, `authorize` stamps one client's `last_seen_at` — the
@@ -127,13 +132,21 @@ impl TokenCache {
 
     fn load(pool: &ReadPool) -> Result<Snapshot, IpcError> {
         let conn = pool.get().ok_or_else(no_connection)?;
-        let (epoch, hosts, clients, controls, realm) = lock(conn)?.auth_snapshot()?;
+        Self::read(conn)
+    }
+
+    /// Epoch, rows, realm sets and device-token policy in one read
+    /// transaction (`Store::auth_snapshot`).
+    fn read(conn: &Mutex<crate::store::Store>) -> Result<Snapshot, IpcError> {
+        let (epoch, hosts, clients, controls, realm, device_policy) =
+            lock(conn)?.auth_snapshot()?;
         Ok(Snapshot {
             epoch,
             hosts: Arc::new(hosts),
             clients: Arc::new(clients),
             controls: Arc::new(controls),
             realm: RealmSets::from_vecs(realm),
+            device_policy,
         })
     }
 
@@ -154,14 +167,7 @@ impl TokenCache {
             // Epoch and rows in one read transaction: the rows are the ones
             // at the epoch recorded with them (possibly newer than
             // `current`, never older).
-            let (epoch, hosts, clients, controls, realm) = lock(conn)?.auth_snapshot()?;
-            *snap = Snapshot {
-                epoch,
-                hosts: Arc::new(hosts),
-                clients: Arc::new(clients),
-                controls: Arc::new(controls),
-                realm: RealmSets::from_vecs(realm),
-            };
+            *snap = Self::read(conn)?;
         }
         Ok(AuthRows {
             hosts: Arc::clone(&snap.hosts),
@@ -169,7 +175,31 @@ impl TokenCache {
             controls: Arc::clone(&snap.controls),
             personal_owner: owner,
             realm: snap.realm.clone(),
+            device_policy: snap.device_policy,
         })
+    }
+
+    /// The device-token policy of the last snapshot read — for `authorize`'s
+    /// writer fallback when the writer cannot read the settings either: the
+    /// last policy this hub knew beats none at all (which would let every
+    /// idle device back in).
+    pub fn last_device_policy(&self) -> DeviceTokenPolicy {
+        self.snapshot
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .device_policy
+    }
+
+    /// When `authorize` last stamped client `id` as seen, in this process.
+    /// A stamp moves no auth epoch, so a snapshot's `last_seen_at` can be
+    /// days old for a device in daily use; the idle check takes the later
+    /// of the two.
+    pub fn last_touched(&self, id: i64) -> Option<i64> {
+        self.touched
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&id)
+            .copied()
     }
 
     /// The hub's personal owner, read through `conn` the first time and

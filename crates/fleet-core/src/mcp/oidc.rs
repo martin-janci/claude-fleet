@@ -85,8 +85,10 @@ pub struct OidcConfig {
     /// A sign-in is refused unless the account holds one of these roles or
     /// groups. Empty: any account the provider authenticates.
     pub allowed_roles: Vec<String>,
-    /// Create a person on an account's first sign-in. Off: only accounts
-    /// the operator linked get in.
+    /// Create a person on an account's first sign-in. Off — the default
+    /// since identity sub-project 1, `FLEET_HUB_OIDC_AUTO_PROVISION=true`
+    /// turns it on: only accounts the operator linked
+    /// (`fleet-hub person link-sso`) get in.
     pub auto_provision: bool,
     /// The ID-token claim that names a provisioned person.
     pub username_claim: String,
@@ -185,7 +187,9 @@ impl OidcConfig {
                 .unwrap_or_default(),
             auto_provision: match get(ENV_AUTO_PROVISION) {
                 Some(v) => parse_bool(ENV_AUTO_PROVISION, &v)?,
-                None => true,
+                // Identity sub-project 1: an unknown account is invited
+                // (linked), never created by its own first sign-in.
+                None => false,
             },
             username_claim: get(ENV_USERNAME_CLAIM).unwrap_or_else(|| "preferred_username".into()),
             mode,

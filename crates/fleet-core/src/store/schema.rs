@@ -2021,6 +2021,10 @@ const MIGRATIONS: &[Migration] = &[
     // (`store::admin_events`) and the auth-epoch triggers on
     // `person_identities`. New tables and IF NOT EXISTS triggers, idempotent.
     Migration::plain(181, include_str!("../../migrations/181_admin_events.sql")),
+    // Identity sub-project 1: device tokens expire. Writes the idle clock's
+    // start (`auth.device_token_ttl_since`, INSERT OR IGNORE) and the
+    // auth-epoch triggers on the `auth.device_token_%` settings.
+    Migration::plain(182, include_str!("../../migrations/182_device_token_ttl.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -3741,6 +3745,54 @@ mod tests {
         assert_eq!(count("SELECT COUNT(*) FROM admin_events"), 1);
         assert_eq!(count("SELECT COUNT(*) FROM admin_events_gc"), 1);
         assert_eq!(count("SELECT open FROM admin_events_gc WHERE id = 1"), 0);
+    }
+
+    #[test]
+    fn migration_182_starts_the_device_idle_clock_now_and_moves_the_epoch_on_its_settings() {
+        let s = store_at_version(181);
+        s.migrate().unwrap();
+        let since = || -> i64 {
+            s.get_setting("auth.device_token_ttl_since")
+                .unwrap()
+                .expect("the migration writes ttl_since")
+                .parse()
+                .unwrap()
+        };
+        let first = since();
+        let now = crate::store::now_unix();
+        assert!((now - first).abs() < 60, "ttl_since {first} is not now ({now})");
+        let epoch = || -> i64 {
+            s.conn
+                .query_row("SELECT epoch FROM auth_epoch WHERE id = 1", [], |r| {
+                    r.get(0)
+                })
+                .unwrap()
+        };
+        // Every `auth.device_token_%` write moves the auth epoch; any other
+        // setting does not.
+        let mut last = epoch();
+        for sql in [
+            "INSERT INTO settings (key, value) VALUES ('auth.device_token_ttl_days', '30')",
+            "UPDATE settings SET value = '7' WHERE key = 'auth.device_token_ttl_days'",
+            "DELETE FROM settings WHERE key = 'auth.device_token_ttl_days'",
+        ] {
+            s.conn.execute_batch(sql).unwrap();
+            assert!(epoch() > last, "{sql} did not move the auth epoch");
+            last = epoch();
+        }
+        s.conn
+            .execute_batch("INSERT INTO settings (key, value) VALUES ('ui.theme', 'dark')")
+            .unwrap();
+        assert_eq!(epoch(), last, "an unrelated setting moved the auth epoch");
+        // Re-running keeps the first anchor.
+        s.conn
+            .execute_batch(
+                "UPDATE settings SET value = '12345' WHERE key = 'auth.device_token_ttl_since';
+                 DELETE FROM schema_version WHERE version >= 182;",
+            )
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(since(), 12345);
     }
 
     #[test]

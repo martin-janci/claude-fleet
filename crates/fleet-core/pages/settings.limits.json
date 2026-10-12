@@ -231,6 +231,20 @@
           "key": "auth.audit_retention_days"
         }
       ]
+    },
+    {
+      "title": "Devices",
+      "intro": "When a paired device that has gone unused, or grown old, is signed out and must be paired again.",
+      "items": [
+        {
+          "type": "field",
+          "key": "auth.device_token_ttl_days"
+        },
+        {
+          "type": "field",
+          "key": "auth.device_token_max_age_days"
+        }
+      ]
     }
   ]
 }

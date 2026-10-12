@@ -281,6 +281,28 @@ async fn authorize(
                     .realm_sets()
                     .map(token_cache::RealmSets::from_vecs)
                     .unwrap_or_default(),
+                // On a failed read, the policy of the cache's last good
+                // snapshot when there is a cache (all off would let every
+                // idle device back in); with no cache, all off, logged.
+                device_policy: match s.device_token_policy() {
+                    Ok(p) => p,
+                    Err(e) => match state.tokens.as_ref() {
+                        Some(cache) => {
+                            tracing::warn!(
+                                error = %e.message,
+                                "[mcp] could not read the device-token policy; using the last one read"
+                            );
+                            cache.last_device_policy()
+                        }
+                        None => {
+                            tracing::warn!(
+                                error = %e.message,
+                                "[mcp] could not read the device-token policy; no device expires on this request"
+                            );
+                            auth::DeviceTokenPolicy::default()
+                        }
+                    },
+                },
             }
         }
     };
@@ -349,6 +371,32 @@ async fn authorize(
     // Identity sub-project 1: the caller's realm roles, before any gate
     // reads them — for the `/hook?token=` fallback as for the header form.
     auth::apply_realm(&mut caller, &rows.realm);
+    // Identity sub-project 1: a paired device's token expires after
+    // `auth.device_token_ttl_days` unused, or `auth.device_token_max_age_days`
+    // after pairing — a 401 like an unknown token, so the app pairs again.
+    // Before the liveness stamp below, which must never revive it. Only a
+    // device is a client caller: the master, host and named tokens are not.
+    if let Some(client) = caller.client.as_ref() {
+        let now = crate::store::now_unix();
+        if let Some(row) = rows.clients.iter().find(|r| r.id == client.id) {
+            // The cached row's `last_seen_at` is as old as its snapshot (a
+            // stamp moves no epoch); this process's own stamps are newer.
+            let seen = state.tokens.as_ref().and_then(|c| c.last_touched(row.id));
+            let expired = if seen > row.last_seen_at {
+                let row = crate::store::ClientTokenRow {
+                    last_seen_at: seen,
+                    ..row.clone()
+                };
+                auth::device_token_expired(&row, &rows.device_policy, now)
+            } else {
+                auth::device_token_expired(row, &rows.device_policy, now)
+            };
+            if expired {
+                tracing::info!(device = %client.name, "[mcp] device token expired; pair again");
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+        }
+    }
     // Liveness for the pairing UI ("last seen"). Best-effort and rate-limited
     // in the store (at most one write a minute per client); a second brief
     // sync lock, again released before the `.await` below.
