@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 mod access_requests;
 mod account_usage_snapshots;
+mod agents;
 mod aux_usage;
 pub mod backup;
 mod bench_work_link;
@@ -51,6 +52,7 @@ mod read_cursors;
 mod read_pool;
 mod reconcile;
 mod reports;
+mod review_prs;
 mod routines;
 mod rows;
 mod runs;
@@ -62,6 +64,7 @@ mod session_grants;
 mod sessions;
 mod setting_review;
 mod start_rules;
+mod support_fingerprints;
 mod task_report;
 mod tasks;
 #[cfg(test)]
@@ -93,6 +96,11 @@ mod work_view;
 
 pub use access_requests::{AccessRequestRow, ACCESS_REQUEST_COOLDOWN_SECS};
 pub use account_usage_snapshots::{UsageSnapshotRow, USAGE_HISTORY_KEEP_SECS};
+pub use agents::{
+    AgentActionRow, AgentCursorRow, AgentJobEnd, AgentJobRow, AgentRuleRow, NewAgentJob,
+    NewAgentRule, AGENT_ACTION_STATES, AGENT_CONFIG_MAX_CHARS, AGENT_JOB_STATES, AGENT_KINDS,
+    AGENT_LEVELS, AGENT_SCOPE_MAX_CHARS,
+};
 pub use aux_usage::{
     AuxUsageRow, NewAuxUsage, AUX_ORIGINS, AUX_ORIGIN_BRIEF, AUX_ORIGIN_COMMIT_MESSAGE,
     AUX_ORIGIN_CONTEXT_HELP, AUX_ORIGIN_HEADLESS_CHECK, AUX_ORIGIN_MORNING_BRIEF,
@@ -182,6 +190,10 @@ pub use pull_requests::{
 pub use read_cursors::CursorRow;
 pub use read_pool::{read_via, ReadPool, READ_POOL_SIZE};
 pub use reports::{ReportFilter, ReportRow};
+pub use review_prs::{
+    NewReviewRecord, ReviewPrRow, ReviewRecordRow, TestExemptionRow, REVIEW_PR_STATUSES,
+    REVIEW_SKIP_REASONS,
+};
 pub use routines::{
     NewRoutineRun, RoutineFields, RoutineRow, RoutineRunRow, ROUTINE_LEASE_SECS, ROUTINE_OVERLAPS,
     ROUTINE_RUN_OUTCOMES, ROUTINE_RUN_OUTCOME_SOURCES, ROUTINE_RUN_STATES, ROUTINE_TRIGGERS,
@@ -206,6 +218,7 @@ pub use setting_review::{
     SETTING_AUDIT_KEEP,
 };
 pub use start_rules::{StartRuleLaunch, StartRuleRow, START_RULE_STATES};
+pub use support_fingerprints::SupportFingerprintRow;
 pub use task_report::{
     EvidenceCommit, EvidenceFile, TaskEvidence, TaskReport, EVIDENCE_COMMITS_MAX,
     EVIDENCE_FILES_MAX, REPORT_ENTRY_MAX_CHARS, REPORT_LIST_MAX, REPORT_OUTCOMES,

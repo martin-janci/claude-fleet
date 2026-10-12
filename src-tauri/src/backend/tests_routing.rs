@@ -1175,6 +1175,30 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "agents_status",
+            "agents",
+            json!({ "action": "status", "agent": "review", "limit": 5 }),
+            r#"{"rules":[],"jobs":[],"pending":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::agents::routed::agents_status(
+                    b,
+                    s,
+                    Some("review".into()),
+                    Some(5),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "agents_decide",
+            "agents",
+            json!({ "action": "reject", "id": 7 }),
+            r#"{"id":7,"job_id":1,"kind":"post_review","payload":"{}","state":"rejected","decided_by":"device:phone","decided_at":5,"executed_at":null,"error":null,"created_at":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::agents::routed::agents_decide(b, s, 7, false)).map(|_| ())
+            }),
+        ),
+        (
             "routines",
             "routines",
             json!({ "action": "failing" }),
@@ -7288,6 +7312,7 @@ const SOURCES: &[(&str, &str)] = &[
         "commands/account_usage.rs",
         include_str!("../commands/account_usage.rs"),
     ),
+    ("commands/agents.rs", include_str!("../commands/agents.rs")),
     ("commands/assets.rs", include_str!("../commands/assets.rs")),
     ("commands/cancel.rs", include_str!("../commands/cancel.rs")),
     (

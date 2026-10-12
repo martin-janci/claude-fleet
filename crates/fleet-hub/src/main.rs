@@ -5,6 +5,7 @@
 // macro output as `double_must_use`. It is not code we wrote — allow it crate-wide.
 #![allow(clippy::double_must_use)]
 
+mod agents;
 mod bench;
 mod catalog;
 mod census;
@@ -188,6 +189,16 @@ enum Cmd {
     Settings {
         #[command(subcommand)]
         cmd: settings::SettingsCmd,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
+    /// The built-in agents (PR reviewer, support): grant one a standing
+    /// rule on a repo or a Jira project, revoke one or all, answer what an
+    /// agent proposed, and read what they did. Writes the database
+    /// directly, as the person at this console.
+    Agents {
+        #[command(subcommand)]
+        cmd: agents::AgentsCmd,
         #[command(flatten)]
         opts: HubOptions,
     },
@@ -558,6 +569,7 @@ async fn main() -> ExitCode {
         Cmd::Decide { cmd, opts } => decide::run(cmd, &opts, &env).await,
         Cmd::Settings { cmd, opts } => settings::run(cmd, &opts, &env),
         Cmd::Guides { cmd, opts } => guides::run(cmd, &opts, &env),
+        Cmd::Agents { cmd, opts } => agents::run(cmd, &opts, &env),
         Cmd::Shepherd { cmd, opts } => shepherd::run(cmd, &opts, &env),
         Cmd::Update { cmd, opts } => update::run(cmd, &opts, &env).await,
         Cmd::Reports {

@@ -1,6 +1,7 @@
 // Runs (Orbit Fleet redesign 8.3): every run on the fleet's behalf —
 // dispatched tasks, a mission's actions and brakes, Jev's decisions and
-// fleet's own `claude -p` runs (planner, summary, triage, …), routine fires — newest first, each
+// fleet's own `claude -p` runs (planner, summary, triage, …), routine fires, the built-in
+// agents' jobs (review, support) — newest first, each
 // linked to the sessions it ran in. The Automation screen's Runs list (8.4)
 // reads it. `list_runs` routes to the hub's `runs { list }` on a paired
 // desktop. Mirrors `fleet_core::store::RunRow` / `service::runs`.
@@ -22,13 +23,15 @@ export type RunKind =
   | 'triage'
   | 'context_help'
   | 'headless_check'
-  | 'routine';
+  | 'routine'
+  | 'review'
+  | 'support';
 
 /** How it ended, in plain words (`RUN_OUTCOMES`). */
 export type RunOutcome = 'ok' | 'failed' | 'needs_person' | 'nothing_to_do' | 'running';
 
 /** Which table it came from (`RUN_SOURCES`). */
-export type RunSource = 'task' | 'orchestration' | 'jev' | 'aux' | 'routine';
+export type RunSource = 'task' | 'orchestration' | 'jev' | 'aux' | 'routine' | 'agent';
 
 /** One run. Optional fields are absent (never null) on the wire. */
 export interface RunRow {

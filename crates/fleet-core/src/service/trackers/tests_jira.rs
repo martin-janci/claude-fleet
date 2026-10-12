@@ -1130,3 +1130,161 @@ fn the_due_date_is_asked_for_and_read_as_a_calendar_date() {
     assert_eq!(due(json!("next Friday")), None);
     assert_eq!(due(json!("2026-02-30")), None);
 }
+
+#[tokio::test]
+async fn issue_threads_read_each_issue_with_its_comments_as_text() {
+    let f = FakeTransport::new();
+    let page = serde_json::json!({
+        "isLast": true,
+        "issues": [{
+            "key": "L2S-7",
+            "fields": {
+                "summary": "Payments fail",
+                "description": {"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"Since 9:00"}]}]},
+                "assignee": {"accountId": "bot-1"},
+                "status": {"name": "Open"},
+                "updated": "2026-10-11T09:30:00.000+0200",
+                "comment": {"comments": [
+                    {"id": "100", "author": {"accountId": "ann", "displayName": "Ann"},
+                     "body": {"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"Tech help!"}]}]},
+                     "created": "2026-10-11T09:31:00.000+0200"},
+                    {"author": {"displayName": "no id"}, "body": "x"}
+                ]}
+            }
+        }, {"fields": {"summary": "no key"}}]
+    });
+    f.once(Method::Post, "/search/jql", Ok(Response::json(200, &page)));
+    let threads = jira(&f).issue_threads("project = L2S", 10).await.unwrap();
+    assert_eq!(threads.len(), 1);
+    let t = &threads[0];
+    assert_eq!(
+        (t.key.as_str(), t.summary.as_str()),
+        ("L2S-7", "Payments fail")
+    );
+    assert_eq!(t.description, "Since 9:00");
+    assert_eq!(
+        (t.assignee_id.as_deref(), t.status.as_str()),
+        (Some("bot-1"), "Open")
+    );
+    assert_eq!(t.updated, Some(1_791_703_800));
+    assert_eq!(t.comments.len(), 1, "a comment without an id is dropped");
+    let c = &t.comments[0];
+    assert_eq!(
+        (c.id.as_str(), c.author_id.as_deref(), c.body.as_str()),
+        ("100", Some("ann"), "Tech help!")
+    );
+    let body = f.requests()[0].json_body().unwrap();
+    assert_eq!(body["jql"], "project = L2S");
+    assert!(body["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v == "comment"));
+}
+
+#[tokio::test]
+async fn the_support_agents_writes_create_link_and_comment_in_adf() {
+    let f = FakeTransport::new();
+    f.once(
+        Method::Post,
+        "/rest/api/3/issueLink",
+        Ok(Response::new(201, "")),
+    );
+    f.once(
+        Method::Post,
+        "/rest/api/3/issue/L2S-7/comment",
+        Ok(Response::json(201, &serde_json::json!({ "id": "300" }))),
+    );
+    f.once(
+        Method::Post,
+        "/rest/api/3/issue",
+        Ok(Response::json(
+            201,
+            &serde_json::json!({ "id": "1", "key": "PD-12" }),
+        )),
+    );
+    let adf = serde_json::json!({ "type": "doc", "version": 1, "content": [] });
+    let j = jira(&f);
+    let created = j
+        .write(&WriteOp::CreateIssue {
+            project: "PD".into(),
+            issue_type: "Bug".into(),
+            summary: "[payments] NPE".into(),
+            adf: adf.clone(),
+            wiki: "h2. x".into(),
+            labels: vec!["payments".into()],
+        })
+        .await
+        .unwrap();
+    assert_eq!(created.remote_id.as_deref(), Some("PD-12"));
+    assert!(created.url.unwrap().ends_with("/browse/PD-12"));
+    j.write(&WriteOp::LinkIssues {
+        link_type: "Causes".into(),
+        inward: "PD-12".into(),
+        outward: "l2s-7".into(),
+    })
+    .await
+    .unwrap();
+    let posted = j
+        .write(&WriteOp::RichComment {
+            key: "L2S-7".into(),
+            adf: adf.clone(),
+            wiki: "h3. x".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(posted.remote_id.as_deref(), Some("300"));
+    let sent = f.requests();
+    let issue = sent[0].json_body().unwrap();
+    assert_eq!(issue["fields"]["project"]["key"], "PD");
+    assert_eq!(issue["fields"]["description"], adf);
+    assert_eq!(issue["fields"]["labels"][0], "payments");
+    let link = sent[1].json_body().unwrap();
+    assert_eq!(
+        (
+            &link["type"]["name"],
+            &link["inwardIssue"]["key"],
+            &link["outwardIssue"]["key"]
+        ),
+        (
+            &Value::from("Causes"),
+            &Value::from("PD-12"),
+            &Value::from("L2S-7")
+        )
+    );
+    assert_eq!(
+        sent[2].json_body().unwrap()["body"],
+        adf,
+        "Cloud gets the ADF"
+    );
+}
+
+#[tokio::test]
+async fn a_bad_project_summary_or_key_is_refused_before_sending() {
+    let f = FakeTransport::new();
+    let j = jira(&f);
+    let create = |project: &str, summary: &str| WriteOp::CreateIssue {
+        project: project.into(),
+        issue_type: "Bug".into(),
+        summary: summary.into(),
+        adf: Value::Null,
+        wiki: String::new(),
+        labels: vec![],
+    };
+    for op in [
+        create("pd", "x"),
+        create("PD", "two\nlines"),
+        create("PD", " "),
+        WriteOp::LinkIssues {
+            link_type: "Causes".into(),
+            inward: "PD-1".into(),
+            outward: "nope".into(),
+        },
+    ] {
+        assert!(
+            matches!(j.write(&op).await, Err(TrackerError::Invalid(_))),
+            "{op:?}"
+        );
+    }
+    assert!(f.requests().is_empty());
+}

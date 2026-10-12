@@ -2942,6 +2942,49 @@
       ]
     },
     {
+      "default_widget": "duration",
+      "key": "agents.poll_interval_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Agents poll interval",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "agents.max_concurrent",
+      "kind": {
+        "max": 10,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Agents running at once",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "agents.max_retries",
+      "kind": {
+        "max": 10,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Agent job attempts",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
       "default_widget": "switch",
       "key": "gc.enabled",
       "kind": {
