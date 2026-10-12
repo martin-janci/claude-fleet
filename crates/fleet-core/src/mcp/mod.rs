@@ -1377,6 +1377,12 @@ mod tests {
             let owner = s.personal_owner_id().unwrap().expect("096 mints one");
             assert_eq!(desk.person_id, Some(owner));
             assert_eq!(kiosk.person_id, Some(owner));
+            // Identity sub-project 1: the trust went to the PERSON, after
+            // the binding; `trusted_at` above is only its mirror.
+            assert!(s
+                .people_with_realm_role(crate::store::ROLE_FLEET_TRUSTED)
+                .unwrap()
+                .contains(&owner));
         }
 
         // A code minted for a person this hub has never heard of: the

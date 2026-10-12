@@ -3758,6 +3758,9 @@ async fn set_client_trust_grants_and_withdraws_and_list_clients_shows_it() {
         let s = store.lock().unwrap();
         s.insert_client_token("mac-desktop", "aa11", "full")
             .unwrap();
+        // Trust is a person's (identity sub-project 1).
+        s.set_client_person("mac-desktop", s.personal_owner_id().unwrap())
+            .unwrap();
     }
     let r = tools
         .set_client_trust(Parameters(SetClientTrustParams {

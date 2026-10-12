@@ -79,9 +79,11 @@ impl TokenMode {
 
 /// The paired client behind a request: the `client_tokens` row that matched.
 /// Only the id, the name and the trust flag travel — never the token or its
-/// hash. `trusted` is `trusted_at IS NOT NULL` on the row: the operator has
-/// vouched for this device, so what it sends is delivered without the
-/// untrusted-content marker (`mcp::tools::apply_marker`).
+/// hash. `trusted` is decided by [`apply_realm`]: the device is `full` and
+/// its person holds the realm role `fleet-trusted` (the operator has vouched
+/// for that person), so what it sends is delivered without the
+/// untrusted-content marker (`mcp::tools::apply_marker`). The resolver's
+/// first guess, the row's `trusted_at` mirror, never survives `authorize`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientRef {
     pub id: i64,
@@ -631,13 +633,22 @@ pub fn resolve_token_at(
 /// Decide the realm-role half of a resolved caller (identity sub-project 1).
 /// Run on every resolved caller before any gate reads it.
 ///
-/// Only a paired device bound to a person is decided here: the master, an
+/// Only a paired device is decided here — `is_fleet_admin` from its person,
+/// `ClientRef::trusted` from its person and its mode: the master, an
 /// admin-scoped control token and a host token keep what the resolver gave
 /// them. Empty sets (a realm read that failed) decide every device `false` —
 /// fail closed.
 pub fn apply_realm(caller: &mut Caller, realm: &RealmSets) {
     if let Some(p) = caller.client.as_ref().and_then(|c| c.person_id) {
         caller.is_fleet_admin = realm.fleet_admins.contains(&p);
+    }
+    // Trust is the person's (`fleet-trusted`), carried by their `full`
+    // devices only. A device bound to nobody — and a peer link or an
+    // updater token, which never have a person — is never trusted, whatever
+    // its row's `trusted_at` mirror says.
+    let full = caller.mode == TokenMode::Full;
+    if let Some(c) = caller.client.as_mut() {
+        c.trusted = full && c.person_id.is_some_and(|p| realm.trusted.contains(&p));
     }
 }
 
@@ -1432,6 +1443,38 @@ mod tests {
         );
         assert!(c.is_fleet_admin);
         assert!(!c.is_personal_owner, "the role is authority, not identity");
+    }
+
+    /// Identity sub-project 1, Task 7: trust is the person's, carried by
+    /// their `full` devices only; the row's `trusted_at` mirror is not read,
+    /// and a device bound to nobody is never trusted.
+    #[test]
+    fn trust_is_decided_by_the_person_and_a_full_device() {
+        let trusted_22 = RealmSets {
+            trusted: std::sync::Arc::new([22].into()),
+            ..Default::default()
+        };
+        let decide = |mode: &str, person: Option<i64>, mirror: bool, realm: &RealmSets| {
+            let mut row = client_row(7, "phone", "tok-phone", mode);
+            row.person_id = person;
+            row.trusted_at = mirror.then_some(1_700_000_000);
+            let mut c = resolve_token("tok-phone", "s3cret", &[], &[row], OWNER).unwrap();
+            apply_realm(&mut c, realm);
+            c.client.unwrap().trusted
+        };
+        assert!(decide("full", Some(22), false, &trusted_22));
+        assert!(
+            !decide("full", Some(22), true, &RealmSets::default()),
+            "fail closed"
+        );
+        assert!(
+            !decide("full", Some(23), true, &trusted_22),
+            "the mirror is not read"
+        );
+        assert!(!decide("readonly", Some(22), false, &trusted_22));
+        assert!(!decide("answer", Some(22), false, &trusted_22));
+        assert!(!decide("full", None, true, &trusted_22), "nobody's device");
+        assert!(!decide("peer", None, true, &trusted_22));
     }
 
     #[test]

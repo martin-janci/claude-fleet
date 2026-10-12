@@ -545,11 +545,15 @@ pub async fn client_trust(
     let shown = v["name"].as_str().unwrap_or(name);
     out::line(&if trusted {
         format!(
-            "trusted {shown} (since {}); its prompts reach agents unmarked from its next call on",
+            "trusted {shown}'s person (since {}); the prompts of every full device of theirs \
+             reach agents unmarked from its next call on",
             fmt_time(v["trusted_at"].as_i64())
         )
     } else {
-        format!("untrusted {shown}; its prompts are marked again from its next call on")
+        format!(
+            "untrusted {shown}'s person; the prompts of their devices are marked again from \
+             the next call on"
+        )
     });
     Ok(ExitCode::SUCCESS)
 }
@@ -1413,10 +1417,12 @@ mod tests {
             )
             .unwrap();
             let personal = s.upsert_catalog("personal", "/p", None, None).unwrap();
-            (
-                s.insert_client_token("desk", "aa11", "full").unwrap().id,
-                personal.id,
-            )
+            let desk = s.insert_client_token("desk", "aa11", "full").unwrap().id;
+            // The personal grant is a person's realm role (identity
+            // sub-project 1), so the device must be somebody's.
+            let dee = s.create_person("dee", None).unwrap().id;
+            s.set_client_person("desk", Some(dee)).unwrap();
+            (desk, personal.id)
         };
         let grant = |on| {
             client_grant(

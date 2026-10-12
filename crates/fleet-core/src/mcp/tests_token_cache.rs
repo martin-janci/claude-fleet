@@ -208,13 +208,17 @@ async fn a_newly_paired_or_minted_token_is_accepted_on_the_next_request() {
     hub.refused("box2-tok").await;
     {
         let s = hub.store.lock().unwrap();
-        s.insert_client_token("tablet", &auth::sha256_hex("tablet-tok"), "readonly")
+        // Trust is a person's, carried by a full device (identity
+        // sub-project 1): the tablet is the owner's full device.
+        s.insert_client_token("tablet", &auth::sha256_hex("tablet-tok"), "full")
+            .unwrap();
+        s.set_client_person("tablet", s.personal_owner_id().unwrap())
             .unwrap();
         s.upsert_host("box2").unwrap();
         s.upsert_host_token("box2", "box2-tok").unwrap();
     }
     let r = hub.accepted("tablet-tok").await;
-    assert!(r.contains("caller=client:tablet mode=Readonly"), "{r}");
+    assert!(r.contains("caller=client:tablet mode=Full"), "{r}");
     hub.accepted("box2-tok").await;
 
     // Trust granted by another process reaches the next request too.

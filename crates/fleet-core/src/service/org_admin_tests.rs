@@ -82,7 +82,10 @@ fn org_actions_run_orgs_admin_and_take_an_org_by_name() {
 #[test]
 fn devices_list_their_org_person_and_grants_and_never_a_machine_token() {
     let st = store();
-    device(&st, "phone", "full");
+    st.lock()
+        .unwrap()
+        .insert_owned_client_token("phone", "digest-phone", "full")
+        .unwrap();
     device(&st, "link", "peer");
     let org = {
         let s = st.lock().unwrap();
@@ -121,13 +124,17 @@ fn devices_list_their_org_person_and_grants_and_never_a_machine_token() {
 #[test]
 fn the_device_in_hand_cannot_be_locked_out_through_itself() {
     let st = store();
-    device(&st, "desk", "full");
-    st.lock()
-        .unwrap()
-        .upsert_catalog("personal", "/p", None, None)
-        .unwrap();
+    // Trust and the personal grant are a person's: desk is dee's.
+    let dee = {
+        let s = st.lock().unwrap();
+        s.upsert_catalog("personal", "/p", None, None).unwrap();
+        s.insert_owned_client_token("desk", "digest-desk", "full")
+            .unwrap()
+            .person_id
+    };
     let me = Me {
         device: Some("desk"),
+        person: dee,
         ..Me::LOCAL
     };
     let mut a = args("revoke_device");
@@ -572,11 +579,13 @@ fn an_org_admin_renames_and_sets_the_mode_of_their_members_devices_only() {
 fn a_device_is_renamed_with_its_grants_and_its_mode_changes() {
     let st = store();
     device(&st, "phone", "readonly");
-    device(&st, "desk", "full");
-    st.lock()
-        .unwrap()
-        .upsert_catalog("personal", "/p", None, None)
-        .unwrap();
+    {
+        // The personal grant is a person's (`assets-admin`): desk has one.
+        let s = st.lock().unwrap();
+        s.insert_owned_client_token("desk", "digest-desk", "full")
+            .unwrap();
+        s.upsert_catalog("personal", "/p", None, None).unwrap();
+    }
     let mut g = args("grant_catalog");
     g.device = Some("desk".into());
     g.catalog = Some("personal".into());
@@ -1369,24 +1378,89 @@ fn a_device_says_what_app_it_runs_once_it_has_called_the_hub() {
     assert_eq!(device_app("agent", "0.6.1"), None, "an agent is no device");
 }
 
+/// Trust is the person's (identity sub-project 1): trusting ada's laptop
+/// trusts her phone too, so neither is "not trusted yet"; ben's phone,
+/// whose person nobody vouched for, is. A readonly device can never be
+/// trusted, so it is never listed as waiting for it.
 #[test]
 fn a_members_row_names_the_devices_not_trusted_yet_and_the_org_counts_them() {
     let st = store();
     device(&st, "ada-phone", "full");
     device(&st, "ada-laptop", "full");
+    device(&st, "ben-phone", "full");
+    device(&st, "ben-tv", "readonly");
     {
         let s = st.lock().unwrap();
         let org = s.add_org("Acme", None, false).unwrap();
         let ada = s.create_person("ada", None).unwrap();
+        let ben = s.create_person("ben", None).unwrap();
         s.set_client_person("ada-phone", Some(ada.id)).unwrap();
         s.set_client_person("ada-laptop", Some(ada.id)).unwrap();
+        s.set_client_person("ben-phone", Some(ben.id)).unwrap();
+        s.set_client_person("ben-tv", Some(ben.id)).unwrap();
         s.set_client_trust("ada-laptop", true).unwrap();
         s.set_org_member(org.id, ada.id, "member", None).unwrap();
+        s.set_org_member(org.id, ben.id, "member", None).unwrap();
     }
     let orgs = run(&args("list_orgs"), &st, Me::LOCAL).unwrap();
     let acme = &orgs[0];
-    assert_eq!(acme["member_count"], 1);
-    let ada = &acme["members"][0];
-    assert_eq!(ada["untrusted_devices"], serde_json::json!(["ada-phone"]));
+    assert_eq!(acme["member_count"], 2);
+    let member = |name: &str| {
+        acme["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["name"] == name)
+            .unwrap_or_else(|| panic!("{name} in {acme}"))
+            .clone()
+    };
+    let ada = member("ada");
+    assert_eq!(ada["untrusted_devices"], serde_json::json!([]));
     assert_eq!(ada["devices"].as_array().unwrap().len(), 2);
+    let ben = member("ben");
+    assert_eq!(ben["untrusted_devices"], serde_json::json!(["ben-phone"]));
+}
+
+/// Trust is the person's, so untrusting ANOTHER device of the caller's own
+/// person would untrust the device in hand too: refused like the device in
+/// hand. Another person's device, and trusting, stay allowed.
+#[test]
+fn untrusting_a_device_of_ones_own_person_is_a_lock_out() {
+    let st = store();
+    let (me_person, other) = {
+        let s = st.lock().unwrap();
+        let me_person = s
+            .insert_owned_client_token("desk", "digest-desk", "full")
+            .unwrap()
+            .person_id;
+        s.insert_client_token("laptop", "digest-laptop", "full")
+            .unwrap();
+        s.set_client_person("laptop", me_person).unwrap();
+        let other = s
+            .insert_owned_client_token("eve-phone", "digest-eve", "full")
+            .unwrap();
+        s.set_client_trust("laptop", true).unwrap();
+        s.set_client_trust("eve-phone", true).unwrap();
+        (me_person, other)
+    };
+    let me = Me {
+        device: Some("desk"),
+        person: me_person,
+        ..Me::LOCAL
+    };
+    let mut a = args("set_device_trust");
+    a.device = Some("laptop".into());
+    a.trusted = Some(false);
+    assert_eq!(err_code(run(&a, &st, me)), "E_INVALID_STATE");
+    assert!(st
+        .lock()
+        .unwrap()
+        .people_with_realm_role(crate::store::ROLE_FLEET_TRUSTED)
+        .unwrap()
+        .contains(&me_person.unwrap()));
+    a.trusted = Some(true);
+    assert_eq!(run(&a, &st, me).unwrap()["trusted"], true);
+    a.device = Some(other.name.clone());
+    a.trusted = Some(false);
+    assert_eq!(run(&a, &st, me).unwrap()["trusted"], false);
 }

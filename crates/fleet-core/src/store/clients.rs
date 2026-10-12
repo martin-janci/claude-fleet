@@ -239,57 +239,96 @@ impl Store {
         Ok(())
     }
 
-    /// Grant or take back the operator's trust in the live client named
-    /// `name`: `trusted_at` becomes now, or NULL. `E_NOTFOUND` when no live
-    /// row holds the name (a revoked client cannot be trusted back into use;
-    /// pair it again). Granting to an already-trusted client keeps the
-    /// original grant time, so the audit row says when it was first given.
+    /// Grant or take back trust through the live client named `name`.
+    /// Trust is its PERSON's (identity sub-project 1): `on` maps the realm
+    /// role `fleet-trusted` to the person, so every `full` device of theirs
+    /// is trusted (`auth::apply_realm`); `off` unmaps the direct grant (a
+    /// grant through a group stays, and is withdrawn there).
+    ///
+    /// The row's `trusted_at` is still written — now, kept on a re-grant, or
+    /// NULL — as a mirror for one release, in the same transaction as the
+    /// role. `E_NOTFOUND` when no live row holds the name (a revoked client
+    /// cannot be trusted back into use; pair it again); `E_VALIDATE` when a
+    /// peer link or an updater token is trusted, or the device belongs to
+    /// no person. Taking trust back from a person-less device clears only
+    /// the mirror. Runs inside the caller's transaction when one is open
+    /// (pairing's `atomically`).
     pub fn set_client_trust(
         &self,
         name: &str,
         trusted: bool,
     ) -> Result<ClientTokenRow, crate::ipc_error::IpcError> {
         let name = name.trim();
-        let at = now_unix();
-        let n = if trusted {
-            let is_peer: bool = self.conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM client_tokens \
-                     WHERE name = ?1 AND revoked_at IS NULL AND mode = 'peer')",
-                rusqlite::params![name],
-                |r| r.get(0),
+        let id = self.in_one_tx(|conn| {
+            let row = self.live_client_token(name)?;
+            if trusted {
+                if let Some(kind) = super::machine_token_kind(&row.mode) {
+                    return Err(crate::ipc_error::IpcError::new(
+                        codes::E_VALIDATE,
+                        format!("'{name}' is {kind}; it is never trusted"),
+                    ));
+                }
+            }
+            self.person_realm_role_in_tx(conn, &row, super::ROLE_FLEET_TRUSTED, trusted)?;
+            conn.execute(
+                if trusted {
+                    "UPDATE client_tokens SET trusted_at = COALESCE(trusted_at, ?2) WHERE id = ?1"
+                } else {
+                    "UPDATE client_tokens SET trusted_at = NULL WHERE id = ?1 AND ?2 IS NOT NULL"
+                },
+                rusqlite::params![row.id, now_unix()],
             )?;
-            if is_peer {
+            Ok(row.id)
+        })?;
+        self.reload_live_client(id, name)
+    }
+
+    /// Map (`on`) or unmap the realm role `role` on the person of `row`, the
+    /// device a grant is made through. `E_VALIDATE` when `on` and the device
+    /// belongs to no person; a person-less `off` is a no-op (there is no
+    /// role to take back). Shared by trust and the assets grant.
+    fn person_realm_role_in_tx(
+        &self,
+        conn: &rusqlite::Connection,
+        row: &ClientTokenRow,
+        role: &str,
+        on: bool,
+    ) -> Result<(), crate::ipc_error::IpcError> {
+        let Some(person) = row.person_id else {
+            if on {
                 return Err(crate::ipc_error::IpcError::new(
                     codes::E_VALIDATE,
-                    format!("'{name}' is a peer hub link; a peer is never trusted"),
+                    format!(
+                        "'{}': the device belongs to no person; bind it to one first \
+                         (fleet-hub client bind-person)",
+                        row.name
+                    ),
                 ));
             }
-            self.conn.execute(
-                "UPDATE client_tokens SET trusted_at = COALESCE(trusted_at, ?2) \
-                 WHERE name = ?1 AND revoked_at IS NULL",
-                rusqlite::params![name, at],
-            )?
-        } else {
-            self.conn.execute(
-                "UPDATE client_tokens SET trusted_at = NULL \
-                 WHERE name = ?1 AND revoked_at IS NULL",
-                rusqlite::params![name],
-            )?
+            return Ok(());
         };
-        if n == 0 {
-            return Err(crate::ipc_error::IpcError::new(
-                codes::E_NOTFOUND,
-                format!("no active client token named '{name}'"),
-            ));
+        let role = super::realm::realm_role_id_in_tx(conn, role)?;
+        if on {
+            self.map_role_in_tx(conn, super::Principal::Person(person), role, false)
+        } else {
+            self.unmap_role_in_tx(conn, super::Principal::Person(person), role, false)
+                .map(|_| ())
         }
-        self.conn
-            .query_row(
-                "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id, assets_admin_at, person_id \
-                 FROM client_tokens WHERE name = ?1 AND revoked_at IS NULL",
-                rusqlite::params![name],
-                map_client_token_row,
-            )
-            .map_err(crate::ipc_error::IpcError::from)
+    }
+
+    /// Run `f` in one transaction: an IMMEDIATE one of its own
+    /// ([`Store::with_tx`]) in autocommit, or a savepoint inside the
+    /// caller's (pairing redeems a code inside [`Store::atomically`], which
+    /// `with_tx` cannot nest in).
+    fn in_one_tx<T>(
+        &self,
+        f: impl FnOnce(&rusqlite::Connection) -> Result<T, crate::ipc_error::IpcError>,
+    ) -> Result<T, crate::ipc_error::IpcError> {
+        if self.conn.is_autocommit() {
+            self.with_tx(f)
+        } else {
+            self.in_savepoint("client_realm_grant", f)
+        }
     }
 
     /// Rename the live client `name` to `to` (validated as at pairing).
@@ -474,10 +513,14 @@ impl Store {
         })
     }
 
-    /// The personal grant (`fleet-hub client grant <name> assets`): a grant
-    /// row on `personal` plus its mirror `assets_admin_at` (Rulings R2).
-    /// With no personal catalog yet, only the mirror is written; configuring
-    /// `personal` turns it into a row (`set_catalog_config`).
+    /// The personal grant (`fleet-hub client grant <name> assets`). It is
+    /// the device's PERSON's (identity sub-project 1): the realm role
+    /// `assets-admin`, which [`Self::client_is_assets_admin`] reads for
+    /// every eligible device of theirs. For one release the grant row on
+    /// `personal` and its mirror `assets_admin_at` are still written (R2) —
+    /// with no personal catalog yet, only the mirror — in the same
+    /// transaction as the role. `E_VALIDATE` for an ineligible device or one
+    /// that belongs to no person.
     pub fn set_client_assets_admin(
         &self,
         name: &str,
@@ -487,12 +530,18 @@ impl Store {
             return self.set_client_catalog_grant(name, personal.id, on);
         }
         let row = self.grantable_client(name, on)?;
-        Self::mirror_personal_grant(&self.conn, row.id, on)?;
+        self.in_one_tx(|conn| {
+            self.person_realm_role_in_tx(conn, &row, super::ROLE_ASSETS_ADMIN, on)?;
+            Self::mirror_personal_grant(conn, row.id, on)?;
+            Ok(())
+        })?;
         self.reload_live_client(row.id, name.trim())
     }
 
     /// Grant (or take back) one catalog to the live client `name` (migration
-    /// 093). On `personal` the mirror `assets_admin_at` follows (R2).
+    /// 093). On `personal` it is the person's `assets-admin` role, with the
+    /// grant row and the mirror `assets_admin_at` following (R2); an org
+    /// catalog's grant stays the device's.
     pub fn set_client_catalog_grant(
         &self,
         name: &str,
@@ -506,41 +555,51 @@ impl Store {
                 format!("catalog {catalog_id} not found"),
             )
         })?;
-        let tx = self.conn.unchecked_transaction()?;
-        if on {
-            tx.execute(
-                "INSERT OR IGNORE INTO client_catalog_grants (client_id, catalog_id, granted_at) VALUES (?1, ?2, ?3)",
-                rusqlite::params![row.id, catalog_id, now_unix()],
-            )?;
-        } else {
-            tx.execute(
-                "DELETE FROM client_catalog_grants WHERE client_id = ?1 AND catalog_id = ?2",
-                rusqlite::params![row.id, catalog_id],
-            )?;
-        }
-        if catalog.org_id.is_none() {
-            Self::mirror_personal_grant(&tx, row.id, on)?;
-        }
-        tx.commit()?;
+        self.in_one_tx(|tx| {
+            if catalog.org_id.is_none() {
+                self.person_realm_role_in_tx(tx, &row, super::ROLE_ASSETS_ADMIN, on)?;
+            }
+            if on {
+                tx.execute(
+                    "INSERT OR IGNORE INTO client_catalog_grants (client_id, catalog_id, granted_at) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![row.id, catalog_id, now_unix()],
+                )?;
+            } else {
+                tx.execute(
+                    "DELETE FROM client_catalog_grants WHERE client_id = ?1 AND catalog_id = ?2",
+                    rusqlite::params![row.id, catalog_id],
+                )?;
+            }
+            if catalog.org_id.is_none() {
+                Self::mirror_personal_grant(tx, row.id, on)?;
+            }
+            Ok(())
+        })?;
         self.reload_live_client(row.id, name.trim())
     }
 
-    /// True when the live client `id` may manage the personal catalog: a
-    /// grant row on `personal`, or — only while no personal catalog exists —
-    /// the pending mirror `assets_admin_at` (R2). `full`, not revoked, no org.
+    /// True when the live client `id` may manage the personal catalog: the
+    /// device is eligible (`full`, not revoked, no org — R3) and its person
+    /// holds the realm role `assets-admin` (identity sub-project 1). The
+    /// grant row and `assets_admin_at` are mirrors and are not read.
     pub fn client_is_assets_admin(&self, id: i64) -> Result<bool, rusqlite::Error> {
-        self.conn.query_row(
-            &format!(
-                "SELECT EXISTS(SELECT 1 FROM client_tokens t
-                   WHERE t.id = ?1 AND {elig}
-                     AND (EXISTS(SELECT 1 FROM client_catalog_grants g JOIN catalogs c ON c.id = g.catalog_id
-                                 WHERE g.client_id = t.id AND c.org_id IS NULL)
-                          OR (t.assets_admin_at IS NOT NULL
-                              AND NOT EXISTS(SELECT 1 FROM catalogs WHERE org_id IS NULL))))",
-                elig = Self::LIVE_GRANT_ELIGIBLE,
-            ),
-            rusqlite::params![id],
-            |r| r.get(0),
+        let person: Option<Option<i64>> = self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT t.person_id FROM client_tokens t WHERE t.id = ?1 AND {elig}",
+                    elig = Self::LIVE_GRANT_ELIGIBLE,
+                ),
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(Some(person)) = person else {
+            return Ok(false);
+        };
+        Ok(
+            super::realm::realm_role_holders(&self.conn, super::ROLE_ASSETS_ADMIN)?
+                .contains(&person),
         )
     }
 
@@ -774,11 +833,124 @@ pub(super) fn get_client_token_by_id(
 }
 
 #[cfg(test)]
+impl Store {
+    /// A test device of its OWN person (`p-<name>`, made on first use):
+    /// trust and the personal assets grant are a person's (identity
+    /// sub-project 1), so a test that grants either to one device — and
+    /// expects its other devices to stay without it — gives each device a
+    /// person nobody else shares.
+    pub(crate) fn insert_owned_client_token(
+        &self,
+        name: &str,
+        token_sha256: &str,
+        mode: &str,
+    ) -> Result<ClientTokenRow, crate::ipc_error::IpcError> {
+        self.insert_client_token(name, token_sha256, mode)?;
+        let person = format!("p-{}", name.trim());
+        let id = match self.get_person_by_name(&person)? {
+            Some(p) => p.id,
+            None => self.create_person(&person, None)?.id,
+        };
+        self.set_client_person(name, Some(id))
+    }
+}
+
+#[cfg(test)]
 mod tests {
-    use crate::store::Store;
+    use crate::ipc_error::codes;
+    use crate::mcp::auth::{Caller, RealmSets};
+    use crate::store::{Store, ROLE_ASSETS_ADMIN};
 
     fn store() -> Store {
         Store::open_in_memory().expect("store")
+    }
+
+    /// Pair a device the way redemption leaves it: a live row of `mode`,
+    /// bound to `person`. Returns the plaintext token and the row id.
+    fn pair_test(s: &Store, name: &str, mode: &str, person: Option<i64>) -> (String, i64) {
+        let token = format!("tok-{name}");
+        let row = s
+            .insert_client_token(name, &crate::mcp::auth::sha256_hex(&token), mode)
+            .unwrap();
+        if person.is_some() {
+            s.set_client_person(name, person).unwrap();
+        }
+        (token, row.id)
+    }
+
+    /// [`pair_test`]'s token.
+    fn pair_test_device(s: &Store, name: &str, mode: &str, person: Option<i64>) -> String {
+        pair_test(s, name, mode, person).0
+    }
+
+    /// [`pair_test`]'s row id.
+    fn pair_test_device_id(s: &Store, name: &str, mode: &str, person: Option<i64>) -> i64 {
+        pair_test(s, name, mode, person).1
+    }
+
+    /// The realm sets `authorize` reads beside the token rows.
+    fn realm_sets_of(s: &Store) -> RealmSets {
+        RealmSets::from_vecs(s.realm_sets().unwrap())
+    }
+
+    /// The caller `authorize` builds for `token`: resolved from the store's
+    /// rows, then decided by `apply_realm`.
+    fn caller_for(s: &Store, token: &str) -> Caller {
+        let rows = s.auth_client_tokens().unwrap();
+        let mut c = crate::mcp::auth::resolve_token(
+            token,
+            "not-the-master",
+            &[],
+            &rows,
+            s.personal_owner_id().unwrap(),
+        )
+        .expect("the device resolves");
+        crate::mcp::auth::apply_realm(&mut c, &realm_sets_of(s));
+        c
+    }
+
+    #[test]
+    fn trusting_a_device_trusts_every_full_device_of_its_person() {
+        let s = Store::open_in_memory().unwrap();
+        let ada = s.create_person("ada", None).unwrap().id;
+        let mac = pair_test_device(&s, "ada-mac", "full", Some(ada));
+        let phone = pair_test_device(&s, "ada-phone", "full", Some(ada));
+        let ro = pair_test_device(&s, "ada-ro", "readonly", Some(ada));
+        s.set_client_trust("ada-mac", true).unwrap();
+        let realm = s.realm_sets().unwrap();
+        assert!(realm.1.contains(&ada));
+        for (tok, trusted) in [(mac, true), (phone, true), (ro, false)] {
+            let mut c = caller_for(&s, &tok);
+            crate::mcp::auth::apply_realm(&mut c, &realm_sets_of(&s));
+            assert_eq!(c.client.unwrap().trusted, trusted, "{tok}");
+        }
+    }
+
+    #[test]
+    fn a_device_with_no_person_is_never_trusted() {
+        let s = Store::open_in_memory().unwrap();
+        pair_test_device(&s, "orphan", "full", None);
+        assert_eq!(
+            s.set_client_trust("orphan", true).unwrap_err().code,
+            codes::E_VALIDATE
+        );
+    }
+
+    #[test]
+    fn assets_admin_follows_the_person_and_the_eligible_device() {
+        let s = Store::open_in_memory().unwrap();
+        let ada = s.create_person("ada", None).unwrap().id;
+        pair_test_device(&s, "ada-mac", "full", Some(ada));
+        let ro = pair_test_device_id(&s, "ada-ro", "readonly", Some(ada));
+        s.set_client_assets_admin("ada-mac", true).unwrap();
+        assert!(s
+            .people_with_realm_role(ROLE_ASSETS_ADMIN)
+            .unwrap()
+            .contains(&ada));
+        assert!(
+            !s.client_is_assets_admin(ro).unwrap(),
+            "readonly is not eligible"
+        );
     }
 
     #[test]
@@ -997,7 +1169,9 @@ mod tests {
     #[test]
     fn a_fresh_client_is_untrusted_and_trust_is_granted_and_taken_back_by_name() {
         let s = store();
-        let row = s.insert_client_token("phone", "aa11", "full").unwrap();
+        let row = s
+            .insert_owned_client_token("phone", "aa11", "full")
+            .unwrap();
         assert!(row.trusted_at.is_none(), "trust is opt-in");
 
         let granted = s.set_client_trust("phone", true).unwrap();
@@ -1020,7 +1194,8 @@ mod tests {
             .set_client_trust("nobody", true)
             .unwrap_err_or_panic("unknown name");
         assert_eq!(e.code, crate::ipc_error::codes::E_NOTFOUND);
-        s.insert_client_token("phone", "aa11", "full").unwrap();
+        s.insert_owned_client_token("phone", "aa11", "full")
+            .unwrap();
         s.set_client_trust("phone", true).unwrap();
         s.revoke_client_token("phone").unwrap();
         let e = s
@@ -1037,7 +1212,7 @@ mod tests {
     #[test]
     fn the_assets_grant_is_for_a_live_full_unbound_client_only() {
         let s = store();
-        let desk = s.insert_client_token("desk", "aa11", "full").unwrap();
+        let desk = s.insert_owned_client_token("desk", "aa11", "full").unwrap();
         assert!(!s.client_is_assets_admin(desk.id).unwrap(), "opt-in");
         let e0 = s.auth_epoch().unwrap();
         let granted = s.set_client_assets_admin(" desk ", true).unwrap();
@@ -1064,7 +1239,8 @@ mod tests {
             code(s.set_client_assets_admin("nobody", true)),
             crate::ipc_error::codes::E_NOTFOUND
         );
-        s.insert_client_token("kiosk", "bb22", "readonly").unwrap();
+        s.insert_owned_client_token("kiosk", "bb22", "readonly")
+            .unwrap();
         assert_eq!(
             code(s.set_client_assets_admin("kiosk", true)),
             crate::ipc_error::codes::E_VALIDATE
@@ -1075,7 +1251,8 @@ mod tests {
             crate::ipc_error::codes::E_VALIDATE
         );
         let org = s.add_org("A", None, false).unwrap();
-        s.insert_client_token("contractor", "dd44", "full").unwrap();
+        s.insert_owned_client_token("contractor", "dd44", "full")
+            .unwrap();
         s.set_client_org("contractor", Some(org.id)).unwrap();
         assert_eq!(
             code(s.set_client_assets_admin("contractor", true)),
@@ -1102,7 +1279,7 @@ mod tests {
             .upsert_catalog("acme", "/a", None, Some(org.id))
             .unwrap()
             .id;
-        let desk = s.insert_client_token("desk", "aa11", "full").unwrap();
+        let desk = s.insert_owned_client_token("desk", "aa11", "full").unwrap();
 
         assert!(!s.client_has_any_catalog_grant(desk.id).unwrap());
         let e0 = s.auth_epoch().unwrap();
@@ -1158,7 +1335,8 @@ mod tests {
         );
         assert!(!s.client_has_any_catalog_grant(desk.id).unwrap(), "revoked");
 
-        s.insert_client_token("kiosk", "bb22", "readonly").unwrap();
+        s.insert_owned_client_token("kiosk", "bb22", "readonly")
+            .unwrap();
         let code = |r: Result<_, crate::ipc_error::IpcError>| r.map(|_| ()).unwrap_err().code;
         assert_eq!(
             code(s.set_client_catalog_grant("kiosk", acme, true)),
@@ -1168,7 +1346,7 @@ mod tests {
             code(s.set_client_catalog_grant("nobody", acme, true)),
             E_NOTFOUND
         );
-        s.insert_client_token("eve", "cc33", "full").unwrap();
+        s.insert_owned_client_token("eve", "cc33", "full").unwrap();
         assert_eq!(
             code(s.set_client_catalog_grant("eve", 9999, true)),
             E_NOTFOUND
@@ -1181,7 +1359,7 @@ mod tests {
     #[test]
     fn a_personal_grant_made_before_any_catalog_waits_in_assets_admin_at() {
         let s = store();
-        let desk = s.insert_client_token("desk", "aa11", "full").unwrap();
+        let desk = s.insert_owned_client_token("desk", "aa11", "full").unwrap();
         s.set_client_assets_admin("desk", true).unwrap();
         assert!(
             s.client_is_assets_admin(desk.id).unwrap(),

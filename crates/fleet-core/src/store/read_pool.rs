@@ -188,16 +188,18 @@ mod tests {
             .insert_client_token("phone", &"a".repeat(64), "full")
             .unwrap();
         moved(&s, "pairing a client");
-        s.set_client_trust("phone", true).unwrap();
-        moved(&s, "trusting a client");
-        s.set_client_trust("phone", false).unwrap();
-        moved(&s, "untrusting a client");
         // Multi-user M1: whose device this is decides which sessions the
         // caller may read, so migration 098's own trigger has to move the
         // epoch for it too.
         let owner = s.personal_owner_id().unwrap().expect("096 mints one");
         s.set_client_person("phone", Some(owner)).unwrap();
         moved(&s, "binding a client to a person");
+        // Trust is the person's realm role (identity sub-project 1), so it
+        // needs the binding above.
+        s.set_client_trust("phone", true).unwrap();
+        moved(&s, "trusting a client");
+        s.set_client_trust("phone", false).unwrap();
+        moved(&s, "untrusting a client");
         s.set_client_person("phone", None).unwrap();
         moved(&s, "unbinding a client from a person");
         s.touch_client_token(row.id, 1_000).unwrap();

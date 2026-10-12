@@ -115,9 +115,27 @@ fn managed_err() -> IpcError {
 
 /// Live holders of realm role `name`, read through `conn`.
 fn holders_in_tx(conn: &Connection, name: &str) -> Result<Vec<i64>, IpcError> {
+    Ok(realm_role_holders(conn, name)?)
+}
+
+/// [`holders_in_tx`] with SQLite's own error, for a reader that answers in
+/// `rusqlite::Error` (`Store::client_is_assets_admin`). Ascending ids.
+pub(crate) fn realm_role_holders(conn: &Connection, name: &str) -> rusqlite::Result<Vec<i64>> {
     let mut stmt = conn.prepare(PEOPLE_WITH_REALM_ROLE)?;
     let ids = stmt.query_map(rusqlite::params![name], |r| r.get(0))?;
-    Ok(ids.collect::<rusqlite::Result<Vec<_>>>()?)
+    ids.collect()
+}
+
+/// The id of the seeded realm role `name` (`fleet-trusted`, `assets-admin`,
+/// …). `E_INTERNAL` when it is missing: migration 178 seeds them all.
+pub(crate) fn realm_role_id_in_tx(conn: &Connection, name: &str) -> Result<i64, IpcError> {
+    conn.query_row(
+        "SELECT id FROM roles WHERE client_id IS NULL AND name = ?1",
+        rusqlite::params![name],
+        |r| r.get(0),
+    )
+    .optional()?
+    .ok_or_else(|| IpcError::new(codes::E_INTERNAL, format!("realm role {name} is missing")))
 }
 
 fn personal_owner_in_tx(conn: &Connection) -> Result<Option<i64>, IpcError> {

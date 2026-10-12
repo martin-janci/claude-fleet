@@ -898,6 +898,7 @@ pub fn list_devices(s: &Store, me: Me<'_>) -> Result<Vec<DeviceSummary>, IpcErro
         .map(|c| (c.id, c.org_id))
         .collect();
     let owner = s.personal_owner_id()?;
+    let trusted_people = s.people_with_realm_role(crate::store::ROLE_FLEET_TRUSTED)?;
     let orgs: std::collections::BTreeMap<i64, String> =
         s.list_orgs()?.into_iter().map(|o| (o.id, o.name)).collect();
     let people: std::collections::BTreeMap<i64, String> = s
@@ -930,6 +931,7 @@ pub fn list_devices(s: &Store, me: Me<'_>) -> Result<Vec<DeviceSummary>, IpcErro
             }
         })
         .map(|c| {
+            let trusted = c.trusted_by(&trusted_people);
             let (kind, app) = apps
                 .get(&format!("client:{}", c.id))
                 .cloned()
@@ -943,7 +945,7 @@ pub fn list_devices(s: &Store, me: Me<'_>) -> Result<Vec<DeviceSummary>, IpcErro
                 this_device: me.device == Some(c.name.as_str()),
                 name: c.name,
                 mode: c.mode,
-                trusted: c.trusted_at.is_some(),
+                trusted,
                 org_id: c.org_id,
                 person_id: c.person_id,
                 created_at: c.created_at,
@@ -1250,13 +1252,27 @@ pub fn run(
         Action::SetDeviceTrust => {
             let on = *need(&args.trusted, name, "trusted")?;
             let device = need(&args.device, name, "device")?;
-            // Trusting the device in hand takes nothing away; only the
-            // withdrawal is a lock-out.
+            // Trusting takes nothing away; only the withdrawal is a
+            // lock-out. Trust is the PERSON's (`fleet-trusted`, identity
+            // sub-project 1), so untrusting any device of the caller's own
+            // person would untrust the device in hand too: refused like the
+            // device in hand itself.
             let row = if on {
                 device_row(&s, device, Me::LOCAL, "")?
             } else {
                 device_row(&s, device, me, "untrusting")?
             };
+            if !on && me.person.is_some() && row.person_id == me.person {
+                return Err(IpcError::new(
+                    codes::E_INVALID_STATE,
+                    format!(
+                        "{:?} is your own device, and trust is your person's: untrusting it \
+                         would take away the trust of the device you are using. Ask another \
+                         administrator, or do it on the hub (fleet-hub client untrust …)",
+                        row.name
+                    ),
+                ));
+            }
             require_org_device(&s, &row, me)?;
             s.set_client_trust(&row.name, on)?;
             device_json(&s, &row.name, me)

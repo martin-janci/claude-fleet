@@ -18,7 +18,7 @@
 
 use super::auth;
 use super::guard::RateLimiter;
-use crate::store::Store;
+use crate::store::{Store, ROLE_FLEET_TRUSTED};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use std::collections::HashMap;
@@ -613,16 +613,7 @@ pub async fn handle_pair(
         // row behind that nobody holds the token for and that keeps the
         // name taken. The code is spent either way.
         s.atomically(|s| {
-            // The trust grant rides on the same code the operator minted: a
-            // `--trusted` pairing lands trusted, nothing else does.
             s.insert_client_token(&req.name, &hash, &req.mode)
-                .and_then(|row| {
-                    if req.trusted {
-                        s.set_client_trust(&row.name, true)
-                    } else {
-                        Ok(row)
-                    }
-                })
                 .and_then(|row| match req.org_id {
                     // The org binding rides on the code too (work graph M14).
                     Some(org) => s.set_client_org(&row.name, Some(org)),
@@ -646,14 +637,35 @@ pub async fn handle_pair(
                     // `pair_client` refuses `person` for both.
                     None => Ok(row),
                 })
+                // The trust grant rides on the same code the operator minted:
+                // a `--trusted` pairing lands trusted, nothing else does. It
+                // goes last because trust is the PERSON's (`fleet-trusted`,
+                // identity sub-project 1), so the device must be theirs
+                // first; a person-less trusted code fails here and the
+                // whole redemption rolls back.
+                .and_then(|row| {
+                    if req.trusted {
+                        s.set_client_trust(&row.name, true)
+                    } else {
+                        Ok(row)
+                    }
+                })
+                // What the device IS, not what this code granted: a full
+                // device of a person already trusted lands trusted too. Read
+                // inside the transaction, so a failed read rolls the
+                // redemption back rather than leaving a row nobody holds.
+                .and_then(|row| {
+                    let trusted = row.trusted_by(&s.people_with_realm_role(ROLE_FLEET_TRUSTED)?);
+                    Ok((row, trusted))
+                })
         })
     };
     match inserted {
-        Ok(row) => {
+        Ok((row, trusted)) => {
             tracing::info!(
                 client = %row.name,
                 mode = %row.mode,
-                trusted = row.trusted_at.is_some(),
+                trusted,
                 person = ?row.person_id,
                 "[mcp] paired a client"
             );
@@ -665,7 +677,7 @@ pub async fn handle_pair(
                     "token": token,
                     "name": row.name,
                     "mode": row.mode,
-                    "trusted": row.trusted_at.is_some(),
+                    "trusted": trusted,
                     "org_id": row.org_id,
                     "person_id": row.person_id,
                     "hub": state.base_url.as_str(),
