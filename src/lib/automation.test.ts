@@ -46,7 +46,7 @@ describe('automation (redesign step 8.4)', () => {
     expect(loopEvery(loop())).toBeNull();
   });
 
-  it('names the three built-in agents with what each is doing', () => {
+  it('names the built-in agents with what each is doing', () => {
     const settings = { ...SETTING_DEFAULTS, 'decide.jev.enabled': 'true', 'decide.jev.status_map': 'assist', 'decide.jev.quick_answer': 'shadow' };
     expect(jevFeaturesOn(settings)).toBe(2);
     const agents = builtInAgents(
@@ -59,8 +59,16 @@ describe('automation (redesign step 8.4)', () => {
       ['operator', 'last ran 10m ago'],
       ['orchestrator', 'last run 1m ago · next in 1m'],
       ['jev', 'on · 2 use cases'],
+      ['review', 'not reported'],
+      ['support', 'not reported'],
     ]);
-    expect(builtInAgents(SETTING_DEFAULTS, [], [], NOW).map((a) => a.state)).toEqual(['no run today', 'not reported', 'off']);
+    expect(builtInAgents(SETTING_DEFAULTS, [], [], NOW).map((a) => a.state)).toEqual([
+      'no run today',
+      'not reported',
+      'off',
+      'not reported',
+      'not reported',
+    ]);
   });
 
   it('reads every page of today’s runs', async () => {

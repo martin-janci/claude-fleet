@@ -1101,6 +1101,25 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "start_device_mirror",
+        Verdict::SameInBoth {
+            why: "opens a scrcpy window on THIS machine; it looks the device up and claims it through \
+                  the routed debug_devices commands, so a paired desktop uses the hub's inventory",
+        },
+    ),
+    (
+        "stop_device_mirror",
+        Verdict::SameInBoth {
+            why: "stops a scrcpy window this machine runs",
+        },
+    ),
+    (
+        "list_device_mirrors",
+        Verdict::SameInBoth {
+            why: "the scrcpy windows this machine runs",
+        },
+    ),
+    (
         "set_fleet_setting",
         Verdict::Routed {
             tool: "set_setting",
@@ -1109,6 +1128,10 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("list_tasks", Verdict::Routed { tool: "list_tasks" }),
     // Orbit Fleet 8.3: the Automation screen's Runs list.
     ("list_runs", Verdict::Routed { tool: "runs" }),
+    // Agents step 5: the Automation screen's Agents tab and the Inbox's
+    // agent actions. The hub serves `agents` to the owner's own device only.
+    ("agents_status", Verdict::Routed { tool: "agents" }),
+    ("agents_decide", Verdict::Routed { tool: "agents" }),
     // Orbit Fleet 8.6: the Automation screen's Routines and the Inbox's failed runs.
     ("routines", Verdict::Routed { tool: "routines" }),
     // ── tasks ───────────────────────────────────────────────────────────────

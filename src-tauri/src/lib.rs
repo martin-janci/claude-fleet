@@ -94,6 +94,11 @@ pub fn run() {
     let reg_for_setup = std::sync::Arc::clone(&reg);
     let tunnels = std::sync::Arc::new(fleet_core::service::tunnel::TunnelSupervisor::new());
     let tunnels_for_exit = std::sync::Arc::clone(&tunnels);
+    // The scrcpy windows this machine runs; killed on quit so none outlives
+    // the app (or keeps a device's claim renewing).
+    let mirrors = std::sync::Arc::new(fleet_core::service::device_mirror::Mirrors::new());
+    let mirrors_for_exit = std::sync::Arc::clone(&mirrors);
+    let mirrors_for_setup = std::sync::Arc::clone(&mirrors);
     let tunnels_for_setup = std::sync::Arc::clone(&tunnels);
     // Cancelled on window destroy, so the hub event bridge's socket does not
     // keep a background task alive after quit. Standalone mode never starts
@@ -262,6 +267,7 @@ pub fn run() {
                 }
             }
             app.manage(std::sync::Arc::clone(&store));
+            app.manage(std::sync::Arc::clone(&mirrors_for_setup));
             app.manage(Mutex::new(fleet_core::mcp::McpRuntime::default()));
             app.manage(std::sync::Arc::clone(&bus_for_usage));
             // One in-memory usage cache for the app's lifetime,
@@ -637,6 +643,9 @@ pub fn run() {
             commands::debug_devices::install_debug_device,
             commands::debug_devices::debug_device_logs,
             commands::debug_devices::debug_device_screenshot,
+            commands::device_mirror::start_device_mirror,
+            commands::device_mirror::stop_device_mirror,
+            commands::device_mirror::list_device_mirrors,
             commands::prs::list_pull_requests,
             commands::start_rules::start_rules,
             commands::wizard_state::wizard_state,
@@ -646,6 +655,8 @@ pub fn run() {
             commands::pages::setting_history,
             commands::pages::set_fleet_setting,
             commands::runs::list_runs,
+            commands::agents::agents_status,
+            commands::agents::agents_decide,
             commands::routines::routines,
             commands::tasks::list_tasks,
             commands::tasks::cancel_task,
@@ -812,6 +823,7 @@ pub fn run() {
                     OnDestroyed::ShutDown => {
                         ssh_client_for_exit.shutdown_all();
                         tunnels_for_exit.stop_all();
+                        mirrors_for_exit.kill_all();
                         shutdown_for_exit.cancel();
                         if let Some(runtime) =
                             window.try_state::<Mutex<fleet_core::mcp::McpRuntime>>()

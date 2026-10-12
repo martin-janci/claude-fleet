@@ -1,8 +1,8 @@
 <script lang="ts">
   import Icon from './kit/Icon.svelte';
   // The Work tab's List layout (design 2026-09-29): every task the current
-  // filters match — tickets, native tasks, bare keys — in To do / Doing /
-  // Done, from ONE `work_tree` read (archived on, so Done has its rows).
+  // filters match — tickets, native tasks, bare keys with a live session —
+  // in To do / Doing / Done (`taskColumnOf`), from ONE `work_tree` read (archived on, so Done has its rows).
   // The header (Tasks | Review, List | Grouped, saved views, filters) is
   // WorkTree's; this is only the body. Proposals show here only as the
   // "N to review" badge: they are decided on the task page. Tracker and
@@ -30,7 +30,14 @@
   import NewTaskDialog from './NewTaskDialog.svelte';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
-  import { displayTitle, groupTasksByStatus, type StatusSections, type TaskNode } from './task_list';
+  import {
+    displayTitle,
+    groupTasksByStatus,
+    unplacedCount,
+    unplacedNote,
+    type StatusSections,
+    type TaskNode,
+  } from './task_list';
   import type { IpcError } from './result';
 
   let {
@@ -59,6 +66,7 @@
   const editBlocked = $derived(hubActionBlocked('edit_work_item', $hubStatus, $hubConnection));
 
   const sections: StatusSections = $derived(groupTasksByStatus(tasks, Math.floor(Date.now() / 1000)));
+  const unplaced = $derived(unplacedNote(unplacedCount(tasks)));
   const emptySections = $derived(
     [
       sections.todo.length === 0 ? 'To do' : null,
@@ -206,6 +214,7 @@
     {#if emptySections.length > 0}
       <p class="muted" data-testid="task-sections-empty">Nothing in {emptySections.join(' or ')}.</p>
     {/if}
+    {#if unplaced}<p class="muted" data-testid="task-list-unplaced">{unplaced}</p>{/if}
   {/if}
 </div>
 

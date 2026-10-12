@@ -2280,6 +2280,49 @@
               }
             ]
           ],
+          "command": "start_device_mirror",
+          "envelope": "args",
+          "id": "debug_device.mirror",
+          "label": "Mirror",
+          "params": [],
+          "report": false,
+          "result": "output",
+          "variants": [
+            "physical",
+            "emulator"
+          ]
+        },
+        {
+          "bind": [
+            [
+              "id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ]
+          ],
+          "command": "stop_device_mirror",
+          "envelope": "args",
+          "id": "debug_device.mirror_stop",
+          "label": "Stop mirror",
+          "params": [],
+          "report": false,
+          "variants": [
+            "physical",
+            "emulator"
+          ]
+        },
+        {
+          "bind": [
+            [
+              "id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ]
+          ],
           "command": "release_debug_device",
           "confirm": "Whoever holds it loses the claim; another session may then use the device.",
           "envelope": "args",
@@ -2950,6 +2993,49 @@
         "type": "int"
       },
       "label": "Out-of-memory budget",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "agents.poll_interval_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Agents poll interval",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "agents.max_concurrent",
+      "kind": {
+        "max": 10,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Agents running at once",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "agents.max_retries",
+      "kind": {
+        "max": 10,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Agent job attempts",
       "widgets": [
         "number",
         "readonly"

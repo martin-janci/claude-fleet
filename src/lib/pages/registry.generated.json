@@ -396,6 +396,70 @@
       "zero": "never"
     },
     {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "300",
+      "help": "Seconds between two looks of one agent rule at what it watches (a repo's pull requests, a Jira project). An agent works only under a rule a person granted.",
+      "key": "agents.poll_interval_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Agents poll interval",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "seconds",
+      "value": "300",
+      "zero": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "3",
+      "help": "Agent jobs that run at the same time, every agent together. A pull request or a ticket never has two at once.",
+      "key": "agents.max_concurrent",
+      "kind": {
+        "max": 10,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Agents running at once",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "count",
+      "value": "3"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "3",
+      "help": "Runs one agent job may get. A failure worth retrying waits 1, 2, 4 … minutes; one that would fail the same way again ends the job at once.",
+      "key": "agents.max_retries",
+      "kind": {
+        "max": 10,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Agent job attempts",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "count",
+      "value": "3"
+    },
+    {
       "ai": "never",
       "danger": {
         "level": "confirm",
@@ -3847,6 +3911,28 @@
             }
           ],
           "title": "Playbooks"
+        },
+        {
+          "items": [
+            {
+              "text": "The PR reviewer and the support agent work only under a rule a person grants: fleet-hub agents grant.",
+              "tone": "info",
+              "type": "notice"
+            },
+            {
+              "key": "agents.poll_interval_secs",
+              "type": "field"
+            },
+            {
+              "key": "agents.max_concurrent",
+              "type": "field"
+            },
+            {
+              "key": "agents.max_retries",
+              "type": "field"
+            }
+          ],
+          "title": "Agents"
         },
         {
           "items": [
@@ -8052,6 +8138,49 @@
           "params": [],
           "report": false,
           "result": "image"
+        },
+        {
+          "bind": [
+            [
+              "id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ]
+          ],
+          "command": "start_device_mirror",
+          "envelope": "args",
+          "id": "debug_device.mirror",
+          "label": "Mirror",
+          "params": [],
+          "report": false,
+          "result": "output",
+          "variants": [
+            "physical",
+            "emulator"
+          ]
+        },
+        {
+          "bind": [
+            [
+              "id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ]
+          ],
+          "command": "stop_device_mirror",
+          "envelope": "args",
+          "id": "debug_device.mirror_stop",
+          "label": "Stop mirror",
+          "params": [],
+          "report": false,
+          "variants": [
+            "physical",
+            "emulator"
+          ]
         },
         {
           "bind": [

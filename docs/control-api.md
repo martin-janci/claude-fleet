@@ -1115,6 +1115,18 @@ Index by area (names only; see the reference for details):
   `pause_all`. Served only to the hub owner's own paired device, never to
   the master an agent holds (the operator has `fleet-hub shepherd`); a write
   needs a trusted full device.
+- **Agents** — `agents`, the built-in agents (the PR reviewer, the support
+  agent) and the standing rules they work under
+  (`docs/superpowers/specs/2026-10-11-review-and-support-agents-design.md`):
+  `status { agent?, limit? }` (rules, newest jobs, actions waiting for a
+  person), `grant { agent: review|support, scope: gh:<owner>/<repo> |
+  jira:<tracker id>:<PROJECT>, host, level: watch|propose|act, project_id?,
+  config?, hours? }`, `revoke { id }`, `pause_all`, `approve { id }`,
+  `reject { id }`. An approved action is carried out by its agent on the
+  next run pass (the reviewer posts the review, unless the pull request's
+  head moved on). Served only to the hub owner's own paired device, never
+  to the master an agent holds (the operator has `fleet-hub agents`); a
+  write needs a trusted full device.
 - **Chat forms** — `ask`. Chat forms: open a `fleet.form/1` form in your own session's chat and wait for a person's answers; the person's side lists, gets, answers and declines. See `docs/forms.md`.
 - **Wizards** — `wizard_state`, a wizard left half-way, to resume on
   another of your devices: `list {kind?}` | `get {kind, key?}` | `save
