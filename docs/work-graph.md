@@ -135,7 +135,8 @@ view.
 **Filters and saved views.** A search, the *Assigned to me* and *To
 review* toggles, and a **Filters** panel laid out like the Sessions
 list's: Organisation, Tracker (or *Local work* / *Bare keys*), Status
-(Open, To do, In progress, Done) and Sessions (Active session, Past only,
+(Open, To do, In progress, Done) — by the Board's rule, so a bare key with a live
+session counts as In progress — and Sessions (Active session, Past only,
 No session, Suggested). Each filter that is on shows as a chip with a ×
 and *Clear all*, and "No tasks match" names them. The view select saves
 the current filters under a name (Save as…, Update, Delete); saved views
