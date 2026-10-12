@@ -22,7 +22,7 @@
   import { shortAge, timeAgo } from './session_status';
   import { assessRow, hasReading, verdictLabel, verdictState } from './evidence';
   import StatusDot from './kit/StatusDot.svelte';
-  import { changedAny, describeEvidence, onWorkChangedDebounced } from './work';
+  import { changedAny, describeEvidence, estimateLabel, onWorkChangedDebounced, priorityLabel } from './work';
   import { providerInfo, unavailableLabel, shownKey } from './trackers';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
@@ -32,7 +32,7 @@
   import WorkRuleEditor from './WorkRuleEditor.svelte';
   import TaskWorkSections from './TaskWorkSections.svelte';
   import TaskAttachments from './TaskAttachments.svelte';
-  import { attachToWork, pastedImages } from './task_attachments';
+  import { attachToWork, formatSize, pastedImages } from './task_attachments';
   import TaskBlockedSpend from './TaskBlockedSpend.svelte';
   import ProposedBy from './ProposedBy.svelte';
   import AiChangeLine from './AiChangeLine.svelte';
@@ -52,6 +52,7 @@
     COMMENT_MAX,
     commentAuthor,
     commentOnWork,
+    commentTimeline,
     deleteWorkComment,
     deliveryOf,
     hasDelivery,
@@ -59,8 +60,11 @@
     subtaskProgress,
     TASK_TAB_LABELS,
     TASK_TABS,
+    postStateLabel,
+    workTrackerComments,
     type TaskTab,
   } from './task_detail';
+  import type { TrackerAttachment, TrackerComment } from './work_view';
   import {
     dependencyName,
     groupSessionLinks,
@@ -298,9 +302,51 @@
   // down or stopped, and comments.
   const events = $derived(detail ? activityEvents(detail) : []);
 
-  // Comments: kept in fleet, never sent to a tracker; deleting is the
-  // author's own.
+  // Comments: kept in fleet, the tracker's own read beside them, and one
+  // posted there too when a person ticks it; deleting is the author's own.
   const commentBlocked = $derived(hubActionBlocked('comment_on_work', $hubStatus, $hubConnection));
+  /** The tracker whose comments sit beside fleet's (by name), if any. */
+  const commentsTracker = $derived(detail?.comments_tracker ?? null);
+  const canPostToTracker = $derived(!!commentsTracker && !!detail?.can_post_to_tracker);
+  let postToTracker = $state(true);
+  // Read when the Comments tab opens, once per ticket; an error never
+  // hides fleet's own.
+  let trackerComments = $state.raw<TrackerComment[]>([]);
+  let trackerAttachments = $state.raw<TrackerAttachment[]>([]);
+  let trackerLoad = $state<'idle' | 'loading' | 'ok' | 'error'>('idle');
+  let trackerError = $state<string | null>(null);
+  let trackerLoadedFor: string | null = null;
+  async function loadTrackerComments(key: string) {
+    trackerLoadedFor = key;
+    trackerLoad = 'loading';
+    trackerError = null;
+    const r = await workTrackerComments(key);
+    if (trackerLoadedFor !== key) return;
+    if (r.ok) {
+      trackerComments = r.value.comments ?? [];
+      trackerAttachments = r.value.attachments ?? [];
+      trackerLoad = 'ok';
+    } else {
+      trackerComments = [];
+      trackerAttachments = [];
+      trackerError = readErrorText(r.error);
+      trackerLoad = 'error';
+    }
+  }
+  $effect(() => {
+    const key = task?.key ?? null;
+    if (tab !== 'comments' || !commentsTracker || !key) return;
+    if (trackerLoadedFor !== key) void loadTrackerComments(key);
+  });
+  // Another task: its tracker's comments are read afresh.
+  $effect(() => {
+    void taskId;
+    trackerLoadedFor = null;
+    trackerComments = [];
+    trackerAttachments = [];
+    trackerLoad = 'idle';
+  });
+  const timeline = $derived(commentTimeline(detail?.comments ?? [], trackerComments));
   const uncommentBlocked = $derived(hubActionBlocked('delete_work_comment', $hubStatus, $hubConnection));
   let draft = $state('');
   let commenting = $state(false);
@@ -311,7 +357,7 @@
     if (!t || t.item_id == null || commenting || !draft.trim()) return;
     commenting = true;
     commentError = null;
-    const r = await commentOnWork(t.item_id, draft);
+    const r = await commentOnWork(t.item_id, draft, canPostToTracker && postToTracker);
     commenting = false;
     if (!r.ok) {
       commentError = readErrorText(r.error);
@@ -416,53 +462,28 @@
      placement). The rail drops under the column in a narrow pane. -->
 <section class="task-detail" data-testid="work-task-detail" aria-label="Task" bind:this={pageEl}>
   <header class="head">
-    {#if task}
-      <nav class="crumbs" aria-label="Where this task lives" data-testid="work-task-crumbs">
-        <span>{orgName(task.org_id)}</span>
-        {#if task.group && task.group.source !== 'none' && task.group.label}<span class="sep" aria-hidden="true">/</span><span
-            >{task.group.label}</span
-          >{/if}
-        {#if task.mission}<span class="sep" aria-hidden="true">/</span><span data-testid="work-task-mission"
-            >{task.mission.name}{#if task.mission.wave != null}&nbsp;· W{task.mission.wave}{/if}</span
-          >{/if}
-        {#if task.parent_task_id}<span class="sep" aria-hidden="true">/</span><button
-            class="crumb-link"
-            type="button"
-            data-testid="work-task-parent"
-            onclick={() => task.parent_task_id && selectedTaskId.set(task.parent_task_id)}>Parent task</button
-          >{/if}
-      </nav>
-    {/if}
-    <div class="head-row">
-      <div class="titlebox">
-        {#if task}
-          <div class="keyline">
-            {#if task.key}
-              <span class="key" data-testid="work-task-key" title={task.key}>{shownKey(task)}</span>
-              <button class="icon-btn" type="button" data-testid="work-task-copy-key" title="Copy {task.display_key || task.key}" onclick={() => void copyKey()}
-                >{#if keyCopied}<Icon name="check" size={12} label="Copied" />{:else}<Icon name="copy" size={12} label="Copy key" />{/if}</button
-              >
-            {/if}
-            <span class="badge" title={task.provider ?? task.kind}>{sourceLabel}</span>
-            {#if task.tracker_name}<span class="muted">{task.tracker_name}</span>{/if}
-          </div>
-        {/if}
-        <h2>
-          <span class="title" class:unavailable={task?.unavailable}>{task ? task.title || (task.key ? '' : task.task_id) : 'Task'}</span>
-        </h2>
-      </div>
-      <div class="head-actions">
-        {#if task}<WorkButton {task} variant="bar" />{/if}
-        {#if task?.kind === 'local' && task.item_id != null}
-          <button
-            class="btn"
-            type="button"
-            data-testid="work-task-edit"
-            disabled={editBlocked !== null}
-            title={editBlocked ?? 'Edit the title, description, status and assignees'}
-            onclick={() => (editing = true)}><Icon name="edit" size={12} />Edit…</button
-          >
-        {/if}
+    <div class="topbar">
+      {#if onclose}
+        <button class="back" type="button" data-testid="work-task-close" title={closeLabel} onclick={onclose}>{closeLabel}</button>
+      {/if}
+      {#if task}
+        <nav class="crumbs" aria-label="Where this task lives" data-testid="work-task-crumbs">
+          <span>{orgName(task.org_id)}</span>
+          {#if task.group && task.group.source !== 'none' && task.group.label}<span class="sep" aria-hidden="true">/</span><span
+              >{task.group.label}</span
+            >{/if}
+          {#if task.mission}<span class="sep" aria-hidden="true">/</span><span data-testid="work-task-mission"
+              >{task.mission.name}{#if task.mission.wave != null}&nbsp;· W{task.mission.wave}{/if}</span
+            >{/if}
+          {#if task.parent_task_id}<span class="sep" aria-hidden="true">/</span><button
+              class="crumb-link"
+              type="button"
+              data-testid="work-task-parent"
+              onclick={() => task.parent_task_id && selectedTaskId.set(task.parent_task_id)}>Parent task</button
+            >{/if}
+        </nav>
+      {/if}
+      <div class="tools">
         {#if task?.url}
           <button
             class="btn btn--quiet"
@@ -481,8 +502,36 @@
           aria-label="Refresh"
           onclick={() => void load(taskId)}><Icon name="retry" size={14} /></button
         >
-        {#if onclose}
-          <button class="btn btn--quiet" type="button" data-testid="work-task-close" onclick={onclose}>{closeLabel}</button>
+      </div>
+    </div>
+    <div class="head-row">
+      <div class="titlebox">
+        {#if task}
+          <div class="keyline">
+            {#if task.key}
+              <span class="key" data-testid="work-task-key" title={task.key}>{shownKey(task)}</span>
+              <button class="icon-btn" type="button" data-testid="work-task-copy-key" title="Copy {task.display_key || task.key}" onclick={() => void copyKey()}
+                >{#if keyCopied}<Icon name="check" size={12} label="Copied" />{:else}<Icon name="copy" size={12} label="Copy key" />{/if}</button
+              >
+            {/if}
+            <span class="badge" title={task.tracker_name ?? task.provider ?? task.kind}>{sourceLabel}</span>
+          </div>
+        {/if}
+        <h2>
+          <span class="title" class:unavailable={task?.unavailable}>{task ? task.title || (task.key ? '' : task.task_id) : 'Task'}</span>
+        </h2>
+      </div>
+      <div class="head-actions">
+        {#if task}<WorkButton {task} variant="bar" />{/if}
+        {#if task?.kind === 'local' && task.item_id != null}
+          <button
+            class="btn"
+            type="button"
+            data-testid="work-task-edit"
+            disabled={editBlocked !== null}
+            title={editBlocked ?? 'Edit the title, description, status and assignees'}
+            onclick={() => (editing = true)}><Icon name="edit" size={12} />Edit…</button
+          >
         {/if}
       </div>
     </div>
@@ -506,6 +555,11 @@
           <span class="chip chip--status chip--{task.status_category ?? 'todo'}" data-testid="work-task-status">{taskStatus(task)}</span>
         {/if}
         {#if task.resolution}<span class="chip">{task.resolution}</span>{/if}
+        {#if task.priority === 'urgent' || task.priority === 'high'}
+          <span class="chip chip--prio-{task.priority}" data-testid="work-task-priority-chip"
+            ><span class="prio-dot prio-dot--{task.priority}" aria-hidden="true"></span>{priorityLabel(task.priority)}</span
+          >
+        {/if}
         {#if subtaskCount}<span class="chip" data-testid="work-task-subtask-chip" title="Subtasks done">✓ {subtaskCount}</span>{/if}
         <TaskBlockedSpend {task} lookup={depById} testid="work-task" />
         {#if trackerDown(task)}<span class="chip chip--warn" data-testid="work-task-tracker-down"
@@ -541,7 +595,7 @@
           onclick={() => (tab = t)}
           >{TASK_TAB_LABELS[t]}{#if t === 'sessions' && (task.sessions ?? []).length > 0}<span class="tab-count"
               >{(task.sessions ?? []).length + (task.sessions_more ?? 0)}</span
-            >{:else if t === 'comments' && (detail?.comments ?? []).length > 0}<span class="tab-count">{(detail?.comments ?? []).length}</span
+            >{:else if t === 'comments' && timeline.length > 0}<span class="tab-count">{timeline.length}</span
             >{/if}</button
         >
       {/each}
@@ -600,6 +654,22 @@
               {#if (task.assignees ?? []).length > 0}
                 <dt>Assignees</dt>
                 <dd data-testid="work-task-assignees">{(task.assignees ?? []).join(', ')}{#if task.mine}&nbsp;(you){/if}</dd>
+              {/if}
+              {#if priorityLabel(task.priority)}
+                <dt>Priority</dt>
+                <dd class="prio" data-testid="work-task-priority"
+                  ><span class="prio-dot prio-dot--{task.priority}" aria-hidden="true"></span>{priorityLabel(task.priority)}</dd
+                >
+              {/if}
+              {#if (task.labels ?? []).length > 0}
+                <dt>Labels</dt>
+                <dd class="labels" data-testid="work-task-labels">
+                  {#each task.labels ?? [] as label (label)}<span class="chip chip--label">{label}</span>{/each}
+                </dd>
+              {/if}
+              {#if estimateLabel(task.estimate, task.estimate_unit)}
+                <dt>Estimate</dt>
+                <dd data-testid="work-task-estimate">{estimateLabel(task.estimate, task.estimate_unit)}</dd>
               {/if}
               <dt>Source</dt>
               <dd>{sourceLabel}{#if task.tracker_name}&nbsp;· {task.tracker_name}{/if}</dd>
@@ -857,41 +927,107 @@
 
     {#if tab === 'comments'}
       <div class="pane-body comments-pane">
-        {#if (detail?.comments ?? []).length === 0}
-          <p class="muted" data-testid="work-task-comments-empty">No comments yet. They stay in fleet; nothing is written to a tracker.</p>
+        {#if commentsTracker}
+          <div class="tracker-load" data-testid="work-task-tracker-comments" aria-busy={trackerLoad === 'loading'}>
+            {#if trackerLoad === 'loading'}
+              <span class="muted small" role="status">Loading {commentsTracker} comments…</span>
+            {:else if trackerLoad === 'error'}
+              <span class="err small" role="alert">Couldn't load the comments on {commentsTracker} ({trackerError}).</span>
+              <button class="btn btn--quiet" type="button" onclick={() => task?.key && void loadTrackerComments(task.key)}>Retry</button>
+            {/if}
+          </div>
+        {/if}
+        {#if trackerAttachments.length > 0}
+          <section class="attachments" data-testid="work-task-tracker-attachments" aria-label="Attachments on {commentsTracker}">
+            <p class="att-head small muted">Attachments on {commentsTracker}</p>
+            <ul>
+              {#each trackerAttachments as a (a.id)}
+                <li data-testid="work-task-tracker-attachment">
+                  {#if a.url}<button class="link-btn" type="button" onclick={() => void openExternal(a.url ?? '')}>{a.name}</button>{:else}{a.name}{/if}{#if a.size}<span class="muted small">{` · ${formatSize(a.size)}`}</span>{/if}
+                </li>
+              {/each}
+            </ul>
+          </section>
+        {/if}
+        {#if timeline.length === 0 && trackerLoad !== 'loading'}
+          <p class="muted" data-testid="work-task-comments-empty">
+            {commentsTracker ? `No comments yet, here or on ${commentsTracker}.` : 'No comments yet. They stay in fleet.'}
+          </p>
         {:else}
           <ul class="comments">
-            {#each detail?.comments ?? [] as c (c.id)}
-              {@const who = commentAuthor(c)}
-              <li class="comment" data-testid="work-task-comment">
-                <span class="avatar" aria-hidden="true">{initialOf(who)}</span>
-                <div class="cmain">
-                  <div class="chead">
-                    <strong>{who}</strong>
-                    <span class="muted small">{timeAgo(c.created_at)}</span>
-                    {#if c.mine}
-                      <span class="cacts">
-                        {#if confirmDelete === c.id}
-                          <button class="btn btn--crit" type="button" data-testid="work-task-comment-delete-confirm" onclick={() => void removeComment(c.id)}
-                            >Delete</button
-                          >
-                          <button class="btn btn--quiet" type="button" onclick={() => (confirmDelete = null)}>Keep</button>
-                        {:else}
-                          <button
-                            class="btn btn--quiet"
-                            type="button"
-                            data-testid="work-task-comment-delete"
-                            disabled={uncommentBlocked !== null}
-                            title={uncommentBlocked ?? 'Delete your comment'}
-                            onclick={() => (confirmDelete = c.id)}>Delete…</button
-                          >
-                        {/if}
-                      </span>
+            {#each timeline as e (e.kind + ':' + e.comment.id)}
+              {#if e.kind === 'tracker'}
+                {@const tc = e.comment}
+                <li class="comment" data-testid="work-task-tracker-comment">
+                  <span class="avatar avatar--tracker" aria-hidden="true">{initialOf(tc.author)}</span>
+                  <div class="cmain">
+                    <div class="chead">
+                      <strong>{tc.author}</strong>
+                      <span class="badge">{commentsTracker}</span>
+                      <span class="muted small">{timeAgo(tc.created_at)}</span>
+                      {#if tc.url}
+                        <span class="cacts">
+                          <button class="link-btn small" type="button" onclick={() => void openExternal(tc.url ?? '')}>Open in {commentsTracker}</button>
+                        </span>
+                      {/if}
+                    </div>
+                    <div class="cbody prose"><MarkdownView source={tc.body} /></div>
+                  </div>
+                </li>
+              {:else}
+                {@const c = e.comment}
+                {@const who = commentAuthor(c)}
+                {@const posted = postStateLabel(c.tracker_post, commentsTracker ?? 'the tracker')}
+                <li class="comment" data-testid="work-task-comment">
+                  <span class="avatar" aria-hidden="true">{initialOf(who)}</span>
+                  <div class="cmain">
+                    <div class="chead">
+                      <strong>{who}</strong>
+                      <span class="muted small">{timeAgo(c.created_at)}</span>
+                      {#if c.mine}
+                        <span class="cacts">
+                          {#if confirmDelete === c.id}
+                            {#if c.tracker_post?.state === 'done'}
+                              <span class="muted small">Stays on {commentsTracker ?? 'the tracker'}.</span>
+                            {:else if c.tracker_post?.state === 'pending'}
+                              <span class="muted small">Its post is cancelled.</span>
+                            {/if}
+                            <button class="btn btn--crit" type="button" data-testid="work-task-comment-delete-confirm" onclick={() => void removeComment(c.id)}
+                              >Delete</button
+                            >
+                            <button class="btn btn--quiet" type="button" onclick={() => (confirmDelete = null)}>Keep</button>
+                          {:else}
+                            <button
+                              class="btn btn--quiet"
+                              type="button"
+                              data-testid="work-task-comment-delete"
+                              disabled={uncommentBlocked !== null}
+                              title={uncommentBlocked ??
+                                (c.tracker_post?.state === 'done'
+                                  ? `Delete your comment here; the copy on ${commentsTracker ?? 'the tracker'} stays`
+                                  : 'Delete your comment')}
+                              onclick={() => (confirmDelete = c.id)}>Delete…</button
+                            >
+                          {/if}
+                        </span>
+                      {/if}
+                    </div>
+                    <div class="cbody prose"><MarkdownView source={c.body} /></div>
+                    {#if posted}
+                      <div
+                        class="small post-state"
+                        class:err={c.tracker_post?.state === 'failed'}
+                        class:muted={c.tracker_post?.state !== 'failed'}
+                        data-testid="work-task-comment-post-state"
+                      >
+                        {#if c.tracker_post?.state === 'done' && c.tracker_post.url}
+                          <button class="link-btn" type="button" onclick={() => void openExternal(c.tracker_post?.url ?? '')}>{posted}</button>
+                        {:else}{posted}{/if}
+                      </div>
                     {/if}
                   </div>
-                  <div class="cbody prose"><MarkdownView source={c.body} /></div>
-                </div>
-              </li>
+                </li>
+              {/if}
             {/each}
           </ul>
         {/if}
@@ -907,7 +1043,7 @@
               rows="3"
               bind:value={draft}
               maxlength={COMMENT_MAX}
-              placeholder="Add a comment: kept in fleet, never sent to the tracker"
+              placeholder={commentsTracker ? 'Add a comment' : 'Add a comment: kept in fleet'}
               aria-label="Comment"
               data-testid="work-task-comment-input"
               onpaste={(e) => void pasteIntoComposer(e)}
@@ -921,6 +1057,12 @@
             <div class="composer-row">
               {#if commentError}<span class="err" role="alert" data-testid="work-task-comment-error">{commentError}</span>{/if}
               {#if attachedNote}<span class="muted small" role="status" data-testid="work-task-comment-attached">{attachedNote} · in Overview → Attachments</span>{/if}
+              {#if canPostToTracker}
+                <label class="small post-to">
+                  <input type="checkbox" bind:checked={postToTracker} data-testid="work-task-post-to-tracker" />
+                  Also post to {commentsTracker}
+                </label>
+              {/if}
               <span class="muted small hint-keys">Markdown · ⌘↵ to post</span>
               <button
                 class="btn"
@@ -1022,11 +1164,14 @@
     align-items: center;
     gap: 8px;
   }
+  /* The page's own gutter, as the session Details tab has (16px 24px). */
   .task-detail {
     display: flex;
     flex-direction: column;
     font-size: var(--text-sm);
     container-type: inline-size;
+    padding: var(--space-4) var(--space-6) var(--space-6);
+    max-width: 1280px;
   }
   .pad {
     margin: var(--space-2) 0 0;
@@ -1037,9 +1182,50 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-1);
-    padding-bottom: var(--space-3);
+    padding-bottom: var(--space-4);
+  }
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-height: var(--control-h-sm);
+    margin-bottom: var(--space-2);
+  }
+  .back {
+    flex: 0 1 auto;
+    max-width: 240px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding: 2px 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-pill);
+    background: none;
+    color: var(--fg-muted);
+    font: inherit;
+    font-size: var(--text-xs);
+    cursor: pointer;
+  }
+  .back:hover {
+    background: var(--bg-hover);
+    color: var(--fg);
+  }
+  .tools {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    flex: none;
+  }
+  .tools .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
   }
   .crumbs {
+    min-width: 0;
+    flex: 1 1 auto;
+    overflow-wrap: anywhere;
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
@@ -1117,9 +1303,10 @@
   }
   .head-actions {
     display: flex;
-    gap: var(--space-1);
-    align-items: flex-start;
+    gap: var(--space-2);
+    align-items: center;
     flex-wrap: wrap;
+    padding-top: 18px;
   }
   .head-actions .btn {
     display: inline-flex;
@@ -1164,6 +1351,48 @@
     background: var(--waiting-soft);
     color: var(--usage-warn);
     white-space: normal;
+  }
+  .chip--prio-urgent {
+    gap: 5px;
+    background: var(--failed-soft);
+    color: var(--danger);
+    font-weight: 600;
+  }
+  .chip--prio-high {
+    gap: 5px;
+    background: var(--waiting-soft);
+    color: var(--usage-warn);
+    font-weight: 600;
+  }
+  .chip--label {
+    height: auto;
+    padding: 1px 6px;
+  }
+  .prio-dot {
+    flex: none;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--fg-muted);
+  }
+  .prio-dot--urgent {
+    background: var(--danger);
+  }
+  .prio-dot--high {
+    background: var(--usage-warn);
+  }
+  .prio-dot--medium {
+    background: var(--accent);
+  }
+  .props dd.prio {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .props dd.labels {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
   }
   .status-pick {
     font: inherit;
@@ -1218,14 +1447,17 @@
   /* ── body: reading column + properties rail ── */
   .body {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(220px, 280px);
+    grid-template-columns: minmax(0, 1fr) minmax(240px, 300px);
     gap: var(--space-6);
-    padding-top: var(--space-4);
+    padding-top: var(--space-6);
   }
   @container (max-width: 720px) {
     .body {
       grid-template-columns: minmax(0, 1fr);
       gap: var(--space-4);
+    }
+    .rail {
+      position: static;
     }
   }
   .main,
@@ -1233,24 +1465,43 @@
   .pane-body {
     display: flex;
     flex-direction: column;
-    gap: var(--space-4);
+    gap: var(--space-6);
     min-width: 0;
   }
   .pane-body {
-    padding-top: var(--space-3);
-    gap: var(--space-2);
+    padding-top: var(--space-4);
+    gap: var(--space-3);
+  }
+  /* Description, subtasks, attachments…: one rule between each block,
+     the shared-work sections' own blocks included. */
+  .main {
+    gap: var(--space-4);
+  }
+  .main > :global(* + *),
+  .main > :global(.tws > * + *) {
+    border-top: 1px solid var(--border);
+    padding-top: var(--space-4);
+  }
+  .main > :global(.tws) {
+    margin: 0;
+    gap: var(--space-4);
+  }
+  .main > :global(.tws:empty) {
+    display: none;
   }
   .rail {
-    gap: var(--space-3);
+    gap: var(--space-4);
     align-self: start;
-    padding: var(--space-3);
+    position: sticky;
+    top: var(--space-4);
+    padding: var(--space-4);
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
     background: var(--bg-raise);
   }
   .rail > section + section {
     border-top: 1px solid var(--border);
-    padding-top: var(--space-3);
+    padding-top: var(--space-4);
   }
   h3 {
     display: flex;
@@ -1301,8 +1552,8 @@
   }
   .props {
     display: grid;
-    grid-template-columns: max-content minmax(0, 1fr);
-    gap: 6px 10px;
+    grid-template-columns: 88px minmax(0, 1fr);
+    gap: 8px 12px;
     margin: 0;
     font-size: var(--text-xs);
   }
@@ -1322,7 +1573,7 @@
     display: flex;
     flex-wrap: wrap;
     gap: 4px;
-    margin-top: var(--space-2);
+    margin-top: var(--space-3);
   }
   .ok {
     color: var(--status-done);
@@ -1515,5 +1766,33 @@
   }
   .hint-keys {
     margin-left: auto;
+  }
+  .tracker-load {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+  .attachments ul {
+    margin: 0 0 var(--space-3);
+    padding-left: var(--space-4);
+  }
+  .attachments .att-head {
+    margin: 0 0 var(--space-1);
+    font-weight: 500;
+  }
+  .tracker-load:empty {
+    display: none;
+  }
+  .avatar--tracker {
+    background: var(--chip-bg);
+    color: var(--fg-muted);
+  }
+  .post-state {
+    margin-top: 2px;
+  }
+  .post-to {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
   }
 </style>

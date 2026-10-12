@@ -48,6 +48,7 @@
   import Timeline from './Timeline.svelte';
   import TimelineWorkProposal from './TimelineWorkProposal.svelte';
   import { push, pushError } from './toasts';
+  import { pushRestartError } from './restart';
   import { copyText } from './clipboard';
   import {
     ciStatusColor,
@@ -515,11 +516,14 @@
   function cancelRestart() {
     confirmingRestart = false;
   }
-  async function onRestart() {
+  // `force` only from the "Restart anyway" `pushRestartError` offers for the
+  // registered fleet controller; it passes the same gate again.
+  async function onRestart(force = false) {
     if (restartBlocked !== null) return;
     confirmingRestart = false;
-    const r = await restartSession(session.host_alias, session.tmux_name);
-    if (!r.ok) pushError(r.error, 'Restart failed');
+    const { host_alias, tmux_name } = session;
+    const r = await restartSession(host_alias, tmux_name, undefined, {}, { force });
+    if (!r.ok) pushRestartError(r.error, host_alias, tmux_name, () => void onRestart(true));
   }
 
   // Make the worktree directory + tmux pane healthy again (deleted dir,
@@ -1357,7 +1361,7 @@
     title="Restart claude?"
     confirmLabel="Restart"
     danger
-    onconfirm={onRestart}
+    onconfirm={() => onRestart()}
     oncancel={cancelRestart}
     confirmTestId="confirm-restart-details"
   >

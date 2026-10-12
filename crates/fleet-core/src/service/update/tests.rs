@@ -118,6 +118,7 @@ fn desktop_req(version: &str) -> CheckRequest {
         },
         phase: UpdatePhase::Idle,
         attempt: None,
+        refresh: false,
     }
 }
 
@@ -130,6 +131,7 @@ fn hub_req(version: &str) -> CheckRequest {
         speaks: Speaks::default(),
         phase: UpdatePhase::Idle,
         attempt: None,
+        refresh: false,
     }
 }
 
@@ -197,6 +199,7 @@ async fn a_client_a_contract_behind_is_offered_the_release_that_speaks_it() {
         speaks: Speaks::default(),
         phase: UpdatePhase::Idle,
         attempt: None,
+        refresh: false,
     };
     for (who, req) in [
         (
@@ -783,6 +786,93 @@ async fn a_new_track_or_interval_wakes_the_refresh_tick() {
 }
 
 #[test]
+fn dev_and_nightly_read_the_channel_every_fifteen_minutes_at_most() {
+    let s = Store::open_in_memory().unwrap();
+    // Stable keeps the operator's interval (the default six hours).
+    assert_eq!(channel_poll_secs(&s), check_interval_secs(&s));
+    assert!(channel_poll_secs(&s) > FAST_TRACK_POLL_SECS);
+    for fast in ["dev", "nightly"] {
+        s.set_setting(settings::UPDATE_TRACK, fast).unwrap();
+        assert_eq!(channel_poll_secs(&s), FAST_TRACK_POLL_SECS, "{fast}");
+    }
+    // A shorter interval than the cap stays shorter.
+    s.set_setting(settings::UPDATE_CHECK_INTERVAL_SECS, "900")
+        .unwrap();
+    assert_eq!(channel_poll_secs(&s), 900);
+    s.set_setting(settings::UPDATE_TRACK, "beta").unwrap();
+    s.set_setting(settings::UPDATE_CHECK_INTERVAL_SECS, "7200")
+        .unwrap();
+    assert_eq!(channel_poll_secs(&s), 7200);
+}
+
+#[tokio::test]
+async fn on_dev_every_target_asks_again_when_the_hub_next_reads_the_channel() {
+    let key = TestKey::new(9);
+    let (store, _) = published_store(&key).await;
+    let k = keys(&key);
+    let asked = |store: &std::sync::Mutex<Store>| {
+        check(
+            store,
+            &client(1, TokenMode::Full, None),
+            &desktop_req("0.3.3"),
+            &k,
+            NOW,
+        )
+        .unwrap()
+        .next_check_secs
+    };
+    // Stable: the operator's interval.
+    assert_eq!(asked(&store), check_interval_secs(&lock(&store).unwrap()));
+    // Dev: no later than the hub's next channel read, so `fleet-updater`
+    // (asking as `hub:self`) installs a new dev build within it.
+    lock(&store)
+        .unwrap()
+        .set_setting(settings::UPDATE_TRACK, "dev")
+        .unwrap();
+    assert!(asked(&store) <= FAST_TRACK_POLL_SECS);
+}
+
+#[test]
+fn only_the_hubs_own_install_wakes_its_updater() {
+    for st in [
+        Status::UpdateAvailable,
+        Status::UpdateRequired,
+        Status::Rollback,
+    ] {
+        assert!(wakes_hub_updater("hub:self", st), "{st:?}");
+        assert!(!wakes_hub_updater("client:1", st), "{st:?}");
+        assert!(!wakes_hub_updater("agent:box1", st), "{st:?}");
+    }
+    for st in [Status::UpToDate, Status::Hold, Status::Unknown] {
+        assert!(!wakes_hub_updater("hub:self", st), "{st:?}");
+    }
+}
+
+#[test]
+fn an_asked_for_refresh_runs_once_a_minute() {
+    assert!(asked_refresh_due(i64::MIN, NOW));
+    assert!(!asked_refresh_due(NOW, NOW));
+    assert!(!asked_refresh_due(NOW, NOW + ASKED_REFRESH_EVERY_SECS - 1));
+    assert!(asked_refresh_due(NOW, NOW + ASKED_REFRESH_EVERY_SECS));
+}
+
+#[test]
+fn refresh_is_left_out_of_a_check_that_does_not_ask_for_it() {
+    // The frozen wire only grows: an older hub must never see the field
+    // unless a person asked, and a body without it parses as `false`.
+    let req = desktop_req("0.3.3");
+    let body = serde_json::to_value(&req).unwrap();
+    assert!(body.get("refresh").is_none());
+    let back: CheckRequest = serde_json::from_value(body).unwrap();
+    assert!(!back.refresh);
+    let asked = CheckRequest {
+        refresh: true,
+        ..desktop_req("0.3.3")
+    };
+    assert_eq!(serde_json::to_value(&asked).unwrap()["refresh"], true);
+}
+
+#[test]
 fn nightly_is_a_track_once_it_is_published() {
     settings::validate(settings::UPDATE_TRACK, "nightly").unwrap();
     assert_eq!(
@@ -1270,6 +1360,7 @@ async fn the_phones_apk_arrives_as_a_signed_amendment() {
         },
         phase: UpdatePhase::Idle,
         attempt: None,
+        refresh: false,
     };
     let before = check(&store, &phone, &req, &keys(&key), NOW).unwrap();
     assert!(before.target.is_none(), "{:?}", before.reason);
@@ -1925,6 +2016,7 @@ fn agent_req(version: &str) -> CheckRequest {
         },
         phase: UpdatePhase::Idle,
         attempt: None,
+        refresh: false,
     }
 }
 

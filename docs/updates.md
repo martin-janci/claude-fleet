@@ -85,9 +85,22 @@ that the hub refuses with `E_HUB_CONTRACT` can still ask what to install.
   `action: unpin` removes the pin. A pin below the installed version is a
   rollback. A pin the publisher does not permit (withdrawn, below its signed
   minimum) is held, never served.
-- **Re-read the channel now.** `update_admin { action: refresh }`. The hub
-  also re-reads it every `update.check_interval_secs`, and at once when
-  `update.track` or `update.check_interval_secs` changes. A failed read
+- **Pushed from the release.** Once a release or a phone's amendment is
+  listed, the release workflows `POST /update/poke` to every hub in the
+  repository variable `FLEET_HUB_POKE_URLS` (space-separated base URLs, e.g.
+  `https://fleet.example.com`). The poke needs no token and can only make
+  the hub re-read its signed channel: now, and once more five and a half
+  minutes later past the CDN's cache. When the hub's own decision moves to
+  an install, it wakes `fleet-updater` (`<data_dir>/update-now`), which then
+  installs under `update.hub.mode = automatic` as on any pass.
+- **Re-read the channel now.** `update_admin { action: refresh }`, or a
+  person's **Check for updates** (Settings → About on the desktop, Settings →
+  Updates on the phone): that check carries `refresh: true` and the hub
+  re-reads the channel before it answers, at most once a minute. The hub
+  also re-reads it every `update.check_interval_secs` — on the `dev` and
+  `nightly` tracks every 15 minutes at most, since they move with every
+  green push to main — and at once when `update.track` or
+  `update.check_interval_secs` changes. A failed read
   keeps the last good copy, is logged at `warn`, and
   `update_status.last_refresh` says why it failed.
   `FLEET_UPDATE_CHANNEL_URL` points the hub at a mirror. It changes only
@@ -254,7 +267,8 @@ opt in; `deploy/hub/upgrade.sh` stays the manual path.
 ### What it installs, and when
 
 It asks `/update/check` as `hub:self` (an `updater` token) on start and then
-every `next_check_secs` the hub names (`update.check_interval_secs`). It
+every `next_check_secs` the hub names (`update.check_interval_secs`, at most
+15 minutes on `dev` and `nightly`). It
 installs when the decision is:
 
 - `update_required`: below the signed or the policy minimum, withdrawn, or

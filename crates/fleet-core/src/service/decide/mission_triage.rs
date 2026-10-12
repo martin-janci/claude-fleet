@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 /// The question's version: bump it when a question below changes.
-pub const QUESTION_VERSION: &str = "mission_triage.v1";
+pub const QUESTION_VERSION: &str = "mission_triage.v2";
 /// What a run is about: a mission, `<id>:outcome` or `<id>:next`.
 pub const SUBJECT_KIND: &str = "mission";
 /// The outcome so far.
@@ -48,15 +48,21 @@ pub const REUSE_SECS: i64 = 7 * 86_400;
 /// Characters of the last failure sent, at most.
 pub const FAILURE_CHARS: usize = 600;
 
-const OUTCOME_INSTRUCTIONS: &str = "state describes a mission that has stopped making progress: \
+pub const OUTCOME_INSTRUCTIONS: &str = concat!(
+    "state describes a mission that has stopped making progress: \
     why fleet thinks it is stuck, its goal and the lines that say when it is done, how many of \
     its tasks are done, failed and blocked, and the last failure. Decide what the mission's \
-    outcome is so far. Choose unsure when the state does not say.";
+    outcome is so far. Choose unsure when the state does not say.",
+    super::quoted_data!()
+);
 
-const NEXT_INSTRUCTIONS: &str = "state describes a mission that has stopped making progress: \
+pub const NEXT_INSTRUCTIONS: &str = concat!(
+    "state describes a mission that has stopped making progress: \
     why fleet thinks it is stuck, its goal and the lines that say when it is done, how many of \
     its tasks are done, failed and blocked, and the last failure. Decide the one next step most \
-    likely to get it moving. Choose unsure when the state does not say.";
+    likely to get it moving. Choose unsure when the state does not say.",
+    super::quoted_data!()
+);
 
 /// PURE: what each outcome means, as the question says it.
 fn outcome_means(o: &str) -> &'static str {

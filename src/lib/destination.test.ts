@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { get } from 'svelte/store';
-import { destination, destinationFlag, goTo, leave } from './destination';
+import { COVERS_WORK, destination, destinationFlag, goTo, leave, uncoverWork } from './destination';
 import { hostsViewOpen, workBoardOpen } from './app_views';
 
 beforeEach(() => destination.set('session'));
@@ -43,5 +43,16 @@ describe('destination', () => {
     expect(get(destination)).toBe('board');
     workBoardOpen.update((v) => !v);
     expect(get(destination)).toBe('session');
+  });
+
+  it('uncoverWork() leaves a page that covers the Work view, and nothing else', () => {
+    for (const d of COVERS_WORK) {
+      goTo(d);
+      uncoverWork();
+      expect(get(destination)).toBe('session');
+    }
+    goTo('board');
+    uncoverWork();
+    expect(get(destination)).toBe('board');
   });
 });

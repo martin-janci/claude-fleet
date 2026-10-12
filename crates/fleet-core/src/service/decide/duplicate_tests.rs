@@ -185,6 +185,10 @@ fn row(id: i64, title: &str) -> WorkItemRow {
         held_at: None,
         done_when: vec![],
         due_at: None,
+        priority: None,
+        labels: vec![],
+        estimate: None,
+        estimate_unit: None,
         display_key: None,
     }
 }

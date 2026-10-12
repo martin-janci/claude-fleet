@@ -25,17 +25,20 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
 /// The question's version: bump it when the question below changes.
-pub const QUESTION_VERSION: &str = "pr_triage.v1";
+pub const QUESTION_VERSION: &str = "pr_triage.v2";
 /// What a run is about: the session that opened the PR (its id as text).
 pub const SUBJECT_KIND: &str = "session";
 /// Most failing check names sent.
 pub const CHECK_NAMES_MAX: usize = 10;
 
 /// The instruction, read literally.
-pub const INSTRUCTIONS: &str = "state describes a GitHub pull request that a coding agent \
+pub const INSTRUCTIONS: &str = concat!(
+    "state describes a GitHub pull request that a coding agent \
     opened and that is not mergeable yet: state.condition is why (conflict, behind or ci_red), \
     state.merge_state is GitHub's mergeStateStatus, state.failing_checks names the failing CI \
-    checks. Choose the one next step most likely to make it mergeable.";
+    checks. Choose the one next step most likely to make it mergeable.",
+    super::quoted_data!()
+);
 
 /// The options, in a stable order: each key is recorded as is.
 pub const OPTIONS: [(&str, &str); 6] = [

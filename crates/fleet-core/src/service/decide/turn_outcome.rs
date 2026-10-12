@@ -49,7 +49,7 @@ use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 
 /// The question's version: bump it when the question below changes.
-pub const QUESTION_VERSION: &str = "turn_outcome.v1";
+pub const QUESTION_VERSION: &str = "turn_outcome.v2";
 /// What a run is about: one turn of one session.
 pub const SUBJECT_KIND: &str = "session_turn";
 /// Below this confidence an answer is recorded, not applied.
@@ -66,14 +66,17 @@ pub const FOLLOWUP_SECS: i64 = 30 * 60;
 pub const PANE_UNREADABLE: &str = "pane_unreadable";
 
 /// The instruction, read literally: the exact condition and what to use.
-pub const INSTRUCTIONS: &str = "state.screen is the end of a terminal screen of Claude Code, an \
+pub const INSTRUCTIONS: &str = concat!(
+    "state.screen is the end of a terminal screen of Claude Code, an \
      AI coding assistant, captured right after it ended a turn and went quiet: its last reply \
      and what is below it. Code is replaced by [code: ...] placeholders. Decide what the turn \
      came to, using only the screen. Choose asked when the reply ends by asking the person a \
      question or for a decision before it can go on; finished when it reports the work done or \
      answered and asks nothing; stuck when it shows an error, a crash or a screen it cannot \
      leave by itself; working when it is still doing the work (a spinner, a running tool). \
-     Choose unsure when the screen does not show which.";
+     Choose unsure when the screen does not show which.",
+    super::quoted_data!()
+);
 
 /// PURE: the question: one Choice over the five outcomes.
 pub fn question() -> Question {

@@ -61,6 +61,11 @@ pub struct CheckRequest {
     pub phase: UpdatePhase,
     #[serde(default)]
     pub attempt: Option<String>,
+    /// A person asked ("Check for updates"): re-read the release channel
+    /// before deciding. The hub takes it at most once a minute; a hub older
+    /// than the field ignores it and answers from its cache.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub refresh: bool,
 }
 
 /// The closed set a decision's `status` is drawn from (design §6.2).
@@ -211,5 +216,23 @@ mod tests {
         assert_eq!(d.status, Status::Unknown);
         assert_eq!(d.reason.code, ReasonCode::Other);
         assert!(d.target.is_none());
+    }
+
+    /// The body fleet-mobile's phones send, byte for byte as its
+    /// `checkRequest` builds it (`contract_accepts` as `{min, max}`).
+    #[test]
+    fn a_phones_check_parses() {
+        let r: CheckRequest = serde_json::from_str(
+            r#"{"update_proto":1,"component":"android",
+                "platform":{"os":"android","arch":"aarch64","variant":"apk"},
+                "installed":{"version":"0.6.3-dev.179.desktop.gf6d4e41","commit":"f6d4e4155c76"},
+                "speaks":{"contract_accepts":{"min":5,"max":17}},"refresh":true}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            r.speaks.contract_accepts,
+            Some(crate::model::Window::new(5, 17))
+        );
+        assert!(r.refresh);
     }
 }

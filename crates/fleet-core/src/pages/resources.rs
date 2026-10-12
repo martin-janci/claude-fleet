@@ -980,6 +980,14 @@ const TRACKER: ResourceType = ResourceType {
         )
         .merge("settings", &["write_back", "pr_remote_link"])
         .confirm("Fleet will write to this tracker: a link on each ticket whose work you linked or started gets a pull request."),
+        FieldSpec::new(
+            "post_comments",
+            "Post comments",
+            "Let a person who comments on a ticket in fleet also post the comment to it, signed with their name. Only when they tick it; agents never post. The token needs permission to comment.",
+            FieldKind::Bool { on_off: false, default: false },
+        )
+        .merge("settings", &["write_back", "comments"])
+        .confirm("Fleet will write to this tracker: a comment a person posts from fleet appears on the ticket under this credential's account."),
     ],
     create: None,
     update: Some(ActionSpec::new("tracker.update", "Apply", "update_tracker", &[TRACKER_ID])),

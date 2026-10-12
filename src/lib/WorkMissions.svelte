@@ -676,7 +676,7 @@
     const r = $missionOpenRequest;
     if (!r) return;
     missionOpenRequest.set(null);
-    void open(r.id);
+    if (r.id != null) void open(r.id);
   });
 
   let stopWatching: (() => void) | null = null;

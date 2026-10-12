@@ -6,6 +6,7 @@
       "completed": false,
       "modified_at": "2026-09-21T10:15:30.000Z",
       "notes": "Move every client to the SSO flow.\nOwner: Dana",
+      "tags": [ { "gid": "1209000000000001", "name": "security" }, { "gid": "1209000000000002", "name": "Q4" } ],
       "permalink_url": "https://app.asana.com/0/1200000000001001/1207000000000001",
       "resource_subtype": "default_task",
       "assignee": {

@@ -2,10 +2,13 @@
 // Follows `app_views.ts`: Control and the panel talk through these stores
 // instead of prop-drilling through App.svelte.
 import { derived, get, writable, type Readable, type Writable } from 'svelte/store';
+import { openControl } from './control';
+import { insertIntoComposer } from './conversation';
 import { invokeCmd } from './result';
 import { killSession, restartSession, sessions, type SessionRow } from './sessions';
 import { sessionActionBlocked } from './share';
 import { pushError } from './toasts';
+import { pushRestartError } from './restart';
 
 export type OperatorBlocked =
   | 'absent'
@@ -251,7 +254,7 @@ async function openAgentOnce(): Promise<void> {
  * shows under the button; a failed restart also raises the sticky error
  * toast every other restart does (Sidebar, SessionDetails).
  */
-export async function restartOperator(): Promise<void> {
+export async function restartOperator(opts: { force?: boolean } = {}): Promise<void> {
   operatorError.set(null);
   const session = get(operatorSession);
   if (!session) {
@@ -268,10 +271,12 @@ export async function restartOperator(): Promise<void> {
     operatorError.set(blocked);
     return;
   }
-  const r = await restartSession(session.host_alias, session.tmux_name);
+  const r = await restartSession(session.host_alias, session.tmux_name, undefined, {}, { force: opts.force });
   if (!r.ok) {
     operatorError.set(`Restart failed: ${r.error.message}`);
-    pushError(r.error, 'Restart failed');
+    // `E_SELF_TARGET` (a hub where the agent was once registered as the
+    // fleet controller) offers "Restart anyway": this funnel again, forced.
+    pushRestartError(r.error, session.host_alias, session.tmux_name, () => void restartOperator({ force: true }));
     return;
   }
   await refreshOperator();
@@ -329,3 +334,19 @@ export const OPERATOR_COMMANDS: readonly OperatorCommand[] = [
   },
 ];
 
+
+/**
+ * Hand `text` to the agent (persona design, step 5: "Change with the
+ * agent" on a dashboard): wake it when it is absent, put the text in its
+ * composer unsent, and open Control's Chat tab on it. The person finishes
+ * the ask and presses Enter. False when the agent could not be reached;
+ * Control then shows why, as it does on any visit.
+ */
+export async function askAgent(text: string): Promise<boolean> {
+  if (!get(operatorSession)) await ensureAgent();
+  const row = get(operatorSession);
+  openControl('chat');
+  if (!row) return false;
+  insertIntoComposer(row.id, text);
+  return true;
+}

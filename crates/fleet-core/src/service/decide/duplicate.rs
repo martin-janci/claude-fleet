@@ -36,7 +36,7 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 /// The question's version: bump it when the question below changes.
-pub const QUESTION_VERSION: &str = "duplicate.v1";
+pub const QUESTION_VERSION: &str = "duplicate.v2";
 /// What a run is about: the proposed work item (its id as text), the
 /// subject the Work view reads a task's proposals by.
 pub const SUBJECT_KIND: &str = PROPOSAL_SUBJECT_WORK_ITEM;
@@ -54,12 +54,15 @@ pub const SCAN_LIMIT: usize = 500;
 pub const WHY_CHARS: usize = 600;
 
 /// The instruction, read literally.
-pub const INSTRUCTIONS: &str = "state.proposed is a task an agent just proposed: its title and \
+pub const INSTRUCTIONS: &str = concat!(
+    "state.proposed is a task an agent just proposed: its title and \
     the agent's reason for it. Each option except none is one task that already exists and is \
     not done, named by its key and title. Decide whether one of them is the SAME piece of work \
     as state.proposed, so that finishing either would finish the other. Choose none when no \
     option is the same work: a task that is only related, overlaps in part, or touches the same \
-    area is not the same work.";
+    area is not the same work.",
+    super::quoted_data!()
+);
 
 const NONE_MEANS: &str = "No existing task is the same work as the proposed one.";
 

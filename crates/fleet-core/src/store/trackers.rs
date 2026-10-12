@@ -76,6 +76,10 @@ pub struct TrackerConfig {
     /// Jira Data Center: the Epic Link custom field's id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub epic_field: Option<String>,
+    /// Jira: the story-points custom field's id (`customfield_10016`), a
+    /// task's estimate in points; `None` when the site has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub points_field: Option<String>,
     // --- M6: what the providers after Jira learn; all default.
     /// The workspace / organisation the tracker reads (Asana workspace gid,
     /// Linear organisation id).
@@ -136,7 +140,8 @@ pub struct TrackerSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
     /// Write-back (work graph M13.4e, decision D3 / D29): what fleet may
-    /// write to this tracker. Off unless an admin turns it on; Jira only.
+    /// write to this tracker. Off unless an admin turns it on; the PR link
+    /// is Jira only, comments every provider's.
     #[serde(default, skip_serializing_if = "WriteBack::is_off")]
     pub write_back: WriteBack,
 }
@@ -149,11 +154,15 @@ pub struct WriteBack {
     /// `started`) to the item as a remote link, once per PR.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pr_remote_link: bool,
+    /// Post a comment a person wrote in fleet to the ticket, when they ask
+    /// for it (owner decision 2026-10-11, migration 172).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub comments: bool,
 }
 
 impl WriteBack {
     pub fn is_off(&self) -> bool {
-        !self.pr_remote_link
+        !self.pr_remote_link && !self.comments
     }
 }
 
@@ -720,9 +729,10 @@ pub fn validate_tracker_settings(
             "extra_ca and allow_private_network are Jira Data Center settings".into(),
         ));
     }
-    if !s.write_back.is_off() && !matches!(provider, "jira" | "jira_dc") {
+    if s.write_back.pr_remote_link && !matches!(provider, "jira" | "jira_dc") {
         return Err(bad(
-            "write_back is a Jira setting: only Jira Cloud and Data Center accept a PR remote link"
+            "write_back.pr_remote_link is a Jira setting: only Jira Cloud and Data Center \
+             accept a PR remote link"
                 .into(),
         ));
     }

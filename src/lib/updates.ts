@@ -80,8 +80,15 @@ export function bannerFor(u: DesktopUpdate | null, dismissed: string | null): Ba
   }
 }
 
-export async function checkForUpdate(): Promise<Result<DesktopUpdate>> {
-  const r = await invokeCmd<DesktopUpdate>('update_check');
+/**
+ * Ask now. `force` is a person's "Check for updates": the hub re-reads the
+ * published channel before it answers (at most once a minute), so a release
+ * cut minutes ago shows up without waiting for the hub's next read.
+ */
+export async function checkForUpdate(force = false): Promise<Result<DesktopUpdate>> {
+  const r = force
+    ? await invokeCmd<DesktopUpdate>('update_check', { force })
+    : await invokeCmd<DesktopUpdate>('update_check');
   if (r.ok) {
     desktopUpdate.set(r.value);
     updateError.set(null);
@@ -151,4 +158,21 @@ export function startUpdateChecks(firstDelayMs = 15_000): () => void {
     void unlisten.then((f) => f());
     void unsubscribe.then((u) => (typeof u === 'function' ? u() : undefined));
   };
+}
+
+/**
+ * PURE: the one line "Check for updates" leaves behind, from the answer it
+ * got. Null while nothing was asked yet.
+ */
+export function checkedLine(u: DesktopUpdate | null): string | null {
+  if (!u) return null;
+  switch (u.status) {
+    case 'up_to_date':
+      return `Up to date (${u.installed}).`;
+    case 'update_available':
+    case 'update_required':
+      return u.version ? `claude-fleet ${u.version} is available.` : u.reason;
+    default:
+      return u.reason || `No update (${u.installed}).`;
+  }
 }

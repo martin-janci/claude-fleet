@@ -1305,6 +1305,22 @@ pub fn ticket_brief_with(
     plan: &StartPlan,
     extra: &str,
 ) -> Result<String, IpcError> {
+    ticket_brief_within(
+        store,
+        plan,
+        extra,
+        crate::service::work::handover::BRIEF_MAX_CHARS,
+    )
+}
+
+/// [`ticket_brief_with`] cut to `max_total` characters (a start keeps the
+/// rest of the brief's budget for the ticket's comments and attachments).
+fn ticket_brief_within(
+    store: &Mutex<Store>,
+    plan: &StartPlan,
+    extra: &str,
+    max_total: usize,
+) -> Result<String, IpcError> {
     const FROM: &str = "the tracker ticket's description";
     let s = lock(store)?;
     let item = plan
@@ -1356,7 +1372,6 @@ pub fn ticket_brief_with(
                     .chars()
                     .count()
                 + 2;
-            let max_total = crate::service::work::handover::BRIEF_MAX_CHARS;
             let budget = max_total.saturating_sub(overhead);
             // budget 0 no longer means silence: fence_ticket says it did not
             // fit. The notice it may append sits outside `budget`, so a cut
@@ -1420,6 +1435,29 @@ pub fn ticket_brief_with(
         }
     }
     Ok(out)
+}
+
+/// The ticket brief with `tail` (the ticket's comments and attachments,
+/// [`crate::service::work::tracker_comments::brief_extras`]) after it, the
+/// whole within the brief's budget: the description gives up what the tail
+/// takes, so both fences keep their ends.
+pub fn ticket_brief_and(
+    store: &Mutex<Store>,
+    plan: &StartPlan,
+    extra: &str,
+    tail: &str,
+) -> Result<String, IpcError> {
+    let max = crate::service::work::handover::BRIEF_MAX_CHARS;
+    if tail.is_empty() {
+        return ticket_brief_within(store, plan, extra, max);
+    }
+    let head = ticket_brief_within(
+        store,
+        plan,
+        extra,
+        max.saturating_sub(tail.chars().count() + 1),
+    )?;
+    Ok(format!("{head}\n{tail}"))
 }
 
 /// May the ticket's text reach a Claude on the plan's host? Only when the
@@ -1688,10 +1726,22 @@ fn with_native_defaults(
     args: &StartArgs,
     scope: &OrgScope,
 ) -> Result<StartArgs, IpcError> {
+    let s = lock(store)?;
+    let local = match (args.item_id, args.reference.as_deref()) {
+        (None, Some(r)) => local_item_for_key(&s, r, scope)?,
+        _ => None,
+    };
+    let args = &match local {
+        Some(id) => StartArgs {
+            item_id: Some(id),
+            reference: None,
+            ..args.clone()
+        },
+        None => args.clone(),
+    };
     let Some(id) = args.item_id else {
         return Ok(args.clone());
     };
-    let s = lock(store)?;
     let Some(item) = s.get_work_item(id)? else {
         return Ok(args.clone());
     };
@@ -1760,6 +1810,33 @@ fn with_native_defaults(
     Ok(out)
 }
 
+/// The fleet task a bare key names (`TASK-12`), when no tracker holds the
+/// key: started by key, it would resolve as a key no tracker knows, so the
+/// session was linked to the key alone and briefed with nothing but it,
+/// never the task's title and notes.
+fn local_item_for_key(
+    s: &Store,
+    reference: &str,
+    scope: &OrgScope,
+) -> Result<Option<i64>, IpcError> {
+    if reference.contains("://") {
+        return Ok(None);
+    }
+    let Ok(key) = crate::store::normalize_work_ref(reference) else {
+        return Ok(None);
+    };
+    let items = s.work_items_by_key(&key)?;
+    if items.iter().any(|i| i.tracker_id.is_some()) {
+        return Ok(None);
+    }
+    for item in items {
+        if item_visible(scope, s, &item)? {
+            return Ok(Some(item.id));
+        }
+    }
+    Ok(None)
+}
+
 /// `work_link { action: start }` end to end over the real `new_session`.
 pub async fn start_work(
     store: &Arc<Mutex<Store>>,
@@ -1801,7 +1878,11 @@ pub async fn start_work_unprompted(
         (Some(b), _) => Some(b.clone()),
         // The brief is read by the new session's Claude: never another
         // org's ticket text, even on a forced cross-org start.
-        (None, true) if brief_visible_on(store, &plan)? => Some(ticket_brief(store, &plan)?),
+        (None, true) if brief_visible_on(store, &plan)? => {
+            let tail =
+                crate::service::work::tracker_comments::brief_extras(store, &plan, net).await;
+            Some(ticket_brief_and(store, &plan, "", &tail)?)
+        }
         (None, _) => None,
     };
     let (row, queued) = start_with(store, &plan, brief, view, |a| {
@@ -2497,11 +2578,12 @@ fn sibling_brief(
     args: &StartArgs,
     plan: &StartPlan,
     sib: &str,
+    tail: &str,
 ) -> Result<Option<String>, IpcError> {
     Ok(match (&args.brief, args.with_brief) {
         (Some(b), _) => Some(format!("{sib}\n\n{b}")),
         (None, true) if brief_visible_on(store, plan)? => {
-            Some(ticket_brief_with(store, plan, sib)?)
+            Some(ticket_brief_and(store, plan, sib, tail)?)
         }
         (None, _) => None,
     })
@@ -2563,6 +2645,13 @@ where
         }
     }
     let labels = sibling_labels(store, &plans);
+    // One ticket, one read of its comments and attachments for every sibling.
+    let tail = match plans.first() {
+        Some(p) if args.brief.is_none() && args.with_brief => {
+            crate::service::work::tracker_comments::brief_extras(store, p, net).await
+        }
+        _ => String::new(),
+    };
     for (i, plan) in plans.iter().enumerate() {
         if deadline.saturating_duration_since(tokio::time::Instant::now()) < START_RESERVE {
             out.skipped.push(StartSkip {
@@ -2579,7 +2668,7 @@ where
             .map(|(_, l)| l.clone())
             .collect();
         let sib = siblings_line(&plan.key, &labels[i], &others, &plan.branch);
-        let brief = match sibling_brief(store, args, plan, &sib) {
+        let brief = match sibling_brief(store, args, plan, &sib, &tail) {
             Ok(b) => b,
             Err(e) => {
                 out.failed.push(StartFailure::of(plan.project_id, &e));

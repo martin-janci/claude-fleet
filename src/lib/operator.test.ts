@@ -18,6 +18,7 @@ import {
   blockedCopy,
 } from './operator';
 import { sessions, applySessionEvents, type SessionRow } from './sessions';
+import { toasts, clearToasts, runToastAction } from './toasts';
 
 const row = (over = {}) =>
   ({
@@ -212,6 +213,30 @@ describe('restartOperator', () => {
     expect(get(operatorError)).toBe(
       'Restart failed: fleet-operator on mefistos is the registered fleet controller',
     );
+  });
+
+  // 2026-10-11: the same refusal, with no way past it. The toast now offers
+  // "Restart anyway"; clicking it forces the restart and the panel recovers.
+  it('E_SELF_TARGET offers Restart anyway, which forces the restart and recovers the panel', async () => {
+    clearToasts();
+    operatorState.set('lost');
+    operatorSession.set(row({ host_alias: 'mefistos' }));
+    invoke.mockRejectedValueOnce({
+      code: 'E_SELF_TARGET',
+      message: 'fleet-operator on mefistos is the registered fleet controller',
+    });
+    await restartOperator();
+    const toast = get(toasts).find((t) => t.action?.label === 'Restart anyway');
+    expect(toast).toBeDefined();
+    invoke.mockResolvedValueOnce(row({ host_alias: 'mefistos' })); // restart_session, forced
+    invoke.mockResolvedValueOnce({ ready: true, session: row({ host_alias: 'mefistos' }), blocked: null });
+    runToastAction(toast!.id);
+    await vi.waitFor(() => expect(get(operatorState)).toBe('ready'));
+    expect(invoke.mock.calls[1]).toEqual([
+      'restart_session',
+      { args: { host_alias: 'mefistos', name: 'fleet-operator', force: true } },
+    ]);
+    expect(get(operatorError)).toBeNull();
   });
 
   it('a successful restart clears the previous failure', async () => {

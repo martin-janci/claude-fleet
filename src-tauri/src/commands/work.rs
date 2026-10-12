@@ -276,6 +276,18 @@ pub struct EditWorkItemArgs {
     /// A top-level item is an epic (`true`) or a task (`false`).
     #[serde(default)]
     pub epic: Option<bool>,
+    /// `urgent | high | medium | low`; `""` clears.
+    #[serde(default)]
+    pub priority: Option<String>,
+    /// `[]` clears.
+    #[serde(default)]
+    pub labels: Option<Vec<String>>,
+    /// 0 to 1000; `0` clears it and its unit.
+    #[serde(default)]
+    pub estimate: Option<f64>,
+    /// `points | hours`.
+    #[serde(default)]
+    pub estimate_unit: Option<String>,
 }
 
 /// `set_work_parent`: `parent` is `item:<id>`, or `""` for the top.
@@ -794,6 +806,10 @@ pub(crate) mod routed {
             assignees: args.assignees,
             due_at: args.due_at,
             epic: args.epic,
+            priority: args.priority,
+            labels: args.labels,
+            estimate: args.estimate,
+            estimate_unit: args.estimate_unit,
             ..Default::default()
         };
         match backend.hub() {

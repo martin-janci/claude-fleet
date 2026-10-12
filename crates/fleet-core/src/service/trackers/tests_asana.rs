@@ -725,3 +725,18 @@ fn notes_are_cut_to_the_excerpt_with_their_true_length() {
     assert_eq!(s.description.as_deref(), Some("short notes"));
     assert_eq!(s.description_chars, Some(11));
 }
+
+#[test]
+fn a_tasks_tags_are_its_labels() {
+    assert!(TASK_FIELDS.contains("tags.name"));
+    let f = FakeTransport::new();
+    let a = asana(&f);
+    let page = fixture("asana", "tasks_mine_p1.json");
+    let s = a.snapshot(&page["data"][0]).unwrap();
+    assert_eq!(s.labels, vec!["security", "Q4"]);
+    assert_eq!(
+        (s.priority, s.estimate, s.estimate_unit),
+        (None, None, None)
+    );
+    assert!(a.snapshot(&page["data"][1]).unwrap().labels.is_empty());
+}

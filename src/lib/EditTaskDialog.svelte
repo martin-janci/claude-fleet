@@ -7,19 +7,27 @@
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
   import {
+    ESTIMATE_MAX,
+    LABEL_MAX_CHARS,
+    LABELS_MAX,
     LOCAL_WORK_TITLE_MAX,
+    WORK_PRIORITIES,
     editWorkItem,
     parseAssignees,
+    parseLabels,
     setWorkStatus,
     workTitleError,
+    type EstimateUnit,
     type WorkItemEdit,
     type WorkItemStatus,
+    type WorkPriority,
   } from './work';
   import { readErrorText, workTask, type TaskDetail } from './work_view';
   import { openExternal } from './open_external';
   import { providerInfo } from './trackers';
 
-  // Edit a task written in Fleet: its title, notes, status, assignees and due date.
+  // Edit a task written in Fleet: its title, notes, status, assignees, due
+  // date, priority, labels and estimate.
   // Reads the task itself (the board and the lists hold no notes), and
   // writes only what changed: `edit_work_item` for the text, then
   // `set_work_status` for the status, both Routed, so a paired desktop
@@ -58,6 +66,11 @@
   let status = $state<WorkItemStatus>('todo');
   let assignees = $state('');
   let due = $state('');
+  let priority = $state<WorkPriority | ''>('');
+  let labels = $state('');
+  /** `null` while the field is empty: no estimate. */
+  let estimate = $state<number | null>(null);
+  let unit = $state<EstimateUnit>('points');
   let busy = $state(false);
   let failure = $state<string | IpcError | null>(null);
   let titleLeft = $state(false);
@@ -68,7 +81,22 @@
   }
 
   // What the form started from: only a changed field is written.
-  let initial = { title: '', notes: '', status: 'todo' as WorkItemStatus, assignees: [] as string[], due: '', epic: false };
+  let initial = {
+    title: '',
+    notes: '',
+    status: 'todo' as WorkItemStatus,
+    assignees: [] as string[],
+    due: '',
+    epic: false,
+    priority: '' as WorkPriority | '',
+    labels: [] as string[],
+    /** 0: no estimate. */
+    estimate: 0,
+    unit: 'points' as EstimateUnit,
+  };
+  const priorityOf = (p: string | null | undefined): WorkPriority | '' =>
+    WORK_PRIORITIES.some((x) => x.value === p) ? (p as WorkPriority) : '';
+  const unitOf = (u: string | null | undefined): EstimateUnit => (u === 'hours' ? 'hours' : 'points');
   let epic = $state(false);
 
   async function load() {
@@ -90,6 +118,10 @@
       assignees: d.task.assignees ?? [],
       due: d.task.due_at ?? '',
       epic: d.task.epic === true,
+      priority: priorityOf(d.task.priority),
+      labels: d.task.labels ?? [],
+      estimate: d.task.estimate ?? 0,
+      unit: unitOf(d.task.estimate_unit),
     };
     epic = initial.epic;
     title = initial.title;
@@ -97,6 +129,10 @@
     status = initial.status;
     assignees = initial.assignees.join(', ');
     due = initial.due;
+    priority = initial.priority;
+    labels = initial.labels.join(', ');
+    estimate = initial.estimate > 0 ? initial.estimate : null;
+    unit = initial.unit;
   }
   void load();
 
@@ -111,6 +147,16 @@
   /** An epic sits at the top (sprints design §3): a filed task or a job
    *  cannot become one. */
   const epicOffered = $derived(task !== null && !task.parent_task_id && task.origin !== 'agent');
+  /** The estimate field as a number: 0 when empty (no estimate). */
+  const estimateValue = $derived(estimate == null || Number.isNaN(estimate) ? 0 : estimate);
+  /** Why the labels or the estimate cannot be saved, as the backend checks them. */
+  const sizeError = $derived.by(() => {
+    const tags = parseLabels(labels);
+    if (tags.length > LABELS_MAX) return `At most ${LABELS_MAX} labels.`;
+    if (tags.some((t) => t.length > LABEL_MAX_CHARS)) return `A label is at most ${LABEL_MAX_CHARS} characters.`;
+    if (estimateValue < 0 || estimateValue > ESTIMATE_MAX) return `An estimate is a number from 0 to ${ESTIMATE_MAX}.`;
+    return null;
+  });
   const titleError = $derived(title.trim() === '' ? 'A title is required.' : workTitleError(title));
   const blocked = $derived(
     hubActionBlocked('edit_work_item', $hubStatus, $hubConnection) ??
@@ -126,13 +172,25 @@
     if (!sameList(people, initial.assignees)) edit.assignees = people;
     if (due !== initial.due) edit.due_at = due;
     if (epicOffered && epic !== initial.epic) edit.epic = epic;
+    if (priority !== initial.priority) edit.priority = priority;
+    const tags = parseLabels(labels);
+    if (!sameList(tags, initial.labels)) edit.labels = tags;
+    const size = estimateValue;
+    if (size !== initial.estimate) {
+      edit.estimate = size;
+      if (size > 0) edit.estimate_unit = unit;
+    } else if (size > 0 && unit !== initial.unit) {
+      edit.estimate_unit = unit;
+    }
     return { edit, status: status !== initial.status ? status : null };
   });
   const dirty = $derived(Object.keys(changes.edit).length > 0 || changes.status !== null);
-  const canSubmit = $derived(editable && !busy && blocked === null && titleError === null && dirty);
+  const canSubmit = $derived(
+    editable && !busy && blocked === null && titleError === null && sizeError === null && dirty,
+  );
   const shownTitleError = $derived(titleLeft || tried ? titleError : null);
   /** Why Save is off, under it. */
-  const why = $derived(blocked ?? titleError ?? (dirty ? null : 'Nothing changed yet.'));
+  const why = $derived(blocked ?? titleError ?? sizeError ?? (dirty ? null : 'Nothing changed yet.'));
 
   /** A refusal stays an `IpcError` so the banner can say the hub refused. */
   const failed = (e: IpcError): string | IpcError => (e.code === 'E_FORBIDDEN' ? e : readErrorText(e));
@@ -145,6 +203,12 @@
     if (edit.assignees !== undefined) back.assignees = before.assignees;
     if (edit.due_at !== undefined) back.due_at = before.due;
     if (edit.epic !== undefined) back.epic = before.epic;
+    if (edit.priority !== undefined) back.priority = before.priority;
+    if (edit.labels !== undefined) back.labels = before.labels;
+    if (edit.estimate !== undefined) back.estimate = before.estimate;
+    if ((edit.estimate !== undefined || edit.estimate_unit !== undefined) && before.estimate > 0) {
+      back.estimate_unit = before.unit;
+    }
     if (Object.keys(back).length > 0) {
       const r = await editWorkItem(itemId, back);
       if (!r.ok) return void pushError(r.error, 'Undo failed');
@@ -177,6 +241,10 @@
         assignees: r.value.assignees ?? [],
         due: r.value.due_at ?? '',
         epic: edit.epic ?? initial.epic,
+        priority: priorityOf(r.value.priority),
+        labels: r.value.labels ?? [],
+        estimate: r.value.estimate ?? 0,
+        unit: unitOf(r.value.estimate_unit),
       };
     }
     if (nextStatus !== null) {
@@ -283,6 +351,45 @@
         <input type="date" bind:value={due} data-testid="edit-task-due" />
       </label>
     </div>
+    <div class="row">
+      <label class="field">
+        <span class="field-label">Priority</span>
+        <select bind:value={priority} data-testid="edit-task-priority">
+          <option value="">None</option>
+          {#each WORK_PRIORITIES as p (p.value)}<option value={p.value}>{p.label}</option>{/each}
+        </select>
+      </label>
+      <label class="field grow">
+        <span class="field-label">Labels</span>
+        <input
+          type="text"
+          bind:value={labels}
+          placeholder="Labels, comma-separated"
+          autocomplete="off"
+          data-testid="edit-task-labels"
+        />
+      </label>
+      <label class="field estimate">
+        <span class="field-label">Estimate</span>
+        <input
+          type="number"
+          min="0"
+          max={ESTIMATE_MAX}
+          step="0.5"
+          bind:value={estimate}
+          placeholder="None"
+          data-testid="edit-task-estimate"
+        />
+      </label>
+      <label class="field">
+        <span class="field-label">Unit</span>
+        <select bind:value={unit} data-testid="edit-task-estimate-unit">
+          <option value="points">Points</option>
+          <option value="hours">Hours</option>
+        </select>
+      </label>
+    </div>
+    {#if sizeError}<p class="err" data-testid="edit-task-size-error">{sizeError}</p>{/if}
     {#if epicOffered}
       <label class="check">
         <input type="checkbox" bind:checked={epic} data-testid="edit-task-epic" />
@@ -296,6 +403,7 @@
   .row { display: flex; gap: var(--space-3); }
   .check { display: flex; gap: var(--space-2); align-items: baseline; font-size: var(--text-xs); }
   .field.grow { flex: 1; }
+  .field.estimate input { width: 6rem; }
   .field textarea:disabled { opacity: 0.6; }
   .field input[aria-invalid='true'] { border-color: var(--danger); }
   .note { font-size: var(--text-2xs); color: var(--fg-muted); margin: 0; }

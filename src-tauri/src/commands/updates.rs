@@ -167,9 +167,12 @@ pub async fn update_check(
     store: State<'_, Arc<Mutex<Store>>>,
     updates: State<'_, crate::self_update::SelfUpdate>,
     data_dir: State<'_, crate::commands::diagnostics::AppDataDir>,
+    force: Option<bool>,
 ) -> Result<crate::self_update::DesktopUpdate, IpcError> {
     let backend: Arc<FleetBackend> = Arc::clone(&backend);
-    updates.check(&backend, &store, &data_dir.0).await
+    updates
+        .check(&backend, &store, &data_dir.0, force.unwrap_or(false))
+        .await
 }
 
 /// Install the target the last `update_check` verified, in place, and

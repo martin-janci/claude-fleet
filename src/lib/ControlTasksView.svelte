@@ -11,7 +11,6 @@
   import { workChanged, editWorkItem, parseAssignees, setWorkStatus, ownerDueChip } from './work';
   import { startWork } from './trackers';
   import { readErrorText, showTaskInWorkView, taskLabel, taskStatus, workTree, type WorkTask } from './work_view';
-  import { leave } from './destination';
   import {
     TASK_SECTIONS,
     TASK_SECTION_LABELS,
@@ -71,7 +70,6 @@
 
   function open(t: WorkTask) {
     showTaskInWorkView(t.task_id);
-    leave('control');
   }
 
   function skipped(what: string): string {

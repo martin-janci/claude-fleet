@@ -42,7 +42,7 @@
   } from './fleet_settings';
   import { hubStatus, ownsTheFleet, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
-  import { startWork, ticketBriefPreview, type TicketRow } from './trackers';
+  import { startWork, ticketBriefPreview, ticketRef, type TicketRow } from './trackers';
   import { startWorkMulti, siblingCandidates, multiStartNote, multiStartToast, shownSiblings } from './multi_start';
   import ProposedBy from './ProposedBy.svelte';
   import StartPulse from './StartPulse.svelte';
@@ -1012,7 +1012,7 @@
     drafting = true;
     draftError = null;
     const r = await draftBrief({
-      ...(t.id != null && t.tracker_id != null ? { item_id: t.id } : { reference: t.key ?? '' }),
+      ...ticketRef(t),
       project_id: project.project.id,
       host_alias: chosenHost,
       worktree: inNewMode ? newWorktreeName.trim() : (chosenWorktree?.name ?? undefined),
@@ -1103,7 +1103,7 @@
     busy = true;
     error = null;
     const args = {
-      ...(t.id != null && t.tracker_id != null ? { item_id: t.id } : { reference: t.key ?? '' }),
+      ...ticketRef(t),
       project_ids: [projectId, ...extra],
       host_alias: host,
       name: friendlyName.trim() || undefined,
@@ -1163,7 +1163,7 @@
     busy = true;
     error = null;
     const r = await startWork({
-      ...(t.id != null && t.tracker_id != null ? { item_id: t.id } : { reference: t.key ?? '' }),
+      ...ticketRef(t),
       project_id: project.project.id,
       host_alias: submittedHost,
       name: friendlyName.trim() || undefined,
@@ -1473,7 +1473,8 @@
               <p class="draft-error small" role="alert" data-testid="ticket-brief-draft-error">{draftError}</p>
             {/if}
             <p class="muted small">
-              Delivered with the first prompt (never typed into the pane). The description is
+              Delivered with the first prompt (never typed into the pane), with the ticket's
+              latest comments and attachment links read from its tracker. The description is
               the ticket author's text and stays fenced as untrusted.
             </p>
           {/if}

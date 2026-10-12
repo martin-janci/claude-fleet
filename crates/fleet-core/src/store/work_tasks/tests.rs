@@ -261,7 +261,7 @@ fn a_person_edits_a_local_items_title_notes_and_assignees() {
                 title: Some(" Fix the login "),
                 notes: Some(" new notes "),
                 assignees: Some(&people),
-                due_at: None,
+                ..ItemEdit::default()
             },
         )
         .unwrap()
@@ -638,4 +638,200 @@ fn a_tracker_ticket_a_job_and_a_proposal_are_not_filed_by_hand() {
     let err = s.set_local_parent(p.id, Some(epic.id)).unwrap_err();
     assert!(err.message.contains("proposal"), "{}", err.message);
     assert!(s.set_local_parent(999_999, None).unwrap().is_none());
+}
+
+#[test]
+fn a_person_sets_changes_and_clears_priority_labels_and_estimate() {
+    let s = Store::open_in_memory().unwrap();
+    let t = s
+        .create_native_item(&native("Rotate NAS password"))
+        .unwrap();
+    assert_eq!(
+        (
+            t.priority.clone(),
+            t.labels.len(),
+            t.estimate,
+            t.estimate_unit.clone()
+        ),
+        (None, 0, None, None)
+    );
+    let labels = vec![
+        " infra ".to_string(),
+        "Infra".into(),
+        "".into(),
+        "q4".into(),
+    ];
+    let e = s
+        .edit_local_item(
+            t.id,
+            &ItemEdit {
+                priority: Some(" High "),
+                labels: Some(&labels),
+                estimate: Some(2.504),
+                ..ItemEdit::default()
+            },
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(e.priority.as_deref(), Some("high"));
+    assert_eq!(e.labels, vec!["infra", "q4"]);
+    // Rounded to two decimals; a first estimate is in points.
+    assert_eq!(
+        (e.estimate.map(|x| x.0), e.estimate_unit.as_deref()),
+        (Some(2.5), Some("points"))
+    );
+    // Read back through the column readers, not only the edit's answer.
+    let back = s.get_work_item(t.id).unwrap().unwrap();
+    assert_eq!(back, e);
+    assert_eq!(s.work_view_item(t.id).unwrap().unwrap().item, e);
+    // The unit alone re-units the estimate; a new number keeps the unit.
+    let e = s
+        .edit_local_item(
+            t.id,
+            &ItemEdit {
+                estimate_unit: Some("hours"),
+                ..ItemEdit::default()
+            },
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (e.estimate.map(|x| x.0), e.estimate_unit.as_deref()),
+        (Some(2.5), Some("hours"))
+    );
+    let e = s
+        .edit_local_item(
+            t.id,
+            &ItemEdit {
+                estimate: Some(4.0),
+                ..ItemEdit::default()
+            },
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (e.estimate.map(|x| x.0), e.estimate_unit.as_deref()),
+        (Some(4.0), Some("hours"))
+    );
+    // Editing the title alone leaves them as they are.
+    let e = s
+        .edit_local_item(
+            t.id,
+            &ItemEdit {
+                title: Some("Rotate the NAS password"),
+                ..ItemEdit::default()
+            },
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(e.priority.as_deref(), Some("high"));
+    assert_eq!(e.labels, vec!["infra", "q4"]);
+    // "" / [] / 0 clear them, the unit with the estimate.
+    let e = s
+        .edit_local_item(
+            t.id,
+            &ItemEdit {
+                priority: Some(""),
+                labels: Some(&[]),
+                estimate: Some(0.0),
+                ..ItemEdit::default()
+            },
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (e.priority, e.labels.len(), e.estimate, e.estimate_unit),
+        (None, 0, None, None)
+    );
+}
+
+#[test]
+fn a_bad_priority_label_or_estimate_is_refused_and_writes_nothing() {
+    let s = Store::open_in_memory().unwrap();
+    let t = s.create_native_item(&native("Ship it")).unwrap();
+    let long = vec!["x".repeat(LABEL_MAX_CHARS + 1)];
+    let many: Vec<String> = (0..=LABELS_MAX).map(|i| format!("l{i}")).collect();
+    let control = vec!["a\u{7}b".to_string()];
+    let cases: Vec<(ItemEdit<'_>, &str)> = vec![
+        (
+            ItemEdit {
+                priority: Some("p1"),
+                ..ItemEdit::default()
+            },
+            "priority",
+        ),
+        (
+            ItemEdit {
+                labels: Some(&long),
+                ..ItemEdit::default()
+            },
+            "longer than",
+        ),
+        (
+            ItemEdit {
+                labels: Some(&many),
+                ..ItemEdit::default()
+            },
+            "at most",
+        ),
+        (
+            ItemEdit {
+                labels: Some(&control),
+                ..ItemEdit::default()
+            },
+            "control",
+        ),
+        (
+            ItemEdit {
+                estimate: Some(1000.5),
+                ..ItemEdit::default()
+            },
+            "0 to 1000",
+        ),
+        (
+            ItemEdit {
+                estimate: Some(-1.0),
+                ..ItemEdit::default()
+            },
+            "0 to 1000",
+        ),
+        (
+            ItemEdit {
+                estimate: Some(f64::NAN),
+                ..ItemEdit::default()
+            },
+            "0 to 1000",
+        ),
+        (
+            ItemEdit {
+                estimate: Some(3.0),
+                estimate_unit: Some("days"),
+                ..ItemEdit::default()
+            },
+            "points or hours",
+        ),
+        (
+            ItemEdit {
+                estimate_unit: Some("hours"),
+                ..ItemEdit::default()
+            },
+            "needs an estimate",
+        ),
+    ];
+    for (edit, says) in cases {
+        let e = s
+            .edit_local_item(
+                t.id,
+                &ItemEdit {
+                    title: Some("Renamed"),
+                    ..edit
+                },
+            )
+            .unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID, "{says}");
+        assert!(e.message.contains(says), "{says}: {}", e.message);
+    }
+    let row = s.get_work_item(t.id).unwrap().unwrap();
+    assert_eq!(row.title, "Ship it");
+    assert_eq!((row.priority, row.estimate), (None, None));
 }
