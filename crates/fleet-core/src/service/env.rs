@@ -267,6 +267,19 @@ async fn sweep_env_files_at(
     swept
 }
 
+/// Resolve a launch's environment and write nothing: the refusal `prepare`
+/// would give, early. A move runs it among its opening checks, so a dry run
+/// predicts it and a real move refuses before any work is carried.
+pub fn check(
+    store: &Mutex<Store>,
+    host: &str,
+    project_id: Option<i64>,
+    session: Option<i64>,
+) -> Result<(), IpcError> {
+    let project = project_slug(store, project_id)?;
+    resolve(store, host, project.as_deref(), session, &BTreeMap::new()).map(|_| ())
+}
+
 /// Resolve, write the file and wrap `pane_cmd`. An empty set returns
 /// `pane_cmd` unchanged and writes nothing.
 pub async fn prepare(

@@ -2406,6 +2406,11 @@ async fn gather(
     crate::service::hub::ensure_local_allowed(&src)?;
     let target = args.target_host_alias.clone();
     let id = snap.claude_id.clone();
+    // The target's environment must resolve (a reference the controlling
+    // process cannot read refuses the launch), so it is refused here, before
+    // any work is carried — and a dry run predicts it. The replay step
+    // resolves again when it writes the file.
+    crate::service::env::check(store, &target, snap.row.project_id, Some(snap.row.id))?;
 
     if let Some(p) = progress.as_mut() {
         p.start(MoveStep::Check);
@@ -4418,6 +4423,43 @@ mod tests {
             .expect("the source");
         assert_eq!(src.owner_person_id, Some(ann));
         assert_eq!(src.visibility, crate::store::VISIBILITY_PRIVATE);
+    }
+
+    #[tokio::test]
+    async fn an_unresolvable_environment_refuses_the_move_and_its_preview_before_anything_is_carried(
+    ) {
+        use crate::store::EnvValue;
+        let f = fixture();
+        f.store
+            .lock()
+            .unwrap()
+            .set_env_var(
+                "global",
+                "",
+                "TOKEN",
+                &EnvValue::Ref("file:/nonexistent/fleet-move-env-test".into()),
+            )
+            .unwrap();
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let mut a = args(&f, false);
+        a.dry_run = true;
+        let e = move_session_with(a, &f.store, &f.fake, &hooks, fast())
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, codes::E_ENV_UNRESOLVED, "{}", e.message);
+        assert!(
+            e.message.contains("TOKEN") && !e.message.contains("nonexistent"),
+            "{}",
+            e.message
+        );
+        let e = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(e.code, codes::E_ENV_UNRESOLVED, "{}", e.message);
+        assert!(hooks.panes.lock().unwrap().is_empty(), "nothing launched");
+        assert!(
+            f.fake.calls_for("beta").is_empty(),
+            "nothing reached the target: {:?}",
+            f.fake.calls_for("beta").len()
+        );
     }
 
     #[tokio::test]
