@@ -410,19 +410,23 @@ impl Store {
     /// Delete a role and, by cascade, its composites and mappings. A seeded
     /// role is `E_FORBIDDEN`; `false` when there is no such role.
     pub fn delete_role(&self, id: i64) -> Result<bool, IpcError> {
-        self.with_tx(|c| {
-            let Some(role) = load_role(c, id)? else {
-                return Ok(false);
-            };
-            if role.seeded {
-                return Err(IpcError::new(
-                    codes::E_FORBIDDEN,
-                    format!("role {:?} is seeded and cannot be deleted", role.name),
-                ));
-            }
-            keeping_fleet_admin(c, || {
-                Ok(c.execute("DELETE FROM roles WHERE id = ?1", rusqlite::params![id])? > 0)
-            })
+        self.with_tx(|c| self.delete_role_in_tx(c, id))
+    }
+
+    /// [`Store::delete_role`] on the caller's transaction (seeded and
+    /// last-admin refusals included).
+    pub fn delete_role_in_tx(&self, c: &Connection, id: i64) -> Result<bool, IpcError> {
+        let Some(role) = load_role(c, id)? else {
+            return Ok(false);
+        };
+        if role.seeded {
+            return Err(IpcError::new(
+                codes::E_FORBIDDEN,
+                format!("role {:?} is seeded and cannot be deleted", role.name),
+            ));
+        }
+        keeping_fleet_admin(c, || {
+            Ok(c.execute("DELETE FROM roles WHERE id = ?1", rusqlite::params![id])? > 0)
         })
     }
 
@@ -474,22 +478,65 @@ impl Store {
 
     /// Remove an edge. An edge between two seeded roles is `E_FORBIDDEN`.
     pub fn remove_composite(&self, parent: i64, child: i64) -> Result<bool, IpcError> {
-        self.with_tx(|c| {
-            if let (Some(p), Some(ch)) = (load_role(c, parent)?, load_role(c, child)?) {
-                if p.seeded && ch.seeded {
-                    return Err(IpcError::new(
-                        codes::E_FORBIDDEN,
-                        "a composite between seeded roles cannot be removed",
-                    ));
-                }
+        self.with_tx(|c| self.remove_composite_in_tx(c, parent, child))
+    }
+
+    /// [`Store::remove_composite`] on the caller's transaction.
+    pub fn remove_composite_in_tx(
+        &self,
+        c: &Connection,
+        parent: i64,
+        child: i64,
+    ) -> Result<bool, IpcError> {
+        if let (Some(p), Some(ch)) = (load_role(c, parent)?, load_role(c, child)?) {
+            if p.seeded && ch.seeded {
+                return Err(IpcError::new(
+                    codes::E_FORBIDDEN,
+                    "a composite between seeded roles cannot be removed",
+                ));
             }
-            keeping_fleet_admin(c, || {
-                Ok(c.execute(
-                    "DELETE FROM role_composites WHERE parent_id = ?1 AND child_id = ?2",
-                    rusqlite::params![parent, child],
-                )? > 0)
-            })
+        }
+        keeping_fleet_admin(c, || {
+            Ok(c.execute(
+                "DELETE FROM role_composites WHERE parent_id = ?1 AND child_id = ?2",
+                rusqlite::params![parent, child],
+            )? > 0)
         })
+    }
+
+    /// The roles a role includes directly, by (client, name).
+    pub fn composites_of(&self, parent: i64) -> Result<Vec<RoleRow>, IpcError> {
+        self.roles_where(
+            "SELECT child_id FROM role_composites WHERE parent_id = ?1",
+            parent,
+        )
+    }
+
+    /// The roles mapped to a group directly, by (client, name).
+    pub fn group_roles(&self, group: i64) -> Result<Vec<RoleRow>, IpcError> {
+        self.roles_where(
+            "SELECT role_id FROM group_role_mappings WHERE group_id = ?1",
+            group,
+        )
+    }
+
+    /// The roles mapped to a person directly (not through a group or a
+    /// composite), by (client, name).
+    pub fn person_roles(&self, person: i64) -> Result<Vec<RoleRow>, IpcError> {
+        self.roles_where(
+            "SELECT role_id FROM user_role_mappings WHERE person_id = ?1",
+            person,
+        )
+    }
+
+    fn roles_where(&self, ids_sql: &str, id: i64) -> Result<Vec<RoleRow>, IpcError> {
+        let sql = format!(
+            "{ROLE_SELECT} WHERE r.id IN ({ids_sql}) \
+             ORDER BY c.client_id IS NOT NULL, c.client_id, r.name"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params![id], map_role_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     // ---- groups ----------------------------------------------------------
@@ -629,57 +676,76 @@ impl Store {
     /// Move a group under `parent` (`None`: to the top). Refused when the
     /// new parent is the group or one of its descendants.
     pub fn move_group(&self, id: i64, parent: Option<i64>) -> Result<GroupRow, IpcError> {
-        self.with_tx(|c| {
-            let g = group_or_404(c, id)?;
-            if g.managed {
+        self.with_tx(|c| self.move_group_in_tx(c, id, parent))
+    }
+
+    /// [`Store::move_group`] on the caller's transaction. Unlike the other
+    /// `_in_tx` writers it keeps the managed checks: no projection moves a
+    /// group, so there is no caller that needs them skipped.
+    pub fn move_group_in_tx(
+        &self,
+        c: &Connection,
+        id: i64,
+        parent: Option<i64>,
+    ) -> Result<GroupRow, IpcError> {
+        let g = group_or_404(c, id)?;
+        if g.managed {
+            return Err(managed_err());
+        }
+        if let Some(p) = parent {
+            if group_or_404(c, p)?.managed {
                 return Err(managed_err());
             }
-            if let Some(p) = parent {
-                if group_or_404(c, p)?.managed {
-                    return Err(managed_err());
+            let mut cur = Some(p);
+            let mut steps = 0;
+            while let Some(x) = cur {
+                if x == id {
+                    return Err(invalid("a group cannot move under itself"));
                 }
-                let mut cur = Some(p);
-                let mut steps = 0;
-                while let Some(x) = cur {
-                    if x == id {
-                        return Err(invalid("a group cannot move under itself"));
-                    }
-                    steps += 1;
-                    if steps > MAX_GROUP_DEPTH {
-                        return Err(invalid("group nesting too deep"));
-                    }
-                    cur = c.query_row(
-                        "SELECT parent_id FROM groups WHERE id = ?1",
-                        rusqlite::params![x],
-                        |r| r.get(0),
-                    )?;
+                steps += 1;
+                if steps > MAX_GROUP_DEPTH {
+                    return Err(invalid("group nesting too deep"));
                 }
+                cur = c.query_row(
+                    "SELECT parent_id FROM groups WHERE id = ?1",
+                    rusqlite::params![x],
+                    |r| r.get(0),
+                )?;
             }
-            if sibling_named(c, parent, &g.name, Some(id))? {
-                return Err(IpcError::new(
-                    codes::E_EXISTS,
-                    format!("a group named {:?} already exists there", g.name),
-                ));
-            }
+        }
+        if sibling_named(c, parent, &g.name, Some(id))? {
+            return Err(IpcError::new(
+                codes::E_EXISTS,
+                format!("a group named {:?} already exists there", g.name),
+            ));
+        }
+        // Moving a group out from under one mapped to `fleet-admin` can take
+        // the role from its members.
+        keeping_fleet_admin(c, || {
             c.execute(
                 "UPDATE groups SET parent_id = ?2 WHERE id = ?1",
                 rusqlite::params![id, parent],
             )?;
-            group_or_404(c, id)
-        })
+            Ok(())
+        })?;
+        group_or_404(c, id)
     }
 
     /// Delete a group and, by cascade, its subgroups, memberships and
     /// mappings. A managed group is `E_FORBIDDEN`; `false` when absent.
     pub fn delete_group(&self, id: i64) -> Result<bool, IpcError> {
-        self.with_tx(|c| {
-            if let Some(g) = load_group(c, id)? {
-                if g.managed {
-                    return Err(managed_err());
-                }
+        self.with_tx(|c| self.delete_unmanaged_group_in_tx(c, id))
+    }
+
+    /// [`Store::delete_group`] on the caller's transaction: the managed and
+    /// last-admin refusals included.
+    pub fn delete_unmanaged_group_in_tx(&self, c: &Connection, id: i64) -> Result<bool, IpcError> {
+        if let Some(g) = load_group(c, id)? {
+            if g.managed {
+                return Err(managed_err());
             }
-            keeping_fleet_admin(c, || self.delete_group_in_tx(c, id))
-        })
+        }
+        keeping_fleet_admin(c, || self.delete_group_in_tx(c, id))
     }
 
     /// The raw writer: no managed check.

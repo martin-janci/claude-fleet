@@ -172,6 +172,7 @@ pub use orchestration::{
     MissionPatch, MissionPolicy, MissionRepoRow, MissionRow, NewMission, NewMissionEvent,
     MISSION_FINAL_STATES, MISSION_ITEM_CAP, MISSION_MODES, MISSION_STATES, PLAN_MISSION_ITEM_CAP,
 };
+pub(crate) use org_members::org_membership_changed;
 pub use org_members::{
     effective_device, role_receives_shares, validate_org_role, DeviceOrg, OrgMemberRow, NO_ORG,
     ORG_ROLES, ROLE_ADMIN, ROLE_MEMBER, ROLE_VIEWER,

@@ -487,6 +487,12 @@ Read or replace the fleet's quick replies: the chip row the desktop and phone co
 
 Parameters: `expected`, `set`
 
+### `realm_admin`
+
+Realm: users, groups (tree, members), realm and client roles (composites), role mappings, effective roles, the audit log. Fleet admin's device: all; an org admin's: their org's groups' members. Changes need a trusted full device.
+
+Parameters: `action`, `child`, `client`, `description`, `group`, `limit`, `name`, `parent`, `profile`, `role`, `since`, `user`
+
 ### `recreate_session`
 
 Recreate a session: kill its tmux session and rebuild it in the same worktree, resuming the same Claude conversation. For a frozen, OOM-killed or out-of-context session, or to revive a ghost: the conversation survives, the process does not. Returns the row.

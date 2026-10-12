@@ -1198,6 +1198,50 @@ impl FleetTools {
         ok_json_compact(&out)
     }
 
+    // ---- realm administration (identity sub-project 1) ----
+
+    #[tool(description = "Realm: users, groups (tree, members), realm and \
+        client roles (composites), role mappings, effective roles, the audit \
+        log. Fleet admin's device: all; an org admin's: their org's groups' \
+        members. Changes need a trusted full device.")]
+    pub(super) async fn realm_admin(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<crate::service::realm_admin::RealmAdminArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::service::org_admin::{self as oa, Me};
+        use crate::service::realm_admin as ra;
+        audit("realm_admin", &args.audit_summary());
+        let action = ra::Action::parse(&args.action).map_err(to_mcp_err)?;
+        if !action.is_read() {
+            org_admin_writer(&caller)?;
+        }
+        let authority = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            oa::authority_for(
+                &s,
+                caller.is_fleet_admin && caller.is_person_device(),
+                caller.person(),
+                caller.client.as_ref().and_then(|c| c.org_id),
+            )
+            .map_err(to_mcp_err)?
+        }
+        .ok_or_else(|| {
+            mcp_err(
+                "E_FORBIDDEN",
+                "realm_admin is for a fleet admin's device, or an org admin's for their org",
+                None,
+            )
+        })?;
+        let me = Me {
+            device: caller.client.as_ref().map(|c| c.name.as_str()),
+            person: caller.person(),
+            authority,
+        };
+        let out = ra::run(&args, &self.store, me).map_err(to_mcp_err)?;
+        ok_json_compact(&out)
+    }
+
     /// `org_admin { pair_device }`: a person's device only — never a peer
     /// link or an updater token, which stay `fleet-hub pair --mode …` — and
     /// the answer carries the URL's QR as rows of `1` (dark) and `0`, so the

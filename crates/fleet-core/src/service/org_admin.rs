@@ -809,7 +809,7 @@ fn person_of(s: &Store, args: &OrgAdminArgs, create: bool) -> Result<i64, IpcErr
 /// An org admin's own membership, and the hub owner's, are not theirs to
 /// change: the first would take away the access they are using, the second
 /// is the hub's.
-fn require_other_member(s: &Store, person: i64, me: Me<'_>) -> Result<(), IpcError> {
+pub(crate) fn require_other_member(s: &Store, person: i64, me: Me<'_>) -> Result<(), IpcError> {
     if !matches!(me.authority, Authority::Org { .. }) {
         return Ok(());
     }

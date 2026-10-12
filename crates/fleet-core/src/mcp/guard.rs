@@ -590,6 +590,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Identity sub-project 1. Not served to the master (it has
+    // `fleet-hub realm`). The tool decides the authority
+    // (`org_admin::authority_for`); a change needs a trusted full device.
+    ToolPolicy {
+        name: "realm_admin",
+        access: Access::Device,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // Guides (declarative pages, layout guide): any token reads the catalog,
     // validates and proposes — a host's session is who writes one, with the
     // fleet-guides skill — and lists. Deciding and removing are a person's:

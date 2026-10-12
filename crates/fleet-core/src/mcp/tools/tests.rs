@@ -19528,6 +19528,116 @@ fn org_admin_reaches_a_persons_full_device_only() {
     }
 }
 
+/// Identity sub-project 1: `realm_admin` is served where `org_admin` is —
+/// a person's full device, bound to an org or not — and never to the master
+/// (it has `fleet-hub realm`), a host's token, a readonly device, a machine
+/// token or a device that proves no person.
+#[test]
+fn realm_admin_reaches_a_persons_full_device_only() {
+    let can = |c: &Caller| {
+        enforce_mode(c, "realm_admin")
+            .and_then(|()| enforce_admin(c, "realm_admin"))
+            .is_ok()
+            && present::visible_to(c, "realm_admin")
+    };
+    assert!(can(&client_caller("laptop", TokenMode::Full)));
+    assert!(can(&trusted(client_caller("laptop", TokenMode::Full))));
+    assert!(can(&org_bound(trusted(client_caller(
+        "acme",
+        TokenMode::Full
+    )))));
+    assert!(!can(&Caller::master()), "not served to the master");
+    assert!(!can(&client_caller("phone", TokenMode::Readonly)));
+    assert!(!can(&host_caller("hosta", TokenMode::Full)));
+    let mut nobody = client_caller("lost", TokenMode::Full);
+    if let Some(c) = nobody.client.as_mut() {
+        c.person_id = None;
+    }
+    assert!(!can(&nobody), "a device that proves no person");
+    for machine in [
+        client_caller("hub-b", TokenMode::Peer),
+        client_caller("fleet-updater", TokenMode::Updater),
+    ] {
+        assert!(!can(&machine), "{:?}", machine.mode);
+    }
+}
+
+/// The tool's half: a fleet admin's device lists the realm but changes it
+/// only once trusted, and its change is audited with the device; a device
+/// whose person administers nothing is refused, lists included.
+#[tokio::test]
+async fn realm_admin_changes_need_a_trusted_fleet_admin_device() {
+    use crate::mcp::auth::{apply_realm, resolve_token, sha256_hex, RealmSets};
+    use crate::service::realm_admin::RealmAdminArgs;
+    use crate::store::{AdminEventQuery, Principal, RoleRef, ROLE_FLEET_ADMIN};
+    const TOK: &str = "ada-laptop-tok";
+    let (tools, _guards, store) = client_tools();
+    let ada = {
+        let s = store.lock().unwrap();
+        let ada = s.create_person("ada", None).unwrap().id;
+        s.insert_client_token("ada-laptop", &sha256_hex(TOK), "full")
+            .unwrap();
+        s.set_client_person("ada-laptop", Some(ada)).unwrap();
+        ada
+    };
+    let caller = || {
+        let s = store.lock().unwrap();
+        let rows = s.auth_client_tokens().unwrap();
+        let mut c = resolve_token(TOK, "master", &[], &rows, s.personal_owner_id().unwrap())
+            .expect("the device resolves");
+        apply_realm(&mut c, &RealmSets::from_vecs(s.realm_sets().unwrap()));
+        c
+    };
+    let call = |c: Caller, action: &str| {
+        let args = RealmAdminArgs {
+            action: action.into(),
+            name: Some("eng".into()),
+            ..Default::default()
+        };
+        tools.realm_admin(Extension(c), Parameters(args))
+    };
+    assert!(
+        call(caller(), "list_groups").await.is_err(),
+        "administers nothing"
+    );
+    {
+        let s = store.lock().unwrap();
+        let fa = s
+            .role(RoleRef::Realm(ROLE_FLEET_ADMIN))
+            .unwrap()
+            .unwrap()
+            .id;
+        s.map_role(Principal::Person(ada), fa).unwrap();
+    }
+    let v = result_json(&call(caller(), "list_groups").await.expect("lists"));
+    assert!(v.to_string().contains("/orgs"), "{v}");
+    assert!(
+        call(caller(), "create_group").await.is_err(),
+        "an untrusted device lists only"
+    );
+    store
+        .lock()
+        .unwrap()
+        .set_client_trust("ada-laptop", true)
+        .unwrap();
+    call(caller(), "create_group")
+        .await
+        .expect("trusted: changes");
+    let s = store.lock().unwrap();
+    let ev = &s
+        .admin_events(&AdminEventQuery {
+            limit: 1,
+            ..Default::default()
+        })
+        .unwrap()[0];
+    assert_eq!(
+        (ev.action.as_str(), ev.resource_id.as_str()),
+        ("create_group", "/eng")
+    );
+    assert_eq!(ev.actor_person, Some(ada));
+    assert!(ev.actor_device.is_some(), "the device it came through");
+}
+
 /// Identity sub-project 1: a SECOND person's trusted full device
 /// administers the fleet exactly while that person holds the realm role
 /// `fleet-admin` — `org_admin` answers with the fleet's reach (an org they

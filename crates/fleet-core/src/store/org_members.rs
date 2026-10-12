@@ -170,6 +170,27 @@ impl Store {
         role: &str,
         added_by: Option<i64>,
     ) -> Result<OrgMemberRow, IpcError> {
+        self.with_tx(|c| self.set_org_member_in_tx(c, org, person, role, added_by))?;
+        super::session_grants::bump_grant_generation();
+        self.org_member(org, person)?.ok_or_else(|| {
+            IpcError::new(
+                codes::E_INTERNAL,
+                "the membership vanished right after it was written",
+            )
+        })
+    }
+
+    /// [`Store::set_org_member`] on the caller's transaction (`conn` is
+    /// this store's connection, inside `with_tx`). The caller bumps the
+    /// grant generation after its commit ([`org_membership_changed`]).
+    pub(crate) fn set_org_member_in_tx(
+        &self,
+        conn: &rusqlite::Connection,
+        org: i64,
+        person: i64,
+        role: &str,
+        added_by: Option<i64>,
+    ) -> Result<(), IpcError> {
         let role = validate_org_role(role)?;
         let org_row = self
             .get_org(org)?
@@ -188,28 +209,30 @@ impl Store {
         }
         // The org's groups are the truth: move the person into the subgroup
         // for `role` and let the projection write the row.
-        self.with_tx(|c| self.place_in_org_in_tx(c, org, &org_row.name, person, role, added_by))?;
-        super::session_grants::bump_grant_generation();
-        self.org_member(org, person)?.ok_or_else(|| {
-            IpcError::new(
-                codes::E_INTERNAL,
-                "the membership vanished right after it was written",
-            )
-        })
+        self.place_in_org_in_tx(conn, org, &org_row.name, person, role, added_by)
     }
 
     /// Take `person` out of `org`: the row stays as a former membership.
     /// `false` when they were not a live member.
     pub fn remove_org_member(&self, org: i64, person: i64) -> Result<bool, IpcError> {
-        let ended = self.with_tx(|c| {
-            let was_live = super::realm::live_org_member_in_tx(c, org, person)?;
-            self.take_out_of_org_in_tx(c, org, person)?;
-            Ok(was_live && !super::realm::live_org_member_in_tx(c, org, person)?)
-        })?;
+        let ended = self.with_tx(|c| self.remove_org_member_in_tx(c, org, person))?;
         if ended {
             super::session_grants::bump_grant_generation();
         }
         Ok(ended)
+    }
+
+    /// [`Store::remove_org_member`] on the caller's transaction; the caller
+    /// bumps the grant generation after its commit when this returns `true`.
+    pub(crate) fn remove_org_member_in_tx(
+        &self,
+        conn: &rusqlite::Connection,
+        org: i64,
+        person: i64,
+    ) -> Result<bool, IpcError> {
+        let was_live = super::realm::live_org_member_in_tx(conn, org, person)?;
+        self.take_out_of_org_in_tx(conn, org, person)?;
+        Ok(was_live && !super::realm::live_org_member_in_tx(conn, org, person)?)
     }
 
     /// One membership row, live or former.
@@ -375,6 +398,14 @@ impl Store {
             person_id: stored.person_id,
         })
     }
+}
+
+/// After a commit that changed an org membership through
+/// [`Store::set_org_member_in_tx`] / [`Store::remove_org_member_in_tx`]:
+/// what [`Store::set_org_member`] does after its own, so cached session
+/// grants are re-read.
+pub(crate) fn org_membership_changed() {
+    super::session_grants::bump_grant_generation();
 }
 
 #[cfg(test)]

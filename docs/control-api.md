@@ -1251,6 +1251,44 @@ Index by area (names only; see the reference for details):
   only. An org admin never changes their own membership or the hub owner's.
   Hub owner only: `set_hub_org { org }` (no org: none), and `update_org`'s
   `owns_hub` / `admins_see_unclaimed`.
+- **`realm_admin`** — the realm model (identity sub-project 1): users,
+  the group tree, realm and client roles, role mappings and the admin
+  audit log. Served to a person's device and not to the master, who has
+  `fleet-hub realm`; like `org_admin`, the tool decides the authority and a
+  change needs a **trusted `full`** device. Actions: `list_users`,
+  `get_user { user }`, `update_user { user, profile }` (`profile`:
+  `email`, `email_verified`, `first_name`, `last_name`, `attributes`;
+  `null` clears a text field), `enable_user`, `disable_user`;
+  `list_groups`, `get_group { group }`, `create_group { name, parent }`,
+  `rename_group { group, name }`, `move_group { group, parent }`,
+  `delete_group`, `add_member { group, user }`, `remove_member`;
+  `list_roles`, `create_role { name, client, description }`,
+  `update_role { role, description }`, `delete_role`,
+  `add_composite { role, child }`, `remove_composite`; `map_role` /
+  `unmap_role { role, user | group }`; `effective_roles { user }` (each
+  role with `via`: `direct`, `group:<path>`, `composite:<role>`); and
+  `audit { since, limit }` (newest first, 100 by default, at most 500).
+  A user is named by person name, a group by path (`/orgs/acme/members`;
+  `parent: ""` is the top level), a role as `fleet-admin` (a realm role)
+  or `<client>:<name>` (`fleet:org-admin`). `list_groups` rows are `{ path,
+  name, managed, org_id, members, roles }`; `list_users` rows are `{ name,
+  uuid, email, enabled, groups, roles }`.
+
+  The `fleet` client's `org-admin` / `org-member` / `org-viewer` roles
+  are never mapped by hand (`E_VALIDATE`): an org's managed groups
+  `/orgs/<org>/admins|members|viewers` carry them, and `add_member` /
+  `remove_member` on one of those changes the org membership itself (the
+  role from the subgroup's name; removing revokes what was shared with
+  them on the org's sessions, as `org_admin`'s `remove_member` does). Any
+  other managed group, and renaming, moving or deleting one, is
+  `E_FORBIDDEN`. A fleet admin's device reaches every action; an org
+  admin's reads its org's subtree and live members only and changes who is
+  in its org's three groups — never their own membership or a fleet
+  admin's — and is refused everything else (`E_FORBIDDEN`). Nobody removes
+  their own `fleet-admin` (an unmapping, leaving or deleting a group, a
+  composite) or disables themselves, and `fleet-admin` never leaves the
+  personal owner or its last holder. Every change records an admin event,
+  which `audit` reads.
 - **`guide`** — step-by-step guides in Settings → Guides (declarative
   pages, layout `guide`; `docs/pages.md` → *Guides*). Any token, a host's
   own included, calls `catalog` (the rules, every setting's key, label and
