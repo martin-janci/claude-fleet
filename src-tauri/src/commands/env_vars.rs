@@ -54,6 +54,10 @@ pub async fn env_var_unset(
 pub(crate) mod routed {
     use super::*;
 
+    // Paired, every command routes by its own name (the verdict table maps
+    // each to the hub's `env_vars` tool); standalone, the desktop is its
+    // own master, so references are allowed.
+
     pub async fn env_vars(
         backend: &FleetBackend,
         store: &Mutex<Store>,
@@ -61,7 +65,6 @@ pub(crate) mod routed {
     ) -> Result<serde_json::Value, IpcError> {
         match backend.hub() {
             Some(hub) => hub.route("env_vars", &args).await,
-            // The standalone desktop is its own master: references allowed.
             None => env::run(store, &args, true),
         }
     }
@@ -71,7 +74,10 @@ pub(crate) mod routed {
         store: &Mutex<Store>,
         args: EnvVarSetArgs,
     ) -> Result<serde_json::Value, IpcError> {
-        env_vars(backend, store, args.into_args()).await
+        match backend.hub() {
+            Some(hub) => hub.route("env_var_set", &args.into_args()).await,
+            None => env::run(store, &args.into_args(), true),
+        }
     }
 
     pub async fn env_var_unset(
@@ -79,21 +85,23 @@ pub(crate) mod routed {
         store: &Mutex<Store>,
         args: EnvVarUnsetArgs,
     ) -> Result<serde_json::Value, IpcError> {
-        env_vars(backend, store, args.into_args()).await
+        match backend.hub() {
+            Some(hub) => hub.route("env_var_unset", &args.into_args()).await,
+            None => env::run(store, &args.into_args(), true),
+        }
     }
 
     pub async fn env_vars_list(
         backend: &FleetBackend,
         store: &Mutex<Store>,
     ) -> Result<serde_json::Value, IpcError> {
-        env_vars(
-            backend,
-            store,
-            EnvVarsArgs {
-                action: "list".into(),
-                ..Default::default()
-            },
-        )
-        .await
+        let args = EnvVarsArgs {
+            action: "list".into(),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("env_vars_list", &args).await,
+            None => env::run(store, &args, true),
+        }
     }
 }
