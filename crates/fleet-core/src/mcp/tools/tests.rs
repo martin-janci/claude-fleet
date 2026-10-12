@@ -2851,6 +2851,7 @@ fn router_sum_serves_every_tool() {
         include_str!("library.rs"),
         include_str!("runs.rs"),
         include_str!("search.rs"),
+        include_str!("env_vars.rs"),
     ]
     .iter()
     .map(|src| src.matches("#[tool(").count())

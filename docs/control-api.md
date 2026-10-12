@@ -103,6 +103,20 @@ with Anthropic and written to the host only (`api_key`, with an optional
 hub owner's devices; everything but `login_status` needs the master or a
 trusted full device. The key and the code are never logged or returned.
 
+### Environment
+
+`env_vars` sets the environment variables every session fleet starts gets,
+by scope (`global` < `host` < `project` as `owner/repo` < `session`, the
+narrower winning): `list`, `set { scope, scope_key, name, value | ref,
+secret? }`, `unset`. A secret or a reference is never listed again; a
+reference (`env:NAME` or `file:/abs`, read by the hub at launch) is the
+master's alone, a device gets `E_FORBIDDEN`. A change applies when a session
+next starts or restarts. `new_session { env }` sets session-scope plain
+values for the session it starts, and a form's `secret` field with an
+`env_target` stores its answer as the session's secret variable
+([forms.md](forms.md#secrets)). Served to the master and the hub owner's
+devices; a write needs the master or a trusted full device.
+
 ### Named tokens
 
 Settings → Control API → **+ Token** (or the `api_tokens` tool) creates a
