@@ -7360,6 +7360,10 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../commands/debug_devices.rs"),
     ),
     (
+        "commands/device_mirror.rs",
+        include_str!("../commands/device_mirror.rs"),
+    ),
+    (
         "commands/federation.rs",
         include_str!("../commands/federation.rs"),
     ),

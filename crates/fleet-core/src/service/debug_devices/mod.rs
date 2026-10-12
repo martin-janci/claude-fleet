@@ -791,6 +791,20 @@ pub async fn screenshot(
     Ok((d, bytes, mime))
 }
 
+/// Start `host`'s adb server; the device mirror's preflight calls this when
+/// the server does not answer.
+pub async fn start_adb_server(ssh: &dyn SshExec, host: &str) -> Result<(), IpcError> {
+    run_on(
+        ssh,
+        host,
+        "adb start-server",
+        &scripts::start_server_script(),
+        Duration::from_secs(30),
+    )
+    .await
+    .map(|_| ())
+}
+
 /// Start an emulator or simulator: an inventoried device by reference, or
 /// a bootable one by `host` and its name, AVD name or UDID (from a scan).
 pub async fn boot(

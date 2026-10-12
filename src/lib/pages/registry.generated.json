@@ -8123,6 +8123,49 @@
               }
             ]
           ],
+          "command": "start_device_mirror",
+          "envelope": "args",
+          "id": "debug_device.mirror",
+          "label": "Mirror",
+          "params": [],
+          "report": false,
+          "result": "output",
+          "variants": [
+            "physical",
+            "emulator"
+          ]
+        },
+        {
+          "bind": [
+            [
+              "id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ]
+          ],
+          "command": "stop_device_mirror",
+          "envelope": "args",
+          "id": "debug_device.mirror_stop",
+          "label": "Stop mirror",
+          "params": [],
+          "report": false,
+          "variants": [
+            "physical",
+            "emulator"
+          ]
+        },
+        {
+          "bind": [
+            [
+              "id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ]
+          ],
           "command": "release_debug_device",
           "confirm": "Whoever holds it loses the claim; another session may then use the device.",
           "envelope": "args",

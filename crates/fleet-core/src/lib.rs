@@ -34,6 +34,7 @@ mod no_eprintln_tests;
 pub mod pages;
 pub mod proc;
 pub mod projects;
+pub mod relay;
 #[cfg(test)]
 mod repo_files;
 pub mod repo_url;

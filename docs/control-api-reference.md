@@ -1204,6 +1204,9 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::debug_devices::install_debug_device`
 - `commands::debug_devices::debug_device_logs`
 - `commands::debug_devices::debug_device_screenshot`
+- `commands::device_mirror::start_device_mirror`
+- `commands::device_mirror::stop_device_mirror`
+- `commands::device_mirror::list_device_mirrors`
 - `commands::prs::list_pull_requests`
 - `commands::start_rules::start_rules`
 - `commands::wizard_state::wizard_state`

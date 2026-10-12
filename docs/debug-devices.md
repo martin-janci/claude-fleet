@@ -45,6 +45,8 @@ you can:
   output is shown;
 - **Logs**: its last 200 log lines, shown on the page (cut when longer);
 - **Screenshot**: the screen as it is now, shown on the page;
+- **Mirror** / **Stop mirror**: open or close a live scrcpy window of an
+  Android device (see *Mirror*);
 - **Release claim** when a session holds it and should not;
 - **Start** / **Stop** an emulator or simulator;
 - **Forget** it.
@@ -52,6 +54,80 @@ you can:
 On a desktop paired with a hub the page shows the hub's devices: the hub
 scans its hosts with its own SSH, and every change goes through the hub's
 `debug_devices` tool.
+
+## Mirror
+
+**Mirror** opens a native `scrcpy` window for an Android phone or emulator,
+with its input, on the machine you are sitting at. iOS is not supported: on a
+physical iPhone the button shows and is refused (`E_UNSUPPORTED`), and
+**Stop mirror** shows on every Android and physical row.
+
+`scrcpy` and `adb` must be installed on THIS machine
+(`brew install scrcpy android-platform-tools`). They are looked up in
+`FLEET_SCRCPY` / `FLEET_ADB`, then `PATH`, then `/opt/homebrew/bin` and
+`/usr/local/bin`, and for adb also `ANDROID_HOME` / `ANDROID_SDK_ROOT`,
+`~/Library/Android/sdk`, `~/Android/Sdk` and `~/Android/sdk`. Neither needs to exist on the
+device's host beyond its adb server.
+
+Two routes, chosen from where the device is:
+
+- **local**: the device is on host `local` and this desktop is standalone.
+  scrcpy talks to this machine's own adb server.
+- **ssh**: the device is on another host that this machine can reach with
+  `ssh <alias>` from its own `~/.ssh/config` (in hub-client mode the alias
+  comes from the hub). scrcpy talks to the host's adb server and to the
+  device's forward port through two loopback relays, each an
+  `ssh -W 127.0.0.1:<port> <alias>`.
+
+In hub-client mode a device on host `local` (the hub's own machine) answers
+`E_NO_ROUTE`: that needs the hub relay, which is not built yet. So do
+devices on an agent host or a WSL host, which this machine has no ssh route
+to; they wait for the hub relay too.
+
+Mirror waits about 5 s (scrcpy's start-up grace) before it reports success.
+
+While a mirror runs it claims the device with the note `scrcpy mirror`
+(30 minutes, renewed every 10). The claim is released when the window closes
+or on **Stop mirror**. On a standalone desktop, a claim you already held
+when you pressed Mirror is kept exactly as it was (expiry and note) and is
+not released when the mirror ends. On a paired desktop the mirror takes the
+claim and releases it when it ends, until the hub can tell a client its own
+claims. If the mirror's claim lapses (the laptop slept) and someone else claims
+the device, the mirror leaves their claim alone. Mirroring a device that is
+already mirrored is refused (`E_EXISTS`) and leaves the running mirror's
+claim alone. If the app quits, scrcpy is killed and the claim lapses on its
+own.
+
+Before it starts, the mirror checks the host's adb server: it asks it
+`host:version` and compares the answer with this machine's `adb version`. A
+difference is refused (`E_ADB_VERSION_MISMATCH`, naming both versions),
+because an adb client of another version kills the server it finds and
+restarts its own, which would drop the host's other adb users. When the
+server does not answer, the mirror runs `adb start-server` on the host over
+ssh; if that fails too the result is `E_NO_ROUTE`.
+
+scrcpy needs a forward on the host. The mirror takes the first free port in
+27183-27199 of that host (from `host:list-forward`, minus this machine's own
+live mirrors), and removes the forward (`killforward`) when the mirror ends.
+With all 17 taken the answer is `E_LIMIT`.
+
+**Security.** The relays bind `127.0.0.1` only and exist only while a mirror
+runs. adb has no authentication, so another local user of this machine could
+connect to them during that window and drive the device. A relay only ever
+reaches `127.0.0.1` on the allowlisted ports of the device's own host.
+
+| Code | Meaning |
+|---|---|
+| `E_TOOL_MISSING` | `scrcpy` or `adb` not found on this machine |
+| `E_ADB_VERSION_MISMATCH` | the host's adb server and this machine's adb differ |
+| `E_NO_ROUTE` | no way to reach the device: hub-local device, agent or WSL host, host adb server down and not startable |
+| `E_MIRROR_FAILED` | scrcpy exited non-zero within the 5 s start-up grace; the message ends with its output |
+| `E_UNSUPPORTED` | an iOS device |
+| `E_INVALID_STATE` | the device is not ready, or has no adb serial yet |
+| `E_EXISTS` | it is already mirrored |
+| `E_CONFLICT` | someone else holds its claim |
+| `E_LIMIT` | all forward ports on the host are taken |
+| `E_NOTFOUND` | an unknown device id, or **Stop mirror** on a device that is not mirrored |
 
 ## From a session
 
@@ -135,9 +211,13 @@ confirmation says.
   Studio on host B talking to the adb server on host A, through an `ssh -L`
   from fleet's machine to A chained to an `ssh -R` onto B (the way the MCP
   tunnel reaches hosts, `service/tunnel.rs`), so `ANDROID_ADB_SERVER_PORT`
-  on B reaches A's devices. Today a session uses the devices through the
-  tool only.
-- Live screen streaming and input (taps, typing) beyond `adb shell input`
-  and `simctl io`.
+  on B reaches A's devices. The mirror's loopback relay prepares this; today
+  a session uses the devices through the tool only.
+- **Mirror through the hub and agents.** A device on the hub's own machine
+  (hub-client mode) needs a `/relay` WebSocket on the hub, and a host
+  reached through `fleet-agent` needs TCP stream frames in `fleet-proto`.
+  Until then those answer `E_NO_ROUTE`.
+- Input beyond scrcpy's window: taps and typing from a session stay
+  `adb shell input` and `simctl io`.
 - The phone app (fleet-mobile) shows no device page yet; it reads the same
   `debug_devices` tool.

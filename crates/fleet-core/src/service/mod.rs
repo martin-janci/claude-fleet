@@ -30,6 +30,7 @@ pub mod control_tokens;
 pub mod debug_devices;
 pub mod decide;
 pub mod delivery;
+pub mod device_mirror;
 pub mod diagnostics;
 pub mod downloads;
 pub mod drafts;

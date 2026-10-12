@@ -1070,7 +1070,10 @@ iOS devices (migration 120), the `debug_devices` control-API tool (list,
 scan, claim / release, run, install across hosts, logs, screenshot, boot,
 shutdown; configure / forget for a person) and the desktop's Debug devices
 page (the `debug_device` resource, routed to the hub, contract revision
-10). Not built: an adb-server bridge so native tools on one host reach
-another host's devices, live screen and input, physical-iOS logs, and a
+10). The device mirror is landed for a local device (standalone) and for a
+host reached over SSH (`relay/`, `service/device_mirror/`): a native scrcpy
+window, with a loopback relay and an adb version check. Not built: the mirror
+through the hub (`/relay`) or an agent host, an adb-server bridge so native
+tools on one host reach another host's devices, physical-iOS logs, and a
 device page in fleet-mobile. None of it has run against real hardware yet:
 the scripts are tested against stub `adb` / `simctl` output.
