@@ -2008,6 +2008,7 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
                 start_token: None,
                 over_limit_ok: None,
                 confirm_nonce: None,
+                env: None,
             }),
         )
         .await
@@ -2253,6 +2254,7 @@ async fn new_session_threads_kind_start_command_and_friendly_name_through() {
                 start_token: None,
                 over_limit_ok: None,
                 confirm_nonce: None,
+                env: None,
             }),
         )
         .await

@@ -107,7 +107,7 @@ Every field has `name` (`[a-z][a-z0-9_]*`, ≤ 40 chars, unique across the
 | `bool` | — | bool |
 | `select` | `options`: 1–50, see below; `other` (bool) | string, one of the values (any text with `other`) |
 | `multiselect` | `options` as above | array of values, in option order |
-| `secret` | `secret_note` (≤ 500); `value` refused | written to the host; see Secrets below |
+| `secret` | `secret_note` (≤ 500); `env_target` (a variable name); `value` refused | written to the host, or stored as the session's variable; see Secrets below |
 
 An option is the pair `[value, label]` or an object
 `{ "value", "label", "detail"?, "proposed"?: { "by", "reason" } }`; the
@@ -222,6 +222,14 @@ the tick. A form with secrets outlives its session's deletion (a trigger
 cancels it if it was pending, clears its answers and keeps the row under
 the negated session id, so a recycled session id never inherits it); a
 form without secrets goes with its session.
+
+A secret field with an `env_target` (`"env_target": "GITHUB_TOKEN"`) is
+stored instead as the session's secret environment variable of that name
+(`env_vars`, session scope, write-only): no host file is written, the
+result's `secrets` does not name the field, and the session gets the
+variable when it next starts or restarts — not in its running pane. The
+name follows the `env_vars` rules (`[A-Za-z_][A-Za-z0-9_]*`, not one fleet
+or the shell sets such as `PATH` or `CLAUDE_CONFIG_DIR`).
 
 ## Who answers
 
