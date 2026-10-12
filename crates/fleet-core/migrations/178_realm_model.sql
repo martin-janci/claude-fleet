@@ -116,27 +116,25 @@ INSERT OR IGNORE INTO user_role_mappings (person_id, role_id)
   SELECT DISTINCT t.person_id, r.id FROM client_tokens t, roles r
   WHERE t.person_id IS NOT NULL AND t.revoked_at IS NULL AND t.trusted_at IS NOT NULL
     AND r.client_id IS NULL AND r.name = 'fleet-trusted';
-INSERT OR IGNORE INTO user_role_mappings (person_id, role_id)
-  SELECT DISTINCT t.person_id, r.id FROM client_tokens t, roles r
-  WHERE t.person_id IS NOT NULL AND t.revoked_at IS NULL AND t.assets_admin_at IS NOT NULL
-    AND r.client_id IS NULL AND r.name = 'assets-admin';
+-- The assets-admin role mapping is backfilled in Rust
+-- (`Store::backfill_assets_admin_roles`, once, when this migration runs): its
+-- predicate reads client_tokens.org_id (migration 066), which a database that
+-- skipped 064-068 only gets from `repair_skipped_main_migrations`, after
+-- the migrations ran.
 
-INSERT OR IGNORE INTO user_role_mappings (person_id, role_id)
-  SELECT DISTINCT t.person_id, r.id
-  FROM client_catalog_grants g JOIN catalogs c ON c.id = g.catalog_id AND c.org_id IS NULL
-  JOIN client_tokens t ON t.id = g.client_id, roles r
-  WHERE t.person_id IS NOT NULL AND t.revoked_at IS NULL
-    AND r.client_id IS NULL AND r.name = 'assets-admin';
-
--- Created after the seed below, so seeding does not bump the epoch of a
--- fresh database. Every later write to the realm model re-resolves every cached caller.
+-- Created after the seed above, not after the DDL: the seed's INSERTs would
+-- otherwise bump the epoch of a fresh database (migration 060 expects 0).
+-- Every later write to the realm model re-resolves every cached caller. The
+-- UPDATE triggers of roles and groups skip `uuid` and the other columns that
+-- decide nothing (the precedent: client_tokens skips last_seen_at), so the
+-- uuid backfill on open never touches the epoch.
 CREATE TRIGGER IF NOT EXISTS auth_epoch_roles_insert
   AFTER INSERT ON roles
 BEGIN
   UPDATE auth_epoch SET epoch = epoch + 1 WHERE id = 1;
 END;
 CREATE TRIGGER IF NOT EXISTS auth_epoch_roles_update
-  AFTER UPDATE ON roles
+  AFTER UPDATE OF client_id, name ON roles
 BEGIN
   UPDATE auth_epoch SET epoch = epoch + 1 WHERE id = 1;
 END;
@@ -166,7 +164,7 @@ BEGIN
   UPDATE auth_epoch SET epoch = epoch + 1 WHERE id = 1;
 END;
 CREATE TRIGGER IF NOT EXISTS auth_epoch_groups_update
-  AFTER UPDATE ON groups
+  AFTER UPDATE OF name, parent_id, managed, org_id ON groups
 BEGIN
   UPDATE auth_epoch SET epoch = epoch + 1 WHERE id = 1;
 END;

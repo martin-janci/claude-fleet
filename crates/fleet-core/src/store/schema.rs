@@ -2162,6 +2162,9 @@ impl Store {
         }
         self.repair_skipped_main_migrations()?;
         self.ensure_work_rules_start_columns()?;
+        if v < 178 {
+            self.backfill_assets_admin_roles()?;
+        }
         self.backfill_stale_demoted()?;
         self.backfill_session_owner()?;
         self.backfill_realm_uuids()?;
@@ -2174,14 +2177,6 @@ impl Store {
     /// older binary inserted gets one too.
     fn backfill_realm_uuids(&self) -> Result<usize> {
         let mut total = 0;
-        // A uuid decides nothing about access, so filling one must not
-        // re-resolve every cached caller: keep the epoch the triggers of the
-        // realm tables would otherwise bump.
-        let epoch: i64 =
-            self.conn
-                .query_row("SELECT epoch FROM auth_epoch WHERE id = 1", [], |r| {
-                    r.get(0)
-                })?;
         // Constants, never input: table names cannot be bound.
         for table in ["people", "roles", "groups", "clients"] {
             let ids: Vec<i64> = self
@@ -2197,11 +2192,28 @@ impl Store {
             }
             total += ids.len();
         }
-        if total > 0 {
-            self.conn
-                .execute("UPDATE auth_epoch SET epoch = ?1 WHERE id = 1", [epoch])?;
-        }
         Ok(total)
+    }
+
+    /// Migration 178's assets-admin mapping, run once after the repair of
+    /// skipped migrations (see the comment in the SQL). Exactly
+    /// `client_is_assets_admin`: a live, full, org-free device holding a grant
+    /// on a catalog with no org, or the `assets_admin_at` flag while no such
+    /// catalog exists yet. Idempotent.
+    fn backfill_assets_admin_roles(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "INSERT OR IGNORE INTO user_role_mappings (person_id, role_id)
+               SELECT DISTINCT t.person_id, r.id FROM client_tokens t, roles r
+               WHERE t.person_id IS NOT NULL AND t.revoked_at IS NULL
+                 AND t.mode = 'full' AND t.org_id IS NULL
+                 AND (EXISTS (SELECT 1 FROM client_catalog_grants g
+                              JOIN catalogs c ON c.id = g.catalog_id
+                              WHERE g.client_id = t.id AND c.org_id IS NULL)
+                      OR (t.assets_admin_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM catalogs WHERE org_id IS NULL)))
+                 AND r.client_id IS NULL AND r.name = 'assets-admin';",
+        )?;
+        Ok(())
     }
 
     /// Migration 080's backfill: a row the tick demoted before the veto had
@@ -3684,7 +3696,7 @@ mod tests {
         s.conn
             .execute_batch(
                 "
-        INSERT INTO people (id, name, is_personal_owner, created_at) VALUES (10,'ada',0,1),(11,'bob',0,1),(12,'cy',0,1),(13,'dee',0,1),(14,'eve',0,1),(15,'fay',0,1);
+        INSERT INTO people (id, name, is_personal_owner, created_at) VALUES (10,'ada',0,1),(11,'bob',0,1),(12,'cy',0,1),(13,'dee',0,1),(14,'eve',0,1),(15,'fay',0,1),(16,'gus',0,1),(17,'hal',0,1);
         INSERT INTO orgs (id, name, isolate_sessions, created_at) VALUES (1,'acme',0,1);
         INSERT INTO org_members (org_id, person_id, role, added_at, added_by, shares_since, removed_at) VALUES
           (1,10,'admin',5,NULL,5,NULL),(1,11,'viewer',6,10,NULL,NULL),(1,12,'member',7,NULL,7,9);
@@ -3692,9 +3704,11 @@ mod tests {
         INSERT INTO client_tokens (name, token_sha256, mode, created_at, assets_admin_at, person_id) VALUES ('dee-pc','d','full',1,2,13);
         INSERT INTO client_tokens (name, token_sha256, mode, created_at, person_id) VALUES ('eve-pc','e','full',1,14);
         INSERT INTO client_tokens (name, token_sha256, mode, created_at, assets_admin_at, revoked_at, person_id) VALUES ('fay-pc','f','full',1,2,3,15);
+        INSERT INTO client_tokens (name, token_sha256, mode, created_at, person_id) VALUES ('gus-pc','g','readonly',1,16);
+        INSERT INTO client_tokens (name, token_sha256, mode, created_at, person_id, org_id) VALUES ('hal-pc','h','full',1,17,1);
         INSERT INTO catalogs (name, repo_path, org_id, created_at) VALUES ('personal', '/tmp/x', NULL, 1);
         INSERT INTO client_catalog_grants (client_id, catalog_id, granted_at)
-          SELECT t.id, c.id, 1 FROM client_tokens t, catalogs c WHERE t.name IN ('eve-pc','fay-pc') AND c.name='personal';
+          SELECT t.id, c.id, 1 FROM client_tokens t, catalogs c WHERE t.name IN ('eve-pc','fay-pc','gus-pc','hal-pc') AND c.name='personal';
     ",
             )
             .unwrap();
@@ -3736,14 +3750,16 @@ mod tests {
             q("SELECT r.name FROM user_role_mappings u JOIN roles r ON r.id=u.role_id WHERE u.person_id=10"),
             ["fleet-trusted"]
         );
-        // assets-admin: the flag alone (dee) and a personal-catalog grant
-        // (eve) both carry over; a revoked device (fay) does not.
+        // assets-admin follows `client_is_assets_admin`: with a personal
+        // catalog, only a grant on it counts (eve). The bare flag (dee), a
+        // revoked device (fay), a readonly one (gus) and an org-bound one
+        // (hal) get nothing.
         assert_eq!(
             q(
                 "SELECT p.name FROM user_role_mappings u JOIN roles r ON r.id=u.role_id
                JOIN people p ON p.id=u.person_id WHERE r.name='assets-admin' ORDER BY p.name"
             ),
-            ["dee", "eve"]
+            ["eve"]
         );
         // Every new row has a uuid; re-running adds nothing.
         for t in ["groups", "roles", "clients"] {
@@ -3766,6 +3782,61 @@ mod tests {
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(q(shape), before);
+    }
+
+    #[test]
+    fn migration_178_counts_the_assets_admin_flag_while_no_personal_catalog_exists() {
+        let s = store_at_version(177);
+        s.conn
+            .execute_batch(
+                "INSERT INTO people (id, name, is_personal_owner, created_at) VALUES (13,'dee',0,1),(16,'gus',0,1);
+                 INSERT INTO client_tokens (name, token_sha256, mode, created_at, assets_admin_at, person_id) VALUES ('dee-pc','d','full',1,2,13);
+                 INSERT INTO client_tokens (name, token_sha256, mode, created_at, assets_admin_at, person_id) VALUES ('gus-pc','g','readonly',1,2,16);",
+            )
+            .unwrap();
+        s.migrate().unwrap();
+        let who: Vec<String> = s
+            .conn
+            .prepare(
+                "SELECT p.name FROM user_role_mappings u JOIN roles r ON r.id=u.role_id
+                 JOIN people p ON p.id=u.person_id WHERE r.name='assets-admin' ORDER BY p.name",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(who, ["dee"]);
+    }
+
+    #[test]
+    fn filling_a_realm_uuid_leaves_the_auth_epoch_alone_but_a_membership_bumps_it() {
+        let s = Store::open_in_memory().unwrap();
+        let epoch = |s: &Store| -> i64 {
+            s.conn
+                .query_row("SELECT epoch FROM auth_epoch WHERE id = 1", [], |r| {
+                    r.get(0)
+                })
+                .unwrap()
+        };
+        let before = epoch(&s);
+        s.conn.execute_batch("UPDATE roles SET uuid = NULL; UPDATE groups SET uuid = NULL; UPDATE clients SET uuid = NULL;").unwrap();
+        assert!(s.backfill_realm_uuids().unwrap() > 0);
+        assert_eq!(epoch(&s), before, "a uuid decides nothing");
+        let g: i64 = s
+            .conn
+            .query_row("SELECT id FROM groups LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        s.conn
+            .execute(
+                "INSERT INTO group_members (group_id, person_id, added_at) VALUES (?1, 1, 1)",
+                [g],
+            )
+            .unwrap();
+        assert!(
+            epoch(&s) > before,
+            "a membership change re-resolves callers"
+        );
     }
 
     /// 091 on a database stopped at 090: existing host_layers rows and managed
