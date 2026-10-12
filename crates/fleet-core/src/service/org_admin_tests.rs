@@ -185,6 +185,53 @@ fn the_device_in_hand_cannot_be_locked_out_through_itself() {
     );
 }
 
+/// The personal grant is the person's (`assets-admin`): taking it from a
+/// SIBLING device of the caller's own person is a lock-out like the device
+/// in hand; another person's device, and the desktop's own store, are not.
+#[test]
+fn taking_the_personal_grant_from_ones_own_person_is_a_lock_out() {
+    let st = store();
+    let me_person = {
+        let s = st.lock().unwrap();
+        s.upsert_catalog("personal", "/p", None, None).unwrap();
+        let me_person = s
+            .insert_owned_client_token("desk", "digest-desk", "full")
+            .unwrap()
+            .person_id;
+        s.insert_client_token("laptop", "digest-laptop", "full")
+            .unwrap();
+        s.set_client_person("laptop", me_person).unwrap();
+        s.insert_owned_client_token("eve-phone", "digest-eve", "full")
+            .unwrap();
+        s.set_client_assets_admin("laptop", true).unwrap();
+        s.set_client_assets_admin("eve-phone", true).unwrap();
+        me_person
+    };
+    let me = Me {
+        device: Some("desk"),
+        person: me_person,
+        ..Me::LOCAL
+    };
+    let mut g = args("grant_catalog");
+    g.device = Some("laptop".into());
+    g.catalog = Some("personal".into());
+    g.on = Some(false);
+    assert_eq!(err_code(run(&g, &st, me)), "E_INVALID_STATE");
+    assert!(st
+        .lock()
+        .unwrap()
+        .people_with_realm_role(crate::store::ROLE_ASSETS_ADMIN)
+        .unwrap()
+        .contains(&me_person.unwrap()));
+    g.device = Some("eve-phone".into());
+    assert!(run(&g, &st, me).unwrap()["catalogs"]
+        .as_array()
+        .is_none_or(|c| c.is_empty()));
+    // The desktop's own store names no person: exempt.
+    g.device = Some("laptop".into());
+    run(&g, &st, Me::LOCAL).unwrap();
+}
+
 #[test]
 fn a_machine_token_is_refused_by_every_device_action() {
     let st = store();

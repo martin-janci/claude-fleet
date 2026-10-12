@@ -1390,6 +1390,21 @@ pub fn run(
                 }
             }
             if catalog == crate::service::catalog::catalogs::PERSONAL {
+                // The personal grant is the PERSON's (`assets-admin`):
+                // taking it from a sibling device of the caller's own person
+                // would take it from the device in hand too.
+                if !on && me.person.is_some() && row.person_id == me.person {
+                    return Err(IpcError::new(
+                        codes::E_INVALID_STATE,
+                        format!(
+                            "{:?} is your own device, and the personal catalog grant is your \
+                             person's: taking it back would take it from the device you are \
+                             using. Ask another administrator, or do it on the hub \
+                             (fleet-hub client ungrant …)",
+                            row.name
+                        ),
+                    ));
+                }
                 s.set_client_assets_admin(&row.name, on)?;
             } else {
                 let id = s

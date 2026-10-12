@@ -270,6 +270,9 @@ impl Store {
                 }
             }
             self.person_realm_role_in_tx(conn, &row, super::ROLE_FLEET_TRUSTED, trusted)?;
+            if !trusted {
+                self.refuse_if_still_holds(&row, super::ROLE_FLEET_TRUSTED, "trusted")?;
+            }
             conn.execute(
                 if trusted {
                     "UPDATE client_tokens SET trusted_at = COALESCE(trusted_at, ?2) WHERE id = ?1"
@@ -314,6 +317,43 @@ impl Store {
             self.unmap_role_in_tx(conn, super::Principal::Person(person), role, false)
                 .map(|_| ())
         }
+    }
+
+    /// After a direct mapping was taken back inside the caller's
+    /// transaction: `E_VALIDATE` when the device's person still holds realm
+    /// role `role` some other way (a group, or a composite), naming where,
+    /// so the transaction rolls back and nothing changes — reporting
+    /// "untrusted" while every full device stays trusted would be false. A
+    /// group grant is withdrawn at the group.
+    fn refuse_if_still_holds(
+        &self,
+        row: &ClientTokenRow,
+        role: &str,
+        what: &str,
+    ) -> Result<(), crate::ipc_error::IpcError> {
+        let Some(person) = row.person_id else {
+            return Ok(());
+        };
+        let Some(held) = self
+            .effective_roles(person)?
+            .into_iter()
+            .find(|r| r.role.client.is_none() && r.role.name == role)
+        else {
+            return Ok(());
+        };
+        let via: Vec<String> = held
+            .via
+            .iter()
+            .map(|v| v.strip_prefix("group:").unwrap_or(v).to_string())
+            .collect();
+        Err(crate::ipc_error::IpcError::new(
+            codes::E_VALIDATE,
+            format!(
+                "'{}' is still {what} through {}; withdraw it there",
+                row.name,
+                via.join(", ")
+            ),
+        ))
     }
 
     /// Run `f` in one transaction: an IMMEDIATE one of its own
@@ -924,6 +964,46 @@ mod tests {
             crate::mcp::auth::apply_realm(&mut c, &realm_sets_of(&s));
             assert_eq!(c.client.unwrap().trusted, trusted, "{tok}");
         }
+    }
+
+    /// Trust held through a group is withdrawn at the group: untrusting a
+    /// device of a member refuses, names the group, and changes nothing.
+    #[test]
+    fn untrust_refuses_while_a_group_still_trusts_the_person() {
+        use crate::store::{Principal, RoleRef, ROLE_FLEET_TRUSTED};
+        let s = Store::open_in_memory().unwrap();
+        let ada = s.create_person("ada", None).unwrap().id;
+        let mac = pair_test_device(&s, "ada-mac", "full", Some(ada));
+        s.set_client_trust("ada-mac", true).unwrap();
+        let team = s.create_group(None, "team", None).unwrap().id;
+        let role = s
+            .role(RoleRef::Realm(ROLE_FLEET_TRUSTED))
+            .unwrap()
+            .unwrap()
+            .id;
+        s.with_tx(|c| {
+            s.add_group_member_in_tx(c, team, ada, None)?;
+            s.map_role_in_tx(c, Principal::Group(team), role, false)
+        })
+        .unwrap();
+        let e = s.set_client_trust("ada-mac", false).unwrap_err();
+        assert_eq!(e.code, codes::E_VALIDATE);
+        assert!(e.message.contains("/team"), "{}", e.message);
+        assert!(caller_for(&s, &mac).client.unwrap().trusted);
+        let row = s
+            .active_client_tokens()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.name == "ada-mac")
+            .unwrap();
+        assert!(row.trusted_at.is_some(), "rolled back: the mirror stays");
+        assert!(
+            s.effective_roles(ada)
+                .unwrap()
+                .iter()
+                .any(|r| r.role.id == role && r.via.iter().any(|v| v == "direct")),
+            "rolled back: the direct mapping stays"
+        );
     }
 
     #[test]
