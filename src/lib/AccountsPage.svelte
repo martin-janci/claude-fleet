@@ -59,7 +59,7 @@
   import { pushError } from './toasts';
   import { accountsPageRequest, accountsPausedRequest } from './account_pill';
   import { requestHostsView, openSettingsAt } from './app_views';
-  import { autoSwitchAccount, type AutoSwitchView } from './account_switch';
+  import { autoSwitchState, loadAutoSwitch, setAutoSwitch, type AutoSwitchPatch } from './account_switch';
   import AddAccountDialog from './AddAccountDialog.svelte';
   import { untrack } from 'svelte';
   import { get } from 'svelte/store';
@@ -122,23 +122,16 @@
 
   // Automatic switching: this person's own answer, and whether the fleet
   // has it on at all. Hidden until it is read (an older hub has no tool).
-  let autoSwitch = $state<AutoSwitchView | null>(null);
+  const autoSwitch = $derived($autoSwitchState);
   let autoSwitchBusy = $state(false);
   $effect(() => {
-    let live = true;
-    void autoSwitchAccount().then((r) => {
-      if (live && r.ok) autoSwitch = r.value;
-    });
-    return () => {
-      live = false;
-    };
+    void loadAutoSwitch(true);
   });
-  async function setAutoSwitch(on: boolean) {
+  async function changeAutoSwitch(patch: AutoSwitchPatch) {
     autoSwitchBusy = true;
-    const r = await autoSwitchAccount(on);
+    const r = await setAutoSwitch(patch);
     autoSwitchBusy = false;
-    if (r.ok) autoSwitch = r.value;
-    else pushError(r.error, 'Changing automatic switching failed');
+    if (!r.ok) pushError(r.error, 'Changing automatic switching failed');
   }
 
   const pausedOf = (a: AccountSummary): SessionRow[] =>
@@ -347,9 +340,19 @@
           data-testid="accounts-auto-switch-toggle"
           checked={autoSwitch.enabled}
           disabled={autoSwitchBusy}
-          onchange={(e) => void setAutoSwitch(e.currentTarget.checked)}
+          onchange={(e) => void changeAutoSwitch({ enabled: e.currentTarget.checked })}
         />
         Switch my sessions automatically when their account runs out
+      </label>
+      <label class="nested" title="Only a session whose turn the limit cut off; one that had finished is just resumed">
+        <input
+          type="checkbox"
+          data-testid="accounts-auto-switch-continue"
+          checked={autoSwitch.continue_after}
+          disabled={autoSwitchBusy || !autoSwitch.enabled}
+          onchange={(e) => void changeAutoSwitch({ continue_after: e.currentTarget.checked })}
+        />
+        then tell it to continue where it stopped
       </label>
       {#if !autoSwitch.fleet_enabled}
         <span class="sub" data-testid="accounts-auto-switch-fleet-off">
@@ -630,6 +633,9 @@
     padding: var(--space-2) var(--space-4);
     border-bottom: 1px solid var(--border);
     font-size: var(--text-sm);
+  }
+  .auto-switch label.nested {
+    color: var(--fg-muted);
   }
   .auto-switch label {
     display: inline-flex;

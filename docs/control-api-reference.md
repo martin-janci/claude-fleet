@@ -83,9 +83,9 @@ Parameters: `answer`, `cancel`, `decline`, `draft`, `form`, `get`, `list`, `note
 
 ### `auto_switch_account`
 
-Your own answer to automatic account switching: when one of your sessions' Claude account runs out, resume it under the login on its host with the most headroom. Pass enabled to turn it on or off for your sessions; leave it out to read it. It only acts while the fleet's accounts.auto_switch is on too. Returns { enabled, fleet_enabled }.
+Your own answer to automatic account switching: when one of your sessions' Claude account runs out, resume it under the login on its host with the most headroom. Pass enabled to turn it on or off for your sessions; leave it out to read it. continue_after: also type 'Continue where you left off.' into a switched session whose turn the limit cut off (off by default). It only acts while the fleet's accounts.auto_switch is on too. Returns { enabled, continue_after, fleet_enabled }.
 
-Parameters: `enabled`
+Parameters: `continue_after`, `enabled`
 
 ### `broadcast_prompt`
 

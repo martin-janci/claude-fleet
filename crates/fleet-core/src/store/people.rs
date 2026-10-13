@@ -799,6 +799,35 @@ impl Store {
         Ok(())
     }
 
+    /// Whether a person wants "continue" typed after an automatic switch
+    /// cut their session's turn off (`people.auto_switch_continue`,
+    /// migration 186): off unless they turned it on. `E_NOTFOUND` for an
+    /// unknown person.
+    pub fn person_auto_switch_continue(&self, id: i64) -> Result<bool, IpcError> {
+        self.conn
+            .query_row(
+                "SELECT auto_switch_continue FROM people WHERE id = ?1",
+                [id],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+            .map(|v| v != 0)
+            .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("no person {id}")))
+    }
+
+    /// Set [`Self::person_auto_switch_continue`]. `E_NOTFOUND` for an
+    /// unknown person.
+    pub fn set_person_auto_switch_continue(&self, id: i64, on: bool) -> Result<(), IpcError> {
+        let n = self.conn.execute(
+            "UPDATE people SET auto_switch_continue = ?2 WHERE id = ?1",
+            rusqlite::params![id, on as i64],
+        )?;
+        if n == 0 {
+            return Err(IpcError::new(codes::E_NOTFOUND, format!("no person {id}")));
+        }
+        Ok(())
+    }
+
     /// The people who turned automatic account switching off, live or not:
     /// what the switch pass reads once per run.
     pub fn people_without_auto_switch(&self) -> Result<std::collections::BTreeSet<i64>, IpcError> {

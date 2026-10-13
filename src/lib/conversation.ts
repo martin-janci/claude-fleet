@@ -1446,7 +1446,13 @@ export function inlineEventFor(
       const d = parseSwitchDetail(e.detail);
       const login = d ? (d.profile ? `profile ${d.profile}` : "the host's own login") : null;
       return e.kind === 'account_switched'
-        ? { id: e.id, at: e.at, label: 'Account ran out: switched automatically', detail: login && `now on ${login}`, tone: 'info' }
+        ? {
+            id: e.id,
+            at: e.at,
+            label: 'Account ran out: switched automatically',
+            detail: login && `now on ${login}${d?.continued ? ' · told to continue' : ''}`,
+            tone: 'info',
+          }
         : {
             id: e.id,
             at: e.at,

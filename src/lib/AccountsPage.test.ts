@@ -28,6 +28,7 @@ import {
   snapshot,
 } from './hosts_fixture';
 import type { UsageSnapshotRow } from './accounts_page';
+import { autoSwitchState } from './account_switch';
 
 const inv = mockedInvoke as unknown as ReturnType<typeof vi.fn>;
 
@@ -304,12 +305,15 @@ describe('AccountsPage: spend, routines and paused sessions (4.1 / 4.2)', () => 
 
 describe('AccountsPage automatic switching', () => {
   function answering(view: { enabled: boolean; fleet_enabled: boolean }) {
-    inv.mockImplementation(async (cmd: string, payload?: { args?: { enabled?: boolean } }) => {
+    let now = { continue_after: false, ...view };
+    inv.mockImplementation(async (cmd: string, payload?: { args?: Record<string, boolean> }) => {
       if (cmd !== 'auto_switch_account') return null;
-      const enabled = payload?.args?.enabled;
-      return enabled === undefined ? view : { ...view, enabled };
+      now = { ...now, ...(payload?.args ?? {}) };
+      return now;
     });
   }
+
+  beforeEach(() => autoSwitchState.set(null));
 
   it('shows the person their own answer and saves a change', async () => {
     answering({ enabled: true, fleet_enabled: true });
@@ -323,6 +327,18 @@ describe('AccountsPage automatic switching', () => {
     );
     await waitFor(() => expect(box.checked).toBe(false));
     expect(screen.getByTestId('accounts-auto-switch').textContent).toContain('wait for you');
+    expect((screen.getByTestId('accounts-auto-switch-continue') as HTMLInputElement).disabled).toBe(true);
+  });
+
+  it('asks to carry on after a switch only when the person ticks it', async () => {
+    answering({ enabled: true, fleet_enabled: true });
+    render(AccountsPage, props);
+    const box = (await screen.findByTestId('accounts-auto-switch-continue')) as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    await fireEvent.click(box);
+    await waitFor(() =>
+      expect(inv).toHaveBeenCalledWith('auto_switch_account', { args: { continue_after: true } }),
+    );
   });
 
   it('says when the fleet has it off', async () => {
@@ -334,6 +350,7 @@ describe('AccountsPage automatic switching', () => {
   });
 
   it('stays hidden when the answer cannot be read', () => {
+    inv.mockImplementation(async () => null);
     render(AccountsPage, props);
     expect(screen.queryByTestId('accounts-auto-switch')).toBeNull();
   });

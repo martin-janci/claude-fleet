@@ -6,6 +6,9 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import {
   announceAccountSwitches,
+  autoSwitchState,
+  setAutoSwitch,
+  switchesAutomatically,
   autoSwitchAccount,
   parseSwitchDetail,
   switchLines,
@@ -31,8 +34,11 @@ describe('account_switch', () => {
     inv.mockResolvedValue({ enabled: false, fleet_enabled: true });
     await autoSwitchAccount();
     expect(inv).toHaveBeenLastCalledWith('auto_switch_account', { args: {} });
-    await autoSwitchAccount(false);
+    await autoSwitchAccount({ enabled: false });
     expect(inv).toHaveBeenLastCalledWith('auto_switch_account', { args: { enabled: false } });
+    await setAutoSwitch({ continue_after: true });
+    expect(inv).toHaveBeenLastCalledWith('auto_switch_account', { args: { continue_after: true } });
+    expect(get(autoSwitchState)).toEqual({ enabled: false, fleet_enabled: true });
   });
 
   it('parses an attempt and refuses what is not one', () => {
@@ -42,6 +48,7 @@ describe('account_switch', () => {
       profile: 'spare',
       used_pct: 12.4,
       error: null,
+      continued: false,
     });
     expect(parseSwitchDetail(null)).toBeNull();
     expect(parseSwitchDetail('not json')).toBeNull();
@@ -71,5 +78,31 @@ describe('account_switch', () => {
     expect(t).toHaveLength(1);
     expect(t[0].message).toContain('resumed under spare');
     expect(t[0].action?.label).toBe('Open');
+  });
+
+  it('says when the session was told to carry on', () => {
+    const d = parseSwitchDetail(detail({ continue: true }))!;
+    expect(switchLines(EVENT_SWITCHED, 'api', d, name).sub).toBe('ada@out ran out · 12% used · told to continue');
+  });
+
+  it('folds several switches in one push into one toast, failures apart', () => {
+    sessions.set([{ ...session('mefistos', 'api'), id: 7 }, { ...session('mefistos', 'web'), id: 8 }]);
+    announceAccountSwitches([
+      { id: 1, session_id: 7, at: 1, kind: EVENT_SWITCHED, detail: detail(), claude_session_id: null },
+      { id: 2, session_id: 8, at: 1, kind: EVENT_SWITCHED, detail: detail(), claude_session_id: null },
+      { id: 3, session_id: 9, at: 1, kind: EVENT_SWITCH_FAILED, detail: detail({ error: 'E_SSH' }), claude_session_id: null },
+    ]);
+    const t = get(toasts);
+    expect(t).toHaveLength(2);
+    expect(t[0].message).toBe('2 sessions resumed under other logins');
+    expect(t[0].sub).toContain('api, web');
+    expect(t[1].message).toContain('Could not move session 9');
+  });
+
+  it('switches automatically only when the fleet and the person both say so', () => {
+    expect(switchesAutomatically(null)).toBe(false);
+    expect(switchesAutomatically({ enabled: true, continue_after: false, fleet_enabled: false })).toBe(false);
+    expect(switchesAutomatically({ enabled: false, continue_after: false, fleet_enabled: true })).toBe(false);
+    expect(switchesAutomatically({ enabled: true, continue_after: false, fleet_enabled: true })).toBe(true);
   });
 });

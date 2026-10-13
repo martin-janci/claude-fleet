@@ -145,7 +145,8 @@ desktop shows no $), and an account at its limit says how many sessions it
 paused, with Show and *Switch to <account>* (step 4.4's bulk move, one
 click). Automatic switching is landed and OFF by default
 (`accounts.auto_switch`, docs/accounts.md → *Switch automatically*; each
-person can turn it off for their own sessions, migration 185; Jev's pick
+person can turn it off for their own sessions, migration 185, and ask for
+"continue" after a switch, migration 186; Jev's pick
 is recorded only, `decide.jev.limit_switch`). Not built: a hub vault for
 setup-tokens and API keys.
 

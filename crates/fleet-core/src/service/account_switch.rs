@@ -32,6 +32,15 @@
 //! [`EVENT_SWITCHED`] or [`EVENT_SWITCH_FAILED`], whose detail names the
 //! logins and accounts by profile and uuid only.
 //!
+//! **Carry on.** A person can also ask for the session to continue
+//! (`people.auto_switch_continue`, migration 186, off by default). Then,
+//! when the session's last turn was cut off by the limit (its newest turn
+//! end is a `stop_failure` of class `rate_limit`, not a `turn_done`), a
+//! switch that went through queues [`CONTINUE_PROMPT`] as a deferred
+//! prompt, not before [`CONTINUE_AFTER_SECS`] so the resumed pane is up;
+//! the deferred-prompt delivery types it once the session is idle. A
+//! session that had finished its turn is only resumed.
+//!
 //! **Bounds.** At most [`MAX_SWITCHES_PER_RUN`] per run, a run at most
 //! every [`RUN_EVERY_SECS`], one at a time, detached from the reconcile
 //! tick; it stands still while `automation.paused` is on, and only the
@@ -57,6 +66,10 @@ pub const RUN_EVERY_SECS: u64 = 60;
 /// the row's account until the next pass reads the new one, and a login
 /// that refused once is not hammered.
 pub const RETRY_AFTER_SECS: i64 = 30 * 60;
+/// What a person who asked to carry on gets typed after a switch.
+pub const CONTINUE_PROMPT: &str = "Continue where you left off.";
+/// How long after the switch the prompt may go in at the earliest.
+pub const CONTINUE_AFTER_SECS: i64 = 30;
 /// The timeline event of a switch that went through.
 pub const EVENT_SWITCHED: &str = "account_switched";
 /// The timeline event of a switch that failed (detail carries the code).
@@ -75,6 +88,9 @@ pub struct Planned {
     /// Every login that qualified, `target` among them (what Jev is asked
     /// over).
     pub candidates: Vec<HostLogin>,
+    /// Queue [`CONTINUE_PROMPT`] once switched: its owner asked for it and
+    /// the limit cut its last turn off.
+    pub continue_after: bool,
 }
 
 /// Whether the fleet has it on (`accounts.auto_switch`).
@@ -101,12 +117,32 @@ pub fn owner_allows(
     personal_owner: Option<i64>,
     opted_out: &BTreeSet<i64>,
 ) -> bool {
-    match row.owner_person_id.or(personal_owner) {
+    match answering_person(row, personal_owner) {
         Some(p) => !opted_out.contains(&p),
         // No owner to ask on a store with no personal owner: nobody said
         // yes, so nothing moves.
         None => false,
     }
+}
+
+/// The person whose answers apply to `row`: its owner, or the personal
+/// owner for a row nobody owns.
+fn answering_person(row: &SessionRow, personal_owner: Option<i64>) -> Option<i64> {
+    row.owner_person_id.or(personal_owner)
+}
+
+/// PURE: whether a turn-end event says the limit cut the turn off: a
+/// `stop_failure` whose class is `rate_limit` (`hooks::stop_failure_class`).
+pub fn cut_off_by_limit(kind: &str, detail: Option<&str>) -> bool {
+    kind == "stop_failure" && detail.is_some_and(|d| d.starts_with("rate_limit"))
+}
+
+/// Whether the session's newest turn end is one the limit cut off.
+fn last_turn_cut_off(s: &Store, session_id: i64) -> Result<bool, IpcError> {
+    Ok(
+        s.newest_session_event_of(session_id, &["turn_done", "stop_failure"])?
+            .is_some_and(|e| cut_off_by_limit(&e.kind, e.detail.as_deref())),
+    )
 }
 
 /// PURE: the logins on `host` a session on `from_account` may move to, the
@@ -200,7 +236,12 @@ pub fn plan(
         let Some(target) = pick(&cands).cloned() else {
             continue;
         };
+        let continue_after = match answering_person(&row, personal_owner) {
+            Some(p) => s.person_auto_switch_continue(p)? && last_turn_cut_off(s, row.id)?,
+            None => false,
+        };
         out.push(Planned {
+            continue_after,
             session_id: row.id,
             host_alias: row.host_alias.clone(),
             tmux_name: row.tmux_name.clone(),
@@ -218,6 +259,7 @@ pub fn plan(
 /// The timeline detail of one attempt: logins by profile, accounts by uuid.
 pub fn detail(p: &Planned, error_code: Option<&str>, jev: Option<&str>) -> String {
     serde_json::json!({
+        "continue": p.continue_after && error_code.is_none(),
         "from_account": p.from_account,
         "to_account": p.target.account_uuid,
         "profile": p.target.profile,
@@ -322,6 +364,9 @@ pub async fn run_with(
         let (kind, code) = match &result {
             Ok(()) => {
                 report.switched += 1;
+                if p.continue_after {
+                    queue_continue(store, p.session_id, now);
+                }
                 (EVENT_SWITCHED, None)
             }
             Err(e) => {
@@ -360,6 +405,10 @@ pub struct AutoSwitchArgs {
     /// sessions; leave it out to read it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    /// `true` / `false`: after a switch, type "Continue where you left off."
+    /// into a session whose turn the limit cut off. Leave it out to keep it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continue_after: Option<bool>,
 }
 
 /// What `auto_switch_account` answers.
@@ -367,6 +416,9 @@ pub struct AutoSwitchArgs {
 pub struct AutoSwitchView {
     /// The caller's own answer (`people.auto_switch_account`).
     pub enabled: bool,
+    /// Whether a switched session whose turn the limit cut off is told to
+    /// carry on (`people.auto_switch_continue`; off unless turned on).
+    pub continue_after: bool,
     /// The fleet's (`accounts.auto_switch`): without it nothing switches,
     /// whatever `enabled` says.
     pub fleet_enabled: bool,
@@ -389,10 +441,32 @@ pub fn my_auto_switch(
     if let Some(on) = args.enabled {
         s.set_person_auto_switch(person, on)?;
     }
+    if let Some(on) = args.continue_after {
+        s.set_person_auto_switch_continue(person, on)?;
+    }
     Ok(AutoSwitchView {
         enabled: s.person_auto_switch(person)?,
+        continue_after: s.person_auto_switch_continue(person)?,
         fleet_enabled: fleet_enabled(s),
     })
+}
+
+/// Queue [`CONTINUE_PROMPT`] for a session just switched. Best effort: a
+/// failure is logged; the switch stands either way.
+fn queue_continue(store: &Mutex<Store>, session_id: i64, now: i64) {
+    let timing = crate::store::DeferredTiming {
+        not_before: Some(now + CONTINUE_AFTER_SECS),
+        // Held, not typed, should the new login be over the line too.
+        until_limit_reset: true,
+        skip_if_archived: true,
+    };
+    let queued = lock(store).and_then(|s| {
+        s.insert_deferred_prompt_timed(session_id, CONTINUE_PROMPT, timing, now)
+            .map_err(IpcError::from)
+    });
+    if let Err(e) = queued {
+        tracing::warn!("[account-switch] queueing continue for {session_id} failed: {e}");
+    }
 }
 
 static RUNNING: AtomicBool = AtomicBool::new(false);

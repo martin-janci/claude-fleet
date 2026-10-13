@@ -287,13 +287,16 @@ fn a_person_reads_and_sets_their_own_answer() {
         my_auto_switch(&s, Some(owner), &read).unwrap(),
         AutoSwitchView {
             enabled: true,
+            continue_after: false,
             fleet_enabled: true
         }
     );
     let off = AutoSwitchArgs {
         enabled: Some(false),
+        continue_after: Some(true),
     };
-    assert!(!my_auto_switch(&s, Some(owner), &off).unwrap().enabled);
+    let v = my_auto_switch(&s, Some(owner), &off).unwrap();
+    assert!(!v.enabled && v.continue_after);
     assert!(!s.person_auto_switch(owner).unwrap());
     let err = my_auto_switch(&s, None, &read).unwrap_err();
     assert_eq!(err.code, crate::ipc_error::codes::E_FORBIDDEN);
@@ -301,4 +304,76 @@ fn a_person_reads_and_sets_their_own_answer() {
         my_auto_switch(&s, Some(9_999), &read).unwrap_err().code,
         crate::ipc_error::codes::E_NOTFOUND
     );
+}
+
+fn turn_end(s: &Store, id: i64, kind: &str, detail: &str) {
+    s.insert_session_event(id, kind, Some(detail)).unwrap();
+}
+
+fn queued(s: &Store, id: i64) -> Vec<(String, Option<i64>)> {
+    let mut st = s
+        .conn_for_test()
+        .prepare("SELECT body, not_before FROM deferred_prompts WHERE session_id = ?1 ORDER BY id")
+        .unwrap();
+    st.query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+#[test]
+fn only_a_turn_the_limit_cut_off_is_told_to_carry_on() {
+    assert!(cut_off_by_limit(
+        "stop_failure",
+        Some("rate_limit: 429 Too Many Requests")
+    ));
+    assert!(cut_off_by_limit("stop_failure", Some("rate_limit")));
+    assert!(!cut_off_by_limit("stop_failure", Some("auth (401)")));
+    assert!(!cut_off_by_limit("turn_done", Some("rate_limit")));
+    let (s, id, owner) = fleet();
+    turn_end(&s, id, "stop_failure", "rate_limit: 429");
+    assert!(!plan_now(&s)[0].continue_after, "off until the person asks");
+    s.set_person_auto_switch_continue(owner, true).unwrap();
+    assert!(plan_now(&s)[0].continue_after);
+    turn_end(&s, id, "turn_done", "");
+    assert!(
+        !plan_now(&s)[0].continue_after,
+        "a finished turn is only resumed"
+    );
+}
+
+#[tokio::test]
+async fn a_switch_queues_continue_for_a_turn_the_limit_cut_off() {
+    let (s, id, owner) = fleet();
+    s.set_person_auto_switch_continue(owner, true).unwrap();
+    turn_end(&s, id, "stop_failure", "rate_limit: 429");
+    let store = Arc::new(Mutex::new(s));
+    let recent = Mutex::new(HashMap::new());
+    run_with(&store, &Fake::default(), None, &recent, true, NOW)
+        .await
+        .unwrap();
+    let s = store.lock().unwrap();
+    assert_eq!(
+        queued(&s, id),
+        [(CONTINUE_PROMPT.to_string(), Some(NOW + CONTINUE_AFTER_SECS))]
+    );
+    let ev = events(&s, id);
+    let d: serde_json::Value = serde_json::from_str(&ev.last().unwrap().1).unwrap();
+    assert_eq!(d["continue"], true);
+}
+
+#[tokio::test]
+async fn a_failed_switch_queues_nothing() {
+    let (s, id, owner) = fleet();
+    s.set_person_auto_switch_continue(owner, true).unwrap();
+    turn_end(&s, id, "stop_failure", "rate_limit: 429");
+    let store = Arc::new(Mutex::new(s));
+    let fake = Fake {
+        fail: true,
+        ..Default::default()
+    };
+    run_with(&store, &fake, None, &Mutex::new(HashMap::new()), true, NOW)
+        .await
+        .unwrap();
+    assert!(queued(&store.lock().unwrap(), id).is_empty());
 }

@@ -11,9 +11,11 @@ impl FleetTools {
     #[tool(description = "Your own answer to automatic account switching: \
         when one of your sessions' Claude account runs out, resume it under \
         the login on its host with the most headroom. Pass enabled to turn \
-        it on or off for your sessions; leave it out to read it. It only \
-        acts while the fleet's accounts.auto_switch is on too. Returns \
-        { enabled, fleet_enabled }.")]
+        it on or off for your sessions; leave it out to read it. \
+        continue_after: also type 'Continue where you left off.' into a \
+        switched session whose turn the limit cut off (off by default). It \
+        only acts while the fleet's accounts.auto_switch is on too. Returns \
+        { enabled, continue_after, fleet_enabled }.")]
     pub(super) async fn auto_switch_account(
         &self,
         Extension(caller): Extension<Caller>,
