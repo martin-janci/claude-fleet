@@ -142,7 +142,7 @@ describe('formatting', () => {
 });
 
 describe('resources on a paired desktop', () => {
-  it('every resource but the company’s, debug devices, linked hubs and environment variables names a command the hub reasons explain: its update, else its create or delete', async () => {
+  it('every resource but the company’s, groups, debug devices, linked hubs and environment variables names a command the hub reasons explain: its update, else its create or delete', async () => {
     const { resourceBlock } = await import('../hub');
     const remote = {
       remote: true,
@@ -162,7 +162,9 @@ describe('resources on a paired desktop', () => {
     // Debug devices route to the hub's `debug_devices` the same way, and
     // linked hubs (11.5) to `link_peer` / `unlink_peer`, and environment
     // variables (spec 2026-10-11) to `env_vars`, which decides per device too.
-    const routed = new Set(['org', 'device', 'person', 'debug_device', 'peer_link', 'env_var']);
+    // Groups (identity sub-project 1) are read-only and list through the
+    // hub's `realm_admin`, so nothing is blocked there either.
+    const routed = new Set(['org', 'device', 'person', 'group', 'debug_device', 'peer_link', 'env_var']);
     for (const r of bundle.resources) {
       const reason = resourceBlock(r, remote);
       if (routed.has(r.id)) expect(reason, r.id).toBeNull();

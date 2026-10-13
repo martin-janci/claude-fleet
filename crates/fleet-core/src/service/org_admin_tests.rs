@@ -1612,3 +1612,49 @@ fn a_set_org_setting_event_never_keeps_the_value() {
     );
     assert!(ev[0].representation.get("value").is_none(), "{:?}", ev[0]);
 }
+
+/// Identity sub-project 1 (Task 12): Settings → People shows each person's
+/// groups and effective roles; an org admin learns only their own org's.
+#[test]
+fn people_carry_their_groups_and_roles_fenced_to_an_org_admins_org() {
+    let c = company();
+    let beta_root = {
+        let s = c.st.lock().unwrap();
+        s.set_org_member(c.beta, c.bob, "admin", None).unwrap();
+        s.list_groups()
+            .unwrap()
+            .into_iter()
+            .filter(|g| g.org_id == Some(c.beta))
+            .map(|g| g.path)
+            .min_by_key(|p| p.len())
+            .expect("Beta has a root group")
+    };
+    let all = list_people(&c.st.lock().unwrap()).unwrap();
+    let bob = all.iter().find(|p| p.name == "bob").unwrap();
+    assert_eq!(bob.groups.len(), 2, "{bob:?}");
+    assert!(
+        bob.groups.iter().any(|g| g.starts_with(&beta_root)),
+        "{bob:?}"
+    );
+    assert!(!bob.roles.is_empty(), "{bob:?}");
+    assert_eq!(bob.roles_display.len(), bob.roles.len());
+    assert!(
+        bob.roles_display.iter().any(|r| r.contains(" (via group:")),
+        "{bob:?}"
+    );
+
+    // Jane administers Acme: bob's Beta standing is not hers to see.
+    let v = run(&args("list_people"), &c.st, c.jane()).unwrap();
+    let people: Vec<PersonSummary> = serde_json::from_value(v).unwrap();
+    let bob = people.iter().find(|p| p.name == "bob").unwrap();
+    assert_eq!(bob.groups.len(), 1, "{bob:?}");
+    assert!(!bob.groups[0].starts_with(&beta_root), "{bob:?}");
+    assert!(!bob.roles.is_empty(), "{bob:?}");
+    for text in bob
+        .roles_display
+        .iter()
+        .chain(bob.roles.iter().flat_map(|r| &r.via))
+    {
+        assert!(!text.contains(&beta_root), "{text} leaks Beta: {bob:?}");
+    }
+}

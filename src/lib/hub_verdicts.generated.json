@@ -192,6 +192,7 @@
     "list_downloads",
     "list_forms",
     "list_github_repos",
+    "list_groups",
     "list_guides",
     "list_host_worktrees",
     "list_hosts",

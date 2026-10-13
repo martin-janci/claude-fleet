@@ -2068,6 +2068,26 @@
           "type": "items"
         },
         {
+          "add": [],
+          "help": "The groups they are a member of. An org's groups follow its members; see Settings → Groups.",
+          "id": "groups",
+          "item_label": {
+            "type": "plain"
+          },
+          "label": "Groups",
+          "type": "items"
+        },
+        {
+          "add": [],
+          "help": "Every role they hold, and through which group, composite or direct mapping.",
+          "id": "roles_display",
+          "item_label": {
+            "type": "plain"
+          },
+          "label": "Roles",
+          "type": "items"
+        },
+        {
           "help": "When the hub first heard of them.",
           "id": "created_at",
           "label": "Added",
@@ -2104,6 +2124,57 @@
         "params": [],
         "report": false
       }
+    },
+    {
+      "empty": "No groups yet. An org's groups appear when the org is added.",
+      "fields": [
+        {
+          "help": "Where the group sits, from the top: /orgs/acme/admins.",
+          "id": "path",
+          "label": "Path",
+          "max": 512,
+          "type": "text"
+        },
+        {
+          "badge": {
+            "text": "managed",
+            "when": "true"
+          },
+          "default": false,
+          "help": "Kept by its org: its members follow the org's members and roles.",
+          "id": "managed",
+          "label": "Managed",
+          "on_off": false,
+          "type": "bool"
+        },
+        {
+          "add": [],
+          "help": "The roles every member holds through this group.",
+          "id": "roles",
+          "item_label": {
+            "type": "plain"
+          },
+          "label": "Roles",
+          "type": "items"
+        },
+        {
+          "add": [],
+          "help": "Its direct members, by name.",
+          "id": "members",
+          "item_label": {
+            "type": "plain"
+          },
+          "label": "Members",
+          "type": "items"
+        }
+      ],
+      "help": "Groups and the roles they grant. An org's own groups, its admins, members and viewers under /orgs, follow the org.",
+      "id": "group",
+      "id_field": "path",
+      "label": "Group",
+      "list": "list_groups",
+      "plural": "Groups",
+      "title_field": "path"
     },
     {
       "actions": [

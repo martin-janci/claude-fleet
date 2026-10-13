@@ -1228,6 +1228,8 @@ const PERSON_RESOURCE: ResourceType = ResourceType {
         FieldSpec::new("display_name", "Shown as", "How the apps show them; empty shows the name.", FieldKind::Text { max: 80 }).edit("display_name"),
         FieldSpec::new("owner", "Owner", "This hub's own owner.", FieldKind::Bool { on_off: false, default: false }).badge(Badge::True { text: "owner" }),
         FieldSpec::new("devices", "Devices", "Their live paired devices. Manage them in Settings → Devices.", FieldKind::Items { item_label: ItemLabel::Plain, remove: None, add: &[], each: &[] }),
+        FieldSpec::new("groups", "Groups", "The groups they are a member of. An org's groups follow its members; see Settings → Groups.", FieldKind::Items { item_label: ItemLabel::Plain, remove: None, add: &[], each: &[] }),
+        FieldSpec::new("roles_display", "Roles", "Every role they hold, and through which group, composite or direct mapping.", FieldKind::Items { item_label: ItemLabel::Plain, remove: None, add: &[], each: &[] }),
         FieldSpec::new("created_at", "Added", "When the hub first heard of them.", FieldKind::Time),
         FieldSpec::new("disabled_at", "Disabled", "When their devices and the shares made to them were revoked.", FieldKind::Time),
     ],
@@ -1248,6 +1250,32 @@ const PERSON_RESOURCE: ResourceType = ResourceType {
         ActionSpec::new("person.disable", "Disable", "disable_person", &[("person_id", Bind::Record("id"))])
             .confirm("Revokes every device of theirs and every share made to them, at once. Their own sessions stay private and theirs. They can be re-enabled later (org_admin enable_person, or fleet-hub person enable), but nothing revoked comes back."),
     ),
+    actions: &[],
+    create_flow: None,
+    variant_by: None,
+};
+
+/// The realm's groups (identity sub-project 1), read-only: membership and
+/// role mappings change on the org's page or through `realm_admin`.
+const GROUP_RESOURCE: ResourceType = ResourceType {
+    id: "group",
+    label: "Group",
+    plural: "Groups",
+    help: "Groups and the roles they grant. An org's own groups, its admins, members and viewers under /orgs, follow the org.",
+    list: "list_groups",
+    id_field: "path",
+    title_field: "path",
+    color_field: None,
+    empty: "No groups yet. An org's groups appear when the org is added.",
+    fields: &[
+        FieldSpec::new("path", "Path", "Where the group sits, from the top: /orgs/acme/admins.", FieldKind::Text { max: 512 }),
+        FieldSpec::new("managed", "Managed", "Kept by its org: its members follow the org's members and roles.", FieldKind::Bool { on_off: false, default: false }).badge(Badge::True { text: "managed" }),
+        FieldSpec::new("roles", "Roles", "The roles every member holds through this group.", FieldKind::Items { item_label: ItemLabel::Plain, remove: None, add: &[], each: &[] }),
+        FieldSpec::new("members", "Members", "Its direct members, by name.", FieldKind::Items { item_label: ItemLabel::Plain, remove: None, add: &[], each: &[] }),
+    ],
+    create: None,
+    update: None,
+    delete: None,
     actions: &[],
     create_flow: None,
     variant_by: None,
@@ -1485,6 +1513,7 @@ pub const RESOURCES: &[ResourceType] = &[
     CATALOG,
     DEVICE_RESOURCE,
     PERSON_RESOURCE,
+    GROUP_RESOURCE,
     DEBUG_DEVICE,
     PEER_LINK,
     ENV_VAR,
@@ -1721,6 +1750,7 @@ mod tests {
                 "link_peer_hub",
                 "list_debug_devices",
                 "list_devices",
+                "list_groups",
                 "list_orgs",
                 "list_peer_links",
                 "list_people",

@@ -2511,6 +2511,23 @@ fn org_admin_read_cases() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        (
+            "list_groups",
+            "realm_admin",
+            json!({ "action": "list_groups" }),
+            r#"[]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::org_devices::routed::list_groups(
+                    b,
+                    s,
+                    fleet_core::service::realm_admin::RealmAdminArgs {
+                        action: "list_groups".into(),
+                        ..Default::default()
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
     ]
 }
 

@@ -455,6 +455,44 @@ pub struct PersonSummary {
     /// Their live devices, by name.
     #[serde(default)]
     pub devices: Vec<String>,
+    /// The paths of the realm groups they are a direct member of
+    /// (`/orgs/acme/admins`). Absent from an older hub's answer.
+    #[serde(default)]
+    pub groups: Vec<String>,
+    /// Every role they hold and how (`Store::effective_roles`).
+    #[serde(default)]
+    pub roles: Vec<EffectiveRoleSummary>,
+    /// `roles` as Settings → People shows them, one line each:
+    /// `fleet:org-admin (via group:/orgs/acme/admins)`.
+    #[serde(default)]
+    pub roles_display: Vec<String>,
+}
+
+/// One role a person holds: the role (`client` set for a client role) and
+/// how they come to hold it — `direct`, `group:<path>`, `composite:<role>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectiveRoleSummary {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
+    #[serde(default)]
+    pub via: Vec<String>,
+}
+
+impl EffectiveRoleSummary {
+    /// `fleet:org-admin (via group:/orgs/acme/admins)`; a realm role has no
+    /// `client:` prefix.
+    pub fn display(&self) -> String {
+        let role = match &self.client {
+            Some(c) => format!("{c}:{}", self.name),
+            None => self.name.clone(),
+        };
+        if self.via.is_empty() {
+            role
+        } else {
+            format!("{role} (via {})", self.via.join(", "))
+        }
+    }
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -963,25 +1001,65 @@ pub fn list_devices(s: &Store, me: Me<'_>) -> Result<Vec<DeviceSummary>, IpcErro
 /// Every person this hub knows, the owner first.
 pub fn list_people(s: &Store) -> Result<Vec<PersonSummary>, IpcError> {
     let devices = s.active_client_tokens()?;
-    let mut out: Vec<PersonSummary> = s
-        .list_people()?
-        .into_iter()
-        .map(|p| PersonSummary {
+    let mut out: Vec<PersonSummary> = Vec::new();
+    for p in s.list_people()? {
+        let groups = s.groups_of(p.id)?.into_iter().map(|g| g.path).collect();
+        let roles: Vec<EffectiveRoleSummary> = s
+            .effective_roles(p.id)?
+            .into_iter()
+            .map(|e| EffectiveRoleSummary {
+                name: e.role.name,
+                client: e.role.client,
+                via: e.via,
+            })
+            .collect();
+        out.push(PersonSummary {
             devices: devices
                 .iter()
                 .filter(|d| d.person_id == Some(p.id))
                 .map(|d| d.name.clone())
                 .collect(),
+            groups,
+            roles_display: roles.iter().map(EffectiveRoleSummary::display).collect(),
+            roles,
             id: p.id,
             name: p.name,
             display_name: p.display_name,
             owner: p.is_personal_owner,
             created_at: p.created_at,
             disabled_at: p.disabled_at,
-        })
-        .collect();
+        });
+    }
     out.sort_by_key(|p| (!p.owner, p.disabled_at.is_some(), p.id));
     Ok(out)
+}
+
+/// What an org admin may learn of their members' realm standing: only the
+/// groups under their org's root group, and only the roles held directly,
+/// through a composite or through one of those groups — as `realm_admin`'s
+/// org fence shows them.
+fn fence_realm_to_org(s: &Store, org: i64, people: &mut [PersonSummary]) -> Result<(), IpcError> {
+    let root = s
+        .list_groups()?
+        .into_iter()
+        .filter(|g| g.org_id == Some(org))
+        .map(|g| g.path)
+        .min_by_key(|p| p.len());
+    let covers = |path: &str| {
+        root.as_deref()
+            .is_some_and(|r| path == r || path.strip_prefix(r).is_some_and(|t| t.starts_with('/')))
+    };
+    for p in people.iter_mut() {
+        p.groups.retain(|g| covers(g));
+        p.roles.retain_mut(|r| {
+            let had = !r.via.is_empty();
+            r.via
+                .retain(|v| v.strip_prefix("group:").is_none_or(covers));
+            !(had && r.via.is_empty())
+        });
+        p.roles_display = p.roles.iter().map(EffectiveRoleSummary::display).collect();
+    }
+    Ok(())
 }
 
 fn device_json(s: &Store, name: &str, me: Me<'_>) -> Result<serde_json::Value, IpcError> {
@@ -1245,6 +1323,7 @@ fn run_action(
                     .collect();
                 let mut people = list_people(s)?;
                 people.retain(|p| members.contains(&p.id));
+                fence_realm_to_org(s, org, &mut people)?;
                 to_json(&people)
             }
         },
