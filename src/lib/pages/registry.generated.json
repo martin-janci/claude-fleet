@@ -1743,6 +1743,27 @@
         "level": "none"
       },
       "default": "false",
+      "help": "New task: once you have written the notes, the title is drafted from them with claude -p on this machine, or on the first reachable host when it is not a fleet host. A draft is text you edit before you create the task.",
+      "key": "work.draft_task_titles",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Draft task titles",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "ai"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
       "help": "Finish: Draft writes a finished mission's release note from its merged PRs, on the mission's planner host.",
       "key": "work.draft_release_notes",
       "kind": {
@@ -4384,6 +4405,10 @@
                 },
                 {
                   "key": "work.draft_briefs",
+                  "type": "field"
+                },
+                {
+                  "key": "work.draft_task_titles",
                   "type": "field"
                 },
                 {

@@ -443,6 +443,23 @@ pub async fn summarize_past_work(
     routed::summarize_past_work(&backend, args, &store, &ssh).await
 }
 
+/// New task's title drafted from its notes (CF-4): one `claude -p` on a
+/// host, behind `work.draft_task_titles`. Nothing is stored.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DraftTaskTitleArgs {
+    pub notes: String,
+}
+
+#[tauri::command]
+pub async fn draft_task_title(
+    args: DraftTaskTitleArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<fleet_core::service::work::title_draft::TitleDraft, IpcError> {
+    routed::draft_task_title(&backend, args, &store, &ssh).await
+}
+
 /// The Today view's digest (work graph M9.1). `since` is the viewer's local
 /// midnight: the hub does not know the desktop's timezone.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1062,6 +1079,32 @@ pub(crate) mod routed {
                     &args.key,
                     args.link_id,
                     &fleet_core::service::view_scope::ViewScope::internal(),
+                )
+                .await
+            }
+        }
+    }
+
+    pub async fn draft_task_title(
+        backend: &FleetBackend,
+        args: DraftTaskTitleArgs,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<work::title_draft::TitleDraft, IpcError> {
+        let wire = WorkLinkArgs {
+            action: "draft_title".into(),
+            notes: Some(args.notes.clone()),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("draft_task_title", &wire).await,
+            None => {
+                work::title_draft::draft_title(
+                    store,
+                    ssh.as_ref(),
+                    &args.notes,
+                    None,
+                    &fleet_core::service::orgs::OrgScope::All,
                 )
                 .await
             }

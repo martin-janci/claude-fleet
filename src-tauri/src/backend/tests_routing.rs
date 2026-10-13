@@ -3731,6 +3731,24 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             }),
         ),
         (
+            "draft_task_title",
+            "work_link",
+            json!({ "session_id": null, "action": "draft_title", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "notes": "Round the totals once" }),
+            r#"{"title":"Round totals once","model":"haiku","host_alias":"local"}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::draft_task_title(
+                    b,
+                    commands::work::DraftTaskTitleArgs {
+                        notes: "Round the totals once".into(),
+                    },
+                    s,
+                    &ssh(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "resume_work",
             "work_link",
             // Only the resume fields travel; an older hub never sees them

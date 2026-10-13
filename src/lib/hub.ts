@@ -423,6 +423,7 @@ export const ROUTED_ACTIONS = [
   'abandon_start',
   'request_work_handover',
   'summarize_past_work',
+  'draft_task_title',
   'tidy_apply',
   'unarchive_session_work',
   'dismiss_reopened',

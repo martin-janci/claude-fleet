@@ -167,6 +167,7 @@
     "discover_lost_sessions",
     "dismiss_ghost_session",
     "dismiss_reopened",
+    "draft_task_title",
     "edit_work_item",
     "ensure_operator",
     "env_var_set",

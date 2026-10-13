@@ -576,6 +576,19 @@ export async function createWorkTask(input: {
   return r;
 }
 
+/** What `draft_task_title` answers (`work::title_draft::TitleDraft`). */
+export interface TitleDraft {
+  title: string;
+  model: string;
+  host_alias: string;
+}
+
+/** A title drafted from a new task's notes: one model call on a host,
+ *  behind `work.draft_task_titles`. Nothing is stored. */
+export function draftTaskTitle(notes: string): Promise<Result<TitleDraft>> {
+  return invokeCmd<TitleDraft>('draft_task_title', { args: { notes: notes.trim() } });
+}
+
 /** The statuses a person may give a native item (`blocked` is a session's
  *  state, never an item's). */
 export type WorkItemStatus = 'todo' | 'in_progress' | 'done';

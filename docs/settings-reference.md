@@ -190,6 +190,7 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `work.help_model` | `haiku` | `haiku` / `sonnet` / `opus` | fleet | The model that answers a question asked at a terminal or composer prompt line, on the session's own host and account. |
 | `work.draft_commit_messages` | `false` | on / off | fleet | Files tab: Draft writes a commit message from the staged diff with claude -p on the session's host. A draft is text you edit and commit yourself. |
 | `work.draft_briefs` | `false` | on / off | fleet | Starting from a ticket: Draft writes the agent's brief from the ticket before the first prompt, on the planned host. |
+| `work.draft_task_titles` | `false` | on / off | fleet | New task: once you have written the notes, the title is drafted from them with claude -p on this machine, or on the first reachable host when it is not a fleet host. A draft is text you edit before you create the task. |
 | `work.draft_release_notes` | `false` | on / off | fleet | Finish: Draft writes a finished mission's release note from its merged PRs, on the mission's planner host. |
 | `work.catch_up_summaries` | `false` | on / off | fleet | A watched session offers "Since 13:20": what it did since you last looked, summarised on its own host and account. |
 | `work.attachment_max_mb` | `10` | 1–16 MiB | fleet | The largest file or image a task takes. At most 16 MiB: what one call between the desktop and the hub carries. |

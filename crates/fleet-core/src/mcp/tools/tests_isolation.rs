@@ -1781,6 +1781,27 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    // CF-4: a title drafted from the caller's own notes. No item and no
+    // session is named, so there is nothing of another org to read; the
+    // fence is the host the model call runs on (`title_draft::pick_host`,
+    // unit-tested there). Here: it is off until turned on, for everyone,
+    // before any host is chosen.
+    m.row(
+        "work_link",
+        "draft_title",
+        |_, _| json!({ "action": "draft_title", "notes": "round the totals once" }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            is_code(who, a, "E_INVALID_STATE", "writing help is off");
+            assert!(
+                text(a).contains("Draft task titles is off"),
+                "{who:?}: {a:?}"
+            );
+        },
+    )
+    .await;
     for args in [
         json!({ "action": "start", "key": "BB-2", "project_id": 1, "host_alias": "h-a" }),
         json!({ "action": "start", "url": "https://bravo.atlassian.net/browse/BB-2",
