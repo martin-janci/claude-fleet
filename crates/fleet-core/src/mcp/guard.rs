@@ -97,7 +97,7 @@ pub enum Access {
     /// **The master is deliberately out.** Its path to a claim is
     /// `fleet-hub session claim`, which writes through `state.db` on the hub
     /// machine — shell access there being the authority §4.5 already
-    /// concedes — and every byte of the master's tool surface is budgeted
+    /// concedes — and every byte of the master's and a full client's tool surface is budgeted
     /// (`the_served_definition_budget_stays_bounded`), the same reasoning
     /// [`Access::PersonDevice`] records one variant up.
     HostToken,
@@ -173,8 +173,8 @@ pub fn access_allows(caller: &crate::mcp::Caller, tool: &str) -> bool {
         // - `is_person_device` narrows WHAT the caller is: a paired client,
         //   which is what keeps the MASTER out of this arm by design (the
         //   operator has `fleet-hub settings` on the hub machine, and every
-        //   byte of the master's tool surface is budgeted —
-        //   `the_served_definition_budget_stays_bounded`). It also keeps out
+        //   byte of the master's and a full client's tool surface is
+        //   budgeted — `the_served_definition_budget_stays_bounded`). It also keeps out
         //   a per-host token, an org-bound client and a single-purpose token.
         //
         // A device that reaches these still has to be trusted to write

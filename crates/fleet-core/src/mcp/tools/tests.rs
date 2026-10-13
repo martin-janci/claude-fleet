@@ -4501,10 +4501,14 @@ fn list_host_worktrees_is_open_to_a_paired_client_in_either_mode() {
 /// added a tool, so every open PR conflicted with every merge to main
 /// (2026-10-08). A new tool of ordinary size now fits on its own; an
 /// unusually long one, or descriptions grown in place, still fail here.
+///
+/// The per-tool budget binds BOTH the master and a full client: a phone pays
+/// for the client surface on every request, and the `Device`-only tools
+/// (`org_admin`, `update_policy`, the settings tools) were never measured.
 #[test]
 fn the_served_definition_budget_stays_bounded() {
     /// Definition bytes per tool served to the master token (the widest
-    /// surface). Lowered from 815 on 2026-10-10: dropping `null` from
+    /// surface) and to a full client. Lowered from 815 on 2026-10-10: dropping `null` from
     /// optional parameters' types and `"minimum": 0` from unsigned ones
     /// (`present::drop_optional_null`) measured 106,006 bytes for 135 tools
     /// (785 a tool), down from 110,022. Raise it only from a measurement the
@@ -4540,8 +4544,8 @@ fn the_served_definition_budget_stays_bounded() {
         (tools.len(), bytes)
     }
     let (served, bytes) = definition_bytes(&Caller::master());
-    let budget = served * BYTES_PER_TOOL;
     let (ro_served, ro_bytes) = definition_bytes(&host_caller("h", TokenMode::Readonly));
+    let (client_served, client_bytes) = definition_bytes(&client_caller("phone", TokenMode::Full));
     for (label, (n, b)) in [
         ("master", (served, bytes)),
         (
@@ -4565,20 +4569,26 @@ fn the_served_definition_budget_stays_bounded() {
     // The measured number, stated as such: every raise of the constant above
     // quotes one of these, so the next one has a figure to quote rather than
     // a baseline inherited from an older entry.
-    println!(
-        "master surface measured at {bytes} bytes for {served} tools ({} a tool), \
-         of the {budget} budget ({} bytes of headroom)",
-        bytes / served.max(1),
-        budget.saturating_sub(bytes)
-    );
-    assert!(
-        bytes <= budget,
-        "the tool surface grew to {bytes} bytes for {served} tools, over the {budget} \
-         budget ({BYTES_PER_TOOL} a tool): trim a description, or raise \
-         BYTES_PER_TOOL on purpose — to {} (the measurement plus 10 bytes a tool), \
-         and say in the commit message what was measured and when",
-        bytes / served.max(1) + 10
-    );
+    for (label, n, b) in [
+        ("master", served, bytes),
+        ("client full", client_served, client_bytes),
+    ] {
+        let budget = n * BYTES_PER_TOOL;
+        println!(
+            "{label} surface measured at {b} bytes for {n} tools ({} a tool), \
+             of the {budget} budget ({} bytes of headroom)",
+            b / n.max(1),
+            budget.saturating_sub(b)
+        );
+        assert!(
+            b <= budget,
+            "the {label} tool surface grew to {b} bytes for {n} tools, over the {budget} \
+             budget ({BYTES_PER_TOOL} a tool): trim a description, or raise \
+             BYTES_PER_TOOL on purpose — to {} (the measurement plus 10 bytes a tool), \
+             and say in the commit message what was measured and when",
+            b / n.max(1) + 10
+        );
+    }
     assert!(
         ro_bytes < bytes / 2,
         "a readonly token must be served a much smaller surface: {ro_bytes} of {bytes}"
