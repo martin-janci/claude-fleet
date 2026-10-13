@@ -19,6 +19,7 @@
 //!    NEITHER the master NOR a host, so the fleet-admin tools stay out of
 //!    its reach.
 
+pub use crate::mcp::token_cache::RealmSets;
 use crate::store::{ApiScope, ClientTokenRow, ControlTokenRow, HostTokenRow};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 
@@ -78,9 +79,11 @@ impl TokenMode {
 
 /// The paired client behind a request: the `client_tokens` row that matched.
 /// Only the id, the name and the trust flag travel — never the token or its
-/// hash. `trusted` is `trusted_at IS NOT NULL` on the row: the operator has
-/// vouched for this device, so what it sends is delivered without the
-/// untrusted-content marker (`mcp::tools::apply_marker`).
+/// hash. `trusted` is decided by [`apply_realm`]: the device is `full` and
+/// its person holds the realm role `fleet-trusted` (the operator has vouched
+/// for that person), so what it sends is delivered without the
+/// untrusted-content marker (`mcp::tools::apply_marker`). The resolver's
+/// first guess, the row's `trusted_at` mirror, never survives `authorize`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientRef {
     pub id: i64,
@@ -184,6 +187,19 @@ pub struct Caller {
     /// here, so the fleet's settings are refused rather than served to
     /// whoever asked.
     pub is_personal_owner: bool,
+    /// Whether this caller has the effective realm role `fleet-admin`, or is
+    /// the master / an admin-scoped control token (identity sub-project 1).
+    /// The AUTHORITY half of what [`Self::is_personal_owner`] meant before;
+    /// `is_personal_owner` keeps the identity half: whose sessions an
+    /// unscoped caller acts as.
+    ///
+    /// The resolver sets it as it sets `is_personal_owner` (a host token:
+    /// never); [`apply_realm`] then decides it for a paired device from the
+    /// realm's role mappings, which ride the auth epoch in the token cache's
+    /// `AuthRows::realm` — so the gates
+    /// (`guard::access_allows`) read a precomputed bool and take no store
+    /// lock (R6-l).
+    pub is_fleet_admin: bool,
     /// `Some(_)` for a named Control API token (see [`ApiTokenRef`]). The
     /// caller then has the master's shape; its scope decides the rest.
     pub api: Option<ApiTokenRef>,
@@ -202,6 +218,7 @@ impl Caller {
             mode: TokenMode::Full,
             pane: None,
             is_personal_owner: true,
+            is_fleet_admin: true,
             api: None,
         }
     }
@@ -530,6 +547,7 @@ pub fn resolve_token_at(
     if !master.is_empty() && constant_time_eq(presented.as_bytes(), master.as_bytes()) {
         found = Some(Caller {
             is_personal_owner: personal_owner.is_some(),
+            is_fleet_admin: personal_owner.is_some(),
             ..Caller::master()
         });
     }
@@ -543,6 +561,7 @@ pub fn resolve_token_at(
                 // A machine's token is never a person, so it is never the
                 // person who owns this hub.
                 is_personal_owner: false,
+                is_fleet_admin: false,
                 api: None,
             });
         }
@@ -566,6 +585,7 @@ pub fn resolve_token_at(
                 mode: TokenMode::parse_client(&row.mode),
                 pane: None,
                 is_personal_owner: is_the_personal_owner(row.person_id, personal_owner),
+                is_fleet_admin: is_the_personal_owner(row.person_id, personal_owner),
                 api: None,
             });
         }
@@ -590,6 +610,7 @@ pub fn resolve_token_at(
                     // The owner's token, as the master is: true exactly when
                     // the hub can say who its owner is (T1).
                     is_personal_owner: personal_owner.is_some(),
+                    is_fleet_admin: personal_owner.is_some(),
                     api: Some(ApiTokenRef {
                         id: row.id,
                         name: row.name.clone(),
@@ -607,6 +628,62 @@ pub fn resolve_token_at(
         }
     }
     found
+}
+
+/// Decide the realm-role half of a resolved caller (identity sub-project 1).
+/// Run on every resolved caller before any gate reads it.
+///
+/// Only a paired device is decided here — `is_fleet_admin` from its person,
+/// `ClientRef::trusted` from its person and its mode: the master, an
+/// admin-scoped control token and a host token keep what the resolver gave
+/// them. Empty sets (a realm read that failed) decide every device `false` —
+/// fail closed.
+pub fn apply_realm(caller: &mut Caller, realm: &RealmSets) {
+    if let Some(p) = caller.client.as_ref().and_then(|c| c.person_id) {
+        caller.is_fleet_admin = realm.fleet_admins.contains(&p);
+    }
+    // Trust is the person's (`fleet-trusted`), carried by their `full`
+    // devices only. A device bound to nobody — and a peer link or an
+    // updater token, which never have a person — is never trusted, whatever
+    // its row's `trusted_at` mirror says.
+    let full = caller.mode == TokenMode::Full;
+    if let Some(c) = caller.client.as_mut() {
+        c.trusted = full && c.person_id.is_some_and(|p| realm.trusted.contains(&p));
+    }
+}
+
+/// When a paired device's token stops resolving (identity sub-project 1,
+/// spec §3): `auth.device_token_ttl_days` / `auth.device_token_max_age_days`
+/// in seconds (`None` = off) and `auth.device_token_ttl_since`, the moment
+/// migration 183 started every existing token's idle clock. The `Default`
+/// — everything off — is what a hub with no such settings means.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DeviceTokenPolicy {
+    /// The sliding idle limit: a token unused this long is expired.
+    pub ttl_secs: Option<i64>,
+    /// The absolute limit from `created_at`, used or not.
+    pub max_age_secs: Option<i64>,
+    /// The idle clock never starts before this (Unix seconds), so the
+    /// upgrade signs nobody out.
+    pub since: i64,
+}
+
+/// Whether `row`'s token has expired at `now` under `p`. Machine tokens — a
+/// peer hub's link and an updater — never expire this way: they are not a
+/// person's device, and nobody would be there to pair them again.
+pub fn device_token_expired(row: &ClientTokenRow, p: &DeviceTokenPolicy, now: i64) -> bool {
+    if matches!(row.mode.as_str(), "peer" | "updater") {
+        return false;
+    }
+    if p.max_age_secs.is_some_and(|max| now - row.created_at > max) {
+        return true;
+    }
+    let anchor = row
+        .last_seen_at
+        .unwrap_or(0)
+        .max(row.created_at)
+        .max(p.since);
+    p.ttl_secs.is_some_and(|ttl| now - anchor > ttl)
 }
 
 /// Whether a paired device's `person_id` is the hub's personal owner.
@@ -793,6 +870,7 @@ pub(crate) fn device_view(
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     }
     .view_scope(store)
     .expect("the scope reads")
@@ -858,6 +936,69 @@ mod tests {
             assets_admin_at: None,
             person_id: None,
         }
+    }
+
+    /// A live `full` device of person `person`, created and last seen at 0.
+    fn client_row_full(name: &str, person: Option<i64>) -> ClientTokenRow {
+        ClientTokenRow {
+            person_id: person,
+            ..client_row(1, name, &format!("tok-{name}"), "full")
+        }
+    }
+
+    #[test]
+    fn an_idle_device_token_expires_but_the_upgrade_signs_nobody_out() {
+        let p = DeviceTokenPolicy {
+            ttl_secs: Some(90 * 86_400),
+            max_age_secs: None,
+            since: 1_000_000,
+        };
+        let mut row = client_row_full("t", Some(1));
+        row.created_at = 10;
+        row.last_seen_at = Some(20);
+        // Idle since long before the upgrade: the clock starts at `since`.
+        assert!(!device_token_expired(&row, &p, 1_000_000 + 89 * 86_400));
+        assert!(device_token_expired(&row, &p, 1_000_000 + 91 * 86_400));
+        row.last_seen_at = Some(1_000_000 + 80 * 86_400);
+        assert!(
+            !device_token_expired(&row, &p, 1_000_000 + 91 * 86_400),
+            "used recently"
+        );
+        // Off: nothing expires.
+        assert!(!device_token_expired(
+            &row,
+            &DeviceTokenPolicy::default(),
+            i64::MAX / 2
+        ));
+    }
+
+    #[test]
+    fn max_age_counts_from_creation_and_machine_tokens_never_expire() {
+        let p = DeviceTokenPolicy {
+            ttl_secs: None,
+            max_age_secs: Some(100),
+            since: 0,
+        };
+        let mut row = client_row_full("t", Some(1));
+        row.created_at = 0;
+        assert!(!device_token_expired(&row, &p, 100));
+        assert!(device_token_expired(&row, &p, 101));
+        // Used a moment ago changes nothing: max age is not idle time.
+        row.last_seen_at = Some(100);
+        assert!(device_token_expired(&row, &p, 101));
+        row.mode = "peer".into();
+        assert!(!device_token_expired(&row, &p, 101));
+        row.mode = "updater".into();
+        assert!(!device_token_expired(&row, &p, 101));
+        // An idle limit spares machine tokens too.
+        let idle = DeviceTokenPolicy {
+            ttl_secs: Some(10),
+            max_age_secs: None,
+            since: 0,
+        };
+        assert!(!device_token_expired(&row, &idle, 1_000));
+        row.mode = "readonly".into();
+        assert!(device_token_expired(&row, &idle, 1_000));
     }
 
     #[test]
@@ -989,6 +1130,7 @@ mod tests {
                 mode: TokenMode::Full,
                 pane: None,
                 is_personal_owner: false,
+                is_fleet_admin: false,
             })
         );
         assert_eq!(
@@ -1000,6 +1142,7 @@ mod tests {
                 mode: TokenMode::Readonly,
                 pane: None,
                 is_personal_owner: false,
+                is_fleet_admin: false,
             })
         );
         // Unknown mode strings fail closed to readonly.
@@ -1089,6 +1232,7 @@ mod tests {
             mode: TokenMode::Full,
             pane: None,
             is_personal_owner: false,
+            is_fleet_admin: false,
         };
         assert!(!c.is_master());
         assert!(!c.is_client());
@@ -1375,6 +1519,77 @@ mod tests {
                 .person(),
             None
         );
+    }
+
+    /// Identity sub-project 1: a SECOND person's device administers the
+    /// fleet exactly when that person holds the realm role `fleet-admin`.
+    #[test]
+    fn a_second_persons_device_is_fleet_admin_only_with_the_role() {
+        let mut row = client_row(7, "phone", "tok-phone", "full");
+        row.person_id = Some(22);
+        let mut c = resolve_token("tok-phone", "s3cret", &[], &[row], OWNER).unwrap();
+        assert!(!c.is_fleet_admin);
+        apply_realm(&mut c, &RealmSets::default());
+        assert!(!c.is_fleet_admin, "empty sets fail closed");
+        apply_realm(
+            &mut c,
+            &RealmSets {
+                fleet_admins: std::sync::Arc::new([22].into()),
+                ..Default::default()
+            },
+        );
+        assert!(c.is_fleet_admin);
+        assert!(!c.is_personal_owner, "the role is authority, not identity");
+    }
+
+    /// Identity sub-project 1, Task 7: trust is the person's, carried by
+    /// their `full` devices only; the row's `trusted_at` mirror is not read,
+    /// and a device bound to nobody is never trusted.
+    #[test]
+    fn trust_is_decided_by_the_person_and_a_full_device() {
+        let trusted_22 = RealmSets {
+            trusted: std::sync::Arc::new([22].into()),
+            ..Default::default()
+        };
+        let decide = |mode: &str, person: Option<i64>, mirror: bool, realm: &RealmSets| {
+            let mut row = client_row(7, "phone", "tok-phone", mode);
+            row.person_id = person;
+            row.trusted_at = mirror.then_some(1_700_000_000);
+            let mut c = resolve_token("tok-phone", "s3cret", &[], &[row], OWNER).unwrap();
+            apply_realm(&mut c, realm);
+            c.client.unwrap().trusted
+        };
+        assert!(decide("full", Some(22), false, &trusted_22));
+        assert!(
+            !decide("full", Some(22), true, &RealmSets::default()),
+            "fail closed"
+        );
+        assert!(
+            !decide("full", Some(23), true, &trusted_22),
+            "the mirror is not read"
+        );
+        assert!(!decide("readonly", Some(22), false, &trusted_22));
+        assert!(!decide("answer", Some(22), false, &trusted_22));
+        assert!(!decide("full", None, true, &trusted_22), "nobody's device");
+        assert!(!decide("peer", None, true, &trusted_22));
+    }
+
+    #[test]
+    fn the_master_is_always_fleet_admin() {
+        let mut c = resolve_token("s3cret", "s3cret", &[], &[], OWNER).unwrap();
+        apply_realm(&mut c, &RealmSets::default());
+        assert!(c.is_fleet_admin);
+        // And a machine's token never is, whatever the sets say.
+        let hosts = [host_row("mefistos", "tok-mef", "full")];
+        let mut h = resolve_token("tok-mef", "s3cret", &hosts, &[], OWNER).unwrap();
+        apply_realm(
+            &mut h,
+            &RealmSets {
+                fleet_admins: std::sync::Arc::new([1].into()),
+                ..Default::default()
+            },
+        );
+        assert!(!h.is_fleet_admin);
     }
 
     /// T2a's boolean, answered where the token is resolved: the master and

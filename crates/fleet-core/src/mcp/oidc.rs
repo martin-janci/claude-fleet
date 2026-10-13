@@ -85,8 +85,10 @@ pub struct OidcConfig {
     /// A sign-in is refused unless the account holds one of these roles or
     /// groups. Empty: any account the provider authenticates.
     pub allowed_roles: Vec<String>,
-    /// Create a person on an account's first sign-in. Off: only accounts
-    /// the operator linked get in.
+    /// Create a person on an account's first sign-in. Off — the default
+    /// since identity sub-project 1, `FLEET_HUB_OIDC_AUTO_PROVISION=true`
+    /// turns it on: only accounts the operator linked
+    /// (`fleet-hub person link-sso`) get in.
     pub auto_provision: bool,
     /// The ID-token claim that names a provisioned person.
     pub username_claim: String,
@@ -185,7 +187,9 @@ impl OidcConfig {
                 .unwrap_or_default(),
             auto_provision: match get(ENV_AUTO_PROVISION) {
                 Some(v) => parse_bool(ENV_AUTO_PROVISION, &v)?,
-                None => true,
+                // Identity sub-project 1: an unknown account is invited
+                // (linked), never created by its own first sign-in.
+                None => false,
             },
             username_claim: get(ENV_USERNAME_CLAIM).unwrap_or_else(|| "preferred_username".into()),
             mode,
@@ -693,10 +697,36 @@ impl OidcProvider {
                 link_hint.replace("<person>", &name)
             )));
         }
+        // The two writes are admin events (identity sub-project 1), in the
+        // same transaction; the sign-in itself is not one.
         s.atomically(|s| {
             let p = s.create_person(&name, who.display_name.as_deref())?;
             s.link_identity(&cfg.issuer, &who.subject, p.id)?;
             s.touch_identity_login(&cfg.issuer, &who.subject)?;
+            s.record_admin_event(&crate::store::AdminEvent {
+                actor_person: Some(p.id),
+                actor_device: None,
+                action: "provision",
+                resource_type: "person",
+                resource_id: &p.id.to_string(),
+                representation: serde_json::json!({
+                    "name": p.name,
+                    "display_name": p.display_name,
+                    "issuer": cfg.issuer,
+                }),
+            })?;
+            s.record_admin_event(&crate::store::AdminEvent {
+                actor_person: Some(p.id),
+                actor_device: None,
+                action: "link",
+                resource_type: "identity",
+                resource_id: &format!("{} {}", cfg.issuer, who.subject),
+                representation: serde_json::json!({
+                    "issuer": cfg.issuer,
+                    "subject": who.subject,
+                    "person_id": p.id,
+                }),
+            })?;
             Ok(p)
         })
         .map_err(internal)

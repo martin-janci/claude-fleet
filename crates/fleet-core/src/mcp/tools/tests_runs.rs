@@ -72,6 +72,7 @@ fn client(mode: TokenMode, org_id: Option<i64>) -> Caller {
         mode,
         pane: None,
         is_personal_owner: org_id.is_none(),
+        is_fleet_admin: org_id.is_none(),
     }
 }
 
@@ -83,6 +84,7 @@ fn host(alias: &str) -> Caller {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     }
 }
 
@@ -178,6 +180,7 @@ async fn each_caller_is_answered_only_the_runs_it_may_see() {
         cl.person_id = Some(PERSON + 1);
     }
     other.is_personal_owner = false;
+    other.is_fleet_admin = false;
     let v = call(&fx, &other, list.clone()).await.unwrap();
     assert_eq!(v["total"], 0, "{v}");
 

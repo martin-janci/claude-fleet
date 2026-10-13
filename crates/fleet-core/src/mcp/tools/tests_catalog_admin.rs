@@ -37,6 +37,7 @@ pub(super) fn client(id: i64, mode: TokenMode, org_id: Option<i64>) -> Caller {
         mode,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     }
 }
 
@@ -48,6 +49,7 @@ pub(super) fn host(alias: &str) -> Caller {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     }
 }
 
@@ -108,14 +110,20 @@ pub(super) fn code_of(r: &Result<CallToolResult, McpError>) -> String {
 #[tokio::test]
 async fn catalog_admin_answers_the_master_and_a_granted_full_unbound_client_only() {
     let s = Store::open_in_memory().unwrap();
-    let desk = s.insert_client_token("desk", "aa11", "full").unwrap();
+    let desk = s.insert_owned_client_token("desk", "aa11", "full").unwrap();
     s.set_client_assets_admin("desk", true).unwrap();
-    let plain = s.insert_client_token("plain", "bb22", "full").unwrap();
-    let kiosk = s.insert_client_token("kiosk", "cc33", "readonly").unwrap();
+    let plain = s
+        .insert_owned_client_token("plain", "bb22", "full")
+        .unwrap();
+    let kiosk = s
+        .insert_owned_client_token("kiosk", "cc33", "readonly")
+        .unwrap();
     // Granted while unbound, then bound to an org: the column stays set,
     // and the live check still says no.
     let org = s.add_org("A", None, false).unwrap();
-    let contractor = s.insert_client_token("contractor", "dd44", "full").unwrap();
+    let contractor = s
+        .insert_owned_client_token("contractor", "dd44", "full")
+        .unwrap();
     s.set_client_assets_admin("contractor", true).unwrap();
     s.set_client_org("contractor", Some(org.id)).unwrap();
     let t = tools(s);
@@ -197,9 +205,11 @@ async fn catalog_admin_answers_the_master_and_a_granted_full_unbound_client_only
 #[tokio::test]
 async fn import_assets_answers_the_master_and_a_granted_full_unbound_client_only() {
     let s = Store::open_in_memory().unwrap();
-    let desk = s.insert_client_token("desk", "aa11", "full").unwrap();
+    let desk = s.insert_owned_client_token("desk", "aa11", "full").unwrap();
     s.set_client_assets_admin("desk", true).unwrap();
-    let plain = s.insert_client_token("plain", "bb22", "full").unwrap();
+    let plain = s
+        .insert_owned_client_token("plain", "bb22", "full")
+        .unwrap();
     let t = tools(s);
 
     async fn import(t: &FleetTools, caller: &Caller) -> Result<CallToolResult, McpError> {
@@ -507,11 +517,13 @@ pub(super) fn two_catalog_store() -> (Store, i64, i64, i64, i64) {
     let acme = s
         .upsert_catalog("acme", "/nonexistent/m3-acme", None, Some(org.id))
         .unwrap();
-    let desk = s.insert_client_token("desk", "aa11", "full").unwrap();
+    let desk = s.insert_owned_client_token("desk", "aa11", "full").unwrap();
     s.set_client_assets_admin("desk", true).unwrap();
-    let ops = s.insert_client_token("ops", "bb22", "full").unwrap();
+    let ops = s.insert_owned_client_token("ops", "bb22", "full").unwrap();
     s.set_client_catalog_grant("ops", acme.id, true).unwrap();
-    let plain = s.insert_client_token("plain", "cc33", "full").unwrap();
+    let plain = s
+        .insert_owned_client_token("plain", "cc33", "full")
+        .unwrap();
     (s, desk.id, ops.id, plain.id, acme.id)
 }
 
@@ -679,7 +691,7 @@ async fn a_granted_client_authors_in_the_named_catalogs_checkout() {
     let acme = s
         .upsert_catalog("acme", &acme_root.to_string_lossy(), None, Some(org.id))
         .unwrap();
-    let ops = s.insert_client_token("ops", "bb22", "full").unwrap();
+    let ops = s.insert_owned_client_token("ops", "bb22", "full").unwrap();
     s.set_client_catalog_grant("ops", acme.id, true).unwrap();
     let t = tools(s);
     let ops = client(ops.id, TokenMode::Full, None);
@@ -868,7 +880,9 @@ async fn apply_sync_needs_a_grant_on_every_catalog_its_plan_writes() {
 async fn an_org_bound_client_is_refused_every_catalog_action() {
     let _g = crate::service::catalog::lock_registry_for_test();
     let (s, _desk, _ops, _plain, acme) = two_catalog_store();
-    let bound = s.insert_client_token("bound", "dd44", "full").unwrap();
+    let bound = s
+        .insert_owned_client_token("bound", "dd44", "full")
+        .unwrap();
     s.set_client_assets_admin("bound", true).unwrap();
     s.set_client_catalog_grant("bound", acme, true).unwrap();
     let org = s.get_catalog_by_name("acme").unwrap().unwrap().org_id;
@@ -1010,7 +1024,7 @@ async fn apply_sync_with_an_unknown_plan_is_refused_before_run_for_a_client() {
 async fn importing_an_outside_host_into_an_org_catalog_needs_the_personal_grant_too() {
     let _g = crate::service::catalog::lock_registry_for_test();
     let (s, _desk, ops, _plain, acme) = two_catalog_store();
-    let both = s.insert_client_token("both", "dd44", "full").unwrap();
+    let both = s.insert_owned_client_token("both", "dd44", "full").unwrap();
     s.set_client_assets_admin("both", true).unwrap();
     s.set_client_catalog_grant("both", acme, true).unwrap();
     let t = tools(s);
@@ -1130,9 +1144,15 @@ async fn the_list_assets_tool_shows_org_catalogs_only_to_who_may_list_every_cata
     let org = s.add_org("acme", None, false).unwrap();
     s.upsert_catalog("acme", &acme_root.to_string_lossy(), None, Some(org.id))
         .unwrap();
-    let plain = s.insert_client_token("plain", "aa11", "full").unwrap();
-    let kiosk = s.insert_client_token("kiosk", "bb22", "readonly").unwrap();
-    let bound = s.insert_client_token("bound", "cc33", "full").unwrap();
+    let plain = s
+        .insert_owned_client_token("plain", "aa11", "full")
+        .unwrap();
+    let kiosk = s
+        .insert_owned_client_token("kiosk", "bb22", "readonly")
+        .unwrap();
+    let bound = s
+        .insert_owned_client_token("bound", "cc33", "full")
+        .unwrap();
     s.set_client_org("bound", Some(org.id)).unwrap();
     let t = tools(s);
 
@@ -1227,14 +1247,20 @@ async fn asset_history_reads_the_named_catalogs_log_for_a_granted_caller_only() 
     let acme = s
         .upsert_catalog("acme", &acme_root.to_string_lossy(), None, Some(org.id))
         .unwrap();
-    let desk = s.insert_client_token("desk", "aa11", "full").unwrap();
+    let desk = s.insert_owned_client_token("desk", "aa11", "full").unwrap();
     s.set_client_assets_admin("desk", true).unwrap();
-    let ops = s.insert_client_token("ops", "bb22", "full").unwrap();
+    let ops = s.insert_owned_client_token("ops", "bb22", "full").unwrap();
     s.set_client_catalog_grant("ops", acme.id, true).unwrap();
-    let plain = s.insert_client_token("plain", "cc33", "full").unwrap();
+    let plain = s
+        .insert_owned_client_token("plain", "cc33", "full")
+        .unwrap();
     // A readonly client cannot even be granted (the store refuses).
-    let kiosk = s.insert_client_token("kiosk", "dd44", "readonly").unwrap();
-    let bound = s.insert_client_token("bound", "ee55", "full").unwrap();
+    let kiosk = s
+        .insert_owned_client_token("kiosk", "dd44", "readonly")
+        .unwrap();
+    let bound = s
+        .insert_owned_client_token("bound", "ee55", "full")
+        .unwrap();
     s.set_client_assets_admin("bound", true).unwrap();
     s.set_client_catalog_grant("bound", acme.id, true).unwrap();
     s.set_client_org("bound", Some(org.id)).unwrap();

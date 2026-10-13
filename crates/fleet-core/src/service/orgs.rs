@@ -1123,9 +1123,10 @@ pub struct OrgMember {
     /// by name. Absent for anyone else.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub devices: Option<Vec<String>>,
-    /// M15 step G7.14, with `devices`: the ones not trusted yet, so the
-    /// member row says "not trusted" and offers Trust device. Absent with
-    /// `devices`, and from an older hub.
+    /// M15 step G7.14, with `devices`: the `full` ones not trusted yet (the
+    /// person holds no `fleet-trusted`; a readonly device is never trusted),
+    /// so the member row says "not trusted" and offers Trust device. Absent
+    /// with `devices`, and from an older hub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub untrusted_devices: Option<Vec<String>>,
 }
@@ -1172,7 +1173,7 @@ impl AdminView {
         caller: &crate::mcp::auth::Caller,
         store: &Mutex<Store>,
     ) -> Result<Self, IpcError> {
-        if caller.is_master() || (caller.is_person_device() && caller.is_personal_owner) {
+        if caller.is_master() || (caller.is_person_device() && caller.is_fleet_admin) {
             return Ok(AdminView::Admin);
         }
         let Some(p) = caller.person() else {
@@ -1185,8 +1186,9 @@ impl AdminView {
             .filter(|m| m.is_live())
             .map(|m| (m.org_id, m.role))
             .collect();
-        // The hub's owner on a device bound to an org administers it.
-        if caller.is_personal_owner {
+        // A fleet admin (the hub's owner among them) on a device bound to an
+        // org administers it.
+        if caller.is_fleet_admin {
             if let Some(o) = caller.client.as_ref().and_then(|c| c.org_id) {
                 roles.insert(o, crate::store::ROLE_ADMIN.to_string());
             }
@@ -1644,6 +1646,13 @@ fn org_details_locked(
         })
         .transpose()?;
     let owner = s.personal_owner_id()?;
+    // Trust is the person's (`fleet-trusted`): a device shows trusted when
+    // the auth layer would decide it so (`ClientTokenRow::trusted_by`).
+    let trusted_people = if clients.is_some() {
+        s.people_with_realm_role(crate::store::ROLE_FLEET_TRUSTED)?
+    } else {
+        Vec::new()
+    };
     // An org admin sees their own org's spend (phases A–C, for that org);
     // the fleet's administrator every org's, when they see every session.
     let now = crate::service::catalog::now_secs();
@@ -1662,7 +1671,7 @@ fn org_details_locked(
         let my_role = devices.role(o.id).map(str::to_string);
         let member_devices = clients.as_deref().filter(|_| administers);
         let members = (admin || my_role.is_some())
-            .then(|| org_member_list(s, o.id, member_devices))
+            .then(|| org_member_list(s, o.id, member_devices, &trusted_people))
             .transpose()?;
         // The devices fenced to it, as its administrators are shown them.
         let org_clients: Option<Vec<&crate::store::ClientTokenRow>> =
@@ -1678,7 +1687,7 @@ fn org_details_locked(
             use crate::service::org_needs::AdminNeed;
             needs.extend(
                 cs.iter()
-                    .filter(|c| c.trusted_at.is_none() && c.mode == "full")
+                    .filter(|c| c.mode == "full" && !c.trusted_by(&trusted_people))
                     .map(|c| AdminNeed::UntrustedDevice {
                         device: c.name.clone(),
                         paired_at: c.created_at,
@@ -1728,7 +1737,7 @@ fn org_details_locked(
                     .map(|c| OrgDevice {
                         name: c.name.clone(),
                         mode: c.mode.clone(),
-                        trusted: c.trusted_at.is_some(),
+                        trusted: c.trusted_by(&trusted_people),
                         last_seen_at: c.last_seen_at,
                     })
                     .collect()
@@ -1945,6 +1954,7 @@ fn org_member_list(
     s: &Store,
     org: i64,
     devices: Option<&[crate::store::ClientTokenRow]>,
+    trusted_people: &[i64],
 ) -> Result<Vec<OrgMember>, IpcError> {
     let mut out = Vec::new();
     for m in s.org_members(org)? {
@@ -1964,7 +1974,7 @@ fn org_member_list(
                     .map(|cs| cs.iter().map(|c| c.name.clone()).collect()),
                 untrusted_devices: theirs.as_ref().map(|cs| {
                     cs.iter()
-                        .filter(|c| c.trusted_at.is_none())
+                        .filter(|c| c.mode == "full" && !c.trusted_by(trusted_people))
                         .map(|c| c.name.clone())
                         .collect()
                 }),

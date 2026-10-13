@@ -106,12 +106,13 @@ async fn hub() -> Hub {
         },
         axum::routing::any(|axum::Extension(c): axum::Extension<Caller>| async move {
             format!(
-                "caller={} mode={:?} trusted={} pane={:?} owner={}",
+                "caller={} mode={:?} trusted={} pane={:?} owner={} fleet_admin={}",
                 c.label(),
                 c.mode,
                 c.is_trusted_client(),
                 c.pane,
-                c.is_personal_owner
+                c.is_personal_owner,
+                c.is_fleet_admin
             )
         }),
         None,
@@ -207,13 +208,17 @@ async fn a_newly_paired_or_minted_token_is_accepted_on_the_next_request() {
     hub.refused("box2-tok").await;
     {
         let s = hub.store.lock().unwrap();
-        s.insert_client_token("tablet", &auth::sha256_hex("tablet-tok"), "readonly")
+        // Trust is a person's, carried by a full device (identity
+        // sub-project 1): the tablet is the owner's full device.
+        s.insert_client_token("tablet", &auth::sha256_hex("tablet-tok"), "full")
+            .unwrap();
+        s.set_client_person("tablet", s.personal_owner_id().unwrap())
             .unwrap();
         s.upsert_host("box2").unwrap();
         s.upsert_host_token("box2", "box2-tok").unwrap();
     }
     let r = hub.accepted("tablet-tok").await;
-    assert!(r.contains("caller=client:tablet mode=Readonly"), "{r}");
+    assert!(r.contains("caller=client:tablet mode=Full"), "{r}");
     hub.accepted("box2-tok").await;
 
     // Trust granted by another process reaches the next request too.
@@ -332,4 +337,132 @@ async fn the_connection_carries_the_pane_and_whether_this_is_the_hubs_owner() {
         r.contains("owner=false"),
         "an unbound device is nobody, never everybody: {r}"
     );
+}
+
+/// Identity sub-project 1: `authorize` decides `is_fleet_admin` from the
+/// realm's role mappings, which ride the cache's auth epoch — a grant or a
+/// revoke by any writer holds from the very next request.
+#[tokio::test]
+async fn a_fleet_admin_grant_and_revoke_hold_on_the_next_request() {
+    use crate::store::{Principal, RoleRef, ROLE_FLEET_ADMIN};
+    let hub = hub().await;
+    let r = hub.accepted(MASTER_TOK).await;
+    assert!(r.contains("fleet_admin=true"), "{r}");
+    let r = hub.accepted(HOST_TOK).await;
+    assert!(r.contains("fleet_admin=false"), "{r}");
+
+    let (ada, fa) = {
+        let s = hub.store.lock().unwrap();
+        let ada = s.create_person("ada", None).unwrap().id;
+        s.set_client_person("phone", Some(ada)).unwrap();
+        let fa = s
+            .role(RoleRef::Realm(ROLE_FLEET_ADMIN))
+            .unwrap()
+            .unwrap()
+            .id;
+        (ada, fa)
+    };
+    let r = hub.accepted(PHONE_TOK).await;
+    assert!(
+        r.contains("owner=false") && r.contains("fleet_admin=false"),
+        "{r}"
+    );
+
+    // Granted by another process, as `fleet-hub` would.
+    hub.other_process()
+        .map_role(Principal::Person(ada), fa)
+        .unwrap();
+    let r = hub.accepted(PHONE_TOK).await;
+    assert!(
+        r.contains("owner=false") && r.contains("fleet_admin=true"),
+        "{r}"
+    );
+
+    hub.store
+        .lock()
+        .unwrap()
+        .unmap_role(Principal::Person(ada), fa)
+        .unwrap();
+    let r = hub.accepted(PHONE_TOK).await;
+    assert!(r.contains("fleet_admin=false"), "the revoke holds: {r}");
+}
+
+/// Identity sub-project 1: a device unused past `auth.device_token_ttl_days`
+/// is a 401 on its next request, and a policy change written by another
+/// process (the settings move the auth epoch) reaches the next one too.
+/// The master and host tokens never expire.
+#[tokio::test]
+async fn an_idle_device_token_is_refused_and_a_policy_change_reaches_the_next_request() {
+    let hub = hub().await;
+    let long_ago = crate::store::now_unix() - 200 * 86_400;
+    // Paired and last seen long ago, and the idle clock started long ago.
+    let cli = hub.other_process();
+    cli.conn_ref()
+        .execute(
+            "UPDATE client_tokens SET created_at = ?1, last_seen_at = ?1 WHERE name = 'phone'",
+            [long_ago],
+        )
+        .unwrap();
+    cli.set_setting(
+        crate::service::settings::DEVICE_TOKEN_TTL_SINCE,
+        &long_ago.to_string(),
+    )
+    .unwrap();
+    // The default idle limit is 90 days.
+    hub.refused(PHONE_TOK).await;
+    hub.accepted(MASTER_TOK).await;
+    hub.accepted(HOST_TOK).await;
+
+    // Never sign out: the same token is back.
+    cli.set_setting(crate::service::settings::DEVICE_TOKEN_TTL_DAYS, "0")
+        .unwrap();
+    let r = hub.accepted(PHONE_TOK).await;
+    assert!(r.contains("caller=client:phone"), "{r}");
+
+    // A max age counts from pairing, however recently it was used: the
+    // request above stamped it seen.
+    cli.set_setting(crate::service::settings::DEVICE_TOKEN_MAX_AGE_DAYS, "100")
+        .unwrap();
+    hub.refused(PHONE_TOK).await;
+    cli.set_setting(crate::service::settings::DEVICE_TOKEN_MAX_AGE_DAYS, "0")
+        .unwrap();
+    hub.accepted(PHONE_TOK).await;
+}
+
+/// A device in daily use is never idle, though the cached row's
+/// `last_seen_at` can be as old as its snapshot (a stamp moves no epoch):
+/// this process's own stamps count.
+#[tokio::test]
+async fn a_device_this_hub_saw_is_not_idle_though_its_row_reads_old() {
+    let hub = hub().await;
+    let long_ago = crate::store::now_unix() - 200 * 86_400;
+    let cli = hub.other_process();
+    cli.set_setting(crate::service::settings::DEVICE_TOKEN_TTL_DAYS, "3650")
+        .unwrap();
+    cli.set_setting(
+        crate::service::settings::DEVICE_TOKEN_TTL_SINCE,
+        &long_ago.to_string(),
+    )
+    .unwrap();
+    cli.conn_ref()
+        .execute(
+            "UPDATE client_tokens SET created_at = ?1, last_seen_at = ?1 WHERE name = 'phone'",
+            [long_ago],
+        )
+        .unwrap();
+    // Seen now: the hub stamps it, in memory and in the row.
+    hub.accepted(PHONE_TOK).await;
+    // Put the row's stamp back (a stamp moves no epoch), then move the
+    // epoch: the snapshot now reads it last seen 200 days ago, as a cached
+    // row of a device used every day would after 200 days.
+    cli.conn_ref()
+        .execute(
+            "UPDATE client_tokens SET last_seen_at = ?1 WHERE name = 'phone'",
+            [long_ago],
+        )
+        .unwrap();
+    cli.set_setting(crate::service::settings::DEVICE_TOKEN_TTL_DAYS, "90")
+        .unwrap();
+    let r = hub.accepted(PHONE_TOK).await;
+    assert!(r.contains("caller=client:phone"), "{r}");
 }

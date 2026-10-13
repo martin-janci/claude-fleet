@@ -589,7 +589,8 @@ that fails is kept as the host's `provision_warning` and retried with a
 backoff (5 min, doubling, at most 6 h). By hand: `fleet-hub provision [--host
 <alias>] [--content-only]` (the `provision_hosts {host, content_only}` tool),
 or **Re-provision this host** on the host's page in a paired desktop — the
-hub owner's own device may run `provision_hosts` for one host with
+device of a fleet admin (the realm role `fleet-admin`; *People and
+devices*) may run `provision_hosts` for one host with
 `content_only` (never every host, a token or a rotation).
 
 **The pane header, and why `--content-only` cannot add it.** Provisioning also
@@ -1080,7 +1081,7 @@ into `state.db` beside the data it guards.
 | `FLEET_HUB_OIDC_CLIENT_ID` | — (required) | The Keycloak client's id. |
 | `FLEET_HUB_OIDC_CLIENT_SECRET` | unset | A confidential client's secret. Unset: a public client, PKCE alone. |
 | `FLEET_HUB_OIDC_ALLOWED_ROLES` | empty (any account) | Comma-separated realm roles, client roles or groups; a sign-in holding none is refused. `/team` and `team` match each other. |
-| `FLEET_HUB_OIDC_AUTO_PROVISION` | `true` | An account's first sign-in creates its person. `false`: only accounts the operator linked get in. |
+| `FLEET_HUB_OIDC_AUTO_PROVISION` | `false` | `false`: only an account the operator linked (`fleet-hub person link-sso <person> --subject <sub>`) gets in — the refusal page prints that command with the account's `sub`. `true`: an unknown account's first sign-in creates its person. |
 | `FLEET_HUB_OIDC_USERNAME_CLAIM` | `preferred_username` | The ID-token claim a new person is named after. |
 | `FLEET_HUB_OIDC_MODE` | `full` | `full` or `readonly`: what a device paired this way may do. |
 | `FLEET_HUB_OIDC_SCOPES` | `openid profile email` | Requested scopes (`openid` is always added). |
@@ -1114,8 +1115,14 @@ username or e-mail, which the provider may let its owner change:
 
 - An account already linked pairs as that person — refused if the person is
   disabled (`person disable` ends SSO reach too).
-- An account seen for the first time creates a person named after its
-  username, when auto-provisioning is on and no live person holds the name.
+- An account seen for the first time is refused by default, and the page
+  prints the `fleet-hub person link-sso <person> --subject <sub>` command
+  that invites it. The person must exist first; a new colleague's is
+  created by naming them (`fleet-hub pair --person <name>`,
+  `client bind-person`). Only when the operator turned
+  auto-provisioning on (`FLEET_HUB_OIDC_AUTO_PROVISION=true`) does a first
+  sign-in create a person named after its username, and then only when no
+  live person holds the name.
 - It is **never** linked to an existing person by name: anybody who can set
   their username at the provider could otherwise become a colleague. So
   that sign-in is refused, and the page prints the command for the
@@ -1140,7 +1147,8 @@ re-reads the keys hourly, and once more when a token names a key it does not
 hold. The token never passes through the browser. Starts and callbacks are rate-limited per
 address. A hub restart forgets every sign-in in flight, like every pairing
 code. What is not built: logout at the provider (a paired device lives
-until `client revoke` or `person disable`, as before), org membership from
+until `client revoke`, `person disable` or its token's expiry — *People and
+devices* → *Administration, trust, expiry and the audit log*), org membership from
 Keycloak groups, and sign-in from the desktop app's own window.
 
 ## Clients
@@ -1206,8 +1214,9 @@ What a client may do:
   `set_host_harnesses`, `pair_client`, `revoke_client`, `set_client_trust`
   and `list_clients` are master-token only, so a paired phone can neither
   re-provision the fleet nor pair a second device nor revoke (or trust) your
-  own client — nor even enumerate the other devices you have paired. The
-  hub owner's own devices (`Access::Person`) are the exception for a few:
+  own client — nor even enumerate the other devices you have paired. A
+  fleet admin's devices (`Access::Person`: the person holds the realm role
+  `fleet-admin`, as the hub's owner always does) are the exception for a few:
   `add_host` and `install_agent` (contract 13; the writes ask a trusted
   `full` device), `set_account_nickname` and `check_host` — so the phone and
   a paired desktop add a host from the hub's SSH config, name an account and
@@ -1234,6 +1243,12 @@ What a client may do:
   (`plan_sync`, `apply_sync`, `inventory`, secrets, `resolve_preview` and
   the rest) also need the personal grant: an org-only grant covers that
   catalog's config, load, layers and admissions, nothing more.
+  The personal grant is the device's person's (identity sub-project 1):
+  it maps the realm role `assets-admin` to them, so each of their `full`
+  devices bound to no org manages the personal catalog; an org catalog's
+  grant stays the one device's. The ASSETS column (and the
+  `catalog_grantees` list for `personal`) still reads the per-device row
+  kept as a mirror for one release.
   `list_catalogs` is open to the master or a person's own unbound full
   device, never an org-bound client; only the master token may
   `add_catalog` or `remove_catalog` (a removal drops every other client's
@@ -1248,9 +1263,20 @@ What a client may do:
   own: everything it sends with `send_prompt`, `broadcast_prompt` or
   `send_message` is delivered *without* the marker line, exactly as the
   master's `raw: true` is, so the receiving agent is not told to distrust
-  what you typed. The grant is per client, revocable with `client untrust`,
-  shown in `client list`, and takes effect on the client's next call; the
-  session timeline still records the call as `client:<name>`. Trust a device
+  what you typed. **Trust is the device's person's**, not the one device's
+  (identity sub-project 1): trusting a device maps the realm role
+  `fleet-trusted` to its person, so **every `full` device of that person is
+  trusted**, and a readonly one never is. A device bound to no person cannot
+  be trusted (`E_VALIDATE`: `client bind-person` it first), nor can a peer
+  link or an updater token. `client untrust` takes back the person's direct
+  grant, and is refused (`E_VALIDATE`, naming where) while the person still
+  holds the role through a group or a composite — take it back there
+  (`fleet-hub realm`). An upgrade maps `fleet-trusted` to every person who
+  had a trusted live device (migration 181), so their other `full` devices
+  are trusted from then on. The change takes effect on the client's next
+  call; the session timeline still records the call as `client:<name>`, and
+  `client list` still shows the per-device `trusted_at` column, which is
+  kept as a mirror for one release and is not what the hub reads. Trust a device
   whose keyboard is yours — the desktop app paired to this hub, your phone —
   never a token an agent holds: what makes an agent's output safe to relay
   is precisely the marker. A fresh pairing is untrusted, and a hub older than
@@ -1276,7 +1302,7 @@ What a client may do:
   beat). Leaving `--person` out pairs the device to **this hub's own owner**,
   which is what makes pairing your own second phone need nothing new; a peer
   hub link and an updater token are nobody's device and are refused either
-  way. Only the hub owner's own device reaches the fleet's settings — see *On
+  way. Only a fleet admin's device reaches the fleet's settings — see *On
   a paired device* under *Configuration*.
 - **Sharing a session, and the sessions nobody owns** (multi-user M1). A
   session a person starts is private to them; they share it with one
@@ -1419,8 +1445,13 @@ it stops.
 
 ### People and devices
 
-A **person** is a row in the hub's database — a name, and nothing else. There
-is no registration, no password and no account service: a fresh hub mints its
+A **person** is a row in the hub's database, shaped like a Keycloak user
+(identity sub-project 1, spec
+`docs/superpowers/specs/2026-10-11-identity-realm-model-design.md`): a name,
+a `uuid`, and a profile that starts empty — `email` (unique among live
+people), `email_verified`, `first_name`, `last_name` and `attributes`
+(migration 180; `realm_admin { update_user }`, `fleet-hub realm user
+update`). There is no registration, no password and no account service: a fresh hub mints its
 own owner on first run, and anyone added later is created the first time you
 name them. A **device** is a paired client (*Pair a phone*), and it belongs to
 exactly one person. That is what makes a session's owner unambiguous.
@@ -1480,13 +1511,89 @@ those rows stay theirs and stay private, readable by nobody, and no command
 here moves them; it does not touch the grants *they* made, which belong to each
 session's own owner; it cannot disable this hub's owner, because every access
 gate keys on that row (rename the owner instead, or revoke their devices one at
-a time with `client revoke`); and **there is no re-enable in this release** —
-`person disable` has no inverse, and a device cannot be bound to a disabled
-person, so plan on adding a fresh person if someone comes back. No tool over
-the control API disables anybody either: this is a command on the hub machine,
-run as the person at its console, like `client bind-person` and `session
-claim`. It needs no running hub, and a running one honours it from its next
-request.
+a time with `client revoke`); and it is not undone by **re-enabling** —
+`fleet-hub person enable <name|id>` (or `org_admin { enable_person }`) lets
+someone who comes back sign in and be paired again, but gives back none of
+their devices, shares, groups, org memberships or roles: pair and add them
+again. Re-enabling is refused while a live person holds their name or email
+address. Over the control API, a fleet admin's trusted `full` device
+disables and re-enables people too (`org_admin { disable_person |
+enable_person }`, `realm_admin { disable_user | enable_user }`), and nobody
+disables themselves; the command here is the hub machine's own, run as the
+person at its console, like `client bind-person` and `session claim`. It
+needs no running hub, and a running one honours it from its next request.
+The hub's owner can never be disabled, by either.
+
+### Administration, trust, expiry and the audit log
+
+**Who administers the fleet is a role, not one person.** A person holding
+the realm role `fleet-admin` — mapped to them directly, through a group, or
+through a composite role — administers the fleet from a device of theirs
+**bound to no org**: the fleet's settings, `org_admin` over every org, and
+the other tools that used to be the hub owner's alone. The hub's owner
+always counts as one, and migration 181 maps the role to them; the master
+token and an admin-scoped named token keep it as before. Nobody removes
+their own `fleet-admin`, and it never leaves the hub's owner or its last
+holder.
+
+`fleet-hub realm role map fleet-admin --user ada` makes a colleague one,
+whatever orgs ada is or was in: a fleet admin is exempt from the org fence
+on devices (*Companies: members and roles*), as the hub's owner is, so
+ada's devices keep their own binding — one bound to no org administers the
+fleet, one the operator bound to an org stays bound to it. Unmapping the
+role fences ada's devices by their memberships again from the next request.
+
+**Trust and the personal asset grant are the person's** (realm roles
+`fleet-trusted` and `assets-admin`; see *Trusted* and the asset grant under
+*Clients*). Nobody untrusts a device of their own person through
+`org_admin`: that would untrust the device in their hand too. Because
+trust reaches every `full` device of the person, an org admin trusts a
+member's device (or pairs one trusted) only while every device of that
+member is fenced to the org and they are in no other org; otherwise it is a
+fleet admin's call (`E_FORBIDDEN`). Untrusting is always theirs. Migration
+181 made a person trusted only for a trusted `full` device of theirs bound
+to no org — a trusted org-bound device never vouched for their others.
+
+**Device tokens expire.** A paired device's token stops resolving after
+`auth.device_token_ttl_days` (default 90; `0` never) without a request, or
+`auth.device_token_max_age_days` after pairing however much it is used
+(default `0`, off). The hub answers `401` as for an unknown token, and the
+device must be paired again. A peer link and an updater token never expire
+this way. Every token that existed at the upgrade starts its idle clock at
+the upgrade (migration 183 records the moment as
+`auth.device_token_ttl_since`), so the upgrade signs nobody out; from
+then on, a device unused for 90 days is. Both settings are on Settings →
+Limits; changing either re-reads every cached token.
+
+**Re-enabling.** `fleet-hub person enable <name|id>` (or `org_admin {
+enable_person }`, `realm_admin { enable_user }`) undoes the disable flag
+only; see *People and devices* above.
+
+**The audit log.** Every change made through `org_admin`, `realm_admin`,
+the master's `revoke_client` / `set_client_trust`, pairing, SSO
+provisioning and `fleet-hub person|client|realm` is an admin event
+(`admin_events`, migration 182): when, the acting person and device (none
+for the operator on the hub machine), the action, the resource's type and
+id, and what the change said, with every key that could hold a secret
+dropped and the text cut at 4096 characters. The events come from
+`org_admin` (`pair_device` included), `realm_admin`, the master's
+`revoke_client` and `set_client_trust`, redeeming a pairing code, an SSO
+sign-in that creates a person and its account link, and the hub CLI's
+`person rename|disable|enable|link-sso|unlink-sso`, `client
+grant|ungrant|bind-person|unbind-person` and `realm` commands. The table is
+append-only in SQL: an update aborts, and a delete aborts except in the
+retention sweep, which drops events older than `auth.audit_retention_days`
+(default 365; `0` keeps them forever). Read it with `realm_admin { audit }`
+or `fleet-hub realm audit`.
+
+What is not recorded yet: a pairing code carries no minter, so a code
+minted by `pair_client` or `fleet-hub pair` leaves no event until it is
+redeemed (and then names the device, not who minted it); `fleet-hub client
+bind` (a device's org) records none, and neither do `fleet-hub org …`
+(`member add|rm|grants`, `own-hub`, `unclaimed-count`, and the org,
+rule, host and tracker commands it routes through `work_admin`) and the
+master's `work_admin` org actions — though their `org_admin` equivalents
+do.
 
 ### Companies: members and roles
 
@@ -1496,26 +1603,29 @@ three roles:
 
 | Role | What they get |
 |---|---|
-| **admin** | Everything the hub's owner can do to that org in Settings → Organisations — its settings, colour, isolation, auto-tidy, Jev consent, its own settings, its spend, its members, its members' devices (pair, trust, revoke) and its catalogs' grants — and nothing outside it. |
+| **admin** | Everything a fleet admin can do to that org in Settings → Organisations — its settings, colour, isolation, auto-tidy, Jev consent, its own settings, its spend, its members, its members' devices (pair, trust, revoke) and its catalogs' grants — and nothing outside it. |
 | **member** | The org's work, and what is shared with the org. |
 | **viewer** | The org's work view and overview, read-only. |
 
 A member's **devices follow their memberships**: a colleague's phone is fenced
 to the org they are in (to one of them, when they are in several — `bind_device`
 picks which), and a viewer's phone is read-only whatever it was paired as. The
-hub's owner and a person in no org keep whatever their device was bound to, so
-an upgrade changes nobody. A person taken out of their last org keeps their
+hub's owner, every other fleet admin, and a person in no org (who never was
+in one) keep whatever their device was bound to, so an upgrade changes
+nobody, and a fleet admin who is also an org member still administers the
+fleet from a device bound to no org. A person taken out of their last org keeps their
 row and their sessions, but their devices then read nothing of any org — a
 departed colleague does not fall back to the whole fleet's work.
 
-Some things stay the **hub owner's** whoever administers an org, because each
-decides which company something belongs to: the orgs' rules, which org a
+Some things stay a **fleet admin's** (the hub's owner, or anyone holding
+`fleet-admin`) whoever administers an org, because each decides which
+company something belongs to: the orgs' rules, which org a
 tracker belongs to, whether bound devices see unassigned work, people's names,
 disabling a person, and the two switches below. **Who administers a host** is
-the hub's owner — or, when a company owns the hub (`org own-hub`), that
+a fleet admin — or, when a company owns the hub (`org own-hub`), that
 company's admins: they route hosts into orgs and see how many sessions on each
 host nobody has claimed. An org's own admins see that count for its hosts only
-when the hub's owner turns it on (`org unclaimed-count`). Registering,
+when a fleet admin turns it on (`org unclaimed-count`). Registering,
 removing and provisioning hosts stay the operator's, as before.
 
 ```bash
@@ -1532,6 +1642,17 @@ These write `state.db` directly, like `person` and `client bind-person`; a
 running hub honours them from its next request. From a device, the org page's
 **Members** section does the same (`org_admin`).
 
+**A membership is a group membership.** Each org has managed groups
+`/orgs/<org>/admins`, `/orgs/<org>/members` and `/orgs/<org>/viewers`,
+mapped to the `fleet` client's roles `org-admin`, `org-member` and
+`org-viewer` (each a composite of the next). The commands above, the
+Members section and `org_admin`'s `set_member` / `remove_member` keep their
+shape and write that group membership; the org membership the rest of the
+hub reads (`org_members`) is a projection of it, rewritten in the same
+transaction. `realm_admin { add_member | remove_member }` on one of the
+three groups does the same. A managed group is never renamed, moved,
+deleted or given a role mapping by hand: its roles come from the org.
+
 **Sharing with a team** is a grant to an org: the owner of a session shares it
 with an org they are a member of (`session_share { org }`, or *an org* in the
 Share sheet), and it reaches the org's members and admins who are in it at that
@@ -1541,6 +1662,34 @@ receives one. Taking a member out of the org revokes what was shared with them
 on its sessions (`--keep-grants` keeps it); an admin can also lower or revoke
 those grants while they stay. Downward only: no admin can widen a grant, add a
 recipient or redirect one, and **no admin reads a member's private session**.
+
+### Groups, roles and the audit log
+
+`fleet-hub realm` is the operator's side of the `realm_admin` tool: users,
+groups, roles, role mappings and the admin audit log, written straight to
+`state.db` as the fleet authority (no running hub needed; the audit log
+records the actor as none). Groups are addressed by path
+(`/orgs/acme/members`), roles by reference (`fleet-admin`, or
+`<client>:<name>` such as `fleet:org-admin`). Every subcommand takes
+`--json`.
+
+```sh
+# Create a group under /orgs and put a person in it
+fleet-hub realm group create platform --parent /orgs
+fleet-hub realm group add /orgs/platform ada
+
+# Give the whole group the fleet-admin role (a person: --user ada)
+fleet-hub realm role map fleet-admin --group /orgs/platform
+fleet-hub realm effective ada
+
+# Read the audit log: who changed what, newest first
+fleet-hub realm audit --since 1760000000 --limit 20
+```
+
+Other subcommands: `realm user list|show|update|enable|disable`,
+`realm group list|show|rename|move|delete|remove`,
+`realm role list|create|delete|compose|decompose|unmap`. A managed group
+(one a company's membership keeps in step) refuses a role mapping.
 
 ### Two people on one host
 
@@ -1991,7 +2140,7 @@ fleet-hub tracker test 3
 
 **From a paired desktop.** Settings → Company (Organisations, Devices,
 People) changes this hub's orgs, paired devices and people through the
-`org_admin` tool: the owner's own device bound to no org reads them, and a
+`org_admin` tool: a fleet admin's device bound to no org reads them, and a
 **trusted** `full` one changes them (`fleet-hub client trust <name>`). It
 pairs a phone with a one-time code and QR (`pair_device`, a person's device
 only — peer links and updater tokens stay `fleet-hub pair --mode`), and
@@ -2897,15 +3046,16 @@ See `docs/pages.md` → *Guides*.
 
 **On a paired device** (declarative pages P6). The desktop paired with this
 hub shows these settings in its own Settings pages, read and written
-through the hub: `get_settings` and `set_setting` answer the master and the
-hub OWNER's own paired device — a client bound to no org whose person is
-this hub's owner (multi-user M1); never a per-host token, an org-bound
-client, or a colleague's device paired to the same hub. A device of either
+through the hub: `get_settings` and `set_setting` answer the master and a
+FLEET ADMIN's paired device — a client bound to no org whose person holds
+the realm role `fleet-admin` (this hub's owner always does); never a
+per-host token, an org-bound client, or the device of a colleague who is
+not a fleet admin. A device of either
 mode reads them; a `full` device proposes; a device you **trust**
 (`fleet-hub client trust <name>`) changes them and decides proposals,
 recorded in the history as `person (client <name>)`. The desktop's review
 uses `setting_proposals`, `setting_history` and `decide_setting_proposals`,
-served to the owner's own paired device and not to the master; a phone can
+served to a fleet admin's paired device and not to the master; a phone can
 read the page specs with `list_pages`. A page's data items (usage,
 retention) and page actions stay on a standalone desktop: a paired desktop
 shows the settings only.
@@ -3725,8 +3875,8 @@ deliberately.
   too; a leftover sidecar is tightened on the next open.
 - **`mcp.confirm_destructive`.** This desktop setting gates destructive
   tools (`broadcast_prompt`, `kill_session`, `delete_worktree`, …) behind a
-  UI confirmation dialog. On a hub the request waits for the owner's paired
-  device instead (`mcp_confirms`, `answer_mcp_confirm`) and expires after
+  UI confirmation dialog. On a hub the request waits for a fleet admin's
+  paired device instead (`mcp_confirms`, `answer_mcp_confirm`) and expires after
   ten minutes unanswered; leave the setting off (its default) unless one of
   your devices will answer. A `state.db` copied from a desktop can carry it
   switched on; `fleet-hub serve` logs a warning at startup when it is.

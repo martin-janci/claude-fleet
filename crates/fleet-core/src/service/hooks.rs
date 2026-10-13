@@ -1822,6 +1822,7 @@ mod tests {
             mode: crate::mcp::TokenMode::Full,
             pane: None,
             is_personal_owner: false,
+            is_fleet_admin: false,
         };
         let err = apply_hook(
             &store,
@@ -1844,6 +1845,7 @@ mod tests {
             mode: crate::mcp::TokenMode::Readonly,
             pane: None,
             is_personal_owner: false,
+            is_fleet_admin: false,
         };
         apply_hook(
             &store,
@@ -2151,6 +2153,7 @@ mod tests {
             mode: crate::mcp::TokenMode::Full,
             pane: None,
             is_personal_owner: false,
+            is_fleet_admin: false,
         };
         let err = apply_hook(
             &store,
@@ -2173,6 +2176,7 @@ mod tests {
             mode: crate::mcp::TokenMode::Readonly,
             pane: None,
             is_personal_owner: false,
+            is_fleet_admin: false,
         };
         apply_hook(
             &store,
@@ -2406,6 +2410,7 @@ mod tests {
             mode: crate::mcp::TokenMode::Full,
             pane: None,
             is_personal_owner: false,
+            is_fleet_admin: false,
         }
     }
 
@@ -3225,6 +3230,7 @@ mod tests {
             mode: crate::mcp::TokenMode::Full,
             pane: None,
             is_personal_owner: false,
+            is_fleet_admin: false,
         };
         for (event, field) in [
             ("SessionEnd", "reason"),

@@ -15,6 +15,21 @@ fn config() -> OidcConfig {
     .unwrap()
 }
 
+/// [`config`] with auto-provisioning turned on explicitly: since identity
+/// sub-project 1 it is off unless the operator sets
+/// `FLEET_HUB_OIDC_AUTO_PROVISION=true`.
+fn provisioning_config() -> OidcConfig {
+    OidcConfig::from_lookup(|k| match k {
+        ENV_ISSUER => Some(format!("{ISS}/")),
+        ENV_CLIENT_ID => Some("fleet-hub".into()),
+        ENV_CLIENT_SECRET => Some("shh".into()),
+        ENV_AUTO_PROVISION => Some("true".into()),
+        _ => None,
+    })
+    .unwrap()
+    .unwrap()
+}
+
 fn discovery() -> serde_json::Value {
     serde_json::json!({
         "issuer": ISS,
@@ -109,7 +124,11 @@ fn no_issuer_means_sign_on_is_off_and_a_half_config_is_an_error() {
 fn the_config_defaults_and_never_prints_its_secret() {
     let c = config();
     assert_eq!(c.issuer, ISS, "the trailing slash is dropped");
-    assert!(c.auto_provision);
+    assert!(
+        !c.auto_provision,
+        "an unknown account is not provisioned unless the operator says so"
+    );
+    assert!(provisioning_config().auto_provision);
     assert_eq!(c.mode, "full");
     assert_eq!(c.username_claim, "preferred_username");
     assert_eq!(c.scopes, "openid profile email");
@@ -355,7 +374,7 @@ fn signed_in(username: Option<&str>, roles: &[&str]) -> SignedIn {
 #[test]
 fn a_first_sign_in_provisions_a_person_and_the_next_finds_them() {
     let s = Store::open_in_memory().unwrap();
-    let oidc = OidcProvider::with_transport(config(), Arc::new(FakeTransport::new()));
+    let oidc = OidcProvider::with_transport(provisioning_config(), Arc::new(FakeTransport::new()));
     let p = oidc
         .resolve_person(&s, &signed_in(Some("ada"), &[]))
         .unwrap();
@@ -372,11 +391,55 @@ fn a_first_sign_in_provisions_a_person_and_the_next_finds_them() {
     assert_eq!(again.id, p.id);
 }
 
+/// Identity sub-project 1: a first sign-in's two writes are admin events —
+/// the person provisioned and the identity linked — and a sign-in that
+/// finds them is not one.
+#[test]
+fn a_provisioning_sign_in_records_provision_and_link_and_a_login_nothing() {
+    let s = Store::open_in_memory().unwrap();
+    let oidc = OidcProvider::with_transport(provisioning_config(), Arc::new(FakeTransport::new()));
+    let epoch = |s: &Store| -> i64 {
+        s.conn_ref()
+            .query_row("SELECT epoch FROM auth_epoch WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    };
+    let p = oidc
+        .resolve_person(&s, &signed_in(Some("ada"), &[]))
+        .unwrap();
+    let all = || {
+        s.admin_events(&crate::store::AdminEventQuery {
+            limit: 10,
+            ..Default::default()
+        })
+        .unwrap()
+    };
+    let ev = all();
+    let actions: Vec<(&str, &str)> = ev
+        .iter()
+        .map(|e| (e.action.as_str(), e.resource_type.as_str()))
+        .collect();
+    assert_eq!(actions, [("link", "identity"), ("provision", "person")]);
+    assert!(ev.iter().all(|e| e.actor_person == Some(p.id)));
+    assert_eq!(ev[1].resource_id, p.id.to_string());
+    // The next sign-in stamps last_login_at: no event, and no auth-epoch
+    // bump (the update trigger ignores that column).
+    let before = epoch(&s);
+    oidc.resolve_person(&s, &signed_in(Some("ada"), &[]))
+        .unwrap();
+    assert_eq!(all().len(), 2);
+    assert_eq!(epoch(&s), before);
+    // Unlinking the account re-resolves every cached caller.
+    s.unlink_identity(ISS, "0b7d-uuid").unwrap();
+    assert!(epoch(&s) > before);
+}
+
 #[test]
 fn an_existing_person_is_never_taken_over_by_name() {
     let s = Store::open_in_memory().unwrap();
     let ada = s.create_person("ada", None).unwrap();
-    let oidc = OidcProvider::with_transport(config(), Arc::new(FakeTransport::new()));
+    let oidc = OidcProvider::with_transport(provisioning_config(), Arc::new(FakeTransport::new()));
     let err = oidc
         .resolve_person(&s, &signed_in(Some("ada"), &[]))
         .unwrap_err();
@@ -409,7 +472,7 @@ fn a_disabled_person_and_a_missing_role_are_refused() {
         Refusal::Forbidden(_)
     ));
 
-    let mut cfg = config();
+    let mut cfg = provisioning_config();
     cfg.allowed_roles = vec!["/fleet".into()];
     let gated = OidcProvider::with_transport(cfg, Arc::new(FakeTransport::new()));
     let fresh = Store::open_in_memory().unwrap();
@@ -427,15 +490,18 @@ fn a_disabled_person_and_a_missing_role_are_refused() {
 
 #[test]
 fn without_auto_provision_only_a_linked_account_gets_in() {
+    // The default (identity sub-project 1): no FLEET_HUB_OIDC_AUTO_PROVISION.
     let s = Store::open_in_memory().unwrap();
-    let mut cfg = config();
-    cfg.auto_provision = false;
-    let oidc = OidcProvider::with_transport(cfg, Arc::new(FakeTransport::new()));
+    let oidc = OidcProvider::with_transport(config(), Arc::new(FakeTransport::new()));
+    // "ada" is a free name: nothing but the default stops the provisioning.
+    assert!(s.get_person_by_name("ada").unwrap().is_none());
     let err = oidc
         .resolve_person(&s, &signed_in(Some("ada"), &[]))
         .unwrap_err();
+    assert!(matches!(err, Refusal::Forbidden(_)), "{err:?}");
     assert!(err.message().contains("link-sso"), "{err:?}");
     assert!(s.get_person_by_name("ada").unwrap().is_none());
+    assert!(s.get_identity(ISS, "0b7d-uuid").unwrap().is_none());
 }
 
 #[test]
@@ -527,7 +593,7 @@ async fn without_a_provider_both_routes_are_404() {
 async fn a_sign_in_ends_in_a_pairing_code_for_that_person() {
     let fake = fake_with_discovery();
     let oidc = Arc::new(OidcProvider::with_transport(
-        config(),
+        provisioning_config(),
         Arc::new(fake.clone()),
     ));
     let (app, store, pairings) = app(Some(oidc));

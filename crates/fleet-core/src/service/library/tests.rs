@@ -25,6 +25,7 @@ fn device(s: &Store, person: i64) -> ViewScope {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     }
     .view_scope(s)
     .unwrap()

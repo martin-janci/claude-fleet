@@ -180,6 +180,7 @@ impl Who {
             // a caller the resolver could not produce is not produced here
             // either.
             is_personal_owner: person == Some(fx.admin),
+            is_fleet_admin: person == Some(fx.admin),
         };
         let host = |alias: &str, pane: Option<&str>| Caller {
             api: None,
@@ -188,6 +189,7 @@ impl Who {
             mode: TokenMode::Full,
             pane: pane.map(str::to_string),
             is_personal_owner: false,
+            is_fleet_admin: false,
         };
         match self {
             Who::Owner => device(Some(fx.owner)),
@@ -2192,6 +2194,7 @@ async fn claiming_needs_the_pane_of_the_row_not_merely_its_host() {
         mode: TokenMode::Full,
         pane: Some(PANE_UNCLAIMED.into()),
         is_personal_owner: false,
+        is_fleet_admin: false,
     };
     // The sibling row, on the same host, with the same token: refused.
     let other =

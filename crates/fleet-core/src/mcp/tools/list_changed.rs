@@ -191,6 +191,7 @@ mod tests {
             mode: TokenMode::Full,
             pane: None,
             is_personal_owner: false,
+            is_fleet_admin: false,
         };
         assert!(wants_notification(&host));
         let client = |mode| Caller {
@@ -206,6 +207,7 @@ mod tests {
             mode,
             pane: None,
             is_personal_owner: false,
+            is_fleet_admin: false,
         };
         assert!(wants_notification(&client(TokenMode::Full)));
         assert!(wants_notification(&client(TokenMode::Readonly)));

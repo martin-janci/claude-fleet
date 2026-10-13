@@ -114,6 +114,10 @@ pub const PAGE_FILES: &[(&str, &str)] = &[
         include_str!("../../pages/settings.people.json"),
     ),
     (
+        "settings.groups.json",
+        include_str!("../../pages/settings.groups.json"),
+    ),
+    (
         "settings.federation.json",
         include_str!("../../pages/settings.federation.json"),
     ),

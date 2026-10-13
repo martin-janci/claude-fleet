@@ -406,6 +406,7 @@ async fn a_run_the_caller_cannot_see_is_not_followed() {
         mode: crate::mcp::auth::TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     }
     .view_scope(&s)
     .unwrap();

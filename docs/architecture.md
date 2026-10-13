@@ -120,6 +120,29 @@ bullet for the area you are about to change.
   (declarative pages P6) —
   and follows `GET /events` instead of polling. Hub-only; `fleet-hub
   pair|client` is the operator's side. See `docs/hub.md` → *Pair a phone*.
+- **The realm model** (identity sub-project 1, spec
+  `docs/superpowers/specs/2026-10-11-identity-realm-model-design.md`,
+  migrations 180–183, `store/realm.rs`): the realm tables — `clients`,
+  `roles`, `role_composites`, `groups`, `group_members`,
+  `user_role_mappings`, `group_role_mappings` — are the source of truth for
+  who holds which role. `org_members` is a projection of each org's managed
+  groups `/orgs/<org>/{admins,members,viewers}`, rewritten by
+  `reproject_org_memberships_in_tx` in the transaction that changes a
+  group membership, so its readers (`ViewScope`, the org admin's authority,
+  grant checks) are unchanged. A write to the realm tables that changes
+  what a role decides moves the auth epoch (triggers); `AuthRows` — the
+  hub's token cache, or a direct read — carries `RealmSets` from
+  `Store::realm_sets` (the holders of `fleet-admin`, the hub's owner always
+  among them, `fleet-trusted` and `assets-admin`) at the same epoch as the
+  token rows, and `mcp::authorize` runs `auth::apply_realm` on every
+  resolved caller before any gate: a paired device's `is_fleet_admin` comes
+  from its person, and `ClientRef::trusted` is its person's `fleet-trusted`
+  on a `full` device (empty sets fail closed). The same pass refuses an
+  expired device token (`auth::device_token_expired`, `DeviceTokenPolicy`
+  on `AuthRows`). `admin_events` (`store/admin_events.rs`) is the
+  append-only audit log, deletable only by the `auth.audit_retention_days`
+  sweep in `service::gc`. Administration is `realm_admin`
+  (`service/realm_admin.rs`) and `fleet-hub realm`.
 - **Assets S1a — unmanaged inventory** (plan
   `docs/superpowers/plans/2026-09-29-assets-s1a-foundation.md`, spec
   `docs/superpowers/specs/2026-09-29-assets-workspace-design.md`): an
