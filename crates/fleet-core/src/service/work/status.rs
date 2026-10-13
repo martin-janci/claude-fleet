@@ -22,6 +22,12 @@ use std::sync::Mutex;
 /// `local::local_item_visible` (its links). Once visible, `store` decides
 /// the rest: the three-category check, and the tracker refusal that names
 /// the ticket.
+///
+/// One thing a per-host token may not do (design 2026-10-13 D3): set a
+/// local item to `done` while its completion gate (`gate::completion_gate`)
+/// has not passed. It is refused with `E_INVALID_STATE`, naming the
+/// `done_when` lines and open subtasks in the way; a person is never
+/// refused.
 pub fn set_status(
     store: &Mutex<Store>,
     scope: &OrgScope,
@@ -29,7 +35,17 @@ pub fn set_status(
     status: &str,
 ) -> Result<WorkItemRow, IpcError> {
     let s = lock(store)?;
-    require_visible(&s, scope, item_id)?;
+    let item = require_visible(&s, scope, item_id)?;
+    // Design 2026-10-13 D3: an agent does not decide a task is done past its
+    // own acceptance lines or open subtasks. A person is never refused.
+    if status == "done" && scope.host().is_some() && item.source == "local" {
+        let now = crate::service::catalog::now_secs();
+        let gate = super::gate::completion_gate(&s, &item, now)?;
+        let gate = super::gate::for_scope(gate, &s, scope)?;
+        if let Some(why) = super::gate::refusal(&gate) {
+            return Err(IpcError::new(crate::ipc_error::codes::E_INVALID_STATE, why));
+        }
+    }
     s.set_item_status(item_id, status)?
         .ok_or_else(|| orgs::not_found("work item", item_id))
 }
@@ -48,21 +64,32 @@ pub fn keep_open(
         .ok_or_else(|| orgs::not_found("work item", item_id))
 }
 
+/// Whether `scope` may see `item`: a local one through its links
+/// (`local::local_item_visible`), a tracker one through its tracker's org.
+/// The one fence of [`set_status`] and [`keep_open`], and of the reads that
+/// answer about an item's result.
+pub(super) fn item_visible(
+    s: &Store,
+    scope: &OrgScope,
+    item: &WorkItemRow,
+) -> Result<bool, IpcError> {
+    if item.source == "local" {
+        super::local::local_item_visible(s, scope, item.id)
+    } else {
+        Ok(scope.sees_org(s.item_org(item.id)?))
+    }
+}
+
 /// The fence [`set_status`] documents: an item outside `scope` answers
-/// exactly as an unknown id.
-fn require_visible(s: &Store, scope: &OrgScope, item_id: i64) -> Result<(), IpcError> {
+/// exactly as an unknown id. Answers the item it found.
+fn require_visible(s: &Store, scope: &OrgScope, item_id: i64) -> Result<WorkItemRow, IpcError> {
     let Some(item) = s.get_work_item(item_id)? else {
         return Err(orgs::not_found("work item", item_id));
     };
-    let visible = if item.source == "local" {
-        super::local::local_item_visible(s, scope, item_id)?
-    } else {
-        scope.sees_org(s.item_org(item_id)?)
-    };
-    if !visible {
+    if !item_visible(s, scope, &item)? {
         return Err(orgs::not_found("work item", item_id));
     }
-    Ok(())
+    Ok(item)
 }
 
 /// The longest column name a status move carries.
@@ -452,6 +479,86 @@ mod tests {
         let w = seeded_local_item_on_host("mercury");
         let e = super::set_status(&w.store, &w.other_org_scope(), w.item, "done").unwrap_err();
         assert_eq!(e.code, crate::ipc_error::codes::E_NOTFOUND);
+    }
+
+    fn open_subtask(w: &Fx, title: &str) -> i64 {
+        w.store
+            .lock()
+            .unwrap()
+            .create_native_item(&crate::store::NativeItem {
+                title,
+                parent_id: Some(w.item),
+                ..Default::default()
+            })
+            .unwrap()
+            .id
+    }
+
+    fn stored_status(w: &Fx) -> String {
+        w.store
+            .lock()
+            .unwrap()
+            .get_work_item(w.item)
+            .unwrap()
+            .unwrap()
+            .status_category
+    }
+
+    #[test]
+    fn an_agent_may_not_set_done_past_an_open_subtask_a_person_may() {
+        let w = seeded_local_item_on_host("mercury");
+        let child = open_subtask(&w, "Child");
+        let e = super::set_status(&w.store, &w.host_scope(), w.item, "done").unwrap_err();
+        assert_eq!(e.code, crate::ipc_error::codes::E_INVALID_STATE);
+        assert!(
+            e.message.contains("subtask \"Child\" is open"),
+            "{}",
+            e.message
+        );
+        assert_eq!(stored_status(&w), "todo", "a refusal writes nothing");
+        // Only `done` is gated: the agent still says it is working on it.
+        let row = super::set_status(&w.store, &w.host_scope(), w.item, "in_progress").unwrap();
+        assert_eq!(row.status_category, "in_progress");
+        // Once the subtask is closed, the same call goes through.
+        w.store
+            .lock()
+            .unwrap()
+            .set_item_status(child, "done")
+            .unwrap();
+        let row = super::set_status(&w.store, &w.host_scope(), w.item, "done").unwrap();
+        assert_eq!(row.status_category, "done");
+    }
+
+    #[test]
+    fn a_person_is_never_refused_by_the_gate() {
+        let w = seeded_local_item_on_host("mercury");
+        open_subtask(&w, "Child");
+        let row = super::set_status(&w.store, &OrgScope::All, w.item, "done").unwrap();
+        assert_eq!(row.status_category, "done");
+    }
+
+    #[test]
+    fn an_agent_may_not_set_done_past_an_unchecked_line_until_a_person_checks_it() {
+        let w = seeded_local_item_on_host("mercury");
+        let line = "the docs say how to turn it on";
+        w.store
+            .lock()
+            .unwrap()
+            .set_item_done_when(w.item, &[line.to_string()], "person:1")
+            .unwrap();
+        let e = super::set_status(&w.store, &w.host_scope(), w.item, "done").unwrap_err();
+        assert_eq!(e.code, crate::ipc_error::codes::E_INVALID_STATE);
+        assert!(e.message.contains(line), "{}", e.message);
+        assert!(e.message.contains("is pending"), "{}", e.message);
+        assert_eq!(stored_status(&w), "todo");
+
+        w.store
+            .lock()
+            .unwrap()
+            .record_verification(w.item, line, true, "person:1", None)
+            .unwrap();
+        let row = super::set_status(&w.store, &w.host_scope(), w.item, "done").unwrap();
+        assert_eq!(row.status_category, "done");
     }
 }
 
