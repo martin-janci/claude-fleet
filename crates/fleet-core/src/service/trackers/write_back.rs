@@ -1,5 +1,14 @@
 //! Write-back to trackers (work graph M13.4e, decisions D3 / D29): the PR
-//! remote link, and a fleet comment posted to its ticket.
+//! remote link, a fleet comment posted to its ticket, and a person's status
+//! move.
+//!
+//! **Status moves** (owner decision 2026-10-12, CF-6): a person who moves a
+//! ticket's card in fleet moves the ticket at its tracker, only where the
+//! tracker's admin turned `write_back.status` on (off by default; every
+//! provider). This one does NOT use the outbox: it is sent while the person
+//! waits (`service::work::status::move_status`), because a move replayed by
+//! a backoff would undo what was done at the tracker since. [`writes_status`]
+//! is its gate.
 //!
 //! **Comments** (owner decision 2026-10-11, migration 172): a person who
 //! comments on a tracker ticket in fleet may ask for the comment to be
@@ -191,6 +200,13 @@ fn writes_pr_links(t: &TrackerRow) -> bool {
 /// The tracker's provider posts comments and its admin turned that on.
 pub fn writes_comments(t: &TrackerRow) -> bool {
     super::provider_caps(t).comments && t.settings.write_back.comments
+}
+
+/// The tracker's provider takes writes and its admin lets a person's status
+/// move reach it (`write_back.status`, CF-6). Sent at once by
+/// `service::work::status::move_status`, never through the outbox.
+pub fn writes_status(t: &TrackerRow) -> bool {
+    super::provider_caps(t).write && t.settings.write_back.status
 }
 
 /// Both orgs known and different: never write there.

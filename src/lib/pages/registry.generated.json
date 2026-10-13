@@ -5003,6 +5003,10 @@
             {
               "key": "post_comments",
               "type": "field"
+            },
+            {
+              "key": "move_tickets",
+              "type": "field"
             }
           ],
           "title": "Write-back"
@@ -7231,6 +7235,20 @@
           "merge_path": [
             "write_back",
             "comments"
+          ],
+          "on_off": false,
+          "type": "bool"
+        },
+        {
+          "confirm": "Fleet will write to this tracker: a ticket a person moves in fleet changes status there, under this credential's account.",
+          "default": false,
+          "edit": "settings",
+          "help": "Let a person who moves a ticket's card on the Board move the ticket here too: a Jira transition, a Linear state, an Asana section or completion, a GitHub issue closed or reopened. Agents never move tickets. The token needs permission to edit issues.",
+          "id": "move_tickets",
+          "label": "Move tickets",
+          "merge_path": [
+            "write_back",
+            "status"
           ],
           "on_off": false,
           "type": "bool"

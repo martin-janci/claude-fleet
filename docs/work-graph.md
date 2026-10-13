@@ -460,8 +460,40 @@ states: to do, in progress, done. You never have to set it: fleet marks work
 request it produced is merged. Setting it yourself overrides that for good; the
 same work will not flip back because a session started again.
 
-A ticket's status is not yours to set here — it belongs to Jira, GitHub, Asana
-or Linear, and fleet would be overwritten on its next sync. Change it there.
+A ticket's status belongs to its tracker — Jira, GitHub, Asana or Linear —
+and fleet never keeps one of its own for it: the next sync would overwrite
+it. What fleet can do is move the ticket *at* the tracker.
+
+#### Moving a ticket from the Board
+
+With **Move tickets** on for a tracker (Settings → Trackers → Write-back,
+any provider, off by default, behind a confirm: it is the tracker admin's
+call), a ticket's card on the Board is no longer locked. Drag it to another
+column, or press ← / →, and fleet moves the ticket at the tracker, under the
+tracker credential's account, while you wait. The card then shows what the
+tracker says, which can be a neighbouring status when the tracker has no
+exact one.
+
+Columns named after a tracker's own status (Jira's *In Review*, an Asana
+section) ask for exactly that status; the plain *To do*, *In progress* and
+*Done* columns ask for the first status of that kind:
+
+| Tracker | What a move does |
+| --- | --- |
+| Jira Cloud, Data Center | Takes the workflow transition that leads to the column's status, else the first one that leads to a status of that kind. Only moves the workflow allows from where the issue is. |
+| Linear | Sets the team's workflow state of that name, else its first *started* state for In progress, first *completed* for Done (never *canceled*), and *unstarted* before *backlog* for To do. |
+| Asana | Dropped on a section's column: moves the task to that section. Plain *Done* (or *Completed*): completes it. Plain *To do* / *In progress*: moves it to the board's first section mapped to that status, top to bottom, and reopens it if it was completed. |
+| GitHub | *Done* closes the issue (*Closed as not planned* closes it that way); any other column reopens a closed one. An open issue has no other status to move to: it is in progress while a pull request is linked. |
+
+If the tracker has no such move, nothing is changed and the card says why
+in the tracker's terms: "ABC-12's workflow has no move to Done from its
+current status; it allows: In Review", a Jira transition whose screen needs
+a field filled in, an Asana board with no section mapped to In progress
+(map one in the tracker's section map, or drop the card on a section's own
+column). Only a person moves a ticket: an agent's `set_status` on one is
+refused. With the setting off the card stays locked and says where to turn
+it on. The token needs permission to edit issues. The List view and the
+phone do not move tickets yet.
 
 ### Detection
 

@@ -6,7 +6,10 @@ import {
   boardColumnOf,
   boardLaneOf,
   boardLiveSession,
+  boardEditable,
   boardMoveRefusal,
+  boardMovesAtTracker,
+  boardMoveTarget,
   boardStep,
   displayTitle,
   groupTasksByStatus,
@@ -223,12 +226,32 @@ describe('the board', () => {
     expect(boardStep(lanes, lanes[4], 1)).toBeNull();
   });
 
-  it('only a native item moves; a ticket names its tracker, a key says why', () => {
+  it('a native item moves; a ticket names its tracker and the setting, a key says why', () => {
     expect(boardMoveRefusal(task({ kind: 'local', item_id: 3 }))).toBeNull();
     expect(boardMoveRefusal(task({ key: 'ABC-12', tracker_name: 'Jira (acme)' }))).toBe(
-      "ABC-12's status belongs to Jira (acme). Change it there.",
+      'ABC-12\'s status belongs to Jira (acme). Change it there, or turn on "Move tickets" for it in Settings → Trackers.',
     );
     expect(boardMoveRefusal(task({ kind: 'ref', item_id: null, key: 'LOC-1' }))).toContain('bare key');
+  });
+
+  it('a ticket moves where its tracker takes moves, and is still not edited here (CF-6)', () => {
+    const ticket = task({ key: 'ABC-12', item_id: 12, tracker_name: 'Jira (acme)', status_movable: true });
+    expect(boardMoveRefusal(ticket)).toBeNull();
+    expect(boardMovesAtTracker(ticket)).toBe(true);
+    expect(boardEditable(ticket)).toBe(false);
+    // A bare key and a native item never move at a tracker, whatever they carry.
+    expect(boardMovesAtTracker(task({ kind: 'ref', item_id: null, key: 'LOC-1', status_movable: true }))).toBe(false);
+    expect(boardMovesAtTracker(task({ kind: 'local', item_id: 3, status_movable: true }))).toBe(false);
+    expect(boardEditable(task({ kind: 'local', item_id: 3 }))).toBe(true);
+  });
+
+  it("a ticket's move names the tracker's column; a native one only the status (CF-6)", () => {
+    const ticket = task({ key: 'ABC-12', item_id: 12, status_movable: true });
+    const review = { id: 'doing:in review', label: 'In Review', status: 'doing' as const };
+    const done = { id: 'done', label: 'Done', status: 'done' as const };
+    expect(boardMoveTarget(ticket, review)).toEqual({ status: 'in_progress', statusName: 'In Review' });
+    expect(boardMoveTarget(ticket, done)).toEqual({ status: 'done' });
+    expect(boardMoveTarget(task({ kind: 'local', item_id: 3 }), review)).toEqual({ status: 'in_progress' });
   });
 
   it('shows the primary live session and its host, never a suggestion or a past one', () => {

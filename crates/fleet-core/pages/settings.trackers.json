@@ -143,6 +143,10 @@
         {
           "type": "field",
           "key": "post_comments"
+        },
+        {
+          "type": "field",
+          "key": "move_tickets"
         }
       ]
     },

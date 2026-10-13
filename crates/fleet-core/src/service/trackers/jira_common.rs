@@ -148,6 +148,67 @@ pub fn map_status_category(key: Option<&str>) -> &'static str {
     }
 }
 
+/// PURE: the id of the transition that moves issue `key` to a status of
+/// `category` (CF-6), out of Jira's answer to `GET issue/{key}/transitions`:
+/// the one leading to the status called `name` when there is one, else the
+/// first leading to any status of that category, in the workflow's own
+/// order. A workflow offers only the moves it allows from where the issue
+/// is, so none at all is [`TrackerError::Unsupported`], said in words.
+pub(crate) fn pick_transition(
+    v: &Value,
+    key: &str,
+    category: &str,
+    name: Option<&str>,
+) -> Result<String, TrackerError> {
+    let offered: Vec<(&str, &str, &str)> = v["transitions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|t| t["isAvailable"].as_bool() != Some(false))
+        .filter_map(|t| {
+            let id = t["id"].as_str()?;
+            (!id.is_empty() && id.len() <= 20 && id.bytes().all(|b| b.is_ascii_digit())).then_some(
+                (
+                    id,
+                    t["to"]["name"].as_str().unwrap_or_default(),
+                    map_status_category(t["to"]["statusCategory"]["key"].as_str()),
+                ),
+            )
+        })
+        .collect();
+    let by_name = name.and_then(|n| {
+        offered
+            .iter()
+            .find(|(_, to, _)| super::same_status_name(to, n))
+    });
+    match by_name.or_else(|| offered.iter().find(|(_, _, c)| *c == category)) {
+        Some((id, _, _)) => Ok(id.to_string()),
+        None => {
+            let mut reachable: Vec<&str> = offered
+                .iter()
+                .map(|(_, to, _)| *to)
+                .filter(|to| !to.is_empty())
+                .collect();
+            reachable.dedup();
+            let wanted = name.unwrap_or_else(|| super::category_label(category));
+            Err(TrackerError::Unsupported(if reachable.is_empty() {
+                format!("{key}'s workflow allows no move from its current status")
+            } else {
+                format!(
+                    "{key}'s workflow has no move to {wanted} from its current status; it \
+                     allows: {}",
+                    reachable
+                        .iter()
+                        .take(8)
+                        .map(|r| r.chars().take(60).collect::<String>())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }))
+        }
+    }
+}
+
 /// A resolution name → completed | not_planned | duplicate. Conservative:
 /// only names that plainly say "not done" or "duplicate" are told apart;
 /// everything else (Done, Fixed, a custom name) is `completed`.

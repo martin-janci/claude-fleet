@@ -378,6 +378,68 @@ impl GitHub {
     }
 }
 
+impl GitHub {
+    /// Close or reopen an issue (CF-6). GitHub has two states: done closes
+    /// it (as not planned when dropped on that column), anything else
+    /// reopens a closed one. An open issue is "in progress" only through a
+    /// linked pull request, which is not a move fleet can make.
+    async fn set_status(
+        &self,
+        key: &str,
+        external_id: Option<&str>,
+        category: &str,
+        name: Option<&str>,
+    ) -> Result<WriteOutcome, TrackerError> {
+        let r = match external_id {
+            Some(id) => ItemRef::Id(id.to_string()),
+            None => ItemRef::parse(key),
+        };
+        let id = self.issue_node_id(&r).await?;
+        let data = self
+            .gql(
+                "query($id: ID!) { node(id: $id) { ... on Issue { state } } }",
+                json!({ "id": id }),
+                CallKind::Other,
+            )
+            .await?;
+        let closed = match data["node"]["state"].as_str() {
+            Some("CLOSED") => true,
+            Some("OPEN") => false,
+            _ => return Err(TrackerError::NotFound),
+        };
+        let (query, vars, answer) = if category == "done" {
+            let reason = match name {
+                Some(n) if super::same_status_name(n, "Closed as not planned") => "NOT_PLANNED",
+                _ => "COMPLETED",
+            };
+            (
+                "mutation($id: ID!, $reason: IssueClosedStateReason) { closeIssue(input: \
+                 { issueId: $id, stateReason: $reason }) { issue { id } } }",
+                json!({ "id": id, "reason": reason }),
+                "closeIssue",
+            )
+        } else if closed {
+            (
+                "mutation($id: ID!) { reopenIssue(input: { issueId: $id }) { issue { id } } }",
+                json!({ "id": id }),
+                "reopenIssue",
+            )
+        } else {
+            return Err(TrackerError::Unsupported(format!(
+                "{key} is open, and GitHub has no other status for an open issue: it is in \
+                 progress while a pull request is linked to it"
+            )));
+        };
+        let data = self.gql(query, vars, CallKind::Other).await?;
+        if data[answer]["issue"].is_null() {
+            return Err(TrackerError::Invalid(
+                "GitHub did not move the issue".into(),
+            ));
+        }
+        Ok(WriteOutcome::default())
+    }
+}
+
 /// An issue node's status.
 pub fn status_of(n: &Value) -> StatusSnapshot {
     let linked = n["linkedBranches"]["totalCount"].as_u64().unwrap_or(0) > 0
@@ -745,6 +807,17 @@ impl TrackerProvider for GitHub {
     }
 
     async fn write(&self, op: &WriteOp) -> Result<WriteOutcome, TrackerError> {
+        if let WriteOp::SetStatus {
+            key,
+            external_id,
+            category,
+            name,
+        } = op
+        {
+            return self
+                .set_status(key, external_id.as_deref(), category, name.as_deref())
+                .await;
+        }
         let WriteOp::Comment {
             key,
             external_id,
@@ -752,7 +825,7 @@ impl TrackerProvider for GitHub {
         } = op
         else {
             return Err(TrackerError::Refused(
-                "GitHub takes comments only from fleet".into(),
+                "GitHub takes comments and status moves only from fleet".into(),
             ));
         };
         let r = match external_id {

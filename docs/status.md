@@ -406,6 +406,24 @@ and URL; `TaskDetail.comments_tracker` / `can_post_to_tracker` say whose
 comments the tab reads and whether the reader may post. Not yet: the phone,
 editing a posted comment, attachments from trackers other than Asana.
 
+Ticket status moves (owner decision 2026-10-12, changing D29 again; CF-6):
+`work_link { set_status, item_id, status, status_name? }` on a tracker's
+ticket moves it at the tracker — `WriteOp::SetStatus`, every provider (a
+Jira transition picked by `jira_common::pick_transition`, a Linear state by
+`linear::pick_state`, an Asana section or `completed`, a GitHub close /
+reopen) — through `service::work::status::move_status`, which sends it
+while the caller waits (NOT through the outbox: a move replayed by a
+backoff would undo what was done at the tracker since), then reads the
+ticket back with `sync::fetch_one`. Fleet still stores no status of its own
+for a ticket (`Store::set_item_status` refuses one). Per tracker
+`settings.write_back.status`, **off by default** (Settings → Trackers →
+Write-back → *Move tickets*, confirm-gated). Refused with nothing sent for
+a per-host token (`E_FORBIDDEN`), the setting off (`E_INVALID_STATE`) or a
+tracker with no such move (`TrackerError::Unsupported` → `E_UNSUPPORTED`).
+`WorkTask.status_movable` unlocks the Board card (`boardMovesAtTracker`);
+`net::https` gained `PUT` for Asana's task update. Not yet: the List view,
+the phone.
+
 Task attachments (migration 168, `work_item_attachments` and the
 content-addressed `work_attachment_blobs`, deduplicated by SHA-256 and kept
 in SQLite so a hub backup carries them; a blob goes with the last live

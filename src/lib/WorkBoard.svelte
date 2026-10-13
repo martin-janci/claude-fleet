@@ -79,7 +79,10 @@
     boardLiveSession,
     boardMissionChip,
     boardOffersStart,
+    boardEditable,
     boardMoveRefusal,
+    boardMovesAtTracker,
+    boardMoveTarget,
     boardStep,
     displayTitle,
     groupTasksForBoard,
@@ -201,10 +204,11 @@
     cardErrors = next;
   }
 
-  /** Move a card to `to`: refused on the card for a task fleet does not own
-   *  the status of, else placed at once and set on the hub. A native task
-   *  lands in the status's own column, whichever column of that status it
-   *  was dropped on. */
+  /** Move a card to `to`: refused on the card for a task nobody may move
+   *  from here, else placed at once and set on the hub. A native task lands
+   *  in the status's own column, whichever column of that status it was
+   *  dropped on. A ticket is moved at its tracker, to the column it was
+   *  dropped on; what the tracker then says is where it ends up. */
   async function move(t: WorkTask, to: BoardLane) {
     const from = laneOfCard(t);
     if (from.id === to.id) return;
@@ -217,11 +221,13 @@
       setCardError(t.task_id, moveBlocked);
       return;
     }
-    if (from.status === to.status) return;
+    const atTracker = boardMovesAtTracker(t);
+    if (!atTracker && from.status === to.status) return;
     setCardError(t.task_id, null);
-    overrides = new Map(overrides).set(t.task_id, to.status);
+    overrides = new Map(overrides).set(t.task_id, atTracker ? to.id : to.status);
     moved = new Set(moved).add(t.task_id);
-    const r = await setWorkStatus(t.item_id as number, BOARD_COLUMN_STATUS[to.status]);
+    const target = boardMoveTarget(t, to);
+    const r = await setWorkStatus(t.item_id as number, target.status, target.statusName);
     if (!r.ok) {
       const back = new Map(overrides);
       back.delete(t.task_id);
@@ -344,7 +350,7 @@
   function oncardkey(e: KeyboardEvent, t: WorkTask, lane: BoardLane) {
     // The keys are the registry's `work-board` rows (step 0.1).
     const act = viewKey('work-board', e);
-    if (act === 'work-board.edit' && !boardMoveRefusal(t) && !editBlocked) {
+    if (act === 'work-board.edit' && boardEditable(t) && !editBlocked) {
       e.preventDefault();
       editing = t.task_id;
       return;
@@ -662,7 +668,7 @@
         >
       {/if}
     </button>
-    {#if !refusal}
+    {#if boardEditable(t)}
       <button
         class="edit"
         type="button"

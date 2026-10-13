@@ -440,6 +440,36 @@ impl TrackerProvider for JiraCloud {
                     remote_id: Some(key),
                 })
             }
+            WriteOp::SetStatus {
+                key,
+                category,
+                name,
+                ..
+            } => {
+                if !super::jira_common::is_key(key) {
+                    return Err(TrackerError::Invalid(format!("{key:?} is not a Jira key")));
+                }
+                let key = key.to_ascii_uppercase();
+                let path = self.url(&format!("/rest/api/3/issue/{key}/transitions"));
+                // Only the moves the workflow allows from where it is now.
+                let offered = self.call(Request::get(path.clone()), Call::Other).await?;
+                let id =
+                    super::jira_common::pick_transition(&offered, &key, category, name.as_deref())?;
+                let cred = self.cred.as_ref().ok_or(TrackerError::Unconfigured)?;
+                let req = Request::post_json(path, &json!({ "transition": { "id": id } }))
+                    .header("Authorization", cred.authorization().expose());
+                let resp = self.transport.send(req).await.map_err(map_transport)?;
+                // 204 with an empty body. A 400 is a transition whose screen
+                // wants a field fleet does not fill.
+                if resp.status == 400 {
+                    return Err(TrackerError::Unsupported(format!(
+                        "Jira refused to move {key}: this transition needs a field filled in \
+                         on its screen; move it in Jira"
+                    )));
+                }
+                check(&resp, Call::Other)?;
+                Ok(WriteOutcome::default())
+            }
             WriteOp::LinkIssues {
                 link_type,
                 inward,

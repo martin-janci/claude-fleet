@@ -1344,8 +1344,8 @@ impl FleetTools {
         write its hand-off. summarize {key, link_id}: \
         a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never \
         (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe \
-        kill when dirty). set_status {item_id, status}: a person's status for \
-        work with no ticket. edit {item_id, title?, notes?, assignees?, \
+        kill when dirty). set_status {item_id, status, status_name?}: a person's status for \
+        work with no ticket, or a ticket moved at its tracker. edit {item_id, title?, notes?, assignees?, \
         due_at?, priority?, labels?, estimate?, estimate_unit?}: a person edits work with no ticket. attach {item_id, name, \
         mime, data_base64, comment_id?}: a file on a task; attachment_delete \
         {attachment_id}. create {title, parent?, \
@@ -1813,9 +1813,10 @@ impl FleetTools {
         }
         if args.action == "set_status" {
             // A person's status for work with no ticket (design
-            // 2026-09-28 §2). The ORG fence is inside `set_status`: an item
-            // outside the scope answers as an unknown id, and a tracker
-            // item is `E_INVALID`, naming the ticket.
+            // 2026-09-28 §2), or a ticket moved at its tracker (CF-6). The
+            // ORG fence is inside `move_status`: an item outside the scope
+            // answers as an unknown id, and a ticket whose tracker does
+            // not take moves is refused, naming it.
             let item_id = args
                 .item_id
                 .ok_or_else(|| mcp_err("E_INVALID", "set_status needs item_id", None))?;
@@ -1839,12 +1840,32 @@ impl FleetTools {
             // confirmed, live link, proven by its pane) sets the status of
             // its own work even when the task is shared with sessions it
             // cannot drive. Its own link is the evidence the task is its.
-            if !self.own_session_works_on(&caller, item_id)? {
+            //
+            // A tracker's ticket (CF-6) is nobody's row: its status is the
+            // tracker's, moved there under the tracker's own credential,
+            // and the fence is the comment-to-tracker one — the org
+            // boundary and "a person, never an agent", both inside
+            // `move_status`. The session gate above would let one
+            // teammate's linked session stop another moving a shared
+            // ticket, which the tracker itself allows.
+            let ticket = crate::ipc_error::lock(&self.store)
+                .and_then(|s| s.get_work_item(item_id))
+                .map_err(to_mcp_err)?
+                .is_some_and(|i| i.source != "local");
+            if !ticket && !self.own_session_works_on(&caller, item_id)? {
                 self.require_drive_on_item_sessions(&caller, item_id)?;
             }
             return ok_json(
-                &crate::service::work::status::set_status(&self.store, &scope, item_id, status)
-                    .map_err(to_mcp_err)?,
+                &crate::service::work::status::move_status(
+                    &self.store,
+                    &scope,
+                    item_id,
+                    status,
+                    args.status_name.as_deref(),
+                    &crate::service::trackers::default_net(),
+                )
+                .await
+                .map_err(to_mcp_err)?,
             );
         }
         if args.action == "edit" {

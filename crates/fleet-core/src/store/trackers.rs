@@ -141,7 +141,7 @@ pub struct TrackerSettings {
     pub hostname: Option<String>,
     /// Write-back (work graph M13.4e, decision D3 / D29): what fleet may
     /// write to this tracker. Off unless an admin turns it on; the PR link
-    /// is Jira only, comments every provider's.
+    /// is Jira only, comments and a status move every provider's.
     #[serde(default, skip_serializing_if = "WriteBack::is_off")]
     pub write_back: WriteBack,
 }
@@ -158,11 +158,16 @@ pub struct WriteBack {
     /// for it (owner decision 2026-10-11, migration 172).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub comments: bool,
+    /// Let a person who moves a ticket in fleet move it at the tracker too
+    /// (owner decision 2026-10-12, CF-6): a transition, a workflow state,
+    /// a section, closed or open.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub status: bool,
 }
 
 impl WriteBack {
     pub fn is_off(&self) -> bool {
-        !self.pr_remote_link && !self.comments
+        !self.pr_remote_link && !self.comments && !self.status
     }
 }
 

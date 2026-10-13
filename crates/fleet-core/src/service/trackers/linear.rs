@@ -1,4 +1,4 @@
-//! Linear, read-only (work graph M6.4).
+//! Linear (work graph M6.4): read, plus the writes a person asks for.
 //!
 //! * **Transport.** `Direct` GraphQL at `https://api.linear.app/graphql`
 //!   only (the host fence), or `via_host`. A personal API key goes in
@@ -114,6 +114,40 @@ pub fn status_of(state: &Value) -> StatusSnapshot {
         category: category.into(),
         resolution: resolution.map(str::to_string),
     }
+}
+
+/// PURE: the id of the workflow state a status move lands in, out of a
+/// team's states: the one called `name` when there is one, else the first
+/// (by the team's own order, `position`) of the state type `category` means
+/// — started for in progress, completed for done (never canceled: that is a
+/// decision, not a move), and for to do unstarted before backlog before
+/// triage.
+pub fn pick_state(states: &Value, category: &str, name: Option<&str>) -> Option<String> {
+    let all: Vec<&Value> = states.as_array()?.iter().collect();
+    let id = |s: &Value| s["id"].as_str().map(str::to_string);
+    if let Some(n) = name {
+        if let Some(s) = all.iter().find(|s| {
+            s["name"]
+                .as_str()
+                .is_some_and(|x| super::same_status_name(x, n))
+        }) {
+            return id(s);
+        }
+    }
+    let types: &[&str] = match category {
+        "in_progress" => &["started"],
+        "done" => &["completed"],
+        _ => &["unstarted", "backlog", "triage"],
+    };
+    types.iter().find_map(|t| {
+        all.iter()
+            .filter(|s| s["type"].as_str() == Some(t))
+            .min_by(|a, b| {
+                let p = |s: &Value| s["position"].as_f64().unwrap_or(f64::MAX);
+                p(a).total_cmp(&p(b))
+            })
+            .and_then(|s| id(s))
+    })
 }
 
 impl Linear {
@@ -371,6 +405,55 @@ impl Linear {
         Ok(f)
     }
 
+    /// Move an issue to a workflow state of its own team (CF-6): the state
+    /// called `name` when the team has one, else [`pick_state`]'s.
+    async fn set_status(
+        &self,
+        key: &str,
+        external_id: Option<&str>,
+        category: &str,
+        name: Option<&str>,
+    ) -> Result<WriteOutcome, TrackerError> {
+        let id = external_id
+            .map(str::to_string)
+            .or_else(|| self.lookup_id(&ItemRef::parse(key)))
+            .filter(|id| issue_ref_ok(id))
+            .ok_or_else(|| TrackerError::Invalid("not a Linear issue".into()))?;
+        let data = self
+            .gql(
+                "query($id: String!) { issue(id: $id) { team { states(first: 100) { nodes \
+                 { id name type position } } } } }",
+                json!({ "id": id }),
+                CallKind::Other,
+            )
+            .await?;
+        if data["issue"].is_null() {
+            return Err(TrackerError::NotFound);
+        }
+        let state = pick_state(&data["issue"]["team"]["states"]["nodes"], category, name)
+            .filter(|s| issue_ref_ok(s))
+            .ok_or_else(|| {
+                TrackerError::Unsupported(format!(
+                    "{key}'s team has no workflow state for {}",
+                    name.unwrap_or_else(|| super::category_label(category))
+                ))
+            })?;
+        let data = self
+            .gql(
+                "mutation($id: String!, $state: String!) { issueUpdate(id: $id, input: \
+                 { stateId: $state }) { success } }",
+                json!({ "id": id, "state": state }),
+                CallKind::Other,
+            )
+            .await?;
+        if data["issueUpdate"]["success"].as_bool() != Some(true) {
+            return Err(TrackerError::Invalid(
+                "Linear did not move the issue".into(),
+            ));
+        }
+        Ok(WriteOutcome::default())
+    }
+
     /// A reference → what `issue(id:)` takes: the id, or an identifier.
     fn lookup_id(&self, r: &ItemRef) -> Option<String> {
         match r {
@@ -624,6 +707,17 @@ impl TrackerProvider for Linear {
     }
 
     async fn write(&self, op: &WriteOp) -> Result<WriteOutcome, TrackerError> {
+        if let WriteOp::SetStatus {
+            key,
+            external_id,
+            category,
+            name,
+        } = op
+        {
+            return self
+                .set_status(key, external_id.as_deref(), category, name.as_deref())
+                .await;
+        }
         let WriteOp::Comment {
             key,
             external_id,
@@ -631,7 +725,7 @@ impl TrackerProvider for Linear {
         } = op
         else {
             return Err(TrackerError::Refused(
-                "Linear takes comments only from fleet".into(),
+                "Linear takes comments and status moves only from fleet".into(),
             ));
         };
         let id = external_id

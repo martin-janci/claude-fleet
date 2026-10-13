@@ -31,6 +31,9 @@ mod tests_isolation_providers;
 #[cfg(test)]
 #[path = "tests_shared_key.rs"]
 mod tests_shared_key;
+#[cfg(test)]
+#[path = "tests_status.rs"]
+mod tests_status;
 pub mod tickets;
 pub mod write_back;
 
@@ -510,6 +513,10 @@ pub enum TrackerError {
     Invalid(String),
     /// No credential is set, or the reference cannot be read.
     Unconfigured,
+    /// The tracker has no way to do what was asked (a workflow with no
+    /// transition to that status, a board with no such section). Nothing
+    /// was sent that changed anything; the sentence is for the person.
+    Unsupported(String),
 }
 
 impl TrackerError {
@@ -523,7 +530,10 @@ impl TrackerError {
             TrackerError::Unreachable(_) => Some("unreachable"),
             TrackerError::Unconfigured => Some("unconfigured"),
             TrackerError::Refused(_) => Some("unreachable"),
-            TrackerError::Forbidden(_) | TrackerError::NotFound | TrackerError::Invalid(_) => None,
+            TrackerError::Forbidden(_)
+            | TrackerError::NotFound
+            | TrackerError::Invalid(_)
+            | TrackerError::Unsupported(_) => None,
         }
     }
 
@@ -549,6 +559,7 @@ impl TrackerError {
             TrackerError::Unconfigured => {
                 "no credential is set (or its env:/file: reference cannot be read)".into()
             }
+            TrackerError::Unsupported(m) => m.clone(),
         }
     }
 
@@ -558,6 +569,7 @@ impl TrackerError {
         let code = match self {
             TrackerError::NotFound => codes::E_NOTFOUND,
             TrackerError::Forbidden(_) => codes::E_FORBIDDEN,
+            TrackerError::Unsupported(_) => codes::E_UNSUPPORTED,
             _ => codes::E_TRACKER,
         };
         let mut e = IpcError::new(code, crate::logging::redact(&self.explain()).into_owned());
@@ -700,6 +712,42 @@ pub enum WriteOp {
         inward: String,
         outward: String,
     },
+    /// Move the item to another status (owner decision 2026-10-12, CF-6):
+    /// a Jira transition, a Linear workflow state, an Asana section or its
+    /// completed flag, a GitHub issue closed or reopened. `key` and
+    /// `external_id` address it as [`Self::Comment`]'s do. `category` is
+    /// fleet's (`todo | in_progress | done`); `name` is the tracker's own
+    /// name for the column the card was dropped on, when it has one — the
+    /// status of that name is preferred, else the first one of `category`.
+    /// A tracker with no such move answers [`TrackerError::Unsupported`].
+    /// Every provider.
+    SetStatus {
+        key: String,
+        external_id: Option<String>,
+        category: String,
+        name: Option<String>,
+    },
+}
+
+/// PURE: two status names are one (a column's label against a tracker's
+/// status): case and spacing aside, as the Board's own `laneKey` reads them.
+pub fn same_status_name(a: &str, b: &str) -> bool {
+    let fold = |s: &str| {
+        s.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    };
+    fold(a) == fold(b)
+}
+
+/// PURE: how a person reads one of fleet's three status categories.
+pub fn category_label(category: &str) -> &'static str {
+    match category {
+        "in_progress" => "In progress",
+        "done" => "Done",
+        _ => "To do",
+    }
 }
 
 /// PURE: a Jira project key (`PD`, `L2S`, `ABC_2`).
