@@ -1466,6 +1466,7 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                     commands::work::SetWorkStatusArgs {
                         item_id: 9,
                         status: "in_progress".into(),
+                        status_name: None,
                     },
                     s,
                 ))

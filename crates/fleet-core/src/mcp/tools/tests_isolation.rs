@@ -2635,7 +2635,10 @@ async fn run_matrix(isolate: bool) {
                 Who::HostA | Who::HostNone | Who::BoundA => {
                     is_code(who, a, "E_NOTFOUND", "another org's ticket")
                 }
-                _ => is_code(who, a, "E_INVALID", "a ticket"),
+                // Only a person moves a ticket (CF-6), never a host's agent.
+                Who::HostB => is_code(who, a, "E_FORBIDDEN", "a ticket, by an agent"),
+                // B Jira has `write_back.status` off, as every tracker starts.
+                _ => is_code(who, a, "E_INVALID_STATE", "a ticket, moving off"),
             }
         },
     )
