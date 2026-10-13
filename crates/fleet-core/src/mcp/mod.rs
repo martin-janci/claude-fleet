@@ -411,7 +411,7 @@ async fn authorize(
             // is never waits on it — a stamp the writer was too busy for is
             // retried by the next request.
             Some(cache) => {
-                if cache.touch_due(client.id, now) {
+                if let Some(prev) = cache.touch_due(client.id, now) {
                     match state.store.try_lock() {
                         Ok(s) => {
                             if let Err(e) = s.touch_client_token(client.id, now) {
@@ -422,7 +422,7 @@ async fn authorize(
                             }
                             record_client_header(&s, &caller, request.headers(), now);
                         }
-                        Err(_) => cache.untouch(client.id),
+                        Err(_) => cache.untouch(client.id, prev),
                     }
                 }
             }
@@ -451,10 +451,10 @@ async fn authorize(
         };
         match state.tokens.as_ref() {
             Some(cache) => {
-                if cache.host_touch_due(alias, now) {
+                if let Some(prev) = cache.host_touch_due(alias, now) {
                     match state.store.try_lock() {
                         Ok(s) => stamp(&s),
-                        Err(_) => cache.host_untouch(alias),
+                        Err(_) => cache.host_untouch(alias, prev),
                     }
                 }
             }
@@ -483,10 +483,10 @@ async fn authorize(
         };
         match state.tokens.as_ref() {
             Some(cache) => {
-                if cache.control_touch_due(api.id, now) {
+                if let Some(prev) = cache.control_touch_due(api.id, now) {
                     match state.store.try_lock() {
                         Ok(s) => stamp(&s),
-                        Err(_) => cache.control_untouch(api.id),
+                        Err(_) => cache.control_untouch(api.id, prev),
                     }
                 }
             }
