@@ -55,6 +55,13 @@ pub enum AgentsCmd {
     Approve { id: i64 },
     /// Reject an action an agent proposed, by its id.
     Reject { id: i64 },
+    /// Per rule: whether it polls and why not, its next poll and its jobs
+    /// by state. Its last poll error lives in the running hub's process:
+    /// ask the hub (`agents { action: explain }`) to see it.
+    Explain,
+    /// One job whole: what it is waiting for or came to, its error, its
+    /// answer and the actions it proposed.
+    Job { id: i64 },
     /// The rules, the newest jobs and the actions waiting for a person.
     Status {
         /// How many jobs and actions to print. [default: 20]
@@ -158,6 +165,68 @@ fn run_on(store: &Mutex<Store>, cmd: AgentsCmd, now: i64) -> Result<ExitCode, St
             let row = admin::decide(store, &a, approve, "console", now).map_err(err)?;
             out::line(&format!("action {id}: {}", row.state));
         }
+        AgentsCmd::Explain => {
+            let e = fleet_core::service::agents::debug::explain(store, now).map_err(err)?;
+            out::line(&format!(
+                "{}polls every {} s, {} at once, {} retries",
+                if e.automation_paused {
+                    "Pause all is on; "
+                } else {
+                    ""
+                },
+                e.poll_interval_secs,
+                e.max_concurrent,
+                e.max_retries
+            ));
+            if e.rules.is_empty() {
+                out::line("no rules: the agents are idle");
+            }
+            for r in &e.rules {
+                let jobs: Vec<String> = r.jobs.iter().map(|(k, n)| format!("{n} {k}")).collect();
+                out::line(&format!(
+                    "rule {}	{}	{}	{}	{}",
+                    r.rule.id,
+                    r.state,
+                    r.rule.scope,
+                    r.summary,
+                    if jobs.is_empty() {
+                        "no jobs".into()
+                    } else {
+                        jobs.join(", ")
+                    }
+                ));
+                if let Some(j) = &r.last_failed {
+                    out::line(&format!(
+                        "  last failed: job {}	{}	{}",
+                        j.id,
+                        j.subject,
+                        j.error.as_deref().unwrap_or("-")
+                    ));
+                }
+            }
+        }
+        AgentsCmd::Job { id } => {
+            let d = fleet_core::service::agents::debug::job(store, id, now).map_err(err)?;
+            out::line(&format!(
+                "job {}	{}	{}	{}",
+                d.job.id, d.job.agent, d.job.subject, d.summary
+            ));
+            for a in &d.actions {
+                out::line(&format!(
+                    "  action {}	{}	{}{}",
+                    a.id,
+                    a.kind,
+                    a.state,
+                    a.error
+                        .as_deref()
+                        .map(|e| format!("\t{e}"))
+                        .unwrap_or_default()
+                ));
+            }
+            if let Some(r) = &d.job.result {
+                out::line(r);
+            }
+        }
         AgentsCmd::Status { limit } => {
             let a = AgentsArgs {
                 limit: Some(limit),
@@ -236,6 +305,17 @@ mod tests {
 
     fn rules(s: &Mutex<Store>) -> Vec<fleet_core::store::AgentRuleRow> {
         s.lock().unwrap().list_agent_rules().unwrap()
+    }
+
+    #[test]
+    fn explain_and_job_read_without_changing_anything() {
+        let (_dir, s) = store();
+        run_on(&s, AgentsCmd::Explain, 1000).unwrap();
+        run_on(&s, grant("watch", None), 1000).unwrap();
+        run_on(&s, AgentsCmd::Explain, 1000).unwrap();
+        assert_eq!(rules(&s).len(), 1);
+        let e = run_on(&s, AgentsCmd::Job { id: 42 }, 1000).unwrap_err();
+        assert!(e.contains("no job 42"), "{e}");
     }
 
     #[test]

@@ -24,6 +24,7 @@ mod provision;
 mod ready;
 mod realm;
 mod reports;
+mod routine;
 mod serve;
 mod session;
 mod settings;
@@ -200,6 +201,14 @@ enum Cmd {
     Agents {
         #[command(subcommand)]
         cmd: agents::AgentsCmd,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
+    /// Debug the routines: list them, explain why one does or does not
+    /// fire, print its decision trace, and dry-run it. Only reads.
+    Routine {
+        #[command(subcommand)]
+        cmd: routine::RoutineCmd,
         #[command(flatten)]
         opts: HubOptions,
     },
@@ -587,6 +596,7 @@ async fn main() -> ExitCode {
         Cmd::Guides { cmd, opts } => guides::run(cmd, &opts, &env),
         Cmd::Agents { cmd, opts } => agents::run(cmd, &opts, &env),
         Cmd::Shepherd { cmd, opts } => shepherd::run(cmd, &opts, &env),
+        Cmd::Routine { cmd, opts } => routine::run(cmd, &opts, &env),
         Cmd::Update { cmd, opts } => update::run(cmd, &opts, &env).await,
         Cmd::Reports {
             limit,

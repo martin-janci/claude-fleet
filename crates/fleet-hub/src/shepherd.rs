@@ -43,6 +43,9 @@ pub enum ShepherdCmd {
     },
     /// Remove every rule: the shepherd stops at its next tick.
     PauseAll,
+    /// What the next tick makes of each session in a project with a rule:
+    /// acts, waits or ignores it, and why. Sends nothing.
+    Explain,
     /// The rules and the newest episodes.
     Status {
         /// How many episodes to print. [default: 20]
@@ -132,6 +135,25 @@ fn run_on(store: &Store, cmd: ShepherdCmd, now: i64) -> Result<ExitCode, String>
                 .map_err(|e| e.to_string())?;
             out::line(&format!("{n} rule(s) removed"));
         }
+        ShepherdCmd::Explain => {
+            let e = fleet_core::service::pr_shepherd::explain(store, now);
+            if e.automation_paused {
+                out::line("Pause all is on: the shepherd sends and merges nothing");
+            }
+            if e.sessions.is_empty() {
+                out::line("no session in a project with a rule in force");
+            }
+            for v in &e.sessions {
+                out::line(&format!(
+                    "session {}	{}	{}	{}	{}",
+                    v.session_id,
+                    v.tmux_name,
+                    v.verdict,
+                    v.condition.as_deref().unwrap_or("-"),
+                    v.detail
+                ));
+            }
+        }
         ShepherdCmd::Status { limit } => {
             let names: HashMap<i64, String> = store
                 .list_projects()
@@ -206,6 +228,15 @@ mod tests {
             hours,
             recipes: None,
         }
+    }
+
+    #[test]
+    fn explain_reads_and_writes_nothing() {
+        let (_dir, s) = store();
+        run_on(&s, ShepherdCmd::Explain, 1000).unwrap();
+        run_on(&s, grant("nudge", None), 1000).unwrap();
+        run_on(&s, ShepherdCmd::Explain, 1000).unwrap();
+        assert!(s.list_shepherd_episodes(10).unwrap().is_empty());
     }
 
     #[test]
