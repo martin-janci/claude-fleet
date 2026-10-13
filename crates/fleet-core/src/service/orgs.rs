@@ -667,8 +667,9 @@ pub fn org_item_for_key(
 
 /// May a per-host token read work `key` (its context, resume plan, or
 /// resume it)? When the key's item is inside its orgs, and some of the
-/// work — a live link on a session of its host, or a past one whose session
-/// ran there — is visible to it. One refusal whether the key exists or not.
+/// work — a live link on a session of its host, an open run whose worker is
+/// on its host, or a past link whose session ran there — is visible to it.
+/// One refusal whether the key exists or not.
 ///
 /// **DECIDED, multi-user M1 (T10): this is an org-authority question and it
 /// is correctly asked of the org alone.** T9b/T9c disclosed a "key-level
@@ -711,6 +712,14 @@ pub fn require_key(s: &Store, scope: &OrgScope, key: &str) -> Result<(), IpcErro
     s.fill_link_orgs(&mut live)?;
     if live.iter().any(|l| scope.sees_link(l)) {
         return Ok(());
+    }
+    // An open run on the host is work its sessions do too: a mission's
+    // worker reads its step by the task that names the item, whatever
+    // became of the link (`Store::work_item_on_host`'s run arm).
+    for item in s.work_items_by_key(&key)? {
+        if scope.sees_org(s.item_org(item.id)?) && s.open_run_on_host(h, item.id)? {
+            return Ok(());
+        }
     }
     let mut ended = s.ended_work_links_for_key(&key)?;
     scope_links(s, scope, &mut ended)?;

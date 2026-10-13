@@ -718,8 +718,11 @@ Index by area (names only; see the reference for details):
   With a brief, the ticket's context (its description
   fenced as untrusted) rides the first hook's `additionalContext` and a short
   start prompt is typed only into a ready REPL. A per-host token reads,
-  looks up and starts only tickets linked to sessions on its own host, and
-  starts only there (`E_FORBIDDEN` says why); it never receives `work:*`
+  looks up and starts only tickets linked to sessions on its own host, or
+  that a session there has an open run on (`work_link { run }`), and
+  starts only there (`E_FORBIDDEN` says why). A session with an open run on
+  a mission's step also reads that mission (`work { mission }`), until the
+  run ends; it never changes it. A per-host token never receives `work:*`
   frames on `/events`. Events: `work:item`, `work:tracker`,
   `work:tracker_removed` — emitted only when something a reader sees
   changed; a session's `work` carries its item's `kind` (`tracker` | `local`
