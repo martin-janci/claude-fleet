@@ -1,6 +1,6 @@
 # Configurable agents: design
 
-Status: proposed, 2026-10-12. Not built.
+Status: step 1 built (definitions), 2026-10-13. Steps 2 to 6 not built.
 Asked for by the owner after the built-in reviewer and support agent landed
 (`2026-10-11-review-and-support-agents-design.md`, PRs
 martin-janci/claude-fleet#871, martin-janci/fleet-mobile#217,
@@ -426,9 +426,22 @@ run real instances.
 
 ## Steps
 
-1. **Definitions**: the `fleet_agent` catalog kind (load, render nothing on
+1. **Definitions** (built): the `fleet_agent` catalog kind (load, render nothing on
    hosts, lint in the Assets tab), the PURE validator, and templates and
    conditions with their tests. `fleet-hub agents define`.
+   `service/fleet_agents/`: `definition.rs` (the typed model, strict on
+   unknown keys, and `problems`: inputs through the form validator, which
+   keys each trigger source and action kind take, template paths against
+   the inputs, the source's subject fields and `output_schema`, read-only
+   run tools, `mcp_call` against the role's `write_tools` and `auto_ok`),
+   `template.rs` (`{{path}}` parse and render), `answer.rs` (the schema
+   subset, the answer check, conditions over the answer). The catalog's
+   `Kind::FleetAgent` loads `fleet-agents/<name>/` (validated after its
+   `skill.md` is read; an invalid one is a load problem) and every harness
+   renders it as nothing. The Assets tab lists it as *Fleet agents* and can
+   create one from a template; its definition is edited as YAML.
+   `fleet-hub agents define <dir|asset.yaml>`. The example
+   `docs/fleet-agent-examples/l2-support/` is loaded by the tests.
 2. **Store bindings**: rendering an MCP binding per run (asset + env
    overrides + secrets), the grant-time `tools/list` check, migration
    `agent_records` and the `fleet-records` read server. Rules gain `definition`

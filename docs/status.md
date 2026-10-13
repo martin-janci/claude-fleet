@@ -798,6 +798,13 @@ the support agent scans a catalog MCP server (`graylog`) for new errors
 built: outbound Slack/Teams notifications (a new channel of the 11.9
 matrix, the owner's call).
 
+Configurable agents (spec `docs/superpowers/specs/2026-10-12-configurable-agents-design.md`),
+step 1 of 6: a `fleet_agent` catalog asset is a typed, validated
+definition (inputs, store roles, trigger, run, actions, limits;
+`service/fleet_agents/`), listed in Assets and checked by `fleet-hub agents
+define`. Nothing runs one yet: store bindings, the generic runner, the
+actions and the grant form are steps 2 to 5.
+
 Session state machine hardening (plan A, #343) is landed: a `working` row
 with no activity for `reconcile.stale_working_secs` turns `idle` with
 `stale_working_at` (migration 065); a StopFailure reads as failed; one

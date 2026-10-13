@@ -376,6 +376,9 @@ impl Harness for Codex {
             AssetSpec::Hook { .. } | AssetSpec::PluginRef { .. } | AssetSpec::Command { .. } => {
                 return Err(unsupported());
             }
+            AssetSpec::FleetAgent { .. } => plan
+                .warnings
+                .push("a fleet agent's definition is the hub's: nothing to install".into()),
         }
         Ok(plan)
     }

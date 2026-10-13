@@ -102,7 +102,7 @@ describe('NewAssetDialog: Toolkit forms', () => {
   it('offers Command as a kind and says what the name becomes', () => {
     render(NewAssetDialog, { onclose: () => {}, onsaved: () => {} });
     const kinds = Array.from((screen.getByTestId('new-asset-kind') as HTMLSelectElement).options).map((o) => o.textContent);
-    expect(kinds).toEqual(['Skill', 'Agent', 'Command', 'Hook', 'MCP server', 'Plugin']);
+    expect(kinds).toEqual(['Skill', 'Agent', 'Command', 'Hook', 'MCP server', 'Plugin', 'Fleet agent']);
     expect(screen.getByTestId('new-asset-dialog').textContent).toContain('Lower case and dashes; it becomes the folder name.');
   });
 

@@ -146,6 +146,7 @@ fn body_file(kind: Kind) -> &'static str {
     match kind {
         Kind::Skill => "body.md",
         Kind::Agent | Kind::Command => "prompt.md",
+        Kind::FleetAgent => "skill.md",
         _ => "",
     }
 }

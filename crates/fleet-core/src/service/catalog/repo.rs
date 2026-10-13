@@ -1157,6 +1157,7 @@ fn body_file(kind: Kind) -> &'static str {
     match kind {
         Kind::Skill => "body.md",
         Kind::Agent | Kind::Command => "prompt.md",
+        Kind::FleetAgent => "skill.md",
         _ => "",
     }
 }
@@ -1258,10 +1259,6 @@ fn load_one(root: &Path, kind: Kind, yaml_path: &Path, stem: &str) -> Result<Ass
             asset.header.name
         ));
     }
-    let problems = asset.validate();
-    if !problems.is_empty() {
-        return Err(problems.join("; "));
-    }
     if kind.is_folder() {
         let dir = yaml_path.parent().unwrap_or(root);
         let body = dir.join(body_file(kind));
@@ -1269,6 +1266,11 @@ fn load_one(root: &Path, kind: Kind, yaml_path: &Path, stem: &str) -> Result<Ass
         asset.body =
             std::fs::read_to_string(&body).map_err(|_| format!("missing {}", body_file(kind)))?;
         asset.resources = read_resources(dir)?;
+    }
+    // After the body: a fleet agent's checks read its skill's templates.
+    let problems = asset.validate();
+    if !problems.is_empty() {
+        return Err(problems.join("; "));
     }
     Ok(asset)
 }
