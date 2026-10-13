@@ -65,6 +65,7 @@
   import ShareSheet from './lib/ShareSheet.svelte';
   import { applyMoveProgress, recheckWaitingRuns } from './lib/moves';
   import { dispatchTimelineEvents, dispatchConversationsChanged } from './lib/live_events';
+  import { announceAccountSwitches } from './lib/account_switch';
   import Toasts from './lib/Toasts.svelte';
   import QuickSwitcher from './lib/QuickSwitcher.svelte';
   import ShortcutSheet from './lib/ShortcutSheet.svelte';
@@ -316,7 +317,11 @@
       onProjectEvents: applyProjectEvents,
       onTaskEvents: applyTaskEvents,
       onAccountUsageEvents: applyAccountUsageEvents,
-      onTimelineEvents: dispatchTimelineEvents,
+      onTimelineEvents: (events) => {
+        dispatchTimelineEvents(events);
+        // An automatic account switch is news wherever the person is looking.
+        announceAccountSwitches(events);
+      },
       onConversationsChanged: dispatchConversationsChanged,
       onAssetInventoryUpdated: mergeInventoryRow,
       onAssetInventoryCleared: (p) => clearInventoryFor(p.host_alias, p.harness),

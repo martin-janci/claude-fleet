@@ -1086,6 +1086,25 @@
       "danger": {
         "level": "none"
       },
+      "default": "false",
+      "help": "When a session's account runs out, resume it under the login on its host with the most headroom without asking. Each person can still turn it off for their own sessions on the Accounts page.",
+      "key": "accounts.auto_switch",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Switch accounts automatically",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "{}",
       "help": "Per-model prices for the estimated cost, in USD per million tokens (input, output, cache_write, cache_read). {} uses the built-in prices only.",
       "key": "usage.prices_json",
@@ -2988,6 +3007,47 @@
       "value": "off"
     },
     {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Asking which login an out-of-credit session should resume under when it is switched automatically. The login with the most headroom is used either way; Jev's pick is recorded beside it so the two can be compared.",
+      "key": "decide.jev.limit_switch",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: login for an automatic switch",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: record only for now"
+        ]
+      ],
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
       "ai": "never",
       "danger": {
         "level": "confirm",
@@ -4310,6 +4370,14 @@
               }
             },
             {
+              "key": "accounts.auto_switch",
+              "type": "field",
+              "when": {
+                "key": "usage.enabled",
+                "truthy": true
+              }
+            },
+            {
               "key": "usage.prices_json",
               "type": "field",
               "when": {
@@ -4780,6 +4848,11 @@
             {
               "hint": "In New session, proposes resuming a past session of the same work or starting fresh; you still press Resume or Create.",
               "key": "decide.jev.resume_or_new",
+              "type": "field"
+            },
+            {
+              "hint": "Records which login Jev would resume an out-of-credit session under, beside the one with the most headroom that is used.",
+              "key": "decide.jev.limit_switch",
               "type": "field"
             },
             {

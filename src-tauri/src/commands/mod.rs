@@ -1,3 +1,4 @@
+pub mod account_switch;
 pub mod account_usage;
 pub mod add_account;
 pub mod agents;

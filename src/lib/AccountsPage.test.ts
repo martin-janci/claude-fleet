@@ -301,3 +301,40 @@ describe('AccountsPage: spend, routines and paused sessions (4.1 / 4.2)', () => 
     expect(screen.queryByTestId('account-paused')).toBeNull();
   });
 });
+
+describe('AccountsPage automatic switching', () => {
+  function answering(view: { enabled: boolean; fleet_enabled: boolean }) {
+    inv.mockImplementation(async (cmd: string, payload?: { args?: { enabled?: boolean } }) => {
+      if (cmd !== 'auto_switch_account') return null;
+      const enabled = payload?.args?.enabled;
+      return enabled === undefined ? view : { ...view, enabled };
+    });
+  }
+
+  it('shows the person their own answer and saves a change', async () => {
+    answering({ enabled: true, fleet_enabled: true });
+    render(AccountsPage, props);
+    const box = (await screen.findByTestId('accounts-auto-switch-toggle')) as HTMLInputElement;
+    expect(box.checked).toBe(true);
+    expect(screen.queryByTestId('accounts-auto-switch-fleet-off')).toBeNull();
+    await fireEvent.click(box);
+    await waitFor(() =>
+      expect(inv).toHaveBeenCalledWith('auto_switch_account', { args: { enabled: false } }),
+    );
+    await waitFor(() => expect(box.checked).toBe(false));
+    expect(screen.getByTestId('accounts-auto-switch').textContent).toContain('wait for you');
+  });
+
+  it('says when the fleet has it off', async () => {
+    answering({ enabled: true, fleet_enabled: false });
+    render(AccountsPage, props);
+    expect((await screen.findByTestId('accounts-auto-switch-fleet-off')).textContent).toContain(
+      'Off for this fleet',
+    );
+  });
+
+  it('stays hidden when the answer cannot be read', () => {
+    render(AccountsPage, props);
+    expect(screen.queryByTestId('accounts-auto-switch')).toBeNull();
+  });
+});

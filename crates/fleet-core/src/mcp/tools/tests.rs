@@ -2853,6 +2853,7 @@ fn router_sum_serves_every_tool() {
         include_str!("wizard_state.rs"),
         include_str!("dashboards.rs"),
         include_str!("presence.rs"),
+        include_str!("account_switch.rs"),
         include_str!("library.rs"),
         include_str!("runs.rs"),
         include_str!("search.rs"),

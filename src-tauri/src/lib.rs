@@ -660,6 +660,7 @@ pub fn run() {
             commands::env_vars::env_var_unset,
             commands::add_account::add_account,
             commands::presence::session_presence,
+            commands::account_switch::auto_switch_account,
             commands::pages::setting_history,
             commands::pages::set_fleet_setting,
             commands::runs::list_runs,

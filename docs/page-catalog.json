@@ -3759,6 +3759,18 @@
       ]
     },
     {
+      "default_widget": "switch",
+      "key": "accounts.auto_switch",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Switch accounts automatically",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
       "default_widget": "textarea",
       "key": "usage.prices_json",
       "kind": {
@@ -4799,6 +4811,24 @@
         "type": "choice"
       },
       "label": "Jev: resume or start fresh",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "decide.jev.limit_switch",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: login for an automatic switch",
       "widgets": [
         "select",
         "radio",

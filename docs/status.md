@@ -143,8 +143,11 @@ account's sessions, switched-on routines and spend today from the
 `usage_daily_account` roll-up (`account_spend`, local only, so a paired
 desktop shows no $), and an account at its limit says how many sessions it
 paused, with Show and *Switch to <account>* (step 4.4's bulk move, one
-click). Not built: a hub vault for setup-tokens and API keys,
-and automatic switching when an account hits its limit.
+click). Automatic switching is landed and OFF by default
+(`accounts.auto_switch`, docs/accounts.md → *Switch automatically*; each
+person can turn it off for their own sessions, migration 185; Jev's pick
+is recorded only, `decide.jev.limit_switch`). Not built: a hub vault for
+setup-tokens and API keys.
 
 Single sign-on (docs/hub.md → *Sign in with Keycloak*): a hub with
 `FLEET_HUB_OIDC_ISSUER` set lets a person pair a device by signing in with

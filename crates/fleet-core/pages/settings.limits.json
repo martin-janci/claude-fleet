@@ -159,6 +159,14 @@
         },
         {
           "type": "field",
+          "key": "accounts.auto_switch",
+          "when": {
+            "key": "usage.enabled",
+            "truthy": true
+          }
+        },
+        {
+          "type": "field",
           "key": "usage.prices_json",
           "when": {
             "key": "usage.enabled",

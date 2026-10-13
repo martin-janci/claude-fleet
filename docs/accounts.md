@@ -132,6 +132,39 @@ with the stored profile (`sessions.claude_profile`, migration 113).
 A moved session keeps its profile name; on the target host that name is a
 separate profile, which asks for its own `/login` the first time.
 
+### Switch automatically
+
+Off by default. The owner turns it on for the fleet in Settings › Limits
+(`accounts.auto_switch`); from then on, a session that shows **Paused ·
+limit** (a live Claude session, not working, whose account has its 5-hour
+or weekly window fully used) is resumed under the login on its host with
+the most headroom, without anyone pressing Switch account. It is the same
+restart Switch account makes (`restart_session { profile }`), so the
+conversation carries on and the row keeps the new login.
+
+Each person decides for their own sessions: the Accounts page's **Switch my
+sessions automatically when their account runs out** (MCP:
+`auto_switch_account { enabled }`) is on by default and turns it off for
+every session that person owns. The owner's answer covers the owner's
+sessions and every session nobody owns.
+
+Which login: another account on the same host (a second login on the same
+account shares its limit), with a usage reading under `accounts.pause_at`,
+not at a limit and not past its daily spend limit, the least used first.
+With none, nothing moves and the row waits for a person. With
+`decide.jev.limit_switch` on, Jev is asked the same question and its
+answer is recorded beside the rule's (docs/decisions.md); the rule's pick
+is the one used.
+
+Bounds: the pass runs on the reconcile tick at most once a minute, switches
+at most five sessions a run, leaves a session it switched or tried alone
+for 30 minutes, skips the fleet controller and sessions on a hidden or
+unreachable host, stands still while Pause all is on, and runs only on the
+hub or a standalone desktop, never on a desktop paired to a hub. Every
+attempt leaves `account_switched` or `account_switch_failed` on the
+session's timeline (logins by profile, accounts by uuid); the desktop shows
+it in the conversation and as a toast.
+
 ### Accounts and usage
 
 A session under a profile is attributed to its profile's account, never the

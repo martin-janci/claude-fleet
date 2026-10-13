@@ -5,6 +5,7 @@ import type { ClaudeStatus, StuckKind, SessionAgent, SessionRow } from './sessio
 import { stuckKindLabel, contextLevel, type ContextLevel } from './attention';
 import type { SessionEvent } from './timeline';
 import { promptFirstLine, type TaskRow } from './tasks';
+import { parseSwitchDetail } from './account_switch';
 
 export type ConvItem =
   | { kind: 'text'; text: string }
@@ -1438,6 +1439,22 @@ export function inlineEventFor(
     }
     case 'conversation_ended':
       return { id: e.id, at: e.at, label: `Conversation ended (${e.detail ?? 'unknown'})`, detail: null, tone: 'info' };
+    // Automatic account switching: the account ran out, and fleet resumed
+    // the conversation under another login on the host (or could not).
+    case 'account_switched':
+    case 'account_switch_failed': {
+      const d = parseSwitchDetail(e.detail);
+      const login = d ? (d.profile ? `profile ${d.profile}` : "the host's own login") : null;
+      return e.kind === 'account_switched'
+        ? { id: e.id, at: e.at, label: 'Account ran out: switched automatically', detail: login && `now on ${login}`, tone: 'info' }
+        : {
+            id: e.id,
+            at: e.at,
+            label: 'Account ran out: automatic switch failed',
+            detail: d?.error ?? null,
+            tone: 'warn',
+          };
+    }
     default:
       return null;
   }
