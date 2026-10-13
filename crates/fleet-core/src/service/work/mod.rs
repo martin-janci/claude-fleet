@@ -282,6 +282,9 @@ pub struct WorkLinkArgs {
     /// set_status: todo | in_progress | done.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// set_status on a ticket: the tracker's column name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_name: Option<String>,
     /// item:<id> or ref:<KEY>; reject: item:<id> merges into it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,

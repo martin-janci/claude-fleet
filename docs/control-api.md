@@ -856,10 +856,20 @@ Index by area (names only; see the reference for details):
   item (a ticket is `E_INVALID`) and returns the item; both emit
   `session:updated` for the rows that show it and `work:item`.
   `work_link { action: "set_status", item_id, status }` sets a local item's
-  status to `todo`, `in_progress` or `done` and returns the item; a ticket is
-  `E_INVALID` too, naming it — its status belongs to its tracker, and the
-  next sync would otherwise overwrite it here. The setting is final: fleet
-  never derives a status back over what a person set.
+  status to `todo`, `in_progress` or `done` and returns the item. The
+  setting is final: fleet never derives a status back over what a person
+  set. On a **ticket** the same action moves it AT ITS TRACKER (CF-6;
+  `status_name?` is the tracker's own name for the column — a Jira status,
+  a Linear state, an Asana section — preferred over the first status of
+  that category): a Jira transition, a Linear state, an Asana section or
+  completion, a GitHub close / reopen, sent while the caller waits, then
+  the ticket is read back and the item returned as the tracker now has it.
+  Fleet stores no status of its own for a ticket. Refused with nothing
+  sent: `E_INVALID_STATE` where the tracker's `settings.write_back.status`
+  is off (the default; it names the tracker), `E_FORBIDDEN` for a per-host
+  token (only a person moves a ticket), `E_UNSUPPORTED` where the tracker
+  has no such move (the sentence says which it allows), `E_TRACKER` when
+  the tracker cannot be reached.
   `work_link { action: "edit", item_id, title?, notes?, assignees? }` edits a
   local item's title, notes (`""` clears) and assignees (display names, `[]`
   clears; trimmed, each once, at most 10 of 80 characters) and returns the

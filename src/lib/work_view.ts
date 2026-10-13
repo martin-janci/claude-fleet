@@ -211,6 +211,9 @@ export interface WorkTask {
   status_category?: string | null;
   status_name?: string | null;
   resolution?: string | null;
+  /** A ticket whose tracker takes a status move from fleet: its Board card
+   *  can be moved (absent from an older hub, and when it is off). */
+  status_movable?: boolean;
   unavailable?: boolean;
   unavailable_reason?: string | null;
   assignees?: string[];

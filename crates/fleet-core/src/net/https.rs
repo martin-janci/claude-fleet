@@ -40,6 +40,7 @@ const SECRET_HEADERS: &[&str] = &["authorization", "cookie", "proxy-authorizatio
 pub enum Method {
     Get,
     Post,
+    Put,
 }
 
 impl Method {
@@ -47,6 +48,7 @@ impl Method {
         match self {
             Method::Get => "GET",
             Method::Post => "POST",
+            Method::Put => "PUT",
         }
     }
 }
@@ -85,6 +87,14 @@ impl Request {
         r.headers
             .push(("Content-Type".into(), "application/json".into()));
         r.body = Some(body);
+        r
+    }
+
+    /// [`Self::post_json`] as a `PUT`: an update of the thing the URL names
+    /// (Asana's task update).
+    pub fn put_json(url: impl Into<String>, body: &serde_json::Value) -> Self {
+        let mut r = Request::post_json(url, body);
+        r.method = Method::Put;
         r
     }
 

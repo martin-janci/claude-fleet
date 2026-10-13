@@ -174,9 +174,42 @@ describe('WorkBoard', () => {
     await flush();
     expect(calls('set_work_status')).toHaveLength(0);
     expect(screen.getByTestId('work-board-card-error').textContent).toBe(
-      "ABC-12's status belongs to Jira (acme). Change it there.",
+      'ABC-12\'s status belongs to Jira (acme). Change it there, or turn on "Move tickets" for it in Settings → Trackers.',
     );
     expect(column('doing:in review').textContent).toContain('Login fails');
+  });
+
+  it('a ticket whose tracker takes moves is moved there, to the column it was dropped on (CF-6)', async () => {
+    const movable = page();
+    movable.tasks[1] = { ...movable.tasks[1], status_movable: true };
+    // A second ticket gives the board a second column of the same status.
+    movable.tasks.push({ ...movable.tasks[1], task_id: 'item:13', item_id: 13, key: 'ABC-13', title: 'Other', status_name: 'In Progress' });
+    (invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, payload?: { args: never }) => {
+      if (cmd === 'work_tree') return movable;
+      if (cmd === 'set_work_status') return setStatus(payload!.args);
+      return null;
+    });
+    const elementFromPoint = vi.fn();
+    Object.defineProperty(document, 'elementFromPoint', { value: elementFromPoint, configurable: true });
+    render(WorkBoard);
+    await flush();
+    const c = card('Login fails');
+    // No lock: this card moves.
+    expect(c.classList.contains('locked')).toBe(false);
+    // Within one status, between two of the tracker's columns: still a move.
+    elementFromPoint.mockReturnValue(column('doing'));
+    await fireEvent.pointerDown(c, { button: 0, clientX: 10, clientY: 10 });
+    await fireEvent.pointerMove(window, { clientX: 300, clientY: 20 });
+    await fireEvent.pointerUp(window, { clientX: 300, clientY: 20 });
+    await flush();
+    expect(calls('set_work_status')[0][1]).toEqual({ args: { item_id: 12, status: 'in_progress' } });
+    // → to Done: the plain status, no column name.
+    await fireEvent.keyDown(card('Login fails'), { key: 'ArrowRight' });
+    await flush();
+    expect(calls('set_work_status')[1][1]).toEqual({ args: { item_id: 12, status: 'done' } });
+    expect(screen.queryByTestId('work-board-card-error')).toBeNull();
+    // A ticket's text is still its tracker's: no edit button on it.
+    expect(screen.getAllByTestId('work-board-card-edit')).toHaveLength(1);
   });
 
   it('← → move a focused native card; a failed write puts it back and says why', async () => {

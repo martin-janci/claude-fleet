@@ -996,6 +996,14 @@ const TRACKER: ResourceType = ResourceType {
         )
         .merge("settings", &["write_back", "create_tickets"])
         .confirm("Fleet will write to this tracker: each task a person promotes is created as a ticket under this credential's account."),
+        FieldSpec::new(
+            "move_tickets",
+            "Move tickets",
+            "Let a person who moves a ticket's card on the Board move the ticket here too: a Jira transition, a Linear state, an Asana section or completion, a GitHub issue closed or reopened. Agents never move tickets. The token needs permission to edit issues.",
+            FieldKind::Bool { on_off: false, default: false },
+        )
+        .merge("settings", &["write_back", "status"])
+        .confirm("Fleet will write to this tracker: a ticket a person moves in fleet changes status there, under this credential's account."),
     ],
     create: None,
     update: Some(ActionSpec::new("tracker.update", "Apply", "update_tracker", &[TRACKER_ID])),

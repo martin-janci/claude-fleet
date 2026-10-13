@@ -1910,6 +1910,7 @@ fn opt_in(fx: &Fx) {
                     pr_remote_link: true,
                     comments: false,
                     create_tickets: false,
+                    status: false,
                 },
                 ..Default::default()
             },

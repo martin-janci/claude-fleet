@@ -1,7 +1,9 @@
 //! `work_link { action: set_status, item_id, status }`: a person's status for
-//! work with no ticket (design 2026-09-28 §2). A tracker item is refused —
-//! `Store::set_item_status` names the ticket — and an item outside the
-//! caller's scope answers exactly as an unknown id.
+//! work with no ticket (design 2026-09-28 §2), and — where its tracker's
+//! admin allows it — a ticket moved at its tracker ([`move_status`], CF-6).
+//! `Store::set_item_status` itself still refuses a tracker item, naming the
+//! ticket: fleet never stores a ticket's status on its own say. An item
+//! outside the caller's scope answers exactly as an unknown id.
 
 use crate::ipc_error::{lock, IpcError};
 use crate::service::orgs::{self, OrgScope};
@@ -39,6 +41,160 @@ pub fn set_status(
         return Err(orgs::not_found("work item", item_id));
     }
     s.set_item_status(item_id, status)?
+        .ok_or_else(|| orgs::not_found("work item", item_id))
+}
+
+/// The longest column name a status move carries.
+const STATUS_NAME_MAX_CHARS: usize = 200;
+
+/// `work_link { action: set_status, item_id, status, status_name? }` for any
+/// item (owner decision 2026-10-12, CF-6): fleet's own work through
+/// [`set_status`], a tracker's ticket by MOVING IT AT ITS TRACKER.
+///
+/// A ticket's status stays its tracker's: nothing is written to
+/// `work_items` here. The move is sent (`WriteOp::SetStatus`: a Jira
+/// transition, a Linear state, an Asana section or completion, a GitHub
+/// close or reopen), then the ticket is read back and stored as the sync
+/// stores it, so the card settles on what the tracker says — which may be a
+/// neighbouring status when the workflow has no exact one. `status_name` is
+/// the tracker's own name for the column the card was dropped on.
+///
+/// Sent now, not through the outbox: a move is a person's gesture on a card
+/// that has to answer on that card, and one replayed hours later by a
+/// backoff would undo whatever was done at the tracker since.
+///
+/// Refused, with nothing sent:
+/// * a per-host token (`E_FORBIDDEN`): only a person moves a ticket, never
+///   an agent — as with a comment posted to the tracker;
+/// * the tracker's admin has not turned `write_back.status` on
+///   (`E_INVALID_STATE`, naming the tracker and where to turn it on);
+/// * the tracker has no such move (`E_UNSUPPORTED`, in the provider's words:
+///   a workflow with no transition there, a board with no such section).
+///
+/// `net` is the caller's tracker network (`trackers::default_net()` in
+/// production, a fake in tests). The store guard is never held across the
+/// provider calls.
+pub async fn move_status(
+    store: &Mutex<Store>,
+    scope: &OrgScope,
+    item_id: i64,
+    status: &str,
+    status_name: Option<&str>,
+    net: &crate::service::trackers::TrackerNet,
+) -> Result<WorkItemRow, IpcError> {
+    use crate::ipc_error::codes;
+    use crate::service::trackers::{self, ItemRef, WriteOp};
+    let (item, t) = {
+        let s = lock(store)?;
+        let Some(item) = s.get_work_item(item_id)? else {
+            return Err(orgs::not_found("work item", item_id));
+        };
+        if item.source == "local" {
+            drop(s);
+            return set_status(store, scope, item_id, status);
+        }
+        if !scope.sees_org(s.item_org(item_id)?) {
+            return Err(orgs::not_found("work item", item_id));
+        }
+        let tracker = match item.tracker_id {
+            Some(id) => s.get_tracker(id)?,
+            None => None,
+        };
+        (item, tracker)
+    };
+    let which = item.key.clone().unwrap_or_else(|| item.title.clone());
+    if !crate::store::STATUS_CATEGORIES.contains(&status) {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "a status is one of {} — `blocked` is a session's state, not an item's",
+                crate::store::STATUS_CATEGORIES.join(", ")
+            ),
+        ));
+    }
+    let name = status_name.map(str::trim).filter(|n| !n.is_empty());
+    if name.is_some_and(|n| {
+        n.chars().count() > STATUS_NAME_MAX_CHARS || n.chars().any(char::is_control)
+    }) {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "status_name is a column's name: one line, at most 200 characters",
+        ));
+    }
+    if matches!(scope, OrgScope::Host { .. }) {
+        return Err(IpcError::new(
+            codes::E_FORBIDDEN,
+            format!("{which}'s status belongs to its tracker: only a person moves a ticket there"),
+        ));
+    }
+    let Some(t) = t else {
+        return Err(IpcError::new(
+            codes::E_UNSUPPORTED,
+            format!("{which} has no tracker fleet can move it at"),
+        ));
+    };
+    if !trackers::write_back::writes_status(&t) {
+        return Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            format!(
+                "{which}'s status belongs to {}. Moving tickets from fleet is off for it; a \
+                 tracker admin turns it on in Settings → Trackers → Move tickets",
+                t.name
+            ),
+        ));
+    }
+    // Already there: nothing to send.
+    if item.status_category == status
+        && name.is_none_or(|n| {
+            item.status_name
+                .as_deref()
+                .is_some_and(|c| trackers::same_status_name(c, n))
+        })
+    {
+        return Ok(item);
+    }
+    let Some(key) = item.key.clone().or_else(|| item.external_id.clone()) else {
+        return Err(IpcError::new(
+            codes::E_UNSUPPORTED,
+            format!("{which} has no key or tracker id to move it by"),
+        ));
+    };
+    let cred = lock(store)?.resolve_tracker_credential(t.id)?;
+    if cred.is_none() && trackers::needs_credential(&t) {
+        return Err(trackers::TrackerError::Unconfigured.to_ipc());
+    }
+    let provider = trackers::provider_for(&t, cred, net).map_err(|e| e.to_ipc())?;
+    provider
+        .write(&WriteOp::SetStatus {
+            key: key.clone(),
+            external_id: item.external_id.clone(),
+            category: status.to_string(),
+            name: name.map(str::to_string),
+        })
+        .await
+        .map_err(|e| e.to_ipc())?;
+    tracing::info!(
+        tracker = t.id,
+        item = item_id,
+        status,
+        "[write-back] ticket moved at its tracker"
+    );
+    // What the tracker says now, stored as the sync stores it. A read that
+    // fails does not undo the move: the next sync brings the status.
+    let reference = match item.external_id.as_deref().filter(|e| !e.is_empty()) {
+        Some(e) if !matches!(t.provider.as_str(), "jira" | "jira_dc") => ItemRef::Id(e.to_string()),
+        _ => ItemRef::parse(&key),
+    };
+    if let Err(e) = trackers::sync::fetch_one(&t, reference, store, net).await {
+        tracing::debug!(
+            tracker = t.id,
+            item = item_id,
+            error = %e.explain(),
+            "[write-back] moved, not read back"
+        );
+    }
+    lock(store)?
+        .get_work_item(item_id)?
         .ok_or_else(|| orgs::not_found("work item", item_id))
 }
 
@@ -275,5 +431,319 @@ mod tests {
         let w = seeded_local_item_on_host("mercury");
         let e = super::set_status(&w.store, &w.other_org_scope(), w.item, "done").unwrap_err();
         assert_eq!(e.code, crate::ipc_error::codes::E_NOTFOUND);
+    }
+}
+
+/// [`move_status`] for a tracker's ticket (CF-6): the gates, the write, and
+/// the card settling on what the tracker then says. No test reaches a
+/// tracker: the network is a [`FakeTransport`].
+#[cfg(test)]
+mod move_tests {
+    use super::move_status;
+    use crate::ipc_error::codes;
+    use crate::net::https::{FakeTransport, Method, Response};
+    use crate::service::orgs::OrgScope;
+    use crate::service::trackers::TrackerNet;
+    use crate::store::{Store, TrackerConfig, TrackerItemWrite, TrackerSettings, WriteBack};
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
+
+    struct W {
+        store: Mutex<Store>,
+        fake: FakeTransport,
+        item: i64,
+    }
+
+    impl W {
+        fn net(&self) -> TrackerNet {
+            TrackerNet::fake(Arc::new(self.fake.clone()))
+        }
+
+        fn stored(&self) -> (String, Option<String>) {
+            let i = self
+                .store
+                .lock()
+                .unwrap()
+                .get_work_item(self.item)
+                .unwrap()
+                .unwrap();
+            (i.status_category, i.status_name)
+        }
+    }
+
+    /// A Jira tracker of org "Mine" holding ABC-1, In Progress; status
+    /// write-back on when `on`.
+    fn jira(on: bool) -> W {
+        let s = Store::open_in_memory().unwrap();
+        let t = s
+            .add_tracker("jira", "Acme Jira", "https://acme.atlassian.net")
+            .unwrap()
+            .id;
+        s.set_tracker_credential(
+            t,
+            "basic",
+            Some("me@x.com"),
+            Some("tok-0123456789abc"),
+            None,
+        )
+        .unwrap();
+        s.set_tracker_probe(
+            t,
+            None,
+            &TrackerConfig {
+                key_prefixes: vec!["ABC".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        s.set_tracker_state(t, "ok", None).unwrap();
+        if on {
+            s.set_tracker_settings(
+                t,
+                &TrackerSettings {
+                    write_back: WriteBack {
+                        status: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        let item = s
+            .upsert_tracker_item(
+                t,
+                &TrackerItemWrite {
+                    external_id: "10001".into(),
+                    key: Some("ABC-1".into()),
+                    title: "Refund".into(),
+                    status_name: "In Progress".into(),
+                    status_category: "in_progress".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .id;
+        W {
+            store: Mutex::new(s),
+            fake: FakeTransport::new(),
+            item,
+        }
+    }
+
+    /// Jira's side of a move to Done: the workflow, the transition, and the
+    /// issue as it reads afterwards.
+    fn jira_moves_to_done(w: &W) {
+        w.fake.always(
+            Method::Get,
+            "/rest/api/3/issue/ABC-1/transitions",
+            Ok(Response::json(
+                200,
+                &json!({ "transitions": [{ "id": "31", "name": "Resolve",
+                    "to": { "name": "Done", "statusCategory": { "key": "done" } } }] }),
+            )),
+        );
+        w.fake.always(
+            Method::Post,
+            "/rest/api/3/issue/ABC-1/transitions",
+            Ok(Response::new(204, "")),
+        );
+        w.fake.always(
+            Method::Post,
+            "/rest/api/3/issue/bulkfetch",
+            Ok(Response::json(
+                200,
+                &json!({ "issues": [{ "id": "10001", "key": "ABC-1", "fields": {
+                    "summary": "Refund",
+                    "status": { "name": "Done", "statusCategory": { "key": "done" } },
+                } }] }),
+            )),
+        );
+    }
+
+    #[tokio::test]
+    async fn a_ticket_is_moved_at_its_tracker_and_settles_on_its_answer() {
+        let w = jira(true);
+        jira_moves_to_done(&w);
+        let row = move_status(&w.store, &OrgScope::All, w.item, "done", None, &w.net())
+            .await
+            .unwrap();
+        assert_eq!(row.status_category, "done");
+        assert_eq!(row.status_name.as_deref(), Some("Done"));
+        // Stored by the read-back, as a sync stores it: never as a person's
+        // own setting, which a sync would then be unable to move.
+        assert_eq!(w.stored(), ("done".to_string(), Some("Done".to_string())));
+        assert_eq!(row.status_set_by, None);
+        let posts: Vec<_> = w
+            .fake
+            .requests()
+            .into_iter()
+            .filter(|r| r.url.ends_with("/transitions") && r.method == Method::Post)
+            .collect();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(
+            posts[0].json_body().unwrap(),
+            json!({ "transition": { "id": "31" } })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_move_that_is_not_read_back_still_succeeds() {
+        let w = jira(true);
+        jira_moves_to_done(&w);
+        w.fake.clear_routes();
+        w.fake.always(
+            Method::Get,
+            "/transitions",
+            Ok(Response::json(
+                200,
+                &json!({ "transitions": [{ "id": "31",
+                    "to": { "name": "Done", "statusCategory": { "key": "done" } } }] }),
+            )),
+        );
+        w.fake
+            .always(Method::Post, "/transitions", Ok(Response::new(204, "")));
+        // No bulkfetch route: the read-back fails as an unreachable tracker.
+        let row = move_status(&w.store, &OrgScope::All, w.item, "done", None, &w.net())
+            .await
+            .unwrap();
+        // The next sync brings the status; nothing was invented here.
+        assert_eq!(row.status_category, "in_progress");
+    }
+
+    #[tokio::test]
+    async fn off_by_default_it_is_refused_naming_the_tracker_and_nothing_is_sent() {
+        let w = jira(false);
+        let e = move_status(&w.store, &OrgScope::All, w.item, "done", None, &w.net())
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID_STATE);
+        assert!(
+            e.message.contains("ABC-1's status belongs to Acme Jira"),
+            "{}",
+            e.message
+        );
+        assert!(e.message.contains("Move tickets"), "{}", e.message);
+        assert!(w.fake.requests().is_empty());
+        assert_eq!(w.stored().0, "in_progress");
+    }
+
+    #[tokio::test]
+    async fn an_agent_never_moves_a_ticket_and_another_org_does_not_see_it() {
+        let w = jira(true);
+        jira_moves_to_done(&w);
+        let (mine, theirs) = {
+            let s = w.store.lock().unwrap();
+            let mine = s.add_org("Mine", None, false).unwrap().id;
+            let theirs = s.add_org("Theirs", None, false).unwrap().id;
+            let t = s.list_trackers().unwrap()[0].id;
+            s.set_tracker_org(t, Some(mine)).unwrap();
+            for (host, org) in [("hosta", mine), ("hostb", theirs)] {
+                s.upsert_host(host).unwrap();
+                s.set_host_org(host, Some(org)).unwrap();
+            }
+            (
+                OrgScope::for_host(&s, "hosta").unwrap(),
+                OrgScope::for_host(&s, "hostb").unwrap(),
+            )
+        };
+        // The host's own Claude, inside the org: it sees the ticket, and is
+        // told a person moves it.
+        let e = move_status(&w.store, &mine, w.item, "done", None, &w.net())
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, codes::E_FORBIDDEN);
+        assert!(e.message.contains("only a person"), "{}", e.message);
+        // Another org: exactly an unknown id.
+        let e = move_status(&w.store, &theirs, w.item, "done", None, &w.net())
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, codes::E_NOTFOUND);
+        assert!(w.fake.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_workflow_with_no_such_move_is_said_on_the_card() {
+        let w = jira(true);
+        w.fake.always(
+            Method::Get,
+            "/transitions",
+            Ok(Response::json(
+                200,
+                &json!({ "transitions": [{ "id": "21",
+                    "to": { "name": "In Review", "statusCategory": { "key": "indeterminate" } } }] }),
+            )),
+        );
+        let e = move_status(&w.store, &OrgScope::All, w.item, "done", None, &w.net())
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, codes::E_UNSUPPORTED);
+        assert!(
+            e.message.contains("no move to Done") && e.message.contains("In Review"),
+            "{}",
+            e.message
+        );
+        assert_eq!(w.stored().0, "in_progress");
+    }
+
+    #[tokio::test]
+    async fn a_card_already_there_sends_nothing_and_a_bad_request_is_refused_first() {
+        let w = jira(true);
+        let row = move_status(
+            &w.store,
+            &OrgScope::All,
+            w.item,
+            "in_progress",
+            Some("in  progress"),
+            &w.net(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(row.status_name.as_deref(), Some("In Progress"));
+        let bad: [(&str, Option<String>); 3] = [
+            ("blocked", None),
+            ("done", Some("two\nlines".into())),
+            ("done", Some("x".repeat(201))),
+        ];
+        for (status, name) in bad {
+            let e = move_status(
+                &w.store,
+                &OrgScope::All,
+                w.item,
+                status,
+                name.as_deref(),
+                &w.net(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(e.code, codes::E_INVALID, "{status} {name:?}");
+        }
+        assert!(w.fake.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn fleets_own_work_is_still_set_here_with_no_tracker_asked() {
+        let w = jira(true);
+        let local = {
+            let s = w.store.lock().unwrap();
+            s.upsert_host("hosta").unwrap();
+            let sid = s
+                .upsert_session("s", "hosta", None, None, 1, 1, "running", None)
+                .unwrap();
+            s.name_session_work(sid, None, "local work").unwrap().0.id
+        };
+        let row = move_status(
+            &w.store,
+            &OrgScope::All,
+            local,
+            "done",
+            Some("Done"),
+            &w.net(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(row.status_category, "done");
+        assert_eq!(row.status_set_by.as_deref(), Some("person"));
+        assert!(w.fake.requests().is_empty());
     }
 }

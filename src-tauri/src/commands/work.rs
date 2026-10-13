@@ -251,11 +251,15 @@ pub async fn create_work_task(
     routed::create_work_task(&backend, args, &store).await
 }
 
-/// A person's status for a native item (`todo` | `in_progress` | `done`).
+/// A person's status for an item (`todo` | `in_progress` | `done`): fleet's
+/// own for a native item, a move at its tracker for a ticket (CF-6), where
+/// `status_name` is the tracker's name for the column it was dropped on.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SetWorkStatusArgs {
     pub item_id: i64,
     pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_name: Option<String>,
 }
 
 /// A person's edit of a native item; a field left out stays as it is.
@@ -763,8 +767,9 @@ pub(crate) mod routed {
         }
     }
 
-    /// `work_link { set_status }`: a tracker item is refused by the
-    /// service (its status is its tracker's), naming the ticket.
+    /// `work_link { set_status }`: a native item's status is fleet's; a
+    /// tracker's ticket is moved at its tracker, where its admin turned
+    /// that on (`write_back.status`), and refused naming it otherwise.
     pub async fn set_work_status(
         backend: &FleetBackend,
         args: SetWorkStatusArgs,
@@ -774,16 +779,22 @@ pub(crate) mod routed {
             action: "set_status".into(),
             item_id: Some(args.item_id),
             status: Some(args.status),
+            status_name: args.status_name,
             ..Default::default()
         };
         match backend.hub() {
             Some(hub) => hub.route("set_work_status", &args).await,
-            None => work::status::set_status(
-                store,
-                &fleet_core::service::orgs::OrgScope::All,
-                args.item_id.unwrap_or_default(),
-                args.status.as_deref().unwrap_or_default(),
-            ),
+            None => {
+                work::status::move_status(
+                    store,
+                    &fleet_core::service::orgs::OrgScope::All,
+                    args.item_id.unwrap_or_default(),
+                    args.status.as_deref().unwrap_or_default(),
+                    args.status_name.as_deref(),
+                    &fleet_core::service::trackers::default_net(),
+                )
+                .await
+            }
         }
     }
 

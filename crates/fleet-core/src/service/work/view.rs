@@ -274,6 +274,10 @@ pub struct WorkTask {
     pub status_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution: Option<String>,
+    /// A ticket whose tracker takes a person's status move from fleet
+    /// (`write_back.status`, CF-6): its card may be moved on the Board.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub status_movable: bool,
     pub unavailable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unavailable_reason: Option<String>,
@@ -2575,6 +2579,8 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
         status_category,
         status_name,
         resolution: item.and_then(|i| i.item.resolution.clone()),
+        status_movable: item.is_some_and(|i| i.item.source != "local")
+            && tracker.is_some_and(crate::service::trackers::write_back::writes_status),
         unavailable: item.is_some_and(|i| i.item.unavailable_at.is_some()),
         unavailable_reason: item.and_then(|i| i.item.unavailable_reason.clone()),
         assignees: item.map(|i| i.item.assignees.clone()).unwrap_or_default(),
