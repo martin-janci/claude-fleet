@@ -142,6 +142,27 @@ describe('WorkTaskDetail', () => {
     expect((screen.getByTestId('edit-task-title') as HTMLInputElement).value).toBe('Clean up the CI cache');
   });
 
+  it('finished local work asks to be closed: Mark done sets the status, Keep open does not', async () => {
+    handlers.work_task = () => ({ ...localTask, task: { ...localTask.task, close_suggested: true, sessions: [] } });
+    handlers.set_work_status = () => ({ id: 77 });
+    handlers.keep_work_open = () => ({ id: 77 });
+    render(WorkTaskDetail, { taskId: 'item:77' });
+    await flush();
+    expect(screen.getByTestId('work-task-close-ask').textContent).toContain('Every session of this work has ended');
+    await fireEvent.click(screen.getByTestId('work-task-keep-open'));
+    await flush();
+    expect(calls('keep_work_open')).toEqual([{ item_id: 77 }]);
+    await fireEvent.click(screen.getByTestId('work-task-mark-done'));
+    await flush();
+    expect(calls('set_work_status')).toEqual([{ item_id: 77, status: 'done' }]);
+  });
+
+  it('a task nobody is asked about, and a ticket, show no close question', async () => {
+    render(WorkTaskDetail, { taskId: 'item:77' });
+    await flush();
+    expect(screen.queryByTestId('work-task-close-ask')).toBeNull();
+  });
+
   it('shows the tracker’s data as text and where the org and group come from', async () => {
     render(WorkTaskDetail, { taskId: 'item:12' });
     await flush();

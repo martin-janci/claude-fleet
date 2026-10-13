@@ -2030,6 +2030,12 @@ const MIGRATIONS: &[Migration] = &[
         183,
         include_str!("../../migrations/183_device_token_ttl.sql"),
     ),
+    // CF-5: a person's "Keep open" on finished local work. A new table,
+    // `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        184,
+        include_str!("../../migrations/184_work_close_dismissals.sql"),
+    ),
 ];
 
 /// The settings row [`Store::finish_realm_upgrade`] writes once migration

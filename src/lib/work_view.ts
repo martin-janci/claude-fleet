@@ -63,6 +63,9 @@ export interface WorkTreeFilters {
    *  (`archived_hidden`); absent shows them (a client from before the
    *  archive). `workTree` always sends it. An older hub ignores it. */
   archived?: boolean;
+  /** Archived tasks only (the tree's Archived section). An older hub
+   *  ignores it and answers every task. Never part of a saved view. */
+  archived_only?: boolean;
   /** One person it is assigned to in its tracker, by name (redesign 6.2). */
   assignee?: string;
   /** One tracker column, the tracker's own status name ("QA Review"). */
@@ -239,6 +242,9 @@ export interface WorkTask {
   /** Done, or every session link archived, with nothing running: hidden
    *  from the tree unless `filters.archived` (or `status: done`). */
   archived?: boolean;
+  /** "Finished — close?": fleet's own work nobody closed whose sessions have
+   *  all ended (absent from an older hub). Answered by Done or Keep open. */
+  close_suggested?: boolean;
   /** Where the item came from: `manual` (a person wrote it in Fleet),
    *  `agent` (a delegated job's mirror), `proposed` (an agent's accepted
    *  proposal) or `detected` (a tracker ticket, a bare key). Absent from an
@@ -904,6 +910,7 @@ export interface WorkTreeQuery {
 export function workTree(q: WorkTreeQuery = {}): Promise<Result<WorkTreePage>> {
   const n = normalizeFilters(q.filters);
   const filters: WorkTreeFilters = { ...n, archived: n.archived === true };
+  if (q.filters?.archived_only === true) filters.archived_only = true;
   return invokeCmd<WorkTreePage>('work_tree', {
     args: clean({
       filters,

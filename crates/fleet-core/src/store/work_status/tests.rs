@@ -321,3 +321,35 @@ fn every_status_change_is_logged_by_the_triggers() {
     assert_eq!(log[2].set_by.as_deref(), Some("person"));
     assert!(log.windows(2).all(|w| w[0].at <= w[1].at));
 }
+
+/// Keep open (CF-5) is not a status: the item stays nobody's, so a working
+/// session still lifts it and a merged PR still stamps it.
+#[test]
+fn keeping_an_item_open_leaves_its_status_alone() {
+    let s = store();
+    let id = name_local_item(&s, "parked");
+    assert!(s.work_close_dismissals().unwrap().is_empty());
+    let row = s.keep_item_open(id).unwrap().unwrap();
+    assert_eq!(row.status_category, "todo");
+    assert_eq!(row.status_set_by, None);
+    let marks = s.work_close_dismissals().unwrap();
+    assert_eq!(marks.len(), 1);
+    assert_eq!(marks[0].0, id);
+    // Asked again: one row, not two.
+    s.keep_item_open(id).unwrap();
+    assert_eq!(s.work_close_dismissals().unwrap().len(), 1);
+    assert!(
+        s.stamp_derived_done(id).unwrap(),
+        "a merged PR still closes it"
+    );
+}
+
+#[test]
+fn keep_open_is_for_local_work_only() {
+    let s = store();
+    let id = seed_tracker_item(&s, "ABC-1");
+    let e = s.keep_item_open(id).unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+    assert!(e.message.contains("ABC-1"), "{}", e.message);
+    assert!(s.keep_item_open(9_999).unwrap().is_none());
+}

@@ -481,7 +481,10 @@ const SCOPE_GUARDS: &[Guard] = &[
               editing: `edit_local_item`, a write like the rename, behind the \
               same `require_drive_on_item_sessions` at the tool layer. A \
               SEVENTH arrived with epics: `set_parent`, which files the ITEM \
-              under a parent, a write behind that same tool-layer gate",
+              under a parent, a write behind that same tool-layer gate. \
+              CF-5 moved `set_status`'s call into `status::require_visible`, \
+              the one fence `set_status` and `keep_open` share; both writes \
+              carry `require_drive_on_item_sessions` at the tool layer",
     },
     Guard {
         file: "crates/fleet-core/src/service/work/local.rs",

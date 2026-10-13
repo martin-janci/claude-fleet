@@ -1685,6 +1685,21 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "keep_work_open",
+            "work_link",
+            json!({ "session_id": null, "action": "keep_open", "key": null, "item_id": 3,
+                    "link_id": null, "source": null }),
+            NATIVE_ITEM_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::keep_work_open(
+                    b,
+                    commands::work::KeepWorkOpenArgs { item_id: 3 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "session_history",
             "session_history",
             // The clamp runs on this side, so the hub is asked for the same

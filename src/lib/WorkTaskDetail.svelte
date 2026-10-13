@@ -45,7 +45,7 @@
   import Icon from './kit/Icon.svelte';
   import { copyText } from './clipboard';
   import { finishesWhen } from './handoffs';
-  import { setWorkStatus, type WorkItemStatus } from './work';
+  import { keepWorkOpen, setWorkStatus, type WorkItemStatus } from './work';
   import { listStartRules, ruleProject, type StartRuleView } from './start_rules';
   import { projects } from './projects';
   import {
@@ -428,6 +428,20 @@
     else void load(taskId);
   }
 
+  // "Finished — close?" answered with Keep open: not a status, so the
+  // suggestion comes back only when a later session ends on the work.
+  const keepBlocked = $derived(hubActionBlocked('keep_work_open', $hubStatus, $hubConnection));
+  async function keepOpen() {
+    const t = task;
+    if (!t || t.item_id == null || statusBusy) return;
+    statusBusy = true;
+    statusError = null;
+    const r = await keepWorkOpen(t.item_id);
+    statusBusy = false;
+    if (!r.ok) statusError = readErrorText(r.error);
+    else void load(taskId);
+  }
+
   // The Delivery block and the start rule that would place a start.
   const rowsById = $derived(new Map($sessions.map((r) => [r.id, r])));
   const delivery = $derived(task ? deliveryOf(task, detail?.last_outcome, rowsById, nowSec) : null);
@@ -610,6 +624,27 @@
       <p class="warn pad" role="status" data-testid="work-task-refresh-error">
         Couldn't refresh ({readErrorText(refreshError)}) — showing what was loaded.
         <button class="btn btn--quiet" type="button" data-testid="work-task-refresh-retry" onclick={() => void load(taskId)}>Retry</button>
+      </p>
+    {/if}
+    {#if task.close_suggested && task.item_id != null}
+      <p class="warn pad close-ask" role="status" data-testid="work-task-close-ask">
+        Every session of this work has ended. Finished?
+        <button
+          class="btn btn--quiet"
+          type="button"
+          data-testid="work-task-mark-done"
+          disabled={statusBlocked !== null || statusBusy}
+          title={statusBlocked ?? 'Mark this work done: with no session running it moves to Archived'}
+          onclick={() => void pickStatus('done')}>Mark done</button
+        >
+        <button
+          class="btn btn--quiet"
+          type="button"
+          data-testid="work-task-keep-open"
+          disabled={keepBlocked !== null || statusBusy}
+          title={keepBlocked ?? 'Not finished: ask again only after another session ends on it'}
+          onclick={() => void keepOpen()}>Keep open</button
+        >
       </p>
     {/if}
     {#if statusError}<p class="warn pad" role="alert" data-testid="work-task-status-error">{statusError}</p>{/if}
