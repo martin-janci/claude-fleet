@@ -20,6 +20,10 @@ describe('reportFromValue (report.rs report_from_value)', () => {
     expect(r).toEqual({
       summary: 'Added the queue table',
       outcome: 'done',
+      done: [],
+      decisions: [],
+      remaining: [],
+      context: [],
       tests_run: ['cargo test queue'],
       warnings: [],
       blockers: [],
@@ -61,6 +65,28 @@ describe('splitRich', () => {
     expect(r.marker).toBe('FLEET_TASK_DONE_9d2404fdfabee30f');
     expect(r.report.outcome).toBe('done');
     expect(r.report.followups).toEqual(['Push the branch and open a PR']);
+  });
+
+  it('keeps done, decisions, remaining and context of a report', () => {
+    const text = [
+      'FLEET_TASK_DONE_abc123',
+      '```json',
+      '{"summary":"s","outcome":"done","done":["a"],"decisions":["b"],"remaining":["c"],"context":["d"]}',
+      '```',
+    ].join('\n');
+    const block = splitRich(text).find((b) => b.t === 'report');
+    expect(block && block.t === 'report' && block.report).toMatchObject({
+      done: ['a'],
+      decisions: ['b'],
+      remaining: ['c'],
+      context: ['d'],
+    });
+  });
+
+  it('reads a report printed before the four lists as having none', () => {
+    const r = reportFromValue({ summary: 's', outcome: 'done', followups: ['a'] })!;
+    expect([r.done, r.decisions, r.remaining, r.context]).toEqual([[], [], [], []]);
+    expect(r.followups).toEqual(['a']);
   });
 
   it('reads a bare object after the marker', () => {
