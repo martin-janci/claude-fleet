@@ -394,7 +394,7 @@ fn installing_with_a_claim_claims_the_device_first() {
         vec![
             (
                 "debug_devices".to_string(),
-                json!({ "action": "claim", "device": "3", "note": "login flow", "claim_s": null })
+                json!({ "action": "claim", "device": "3", "note": "login flow", "claim_s": null, "queue": null })
             ),
             (
                 "debug_devices".to_string(),
@@ -1050,6 +1050,15 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "env_vars_list",
+            "env_vars",
+            json!({ "action": "list" }),
+            r#"[]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::env_vars::routed::env_vars_list(b, s)).map(|_| ())
+            }),
+        ),
+        (
             "add_account",
             "add_account",
             json!({ "action": "daily_limit", "host_alias": "trn", "profile": "api", "daily_limit_usd": 5.0 }),
@@ -1100,6 +1109,23 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                     fleet_core::service::wizard_state::WizardStateArgs {
                         action: "get".into(),
                         kind: Some("add_project".into()),
+                        ..Default::default()
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "dashboards",
+            "dashboards",
+            json!({ "action": "list" }),
+            r#"[{"id":"dash.r42","title":"R","spec":{},"pinned_at":1,"updated_at":2}]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::dashboards::routed::dashboards(
+                    b,
+                    s,
+                    fleet_core::service::dashboards::DashboardsArgs {
+                        action: "list".into(),
                         ..Default::default()
                     },
                 ))
@@ -1440,6 +1466,7 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                     commands::work::SetWorkStatusArgs {
                         item_id: 9,
                         status: "in_progress".into(),
+                        status_name: None,
                     },
                     s,
                 ))
@@ -1550,6 +1577,26 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // A task becomes a tracker's ticket (owner decision 2026-10-11).
+        (
+            "promote_work_item",
+            "work_link",
+            json!({ "session_id": null, "action": "promote", "key": null, "item_id": 9,
+                    "link_id": null, "source": null, "tracker_id": 2, "container": "ENG" }),
+            NATIVE_ITEM_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::promote_work_item(
+                    b,
+                    commands::work_view::PromoteWorkItemArgs {
+                        item_id: 9,
+                        tracker_id: Some(2),
+                        container: Some("ENG".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
         // Epics (sprints design 2026-09-28 §3).
         (
             "set_work_parent",
@@ -1632,6 +1679,21 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                         merge_into: None,
                     },
                     false,
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "keep_work_open",
+            "work_link",
+            json!({ "session_id": null, "action": "keep_open", "key": null, "item_id": 3,
+                    "link_id": null, "source": null }),
+            NATIVE_ITEM_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::keep_work_open(
+                    b,
+                    commands::work::KeepWorkOpenArgs { item_id: 3 },
                     s,
                 ))
                 .map(|_| ())
@@ -2386,6 +2448,7 @@ fn new_session_never_sends_an_owner_over_the_wire() {
             over_limit_ok: false,
             owner_person_id: Some(42),
             start_token: None,
+            env: None,
         },
         &st,
         &ssh(),
@@ -2459,6 +2522,23 @@ fn org_admin_read_cases() -> Vec<Case> {
                     s,
                     OrgAdminArgs {
                         ..OrgAdminArgs::new("list_people")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "list_groups",
+            "realm_admin",
+            json!({ "action": "list_groups" }),
+            r#"[]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::org_devices::routed::list_groups(
+                    b,
+                    s,
+                    fleet_core::service::realm_admin::RealmAdminArgs {
+                        action: "list_groups".into(),
+                        ..Default::default()
                     },
                 ))
                 .map(|_| ())
@@ -2960,6 +3040,66 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
 
     vec![
         (
+            "env_vars",
+            "env_vars",
+            json!({ "action": "set", "scope": "global", "name": "A", "value": "v", "secret": false }),
+            r#"{"set":"A","scope":"global","scope_key":"","applies":"on the next start or restart"}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::env_vars::routed::env_vars(
+                    b,
+                    s,
+                    fleet_core::service::env::EnvVarsArgs {
+                        action: "set".into(),
+                        scope: Some("global".into()),
+                        scope_key: None,
+                        name: Some("A".into()),
+                        value: Some("v".into()),
+                        r#ref: None,
+                        secret: Some(false),
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "env_var_set",
+            "env_vars",
+            json!({ "action": "set", "scope": "host", "scope_key": "mercury", "name": "B", "value": "w", "secret": true }),
+            r#"{"set":"B","scope":"host","scope_key":"mercury","applies":"on the next start or restart"}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::env_vars::routed::env_var_set(
+                    b,
+                    s,
+                    fleet_core::service::env::EnvVarSetArgs {
+                        scope: "host".into(),
+                        scope_key: Some("mercury".into()),
+                        name: "B".into(),
+                        value: "w".into(),
+                        secret: Some(true),
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "env_var_unset",
+            "env_vars",
+            json!({ "action": "unset", "scope": "global", "name": "A" }),
+            r#"{"removed":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::env_vars::routed::env_var_unset(
+                    b,
+                    s,
+                    fleet_core::service::env::EnvVarUnsetArgs {
+                        scope: "global".into(),
+                        scope_key: None,
+                        name: "A".into(),
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "link_peer_hub",
             "link_peer",
             json!({ "url": "https://hub.other.example", "code": "AB12-CD34" }),
@@ -3125,7 +3265,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
         (
             "claim_debug_device",
             "debug_devices",
-            json!({ "action": "claim", "device": "3", "note": "login flow", "claim_s": null }),
+            json!({ "action": "claim", "device": "3", "note": "login flow", "claim_s": null, "queue": true }),
             DEBUG_DEVICE_JSON,
             Box::new(|b, s, _| {
                 block_on(commands::debug_devices::routed::claim_debug_device(
@@ -3135,6 +3275,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         id: 3,
                         note: Some("login flow".into()),
                         claim_s: None,
+                        queue: Some(true),
                     },
                 ))
                 .map(|_| ())
@@ -3615,6 +3756,24 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     commands::work::SummarizePastWorkArgs {
                         key: "ABC-1".into(),
                         link_id: 4,
+                    },
+                    s,
+                    &ssh(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "draft_task_title",
+            "work_link",
+            json!({ "session_id": null, "action": "draft_title", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "notes": "Round the totals once" }),
+            r#"{"title":"Round totals once","model":"haiku","host_alias":"local"}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::draft_task_title(
+                    b,
+                    commands::work::DraftTaskTitleArgs {
+                        notes: "Round the totals once".into(),
                     },
                     s,
                     &ssh(),
@@ -4470,6 +4629,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         over_limit_ok: false,
                         owner_person_id: Some(42),
                         start_token: Some("st-demo-1".into()),
+                        env: None,
                     },
                     s,
                     h,
@@ -7377,8 +7537,16 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../commands/wizard_state.rs"),
     ),
     (
+        "commands/dashboards.rs",
+        include_str!("../commands/dashboards.rs"),
+    ),
+    (
         "commands/api_tokens.rs",
         include_str!("../commands/api_tokens.rs"),
+    ),
+    (
+        "commands/env_vars.rs",
+        include_str!("../commands/env_vars.rs"),
     ),
     (
         "commands/add_account.rs",
@@ -8521,4 +8689,53 @@ fn update_routes_are_the_only_contract_exemption() {
             assert_eq!(err.code, codes::E_INTERNAL, "{path}: {err:?}");
         }
     }
+}
+
+/// Persona dashboards step 6: a hub that does not serve `dashboards` yet
+/// answers unknown tool, and the desktop keeps the pin in its own store,
+/// as it did before they moved to the hub.
+#[test]
+fn a_hub_without_dashboards_keeps_them_on_this_desktop() {
+    let unknown_tool = || {
+        Arc::new(Fake {
+            body: format!(
+                "event: message\ndata: {}\n\n",
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": { "code": -32602, "message": "tool not found" },
+                })
+            ),
+            seen: Mutex::new(Vec::new()),
+        })
+    };
+    let (_dir, st) = store();
+    let fake = unknown_tool();
+    let pin = fleet_core::service::dashboards::DashboardsArgs {
+        action: "pin".into(),
+        dashboard: Some(json!({
+            "spec": "fleet.ui/1", "kind": "dashboard", "id": "dash.r42", "title": "R",
+            "widgets": [ { "kind": "stat", "title": "Open", "value": "open" } ]
+        })),
+        ..Default::default()
+    };
+    let got = block_on(commands::dashboards::routed::dashboards(
+        &remote_backend(&fake),
+        &st,
+        pin,
+    ))
+    .expect("kept here, not an error");
+    assert_eq!(got["id"], "dash.r42");
+    assert_eq!(fake.only_call().0, "dashboards");
+    let fake = unknown_tool();
+    let listed = block_on(commands::dashboards::routed::dashboards(
+        &remote_backend(&fake),
+        &st,
+        fleet_core::service::dashboards::DashboardsArgs {
+            action: "list".into(),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    assert_eq!(listed.as_array().map(Vec::len), Some(1));
 }

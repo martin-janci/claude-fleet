@@ -727,6 +727,15 @@ impl Store {
                 [from],
             )?;
         }
+        // Host-scope environment: into's own entry wins on a name clash.
+        tx.execute(
+            "UPDATE OR IGNORE env_vars SET scope_key = ?2 WHERE scope = 'host' AND scope_key = ?1",
+            rusqlite::params![from, into],
+        )?;
+        tx.execute(
+            "DELETE FROM env_vars WHERE scope = 'host' AND scope_key = ?1",
+            [from],
+        )?;
         // Keyed (day, host_alias, backfill) since plan D's migration 071: a
         // collected day and a first-cursor backfill day sum separately.
         let usage_days_merged = tx.execute(
@@ -1312,6 +1321,24 @@ mod tests {
         s.set_host_provisioned("h", false).unwrap();
         let row = s.get_host_row("h").unwrap().unwrap();
         assert!(!row.provisioned && !row.provision_stale && row.provisioned_at.is_none());
+    }
+
+    #[test]
+    fn merging_hosts_carries_their_environment_and_into_wins() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("old").unwrap();
+        s.upsert_host("new").unwrap();
+        let plain = |v: &str| crate::store::EnvValue::Plain(v.into());
+        s.set_env_var("host", "old", "A", &plain("old")).unwrap();
+        s.set_env_var("host", "old", "B", &plain("b")).unwrap();
+        s.set_env_var("host", "new", "A", &plain("new")).unwrap();
+        s.merge_host_alias("old", "new").unwrap();
+        let rows = s.list_env_vars().unwrap();
+        let got: Vec<_> = rows
+            .iter()
+            .map(|r| (r.scope_key.as_str(), r.name.as_str(), r.value.as_deref()))
+            .collect();
+        assert_eq!(got, [("new", "A", Some("new")), ("new", "B", Some("b"))]);
     }
 
     /// Migration 093: a merged host keeps its admissions, like its layer

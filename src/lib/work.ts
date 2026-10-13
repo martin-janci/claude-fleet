@@ -576,15 +576,39 @@ export async function createWorkTask(input: {
   return r;
 }
 
+/** What `draft_task_title` answers (`work::title_draft::TitleDraft`). */
+export interface TitleDraft {
+  title: string;
+  model: string;
+  host_alias: string;
+}
+
+/** A title drafted from a new task's notes: one model call on a host,
+ *  behind `work.draft_task_titles`. Nothing is stored. */
+export function draftTaskTitle(notes: string): Promise<Result<TitleDraft>> {
+  return invokeCmd<TitleDraft>('draft_task_title', { args: { notes: notes.trim() } });
+}
+
 /** The statuses a person may give a native item (`blocked` is a session's
  *  state, never an item's). */
 export type WorkItemStatus = 'todo' | 'in_progress' | 'done';
 
 /** A person's status for a native item: final over the derived one
- *  (sprints design 2026-09-28 §2). A tracker's ticket is refused,
- *  `E_INVALID`, naming it: its status is its tracker's. */
-export async function setWorkStatus(itemId: number, status: WorkItemStatus): Promise<Result<WorkItemRow>> {
-  const r = await invokeCmd<WorkItemRow>('set_work_status', { args: { item_id: itemId, status } });
+ *  (sprints design 2026-09-28 §2). A tracker's ticket is moved AT ITS
+ *  TRACKER where its admin turned "Move tickets" on (`statusName`: the
+ *  tracker's name for the column, when it has one), and the row that comes
+ *  back is what the tracker then said; otherwise it is refused, naming it. */
+export async function setWorkStatus(itemId: number, status: WorkItemStatus, statusName?: string): Promise<Result<WorkItemRow>> {
+  const args = statusName ? { item_id: itemId, status, status_name: statusName } : { item_id: itemId, status };
+  const r = await invokeCmd<WorkItemRow>('set_work_status', { args });
+  if (r.ok) bumpWorkChanged();
+  return r;
+}
+
+/** Keep open: the answer to the Work view's "finished — close?" that is not
+ *  a status. It asks again once a session ends on the work later. */
+export async function keepWorkOpen(itemId: number): Promise<Result<WorkItemRow>> {
+  const r = await invokeCmd<WorkItemRow>('keep_work_open', { args: { item_id: itemId } });
   if (r.ok) bumpWorkChanged();
   return r;
 }

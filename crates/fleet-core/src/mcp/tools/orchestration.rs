@@ -668,6 +668,7 @@ impl FleetTools {
                                 .and_then(|s| super::fleet::owner_for(&caller, &s))
                         }),
                         start_token: None,
+                        env: None,
                     },
                     &self.store,
                     &self.ssh,
@@ -1342,14 +1343,17 @@ impl FleetTools {
         attempt at the item in its own session and worktree, tracked as a task. \
         handover {session_id}: ask it to \
         write its hand-off. summarize {key, link_id}: \
-        a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never \
+        a Claude-written summary of past work. archive|unarchive (UI only; with \
+        no session_id: the ended links of link_id|key|item_id|task_id), unlink \
+        {link_id} with no session_id removes an ended link; snooze {days}|never \
         (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe \
-        kill when dirty). set_status {item_id, status}: a person's status for \
-        work with no ticket. edit {item_id, title?, notes?, assignees?, \
+        kill when dirty). set_status {item_id, status, status_name?}: a person's status for \
+        work with no ticket, or a ticket moved at its tracker; keep_open {item_id} answers close_suggested. edit {item_id, title?, notes?, assignees?, \
         due_at?, priority?, labels?, estimate?, estimate_unit?}: a person edits work with no ticket. attach {item_id, name, \
         mime, data_base64, comment_id?}: a file on a task; attachment_delete \
         {attachment_id}. create {title, parent?, \
-        notes?, assignees?, due_at?}: a task or subtask. propose {parent, title, why?}: a subtask a person accepts \
+        notes?, assignees?, due_at?}: a task or subtask. promote {item_id, tracker_id?, \
+        container?}: make it a ticket. propose {parent, title, why?}: a subtask a person accepts \
         or rejects {item_id, no session_id}. bucket_add|bucket_remove \
         {bucket_id, item_id}: sprint/release. mission_save {mission, \
         mission_id?, item_id?: root}; mission_state {mission_id, status} (paused \
@@ -1425,6 +1429,37 @@ impl FleetTools {
                 &work_link_start_summary(&args, &repos),
                 &caller,
             )?;
+        }
+        if args.action == "draft_title" {
+            // CF-4: New task's title drafted from its notes. It spends a
+            // model call, so the operator's request is confirmed like a
+            // summary's. There is no item yet, so no item gate: the fence is
+            // the host it runs on, which `pick_host` holds to the caller's
+            // scope (a per-host token its own host, a bound client its
+            // org's hosts).
+            let notes = args
+                .notes
+                .as_deref()
+                .ok_or_else(|| mcp_err("E_INVALID", "draft_title needs notes", None))?;
+            if caller.is_operator() {
+                self.confirm_gate(
+                    "work_link",
+                    args.confirm_nonce.as_deref(),
+                    "Draft a task title with a model call on a host",
+                    &caller,
+                )?;
+            }
+            return ok_json(
+                &crate::service::work::title_draft::draft_title(
+                    &self.store,
+                    self.ssh.as_ref(),
+                    notes,
+                    args.host_alias.as_deref(),
+                    &scope,
+                )
+                .await
+                .map_err(to_mcp_err)?,
+            );
         }
         if args.action == "summarize" {
             // Work graph M13.4c: a Claude-written summary of a dead session
@@ -1811,11 +1846,27 @@ impl FleetTools {
                 )),
             };
         }
+        if args.action == "keep_open" {
+            // "Finished — close?" answered with Keep open (CF-5). The org
+            // fence is inside `keep_open`; the person fence is
+            // `set_status`'s, since it answers for the same row.
+            let item_id = args
+                .item_id
+                .ok_or_else(|| mcp_err("E_INVALID", "keep_open needs item_id", None))?;
+            if !self.own_session_works_on(&caller, item_id)? {
+                self.require_drive_on_item_sessions(&caller, item_id)?;
+            }
+            return ok_json(
+                &crate::service::work::status::keep_open(&self.store, &scope, item_id)
+                    .map_err(to_mcp_err)?,
+            );
+        }
         if args.action == "set_status" {
             // A person's status for work with no ticket (design
-            // 2026-09-28 §2). The ORG fence is inside `set_status`: an item
-            // outside the scope answers as an unknown id, and a tracker
-            // item is `E_INVALID`, naming the ticket.
+            // 2026-09-28 §2), or a ticket moved at its tracker (CF-6). The
+            // ORG fence is inside `move_status`: an item outside the scope
+            // answers as an unknown id, and a ticket whose tracker does
+            // not take moves is refused, naming it.
             let item_id = args
                 .item_id
                 .ok_or_else(|| mcp_err("E_INVALID", "set_status needs item_id", None))?;
@@ -1839,12 +1890,32 @@ impl FleetTools {
             // confirmed, live link, proven by its pane) sets the status of
             // its own work even when the task is shared with sessions it
             // cannot drive. Its own link is the evidence the task is its.
-            if !self.own_session_works_on(&caller, item_id)? {
+            //
+            // A tracker's ticket (CF-6) is nobody's row: its status is the
+            // tracker's, moved there under the tracker's own credential,
+            // and the fence is the comment-to-tracker one — the org
+            // boundary and "a person, never an agent", both inside
+            // `move_status`. The session gate above would let one
+            // teammate's linked session stop another moving a shared
+            // ticket, which the tracker itself allows.
+            let ticket = crate::ipc_error::lock(&self.store)
+                .and_then(|s| s.get_work_item(item_id))
+                .map_err(to_mcp_err)?
+                .is_some_and(|i| i.source != "local");
+            if !ticket && !self.own_session_works_on(&caller, item_id)? {
                 self.require_drive_on_item_sessions(&caller, item_id)?;
             }
             return ok_json(
-                &crate::service::work::status::set_status(&self.store, &scope, item_id, status)
-                    .map_err(to_mcp_err)?,
+                &crate::service::work::status::move_status(
+                    &self.store,
+                    &scope,
+                    item_id,
+                    status,
+                    args.status_name.as_deref(),
+                    &crate::service::trackers::default_net(),
+                )
+                .await
+                .map_err(to_mcp_err)?,
             );
         }
         if args.action == "edit" {
@@ -1888,6 +1959,21 @@ impl FleetTools {
                     person,
                 )
                 .map_err(to_mcp_err)?,
+            );
+        }
+        // Promoting a task to a tracker's ticket: about the ITEM, so its
+        // org fence (inside: an item outside the scope answers as unknown),
+        // and `edit`'s person fence with no agent exception — only a person
+        // promotes (a per-host token is refused inside).
+        if args.action == "promote" {
+            let item_id = args
+                .item_id
+                .ok_or_else(|| mcp_err("E_INVALID", "promote needs item_id", None))?;
+            self.require_drive_on_item_sessions(&caller, item_id)?;
+            let person = self.view_scope(&caller)?.person;
+            return ok_json(
+                &crate::service::work::promote::promote(&args, &self.store, &scope, person)
+                    .map_err(to_mcp_err)?,
             );
         }
         if args.action == "comment_delete" {
@@ -2452,6 +2538,33 @@ impl FleetTools {
             .map_err(to_mcp_err)?;
             return ok_json(&out);
         }
+        // TASK-263: a link whose session is gone has no `session_id` to
+        // pass, so `archive`, `unarchive` and `unlink` without one reach
+        // ENDED links by `link_id` (or, for the two archives, by key /
+        // item / task). This is not a session-addressed surface, so it
+        // threads no `Reach`: its fence is the one every read of ended
+        // links takes (`scope_links_for`: org, host, person), and another
+        // person's past work answers as a link that does not exist. The
+        // predicate lives in `ended`, so the session gate's scan
+        // (`every_session_addressed_tool_declares_its_reach`) still reads
+        // the three as the tail's actions they otherwise are.
+        if crate::service::work::ended::is_sessionless(&args) {
+            // Removal deletes history, a fleet-level decision: the
+            // operator's or a person's, never a session's own token.
+            if crate::service::work::ended::is_removal(&args) && caller.host_alias.is_some() {
+                return Err(mcp_err(
+                    "E_FORBIDDEN",
+                    "a per-host token cannot remove an ended work link; archive it, or ask \
+                     the operator",
+                    None,
+                ));
+            }
+            let view_scope = self.view_scope(&caller)?;
+            return ok_json(
+                &crate::service::work::ended::work_link_ended(&args, &self.store, &view_scope)
+                    .map_err(to_mcp_err)?,
+            );
+        }
         // Work graph M14.1c: the Work view's structure and batch decisions.
         // Who may write what is inside (`structure`): never a per-host
         // token; a bound client its own org's placements and views only;
@@ -2592,11 +2705,8 @@ impl FleetTools {
             }
         }
         let sid = args.session_id.ok_or_else(|| {
-            mcp_err(
-                "E_INVALID",
-                format!("{} needs session_id", args.action),
-                None,
-            )
+            // A reject's message names the sessionless forms (TASK-263).
+            to_mcp_err(crate::service::work::ended::needs_session(&args.action))
         })?;
         // `drive`: every `work_link` action that reaches here writes the
         // session's own work graph — link, reject, confirm, unlink, ack,

@@ -1,8 +1,35 @@
 import { describe, expect, it } from 'vitest';
-import { activityEvents, commentAuthor, commentTimeline, deliveryOf, globMatch, hasDelivery, postStateLabel, startRuleFor, workSpan } from './task_detail';
+import {
+  activityEvents,
+  commentAuthor,
+  commentTimeline,
+  deliveryOf,
+  globMatch,
+  hasDelivery,
+  postStateLabel,
+  promoteTitle,
+  promotionLabel,
+  startRuleFor,
+  workSpan,
+} from './task_detail';
 import { link, task } from './work_view_fixture';
 
 describe('task_detail', () => {
+  it('promotionLabel says a ticket is on its way, or why it was not made', () => {
+    expect(promotionLabel(null)).toBeNull();
+    expect(promotionLabel({ state: 'pending', tracker: 'Jira' })).toBe('Creating the ticket in Jira…');
+    expect(promotionLabel({ state: 'failed', tracker: 'Jira', error: 'not permitted: 403' })).toBe('Not created in Jira: not permitted: 403');
+    expect(promotionLabel({ state: 'failed', tracker: '' })).toBe('Not created in the tracker: the tracker refused it');
+  });
+
+  it('promoteTitle names the parent ticket, the one tracker, or none', () => {
+    const t = { tracker_id: 1, tracker: 'Jira', provider: 'jira' };
+    expect(promoteTitle([])).toBe('');
+    expect(promoteTitle([{ ...t, parent_key: 'ABC-1' }])).toBe('Create it as a subtask of ABC-1 in Jira');
+    expect(promoteTitle([t])).toBe('Create it as a ticket in Jira');
+    expect(promoteTitle([t, { ...t, tracker_id: 2, tracker: 'Asana' }])).toBe('Create it as a ticket in a tracker');
+  });
+
   it('globMatch mirrors the backend: * is any run, case ignored', () => {
     expect(globMatch('PD-*', 'pd-12')).toBe(true);
     expect(globMatch('PD-*', 'PX-12')).toBe(false);

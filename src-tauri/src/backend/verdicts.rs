@@ -370,9 +370,13 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     // Shared work context (design 2026-09-29): a task or subtask a person
     // writes, and a person's decision on an agent's proposal.
     ("create_work_task", Verdict::Routed { tool: "work_link" }),
+    // CF-4: New task's title drafted from its notes, on a host of the hub.
+    ("draft_task_title", Verdict::Routed { tool: "work_link" }),
     // The board (sprints design 2026-09-28 §6c): a person's status for a
     // native item, set by dragging its card to a column.
     ("set_work_status", Verdict::Routed { tool: "work_link" }),
+    // CF-5: Keep open, the answer to "finished — close?".
+    ("keep_work_open", Verdict::Routed { tool: "work_link" }),
     // Task editing: a person's title, notes and assignees for a native item.
     ("edit_work_item", Verdict::Routed { tool: "work_link" }),
     // Epics (sprints design 2026-09-28 §3): a local item filed under an epic.
@@ -391,6 +395,9 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     // A ticket's comments at its tracker, read live beside fleet's own;
     // posting one is `comment_on_work`'s `post_to_tracker`.
     ("work_tracker_comments", Verdict::Routed { tool: "work" }),
+    // A task of fleet's own becomes a tracker's ticket (owner decision
+    // 2026-10-11): the hub owns the trackers and the outbox that creates it.
+    ("promote_work_item", Verdict::Routed { tool: "work_link" }),
     // Sprints and releases (design 2026-09-28 §6a/§6b): reads and
     // membership route; so do the buckets themselves, as work_link's
     // bucket_admin (owner decision 2026-10-10: the hub decides who plans).
@@ -624,6 +631,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         Verdict::Routed { tool: "org_admin" },
     ),
     ("list_people", Verdict::Routed { tool: "org_admin" }),
+    // Identity sub-project 1: Settings → Groups, read-only.
+    ("list_groups", Verdict::Routed { tool: "realm_admin" }),
     ("add_person", Verdict::Routed { tool: "org_admin" }),
     ("rename_person", Verdict::Routed { tool: "org_admin" }),
     ("disable_person", Verdict::Routed { tool: "org_admin" }),
@@ -1001,6 +1010,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     // window is onto, so the hub's. Its tool serves the owner's trusted full
     // device read and act tokens; an admin one stays the hub master's.
     ("api_tokens", Verdict::Routed { tool: "api_tokens" }),
+    // Session environment variables (spec 2026-10-11): the variables of the
+    // fleet this window is onto, so the hub's. Its tool serves the owner's
+    // trusted full device values and secrets; a reference (env:/file: on
+    // the hub) stays the hub master's.
+    ("env_vars", Verdict::Routed { tool: "env_vars" }),
+    ("env_vars_list", Verdict::Routed { tool: "env_vars" }),
+    ("env_var_set", Verdict::Routed { tool: "env_vars" }),
+    ("env_var_unset", Verdict::Routed { tool: "env_vars" }),
     // Add account (M15 step G2.9): the profile goes on a host of the fleet
     // this window is onto, and its account into that fleet's list.
     (
@@ -1025,6 +1042,9 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "wizard_state",
         },
     ),
+    // Pinned dashboards (persona design step 6) are kept on the hub, so
+    // every device of the person shows them.
+    ("dashboards", Verdict::Routed { tool: "dashboards" }),
     (
         "session_presence",
         Verdict::Routed {

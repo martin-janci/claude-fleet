@@ -405,6 +405,7 @@ fn a_headless_check_is_shown_to_whoever_sees_the_implementer() {
             mode: TokenMode::Full,
             pane: None,
             is_personal_owner: false,
+            is_fleet_admin: false,
         }
         .view_scope(&s)
         .unwrap()

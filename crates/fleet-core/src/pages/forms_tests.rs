@@ -61,6 +61,32 @@ fn a_secrets_value_is_kept_apart_from_the_answers() {
 }
 
 #[test]
+fn env_target_is_for_secret_fields_and_must_be_a_variable_name() {
+    let form = |field: serde_json::Value| {
+        parse(&json!({ "spec": "fleet.form/1", "title": "T", "steps": [
+            { "title": "A", "fields": [ field ] } ] }))
+    };
+    assert!(form(
+        json!({ "name": "tok", "type": "secret", "label": "Token", "env_target": "GITHUB_TOKEN" })
+    )
+    .is_ok());
+    let not_secret =
+        form(json!({ "name": "x", "type": "text", "label": "X", "env_target": "A" })).unwrap_err();
+    assert!(not_secret[0].contains("env_target"), "{not_secret:?}");
+    let reserved =
+        form(json!({ "name": "x", "type": "secret", "label": "X", "env_target": "PATH" }))
+            .unwrap_err();
+    assert!(
+        reserved[0].contains("env_target") && reserved[0].contains("PATH"),
+        "{reserved:?}"
+    );
+    let malformed =
+        form(json!({ "name": "x", "type": "secret", "label": "X", "env_target": "1A" }))
+            .unwrap_err();
+    assert!(malformed[0].contains("env_target"), "{malformed:?}");
+}
+
+#[test]
 fn debug_names_a_secret_but_never_prints_its_value() {
     let mut a = Answers::default();
     a.secrets.insert("pw".into(), "hunter2".into());

@@ -76,7 +76,7 @@ and *Clear all*; an empty list names the filters that hide it.
 The Work tab opens in **List** layout; the header, filters and saved views are unchanged, and **List | Grouped** switches to the organisation → group tree described below.
 
 - **List** sorts every task the filters match into **To do**, **Doing** (in progress) and **Done** (the last 7 days, collapsed). A ticket keeps its tracker's own status name in its row; its section follows fleet's effective status, by the same rule as the Board: only a task with no status (a bare key, or a ticket its tracker has not reported on yet) follows its live sessions — Doing while one runs, and off the List and the Board once none does, since nothing says where it stands. A line under the sections counts those (*N tasks not shown*); the Grouped tree lists them, and *Name this work…* gives a bare key a status of its own.
-- **+ New task** writes a task in fleet itself (`TASK-<id>`); ▾ opens the **New task** dialog, which ⌘N (Ctrl+Shift+N) also opens anywhere in Work: title, project, notes, and **Start a session for it now**, which opens the new task's start menu next. A new task stays in fleet: fleet creates no ticket in a tracker. Its **Work** button (below) opens a session in that project with the title and notes as its first prompt.
+- **+ New task** writes a task in fleet itself (`TASK-<id>`); ▾ opens the **New task** dialog, which ⌘N (Ctrl+Shift+N) also opens anywhere in Work: title, project, notes, attachments, and **Start a session for it now**, which opens the new task's start menu next. A new task stays in fleet: fleet creates no ticket in a tracker. **Attachments** (2026-10-12) takes files by the button, by dropping them on the row, or by pasting an image; they are held in the dialog, refused there as the task page refuses them (empty, over *Largest attachment*, an SVG), and attached once the task is made. A file that then fails leaves the task created: the dialog closes onto the task and says which file to add again. With **Draft task titles** on (Settings → Work & trackers → Writing help, off by default), leaving the notes with no title yet drafts one from them — one `claude -p` on this machine, or on the first reachable host when this machine is not a fleet host; a paired desktop asks its hub, which picks among its own hosts the same way. The title is marked *Drafted* with **Undo** and **Regenerate**; a title you typed is never replaced (the draft is offered beside it), **Draft title** asks again, and a draft that fails says why and blocks nothing. Its **Work** button (below) opens a session in that project with the title and notes as its first prompt.
 - **The Work button** (2026-10-06) is on every task row. Its main half reads **Open** (a live session: select it), **Continue** (no live session but a past one: resume its last conversation) or **Start**. Start asks fleet first where it would land; when everything is known and nothing is in the way it starts at once, with the brief on — for a Jira, Asana, Linear or GitHub ticket too. Otherwise it opens the *start popover*: pick the **Repo**, the **Host** (an offline one says so), edit the **Branch**, turn the **Brief** off or preview it as text, and see what is in the way: a live session on the task (Start then makes a *parallel* session in a checkout of its own, `<branch>-2`, never the same tree; *Open it* jumps there — the warning names that session, unless its name is the task's key over again, which says nothing twice), a task that is done, a proposal (*Accept & start*), another organisation (tick *Start across organisations* if it is meant). ▾ offers *Start new…* (always the popover), *Continue* one of the last past sessions, *Attach running session…* and *Copy key*; Alt-click on Start opens the popover as well. In the list, `j` / `k` move the selection, `s` runs the selected task's Work button and ⇧S opens its popover. The task page's **Start new** asks the same way.
 - **Attach running session…** (2026-10-06) puts a session that is already running on the task. The picker lists every session not on it yet — the same repository first, then sessions with no task, then idle ones — with a filter. A session already on another task offers **Switch** (that task's link ends and this one becomes its primary; the old task keeps the conversation, and *Continue* there resumes it) or **Add** (this task is a secondary link and the other stays primary). Add is the default while the session is mid-turn or when its checkout is named after the other key, Switch otherwise. When the task is already open in another session the picker says so (naming it when it is yours to see, "someone" otherwise) and the button becomes *Attach anyway*. For ten seconds after, *Undo* puts things back: a Switch switches back, an attach to a session with no task removes the link.
 - **The task page** adds *Brief*, *Subtasks* (+ Add subtask, Start), *Proposals* (an agent's suggested subtasks — Accept / Reject; rejected ones behind a toggle), *Delegated jobs* with their result, and *Agent steps* — the agent's own `TaskCreate` / `TaskUpdate` todos per session, labelled "per the agent", never a status. Placement and rules sit under *Placement & rules*.
@@ -135,20 +135,35 @@ view.
 **Filters and saved views.** A search, the *Assigned to me* and *To
 review* toggles, and a **Filters** panel laid out like the Sessions
 list's: Organisation, Tracker (or *Local work* / *Bare keys*), Status
-(Open, To do, In progress, Done) and Sessions (Active session, Past only,
+(Open, To do, In progress, Done) — by the Board's rule, so a bare key with a live
+session counts as In progress — and Sessions (Active session, Past only,
 No session, Suggested). Each filter that is on shows as a chip with a ×
 and *Clear all*, and "No tasks match" names them. The view select saves
 the current filters under a name (Save as…, Update, Delete); saved views
 live on the hub, so the phone has the same ones. The Sessions list's own
 filters (hosts, recency, org scope) do not apply here and step aside.
 Archived tasks (done, or every session archived, with nothing running)
-are hidden by default; the end of the tree says how many, with *Show
-archived*, and the panel has an *Archived tasks* switch. *Status: Done*
+stay out of the tree: they are in one collapsed **Archived · n** section
+at its end, read only when you open it, under the same filters. The
+panel's *Archived tasks* switch mixes them back into the tree instead
+(*Hide archived* undoes it). *Status: Done*
 shows done tasks regardless, and *Sessions: Past only* shows past work
 (which is archived work), as the Sessions list's *Past only* does. A task
 is archived only when it is archived for everyone: a session on another
 host or in another org that you cannot see still keeps it in the tree.
 ⌘⇧O cycles the Work view's organisation.
+
+**Finished — close?** Work that ends without a merged pull request (a local
+commit, an answer, nothing to merge) is never marked done by fleet. When
+every session of one of fleet's own tasks has ended and nobody has set its
+status, the task rises to the top of its group, next to the tasks that need
+you, marked *finished — close?* with two answers; the task's detail asks
+the same. **Mark done** closes it, and with no session running it moves to
+the *Archived* section. **Keep open** leaves it as it is and stops asking
+until another session ends on it; it is not a status, so the task still
+shows *in progress* while a session works on it and still closes on a
+merged pull request. Fleet never closes work by itself this way, and never
+asks about a tracker's ticket.
 
 **A task's detail** (select it) shows the tracker's data, where its org and
 its group come from, the repositories it ran in, every session with its
@@ -180,7 +195,8 @@ says so:
   boundary, so moving a task is a separate, previewed step (below).
 - **Group**: *placed by a person*, *by a rule* (named), *from the tracker*
   (the Jira project, Linear team, GitHub repository, Asana project), *from
-  its repository*, or *from its key prefix*. Placing a task in a group is
+  its repository* (the one its sessions run in; before any session, its
+  project's, or its parent task's), or *from its key prefix*. Placing a task in a group is
   local to fleet: it never changes the Jira or Asana ticket.
 
 **Correcting it.**
@@ -258,7 +274,9 @@ including tasks with no session at all — as reads of the `work` tool
   count under the filters), and the orgs and trackers the caller sees.
   Filters: `org` (an id or `"none"`), `tracker` (an id, `"local"` or
   `"ref"`), `status`, `mine`, `has` (`active` / `past_only` / `none` /
-  `suggested`), `review`, `query`, `group`, `archived`, and (redesign
+  `suggested`), `review`, `query`, `group`, `archived`, `archived_only`
+  (archived tasks alone, the Archived section's read; a hub from before it
+  ignores it), and (redesign
   step 6.2) `assignee` (one person by name, any case), `status_name` (one
   tracker column, the tracker's own status name, any case) and `group_by`:
   what a section under each org is, `group` (the default: a person, rule,
@@ -286,7 +304,9 @@ including tasks with no session at all — as reads of the `work` tool
   keeps seeing every task. `status: "done"`, a `done` stage and
   `has: "past_only"` show them anyway. `archived_hidden` says how many passed every other filter
   but were hidden that way (over the whole result, not the page). Each
-  task carries `archived`; `task` / `session_tasks` / `review` answer archived
+  task carries `archived`, and `close_suggested` when it is finished work
+  of fleet's own waiting for an answer (`work_link { action: set_status }`
+  or `keep_open`), which sorts right after the tasks that need a person; `task` / `session_tasks` / `review` answer archived
   tasks as any other. Pages are a keyset: pass
   `next_cursor` back with the same filters (other filters refuse it). No
   task is repeated across pages while the fleet changes; a task that moved
@@ -460,8 +480,40 @@ states: to do, in progress, done. You never have to set it: fleet marks work
 request it produced is merged. Setting it yourself overrides that for good; the
 same work will not flip back because a session started again.
 
-A ticket's status is not yours to set here — it belongs to Jira, GitHub, Asana
-or Linear, and fleet would be overwritten on its next sync. Change it there.
+A ticket's status belongs to its tracker — Jira, GitHub, Asana or Linear —
+and fleet never keeps one of its own for it: the next sync would overwrite
+it. What fleet can do is move the ticket *at* the tracker.
+
+#### Moving a ticket from the Board
+
+With **Move tickets** on for a tracker (Settings → Trackers → Write-back,
+any provider, off by default, behind a confirm: it is the tracker admin's
+call), a ticket's card on the Board is no longer locked. Drag it to another
+column, or press ← / →, and fleet moves the ticket at the tracker, under the
+tracker credential's account, while you wait. The card then shows what the
+tracker says, which can be a neighbouring status when the tracker has no
+exact one.
+
+Columns named after a tracker's own status (Jira's *In Review*, an Asana
+section) ask for exactly that status; the plain *To do*, *In progress* and
+*Done* columns ask for the first status of that kind:
+
+| Tracker | What a move does |
+| --- | --- |
+| Jira Cloud, Data Center | Takes the workflow transition that leads to the column's status, else the first one that leads to a status of that kind. Only moves the workflow allows from where the issue is. |
+| Linear | Sets the team's workflow state of that name, else its first *started* state for In progress, first *completed* for Done (never *canceled*), and *unstarted* before *backlog* for To do. |
+| Asana | Dropped on a section's column: moves the task to that section. Plain *Done* (or *Completed*): completes it. Plain *To do* / *In progress*: moves it to the board's first section mapped to that status, top to bottom, and reopens it if it was completed. |
+| GitHub | *Done* closes the issue (*Closed as not planned* closes it that way); any other column reopens a closed one. An open issue has no other status to move to: it is in progress while a pull request is linked. |
+
+If the tracker has no such move, nothing is changed and the card says why
+in the tracker's terms: "ABC-12's workflow has no move to Done from its
+current status; it allows: In Review", a Jira transition whose screen needs
+a field filled in, an Asana board with no section mapped to In progress
+(map one in the tracker's section map, or drop the card on a section's own
+column). Only a person moves a ticket: an agent's `set_status` on one is
+refused. With the setting off the card stays locked and says where to turn
+it on. The token needs permission to edit issues. The List view and the
+phone do not move tickets yet.
 
 ### Detection
 
@@ -708,6 +760,50 @@ off or the task has no ticket — then nothing is saved at all.
 
 This changes D29 on the owner's word (2026-10-11): comments a person posts
 are written back; transitions and worklogs still are not.
+
+### Local tasks, and promoting one to a ticket (off by default)
+
+Work can stay in fleet while it is small: a task of fleet's own, or a
+subtask under a tracker's ticket (*+ Add subtask* on the ticket's page).
+Such a subtask is fleet's alone — the tracker never sees it — and starts,
+comments and sprints like any other task.
+
+When it should be tracked, **Promote to ticket…** on the task's page makes it
+one. With **Create tickets** on (Settings → Trackers → Write-back, every
+provider: Jira Cloud and Data Center, Asana, Linear, GitHub; off by default,
+behind a confirm):
+
+- **A subtask of a ticket** is created under that ticket, in its tracker: a
+  Jira sub-task (the project's first sub-task issue type), an Asana subtask,
+  a Linear sub-issue in the parent's team, a GitHub sub-issue in the
+  parent's repository. Nothing to pick.
+- **A task at the top** goes to the tracker you pick: into a Jira project
+  the site owns (its *Task* type, else its first standard type), a Linear
+  team, a GitHub repository (one the tracker is narrowed to, or any in its
+  scope, typed as `owner/repo`), or an Asana project — or, with none, into
+  the Asana workspace, assigned to the tracker's account so it shows in its
+  views.
+- **What is sent**: the title and the description, signed `— <your name> via
+  fleet`. Assignees, due dates, priority, labels and estimates stay in fleet
+  for now.
+- **The task becomes the ticket.** Once the tracker answers, the same task
+  is that ticket — its new key (`ABC-7`, `ENG-12`, `acme/api#40`; an Asana
+  task draws its tracker's display key), its tracker's status — and its sessions, comments,
+  subtasks, sprint and history stay with it. Its old fleet key still finds
+  it. Local subtasks under it stay fleet's own, and can be promoted in turn.
+- **Not promoted**: a tracker's ticket, an epic, a delegated job, an open
+  proposal, and a task under a task of fleet's own (promote its parent
+  first, or take it out to the top). Only a person promotes; an agent's
+  `promote` is refused.
+- **Once.** A create is not idempotent, so it is sent at most once, through
+  the same outbox as a comment: within seconds on the desktop or hub that
+  owns the trackers. The task page says *Creating the ticket in …* meanwhile,
+  or *Not created in …: <why>* after a refusal, and offers Promote again.
+- **The token needs permission to create issues** (Jira: *Create issues* in
+  the project; Asana and Linear: a key that may add tasks / issues there;
+  GitHub: `gh` logged in with `repo` scope). A GitHub sub-issue that cannot
+  be filed under its parent is still created, at the top of the
+  repository.
 
 ### Sync
 
@@ -1277,6 +1373,7 @@ in [the settings reference](settings-reference.md).
 | `work.help_model` | `haiku` | `haiku` / `sonnet` / `opus` | fleet | The model that answers a question asked at a terminal or composer prompt line, on the session's own host and account. |
 | `work.draft_commit_messages` | `false` | on / off | fleet | Files tab: Draft writes a commit message from the staged diff with claude -p on the session's host. A draft is text you edit and commit yourself. |
 | `work.draft_briefs` | `false` | on / off | fleet | Starting from a ticket: Draft writes the agent's brief from the ticket before the first prompt, on the planned host. |
+| `work.draft_task_titles` | `false` | on / off | fleet | New task: once you have written the notes, the title is drafted from them with claude -p on this machine, or on the first reachable host when it is not a fleet host. A draft is text you edit before you create the task. |
 | `work.draft_release_notes` | `false` | on / off | fleet | Finish: Draft writes a finished mission's release note from its merged PRs, on the mission's planner host. |
 | `work.catch_up_summaries` | `false` | on / off | fleet | A watched session offers "Since 13:20": what it did since you last looked, summarised on its own host and account. |
 | `work.attachment_max_mb` | `10` | 1–16 MiB | fleet | The largest file or image a task takes. At most 16 MiB: what one call between the desktop and the hub carries. |

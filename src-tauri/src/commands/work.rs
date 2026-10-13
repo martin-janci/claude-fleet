@@ -251,11 +251,21 @@ pub async fn create_work_task(
     routed::create_work_task(&backend, args, &store).await
 }
 
-/// A person's status for a native item (`todo` | `in_progress` | `done`).
+/// A person's status for an item (`todo` | `in_progress` | `done`): fleet's
+/// own for a native item, a move at its tracker for a ticket (CF-6), where
+/// `status_name` is the tracker's name for the column it was dropped on.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SetWorkStatusArgs {
     pub item_id: i64,
     pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_name: Option<String>,
+}
+
+/// *Keep open* on fleet's own work the Work view suggested closing (CF-5).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct KeepWorkOpenArgs {
+    pub item_id: i64,
 }
 
 /// A person's edit of a native item; a field left out stays as it is.
@@ -322,6 +332,15 @@ pub async fn set_work_status(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<WorkItemRow, IpcError> {
     routed::set_work_status(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn keep_work_open(
+    args: KeepWorkOpenArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<WorkItemRow, IpcError> {
+    routed::keep_work_open(&backend, args, &store).await
 }
 
 #[tauri::command]
@@ -441,6 +460,23 @@ pub async fn summarize_past_work(
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<SummaryOutcome, IpcError> {
     routed::summarize_past_work(&backend, args, &store, &ssh).await
+}
+
+/// New task's title drafted from its notes (CF-4): one `claude -p` on a
+/// host, behind `work.draft_task_titles`. Nothing is stored.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DraftTaskTitleArgs {
+    pub notes: String,
+}
+
+#[tauri::command]
+pub async fn draft_task_title(
+    args: DraftTaskTitleArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<fleet_core::service::work::title_draft::TitleDraft, IpcError> {
+    routed::draft_task_title(&backend, args, &store, &ssh).await
 }
 
 /// The Today view's digest (work graph M9.1). `since` is the viewer's local
@@ -746,8 +782,9 @@ pub(crate) mod routed {
         }
     }
 
-    /// `work_link { set_status }`: a tracker item is refused by the
-    /// service (its status is its tracker's), naming the ticket.
+    /// `work_link { set_status }`: a native item's status is fleet's; a
+    /// tracker's ticket is moved at its tracker, where its admin turned
+    /// that on (`write_back.status`), and refused naming it otherwise.
     pub async fn set_work_status(
         backend: &FleetBackend,
         args: SetWorkStatusArgs,
@@ -757,15 +794,43 @@ pub(crate) mod routed {
             action: "set_status".into(),
             item_id: Some(args.item_id),
             status: Some(args.status),
+            status_name: args.status_name,
             ..Default::default()
         };
         match backend.hub() {
             Some(hub) => hub.route("set_work_status", &args).await,
-            None => work::status::set_status(
+            None => {
+                work::status::move_status(
+                    store,
+                    &fleet_core::service::orgs::OrgScope::All,
+                    args.item_id.unwrap_or_default(),
+                    args.status.as_deref().unwrap_or_default(),
+                    args.status_name.as_deref(),
+                    &fleet_core::service::trackers::default_net(),
+                )
+                .await
+            }
+        }
+    }
+
+    /// `work_link { keep_open }`: the answer to "finished — close?" that is
+    /// not a status (CF-5).
+    pub async fn keep_work_open(
+        backend: &FleetBackend,
+        args: KeepWorkOpenArgs,
+        store: &Mutex<Store>,
+    ) -> Result<WorkItemRow, IpcError> {
+        let args = WorkLinkArgs {
+            action: "keep_open".into(),
+            item_id: Some(args.item_id),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("keep_work_open", &args).await,
+            None => work::status::keep_open(
                 store,
                 &fleet_core::service::orgs::OrgScope::All,
                 args.item_id.unwrap_or_default(),
-                args.status.as_deref().unwrap_or_default(),
             ),
         }
     }
@@ -1062,6 +1127,32 @@ pub(crate) mod routed {
                     &args.key,
                     args.link_id,
                     &fleet_core::service::view_scope::ViewScope::internal(),
+                )
+                .await
+            }
+        }
+    }
+
+    pub async fn draft_task_title(
+        backend: &FleetBackend,
+        args: DraftTaskTitleArgs,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<work::title_draft::TitleDraft, IpcError> {
+        let wire = WorkLinkArgs {
+            action: "draft_title".into(),
+            notes: Some(args.notes.clone()),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("draft_task_title", &wire).await,
+            None => {
+                work::title_draft::draft_title(
+                    store,
+                    ssh.as_ref(),
+                    &args.notes,
+                    None,
+                    &fleet_core::service::orgs::OrgScope::All,
                 )
                 .await
             }

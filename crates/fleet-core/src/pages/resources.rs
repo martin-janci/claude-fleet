@@ -988,6 +988,22 @@ const TRACKER: ResourceType = ResourceType {
         )
         .merge("settings", &["write_back", "comments"])
         .confirm("Fleet will write to this tracker: a comment a person posts from fleet appears on the ticket under this credential's account."),
+        FieldSpec::new(
+            "create_tickets",
+            "Create tickets",
+            "Let a person promote a task made in fleet to a ticket here: a subtask of a ticket becomes that ticket's subtask, a task goes into the project they pick. Agents never create one. The token needs permission to create issues.",
+            FieldKind::Bool { on_off: false, default: false },
+        )
+        .merge("settings", &["write_back", "create_tickets"])
+        .confirm("Fleet will write to this tracker: each task a person promotes is created as a ticket under this credential's account."),
+        FieldSpec::new(
+            "move_tickets",
+            "Move tickets",
+            "Let a person who moves a ticket's card on the Board move the ticket here too: a Jira transition, a Linear state, an Asana section or completion, a GitHub issue closed or reopened. Agents never move tickets. The token needs permission to edit issues.",
+            FieldKind::Bool { on_off: false, default: false },
+        )
+        .merge("settings", &["write_back", "status"])
+        .confirm("Fleet will write to this tracker: a ticket a person moves in fleet changes status there, under this credential's account."),
     ],
     create: None,
     update: Some(ActionSpec::new("tracker.update", "Apply", "update_tracker", &[TRACKER_ID])),
@@ -1220,6 +1236,8 @@ const PERSON_RESOURCE: ResourceType = ResourceType {
         FieldSpec::new("display_name", "Shown as", "How the apps show them; empty shows the name.", FieldKind::Text { max: 80 }).edit("display_name"),
         FieldSpec::new("owner", "Owner", "This hub's own owner.", FieldKind::Bool { on_off: false, default: false }).badge(Badge::True { text: "owner" }),
         FieldSpec::new("devices", "Devices", "Their live paired devices. Manage them in Settings → Devices.", FieldKind::Items { item_label: ItemLabel::Plain, remove: None, add: &[], each: &[] }),
+        FieldSpec::new("groups", "Groups", "The groups they are a member of. An org's groups follow its members; see Settings → Groups.", FieldKind::Items { item_label: ItemLabel::Plain, remove: None, add: &[], each: &[] }),
+        FieldSpec::new("roles_display", "Roles", "Every role they hold, and through which group, composite or direct mapping.", FieldKind::Items { item_label: ItemLabel::Plain, remove: None, add: &[], each: &[] }),
         FieldSpec::new("created_at", "Added", "When the hub first heard of them.", FieldKind::Time),
         FieldSpec::new("disabled_at", "Disabled", "When their devices and the shares made to them were revoked.", FieldKind::Time),
     ],
@@ -1238,8 +1256,34 @@ const PERSON_RESOURCE: ResourceType = ResourceType {
     update: Some(ActionSpec::new("person.update", "Apply", "rename_person", &[("person_id", Bind::Record("id"))])),
     delete: Some(
         ActionSpec::new("person.disable", "Disable", "disable_person", &[("person_id", Bind::Record("id"))])
-            .confirm("Revokes every device of theirs and every share made to them, at once. Their own sessions stay private and theirs. There is no re-enable."),
+            .confirm("Revokes every device of theirs and every share made to them, at once. Their own sessions stay private and theirs. They can be re-enabled later (org_admin enable_person, or fleet-hub person enable), but nothing revoked comes back."),
     ),
+    actions: &[],
+    create_flow: None,
+    variant_by: None,
+};
+
+/// The realm's groups (identity sub-project 1), read-only: membership and
+/// role mappings change on the org's page or through `realm_admin`.
+const GROUP_RESOURCE: ResourceType = ResourceType {
+    id: "group",
+    label: "Group",
+    plural: "Groups",
+    help: "Groups and the roles they grant. An org's own groups, its admins, members and viewers under /orgs, follow the org.",
+    list: "list_groups",
+    id_field: "path",
+    title_field: "path",
+    color_field: None,
+    empty: "No groups yet. An org's groups appear when the org is added.",
+    fields: &[
+        FieldSpec::new("path", "Path", "Where the group sits, from the top: /orgs/acme/admins.", FieldKind::Text { max: 512 }),
+        FieldSpec::new("managed", "Managed", "Kept by its org: its members follow the org's members and roles.", FieldKind::Bool { on_off: false, default: false }).badge(Badge::True { text: "managed" }),
+        FieldSpec::new("roles", "Roles", "The roles every member holds through this group.", FieldKind::Items { item_label: ItemLabel::Plain, remove: None, add: &[], each: &[] }),
+        FieldSpec::new("members", "Members", "Its direct members, by name.", FieldKind::Items { item_label: ItemLabel::Plain, remove: None, add: &[], each: &[] }),
+    ],
+    create: None,
+    update: None,
+    delete: None,
     actions: &[],
     create_flow: None,
     variant_by: None,
@@ -1298,6 +1342,7 @@ const DEBUG_DEVICE: ResourceType = ResourceType {
         FieldSpec::new("claimed_by", "Claimed by", "Who is using it now; nobody else may until the claim ends.", FieldKind::Text { max: 256 }),
         FieldSpec::new("claim_note", "For", "What the claim says it is for.", FieldKind::Text { max: 200 }),
         FieldSpec::new("claimed_until", "Claim ends", "When the claim lapses unless its holder keeps using it.", FieldKind::Time),
+        FieldSpec::new("waiting", "Waiting", "Sessions and people in line for it; each gets the claim in turn when the one before releases it or lets it lapse.", FieldKind::Count),
         FieldSpec::new("last_seen_at", "Last seen", "When a scan last found it.", FieldKind::Time),
     ],
     create: None,
@@ -1308,8 +1353,16 @@ const DEBUG_DEVICE: ResourceType = ResourceType {
     ),
     actions: &[
         ActionSpec::new("debug_device.rescan", "Rescan host", "scan_debug_devices", &[("host", Bind::Record("host"))]),
-        ActionSpec::new("debug_device.claim", "Claim", "claim_debug_device", &[DEBUG_DEVICE_ID, ("note", Bind::Param("note"))])
-            .params(&[param("note", "For (optional)", text(200, "testing the login flow"), false)]),
+        ActionSpec::new(
+            "debug_device.claim",
+            "Claim",
+            "claim_debug_device",
+            &[DEBUG_DEVICE_ID, ("note", Bind::Param("note")), ("queue", Bind::Param("queue"))],
+        )
+            .params(&[
+                param("note", "For (optional)", text(200, "testing the login flow"), false),
+                param("queue", "Wait in line if someone holds it", ParamKind::Toggle { default: false }, false),
+            ]),
         ActionSpec::new(
             "debug_device.install",
             "Install app…",
@@ -1338,7 +1391,7 @@ const DEBUG_DEVICE: ResourceType = ResourceType {
         ActionSpec::new("debug_device.mirror_stop", "Stop mirror", "stop_device_mirror", &[DEBUG_DEVICE_ID])
             .variants(&["physical", "emulator"]),
         ActionSpec::new("debug_device.release", "Release claim", "release_debug_device", &[DEBUG_DEVICE_ID])
-            .confirm("Whoever holds it loses the claim; another session may then use the device."),
+            .confirm("Whoever holds it loses the claim and the next in line gets it, or another session may then use it. If you wait in its line, you only leave the line."),
         ActionSpec::new("debug_device.boot", "Start", "boot_debug_device", &[DEBUG_DEVICE_ID]).variants(&["emulator", "simulator"]),
         ActionSpec::new("debug_device.shutdown", "Stop", "shutdown_debug_device", &[DEBUG_DEVICE_ID])
             .variants(&["emulator", "simulator"])
@@ -1402,14 +1455,76 @@ const PEER_LINK: ResourceType = ResourceType {
     variant_by: None,
 };
 
+const ENV_SCOPES: &[(&str, &str)] = &[
+    ("global", "Global"),
+    ("host", "Host"),
+    ("project", "Project"),
+    ("session", "Session"),
+];
+
+/// Session environment variables (spec 2026-10-11-session-env-and-secrets-design.md):
+/// Settings › Environment. Add and Remove are `env_var_set` / `env_var_unset`,
+/// `env_vars set` / `unset` with the action supplied by the command, since a
+/// resource action binds no constant.
+const ENV_VAR: ResourceType = ResourceType {
+    id: "env_var",
+    label: "Environment variable",
+    plural: "Environment variables",
+    help: "Set in every session fleet starts, by scope: global, then host, then project (owner/repo), then session; the narrower wins. A change applies when a session next starts or restarts. A secret's value is never shown again.",
+    list: "env_vars_list",
+    id_field: "id",
+    title_field: "name",
+    color_field: None,
+    empty: "No variables. Add one to have it in every session fleet starts.",
+    fields: &[
+        FieldSpec::new("name", "Name", "The variable's name.", FieldKind::Text { max: 128 }),
+        FieldSpec::new("scope", "Scope", "Where it applies: everywhere, one host, one project or one session.", FieldKind::Choice { options: ENV_SCOPES }).badge(Badge::Label),
+        FieldSpec::new("scope_key", "Applies to", "The host alias, owner/repo or session id; empty for global.", FieldKind::Text { max: 255 }),
+        FieldSpec::new("value", "Value", "Shown for a plain value only.", FieldKind::Text { max: 32768 }),
+        FieldSpec::new("secret", "Secret", "Write-only: never shown again.", FieldKind::Bool { on_off: false, default: false }).badge(Badge::True { text: "secret" }),
+        FieldSpec::new("is_ref", "Reference", "Read from the hub's environment or a file on it when a session starts.", FieldKind::Bool { on_off: false, default: false }).badge(Badge::True { text: "ref" }),
+        FieldSpec::new("updated_at", "Changed", "When it was last set.", FieldKind::Time),
+    ],
+    create: Some(
+        ActionSpec::new("env_var.set", "Add variable", "env_var_set", &[
+            ("scope", Bind::Param("scope")),
+            ("scope_key", Bind::Param("scope_key")),
+            ("name", Bind::Param("name")),
+            ("value", Bind::Param("value")),
+            ("secret", Bind::Param("secret")),
+        ])
+        .params(&[
+            param("scope", "Scope", ParamKind::Choice { options: &[("global", "Global"), ("host", "Host"), ("project", "Project")] }, true),
+            param("scope_key", "Host or owner/repo", text(255, "mercury · owner/repo · empty for global"), false),
+            param("name", "Name", text(128, "DATABASE_URL"), true),
+            param("value", "Value", ParamKind::Secret, true),
+            param("secret", "Keep it secret (never shown again)", ParamKind::Toggle { default: true }, false),
+        ]),
+    ),
+    update: None,
+    delete: Some(
+        ActionSpec::new("env_var.remove", "Remove", "env_var_unset", &[
+            ("scope", Bind::Record("scope")),
+            ("scope_key", Bind::Record("scope_key")),
+            ("name", Bind::Record("name")),
+        ])
+        .confirm("Remove this variable? A running session keeps it until it restarts."),
+    ),
+    actions: &[],
+    create_flow: None,
+    variant_by: None,
+};
+
 pub const RESOURCES: &[ResourceType] = &[
     ORG,
     TRACKER,
     CATALOG,
     DEVICE_RESOURCE,
     PERSON_RESOURCE,
+    GROUP_RESOURCE,
     DEBUG_DEVICE,
     PEER_LINK,
+    ENV_VAR,
 ];
 
 pub fn resource(id: &str) -> Option<&'static ResourceType> {
@@ -1630,6 +1745,9 @@ mod tests {
                 "debug_device_logs",
                 "debug_device_screenshot",
                 "disable_person",
+                "env_var_set",
+                "env_var_unset",
+                "env_vars_list",
                 "flow_back",
                 "flow_cancel",
                 "flow_start",
@@ -1640,6 +1758,7 @@ mod tests {
                 "link_peer_hub",
                 "list_debug_devices",
                 "list_devices",
+                "list_groups",
                 "list_orgs",
                 "list_peer_links",
                 "list_people",

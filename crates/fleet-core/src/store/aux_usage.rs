@@ -20,6 +20,9 @@ pub const AUX_ORIGIN_RELEASE_NOTE: &str = "release_note";
 pub const AUX_ORIGIN_MORNING_BRIEF: &str = "morning_brief";
 /// [`NewAuxUsage::origin`] of a brief drafted from a ticket (redesign 6.10).
 pub const AUX_ORIGIN_BRIEF: &str = "brief";
+/// [`NewAuxUsage::origin`] of a task's title drafted from its notes
+/// (`service::work::title_draft`).
+pub const AUX_ORIGIN_TASK_TITLE: &str = "task_title";
 /// [`NewAuxUsage::origin`] of a watcher's "Since 13:20" summary of a
 /// session (Orbit Fleet 11.11).
 pub const AUX_ORIGIN_WATCH_SUMMARY: &str = "watch_summary";
@@ -41,6 +44,7 @@ pub const AUX_ORIGINS: &[&str] = &[
     AUX_ORIGIN_RELEASE_NOTE,
     AUX_ORIGIN_MORNING_BRIEF,
     AUX_ORIGIN_BRIEF,
+    AUX_ORIGIN_TASK_TITLE,
     AUX_ORIGIN_WATCH_SUMMARY,
     AUX_ORIGIN_TRIAGE,
     AUX_ORIGIN_CONTEXT_HELP,

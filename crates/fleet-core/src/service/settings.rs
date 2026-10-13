@@ -570,6 +570,8 @@ pub const WORK_DRAFT_COMMIT_MESSAGES: &str = "work.draft_commit_messages";
 /// A start drafts the agent's brief from its ticket
 /// (`work::brief_draft`).
 pub const WORK_DRAFT_BRIEFS: &str = "work.draft_briefs";
+/// New task drafts the title from the notes (`work::title_draft`).
+pub const WORK_DRAFT_TASK_TITLES: &str = "work.draft_task_titles";
 /// Finish drafts a mission's release note from its merged PRs
 /// (`work::orchestrate::drafts::release_note`).
 pub const WORK_DRAFT_RELEASE_NOTES: &str = "work.draft_release_notes";
@@ -771,6 +773,19 @@ pub const DECIDE_JEV_MODEL: &str = "decide.jev.model";
 pub const DECIDE_JEV_MODELS: &[&str] = &["jev-1.13.0", "jev-latest"];
 /// Days a `decision_runs` row is kept (`0` = forever).
 pub const DECIDE_RETENTION_DAYS: &str = "decide.retention_days";
+/// Days an admin event (`store::admin_events`, the identity audit log) is
+/// kept (`0` = forever); swept by `service::gc`.
+pub const AUDIT_RETENTION_DAYS: &str = "auth.audit_retention_days";
+/// Days a paired device may go unused before its token stops resolving
+/// (`0` = never; identity sub-project 1). Peer and updater tokens never
+/// expire. Decided per request in `mcp::authorize`.
+pub const DEVICE_TOKEN_TTL_DAYS: &str = "auth.device_token_ttl_days";
+/// Days after pairing a device's token stops resolving, used or not
+/// (`0` = off).
+pub const DEVICE_TOKEN_MAX_AGE_DAYS: &str = "auth.device_token_max_age_days";
+/// Not a registered setting: the Unix second migration 183 started every
+/// existing token's idle clock, so the upgrade signs nobody out.
+pub const DEVICE_TOKEN_TTL_SINCE: &str = "auth.device_token_ttl_since";
 /// A second opinion: every question a use case in `shadow` or `assist`
 /// asks Jev is also asked of Claude in print mode on
 /// [`DECIDE_HAIKU_HOST`], and its answer recorded beside Jev's (provider
@@ -1486,6 +1501,14 @@ pub const SPECS: &[Spec] = &[
     )
     .tags(&[Tag::Ai]),
     Spec::new(
+        WORK_DRAFT_TASK_TITLES,
+        "false",
+        Kind::Bool,
+        "Draft task titles",
+        "New task: once you have written the notes, the title is drafted from them with claude -p on this machine, or on the first reachable host when it is not a fleet host. A draft is text you edit before you create the task.",
+    )
+    .tags(&[Tag::Ai]),
+    Spec::new(
         WORK_DRAFT_RELEASE_NOTES,
         "false",
         Kind::Bool,
@@ -1925,6 +1948,33 @@ pub const SPECS: &[Spec] = &[
     )
     .unit(Unit::Days)
     .zero("forever"),
+    Spec::new(
+        AUDIT_RETENTION_DAYS,
+        "365",
+        Kind::Int { min: 0, max: 3650 },
+        "Audit: keep admin events",
+        "Days an administrative change (who changed which person, group, role or device) is kept.",
+    )
+    .unit(Unit::Days)
+    .zero("forever"),
+    Spec::new(
+        DEVICE_TOKEN_TTL_DAYS,
+        "90",
+        Kind::Int { min: 0, max: 3650 },
+        "Devices: sign out after idle days",
+        "Days a paired device may go unused before it is signed out and must be paired again. Peer hubs and updaters are never signed out.",
+    )
+    .unit(Unit::Days)
+    .zero("never"),
+    Spec::new(
+        DEVICE_TOKEN_MAX_AGE_DAYS,
+        "0",
+        Kind::Int { min: 0, max: 3650 },
+        "Devices: sign out days after pairing",
+        "Days after pairing a device is signed out, however often it is used. Peer hubs and updaters are never signed out.",
+    )
+    .unit(Unit::Days)
+    .zero("off"),
     Spec::new(
         DECIDE_JEV_FLOORS,
         "",

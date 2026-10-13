@@ -47,6 +47,9 @@ pub struct ClaimDebugDeviceArgs {
     /// How long, in seconds; the service's default (30 min) when absent.
     #[serde(default)]
     pub claim_s: Option<i64>,
+    /// When someone else holds it, wait in line instead of failing.
+    #[serde(default)]
+    pub queue: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -368,6 +371,7 @@ pub(crate) mod routed {
                         "device": args.id.to_string(),
                         "note": args.note,
                         "claim_s": args.claim_s,
+                        "queue": args.queue,
                     }),
                 )
                 .await
@@ -378,6 +382,7 @@ pub(crate) mod routed {
                 &args.id.to_string(),
                 args.claim_s,
                 args.note.as_deref(),
+                args.queue.unwrap_or(false),
             ),
         }
     }
@@ -397,6 +402,7 @@ pub(crate) mod routed {
                     id: args.id,
                     note,
                     claim_s: None,
+                    queue: None,
                 },
             )
             .await?;

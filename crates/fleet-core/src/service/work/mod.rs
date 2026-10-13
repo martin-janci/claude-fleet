@@ -12,6 +12,7 @@ pub mod card;
 pub mod confidence;
 pub mod describe;
 pub mod detect;
+pub mod ended;
 pub mod graph;
 pub mod handover;
 pub mod harvest;
@@ -20,6 +21,7 @@ pub mod missions;
 pub mod nudge;
 pub mod orchestrate;
 pub mod plan_import;
+pub mod promote;
 pub mod recognize;
 pub mod report;
 pub mod resolve;
@@ -34,6 +36,7 @@ pub mod steps;
 pub mod structure;
 pub mod summary;
 pub mod tidy;
+pub mod title_draft;
 pub mod today;
 pub mod tracker_comments;
 pub mod usage;
@@ -190,7 +193,7 @@ pub struct WorkLinkArgs {
     /// Start: brief Claude with the ticket.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub with_brief: Option<bool>,
-    /// preview_start: have a model draft the brief (one call on the host).
+    /// preview_start: a model drafts the brief (a host call).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft_brief: Option<bool>,
     /// Start: session name.
@@ -247,6 +250,12 @@ pub struct WorkLinkArgs {
     /// comment: also post it to the ticket's tracker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_to_tracker: Option<bool>,
+    /// promote: a top task's tracker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracker_id: Option<i64>,
+    /// promote: Jira project, Asana project gid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
     /// create/propose/edit/comment: text (edit: "" clears).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
@@ -274,6 +283,9 @@ pub struct WorkLinkArgs {
     /// set_status: todo | in_progress | done.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// set_status on a ticket: the tracker's column name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_name: Option<String>,
     /// item:<id> or ref:<KEY>; reject: item:<id> merges into it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
@@ -573,13 +585,16 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "accept",
     "name",
     "set_status",
+    "keep_open",
     "edit",
     "set_parent",
     "comment",
     "comment_delete",
+    "promote",
     "attach",
     "attachment_delete",
     "summarize",
+    "draft_title",
     "set_primary",
     "reconsider",
     "ack",
@@ -654,9 +669,11 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("rename_work_item", "work_link", "name"),
     ("create_work_task", "work_link", "create"),
     ("set_work_status", "work_link", "set_status"),
+    ("keep_work_open", "work_link", "keep_open"),
     ("edit_work_item", "work_link", "edit"),
     ("set_work_parent", "work_link", "set_parent"),
     ("comment_on_work", "work_link", "comment"),
+    ("promote_work_item", "work_link", "promote"),
     ("delete_work_comment", "work_link", "comment_delete"),
     ("attach_to_work", "work_link", "attach"),
     ("delete_work_attachment", "work_link", "attachment_delete"),
@@ -665,6 +682,7 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("accept_work_proposal", "work_link", "accept"),
     ("reject_work_proposal", "work_link", "reject"),
     ("summarize_past_work", "work_link", "summarize"),
+    ("draft_task_title", "work_link", "draft_title"),
     // Work graph M14.1d: the Work view's desktop commands.
     ("work_tree", "work", "tree"),
     ("work_task", "work", "task"),
@@ -1124,12 +1142,11 @@ fn work_link_locked<'a>(
             format!("{} has its own entry point", args.action),
         ));
     }
-    let session_id = args.session_id.ok_or_else(|| {
-        IpcError::new(
-            codes::E_INVALID,
-            format!("{} needs session_id", args.action),
-        )
-    })?;
+    // The three sessionless forms live in `ended` (TASK-263) and never
+    // reach here; a reject has none, and is told where those two are.
+    let session_id = args
+        .session_id
+        .ok_or_else(|| ended::needs_session(&args.action))?;
     // A client bound to an org never reaches another org's session (the
     // transport's session gate says so first; this keeps the service's own
     // answer the same — the unknown session's — for every entry point, the

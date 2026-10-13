@@ -1234,15 +1234,15 @@ pub(super) fn enforce_admin(caller: &Caller, tool: &str) -> Result<(), McpError>
     // blocked operator gets.
     let message = if access == Some(guard::Access::Person) {
         format!(
-            "{tool} is for the fleet's operator or the hub owner's OWN paired device, \
-             not a host's token, a device bound to an org, or another person's \
-             device ({} refused)",
+            "{tool} is for the fleet's operator or a fleet admin's OWN paired device, \
+             not a host's token, a device bound to an org, or the device of a \
+             person without the fleet-admin role ({} refused)",
             caller.label()
         )
     } else if access == Some(guard::Access::PersonDevice) {
         format!(
-            "{tool} is for the hub owner's OWN paired device — not another person's, \
-             not one bound to an org; on the hub machine use fleet-hub settings \
+            "{tool} is for a fleet admin's OWN paired device — not one of a person \
+             without the fleet-admin role, not one bound to an org; on the hub machine use fleet-hub settings \
              ({} refused)",
             caller.label()
         )

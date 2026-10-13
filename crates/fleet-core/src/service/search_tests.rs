@@ -36,6 +36,7 @@ fn stranger(st: &Mutex<Store>) -> ViewScope {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
         api: None,
     };
     caller.view_scope(&st.lock().unwrap()).unwrap()

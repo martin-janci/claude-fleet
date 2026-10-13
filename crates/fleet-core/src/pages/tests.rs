@@ -865,3 +865,18 @@ fn a_table_shows_plain_fields_and_filters_its_own_columns() {
     cat.table = serde_json::from_value(json!({ "title": "T", "columns": ["name"] })).unwrap();
     assert!(messages(&[cat]).contains("a table belongs to a master_detail page"));
 }
+
+/// Identity sub-project 1 (Task 12): Settings → Groups lists the realm's
+/// groups and changes nothing — membership and mappings stay with the org
+/// page and `realm_admin`.
+#[test]
+fn the_groups_page_is_read_only() {
+    let page = super::get("settings.groups").expect("settings.groups is a page");
+    assert_eq!(page.resource.as_deref(), Some("group"));
+    let group = super::resources::resource("group").expect("group is a resource");
+    assert_eq!(group.list, "list_groups");
+    assert!(group.create.is_none(), "a group is not created here");
+    assert!(group.update.is_none(), "a group is not changed here");
+    assert!(group.delete.is_none(), "a group is not deleted here");
+    assert!(group.actions().is_empty(), "{:?}", group.actions());
+}

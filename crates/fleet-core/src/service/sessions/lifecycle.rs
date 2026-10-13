@@ -107,6 +107,11 @@ pub struct NewSessionArgs {
     /// the hub's `/events` stream. 1–64 of `[A-Za-z0-9_-]`.
     #[serde(default)]
     pub start_token: Option<String>,
+    /// Session-scope environment variables (plain values) for this session:
+    /// used in memory for the first launch (`service::env::prepare`), then
+    /// stored as session-scope `env_vars` rows once the row exists.
+    #[serde(default)]
+    pub env: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// An existing worktree to make sure is present on a remote host, ahead of
@@ -1043,6 +1048,23 @@ pub(super) async fn new_session_inner(
             args.new_worktree.as_deref(),
         )?
     };
+    // The session's environment, resolved and written before any workspace
+    // step: an unresolved or invalid variable refuses the create with no
+    // worktree or branch left behind. Both launchers below
+    // (`ensure_for_new_session` and `new_session`) get the wrapped command.
+    // No store guard is held here (`prepare` locks and awaits).
+    let (claude_id, pane_cmd) = claude_id_and_pane_cmd(&args);
+    let env_extra = args.env.clone().unwrap_or_default();
+    let pane_cmd = crate::service::env::prepare(
+        store,
+        &**ssh,
+        &args.host_alias,
+        Some(args.project_id),
+        None,
+        &env_extra,
+        &pane_cmd,
+    )
+    .await?;
     let path: PathBuf = if let Some(p) = fixed.clone() {
         PathBuf::from(p)
     } else if args.host_alias == "local" {
@@ -1166,7 +1188,6 @@ pub(super) async fn new_session_inner(
     // A "shell" session runs a plain login shell in the pane instead of
     // Claude Code. Any other value (incl. None) is treated as a "work" session.
     let is_shell = args.kind.as_deref() == Some("shell");
-    let (claude_id, pane_cmd) = claude_id_and_pane_cmd(&args);
 
     // Automatic self-repair for an EXISTING worktree row / main checkout: the
     // row may point at a directory that was deleted since it was written.
@@ -1239,6 +1260,25 @@ pub(super) async fn new_session_inner(
             )
         })?;
 
+    // The row's project comes from reconcile's cwd match, which finds none
+    // for a cwd outside the host's project layout (a system project on a
+    // remote host, a custom root). The session was created against
+    // `args.project_id`; pin it, so a relaunch resolves the same project-scope
+    // environment as this launch did. Reconcile keeps a started row's project
+    // when its own match is empty.
+    if row.project_id.is_none() {
+        s.set_session_project(row.id, args.project_id)?;
+    }
+    // `new_session { env }` was used in memory for this launch; from now on
+    // it is the session's own scope, read by every relaunch.
+    for (name, value) in &env_extra {
+        s.set_env_var(
+            "session",
+            &row.id.to_string(),
+            name,
+            &crate::store::EnvValue::Plain(value.clone()),
+        )?;
+    }
     let worktree_id =
         link_new_session_worktree(&s, row.id, &args, &path.to_string_lossy(), fixed.is_some())?;
     let derived_friendly = derive_friendly_name(&s, &args, worktree_id.or(row.worktree_id))?;
@@ -2072,7 +2112,7 @@ pub async fn restart_session(
     // restarted shell session comes back as a shell, not a Claude pane. Read
     // the controller under the same lock and refuse to restart ourselves
     // unless forced ([`restart_guard`], which exempts the operator).
-    let (kind, agent, claude_id, session_id, launch, gone_cwd) = {
+    let (kind, agent, claude_id, session_id, project_id, launch, gone_cwd) = {
         let s = lock(store)?;
         restart_guard(&s, &args.host_alias, &args.name, args.force)?;
         let row = s.get_session(&args.name, &args.host_alias)?;
@@ -2115,6 +2155,7 @@ pub async fn restart_session(
                     r.agent,
                     r.claude_session_id,
                     Some(r.id),
+                    r.project_id,
                     launch,
                     gone_cwd,
                 )
@@ -2140,6 +2181,7 @@ pub async fn restart_session(
                 crate::store::AGENT_CLAUDE.to_string(),
                 None,
                 None,
+                None,
                 Default::default(),
                 gone_cwd,
             ),
@@ -2157,6 +2199,18 @@ pub async fn restart_session(
     }
     let pane_cmd: String =
         recreate_pane_command(&kind, &agent, claude_id.as_deref(), &args.name, &launch);
+    // A fresh env file per restart, so an edit since the last launch applies.
+    // Every launcher below (and `restart_unrepaired`) gets this command.
+    let pane_cmd = crate::service::env::prepare(
+        store,
+        &**ssh,
+        &args.host_alias,
+        project_id,
+        session_id,
+        &Default::default(),
+        &pane_cmd,
+    )
+    .await?;
     let tmux = exec_for(&args.host_alias, ssh);
     // A Claude pane relaunched reads the login it runs under afresh.
     let login = session_id
@@ -2515,6 +2569,18 @@ pub async fn recreate_session(
         );
         (sess, cwd_src, pane_cmd)
     };
+    // Off the lock: `prepare` locks and awaits. Before any workspace or tmux
+    // step, so an unresolved variable refuses with the session untouched.
+    let pane_cmd = crate::service::env::prepare(
+        store,
+        &**ssh,
+        &sess.host_alias,
+        sess.project_id,
+        Some(sess.id),
+        &Default::default(),
+        &pane_cmd,
+    )
+    .await?;
     // Recreate is the confirmed "rebuild it" action, so it brings the
     // workspace back whatever that takes: re-clone a missing remote
     // checkout, then repair — the explicit repair when the automatic one

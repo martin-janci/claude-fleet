@@ -8,9 +8,11 @@
 //! ([`Store::auth_client_tokens`]) and where `/events` re-checks a client
 //! ([`Store::client_token_binding`]):
 //!
-//! * the hub's owner, or a person with no membership row: the device's own
-//!   binding, exactly as before migration 107 — an upgraded hub changes
-//!   nothing;
+//! * a fleet admin (the hub's owner, or a live holder of the realm role
+//!   `fleet-admin`, identity sub-project 1), or a person with no membership
+//!   row: the device's own binding, exactly as before migration 107 — an
+//!   upgraded hub changes nothing, and a fleet admin who is or was an org
+//!   member still administers the fleet from a device bound to no org;
 //! * a person with live memberships: the device's binding when it is one of
 //!   them, else their first one. Never an org they are not in;
 //! * a person whose every membership was removed: [`NO_ORG`], which reads
@@ -24,7 +26,7 @@
 //! membership changes what a cached caller resolves to, and the grant
 //! generation, because it changes which org grants reach whom.
 
-use super::{now_unix, ClientBinding, ClientTokenRow, Store};
+use super::{ClientBinding, ClientTokenRow, Store};
 use crate::ipc_error::{codes, IpcError};
 use rusqlite::OptionalExtension;
 use std::collections::BTreeMap;
@@ -114,24 +116,25 @@ pub struct DeviceOrg {
     pub readonly: bool,
 }
 
-/// THE rule (see the module docs). `memberships` are this person's rows,
-/// live and former, in any order.
+/// THE rule (see the module docs). `exempt` is the fleet's admins
+/// ([`Store::fleet_admins`]: the owner and every live `fleet-admin`),
+/// ascending, read at the same auth epoch as the rows; `memberships` are this
+/// person's rows, live and former, in any order.
 pub fn effective_device(
     person: Option<i64>,
     stored_org: Option<i64>,
-    owner: Option<i64>,
+    exempt: &[i64],
     memberships: &[OrgMemberRow],
 ) -> DeviceOrg {
     let unchanged = DeviceOrg {
         org_id: stored_org,
         readonly: false,
     };
+    // A person-less device is nobody's, so never a fleet admin's.
     let Some(p) = person else {
         return unchanged;
     };
-    // `matches!`, not `==`: two `None`s must not make a person-less device
-    // the owner's (the `is_the_personal_owner` trap).
-    if matches!(owner, Some(o) if o == p) {
+    if exempt.contains(&p) {
         return unchanged;
     }
     let mine: Vec<&OrgMemberRow> = memberships.iter().filter(|m| m.person_id == p).collect();
@@ -170,13 +173,31 @@ impl Store {
         role: &str,
         added_by: Option<i64>,
     ) -> Result<OrgMemberRow, IpcError> {
+        self.with_tx(|c| self.set_org_member_in_tx(c, org, person, role, added_by))?;
+        super::session_grants::bump_grant_generation();
+        self.org_member(org, person)?.ok_or_else(|| {
+            IpcError::new(
+                codes::E_INTERNAL,
+                "the membership vanished right after it was written",
+            )
+        })
+    }
+
+    /// [`Store::set_org_member`] on the caller's transaction (`conn` is
+    /// this store's connection, inside `with_tx`). The caller bumps the
+    /// grant generation after its commit ([`org_membership_changed`]).
+    pub(crate) fn set_org_member_in_tx(
+        &self,
+        conn: &rusqlite::Connection,
+        org: i64,
+        person: i64,
+        role: &str,
+        added_by: Option<i64>,
+    ) -> Result<(), IpcError> {
         let role = validate_org_role(role)?;
-        if self.get_org(org)?.is_none() {
-            return Err(IpcError::new(
-                codes::E_NOTFOUND,
-                format!("org {org} not found"),
-            ));
-        }
+        let org_row = self
+            .get_org(org)?
+            .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("org {org} not found")))?;
         let p = self
             .get_person(person)?
             .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("no person {person}")))?;
@@ -189,62 +210,32 @@ impl Store {
                 ),
             ));
         }
-        let now = now_unix();
-        let shares = role_receives_shares(role);
-        match self.org_member(org, person)? {
-            Some(m) if m.is_live() => {
-                // A change of role. Gaining the right to receive shares
-                // starts it now; keeping it keeps when it started; losing it
-                // clears it.
-                let since = match (shares, m.shares_since) {
-                    (false, _) => None,
-                    (true, Some(t)) => Some(t),
-                    (true, None) => Some(now),
-                };
-                self.conn.execute(
-                    "UPDATE org_members SET role = ?3, shares_since = ?4 \
-                      WHERE org_id = ?1 AND person_id = ?2",
-                    rusqlite::params![org, person, role, since],
-                )?;
-            }
-            Some(_) => {
-                self.conn.execute(
-                    "UPDATE org_members SET role = ?3, added_at = ?4, added_by = ?5, \
-                            shares_since = ?6, removed_at = NULL \
-                      WHERE org_id = ?1 AND person_id = ?2",
-                    rusqlite::params![org, person, role, now, added_by, shares.then_some(now)],
-                )?;
-            }
-            None => {
-                self.conn.execute(
-                    "INSERT INTO org_members \
-                       (org_id, person_id, role, added_at, added_by, shares_since) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    rusqlite::params![org, person, role, now, added_by, shares.then_some(now)],
-                )?;
-            }
-        }
-        super::session_grants::bump_grant_generation();
-        self.org_member(org, person)?.ok_or_else(|| {
-            IpcError::new(
-                codes::E_INTERNAL,
-                "the membership vanished right after it was written",
-            )
-        })
+        // The org's groups are the truth: move the person into the subgroup
+        // for `role` and let the projection write the row.
+        self.place_in_org_in_tx(conn, org, &org_row.name, person, role, added_by)
     }
 
     /// Take `person` out of `org`: the row stays as a former membership.
     /// `false` when they were not a live member.
     pub fn remove_org_member(&self, org: i64, person: i64) -> Result<bool, IpcError> {
-        let n = self.conn.execute(
-            "UPDATE org_members SET removed_at = ?3 \
-              WHERE org_id = ?1 AND person_id = ?2 AND removed_at IS NULL",
-            rusqlite::params![org, person, now_unix()],
-        )?;
-        if n > 0 {
+        let ended = self.with_tx(|c| self.remove_org_member_in_tx(c, org, person))?;
+        if ended {
             super::session_grants::bump_grant_generation();
         }
-        Ok(n > 0)
+        Ok(ended)
+    }
+
+    /// [`Store::remove_org_member`] on the caller's transaction; the caller
+    /// bumps the grant generation after its commit when this returns `true`.
+    pub(crate) fn remove_org_member_in_tx(
+        &self,
+        conn: &rusqlite::Connection,
+        org: i64,
+        person: i64,
+    ) -> Result<bool, IpcError> {
+        let was_live = super::realm::live_org_member_in_tx(conn, org, person)?;
+        self.take_out_of_org_in_tx(conn, org, person)?;
+        Ok(was_live && !super::realm::live_org_member_in_tx(conn, org, person)?)
     }
 
     /// One membership row, live or former.
@@ -370,8 +361,18 @@ impl Store {
     /// ([`effective_device`]). Listings and admin writes read
     /// [`Store::active_client_tokens`], which is the stored binding.
     pub fn auth_client_tokens(&self) -> Result<Vec<ClientTokenRow>, IpcError> {
+        let exempt = self.fleet_admins()?;
+        self.auth_client_tokens_exempting(&exempt)
+    }
+
+    /// [`Store::auth_client_tokens`] with the fleet admins the caller read
+    /// (`Store::auth_snapshot` reads them once, in the same transaction, for
+    /// the rows and for `RealmSets`).
+    pub(crate) fn auth_client_tokens_exempting(
+        &self,
+        exempt: &[i64],
+    ) -> Result<Vec<ClientTokenRow>, IpcError> {
         let mut rows = self.active_client_tokens()?;
-        let owner = self.personal_owner_id()?;
         let members = self.memberships_by_person()?;
         for r in &mut rows {
             if super::machine_token_kind(&r.mode).is_some() {
@@ -381,7 +382,7 @@ impl Store {
             let Some(mine) = members.get(&p) else {
                 continue;
             };
-            let d = effective_device(Some(p), r.org_id, owner, mine);
+            let d = effective_device(Some(p), r.org_id, exempt, mine);
             r.org_id = d.org_id;
             if d.readonly && matches!(r.mode.as_str(), "full" | "answer") {
                 r.mode = "readonly".into();
@@ -402,7 +403,7 @@ impl Store {
         let d = effective_device(
             Some(p),
             stored.org_id,
-            self.personal_owner_id()?,
+            &self.fleet_admins()?,
             &self.memberships_of(p)?,
         );
         Ok(ClientBinding {
@@ -410,6 +411,14 @@ impl Store {
             person_id: stored.person_id,
         })
     }
+}
+
+/// After a commit that changed an org membership through
+/// [`Store::set_org_member_in_tx`] / [`Store::remove_org_member_in_tx`]:
+/// what [`Store::set_org_member`] does after its own, so cached session
+/// grants are re-read.
+pub(crate) fn org_membership_changed() {
+    super::session_grants::bump_grant_generation();
 }
 
 #[cfg(test)]

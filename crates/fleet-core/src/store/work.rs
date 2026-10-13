@@ -1623,6 +1623,18 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Ended confirmed links to work item `item_id` (its past sessions),
+    /// newest first — [`Self::ended_work_links_for_key`] by item (TASK-263).
+    pub fn ended_work_links_for_item(&self, item_id: i64) -> Result<Vec<WorkLinkRow>, IpcError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {LINK_COLUMNS} FROM work_links \
+             WHERE ended_at IS NOT NULL AND state = 'confirmed' AND item_id = ?1 \
+             ORDER BY ended_at DESC, id DESC"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![item_id], map_link)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Give `participant` a live confirmed link to `(item_id, ref_key)`
     /// because of something fleet did (`resumed`, `forked`, `inherited`),
     /// unless it already has a live link to that target — a confirmed one

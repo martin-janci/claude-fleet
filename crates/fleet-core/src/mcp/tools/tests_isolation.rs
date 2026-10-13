@@ -81,6 +81,7 @@ impl Who {
             mode: TokenMode::Full,
             pane: Some(pane.into()),
             is_personal_owner: false,
+            is_fleet_admin: false,
         };
         // Every paired client here is the hub's one person's device.
         // A device bound to NOBODY is a refusing scope (M1, T2's default
@@ -100,6 +101,7 @@ impl Who {
             mode,
             pane: None,
             is_personal_owner: org_id.is_none(),
+            is_fleet_admin: org_id.is_none(),
         };
         match self {
             Who::Master => Caller::master(),
@@ -1781,6 +1783,27 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    // CF-4: a title drafted from the caller's own notes. No item and no
+    // session is named, so there is nothing of another org to read; the
+    // fence is the host the model call runs on (`title_draft::pick_host`,
+    // unit-tested there). Here: it is off until turned on, for everyone,
+    // before any host is chosen.
+    m.row(
+        "work_link",
+        "draft_title",
+        |_, _| json!({ "action": "draft_title", "notes": "round the totals once" }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            is_code(who, a, "E_INVALID_STATE", "writing help is off");
+            assert!(
+                text(a).contains("Draft task titles is off"),
+                "{who:?}: {a:?}"
+            );
+        },
+    )
+    .await;
     for args in [
         json!({ "action": "start", "key": "BB-2", "project_id": 1, "host_alias": "h-a" }),
         json!({ "action": "start", "url": "https://bravo.atlassian.net/browse/BB-2",
@@ -2287,6 +2310,7 @@ async fn run_matrix(isolate: bool) {
                 mode: TokenMode::Full,
                 pane: None,
                 is_personal_owner: false,
+                is_fleet_admin: false,
             };
             let ctx = crate::service::hooks::HookContext {
                 caller: &c,
@@ -2621,6 +2645,32 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    // Keep open (CF-5): the answer to "finished — close?" on host A's own
+    // local item, fenced exactly as `set_status` is.
+    let unknown_item_keep = call(
+        &fx,
+        Who::HostB,
+        "work_link",
+        json!({ "action": "keep_open", "item_id": 999_999 }),
+    )
+    .await;
+    m.row(
+        "work_link",
+        "keep_open",
+        move |_, _| json!({ "action": "keep_open", "item_id": local_a }),
+        move |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostB | Who::HostNone | Who::BoundB => {
+                    same_as_unknown(a, &unknown_item_keep, &local_a.to_string(), "999999")
+                }
+                _ => assert!(text(a).contains("\"source\":\"local\""), "{who:?}: {a:?}"),
+            }
+        },
+    )
+    .await;
     // A ticket's status is not a person's to set here: refused for who
     // sees it, unknown otherwise (`store::tracker_items` owns it).
     m.row(
@@ -2635,7 +2685,10 @@ async fn run_matrix(isolate: bool) {
                 Who::HostA | Who::HostNone | Who::BoundA => {
                     is_code(who, a, "E_NOTFOUND", "another org's ticket")
                 }
-                _ => is_code(who, a, "E_INVALID", "a ticket"),
+                // Only a person moves a ticket (CF-6), never a host's agent.
+                Who::HostB => is_code(who, a, "E_FORBIDDEN", "a ticket, by an agent"),
+                // B Jira has `write_back.status` off, as every tracker starts.
+                _ => is_code(who, a, "E_INVALID_STATE", "a ticket, moving off"),
             }
         },
     )
@@ -2662,6 +2715,34 @@ async fn run_matrix(isolate: bool) {
                     same_as_unknown(a, &unknown_item_comment, &local_a.to_string(), "999999")
                 }
                 _ => assert!(text(a).contains("\"body\":\"a note\""), "{who:?}: {a:?}"),
+            }
+        },
+    )
+    .await;
+    // Promoting a task: `comment`'s fences on the item, and then a person
+    // only — host A's own token sees the item and is still refused. A
+    // person reaches the arguments (this task at the top names no tracker).
+    let unknown_item_promote = call(
+        &fx,
+        Who::HostB,
+        "work_link",
+        json!({ "action": "promote", "item_id": 999_999 }),
+    )
+    .await;
+    m.row(
+        "work_link",
+        "promote",
+        move |_, _| json!({ "action": "promote", "item_id": local_a }),
+        move |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostB | Who::HostNone | Who::BoundB => {
+                    same_as_unknown(a, &unknown_item_promote, &local_a.to_string(), "999999")
+                }
+                Who::HostA => is_code(who, a, "E_FORBIDDEN", "only a person promotes"),
+                _ => is_code(who, a, "E_INVALID", "a task at the top needs a tracker"),
             }
         },
     )
@@ -5404,6 +5485,7 @@ async fn a_per_host_token_still_cannot_read_another_hosts_tickets_in_its_org() {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     };
     let r =
         fx.t.work(

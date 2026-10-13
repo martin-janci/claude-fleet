@@ -137,6 +137,7 @@ fn session_args(r: &RoutineRow, host: &str, owner: Option<i64>) -> NewSessionArg
         over_limit_ok: false,
         owner_person_id: owner,
         start_token: None,
+        env: None,
     }
 }
 

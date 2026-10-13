@@ -236,6 +236,7 @@ impl SupportHost for FakeHost {
             Ok(WriteOutcome {
                 remote_id: Some("PD-9".into()),
                 url: None,
+                key: None,
             })
         } else {
             answers.remove(0)

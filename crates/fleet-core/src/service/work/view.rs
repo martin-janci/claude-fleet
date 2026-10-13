@@ -104,6 +104,9 @@ pub struct WorkTreeFilters {
     /// active) into archived_hidden; absent shows them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived: Option<bool>,
+    /// true: archived tasks only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_only: Option<bool>,
     /// One person the task is assigned to in its tracker, by name (any
     /// case).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -274,6 +277,10 @@ pub struct WorkTask {
     pub status_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution: Option<String>,
+    /// A ticket whose tracker takes a person's status move from fleet
+    /// (`write_back.status`, CF-6): its card may be moved on the Board.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub status_movable: bool,
     pub unavailable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unavailable_reason: Option<String>,
@@ -320,6 +327,12 @@ pub struct WorkTask {
     /// while another host or org still works on it.
     #[serde(default)]
     pub archived: bool,
+    /// "Finished — close?" (CF-5): fleet's own work nobody has closed whose
+    /// sessions have all ended. Never set on a tracker's ticket, on work
+    /// whose status a person or a job set, or after *Keep open* until a
+    /// session ends on it again. Sorts with the tasks that need a person.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub close_suggested: bool,
     /// Where the item came from: `manual` (a person wrote it in Fleet),
     /// `agent` (a delegated job's mirror), `proposed` (an agent's accepted
     /// proposal) or `detected` (a tracker ticket, a bare key).
@@ -900,6 +913,16 @@ pub struct TaskDetail {
     /// `work { attachment }`'s.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<crate::store::AttachmentRow>,
+    /// The task's promotion to a tracker while it is being sent, or why it
+    /// was not (owner decision 2026-10-11). Absent once it is the ticket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promotion: Option<super::promote::PromotionView>,
+    /// Where the reader may promote this task of fleet's own: its parent's
+    /// tracker for a subtask of a ticket, every tracker that takes new
+    /// tickets for a task at the top. Empty for an agent, a tracker's
+    /// ticket, or where no tracker's admin turned creating on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub promote_targets: Vec<super::promote::PromoteTarget>,
 }
 
 /// The task one of a session's links points at, briefly.
@@ -1105,6 +1128,9 @@ pub(crate) struct Graph {
     /// "someone is working on this" never leaks through a task the caller
     /// can otherwise see.
     pub(crate) working_session_items: BTreeSet<i64>,
+    /// A person's *Keep open* per local item (`work_close_dismissals`):
+    /// when, so a session that ends later brings the suggestion back.
+    pub(crate) close_dismissed: HashMap<i64, i64>,
     /// Session rows that EXIST and this reader may not see (multi-user M1,
     /// T7) — the ids [`Self::load_for`] took out of [`Self::sessions`].
     ///
@@ -1375,6 +1401,7 @@ impl Graph {
             context_red_pct: crate::service::health::context_red_pct(s),
             facts: s.attention_facts(),
             working_session_items,
+            close_dismissed: s.work_close_dismissals()?.into_iter().collect(),
             hidden_sessions,
             hidden_links,
             job_states,
@@ -1696,8 +1723,28 @@ impl Graph {
             Some(row) => row.project_id,
             None => l.link.snap_project_id,
         }?;
-        let p = self.projects.get(&pid)?;
+        self.repo_label(pid)
+    }
+
+    /// A project as the repo a group is named after: `owner/repo`, and
+    /// nothing for a local (or empty) owner.
+    fn repo_label(&self, project_id: i64) -> Option<String> {
+        let p = self.projects.get(&project_id)?;
         (p.owner != "local" && !p.owner.is_empty()).then(|| format!("{}/{}", p.owner, p.repo))
+    }
+
+    /// The repo of the project a native item runs in: its own, else the
+    /// nearest parent's that names one (a subtask is filed with none), at
+    /// most `LOCAL_DEPTH_MAX` hops up, as [`Self::item_org`] climbs.
+    fn item_repo(&self, item: &ViewItem) -> Option<String> {
+        let mut cur = item;
+        for _ in 0..=crate::store::LOCAL_DEPTH_MAX {
+            if let Some(pid) = cur.item.project_id {
+                return self.repo_label(pid);
+            }
+            cur = self.items.get(&cur.item.parent_id?)?;
+        }
+        None
     }
 }
 
@@ -2036,10 +2083,16 @@ fn group_of(
             tracker_value: Some(c),
         };
     }
-    if let Some(repo) = repos.first() {
+    // The repo its sessions run in, else its project's: a task nobody has
+    // started yet has no link to read one from.
+    if let Some(repo) = repos
+        .first()
+        .cloned()
+        .or_else(|| item.and_then(|i| g.item_repo(i)))
+    {
         return GroupRef {
             id: format!("repo:{repo}"),
-            label: repo.clone(),
+            label: repo,
             source: "repo".into(),
             rule_id: None,
             tracker_value: None,
@@ -2475,6 +2528,7 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
     // host or in an org it cannot see still keeps the task in work.
     let archived = !b.all.iter().any(|(_, st)| *st == "active")
         && (status_category.as_deref() == Some("done") || all_links_archived(&b.all));
+    let close_suggested = close_suggested(g, item, status_category.as_deref(), &b.all);
     let (blocked, blocked_by) = match item {
         Some(i) if status_category.as_deref() != Some("done") => blocked_on(g, i.item.id),
         _ => (false, Vec::new()),
@@ -2565,6 +2619,8 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
         status_category,
         status_name,
         resolution: item.and_then(|i| i.item.resolution.clone()),
+        status_movable: item.is_some_and(|i| i.item.source != "local")
+            && tracker.is_some_and(crate::service::trackers::write_back::writes_status),
         unavailable: item.is_some_and(|i| i.item.unavailable_at.is_some()),
         unavailable_reason: item.and_then(|i| i.item.unavailable_reason.clone()),
         assignees: item.map(|i| i.item.assignees.clone()).unwrap_or_default(),
@@ -2588,6 +2644,7 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
         sessions_more: listed.len() as u32,
         sessions: Vec::new(),
         archived,
+        close_suggested,
         origin,
         project_id,
         project_label,
@@ -2723,6 +2780,46 @@ fn all_links_archived(links: &[(&ViewLink, &str)]) -> bool {
     ended
 }
 
+/// "Finished — close?" (CF-5): local work that is not done, whose status
+/// nobody set, with no active session and at least one ended one — and,
+/// after a person's *Keep open*, only once a session ended on it later.
+///
+/// Over every link, as `archived` is: a session on a host or in an org the
+/// caller cannot see is still someone working on it. A status a person or a
+/// job set (`status_set_by`) ends the question for good — *Reopen* is one —
+/// while a derived `done` never reaches here (it is done).
+fn close_suggested(
+    g: &Graph,
+    item: Option<&ViewItem>,
+    status: Option<&str>,
+    links: &[(&ViewLink, &str)],
+) -> bool {
+    let Some(i) = item else { return false };
+    if i.item.source != "local" || status == Some("done") || i.item.status_set_by.is_some() {
+        return false;
+    }
+    let mut last_ended: Option<i64> = None;
+    for (l, st) in links {
+        match *st {
+            "active" => return false,
+            "ended" => {
+                let at = l
+                    .link
+                    .ended_at
+                    .or(l.link.decided_at)
+                    .unwrap_or(l.link.created_at);
+                last_ended = Some(last_ended.map_or(at, |x| x.max(at)));
+            }
+            _ => {}
+        }
+    }
+    match (last_ended, g.close_dismissed.get(&i.item.id)) {
+        (None, _) => false,
+        (Some(_), None) => true,
+        (Some(ended), Some(kept)) => ended > *kept,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Filters, order, cursor
 // ---------------------------------------------------------------------------
@@ -2845,7 +2942,14 @@ fn matches_filters(t: &WorkTask, f: &WorkTreeFilters, with_group: bool) -> bool 
     if !f.stages.is_empty() && !f.stages.contains(&t.stage) {
         return false;
     }
-    let status = t.status_category.as_deref();
+    // The Board and List's rule (`taskColumnOf`): a task with a status is
+    // that status, live sessions or not; one with none (a bare key, a ticket
+    // its tracker has not reported on) is in progress while a session runs
+    // on it, and no status at all otherwise.
+    let status = t
+        .status_category
+        .as_deref()
+        .or((t.counts.active > 0).then_some("in_progress"));
     let ok = match f.status.as_deref() {
         None | Some("any") => true,
         Some("open") => status != Some("done"),
@@ -2954,6 +3058,9 @@ fn matches_filters(t: &WorkTask, f: &WorkTreeFilters, with_group: bool) -> bool 
             }
         }
     }
+    if f.archived_only == Some(true) && !t.archived {
+        return false;
+    }
     !hidden_as_archived(t, f)
 }
 
@@ -2966,6 +3073,7 @@ fn matches_filters(t: &WorkTask, f: &WorkTreeFilters, with_group: bool) -> bool 
 fn hidden_as_archived(t: &WorkTask, f: &WorkTreeFilters) -> bool {
     t.archived
         && f.archived == Some(false)
+        && f.archived_only != Some(true)
         && f.status.as_deref() != Some("done")
         && !f.stages.iter().any(|s| s == "done")
         && f.has.as_deref() != Some("past_only")
@@ -3098,7 +3206,13 @@ fn sort_key(t: &WorkTask, org_names: &HashMap<i64, String>, sort: Option<&str>) 
             None => (1, 0, t.task_id.clone()),
         },
         _ => (
-            u8::from(!t.needs_you),
+            // Finished local work waiting to be closed (`close_suggested`)
+            // sits right under the tasks that need a person.
+            match (t.needs_you, t.close_suggested) {
+                (true, _) => 0,
+                (false, true) => 1,
+                (false, false) => 2,
+            },
             -t.last_activity_at.unwrap_or(0),
             t.task_id.clone(),
         ),
@@ -3768,6 +3882,16 @@ pub fn task(
             && crate::service::trackers::write_back::writes_comments(t)
     });
     let comments_tracker = comments_tracker.map(|t| t.name.clone());
+    let (promotion, promote_targets) = match item {
+        Some(i) if i.item.source == "local" => {
+            let s = lock(store)?;
+            (
+                super::promote::promotion_view(&s, i.item.id, &g.trackers)?,
+                super::promote::targets(&s, scope, &i.item, &g.trackers)?,
+            )
+        }
+        _ => (None, Vec::new()),
+    };
     let excerpt = meta.description.clone().filter(|d| !d.trim().is_empty());
     // The full length and whether the answer shows less of it, for every
     // caller: a person's screen has no fence notice to read it from. The
@@ -3937,6 +4061,8 @@ pub fn task(
         comments_tracker,
         can_post_to_tracker,
         attachments,
+        promotion,
+        promote_targets,
     })
 }
 

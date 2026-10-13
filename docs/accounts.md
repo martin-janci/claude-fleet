@@ -42,6 +42,12 @@ The dotfiles are not linked, so `.credentials.json` and the profile's
 `.claude.json` (its login and onboarding state) stay its own. On macOS the
 Keychain entry is per config dir too.
 
+Because the profile's `.claude.json` is its own, so are its user-scope MCP
+servers. Provisioning a host (not the `content_only` refresh) merges fleet's
+`claude-fleet` entry into every profile's `.claude.json`; a profile added
+since then has no fleet MCP server until the host is provisioned again, and
+a session picks the entry up only when it starts.
+
 Sharing `projects/` is what lets a conversation move between logins: the
 transcript is in the same place under every profile, so `--resume` finds it.
 

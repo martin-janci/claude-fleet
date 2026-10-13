@@ -41,8 +41,10 @@ mod add_account;
 mod agents;
 mod api_tokens;
 mod assets;
+mod dashboards;
 mod devices;
 mod downloads;
+mod env_vars;
 mod fleet;
 mod forms;
 mod library;
@@ -394,10 +396,12 @@ impl FleetTools {
             + Self::routines_router()
             + Self::start_rules_router()
             + Self::wizard_state_router()
+            + Self::dashboards_router()
             + Self::presence_router()
             + Self::library_router()
             + Self::runs_router()
             + Self::search_router()
+            + Self::env_vars_router()
     }
 }
 

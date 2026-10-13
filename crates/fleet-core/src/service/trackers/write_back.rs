@@ -1,5 +1,14 @@
 //! Write-back to trackers (work graph M13.4e, decisions D3 / D29): the PR
-//! remote link, and a fleet comment posted to its ticket.
+//! remote link, a fleet comment posted to its ticket, and a person's status
+//! move.
+//!
+//! **Status moves** (owner decision 2026-10-12, CF-6): a person who moves a
+//! ticket's card in fleet moves the ticket at its tracker, only where the
+//! tracker's admin turned `write_back.status` on (off by default; every
+//! provider). This one does NOT use the outbox: it is sent while the person
+//! waits (`service::work::status::move_status`), because a move replayed by
+//! a backoff would undo what was done at the tracker since. [`writes_status`]
+//! is its gate.
 //!
 //! **Comments** (owner decision 2026-10-11, migration 172): a person who
 //! comments on a tracker ticket in fleet may ask for the comment to be
@@ -12,6 +21,16 @@
 //! (`remote_id`), which hides that comment from the tracker's own list
 //! while the fleet comment is live. [`nudge`] wakes the sync tick to drain
 //! at once instead of at its next pass.
+//!
+//! **Promoting a task** (owner decision 2026-10-11): a person turns a task
+//! made in fleet into a tracker's ticket (`work_link { promote }`,
+//! `service::work::promote`). The outbox row (op `create_item`, url
+//! `fleet-item:<id>`) goes out only where the tracker's admin turned
+//! `write_back.create_tickets` on (off by default; every provider in
+//! `CREATE_PROVIDERS`). The drain re-checks the setting and the org, creates the
+//! ticket once — a create is not idempotent — and converts the task in
+//! place into that ticket ([`Store::promote_local_item`]), then reads the
+//! ticket back so its status shows at once.
 //!
 //! When a session has a pull request, [`on_pr`] queues one write per item the
 //! session is linked to — only where all of these hold:
@@ -41,10 +60,11 @@
 //! PR already linked to the tracker). Each goes through [`on_pr`]'s checks,
 //! so an agent's link still never writes.
 
-use super::{TrackerError, TrackerProvider, WriteOp};
+use super::{CreateParent, TrackerError, TrackerProvider, WriteOp};
 use crate::ipc_error::{lock, IpcError};
 use crate::store::{
-    NewTrackerWrite, Store, TrackerRow, PERSON_SOURCES, WRITE_OP_COMMENT, WRITE_OP_PR_REMOTE_LINK,
+    NewTrackerWrite, Store, TrackerRow, PERSON_SOURCES, WRITE_OP_COMMENT, WRITE_OP_CREATE_ITEM,
+    WRITE_OP_PR_REMOTE_LINK,
 };
 use std::sync::{Mutex, OnceLock};
 
@@ -193,6 +213,18 @@ pub fn writes_comments(t: &TrackerRow) -> bool {
     super::provider_caps(t).comments && t.settings.write_back.comments
 }
 
+/// The tracker's provider creates tickets and its admin turned that on.
+pub fn writes_creates(t: &TrackerRow) -> bool {
+    super::creates_items(&t.provider) && t.settings.write_back.create_tickets
+}
+
+/// The tracker's provider takes writes and its admin lets a person's status
+/// move reach it (`write_back.status`, CF-6). Sent at once by
+/// `service::work::status::move_status`, never through the outbox.
+pub fn writes_status(t: &TrackerRow) -> bool {
+    super::provider_caps(t).write && t.settings.write_back.status
+}
+
 /// Both orgs known and different: never write there.
 fn crosses(session_org: Option<i64>, tracker_org: Option<i64>) -> bool {
     matches!((session_org, tracker_org), (Some(a), Some(b)) if a != b)
@@ -252,6 +284,23 @@ pub async fn drain(
                 external_id: w.external_id.clone(),
                 body: w.body.clone().unwrap_or_default(),
             },
+            WRITE_OP_CREATE_ITEM if writes_creates(t) => match w.external_id.clone() {
+                Some(id) => WriteOp::CreateItem {
+                    container: None,
+                    parent: Some(CreateParent {
+                        key: w.item_key.clone(),
+                        external_id: Some(id),
+                    }),
+                    title: w.title.clone(),
+                    description: w.body.clone().unwrap_or_default(),
+                },
+                None => WriteOp::CreateItem {
+                    container: Some(w.item_key.clone()).filter(|c| !c.is_empty()),
+                    parent: None,
+                    title: w.title.clone(),
+                    description: w.body.clone().unwrap_or_default(),
+                },
+            },
             // Off now (it stays queued until it is on again), or an op
             // this build does not know.
             _ => continue,
@@ -272,7 +321,19 @@ pub async fn drain(
             report.given_up += 1;
             continue;
         }
+        if w.op == WRITE_OP_CREATE_ITEM && w.title.trim().is_empty() {
+            settle(lock(store).and_then(|s| {
+                s.retry_tracker_write(w.id, "the task has no title", None, true)?;
+                s.emit_comment_write(&w.url)
+            }));
+            report.given_up += 1;
+            continue;
+        }
         match provider.write(&op).await {
+            Ok(outcome) if w.op == WRITE_OP_CREATE_ITEM => {
+                created(t, provider, store, &w, outcome).await;
+                report.sent += 1;
+            }
             Ok(outcome) => {
                 settle(lock(store).and_then(|s| {
                     s.finish_tracker_write_as(
@@ -330,6 +391,73 @@ pub async fn drain(
         }
     }
     report
+}
+
+/// A create write landed as `outcome`: settle it and make the task that
+/// ticket. Sent is sent — the ticket exists at the tracker — so a task that
+/// cannot be converted (it was deleted, or the sync already cached the new
+/// ticket as a row of its own) only logs; the write still says where the
+/// ticket is. The ticket is then read back so its status, assignee and
+/// parent show before the next pass.
+async fn created(
+    t: &TrackerRow,
+    provider: &dyn TrackerProvider,
+    store: &Mutex<Store>,
+    w: &crate::store::TrackerWriteRow,
+    outcome: super::WriteOutcome,
+) {
+    let item_id = w
+        .url
+        .strip_prefix("fleet-item:")
+        .and_then(|n| n.parse::<i64>().ok());
+    let promoted = lock(store).and_then(|s| {
+        s.finish_tracker_write_as(w.id, outcome.remote_id.as_deref(), outcome.url.as_deref())?;
+        let done = match (
+            item_id,
+            outcome.remote_id.as_deref(),
+            outcome.key.as_deref(),
+        ) {
+            (Some(item), Some(ext), Some(key)) => {
+                s.promote_local_item(item, t.id, ext, key, outcome.url.as_deref())?
+            }
+            _ => false,
+        };
+        s.emit_comment_write(&w.url)?;
+        Ok(done)
+    });
+    match promoted {
+        Ok(true) => {}
+        Ok(false) => tracing::warn!(
+            write = w.id,
+            tracker = t.id,
+            "[write-back] ticket created; the task stayed fleet's own"
+        ),
+        Err(e) => {
+            tracing::warn!(write = w.id, error = %e.message, "[write-back] ticket created, not settled");
+            return;
+        }
+    }
+    let Some(ext) = outcome.remote_id else {
+        return;
+    };
+    match provider.fetch(&[super::ItemRef::Id(ext)]).await {
+        Ok(got) => {
+            for f in got {
+                if let super::Fetched::Found(item) = f {
+                    if let Err(e) = lock(store).and_then(|s| {
+                        s.upsert_tracker_item(t.id, &super::sync::to_write(*item))
+                            .map(|_| ())
+                    }) {
+                        tracing::debug!(write = w.id, error = %e.message, "[write-back] new ticket not cached");
+                    }
+                }
+            }
+        }
+        // The next pass reads it.
+        Err(e) => {
+            tracing::debug!(write = w.id, error = %e.explain(), "[write-back] new ticket not read back")
+        }
+    }
 }
 
 #[cfg(test)]

@@ -7,7 +7,7 @@ import { invoke } from '@tauri-apps/api/core';
 import DashboardView from './DashboardView.svelte';
 import { workspace } from './workspace';
 import { expectAccessible } from './a11y_check';
-import { pinnedDashboards, shownDashboard } from './dashboards';
+import { dashboardBlock, pinnedDashboards, shownDashboard, type Dashboard } from './dashboards';
 import { operatorSession } from './operator';
 import { composerDrafts } from './conversation';
 import { destination } from './destination';
@@ -15,11 +15,28 @@ import { fireEvent } from '@testing-library/svelte';
 import type { SessionRow } from './sessions';
 
 const mock = invoke as ReturnType<typeof vi.fn>;
+
+/** The hub's `dashboards` tool, over the rows the test seeds. */
+function fakeDashboards(rows: Map<string, Record<string, unknown>>, a: { args: { action: string; id?: string; dashboard?: Record<string, unknown>; why?: string } }) {
+  const { action, id, dashboard, why } = a.args;
+  if (action === 'list') return [...rows.values()];
+  if (action === 'pin') {
+    const row = { id: dashboard!.id, title: dashboard!.title, spec: dashboard!, why, pinned_at: 100 };
+    rows.set(dashboard!.id as string, row);
+    return row;
+  }
+  return { removed: rows.delete(id!) };
+}
+
+let hub = new Map<string, Record<string, unknown>>();
+const seed = (d: Dashboard) => hub.set(d.id, { id: d.id, title: d.title, spec: dashboardBlock(d), pinned_at: 1_760_000_000 });
 const stages = { backlog: 2, in_progress: 1, in_review: 1, blocked: 1, done: 3 };
 
 beforeEach(() => {
   mock.mockReset();
+  hub = new Map();
   mock.mockImplementation(async (cmd: string, a?: { args?: { filters?: { group_by?: string } } }) => {
+    if (cmd === 'dashboards') return fakeDashboards(hub, a as never);
     expect(cmd).toBe('work_stats');
     const by = a?.args?.filters?.group_by;
     return {
@@ -82,20 +99,18 @@ describe('DashboardView', () => {
 
   it('shows a pinned dashboard, and hands it to the agent to change a widget', async () => {
     workspace.set('pm');
-    pinnedDashboards.set([
-      {
-        id: 'dash.release-42',
-        title: 'Release 4.2',
-        intro: 'What the release still holds.',
-        pinned_at: 1_760_000_000,
-        widgets: [{ kind: 'groups', title: 'By person', query: { group_by: 'person' }, show: 'stages' }],
-      },
-    ]);
+    seed({
+      id: 'dash.release-42',
+      title: 'Release 4.2',
+      intro: 'What the release still holds.',
+      widgets: [{ kind: 'groups', title: 'By person', query: { group_by: 'person' }, show: 'stages' }],
+    });
     shownDashboard.set({ id: 'dash.release-42', workspace: 'pm' });
     operatorSession.set({ id: 99 } as SessionRow);
     const r = render(DashboardView);
+    // Pinned on another device: the page reads it from the hub.
+    await waitFor(() => expect(r.getByRole('heading', { level: 1 }).textContent).toBe('Release 4.2'));
     await waitFor(() => expect(r.getByText('Ana')).toBeTruthy());
-    expect(r.getByRole('heading', { level: 1 }).textContent).toBe('Release 4.2');
     expect(r.getByText(/Pinned on .* from the agent's proposal/)).toBeTruthy();
 
     await fireEvent.click(r.getByTestId('widget-change'));
@@ -112,14 +127,13 @@ describe('DashboardView', () => {
 
   it('unpins, and falls back to the workspace’s own dashboard', async () => {
     workspace.set('po');
-    pinnedDashboards.set([
-      { id: 'dash.x', title: 'Mine', intro: '', pinned_at: 1, widgets: [{ kind: 'stat', title: 'Open', query: {}, value: 'open' }] },
-    ]);
+    seed({ id: 'dash.x', title: 'Mine', intro: '', widgets: [{ kind: 'stat', title: 'Open', query: {}, value: 'open' }] });
     shownDashboard.set({ id: 'dash.x', workspace: 'po' });
     const r = render(DashboardView);
-    expect(r.getByRole('heading', { level: 1 }).textContent).toBe('Mine');
+    await waitFor(() => expect(r.getByRole('heading', { level: 1 }).textContent).toBe('Mine'));
     await fireEvent.click(r.getByTestId('dashboard-unpin'));
+    await waitFor(() => expect(r.getByRole('heading', { level: 1 }).textContent).toBe('Epics and releases'));
     expect(get(pinnedDashboards)).toEqual([]);
-    expect(r.getByRole('heading', { level: 1 }).textContent).toBe('Epics and releases');
+    expect(hub.size).toBe(0);
   });
 });

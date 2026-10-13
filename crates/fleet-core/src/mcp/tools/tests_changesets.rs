@@ -92,7 +92,9 @@ async fn list_is_open_to_unbound_clients_but_only_a_grant_on_the_cards_catalog_m
     let _g = crate::service::catalog::lock_registry_for_test();
     let (s, desk, ops, plain, acme, card) = seeded();
     let org_id = s.get_catalog(acme).unwrap().unwrap().org_id;
-    let bound = s.insert_client_token("bound", "ee55", "full").unwrap();
+    let bound = s
+        .insert_owned_client_token("bound", "ee55", "full")
+        .unwrap();
     s.set_client_org("bound", org_id).unwrap();
     let t = tools(s);
     for caller in [
@@ -180,7 +182,9 @@ async fn list_is_open_to_unbound_clients_but_only_a_grant_on_the_cards_catalog_m
 async fn propose_needs_the_personal_grant_and_a_readonly_client_is_refused() {
     let _g = crate::service::catalog::lock_registry_for_test();
     let (s, _desk, ops, _plain, _acme, _card) = seeded();
-    let kiosk = s.insert_client_token("kiosk", "dd44", "readonly").unwrap();
+    let kiosk = s
+        .insert_owned_client_token("kiosk", "dd44", "readonly")
+        .unwrap();
     let t = tools(s);
     let r = call(
         &t,
@@ -435,7 +439,9 @@ async fn an_org_bound_client_learns_nothing_about_cards() {
     let (s, _desk, _ops, _plain, acme, card) = seeded();
     let org_id = s.get_catalog(acme).unwrap().unwrap().org_id;
     // Granted acme while unbound, then bound: the grant row stays.
-    let bound = s.insert_client_token("bound", "ee55", "full").unwrap();
+    let bound = s
+        .insert_owned_client_token("bound", "ee55", "full")
+        .unwrap();
     s.set_client_catalog_grant("bound", acme, true).unwrap();
     s.set_client_org("bound", org_id).unwrap();
     let t = tools(s);

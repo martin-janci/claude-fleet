@@ -2,16 +2,19 @@
   // A `dashboard` block (docs/chat-blocks.md, persona design step 5): a
   // dashboard the agent proposes, drawn live from `work_stats` under the
   // person's access, as the Dashboards page draws it. The block names only
-  // filters; every number here is the app's. Pin keeps it on this device;
-  // a block with the id of a pinned dashboard is offered as its
+  // filters; every number here is the app's. Pin keeps it on the hub for
+  // the person (step 6), so every device of theirs shows it; a block with the id of a pinned dashboard is offered as its
   // replacement, with what it changes. Nothing is pinned without a click.
+  import { onMount } from 'svelte';
   import { get } from 'svelte/store';
+  import { errorText } from '../error_copy';
   import Button from '../kit/Button.svelte';
   import DashboardBody from '../DashboardBody.svelte';
   import { goTo } from '../destination';
   import { workspace } from '../workspace';
   import {
     dashboardChanges,
+    ensurePinned,
     MAX_PINNED,
     pinDashboard,
     pinnedDashboards,
@@ -30,8 +33,19 @@
 
   let body = $state<ReturnType<typeof DashboardBody> | null>(null);
 
-  function pin() {
-    if (pinDashboard(dash, block.why)) open();
+  let busy = $state(false);
+  let failure = $state<string | null>(null);
+
+  // Whether it is pinned already decides the button: read the pins once.
+  onMount(() => void ensurePinned());
+
+  async function pin() {
+    busy = true;
+    failure = null;
+    const r = await pinDashboard(dash, block.why);
+    busy = false;
+    if (r.ok) open();
+    else failure = errorText(r.error);
   }
 
   function open() {
@@ -55,21 +69,22 @@
 
   <div class="actions" data-testid="rich-dashboard-state" data-state={pinState}>
     {#if pinState === 'new'}
-      <Button size="sm" variant="primary" onclick={pin} testid="rich-dashboard-pin">Pin to Dashboards</Button>
+      <Button size="sm" variant="primary" onclick={pin} disabled={busy} testid="rich-dashboard-pin">Pin to Dashboards</Button>
     {:else if pinState === 'replace'}
       <span class="note">
         Replaces your pinned “{before?.title}”{changes.length ? `: ${changes.join(', ')}` : ''}.
       </span>
-      <Button size="sm" variant="primary" onclick={pin} testid="rich-dashboard-pin">Replace pinned</Button>
+      <Button size="sm" variant="primary" onclick={pin} disabled={busy} testid="rich-dashboard-pin">Replace pinned</Button>
     {:else if pinState === 'same'}
       <span class="note">Pinned.</span>
       <Button size="sm" onclick={open} testid="rich-dashboard-open">Open</Button>
     {:else if pinState === 'full'}
-      <span class="note">{MAX_PINNED} dashboards are pinned on this device. Unpin one on the Dashboards page first.</span>
+      <span class="note">{MAX_PINNED} dashboards are pinned. Unpin one on the Dashboards page first.</span>
     {:else}
       <span class="note">Its id is a built-in dashboard's, so it cannot be pinned. Ask the agent for an id of its own.</span>
     {/if}
   </div>
+  {#if failure}<p class="err" role="alert" data-testid="rich-dashboard-error">Not pinned: {failure}</p>{/if}
 </section>
 
 <style>
@@ -110,4 +125,5 @@
   .prov { color: var(--fg-muted); }
   .actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
   .note { flex: 1 1 12rem; }
+  .err { margin: 0; font-size: var(--text-xs); color: var(--status-failed); }
 </style>

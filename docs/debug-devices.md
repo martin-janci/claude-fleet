@@ -40,6 +40,8 @@ you can:
   it (off by default: only its own host's sessions do);
 - **Claim** it while you test by hand, with an optional note on what for
   (sessions then get `E_CONFLICT` until the claim lapses or is released);
+  with **Wait in line if someone holds it** on, a held device puts you in
+  its queue instead (see *Queue*), and **Waiting** counts who is in line;
 - **Install app…**: an `.apk`, `.app` or `.ipa` by its path on the device's
   own host, or on another host you pick (copied across first); the install's
   output is shown;
@@ -47,7 +49,8 @@ you can:
 - **Screenshot**: the screen as it is now, shown on the page;
 - **Mirror** / **Stop mirror**: open or close a live scrcpy window of an
   Android device (see *Mirror*);
-- **Release claim** when a session holds it and should not;
+- **Release claim** when a session holds it and should not (the next in
+  line gets it);
 - **Start** / **Stop** an emulator or simulator;
 - **Forget** it.
 
@@ -138,7 +141,7 @@ The control API's `debug_devices` tool (see `docs/control-api.md`), by
 |---|---|
 | `list { refresh? }` | The devices you may use, and each host's last scan. `refresh` scans first and waits |
 | `scan { host? }` | Scan now; also answers the emulators and simulators that could be started (`bootable`) |
-| `claim { device, claim_s?, note? }` / `release { device }` | Keep other sessions off a device while you test |
+| `claim { device, claim_s?, note?, queue? }` / `release { device }` | Keep other sessions off a device while you test; with `queue`, wait in line for a held one (see *Queue*) |
 | `run { device, args, timeout_s? }` | One `adb`, `xcrun simctl` or `xcrun devicectl device` command |
 | `install { device, path, host? }` | Install an app: `.apk`, or a simulator's `.app`, or `.app` / `.ipa` on an iPhone |
 | `logs { device, lines?, filter?, contains?, since_s? }` | Recent log lines: `logcat -d`, or a simulator's `log show` |
@@ -192,6 +195,34 @@ yet), so build on the device's host or install from it.
   on one host do not share a claim. Only the holder or a person releases
   one.
 
+## Queue
+
+Two sessions that both want the bench phone do not have to poll `claim`
+until one wins. `claim { device, queue: true }` on a device someone else
+holds puts the caller in the device's line and answers the device with:
+
+- `queue`: who waits, first in line first (`holder`, `note`, `queued_at`);
+- `waiting`: how many;
+- `queue_place`: the caller's own place (1: next).
+
+Asking again keeps the place (and updates its note). On a free device
+`queue` changes nothing: the caller gets the claim at once.
+
+Whenever the device is read (a list, a resolve, any action), a claim that
+was released or has lapsed passes to the first in line, with that entry's
+note, for 10 minutes. The new holder's first use extends it as any claim's
+use does (to at least 30 minutes ahead), and a `claim` sets the length it
+asks for. So a waiter whose session went away holds the rest of the line up
+for at most those 10 minutes. A session that wants to know when its turn
+came reads `list` or `claim { queue: true }` again: `claimed_by` is then
+itself.
+
+`release` from the holder (or a person) gives the claim up, and the next in
+line gets it. `release` from someone waiting in the line of a device another
+holds only leaves the line, a person's too: the claim stays its holder's (a
+person who means to take it away releases again, once out of line). A place
+lapses after a day; a forgotten device takes its line with it.
+
 Sharing a simulator lets other hosts' sessions run apps on that Mac, since a
 simulator app is a Mac process. That is what the Shared toggle's
 confirmation says.
@@ -221,3 +252,5 @@ confirmation says.
   `adb shell input` and `simctl io`.
 - The phone app (fleet-mobile) shows no device page yet; it reads the same
   `debug_devices` tool.
+- No push when a turn comes: a waiting session reads the device again to
+  find it holds the claim.

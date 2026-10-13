@@ -53,6 +53,12 @@ export interface PersonSummary {
   created_at: number;
   disabled_at?: number;
   devices: string[];
+  /** The realm groups they are a direct member of, by path. */
+  groups: string[];
+  /** Every role they hold and how (`direct`, `group:<path>`, `composite:<role>`). */
+  roles: { name: string; client?: string; via: string[] }[];
+  /** `roles` one line each, as Settings → People shows them. */
+  roles_display: string[];
 }
 
 export const people = writable<PersonSummary[]>([]);

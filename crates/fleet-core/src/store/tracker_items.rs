@@ -203,7 +203,7 @@ pub(super) struct SessionChange {
 }
 
 impl SessionChange {
-    const ALL: SessionChange = SessionChange {
+    pub(super) const ALL: SessionChange = SessionChange {
         primary: true,
         suggested: true,
         rejected: true,
@@ -1142,20 +1142,38 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Items linked to sessions on `host`: a live link whose session runs
-    /// there, or an ended link that ran there. The per-host token's fence
-    /// (M3 plan, decision 6).
+    /// Items the sessions on `host` work on: a live link whose session runs
+    /// there, an ended link that ran there, or an open run
+    /// (`work_link { run }`, a `tasks` row naming the item) whose worker is
+    /// there. The per-host token's fence (M3 plan, decision 6).
+    ///
+    /// The run arm is what lets a mission's worker read the step it was
+    /// started on: its task names the item whatever became of its link (a
+    /// recreated session, a link a person ended).
     pub fn work_item_ids_on_host(&self, host: &str) -> Result<Vec<i64>, IpcError> {
-        let mut stmt = self.conn.prepare(
+        // Two statements, not a UNION: as one arm of a compound the link
+        // read loses its walk of `idx_work_links_item` and scans the table
+        // (`service/work/scale_tests.rs`).
+        let mut ids = BTreeSet::new();
+        for sql in [
             "SELECT DISTINCT l.item_id FROM work_links l \
              LEFT JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
              LEFT JOIN sessions s ON s.id = p.session_id \
              WHERE l.item_id IS NOT NULL AND l.state = 'confirmed' AND \
                ((l.ended_at IS NULL AND s.host_alias = ?1) OR \
                 (l.ended_at IS NOT NULL AND l.snap_host = ?1))",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![host], |r| r.get(0))?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+            "SELECT t.work_item_id FROM tasks t \
+             JOIN sessions s ON s.id = t.worker_session_id \
+             WHERE t.work_item_id IS NOT NULL AND t.state IN ('queued', 'running') \
+               AND s.host_alias = ?1",
+        ] {
+            let mut stmt = self.conn.prepare(sql)?;
+            let rows = stmt.query_map(rusqlite::params![host], |r| r.get::<_, i64>(0))?;
+            for id in rows {
+                ids.insert(id?);
+            }
+        }
+        Ok(ids.into_iter().collect())
     }
 
     /// Is item `item_id` one of [`Store::work_item_ids_on_host`]'s? The same
@@ -1167,7 +1185,24 @@ impl Store {
              LEFT JOIN sessions s ON s.id = p.session_id \
              WHERE l.item_id = ?2 AND l.state = 'confirmed' AND \
                ((l.ended_at IS NULL AND s.host_alias = ?1) OR \
-                (l.ended_at IS NOT NULL AND l.snap_host = ?1)))",
+                (l.ended_at IS NOT NULL AND l.snap_host = ?1))) \
+             OR EXISTS (SELECT 1 FROM tasks t \
+             JOIN sessions s ON s.id = t.worker_session_id \
+             WHERE t.work_item_id = ?2 AND t.state IN ('queued', 'running') \
+               AND s.host_alias = ?1)",
+            rusqlite::params![host, item_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Whether a session on `host` has an open run (queued or running) on
+    /// item `item_id`: the run arm of [`Store::work_item_on_host`], alone.
+    pub fn open_run_on_host(&self, host: &str, item_id: i64) -> Result<bool, IpcError> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM tasks t \
+             JOIN sessions s ON s.id = t.worker_session_id \
+             WHERE t.work_item_id = ?2 AND t.state IN ('queued', 'running') \
+               AND s.host_alias = ?1)",
             rusqlite::params![host, item_id],
             |r| r.get(0),
         )?)

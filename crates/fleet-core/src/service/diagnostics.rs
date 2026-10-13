@@ -241,6 +241,7 @@ pub fn collect(
         sessions,
         tracker_secrets,
         decision_secrets,
+        env_secrets,
     ) = {
         let s = lock(store)?;
         let cfg = crate::mcp::settings::McpSettings::read(&s)?;
@@ -256,6 +257,7 @@ pub fn collect(
             s.list_all_sessions()?,
             s.tracker_secret_literals()?,
             s.decision_secret_literals()?,
+            s.env_secret_literals()?,
         )
     };
 
@@ -269,6 +271,8 @@ pub fn collect(
     secrets.extend(tracker_secrets);
     // The decision model's API key (Jev evaluation), masked the same way.
     secrets.extend(decision_secrets);
+    // Session environment secrets (spec 2026-10-11), masked the same way.
+    secrets.extend(env_secrets);
     let token_modes: BTreeMap<&str, &str> = tokens
         .iter()
         .map(|t| (t.host_alias.as_str(), t.mode.as_str()))
@@ -429,6 +433,8 @@ mod tests {
     const ODD_TOK: &str = "odd-shaped-host-token-Zq9";
     /// A tracker credential of no recognisable shape (work graph M3).
     const TRACKER_TOK: &str = "jira-odd-shaped-secret-7Q";
+    /// A stored session-environment secret of no recognisable shape.
+    const ENV_SECRET: &str = "env-odd-shaped-secret-4Kx";
 
     fn seeded_store() -> Mutex<Store> {
         let s = Store::open_in_memory().unwrap();
@@ -445,6 +451,13 @@ mod tests {
             .unwrap();
         s.set_tracker_credential(t.id, "basic", Some("me@acme.com"), Some(TRACKER_TOK), None)
             .unwrap();
+        s.set_env_var(
+            "global",
+            "",
+            "SOME_KEY",
+            &crate::store::EnvValue::Secret(crate::store::Secret::new(ENV_SECRET)),
+        )
+        .unwrap();
         Mutex::new(s)
     }
 
@@ -483,6 +496,7 @@ mod tests {
                  INFO GET /hook?token={HOST_TOK}\n\
                  WARN odd token {ODD_TOK} seen\n\
                  WARN jira sync failed with {TRACKER_TOK}\n\
+                 WARN launch env had {ENV_SECRET} in it\n\
                  INFO plain line\n"
             ),
         )
@@ -491,7 +505,7 @@ mod tests {
         let store = seeded_store();
         let b = collect(&store, inputs(tmp.path(), &logs)).unwrap();
 
-        for secret in [MASTER, HOST_TOK, ODD_TOK, TRACKER_TOK] {
+        for secret in [MASTER, HOST_TOK, ODD_TOK, TRACKER_TOK, ENV_SECRET] {
             assert!(
                 !b.text.contains(secret),
                 "bundle leaked {secret}:\n{}",
@@ -515,7 +529,7 @@ mod tests {
         );
         assert!(b.text.contains("reconcile.interval_secs = "));
         assert!(b.text.contains("INFO plain line"));
-        assert!(b.text.contains("== Recent log (last 5 lines) =="));
+        assert!(b.text.contains("== Recent log (last 6 lines) =="));
         assert_eq!(b.log_dir, logs.display().to_string());
         assert!(b.log_file.unwrap().ends_with("claude-fleet.2026-09-11.log"));
     }

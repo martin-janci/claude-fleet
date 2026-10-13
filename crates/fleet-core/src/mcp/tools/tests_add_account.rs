@@ -19,6 +19,7 @@ fn device(trusted: bool) -> Caller {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: true,
+        is_fleet_admin: true,
     }
 }
 

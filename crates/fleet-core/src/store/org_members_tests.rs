@@ -12,7 +12,8 @@ fn member(org: i64, person: i64, role: &str, added_at: i64, removed: bool) -> Or
     }
 }
 
-const OWNER: Option<i64> = Some(1);
+/// The fleet's admins (`Store::fleet_admins`): here the owner, person 1.
+const OWNER: &[i64] = &[1];
 
 #[test]
 fn the_owner_and_a_person_in_no_org_keep_their_binding() {
@@ -37,7 +38,7 @@ fn the_owner_and_a_person_in_no_org_keep_their_binding() {
     }
     // A device bound to nobody is never resolved as the owner's.
     assert_eq!(
-        effective_device(None, None, None, &any),
+        effective_device(None, None, &[], &any),
         DeviceOrg {
             org_id: None,
             readonly: false
@@ -165,4 +166,89 @@ fn removing_an_org_leaves_former_members_and_one_owner_of_the_hub() {
             .unwrap()
             .admins_see_unclaimed
     );
+}
+
+/// Identity sub-project 1 (final review I2): every fleet admin is exempt
+/// from the org fence, as the owner is — a fleet admin who is, or was, an
+/// org member keeps their device's own binding (unbound stays unbound, so it
+/// administers the fleet; bound by the operator stays bound) and its mode.
+/// Unmapping the role fences them again; a plain member never was exempt.
+#[test]
+fn a_fleet_admins_device_keeps_its_own_binding_whatever_their_memberships() {
+    let s = Store::open_in_memory().unwrap();
+    let acme = s.add_org("Acme", None, false).unwrap().id;
+    let beta = s.add_org("Beta", None, false).unwrap().id;
+    let fa = s
+        .role(crate::store::RoleRef::Realm(crate::store::ROLE_FLEET_ADMIN))
+        .unwrap()
+        .unwrap()
+        .id;
+    let mut ids = Vec::new();
+    for name in ["ann", "wes", "pat"] {
+        let p = s.create_person(name, None).unwrap().id;
+        s.insert_client_token(&format!("{name}-phone"), name, "full")
+            .unwrap();
+        s.set_client_person(&format!("{name}-phone"), Some(p))
+            .unwrap();
+        s.set_org_member(acme, p, ROLE_VIEWER, None).unwrap();
+        ids.push(p);
+    }
+    let (ann, wes) = (ids[0], ids[1]);
+    s.remove_org_member(acme, wes).unwrap();
+    s.insert_client_token("ann-laptop", "ann-l", "full")
+        .unwrap();
+    s.set_client_person("ann-laptop", Some(ann)).unwrap();
+    s.set_client_org("ann-laptop", Some(beta)).unwrap();
+    for p in [ann, wes] {
+        s.map_role(crate::store::Principal::Person(p), fa).unwrap();
+    }
+    let auth = |name: &str| {
+        let r = s
+            .auth_client_tokens()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.name == name)
+            .unwrap();
+        (r.org_id, r.mode)
+    };
+    assert_eq!(auth("ann-phone"), (None, "full".to_string()), "a member");
+    assert_eq!(
+        auth("wes-phone"),
+        (None, "full".to_string()),
+        "a former member"
+    );
+    assert_eq!(
+        auth("ann-laptop"),
+        (Some(beta), "full".to_string()),
+        "bound stays bound"
+    );
+    assert_eq!(
+        auth("pat-phone"),
+        (Some(acme), "readonly".to_string()),
+        "fenced"
+    );
+    let binding = |name: &str| {
+        let id = s
+            .active_client_tokens()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.name == name)
+            .unwrap()
+            .id;
+        s.client_token_binding(id).unwrap().unwrap().org_id
+    };
+    assert_eq!(binding("ann-phone"), None, "/events reads the same rule");
+    assert_eq!(binding("wes-phone"), None);
+    // The snapshot's rows and sets agree.
+    let (_, _, clients, _, realm, _) = s.auth_snapshot().unwrap();
+    assert!(realm.0.contains(&ann) && realm.0.contains(&wes));
+    let snap = clients.iter().find(|r| r.name == "ann-phone").unwrap();
+    assert_eq!(snap.org_id, None);
+    for p in [ann, wes] {
+        s.unmap_role(crate::store::Principal::Person(p), fa)
+            .unwrap();
+    }
+    assert_eq!(auth("ann-phone"), (Some(acme), "readonly".to_string()));
+    assert_eq!(auth("wes-phone"), (Some(NO_ORG), "readonly".to_string()));
+    assert_eq!(binding("ann-phone"), Some(acme));
 }

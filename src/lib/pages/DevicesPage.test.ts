@@ -52,8 +52,8 @@ function route(extra: Record<string, unknown> = {}) {
     if (cmd === 'list_orgs') return [acme];
     if (cmd === 'list_people')
       return [
-        { id: 1, name: 'owner', owner: true, created_at: 1, devices: ['laptop'] },
-        { id: 2, name: 'ada', owner: false, created_at: 2, devices: ['ada-phone'] },
+        { id: 1, name: 'owner', owner: true, created_at: 1, devices: ['laptop'], groups: [], roles: [], roles_display: [] },
+        { id: 2, name: 'ada', owner: false, created_at: 2, devices: ['ada-phone'], groups: [], roles: [], roles_display: [] },
       ];
     if (cmd === 'catalog_list_catalogs') return [{ name: 'personal' }, { name: 'acme' }];
     if (cmd === 'pair_device') return PAIRING;
@@ -70,8 +70,8 @@ beforeEach(() => {
   orgs.set([acme]);
   devices.set([laptop, phone]);
   people.set([
-    { id: 1, name: 'owner', owner: true, created_at: 1, devices: ['laptop'] },
-    { id: 2, name: 'ada', owner: false, created_at: 2, devices: ['ada-phone'] },
+    { id: 1, name: 'owner', owner: true, created_at: 1, devices: ['laptop'], groups: [], roles: [], roles_display: [] },
+    { id: 2, name: 'ada', owner: false, created_at: 2, devices: ['ada-phone'], groups: [], roles: [], roles_display: [] },
   ]);
   catalogStatuses.set([{ name: 'personal' }, { name: 'acme' }] as never);
   route();

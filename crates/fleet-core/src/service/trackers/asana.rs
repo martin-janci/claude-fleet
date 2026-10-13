@@ -95,6 +95,9 @@ pub fn site_workspace(site_url: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The longest task name fleet sends Asana, in characters.
+const NAME_MAX_CHARS: usize = 1_024;
+
 /// A gid: digits only, so it can go into a path unescaped.
 fn gid_ok(s: &str) -> bool {
     !s.is_empty() && s.len() <= 24 && s.bytes().all(|b| b.is_ascii_digit())
@@ -167,6 +170,200 @@ impl Asana {
             return Err(TrackerError::Invalid("not an Asana answer".into()));
         }
         Ok(v)
+    }
+
+    /// Create a task from a fleet task ([`WriteOp::CreateItem`]): a subtask
+    /// of `parent`, or a task in project `container` — or, with neither, in
+    /// the workspace, assigned to the API user so it shows in their views.
+    async fn create_task(
+        &self,
+        container: Option<&str>,
+        parent: Option<&super::CreateParent>,
+        title: &str,
+        description: &str,
+    ) -> Result<WriteOutcome, TrackerError> {
+        let name: String = title
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(NAME_MAX_CHARS)
+            .collect();
+        let mut data = json!({ "name": name });
+        if !description.trim().is_empty() {
+            data["notes"] = Value::String(description.to_string());
+        }
+        let path = match parent {
+            Some(p) => {
+                let gid = p
+                    .external_id
+                    .as_deref()
+                    .filter(|g| gid_ok(g))
+                    .map(str::to_string)
+                    .or_else(|| self.gid_of(&ItemRef::parse(&p.key)))
+                    .ok_or_else(|| TrackerError::Invalid("not an Asana task".into()))?;
+                format!("/tasks/{gid}/subtasks")
+            }
+            None => {
+                let workspace = self
+                    .config
+                    .workspace
+                    .clone()
+                    .or_else(|| self.site_workspace.clone())
+                    .filter(|w| gid_ok(w))
+                    .ok_or_else(|| TrackerError::Invalid("no Asana workspace".into()))?;
+                data["workspace"] = Value::String(workspace);
+                match container {
+                    Some(c) if gid_ok(c) => data["projects"] = json!([c]),
+                    Some(_) => return Err(TrackerError::Invalid("not an Asana project".into())),
+                    None => data["assignee"] = Value::String("me".into()),
+                }
+                "/tasks".to_string()
+            }
+        };
+        let v = self
+            .post(&path, &json!({ "data": data }), CallKind::Other)
+            .await?;
+        let gid = v["data"]["gid"]
+            .as_str()
+            .filter(|g| gid_ok(g))
+            .map(str::to_string)
+            .ok_or_else(|| {
+                TrackerError::Invalid("Asana created the task but did not say which one".into())
+            })?;
+        Ok(WriteOutcome {
+            key: Some(format!("asana:{gid}")),
+            url: v["data"]["permalink_url"]
+                .as_str()
+                .filter(|u| u.starts_with("https://app.asana.com/") && u.len() <= 2048)
+                .map(str::to_string),
+            remote_id: Some(gid),
+        })
+    }
+
+    /// `PUT` `body` (JSON) to `path`: an update, read as [`Self::get`]'s.
+    async fn put(&self, path: &str, body: &Value, call: CallKind) -> Result<Value, TrackerError> {
+        let cred = self.cred.as_ref().ok_or(TrackerError::Unconfigured)?;
+        let req = Request::put_json(format!("{API}{path}"), body)
+            .header("Authorization", cred.authorization().expose());
+        let resp = self.transport.send(req).await.map_err(map_transport)?;
+        check_http(&resp, call)?;
+        let v: Value = resp.parse_json().map_err(TrackerError::Invalid)?;
+        if !v.is_object() {
+            return Err(TrackerError::Invalid("not an Asana answer".into()));
+        }
+        Ok(v)
+    }
+
+    /// Move a task to another status (CF-6). Asana's status is two things:
+    /// the `completed` flag, and the section the task sits in on its board
+    /// (the first project it is in, as [`Self::snapshot`] reads it).
+    ///
+    /// * Dropped on a column named after a section of that board: the task
+    ///   moves to that section, and is reopened when it was completed.
+    /// * Done with no such section (the plain Done column, or "Completed"):
+    ///   the task is completed, where it is.
+    /// * To do / In progress with no such section: reopened when completed,
+    ///   then moved to the first section of the board, in the board's own
+    ///   order, that counts as that status ([`Self::section_category`]) —
+    ///   unless the section it is in already does.
+    async fn set_status(
+        &self,
+        key: &str,
+        external_id: Option<&str>,
+        category: &str,
+        name: Option<&str>,
+    ) -> Result<WriteOutcome, TrackerError> {
+        let gid = external_id
+            .filter(|g| gid_ok(g))
+            .map(str::to_string)
+            .or_else(|| self.gid_of(&ItemRef::parse(key)))
+            .ok_or_else(|| TrackerError::Invalid("not an Asana task".into()))?;
+        let task = self
+            .get(
+                &format!(
+                    "/tasks/{gid}?opt_fields=completed,memberships.project.gid,\
+                     memberships.section.gid,memberships.section.name"
+                ),
+                CallKind::Other,
+            )
+            .await?;
+        let task = &task["data"];
+        let completed = task["completed"].as_bool().unwrap_or(false);
+        let membership = task["memberships"].as_array().and_then(|m| m.first());
+        let project = membership
+            .and_then(|m| m["project"]["gid"].as_str())
+            .filter(|p| gid_ok(p));
+        let current = membership
+            .and_then(|m| m["section"]["name"].as_str())
+            .map(str::trim)
+            .unwrap_or_default();
+        // The board's sections, in its order: (gid, name).
+        let mut sections: Vec<(String, String)> = Vec::new();
+        if let Some(p) = project {
+            let v = self
+                .get(
+                    &format!("/projects/{p}/sections?opt_fields=name"),
+                    CallKind::Other,
+                )
+                .await?;
+            for sec in v["data"].as_array().into_iter().flatten() {
+                if let (Some(g), Some(n)) = (
+                    sec["gid"].as_str().filter(|g| gid_ok(g)),
+                    sec["name"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|n| !n.is_empty()),
+                ) {
+                    sections.push((g.to_string(), n.to_string()));
+                }
+            }
+        }
+        let named = name.and_then(|n| sections.iter().find(|(_, s)| super::same_status_name(s, n)));
+        let target = match (named, category) {
+            (Some(sec), _) => Some(sec),
+            // Completing is the whole move.
+            (None, "done") => None,
+            (None, _) if !current.is_empty() && self.section_category(current) == category => None,
+            (None, _) => {
+                let first = sections
+                    .iter()
+                    .find(|(_, s)| self.section_category(s) == category);
+                if first.is_none() {
+                    return Err(TrackerError::Unsupported(if project.is_none() {
+                        format!(
+                            "{key} is on no Asana board, so it has no section to move to; \
+                             it can only be completed or reopened"
+                        )
+                    } else {
+                        format!(
+                            "no section of {key}'s board counts as {}; map one in Settings → \
+                             Trackers, or drop the card on a section's own column",
+                            super::category_label(category)
+                        )
+                    }));
+                }
+                first
+            }
+        };
+        let complete = named.is_none() && category == "done";
+        if complete != completed {
+            self.put(
+                &format!("/tasks/{gid}"),
+                &json!({ "data": { "completed": complete } }),
+                CallKind::Other,
+            )
+            .await?;
+        }
+        if let Some((section, _)) = target {
+            self.post(
+                &format!("/sections/{section}/addTask"),
+                &json!({ "data": { "task": gid } }),
+                CallKind::Other,
+            )
+            .await?;
+        }
+        Ok(WriteOutcome::default())
     }
 
     /// One page of tasks at `path` (a listing endpoint with its query).
@@ -806,6 +1003,28 @@ impl TrackerProvider for Asana {
     }
 
     async fn write(&self, op: &WriteOp) -> Result<WriteOutcome, TrackerError> {
+        if let WriteOp::CreateItem {
+            container,
+            parent,
+            title,
+            description,
+        } = op
+        {
+            return self
+                .create_task(container.as_deref(), parent.as_ref(), title, description)
+                .await;
+        }
+        if let WriteOp::SetStatus {
+            key,
+            external_id,
+            category,
+            name,
+        } = op
+        {
+            return self
+                .set_status(key, external_id.as_deref(), category, name.as_deref())
+                .await;
+        }
         let WriteOp::Comment {
             key,
             external_id,
@@ -813,7 +1032,7 @@ impl TrackerProvider for Asana {
         } = op
         else {
             return Err(TrackerError::Refused(
-                "Asana takes comments only from fleet".into(),
+                "Asana takes comments, new tasks and status moves only from fleet".into(),
             ));
         };
         let gid = external_id
@@ -835,6 +1054,7 @@ impl TrackerProvider for Asana {
                 .filter(|g| gid_ok(g))
                 .map(str::to_string),
             url: None,
+            key: None,
         })
     }
 }

@@ -321,6 +321,9 @@ mod tests {
 
     /// The scripts against a real git repository: a fake `origin` with a
     /// PR head, a clone of it, then prepare, a moved head, cleanup, prune.
+    /// Unix only: the scripts run on a fleet host's shell, and Git Bash on
+    /// Windows does not take these paths.
+    #[cfg(unix)]
     #[test]
     fn the_scripts_work_on_a_real_repository() {
         if crate::proc::std_command("git")
@@ -381,10 +384,13 @@ mod tests {
         assert!(!std::path::Path::new(&w).exists());
         // Job 11's worktree, aged past the stale line, is a crashed run's:
         // the prune removes it, its ref and the empty parent.
-        sh(&format!(
-            "touch -d '2 hours ago' {}",
-            q(&workspace_dir(&root, 11))
-        ));
+        // Set by the test itself: `touch -d '2 hours ago'` is GNU only.
+        std::fs::File::open(workspace_dir(&root, 11))
+            .unwrap()
+            .set_modified(
+                std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 60 * 60),
+            )
+            .unwrap();
         run(prune_script(&root, 60).unwrap());
         let refs = sh(&format!(
             "{env}git -C {} for-each-ref refs/fleet-agents/",

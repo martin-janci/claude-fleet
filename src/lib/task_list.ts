@@ -199,16 +199,38 @@ export function boardStep(lanes: readonly BoardLane[], from: BoardLane, dir: 1 |
   return null;
 }
 
-/** Why a card cannot be moved by a person, or `null` when it can: only a
- *  native item has a status fleet owns. */
+/** A task fleet owns: a native item. Only it is edited here; a ticket's
+ *  text is its tracker's. */
+export function boardEditable(t: WorkTask): boolean {
+  return t.kind === 'local' && t.item_id != null;
+}
+
+/** A ticket whose tracker takes a person's move from fleet
+ *  (`write_back.status`, turned on per tracker): moving its card moves it
+ *  there. */
+export function boardMovesAtTracker(t: WorkTask): boolean {
+  return t.kind === 'tracker' && t.item_id != null && t.status_movable === true;
+}
+
+/** Why a card cannot be moved by a person, or `null` when it can: a native
+ *  item has a status fleet owns, and a ticket is moved at its tracker where
+ *  the tracker's admin allowed it. */
 export function boardMoveRefusal(t: WorkTask): string | null {
-  if (t.kind === 'local' && t.item_id != null) return null;
+  if (boardEditable(t) || boardMovesAtTracker(t)) return null;
   const name = t.key || displayTitle(t);
   if (t.kind === 'ref') {
     return `${name} is a bare key with no status of its own: it is In progress while a session runs on it. Name it as local work ("Name this work…") to give it a status.`;
   }
   const where = t.tracker_name || t.provider || 'its tracker';
-  return `${name}'s status belongs to ${where}. Change it there.`;
+  return `${name}'s status belongs to ${where}. Change it there, or turn on "Move tickets" for it in Settings → Trackers.`;
+}
+
+/** What moving a card to `to` asks for: the status, and for a ticket the
+ *  tracker's own name for that column when the column has one (a Jira
+ *  status, an Asana section). A native task has only the three statuses. */
+export function boardMoveTarget(t: WorkTask, to: BoardLane): { status: 'todo' | 'in_progress' | 'done'; statusName?: string } {
+  const status = BOARD_COLUMN_STATUS[to.status];
+  return boardMovesAtTracker(t) && to.id !== to.status ? { status, statusName: to.label } : { status };
 }
 
 /** The live session a card shows (the primary first): what no tracker's

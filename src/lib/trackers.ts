@@ -57,7 +57,7 @@ export interface TrackerSettings {
   hostname?: string | null;
   /** What fleet may write (work graph M13.4e, D3): a PR link (Jira only)
    *  and a person's comment (every provider). Absent: nothing. */
-  write_back?: { pr_remote_link?: boolean; comments?: boolean };
+  write_back?: { pr_remote_link?: boolean; comments?: boolean; status?: boolean };
 }
 
 /** A tracker as every read returns it: never a secret, only a hint. */

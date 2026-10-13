@@ -31,6 +31,9 @@ mod tests_isolation_providers;
 #[cfg(test)]
 #[path = "tests_shared_key.rs"]
 mod tests_shared_key;
+#[cfg(test)]
+#[path = "tests_status.rs"]
+mod tests_status;
 pub mod tickets;
 pub mod write_back;
 
@@ -269,11 +272,15 @@ pub fn newest_comments(mut comments: Vec<TrackerComment>, limit: usize) -> Vec<T
 }
 
 /// What a write left at the tracker, when it says: the id and the URL of
-/// what was written (a comment's). A PR remote link needs neither.
+/// what was written (a comment's, a created ticket's). A PR remote link
+/// needs neither.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WriteOutcome {
     pub remote_id: Option<String>,
     pub url: Option<String>,
+    /// A created ticket's key as the tracker names it (`ENG-123`,
+    /// `asana:<gid>`): what the promoted fleet task is keyed by after.
+    pub key: Option<String>,
 }
 
 /// What a probe learned: the site's instance id and the config to store.
@@ -510,6 +517,10 @@ pub enum TrackerError {
     Invalid(String),
     /// No credential is set, or the reference cannot be read.
     Unconfigured,
+    /// The tracker has no way to do what was asked (a workflow with no
+    /// transition to that status, a board with no such section). Nothing
+    /// was sent that changed anything; the sentence is for the person.
+    Unsupported(String),
 }
 
 impl TrackerError {
@@ -523,7 +534,10 @@ impl TrackerError {
             TrackerError::Unreachable(_) => Some("unreachable"),
             TrackerError::Unconfigured => Some("unconfigured"),
             TrackerError::Refused(_) => Some("unreachable"),
-            TrackerError::Forbidden(_) | TrackerError::NotFound | TrackerError::Invalid(_) => None,
+            TrackerError::Forbidden(_)
+            | TrackerError::NotFound
+            | TrackerError::Invalid(_)
+            | TrackerError::Unsupported(_) => None,
         }
     }
 
@@ -549,6 +563,7 @@ impl TrackerError {
             TrackerError::Unconfigured => {
                 "no credential is set (or its env:/file: reference cannot be read)".into()
             }
+            TrackerError::Unsupported(m) => m.clone(),
         }
     }
 
@@ -558,6 +573,7 @@ impl TrackerError {
         let code = match self {
             TrackerError::NotFound => codes::E_NOTFOUND,
             TrackerError::Forbidden(_) => codes::E_FORBIDDEN,
+            TrackerError::Unsupported(_) => codes::E_UNSUPPORTED,
             _ => codes::E_TRACKER,
         };
         let mut e = IpcError::new(code, crate::logging::redact(&self.explain()).into_owned());
@@ -700,6 +716,72 @@ pub enum WriteOp {
         inward: String,
         outward: String,
     },
+    /// Create a ticket from a fleet task (owner decision 2026-10-11:
+    /// promoting a local task to a tracked one). Under `parent` — a ticket
+    /// of this tracker — it is that ticket's subtask; otherwise it goes into
+    /// `container` (a Jira project key, an Asana project gid or none for
+    /// the Asana workspace, a Linear team key, a GitHub `owner/repo`).
+    /// `description` is plain text. Not idempotent at the tracker: the
+    /// outbox sends it once. Every provider in [`CREATE_PROVIDERS`].
+    CreateItem {
+        container: Option<String>,
+        parent: Option<CreateParent>,
+        title: String,
+        description: String,
+    },
+    /// Move the item to another status (owner decision 2026-10-12, CF-6):
+    /// a Jira transition, a Linear workflow state, an Asana section or its
+    /// completed flag, a GitHub issue closed or reopened. `key` and
+    /// `external_id` address it as [`Self::Comment`]'s do. `category` is
+    /// fleet's (`todo | in_progress | done`); `name` is the tracker's own
+    /// name for the column the card was dropped on, when it has one — the
+    /// status of that name is preferred, else the first one of `category`.
+    /// A tracker with no such move answers [`TrackerError::Unsupported`].
+    /// Every provider.
+    SetStatus {
+        key: String,
+        external_id: Option<String>,
+        category: String,
+        name: Option<String>,
+    },
+}
+
+/// PURE: two status names are one (a column's label against a tracker's
+/// status): case and spacing aside, as the Board's own `laneKey` reads them.
+pub fn same_status_name(a: &str, b: &str) -> bool {
+    let fold = |s: &str| {
+        s.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    };
+    fold(a) == fold(b)
+}
+
+/// PURE: how a person reads one of fleet's three status categories.
+pub fn category_label(category: &str) -> &'static str {
+    match category {
+        "in_progress" => "In progress",
+        "done" => "Done",
+        _ => "To do",
+    }
+}
+
+/// The ticket a created ticket goes under: its key and, for a provider that
+/// addresses an item by it (Asana), its tracker id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateParent {
+    pub key: String,
+    pub external_id: Option<String>,
+}
+
+/// The providers that create a ticket from a fleet task
+/// ([`WriteOp::CreateItem`]).
+pub const CREATE_PROVIDERS: &[&str] = &["jira", "jira_dc", "asana", "linear", "github"];
+
+/// PURE: `provider` creates tickets ([`CREATE_PROVIDERS`]).
+pub fn creates_items(provider: &str) -> bool {
+    CREATE_PROVIDERS.contains(&provider)
 }
 
 /// PURE: a Jira project key (`PD`, `L2S`, `ABC_2`).

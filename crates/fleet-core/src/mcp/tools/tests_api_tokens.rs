@@ -159,6 +159,7 @@ fn owners_device(trusted: bool, mode: TokenMode) -> Caller {
         mode,
         pane: None,
         is_personal_owner: true,
+        is_fleet_admin: true,
     }
 }
 
@@ -274,6 +275,7 @@ async fn a_device_mints_read_or_act_only_and_only_when_trusted_and_full() {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     };
     assert!(
         tokens_call(&t, &host, serde_json::json!({"action": "list"}))

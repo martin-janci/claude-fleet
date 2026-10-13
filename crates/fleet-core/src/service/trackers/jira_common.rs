@@ -94,6 +94,118 @@ pub(crate) fn posted_comment(v: &Value, site: &str, key: &str) -> super::WriteOu
             .as_ref()
             .map(|id| format!("{site}/browse/{key}?focusedCommentId={id}")),
         remote_id: id,
+        key: None,
+    }
+}
+
+/// The longest summary Jira takes, in characters.
+pub const SUMMARY_MAX_CHARS: usize = 255;
+
+/// PURE: a fleet title as a Jira summary: one line, at most
+/// [`SUMMARY_MAX_CHARS`] characters.
+pub fn summary_of(title: &str) -> String {
+    title
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(SUMMARY_MAX_CHARS)
+        .collect()
+}
+
+/// PURE: `s` is a Jira project key (the prefix of a ticket key).
+pub fn is_project_key(s: &str) -> bool {
+    s.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && (2..=KEY_PREFIX_MAX_CHARS).contains(&s.len())
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// PURE: the issue type a ticket fleet creates takes, from a project's
+/// create metadata (`GET …/issue/createmeta/{project}/issuetypes`: the
+/// list is `issueTypes` on Cloud and `values` on Data Center). A subtask
+/// takes the first sub-task type; a task the one named "Task", else the
+/// first standard type (hierarchy level 0), else the first that is not a
+/// sub-task. `None` when the project offers no such type.
+pub fn pick_issue_type(meta: &Value, subtask: bool) -> Option<String> {
+    let types = meta["issueTypes"]
+        .as_array()
+        .or_else(|| meta["values"].as_array())?;
+    let id = |t: &Value| match &t["id"] {
+        Value::String(s) if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) => {
+            Some(s.clone())
+        }
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    };
+    let is_sub = |t: &Value| t["subtask"].as_bool().unwrap_or(false);
+    let pick = if subtask {
+        types.iter().find(|t| is_sub(t))
+    } else {
+        types
+            .iter()
+            .find(|t| {
+                !is_sub(t)
+                    && t["name"]
+                        .as_str()
+                        .is_some_and(|n| n.eq_ignore_ascii_case("task"))
+            })
+            .or_else(|| {
+                types
+                    .iter()
+                    .find(|t| !is_sub(t) && t["hierarchyLevel"].as_i64() == Some(0))
+            })
+            .or_else(|| types.iter().find(|t| !is_sub(t)))
+    };
+    pick.and_then(id)
+}
+
+/// The `fields` of `POST …/issue` for a ticket fleet creates. `description`
+/// is the API version's own shape (ADF on Cloud, a string on Data Center).
+pub fn create_issue_body(
+    project: &str,
+    issue_type: &str,
+    title: &str,
+    description: Value,
+    parent: Option<&str>,
+) -> Value {
+    let mut fields = serde_json::json!({
+        "project": { "key": project },
+        "issuetype": { "id": issue_type },
+        "summary": summary_of(title),
+    });
+    if !description.is_null() {
+        fields["description"] = description;
+    }
+    if let Some(p) = parent {
+        fields["parent"] = serde_json::json!({ "key": p });
+    }
+    serde_json::json!({ "fields": fields })
+}
+
+/// What `POST …/issue` answered (`{"id","key","self"}`) as the outcome:
+/// the issue id, its key, and its page on `site`. An answer without a
+/// valid id and key is `Invalid`: the ticket may exist, but fleet cannot
+/// tell which one it is.
+pub(crate) fn created_issue(v: &Value, site: &str) -> Result<super::WriteOutcome, TrackerError> {
+    let id = match &v["id"] {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+    .filter(|id| !id.is_empty() && id.len() <= 24 && id.bytes().all(|b| b.is_ascii_digit()));
+    let key = v["key"]
+        .as_str()
+        .filter(|k| is_key(k))
+        .map(str::to_ascii_uppercase);
+    match (id, key) {
+        (Some(id), Some(key)) => Ok(super::WriteOutcome {
+            url: Some(format!("{site}/browse/{key}")),
+            remote_id: Some(id),
+            key: Some(key),
+        }),
+        _ => Err(TrackerError::Invalid(
+            "Jira created the issue but did not say which one".into(),
+        )),
     }
 }
 
@@ -145,6 +257,67 @@ pub fn map_status_category(key: Option<&str>) -> &'static str {
         Some("indeterminate") => "in_progress",
         Some("done") => "done",
         _ => "todo",
+    }
+}
+
+/// PURE: the id of the transition that moves issue `key` to a status of
+/// `category` (CF-6), out of Jira's answer to `GET issue/{key}/transitions`:
+/// the one leading to the status called `name` when there is one, else the
+/// first leading to any status of that category, in the workflow's own
+/// order. A workflow offers only the moves it allows from where the issue
+/// is, so none at all is [`TrackerError::Unsupported`], said in words.
+pub(crate) fn pick_transition(
+    v: &Value,
+    key: &str,
+    category: &str,
+    name: Option<&str>,
+) -> Result<String, TrackerError> {
+    let offered: Vec<(&str, &str, &str)> = v["transitions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|t| t["isAvailable"].as_bool() != Some(false))
+        .filter_map(|t| {
+            let id = t["id"].as_str()?;
+            (!id.is_empty() && id.len() <= 20 && id.bytes().all(|b| b.is_ascii_digit())).then_some(
+                (
+                    id,
+                    t["to"]["name"].as_str().unwrap_or_default(),
+                    map_status_category(t["to"]["statusCategory"]["key"].as_str()),
+                ),
+            )
+        })
+        .collect();
+    let by_name = name.and_then(|n| {
+        offered
+            .iter()
+            .find(|(_, to, _)| super::same_status_name(to, n))
+    });
+    match by_name.or_else(|| offered.iter().find(|(_, _, c)| *c == category)) {
+        Some((id, _, _)) => Ok(id.to_string()),
+        None => {
+            let mut reachable: Vec<&str> = offered
+                .iter()
+                .map(|(_, to, _)| *to)
+                .filter(|to| !to.is_empty())
+                .collect();
+            reachable.dedup();
+            let wanted = name.unwrap_or_else(|| super::category_label(category));
+            Err(TrackerError::Unsupported(if reachable.is_empty() {
+                format!("{key}'s workflow allows no move from its current status")
+            } else {
+                format!(
+                    "{key}'s workflow has no move to {wanted} from its current status; it \
+                     allows: {}",
+                    reachable
+                        .iter()
+                        .take(8)
+                        .map(|r| r.chars().take(60).collect::<String>())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }))
+        }
     }
 }
 

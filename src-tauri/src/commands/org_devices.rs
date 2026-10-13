@@ -8,7 +8,8 @@
 
 use crate::backend::FleetBackend;
 use fleet_core::ipc_error::IpcError;
-use fleet_core::service::org_admin::{DeviceSummary, OrgAdminArgs, PersonSummary};
+use fleet_core::service::org_admin::{DeviceSummary, Me, OrgAdminArgs, PersonSummary};
+use fleet_core::service::realm_admin::{self, RealmAdminArgs};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -286,6 +287,42 @@ pub async fn list_people(
     decode(routed::list_people(&backend, &store, OrgAdminArgs::new("list_people")).await?)
 }
 
+/// One realm group as Settings → Groups lists it (`realm_admin
+/// list_groups`; its `org_id` is not shown, so it is not read).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupSummary {
+    pub path: String,
+    pub name: String,
+    #[serde(default)]
+    pub managed: bool,
+    /// Its direct members, by name.
+    #[serde(default)]
+    pub members: Vec<String>,
+    /// The roles mapped onto it: `fleet-admin`, `fleet:org-admin`.
+    #[serde(default)]
+    pub roles: Vec<String>,
+}
+
+/// Settings → Groups: read-only. The hub's `realm_admin list_groups` when
+/// paired, this desktop's own store otherwise.
+#[tauri::command]
+pub async fn list_groups(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<GroupSummary>, IpcError> {
+    decode(
+        routed::list_groups(
+            &backend,
+            &store,
+            RealmAdminArgs {
+                action: "list_groups".into(),
+                ..Default::default()
+            },
+        )
+        .await?,
+    )
+}
+
 #[tauri::command]
 pub async fn add_person(
     backend: State<'_, Arc<FleetBackend>>,
@@ -486,6 +523,17 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("list_people", &args).await,
             None => local(&args, store),
+        }
+    }
+
+    pub async fn list_groups(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: RealmAdminArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("list_groups", &args).await,
+            None => realm_admin::run(&args, store, Me::LOCAL),
         }
     }
 

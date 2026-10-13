@@ -169,6 +169,10 @@ pub fn wire_keys<T: Serialize>(value: &T) -> Vec<String> {
 /// to tools added at revision 17 without a bump; a hub without them answers
 /// `E_HUB_PROTOCOL`, which the field and the checklist show as their error,
 /// where before this build both were refused outright.
+///
+/// Stays 16 for revision 18: Settings › Environment routes to the `env_vars`
+/// tool a revision-17 hub lacks, and its actions show that hub's
+/// `E_HUB_PROTOCOL` as their error; `new_session`'s `env` is ignored there.
 pub const MIN_HUB_CONTRACT: u32 = 16;
 
 /// The highest hub wire-contract revision this build understands. A hub
@@ -203,7 +207,9 @@ pub const MIN_HUB_CONTRACT: u32 = 16;
 ///
 /// Raised to 17 with revision 17 (gap plan batch 3, G7.2 and G7.3, and
 /// `session_context_help`).
-pub const MAX_HUB_CONTRACT: u32 = 17;
+///
+/// Raised to 18 with revision 18 (session environment variables).
+pub const MAX_HUB_CONTRACT: u32 = 18;
 
 /// Where a hub's wire-contract revision stands against what this build
 /// accepts. A pure function of the three numbers on purpose: the real bounds

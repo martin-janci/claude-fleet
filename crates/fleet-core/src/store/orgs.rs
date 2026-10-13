@@ -226,6 +226,16 @@ pub fn validate_org_name(name: &str) -> Result<String, IpcError> {
             format!("an org name is 1–{ORG_NAME_MAX_CHARS} characters, one line"),
         ));
     }
+    // The org's group is `/orgs/<name>`: a `/` would make its path read as
+    // a group inside another org (identity sub-project 1). An org named
+    // before this rule keeps its name (`update_org` passes it unchanged);
+    // the org fence decides by group ancestry, so it is safe either way.
+    if n.contains('/') {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "an org name has no `/`: it is the name of the org's group, /orgs/<name>",
+        ));
+    }
     Ok(n.to_string())
 }
 
@@ -380,22 +390,28 @@ impl Store {
     ) -> Result<OrgRow, IpcError> {
         let name = validate_org_name(name)?;
         let color = validate_org_color(color)?;
-        let taken: bool = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM orgs WHERE lower(name) = lower(?1))",
-            rusqlite::params![name],
-            |r| r.get(0),
-        )?;
-        if taken {
-            return Err(IpcError::new(
-                codes::E_EXISTS,
-                format!("an org named {name:?} already exists"),
-            ));
-        }
-        self.conn.execute(
-            "INSERT INTO orgs (name, color, isolate_sessions, created_at) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![name, color, isolate_sessions as i64, now_unix()],
-        )?;
-        let id = self.conn.last_insert_rowid();
+        // The org and its groups (`/orgs/<name>` and its three subgroups,
+        // whose members `org_members` projects) are made together.
+        let id = self.with_tx(|c| {
+            let taken: bool = c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM orgs WHERE lower(name) = lower(?1))",
+                rusqlite::params![name],
+                |r| r.get(0),
+            )?;
+            if taken {
+                return Err(IpcError::new(
+                    codes::E_EXISTS,
+                    format!("an org named {name:?} already exists"),
+                ));
+            }
+            c.execute(
+                "INSERT INTO orgs (name, color, isolate_sessions, created_at) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![name, color, isolate_sessions as i64, now_unix()],
+            )?;
+            let id = c.last_insert_rowid();
+            self.ensure_org_groups_in_tx(c, id, &name)?;
+            Ok(id)
+        })?;
         self.get_org(id)?
             .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "org vanished"))
     }
@@ -410,6 +426,8 @@ impl Store {
     ) -> Result<OrgRow, IpcError> {
         let cur = self.get_org(id)?.ok_or_else(|| org_not_found(id))?;
         let name = match name {
+            // Unchanged: an org named before `/` was refused keeps its name.
+            Some(n) if n.trim() == cur.name => cur.name,
             Some(n) => {
                 let n = validate_org_name(n)?;
                 let taken: bool = self.conn.query_row(
@@ -432,10 +450,14 @@ impl Store {
             None => cur.color,
         };
         let isolate = isolate_sessions.unwrap_or(cur.isolate_sessions);
-        self.conn.execute(
-            "UPDATE orgs SET name = ?2, color = ?3, isolate_sessions = ?4 WHERE id = ?1",
-            rusqlite::params![id, name, color, isolate as i64],
-        )?;
+        // The root group `/orgs/<name>` follows the org's name.
+        self.with_tx(|c| {
+            c.execute(
+                "UPDATE orgs SET name = ?2, color = ?3, isolate_sessions = ?4 WHERE id = ?1",
+                rusqlite::params![id, name, color, isolate as i64],
+            )?;
+            self.rename_org_groups_in_tx(c, id, &name)
+        })?;
         self.get_org(id)?.ok_or_else(|| org_not_found(id))
     }
 
@@ -644,12 +666,12 @@ impl Store {
         // Phase D (migration 107): its members become FORMER members — the
         // row stays, so a person whose last company this was reads nothing
         // of any org rather than every org's work — and what was shared with
-        // the org reaches nobody.
+        // the org reaches nobody. Its groups go (the subgroups, their
+        // memberships and mappings with them), and `org_members` follows as
+        // the projection of an org with no groups.
         let now = now_unix();
-        tx.execute(
-            "UPDATE org_members SET removed_at = ?2 WHERE org_id = ?1 AND removed_at IS NULL",
-            rusqlite::params![id, now],
-        )?;
+        super::realm::delete_org_groups_in_tx(&tx, id)?;
+        super::realm::end_all_org_member_rows_in_tx(&tx, id, now)?;
         let revoked = tx.execute(
             "UPDATE session_grants SET revoked_at = ?2 WHERE org_id = ?1 AND revoked_at IS NULL",
             rusqlite::params![id, now],

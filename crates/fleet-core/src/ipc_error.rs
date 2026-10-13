@@ -252,6 +252,11 @@ pub mod codes {
     /// with no value. The message lists the NAMES only, never a value. Set
     /// them (`catalog_set_secret`) or re-apply with `force_partial`.
     pub const E_SECRET_MISSING: &str = "E_SECRET_MISSING";
+
+    /// Session environment: a variable's `credential_ref` resolved to
+    /// nothing at launch, so the launch was refused. The message names the
+    /// variable and the reference kind, never a value or a path.
+    pub const E_ENV_UNRESOLVED: &str = "E_ENV_UNRESOLVED";
     /// Remote (hub-client) mode: the hub answered `401`. The client token is
     /// no longer accepted — the operator revoked it, or the hub was re-inited
     /// with a fresh database. The desktop must send the user back to the Hub

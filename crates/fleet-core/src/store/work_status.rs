@@ -267,6 +267,53 @@ impl Store {
         }
         Ok(wrote)
     }
+
+    /// A person's "Keep open" on local work the Work view suggested closing
+    /// (CF-5, migration 086). `Ok(None)` for an unknown id, as
+    /// [`Self::set_item_status`] answers one.
+    ///
+    /// Not a status: `status_set_by = 'person'` is final, so setting `todo`
+    /// here would stop the item ever reading `in_progress` or being stamped
+    /// `done` by a merged PR. This only moves the mark the suggestion is
+    /// judged against — it returns once a session ends on the item later.
+    ///
+    /// Refused for a tracker item: nothing is ever suggested for one.
+    pub fn keep_item_open(&self, item_id: i64) -> Result<Option<WorkItemRow>, IpcError> {
+        let Some(before) = self.get_work_item(item_id)? else {
+            return Ok(None);
+        };
+        if before.source != "local" {
+            let which = before.key.clone().unwrap_or_else(|| before.title.clone());
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!("{which} is a tracker's ticket; fleet never suggests closing one"),
+            ));
+        }
+        self.conn.execute(
+            "INSERT INTO work_close_dismissals (item_id, dismissed_at) VALUES (?1, ?2) \
+             ON CONFLICT(item_id) DO UPDATE SET dismissed_at = excluded.dismissed_at",
+            rusqlite::params![item_id, now_unix()],
+        )?;
+        self.emit_work_item(
+            item_id,
+            super::tracker_items::SessionChange {
+                primary: true,
+                suggested: false,
+                rejected: false,
+            },
+        )?;
+        Ok(Some(before))
+    }
+
+    /// Every "Keep open" answer, as `(item_id, dismissed_at)` — one read for
+    /// a whole Work view page.
+    pub fn work_close_dismissals(&self) -> Result<Vec<(i64, i64)>, IpcError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT item_id, dismissed_at FROM work_close_dismissals")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
 }
 
 /// One change of an item's stored status (`work_status_log`, migration

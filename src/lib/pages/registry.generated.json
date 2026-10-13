@@ -1743,6 +1743,27 @@
         "level": "none"
       },
       "default": "false",
+      "help": "New task: once you have written the notes, the title is drafted from them with claude -p on this machine, or on the first reachable host when it is not a fleet host. A draft is text you edit before you create the task.",
+      "key": "work.draft_task_titles",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Draft task titles",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "ai"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
       "help": "Finish: Draft writes a finished mission's release note from its merged PRs, on the mission's planner host.",
       "key": "work.draft_release_notes",
       "kind": {
@@ -3252,6 +3273,72 @@
       "danger": {
         "level": "none"
       },
+      "default": "365",
+      "help": "Days an administrative change (who changed which person, group, role or device) is kept.",
+      "key": "auth.audit_retention_days",
+      "kind": {
+        "max": 3650,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Audit: keep admin events",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "days",
+      "value": "365",
+      "zero": "forever"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "90",
+      "help": "Days a paired device may go unused before it is signed out and must be paired again. Peer hubs and updaters are never signed out.",
+      "key": "auth.device_token_ttl_days",
+      "kind": {
+        "max": 3650,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Devices: sign out after idle days",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "days",
+      "value": "90",
+      "zero": "never"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "0",
+      "help": "Days after pairing a device is signed out, however often it is used. Peer hubs and updaters are never signed out.",
+      "key": "auth.device_token_max_age_days",
+      "kind": {
+        "max": 3650,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Devices: sign out days after pairing",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "days",
+      "value": "0",
+      "zero": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "",
       "help": "Per-feature confidence floors fitted from runs a person confirmed, corrected or rejected (fleet-hub decide floor fit). A fitted floor only raises a feature's built-in one, and only for the question version and model it was fitted against.",
       "key": "decide.jev.floors",
@@ -3784,6 +3871,10 @@
               "type": "link"
             },
             {
+              "page": "settings.env",
+              "type": "link"
+            },
+            {
               "page": "settings.hub",
               "type": "link"
             },
@@ -3814,6 +3905,10 @@
             },
             {
               "page": "settings.people",
+              "type": "link"
+            },
+            {
+              "page": "settings.groups",
               "type": "link"
             }
           ],
@@ -4279,6 +4374,30 @@
             }
           ],
           "title": "Error reports"
+        },
+        {
+          "intro": "How long the record of administrative changes is kept.",
+          "items": [
+            {
+              "key": "auth.audit_retention_days",
+              "type": "field"
+            }
+          ],
+          "title": "Audit"
+        },
+        {
+          "intro": "When a paired device that has gone unused, or grown old, is signed out and must be paired again.",
+          "items": [
+            {
+              "key": "auth.device_token_ttl_days",
+              "type": "field"
+            },
+            {
+              "key": "auth.device_token_max_age_days",
+              "type": "field"
+            }
+          ],
+          "title": "Devices"
         }
       ],
       "spec": "fleet.page/1",
@@ -4380,6 +4499,10 @@
                 },
                 {
                   "key": "work.draft_briefs",
+                  "type": "field"
+                },
+                {
+                  "key": "work.draft_task_titles",
                   "type": "field"
                 },
                 {
@@ -5003,6 +5126,14 @@
             {
               "key": "post_comments",
               "type": "field"
+            },
+            {
+              "key": "create_tickets",
+              "type": "field"
+            },
+            {
+              "key": "move_tickets",
+              "type": "field"
             }
           ],
           "title": "Write-back"
@@ -5418,6 +5549,63 @@
       "title": "Devices"
     },
     {
+      "id": "settings.env",
+      "intro": "Environment variables for the sessions fleet starts: global, per host, per project or per session, the narrower winning. A change applies when a session next starts or restarts. A secret is write-only.",
+      "layout": "master_detail",
+      "parent": "settings",
+      "resource": "env_var",
+      "sections": [
+        {
+          "items": [
+            {
+              "key": "name",
+              "type": "field"
+            },
+            {
+              "key": "scope",
+              "type": "field"
+            },
+            {
+              "key": "scope_key",
+              "type": "field"
+            },
+            {
+              "key": "value",
+              "type": "field"
+            },
+            {
+              "key": "secret",
+              "type": "field"
+            },
+            {
+              "key": "is_ref",
+              "type": "field"
+            },
+            {
+              "key": "updated_at",
+              "type": "field"
+            }
+          ],
+          "title": "Variable"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "table": {
+        "columns": [
+          "name",
+          "scope",
+          "scope_key",
+          "secret"
+        ],
+        "filters": [
+          "scope"
+        ],
+        "group_by": "scope",
+        "title": "Variables"
+      },
+      "title": "Environment"
+    },
+    {
       "id": "settings.people",
       "intro": "The people this hub knows. Add one with + Person, or they are added when a device is paired or handed to them. Disabling someone revokes their devices and the shares made to them.",
       "layout": "master_detail",
@@ -5457,10 +5645,60 @@
             }
           ],
           "title": "Access"
+        },
+        {
+          "items": [
+            {
+              "key": "groups",
+              "type": "field"
+            },
+            {
+              "key": "roles_display",
+              "type": "field"
+            }
+          ],
+          "title": "Roles"
         }
       ],
       "spec": "fleet.page/1",
       "title": "People"
+    },
+    {
+      "id": "settings.groups",
+      "intro": "Groups and the roles they grant. An org's own groups, its admins, members and viewers under /orgs, follow the org; change their members on the org's page or with realm_admin.",
+      "layout": "master_detail",
+      "parent": "settings",
+      "resource": "group",
+      "sections": [
+        {
+          "items": [
+            {
+              "key": "path",
+              "type": "field"
+            },
+            {
+              "key": "managed",
+              "type": "field"
+            }
+          ],
+          "title": "Group"
+        },
+        {
+          "items": [
+            {
+              "key": "roles",
+              "type": "field"
+            },
+            {
+              "key": "members",
+              "type": "field"
+            }
+          ],
+          "title": "Grants"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "title": "Groups"
     },
     {
       "graph": {
@@ -5918,6 +6156,10 @@
             },
             {
               "key": "claimed_until",
+              "type": "field"
+            },
+            {
+              "key": "waiting",
               "type": "field"
             }
           ],
@@ -7234,6 +7476,34 @@
           ],
           "on_off": false,
           "type": "bool"
+        },
+        {
+          "confirm": "Fleet will write to this tracker: each task a person promotes is created as a ticket under this credential's account.",
+          "default": false,
+          "edit": "settings",
+          "help": "Let a person promote a task made in fleet to a ticket here: a subtask of a ticket becomes that ticket's subtask, a task goes into the project they pick. Agents never create one. The token needs permission to create issues.",
+          "id": "create_tickets",
+          "label": "Create tickets",
+          "merge_path": [
+            "write_back",
+            "create_tickets"
+          ],
+          "on_off": false,
+          "type": "bool"
+        },
+        {
+          "confirm": "Fleet will write to this tracker: a ticket a person moves in fleet changes status there, under this credential's account.",
+          "default": false,
+          "edit": "settings",
+          "help": "Let a person who moves a ticket's card on the Board move the ticket here too: a Jira transition, a Linear state, an Asana section or completion, a GitHub issue closed or reopened. Agents never move tickets. The token needs permission to edit issues.",
+          "id": "move_tickets",
+          "label": "Move tickets",
+          "merge_path": [
+            "write_back",
+            "status"
+          ],
+          "on_off": false,
+          "type": "bool"
         }
       ],
       "help": "Trackers add a ticket's title and status to the sessions working on it, and list your tickets in ⌘K. Nothing needs one: keys in branch names group sessions without any tracker.",
@@ -7863,7 +8133,7 @@
           ]
         ],
         "command": "disable_person",
-        "confirm": "Revokes every device of theirs and every share made to them, at once. Their own sessions stay private and theirs. There is no re-enable.",
+        "confirm": "Revokes every device of theirs and every share made to them, at once. Their own sessions stay private and theirs. They can be re-enabled later (org_admin enable_person, or fleet-hub person enable), but nothing revoked comes back.",
         "envelope": "args",
         "id": "person.disable",
         "label": "Disable",
@@ -7911,6 +8181,26 @@
           "type": "items"
         },
         {
+          "add": [],
+          "help": "The groups they are a member of. An org's groups follow its members; see Settings → Groups.",
+          "id": "groups",
+          "item_label": {
+            "type": "plain"
+          },
+          "label": "Groups",
+          "type": "items"
+        },
+        {
+          "add": [],
+          "help": "Every role they hold, and through which group, composite or direct mapping.",
+          "id": "roles_display",
+          "item_label": {
+            "type": "plain"
+          },
+          "label": "Roles",
+          "type": "items"
+        },
+        {
           "help": "When the hub first heard of them.",
           "id": "created_at",
           "label": "Added",
@@ -7949,6 +8239,57 @@
       }
     },
     {
+      "empty": "No groups yet. An org's groups appear when the org is added.",
+      "fields": [
+        {
+          "help": "Where the group sits, from the top: /orgs/acme/admins.",
+          "id": "path",
+          "label": "Path",
+          "max": 512,
+          "type": "text"
+        },
+        {
+          "badge": {
+            "text": "managed",
+            "when": "true"
+          },
+          "default": false,
+          "help": "Kept by its org: its members follow the org's members and roles.",
+          "id": "managed",
+          "label": "Managed",
+          "on_off": false,
+          "type": "bool"
+        },
+        {
+          "add": [],
+          "help": "The roles every member holds through this group.",
+          "id": "roles",
+          "item_label": {
+            "type": "plain"
+          },
+          "label": "Roles",
+          "type": "items"
+        },
+        {
+          "add": [],
+          "help": "Its direct members, by name.",
+          "id": "members",
+          "item_label": {
+            "type": "plain"
+          },
+          "label": "Members",
+          "type": "items"
+        }
+      ],
+      "help": "Groups and the roles they grant. An org's own groups, its admins, members and viewers under /orgs, follow the org.",
+      "id": "group",
+      "id_field": "path",
+      "label": "Group",
+      "list": "list_groups",
+      "plural": "Groups",
+      "title_field": "path"
+    },
+    {
       "actions": [
         {
           "bind": [
@@ -7982,6 +8323,13 @@
                 "from": "param",
                 "name": "note"
               }
+            ],
+            [
+              "queue",
+              {
+                "from": "param",
+                "name": "queue"
+              }
             ]
           ],
           "command": "claim_debug_device",
@@ -7996,6 +8344,13 @@
               "placeholder": "testing the login flow",
               "required": false,
               "type": "text"
+            },
+            {
+              "default": false,
+              "label": "Wait in line if someone holds it",
+              "name": "queue",
+              "required": false,
+              "type": "toggle"
             }
           ],
           "report": false
@@ -8167,7 +8522,7 @@
             ]
           ],
           "command": "release_debug_device",
-          "confirm": "Whoever holds it loses the claim; another session may then use the device.",
+          "confirm": "Whoever holds it loses the claim and the next in line gets it, or another session may then use it. If you wait in its line, you only leave the line.",
           "envelope": "args",
           "id": "debug_device.release",
           "label": "Release claim",
@@ -8394,6 +8749,12 @@
           "type": "time"
         },
         {
+          "help": "Sessions and people in line for it; each gets the claim in turn when the one before releases it or lets it lapse.",
+          "id": "waiting",
+          "label": "Waiting",
+          "type": "count"
+        },
+        {
           "help": "When a scan last found it.",
           "id": "last_seen_at",
           "label": "Last seen",
@@ -8604,6 +8965,223 @@
       "list": "list_peer_links",
       "plural": "Linked hubs",
       "title_field": "title"
+    },
+    {
+      "create": {
+        "bind": [
+          [
+            "scope",
+            {
+              "from": "param",
+              "name": "scope"
+            }
+          ],
+          [
+            "scope_key",
+            {
+              "from": "param",
+              "name": "scope_key"
+            }
+          ],
+          [
+            "name",
+            {
+              "from": "param",
+              "name": "name"
+            }
+          ],
+          [
+            "value",
+            {
+              "from": "param",
+              "name": "value"
+            }
+          ],
+          [
+            "secret",
+            {
+              "from": "param",
+              "name": "secret"
+            }
+          ]
+        ],
+        "command": "env_var_set",
+        "envelope": "args",
+        "id": "env_var.set",
+        "label": "Add variable",
+        "params": [
+          {
+            "label": "Scope",
+            "name": "scope",
+            "options": [
+              [
+                "global",
+                "Global"
+              ],
+              [
+                "host",
+                "Host"
+              ],
+              [
+                "project",
+                "Project"
+              ]
+            ],
+            "required": true,
+            "type": "choice"
+          },
+          {
+            "label": "Host or owner/repo",
+            "max": 255,
+            "name": "scope_key",
+            "placeholder": "mercury · owner/repo · empty for global",
+            "required": false,
+            "type": "text"
+          },
+          {
+            "label": "Name",
+            "max": 128,
+            "name": "name",
+            "placeholder": "DATABASE_URL",
+            "required": true,
+            "type": "text"
+          },
+          {
+            "label": "Value",
+            "name": "value",
+            "required": true,
+            "type": "secret"
+          },
+          {
+            "default": true,
+            "label": "Keep it secret (never shown again)",
+            "name": "secret",
+            "required": false,
+            "type": "toggle"
+          }
+        ],
+        "report": false
+      },
+      "delete": {
+        "bind": [
+          [
+            "scope",
+            {
+              "from": "record",
+              "name": "scope"
+            }
+          ],
+          [
+            "scope_key",
+            {
+              "from": "record",
+              "name": "scope_key"
+            }
+          ],
+          [
+            "name",
+            {
+              "from": "record",
+              "name": "name"
+            }
+          ]
+        ],
+        "command": "env_var_unset",
+        "confirm": "Remove this variable? A running session keeps it until it restarts.",
+        "envelope": "args",
+        "id": "env_var.remove",
+        "label": "Remove",
+        "params": [],
+        "report": false
+      },
+      "empty": "No variables. Add one to have it in every session fleet starts.",
+      "fields": [
+        {
+          "help": "The variable's name.",
+          "id": "name",
+          "label": "Name",
+          "max": 128,
+          "type": "text"
+        },
+        {
+          "badge": {
+            "when": "label"
+          },
+          "help": "Where it applies: everywhere, one host, one project or one session.",
+          "id": "scope",
+          "label": "Scope",
+          "options": [
+            [
+              "global",
+              "Global"
+            ],
+            [
+              "host",
+              "Host"
+            ],
+            [
+              "project",
+              "Project"
+            ],
+            [
+              "session",
+              "Session"
+            ]
+          ],
+          "type": "choice"
+        },
+        {
+          "help": "The host alias, owner/repo or session id; empty for global.",
+          "id": "scope_key",
+          "label": "Applies to",
+          "max": 255,
+          "type": "text"
+        },
+        {
+          "help": "Shown for a plain value only.",
+          "id": "value",
+          "label": "Value",
+          "max": 32768,
+          "type": "text"
+        },
+        {
+          "badge": {
+            "text": "secret",
+            "when": "true"
+          },
+          "default": false,
+          "help": "Write-only: never shown again.",
+          "id": "secret",
+          "label": "Secret",
+          "on_off": false,
+          "type": "bool"
+        },
+        {
+          "badge": {
+            "text": "ref",
+            "when": "true"
+          },
+          "default": false,
+          "help": "Read from the hub's environment or a file on it when a session starts.",
+          "id": "is_ref",
+          "label": "Reference",
+          "on_off": false,
+          "type": "bool"
+        },
+        {
+          "help": "When it was last set.",
+          "id": "updated_at",
+          "label": "Changed",
+          "type": "time"
+        }
+      ],
+      "help": "Set in every session fleet starts, by scope: global, then host, then project (owner/repo), then session; the narrower wins. A change applies when a session next starts or restarts. A secret's value is never shown again.",
+      "id": "env_var",
+      "id_field": "id",
+      "label": "Environment variable",
+      "list": "env_vars_list",
+      "plural": "Environment variables",
+      "title_field": "name"
     }
   ],
   "sources": [

@@ -35,6 +35,7 @@ fn vs(store: &Mutex<Store>, scope: &OrgScope) -> ViewScope {
             mode: crate::mcp::auth::TokenMode::Full,
             pane: None,
             is_personal_owner: false,
+            is_fleet_admin: false,
         }
         .view_scope(&store.lock().unwrap())
         .expect("a host scope"),
@@ -939,6 +940,8 @@ async fn an_agents_start_is_recorded_as_the_agents_and_never_writes_back() {
                     write_back: WriteBack {
                         pr_remote_link: true,
                         comments: false,
+                        create_tickets: false,
+                        status: false,
                     },
                     ..Default::default()
                 },

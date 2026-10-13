@@ -362,3 +362,53 @@ fn a_reopen_is_the_transition_out_of_done_with_a_journal_row() {
         .unwrap();
     assert_eq!(stamp, None);
 }
+
+/// TASK-263: an ended link is archived, un-archived and removed by id — the
+/// forms the control API takes for a link whose session is gone. A live
+/// link is never touched by any of them, nor is an unknown id an error.
+#[test]
+fn ended_links_are_archived_and_removed_by_id_and_live_ones_are_not() {
+    let s = Store::open_in_memory().unwrap();
+    let gone = seed(&s, "gone");
+    let live = seed(&s, "live");
+    s.link_session_work(gone, WorkTarget::Key("ABC-1"), "manual")
+        .unwrap();
+    s.link_session_work(live, WorkTarget::Key("ABC-1"), "manual")
+        .unwrap();
+    let live_link = s.session_work_links(live).unwrap()[0].id;
+    s.delete_session(gone).unwrap();
+    let ended = s.ended_work_links_for_key("ABC-1").unwrap();
+    assert_eq!(ended.len(), 1);
+    let id = ended[0].id;
+    assert_eq!(s.work_link_archived_at(id).unwrap(), None);
+
+    assert_eq!(
+        s.archive_ended_links(&[id, live_link, 9_999], true)
+            .unwrap(),
+        1
+    );
+    let at = s.work_link_archived_at(id).unwrap().expect("stamped");
+    assert_eq!(
+        s.work_link_archived_at(live_link).unwrap(),
+        None,
+        "a live link is archived through its session"
+    );
+    assert_eq!(s.archive_ended_links(&[id], true).unwrap(), 0, "idempotent");
+    assert_eq!(
+        s.work_link_archived_at(id).unwrap(),
+        Some(at),
+        "first stamp kept"
+    );
+    assert_eq!(s.archive_ended_links(&[id], false).unwrap(), 1);
+    assert_eq!(s.work_link_archived_at(id).unwrap(), None);
+    assert_eq!(s.archive_ended_links(&[], true).unwrap(), 0);
+
+    assert_eq!(s.remove_ended_links(&[id, live_link, 9_999]).unwrap(), 1);
+    assert!(s.ended_work_links_for_key("ABC-1").unwrap().is_empty());
+    assert!(
+        s.get_work_link(live_link).unwrap().is_some(),
+        "live link stays"
+    );
+    assert_eq!(s.remove_ended_links(&[id]).unwrap(), 0, "gone is gone");
+    assert_eq!(s.work_link_archived_at(9_999).unwrap(), None);
+}

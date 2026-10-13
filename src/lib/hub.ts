@@ -423,6 +423,7 @@ export const ROUTED_ACTIONS = [
   'abandon_start',
   'request_work_handover',
   'summarize_past_work',
+  'draft_task_title',
   'tidy_apply',
   'unarchive_session_work',
   'dismiss_reopened',
@@ -430,11 +431,14 @@ export const ROUTED_ACTIONS = [
   'rename_work_item',
   // The board: a native item's status, set by dragging its card.
   'set_work_status',
+  'keep_work_open',
   // Task editing: a native item's title, notes and assignees.
   'edit_work_item',
   // Task comments: kept in fleet; deleting is the author's own.
   'comment_on_work',
   'delete_work_comment',
+  // Promoting a task of fleet's own: the hub owns the trackers that create it.
+  'promote_work_item',
   // Task attachments: kept in fleet; deleting is the author's own.
   'attach_to_work',
   'delete_work_attachment',

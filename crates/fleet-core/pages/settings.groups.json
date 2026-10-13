@@ -1,0 +1,37 @@
+{
+  "spec": "fleet.page/1",
+  "id": "settings.groups",
+  "title": "Groups",
+  "parent": "settings",
+  "layout": "master_detail",
+  "resource": "group",
+  "intro": "Groups and the roles they grant. An org's own groups, its admins, members and viewers under /orgs, follow the org; change their members on the org's page or with realm_admin.",
+  "sections": [
+    {
+      "title": "Group",
+      "items": [
+        {
+          "type": "field",
+          "key": "path"
+        },
+        {
+          "type": "field",
+          "key": "managed"
+        }
+      ]
+    },
+    {
+      "title": "Grants",
+      "items": [
+        {
+          "type": "field",
+          "key": "roles"
+        },
+        {
+          "type": "field",
+          "key": "members"
+        }
+      ]
+    }
+  ]
+}

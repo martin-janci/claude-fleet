@@ -52,9 +52,10 @@ pub enum Access {
     /// (send / kill / new_session across hosts stay allowed by design), not
     /// fleet admin.
     Client,
-    /// Reachable by the master and by THE HUB'S OWNER's own paired device: a
+    /// Reachable by the master and by a FLEET ADMIN's own paired device: a
     /// paired client bound to no org (the desktop paired with `fleet-hub
-    /// pair`, a phone) whose person is `Store::personal_owner_id()`. Never a
+    /// pair`, a phone) whose person holds the realm role `fleet-admin` — the
+    /// hub's owner always does (identity sub-project 1). Never a
     /// per-host token — its Claude is fenced to its host's org, and these
     /// tools are fleet-wide — nor a client bound to an org (M14), nor (since
     /// multi-user M1) a SECOND person's device. The fleet's settings
@@ -121,7 +122,7 @@ pub enum Access {
 /// has a `&Caller` and nothing else and runs over the whole router on every
 /// served list, so a lookup here would be a lock per request. Everything it
 /// needs about WHO the caller is was resolved once, where the token was
-/// resolved: [`crate::mcp::Caller::is_personal_owner`].
+/// resolved: [`crate::mcp::Caller::is_fleet_admin`].
 /// The tools a host-limited named token may call (M15 step G2.8): each
 /// reaches a session through `resolve_row_and_gate` (which runs
 /// `require_host`) or lists through `ViewScope::sees_session_row` (which
@@ -150,17 +151,20 @@ pub fn access_allows(caller: &crate::mcp::Caller, tool: &str) -> bool {
     }
     match policy(tool).map(|p| p.access) {
         Some(Access::Client) => true,
-        // Multi-user M1 (T2a): the hub's OWNER, not any person. Without the
+        // Multi-user M1 (T2a): the hub's OWNER, not any person — since
+        // identity sub-project 1, any holder of the realm role `fleet-admin`
+        // (the owner always is one). Without the
         // boolean this arm read "any paired device bound to no org", which
         // on a hub with a second person handed that person the whole fleet's
         // settings. The boolean is false when the hub cannot say who its
         // owner is, so that state refuses rather than opens.
         Some(Access::Person) => {
-            caller.is_personal_owner && (caller.is_master() || caller.is_person_device())
+            caller.is_fleet_admin && (caller.is_master() || caller.is_person_device())
         }
         // Two conjuncts, narrowing two different axes, and BOTH are needed:
         //
-        // - `is_personal_owner` narrows WHOSE device it is. Without it this
+        // - `is_fleet_admin` (the owner's `is_personal_owner` before identity
+        //   sub-project 1) narrows WHOSE device it is. Without it this
         //   arm read "any paired device bound to no org", so on a hub with a
         //   second person that colleague's phone reached
         //   `decide_setting_proposals` — which applies a proposed settings
@@ -175,7 +179,7 @@ pub fn access_allows(caller: &crate::mcp::Caller, tool: &str) -> bool {
         //
         // A device that reaches these still has to be trusted to write
         // anything (`settings_writer`).
-        Some(Access::PersonDevice) => caller.is_personal_owner && caller.is_person_device(),
+        Some(Access::PersonDevice) => caller.is_fleet_admin && caller.is_person_device(),
         // Multi-user M1 (T12): a per-host token, and only one. `host_alias`
         // is `Some` for exactly that shape of caller — the master carries
         // neither field and a paired client carries `client` — so this arm
@@ -586,6 +590,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Identity sub-project 1. Not served to the master (it has
+    // `fleet-hub realm`). The tool decides the authority
+    // (`org_admin::authority_for`); a change needs a trusted full device.
+    ToolPolicy {
+        name: "realm_admin",
+        access: Access::Device,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // Guides (declarative pages, layout guide): any token reads the catalog,
     // validates and proposes — a host's session is who writes one, with the
     // fleet-guides skill — and lists. Deciding and removing are a person's:
@@ -655,6 +669,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
     // other device. A person's; a host's token is not served it.
     ToolPolicy {
         name: "wizard_state",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Pinned dashboards (persona design step 6): a person's, on the hub so
+    // every device of theirs shows them. The agent reads; a person pins.
+    ToolPolicy {
+        name: "dashboards",
         access: Access::Client,
         readonly: false,
         confirm: false,
@@ -762,6 +785,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
     },
     ToolPolicy {
         name: "api_tokens",
+        access: Access::Person,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Session environment variables (spec 2026-10-11): a person's, like the
+    // fleet's settings; a write needs a trusted full device, a reference
+    // the master (checked in the tool).
+    ToolPolicy {
+        name: "env_vars",
         access: Access::Person,
         readonly: false,
         confirm: false,
@@ -1813,6 +1846,7 @@ pub const NOT_FOR_HOST_TOKENS: &[&str] = &[
     "routines",
     "start_rules",
     "wizard_state",
+    "dashboards",
     "propose_host_placement",
     "session_share",
     "session_unshare",
@@ -2509,14 +2543,17 @@ const REDACT_KEYS: &[&str] = &[
 /// tracker credential, for the same reason. `code` is `link_peer`'s one-time
 /// pairing code, still valid when the link fails (review r04 S3), and
 /// `add_account`'s sign-in code. `api_key` is `add_account`'s Anthropic key
-/// (M15 G2.9), which fleet never stores.
-const SKIP_KEYS: &[&str] = &["confirm_nonce", "value", "secret", "code", "api_key"];
+/// (M15 G2.9), which fleet never stores. `value` is also `env_vars`'s, and
+/// `ref` its credential reference (a path or variable name on the hub).
+pub(crate) const SKIP_KEYS: &[&str] =
+    &["confirm_nonce", "value", "secret", "code", "api_key", "ref"];
 /// Argument keys whose value is an object of person-typed answers (`ask`'s
 /// `values` may carry a form's secret fields): only the field count is kept,
 /// as `<N fields>`, never a name or a value. `args` is a nested payload
 /// (`catalog_admin`'s `set_secret` carries its value there, review r04 S2),
-/// which the top-level keys above cannot see into.
-const COUNT_KEYS: &[&str] = &["values", "args"];
+/// which the top-level keys above cannot see into. `env` is `new_session`'s
+/// session-scope variables: their names and values are the session's own.
+const COUNT_KEYS: &[&str] = &["values", "args", "env"];
 const SUMMARY_MAX_CHARS: usize = 240;
 
 /// Replace every character that could end a line downstream — see
@@ -3141,6 +3178,32 @@ mod tests {
         ] {
             assert!(!could_pass_for_a_marker_line(line), "{line:?}");
         }
+    }
+
+    #[test]
+    fn redact_args_never_keeps_an_env_value_or_reference() {
+        let args = serde_json::json!({
+            "action": "set",
+            "scope": "global",
+            "name": "TOKEN",
+            "value": "sk-live-abcdef123456",
+            "ref": "file:/run/secrets/t",
+        });
+        let out = redact_args(args.as_object());
+        assert!(
+            !out.contains("sk-live") && !out.contains("/run/secrets") && !out.contains("ref="),
+            "{out}"
+        );
+        assert!(out.contains("name=TOKEN"), "{out}");
+        let ns = serde_json::json!({
+            "host_alias": "local",
+            "env": { "A": "secret-value-xyz", "B": "2" },
+        });
+        let out = redact_args(ns.as_object());
+        assert!(
+            out.contains("<2 fields>") && !out.contains("secret-value-xyz") && !out.contains("A"),
+            "{out}"
+        );
     }
 
     #[test]

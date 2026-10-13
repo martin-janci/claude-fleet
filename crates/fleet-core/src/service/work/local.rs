@@ -842,6 +842,19 @@ fn comment_post(
             "this ticket has no key or tracker id to post to",
         ));
     };
+    Ok(PostSpec {
+        tracker_id: t.id,
+        item_key,
+        external_id: item.external_id.clone(),
+        tracker_org_id: t.org_id,
+        signature: fleet_signature(s, person)?,
+    })
+}
+
+/// What fleet signs a text it writes to a tracker with: `— <name> via
+/// fleet` with the person's display name when the caller proves one, else
+/// `— via fleet` (never a device name: a device name is its person's own).
+pub(super) fn fleet_signature(s: &Store, person: Option<i64>) -> Result<String, IpcError> {
     let name = match person {
         Some(p) => s
             .get_person(p)?
@@ -850,15 +863,9 @@ fn comment_post(
             .filter(|n| !n.is_empty()),
         None => None,
     };
-    Ok(PostSpec {
-        tracker_id: t.id,
-        item_key,
-        external_id: item.external_id.clone(),
-        tracker_org_id: t.org_id,
-        signature: match name {
-            Some(n) => format!("— {n} via fleet"),
-            None => "— via fleet".into(),
-        },
+    Ok(match name {
+        Some(n) => format!("— {n} via fleet"),
+        None => "— via fleet".into(),
     })
 }
 

@@ -135,11 +135,17 @@ Where a message just sent in Control goes (propose {text}), or record the person
 
 Parameters: `action`, `chosen`, `run_id`, `text`
 
+### `dashboards`
+
+The person's pinned dashboards (`dashboard` blocks): list | get {id} | pin {dashboard, why?} | unpin {id}. The agent only reads (E_FORBIDDEN).
+
+Parameters: `action`, `dashboard`, `id`, `why`
+
 ### `debug_devices`
 
-Phones, emulators and simulators on any fleet host, used from any session that may see them; commands run on the device's host. run: one adb / simctl / devicectl command. install copies the app from your host. screenshot answers an image. A claim keeps others off (E_CONFLICT); use extends it.
+Phones, emulators and simulators on any fleet host, used from any session that may see them; commands run on the device's host. run: one adb / simctl / devicectl command. install copies the app from your host. screenshot answers an image. A claim keeps others off (E_CONFLICT); use extends it. claim with queue waits in line for a held one; it is yours when your turn comes.
 
-Parameters: `action`, `args`, `claim_s`, `contains`, `device`, `downgrade`, `filter`, `host`, `label`, `lines`, `name`, `note`, `path`, `refresh`, `shared`, `since_s`, `timeout_s`
+Parameters: `action`, `args`, `claim_s`, `contains`, `device`, `downgrade`, `filter`, `host`, `label`, `lines`, `name`, `note`, `path`, `queue`, `refresh`, `shared`, `since_s`, `timeout_s`
 
 ### `decide_related_session`
 
@@ -184,6 +190,12 @@ Parameters: `confirm_nonce`, `new_worker`, `prompt`, `raw`, `requester_session_i
 ### `ensure_operator`
 
 Ensure the UX agent's operator session exists on a reachable host; returns its row.
+
+### `env_vars`
+
+Session environment variables for the next start; global < host < project < session. list; set {scope, scope_key, name, value|ref, secret?}; unset {scope, scope_key, name}. Secrets and refs are never listed; ref (env:NAME|file:/abs) is master-only. E_INVALID, E_FORBIDDEN.
+
+Parameters: `action`, `name`, `ref`, `scope`, `scope_key`, `secret`, `value`
 
 ### `fleet_health`
 
@@ -365,7 +377,7 @@ Parameters: `agent`, `confirm_nonce`, `host_alias`, `name`, `project_id`, `promp
 
 Create a Claude Code tmux session on a host, in a project (and optional worktree, or a fresh one with new_worktree). Auto-clones the repo on remote hosts.
 
-Parameters: `agent`, `base_branch`, `confirm_nonce`, `effort`, `friendly_name`, `host_alias`, `kind`, `model`, `name`, `new_worktree`, `over_limit_ok`, `profile`, `project_id`, `resume_claude_session_id`, `start_command`, `start_token`, `worktree_id`
+Parameters: `agent`, `base_branch`, `confirm_nonce`, `effort`, `env`, `friendly_name`, `host_alias`, `kind`, `model`, `name`, `new_worktree`, `over_limit_ok`, `profile`, `project_id`, `resume_claude_session_id`, `start_command`, `start_token`, `worktree_id`
 
 ### `new_shell_session`
 
@@ -474,6 +486,12 @@ Parameters: `cancel`, `session_id`
 Read or replace the fleet's quick replies: the chip row the desktop and phone composers draw above the prompt box, as [{label, text, auto_send}] in order. No arguments reads; `set` replaces the whole list (max 24, [] restores the defaults; not a host token or the operator). Errors: E_INVALID, E_CONFLICT, E_FORBIDDEN.
 
 Parameters: `expected`, `set`
+
+### `realm_admin`
+
+Realm: users, groups (tree, members), realm and client roles (composites), role mappings, effective roles, the audit log. Fleet admin's device: all; an org admin's: their org's groups' members. Changes need a trusted full device.
+
+Parameters: `action`, `child`, `client`, `description`, `group`, `limit`, `name`, `parent`, `profile`, `role`, `since`, `user`
 
 ### `recreate_session`
 
@@ -941,9 +959,9 @@ Parameters: `action`, `auth_kind`, `auto_tidy`, `bound_sees_unassigned`, `bucket
 
 ### `work_link`
 
-Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. switch {link_id, key|item_id}: end that link, take the primary. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket (project_ids: one per repo; parallel: beside a live one); preview_start: where it would land, nothing made. abandon_start {session_id}: undo an unused start. run {item_id, role?}: an attempt at the item in its own session and worktree, tracked as a task. handover {session_id}: ask it to write its hand-off. summarize {key, link_id}: a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe kill when dirty). set_status {item_id, status}: a person's status for work with no ticket. edit {item_id, title?, notes?, assignees?, due_at?, priority?, labels?, estimate?, estimate_unit?}: a person edits work with no ticket. attach {item_id, name, mime, data_base64, comment_id?}: a file on a task; attachment_delete {attachment_id}. create {title, parent?, notes?, assignees?, due_at?}: a task or subtask. propose {parent, title, why?}: a subtask a person accepts or rejects {item_id, no session_id}. bucket_add|bucket_remove {bucket_id, item_id}: sprint/release. mission_save {mission, mission_id?, item_id?: root}; mission_state {mission_id, status} (paused reopens a finished one); mission_repo {project_id, role?, on?}; mission_item {item_id, on?}; mission_delete; mission_import {plan}. dep {item_id, depends_on, on?}; hold {item_id, on?}; propose_tree {parent, tree}; accept_many | undo_accept {item_ids}. done_when {item_id, done_when: [ci[:check] | review | test[:cmd] | person | text]}; verify {item_id, line, ok, note?}: a person's check. mission_start {mission_id, step?}: take the next steps; retry {item_id, note?}; mission_plan: ask the planner; card_decide {card_id, ok, note?}; mission_grant {mission_id, level, hours?, budget_cents?, hosts?, max_parallel?, profile?}; mission_revoke; missions_pause_all. mission_release_note {mission_id}: a drafted release note of a completed mission; today_brief {refresh?, org_id?, since?}: Today's morning brief, drafted only on refresh; mission_triage {mission_id, refresh?}: a stuck mission's card, Jev's proposed outcome and next step (never applied), and with refresh its drafted words. Work view: primary:false links a secondary; expected_* guard (E_CONFLICT). place {task_id|item_id, group, note?, expected_version}: group a task; unplace clears it.
+Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. switch {link_id, key|item_id}: end that link, take the primary. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket (project_ids: one per repo; parallel: beside a live one); preview_start: where it would land, nothing made. abandon_start {session_id}: undo an unused start. run {item_id, role?}: an attempt at the item in its own session and worktree, tracked as a task. handover {session_id}: ask it to write its hand-off. summarize {key, link_id}: a Claude-written summary of past work. archive|unarchive (UI only; with no session_id: the ended links of link_id|key|item_id|task_id), unlink {link_id} with no session_id removes an ended link; snooze {days}|never (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe kill when dirty). set_status {item_id, status, status_name?}: a person's status for work with no ticket, or a ticket moved at its tracker; keep_open {item_id} answers close_suggested. edit {item_id, title?, notes?, assignees?, due_at?, priority?, labels?, estimate?, estimate_unit?}: a person edits work with no ticket. attach {item_id, name, mime, data_base64, comment_id?}: a file on a task; attachment_delete {attachment_id}. create {title, parent?, notes?, assignees?, due_at?}: a task or subtask. promote {item_id, tracker_id?, container?}: make it a ticket. propose {parent, title, why?}: a subtask a person accepts or rejects {item_id, no session_id}. bucket_add|bucket_remove {bucket_id, item_id}: sprint/release. mission_save {mission, mission_id?, item_id?: root}; mission_state {mission_id, status} (paused reopens a finished one); mission_repo {project_id, role?, on?}; mission_item {item_id, on?}; mission_delete; mission_import {plan}. dep {item_id, depends_on, on?}; hold {item_id, on?}; propose_tree {parent, tree}; accept_many | undo_accept {item_ids}. done_when {item_id, done_when: [ci[:check] | review | test[:cmd] | person | text]}; verify {item_id, line, ok, note?}: a person's check. mission_start {mission_id, step?}: take the next steps; retry {item_id, note?}; mission_plan: ask the planner; card_decide {card_id, ok, note?}; mission_grant {mission_id, level, hours?, budget_cents?, hosts?, max_parallel?, profile?}; mission_revoke; missions_pause_all. mission_release_note {mission_id}: a drafted release note of a completed mission; today_brief {refresh?, org_id?, since?}: Today's morning brief, drafted only on refresh; mission_triage {mission_id, refresh?}: a stuck mission's card, Jev's proposed outcome and next step (never applied), and with refresh its drafted words. Work view: primary:false links a secondary; expected_* guard (E_CONFLICT). place {task_id|item_id, group, note?, expected_version}: group a task; unplace clears it.
 
-Parameters: `ack_live`, `action`, `assignees`, `attachment_id`, `brief`, `bucket_id`, `bucket_op`, `budget_cents`, `card_id`, `comment_id`, `confirm_nonce`, `data_base64`, `days`, `decisions`, `depends_on`, `done_when`, `draft_brief`, `due_at`, `epic`, `estimate`, `estimate_unit`, `expected_primary`, `expected_version`, `force_cross_org`, `group`, `host_alias`, `hosts`, `hours`, `impact_token`, `item_id`, `item_ids`, `items`, `key`, `labels`, `level`, `line`, `link_id`, `max_parallel`, `mime`, `mission`, `mission_id`, `mode`, `name`, `note`, `notes`, `ok`, `on`, `org_id`, `parallel`, `parent`, `plan`, `post_to_tracker`, `primary`, `priority`, `profile`, `project_id`, `project_ids`, `refresh`, `role`, `rule`, `rule_id`, `session_id`, `since`, `source`, `status`, `step`, `task_id`, `title`, `tree`, `url`, `view`, `view_id`, `why`, `with_brief`, `worktree`
+Parameters: `ack_live`, `action`, `assignees`, `attachment_id`, `brief`, `bucket_id`, `bucket_op`, `budget_cents`, `card_id`, `comment_id`, `confirm_nonce`, `container`, `data_base64`, `days`, `decisions`, `depends_on`, `done_when`, `draft_brief`, `due_at`, `epic`, `estimate`, `estimate_unit`, `expected_primary`, `expected_version`, `force_cross_org`, `group`, `host_alias`, `hosts`, `hours`, `impact_token`, `item_id`, `item_ids`, `items`, `key`, `labels`, `level`, `line`, `link_id`, `max_parallel`, `mime`, `mission`, `mission_id`, `mode`, `name`, `note`, `notes`, `ok`, `on`, `org_id`, `parallel`, `parent`, `plan`, `post_to_tracker`, `primary`, `priority`, `profile`, `project_id`, `project_ids`, `refresh`, `role`, `rule`, `rule_id`, `session_id`, `since`, `source`, `status`, `status_name`, `step`, `task_id`, `title`, `tracker_id`, `tree`, `url`, `view`, `view_id`, `why`, `with_brief`, `worktree`
 
 ## Tauri IPC commands
 
@@ -1014,7 +1032,9 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::work::name_session_work`
 - `commands::work::rename_work_item`
 - `commands::work::create_work_task`
+- `commands::work::draft_task_title`
 - `commands::work::set_work_status`
+- `commands::work::keep_work_open`
 - `commands::work::edit_work_item`
 - `commands::work::set_work_parent`
 - `commands::work::accept_work_proposal`
@@ -1044,6 +1064,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::work_view::delete_work_attachment`
 - `commands::work_view::work_attachment`
 - `commands::work_view::work_tracker_comments`
+- `commands::work_view::promote_work_item`
 - `commands::work_view::work_buckets`
 - `commands::work_view::work_stats`
 - `commands::work_view::work_bucket`
@@ -1122,6 +1143,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::org_devices::set_device_person`
 - `commands::org_devices::grant_device_catalog`
 - `commands::org_devices::list_people`
+- `commands::org_devices::list_groups`
 - `commands::org_devices::add_person`
 - `commands::org_devices::rename_person`
 - `commands::org_devices::disable_person`
@@ -1210,7 +1232,12 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::prs::list_pull_requests`
 - `commands::start_rules::start_rules`
 - `commands::wizard_state::wizard_state`
+- `commands::dashboards::dashboards`
 - `commands::api_tokens::api_tokens`
+- `commands::env_vars::env_vars`
+- `commands::env_vars::env_vars_list`
+- `commands::env_vars::env_var_set`
+- `commands::env_vars::env_var_unset`
 - `commands::add_account::add_account`
 - `commands::presence::session_presence`
 - `commands::pages::setting_history`

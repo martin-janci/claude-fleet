@@ -48,6 +48,7 @@ fn host(store: &Mutex<Store>, alias: &str) -> Asker {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     };
     asker_for(store, caller, &format!("host:{alias}"))
 }
@@ -111,6 +112,7 @@ fn a_bound_client_never_sees_another_orgs_devices() {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     };
     let bound = asker_for(&st, caller, "client:work");
     // Its own org's, and unassigned hosts' (D31's default); never Beta's.
@@ -131,7 +133,7 @@ fn a_host_cannot_share_label_or_forget_a_device() {
     // And a host never reaches another host's unshared device at all.
     let b1 = id_of(&st, "B1");
     assert_eq!(
-        claim(&st, &host(&st, "a"), &b1.to_string(), None, None)
+        claim(&st, &host(&st, "a"), &b1.to_string(), None, None, false)
             .unwrap_err()
             .code,
         codes::E_NOTFOUND
@@ -188,12 +190,12 @@ fn a_claim_holds_off_others_until_released() {
     configure(&st, &person(), b1.parse().unwrap(), None, Some(true)).unwrap();
     let a = host(&st, "a");
     let b = host(&st, "b");
-    let d = claim(&st, &a, &b1, Some(600), Some("ui tests")).unwrap();
+    let d = claim(&st, &a, &b1, Some(600), Some("ui tests"), false).unwrap();
     assert_eq!(d.claimed_by.as_deref(), Some("host:a"));
     assert_eq!(d.claim_note.as_deref(), Some("ui tests"));
     // Another host is refused the claim and the device.
     assert_eq!(
-        claim(&st, &b, &b1, None, None).unwrap_err().code,
+        claim(&st, &b, &b1, None, None, false).unwrap_err().code,
         codes::E_CONFLICT
     );
     assert_eq!(
@@ -217,6 +219,92 @@ fn a_claim_holds_off_others_until_released() {
     assert!(usable(&st, &b, &b1, false).is_ok());
 }
 
+/// Hosts `a`, `b` and `c` all see B1 (shared, and `c` moved into b's org).
+fn shared_b1() -> (Arc<Mutex<Store>>, String) {
+    let st = fleet();
+    st.lock().unwrap().set_host_org("c", None).unwrap();
+    let b1 = id_of(&st, "B1").to_string();
+    configure(&st, &person(), b1.parse().unwrap(), None, Some(true)).unwrap();
+    (st, b1)
+}
+
+#[test]
+fn a_queued_claim_waits_its_turn_and_gets_the_device_on_release() {
+    let (st, b1) = shared_b1();
+    let (a, b, c) = (host(&st, "a"), host(&st, "b"), host(&st, "c"));
+    claim(&st, &a, &b1, None, None, false).unwrap();
+    // b and c line up; neither is refused.
+    let d = claim(&st, &b, &b1, Some(900), Some("ui tests"), true).unwrap();
+    assert_eq!(d.claimed_by.as_deref(), Some("host:a"));
+    assert_eq!(d.queue_place, Some(1));
+    let d = claim(&st, &c, &b1, None, None, true).unwrap();
+    assert_eq!(d.queue_place, Some(2));
+    let line: Vec<&str> = d.queue.iter().map(|w| w.holder.as_str()).collect();
+    assert_eq!(line, ["host:b", "host:c"]);
+    // Asking again keeps the place.
+    assert_eq!(
+        claim(&st, &b, &b1, None, Some("ui tests"), true)
+            .unwrap()
+            .queue_place,
+        Some(1)
+    );
+    // Without queue it is still refused, and says others wait.
+    let e = claim(&st, &c, &b1, None, None, false).unwrap_err();
+    assert_eq!(e.code, codes::E_CONFLICT);
+    assert!(e.message.contains("2 waiting"), "{}", e.message);
+    // a is done: b holds it now, for the hand-off, with its note.
+    let d = release(&st, &a, &b1).unwrap();
+    assert_eq!(d.claimed_by.as_deref(), Some("host:b"));
+    assert_eq!(d.claim_note.as_deref(), Some("ui tests"));
+    assert!(d.claimed_until.unwrap() <= now_unix() + HANDOFF_SECS);
+    assert_eq!(d.queue.len(), 1);
+    assert!(usable(&st, &b, &b1, false).is_ok());
+    assert_eq!(
+        usable(&st, &a, &b1, false).unwrap_err().code,
+        codes::E_CONFLICT
+    );
+    // c gives up its place, and so does a person: neither takes b's claim.
+    let d = release(&st, &c, &b1).unwrap();
+    assert_eq!(
+        (d.claimed_by.as_deref(), d.queue_place),
+        (Some("host:b"), None)
+    );
+    assert!(d.queue.is_empty());
+    claim(&st, &person(), &b1, None, None, true).unwrap();
+    let d = release(&st, &person(), &b1).unwrap();
+    assert_eq!((d.claimed_by.as_deref(), d.waiting), (Some("host:b"), 0));
+    // Out of line, a person's release takes the claim; b's would too.
+    assert_eq!(release(&st, &person(), &b1).unwrap().claimed_by, None);
+}
+
+#[test]
+fn a_lapsed_claim_passes_to_the_first_in_line() {
+    let (st, b1) = shared_b1();
+    let id: i64 = b1.parse().unwrap();
+    let (a, c) = (host(&st, "a"), host(&st, "c"));
+    claim(&st, &a, &b1, None, None, false).unwrap();
+    claim(&st, &c, &b1, None, None, true).unwrap();
+    // A host not in line still may not release another's claim.
+    assert_eq!(
+        release(&st, &host(&st, "b"), &b1).unwrap_err().code,
+        codes::E_FORBIDDEN
+    );
+    st.lock()
+        .unwrap()
+        .debug_device_claim(id, "host:a", None, now_unix() - 1)
+        .unwrap();
+    let d = resolve(&st.lock().unwrap(), &person(), &b1).unwrap();
+    assert_eq!(d.claimed_by.as_deref(), Some("host:c"));
+    assert!(d.queue.is_empty());
+    // A free device is claimed outright, queue or not.
+    release(&st, &c, &b1).unwrap();
+    let d = claim(&st, &a, &b1, None, None, true).unwrap();
+    assert_eq!(
+        (d.claimed_by.as_deref(), d.queue_place),
+        (Some("host:a"), None)
+    );
+}
+
 #[test]
 fn an_expired_claim_reads_as_none() {
     let st = fleet();
@@ -227,7 +315,7 @@ fn an_expired_claim_reads_as_none() {
         .unwrap();
     let d = resolve(&st.lock().unwrap(), &person(), "A1").unwrap();
     assert_eq!((d.claimed_by, d.claimed_until), (None, None));
-    assert!(claim(&st, &host(&st, "a"), "A1", None, None).is_ok());
+    assert!(claim(&st, &host(&st, "a"), "A1", None, None, false).is_ok());
 }
 
 #[test]

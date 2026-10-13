@@ -25,7 +25,7 @@ account usage history (122), the Hosts page's probe facts (123), token use
 (126), the cost of fleet's own `claude -p` runs (127), every PR a session's
 branch has had (`pull_requests`, 128), cost per account (130), prompts
 queued for a busy session (133), the agent CLIs a host has (134) and the
-add-host wizard's state (135). The hub contract is revision 17
+add-host wizard's state (135). The hub contract is revision 18
 (`CONTRACT_REVISION`, `crates/fleet-core/src/wire_contract.rs`):
 revisions 11 to 14 add tools a revision-10 hub does not serve, so the
 desktop and its hub are upgraded together; 15 widens the form spec and
@@ -36,7 +36,9 @@ desktop needs at least a revision-16 hub; 17 adds gap plan batch 3's tools
 and the composer's context help on a shared session
 (`session_context_help`), each of which a revision-16 hub answers as
 nothing saved, nothing proposed or "the hub needs updating", so a desktop
-accepts a revision-16 or 17 hub.
+accepts a revision-16 to 18 hub; 18 adds session environment variables
+(`env_vars`, `new_session { env }`, a form's `env_target`), whose Settings
+page a revision-17 hub answers with an unknown tool.
 
 Ticket keys (2026-10, migration 169, `store/ticket_keys.rs`). Fleet
 administers Jira-style keys: each ticket space (a project, a GitHub
@@ -149,8 +151,54 @@ Single sign-on (docs/hub.md → *Sign in with Keycloak*): a hub with
 Keycloak or another OIDC provider (`mcp/oidc.rs`, `/auth/oidc/start` →
 `/auth/oidc/callback` → an ordinary pairing code). Accounts are linked to
 people by (issuer, sub) (migration 167, `fleet-hub person link-sso`).
-OFF by default. Not built: org membership from Keycloak groups, logout at
-the provider, an SSO button in the desktop or mobile app.
+OFF by default. The ID token's signature is verified against the issuer's
+JWKS (`mcp/oidc/jwks.rs`), and `FLEET_HUB_OIDC_AUTO_PROVISION` defaults to
+`false`: an account is invited with `fleet-hub person link-sso`.
+
+Identity sub-project 1 (the realm model and user-management hardening,
+spec `docs/superpowers/specs/2026-10-11-identity-realm-model-design.md`)
+is landed: a person carries a Keycloak user profile and `uuid` (migration
+180); the realm model — `clients`, `roles`, `role_composites`, `groups`,
+`group_members`, `user_role_mappings`, `group_role_mappings` (181) — is
+seeded with the client `fleet`, the realm roles `fleet-admin`,
+`fleet-trusted` and `assets-admin`, the client roles `fleet:org-admin` ⊃
+`org-member` ⊃ `org-viewer`, and each org's managed groups
+`/orgs/<org>/{admins,members,viewers}`. `org_members` is a projection of
+those groups (`store/realm.rs`); `set_org_member`, `remove_org_member` and
+`fleet-hub org member` keep their shape and write group membership.
+`Caller.is_fleet_admin` (the realm role `fleet-admin`; the hub's owner
+always) decides fleet-wide administration where the single owner did, from
+a device bound to no org; every fleet admin is exempt from the org fence on
+devices, as the owner is, so one who is or was an org member keeps their
+device's own binding. An org admin trusts a member's device only while
+everything of that person is inside the org, and the org fence follows
+group ancestry (new org names refuse `/`).
+Trust and the personal asset grant are the person's (`fleet-trusted`,
+`assets-admin`): a device is trusted when its person holds the role and
+the device is `full`, and untrusting is refused while a group still grants
+it. `admin_events` (182) is an append-only audit log written by
+`org_admin`, `realm_admin`, the master's `revoke_client` /
+`set_client_trust`, pairing, SSO provisioning and `fleet-hub
+person|client|realm`, kept `auth.audit_retention_days` (365). A
+disabled person can be re-enabled (`fleet-hub person enable`). Device
+tokens expire after `auth.device_token_ttl_days` (90, `0` never) unused or
+`auth.device_token_max_age_days` (`0` off) after pairing — a 401, "pair
+again" — with the idle clock started at the upgrade (183,
+`auth.device_token_ttl_since`); both are on Settings → Limits. Administration:
+the `realm_admin` MCP tool (users, groups, roles, mappings, effective roles,
+audit; a fleet admin's device reaches everything, an org admin's its org's
+managed subgroups' membership and narrowed reads; writes need a trusted
+`full` device), `fleet-hub realm user|group|role|effective|audit`, and the
+desktop's read-only Settings → Groups and People's *Roles* section.
+Breaking: trusting a device trusts every `full` device of its person; SSO
+no longer auto-provisions; device tokens expire after 90 idle days. Known
+gaps: a pairing code carries no minter (a mint by `pair_client` or
+`fleet-hub pair` records no event), `fleet-hub client bind`, `fleet-hub
+org …` and the master's `work_admin` org actions record none, and `list_clients` and `catalog_grantees` for `personal` still show
+the per-device trust / grant mirror. Not built: sub-projects 2–6 (the
+hub's own IdP, fleet clients on OIDC, passkeys and e-mail, brokering, and
+editing administration with realm export / import — the spec's roadmap);
+logout at the provider and an SSO button in the desktop or mobile app.
 
 The headless `fleet-hub` daemon, `fleet-agent` for hosts the hub cannot reach
 over SSH, paired-client access for phones/browsers, and hub-client mode
@@ -405,6 +453,43 @@ at the tracker. `CommentRow.tracker_post` carries the post's state, error
 and URL; `TaskDetail.comments_tracker` / `can_post_to_tracker` say whose
 comments the tab reads and whether the reader may post. Not yet: the phone,
 editing a posted comment, attachments from trackers other than Asana.
+
+Promoting a task to a ticket (owner decision 2026-10-11: local tasks and
+subtasks first, tracked later): `work_link { promote, item_id, tracker_id?,
+container? }` (routed desktop `promote_work_item`, `service/work/promote.rs`)
+queues the outbox's `create_item` op (`url` `fleet-item:<id>`; `item_key` /
+`external_id` the parent ticket for a subtask, else the container), and the
+drain's `WriteOp::CreateItem` creates a Jira sub-task or task (createmeta
+picks the issue type), an Asana task / subtask, a Linear issue / sub-issue
+(`issueCreate`, `parentId`) or a GitHub issue (`createIssue`, then
+`addSubIssue` under a parent; a failed link leaves it at the top), then converts the task IN
+PLACE (`Store::promote_local_item`: same row, the tracker's key and id, the
+old key an alias) and reads the ticket back. Per tracker
+`settings.write_back.create_tickets`, **off by default** (Settings → Trackers
+→ Write-back → *Create tickets*, confirm-gated, every provider). Refused for a per-host token (`E_FORBIDDEN`), the setting off
+(`E_INVALID_STATE`), a tracker's ticket, an epic, a job, a proposal or a task
+under a task of fleet's own (`E_INVALID`). A failed promotion may be tried
+again. `TaskDetail.promotion` / `promote_targets` drive *Promote to
+ticket…* on the task page. Not yet: sending assignees,
+due dates, priority, labels or estimates, epics, and the phone.
+
+Ticket status moves (owner decision 2026-10-12, changing D29 again; CF-6):
+`work_link { set_status, item_id, status, status_name? }` on a tracker's
+ticket moves it at the tracker — `WriteOp::SetStatus`, every provider (a
+Jira transition picked by `jira_common::pick_transition`, a Linear state by
+`linear::pick_state`, an Asana section or `completed`, a GitHub close /
+reopen) — through `service::work::status::move_status`, which sends it
+while the caller waits (NOT through the outbox: a move replayed by a
+backoff would undo what was done at the tracker since), then reads the
+ticket back with `sync::fetch_one`. Fleet still stores no status of its own
+for a ticket (`Store::set_item_status` refuses one). Per tracker
+`settings.write_back.status`, **off by default** (Settings → Trackers →
+Write-back → *Move tickets*, confirm-gated). Refused with nothing sent for
+a per-host token (`E_FORBIDDEN`), the setting off (`E_INVALID_STATE`) or a
+tracker with no such move (`TrackerError::Unsupported` → `E_UNSUPPORTED`).
+`WorkTask.status_movable` unlocks the Board card (`boardMovesAtTracker`);
+`net::https` gained `PUT` for Asana's task update. Not yet: the List view,
+the phone.
 
 Task attachments (migration 168, `work_item_attachments` and the
 content-addressed `work_attachment_blobs`, deduplicated by SHA-256 and kept
@@ -735,6 +820,8 @@ Symlinks sync as links (their target, never followed; not on a Windows
 desktop). Not yet: a filesystem watcher, a three-way merge editor.
 
 Chat forms, part 1 (spec 2026-10-07-chat-forms-design.md): the ask tool, fleet.form/1, the form card in the Conversation panel, secrets to host files (migration 119; guide `docs/forms.md`). Contract revision 9: the desktop and its hub ship together. The app's own wizards (New session, Add host, Pair a device, Add project, Link to a hub, Get started) are fleet.form/1 specs too (redesign 10.12, `src/lib/forms/wizards/`, `docs/forms.md` → *Wizards are forms too*). As dialogs: Link to a hub (Settings › Hub), Pair a device (Settings › Devices) and Get started's first session (`get_started`). In the chat (`ChatForm` at the end of the Conversation panel and of Control's chat): an agent's `wizard` block (`docs/chat-blocks.md`) opens Add host, Add project, Get started, New session or Pair a device, and Control's *Add project* chip opens Add project; nothing runs until the last button. An agent may stream a long form while it writes it, `ask { draft }` (migration 153, the row's `form_draft`), which the chat draws in as skeleton fields until `ask { form }` opens it. The phone's form sheet (14.7) is fleet-mobile's. Part 2 (forms in guide steps) is not started; the fleet-mobile card is its own plan.
+
+Session environment variables (spec 2026-10-11-session-env-and-secrets-design.md, migration 179, contract 18): `env_vars` (global < host < project < session), `new_session { env }`, a form's `env_target`, Settings › Environment (resource `env_var`, `env_var_set` / `env_var_unset`), the launch file under `~/.claude-fleet/env` sourced by every pane command (create, restart, recreate, repair, review, move) and swept after 10 minutes, and `env_secret_literals` masked in diagnostics. Not built: encryption at rest, `op://` references, a per-worktree scope, a session panel editor.
 
 PR shepherd, steps 1 to 4 of 5 (step 2 without its Inbox card), are built and do nothing until a person
 grants a rule (spec `docs/superpowers/specs/2026-10-08-pr-shepherd-design.md`):

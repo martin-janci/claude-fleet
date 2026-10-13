@@ -40,6 +40,19 @@
           "key": "disabled_at"
         }
       ]
+    },
+    {
+      "title": "Roles",
+      "items": [
+        {
+          "type": "field",
+          "key": "groups"
+        },
+        {
+          "type": "field",
+          "key": "roles_display"
+        }
+      ]
     }
   ]
 }

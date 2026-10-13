@@ -481,7 +481,10 @@ const SCOPE_GUARDS: &[Guard] = &[
               editing: `edit_local_item`, a write like the rename, behind the \
               same `require_drive_on_item_sessions` at the tool layer. A \
               SEVENTH arrived with epics: `set_parent`, which files the ITEM \
-              under a parent, a write behind that same tool-layer gate",
+              under a parent, a write behind that same tool-layer gate. \
+              CF-5 moved `set_status`'s call into `status::require_visible`, \
+              the one fence `set_status` and `keep_open` share; both writes \
+              carry `require_drive_on_item_sessions` at the tool layer",
     },
     Guard {
         file: "crates/fleet-core/src/service/work/local.rs",
@@ -736,6 +739,16 @@ const SCOPE_GUARDS: &[Guard] = &[
         code: "\"snooze\" | \"never\" if !scope.is_all() && !link_visible(scope, s, item.link_id) => {",
         verdict: Verdict::OrgBoundary,
         why: "the same org check on the link a snooze flag goes to",
+    },
+    // ---- service/work/title_draft.rs ------------------------------------
+    Guard {
+        file: "crates/fleet-core/src/service/work/title_draft.rs",
+        func: "pick_host",
+        nth: 0,
+        code: "OrgScope::All => true,",
+        verdict: Verdict::OrgBoundary,
+        why: "which hosts a title draft may run on, by org; the notes are the \
+              caller's own and no session or item is read",
     },
     // ---- service/work/view.rs -------------------------------------------
     Guard {

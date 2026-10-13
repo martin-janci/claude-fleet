@@ -1986,6 +1986,7 @@ mod tests {
             mode: crate::mcp::auth::TokenMode::Full,
             pane: None,
             is_personal_owner: false,
+            is_fleet_admin: false,
         };
         let fenced = fence_host_bound(&host, None).unwrap();
         assert!(!fenced.iter().any(|k| k == "work"));
@@ -2012,6 +2013,7 @@ mod tests {
             mode: crate::mcp::auth::TokenMode::Full,
             pane: None,
             is_personal_owner: false,
+            is_fleet_admin: false,
         };
         assert_eq!(fence_host_bound(&persons_device, None), None);
         assert!(matches(
@@ -2154,6 +2156,7 @@ mod tests {
                 mode: crate::mcp::auth::TokenMode::Full,
                 pane: None,
                 is_personal_owner: false,
+                is_fleet_admin: false,
             };
             let s = self.store.lock().unwrap();
             caller.view_scope(&s).unwrap()
@@ -2369,6 +2372,7 @@ mod tests {
             mode: crate::mcp::auth::TokenMode::Full,
             pane: None,
             is_personal_owner: false,
+            is_fleet_admin: false,
         };
         let scope = {
             let s = fx.store.lock().unwrap();
@@ -2954,6 +2958,7 @@ mod tests {
             mode: crate::mcp::auth::TokenMode::Full,
             pane: None,
             is_personal_owner: false,
+            is_fleet_admin: false,
         };
         let fenced = fence_host_bound(&host, None).unwrap();
         assert!(!fenced.iter().any(|k| k == "grant"));
@@ -2992,6 +2997,7 @@ mod tests {
             mode: TokenMode::Peer,
             pane: None,
             is_personal_owner: false,
+            is_fleet_admin: false,
         };
         let resp = refuses_peer(&peer).expect("a peer must be refused");
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);

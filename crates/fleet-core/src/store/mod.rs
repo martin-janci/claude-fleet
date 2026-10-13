@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 mod access_requests;
 mod account_usage_snapshots;
+mod admin_events;
 mod agents;
 mod aux_usage;
 pub mod backup;
@@ -24,6 +25,7 @@ mod debug_devices;
 mod decisions;
 mod deferred_prompts;
 mod downloads;
+mod env_vars;
 mod forms;
 mod guides;
 mod host_setup;
@@ -44,12 +46,14 @@ mod orgs;
 mod participants;
 mod peer_links;
 mod people;
+mod pinned_dashboards;
 mod pr_shepherd;
 mod project_picks;
 mod projects;
 mod pull_requests;
 mod read_cursors;
 mod read_pool;
+mod realm;
 mod reconcile;
 mod reports;
 mod review_prs;
@@ -96,6 +100,7 @@ mod work_view;
 
 pub use access_requests::{AccessRequestRow, ACCESS_REQUEST_COOLDOWN_SECS};
 pub use account_usage_snapshots::{UsageSnapshotRow, USAGE_HISTORY_KEEP_SECS};
+pub use admin_events::{AdminEvent, AdminEventQuery, AdminEventRow, ADMIN_EVENTS_MAX_LIMIT};
 pub use agents::{
     AgentActionRow, AgentCursorRow, AgentJobEnd, AgentJobRow, AgentRuleRow, NewAgentJob,
     NewAgentRule, AGENT_ACTION_STATES, AGENT_CONFIG_MAX_CHARS, AGENT_JOB_STATES, AGENT_KINDS,
@@ -104,8 +109,8 @@ pub use agents::{
 pub use aux_usage::{
     AuxUsageRow, NewAuxUsage, AUX_ORIGINS, AUX_ORIGIN_BRIEF, AUX_ORIGIN_COMMIT_MESSAGE,
     AUX_ORIGIN_CONTEXT_HELP, AUX_ORIGIN_HEADLESS_CHECK, AUX_ORIGIN_MORNING_BRIEF,
-    AUX_ORIGIN_PLANNER, AUX_ORIGIN_RELEASE_NOTE, AUX_ORIGIN_SUMMARY, AUX_ORIGIN_TRIAGE,
-    AUX_ORIGIN_WATCH_SUMMARY,
+    AUX_ORIGIN_PLANNER, AUX_ORIGIN_RELEASE_NOTE, AUX_ORIGIN_SUMMARY, AUX_ORIGIN_TASK_TITLE,
+    AUX_ORIGIN_TRIAGE, AUX_ORIGIN_WATCH_SUMMARY,
 };
 pub use bench_work_link::{BenchHostLink, BenchItemRow, BenchLinkRow, BenchUnlinkedRow};
 pub use changesets::{
@@ -120,7 +125,7 @@ pub use control_handoffs::{
 };
 pub use control_tokens::{ApiScope, ControlTokenRow, NewControlToken};
 pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};
-pub use debug_devices::{DebugDeviceRow, DebugDeviceScan, SeenDevice};
+pub use debug_devices::{DebugDeviceRow, DebugDeviceScan, DebugDeviceWaiter, SeenDevice};
 pub use decisions::{
     is_decision_word, DecisionKeyStatus, DecisionRunFilter, DecisionRunRow, DecisionStatRow,
     NewDecisionRun, RunScope, DECISION_BENCH_SUBJECT, DECISION_CALL_FAILURES, DECISION_FALLBACKS,
@@ -130,9 +135,16 @@ pub use decisions::{
 };
 pub use deferred_prompts::{DeferredPromptRow, DeferredTiming, DEFERRED_MAX_ATTEMPTS};
 pub use downloads::{DownloadRow, NewDownload};
+pub use env_vars::{
+    check_env_name, check_env_scope, check_env_value, EnvSource, EnvValue, EnvVarRow, ENV_SCOPES,
+};
 pub use forms::{FormFinish, FormRow, NewForm, FORM_STATES};
 pub use guides::{GuideProposalRow, NewGuideProposal, DECIDED_GUIDE_KEEP_SECS};
 pub use host_setup::{AgentInstallRow, HostSetupRow, SetupCheck};
+// For `realm_admin` (identity sub-project 1), which records its events
+// inside its own transactions.
+#[allow(unused_imports)]
+pub(crate) use admin_events::record_admin_event_in_tx;
 pub use identities::{normalize_issuer, IdentityRow, MAX_IDENTITY_FIELD_LEN};
 pub use item_deps::{ItemDepRow, DEP_SOURCES};
 pub use item_verify::{
@@ -160,6 +172,7 @@ pub use orchestration::{
     MissionPatch, MissionPolicy, MissionRepoRow, MissionRow, NewMission, NewMissionEvent,
     MISSION_FINAL_STATES, MISSION_ITEM_CAP, MISSION_MODES, MISSION_STATES, PLAN_MISSION_ITEM_CAP,
 };
+pub(crate) use org_members::org_membership_changed;
 pub use org_members::{
     effective_device, role_receives_shares, validate_org_role, DeviceOrg, OrgMemberRow, NO_ORG,
     ORG_ROLES, ROLE_ADMIN, ROLE_MEMBER, ROLE_VIEWER,
@@ -176,8 +189,10 @@ pub use peer_links::{
     PEER_PENDING_MAX_SECS,
 };
 pub use people::{
-    machine_token_kind, validate_person_name, PersonRow, MAX_PERSON_NAME_LEN, PERSONAL_OWNER_NAME,
+    machine_token_kind, validate_person_name, PersonProfile, PersonRow, MAX_PERSON_NAME_LEN,
+    PERSONAL_OWNER_NAME,
 };
+pub use pinned_dashboards::{PinnedDashboardRow, PinnedDashboardWrite};
 pub use pr_shepherd::{
     ShepherdEpisodeRow, ShepherdMergeRow, ShepherdRuleRow, SHEPHERD_LEVELS,
     SHEPHERD_RECIPES_MAX_CHARS,
@@ -189,6 +204,7 @@ pub use pull_requests::{
 };
 pub use read_cursors::CursorRow;
 pub use read_pool::{read_via, ReadPool, READ_POOL_SIZE};
+pub use realm::*;
 pub use reports::{ReportFilter, ReportRow};
 pub use review_prs::{
     NewReviewRecord, ReviewPrRow, ReviewRecordRow, TestExemptionRow, REVIEW_PR_STATUSES,
@@ -231,9 +247,10 @@ pub use ticket_keys::{
 pub(crate) use tracker_items::ItemUpsertOutcome;
 pub use tracker_items::{github_covers, tracker_claims, ItemMeta, TrackerItemWrite, UpsertOutcome};
 pub use tracker_writes::{
-    comment_write_url, NewTrackerWrite, TrackerWriteRow, WRITE_MAX_ATTEMPTS, WRITE_OP_COMMENT,
-    WRITE_OP_PR_REMOTE_LINK,
+    comment_write_url, item_write_url, NewTrackerWrite, TrackerWriteRow, WRITE_MAX_ATTEMPTS,
+    WRITE_OP_COMMENT, WRITE_OP_CREATE_ITEM, WRITE_OP_PR_REMOTE_LINK,
 };
+pub(crate) use trackers::read_credential_ref;
 pub use trackers::{
     ghes_host_ok, ghes_host_part, github_site, is_allowed_tracker_host, normalize_dc_site,
     normalize_provider_site, normalize_site_url, validate_credential_ref, validate_ghes_hostname,
@@ -920,6 +937,20 @@ impl Store {
     /// waiting the busy timeout for it; WAL readers never block it.
     pub(crate) fn immediate_transaction(&self) -> Result<rusqlite::Transaction<'_>> {
         rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+    }
+
+    /// Run `f` on the connection inside one IMMEDIATE transaction: commit on
+    /// `Ok`, roll back on `Err`. For the `_in_tx` helpers of the realm model
+    /// (`store/realm.rs`), which take the `&Connection` and never open a
+    /// transaction of their own. Must not be nested.
+    pub fn with_tx<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> std::result::Result<T, crate::ipc_error::IpcError>,
+    ) -> std::result::Result<T, crate::ipc_error::IpcError> {
+        let tx = self.immediate_transaction()?;
+        let v = f(&tx)?;
+        tx.commit()?;
+        Ok(v)
     }
 
     /// Run `f` inside a single `conn.transaction()`. Test-only since the
