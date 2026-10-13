@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "version": "0.6.3-dev.319.desktop.gd910ca0",
+  "mobile_accepts": [
+    0,
+    18
+  ],
+  "components": {
+    "android": {
+      "version": "0.6.3-dev.319.desktop.gd910ca0",
+      "artifacts": [
+        {
+          "kind": "apk",
+          "url": "https://github.com/martin-janci/fleet-mobile/releases/download/v0.6.3-dev.319.desktop.gd910ca0/fleet-mobile-0.6.3-dev.319.desktop.gd910ca0.apk",
+          "sha256": "eac63a127f0d9eaaa77494dace0f40cf7e63416a42c8c379711c3b25834538f4",
+          "size": 17959118,
+          "version_code": 411075,
+          "signer_sha256": "87081ff376e7ad2cb3082bf8f48dac2f451bffda66693b575c31cd4c354b9a15"
+        }
+      ]
+    }
+  }
+}
