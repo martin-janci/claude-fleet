@@ -24,6 +24,8 @@
     "@tauri-apps/plugin-opener": "^2"
   },
   "devDependencies": {
+    "@reticlehq/browser": "3.6.0",
+    "@reticlehq/vite-plugin": "3.6.0",
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
     "@tauri-apps/cli": "^2",
     "@testing-library/jest-dom": "^6.9.1",
