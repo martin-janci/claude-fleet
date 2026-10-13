@@ -1406,6 +1406,12 @@ derive from them.
   pull requests its work opened, as `prs { list }` rows behind the same
   fence. A finished mission reopens with `work_link { mission_state,
   status: paused }`; it does not go straight back to active.
+- **`sessions`** (on `work { mission }`, any state; optional, absent when
+  there are none and from an older hub): the mission's child sessions, the
+  running sessions on its member items that the caller may see, with the
+  same fields as `finish.sessions` (`session_id`, `item_id`, `host_alias`,
+  `tmux_name`, `kind`, `worktree_kb?`). A running mission's workers show
+  here; `finish.sessions` stays for a finished one.
 
 ### Errors and limits
 

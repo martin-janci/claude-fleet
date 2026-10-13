@@ -91,6 +91,8 @@
     type TaskNode,
   } from './task_list';
   import type { IpcError } from './result';
+  import { workRowClick } from './prefs';
+  import { selectSessionExplicitly } from './selection';
 
   let {
     onclose,
@@ -286,7 +288,12 @@
 
   function open(t: WorkTask) {
     sidebarView.set('work');
-    openTask(t.task_id, t.sessions);
+    // Under the `work.rowClick` pref a card with a live session opens it;
+    // one whose session left the fleet opens the ticket, as by default.
+    const live = get(workRowClick) === 'session' ? boardLiveSession(t) : null;
+    const row = live ? get(sessions).find((r) => r.id === live.session_id) : undefined;
+    if (row) selectSessionExplicitly(row, { task: t.task_id });
+    else openTask(t.task_id, t.sessions);
   }
 
   // ── Pointer drag ──
