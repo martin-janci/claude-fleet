@@ -495,19 +495,30 @@ fn every_mission_lists_its_live_sessions_behind_their_fence() {
     );
 }
 
-/// A per-host token standing in session `proven` on host `h`.
+/// A per-host token standing in session `proven` on host `h`: the row
+/// carries the pane the token's header names, as a provisioned host's does.
 fn worker_scope(store: &Mutex<Store>, proven: i64) -> ViewScope {
-    use crate::service::view_scope::{GrantSet, TeamReach, UnclaimedReach};
-    ViewScope::for_caller(
-        orgs::OrgScope::for_host(&lock(store).unwrap(), "h").unwrap(),
-        None,
-        GrantSet::default(),
-        Some("h".into()),
-        Some(proven),
-        false,
-        UnclaimedReach::None,
-        TeamReach::default(),
-    )
+    let s = lock(store).unwrap();
+    let pane = format!("%{proven}");
+    s.conn_ref()
+        .execute(
+            "UPDATE sessions SET tmux_pane_id = ?1 WHERE id = ?2",
+            rusqlite::params![pane, proven],
+        )
+        .unwrap();
+    let scope = Caller {
+        api: None,
+        host_alias: Some("h".into()),
+        client: None,
+        mode: TokenMode::Full,
+        pane: Some(pane),
+        is_personal_owner: false,
+        is_fleet_admin: false,
+    }
+    .view_scope(&s)
+    .unwrap();
+    assert_eq!(scope.proven_session, Some(proven));
+    scope
 }
 
 /// A worker names no person, so the person rule never passes for it; the
