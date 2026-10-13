@@ -29,19 +29,40 @@ pub fn set_status(
     status: &str,
 ) -> Result<WorkItemRow, IpcError> {
     let s = lock(store)?;
+    require_visible(&s, scope, item_id)?;
+    s.set_item_status(item_id, status)?
+        .ok_or_else(|| orgs::not_found("work item", item_id))
+}
+
+/// `work_link { action: keep_open, item_id }`: a person's answer to the Work
+/// view's "finished — close?" on local work (CF-5). Not a status — see
+/// `Store::keep_item_open` — and fenced exactly as [`set_status`] is.
+pub fn keep_open(
+    store: &Mutex<Store>,
+    scope: &OrgScope,
+    item_id: i64,
+) -> Result<WorkItemRow, IpcError> {
+    let s = lock(store)?;
+    require_visible(&s, scope, item_id)?;
+    s.keep_item_open(item_id)?
+        .ok_or_else(|| orgs::not_found("work item", item_id))
+}
+
+/// The fence [`set_status`] documents: an item outside `scope` answers
+/// exactly as an unknown id.
+fn require_visible(s: &Store, scope: &OrgScope, item_id: i64) -> Result<(), IpcError> {
     let Some(item) = s.get_work_item(item_id)? else {
         return Err(orgs::not_found("work item", item_id));
     };
     let visible = if item.source == "local" {
-        super::local::local_item_visible(&s, scope, item_id)?
+        super::local::local_item_visible(s, scope, item_id)?
     } else {
         scope.sees_org(s.item_org(item_id)?)
     };
     if !visible {
         return Err(orgs::not_found("work item", item_id));
     }
-    s.set_item_status(item_id, status)?
-        .ok_or_else(|| orgs::not_found("work item", item_id))
+    Ok(())
 }
 
 /// The longest column name a status move carries.

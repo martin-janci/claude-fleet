@@ -11861,6 +11861,13 @@ fn arm_reaches(code: &str) -> Vec<String> {
 /// list declared, an arm that silently inherits the tail is a test failure
 /// instead (T9b). `work`'s tail is `""`, which already fails closed, so only
 /// `work_link` needs this.
+//
+// `archive`, `unarchive` and `unlink` also have a SESSIONLESS form (TASK-263:
+// `ended::is_sessionless`, an early return before the gate) that addresses an
+// ended link — one whose session is gone — through the read fence of ended
+// links (`scope_links_for`), not through the session gate; it threads no
+// `Reach` because there is no session to reach. Its fence is proven by
+// `ended_work_links_are_archived_and_removed_without_a_session`.
 const WORK_LINK_TAIL_ACTIONS: &[&str] = &[
     "link",
     "reject",
@@ -12102,6 +12109,9 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     // `require_drive_on_item_sessions`, the same gate and level as `name`'s
     // rename half.
     ("work_link", "set_status", &["Drive"]),
+    // Keep open (CF-5) answers "finished — close?" for the same row, behind
+    // `set_status`'s gate.
+    ("work_link", "keep_open", &["Drive"]),
     // Task editing: the text the owner's sidebar shows for their own row,
     // behind `set_status`'s gate.
     ("work_link", "edit", &["Drive"]),
@@ -20587,4 +20597,192 @@ async fn check_host_refuses_a_host_the_fleet_does_not_have() {
         .await
         .expect_err("hostile alias");
     assert!(err.message.starts_with("E_INVALID"), "{}", err.message);
+}
+
+/// TASK-263: a link whose session is gone is archived or removed with no
+/// `session_id` — the one the operator had none of. The fence is the read
+/// fence of ended links (`scope_links_for`): another person's past work
+/// answers as a link that does not exist (the wording `resume` and
+/// `summarize` use); a per-host token sees its own host's ended links only
+/// when they recorded no person's conversation, and may hide but never
+/// delete them; a sessionless `reject` is told where the two forms are.
+#[tokio::test]
+async fn ended_work_links_are_archived_and_removed_without_a_session() {
+    use crate::service::work::WorkLinkArgs;
+    const CID: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("h").unwrap();
+    s.upsert_host("elsewhere").unwrap();
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
+    let bob = s.create_person("bob", None).unwrap().id;
+    // Ada's past session on ABC-1, its conversation recorded against her.
+    let past = s
+        .upsert_session("dev-o-r--abc-1", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.claim_if_unclaimed(past, Some(ada)).unwrap();
+    s.rebind_conversation(past, CID, crate::store::StartSource::Startup, None, None)
+        .unwrap();
+    s.link_session_work(past, crate::store::WorkTarget::Key("ABC-1"), "manual")
+        .unwrap();
+    s.delete_session(past).unwrap();
+    let adas = s.ended_work_links_for_key("ABC-1").unwrap()[0].id;
+    // A second past session on the same key that recorded no conversation:
+    // nobody's, so its host's token may see it.
+    let bare = s
+        .upsert_session("dev-o-r--abc-1-2", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.link_session_work(bare, crate::store::WorkTarget::Key("ABC-1"), "manual")
+        .unwrap();
+    s.delete_session(bare).unwrap();
+    let bares = s
+        .ended_work_links_for_key("ABC-1")
+        .unwrap()
+        .into_iter()
+        .map(|l| l.id)
+        .find(|id| *id != adas)
+        .expect("the second link ended too");
+    let t = test_tools(s);
+
+    let call = |caller: Caller, action: &str, link_id: Option<i64>, key: Option<&str>| {
+        t.work_link(
+            Extension(caller),
+            Parameters(WorkLinkArgs {
+                action: action.into(),
+                key: key.map(Into::into),
+                link_id,
+                ..Default::default()
+            }),
+        )
+    };
+    let body = |out: &rmcp::model::CallToolResult| -> serde_json::Value {
+        serde_json::from_str(text_of(&out.content[0])).unwrap()
+    };
+
+    // Not Bob's conversation: the link does not exist, with or without the key.
+    let stranger = device_of(bob, ada);
+    let e = call(stranger.clone(), "archive", Some(adas), Some("ABC-1"))
+        .await
+        .expect_err("not Bob's past work");
+    assert!(
+        e.message
+            .starts_with("E_NOTFOUND: ABC-1 has no ended work link"),
+        "{}",
+        e.message
+    );
+    let e = call(stranger, "unlink", Some(adas), None)
+        .await
+        .expect_err("not Bob's past work");
+    assert!(
+        e.message.starts_with("E_NOTFOUND: no ended work link"),
+        "{}",
+        e.message
+    );
+
+    // A machine's token: another host's past is nothing; on its own host a
+    // person's recorded conversation is nothing either, the conversation-less
+    // link is its to archive — and never its to remove.
+    let e = call(
+        host_caller("elsewhere", TokenMode::Full),
+        "archive",
+        Some(bares),
+        None,
+    )
+    .await
+    .expect_err("ended on another host");
+    assert!(e.message.starts_with("E_NOTFOUND"), "{}", e.message);
+    let own = host_caller("h", TokenMode::Full);
+    let e = call(own.clone(), "archive", Some(adas), None)
+        .await
+        .expect_err("Ada's conversation is not a machine's");
+    assert!(e.message.starts_with("E_NOTFOUND"), "{}", e.message);
+    let v = body(
+        &call(own.clone(), "archive", Some(bares), None)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        (v["action"].as_str(), v["changed"].as_i64()),
+        (Some("archived"), Some(1))
+    );
+    assert_eq!(v["links"][0]["link_id"], bares);
+    assert_eq!(v["links"][0]["key"], "ABC-1");
+    assert_eq!(v["links"][0]["snap_host"], "h");
+    assert!(v["links"][0]["archived_at"].is_i64(), "{v}");
+    let e = call(own, "unlink", Some(bares), None)
+        .await
+        .expect_err("history is not a token's to delete");
+    assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
+
+    // The master (Ada's hub): a sessionless reject is told where to go; an
+    // un-archive by key reaches both links and changes the one that was
+    // archived; a removal by id leaves the other session's past in place.
+    let e = call(Caller::master(), "reject", Some(adas), Some("ABC-1"))
+        .await
+        .expect_err("reject needs a live session");
+    assert!(
+        e.message.starts_with("E_INVALID: reject needs session_id"),
+        "{}",
+        e.message
+    );
+    // By key, the master reaches Ada's link only: a link that recorded no
+    // conversation is a machine's or the SOLE person's to see, and Bob
+    // exists. The machine's archive of it stands.
+    let v = body(
+        &call(Caller::master(), "archive", None, Some("abc-1"))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        (v["action"].as_str(), v["changed"].as_i64()),
+        (Some("archived"), Some(1))
+    );
+    assert_eq!(v["links"].as_array().map(Vec::len), Some(1), "{v}");
+    assert_eq!(v["links"][0]["link_id"], adas);
+    let v = body(
+        &call(Caller::master(), "unarchive", None, Some("ABC-1"))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        (v["action"].as_str(), v["changed"].as_i64()),
+        (Some("unarchived"), Some(1))
+    );
+    assert!(v["links"][0]["archived_at"].is_null(), "{v}");
+    assert!(
+        t.store
+            .lock()
+            .unwrap()
+            .work_link_archived_at(bares)
+            .unwrap()
+            .is_some(),
+        "the machine's archive of its own link stands"
+    );
+    let v = body(
+        &call(Caller::master(), "unlink", Some(adas), Some("ABC-1"))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        (v["action"].as_str(), v["changed"].as_i64()),
+        (Some("removed"), Some(1))
+    );
+    let left: Vec<i64> = t
+        .store
+        .lock()
+        .unwrap()
+        .ended_work_links_for_key("ABC-1")
+        .unwrap()
+        .iter()
+        .map(|l| l.id)
+        .collect();
+    assert_eq!(left, vec![bares], "the other session's past stays");
+    let e = call(Caller::master(), "unlink", Some(adas), Some("ABC-1"))
+        .await
+        .expect_err("gone is gone");
+    assert!(
+        e.message
+            .starts_with("E_NOTFOUND: ABC-1 has no ended work link"),
+        "{}",
+        e.message
+    );
 }

@@ -817,6 +817,17 @@ impl Store {
         self.conn.last_insert_rowid()
     }
 
+    /// A *Keep open* answer at a chosen time (`work_close_dismissals`).
+    pub(crate) fn seed_close_dismissal(&self, item_id: i64, at: i64) {
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO work_close_dismissals (item_id, dismissed_at) \
+                 VALUES (?1, ?2)",
+                rusqlite::params![item_id, at],
+            )
+            .unwrap();
+    }
+
     pub(crate) fn seed_local_item_org(&self, item_id: i64, org: Option<i64>) {
         self.conn
             .execute(

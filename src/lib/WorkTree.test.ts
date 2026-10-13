@@ -334,30 +334,88 @@ describe('WorkTree', () => {
     expect(screen.getByTestId('work-tree-error').textContent).toContain(NEWER_HUB);
   });
 
-  it('archived tasks: hidden by default with a count, one click shows them, and back', async () => {
-    treeImpl = (a) => ({ ...firstPage, archived_hidden: a.filters?.archived ? 0 : 5 });
+  const ARCHIVED = [
+    task({ task_id: 'item:90', key: 'OLD-1', title: 'Shipped', archived: true, sessions: [] }),
+    task({ task_id: 'item:91', key: 'OLD-2', title: 'Also shipped', archived: true, sessions: [] }),
+  ];
+
+  it('archived tasks: one collapsed section at the end, read only when opened', async () => {
+    treeImpl = (a) =>
+      a.filters?.archived_only
+        ? // An older hub ignores `archived_only`: only archived tasks are shown.
+          { ...firstPage, tasks: [...ARCHIVED, firstPage.tasks[0]], next_cursor: null }
+        : { ...firstPage, archived_hidden: a.filters?.archived ? 0 : 2 };
     render(WorkTree);
     await flush();
     expect(treeCalls().at(-1)?.filters).toEqual({ archived: false });
-    expect(screen.getByTestId('work-archived-row').textContent).toContain('5 archived tasks hidden');
-    await fireEvent.click(screen.getByTestId('work-archived-toggle'));
+    const head = screen.getByTestId('work-archived-head');
+    expect(head.textContent?.replace(/\s+/g, ' ').trim()).toBe('▸ Archived 2');
+    expect(head.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByTestId('work-archived-tasks')).toBeNull();
+    expect(treeCalls().some((c) => c.filters?.archived_only)).toBe(false);
+
+    await fireEvent.click(head);
     await flush();
-    expect(get(workViewFilters)).toEqual({ archived: true });
+    expect(treeCalls().at(-1)).toEqual({ filters: { archived: true, archived_only: true }, limit: 50 });
+    // The view's own filters are untouched: archived tasks are not mixed in.
+    expect(get(workViewFilters)).toEqual({});
+    const list = screen.getByTestId('work-archived-tasks');
+    expect(within(list).getAllByTestId('work-task').map((t) => t.getAttribute('data-task-id'))).toEqual(['item:90', 'item:91']);
+
+    await fireEvent.click(screen.getByTestId('work-archived-head'));
+    await flush();
+    expect(screen.queryByTestId('work-archived-tasks')).toBeNull();
+  });
+
+  it('the Filters panel’s switch still mixes archived tasks in, with a way back', async () => {
+    treeImpl = (a) => ({ ...firstPage, archived_hidden: a.filters?.archived ? 0 : 5 });
+    workViewFilters.set({ archived: true });
+    render(WorkTree);
+    await flush();
     expect(treeCalls().at(-1)?.filters).toEqual({ archived: true });
     expect(screen.getByTestId('work-archived-row').textContent).toContain('Showing archived tasks');
+    expect(screen.queryByTestId('work-archived-head')).toBeNull();
     await fireEvent.click(screen.getByTestId('work-archived-toggle'));
     await flush();
     expect(get(workViewFilters)).toEqual({});
+    expect(screen.getByTestId('work-archived-head')).toBeTruthy();
   });
 
   it('when every match is archived, the empty state offers them', async () => {
-    treeImpl = (a) => (a.filters?.archived ? firstPage : { ...firstPage, tasks: [], groups: [], total: 0, archived_hidden: 2 });
+    treeImpl = (a) =>
+      a.filters?.archived_only
+        ? { ...firstPage, tasks: ARCHIVED, groups: [], total: 2, next_cursor: null }
+        : { ...firstPage, tasks: [], groups: [], total: 0, archived_hidden: 2 };
     render(WorkTree);
     await flush();
     expect(screen.getByTestId('work-tree-empty').textContent).not.toContain('No work yet');
-    await fireEvent.click(screen.getByTestId('work-archived-toggle'));
+    await fireEvent.click(screen.getByTestId('work-archived-head'));
     await flush();
     expect(screen.getAllByTestId('work-task')).toHaveLength(2);
+  });
+
+  it('finished local work asks to be closed: Mark done and Keep open', async () => {
+    const finished = task({
+      task_id: 'item:70',
+      item_id: 70,
+      key: 'LOC-70',
+      kind: 'local',
+      close_suggested: true,
+      sessions: [link({ link_id: 80, session_id: null, name: 'gone', state: 'ended', ended_at: 1790000000 })],
+    });
+    treeImpl = () => ({ ...firstPage, tasks: [finished, ...firstPage.tasks] });
+    render(WorkTree);
+    await flush();
+    const asks = screen.getAllByTestId('work-task-close-ask');
+    expect(asks).toHaveLength(1);
+    expect(asks[0].textContent).toContain('finished — close?');
+
+    await fireEvent.click(screen.getByTestId('work-task-mark-done'));
+    await flush();
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('set_work_status', { args: { item_id: 70, status: 'done' } });
+    await fireEvent.click(screen.getByTestId('work-task-keep-open'));
+    await flush();
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('keep_work_open', { args: { item_id: 70 } });
   });
 
   it('filters reload the view; work:changed re-reads it once, debounced', async () => {
