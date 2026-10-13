@@ -12,8 +12,11 @@
 //!
 //! **Which sessions.** Exactly the rows the attention model shows as
 //! "Paused · limit" (`attention::Reason::AccountLimit`): a live Claude
-//! session with a pane, not working, whose account has a 5-hour or weekly
-//! window fully used that has not reset. Never touched: shells, pane-less
+//! session with a pane, not working, not waiting on a dialog or a form and
+//! not stuck, whose account has a 5-hour or weekly window fully used that
+//! has not reset. With `accounts.auto_switch_early` on (off by default), the
+//! same session moves once its account passes `accounts.pause_at`, so its
+//! next turn does not stall at the limit. Never touched: shells, pane-less
 //! (`bg` / `external`) sessions, other agents, ghosts and lost rows, the
 //! registered controller, sessions on a hidden or unreachable host, and a
 //! session switched (or tried) in the last [`RETRY_AFTER_SECS`].
@@ -107,6 +110,11 @@ pub fn switchable(row: &SessionRow, is_limited: impl Fn(&str) -> bool) -> bool {
         && row.status != "ghost"
         && row.lost_at.is_none()
         && row.claude_status.as_deref() != Some("working")
+        // Waiting on a dialog or a form, or stuck: the attention model puts
+        // these before "Paused · limit", and a restart would lose the dialog.
+        && row.claude_status.as_deref() != Some("blocked")
+        && row.pending_form.is_none()
+        && row.stuck_kind.is_none()
         && row.account_uuid.as_deref().is_some_and(is_limited)
 }
 
@@ -193,7 +201,16 @@ pub fn plan(
             .and_then(|r| account_limits::used_pct_of(&r.usage, Some(r.fetched_at), now))
     };
     let is_limited = |uuid: &str| used(uuid).is_some_and(|u| u >= 100.0);
-    if !snaps.iter().any(|r| is_limited(&r.account_uuid)) {
+    let pause_at = account_limits::pause_at_pct(s);
+    // Early (`accounts.auto_switch_early`): an idle session moves once its
+    // account passes `accounts.pause_at`, before its next turn stalls.
+    let line = if settings::get_bool(s, settings::ACCOUNTS_AUTO_SWITCH_EARLY) {
+        pause_at
+    } else {
+        100.0
+    };
+    let due = |uuid: &str| used(uuid).is_some_and(|u| u >= line);
+    if !snaps.iter().any(|r| due(&r.account_uuid)) {
         return Ok(Vec::new());
     }
     let hosts: Vec<HostRow> =
@@ -201,13 +218,12 @@ pub fn plan(
             .into_iter()
             .filter(|h| h.reachable || h.alias == "local")
             .collect();
-    let pause_at = account_limits::pause_at_pct(s);
     let opted_out = s.people_without_auto_switch()?;
     let personal_owner = s.personal_owner_id()?;
     let controller = s.get_controller()?;
     let mut out = Vec::new();
     for row in s.list_all_sessions()? {
-        if !switchable(&row, is_limited)
+        if !switchable(&row, due)
             || !owner_allows(&row, personal_owner, &opted_out)
             || controller
                 .as_ref()

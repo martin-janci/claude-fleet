@@ -136,9 +136,9 @@ separate profile, which asks for its own `/login` the first time.
 
 Off by default. The owner turns it on for the fleet in Settings › Limits
 (`accounts.auto_switch`); from then on, a session that shows **Paused ·
-limit** (a live Claude session, not working, whose account has its 5-hour
-or weekly window fully used) is resumed under the login on its host with
-the most headroom, without anyone pressing Switch account. It is the same
+limit** (a live Claude session, not working, not waiting on a dialog or a
+form and not stuck, whose account has its 5-hour or weekly window fully
+used) is resumed under the login on its host with the most headroom, without anyone pressing Switch account. It is the same
 restart Switch account makes (`restart_session { profile }`), so the
 conversation carries on and the row keeps the new login.
 
@@ -147,6 +147,11 @@ sessions automatically when their account runs out** (MCP:
 `auto_switch_account { enabled }`) is on by default and turns it off for
 every session that person owns. The owner's answer covers the owner's
 sessions and every session nobody owns.
+
+**Switch before the limit** (`accounts.auto_switch_early`, off by default,
+shown once the fleet switch is on) also moves an idle session once its
+account passes `accounts.pause_at`, so its next turn does not stall at the
+limit. A working session is never moved, early or not.
 
 Below it, **then tell it to continue where it stopped** (MCP:
 `auto_switch_account { continue_after: true }`, off by default): when the

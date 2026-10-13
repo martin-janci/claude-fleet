@@ -3771,6 +3771,18 @@
       ]
     },
     {
+      "default_widget": "switch",
+      "key": "accounts.auto_switch_early",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Switch before the limit",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
       "default_widget": "textarea",
       "key": "usage.prices_json",
       "kind": {

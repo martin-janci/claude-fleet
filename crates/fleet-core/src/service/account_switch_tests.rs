@@ -377,3 +377,45 @@ async fn a_failed_switch_queues_nothing() {
         .unwrap();
     assert!(queued(&store.lock().unwrap(), id).is_empty());
 }
+
+#[test]
+fn a_session_waiting_on_a_dialog_or_stuck_is_never_restarted() {
+    let (s, id, _) = fleet();
+    let set = |sql: &str| {
+        s.conn_for_test()
+            .execute(&format!("UPDATE sessions SET {sql} WHERE id = ?1"), [id])
+            .unwrap();
+    };
+    set("claude_status = 'blocked'");
+    assert!(plan_now(&s).is_empty(), "a permission prompt would be lost");
+    set("claude_status = 'idle', stuck_kind = 'auth_menu'");
+    assert!(plan_now(&s).is_empty(), "stuck is a person's");
+    set("stuck_kind = NULL");
+    assert_eq!(plan_now(&s).len(), 1);
+}
+
+#[test]
+fn early_an_idle_session_moves_past_the_line_not_only_at_the_limit() {
+    let (s, id, _) = fleet();
+    seed_usage(&s, "mac", None, "acct-out", 93.0, NOW);
+    assert!(plan_now(&s).is_empty(), "93% is not out");
+    settings::set(&s, settings::ACCOUNTS_AUTO_SWITCH_EARLY, "true").unwrap();
+    let p = plan_now(&s);
+    assert_eq!(p.len(), 1, "past accounts.pause_at (90)");
+    assert_eq!(p[0].target.profile.as_deref(), Some("spare"));
+    s.conn_for_test()
+        .execute(
+            "UPDATE sessions SET claude_status = 'working' WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+    assert!(plan_now(&s).is_empty(), "a working session is never moved");
+    seed_usage(&s, "mac", None, "acct-out", 80.0, NOW);
+    s.conn_for_test()
+        .execute(
+            "UPDATE sessions SET claude_status = 'idle' WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+    assert!(plan_now(&s).is_empty(), "under the line");
+}

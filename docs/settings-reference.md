@@ -146,6 +146,7 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 |---|---|---|---|---|
 | `accounts.pause_at` | `90` | 50–100% | fleet | Used share of an account's 5-hour or weekly window at which starting a session on it asks first and offers the login with the most headroom. |
 | `accounts.auto_switch` | `false` | on / off | fleet | When a session's account runs out, resume it under the login on its host with the most headroom without asking. Each person can still turn it off for their own sessions on the Accounts page. |
+| `accounts.auto_switch_early` | `false` | on / off | fleet | Also move an idle session once its account passes "Ask before starting at", so its next turn does not stall at the limit. A working session is never moved. |
 
 ## Error reports
 

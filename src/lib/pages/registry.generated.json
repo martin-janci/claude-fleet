@@ -1105,6 +1105,25 @@
       "danger": {
         "level": "none"
       },
+      "default": "false",
+      "help": "Also move an idle session once its account passes \"Ask before starting at\", so its next turn does not stall at the limit. A working session is never moved.",
+      "key": "accounts.auto_switch_early",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Switch before the limit",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "{}",
       "help": "Per-model prices for the estimated cost, in USD per million tokens (input, output, cache_write, cache_read). {} uses the built-in prices only.",
       "key": "usage.prices_json",
@@ -4374,6 +4393,14 @@
               "type": "field",
               "when": {
                 "key": "usage.enabled",
+                "truthy": true
+              }
+            },
+            {
+              "key": "accounts.auto_switch_early",
+              "type": "field",
+              "when": {
+                "key": "accounts.auto_switch",
                 "truthy": true
               }
             },

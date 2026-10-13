@@ -483,6 +483,9 @@ pub const ACCOUNTS_PAUSE_AT: &str = "accounts.pause_at";
 /// fleet's switch; each person can still turn it off for their own sessions
 /// (`people.auto_switch_account`, migration 185).
 pub const ACCOUNTS_AUTO_SWITCH: &str = "accounts.auto_switch";
+/// With [`ACCOUNTS_AUTO_SWITCH`], move an idle session once its account
+/// passes `accounts.pause_at`, not only once it is out.
+pub const ACCOUNTS_AUTO_SWITCH_EARLY: &str = "accounts.auto_switch_early";
 pub const USAGE_ENABLED: &str = "usage.enabled";
 /// Copy conversation text into the hub's search index, so a search finds
 /// what was said in any session (search phase 3, `service::search_index`).
@@ -1255,6 +1258,13 @@ pub const SPECS: &[Spec] = &[
         Kind::Bool,
         "Switch accounts automatically",
         "When a session's account runs out, resume it under the login on its host with the most headroom without asking. Each person can still turn it off for their own sessions on the Accounts page.",
+    ),
+    Spec::new(
+        ACCOUNTS_AUTO_SWITCH_EARLY,
+        "false",
+        Kind::Bool,
+        "Switch before the limit",
+        "Also move an idle session once its account passes \"Ask before starting at\", so its next turn does not stall at the limit. A working session is never moved.",
     ),
     Spec::new(
         USAGE_PRICES_JSON,
