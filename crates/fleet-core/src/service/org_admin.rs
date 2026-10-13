@@ -50,17 +50,20 @@ use std::sync::Mutex;
 pub struct OrgAdminArgs {
     /// list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker|set_org_setting|list_devices|pair_device|revoke_device|set_device_trust|rename_device|set_device_mode|bind_device|set_device_person|grant_catalog|list_people|add_person|rename_person|disable_person|enable_person|list_members|set_member|remove_member|member_grants|revoke_member_grants|narrow_member_grants|set_hub_org|set_admins_see_unclaimed|rule_preview|add_project|remove_project|revoke_share|narrow_share
     pub action: String,
-    /// Org name, or a new person or device name.
+    /// Org name (add/update_org), or a person's or device's new name
+    /// (rename_person, rename_device).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The org acted on (or bound to).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<i64>,
+    /// An org by name, instead of org_id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org: Option<String>,
     /// `#rrggbb`; "" clears it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
-    /// Fence sessions off from other orgs.
+    /// Fence sessions between this org and the others.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub isolate_sessions: Option<bool>,
     /// on|off|inherit.
@@ -69,76 +72,94 @@ pub struct OrgAdminArgs {
     /// on|off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jev: Option<String>,
-    /// on|off: reply-text consent, on top of jev.
+    /// on|off: the org's reply-text consent (D48), on top of jev.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jev_reply: Option<String>,
-    /// Bound devices also see unassigned work.
+    /// Its bound devices also see unassigned work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bound_sees_unassigned: Option<bool>,
+    /// remove_rule.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule_id: Option<i64>,
+    /// Rule: a GitHub owner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
+    /// Rule: one repository of `owner`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
+    /// Rule: a path prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path_prefix: Option<String>,
-    /// Rule or assign_host / unassign_host: a host.
+    /// Rule, or assign_host / unassign_host: a host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_alias: Option<String>,
+    /// assign_tracker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tracker_id: Option<i64>,
+    /// A paired device, by name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<String>,
     /// full|readonly (pair_device, set_device_mode).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
+    /// Its prompts reach agents unmarked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trusted: Option<bool>,
-    /// Whose device (created when new); absent: the hub's owner.
+    /// Whose device, by name; created when new. Absent: the hub's owner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub person: Option<String>,
     /// rename_person / disable_person / enable_person.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub person_id: Option<i64>,
+    /// rename_person; "" clears it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// A catalog, by name (grant_catalog).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog: Option<String>,
+    /// Grant (true) or take back (false).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on: Option<bool>,
+    /// Pairing code lifetime, seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_s: Option<u64>,
+    /// set_org_setting: a setting an org may set for itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
-    /// set_org_setting: its value; absent inherits.
+    /// set_org_setting: the org's own value; absent inherits the fleet's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
     /// set_member: admin|member|viewer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
-    /// remove_member: keep their shares.
+    /// remove_member: keep what was shared with them on the org's sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_grants: Option<bool>,
     /// update_org: this company owns the hub (hub owner only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owns_hub: Option<bool>,
-    /// update_org: admins see the unclaimed count (hub owner only).
+    /// update_org: its admins see the unclaimed count (hub owner only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admins_see_unclaimed: Option<bool>,
-    /// update_org: members see only their own sessions (default on).
+    /// update_org: members see only their own sessions (default on); off,
+    /// they watch each other's sessions in the org.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub members_own_sessions_only: Option<bool>,
+    /// add_project: its git remote.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote: Option<String>,
+    /// add_project: where it is checked out on the hosts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    /// add_project: host aliases, comma-separated; empty = all the org's.
+    /// add_project: host aliases it may run on, comma-separated; empty =
+    /// every host of the org.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hosts: Option<String>,
+    /// remove_project.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<i64>,
-    /// revoke_share / narrow_share: the share.
+    /// revoke_share / narrow_share: the share (a session grant) on one of
+    /// the org's sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grant_id: Option<i64>,
 }

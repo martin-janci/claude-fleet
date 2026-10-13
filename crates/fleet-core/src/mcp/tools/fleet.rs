@@ -1121,9 +1121,11 @@ impl FleetTools {
 
     // ---- organisation administration (phase B) ----
 
-    #[tool(description = "Administer the company: orgs, devices (pair_device \
-        → code + QR), people and members. Hub owner's device: all; an org \
-        admin's: their org. Changes need a trusted full device.")]
+    #[tool(description = "Administer the company: orgs (work_admin's org \
+        actions), devices (list, pair_device → code + QR, revoke, trust, bind, \
+        hand over, grant a catalog), people and members (roles, a member's \
+        grants). Hub owner's device: all; an org admin's: their org. Changes \
+        need a trusted full device, never locking out the one in use.")]
     pub(super) async fn org_admin(
         &self,
         Extension(caller): Extension<Caller>,
@@ -1198,9 +1200,10 @@ impl FleetTools {
 
     // ---- realm administration (identity sub-project 1) ----
 
-    #[tool(description = "Realm: users, groups, roles and mappings, effective \
-        roles, the audit log. Fleet admin's device: all; an org admin's: their \
-        org. Changes need a trusted full device.")]
+    #[tool(description = "Realm: users, groups (tree, members), realm and \
+        client roles (composites), role mappings, effective roles, the audit \
+        log. Fleet admin's device: all; an org admin's: their org's groups' \
+        members. Changes need a trusted full device.")]
     pub(super) async fn realm_admin(
         &self,
         Extension(caller): Extension<Caller>,

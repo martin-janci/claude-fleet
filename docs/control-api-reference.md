@@ -391,7 +391,7 @@ Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_
 
 ### `org_admin`
 
-Administer the company: orgs, devices (pair_device → code + QR), people and members. Hub owner's device: all; an org admin's: their org. Changes need a trusted full device.
+Administer the company: orgs (work_admin's org actions), devices (list, pair_device → code + QR, revoke, trust, bind, hand over, grant a catalog), people and members (roles, a member's grants). Hub owner's device: all; an org admin's: their org. Changes need a trusted full device, never locking out the one in use.
 
 Parameters: `action`, `admins_see_unclaimed`, `auto_tidy`, `bound_sees_unassigned`, `catalog`, `color`, `device`, `display_name`, `grant_id`, `host_alias`, `hosts`, `isolate_sessions`, `jev`, `jev_reply`, `keep_grants`, `key`, `members_own_sessions_only`, `mode`, `name`, `on`, `org`, `org_id`, `owner`, `owns_hub`, `path`, `path_prefix`, `person`, `person_id`, `project_id`, `remote`, `repo`, `role`, `rule_id`, `tracker_id`, `trusted`, `ttl_s`, `value`
 
@@ -489,7 +489,7 @@ Parameters: `expected`, `set`
 
 ### `realm_admin`
 
-Realm: users, groups, roles and mappings, effective roles, the audit log. Fleet admin's device: all; an org admin's: their org. Changes need a trusted full device.
+Realm: users, groups (tree, members), realm and client roles (composites), role mappings, effective roles, the audit log. Fleet admin's device: all; an org admin's: their org's groups' members. Changes need a trusted full device.
 
 Parameters: `action`, `child`, `client`, `description`, `group`, `limit`, `name`, `parent`, `profile`, `role`, `since`, `user`
 
@@ -899,7 +899,7 @@ Parameters: `action`, `component`, `halt_failure_ratio`, `mandatory`, `minimum`,
 
 ### `update_policy`
 
-An org's update policy: list, set or clear per component. Hub owner's device: any org; an org admin's: theirs.
+An org's update policy from a person's device: list, set or clear its mode, floor, window and pin per component. The hub owner's device for any org, an org admin's for theirs. E_FORBIDDEN, E_INVALID.
 
 Parameters: `action`, `component`, `mandatory`, `minimum`, `mode`, `org_id`, `reason`, `version`, `window`
 

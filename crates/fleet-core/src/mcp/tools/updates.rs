@@ -213,8 +213,10 @@ impl FleetTools {
         }
     }
 
-    #[tool(description = "An org's update policy: list, set or clear per \
-        component. Hub owner's device: any org; an org admin's: theirs.")]
+    #[tool(description = "An org's update policy from a person's device: list, \
+        set or clear its mode, floor, window and pin per component. The hub \
+        owner's device for any org, an org admin's for theirs. E_FORBIDDEN, \
+        E_INVALID.")]
     pub(super) async fn update_policy(
         &self,
         Extension(caller): Extension<Caller>,

@@ -4524,8 +4524,14 @@ fn the_served_definition_budget_stays_bounded() {
     /// old budget, together over it: measured 118,264 bytes for 145 tools
     /// (815 a tool).
     /// The identity realm branch (org_admin's `enable_person`, the realm /
-    /// trust prose) lands inside the same 825.
-    const BYTES_PER_TOOL: usize = 825;
+    /// trust prose) landed inside the same 825 for the master.
+    /// Raised to 841 on 2026-10-13 when the budget began to bind the full
+    /// client's surface too: the client full surface, which also serves
+    /// `org_admin`, `realm_admin` and `update_policy`, measured 124,773 bytes
+    /// for 150 tools (831 a tool); the master stays at 818 a tool. Their
+    /// descriptions and parameter docs keep every fact an agent cannot infer
+    /// (refusal rules, units, scopes, error codes) rather than shrink to 825.
+    const BYTES_PER_TOOL: usize = 841;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
