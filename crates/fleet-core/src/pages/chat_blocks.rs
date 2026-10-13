@@ -35,6 +35,7 @@ pub const KINDS: &[&str] = &[
     "setting",
     "wizard",
     "dashboard",
+    "device",
 ];
 /// The app's wizards a `wizard` block may open in the chat (redesign 10.12):
 /// the ones in `src/lib/forms/wizards/` whose last button runs in the chat
@@ -270,6 +271,20 @@ pub enum BlockKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         why: Option<String>,
         widgets: Vec<DashWidget>,
+    },
+    /// A debug device (`docs/debug-devices.md`), drawn live from the
+    /// person's own list: its state, who holds or waits for it, and a
+    /// screenshot or a mirror on a click.
+    Device {
+        /// An id (`#12`), label, name, serial or key, optionally as
+        /// `host/that`: what `debug_devices` takes as `device`.
+        device: String,
+        /// A heading over the device; its own title when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        /// Markdown under the device: what to look at on it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
 }
 
@@ -656,6 +671,11 @@ pub fn check(v: &Value) -> Result<(), Vec<String>> {
             p.str(o, "why", "", false, 500);
             let widgets = p.arr(o, "widgets", "", 1, 12);
             p.each(&widgets, "widget", dash_widget);
+        }
+        "device" => {
+            p.str(o, "device", "", true, 200);
+            p.str(o, "title", "", false, 120);
+            p.str(o, "note", "", false, 2000);
         }
         _ => unreachable!("kind is one of KINDS"),
     }

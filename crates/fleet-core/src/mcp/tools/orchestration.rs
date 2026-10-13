@@ -301,8 +301,9 @@ impl FleetTools {
 
     #[tool(description = "One tool call's input and result (omitted by \
         session_conversation): { id, name, input, edit {file_path, old, new} \
-        | null, command | null, result | null, is_error }; texts capped at \
-        8000 chars. Read-only. Errors: as session_conversation, E_NOTFOUND.")]
+        | null, command | null, result | null, is_error, images? [{mime, \
+        data}], images_omitted? }; texts capped at 8000 chars, images (a \
+        screenshot) at 2 of 4 MiB base64. Read-only. Errors: as session_conversation, E_NOTFOUND.")]
     pub(super) async fn session_tool_detail(
         &self,
         Extension(caller): Extension<Caller>,
