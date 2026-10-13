@@ -38,7 +38,13 @@ function detail(id: number, name: string, over: Partial<MissionDetail> = {}): Mi
 
 describe('missionNow', () => {
   it('names the current step and draws trails while it runs', () => {
-    expect(missionNow(detail(1, 'Payments'))).toEqual({ id: 1, name: 'Payments', step: 'Schema', waiting: false, trails: true });
+    expect(missionNow(detail(1, 'Payments'))).toEqual({ id: 1, name: 'Payments', step: 'Schema', waiting: false, trails: true, sessions: 0 });
+  });
+
+  it('counts its live child sessions', () => {
+    const s = { item_id: 11, host_alias: 'h', tmux_name: 'pay-schema', kind: 'claude' };
+    const d = detail(1, 'P', { sessions: [{ ...s, session_id: 1 }, { ...s, session_id: 2 }] });
+    expect(missionNow(d).sessions).toBe(2);
   });
 
   it('waits on a person: an ask step or an open card, and no trails', () => {

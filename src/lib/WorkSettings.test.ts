@@ -61,4 +61,18 @@ describe('Settings → Work & trackers', () => {
     await tick();
     expect(screen.queryByTestId('work-usage-link')).toBeNull();
   });
+
+  it('sets what a Work row click opens: Ticket by default, Session on request', async () => {
+    route();
+    const { workRowClick } = await import('./prefs');
+    const { get } = await import('svelte/store');
+    workRowClick.set('ticket');
+    render(WorkSettings);
+    await tick();
+    expect(screen.getByTestId('work-row-click-ticket').getAttribute('aria-pressed')).toBe('true');
+    await fireEvent.click(screen.getByTestId('work-row-click-session'));
+    expect(get(workRowClick)).toBe('session');
+    expect(localStorage.getItem('cf:pref:work.rowClick')).toBe('"session"');
+    workRowClick.set('ticket');
+  });
 });

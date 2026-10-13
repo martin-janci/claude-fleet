@@ -12,6 +12,20 @@ export function liveLinks(t: Pick<WorkTask, 'sessions'>): WorkTaskLink[] {
   return (t.sessions ?? []).filter((l) => l.state === 'active' && l.session_id != null);
 }
 
+/** The live session a row opens in one click: its primary link, else the
+ *  first live one; null when nothing works on it now. */
+export function rowSessionLink(t: Pick<WorkTask, 'sessions'>): WorkTaskLink | null {
+  const live = liveLinks(t);
+  return live.find((l) => l.primary) ?? live[0] ?? null;
+}
+
+/** What a click on the row opens under the `work.rowClick` pref: the
+ *  session link to open, or null for the ticket (the default, and the
+ *  fallback when the task has no live session). */
+export function rowClickSession(t: Pick<WorkTask, 'sessions'>, pref: 'ticket' | 'session'): WorkTaskLink | null {
+  return pref === 'session' ? rowSessionLink(t) : null;
+}
+
 function failed(l: Pick<WorkTaskLink, 'claude_status'>): boolean {
   return l.claude_status === 'failed';
 }

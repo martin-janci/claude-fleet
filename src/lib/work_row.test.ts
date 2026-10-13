@@ -2,7 +2,7 @@
 // open").
 import { describe, it, expect } from 'vitest';
 import { link, task } from './work_view_fixture';
-import { costChip, prChip, prNumber, stageOf, taskLine, taskTone } from './work_row';
+import { costChip, prChip, prNumber, rowClickSession, rowSessionLink, stageOf, taskLine, taskTone } from './work_row';
 
 describe('work_row', () => {
   it('reads the stage the hub sent, else one from the tracker for an older hub', () => {
@@ -46,5 +46,23 @@ describe('work_row', () => {
     expect(costChip({ cost_micros: 8_510_000 })).toBe('$8.51');
     expect(costChip({ cost_micros: 0 })).toBeNull();
     expect(costChip({})).toBeNull();
+  });
+
+  it('a row opens its primary live session under the Session pref, else the ticket', () => {
+    const two = task({
+      sessions: [
+        link({ link_id: 1, session_id: 5, primary: false }),
+        link({ link_id: 2, session_id: 6, primary: true }),
+        link({ link_id: 3, session_id: 8, state: 'ended' }),
+      ],
+    });
+    expect(rowSessionLink(two)?.session_id).toBe(6);
+    expect(rowClickSession(two, 'session')?.session_id).toBe(6);
+    expect(rowClickSession(two, 'ticket')).toBeNull();
+    const secondary = task({ sessions: [link({ session_id: 5, primary: false })] });
+    expect(rowSessionLink(secondary)?.session_id).toBe(5);
+    const ended = task({ sessions: [link({ state: 'ended' })] });
+    expect(rowClickSession(ended, 'session')).toBeNull();
+    expect(rowClickSession(task({ sessions: [] }), 'session')).toBeNull();
   });
 });

@@ -156,3 +156,19 @@ badgeCounts.subscribe((v) => writePref('ui.badgeCounts', v));
 export function badgeNumber(count: number, pref: BadgeCounts): number {
   return pref === 'off' ? 0 : count;
 }
+
+// ─── What a Work row's click opens ───────────────────────────────────────
+
+export type WorkRowClick = 'ticket' | 'session';
+
+const isWorkRowClick = (v: unknown): v is WorkRowClick => v === 'ticket' || v === 'session';
+
+/**
+ * What clicking a task in the Work list (and a Board card) opens. `ticket`
+ * (the default) selects the task and shows its detail; `session` opens the
+ * task's live session instead (its primary one, else the first), and falls
+ * back to the ticket when it has none. The row's session chip opens the
+ * session under either.
+ */
+export const workRowClick = writable<WorkRowClick>(readPref<WorkRowClick>('work.rowClick', 'ticket', isWorkRowClick));
+workRowClick.subscribe((v) => writePref('work.rowClick', v));
