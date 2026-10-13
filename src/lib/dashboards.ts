@@ -71,10 +71,20 @@ export interface WorkStats {
   groups: StatsGroup[];
   groups_more?: number;
   generated_at: number;
+  /** With `since`: one point a day, oldest first, today last (step 8). */
+  burnup?: BurnupDay[];
 }
 
-export function workStats(filters: WorkTreeFilters): Promise<Result<WorkStats>> {
-  return invokeCmd<WorkStats>('work_stats', { args: { filters } });
+/** One day of a burn-up: the tasks there were and the ones done by its end. */
+export interface BurnupDay {
+  /** The day's start, unix seconds (UTC midnight). */
+  day: number;
+  total: number;
+  done: number;
+}
+
+export function workStats(filters: WorkTreeFilters, since?: number): Promise<Result<WorkStats>> {
+  return invokeCmd<WorkStats>('work_stats', { args: { filters, ...(since !== undefined ? { since } : {}) } });
 }
 
 // ---------------------------------------------------------------------------
@@ -101,6 +111,15 @@ export type Widget =
       limit?: number;
       /** Leave the "No …" group out. */
       hide_none?: boolean;
+    }
+  | {
+      /** The query's tasks and how many were done, day by day over the
+       *  last `days` days, from their status history (step 8). */
+      kind: 'burnup';
+      title: string;
+      query: WorkTreeFilters;
+      /** 2–90; 14 when absent. */
+      days?: number;
     }
   | {
       /** Sprints or releases with their health. */
@@ -168,6 +187,7 @@ export const BUILTIN_DASHBOARDS: Record<WorkspaceId, Dashboard> = {
     intro: 'The active sprint: done against time gone, scope change, and who is blocked.',
     widgets: [
       { kind: 'buckets', title: 'Active sprint', query: { group_by: 'sprint' }, states: ['active'] },
+      { kind: 'burnup', title: 'Sprint burn-up', query: { iteration: 'current' }, days: 14 },
       { kind: 'stat', title: 'Waiting on other work', query: OPEN, value: 'blocked', warn: true },
       { kind: 'stat', title: 'In review', query: OPEN, value: 'in_review' },
       { kind: 'stat', title: 'Needs a person', query: OPEN, value: 'needs_you', warn: true },
@@ -198,15 +218,43 @@ export function queryKey(q: WorkTreeFilters): string {
   return JSON.stringify(Object.keys(q).sort().map((k) => [k, q[k as keyof WorkTreeFilters]]));
 }
 
-/** Every distinct query of `d`, by key. */
-export function dashboardQueries(d: Dashboard): Map<string, WorkTreeFilters> {
-  const out = new Map<string, WorkTreeFilters>();
+/** A burn-up's window when the widget names none. */
+export const BURNUP_DEFAULT_DAYS = 14;
+const DAY = 86_400;
+
+/** The days a widget's burn-up spans; `undefined` for any other widget. */
+export function burnupDaysOf(w: Widget): number | undefined {
+  return w.kind === 'burnup' ? (w.days ?? BURNUP_DEFAULT_DAYS) : undefined;
+}
+
+/** The read a widget answers from: its filters, and a burn-up's window. */
+export function widgetKey(w: Widget): string {
+  const days = burnupDaysOf(w);
+  return days === undefined ? queryKey(w.query) : `${queryKey(w.query)}|burnup:${days}`;
+}
+
+/** One read: the filters, and for a burn-up the days it spans. */
+export interface StatsAsk {
+  filters: WorkTreeFilters;
+  days?: number;
+}
+
+/** Every distinct read of `d`, by key. */
+export function dashboardQueries(d: Dashboard): Map<string, StatsAsk> {
+  const out = new Map<string, StatsAsk>();
   for (const w of d.widgets) {
     // Archived work counts: a done task is still done.
-    const q: WorkTreeFilters = { archived: true, ...w.query };
-    out.set(queryKey(w.query), q);
+    const filters: WorkTreeFilters = { archived: true, ...w.query };
+    const days = burnupDaysOf(w);
+    out.set(widgetKey(w), days === undefined ? { filters } : { filters, days });
   }
   return out;
+}
+
+/** A burn-up's start for `days` days ending today, as `work_stats` takes
+ *  it: the first day's UTC midnight. */
+export function burnupSince(days: number, now = Math.floor(Date.now() / 1000)): number {
+  return Math.floor(now / DAY) * DAY - (days - 1) * DAY;
 }
 
 /** Micro-USD as dollars, as the Work view writes spend. */

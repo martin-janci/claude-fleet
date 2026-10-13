@@ -655,7 +655,9 @@ function checkForm(v: unknown, p: Problems): FormSpec | null {
 
 // ── A dashboard's widgets (persona design, step 5; chat_blocks.rs `widget`) ─
 
-export const DASH_WIDGET_KINDS = ['stat', 'groups', 'buckets'] as const;
+export const DASH_WIDGET_KINDS = ['stat', 'groups', 'buckets', 'burnup'] as const;
+/** A burn-up's longest window (`BURNUP_MAX_DAYS` in stats.rs). */
+export const DASH_BURNUP_MAX_DAYS = 90;
 export const DASH_STAT_VALUES = ['total', 'open', 'needs_you', 'pct_done', 'cost', ...WORK_STAGES] as const;
 export const DASH_GROUP_SHOWS = ['stages', 'done'] as const;
 export const DASH_BUCKET_STATES = ['planned', 'active', 'closed', 'released'] as const;
@@ -760,6 +762,11 @@ function dashWidget(o: Record<string, unknown>, p: Problems, at: string): Widget
         query: query as unknown as Extract<Widget, { kind: 'buckets' }>['query'],
         ...(states ? { states } : {}),
       };
+    }
+    case 'burnup': {
+      const days = num(o, 'days', p, at, { min: 2 });
+      if (days !== undefined && days > DASH_BURNUP_MAX_DAYS) p.add(at, `\`days\` must be at most ${DASH_BURNUP_MAX_DAYS}`);
+      return { kind, title, query, ...(days !== undefined ? { days } : {}) };
     }
     default:
       return null;

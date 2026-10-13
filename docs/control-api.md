@@ -934,8 +934,13 @@ Index by area (names only; see the reference for details):
   members the caller sees that joined or left after the start). An agent
   asked "how is the sprint going" reads this and answers with a `results`
   card (`docs/chat-blocks.md`). Every change of an item's stored status is
-  also logged by triggers in `work_status_log` (migration 170), so later
-  burn-up and cycle-time reads have history to draw from.
+  also logged by triggers in `work_status_log` (migration 170). With
+  `since` (a unix time at most 90 days back), the answer also carries
+  `burnup`: one `{ day, total, done }` a day from `since`'s day to today
+  (`day` is the UTC midnight), the matching tasks there were and how many
+  were done by the day's end, from that history. History starts the day
+  migration 170 ran: a task with no history row counts for the whole window
+  in the stage it has now.
   `work { action: "local_items" }` lists local items (`id`, `key`, `title`,
   `created_at`, `updated_at`, `live_sessions`), newest change first.
   Readonly tokens cannot name or rename. A per-host token names work only on

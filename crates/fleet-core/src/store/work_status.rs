@@ -349,6 +349,35 @@ impl Store {
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
+
+    /// The status history of each of `item_ids` as `(at, category)`, oldest
+    /// first; an item with none is absent. Read in chunks, so a dashboard
+    /// over thousands of tasks is a handful of queries.
+    pub fn status_logs(
+        &self,
+        item_ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, Vec<(i64, String)>>, IpcError> {
+        let mut out: std::collections::HashMap<i64, Vec<(i64, String)>> = Default::default();
+        for chunk in item_ids.chunks(500) {
+            let marks = vec!["?"; chunk.len()].join(",");
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT item_id, at, category FROM work_status_log \
+                 WHERE item_id IN ({marks}) ORDER BY item_id, at, id"
+            ))?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (item, at, category) = row?;
+                out.entry(item).or_default().push((at, category));
+            }
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]

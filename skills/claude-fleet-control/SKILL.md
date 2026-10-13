@@ -288,8 +288,9 @@ When the person asks for a dashboard, or for a view they will come back
 to ("how is release 4.2 doing, every morning"), answer with a `dashboard`
 block: `id` (letters, digits, `. _ : -`), `title`, `intro`, `why`, and 1–12
 `widgets`, each `stat` (`value`: total, open, needs_you, pct_done, cost or
-a stage), `groups` (`query.group_by`; `show`: stages or done) or
-`buckets` (`query.group_by`: sprint or release; `states`). A widget's
+a stage), `groups` (`query.group_by`; `show`: stages or done),
+`buckets` (`query.group_by`: sprint or release; `states`) or `burnup`
+(done against scope per day; `days`, 2–90). A widget's
 `query` takes the Work view's filters (`status`, `mine`, `stages`,
 `group_by`, `epic`, `iteration`, `assignee`, …). Never write a number: the
 app counts each query itself under the person's access. Check the filters

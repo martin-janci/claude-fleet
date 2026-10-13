@@ -317,6 +317,12 @@ Each widget has a `kind`, a `title` (≤ 80) and a `query`:
   done against time gone, the dates, the goal and the scope change since
   the start. `states` keeps only `planned`, `active`, `closed` or
   `released` ones.
+- `{ "kind": "burnup", "title", "query"?, "days"? }`: the query's tasks
+  and how many were done, day by day over the last `days` days (2–90,
+  default 14), as two lines on one axis (scope dashed, done solid), from
+  the tasks' status history (`work { stats, since }`). History starts the
+  day the hub began keeping it; a task older than that counts for the whole
+  window in its stage now.
 
 A `query` is the Work view's filters (`work { tree }`'s `filters`): `org`
 (an id or `none`), `status` (`any`, `open`, `todo`, `in_progress`, `done`),
