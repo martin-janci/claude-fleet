@@ -1723,8 +1723,28 @@ impl Graph {
             Some(row) => row.project_id,
             None => l.link.snap_project_id,
         }?;
-        let p = self.projects.get(&pid)?;
+        self.repo_label(pid)
+    }
+
+    /// A project as the repo a group is named after: `owner/repo`, and
+    /// nothing for a local (or empty) owner.
+    fn repo_label(&self, project_id: i64) -> Option<String> {
+        let p = self.projects.get(&project_id)?;
         (p.owner != "local" && !p.owner.is_empty()).then(|| format!("{}/{}", p.owner, p.repo))
+    }
+
+    /// The repo of the project a native item runs in: its own, else the
+    /// nearest parent's that names one (a subtask is filed with none), at
+    /// most `LOCAL_DEPTH_MAX` hops up, as [`Self::item_org`] climbs.
+    fn item_repo(&self, item: &ViewItem) -> Option<String> {
+        let mut cur = item;
+        for _ in 0..=crate::store::LOCAL_DEPTH_MAX {
+            if let Some(pid) = cur.item.project_id {
+                return self.repo_label(pid);
+            }
+            cur = self.items.get(&cur.item.parent_id?)?;
+        }
+        None
     }
 }
 
@@ -2063,10 +2083,16 @@ fn group_of(
             tracker_value: Some(c),
         };
     }
-    if let Some(repo) = repos.first() {
+    // The repo its sessions run in, else its project's: a task nobody has
+    // started yet has no link to read one from.
+    if let Some(repo) = repos
+        .first()
+        .cloned()
+        .or_else(|| item.and_then(|i| g.item_repo(i)))
+    {
         return GroupRef {
             id: format!("repo:{repo}"),
-            label: repo.clone(),
+            label: repo,
             source: "repo".into(),
             rule_id: None,
             tracker_value: None,
