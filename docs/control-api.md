@@ -1972,7 +1972,7 @@ automatically on app start.
   `tool`, `summary`, `caller`, `operator`, `asked_at`) and answers one with
   `answer_mcp_confirm` (`nonce`, `approved`; `false` when it was already
   answered or expired). `control_route` (redesign step 9.9, Jev K2,
-  `decide.jev.control_route`) tells the owner's device where a message just
+  `decide.jev.control_route`) tells a fleet admin's device where a message just
   sent in Control goes: `propose {text}` answers `{outcome: proposed | ask |
   none, target?, proposal?, targets, run_id?}` over the active missions and
   running sessions, and `follow {run_id, chosen}` records the person's pick.

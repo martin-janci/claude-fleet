@@ -167,13 +167,16 @@ seeded with the client `fleet`, the realm roles `fleet-admin`,
 those groups (`store/realm.rs`); `set_org_member`, `remove_org_member` and
 `fleet-hub org member` keep their shape and write group membership.
 `Caller.is_fleet_admin` (the realm role `fleet-admin`; the hub's owner
-always) decides fleet-wide administration where the single owner did.
+always) decides fleet-wide administration where the single owner did, from
+a device bound to no org — a fleet admin who is or was an org member has
+their devices fenced like any member's; only the owner is exempt.
 Trust and the personal asset grant are the person's (`fleet-trusted`,
 `assets-admin`): a device is trusted when its person holds the role and
 the device is `full`, and untrusting is refused while a group still grants
 it. `admin_events` (182) is an append-only audit log written by
-`org_admin`, `realm_admin`, the master's client tools, pairing, SSO
-provisioning and most of the hub CLI, kept `auth.audit_retention_days` (365). A
+`org_admin`, `realm_admin`, the master's `revoke_client` /
+`set_client_trust`, pairing, SSO provisioning and `fleet-hub
+person|client|realm`, kept `auth.audit_retention_days` (365). A
 disabled person can be re-enabled (`fleet-hub person enable`). Device
 tokens expire after `auth.device_token_ttl_days` (90, `0` never) unused or
 `auth.device_token_max_age_days` (`0` off) after pairing — a 401, "pair
@@ -187,8 +190,8 @@ desktop's read-only Settings → Groups and People's *Roles* section.
 Breaking: trusting a device trusts every `full` device of its person; SSO
 no longer auto-provisions; device tokens expire after 90 idle days. Known
 gaps: a pairing code carries no minter (a mint by `pair_client` or
-`fleet-hub pair` records no event), `fleet-hub client bind` and
-`fleet-hub org member add|rm` record no event, and `list_clients` and `catalog_grantees` for `personal` still show
+`fleet-hub pair` records no event), `fleet-hub client bind`, `fleet-hub
+org …` and the master's `work_admin` org actions record none, and `list_clients` and `catalog_grantees` for `personal` still show
 the per-device trust / grant mirror. Not built: sub-projects 2–6 (the
 hub's own IdP, fleet clients on OIDC, passkeys and e-mail, brokering, and
 editing administration with realm export / import — the spec's roadmap);

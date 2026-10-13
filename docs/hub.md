@@ -1516,23 +1516,35 @@ a time with `client revoke`); and it is not undone by **re-enabling** —
 someone who comes back sign in and be paired again, but gives back none of
 their devices, shares, groups, org memberships or roles: pair and add them
 again. Re-enabling is refused while a live person holds their name or email
-address. No tool over
-the control API disables anybody either: this is a command on the hub machine,
-run as the person at its console, like `client bind-person` and `session
-claim`. It needs no running hub, and a running one honours it from its next
-request.
+address. Over the control API, a fleet admin's trusted `full` device
+disables and re-enables people too (`org_admin { disable_person |
+enable_person }`, `realm_admin { disable_user | enable_user }`), and nobody
+disables themselves; the command here is the hub machine's own, run as the
+person at its console, like `client bind-person` and `session claim`. It
+needs no running hub, and a running one honours it from its next request.
+The hub's owner can never be disabled, by either.
 
 ### Administration, trust, expiry and the audit log
 
 **Who administers the fleet is a role, not one person.** A person holding
 the realm role `fleet-admin` — mapped to them directly, through a group, or
-through a composite role — administers the fleet from their devices: the
-fleet's settings, `org_admin` over every org, and the other tools that
-used to be the hub owner's alone. The hub's owner always counts as one,
-and migration 181 maps the role to them; the master token and an
-admin-scoped named token keep it as before. `fleet-hub realm role map
-fleet-admin --user ada` makes a colleague one. Nobody removes their own
-`fleet-admin`, and it never leaves the hub's owner or its last holder.
+through a composite role — administers the fleet from a device of theirs
+**bound to no org**: the fleet's settings, `org_admin` over every org, and
+the other tools that used to be the hub owner's alone. The hub's owner
+always counts as one, and migration 181 maps the role to them; the master
+token and an admin-scoped named token keep it as before. Nobody removes
+their own `fleet-admin`, and it never leaves the hub's owner or its last
+holder.
+
+`fleet-hub realm role map fleet-admin --user ada` makes a colleague one,
+and it reaches the whole fleet only when ada is in no org and never was.
+A person who is, or was, a member of an org has their devices fenced by
+those memberships like any member's (*Companies: members and roles*): a
+live member's device acts on their org, with that org's authority at
+most, whatever roles they hold, and taking them out of the org does not
+unfence it — a former member's devices read nothing of any org. Binding
+the device elsewhere does not change that either. Only the hub's owner is
+exempt.
 
 **Trust and the personal asset grant are the person's** (realm roles
 `fleet-trusted` and `assets-admin`; see *Trusted* and the asset grant under
@@ -1554,7 +1566,9 @@ Limits; changing either re-reads every cached token.
 enable_person }`, `realm_admin { enable_user }`) undoes the disable flag
 only; see *People and devices* above.
 
-**The audit log.** Every administrative change is an admin event
+**The audit log.** Every change made through `org_admin`, `realm_admin`,
+the master's `revoke_client` / `set_client_trust`, pairing, SSO
+provisioning and `fleet-hub person|client|realm` is an admin event
 (`admin_events`, migration 182): when, the acting person and device (none
 for the operator on the hub machine), the action, the resource's type and
 id, and what the change said, with every key that could hold a secret
@@ -1572,7 +1586,11 @@ or `fleet-hub realm audit`.
 What is not recorded yet: a pairing code carries no minter, so a code
 minted by `pair_client` or `fleet-hub pair` leaves no event until it is
 redeemed (and then names the device, not who minted it); `fleet-hub client
-bind` (a device's org) and `fleet-hub org member add|rm` record none.
+bind` (a device's org) records none, and neither do `fleet-hub org …`
+(`member add|rm|grants`, `own-hub`, `unclaimed-count`, and the org,
+rule, host and tracker commands it routes through `work_admin`) and the
+master's `work_admin` org actions — though their `org_admin` equivalents
+do.
 
 ### Companies: members and roles
 
@@ -1589,8 +1607,11 @@ three roles:
 A member's **devices follow their memberships**: a colleague's phone is fenced
 to the org they are in (to one of them, when they are in several — `bind_device`
 picks which), and a viewer's phone is read-only whatever it was paired as. The
-hub's owner and a person in no org keep whatever their device was bound to, so
-an upgrade changes nobody. A person taken out of their last org keeps their
+hub's owner and a person in no org (who never was in one) keep whatever their
+device was bound to, so an upgrade changes nobody. This holds for a fleet
+admin too: only the hub's owner is exempt, so a colleague given
+`fleet-admin` administers the fleet only while they are in no org and never
+were. A person taken out of their last org keeps their
 row and their sessions, but their devices then read nothing of any org — a
 departed colleague does not fall back to the whole fleet's work.
 
