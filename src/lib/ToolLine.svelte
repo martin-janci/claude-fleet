@@ -3,6 +3,8 @@
   // target, duration, failure mark) that expands to the call's input and
   // result. The detail is not in the poll payload; it is read on the first
   // expand through `session_tool_detail` and kept for the row's lifetime.
+  // A session's `debug_devices` call expands to the device it acted on
+  // rather than raw JSON, and any result's images are drawn inline.
   import { untrack } from 'svelte';
   import {
     toolDetail,
@@ -19,6 +21,9 @@
   import Icon from './kit/Icon.svelte';
   import type { OfIconName as IconName } from './kit/icons';
   import { lineDiff, splitPath, parseNumbered, parseTodos, parseFileList, inputField, detailKind } from './tool_view';
+  import { DEVICE_TOOL, deviceCallLine, parseDeviceCall, parseDeviceResult } from './debug_devices';
+  import DeviceSummary from './DeviceSummary.svelte';
+  import ImageShot from './ImageShot.svelte';
 
   let {
     line,
@@ -84,7 +89,9 @@
   }
 
   const verb = $derived(toolVerb(line.name || toolName(line.summary)));
-  const target = $derived(shortTarget(line.target) ?? argsOf(line.summary));
+  /** A device call's input, once its detail is read. */
+  const deviceCall = $derived(detail?.name === DEVICE_TOOL ? parseDeviceCall(detail.input) : null);
+  const target = $derived(deviceCall ? deviceCallLine(deviceCall) : (shortTarget(line.target) ?? argsOf(line.summary)));
   const elapsed = $derived(toolDurationMs(line.at, line.ended_at, line.done || !live ? null : nowMs));
   const noResult = $derived(!line.done && !live);
   // Redesign 5.14 (LoadersInFlows, Chat · Agent tool calls): a
@@ -144,13 +151,20 @@
   const todos = $derived(kind === 'todos' && detail ? parseTodos(detail.input) : null);
   const files = $derived(kind === 'files' && detail?.result != null && !detail.is_error ? parseFileList(detail.result) : null);
   const pattern = $derived(kind === 'files' && detail ? inputField(detail.input, 'pattern') : null);
+  const deviceView = $derived(
+    kind === 'device' && detail?.result != null && !detail.is_error ? parseDeviceResult(detail.result) : null,
+  );
   /** A structured view stands in for the raw result; the success line an
    *  edit or TodoWrite answers with ("The file … has been updated") says
    *  nothing the view does not, so it is shown only when it is an error. */
   const hideResult = $derived(
     detail !== null &&
       !detail.is_error &&
-      ((kind === 'edit' && diffView !== null) || numbered !== null || files !== null || (kind === 'todos' && todos !== null)),
+      ((kind === 'edit' && diffView !== null) ||
+        numbered !== null ||
+        files !== null ||
+        (kind === 'todos' && todos !== null) ||
+        (deviceView !== null && deviceView.kind !== 'text')),
   );
 
   const ICONS: Record<string, IconName> = {
@@ -164,6 +178,7 @@
     Glob: 'search',
     WebSearch: 'search',
     TodoWrite: 'list',
+    [DEVICE_TOOL]: 'hosts',
   };
   const icon = $derived<IconName>(ICONS[line.name || toolName(line.summary)] ?? 'toolkit');
   const TODO_ICON: Record<string, IconName> = { completed: 'circle-check', in_progress: 'circle-half', pending: 'circle' };
@@ -280,6 +295,37 @@
               <li class={t.status}><Icon name={TODO_ICON[t.status]} size={14} /><span>{t.content}</span></li>
             {/each}
           </ul>
+        {:else if kind === 'device'}
+          {#if deviceCall}
+            <div class="head" data-testid="conv-device-call">
+              <span class="path"><span class="base">{deviceCallLine(deviceCall)}</span></span>
+              {#if deviceCall.args}<span class="dref mono" title={deviceCall.args.join(' ')}>{deviceCall.args.join(' ')}</span>{/if}
+              {#if deviceCall.path}<span class="dref mono" title={deviceCall.path}>{deviceCall.path}</span>{/if}
+            </div>
+          {/if}
+          {#if deviceView?.kind === 'device'}
+            <div class="dcard" data-testid="conv-device-result"><DeviceSummary device={deviceView.device} nowSecs={nowMs / 1000} /></div>
+          {:else if deviceView?.kind === 'list'}
+            <ul class="dlist" data-testid="conv-device-list">
+              {#each deviceView.devices as d (d.id)}
+                <li><DeviceSummary device={d} nowSecs={nowMs / 1000} compact /></li>
+              {:else}
+                <li class="muted">No devices.</li>
+              {/each}
+            </ul>
+          {:else if deviceView?.kind === 'output'}
+            <div class="result-wrap">
+              <pre class="result out" data-testid="conv-device-output">{deviceView.output.output || '(no output)'}</pre>
+              <div class="copy-slot"><CopyButton text={deviceView.output.output} label="Copy output" /></div>
+            </div>
+            <p class="muted">
+              Exit {deviceView.output.exit_code}{#if deviceView.output.truncated} · output truncated at 256 KiB{/if}
+            </p>
+          {/if}
+          <details class="raw-input">
+            <summary>Input</summary>
+            <pre class="input">{detail.input}</pre>
+          </details>
         {:else if kind !== 'read' && kind !== 'files'}
           <pre class="input">{detail.input}</pre>
         {/if}
@@ -297,6 +343,18 @@
           {/if}
         {:else if detail.result === null}
           <p class="muted">No result yet.</p>
+        {/if}
+        {#if detail.images?.length}
+          <div class="images" data-testid="conv-tool-images">
+            {#each detail.images as img, k (k)}
+              <ImageShot mime={img.mime} data={img.data} alt={`Image ${k + 1} of the ${verb} result`} testid="conv-tool-image" />
+            {/each}
+          </div>
+        {/if}
+        {#if detail.images_omitted}
+          <p class="muted" data-testid="conv-tool-images-omitted">
+            {detail.images_omitted} more {detail.images_omitted === 1 ? 'image' : 'images'} not shown
+          </p>
         {/if}
       </div>
     {:else}
@@ -589,6 +647,40 @@
     position: absolute;
     top: 0.25rem;
     right: 0.35rem;
+  }
+  .dref {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--fg-muted);
+  }
+  .dcard {
+    margin: 0 0 0.4rem;
+  }
+  .dlist {
+    list-style: none;
+    margin: 0 0 0.4rem;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+  .out {
+    max-height: 24rem;
+    overflow: auto;
+    font-family: var(--mono);
+  }
+  .raw-input summary {
+    cursor: pointer;
+    color: var(--fg-muted);
+    font-size: var(--text-2xs);
+  }
+  .images {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-top: 0.35rem;
   }
   .result[data-error] {
     color: var(--usage-crit);

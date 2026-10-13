@@ -282,3 +282,122 @@ describe('ToolLine state mark (redesign 5.14, New layout)', () => {
     await expectAccessible(container);
   });
 });
+
+describe('ToolLine: a debug_devices call', () => {
+  const DEVICE = 'mcp__claude-fleet__debug_devices';
+  const pixel = {
+    id: 3,
+    title: 'bench pixel',
+    host: 'mac',
+    platform: 'android',
+    kind: 'physical',
+    key: 'usb:R5CT',
+    name: 'Pixel 9',
+    os_version: '16',
+    state: 'online',
+    ready: true,
+    shared: false,
+    claimed_by: 'host:mercury#42',
+    claimed_until: 1_000 + 12 * 60,
+    claim_note: 'login flow',
+    waiting: 1,
+    first_seen_at: 1,
+    last_seen_at: 2,
+  };
+  const deviceLine = line({ name: DEVICE, target: null, summary: DEVICE });
+
+  it('leads with Device and shows the device it answered, not raw JSON', async () => {
+    mockedDetail.mockResolvedValue({
+      ok: true,
+      value: detail({ name: DEVICE, command: null, input: '{\n  "action": "claim",\n  "device": "bench pixel"\n}', result: JSON.stringify(pixel) }),
+    });
+    render(ToolLine, { line: deviceLine, sessionId: 1, claudeSessionId: null, nowMs: 1_000_000, live: false });
+    expect(screen.getByTestId('conv-tool').textContent).toContain('Device');
+    await fireEvent.click(screen.getByTestId('conv-tool'));
+    await settle();
+    expect(screen.getByTestId('conv-tool').textContent).toContain('claim · bench pixel');
+    const card = screen.getByTestId('conv-device-result');
+    expect(card.textContent).toContain('bench pixel');
+    expect(card.textContent).toContain('on mac');
+    expect(screen.getByTestId('device-state').textContent).toBe('Online');
+    expect(screen.getByTestId('device-holder').textContent).toContain('session #42 on mercury');
+    expect(screen.getByTestId('device-holder').textContent).toBe('Held by session #42 on mercury · 12 min left · “login flow”');
+    expect(screen.getByTestId('device-queue').textContent).toContain('1 waiting');
+    // The raw JSON is only behind the Input disclosure.
+    expect(screen.queryByTestId('conv-tool-result')).toBeNull();
+    expect(screen.getByText('Input').closest('details')?.open).toBe(false);
+  });
+
+  it('a list result is a compact list, a run result its output', async () => {
+    mockedDetail.mockResolvedValueOnce({
+      ok: true,
+      value: detail({ name: DEVICE, command: null, input: '{"action":"list"}', result: JSON.stringify({ devices: [pixel, { ...pixel, id: 4, title: 'iPhone 16' }] }) }),
+    });
+    const { unmount } = render(ToolLine, { line: deviceLine, sessionId: 1, claudeSessionId: null, nowMs: 0, live: false });
+    await fireEvent.click(screen.getByTestId('conv-tool'));
+    await settle();
+    expect(screen.getByTestId('conv-device-list').querySelectorAll('li')).toHaveLength(2);
+    unmount();
+
+    mockedDetail.mockResolvedValueOnce({
+      ok: true,
+      value: detail({ name: DEVICE, command: null, input: '{"action":"run","device":"pixel","args":["shell","ls"]}', result: '{"exit_code":0,"output":"sdcard","truncated":true}' }),
+    });
+    render(ToolLine, { line: deviceLine, sessionId: 1, claudeSessionId: null, nowMs: 0, live: false });
+    await fireEvent.click(screen.getByTestId('conv-tool'));
+    await settle();
+    expect(screen.getByTestId('conv-device-output').textContent).toBe('sdcard');
+    expect(screen.getByTestId('conv-tool-detail').textContent).toContain('output truncated');
+  });
+
+  it('draws a screenshot result as an image that opens full size', async () => {
+    mockedDetail.mockResolvedValue({
+      ok: true,
+      value: detail({
+        name: DEVICE,
+        command: null,
+        input: '{"action":"screenshot","device":"pixel"}',
+        result: 'bench pixel on mac: 3 bytes',
+        images: [{ mime: 'image/png', data: 'AAEC' }],
+        images_omitted: 2,
+      }),
+    });
+    render(ToolLine, { line: deviceLine, sessionId: 1, claudeSessionId: null, nowMs: 0, live: false });
+    await fireEvent.click(screen.getByTestId('conv-tool'));
+    await settle();
+    expect(screen.getByTestId('conv-tool-result').textContent).toContain('3 bytes');
+    const img = screen.getByTestId('conv-tool-image').querySelector('img')!;
+    expect(img.getAttribute('src')).toBe('data:image/png;base64,AAEC');
+    expect(screen.getByTestId('conv-tool-images-omitted').textContent).toContain('2 more images not shown');
+    await fireEvent.click(screen.getByTestId('conv-tool-image'));
+    const full = screen.getByTestId('conv-tool-image-full');
+    expect(full.getAttribute('role')).toBe('dialog');
+    await fireEvent.keyDown(full, { key: 'Escape' });
+    expect(screen.queryByTestId('conv-tool-image-full')).toBeNull();
+  });
+
+  it('any tool’s images are drawn, and a non-image type is not', async () => {
+    mockedDetail.mockResolvedValue({
+      ok: true,
+      value: detail({ images: [{ mime: 'image/jpeg', data: '/9j/' }, { mime: 'text/html', data: 'PGI+' }] }),
+    });
+    render(ToolLine, { line: line(), sessionId: 1, claudeSessionId: null, nowMs: 0, live: false });
+    await fireEvent.click(screen.getByTestId('conv-tool'));
+    await settle();
+    const imgs = screen.getAllByTestId('conv-tool-image');
+    expect(imgs).toHaveLength(1);
+    expect(imgs[0].querySelector('img')?.getAttribute('src')).toBe('data:image/jpeg;base64,/9j/');
+  });
+
+  it('an error result keeps the error styling', async () => {
+    mockedDetail.mockResolvedValue({
+      ok: true,
+      value: detail({ name: DEVICE, command: null, input: '{"action":"claim","device":"pixel"}', result: 'E_CONFLICT: held by host:mac#7', is_error: true }),
+    });
+    render(ToolLine, { line: { ...deviceLine, error: true }, sessionId: 1, claudeSessionId: null, nowMs: 0, live: false });
+    await fireEvent.click(screen.getByTestId('conv-tool'));
+    await settle();
+    expect(screen.getByTestId('conv-tool-result').getAttribute('data-error')).toBe('true');
+    expect(screen.queryByTestId('conv-device-result')).toBeNull();
+  });
+});

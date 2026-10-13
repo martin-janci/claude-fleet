@@ -402,6 +402,7 @@ pub const HOST_BOUND_HIDDEN_KINDS: &[&str] = &[
     "local_workspace",
     "confirm",
     "handoff",
+    "dashboards",
 ];
 
 /// Narrow the requested kinds for a host-bound caller; everyone else keeps
@@ -593,6 +594,15 @@ pub(crate) const KIND_FENCES: &[(&str, KindFence)] = &[
             sent where is read through `control_handoffs`, which answers the hub's personal \
             owner on their own paired device only; anyone else learns that SOME receipt was \
             written and nothing more. Host-bound hidden besides",
+        ),
+    ),
+    (
+        "dashboards",
+        KindFence::NoSessionContent(
+            "nothing: `RowChange::DashboardsChanged` is an empty object. Which dashboards \
+            are pinned is read through `dashboards`, which answers each person their own \
+            rows only; anyone else learns that SOME person's pins moved and nothing more. \
+            Host-bound hidden besides",
         ),
     ),
 ];

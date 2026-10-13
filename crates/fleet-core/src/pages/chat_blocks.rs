@@ -35,6 +35,7 @@ pub const KINDS: &[&str] = &[
     "setting",
     "wizard",
     "dashboard",
+    "device",
 ];
 /// The app's wizards a `wizard` block may open in the chat (redesign 10.12):
 /// the ones in `src/lib/forms/wizards/` whose last button runs in the chat
@@ -61,7 +62,9 @@ pub const RESULT_CHARTS: &[&str] = &["line", "bar", "sparkline"];
 const RESULT_ITEM_TYPES: &[&str] = &["stat", "chart", "table"];
 /// What a `dashboard` block's widgets are (persona design, step 5): the
 /// widgets of `src/lib/dashboards.ts`, drawn from `work { stats }`.
-pub const DASH_WIDGET_KINDS: &[&str] = &["stat", "groups", "buckets"];
+pub const DASH_WIDGET_KINDS: &[&str] = &["stat", "groups", "buckets", "burnup"];
+/// A burn-up's longest window (`BURNUP_MAX_DAYS` in service/work/stats.rs).
+pub const DASH_BURNUP_MAX_DAYS: u32 = 90;
 /// The Work view's stages (`WORK_STAGES` in work_view.ts).
 pub const WORK_STAGES: &[&str] = &["backlog", "in_progress", "in_review", "blocked", "done"];
 pub const DASH_STAT_VALUES: &[&str] = &[
@@ -271,6 +274,20 @@ pub enum BlockKind {
         why: Option<String>,
         widgets: Vec<DashWidget>,
     },
+    /// A debug device (`docs/debug-devices.md`), drawn live from the
+    /// person's own list: its state, who holds or waits for it, and a
+    /// screenshot or a mirror on a click.
+    Device {
+        /// An id (`#12`), label, name, serial or key, optionally as
+        /// `host/that`: what `debug_devices` takes as `device`.
+        device: String,
+        /// A heading over the device; its own title when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        /// Markdown under the device: what to look at on it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
 }
 
 /// One widget of a `dashboard` block.
@@ -303,6 +320,17 @@ pub enum DashWidget {
         /// Leave the "No …" group out.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hide_none: Option<bool>,
+    },
+    /// A burn-up: for each of the last `days` days, the query's tasks and
+    /// how many of them were done by the day's end, from their status
+    /// history (`work { stats, since }`).
+    Burnup {
+        title: String,
+        #[serde(default)]
+        query: DashQuery,
+        /// 2–90 (default 14).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        days: Option<u32>,
     },
     /// Sprints or releases (`query.group_by`) with their health.
     Buckets {
@@ -657,6 +685,11 @@ pub fn check(v: &Value) -> Result<(), Vec<String>> {
             let widgets = p.arr(o, "widgets", "", 1, 12);
             p.each(&widgets, "widget", dash_widget);
         }
+        "device" => {
+            p.str(o, "device", "", true, 200);
+            p.str(o, "title", "", false, 120);
+            p.str(o, "note", "", false, 2000);
+        }
         _ => unreachable!("kind is one of KINDS"),
     }
     if p.0.is_empty() {
@@ -695,6 +728,12 @@ fn dash_widget(p: &mut Problems, o: &Map<String, Value>, at: &str) {
             }
             if let Some(states) = p.opt_arr(o, "states", at, 1, DASH_BUCKET_STATES.len()) {
                 p.one_of_each(&states, &format!("{at} › state"), DASH_BUCKET_STATES);
+            }
+        }
+        Some("burnup") => {
+            let days = p.num(o, "days", at, 2);
+            if days.is_some_and(|d| d > f64::from(DASH_BURNUP_MAX_DAYS)) {
+                p.add(at, format!("`days` must be at most {DASH_BURNUP_MAX_DAYS}"));
             }
         }
         _ => {}

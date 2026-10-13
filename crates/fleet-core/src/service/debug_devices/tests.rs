@@ -306,6 +306,39 @@ fn a_lapsed_claim_passes_to_the_first_in_line() {
 }
 
 #[test]
+fn a_person_reads_a_held_device_without_its_claim_and_a_host_does_not() {
+    let (st, b1) = shared_b1();
+    let id: i64 = b1.parse().unwrap();
+    claim(&st, &host(&st, "a"), &b1, Some(600), None, false).unwrap();
+    let until = || {
+        st.lock()
+            .unwrap()
+            .debug_device(id)
+            .unwrap()
+            .unwrap()
+            .claimed_until
+    };
+    let before = until();
+    // A person looks: allowed, and the holder's claim is not touched.
+    assert_eq!(readable(&st, &person(), &b1).unwrap().id, id);
+    assert_eq!(until(), before);
+    // Another host's session may not, as for any use.
+    assert_eq!(
+        readable(&st, &host(&st, "c"), &b1).unwrap_err().code,
+        codes::E_CONFLICT
+    );
+    // Reading still needs a ready device.
+    st.lock()
+        .unwrap()
+        .debug_device_set_state(id, "offline")
+        .unwrap();
+    assert_eq!(
+        readable(&st, &person(), &b1).unwrap_err().code,
+        codes::E_INVALID_STATE
+    );
+}
+
+#[test]
 fn an_expired_claim_reads_as_none() {
     let st = fleet();
     let a1 = id_of(&st, "A1");
