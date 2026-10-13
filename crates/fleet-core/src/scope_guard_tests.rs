@@ -1835,6 +1835,23 @@ const ORG_HALF_SITES: &[OrgHalf] = &[
                       host binding",
     },
     OrgHalf {
+        file: "crates/fleet-core/src/service/work/wrapup.rs",
+        func: "request",
+        nth: 0,
+        code: "if row.host_alias != h || !scope.sees_row_org_only(&row) {",
+        person_half: "`resolve_row_person_gated(.., Reach::Drive, ..)` in \
+                      `work_link { action: wrap_up }` — drive, because a \
+                      wrap-up request types into the pane",
+    },
+    OrgHalf {
+        file: "crates/fleet-core/src/service/work/wrapup.rs",
+        func: "request",
+        nth: 1,
+        code: "} else if !scope.sees_row_org_only(&row) {",
+        person_half: "the same `resolve_row_person_gated`, for a caller with no \
+                      host binding",
+    },
+    OrgHalf {
         // `person_sees` IS the body of `require_person_sees`; T11 split the
         // two so the long-poll re-check could reuse the one gate in the
         // service layer's error type, and the call moved with the body.
