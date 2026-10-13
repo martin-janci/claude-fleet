@@ -788,15 +788,9 @@ fn check_path(p: &Path, at: &str, scope: Scope, out: &mut Vec<String>) {
     }
 }
 
-/// PURE: every problem with a definition; empty when it is fine.
-/// `templates` are `skill.md`'s named body templates.
-pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<String> {
-    let mut out = Vec::new();
-
-    // ── inputs: the form validator's rules, plus the reference types ──
-    if d.inputs.len() > MAX_INPUTS {
-        out.push(format!("inputs: at most {MAX_INPUTS}"));
-    }
+/// PURE: the definition's inputs as a one-step form (a reference input is
+/// a text field: fleet checks the value itself); `None` without inputs.
+pub fn inputs_form(d: &Definition) -> Option<FormSpec> {
     let fields: Vec<FormField> = d
         .inputs
         .iter()
@@ -827,8 +821,39 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
             disabled_reason: None,
             drafted: None,
             secret_note: None,
+            env_target: None,
         })
         .collect();
+    if fields.is_empty() {
+        return None;
+    }
+    Some(FormSpec {
+        spec: forms::FORM_SPEC_VERSION.into(),
+        title: "inputs".into(),
+        intro: None,
+        submit: None,
+        save_later: false,
+        steps: vec![FormStep {
+            title: "Inputs".into(),
+            name: None,
+            kind: Default::default(),
+            intro: None,
+            when: None,
+            fields,
+        }],
+        checks: Vec::new(),
+    })
+}
+
+/// PURE: every problem with a definition; empty when it is fine.
+/// `templates` are `skill.md`'s named body templates.
+pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<String> {
+    let mut out = Vec::new();
+
+    // ── inputs: the form validator's rules, plus the reference types ──
+    if d.inputs.len() > MAX_INPUTS {
+        out.push(format!("inputs: at most {MAX_INPUTS}"));
+    }
     for i in d.inputs.iter().filter(|i| i.kind.is_reference()) {
         if i.options.is_some() || i.max_len.is_some() || i.placeholder.is_some() {
             out.push(format!(
@@ -837,23 +862,7 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
             ));
         }
     }
-    if !fields.is_empty() {
-        let form = FormSpec {
-            spec: forms::FORM_SPEC_VERSION.into(),
-            title: "inputs".into(),
-            intro: None,
-            submit: None,
-            save_later: false,
-            steps: vec![FormStep {
-                title: "Inputs".into(),
-                name: None,
-                kind: Default::default(),
-                intro: None,
-                when: None,
-                fields,
-            }],
-            checks: Vec::new(),
-        };
+    if let Some(form) = inputs_form(d) {
         for p in forms::validate(&form) {
             out.push(format!("inputs: {}", p.trim_start_matches("step 1 › ")));
         }

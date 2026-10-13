@@ -332,3 +332,198 @@ fn the_catalog_loads_a_fleet_agent_and_installs_nothing() {
         cat.problems
     );
 }
+
+mod grants {
+    //! Step 2: an instance's grant, checked against the example.
+    use super::super::grant::{self, prepare, probe_problem, Sources};
+    use super::example;
+    use crate::ipc_error::codes;
+    use crate::service::agents::admin::AgentsArgs;
+    use crate::service::catalog::model::AssetSpec;
+    use crate::store::Store;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    fn server(placeholder: &str) -> AssetSpec {
+        AssetSpec::McpServer {
+            transport: "stdio".into(),
+            url: None,
+            headers: BTreeMap::new(),
+            command: Some("node".into()),
+            args: vec!["/opt/sa/index.js".into()],
+            env: [("TOKEN".to_string(), format!("${{{placeholder}}}"))].into(),
+        }
+    }
+
+    fn sources() -> Sources {
+        let (yaml, skill) = example();
+        Sources {
+            definition: super::load(&yaml, &skill).unwrap(),
+            servers: [
+                ("graylog".to_string(), server("GRAYLOG_API_TOKEN")),
+                ("kb".to_string(), server("KB_TOKEN")),
+            ]
+            .into(),
+        }
+    }
+
+    /// A store with host `box`, project `o/r` and Jira tracker 1.
+    fn store() -> (Store, i64, i64) {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("box").unwrap();
+        let pid = s.upsert_project("o", "r", "/p/o/r").unwrap();
+        let tid = s
+            .add_tracker("jira", "Jira", "https://acme.atlassian.net")
+            .unwrap()
+            .id;
+        (s, pid, tid)
+    }
+
+    fn args(pid: i64, tid: i64) -> AgentsArgs {
+        AgentsArgs {
+            action: "grant".into(),
+            agent: Some("fleet".into()),
+            scope: Some("l2-prod".into()),
+            level: Some("propose".into()),
+            host: Some("box".into()),
+            project_id: Some(pid),
+            definition: Some("l2-support".into()),
+            config: Some(json!({ "jira_tracker": tid.to_string(), "project": "L2S" })),
+            bindings: Some(json!([
+                { "role": "logs", "server": "graylog", "name": "logs-prod",
+                  "env": { "GRAYLOG_API_TOKEN": "${GRAYLOG_PROD_TOKEN}" } },
+                { "role": "kb", "server": "kb" },
+                { "role": "memory", "namespace": "shared:l2-fingerprints" }
+            ])),
+            hours: Some(1),
+            ..Default::default()
+        }
+    }
+
+    fn secrets() -> BTreeMap<String, String> {
+        [("GRAYLOG_PROD_TOKEN", "g-prod"), ("KB_TOKEN", "kb")]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_grant_is_checked_and_its_stores_rendered() {
+        let (s, pid, tid) = store();
+        let p = prepare(&s, &args(pid, tid), &sources(), &secrets(), "phone", 100).unwrap();
+        let r = &p.rule;
+        assert_eq!(
+            (r.agent.as_str(), r.scope.as_str(), r.definition.as_deref()),
+            ("fleet", "l2-prod", Some("l2-support"))
+        );
+        assert_eq!(r.expires_at, Some(3700));
+        let values: serde_json::Value = serde_json::from_str(&r.config).unwrap();
+        assert_eq!(values["project"], "L2S");
+        assert_eq!(values["phrases"], "Tech help!, /analyze", "the default");
+        assert!(!r.bindings.contains("g-prod"), "the rule holds no secret");
+        let probes: Vec<(&str, &str)> = p
+            .probes
+            .iter()
+            .map(|p| (p.role.role.as_str(), p.binding.as_str()))
+            .collect();
+        assert_eq!(probes, [("logs", "logs-prod"), ("kb", "kb")]);
+        assert_eq!(p.probes[0].entry["env"]["TOKEN"], "g-prod");
+        assert!(!format!("{:?}", p.probes[0]).contains("g-prod"));
+        let id = s.grant_agent_rule(r).unwrap();
+        assert_eq!(s.agent_rule(id).unwrap().unwrap().bindings, r.bindings);
+    }
+
+    #[test]
+    fn a_bad_grant_is_refused_with_its_reason() {
+        let (s, pid, tid) = store();
+        let refused = |edit: &dyn Fn(&mut AgentsArgs), secrets: BTreeMap<String, String>| {
+            let mut a = args(pid, tid);
+            edit(&mut a);
+            prepare(&s, &a, &sources(), &secrets, "x", 0).unwrap_err()
+        };
+        type Edit = Box<dyn Fn(&mut AgentsArgs)>;
+        let cases: Vec<(Edit, &str)> = vec![
+            (Box::new(|a| a.scope = Some("L2 prod".into())), "instance"),
+            (
+                Box::new(|a| a.definition = Some("other".into())),
+                "not the one named",
+            ),
+            (Box::new(|a| a.project_id = None), "project's checkout"),
+            (
+                Box::new(|a| a.config = Some(json!({ "jira_tracker": "1" }))),
+                "inputs › project",
+            ),
+            (
+                Box::new(|a| a.config = Some(json!({ "jira_tracker": "99", "project": "L2S" }))),
+                "no tracker 99",
+            ),
+            (
+                Box::new(|a| a.config = Some(json!({ "nope": 1 }))),
+                "inputs",
+            ),
+            (Box::new(|a| a.bindings = Some(json!([]))), "logs: required"),
+            (
+                Box::new(|a| {
+                    a.bindings = Some(json!([{ "role": "logs", "server": "graylog",
+                    "env": { "GRAYLOG_API_TOKEN": "literal" } }]))
+                }),
+                "never a value",
+            ),
+            (Box::new(|a| a.bindings = Some(json!({}))), "bindings"),
+            (Box::new(|a| a.level = Some("auto".into())), "level"),
+            (Box::new(|a| a.host = Some("nowhere".into())), "no host"),
+        ];
+        for (edit, want) in cases {
+            let e = refused(&*edit, secrets());
+            assert!(e.message.contains(want), "{want}: {}", e.message);
+        }
+        let mut few = secrets();
+        few.remove("GRAYLOG_PROD_TOKEN");
+        let e = refused(&|_| {}, few);
+        assert_eq!(e.code, codes::E_VALIDATE);
+        assert!(
+            e.message
+                .contains("missing secret(s): GRAYLOG_PROD_TOKEN on box"),
+            "{}",
+            e.message
+        );
+        assert!(s.list_agent_rules().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_store_without_the_definitions_tools_fails_the_grant() {
+        let (s, pid, tid) = store();
+        let p = prepare(&s, &args(pid, tid), &sources(), &secrets(), "x", 0).unwrap();
+        let kb = &p.probes[1];
+        let tools = |n: &[&str]| Ok(n.iter().map(|t| t.to_string()).collect());
+        assert_eq!(
+            probe_problem(
+                kb,
+                tools(&["search_known_errors", "search_docs", "add_known_error"])
+            ),
+            None
+        );
+        assert_eq!(
+            probe_problem(kb, tools(&["search_docs"])).unwrap(),
+            "bindings › kb (kb): the server has no search_known_errors, add_known_error"
+        );
+        assert!(probe_problem(kb, Err("node: not found".into()))
+            .unwrap()
+            .contains("could not be asked: node: not found"));
+        assert!(grant::instance_ok("l2-prod") && !grant::instance_ok("-x"));
+    }
+
+    #[test]
+    fn the_admin_path_refuses_a_fleet_grant_and_fleet_fields() {
+        let (s, pid, tid) = store();
+        let st = std::sync::Mutex::new(s);
+        let e = crate::service::agents::admin::call(&st, &args(pid, tid), "x", 0).unwrap_err();
+        assert!(e.message.contains("stores checked"), "{}", e.message);
+        let mut review = args(pid, tid);
+        review.agent = Some("review".into());
+        review.scope = Some("gh:o/r".into());
+        review.config = None;
+        let e = crate::service::agents::admin::call(&st, &review, "x", 0).unwrap_err();
+        assert!(e.message.contains("for agent fleet"), "{}", e.message);
+    }
+}

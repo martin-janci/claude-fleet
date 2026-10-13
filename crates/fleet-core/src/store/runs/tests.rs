@@ -848,6 +848,8 @@ fn an_agents_jobs_are_runs_seen_with_whole_fleet_spend() {
             granted_by: "t".into(),
             granted_at: 0,
             expires_at: None,
+            definition: None,
+            bindings: "[]".into(),
         })
         .unwrap();
     let job = |subject: &str, key: &str| crate::store::NewAgentJob {

@@ -631,6 +631,17 @@ impl Asset {
     /// A fleet agent's definition, typed, and its skill's templates: what
     /// is wrong with them (`service::fleet_agents::definition::problems`).
     pub fn fleet_agent_problems(&self) -> Vec<String> {
+        if !matches!(self.spec, AssetSpec::FleetAgent { .. }) {
+            return Vec::new();
+        }
+        self.fleet_agent().err().unwrap_or_default()
+    }
+
+    /// A fleet agent loaded: its definition, skill and templates, or every
+    /// problem (an asset of another kind is one).
+    pub fn fleet_agent(
+        &self,
+    ) -> Result<crate::service::fleet_agents::definition::Loaded, Vec<String>> {
         use crate::service::fleet_agents::definition;
         let AssetSpec::FleetAgent {
             inputs,
@@ -641,7 +652,7 @@ impl Asset {
             limits,
         } = &self.spec
         else {
-            return Vec::new();
+            return Err(vec![format!("{} is not a fleet agent", self.header.name)]);
         };
         let mut obj = serde_json::Map::new();
         obj.insert("inputs".into(), inputs.clone().into());
@@ -654,14 +665,18 @@ impl Asset {
         if !limits.is_null() {
             obj.insert("limits".into(), limits.clone());
         }
-        let d = match definition::parse_value(&serde_json::Value::Object(obj)) {
-            Ok(d) => d,
-            Err(e) => return vec![e],
-        };
-        match definition::split_skill(&self.body) {
-            Ok((templates, _)) => definition::problems(&d, &templates),
-            Err(e) => vec![e],
+        let d = definition::parse_value(&serde_json::Value::Object(obj)).map_err(|e| vec![e])?;
+        let (templates, skill) = definition::split_skill(&self.body).map_err(|e| vec![e])?;
+        let p = definition::problems(&d, &templates);
+        if !p.is_empty() {
+            return Err(p);
         }
+        Ok(definition::Loaded {
+            name: self.header.name.clone(),
+            definition: d,
+            skill,
+            templates,
+        })
     }
 }
 

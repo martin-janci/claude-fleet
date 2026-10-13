@@ -9,13 +9,16 @@
 import { derived, writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 
-export type AgentKind = 'review' | 'support';
+/** `fleet`: an instance of a catalog fleet agent (configurable agents,
+ *  step 2); the Agents tab lists them from step 5. */
+export type AgentKind = 'review' | 'support' | 'fleet';
 export type AgentLevel = 'watch' | 'propose' | 'act';
 
 export interface AgentRule {
   id: number;
   agent: AgentKind | string;
-  /** `gh:<owner>/<repo>` or `jira:<tracker id>:<PROJECT>`. */
+  /** `gh:<owner>/<repo>`, `jira:<tracker id>:<PROJECT>`, or a fleet
+   *  agent's instance name. */
   scope: string;
   level: AgentLevel | string;
   host_alias: string;
@@ -25,6 +28,10 @@ export interface AgentRule {
   granted_by: string;
   granted_at: number;
   expires_at: number | null;
+  /** `fleet`: the catalog definition the rule runs. */
+  definition?: string;
+  /** `fleet`: the store bindings, JSON text (`[]` otherwise). */
+  bindings: string;
   /** Not expired. */
   active: boolean;
 }

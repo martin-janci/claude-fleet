@@ -21,16 +21,23 @@ use std::sync::Mutex;
 
 #[derive(Subcommand, Debug)]
 pub enum AgentsCmd {
-    /// Let an agent work on a repo or a Jira project.
+    /// Let an agent work on a repo or a Jira project, or start an instance
+    /// of a fleet agent (a catalog `fleet_agent`).
     ///
     /// `watch` runs the agent and keeps its result in fleet; `propose`
     /// also queues each write it wants (a review, a ticket comment) for a
     /// person to approve; `act` writes, except what the agent always asks
     /// about.
+    ///
+    /// A fleet agent: `grant fleet <instance> --definition <name> --values
+    /// values.json --bindings bindings.json --host <h>`. Each MCP binding is
+    /// started on the host and asked for its tools before the rule is
+    /// written.
     Grant {
-        /// review | support
+        /// review | support | fleet
         agent: String,
-        /// gh:<owner>/<repo> for review, jira:<tracker id>:<PROJECT> for support.
+        /// gh:<owner>/<repo> for review, jira:<tracker id>:<PROJECT> for
+        /// support, the instance name for fleet.
         scope: String,
         /// The host the agent's runs use.
         #[arg(long)]
@@ -47,6 +54,8 @@ pub enum AgentsCmd {
         /// The rule ends after this many hours. [default: never]
         #[arg(long)]
         hours: Option<i64>,
+        #[command(flatten)]
+        fleet: Box<FleetGrant>,
     },
     /// Remove one rule, by its id (see `status`).
     Revoke { id: i64 },
@@ -68,6 +77,20 @@ pub enum AgentsCmd {
     },
 }
 
+/// `grant fleet`'s own options.
+#[derive(clap::Args, Debug, Default, Clone, PartialEq, Eq)]
+pub struct FleetGrant {
+    /// fleet: the catalog fleet_agent the instance runs.
+    #[arg(long)]
+    pub definition: Option<String>,
+    /// fleet: a JSON file of the instance's input values (an object).
+    #[arg(long)]
+    pub values: Option<std::path::PathBuf>,
+    /// fleet: a JSON file of the store bindings (an array).
+    #[arg(long)]
+    pub bindings: Option<std::path::PathBuf>,
+}
+
 fn project_id(store: &Store, spec: &str) -> Result<i64, String> {
     let (owner, repo) = spec
         .split_once('/')
@@ -81,7 +104,7 @@ fn project_id(store: &Store, spec: &str) -> Result<i64, String> {
         .ok_or_else(|| format!("no project {spec} on this hub"))
 }
 
-pub fn run(
+pub async fn run(
     cmd: AgentsCmd,
     opts: &HubOptions,
     env: &HashMap<String, String>,
@@ -90,8 +113,79 @@ pub fn run(
         return define(path);
     }
     crate::serve::existing_db(&crate::config::resolve_data_dir(opts, env))?;
-    let store = crate::serve::open_store(opts, env)?;
-    run_on(&Mutex::new(store), cmd, fleet_core::store::now_unix())
+    let store = Mutex::new(crate::serve::open_store(opts, env)?);
+    let now = fleet_core::store::now_unix();
+    if let AgentsCmd::Grant { agent, .. } = &cmd {
+        if agent == "fleet" {
+            let a = fleet_args(&store, cmd)?;
+            fleet_core::service::catalog::load(false, &store).map_err(|e| e.message)?;
+            let ssh = fleet_core::ssh::SshClient::new();
+            let id =
+                fleet_core::service::fleet_agents::grant::grant(&store, &ssh, &a, "console", now)
+                    .await
+                    .map_err(|e| e.message)?
+                    .id
+                    .unwrap_or_default();
+            out::line(&format!(
+                "rule {id}: fleet agent {} as {} at {}{}",
+                a.definition.as_deref().unwrap_or_default(),
+                a.scope.as_deref().unwrap_or_default(),
+                a.level.as_deref().unwrap_or_default(),
+                a.hours.map(|h| format!(" for {h} h")).unwrap_or_default()
+            ));
+            return Ok(ExitCode::SUCCESS);
+        }
+    }
+    run_on(&store, cmd, now)
+}
+
+fn json_file(path: &std::path::Path) -> Result<serde_json::Value, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// `grant fleet …` as the `agents` tool's arguments.
+fn fleet_args(store: &Mutex<Store>, cmd: AgentsCmd) -> Result<AgentsArgs, String> {
+    let AgentsCmd::Grant {
+        agent,
+        scope,
+        host,
+        level,
+        project,
+        config,
+        hours,
+        fleet,
+    } = cmd
+    else {
+        return Err("not a grant".into());
+    };
+    let FleetGrant {
+        definition,
+        values,
+        bindings,
+    } = *fleet;
+    if config.is_some() {
+        return Err("a fleet agent takes --values, not --config".into());
+    }
+    let project_id = match &project {
+        Some(p) => {
+            let s = store.lock().map_err(|e| e.to_string())?;
+            Some(project_id(&s, p)?)
+        }
+        None => None,
+    };
+    Ok(AgentsArgs {
+        agent: Some(agent),
+        scope: Some(scope),
+        level: Some(level),
+        host: Some(host),
+        project_id,
+        config: values.as_deref().map(json_file).transpose()?,
+        hours,
+        definition: Some(definition.ok_or("a fleet agent needs --definition")?),
+        bindings: bindings.as_deref().map(json_file).transpose()?,
+        ..args("grant")
+    })
 }
 
 /// `agents define`: load and check a definition, no hub needed.
@@ -148,7 +242,11 @@ fn run_on(store: &Mutex<Store>, cmd: AgentsCmd, now: i64) -> Result<ExitCode, St
             project,
             config,
             hours,
+            fleet,
         } => {
+            if *fleet != FleetGrant::default() {
+                return Err("--definition, --values and --bindings are for agent fleet".into());
+            }
             let project_id = match &project {
                 Some(p) => {
                     let s = store.lock().map_err(|e| e.to_string())?;
@@ -276,6 +374,7 @@ mod tests {
             project: Some("o/r".into()),
             config: Some(r#"{"max_diff_lines":3000}"#.into()),
             hours,
+            fleet: Box::default(),
         }
     }
 
@@ -309,6 +408,7 @@ mod tests {
             project: None,
             config: config.map(Into::into),
             hours: None,
+            fleet: Box::default(),
         };
         let (_dir, s) = store();
         for cmd in [
@@ -346,5 +446,40 @@ mod tests {
         .unwrap();
         assert_eq!(define(dir.path()).unwrap(), ExitCode::from(1));
         assert!(define(&dir.path().join("nope.yaml")).is_err());
+    }
+
+    #[test]
+    fn a_fleet_grant_reads_its_files_and_a_builtin_takes_none() {
+        let (dir, s) = store();
+        let values = dir.path().join("values.json");
+        let binds = dir.path().join("bindings.json");
+        std::fs::write(&values, r#"{"project":"L2S"}"#).unwrap();
+        std::fs::write(&binds, r#"[{"role":"memory","namespace":"rule"}]"#).unwrap();
+        let cmd = |config: Option<&str>| AgentsCmd::Grant {
+            agent: "fleet".into(),
+            scope: "l2-prod".into(),
+            host: "box".into(),
+            level: "watch".into(),
+            project: Some("o/r".into()),
+            config: config.map(Into::into),
+            hours: Some(3),
+            fleet: Box::new(FleetGrant {
+                definition: Some("l2-support".into()),
+                values: Some(values.clone()),
+                bindings: Some(binds.clone()),
+            }),
+        };
+        let a = fleet_args(&s, cmd(None)).unwrap();
+        assert_eq!(a.config.unwrap()["project"], "L2S");
+        assert_eq!(a.bindings.unwrap()[0]["namespace"], "rule");
+        assert_eq!(a.definition.as_deref(), Some("l2-support"));
+        assert!(a.project_id.is_some());
+        assert!(fleet_args(&s, cmd(Some("{}"))).is_err());
+        let mut builtin = grant("watch", None);
+        if let AgentsCmd::Grant { fleet, .. } = &mut builtin {
+            fleet.definition = Some("l2-support".into());
+        }
+        assert!(run_on(&s, builtin, 0).is_err());
+        assert!(rules(&s).is_empty());
     }
 }

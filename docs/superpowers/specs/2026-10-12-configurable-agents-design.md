@@ -1,6 +1,7 @@
 # Configurable agents: design
 
-Status: step 1 built (definitions), 2026-10-13. Steps 2 to 6 not built.
+Status: steps 1 (definitions) and 2 (store bindings) built, 2026-10-13. Steps 3
+to 6 not built.
 Asked for by the owner after the built-in reviewer and support agent landed
 (`2026-10-11-review-and-support-agents-design.md`, PRs
 martin-janci/claude-fleet#871, martin-janci/fleet-mobile#217,
@@ -442,10 +443,33 @@ run real instances.
    create one from a template; its definition is edited as YAML.
    `fleet-hub agents define <dir|asset.yaml>`. The example
    `docs/fleet-agent-examples/l2-support/` is loaded by the tests.
-2. **Store bindings**: rendering an MCP binding per run (asset + env
+2. **Store bindings** (built): rendering an MCP binding per run (asset + env
    overrides + secrets), the grant-time `tools/list` check, migration
    `agent_records` and the `fleet-records` read server. Rules gain `definition`
    and `bindings`, and `agents grant` takes them.
+   Migration 185 rebuilds `agent_rules` and `agent_jobs` (their `agent`
+   CHECK admits `fleet`; rules gain `definition`, `bindings`) and adds
+   `agent_records`. A fleet rule's `scope` is its instance name, its
+   `config` the input values. `service/fleet_agents/`: `bindings.rs`
+   (the binding model; `check`, PURE, against the definition and the
+   catalog: every required role bound, kinds matching, unique binding names,
+   an override only of a placeholder the server has and only ever
+   `${SECRET}`; `render_entry` and `mcp_config` for a run: read tools only,
+   plus `fleet-records`), `grant.rs` (the grant in lock order: the
+   definition and servers out of the catalog, the host's secrets, `prepare`
+   under the store lock, which fills input defaults and checks the values
+   with the form validator and fleet's references, then `check_stores`
+   with no lock held, then the write), `probe.rs` (`initialize` +
+   `tools/list` on the host: a stdio server's script, secrets as `export`s,
+   travels on stdin; an http one is asked with `curl -K`, headers in a
+   config file), `records.rs` (`fleet-records`: `get` and `find` over the
+   rule's stores, named by role). One change from *D*: the read server is
+   not a control API tool. It is `/agent-records` beside `/pair`, outside
+   `authorize`, and its only credential is a run token held in the hub's
+   memory as a hash (`records::issue` / `revoke`), so no hub token and no
+   change to the control API's callers is involved. The admin path
+   (`admin::validate_grant`) refuses `agent: fleet`; the `agents` tool and
+   `fleet-hub agents grant fleet` route it to `fleet_agents::grant`.
 3. **Generic runner**: trigger sources `tracker_comments`, `tracker_assigned`,
    `mcp_scan`, `schedule`, `manual`; prompt assembly; answer validation
    against `output_schema`.
