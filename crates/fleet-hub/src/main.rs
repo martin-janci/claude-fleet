@@ -22,6 +22,7 @@ mod peer;
 mod person;
 mod provision;
 mod ready;
+mod realm;
 mod reports;
 mod serve;
 mod session;
@@ -265,6 +266,20 @@ enum Cmd {
     Person {
         #[command(subcommand)]
         cmd: person::PersonCmd,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
+    /// Users, groups, roles, role mappings and the audit log (identity
+    /// realm model).
+    ///
+    /// The operator's side of the `realm_admin` control-API tool: the same
+    /// service, run as the fleet authority on the hub machine, so the audit
+    /// log records the actor as none. Reads and writes `state.db` directly;
+    /// no running hub is needed. Roles are `fleet-admin` or
+    /// `<client>:<name>`; groups are addressed by path.
+    Realm {
+        #[command(subcommand)]
+        cmd: realm::RealmCmd,
         #[command(flatten)]
         opts: HubOptions,
     },
@@ -557,6 +572,7 @@ async fn main() -> ExitCode {
         Cmd::Org { cmd, opts } => org::run(cmd, &opts, &env).await,
         Cmd::Host { cmd, opts } => host::run(cmd, &opts, &env).await,
         Cmd::Person { cmd, opts } => person::run(cmd, &opts, &env),
+        Cmd::Realm { cmd, opts } => realm::run(cmd, &opts, &env),
         Cmd::Session { cmd, opts } => session::run(cmd, &opts, &env),
         Cmd::Provision {
             host,
@@ -687,6 +703,34 @@ mod tests {
         );
         assert_eq!(c.store.schema_to, fleet_core::store::known_schema_version());
         assert_eq!(c.update_proto, fleet_update::wire::UPDATE_PROTO);
+    }
+
+    #[test]
+    fn realm_subcommands_parse() {
+        for argv in [
+            &[
+                "fleet-hub",
+                "realm",
+                "group",
+                "create",
+                "eng",
+                "--parent",
+                "/orgs",
+            ][..],
+            &[
+                "fleet-hub",
+                "realm",
+                "role",
+                "map",
+                "fleet-admin",
+                "--user",
+                "ada",
+            ],
+            &["fleet-hub", "realm", "audit", "--limit", "20", "--json"],
+            &["fleet-hub", "realm", "effective", "ada"],
+        ] {
+            Cli::try_parse_from(argv).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+        }
     }
 
     #[test]

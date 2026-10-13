@@ -1551,6 +1551,34 @@ on its sessions (`--keep-grants` keeps it); an admin can also lower or revoke
 those grants while they stay. Downward only: no admin can widen a grant, add a
 recipient or redirect one, and **no admin reads a member's private session**.
 
+### Groups, roles and the audit log
+
+`fleet-hub realm` is the operator's side of the `realm_admin` tool: users,
+groups, roles, role mappings and the admin audit log, written straight to
+`state.db` as the fleet authority (no running hub needed; the audit log
+records the actor as none). Groups are addressed by path
+(`/orgs/acme/members`), roles by reference (`fleet-admin`, or
+`<client>:<name>` such as `fleet:org-admin`). Every subcommand takes
+`--json`.
+
+```sh
+# Create a group under /orgs and put a person in it
+fleet-hub realm group create platform --parent /orgs
+fleet-hub realm group add /orgs/platform ada
+
+# Give the whole group the fleet-admin role (a person: --user ada)
+fleet-hub realm role map fleet-admin --group /orgs/platform
+fleet-hub realm effective ada
+
+# Read the audit log: who changed what, newest first
+fleet-hub realm audit --since 1760000000 --limit 20
+```
+
+Other subcommands: `realm user list|show|update|enable|disable`,
+`realm group list|show|rename|move|delete|remove`,
+`realm role list|create|delete|compose|decompose|unmap`. A managed group
+(one a company's membership keeps in step) refuses a role mapping.
+
 ### Two people on one host
 
 Give each person their own unix account on a shared host, and add each account
