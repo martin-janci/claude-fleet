@@ -570,6 +570,8 @@ pub const WORK_DRAFT_COMMIT_MESSAGES: &str = "work.draft_commit_messages";
 /// A start drafts the agent's brief from its ticket
 /// (`work::brief_draft`).
 pub const WORK_DRAFT_BRIEFS: &str = "work.draft_briefs";
+/// New task drafts the title from the notes (`work::title_draft`).
+pub const WORK_DRAFT_TASK_TITLES: &str = "work.draft_task_titles";
 /// Finish drafts a mission's release note from its merged PRs
 /// (`work::orchestrate::drafts::release_note`).
 pub const WORK_DRAFT_RELEASE_NOTES: &str = "work.draft_release_notes";
@@ -1483,6 +1485,14 @@ pub const SPECS: &[Spec] = &[
         Kind::Bool,
         "Draft agent briefs",
         "Starting from a ticket: Draft writes the agent's brief from the ticket before the first prompt, on the planned host.",
+    )
+    .tags(&[Tag::Ai]),
+    Spec::new(
+        WORK_DRAFT_TASK_TITLES,
+        "false",
+        Kind::Bool,
+        "Draft task titles",
+        "New task: once you have written the notes, the title is drafted from them with claude -p on this machine, or on the first reachable host when it is not a fleet host. A draft is text you edit before you create the task.",
     )
     .tags(&[Tag::Ai]),
     Spec::new(

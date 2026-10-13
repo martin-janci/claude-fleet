@@ -737,6 +737,16 @@ const SCOPE_GUARDS: &[Guard] = &[
         verdict: Verdict::OrgBoundary,
         why: "the same org check on the link a snooze flag goes to",
     },
+    // ---- service/work/title_draft.rs ------------------------------------
+    Guard {
+        file: "crates/fleet-core/src/service/work/title_draft.rs",
+        func: "pick_host",
+        nth: 0,
+        code: "OrgScope::All => true,",
+        verdict: Verdict::OrgBoundary,
+        why: "which hosts a title draft may run on, by org; the notes are the \
+              caller's own and no session or item is read",
+    },
     // ---- service/work/view.rs -------------------------------------------
     Guard {
         file: "crates/fleet-core/src/service/work/view.rs",

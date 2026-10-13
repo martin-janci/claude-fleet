@@ -12496,6 +12496,14 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
     ),
     (
         "work_link",
+        "draft_title",
+        "a title drafted from the caller's own notes for a task that does not \
+         exist yet: no item, no session, nothing stored. Its fence is the \
+         host the model call runs on, which `title_draft::pick_host` holds \
+         to the caller's org scope",
+    ),
+    (
+        "work_link",
         "accept",
         "a person's decision on a proposal, by `item_id`: no session is \
          named, and `work::local::decide` refuses every scoped caller — a \

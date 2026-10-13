@@ -4085,6 +4085,18 @@
     },
     {
       "default_widget": "switch",
+      "key": "work.draft_task_titles",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Draft task titles",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
       "key": "work.draft_release_notes",
       "kind": {
         "type": "bool"

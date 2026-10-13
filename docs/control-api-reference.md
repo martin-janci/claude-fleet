@@ -1026,6 +1026,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::work::name_session_work`
 - `commands::work::rename_work_item`
 - `commands::work::create_work_task`
+- `commands::work::draft_task_title`
 - `commands::work::set_work_status`
 - `commands::work::edit_work_item`
 - `commands::work::set_work_parent`

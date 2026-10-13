@@ -77,6 +77,10 @@
             },
             {
               "type": "field",
+              "key": "work.draft_task_titles"
+            },
+            {
+              "type": "field",
               "key": "work.draft_release_notes"
             },
             {

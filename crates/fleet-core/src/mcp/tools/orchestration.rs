@@ -1428,6 +1428,37 @@ impl FleetTools {
                 &caller,
             )?;
         }
+        if args.action == "draft_title" {
+            // CF-4: New task's title drafted from its notes. It spends a
+            // model call, so the operator's request is confirmed like a
+            // summary's. There is no item yet, so no item gate: the fence is
+            // the host it runs on, which `pick_host` holds to the caller's
+            // scope (a per-host token its own host, a bound client its
+            // org's hosts).
+            let notes = args
+                .notes
+                .as_deref()
+                .ok_or_else(|| mcp_err("E_INVALID", "draft_title needs notes", None))?;
+            if caller.is_operator() {
+                self.confirm_gate(
+                    "work_link",
+                    args.confirm_nonce.as_deref(),
+                    "Draft a task title with a model call on a host",
+                    &caller,
+                )?;
+            }
+            return ok_json(
+                &crate::service::work::title_draft::draft_title(
+                    &self.store,
+                    self.ssh.as_ref(),
+                    notes,
+                    args.host_alias.as_deref(),
+                    &scope,
+                )
+                .await
+                .map_err(to_mcp_err)?,
+            );
+        }
         if args.action == "summarize" {
             // Work graph M13.4c: a Claude-written summary of a dead session
             // (on demand only, D10 / D27). It spends a model call, so the

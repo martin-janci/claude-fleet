@@ -35,6 +35,7 @@ pub mod steps;
 pub mod structure;
 pub mod summary;
 pub mod tidy;
+pub mod title_draft;
 pub mod today;
 pub mod tracker_comments;
 pub mod usage;
@@ -191,7 +192,7 @@ pub struct WorkLinkArgs {
     /// Start: brief Claude with the ticket.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub with_brief: Option<bool>,
-    /// preview_start: have a model draft the brief (one call on the host).
+    /// preview_start: a model drafts the brief (a host call).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft_brief: Option<bool>,
     /// Start: session name.
@@ -588,6 +589,7 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "attach",
     "attachment_delete",
     "summarize",
+    "draft_title",
     "set_primary",
     "reconsider",
     "ack",
@@ -674,6 +676,7 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("accept_work_proposal", "work_link", "accept"),
     ("reject_work_proposal", "work_link", "reject"),
     ("summarize_past_work", "work_link", "summarize"),
+    ("draft_task_title", "work_link", "draft_title"),
     // Work graph M14.1d: the Work view's desktop commands.
     ("work_tree", "work", "tree"),
     ("work_task", "work", "task"),
