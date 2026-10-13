@@ -12,6 +12,10 @@
 //! may `list` and `get`; its `pin` and `unpin` are refused (`may_pin`
 //! false): it proposes with a block and the person decides.
 //!
+//! **Who hears of it.** A pin or an unpin emits `dashboards:changed`, an
+//! empty frame: the person's open devices re-read through this tool, so no
+//! dashboard rides the event stream (persona design step 7).
+//!
 //! **What a row holds.** A block that passes the same check the app draws
 //! it with (`pages::chat_blocks::check`), never a built-in's id, at most
 //! [`MAX_PINNED`] per person.
@@ -187,21 +191,30 @@ pub fn pin(
             scope.person
         }
     };
-    Ok(s.pin_dashboard(&PinnedDashboardWrite {
+    let row = s.pin_dashboard(&PinnedDashboardWrite {
         id: &id,
         person_id: person,
         title: &title,
         spec: &block,
         why: why.as_deref(),
         device: device.as_deref(),
-    })?)
+    })?;
+    // The person's other devices re-read their pins.
+    s.bus_dashboards_changed();
+    Ok(row)
 }
 
 /// `dashboards { unpin, id }`: whether it was pinned.
 pub fn unpin(store: &Mutex<Store>, scope: &ViewScope, id: &str) -> Result<bool, IpcError> {
     let s = lock(store)?;
     match readable(&s, scope, id)? {
-        Some(r) => Ok(s.unpin_dashboard(id, r.person_id)?),
+        Some(r) => {
+            let removed = s.unpin_dashboard(id, r.person_id)?;
+            if removed {
+                s.bus_dashboards_changed();
+            }
+            Ok(removed)
+        }
         None => Ok(false),
     }
 }

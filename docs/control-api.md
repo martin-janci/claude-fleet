@@ -1189,7 +1189,8 @@ Index by area (names only; see the reference for details):
   | `unpin {id}`. A pin checks the block as the app draws it, refuses a
   built-in's id and keeps at most 20 per person. The agent (Control's
   operator) reads them; its `pin` and `unpin` answer `E_FORBIDDEN`. Not
-  served to a per-host token.
+  served to a per-host token. A pin or an unpin emits an empty
+  `dashboards:changed` event, and the person's open devices re-read.
 - **Operator settings** — `get_settings` (every registered key of the
   settings registry, `service/settings.rs`, with its effective value; a
   read, but master token only, since the values name hosts and their

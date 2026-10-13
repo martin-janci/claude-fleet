@@ -15,6 +15,8 @@
 // goes back through the agent: "Change" puts the dashboard as it is into
 // the agent's composer, and its answer is a new block with the same id.
 import { writable } from 'svelte/store';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { DASHBOARDS_CHANGED_EVENT } from './events';
 import { readPref, writePref } from './prefs';
 import { checkUiBlock, UI_SPEC } from './rich_blocks';
 import { invokeCmd, type Result } from './result';
@@ -348,8 +350,6 @@ function call<T>(args: Record<string, unknown>): Promise<Result<T>> {
   return invokeCmd<T>('dashboards', { args });
 }
 
-let loading: Promise<void> | null = null;
-
 /** Read the pinned dashboards again; moves step 5's local pins first. */
 export async function loadPinned(): Promise<void> {
   const r = await call<PinnedRow[]>({ action: 'list' });
@@ -364,12 +364,43 @@ export async function loadPinned(): Promise<void> {
   pinnedDashboards.set(rows.flatMap((x) => fromBlock(x.spec, x.pinned_at, x.why) ?? []));
 }
 
-/** Read them once per window; the page and the cards call it on mount. */
-export function ensurePinned(): Promise<void> {
-  loading ??= loadPinned().catch(() => {
-    loading = null;
-  });
-  return loading;
+let followers = 0;
+let stopFollowing: (() => void) | null = null;
+
+/**
+ * Keep `pinnedDashboards` current while a page or a card shows it: read
+ * now, and again on `dashboards:changed`, which the hub sends when the
+ * person pins or unpins on any device (step 7). Returns the release; the
+ * last release stops listening.
+ */
+export function followPinned(): () => void {
+  followers += 1;
+  if (followers === 1) {
+    let disposed = false;
+    let unlisten: UnlistenFn | null = null;
+    void loadPinned();
+    void listen(DASHBOARDS_CHANGED_EVENT, () => void loadPinned()).then(
+      (u) => {
+        if (disposed) u();
+        else unlisten = u;
+      },
+      () => {},
+    );
+    stopFollowing = () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    followers -= 1;
+    if (followers === 0) {
+      stopFollowing?.();
+      stopFollowing = null;
+    }
+  };
 }
 
 /** The id of every built-in: a proposal may not take one over. */

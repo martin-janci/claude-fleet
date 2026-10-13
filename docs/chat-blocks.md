@@ -336,7 +336,7 @@ page re-reads when work changes.
 pin }` over the control API, `docs/control-api.md`), so every device of
 theirs shows it in the Dashboards page's picker; a standalone desktop, or a
 hub that does not serve `dashboards` yet, keeps it in the desktop's own
-store. A block whose `id` is a pinned dashboard's is offered as its
+store. Another open device of the person's updates at once (`dashboards:changed`). A block whose `id` is a pinned dashboard's is offered as its
 replacement and says what it changes (`adds “Spent”, removes “By person”`);
 one the same as the pinned one says *Pinned*. A block may not take a
 built-in's id (`dash.developer`, `dash.tester`, `dash.pm`, `dash.scrum`,
