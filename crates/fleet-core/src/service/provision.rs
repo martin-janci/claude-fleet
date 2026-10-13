@@ -30,6 +30,8 @@ const MANAGED_MARKER: &str = ".fleet-managed";
 const SKILLS_ROOT: &str = "~/.claude/skills";
 pub(crate) const CLAUDE_JSON: &str = "~/.claude.json";
 pub(crate) const CLAUDE_DIR: &str = "~/.claude";
+/// Parent of the login profiles (`~/.claude-profiles/<name>`, docs/accounts.md).
+const PROFILES_DIR: &str = "~/.claude-profiles";
 const CLAUDE_MD_PATH: &str = "~/.claude/CLAUDE.md";
 const TMUX_CONF: &str = "~/.tmux.conf";
 
@@ -300,6 +302,84 @@ pub async fn provision_one_with(
     .await?;
     // 5. The `/voice` recorder stand-in and the URL it streams from.
     provision_voice(ssh, host, base).await?;
+    // 6. The same MCP entry in every login profile. Last, so a profile that
+    //    cannot be written never keeps the host's own files from landing.
+    provision_profiles(ssh, host, base, token).await?;
+    Ok(())
+}
+
+/// Shell script listing the host's login profile dirs, one `@@P\t<name>`
+/// line each (`tmux::parse_profiles` drops any name that is not a valid
+/// profile name, so none reaches a path).
+fn profile_names_script() -> String {
+    "for d in \"$HOME\"/.claude-profiles/*/; do [ -d \"$d\" ] || continue; \
+     printf '@@P\\t%s\\n' \"$(basename \"$d\")\"; done"
+        .to_string()
+}
+
+/// The names of the host's login profiles (`~/.claude-profiles/<name>`).
+async fn profile_names(ssh: &dyn SshExec, host: &str) -> Result<Vec<String>, IpcError> {
+    let profiles = if host == "local" {
+        crate::service::hub::ensure_local_allowed(host)?;
+        let home = expand_home_local("~")?;
+        crate::tmux::read_local_profiles(std::path::Path::new(&home)).ok_or_else(|| {
+            IpcError::new(
+                codes::E_PROVISION,
+                "list ~/.claude-profiles on local failed",
+            )
+        })?
+    } else {
+        let script = quote(&profile_names_script());
+        let out = ssh
+            .run(host, &["bash", "-lc", &script], PROVISION_TIMEOUT)
+            .await?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(IpcError::new(
+                codes::E_PROVISION,
+                format!(
+                    "list ~/.claude-profiles on {host} failed ({}): {}",
+                    out.status,
+                    crate::logging::redact(stderr.trim())
+                ),
+            ));
+        }
+        crate::tmux::parse_profiles(&String::from_utf8_lossy(&out.stdout))
+    };
+    Ok(profiles.into_iter().map(|p| p.name).collect())
+}
+
+/// Merge the claude-fleet MCP entry into every login profile's own
+/// `.claude.json`. A session started under a profile runs with
+/// `CLAUDE_CONFIG_DIR=~/.claude-profiles/<name>` and reads that file instead
+/// of `~/.claude.json`; it is a dotfile, so `tmux::PROFILE_LINKS` does not
+/// share it, and without this the session has no fleet MCP server. Same
+/// read → merge → back up → write as the host's own file, except that a
+/// profile whose entry is already current is left alone: a running Claude
+/// rewrites that file all the time.
+async fn provision_profiles(
+    ssh: &dyn SshExec,
+    host: &str,
+    base: &HubBase,
+    token: &str,
+) -> Result<(), IpcError> {
+    for name in profile_names(ssh, host).await? {
+        let dir = format!("{PROFILES_DIR}/{name}");
+        let path = format!("{dir}/.claude.json");
+        let existing = read_host_file(ssh, host, &path).await?;
+        let merged = merge_mcp_entry(&existing, &base.mcp_url(), token)
+            .map_err(|e| IpcError::new(&e.code, format!("profile {name}: {}", e.message)))?;
+        if serde_json::from_str::<serde_json::Value>(&existing).ok()
+            == serde_json::from_str::<serde_json::Value>(&merged).ok()
+        {
+            continue;
+        }
+        if !existing.trim().is_empty() {
+            write_host_file_secret(ssh, host, &dir, &format!("{path}.fleet-bak"), &existing)
+                .await?;
+        }
+        write_host_file_secret(ssh, host, &dir, &path, &merged).await?;
+    }
     Ok(())
 }
 
@@ -2459,6 +2539,8 @@ mod tests {
         ));
         // 5. the `/voice` recorder stand-in and its config (voice relay F1)
         steps.extend(voice_steps());
+        // 6. login profiles: a fresh host has none
+        steps.push(Script(profile_names_script()));
         steps
     }
 
@@ -3183,6 +3265,56 @@ mod tests {
             .iter()
             .filter_map(Call::stdin_str)
             .all(|s| s.contains(TOKEN)));
+    }
+
+    /// A session under a login profile reads the profile's own
+    /// `.claude.json`, so the entry goes there too: siblings (the profile's
+    /// login) kept, the previous content backed up, and a name that is not
+    /// a profile name never turned into a path.
+    #[tokio::test]
+    async fn provision_one_merges_the_mcp_entry_into_each_login_profile() {
+        let path = format!("{PROFILES_DIR}/work/.claude.json");
+        let own = r#"{"oauthAccount":{"emailAddress":"w@x.com"}}"#;
+        let fake = fresh_host();
+        fake.on(
+            Match::script(&profile_names_script()),
+            Reply::ok("@@P\twork\n@@P\t../evil\n"),
+        )
+        .on(Match::script(&remote_read_script(&path)), Reply::ok(own));
+        provision_one(&fake, "h1", &base(), TOKEN).await.unwrap();
+        let calls = fake.calls();
+        assert!(calls.iter().all(|c| !c.command().contains(TOKEN)));
+        let uploaded = |abs: &str| {
+            let cmd = format!("cat > {}", quote(abs));
+            calls
+                .iter()
+                .find(|c| c.command() == cmd)
+                .and_then(Call::stdin_str)
+        };
+        let dir = format!("{HOME}/.claude-profiles/work");
+        let written = uploaded(&format!("{dir}/.claude.json.fleet-tmp")).expect("profile write");
+        assert_eq!(written, merge_mcp_entry(own, URL, TOKEN).unwrap());
+        assert_eq!(
+            uploaded(&format!("{dir}/.claude.json.fleet-bak.fleet-tmp")).as_deref(),
+            Some(own)
+        );
+        assert!(calls.iter().all(|c| !c.command().contains("evil")));
+
+        // A profile whose entry is already current is not rewritten.
+        let again = fresh_host();
+        again
+            .on(
+                Match::script(&profile_names_script()),
+                Reply::ok("@@P\twork\n"),
+            )
+            .on(
+                Match::script(&remote_read_script(&path)),
+                Reply::ok(&written),
+            );
+        provision_one(&again, "h1", &base(), TOKEN).await.unwrap();
+        assert!(again.calls().iter().all(|c| !c
+            .command()
+            .contains(".claude-profiles/work/.claude.json.fleet")));
     }
 
     /// A host already provisioned by `provision_one`: its files read back
