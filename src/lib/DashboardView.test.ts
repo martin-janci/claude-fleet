@@ -39,7 +39,9 @@ beforeEach(() => {
     if (cmd === 'dashboards') return fakeDashboards(hub, a as never);
     expect(cmd).toBe('work_stats');
     const by = a?.args?.filters?.group_by;
+    const since = (a?.args as { since?: number } | undefined)?.since;
     return {
+      ...(since !== undefined ? { burnup: [{ day: since, total: 6, done: 2 }, { day: since + 86_400, total: 8, done: 3 }] } : {}),
       group_by: by ?? 'group',
       total: 8,
       stages,
@@ -80,6 +82,10 @@ describe('DashboardView', () => {
     expect(r.getByText('Behind')).toBeTruthy();
     expect(r.getByText(/scope \+3\/−1 since start/)).toBeTruthy();
     expect(r.getByText('Ana')).toBeTruthy();
+    // The sprint's burn-up asks for its days and draws them.
+    expect(r.getByTestId('burnup').textContent).toContain('Done');
+    const burnupAsk = mock.mock.calls.find((c) => c[1]?.args?.since !== undefined);
+    expect(burnupAsk?.[1].args.filters).toMatchObject({ iteration: 'current' });
     // One read per distinct query, not per widget.
     const asked = new Set(mock.mock.calls.map((c) => JSON.stringify(c[1])));
     expect(mock.mock.calls.length).toBe(asked.size);

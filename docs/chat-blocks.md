@@ -319,6 +319,12 @@ Each widget has a `kind`, a `title` (≤ 80) and a `query`:
   done against time gone, the dates, the goal and the scope change since
   the start. `states` keeps only `planned`, `active`, `closed` or
   `released` ones.
+- `{ "kind": "burnup", "title", "query"?, "days"? }`: the query's tasks
+  and how many were done, day by day over the last `days` days (2–90,
+  default 14), as two lines on one axis (scope dashed, done solid), from
+  the tasks' status history (`work { stats, since }`). History starts the
+  day the hub began keeping it; a task older than that counts for the whole
+  window in its stage now.
 
 A `query` is the Work view's filters (`work { tree }`'s `filters`): `org`
 (an id or `none`), `status` (`any`, `open`, `todo`, `in_progress`, `done`),
@@ -338,7 +344,7 @@ page re-reads when work changes.
 pin }` over the control API, `docs/control-api.md`), so every device of
 theirs shows it in the Dashboards page's picker; a standalone desktop, or a
 hub that does not serve `dashboards` yet, keeps it in the desktop's own
-store. A block whose `id` is a pinned dashboard's is offered as its
+store. Another open device of the person's updates at once (`dashboards:changed`). A block whose `id` is a pinned dashboard's is offered as its
 replacement and says what it changes (`adds “Spent”, removes “By person”`);
 one the same as the pinned one says *Pinned*. A block may not take a
 built-in's id (`dash.developer`, `dash.tester`, `dash.pm`, `dash.scrum`,

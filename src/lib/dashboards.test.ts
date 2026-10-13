@@ -52,7 +52,7 @@ describe('dashboards', () => {
     const opens = BUILTIN_DASHBOARDS.scrum.widgets.filter((w) => queryKey(w.query) === queryKey({ status: 'open' }));
     expect(opens.length).toBeGreaterThan(1);
     expect(qs.size).toBeLessThan(BUILTIN_DASHBOARDS.scrum.widgets.length);
-    for (const q of qs.values()) expect(q.archived).toBe(true);
+    for (const q of qs.values()) expect(q.filters.archived).toBe(true);
     expect(queryKey({ status: 'open', mine: true })).toBe(queryKey({ mine: true, status: 'open' }));
   });
 

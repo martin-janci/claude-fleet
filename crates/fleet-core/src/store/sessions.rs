@@ -2458,6 +2458,12 @@ impl Store {
     pub fn bus_handoff_changed(&self) {
         self.bus.handoff_changed();
     }
+
+    /// Emit `dashboards:changed` (persona design step 7): a person's pinned
+    /// dashboards moved; their devices re-read them.
+    pub fn bus_dashboards_changed(&self) {
+        self.bus.dashboards_changed();
+    }
 }
 
 #[cfg(test)]

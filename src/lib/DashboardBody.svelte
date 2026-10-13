@@ -6,6 +6,7 @@
 -->
 <script lang="ts">
   import { onDestroy } from 'svelte';
+  import BurnupChart from './BurnupChart.svelte';
   import Loader from './Loader.svelte';
   import { workChanged } from './work';
   import { errorText } from './error_copy';
@@ -14,15 +15,17 @@
     STAGE_KEYS,
     STAGE_LABELS,
     bucketsShown,
+    burnupSince,
     dashboardQueries,
     groupsShown,
     paceOf,
-    queryKey,
+    widgetKey,
     segmentsOf,
     shortDate,
     statOf,
     workStats,
     type Dashboard,
+    type Widget,
     type WorkStats,
   } from './dashboards';
 
@@ -58,7 +61,7 @@
     const failed: Record<string, string> = {};
     await Promise.all(
       [...queries].map(async ([key, q]) => {
-        const r = await workStats(q);
+        const r = await workStats(q.filters, q.days === undefined ? undefined : burnupSince(q.days));
         if (r.ok) got[key] = r.value;
         else failed[key] = errorText(r.error);
       }),
@@ -95,8 +98,8 @@
     seq++;
   });
 
-  const answerOf = (q: object) => answers[queryKey(q as never)];
-  const errorOf = (q: object) => errors[queryKey(q as never)];
+  const answerOf = (w: Widget) => answers[widgetKey(w)];
+  const errorOf = (w: Widget) => errors[widgetKey(w)];
 </script>
 
   {#if loading && Object.keys(answers).length === 0}
@@ -104,8 +107,8 @@
   {:else}
     <div class="grid" class:compact>
       {#each dash.widgets as w, i (i)}
-        {@const s = answerOf(w.query)}
-        {@const err = errorOf(w.query)}
+        {@const s = answerOf(w)}
+        {@const err = errorOf(w)}
         <section
           class="card"
           class:wide={w.kind !== 'stat'}
@@ -164,6 +167,14 @@
                   {#each STAGE_KEYS as k (k)}<span><i class="sw st-{k}"></i>{STAGE_LABELS[k]}</span>{/each}
                 </div>
               {/if}
+            {/if}
+          {:else if w.kind === 'burnup'}
+            <h2>{w.title}</h2>
+            {#if s.burnup}
+              <BurnupChart days={s.burnup} title={w.title} />
+            {:else}
+              <!-- A hub before step 8 answers the counts without the days. -->
+              <p class="none">This hub does not keep a burn-up yet.</p>
             {/if}
           {:else if w.kind === 'buckets'}
             {@const rows = bucketsShown(s, w)}
