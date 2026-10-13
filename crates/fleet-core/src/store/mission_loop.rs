@@ -209,6 +209,28 @@ impl Store {
             .is_some())
     }
 
+    /// Whether `session_id` has an open run (queued or running) on a member
+    /// of mission `mission_id`: what lets a worker read the mission it works
+    /// for, and only while it does.
+    pub fn is_open_worker_of_mission(
+        &self,
+        session_id: i64,
+        mission_id: i64,
+    ) -> Result<bool, IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM tasks t \
+                 JOIN work_items i ON i.id = t.work_item_id \
+                 WHERE t.worker_session_id = ?1 AND i.orchestration_project_id = ?2 \
+                   AND t.state IN ('queued', 'running') LIMIT 1",
+                [session_id, mission_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
     /// The branch `session_id` is on, as the PR probe last read it, else
     /// its worktree's.
     pub fn session_branch(&self, session_id: i64) -> Result<Option<String>, IpcError> {

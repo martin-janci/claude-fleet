@@ -409,3 +409,84 @@ fn a_finished_mission_lists_its_live_sessions_and_its_prs_and_reopens() {
     assert_eq!(r.finished_at, None);
     assert_eq!(mission(&st, &me, m.id, None).unwrap().finish, None);
 }
+
+/// A per-host token standing in session `proven` on host `h`.
+fn worker_scope(store: &Mutex<Store>, proven: i64) -> ViewScope {
+    use crate::service::view_scope::{GrantSet, TeamReach, UnclaimedReach};
+    ViewScope::for_caller(
+        orgs::OrgScope::for_host(&lock(store).unwrap(), "h").unwrap(),
+        None,
+        GrantSet::default(),
+        Some("h".into()),
+        Some(proven),
+        false,
+        UnclaimedReach::None,
+        TeamReach::default(),
+    )
+}
+
+/// A worker names no person, so the person rule never passes for it; the
+/// session a mission started must still read the plan it was started on.
+#[test]
+fn a_worker_reads_the_mission_it_has_an_open_run_on_and_nothing_more() {
+    let st = store();
+    let (ana, _) = people(&st);
+    let m = new_mission(&st, &person(&st, None, ana), None);
+    let root = m.root_item_id.unwrap();
+    let (worker, bystander) = {
+        let s = lock(&st).unwrap();
+        s.upsert_host("h").unwrap();
+        (
+            s.upsert_session("dev-o-r--w", "h", None, None, 1, 1, "running", None)
+                .unwrap(),
+            s.upsert_session("dev-o-r--x", "h", None, None, 2, 2, "running", None)
+                .unwrap(),
+        )
+    };
+    let me = worker_scope(&st, worker);
+
+    // Before its run: the unknown id, and an empty list.
+    assert_eq!(
+        mission(&st, &me, m.id, None).unwrap_err().code,
+        codes::E_NOTFOUND
+    );
+    assert!(missions(&st, &me).unwrap().is_empty());
+
+    let task =
+        super::super::run::record_run(&lock(&st).unwrap(), worker, "do it", root, 1, "implement")
+            .unwrap();
+
+    let d = mission(&st, &me, m.id, None).unwrap();
+    assert_eq!(d.mission.id, m.id);
+    assert!(!d.may_change, "a worker reads, it does not run the mission");
+    assert_eq!(missions(&st, &me).unwrap().len(), 1);
+    // Reading is all it got.
+    assert_eq!(
+        set_state(
+            &WorkLinkArgs {
+                status: Some("active".into()),
+                ..by_id("mission_state", m.id)
+            },
+            &st,
+            &me
+        )
+        .unwrap_err()
+        .code,
+        codes::E_FORBIDDEN
+    );
+
+    // Another session on the same host proves another pane: nothing.
+    let other = worker_scope(&st, bystander);
+    assert_eq!(
+        mission(&st, &other, m.id, None).unwrap_err().code,
+        codes::E_NOTFOUND
+    );
+    assert!(missions(&st, &other).unwrap().is_empty());
+
+    // Once the run ended, so did the read.
+    crate::service::tasks::fail_task(&lock(&st).unwrap(), task.id, "boom").unwrap();
+    assert_eq!(
+        mission(&st, &me, m.id, None).unwrap_err().code,
+        codes::E_NOTFOUND
+    );
+}

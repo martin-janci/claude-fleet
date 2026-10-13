@@ -14,8 +14,10 @@
 //! (`OrgScope::sees_org` of the mission's org); then its owner, the hub's
 //! own reader, the one person of a single-person hub for an unowned
 //! mission ([`ViewScope::may_own_person_row`]), and a live member of the
-//! mission's org. **Who may change it:** the same, except that of the org's
-//! members only an admin may. Anyone else gets exactly the answer of an id
+//! mission's org. A session with an open run on one of its members reads
+//! it too (`reads_as_worker`), for as long as the run is open. **Who may
+//! change it:** the people above, except that of the org's members only an
+//! admin may; never a worker. Anyone else gets exactly the answer of an id
 //! that does not exist (`orgs::not_found`).
 
 use super::WorkLinkArgs;
@@ -153,10 +155,24 @@ pub fn may_change_mission(s: &Store, scope: &ViewScope, m: &MissionRow) -> Resul
         && role_in(s, scope, m.org_id)?.as_deref() == Some(crate::store::ROLE_ADMIN))
 }
 
+/// May `scope` read `m` as one of its workers? The session its pane proves
+/// has an open run on a member item, inside the org boundary. A worker is a
+/// per-host token and names no person, so [`sees_mission`] never passes for
+/// it; without this the session a mission started cannot read the plan it
+/// was started on. A read only, and only while the run is open: every other
+/// caller of [`sees_mission`] (cards, pull requests, runs) keeps the person
+/// rule, and [`may_change_mission`] is untouched.
+fn reads_as_worker(s: &Store, scope: &ViewScope, m: &MissionRow) -> Result<bool, IpcError> {
+    let Some(session) = scope.proven_session else {
+        return Ok(false);
+    };
+    Ok(scope.org.sees_org(m.org_id) && s.is_open_worker_of_mission(session, m.id)?)
+}
+
 /// The mission, if `scope` may read it.
 pub(super) fn visible(s: &Store, scope: &ViewScope, id: i64) -> Result<MissionRow, IpcError> {
     match s.get_mission(id)? {
-        Some(m) if sees_mission(s, scope, &m)? => Ok(m),
+        Some(m) if sees_mission(s, scope, &m)? || reads_as_worker(s, scope, &m)? => Ok(m),
         _ => Err(not_found(id)),
     }
 }
@@ -209,7 +225,7 @@ pub fn missions(store: &Mutex<Store>, scope: &ViewScope) -> Result<Vec<MissionRo
     let now = crate::store::now_unix();
     let mut out = Vec::new();
     for mut m in s.list_missions()? {
-        if sees_mission(&s, scope, &m)? {
+        if sees_mission(&s, scope, &m)? || reads_as_worker(&s, scope, &m)? {
             super::orchestrate::fill_spend(&s, &mut m, now)?;
             out.push(m);
         }

@@ -2129,7 +2129,8 @@ fleet-hub tracker test 3
   GitHub (`ghp_`, `gho_`, `github_pat_` …), Linear (`lin_api_`) and Asana
   token shapes included.
 - **Isolation:** a per-host token (an in-session Claude) sees only tickets
-  linked to sessions on its own host, inside its host's organisation (see
+  linked to sessions on its own host or that a session there has an open
+  run on, inside its host's organisation (see
   *Organisations and isolation* below), whatever the provider, and never
   receives `work:*` frames on `/events`. Master and paired clients see all.
 - **Migrating from the desktop:** a copied `state.db` carries the desktop's
