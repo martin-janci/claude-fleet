@@ -2036,6 +2036,12 @@ const MIGRATIONS: &[Migration] = &[
         184,
         include_str!("../../migrations/184_work_close_dismissals.sql"),
     ),
+    // Routine debugging: the scheduler's decisions per routine, capped.
+    // A new table, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        185,
+        include_str!("../../migrations/185_routine_decisions.sql"),
+    ),
 ];
 
 /// The settings row [`Store::finish_realm_upgrade`] writes once migration

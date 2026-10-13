@@ -32,6 +32,7 @@
 //! executor is; production registers the PR reviewer ([`review`]).
 
 pub mod admin;
+pub mod debug;
 pub mod review;
 pub mod support;
 #[cfg(test)]
@@ -322,6 +323,7 @@ pub async fn poll_with(store: &Mutex<Store>, reg: &Registry, now: i64) -> usize 
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!(rule_id = rule.id, agent = %rule.agent, error = %e, "[agents] poll failed");
+                debug::poll_failed(rule.id, now, &e.to_string());
                 continue;
             }
         };
@@ -347,9 +349,13 @@ pub async fn poll_with(store: &Mutex<Store>, reg: &Registry, now: i64) -> usize 
             continue;
         }
         match s.record_agent_poll(rule.id, now, polled.cursor.as_deref(), &jobs) {
-            Ok(n) => added += n,
+            Ok(n) => {
+                debug::poll_ok(rule.id);
+                added += n
+            }
             Err(e) => {
-                tracing::warn!(rule_id = rule.id, error = %e, "[agents] recording a poll failed")
+                tracing::warn!(rule_id = rule.id, error = %e, "[agents] recording a poll failed");
+                debug::poll_failed(rule.id, now, &format!("recording the poll: {e}"));
             }
         }
     }

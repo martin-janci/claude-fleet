@@ -504,6 +504,64 @@ impl Store {
             .optional()
     }
 
+    /// Rule `rule_id`'s jobs counted by state: `(state, count)`, by state.
+    pub fn agent_job_counts(&self, rule_id: i64) -> Result<Vec<(String, i64)>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT state, COUNT(*) FROM agent_jobs WHERE rule_id = ?1 \
+             GROUP BY state ORDER BY state",
+        )?;
+        let rows = stmt.query_map(params![rule_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
+    }
+
+    /// Rule `rule_id`'s newest job in `state`.
+    pub fn newest_agent_job_in(
+        &self,
+        rule_id: i64,
+        state: &str,
+    ) -> Result<Option<AgentJobRow>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT {JOB_COLS} FROM agent_jobs WHERE rule_id = ?1 AND state = ?2 \
+                     ORDER BY updated_at DESC, id DESC LIMIT 1"
+                ),
+                params![rule_id, state],
+                job_row,
+            )
+            .optional()
+    }
+
+    /// Rule `rule_id`'s pending job that runs first: the earliest
+    /// `next_attempt_at`.
+    pub fn next_pending_agent_job(
+        &self,
+        rule_id: i64,
+    ) -> Result<Option<AgentJobRow>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT {JOB_COLS} FROM agent_jobs WHERE rule_id = ?1 AND state = 'pending' \
+                     ORDER BY next_attempt_at, id LIMIT 1"
+                ),
+                params![rule_id],
+                job_row,
+            )
+            .optional()
+    }
+
+    /// The actions job `job_id` proposed, oldest first.
+    pub fn agent_actions_of_job(
+        &self,
+        job_id: i64,
+    ) -> Result<Vec<AgentActionRow>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ACTION_COLS} FROM agent_actions WHERE job_id = ?1 ORDER BY id"
+        ))?;
+        let rows = stmt.query_map(params![job_id], action_row)?;
+        rows.collect()
+    }
+
     /// Queue a write job `job_id` proposes. `payload` must be JSON.
     pub fn insert_agent_action(
         &self,

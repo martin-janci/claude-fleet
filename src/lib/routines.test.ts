@@ -294,3 +294,20 @@ describe('the calm Inbox names the next routine (G7.15)', () => {
     );
   });
 });
+
+describe('the Debug tab words (migration 185)', () => {
+  it('names every check and verdict, and dots them', async () => {
+    const { checkLabel, decisionLabel, debugDot } = await import('./routines');
+    expect(checkLabel('automation')).toBe('Pause all');
+    expect(checkLabel('day_budget')).toBe('Day budget');
+    expect(checkLabel('new_check')).toBe('new_check');
+    expect(decisionLabel('filtered')).toBe('Not its event');
+    expect(decisionLabel('dropped')).toBe('Dropped');
+    expect(debugDot('ok')).toBe('done');
+    expect(debugDot('fired')).toBe('done');
+    expect(debugDot('warn')).toBe('waiting');
+    expect(debugDot('dropped')).toBe('waiting');
+    expect(debugDot('block')).toBe('failed');
+    expect(debugDot('filtered')).toBe('idle');
+  });
+});

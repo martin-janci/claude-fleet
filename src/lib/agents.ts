@@ -8,6 +8,7 @@
 // `fleet_core::service::agents::admin` and `fleet_core::store::Agent*Row`.
 import { derived, writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
+import type { LoopHealth } from './ipc';
 
 export type AgentKind = 'review' | 'support';
 export type AgentLevel = 'watch' | 'propose' | 'act';
@@ -78,6 +79,64 @@ export function agentsStatus(agent?: AgentKind, limit?: number): Promise<Result<
 
 export function decideAgentAction(id: number, approve: boolean): Promise<Result<AgentAction>> {
   return invokeCmd<AgentAction>('agents_decide', { id, approve });
+}
+
+// ---- debugging (`service::agents::debug`; the `agents_debug` command) -------
+
+export interface AgentPollError {
+  at: number;
+  message: string;
+}
+
+/** One rule, as `explain` reads it. */
+export interface AgentRuleExplain {
+  rule: Omit<AgentRule, 'active'>;
+  active: boolean;
+  state: 'ok' | 'warn' | 'block';
+  summary: string;
+  polled_at?: number;
+  next_poll_at?: number;
+  cursor?: string;
+  poll_error?: AgentPollError;
+  /** Its jobs counted by state. */
+  jobs: Record<string, number>;
+  next_job?: AgentJob;
+  last_failed?: AgentJob;
+}
+
+export interface AgentsExplain {
+  automation_paused: boolean;
+  poll_interval_secs: number;
+  max_concurrent: number;
+  max_retries: number;
+  loops: LoopHealth[];
+  rules: AgentRuleExplain[];
+}
+
+export interface AgentJobDetail {
+  job: AgentJob;
+  rule?: Omit<AgentRule, 'active'>;
+  actions: AgentAction[];
+  summary: string;
+}
+
+export function explainAgents(): Promise<Result<AgentsExplain>> {
+  return invokeCmd<AgentsExplain>('agents_debug', { action: 'explain', id: null });
+}
+
+export function agentJob(id: number): Promise<Result<AgentJobDetail>> {
+  return invokeCmd<AgentJobDetail>('agents_debug', { action: 'job', id });
+}
+
+/** "2 pending · 1 failed · 5 done", in a fixed order. */
+export function jobCountsLine(jobs: Record<string, number>): string {
+  const order = ['pending', 'running', 'needs_person', 'failed', 'skipped', 'done'];
+  const known = order.filter((k) => (jobs[k] ?? 0) > 0).map((k) => `${jobs[k]} ${k.replace('_', ' ')}`);
+  const other = Object.keys(jobs)
+    .filter((k) => !order.includes(k) && jobs[k] > 0)
+    .map((k) => `${jobs[k]} ${k}`);
+  const all = [...known, ...other];
+  return all.length ? all.join(' · ') : 'no jobs yet';
 }
 
 /** The last status read; null before the first one or when it failed (a

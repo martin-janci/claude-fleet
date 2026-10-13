@@ -7,7 +7,8 @@
   the built-in ones, fleet's own loops (8.1); Runs lists every run (8.3),
   each linked to its session; Agents names the agents fleet runs itself,
   then the PR reviewer's and the support agent's rules, the actions they
-  wait on a person for (AgentActions) and their newest jobs; Rules holds
+  wait on a person for (AgentActions), their newest jobs and Debug
+  (AgentsDebug: why a rule finds or runs nothing); Rules holds
   the start rules (8.11, StartRules).
 -->
 <script lang="ts">
@@ -23,6 +24,7 @@
   import RoutinesPanel from './automation/RoutinesPanel.svelte';
   import StartRules from './StartRules.svelte';
   import AgentActions from './automation/AgentActions.svelte';
+  import AgentsDebug from './automation/AgentsDebug.svelte';
   import { agents as agentsStatus, jobLine, loadAgents, ruleLine } from './agents';
   import { fleetSettings, loadFleetSettings } from './fleet_settings';
   import { listRuns, outcomeLabel, type RunOutcome, type RunRow } from './runs';
@@ -127,6 +129,12 @@
   }
 
   /** An agent job's state in the Runs list's words (`store::runs`). */
+  /** "Today 09:04" / "Tue 18:30", as Routines' run list reads a time. */
+  const debugClock = (sec: number) => {
+    const d = new Date(sec * 1000);
+    const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    return d.toDateString() === new Date().toDateString() ? `Today ${hm}` : `${d.toLocaleDateString(undefined, { weekday: 'short' })} ${hm}`;
+  };
   const JOB_OUTCOME: Record<string, string> = { done: 'ok', failed: 'failed', skipped: 'nothing_to_do', needs_person: 'needs_person' };
   const RUN_DOT: Record<string, OfState> = { ok: 'done', nothing_to_do: 'idle', failed: 'failed', needs_person: 'waiting', running: 'working' };
 
@@ -329,6 +337,7 @@
                 {/each}
               </ul>
             {/if}
+            <AgentsDebug clock={debugClock} />
           {/if}
         </div>
         {:else if error}

@@ -11,6 +11,9 @@ use crate::service::agents::admin::{self, AgentsArgs};
 impl FleetTools {
     #[tool(description = "The built-in agents (PR reviewer, support): status \
         {agent?, limit?} (rules, newest jobs, actions waiting for a person), \
+        explain (per rule: polls or why not, next poll, last poll error, jobs \
+        by state, the next and the last failed job), job {id} (one job whole, \
+        its proposed actions included), \
         grant {agent: review | support, scope: gh:<owner>/<repo> | \
         jira:<tracker id>:<PROJECT>, host, level: watch | propose | act, \
         project_id?, config?, hours?}, revoke {id}, pause_all, approve {id}, \

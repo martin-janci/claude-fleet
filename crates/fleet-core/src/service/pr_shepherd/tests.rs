@@ -519,3 +519,69 @@ async fn a_refusal_is_retried_after_a_probe_period_and_a_failure_is_not() {
         .iter()
         .any(|e| e.detail.as_deref() == Some("merge:failed:head moved")));
 }
+
+#[test]
+fn judge_says_why_a_candidate_gets_nothing() {
+    let seen = Seen::default();
+    let why = |j: Judged| match j {
+        Judged::Ignored(w) => format!("ignored: {w}"),
+        Judged::Waiting(w) => format!("waiting: {w}"),
+        Judged::Act(p) => format!("acts: {:?}", p.condition),
+    };
+    let red = cand(1, evidence("UNSTABLE", &["lint"]));
+    assert!(why(judge(&red, &HashMap::new(), &seen, NOW)).contains("no rule"));
+    let clean = cand(1, evidence("CLEAN", &[]));
+    assert!(why(judge(&clean, &rules("nudge"), &seen, NOW)).starts_with("ignored: its PR has no"));
+    let mut busy = red.clone();
+    busy.busy = true;
+    assert!(why(judge(&busy, &rules("nudge"), &seen, NOW)).contains("mid-turn"));
+    let mut fresh = red.clone();
+    fresh.idle_since = Some(NOW - 5);
+    assert!(why(judge(&fresh, &rules("nudge"), &seen, NOW)).contains("idle for 60 s"));
+    let mut ahead = red.clone();
+    ahead.evidence.ahead = Some(2);
+    assert!(why(judge(&ahead, &rules("nudge"), &seen, NOW)).contains("not pushed"));
+    let mut done = Seen::default();
+    done.episodes.insert((1, HEAD.to_string(), "ci_red"));
+    assert!(why(judge(&red, &rules("nudge"), &done, NOW)).contains("already recorded"));
+    assert_eq!(why(judge(&red, &rules("nudge"), &seen, NOW)), "acts: CiRed");
+    // plan is judge's Act, nothing else.
+    assert_eq!(
+        plan(&[red, busy, clean], &rules("nudge"), &seen, NOW).len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn explain_reads_what_the_next_tick_would_do_and_sends_nothing() {
+    let (store, pid, id) = seeded(&evidence("UNSTABLE", &["clippy"]));
+    let none = {
+        let s = store.lock().unwrap();
+        s.upsert_session("s2", "local", Some(pid), None, 1, 1, "running", None)
+            .unwrap()
+    };
+    assert!(
+        explain(&store.lock().unwrap(), NOW).sessions.is_empty(),
+        "no rule, no rows"
+    );
+    grant(&store, pid, "nudge");
+    let e = explain(&store.lock().unwrap(), NOW);
+    let v = |sid: i64| {
+        e.sessions
+            .iter()
+            .find(|v| v.session_id == sid)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(v(id).verdict, "acts");
+    assert_eq!(v(id).condition.as_deref(), Some("ci_red"));
+    assert!(v(id).detail.starts_with("nudge"), "{:?}", v(id));
+    assert_eq!(v(none).verdict, "ignored");
+    assert!(v(none).detail.contains("no PR reading"));
+    // Explaining sent nothing: the real tick still acts.
+    let exec = FakeExec::new();
+    assert_eq!(run_with(&store, &exec, NOW).await, 1);
+    let e = explain(&store.lock().unwrap(), NOW);
+    let after = e.sessions.iter().find(|v| v.session_id == id).unwrap();
+    assert!(after.detail.contains("already recorded"), "{after:?}");
+}

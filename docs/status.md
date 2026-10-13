@@ -782,6 +782,12 @@ the Inbox. `runs` (8.3, migration 141) lists tasks, missions, Jev,
 project, and optionally a host, before Jev K1 is asked; after five starts
 of the same prefix in the same project, the start preview offers the rule.
 The New layout's Automation screen holds Routines, Rules, Runs and Agents.
+Debugging them (migration 185): a routine's trace of every scheduler
+decision (`routine_decisions`, the newest 200, dropped and filtered event
+fires included), `routines { explain | decisions | dry_run }` and the
+routine's Debug tab; `agents { explain | job }` (the desktop's
+`agents_debug`, Automation › Agents › Debug, with each rule's last poll
+error per process) and `pr_shepherd { explain }` (no UI). All read only.
 
 Reply actions are landed (#338): Copy, Quote, Retry, Fork here and Rewind
 here under each reply; Fork, Rewind and Retry are one operation,

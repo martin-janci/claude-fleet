@@ -1092,6 +1092,23 @@ Index by area (names only; see the reference for details):
   never `run_now`. Read and changed by the owner and the org's admins, read
   by the org's members, never served to a per-host token; the routine's
   org is its host's.
+  Debugging (migration 185), all reads that start nothing: every scheduler
+  decision is a row of the routine's trace (`fired`, `failed`, `skipped`,
+  `dropped` for an event fire the routine was busy, over budget or inside
+  its rate for, `filtered` for an event that was not its owner's, its
+  repo's or its organisation's; the newest 200). `explain { routine_id,
+  limit? }` answers `summary`, the worst `state` (`ok` | `warn` | `block`)
+  and its `checks` in the scheduler's order (`enabled`, `automation`,
+  `scheduler`, `schedule` or `event`, `overlap`, `day_budget`,
+  `fleet_budget`, `account`, `host`), an event routine's `event` (its
+  cursor, its ten newest events of its kind with whether each fires it
+  and why not), and `decisions`; `decisions { routine_id, limit? }` is
+  the trace alone; `dry_run { routine_id, event_id? }` answers whether a
+  fire now `starts`, the `session` it would start, the exact `prompt` it
+  would type (the autonomy line and the PR line included) and the checks
+  only a scheduled fire must also pass. An event or decision on a session
+  the caller may not read is left out, and `dry_run` on such an event
+  answers `E_NOTFOUND`.
 - **Start rules** — `start_rules`, by `action` (Orbit Fleet 8.11): a task
   key pattern (`PD-*`, `*` for any run of characters, any case) that names
   the project, and optionally the host, a start of a matching task lands
@@ -1161,7 +1178,9 @@ Index by area (names only; see the reference for details):
   token.
 - **PR shepherd** — `pr_shepherd`, the standing rules that let fleet look
   after a project's PRs (`docs/superpowers/specs/2026-10-08-pr-shepherd-design.md`):
-  `status` (rules, recent episodes and merges), `grant { project_id, level:
+  `status` (rules, recent episodes and merges), `explain` (what the next
+  tick makes of each session in a ruled project: `acts`, `waiting` or
+  `ignored`, and why; nothing is sent), `grant { project_id, level:
   watch|nudge|merge, hours?, recipes? }`, `revoke { project_id }`,
   `pause_all`. Served only to a fleet admin's paired device, never to
   the master an agent holds (the operator has `fleet-hub shepherd`); a write
@@ -1170,7 +1189,10 @@ Index by area (names only; see the reference for details):
   agent) and the standing rules they work under
   (`docs/superpowers/specs/2026-10-11-review-and-support-agents-design.md`):
   `status { agent?, limit? }` (rules, newest jobs, actions waiting for a
-  person), `grant { agent: review|support, scope: gh:<owner>/<repo> |
+  person), `explain` (per rule: whether it polls and why not, its next poll,
+  its last poll error since the process started, its jobs by state, the
+  next pending and the last failed job), `job { id }` (one job, its
+  proposed actions included), `grant { agent: review|support, scope: gh:<owner>/<repo> |
   jira:<tracker id>:<PROJECT>, host, level: watch|propose|act, project_id?,
   config?, hours? }`, `revoke { id }`, `pause_all`, `approve { id }`,
   `reject { id }`. An approved action is carried out by its agent on the
