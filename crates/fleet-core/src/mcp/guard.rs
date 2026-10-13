@@ -158,9 +158,7 @@ pub fn access_allows(caller: &crate::mcp::Caller, tool: &str) -> bool {
         // on a hub with a second person handed that person the whole fleet's
         // settings. The boolean is false when the hub cannot say who its
         // owner is, so that state refuses rather than opens.
-        Some(Access::Person) => {
-            caller.is_fleet_admin && (caller.is_master() || caller.is_person_device())
-        }
+        Some(Access::Person) => caller.is_master_or_fleet_admin_device(),
         // Two conjuncts, narrowing two different axes, and BOTH are needed:
         //
         // - `is_fleet_admin` (the owner's `is_personal_owner` before identity
@@ -179,7 +177,7 @@ pub fn access_allows(caller: &crate::mcp::Caller, tool: &str) -> bool {
         //
         // A device that reaches these still has to be trusted to write
         // anything (`settings_writer`).
-        Some(Access::PersonDevice) => caller.is_fleet_admin && caller.is_person_device(),
+        Some(Access::PersonDevice) => caller.is_fleet_admin_device(),
         // Multi-user M1 (T12): a per-host token, and only one. `host_alias`
         // is `Some` for exactly that shape of caller — the master carries
         // neither field and a paired client carries `client` — so this arm

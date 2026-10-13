@@ -1182,7 +1182,7 @@ impl AdminView {
         caller: &crate::mcp::auth::Caller,
         store: &Mutex<Store>,
     ) -> Result<Self, IpcError> {
-        if caller.is_master() || (caller.is_person_device() && caller.is_fleet_admin) {
+        if caller.is_master_or_fleet_admin_device() {
             return Ok(AdminView::Admin);
         }
         let Some(p) = caller.person() else {

@@ -373,9 +373,7 @@ impl FleetTools {
         // owner's, like every fleet-wide setting since M1: a second
         // person's device or an org-bound one reads it, never replaces it
         // (review r04 F4).
-        if p.set.is_some()
-            && !(caller.is_master() || (caller.is_fleet_admin && caller.is_person_device()))
-        {
+        if p.set.is_some() && !caller.is_master_or_fleet_admin_device() {
             return Err(to_mcp_err(IpcError::new(
                 codes::E_FORBIDDEN,
                 "quick replies are the hub owner's: another person's or an org's device \
@@ -1143,7 +1141,7 @@ impl FleetTools {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             oa::authority_for(
                 &s,
-                caller.is_fleet_admin && caller.is_person_device(),
+                caller.is_fleet_admin_device(),
                 caller.person(),
                 caller.client.as_ref().and_then(|c| c.org_id),
             )
@@ -1220,7 +1218,7 @@ impl FleetTools {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             oa::authority_for(
                 &s,
-                caller.is_fleet_admin && caller.is_person_device(),
+                caller.is_fleet_admin_device(),
                 caller.person(),
                 caller.client.as_ref().and_then(|c| c.org_id),
             )

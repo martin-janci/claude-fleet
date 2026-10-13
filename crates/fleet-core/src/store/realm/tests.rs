@@ -495,3 +495,34 @@ fn the_last_live_holder_cannot_drop_fleet_admin() {
         vec![bo]
     );
 }
+
+#[test]
+fn role_ref_spells_a_client_role_with_its_client() {
+    assert_eq!(role_ref(Some("fleet"), "org-admin"), "fleet:org-admin");
+    assert_eq!(role_ref(None, "fleet-admin"), "fleet-admin");
+}
+
+#[test]
+fn a_fence_keeps_a_role_only_while_one_via_is_inside() {
+    let s = s();
+    let org = s.add_org("acme", None, false).unwrap().id;
+    let fence = s.org_group_fence(org).unwrap();
+    let mut direct = vec!["direct".to_string()];
+    assert!(fence.keep_role_vias(&mut direct));
+    let mut outside = vec!["group:/elsewhere".to_string()];
+    assert!(
+        !fence.keep_role_vias(&mut outside),
+        "every via was fenced out"
+    );
+    let mut mixed = vec![
+        "group:/elsewhere".to_string(),
+        "group:/orgs/acme/admins".to_string(),
+    ];
+    assert!(fence.keep_role_vias(&mut mixed));
+    assert_eq!(mixed, vec!["group:/orgs/acme/admins".to_string()]);
+    let mut none: Vec<String> = Vec::new();
+    assert!(
+        fence.keep_role_vias(&mut none),
+        "a role with no via is kept, as before"
+    );
+}

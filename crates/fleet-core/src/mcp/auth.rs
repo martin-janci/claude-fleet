@@ -272,6 +272,19 @@ impl Caller {
             && self.client.as_ref().is_some_and(|c| c.org_id.is_none())
     }
 
+    /// A fleet admin on a paired, org-free device of their own: the shape
+    /// `Access::PersonDevice` admits. WHOSE and WHAT in one predicate, so no
+    /// gate spells half of it.
+    pub fn is_fleet_admin_device(&self) -> bool {
+        self.is_fleet_admin && self.is_person_device()
+    }
+
+    /// [`Self::is_fleet_admin_device`] or the master: the two callers that
+    /// administer the fleet (`Access::Person`).
+    pub fn is_master_or_fleet_admin_device(&self) -> bool {
+        self.is_master() || self.is_fleet_admin_device()
+    }
+
     /// WHO this caller is, as a `people` row id (multi-user M1): the person
     /// whose device it is.
     ///
@@ -879,6 +892,26 @@ pub(crate) fn device_view(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fleet_admins_device_is_one_predicate() {
+        let mut c = Caller::master();
+        assert!(!c.is_fleet_admin_device(), "the master is not a device");
+        assert!(c.is_master_or_fleet_admin_device());
+        c.client = Some(ClientRef {
+            id: 1,
+            name: "phone".into(),
+            trusted: false,
+            org_id: None,
+            person_id: Some(1),
+        });
+        c.is_fleet_admin = true;
+        assert!(c.is_fleet_admin_device());
+        assert!(c.is_master_or_fleet_admin_device());
+        c.is_fleet_admin = false;
+        assert!(!c.is_fleet_admin_device());
+        assert!(!c.is_master_or_fleet_admin_device());
+    }
 
     /// The hub's personal owner as these tests see it (multi-user M1). Any
     /// id would do: what every assertion turns on is whether a caller's

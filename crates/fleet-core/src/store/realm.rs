@@ -33,6 +33,15 @@ const MAX_NAME_LEN: usize = 64;
 const MAX_DESCRIPTION_LEN: usize = 512;
 const MAX_GROUP_DEPTH: usize = 64;
 
+/// `client:name` for a client role, the bare name for a realm role: the one
+/// spelling of a role reference (`fleet:org-admin`, `fleet-admin`).
+pub fn role_ref(client: Option<&str>, name: &str) -> String {
+    match client {
+        Some(c) => format!("{c}:{name}"),
+        None => name.to_string(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoleRow {
     pub id: i64,
@@ -1348,6 +1357,15 @@ impl OrgGroupFence {
     pub fn shows_via(&self, via: &str) -> bool {
         via.strip_prefix("group:")
             .is_none_or(|p| self.paths.contains(p))
+    }
+
+    /// Fence a role's `via` list in place: drop every `via` the fence does
+    /// not show. Returns whether the role is still shown; a role whose every
+    /// via was fenced out is not (a role with no via never had one to fence).
+    pub fn keep_role_vias(&self, via: &mut Vec<String>) -> bool {
+        let had = !via.is_empty();
+        via.retain(|v| self.shows_via(v));
+        !(had && via.is_empty())
     }
 }
 

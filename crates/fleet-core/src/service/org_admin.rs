@@ -483,10 +483,7 @@ impl EffectiveRoleSummary {
     /// `fleet:org-admin (via group:/orgs/acme/admins)`; a realm role has no
     /// `client:` prefix.
     pub fn display(&self) -> String {
-        let role = match &self.client {
-            Some(c) => format!("{c}:{}", self.name),
-            None => self.name.clone(),
-        };
+        let role = crate::store::role_ref(self.client.as_deref(), &self.name);
         if self.via.is_empty() {
             role
         } else {
@@ -1101,11 +1098,7 @@ fn fence_realm_to_org(s: &Store, org: i64, people: &mut [PersonSummary]) -> Resu
             .filter(|g| fence.covers(g.id))
             .map(|g| g.path)
             .collect();
-        p.roles.retain_mut(|r| {
-            let had = !r.via.is_empty();
-            r.via.retain(|v| fence.shows_via(v));
-            !(had && r.via.is_empty())
-        });
+        p.roles.retain_mut(|r| fence.keep_role_vias(&mut r.via));
         p.roles_display = p.roles.iter().map(EffectiveRoleSummary::display).collect();
     }
     Ok(())
