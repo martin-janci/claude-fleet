@@ -1151,21 +1151,29 @@ impl Store {
     /// started on: its task names the item whatever became of its link (a
     /// recreated session, a link a person ended).
     pub fn work_item_ids_on_host(&self, host: &str) -> Result<Vec<i64>, IpcError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT l.item_id FROM work_links l \
+        // Two statements, not a UNION: as one arm of a compound the link
+        // read loses its walk of `idx_work_links_item` and scans the table
+        // (`service/work/scale_tests.rs`).
+        let mut ids = BTreeSet::new();
+        for sql in [
+            "SELECT DISTINCT l.item_id FROM work_links l \
              LEFT JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
              LEFT JOIN sessions s ON s.id = p.session_id \
              WHERE l.item_id IS NOT NULL AND l.state = 'confirmed' AND \
                ((l.ended_at IS NULL AND s.host_alias = ?1) OR \
-                (l.ended_at IS NOT NULL AND l.snap_host = ?1)) \
-             UNION \
-             SELECT t.work_item_id FROM tasks t \
+                (l.ended_at IS NOT NULL AND l.snap_host = ?1))",
+            "SELECT t.work_item_id FROM tasks t \
              JOIN sessions s ON s.id = t.worker_session_id \
              WHERE t.work_item_id IS NOT NULL AND t.state IN ('queued', 'running') \
                AND s.host_alias = ?1",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![host], |r| r.get(0))?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        ] {
+            let mut stmt = self.conn.prepare(sql)?;
+            let rows = stmt.query_map(rusqlite::params![host], |r| r.get::<_, i64>(0))?;
+            for id in rows {
+                ids.insert(id?);
+            }
+        }
+        Ok(ids.into_iter().collect())
     }
 
     /// Is item `item_id` one of [`Store::work_item_ids_on_host`]'s? The same
