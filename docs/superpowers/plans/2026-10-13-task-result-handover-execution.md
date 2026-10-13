@@ -61,8 +61,8 @@ So that no two agents edit the same registration lines. One commit on the featur
 
 - `crates/fleet-core/src/service/work/mod.rs`: add `pub mod wrapup; pub mod gate; pub mod result; pub mod followup;` beside the other `pub mod` lines, and create the four files, each holding only a `//!` line naming its purpose.
 - `crates/fleet-core/src/store/mod.rs`: add `mod followups;` in the form its neighbours use, and create `store/followups.rs` with a `//!` line.
-- `crates/fleet-core/migrations/184_followup_origin.sql` with the SQL of task plan Task 5 Step 1, registered in `store/schema.rs` after the `183` entry. Confirm the number first: `git fetch origin main && git ls-tree --name-only origin/main crates/fleet-core/migrations/ | tail -1`.
-- `crates/fleet-core/src/store/rows.rs`: `WorkItemRow.origin_task_id: Option<i64>` in the struct, the column list and the mapper (follow `done_when`).
+- `crates/fleet-core/migrations/185_followup_origin.sql` with the SQL of task plan Task 5 Step 1, registered in `store/schema.rs` after the `184` entry (main took 184 on 2026-10-13), with an `already_applied` guard. Confirm the number first: `git fetch origin main && git ls-tree --name-only origin/main crates/fleet-core/migrations/ | tail -1`.
+- `crates/fleet-core/src/store/work.rs`: `WorkItemRow.origin_task_id: Option<i64>` in the struct, the column list and the mapper (follow `done_when`).
 
 No build for W0 alone; Wave A's build covers it.
 
@@ -121,7 +121,7 @@ Merge order: C1, C2. Then **build 3**.
 ## Wave D (orchestrator)
 
 1. Dispatch one review agent with the diff `origin/main...HEAD` and the spec, not with your conclusions: correctness of the scope fences (an item or task outside the caller's scope answers as unknown), the `wrapup` role not read as an attempt anywhere (`graft grep "work_item_id"` consumers that do not filter by role), and that the brief stays under `BRIEF_MAX_CHARS`. Fix what it confirms.
-2. `git fetch origin main`; if main took migration 184, merge `origin/main` and run `scripts/renumber-migrations.sh` (a shell script, it compiles nothing).
+2. `git fetch origin main`; if main took migration 185, merge `origin/main` and run `scripts/renumber-migrations.sh` (a shell script, it compiles nothing).
 3. Push, **build 4** on the final HEAD.
 4. Open one PR to `main`. In its body say what was not done: task plan Task 7 Step 8 (seeing the panel in the running app) needs `pnpm tauri dev`, which compiles Rust locally and is excluded by Rule 1. A person runs it, or the owner lifts the rule for that one step. Reticle is wired (`vite.config.ts`, `src/reticle-dev.ts`) and connects by itself as soon as the dev app runs.
 5. Do not merge the PR; the owner does.

@@ -14,7 +14,7 @@
 
 - Validate with the ladder in `CLAUDE.md`: `cargo fleet-fast-check` after each edit, `scripts/verify.sh` before each commit, `scripts/verify.sh full` before the PR. Never `cargo build`, never `-p <crate>`.
 - Narrow tests with a filter: `cargo fleet-test -- <filter>`. On a loaded box prefix `TMPDIR=/dev/shm/fleet-tests` (Linux) for `src-tauri` tests.
-- Migration number: take it from `origin/main` (`git ls-tree --name-only origin/main crates/fleet-core/migrations/ | tail -1`). It was `183` on 2026-10-13, so this plan uses `184`; renumber if main moved.
+- Migration number: take it from `origin/main` (`git ls-tree --name-only origin/main crates/fleet-core/migrations/ | tail -1`). Main took `184` (`184_work_close_dismissals.sql`) on 2026-10-13, so this plan uses `185`; renumber if main moved again.
 - SQLite goes through `Store` behind `std::sync::Mutex`; never hold the guard across `.await`.
 - Errors are `IpcError` with `E_*` codes. An item or session outside the caller's scope answers exactly as an unknown id (`orgs::not_found`).
 - Text served to a per-host token is fenced with `crate::mcp::guard::fence_untrusted`.
@@ -32,7 +32,7 @@
 | `crates/fleet-core/src/service/work/gate.rs` (create) | `Gate`, `completion_gate` |
 | `crates/fleet-core/src/service/work/status.rs` (modify) | agent `done` refused when the gate is not passed |
 | `crates/fleet-core/src/service/work/result.rs` (create) | `TaskResultView`, `result_for_item`, `result_for_session` |
-| `crates/fleet-core/migrations/184_followup_origin.sql` (create) | `work_items.origin_task_id` |
+| `crates/fleet-core/migrations/185_followup_origin.sql` (create) | `work_items.origin_task_id` |
 | `crates/fleet-core/src/store/followups.rs` (create) | `Store::create_followup`, `Store::followups_of` |
 | `crates/fleet-core/src/service/work/followup.rs` (create) | scope fence + title rules for a follow-up |
 | `crates/fleet-core/src/service/work/handover.rs` (modify) | `OriginFacts`, rendered first in the brief |
@@ -803,9 +803,9 @@ git commit -m "feat(work): one result view per task: report, evidence, gate, PR"
 ### Task 5: Create a follow-up task from a result
 
 **Files:**
-- Create: `crates/fleet-core/migrations/184_followup_origin.sql`
-- Modify: `crates/fleet-core/src/store/schema.rs` (register after the `183_…` entry at ~2031)
-- Create: `crates/fleet-core/src/store/followups.rs`; modify `store/mod.rs`, `store/rows.rs` (`WorkItemRow.origin_task_id`)
+- Create: `crates/fleet-core/migrations/185_followup_origin.sql`
+- Modify: `crates/fleet-core/src/store/schema.rs` (registered after the `184_…` entry)
+- Create: `crates/fleet-core/src/store/followups.rs`; modify `store/mod.rs`, `store/work.rs` (`WorkItemRow.origin_task_id`)
 - Create: `crates/fleet-core/src/service/work/followup.rs`
 - Modify: `service/work/result.rs` (the `made` line), `mcp/tools/orchestration.rs`, `src-tauri`
 - Test: `store/followups.rs`, `service/work/followup.rs`, `store/schema/tests_upgrade.rs` if it lists columns
@@ -839,10 +839,10 @@ ALTER TABLE work_items ADD COLUMN origin_task_id INTEGER REFERENCES tasks(id) ON
 CREATE INDEX IF NOT EXISTS idx_work_items_origin_task
   ON work_items(origin_task_id) WHERE origin_task_id IS NOT NULL;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (184);
+INSERT OR IGNORE INTO schema_version (version) VALUES (185);
 ```
 
-Register it in `store/schema.rs` in the form of the `183` entry. Add `origin_task_id` to the work-item column list and mapper in `store/rows.rs` (follow `done_when`, the newest optional column there) and to `WorkItemRow` with `#[serde(default, skip_serializing_if = "Option::is_none")]`.
+Register it in `store/schema.rs` after the `184` entry, in the guarded form (`already_applied: Some(work_items_has_origin_task_id)`, as migration 117 does for `done_when`): it is an `ADD COLUMN`. Add `origin_task_id` to the work-item column list (`ITEM_COLUMNS`, `ITEM_COLUMN_COUNT`) and mapper in `store/work.rs` and to `WorkItemRow` with `#[serde(default, skip_serializing_if = "Option::is_none")]`.
 
 - [ ] **Step 2: Write the failing store tests** (`store/followups.rs`)
 
@@ -1379,7 +1379,7 @@ Expected: exit 0. A failure in `service::add_project` or `fleet-agent`'s `report
 - [ ] **Step 3: Check the migration number against main**
 
 Run: `git fetch origin main && scripts/check-migration-numbers.sh`
-Expected: exit 0. If main took 184: merge `origin/main`, then `scripts/renumber-migrations.sh`.
+Expected: exit 0. If main took 185: merge `origin/main`, then `scripts/renumber-migrations.sh`.
 
 - [ ] **Step 4: Commit**
 
