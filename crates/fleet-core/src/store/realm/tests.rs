@@ -526,3 +526,31 @@ fn a_fence_keeps_a_role_only_while_one_via_is_inside() {
         "a role with no via is kept, as before"
     );
 }
+
+/// A subtree moved under a deep parent must not push any group past the
+/// depth cap: `list_groups` walks every path and would refuse the whole
+/// realm.
+#[test]
+fn moving_a_tall_subtree_under_a_deep_parent_is_refused() {
+    let s = s();
+    // A chain of MAX_GROUP_DEPTH - 2 groups under the top.
+    let mut deep = None;
+    for i in 0..(MAX_GROUP_DEPTH - 2) {
+        deep = Some(s.create_group(deep, &format!("d{i}"), None).unwrap().id);
+    }
+    // A subtree three groups tall.
+    let a = s.create_group(None, "a", None).unwrap().id;
+    let b = s.create_group(Some(a), "b", None).unwrap().id;
+    let _c = s.create_group(Some(b), "c", None).unwrap().id;
+    let err = s.move_group(a, deep).unwrap_err();
+    assert_eq!(err.code, codes::E_VALIDATE);
+    assert!(err.message.contains("too deep"), "{}", err.message);
+    assert!(
+        s.list_groups().is_ok(),
+        "the listing still works after the refusal"
+    );
+    // One group tall fits where three did not.
+    let lone = s.create_group(None, "lone", None).unwrap().id;
+    s.move_group(lone, deep).unwrap();
+    assert!(s.list_groups().is_ok());
+}
