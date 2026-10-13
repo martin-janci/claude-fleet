@@ -3060,10 +3060,13 @@
 
 <style>
   .composer-above {
-    flex: 0 1 auto;
+    /* Not shrunk by flex (a short pane used to squeeze it to two lines, so
+       an expanded task group opened out of sight): its own cap sizes it,
+       with a floor that fits a header, a receipt and a row. */
+    flex: 0 0 auto;
     min-height: 0;
     /* The transcript keeps the rest; the tray scrolls. */
-    max-height: min(40%, 22rem);
+    max-height: clamp(min(6.5rem, 30%), 40%, 22rem);
     overflow-y: auto;
     overscroll-behavior: contain;
     scrollbar-gutter: stable;
@@ -3073,10 +3076,20 @@
     gap: 0.35rem;
     padding: var(--space-1) var(--chat-inset);
   }
-  /* Says there is more below while the tray overflows. */
+  /* An open task group is the person asking for room, and a card waiting
+     on a decision (a start or kill to confirm, a question) must show its
+     buttons: the tray grows, the transcript still keeps its floor
+     (`.thread-area`). */
+  .composer-above:has(:global([data-testid='handoff-task-toggle'][aria-expanded='true'])),
+  .composer-above:has(:global([data-testid='confirm-cards'])),
+  .composer-above:has(:global(.of-question)) {
+    max-height: clamp(min(10rem, 45%), 60%, 28rem);
+  }
+  /* Says there is more below while the tray overflows; short, so it hints
+     without hiding a whole row. */
   .composer-above:global([data-overflow='true']) {
-    -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - var(--space-4)), transparent);
-    mask-image: linear-gradient(to bottom, #000 calc(100% - var(--space-4)), transparent);
+    -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 0.75rem), transparent);
+    mask-image: linear-gradient(to bottom, #000 calc(100% - 0.75rem), transparent);
   }
   .composer-above:global([data-overflow='true'][data-at-end='true']) {
     -webkit-mask-image: none;
@@ -3110,8 +3123,10 @@
   }
   .thread-area {
     position: relative;
-    flex: 1 1 auto;
-    min-height: 0;
+    /* Basis 0: the transcript takes what is left, however long it is, and
+       never less than a few lines. */
+    flex: 1 1 0;
+    min-height: min(5rem, 25%);
     display: flex;
     flex-direction: column;
   }
