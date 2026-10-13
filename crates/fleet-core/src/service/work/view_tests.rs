@@ -799,6 +799,70 @@ fn dump_wire_samples_when_asked() {
     );
 }
 
+/// A native task no session has run on yet still knows its project: it sits
+/// in that repo's group — the one a session's task sits in — rather than
+/// under its key prefix, and a subtask with no project of its own follows
+/// its parent. A rule and a person's placement still come first.
+#[test]
+fn a_task_with_no_session_sits_in_its_projects_repo_group() {
+    let w = world();
+    let (parent, sub, loose) = {
+        let s = w.st.lock().unwrap();
+        let pid = s.upsert_project("acme", "api", "/src/api").unwrap();
+        let parent = s
+            .create_native_item(&crate::store::NativeItem {
+                title: "Speed up connection",
+                project_id: Some(pid),
+                ..Default::default()
+            })
+            .unwrap();
+        let sub = s
+            .create_native_item(&crate::store::NativeItem {
+                title: "Group by project",
+                parent_id: Some(parent.id),
+                ..Default::default()
+            })
+            .unwrap();
+        let loose = s
+            .create_native_item(&crate::store::NativeItem {
+                title: "No project at all",
+                ..Default::default()
+            })
+            .unwrap();
+        (parent, sub, loose)
+    };
+    let group = |w: &W, id: i64| {
+        task(&w.st, &vs(&OrgScope::All), &format!("item:{id}"))
+            .unwrap()
+            .task
+            .group
+    };
+    for id in [parent.id, sub.id] {
+        let g = group(&w, id);
+        assert_eq!(
+            (g.id.as_str(), g.label.as_str(), g.source.as_str()),
+            ("repo:acme/api", "acme/api", "repo")
+        );
+    }
+    assert_eq!(group(&w, loose.id).source, "key", "no project: the key");
+
+    let rule = w.st.lock().unwrap().seed_rule(
+        "Speed",
+        &RuleConditions {
+            title_contains: Some("speed up".into()),
+            ..Default::default()
+        },
+        "Performance",
+    );
+    let g = group(&w, parent.id);
+    assert_eq!((g.source.as_str(), g.rule_id), ("rule", Some(rule)));
+    w.st.lock()
+        .unwrap()
+        .seed_placement(&format!("item:{}", parent.id), Some("Mine"), None);
+    assert_eq!(group(&w, parent.id).source, "manual");
+    assert_eq!(group(&w, sub.id).source, "repo", "the subtask stays");
+}
+
 /// UC6: where a task sits and why — a person's placement beats a rule, a
 /// rule beats the tracker; a rule's preview changes nothing; a disabled
 /// rule and a cleared placement fall back.

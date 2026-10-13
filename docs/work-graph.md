@@ -181,7 +181,8 @@ says so:
   boundary, so moving a task is a separate, previewed step (below).
 - **Group**: *placed by a person*, *by a rule* (named), *from the tracker*
   (the Jira project, Linear team, GitHub repository, Asana project), *from
-  its repository*, or *from its key prefix*. Placing a task in a group is
+  its repository* (the one its sessions run in; before any session, its
+  project's, or its parent task's), or *from its key prefix*. Placing a task in a group is
   local to fleet: it never changes the Jira or Asana ticket.
 
 **Correcting it.**
