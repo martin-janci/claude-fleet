@@ -90,8 +90,8 @@
     place-items: center;
     padding: var(--space-3);
     background: var(--scrim);
-  }
-  .lightbox:focus {
+    /* Focused from script only (tabindex -1), to take Escape: the whole
+       screen is not a ring. Close inside it keeps its own. */
     outline: none;
   }
   figure {
