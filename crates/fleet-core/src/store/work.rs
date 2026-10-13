@@ -248,6 +248,10 @@ pub struct WorkItemRow {
     /// `points | hours`; set exactly when `estimate` is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimate_unit: Option<String>,
+    /// The task whose result this follow-up was made from (migration 185);
+    /// `None` for every item not made from a result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_task_id: Option<i64>,
 }
 
 /// A task's estimate (migration 171): a finite, positive number, rounded to
@@ -616,12 +620,12 @@ pub(super) const ITEM_COLUMNS: &str =
      assignees, iteration, updated_ext, status_changed_at, fetched_at, unavailable_at, \
      unavailable_reason, status_set_by, status_set_at, origin, project_id, notes, task_id, \
      proposal_state, proposed_by, proposal_why, held_at, done_when, due_at, display_key, priority, \
-     labels, estimate, estimate_unit";
+     labels, estimate, estimate_unit, origin_task_id";
 
 /// How many columns [`ITEM_COLUMNS`] names. A query that appends its own
 /// columns after the list indexes them as `ITEM_COLUMN_COUNT + n` — never a
 /// literal, because a literal silently shifts when a column is added here.
-pub(super) const ITEM_COLUMN_COUNT: usize = 40;
+pub(super) const ITEM_COLUMN_COUNT: usize = 41;
 
 /// A JSON array column as a list; anything unreadable is empty.
 fn json_list(raw: Option<String>) -> Vec<String> {
@@ -671,6 +675,7 @@ pub(super) fn map_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkItemRow> {
         labels: json_list(r.get(37)?),
         estimate: r.get::<_, Option<f64>>(38)?.and_then(Estimate::new),
         estimate_unit: r.get(39)?,
+        origin_task_id: r.get(40)?,
     })
 }
 
@@ -1620,6 +1625,18 @@ impl Store {
              ORDER BY l.ended_at DESC, l.id DESC"
         ))?;
         let rows = stmt.query_map(rusqlite::params![key], map_link)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Ended confirmed links to work item `item_id` (its past sessions),
+    /// newest first — [`Self::ended_work_links_for_key`] by item (TASK-263).
+    pub fn ended_work_links_for_item(&self, item_id: i64) -> Result<Vec<WorkLinkRow>, IpcError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {LINK_COLUMNS} FROM work_links \
+             WHERE ended_at IS NOT NULL AND state = 'confirmed' AND item_id = ?1 \
+             ORDER BY ended_at DESC, id DESC"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![item_id], map_link)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 

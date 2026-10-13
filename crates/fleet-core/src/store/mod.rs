@@ -26,6 +26,7 @@ mod decisions;
 mod deferred_prompts;
 mod downloads;
 mod env_vars;
+mod followups;
 mod forms;
 mod guides;
 mod host_setup;

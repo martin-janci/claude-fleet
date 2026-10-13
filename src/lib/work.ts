@@ -605,6 +605,14 @@ export async function setWorkStatus(itemId: number, status: WorkItemStatus, stat
   return r;
 }
 
+/** Keep open: the answer to the Work view's "finished — close?" that is not
+ *  a status. It asks again once a session ends on the work later. */
+export async function keepWorkOpen(itemId: number): Promise<Result<WorkItemRow>> {
+  const r = await invokeCmd<WorkItemRow>('keep_work_open', { args: { item_id: itemId } });
+  if (r.ok) bumpWorkChanged();
+  return r;
+}
+
 /** A person's edit of a native item: each field left out stays as it is;
  *  `notes: ''`, `assignees: []` and `due_at: ''` clear them. A tracker's ticket is
  *  refused, `E_INVALID`, naming it: its text is its tracker's. */

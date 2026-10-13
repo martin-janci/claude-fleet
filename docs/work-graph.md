@@ -143,13 +143,27 @@ the current filters under a name (Save as…, Update, Delete); saved views
 live on the hub, so the phone has the same ones. The Sessions list's own
 filters (hosts, recency, org scope) do not apply here and step aside.
 Archived tasks (done, or every session archived, with nothing running)
-are hidden by default; the end of the tree says how many, with *Show
-archived*, and the panel has an *Archived tasks* switch. *Status: Done*
+stay out of the tree: they are in one collapsed **Archived · n** section
+at its end, read only when you open it, under the same filters. The
+panel's *Archived tasks* switch mixes them back into the tree instead
+(*Hide archived* undoes it). *Status: Done*
 shows done tasks regardless, and *Sessions: Past only* shows past work
 (which is archived work), as the Sessions list's *Past only* does. A task
 is archived only when it is archived for everyone: a session on another
 host or in another org that you cannot see still keeps it in the tree.
 ⌘⇧O cycles the Work view's organisation.
+
+**Finished — close?** Work that ends without a merged pull request (a local
+commit, an answer, nothing to merge) is never marked done by fleet. When
+every session of one of fleet's own tasks has ended and nobody has set its
+status, the task rises to the top of its group, next to the tasks that need
+you, marked *finished — close?* with two answers; the task's detail asks
+the same. **Mark done** closes it, and with no session running it moves to
+the *Archived* section. **Keep open** leaves it as it is and stops asking
+until another session ends on it; it is not a status, so the task still
+shows *in progress* while a session works on it and still closes on a
+merged pull request. Fleet never closes work by itself this way, and never
+asks about a tracker's ticket.
 
 **A task's detail** (select it) shows the tracker's data, where its org and
 its group come from, the repositories it ran in, every session with its
@@ -181,7 +195,8 @@ says so:
   boundary, so moving a task is a separate, previewed step (below).
 - **Group**: *placed by a person*, *by a rule* (named), *from the tracker*
   (the Jira project, Linear team, GitHub repository, Asana project), *from
-  its repository*, or *from its key prefix*. Placing a task in a group is
+  its repository* (the one its sessions run in; before any session, its
+  project's, or its parent task's), or *from its key prefix*. Placing a task in a group is
   local to fleet: it never changes the Jira or Asana ticket.
 
 **Correcting it.**
@@ -259,7 +274,9 @@ including tasks with no session at all — as reads of the `work` tool
   count under the filters), and the orgs and trackers the caller sees.
   Filters: `org` (an id or `"none"`), `tracker` (an id, `"local"` or
   `"ref"`), `status`, `mine`, `has` (`active` / `past_only` / `none` /
-  `suggested`), `review`, `query`, `group`, `archived`, and (redesign
+  `suggested`), `review`, `query`, `group`, `archived`, `archived_only`
+  (archived tasks alone, the Archived section's read; a hub from before it
+  ignores it), and (redesign
   step 6.2) `assignee` (one person by name, any case), `status_name` (one
   tracker column, the tracker's own status name, any case) and `group_by`:
   what a section under each org is, `group` (the default: a person, rule,
@@ -287,7 +304,9 @@ including tasks with no session at all — as reads of the `work` tool
   keeps seeing every task. `status: "done"`, a `done` stage and
   `has: "past_only"` show them anyway. `archived_hidden` says how many passed every other filter
   but were hidden that way (over the whole result, not the page). Each
-  task carries `archived`; `task` / `session_tasks` / `review` answer archived
+  task carries `archived`, and `close_suggested` when it is finished work
+  of fleet's own waiting for an answer (`work_link { action: set_status }`
+  or `keep_open`), which sorts right after the tasks that need a person; `task` / `session_tasks` / `review` answer archived
   tasks as any other. Pages are a keyset: pass
   `next_cursor` back with the same filters (other filters refuse it). No
   task is repeated across pages while the fleet changes; a task that moved

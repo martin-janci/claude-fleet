@@ -12,6 +12,9 @@ pub mod card;
 pub mod confidence;
 pub mod describe;
 pub mod detect;
+pub mod ended;
+pub mod followup;
+pub mod gate;
 pub mod graph;
 pub mod handover;
 pub mod harvest;
@@ -24,6 +27,7 @@ pub mod promote;
 pub mod recognize;
 pub mod report;
 pub mod resolve;
+pub mod result;
 pub mod resume;
 pub mod retention;
 pub mod run;
@@ -41,6 +45,7 @@ pub mod tracker_comments;
 pub mod usage;
 pub mod verify;
 pub mod view;
+pub mod wrapup;
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs::{self, OrgScope};
@@ -584,6 +589,7 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "accept",
     "name",
     "set_status",
+    "keep_open",
     "edit",
     "set_parent",
     "comment",
@@ -667,6 +673,7 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("rename_work_item", "work_link", "name"),
     ("create_work_task", "work_link", "create"),
     ("set_work_status", "work_link", "set_status"),
+    ("keep_work_open", "work_link", "keep_open"),
     ("edit_work_item", "work_link", "edit"),
     ("set_work_parent", "work_link", "set_parent"),
     ("comment_on_work", "work_link", "comment"),
@@ -1139,12 +1146,11 @@ fn work_link_locked<'a>(
             format!("{} has its own entry point", args.action),
         ));
     }
-    let session_id = args.session_id.ok_or_else(|| {
-        IpcError::new(
-            codes::E_INVALID,
-            format!("{} needs session_id", args.action),
-        )
-    })?;
+    // The three sessionless forms live in `ended` (TASK-263) and never
+    // reach here; a reject has none, and is told where those two are.
+    let session_id = args
+        .session_id
+        .ok_or_else(|| ended::needs_session(&args.action))?;
     // A client bound to an org never reaches another org's session (the
     // transport's session gate says so first; this keeps the service's own
     // answer the same — the unknown session's — for every entry point, the

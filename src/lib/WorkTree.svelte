@@ -2,7 +2,9 @@
   import Skeleton from './states/Skeleton.svelte';
   import Icon from './kit/Icon.svelte';
   import { tablistKeys } from './tablist_keys';
-  import { onWorkChangedDebounced } from './work';
+  import { keepWorkOpen, onWorkChangedDebounced, setWorkStatus } from './work';
+  import { hubStatus, hubActionBlocked } from './hub';
+  import { hubConnection } from './hub_connection';
   // The Work view's tree (work graph M14), shown in the sidebar in place of
   // the Sessions tree: organisation → group → task → every session of the
   // task (primary ★, secondary, suggested, past). A session under several
@@ -131,6 +133,63 @@
       const { group: _g, archived: _a, ...rest } = normalizeFilters(f);
       return on ? { ...rest, archived: true } : rest;
     });
+  }
+
+  // The Archived section: archived tasks stay out of the tree, in one
+  // collapsed section at its end that reads them only when opened (the
+  // Filters panel's "Archived tasks" switch still mixes them in instead).
+  const ARCHIVED_KEY = 'archived';
+  let archivedTasks = $state.raw<WorkTask[]>([]);
+  let archivedCursor = $state<string | null>(null);
+  let archivedBusy = $state(false);
+  let archivedError = $state<string | null>(null);
+  let archivedSeq = 0;
+  async function loadArchived(more = false) {
+    const mine = ++archivedSeq;
+    const { group: _g, ...rest } = normalizeFilters(get(workViewFilters));
+    // A refresh re-reads as many as were shown.
+    const limit = more ? pageSize : Math.min(PAGE_MAX, Math.max(pageSize, archivedTasks.length));
+    archivedBusy = true;
+    const r = await workTree({
+      filters: { ...rest, archived: true, archived_only: true },
+      cursor: more ? archivedCursor : null,
+      limit,
+    });
+    if (mine !== archivedSeq) return;
+    archivedBusy = false;
+    if (!r.ok) {
+      archivedError = readErrorText(r.error);
+      return;
+    }
+    archivedError = null;
+    const p = pageOf(r.value);
+    // An older hub ignores `archived_only` and answers every task.
+    const got = p.tasks.filter((t) => t.archived === true);
+    archivedTasks = more ? mergeTasks(archivedTasks, got) : got;
+    archivedCursor = p.next_cursor ?? null;
+  }
+  function toggleArchived() {
+    const open = !archivedOpen;
+    setExpanded(get(workViewKey), ARCHIVED_KEY, open);
+    if (open) void loadArchived();
+  }
+
+  // "Finished — close?" on fleet's own task whose sessions have all ended.
+  const closeBlocked = $derived(hubActionBlocked('set_work_status', $hubStatus, $hubConnection));
+  const keepBlocked = $derived(hubActionBlocked('keep_work_open', $hubStatus, $hubConnection));
+  let answering = $state.raw<Set<string>>(new Set());
+  let answerErrors = $state.raw<Map<string, string>>(new Map());
+  async function answerClose(t: WorkTask, done: boolean) {
+    if (t.item_id == null || answering.has(t.task_id)) return;
+    answering = new Set(answering).add(t.task_id);
+    const r = done ? await setWorkStatus(t.item_id, 'done') : await keepWorkOpen(t.item_id);
+    const left = new Set(answering);
+    left.delete(t.task_id);
+    answering = left;
+    const errs = new Map(answerErrors);
+    if (r.ok) errs.delete(t.task_id);
+    else errs.set(t.task_id, readErrorText(r.error));
+    answerErrors = errs;
   }
   let states = $state.raw<Map<string, SectionState>>(new Map());
   let loading = $state(false);
@@ -270,6 +329,7 @@
   const taskById = (id: string) => loadedById.get(id);
   const selectedSessionId = $derived($selectedSession?.id ?? null);
   const expanded = $derived($workExpanded[$workViewKey] ?? {});
+  const archivedOpen = $derived(expanded[ARCHIVED_KEY] === true);
 
   /** "32bit · claude-fleet": the org, then the group (one section per org
    *  when grouped by organisation). */
@@ -422,6 +482,13 @@
       }
       const want = sameView ? Math.max(pageSize, had.get(k) ?? 0) : pageSize;
       void loadSection(g, false, want);
+    }
+    if ((get(workExpanded)[get(workViewKey)] ?? {})[ARCHIVED_KEY] === true && (page?.archived_hidden ?? 0) > 0) void loadArchived();
+    else {
+      archivedSeq++;
+      archivedBusy = false;
+      archivedTasks = [];
+      archivedCursor = null;
     }
     loadedOnce = true;
     if (filters.group_by === 'sprint' || filters.group_by === 'release' || selecting) void loadBuckets();
@@ -930,35 +997,7 @@
               {#if groupOpen(g)}
                 <ul class="tasks">
                   {#each g.tasks as t (t.task_id)}
-                    <li
-                      class="task"
-                      class:selected={$selectedTaskId === t.task_id}
-                      class:lit={(t.sessions ?? []).some((l) => isOccurrenceOf(l, selectedSessionId))}
-                      class:picking={selecting}
-                      data-testid="work-task"
-                      data-task-id={t.task_id}
-                    >
-                      {#if selecting}
-                        <input
-                          class="pick"
-                          type="checkbox"
-                          aria-label="Select {t.key ?? t.title ?? t.task_id}"
-                          data-testid="work-task-pick"
-                          disabled={t.item_id == null}
-                          title={t.item_id == null ? 'A bare key has no task to plan yet: open it to make one' : undefined}
-                          checked={t.item_id != null && picked.has(t.item_id)}
-                          onchange={() => t.item_id != null && togglePick(t.item_id)}
-                        />
-                      {/if}
-                      <WorkTaskRow
-                        task={t}
-                        selected={$selectedTaskId === t.task_id}
-                        currentSessionId={selectedSessionId}
-                        lookup={taskById}
-                        onselect={() => selectTask(t)}
-                        onopen={(l) => openOccurrence(t, l)}
-                      />
-                    </li>
+                    {@render taskItem(t)}
                   {/each}
                   {#if sectionBusy.has(g.key)}
                     <li class="state" data-testid="work-section-loading"><Skeleton rows={1} label="Loading" /></li>
@@ -1056,9 +1095,65 @@
   <WorkBuckets onclose={() => (bucketsOpen = false)} />
 {/if}
 
+{#snippet taskItem(t: WorkTask)}
+  <li
+    class="task"
+    class:selected={$selectedTaskId === t.task_id}
+    class:lit={(t.sessions ?? []).some((l) => isOccurrenceOf(l, selectedSessionId))}
+    class:picking={selecting}
+    data-testid="work-task"
+    data-task-id={t.task_id}
+  >
+    {#if selecting}
+      <input
+        class="pick"
+        type="checkbox"
+        aria-label="Select {t.key ?? t.title ?? t.task_id}"
+        data-testid="work-task-pick"
+        disabled={t.item_id == null}
+        title={t.item_id == null ? 'A bare key has no task to plan yet: open it to make one' : undefined}
+        checked={t.item_id != null && picked.has(t.item_id)}
+        onchange={() => t.item_id != null && togglePick(t.item_id)}
+      />
+    {/if}
+    <WorkTaskRow
+      task={t}
+      selected={$selectedTaskId === t.task_id}
+      currentSessionId={selectedSessionId}
+      lookup={taskById}
+      onselect={() => selectTask(t)}
+      onopen={(l) => openOccurrence(t, l)}
+    />
+    {#if t.close_suggested && t.item_id != null}
+      <div class="close-ask" data-testid="work-task-close-ask">
+        <span title="Every session of this work has ended, and nobody has closed it">finished — close?</span>
+        <button
+          class="btn btn--quiet"
+          type="button"
+          data-testid="work-task-mark-done"
+          disabled={closeBlocked !== null || answering.has(t.task_id)}
+          title={closeBlocked ?? 'Mark this work done: it moves to Archived'}
+          onclick={() => void answerClose(t, true)}>Mark done</button
+        >
+        <button
+          class="btn btn--quiet"
+          type="button"
+          data-testid="work-task-keep-open"
+          disabled={keepBlocked !== null || answering.has(t.task_id)}
+          title={keepBlocked ?? 'Not finished: ask again only after another session ends on it'}
+          onclick={() => void answerClose(t, false)}>Keep open</button
+        >
+      </div>
+      {#if answerErrors.get(t.task_id)}
+        <div class="state error" role="alert" data-testid="work-task-close-error">{answerErrors.get(t.task_id)}</div>
+      {/if}
+    {/if}
+  </li>
+{/snippet}
+
 {#snippet archivedRow()}
   <!-- Archived tasks (done, or every session archived, and nothing
-       running) stay out of the way; one click brings them all back. -->
+       running) stay out of the way, in one collapsed section. -->
   <div class="archived-row" data-testid="work-archived-row">
     {#if $workViewFilters.archived}
       <span>Showing archived tasks</span>
@@ -1066,12 +1161,35 @@
         >Hide archived</button
       >
     {:else}
-      <span>{archivedHidden} archived task{archivedHidden === 1 ? '' : 's'} hidden</span>
-      <button class="btn btn--quiet" type="button" data-testid="work-archived-toggle" onclick={() => setArchived(true)}
-        >Show archived</button
-      >
+      <button class="archived-head" type="button" data-testid="work-archived-head" aria-expanded={archivedOpen} onclick={toggleArchived}>
+        <span class="caret" class:open={archivedOpen} aria-hidden="true">▸</span>
+        <span class="archived-name">Archived</span>
+        <span class="of-count" data-testid="work-archived-count">{archivedHidden}</span>
+      </button>
     {/if}
   </div>
+  {#if archivedOpen && !$workViewFilters.archived}
+    <ul class="tasks archived-tasks" data-testid="work-archived-tasks" aria-label="Archived tasks">
+      {#each archivedTasks as t (t.task_id)}
+        {@render taskItem(t)}
+      {/each}
+      {#if archivedBusy}
+        <li class="state" data-testid="work-archived-loading"><Skeleton rows={1} label="Loading" /></li>
+      {/if}
+      {#if archivedError}
+        <li class="state error" role="alert" data-testid="work-archived-error">
+          {archivedError}
+          <button class="btn btn--quiet" type="button" onclick={() => void loadArchived()}>Retry</button>
+        </li>
+      {:else if archivedCursor && !archivedBusy}
+        <li>
+          <button class="btn btn--quiet more-btn" type="button" data-testid="work-archived-more" onclick={() => void loadArchived(true)}
+            >Load more ({Math.max(0, archivedHidden - archivedTasks.length)} left)</button
+          >
+        </li>
+      {/if}
+    </ul>
+  {/if}
 {/snippet}
 
 {#if newTaskOpen}
@@ -1301,8 +1419,36 @@
     color: var(--fg-muted);
     font-size: var(--control-font);
   }
-  .archived-row span {
+  .archived-row > span {
     flex: 1;
+  }
+  .archived-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .archived-name {
+    flex: 1;
+  }
+  .archived-tasks {
+    opacity: 0.85;
+  }
+  .close-ask {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin: 0 0 2px 22px;
+    font-size: var(--text-xs);
+    color: var(--usage-warn);
   }
   .empty {
     display: flex;
