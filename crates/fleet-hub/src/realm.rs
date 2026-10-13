@@ -581,14 +581,19 @@ fn execute(store: Store, cmd: RealmCmd) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn print(action: &str, v: &Value, json: bool) -> Result<(), String> {
+/// What `print` writes: the table for a read, else the service's value as
+/// pretty JSON (always, with `--json`).
+fn format_out(action: &str, v: &Value, json: bool) -> Result<String, String> {
     if !json {
         if let Some(t) = render(action, v) {
-            out::line(&t);
-            return Ok(());
+            return Ok(t);
         }
     }
-    out::line(&serde_json::to_string_pretty(v).map_err(|e| e.to_string())?);
+    serde_json::to_string_pretty(v).map_err(|e| e.to_string())
+}
+
+fn print(action: &str, v: &Value, json: bool) -> Result<(), String> {
+    out::line(&format_out(action, v, json)?);
     Ok(())
 }
 
@@ -668,5 +673,106 @@ mod tests {
         let t = render("audit", &log).expect("table");
         assert!(t.contains("create_group") && t.contains("map_role"), "{t}");
         let _ = owner;
+    }
+
+    fn hub() -> (tempfile::TempDir, HubOptions) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let opts = HubOptions {
+            data_dir: Some(dir.path().to_path_buf()),
+            ..HubOptions::default()
+        };
+        (dir, opts)
+    }
+
+    fn read(store: &Mutex<Store>, argv: &[&str]) -> (String, Value) {
+        let (a, _) = request(parse(argv));
+        let v = realm_admin::run(&a, store, Me::LOCAL).expect("read");
+        (a.action, v)
+    }
+
+    #[test]
+    fn run_refuses_a_data_dir_without_a_database() {
+        let (_dir, opts) = hub();
+        let r = run(parse(&["group", "list"]), &opts, &HashMap::new());
+        assert!(r.is_err(), "no state.db must be refused, not created");
+    }
+
+    #[test]
+    fn run_goes_through_the_store_and_execute_writes_and_reads() {
+        let (_dir, opts) = hub();
+        let env = HashMap::new();
+        drop(crate::serve::open_store(&opts, &env).expect("store"));
+        // A write and a read through `run`, then the effect through `execute`.
+        run(parse(&["group", "create", "eng", "--json"]), &opts, &env).expect("create");
+        let store = crate::serve::open_store(&opts, &env).expect("store");
+        assert!(execute(store, parse(&["group", "list"])).is_ok());
+        let store = Mutex::new(crate::serve::open_store(&opts, &env).expect("store"));
+        let (_, groups) = read(&store, &["group", "list"]);
+        assert!(groups.to_string().contains("/eng"), "{groups}");
+        // A service refusal comes back as the Err string, exit not success.
+        let store = crate::serve::open_store(&opts, &env).expect("store");
+        let e = execute(store, parse(&["group", "show", "/nope"])).unwrap_err();
+        assert!(!e.is_empty());
+    }
+
+    #[test]
+    fn json_output_is_the_services_value() {
+        let (_dir, opts) = hub();
+        let env = HashMap::new();
+        let store = Mutex::new(crate::serve::open_store(&opts, &env).expect("store"));
+        let (a, _) = request(parse(&["group", "create", "eng"]));
+        let w = realm_admin::run(&a, &store, Me::LOCAL).expect("create");
+        let text = format_out("create_group", &w, true).expect("json");
+        assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), w);
+        let (act, groups) = read(&store, &["group", "list"]);
+        let text = format_out(&act, &groups, true).expect("json");
+        assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), groups);
+        // Without --json a read is a table, a write is still JSON.
+        assert!(format_out(&act, &groups, false).unwrap().contains("PATH"));
+        let text = format_out("create_group", &w, false).expect("json");
+        assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), w);
+    }
+
+    #[test]
+    fn the_list_tables_show_their_columns() {
+        let (_dir, opts) = hub();
+        let store = Mutex::new(crate::serve::open_store(&opts, &HashMap::new()).expect("store"));
+        store
+            .lock()
+            .unwrap()
+            .create_person("ada", None)
+            .expect("person");
+        for argv in [
+            &["group", "create", "eng"][..],
+            &["group", "add", "/eng", "ada"],
+            &["role", "create", "reviewer", "--description", "reads diffs"],
+            &["role", "map", "reviewer", "--group", "/eng"],
+            &["user", "update", "ada", "--email", "ada@example.com"],
+        ] {
+            read(&store, argv);
+        }
+        let (a, users) = read(&store, &["user", "list"]);
+        let t = render(&a, &users).expect("table");
+        let uuid = users[0]["uuid"].as_str().expect("uuid").to_string();
+        for want in [
+            "ada",
+            "ada@example.com",
+            "yes",
+            "/eng",
+            "reviewer",
+            uuid.as_str(),
+        ] {
+            assert!(t.contains(want), "users table lacks {want}: {t}");
+        }
+        let (a, groups) = read(&store, &["group", "list"]);
+        let t = render(&a, &groups).expect("table");
+        for want in ["/eng", "no", "ada", "reviewer"] {
+            assert!(t.contains(want), "groups table lacks {want}: {t}");
+        }
+        let (a, roles) = read(&store, &["role", "list"]);
+        let t = render(&a, &roles).expect("table");
+        for want in ["fleet-admin", "reviewer", "reads diffs", "yes", "no"] {
+            assert!(t.contains(want), "roles table lacks {want}: {t}");
+        }
     }
 }
