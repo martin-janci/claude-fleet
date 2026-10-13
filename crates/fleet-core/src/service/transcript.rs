@@ -262,6 +262,29 @@ fn one_line(s: &str) -> String {
 /// else. `None` when nothing identifying is in the input.
 pub fn tool_target(name: &str, input: Option<&serde_json::Value>) -> Option<String> {
     let map = input?.as_object()?;
+    // fleet's own `debug_devices`: what it did to which device
+    // (`screenshot · bench pixel`), as the chat's device card reads it.
+    if name.ends_with("__debug_devices") {
+        let s = |k: &str| map.get(k).and_then(|v| v.as_str()).map(str::trim);
+        let action = match (s("action"), map.get("queue").and_then(|q| q.as_bool())) {
+            (Some("claim"), Some(true)) => "wait in line",
+            (Some(a), _) if !a.is_empty() => a,
+            _ => return None,
+        };
+        let what = s("device")
+            .filter(|d| !d.is_empty())
+            .map(str::to_string)
+            .or_else(|| match (s("host"), s("name")) {
+                (Some(h), Some(n)) => Some(format!("{h}/{n}")),
+                (Some(h), None) => Some(h.to_string()),
+                _ => None,
+            });
+        let line = match what {
+            Some(w) => format!("{action} · {w}"),
+            None => action.to_string(),
+        };
+        return Some(cap_chars(one_line(&line).as_str(), TOOL_TARGET_MAX_CHARS));
+    }
     // Only `SendMessage`: a `to` in some other tool's input is not known to
     // name what that tool touched.
     let addressee: &[&str] = if name == "SendMessage" { &["to"] } else { &[] };
@@ -4034,6 +4057,25 @@ mod tests {
         assert_eq!(r.chars().count(), 1_501);
         assert!(r.ends_with('…'));
         assert!(r.starts_with(&"é".repeat(1_500)));
+    }
+
+    #[test]
+    fn a_debug_device_call_names_its_action_and_device() {
+        let t = |v: serde_json::Value| tool_target("mcp__claude-fleet__debug_devices", Some(&v));
+        assert_eq!(
+            t(serde_json::json!({"action": "screenshot", "device": "bench pixel"})).as_deref(),
+            Some("screenshot · bench pixel")
+        );
+        assert_eq!(
+            t(serde_json::json!({"action": "claim", "device": "#3", "queue": true})).as_deref(),
+            Some("wait in line · #3")
+        );
+        assert_eq!(
+            t(serde_json::json!({"action": "boot", "host": "mac", "name": "iPhone 17"})).as_deref(),
+            Some("boot · mac/iPhone 17")
+        );
+        assert_eq!(t(serde_json::json!({"action": "list"})).as_deref(), Some("list"));
+        assert_eq!(t(serde_json::json!({"device": "x"})), None);
     }
 
     #[test]

@@ -95,7 +95,7 @@ describe('DebugDevicesBoard', () => {
     expect(screen.getByTestId('device-claim-3').textContent).toBe('Free');
     expect(screen.getByTestId('device-claim-4').textContent).toBe('In use by session #42 on mercury · login flow');
     expect(screen.getByTestId('device-shared-4')).toBeTruthy();
-    expect(screen.getByTestId('device-state-7').textContent).toBe('Stopped');
+    expect(screen.getByTestId('device-state-7').textContent).toBe('Shut down');
     expect(screen.getByTestId('device-hint-7').textContent).toBe('Start it first.');
     // Only the actions that apply.
     expect(screen.getByTestId('device-action-3-claim')).toBeTruthy();

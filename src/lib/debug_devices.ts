@@ -186,9 +186,9 @@ export function stateLabel(d: DebugDevice): string {
   switch (d.state) {
     case 'online':
     case 'booted':
-      return 'Ready';
+      return 'Online';
     case 'shutdown':
-      return 'Stopped';
+      return 'Shut down';
     case 'unauthorized':
       return 'Not trusted';
     case 'missing':
@@ -198,7 +198,7 @@ export function stateLabel(d: DebugDevice): string {
     case 'booting':
       return 'Starting';
     default:
-      return d.state ? d.state[0].toUpperCase() + d.state.slice(1) : 'Unknown';
+      return d.state ? d.state[0].toUpperCase() + d.state.slice(1) : 'No state';
   }
 }
 
