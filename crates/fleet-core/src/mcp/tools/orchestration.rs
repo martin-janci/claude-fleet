@@ -1343,7 +1343,9 @@ impl FleetTools {
         attempt at the item in its own session and worktree, tracked as a task. \
         handover {session_id}: ask it to \
         write its hand-off. summarize {key, link_id}: \
-        a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never \
+        a Claude-written summary of past work. archive|unarchive (UI only; with \
+        no session_id: the ended links of link_id|key|item_id|task_id), unlink \
+        {link_id} with no session_id removes an ended link; snooze {days}|never \
         (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe \
         kill when dirty). set_status {item_id, status, status_name?}: a person's status for \
         work with no ticket, or a ticket moved at its tracker; keep_open {item_id} answers close_suggested. edit {item_id, title?, notes?, assignees?, \
@@ -2536,6 +2538,33 @@ impl FleetTools {
             .map_err(to_mcp_err)?;
             return ok_json(&out);
         }
+        // TASK-263: a link whose session is gone has no `session_id` to
+        // pass, so `archive`, `unarchive` and `unlink` without one reach
+        // ENDED links by `link_id` (or, for the two archives, by key /
+        // item / task). This is not a session-addressed surface, so it
+        // threads no `Reach`: its fence is the one every read of ended
+        // links takes (`scope_links_for`: org, host, person), and another
+        // person's past work answers as a link that does not exist. The
+        // predicate lives in `ended`, so the session gate's scan
+        // (`every_session_addressed_tool_declares_its_reach`) still reads
+        // the three as the tail's actions they otherwise are.
+        if crate::service::work::ended::is_sessionless(&args) {
+            // Removal deletes history, a fleet-level decision: the
+            // operator's or a person's, never a session's own token.
+            if crate::service::work::ended::is_removal(&args) && caller.host_alias.is_some() {
+                return Err(mcp_err(
+                    "E_FORBIDDEN",
+                    "a per-host token cannot remove an ended work link; archive it, or ask \
+                     the operator",
+                    None,
+                ));
+            }
+            let view_scope = self.view_scope(&caller)?;
+            return ok_json(
+                &crate::service::work::ended::work_link_ended(&args, &self.store, &view_scope)
+                    .map_err(to_mcp_err)?,
+            );
+        }
         // Work graph M14.1c: the Work view's structure and batch decisions.
         // Who may write what is inside (`structure`): never a per-host
         // token; a bound client its own org's placements and views only;
@@ -2676,11 +2705,8 @@ impl FleetTools {
             }
         }
         let sid = args.session_id.ok_or_else(|| {
-            mcp_err(
-                "E_INVALID",
-                format!("{} needs session_id", args.action),
-                None,
-            )
+            // A reject's message names the sessionless forms (TASK-263).
+            to_mcp_err(crate::service::work::ended::needs_session(&args.action))
         })?;
         // `drive`: every `work_link` action that reaches here writes the
         // session's own work graph — link, reject, confirm, unlink, ack,

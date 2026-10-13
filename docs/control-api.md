@@ -786,7 +786,19 @@ Index by area (names only; see the reference for details):
   needs the desktop's confirmation (`confirm_nonce`), like `kill_session`.
   `work_link { session_id, action: "archive" | "unarchive" }` collapses a
   live session into its group's Done (UI only; tmux keeps running) or brings
-  it back — a prompt or an attach does too; `{ action: "snooze", days? }`
+  it back — a prompt or an attach does too. Without `session_id`, the same
+  two actions address work whose sessions are GONE (TASK-263): `{ action:
+  "archive" | "unarchive", link_id | key | item_id | task_id }` stamps or
+  clears `archived_at` on the target's ended links (every one of the key's
+  for `key`), so a task that lives only on past sessions collapses into
+  Done; `{ action: "unlink", link_id }` with no `session_id` deletes that
+  one ended link, snapshot and resumability with it — a detection that was
+  wrong — and is refused to a per-host token (`E_FORBIDDEN`). Both answer
+  `{ action, links: [{ link_id, key?, item_id?, snap_host?, snap_name?,
+  ended_at, archived_at? }], changed }` and emit `work:changed`; a link the
+  caller may not see, a live one or an unknown id answers `E_NOTFOUND` in
+  one wording. A `reject` with no `session_id` is `E_INVALID` and names
+  those two forms. `{ action: "snooze", days? }`
   (default 7) and `{ action: "never" }` flag the session's primary link (or
   `link_id`); `{ action: "dismiss", item_id }` clears a reopened entry
   (refused to a per-host token). A per-host token sees and applies only its

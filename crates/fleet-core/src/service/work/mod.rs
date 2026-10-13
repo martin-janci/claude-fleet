@@ -12,6 +12,7 @@ pub mod card;
 pub mod confidence;
 pub mod describe;
 pub mod detect;
+pub mod ended;
 pub mod graph;
 pub mod handover;
 pub mod harvest;
@@ -1141,12 +1142,11 @@ fn work_link_locked<'a>(
             format!("{} has its own entry point", args.action),
         ));
     }
-    let session_id = args.session_id.ok_or_else(|| {
-        IpcError::new(
-            codes::E_INVALID,
-            format!("{} needs session_id", args.action),
-        )
-    })?;
+    // The three sessionless forms live in `ended` (TASK-263) and never
+    // reach here; a reject has none, and is told where those two are.
+    let session_id = args
+        .session_id
+        .ok_or_else(|| ended::needs_session(&args.action))?;
     // A client bound to an org never reaches another org's session (the
     // transport's session gate says so first; this keeps the service's own
     // answer the same — the unknown session's — for every entry point, the
