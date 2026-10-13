@@ -158,6 +158,12 @@ pub struct WriteBack {
     /// for it (owner decision 2026-10-11, migration 172).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub comments: bool,
+    /// Let a person promote a fleet task to a ticket here: fleet creates it
+    /// (a subtask of the parent's ticket, or in a project they pick) and
+    /// the task becomes that ticket (owner decision 2026-10-11). Every
+    /// provider in `service::trackers::CREATE_PROVIDERS`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub create_tickets: bool,
     /// Let a person who moves a ticket in fleet move it at the tracker too
     /// (owner decision 2026-10-12, CF-6): a transition, a workflow state,
     /// a section, closed or open.
@@ -167,7 +173,7 @@ pub struct WriteBack {
 
 impl WriteBack {
     pub fn is_off(&self) -> bool {
-        !self.pr_remote_link && !self.comments && !self.status
+        !self.pr_remote_link && !self.comments && !self.create_tickets && !self.status
     }
 }
 
@@ -741,6 +747,11 @@ pub fn validate_tracker_settings(
                 .into(),
         ));
     }
+    if s.write_back.create_tickets && !crate::service::trackers::creates_items(provider) {
+        return Err(bad(format!(
+            "write_back.create_tickets: fleet does not create tickets in a {provider} tracker"
+        )));
+    }
     if let Some(h) = &s.hostname {
         if provider != "github" {
             return Err(bad(
@@ -827,7 +838,7 @@ pub fn validate_credential_ref(r: &str) -> Result<(), IpcError> {
 /// Read a credential reference. `None` when it cannot be read (unset
 /// variable, missing file, empty value); the reason is logged without the
 /// value.
-pub(super) fn read_credential_ref(r: &str) -> Option<String> {
+pub(crate) fn read_credential_ref(r: &str) -> Option<String> {
     let value = if let Some(name) = r.strip_prefix("env:") {
         std::env::var(name).ok()
     } else if let Some(path) = r.strip_prefix("file:") {

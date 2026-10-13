@@ -55,6 +55,14 @@ fn issue_ref_ok(id: &str) -> bool {
     !id.is_empty() && id.len() <= 100 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
+/// PURE: a Linear team key (`ENG`, `A1`): a letter, then letters and
+/// digits, at most ten.
+pub fn team_key_ok(k: &str) -> bool {
+    k.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && k.len() <= 10
+        && k.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
 pub struct Linear {
     /// The workspace `urlKey` the site names.
     url_key: Option<String>,
@@ -266,7 +274,9 @@ impl Linear {
                 .await?;
             if let Some(d) = v["data"].as_object() {
                 for (k, i) in pending.iter().enumerate() {
-                    found[*i] = self.snapshot(&d[&format!("i{k}")]);
+                    // An answer missing an alias is that issue not found,
+                    // never a panic on a map index.
+                    found[*i] = d.get(&format!("i{k}")).and_then(|n| self.snapshot(n));
                 }
                 break;
             }
@@ -455,6 +465,101 @@ impl Linear {
     }
 
     /// A reference → what `issue(id:)` takes: the id, or an identifier.
+    /// Create an issue from a fleet task ([`WriteOp::CreateItem`]): a
+    /// sub-issue of `parent` in its team, or an issue of team `container`
+    /// (its key).
+    async fn create_issue(
+        &self,
+        container: Option<&str>,
+        parent: Option<&super::CreateParent>,
+        title: &str,
+        description: &str,
+    ) -> Result<WriteOutcome, TrackerError> {
+        let (team, parent_id) = match parent {
+            Some(p) => {
+                let id = p
+                    .external_id
+                    .clone()
+                    .or_else(|| self.lookup_id(&ItemRef::parse(&p.key)))
+                    .filter(|id| issue_ref_ok(id))
+                    .ok_or_else(|| TrackerError::Invalid("not a Linear issue".into()))?;
+                let d = self
+                    .gql(
+                        "query($id: String!) { issue(id: $id) { id team { id } } }",
+                        json!({ "id": id }),
+                        CallKind::Other,
+                    )
+                    .await?;
+                let team = d["issue"]["team"]["id"].as_str().map(str::to_string);
+                let parent_id = d["issue"]["id"].as_str().map(str::to_string);
+                (team.ok_or(TrackerError::NotFound)?, parent_id)
+            }
+            None => {
+                let key = container
+                    .filter(|k| team_key_ok(k))
+                    .map(str::to_ascii_uppercase)
+                    .ok_or_else(|| {
+                        TrackerError::Invalid("no Linear team to create it in".into())
+                    })?;
+                let d = self
+                    .gql(
+                        "query($k: String!) { teams(filter: { key: { eq: $k } }) { nodes { id } } }",
+                        json!({ "k": key }),
+                        CallKind::Other,
+                    )
+                    .await?;
+                let team = d["teams"]["nodes"][0]["id"]
+                    .as_str()
+                    .map(str::to_string)
+                    .ok_or(TrackerError::NotFound)?;
+                (team, None)
+            }
+        };
+        let title: String = title.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut input = json!({ "teamId": team, "title": title });
+        if !description.trim().is_empty() {
+            input["description"] = Value::String(description.to_string());
+        }
+        if let Some(p) = parent_id.filter(|id| issue_ref_ok(id)) {
+            input["parentId"] = Value::String(p);
+        }
+        let data = self
+            .gql(
+                "mutation($input: IssueCreateInput!) { issueCreate(input: $input) { success \
+                 issue { id identifier url } } }",
+                json!({ "input": input }),
+                CallKind::Other,
+            )
+            .await?;
+        let created = &data["issueCreate"];
+        let issue = &created["issue"];
+        let id = issue["id"].as_str().filter(|id| issue_ref_ok(id));
+        let key = issue["identifier"]
+            .as_str()
+            .filter(|k| {
+                k.split_once('-').is_some_and(|(t, n)| {
+                    team_key_ok(t)
+                        && !n.is_empty()
+                        && n.len() <= 9
+                        && n.bytes().all(|b| b.is_ascii_digit())
+                })
+            })
+            .map(str::to_ascii_uppercase);
+        match (created["success"].as_bool(), id, key) {
+            (Some(true), Some(id), Some(key)) => Ok(WriteOutcome {
+                remote_id: Some(id.to_string()),
+                url: issue["url"]
+                    .as_str()
+                    .filter(|u| u.starts_with(WEB_PREFIX) && u.len() <= 2048)
+                    .map(str::to_string),
+                key: Some(key),
+            }),
+            _ => Err(TrackerError::Invalid(
+                "Linear created the issue but did not say which one".into(),
+            )),
+        }
+    }
+
     fn lookup_id(&self, r: &ItemRef) -> Option<String> {
         match r {
             ItemRef::Id(id) => Some(id.clone()),
@@ -707,6 +812,17 @@ impl TrackerProvider for Linear {
     }
 
     async fn write(&self, op: &WriteOp) -> Result<WriteOutcome, TrackerError> {
+        if let WriteOp::CreateItem {
+            container,
+            parent,
+            title,
+            description,
+        } = op
+        {
+            return self
+                .create_issue(container.as_deref(), parent.as_ref(), title, description)
+                .await;
+        }
         if let WriteOp::SetStatus {
             key,
             external_id,
@@ -725,7 +841,7 @@ impl TrackerProvider for Linear {
         } = op
         else {
             return Err(TrackerError::Refused(
-                "Linear takes comments and status moves only from fleet".into(),
+                "Linear takes comments, new issues and status moves only from fleet".into(),
             ));
         };
         let id = external_id
@@ -756,6 +872,7 @@ impl TrackerProvider for Linear {
                 .as_str()
                 .filter(|u| u.starts_with(WEB_PREFIX) && u.len() <= 2048)
                 .map(str::to_string),
+            key: None,
         })
     }
 }

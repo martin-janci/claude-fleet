@@ -962,6 +962,95 @@ describe('WorkTaskDetail', () => {
     });
   });
 
+  describe('promoting a task of fleet\'s own to a ticket', () => {
+    it('offers Promote where the hub names a target, and sends the project picked', async () => {
+      handlers.work_task = () => ({
+        ...localTask,
+        promote_targets: [
+          {
+            tracker_id: 1,
+            tracker: 'Jira (acme)',
+            provider: 'jira',
+            containers: [
+              ['ABC', 'ABC'],
+              ['OPS', 'OPS'],
+            ],
+            container_required: true,
+          },
+        ],
+      });
+      handlers.promote_work_item = () => ({ id: 77 });
+      render(WorkTaskDetail, { taskId: 'item:77' });
+      await flush();
+      await fireEvent.click(screen.getByTestId('work-task-promote'));
+      await flush();
+      const submit = screen.getByTestId('promote-task-submit') as HTMLButtonElement;
+      expect(submit.disabled).toBe(true);
+      await fireEvent.change(screen.getByTestId('promote-task-container'), { target: { value: 'OPS' } });
+      await flush();
+      expect(submit.disabled).toBe(false);
+      await fireEvent.click(submit);
+      await flush();
+      expect(calls('promote_work_item')).toEqual([{ item_id: 77, tracker_id: 1, container: 'OPS' }]);
+    });
+
+    it('a subtask of a ticket picks nothing; one on its way shows instead of the button', async () => {
+      handlers.work_task = () => ({
+        ...localTask,
+        promote_targets: [{ tracker_id: 1, tracker: 'Jira (acme)', provider: 'jira', parent_key: 'ABC-12' }],
+      });
+      handlers.promote_work_item = () => ({ id: 77 });
+      const { unmount } = render(WorkTaskDetail, { taskId: 'item:77' });
+      await flush();
+      expect(screen.getByTestId('work-task-promote').getAttribute('title')).toBe(
+        'Create it as a subtask of ABC-12 in Jira (acme)',
+      );
+      await fireEvent.click(screen.getByTestId('work-task-promote'));
+      await flush();
+      expect(screen.getByTestId('promote-task-under').textContent).toContain('ABC-12');
+      expect(screen.queryByTestId('promote-task-container')).toBeNull();
+      await fireEvent.click(screen.getByTestId('promote-task-submit'));
+      await flush();
+      expect(calls('promote_work_item')).toEqual([{ item_id: 77 }]);
+      unmount();
+
+      handlers.work_task = () => ({
+        ...localTask,
+        promote_targets: [{ tracker_id: 1, tracker: 'Jira (acme)', provider: 'jira', parent_key: 'ABC-12' }],
+        promotion: { state: 'pending', tracker: 'Jira (acme)' },
+      });
+      render(WorkTaskDetail, { taskId: 'item:77' });
+      await flush();
+      expect(screen.queryByTestId('work-task-promote')).toBeNull();
+      expect(screen.getByTestId('work-task-promotion').textContent?.trim()).toBe('Creating the ticket in Jira (acme)…');
+    });
+
+    it('a GitHub tracker narrowed to no repositories takes one typed in', async () => {
+      handlers.work_task = () => ({
+        ...localTask,
+        promote_targets: [{ tracker_id: 4, tracker: 'GitHub (acme)', provider: 'github', container_required: true }],
+      });
+      handlers.promote_work_item = () => ({ id: 77 });
+      render(WorkTaskDetail, { taskId: 'item:77' });
+      await flush();
+      await fireEvent.click(screen.getByTestId('work-task-promote'));
+      await flush();
+      const submit = screen.getByTestId('promote-task-submit') as HTMLButtonElement;
+      expect(submit.disabled).toBe(true);
+      await fireEvent.input(screen.getByTestId('promote-task-container-text'), { target: { value: ' acme/api ' } });
+      await flush();
+      await fireEvent.click(submit);
+      await flush();
+      expect(calls('promote_work_item')).toEqual([{ item_id: 77, tracker_id: 4, container: 'acme/api' }]);
+    });
+
+    it('a ticket, or a task no tracker takes, offers no Promote', async () => {
+      render(WorkTaskDetail, { taskId: 'item:77' });
+      await flush();
+      expect(screen.queryByTestId('work-task-promote')).toBeNull();
+    });
+  });
+
   describe('G3.4: tabs, Delivery, inline status, the start rule', () => {
     it('Sessions counts its links; Activity says when nothing happened', async () => {
       handlers.work_task = () => ({ ...localTask, last_outcome: null, task: { ...localTask.task, sessions: [] } });

@@ -252,6 +252,11 @@ pub mod codes {
     /// with no value. The message lists the NAMES only, never a value. Set
     /// them (`catalog_set_secret`) or re-apply with `force_partial`.
     pub const E_SECRET_MISSING: &str = "E_SECRET_MISSING";
+
+    /// Session environment: a variable's `credential_ref` resolved to
+    /// nothing at launch, so the launch was refused. The message names the
+    /// variable and the reference kind, never a value or a path.
+    pub const E_ENV_UNRESOLVED: &str = "E_ENV_UNRESOLVED";
     /// Remote (hub-client) mode: the hub answered `401`. The client token is
     /// no longer accepted — the operator revoked it, or the hub was re-inited
     /// with a fresh database. The desktop must send the user back to the Hub
@@ -321,6 +326,18 @@ pub mod codes {
     /// The message always names what to do instead: run it on the hub, or in
     /// a standalone app. Never returned in standalone mode.
     pub const E_LOCAL_ONLY: &str = "E_LOCAL_ONLY";
+    /// Device mirror: `scrcpy` or `adb` is not installed on this machine.
+    /// The message names the tool and how to install it.
+    pub const E_TOOL_MISSING: &str = "E_TOOL_MISSING";
+    /// Device mirror: this machine's adb speaks another protocol version
+    /// than the device host's adb server. Refused before any adb client
+    /// runs, because a mismatched client `host:kill`s the server.
+    pub const E_ADB_VERSION_MISMATCH: &str = "E_ADB_VERSION_MISMATCH";
+    /// Device mirror: no way from this machine to the device's host.
+    pub const E_NO_ROUTE: &str = "E_NO_ROUTE";
+    /// Device mirror: `scrcpy` exited with an error right after starting;
+    /// the message carries the tail of its output.
+    pub const E_MIRROR_FAILED: &str = "E_MIRROR_FAILED";
 
     /// Every code a *transport* raises when a command did not reach, or did
     /// not come back from, the host — over SSH or over an agent.

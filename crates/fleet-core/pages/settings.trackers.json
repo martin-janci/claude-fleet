@@ -146,6 +146,10 @@
         },
         {
           "type": "field",
+          "key": "create_tickets"
+        },
+        {
+          "type": "field",
           "key": "move_tickets"
         }
       ]

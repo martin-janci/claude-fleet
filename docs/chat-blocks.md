@@ -332,12 +332,16 @@ as the Dashboards page draws its built-ins; two widgets with the same query
 cost one read. A card in the transcript reads once (with *Refresh*); the
 page re-reads when work changes.
 
-*Pin to Dashboards* keeps it on this device, in the Dashboards page's
-picker. A block whose `id` is a pinned dashboard's is offered as its
+*Pin to Dashboards* keeps it on the hub, for the person (`dashboards {
+pin }` over the control API, `docs/control-api.md`), so every device of
+theirs shows it in the Dashboards page's picker; a standalone desktop, or a
+hub that does not serve `dashboards` yet, keeps it in the desktop's own
+store. A block whose `id` is a pinned dashboard's is offered as its
 replacement and says what it changes (`adds “Spent”, removes “By person”`);
 one the same as the pinned one says *Pinned*. A block may not take a
 built-in's id (`dash.developer`, `dash.tester`, `dash.pm`, `dash.scrum`,
-`dash.po`). A device keeps at most 20.
+`dash.po`). A person keeps at most 20. The agent reads what is pinned with
+`dashboards { list }` and `{ get, id }`; only a person pins or unpins.
 
 On the page, *Change with the agent* (or a widget's *Change*) puts the
 dashboard, as this block, in the agent's composer in Control, followed by
@@ -361,8 +365,8 @@ model (`REGEN_FORM_DOCS=1 cargo fleet-test -- form_docs_are_current`), for
 editors, LLM structured output and fleet-mobile. The app's check is
 `checkUiBlock` in `src/lib/rich_blocks.ts`. Its Rust twin,
 `crates/fleet-core/src/pages/chat_blocks.rs`, is the model the schema is
-generated from and the same check, meant for blocks fleet writes or relays
-itself; no production path calls it yet. Both run
+generated from and the same check, for blocks fleet keeps or relays itself:
+the hub checks a dashboard with it before it pins one. Both run
 `docs/chat-block-examples/blocks.json` and report the same problems, in
 the same words and order: `item 1 › point 3: must be [x, number]`. At
 most 20 problems are reported.

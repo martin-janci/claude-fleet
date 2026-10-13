@@ -66,6 +66,30 @@ pub async fn spawn_review(
         let cwd_src = cwd_source_for_session(&s, &source)?;
         (source, cwd_src)
     };
+    // The review's pane command: its agent's plain one, as a "work" session
+    // of that agent would run (Claude Code under a minted conversation id,
+    // Codex fresh — it picks its own id), sourcing the environment of the
+    // source's host and project. No session scope: the review row does not
+    // exist yet. Before the workspace step, so an unresolved variable
+    // refuses with nothing created; no store guard is held here.
+    let short = format!("{:x}", now_unix() & 0xfffff);
+    let review_name = format!("{}--review-{}", source.tmux_name, short);
+    let launch = crate::tmux::ClaudeLaunch::default();
+    let claude_id = agent.mint_conversation_id();
+    let pane = match claude_id.as_deref() {
+        Some(id) => agent.launch_command(Some(id), &review_name, &launch),
+        None => agent.start_command(&review_name, &launch),
+    };
+    let pane = crate::service::env::prepare(
+        store,
+        &**ssh,
+        &source.host_alias,
+        source.project_id,
+        None,
+        &Default::default(),
+        &pane,
+    )
+    .await?;
     // Automatic workspace check (create-only) in the SOURCE's workspace, and
     // use the directory the probe resolved on the host. The remote guess in
     // `resolve_cwd_source` assumes `.claude/worktrees/`, so on a
@@ -87,17 +111,6 @@ pub async fn spawn_review(
     };
 
     // 2. Spawn the review tmux session (off-lock).
-    //    A review runs its agent's plain pane command, as a "work" session
-    //    of that agent would: Claude Code under a minted conversation id,
-    //    Codex fresh (it picks its own id).
-    let short = format!("{:x}", now_unix() & 0xfffff);
-    let review_name = format!("{}--review-{}", source.tmux_name, short);
-    let launch = crate::tmux::ClaudeLaunch::default();
-    let claude_id = agent.mint_conversation_id();
-    let pane = match claude_id.as_deref() {
-        Some(id) => agent.launch_command(Some(id), &review_name, &launch),
-        None => agent.start_command(&review_name, &launch),
-    };
     let tmux = exec_for(&source.host_alias, ssh);
     tmux.new_session(&review_name, std::path::Path::new(&cwd), &pane)
         .await?;

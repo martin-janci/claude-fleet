@@ -135,7 +135,8 @@ view.
 **Filters and saved views.** A search, the *Assigned to me* and *To
 review* toggles, and a **Filters** panel laid out like the Sessions
 list's: Organisation, Tracker (or *Local work* / *Bare keys*), Status
-(Open, To do, In progress, Done) and Sessions (Active session, Past only,
+(Open, To do, In progress, Done) — by the Board's rule, so a bare key with a live
+session counts as In progress — and Sessions (Active session, Past only,
 No session, Suggested). Each filter that is on shows as a chip with a ×
 and *Clear all*, and "No tasks match" names them. The view select saves
 the current filters under a name (Save as…, Update, Delete); saved views
@@ -740,6 +741,50 @@ off or the task has no ticket — then nothing is saved at all.
 
 This changes D29 on the owner's word (2026-10-11): comments a person posts
 are written back; transitions and worklogs still are not.
+
+### Local tasks, and promoting one to a ticket (off by default)
+
+Work can stay in fleet while it is small: a task of fleet's own, or a
+subtask under a tracker's ticket (*+ Add subtask* on the ticket's page).
+Such a subtask is fleet's alone — the tracker never sees it — and starts,
+comments and sprints like any other task.
+
+When it should be tracked, **Promote to ticket…** on the task's page makes it
+one. With **Create tickets** on (Settings → Trackers → Write-back, every
+provider: Jira Cloud and Data Center, Asana, Linear, GitHub; off by default,
+behind a confirm):
+
+- **A subtask of a ticket** is created under that ticket, in its tracker: a
+  Jira sub-task (the project's first sub-task issue type), an Asana subtask,
+  a Linear sub-issue in the parent's team, a GitHub sub-issue in the
+  parent's repository. Nothing to pick.
+- **A task at the top** goes to the tracker you pick: into a Jira project
+  the site owns (its *Task* type, else its first standard type), a Linear
+  team, a GitHub repository (one the tracker is narrowed to, or any in its
+  scope, typed as `owner/repo`), or an Asana project — or, with none, into
+  the Asana workspace, assigned to the tracker's account so it shows in its
+  views.
+- **What is sent**: the title and the description, signed `— <your name> via
+  fleet`. Assignees, due dates, priority, labels and estimates stay in fleet
+  for now.
+- **The task becomes the ticket.** Once the tracker answers, the same task
+  is that ticket — its new key (`ABC-7`, `ENG-12`, `acme/api#40`; an Asana
+  task draws its tracker's display key), its tracker's status — and its sessions, comments,
+  subtasks, sprint and history stay with it. Its old fleet key still finds
+  it. Local subtasks under it stay fleet's own, and can be promoted in turn.
+- **Not promoted**: a tracker's ticket, an epic, a delegated job, an open
+  proposal, and a task under a task of fleet's own (promote its parent
+  first, or take it out to the top). Only a person promotes; an agent's
+  `promote` is refused.
+- **Once.** A create is not idempotent, so it is sent at most once, through
+  the same outbox as a comment: within seconds on the desktop or hub that
+  owns the trackers. The task page says *Creating the ticket in …* meanwhile,
+  or *Not created in …: <why>* after a refusal, and offers Promote again.
+- **The token needs permission to create issues** (Jira: *Create issues* in
+  the project; Asana and Linear: a key that may add tasks / issues there;
+  GitHub: `gh` logged in with `repo` scope). A GitHub sub-issue that cannot
+  be filed under its parent is still created, at the top of the
+  repository.
 
 ### Sync
 

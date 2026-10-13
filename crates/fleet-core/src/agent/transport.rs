@@ -1,7 +1,7 @@
 //! `SshExec` over a live agent connection.
 //!
 //! The service layer above this is unchanged and unaware: it keeps calling the
-//! same seven methods. Two places where the agent protocol does not line up
+//! same eight methods. Two places where the agent protocol does not line up
 //! with `SshExec` are decided here, and both are visible to a reviewer:
 //!
 //! 1. **`args` is a command line, not an argv.** `SshExec`'s contract is ssh's:
@@ -59,14 +59,17 @@ impl AgentTransport {
         &self,
         host: &str,
         args: &[&str],
+        stdin: Option<String>,
         wall_clock: Duration,
         cap: Option<usize>,
         token: Option<CancellationToken>,
     ) -> Result<Output, IpcError> {
         let id = uuid::Uuid::new_v4().to_string();
         // Every frame this transport builds — here and in `upload_file` below
-        // — is one an agent at `proto` 1 already understands, so nothing is
-        // gated on `self.registry.negotiated_proto(host)`. The FIRST time
+        // — is one an agent at `proto` 1 already understands (`stdin`
+        // included: the field, and the agent's write of it to the child, are
+        // as old as proto 1), so nothing is gated on
+        // `self.registry.negotiated_proto(host)`. The FIRST time
         // that stops being true — a new frame kind, or a changed field
         // meaning, that an agent below some version could not act on — is
         // where a caller here has to check it before sending, refusing (or
@@ -75,8 +78,7 @@ impl AgentTransport {
         let frame = HubFrame::Exec {
             id: id.clone(),
             argv: shell_argv(args),
-            // `SshExec` has no stdin parameter; nothing can set this yet.
-            stdin: None,
+            stdin,
             timeout_ms: wall_clock.as_millis() as u64,
             cap_bytes: cap.map(|c| c as u64),
         };
@@ -240,6 +242,33 @@ fn upload_mode(md: &std::fs::Metadata) -> u32 {
     }
 }
 
+/// What `run_with_stdin` may send: the frame's `stdin` is text, so the bytes
+/// must be UTF-8 (a lossy conversion would change what the command reads,
+/// and the one secret-bearing caller, `via_host`'s curl header block, must
+/// arrive byte for byte), and it travels in one frame, so it is bound by the
+/// payload limit — judged from the length first, before the UTF-8 check
+/// walks the bytes. Both refusals happen before any frame is built, so
+/// nothing refused reaches the wire. Widening to arbitrary bytes needs a
+/// `stdin_b64` field and a proto bump (see `HubFrame::Exec`).
+fn stdin_text(host: &str, stdin: Vec<u8>) -> Result<String, IpcError> {
+    if stdin.len() > fleet_proto::MAX_PAYLOAD_BYTES {
+        return Err(IpcError::new(
+            codes::E_UNSUPPORTED,
+            format!(
+                "stdin for {host} is {} MiB: the agent transport carries at most {} MiB in one frame",
+                stdin.len() / (1024 * 1024),
+                fleet_proto::MAX_PAYLOAD_BYTES / (1024 * 1024),
+            ),
+        ));
+    }
+    String::from_utf8(stdin).map_err(|_| {
+        IpcError::new(
+            codes::E_UNSUPPORTED,
+            format!("stdin for {host} is not UTF-8: the agent transport carries stdin as text"),
+        )
+    })
+}
+
 fn cancelled(host: &str) -> IpcError {
     IpcError::new(
         codes::E_CANCELLED,
@@ -263,6 +292,7 @@ impl SshExec for AgentTransport {
         self.exec(
             host,
             args,
+            None,
             SshClient::default_wall_clock(timeout),
             None,
             None,
@@ -277,7 +307,7 @@ impl SshExec for AgentTransport {
         _connect_timeout: Duration,
         wall_clock: Duration,
     ) -> Result<Output, IpcError> {
-        self.exec(host, args, wall_clock, None, None).await
+        self.exec(host, args, None, wall_clock, None, None).await
     }
 
     async fn run_bounded_capped(
@@ -288,7 +318,7 @@ impl SshExec for AgentTransport {
         wall_clock: Duration,
         max_output: usize,
     ) -> Result<Output, IpcError> {
-        self.exec(host, args, wall_clock, Some(max_output), None)
+        self.exec(host, args, None, wall_clock, Some(max_output), None)
             .await
     }
 
@@ -302,6 +332,7 @@ impl SshExec for AgentTransport {
         self.exec(
             host,
             args,
+            None,
             SshClient::default_wall_clock(timeout),
             None,
             Some(token),
@@ -317,7 +348,25 @@ impl SshExec for AgentTransport {
         wall_clock: Duration,
         token: CancellationToken,
     ) -> Result<Output, IpcError> {
-        self.exec(host, args, wall_clock, None, Some(token)).await
+        self.exec(host, args, None, wall_clock, None, Some(token))
+            .await
+    }
+
+    /// `run_bounded_capped` with the bytes on the child's stdin: the one
+    /// method that sets `Exec.stdin`, which the agent writes to the child
+    /// and closes. Text only — see [`stdin_text`] for what is refused.
+    async fn run_with_stdin(
+        &self,
+        host: &str,
+        args: &[&str],
+        stdin: Vec<u8>,
+        _connect_timeout: Duration,
+        wall_clock: Duration,
+        max_output: usize,
+    ) -> Result<Output, IpcError> {
+        let text = stdin_text(host, stdin)?;
+        self.exec(host, args, Some(text), wall_clock, Some(max_output), None)
+            .await
     }
 
     /// `timeout` is unused for the same reason as in `run`: there is no
@@ -484,7 +533,10 @@ mod tests {
             ],
             "the args are joined into one command line for a shell to re-split"
         );
-        assert_eq!(stdin, None, "SshExec has no stdin parameter");
+        assert_eq!(
+            stdin, None,
+            "`run` sends no stdin; only `run_with_stdin` does"
+        );
         assert_eq!(
             timeout_ms,
             SshClient::default_wall_clock(Duration::from_secs(5)).as_millis() as u64,
@@ -518,6 +570,98 @@ mod tests {
             .output()
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout), "a b\nc'd\n");
+    }
+
+    // ── stdin ───────────────────────────────────────────────────────────────
+
+    /// `run_with_stdin` is the one method that sets `Exec.stdin`: the bytes
+    /// go as the frame's text, the args take the same shell shape as `run`,
+    /// and the output cap rides as `cap_bytes` the way `run_bounded_capped`
+    /// sends it.
+    #[tokio::test]
+    async fn run_with_stdin_hands_the_agent_the_text_and_the_cap() {
+        let (t, agent) = setup(answer_with(0, b"echoed", b""));
+        let quoted = quote("cat");
+        let out = t
+            .run_with_stdin(
+                "laptop",
+                &["bash", "-lc", &quoted],
+                b"a prompt\n".to_vec(),
+                Duration::from_secs(5),
+                Duration::from_secs(30),
+                4096,
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.stdout, b"echoed");
+        let (_, argv, stdin, timeout_ms, cap) = as_exec(agent.only_frame());
+        assert_eq!(
+            argv,
+            vec![
+                "bash".to_string(),
+                "-c".to_string(),
+                format!("bash -lc {quoted}")
+            ]
+        );
+        assert_eq!(
+            stdin.as_deref(),
+            Some("a prompt\n"),
+            "the bytes ride as text"
+        );
+        assert_eq!(
+            timeout_ms, 30_000,
+            "the caller's wall clock, no connect step"
+        );
+        assert_eq!(cap, Some(4096));
+    }
+
+    /// The frame's stdin is text. Bytes that are not UTF-8 cannot be sent
+    /// faithfully (a lossy conversion would change what the command reads),
+    /// so they are refused before any frame is built — and the refusal
+    /// names the transport, as the SSH path's `E_UNSUPPORTED` used to.
+    #[tokio::test]
+    async fn run_with_stdin_refuses_bytes_that_are_not_text_without_sending() {
+        let (t, agent) = setup(answer_exit(0));
+        let err = t
+            .run_with_stdin(
+                "laptop",
+                &["cat"],
+                vec![0xff, 0xfe, b'x'],
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                1024,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_UNSUPPORTED, "{err:?}");
+        assert!(err.message.contains("UTF-8"), "{}", err.message);
+        assert!(agent.sent().is_empty(), "nothing reaches the wire");
+    }
+
+    /// Stdin travels in one frame, so it is bound by the payload limit —
+    /// judged from its length, before the UTF-8 check walks it.
+    #[tokio::test]
+    async fn run_with_stdin_refuses_an_oversize_input_without_sending() {
+        let (t, agent) = setup(answer_exit(0));
+        // Zeroed, so the allocation is lazy pages, not a 200 MiB memset.
+        let big = vec![0u8; fleet_proto::MAX_PAYLOAD_BYTES + 1];
+        let err = t
+            .run_with_stdin(
+                "laptop",
+                &["cat"],
+                big,
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                1024,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_UNSUPPORTED, "{err:?}");
+        assert!(err.message.contains("200 MiB"), "{}", err.message);
+        assert!(
+            agent.sent().is_empty(),
+            "nothing oversized reaches the wire"
+        );
     }
 
     // ── result mapping ──────────────────────────────────────────────────────

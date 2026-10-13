@@ -1982,6 +1982,20 @@ const MIGRATIONS: &[Migration] = &[
         176,
         include_str!("../../migrations/176_review_test_exemptions.sql"),
     ),
+    // Debug devices: the line waiting for a claimed device,
+    // `debug_device_queue`. New table, idempotent.
+    Migration::plain(
+        177,
+        include_str!("../../migrations/177_debug_device_queue.sql"),
+    ),
+    // Persona dashboards step 6: dashboards a person pinned, on the hub.
+    // `IF NOT EXISTS` throughout, so idempotent.
+    Migration::plain(
+        178,
+        include_str!("../../migrations/178_pinned_dashboards.sql"),
+    ),
+    // Session environment variables and secrets.
+    Migration::plain(179, include_str!("../../migrations/179_env_vars.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -2410,6 +2424,7 @@ mod tests {
     use super::*;
 
     const EXPECTED_TABLES: &[&str] = &[
+        "env_vars",
         "hosts",
         "projects",
         "worktrees",

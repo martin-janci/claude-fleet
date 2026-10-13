@@ -95,13 +95,14 @@ admin      add_host remove_host probe_host check_host hide_host merge_host
            refresh_projects delete_worktree pair_client list_clients
            revoke_client set_client_trust api_tokens set_secret rename_session
            set_friendly_name list_accounts add_account get_settings set_setting guide
+           env_vars
            quick_replies work_admin ensure_operator operator_status
            update_status update_admin link_peer unlink_peer list_peer_links
 device     pr_shepherd agents mcp_confirms answer_mcp_confirm setting_proposals
            decide_setting_proposals setting_history control_route
            resume_or_new control_handoffs list_pages project_picks
            set_project_pick
-           org_admin update_policy session_claim wizard_state
+           org_admin update_policy session_claim wizard_state dashboards
 ```
 
 ## Status vocabulary
@@ -293,7 +294,9 @@ a stage), `groups` (`query.group_by`; `show`: stages or done) or
 app counts each query itself under the person's access. Check the filters
 with `work { stats }` first. When their message starts with a dashboard
 block they pinned ("My pinned dashboard …"), answer with the changed block
-under the **same** `id`: the card offers it as a replacement.
+under the **same** `id`: the card offers it as a replacement. Before you
+change one, read what is pinned with `dashboards { list }` or
+`dashboards { get, id }`; pinning and unpinning are the person's.
 
 When the person asks in their own words for what a wizard does ("set up a
 new project for acme/pos on mercury"), answer with its `wizard` block and
@@ -511,6 +514,19 @@ before a test run so no other session drives it at the same time:
 A stopped emulator or simulator: `scan` lists it under `bootable`; `{ action:
 "boot", host, name }` starts it. `unauthorized` means the phone's USB
 debugging prompt waits for a person; say so rather than retrying.
+
+## Environment — `env_vars`
+
+Variables every session fleet starts gets, by scope: `global` < `host` <
+`project` (`owner/repo`) < `session` (narrower wins). `env_vars { action:
+"set", scope, scope_key, name, value }` stores a plain value; `secret: true`
+makes it write-only (never listed again). A change applies when a session
+next starts or restarts, never to a running pane. `new_session { env: {NAME:
+value} }` sets session-scope plain values for the session it starts. A
+secret the agent must not see comes through `ask` with a `secret` field
+whose `env_target` names the variable: the answer lands in the session's
+scope, not in the reply. `ref` (`env:NAME` | `file:/abs`, read by the hub at
+launch) is the master's alone; a device gets `E_FORBIDDEN`.
 
 ## Host clipboard — `get_clipboard` / `set_clipboard`
 

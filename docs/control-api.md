@@ -103,6 +103,20 @@ with Anthropic and written to the host only (`api_key`, with an optional
 hub owner's devices; everything but `login_status` needs the master or a
 trusted full device. The key and the code are never logged or returned.
 
+### Environment
+
+`env_vars` sets the environment variables every session fleet starts gets,
+by scope (`global` < `host` < `project` as `owner/repo` < `session`, the
+narrower winning): `list`, `set { scope, scope_key, name, value | ref,
+secret? }`, `unset`. A secret or a reference is never listed again; a
+reference (`env:NAME` or `file:/abs`, read by the hub at launch) is the
+master's alone, a device gets `E_FORBIDDEN`. A change applies when a session
+next starts or restarts. `new_session { env }` sets session-scope plain
+values for the session it starts, and a form's `secret` field with an
+`env_target` stores its answer as the session's secret variable
+([forms.md](forms.md#secrets)). Served to the master and the hub owner's
+devices; a write needs the master or a trusted full device.
+
 ### Named tokens
 
 Settings → Control API → **+ Token** (or the `api_tokens` tool) creates a
@@ -668,7 +682,14 @@ Index by area (names only; see the reference for details):
   post_to_tracker: true }` on a ticket also posts the comment there, signed
   `— <name> via fleet`, through the same outbox, drained at once; refused
   for a per-host token, fleet's own work, or with the setting off, and then
-  nothing is written). `work { action: "tracker_comments", key }` reads a
+  nothing is written), and for every provider
+  `write_back: { create_tickets }` (off by default: a person's `work_link {
+  promote, item_id, tracker_id?, container? }` turns a task of fleet's own
+  into a ticket there — a subtask of a ticket under that ticket, a task at
+  the top into `container`, a Jira project key, an Asana project gid, a
+  Linear team key or a GitHub `owner/repo` — and
+  the task becomes that ticket once the outbox sends it; `work { task }`
+  answers `promotion` and `promote_targets`). `work { action: "tracker_comments", key }` reads a
   ticket's own comments live (newest 50, oldest first, no cache; the ones
   fleet posted from a live comment left out; bodies fenced for a per-host
   token; `can_post` says whether the caller may post there), and for Asana
@@ -1079,9 +1100,12 @@ Index by area (names only; see the reference for details):
   copies the app from the caller's host (a per-host token: its own host
   only) to the device's host first; `logs` (`logcat -d`, a simulator's
   `log show`), `screenshot` (an image content block), `boot`, `shutdown`.
-  `claim { device, claim_s?, note? }` keeps every other caller off the
-  device (`E_CONFLICT`) until it lapses or is released; each use by its
-  holder extends it. A per-host token sees its own host's devices and the
+  `claim { device, claim_s?, note?, queue? }` keeps every other caller off
+  the device (`E_CONFLICT`) until it lapses or is released; each use by its
+  holder extends it. With `queue: true` a held device answers your place in
+  its line (`queue_place`) instead of `E_CONFLICT`, and the claim passes to
+  the first in line when the holder releases it or lets it lapse;
+  `release` from someone in that line only leaves it. A per-host token sees its own host's devices and the
   ones a person marked `shared` on hosts of its own org; `configure {
   label, shared }` and `forget` are a person's. See `docs/debug-devices.md`.
 - **Pull requests** — `prs`, `action: list { state?: open|merged|closed|all,
@@ -1136,6 +1160,13 @@ Index by area (names only; see the reference for details):
   another of your devices: `list {kind?}` | `get {kind, key?}` | `save
   {kind, key?, step, answers, label?}` | `clear {kind, key?}`. Rows name the
   device that saved last.
+- **Dashboards** — `dashboards`, the dashboards a person pinned from a
+  `dashboard` block (`docs/chat-blocks.md`), kept on the hub so every
+  device of theirs shows them: `list` | `get {id}` | `pin {dashboard, why?}`
+  | `unpin {id}`. A pin checks the block as the app draws it, refuses a
+  built-in's id and keeps at most 20 per person. The agent (Control's
+  operator) reads them; its `pin` and `unpin` answer `E_FORBIDDEN`. Not
+  served to a per-host token.
 - **Operator settings** — `get_settings` (every registered key of the
   settings registry, `service/settings.rs`, with its effective value; a
   read, but master token only, since the values name hosts and their

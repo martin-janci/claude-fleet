@@ -207,6 +207,11 @@ pub struct FormField {
     /// 0600 file on mercury, never shown to the agent").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret_note: Option<String>,
+    /// secret: store the answer as the session's environment variable NAME
+    /// (secret, write-only; applied on its next start or restart) instead
+    /// of writing a host file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_target: Option<String>,
 }
 
 /// One option of a select or multiselect: the original `[value, label]`
@@ -511,6 +516,15 @@ fn check_field(v: &mut Problems, at: &str, f: &FormField, seen: &BTreeMap<&str, 
     match (&f.secret_note, f.kind) {
         (Some(t), Secret) => v.text(at, "secret_note", t, MAX_TEXT),
         (Some(_), _) => not_for(v, "secret_note"),
+        (None, _) => {}
+    }
+    match (&f.env_target, f.kind) {
+        (Some(t), Secret) => {
+            if let Err(e) = crate::store::check_env_name(t) {
+                v.bad(at, format!("env_target: {}", e.message));
+            }
+        }
+        (Some(_), _) => not_for(v, "env_target"),
         (None, _) => {}
     }
     if f.other && f.kind != Select {

@@ -447,6 +447,34 @@ export interface TaskDetail {
   /** Files and images on the task, newest first: metadata only (the bytes
    *  are `work_attachment`'s). */
   attachments?: TaskAttachment[];
+  /** The task's promotion to a tracker while it is sent, or why it was not.
+   *  Absent once the task is the ticket (and from an older hub). */
+  promotion?: PromotionView | null;
+  /** Where this reader may promote a task of fleet's own. Empty: a
+   *  tracker's ticket, an agent, or no tracker takes new tickets. */
+  promote_targets?: PromoteTarget[];
+}
+
+/** `service::work::promote::PromotionView`. */
+export interface PromotionView {
+  state: 'pending' | 'failed';
+  /** The tracker, by its Settings name. */
+  tracker: string;
+  error?: string | null;
+}
+
+/** `service::work::promote::PromoteTarget`: a tracker a task may become a
+ *  ticket in. */
+export interface PromoteTarget {
+  tracker_id: number;
+  tracker: string;
+  provider: string;
+  /** A subtask's parent ticket: it is created under it. */
+  parent_key?: string | null;
+  /** `[id, name]`: Jira project keys, Asana projects. */
+  containers?: [string, string][];
+  /** One must be picked (Jira). */
+  container_required?: boolean;
 }
 
 /** One file on a task (`store::AttachmentRow`). Kept in fleet, never a tracker's. */

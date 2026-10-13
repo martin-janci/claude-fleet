@@ -31,7 +31,8 @@ use fleet_core::service::work::view::{
 };
 use fleet_core::service::work::{self, WorkArgs, WorkLinkArgs};
 use fleet_core::store::{
-    AttachmentRow, BucketRow, CommentRow, Decider, SessionRow, Store, WorkRule, WorkView,
+    AttachmentRow, BucketRow, CommentRow, Decider, SessionRow, Store, WorkItemRow, WorkRule,
+    WorkView,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -224,6 +225,18 @@ pub struct CommentOnWorkArgs {
     pub post_to_tracker: Option<bool>,
 }
 
+/// `promote_work_item`: a task of fleet's own becomes a tracker's ticket
+/// (owner decision 2026-10-11). A subtask of a ticket names neither field;
+/// a task at the top names its tracker and, for Jira, the project.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PromoteWorkItemArgs {
+    pub item_id: i64,
+    #[serde(default)]
+    pub tracker_id: Option<i64>,
+    #[serde(default)]
+    pub container: Option<String>,
+}
+
 /// `work_tracker_comments`: a ticket's comments at its tracker, by key.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorkTrackerCommentsArgs {
@@ -285,6 +298,15 @@ pub async fn comment_on_work(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<CommentRow, IpcError> {
     routed::comment_on_work(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn promote_work_item(
+    args: PromoteWorkItemArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<WorkItemRow, IpcError> {
+    routed::promote_work_item(&backend, args, &store).await
 }
 
 #[tauri::command]
@@ -1052,6 +1074,24 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("comment_on_work", &wire).await,
             None => work::local::comment(&wire, store, &OrgScope::All, LOCAL_ACTOR, None),
+        }
+    }
+
+    pub async fn promote_work_item(
+        backend: &FleetBackend,
+        args: PromoteWorkItemArgs,
+        store: &Mutex<Store>,
+    ) -> Result<WorkItemRow, IpcError> {
+        let wire = WorkLinkArgs {
+            action: "promote".into(),
+            item_id: Some(args.item_id),
+            tracker_id: args.tracker_id,
+            container: args.container,
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("promote_work_item", &wire).await,
+            None => work::promote::promote(&wire, store, &OrgScope::All, None),
         }
     }
 

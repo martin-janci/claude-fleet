@@ -84,8 +84,8 @@ pub const MAX_PROMPT_BYTES: usize = 256 * 1024;
 pub mod reason {
     /// The call ran past its wall clock (or the host-side `timeout`).
     pub const TIMEOUT: &str = "timeout";
-    /// SSH failed (unreachable host, spawn failure, or a transport that
-    /// cannot pipe stdin: a host reached only through fleet-agent).
+    /// SSH or the agent transport failed (unreachable host, spawn failure,
+    /// a prompt the agent frame cannot carry).
     pub const SSH_ERROR: &str = "ssh_error";
     /// `claude` is not on the host's login PATH.
     pub const NO_CLAUDE: &str = "noclaude";

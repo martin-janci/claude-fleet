@@ -294,6 +294,7 @@ pub async fn spawn_author_session(
             over_limit_ok: false,
             owner_person_id: crate::service::sessions::hub_personal_owner(store),
             start_token: None,
+            env: None,
         },
         store,
         ssh,

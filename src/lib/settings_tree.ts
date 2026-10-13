@@ -73,6 +73,7 @@ export const SETTINGS_TREE: readonly SettingsGroup[] = [
         page: 'settings.projects',
         pageOnlyRemote: true,
       },
+      { id: 'env', label: 'Environment', page: 'settings.env' },
       {
         id: 'restore',
         label: 'Restore lost sessions',

@@ -16,7 +16,7 @@
 //! exactly the service-layer churn the whole sub-project exists to avoid. So
 //! the router is installed *inside* [`SshClient`](crate::ssh::SshClient)
 //! instead, and every existing `Arc<SshClient>` holder routes for free. The
-//! seam is still the same seam: the seven `SshExec` methods, unchanged.
+//! seam is still the same seam: the eight `SshExec` methods, unchanged.
 //!
 //! A client built by [`SshClient::new`](crate::ssh::SshClient::new) — the
 //! desktop's — carries no router at all, so it never consults a store and
@@ -354,7 +354,7 @@ mod tests {
         assert!(!reg.connected("laptop"), "and the stale connection is gone");
     }
 
-    // ── the seven methods ─────────────────────────────────────────────────
+    // ── the eight methods ─────────────────────────────────────────────────
 
     #[tokio::test]
     async fn run_reaches_the_agent() {
@@ -391,16 +391,48 @@ mod tests {
         ssh.upload_file("laptop", file.path(), "/tmp/there", WALL)
             .await
             .unwrap();
+        ssh.run_with_stdin("laptop", &a, b"in\n".to_vec(), CONNECT, WALL, 1024)
+            .await
+            .unwrap();
 
         let home = ssh.remote_home("laptop").await.unwrap();
         assert_eq!(home, "/home/u");
 
         assert_eq!(
             agent.sent().len(),
-            7,
-            "all seven methods route: {:?}",
+            8,
+            "all eight methods route: {:?}",
             agent.sent()
         );
+    }
+
+    /// The stdin path routes too, with the bytes on the frame — the one
+    /// `SshExec` method the agent transport did not serve until CF-3, when
+    /// a tracker on an agent host failed every request with
+    /// `E_UNSUPPORTED`.
+    #[tokio::test]
+    async fn run_with_stdin_reaches_the_agent_with_the_bytes() {
+        let (ssh, reg, _store) = hub_client(&[("laptop", None, "agent")]);
+        let agent = FakeAgent::connect(&reg, "laptop", fake::answer_with(0, b"ok", b""));
+        let a = script();
+        let out = ssh
+            .run_with_stdin(
+                "laptop",
+                &args(&a),
+                b"the body".to_vec(),
+                CONNECT,
+                WALL,
+                1024,
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.stdout, b"ok");
+        match agent.only_frame() {
+            fleet_proto::HubFrame::Exec { stdin, .. } => {
+                assert_eq!(stdin.as_deref(), Some("the body"));
+            }
+            other => panic!("expected an exec frame, got {other:?}"),
+        }
     }
 
     /// An agent host with nothing connected must report unreachable at once,

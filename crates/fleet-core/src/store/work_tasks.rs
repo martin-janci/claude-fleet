@@ -1073,6 +1073,70 @@ impl Store {
         self.get_work_item(item_id)
     }
 
+    /// A local task became `tracker_id`'s ticket (owner decision
+    /// 2026-10-11: promoting it): the SAME row, now that tracker's item —
+    /// keyed by `external_id` / `key`, its old fleet key kept as an alias so
+    /// it still resolves — and everything on it (sessions, comments,
+    /// subtasks, sprints, history) stays where it is. Its `origin` stays:
+    /// a person still made it in fleet, so it stays listed among its
+    /// parent's subtasks. The tracker's numbering takes over the key (an
+    /// Asana task draws its tracker's display key). `false`, and nothing
+    /// written, when the item is gone or no longer local, or when the
+    /// tracker's ticket is already cached as another row.
+    pub fn promote_local_item(
+        &self,
+        item_id: i64,
+        tracker_id: i64,
+        external_id: &str,
+        key: &str,
+        url: Option<&str>,
+    ) -> Result<bool, IpcError> {
+        let Some(before) = self.get_work_item(item_id)? else {
+            return Ok(false);
+        };
+        if before.source != "local" || external_id.is_empty() {
+            return Ok(false);
+        }
+        let taken: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM work_items WHERE tracker_id = ?1 AND external_id = ?2",
+                rusqlite::params![tracker_id, external_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if taken.is_some_and(|id| id != item_id) {
+            return Ok(false);
+        }
+        let key = super::work::canonical_key(key);
+        let mut aliases = before.aliases.clone();
+        aliases.extend(before.key.clone());
+        aliases.extend(before.display_key.clone());
+        aliases.sort();
+        aliases.dedup();
+        aliases.retain(|a| *a != key);
+        let aliases = (!aliases.is_empty())
+            .then(|| serde_json::to_string(&aliases).ok())
+            .flatten();
+        let now = now_unix();
+        let n = self.conn.execute(
+            "UPDATE work_items SET \
+               source = (SELECT provider FROM trackers WHERE id = ?1), tracker_id = ?1, \
+               external_id = ?2, key = ?3, url = ?4, aliases = ?5, display_key = NULL, \
+               ticket_space_id = NULL, ticket_seq = NULL, status_set_by = NULL, \
+               status_set_at = NULL, fetched_at = ?6, updated_at = ?6 \
+             WHERE id = ?7 AND source = 'local' \
+               AND EXISTS (SELECT 1 FROM trackers WHERE id = ?1)",
+            rusqlite::params![tracker_id, external_id, key, url, aliases, now, item_id],
+        )?;
+        if n == 0 {
+            return Ok(false);
+        }
+        self.ensure_tracker_ticket_key(item_id, tracker_id, Some(&key))?;
+        self.emit_work_item(item_id, super::tracker_items::SessionChange::ALL)?;
+        Ok(true)
+    }
+
     /// Every native child of `parent_id`, proposals included, oldest first.
     ///
     /// `origin = 'agent'` rows are JOB MIRRORS, and their title and notes are

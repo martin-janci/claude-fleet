@@ -2406,6 +2406,11 @@ async fn gather(
     crate::service::hub::ensure_local_allowed(&src)?;
     let target = args.target_host_alias.clone();
     let id = snap.claude_id.clone();
+    // The target's environment must resolve (a reference the controlling
+    // process cannot read refuses the launch), so it is refused here, before
+    // any work is carried — and a dry run predicts it. The replay step
+    // resolves again when it writes the file.
+    crate::service::env::check(store, &target, snap.row.project_id, Some(snap.row.id))?;
 
     if let Some(p) = progress.as_mut() {
         p.start(MoveStep::Check);
@@ -2859,6 +2864,20 @@ async fn move_session_inner(
         &tmux_name,
         &snap.launch,
     );
+    // The target sources the session's environment: the target host's
+    // scope, the project's, and the source row's session scope (copied to
+    // the target row below). Before the workspace step; no store guard here.
+    let pane_cmd = crate::service::env::prepare(
+        store,
+        ssh,
+        &target,
+        snap.row.project_id,
+        Some(snap.row.id),
+        &Default::default(),
+        &pane_cmd,
+    )
+    .await
+    .map_err(|e| before_target("preparing the session's environment", e))?;
     let cwd = hooks
         .ensure_target_workspace(
             store,
@@ -3324,6 +3343,15 @@ async fn move_session_inner(
                 "[move_session] storing the launch options failed"
             );
         }
+        // The session-scope environment follows the session; the source's
+        // rows go with the source row when it is deleted.
+        if let Err(e) = s.copy_session_env(snap.row.id, row.id) {
+            tracing::warn!(
+                session_id = row.id,
+                error = %e,
+                "[move_session] copying the session's environment failed"
+            );
+        }
         // Usage (G1): the target's transcript is a whole-line prefix copy of
         // the source's, so its usage cursor starts where the source's stands
         // and the copied history is not counted twice.
@@ -3689,6 +3717,8 @@ mod tests {
         /// ran (`None` = no kill).
         moved_at_kill: Mutex<Option<bool>>,
         started: Mutex<Vec<(String, String)>>,
+        /// The pane command of every `start_target` call.
+        panes: Mutex<Vec<String>>,
         log: Mutex<Vec<String>>,
         /// What `pane_status` answers (the live pane of a stale-demoted
         /// source); `None` = cannot tell. Each ask is logged `pane <id>`.
@@ -3718,6 +3748,7 @@ mod tests {
                 mid_move_answers: Mutex::new(None),
                 moved_at_kill: Mutex::new(None),
                 started: Mutex::new(Vec::new()),
+                panes: Mutex::new(Vec::new()),
                 log: Mutex::new(Vec::new()),
                 pane: None,
                 target_owner: None,
@@ -3769,6 +3800,7 @@ mod tests {
             }
             .new_session(name, std::path::Path::new(cwd), pane_cmd)
             .await?;
+            self.panes.lock().unwrap().push(pane_cmd.to_string());
             if self.grow_source_on_start {
                 self.fake.on_host(
                     "alpha",
@@ -4158,6 +4190,65 @@ mod tests {
         );
     }
 
+    /// The target starts sourcing the session's environment, and the
+    /// session scope (a secret included) follows the session to its new row.
+    #[tokio::test]
+    async fn move_launches_the_target_with_its_environment() {
+        use crate::store::{EnvSource, EnvValue, Secret};
+        const ENV_PREFIX: &str = "__fleet_env_file=\"$HOME\"/'.claude-fleet/env/";
+        let f = fixture();
+        {
+            let s = f.store.lock().unwrap();
+            s.set_env_var("global", "", "FLEET_T", &EnvValue::Plain("1".into()))
+                .unwrap();
+            s.set_env_var(
+                "session",
+                &f.source_id.to_string(),
+                "SESS_SECRET",
+                &EnvValue::Secret(Secret::new("sess-secret-4471")),
+            )
+            .unwrap();
+        }
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let rep = run(&f, &hooks, false).await.expect("move");
+        let panes = hooks.panes.lock().unwrap().clone();
+        assert_eq!(panes.len(), 1, "{panes:?}");
+        assert!(panes[0].starts_with(ENV_PREFIX), "{}", panes[0]);
+        assert!(!panes[0].contains("FLEET_T=1"), "{}", panes[0]);
+        assert!(!panes[0].contains("sess-secret-4471"), "{}", panes[0]);
+        let body = f
+            .fake
+            .calls_for("beta")
+            .iter()
+            .filter(|c| c.is_upload())
+            .filter_map(|c| c.stdin_str())
+            .find(|b| b.contains("export FLEET_T="))
+            .expect("the env file was uploaded to the target");
+        assert!(body.contains("export FLEET_T='1'"), "{body}");
+        assert!(
+            body.contains("export SESS_SECRET='sess-secret-4471'"),
+            "{body}"
+        );
+        let on_target = f
+            .store
+            .lock()
+            .unwrap()
+            .env_for_launch("beta", None, Some(rep.target_session_id))
+            .unwrap();
+        let secret = on_target
+            .iter()
+            .find(|(n, _)| n == "SESS_SECRET")
+            .map(|(_, src)| match src {
+                EnvSource::Value(v) => v.expose().to_string(),
+                EnvSource::Ref(r) => panic!("a reference: {r}"),
+            });
+        assert_eq!(
+            secret.as_deref(),
+            Some("sess-secret-4471"),
+            "the session scope was copied to the target row"
+        );
+    }
+
     #[tokio::test]
     async fn a_moved_outcome_keeps_every_report_field_at_the_top_level() {
         let (f, _bus) = recorded_fixture();
@@ -4332,6 +4423,45 @@ mod tests {
             .expect("the source");
         assert_eq!(src.owner_person_id, Some(ann));
         assert_eq!(src.visibility, crate::store::VISIBILITY_PRIVATE);
+    }
+
+    #[tokio::test]
+    async fn an_unresolvable_environment_refuses_the_move_and_its_preview_before_anything_is_carried(
+    ) {
+        use crate::store::EnvValue;
+        let f = fixture();
+        // `/nonexistent` is not an absolute path on Windows, and the reference
+        // must be one to be stored at all.
+        let reference = if cfg!(windows) {
+            r"file:C:\nonexistent\fleet-move-env-test"
+        } else {
+            "file:/nonexistent/fleet-move-env-test"
+        };
+        f.store
+            .lock()
+            .unwrap()
+            .set_env_var("global", "", "TOKEN", &EnvValue::Ref(reference.into()))
+            .unwrap();
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let mut a = args(&f, false);
+        a.dry_run = true;
+        let e = move_session_with(a, &f.store, &f.fake, &hooks, fast())
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, codes::E_ENV_UNRESOLVED, "{}", e.message);
+        assert!(
+            e.message.contains("TOKEN") && !e.message.contains("nonexistent"),
+            "{}",
+            e.message
+        );
+        let e = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(e.code, codes::E_ENV_UNRESOLVED, "{}", e.message);
+        assert!(hooks.panes.lock().unwrap().is_empty(), "nothing launched");
+        assert!(
+            f.fake.calls_for("beta").is_empty(),
+            "nothing reached the target: {:?}",
+            f.fake.calls_for("beta").len()
+        );
     }
 
     #[tokio::test]

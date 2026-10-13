@@ -20,6 +20,7 @@ pub mod missions;
 pub mod nudge;
 pub mod orchestrate;
 pub mod plan_import;
+pub mod promote;
 pub mod recognize;
 pub mod report;
 pub mod resolve;
@@ -247,6 +248,12 @@ pub struct WorkLinkArgs {
     /// comment: also post it to the ticket's tracker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_to_tracker: Option<bool>,
+    /// promote: a top task's tracker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracker_id: Option<i64>,
+    /// promote: Jira project, Asana project gid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
     /// create/propose/edit/comment: text (edit: "" clears).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
@@ -580,6 +587,7 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "set_parent",
     "comment",
     "comment_delete",
+    "promote",
     "attach",
     "attachment_delete",
     "summarize",
@@ -660,6 +668,7 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("edit_work_item", "work_link", "edit"),
     ("set_work_parent", "work_link", "set_parent"),
     ("comment_on_work", "work_link", "comment"),
+    ("promote_work_item", "work_link", "promote"),
     ("delete_work_comment", "work_link", "comment_delete"),
     ("attach_to_work", "work_link", "attach"),
     ("delete_work_attachment", "work_link", "attachment_delete"),

@@ -904,6 +904,16 @@ pub struct TaskDetail {
     /// `work { attachment }`'s.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<crate::store::AttachmentRow>,
+    /// The task's promotion to a tracker while it is being sent, or why it
+    /// was not (owner decision 2026-10-11). Absent once it is the ticket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promotion: Option<super::promote::PromotionView>,
+    /// Where the reader may promote this task of fleet's own: its parent's
+    /// tracker for a subtask of a ticket, every tracker that takes new
+    /// tickets for a task at the top. Empty for an agent, a tracker's
+    /// ticket, or where no tracker's admin turned creating on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub promote_targets: Vec<super::promote::PromoteTarget>,
 }
 
 /// The task one of a session's links points at, briefly.
@@ -2851,7 +2861,14 @@ fn matches_filters(t: &WorkTask, f: &WorkTreeFilters, with_group: bool) -> bool 
     if !f.stages.is_empty() && !f.stages.contains(&t.stage) {
         return false;
     }
-    let status = t.status_category.as_deref();
+    // The Board and List's rule (`taskColumnOf`): a task with a status is
+    // that status, live sessions or not; one with none (a bare key, a ticket
+    // its tracker has not reported on) is in progress while a session runs
+    // on it, and no status at all otherwise.
+    let status = t
+        .status_category
+        .as_deref()
+        .or((t.counts.active > 0).then_some("in_progress"));
     let ok = match f.status.as_deref() {
         None | Some("any") => true,
         Some("open") => status != Some("done"),
@@ -3774,6 +3791,16 @@ pub fn task(
             && crate::service::trackers::write_back::writes_comments(t)
     });
     let comments_tracker = comments_tracker.map(|t| t.name.clone());
+    let (promotion, promote_targets) = match item {
+        Some(i) if i.item.source == "local" => {
+            let s = lock(store)?;
+            (
+                super::promote::promotion_view(&s, i.item.id, &g.trackers)?,
+                super::promote::targets(&s, scope, &i.item, &g.trackers)?,
+            )
+        }
+        _ => (None, Vec::new()),
+    };
     let excerpt = meta.description.clone().filter(|d| !d.trim().is_empty());
     // The full length and whether the answer shows less of it, for every
     // caller: a person's screen has no fence notice to read it from. The
@@ -3943,6 +3970,8 @@ pub fn task(
         comments_tracker,
         can_post_to_tracker,
         attachments,
+        promotion,
+        promote_targets,
     })
 }
 

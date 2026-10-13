@@ -351,6 +351,135 @@ impl GitHub {
         }
     }
 
+    /// Create an issue from a fleet task ([`WriteOp::CreateItem`]): in the
+    /// repository of `parent` and then its sub-issue, or in repository
+    /// `container` (`owner/repo`, inside this tracker's scope).
+    async fn create_issue(
+        &self,
+        container: Option<&str>,
+        parent: Option<&super::CreateParent>,
+        title: &str,
+        description: &str,
+    ) -> Result<WriteOutcome, TrackerError> {
+        let (repo_id, parent_id) = match parent {
+            Some(p) => {
+                let r = match &p.external_id {
+                    Some(id) => ItemRef::Id(id.clone()),
+                    None => ItemRef::parse(&p.key),
+                };
+                let id = self.issue_node_id(&r).await?;
+                let d = self
+                    .gql(
+                        "query($id: ID!) { node(id: $id) { ... on Issue { id repository { id } } } }",
+                        json!({ "id": id }),
+                        CallKind::Other,
+                    )
+                    .await?;
+                let repo = d["node"]["repository"]["id"]
+                    .as_str()
+                    .filter(|id| node_id_ok(id))
+                    .map(str::to_string)
+                    .ok_or(TrackerError::NotFound)?;
+                (repo, Some(id))
+            }
+            None => {
+                let repo = container
+                    .and_then(|c| {
+                        let c = c.trim();
+                        // A bare `owner/repo` is on this tracker's instance.
+                        let full = if c.matches('/').count() >= 2 {
+                            c.to_string()
+                        } else {
+                            format!("{}{c}", self.key_prefix())
+                        };
+                        self.in_scope(&full)
+                            .then(|| self.local_repo(&full))
+                            .flatten()
+                    })
+                    .ok_or_else(|| {
+                        TrackerError::Invalid(
+                            "no repository of this tracker to create it in".into(),
+                        )
+                    })?;
+                let (o, name) = repo
+                    .split_once('/')
+                    .ok_or_else(|| TrackerError::Invalid("not a repository".into()))?;
+                let d = self
+                    .gql(
+                        "query($o: String!, $r: String!) { repository(owner: $o, name: $r) { id } }",
+                        json!({ "o": o, "r": name }),
+                        CallKind::Other,
+                    )
+                    .await?;
+                let id = d["repository"]["id"]
+                    .as_str()
+                    .filter(|id| node_id_ok(id))
+                    .map(str::to_string)
+                    .ok_or(TrackerError::NotFound)?;
+                (id, None)
+            }
+        };
+        let title: String = title.split_whitespace().collect::<Vec<_>>().join(" ");
+        let data = self
+            .gql(
+                "mutation($repo: ID!, $title: String!, $body: String) { createIssue(input: { \
+                 repositoryId: $repo, title: $title, body: $body }) { issue { id number url \
+                 repository { nameWithOwner } } } }",
+                json!({
+                    "repo": repo_id,
+                    "title": title,
+                    "body": Some(description).filter(|d| !d.trim().is_empty()),
+                }),
+                CallKind::Other,
+            )
+            .await?;
+        let issue = &data["createIssue"]["issue"];
+        let id = issue["id"]
+            .as_str()
+            .filter(|id| node_id_ok(id))
+            .map(str::to_string);
+        let key = match (
+            issue["repository"]["nameWithOwner"]
+                .as_str()
+                .and_then(normalize_repo),
+            issue["number"].as_u64(),
+        ) {
+            (Some(r), Some(n)) => Some(self.key(&r, n)),
+            _ => None,
+        };
+        let (Some(id), Some(key)) = (id, key) else {
+            return Err(TrackerError::Invalid(
+                "GitHub created the issue but did not say which one".into(),
+            ));
+        };
+        let prefix = self.web_prefix();
+        let url = issue["url"]
+            .as_str()
+            .filter(|u| u.starts_with(&prefix) && u.len() <= 2048)
+            .map(str::to_string);
+        if let Some(parent) = parent_id {
+            // The issue exists now: a sub-issue link that fails leaves it at
+            // the top of its repository rather than failing the create, which
+            // would send it again.
+            if let Err(e) = self
+                .gql(
+                    "mutation($p: ID!, $c: ID!) { addSubIssue(input: { issueId: $p, \
+                     subIssueId: $c }) { issue { id } } }",
+                    json!({ "p": parent, "c": id }),
+                    CallKind::Other,
+                )
+                .await
+            {
+                tracing::warn!(error = %e.explain(), "[github] issue created; not filed under its parent");
+            }
+        }
+        Ok(WriteOutcome {
+            remote_id: Some(id),
+            url,
+            key: Some(key),
+        })
+    }
+
     /// An issue's node id: `r` itself when it is one, else looked up by
     /// repository and number.
     async fn issue_node_id(&self, r: &ItemRef) -> Result<String, TrackerError> {
@@ -807,6 +936,17 @@ impl TrackerProvider for GitHub {
     }
 
     async fn write(&self, op: &WriteOp) -> Result<WriteOutcome, TrackerError> {
+        if let WriteOp::CreateItem {
+            container,
+            parent,
+            title,
+            description,
+        } = op
+        {
+            return self
+                .create_issue(container.as_deref(), parent.as_ref(), title, description)
+                .await;
+        }
         if let WriteOp::SetStatus {
             key,
             external_id,
@@ -825,7 +965,7 @@ impl TrackerProvider for GitHub {
         } = op
         else {
             return Err(TrackerError::Refused(
-                "GitHub takes comments and status moves only from fleet".into(),
+                "GitHub takes comments, new issues and status moves only from fleet".into(),
             ));
         };
         let r = match external_id {
@@ -857,6 +997,7 @@ impl TrackerProvider for GitHub {
                 .as_str()
                 .filter(|u| u.starts_with(&prefix) && u.len() <= 2048)
                 .map(str::to_string),
+            key: None,
         })
     }
 }
