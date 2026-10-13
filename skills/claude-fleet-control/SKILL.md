@@ -331,8 +331,10 @@ and `comment` by `item_id`; a tracker ticket's status changes in the tracker.
 on any local task your own session is on, even one shared with other people's
 sessions. So does planning it: `set_parent { item_id, parent }` files it under
 an epic or task, and `bucket_add` / `bucket_remove { bucket_id, item_id }` puts
-it in or takes it out of a sprint or release. A task your session is not on is
-the team's plan: a person sprints it.
+it in or takes it out of a sprint or release, and `dep { item_id, depends_on,
+on? }` says what it waits on (`on: false` removes the edge). A task your session
+is not on is the team's plan: a person sprints it. A task in a mission stays its
+owner's plan, and `hold` / `done_when` are a person's.
 
 ## Tasks, subtasks and proposals (shared work context)
 

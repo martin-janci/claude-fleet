@@ -1725,9 +1725,21 @@ impl FleetTools {
         // An edge of the graph, or a hold (orchestration O2): a person's plan,
         // so never a per-host or peer token (`mission_caller`); the item's
         // own sessions pass the drive gate, as for `set_status`.
+        //
+        // One exception for `dep`: an agent declares what its OWN task
+        // waits on (`set_status`'s rule: its session is on the task through
+        // a confirmed, live link). A task in a mission is still its owner's
+        // to change (`require_mission_change`, inside), and `hold` stays a
+        // person's.
         if args.action == "dep" {
-            mission_caller(&caller)?;
-            self.require_drive_on_item_sessions(&caller, graph_item(&args)?)?;
+            let own = match args.item_id {
+                Some(item_id) => self.own_session_works_on(&caller, item_id)?,
+                None => false,
+            };
+            if !own {
+                mission_caller(&caller)?;
+                self.require_drive_on_item_sessions(&caller, graph_item(&args)?)?;
+            }
             let view_scope = self.view_scope(&caller)?;
             return ok_json(
                 &crate::service::work::graph::dep(&args, &self.store, &view_scope)
