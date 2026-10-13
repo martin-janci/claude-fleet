@@ -18,11 +18,10 @@
 //!    `GET /auth/oidc/callback?code&state`.
 //! 3. The hub exchanges the code at the token endpoint (directly, over TLS,
 //!    with the verifier and — for a confidential client — the secret) and
-//!    checks the ID token: `iss`, `aud`/`azp`, `exp`, `nonce`. The
-//!    signature is not checked, and need not be: OIDC Core §3.1.3.7 (6)
-//!    lets a client that received the ID token straight from the token
-//!    endpoint over TLS rely on the TLS server validation instead. The
-//!    token never passes through the browser.
+//!    checks the ID token: its signature against the issuer's JWKS
+//!    (`jwks_uri` from discovery, on the issuer's host; RS256, PS256 or
+//!    ES256 only), then `iss`, `aud`/`azp`, `exp`, `nonce`. The token never
+//!    passes through the browser.
 //! 4. The account (issuer, `sub`) is looked up in `person_identities`
 //!    (`store::identities`). Linked → that person, refused if disabled.
 //!    Unlinked → a new person named after the username claim when
@@ -202,6 +201,7 @@ impl OidcConfig {
 struct Endpoints {
     authorization: String,
     token: String,
+    jwks: String,
 }
 
 /// One sign-in in flight, keyed by its `state`.
@@ -251,12 +251,26 @@ impl Refusal {
     }
 }
 
+#[derive(Default)]
+struct JwksCache {
+    keys: Vec<jwks::Jwk>,
+    fetched_at: Option<Instant>,
+    /// When an unknown `kid` last forced a refetch.
+    refetched_at: Option<Instant>,
+}
+/// Keys are re-read at most this often when nothing forces it.
+const JWKS_TTL: Duration = Duration::from_secs(3600);
+/// An unknown `kid` refetches at most this often, so a stream of forged
+/// tokens cannot turn the hub into a load generator against the provider.
+const JWKS_REFETCH_FLOOR: Duration = Duration::from_secs(60);
+
 /// The hub's side of single sign-on: the configuration, the HTTP seam to
 /// the provider, its cached endpoints and the sign-ins in flight.
 pub struct OidcProvider {
     config: OidcConfig,
     transport: Arc<dyn HttpTransport>,
     endpoints: tokio::sync::Mutex<Option<Endpoints>>,
+    jwks: tokio::sync::Mutex<JwksCache>,
     pending: Mutex<HashMap<String, PendingLogin>>,
 }
 
@@ -293,6 +307,7 @@ impl OidcProvider {
             config,
             transport,
             endpoints: tokio::sync::Mutex::new(None),
+            jwks: tokio::sync::Mutex::new(JwksCache::default()),
             pending: Mutex::new(HashMap::new()),
         }
     }
@@ -342,7 +357,7 @@ impl OidcProvider {
             let v = doc[key]
                 .as_str()
                 .ok_or_else(|| Refusal::Provider(format!("discovery has no {key}")))?;
-            // Both endpoints live on the issuer's host (Keycloak serves them
+            // Every endpoint lives on the issuer's host (Keycloak serves them
             // under the realm): the token endpoint gets the secret, and the
             // authorization endpoint is where the person types a password.
             if !v.starts_with("https://") || host_of(v) != issuer_host {
@@ -355,9 +370,58 @@ impl OidcProvider {
         let e = Endpoints {
             authorization: endpoint("authorization_endpoint")?,
             token: endpoint("token_endpoint")?,
+            jwks: endpoint("jwks_uri")?,
         };
         *cached = Some(e.clone());
         Ok(e)
+    }
+
+    async fn fetch_jwks(&self, cache: &mut JwksCache) -> Result<(), Refusal> {
+        let url = self.endpoints().await?.jwks;
+        let resp = self
+            .transport
+            .send(Request::get(&url))
+            .await
+            .map_err(|e| Refusal::Provider(format!("the JWKS could not be fetched: {e}")))?;
+        if !resp.is_success() {
+            return Err(Refusal::Provider("the JWKS request did not succeed".into()));
+        }
+        let doc: serde_json::Value = resp
+            .parse_json()
+            .map_err(|e| Refusal::Provider(format!("the JWKS is not JSON: {e}")))?;
+        cache.keys = jwks::parse_jwks(&doc).map_err(Refusal::Provider)?;
+        cache.fetched_at = Some(Instant::now());
+        Ok(())
+    }
+
+    /// Check the ID token's signature against the issuer's published keys.
+    async fn verify_id_token(&self, jwt: &str) -> Result<(), Refusal> {
+        let mut cache = self.jwks.lock().await;
+        if cache.fetched_at.is_none_or(|t| t.elapsed() > JWKS_TTL) {
+            self.fetch_jwks(&mut cache).await?;
+        }
+        match jwks::verify(jwt, &cache.keys) {
+            jwks::Verdict::Valid => return Ok(()),
+            jwks::Verdict::Invalid(why) => {
+                return Err(Refusal::Invalid(format!("id_token: {why}")))
+            }
+            jwks::Verdict::UnknownKey => {}
+        }
+        let unknown =
+            || Refusal::Invalid("id_token: signed by a key the provider does not publish".into());
+        if cache
+            .refetched_at
+            .is_some_and(|t| t.elapsed() < JWKS_REFETCH_FLOOR)
+        {
+            return Err(unknown());
+        }
+        cache.refetched_at = Some(Instant::now());
+        self.fetch_jwks(&mut cache).await?;
+        match jwks::verify(jwt, &cache.keys) {
+            jwks::Verdict::Valid => Ok(()),
+            jwks::Verdict::Invalid(why) => Err(Refusal::Invalid(format!("id_token: {why}"))),
+            jwks::Verdict::UnknownKey => Err(unknown()),
+        }
     }
 
     /// Begin a sign-in: where to send the browser, and the `state` to bind
@@ -495,12 +559,14 @@ impl OidcProvider {
         let id_token = tokens["id_token"]
             .as_str()
             .ok_or_else(|| Refusal::Provider("the token response carries no id_token".into()))?;
+        self.verify_id_token(id_token).await?;
         let claims = jwt_claims(id_token)
             .ok_or_else(|| Refusal::Provider("the id_token is not a readable JWT".into()))?;
         self.check_id_claims(&claims, &login.nonce, unix_now())?;
         // Keycloak puts realm and client roles in the ACCESS token
         // (`realm_access`, `resource_access`), not the ID token. It came
-        // over the same TLS exchange, so its payload is read the same way.
+        // from the token exchange whose ID token just verified, so its payload
+        // is read without a second signature check (roles only).
         let access = tokens["access_token"].as_str().and_then(jwt_claims);
         let mut roles = roles_in(&claims, &self.config.client_id);
         if let Some(a) = &access {
@@ -673,8 +739,9 @@ fn one_line(s: &str) -> String {
         .collect()
 }
 
-/// The payload of a compact JWS, unverified. See the module docs for why
-/// that is enough here and only here.
+/// The payload of a compact JWS, WITHOUT checking its signature. The ID
+/// token's signature is verified first by `verify_id_token` (against the
+/// issuer's JWKS); the access token is only read for roles.
 fn jwt_claims(jwt: &str) -> Option<serde_json::Value> {
     let mut parts = jwt.split('.');
     let (_header, payload) = (parts.next()?, parts.next()?);
@@ -1022,5 +1089,6 @@ fn device_name_for(person: &str, taken: &[String]) -> String {
     }
 }
 
+mod jwks;
 #[cfg(test)]
 mod tests;
