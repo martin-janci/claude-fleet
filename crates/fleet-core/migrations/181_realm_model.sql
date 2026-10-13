@@ -102,25 +102,32 @@ INSERT OR IGNORE INTO group_role_mappings (group_id, role_id)
   JOIN roles r ON r.name = CASE sg.name WHEN 'admins' THEN 'org-admin' WHEN 'members' THEN 'org-member' ELSE 'org-viewer' END
   JOIN clients c ON c.id = r.client_id AND c.client_id = 'fleet';
 
+-- Only a live person's membership is copied. Before this migration
+-- `disable_person` left a disabled person's `org_members` rows live; copied,
+-- they would come back as roles on a re-enable (which restores nothing,
+-- spec §3). Their rows end here instead, as do live rows of an org that no
+-- longer exists, so `org_members` is exactly the projection of the groups
+-- (spec §2 step 5, checked once by `Store::migrate` after this script).
 INSERT OR IGNORE INTO group_members (group_id, person_id, added_at, added_by)
   SELECT sg.id, m.person_id, m.added_at, m.added_by
   FROM org_members m JOIN groups root ON root.org_id = m.org_id
   JOIN groups sg ON sg.parent_id = root.id
    AND sg.name = CASE m.role WHEN 'admin' THEN 'admins' WHEN 'member' THEN 'members' ELSE 'viewers' END
+  JOIN people p ON p.id = m.person_id AND p.disabled_at IS NULL
   WHERE m.removed_at IS NULL;
+UPDATE org_members SET removed_at = strftime('%s','now')
+  WHERE removed_at IS NULL
+    AND (person_id IN (SELECT id FROM people WHERE disabled_at IS NOT NULL)
+         OR org_id NOT IN (SELECT id FROM orgs));
 
 INSERT OR IGNORE INTO user_role_mappings (person_id, role_id)
   SELECT p.id, r.id FROM people p, roles r
   WHERE p.is_personal_owner = 1 AND r.client_id IS NULL AND r.name = 'fleet-admin';
-INSERT OR IGNORE INTO user_role_mappings (person_id, role_id)
-  SELECT DISTINCT t.person_id, r.id FROM client_tokens t, roles r
-  WHERE t.person_id IS NOT NULL AND t.revoked_at IS NULL AND t.trusted_at IS NOT NULL
-    AND r.client_id IS NULL AND r.name = 'fleet-trusted';
--- The assets-admin role mapping is backfilled in Rust
--- (`Store::backfill_assets_admin_roles`, once, when this migration runs): its
--- predicate reads client_tokens.org_id (migration 066), which a database that
--- skipped 064-068 only gets from `repair_skipped_main_migrations`, after
--- the migrations ran.
+-- The fleet-trusted and assets-admin role mappings are backfilled in Rust
+-- (`Store::backfill_device_roles`, once, gated by the settings flag
+-- `realm.upgrade_backfilled`): both predicates read client_tokens.org_id
+-- (migration 066), which a database that skipped 064-068 only gets from
+-- `repair_skipped_main_migrations`, after the migrations ran.
 
 -- Created after the seed above, not after the DDL: the seed's INSERTs would
 -- otherwise bump the epoch of a fresh database (migration 060 expects 0).

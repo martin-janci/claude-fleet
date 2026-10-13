@@ -2032,6 +2032,10 @@ const MIGRATIONS: &[Migration] = &[
     ),
 ];
 
+/// The settings row [`Store::finish_realm_upgrade`] writes once migration
+/// 181's Rust half has run. Not a registered setting.
+pub(crate) const REALM_UPGRADE_FLAG: &str = "realm.upgrade_backfilled";
+
 /// One schema migration. `already_applied`, when set, reports whether the
 /// migration's change is already in the schema, for a migration that cannot
 /// be written idempotently in SQL. Tests roll the recorded version back and
@@ -2113,10 +2117,25 @@ pub fn is_newer_schema_error(e: &rusqlite::Error) -> bool {
     )
 }
 
+/// How [`Store::finish_realm_upgrade`]'s refusal starts.
+const REALM_PROJECTION_PREFIX: &str = "migration 181: ";
+
+/// Whether `e` is migration 181's step-5 refusal: an intact database whose
+/// org memberships disagree with its groups, not a corrupt file.
+fn is_realm_projection_error(e: &rusqlite::Error) -> bool {
+    matches!(
+        e,
+        rusqlite::Error::SqliteFailure(f, Some(msg))
+            if f.code == rusqlite::ErrorCode::ConstraintViolation
+                && msg.starts_with(REALM_PROJECTION_PREFIX)
+    )
+}
+
 /// The advice an opener adds to a failure to open `state.db`: none for the
-/// downgrade refusal (its message already says what to do), else `corrupt`.
+/// downgrade refusal and migration 181's projection refusal (their messages
+/// say what to do, and the file is intact), else `corrupt`.
 pub fn open_failure_advice<'a>(e: &rusqlite::Error, corrupt: &'a str) -> &'a str {
-    if is_newer_schema_error(e) {
+    if is_newer_schema_error(e) || is_realm_projection_error(e) {
         ""
     } else {
         corrupt
@@ -2187,9 +2206,7 @@ impl Store {
         }
         self.repair_skipped_main_migrations()?;
         self.ensure_work_rules_start_columns()?;
-        if v < 181 {
-            self.backfill_assets_admin_roles()?;
-        }
+        self.finish_realm_upgrade()?;
         self.backfill_stale_demoted()?;
         self.backfill_session_owner()?;
         self.backfill_realm_uuids()?;
@@ -2220,14 +2237,68 @@ impl Store {
         Ok(total)
     }
 
-    /// Migration 181's assets-admin mapping, run once after the repair of
-    /// skipped migrations (see the comment in the SQL). Exactly
-    /// `client_is_assets_admin`: a live, full, org-free device holding a grant
-    /// on a catalog with no org, or the `assets_admin_at` flag while no such
-    /// catalog exists yet. Idempotent.
-    fn backfill_assets_admin_roles(&self) -> Result<()> {
+    /// Migration 181's Rust half, ONCE per database: the device-role
+    /// backfill ([`Store::backfill_device_roles`]) and the spec's step 5 —
+    /// the `org_members` projection of the groups must equal the rows the
+    /// script left, for every live person, or the open fails naming the
+    /// first person that differs. Gated by the settings flag
+    /// [`REALM_UPGRADE_FLAG`], written in the SAME transaction as the
+    /// backfill's rows, so neither a later migration failing nor the
+    /// process dying after 181 committed can skip it for good (a gate on
+    /// the pre-migration version could), and a second open runs nothing.
+    fn finish_realm_upgrade(&self) -> Result<()> {
+        let done: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM settings WHERE key = ?1)",
+            [REALM_UPGRADE_FLAG],
+            |r| r.get(0),
+        )?;
+        if done {
+            return Ok(());
+        }
+        let tx = self.immediate_transaction()?;
+        self.backfill_device_roles()?;
+        let failure = |m: String| {
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+                Some(m),
+            )
+        };
+        if let Some(m) =
+            super::realm::projection_mismatch_in_tx(&tx).map_err(|e| failure(e.message))?
+        {
+            // `tx` rolls back on the way out: nothing of this pass stays.
+            return Err(failure(format!(
+                "{REALM_PROJECTION_PREFIX}the org memberships the realm's groups give differ from \
+                 org_members ({m}); this check wrote nothing and runs again on the next open — \
+                 report it rather than editing either table by hand"
+            )));
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, '1')",
+            [REALM_UPGRADE_FLAG],
+        )?;
+        tx.commit()
+    }
+
+    /// Migration 181's device-role mappings (see the comment in the SQL):
+    ///
+    /// * `fleet-trusted` for a person with a live, trusted, `full` device
+    ///   bound to no org — a trusted ORG-BOUND device never vouched for the
+    ///   person's other devices before 181, so it does not make them
+    ///   trusted now;
+    /// * `assets-admin`, exactly `client_is_assets_admin`: a live, full,
+    ///   org-free device holding a grant on a catalog with no org, or the
+    ///   `assets_admin_at` flag while no such catalog exists yet.
+    ///
+    /// Idempotent; run once, by [`Store::finish_realm_upgrade`].
+    fn backfill_device_roles(&self) -> Result<()> {
         self.conn.execute_batch(
             "INSERT OR IGNORE INTO user_role_mappings (person_id, role_id)
+               SELECT DISTINCT t.person_id, r.id FROM client_tokens t, roles r
+               WHERE t.person_id IS NOT NULL AND t.revoked_at IS NULL AND t.trusted_at IS NOT NULL
+                 AND t.mode = 'full' AND t.org_id IS NULL
+                 AND r.client_id IS NULL AND r.name = 'fleet-trusted';
+             INSERT OR IGNORE INTO user_role_mappings (person_id, role_id)
                SELECT DISTINCT t.person_id, r.id FROM client_tokens t, roles r
                WHERE t.person_id IS NOT NULL AND t.revoked_at IS NULL
                  AND t.mode = 'full' AND t.org_id IS NULL
@@ -3811,15 +3882,17 @@ mod tests {
             .execute_batch(
                 "
         INSERT INTO people (id, name, is_personal_owner, created_at) VALUES (10,'ada',0,1),(11,'bob',0,1),(12,'cy',0,1),(13,'dee',0,1),(14,'eve',0,1),(15,'fay',0,1),(16,'gus',0,1),(17,'hal',0,1);
+        INSERT INTO people (id, name, is_personal_owner, created_at, disabled_at) VALUES (18,'ivy',0,1,8);
         INSERT INTO orgs (id, name, isolate_sessions, created_at) VALUES (1,'acme',0,1);
         INSERT INTO org_members (org_id, person_id, role, added_at, added_by, shares_since, removed_at) VALUES
-          (1,10,'admin',5,NULL,5,NULL),(1,11,'viewer',6,10,NULL,NULL),(1,12,'member',7,NULL,7,9);
+          (1,10,'admin',5,NULL,5,NULL),(1,11,'viewer',6,10,NULL,NULL),(1,12,'member',7,NULL,7,9),
+          (1,18,'admin',4,NULL,4,NULL),(2,10,'member',4,NULL,4,NULL);
         INSERT INTO client_tokens (name, token_sha256, mode, created_at, trusted_at, person_id) VALUES ('ada-mac','x','full',1,2,10);
         INSERT INTO client_tokens (name, token_sha256, mode, created_at, assets_admin_at, person_id) VALUES ('dee-pc','d','full',1,2,13);
         INSERT INTO client_tokens (name, token_sha256, mode, created_at, person_id) VALUES ('eve-pc','e','full',1,14);
         INSERT INTO client_tokens (name, token_sha256, mode, created_at, assets_admin_at, revoked_at, person_id) VALUES ('fay-pc','f','full',1,2,3,15);
-        INSERT INTO client_tokens (name, token_sha256, mode, created_at, person_id) VALUES ('gus-pc','g','readonly',1,16);
-        INSERT INTO client_tokens (name, token_sha256, mode, created_at, person_id, org_id) VALUES ('hal-pc','h','full',1,17,1);
+        INSERT INTO client_tokens (name, token_sha256, mode, created_at, trusted_at, person_id) VALUES ('gus-pc','g','readonly',1,2,16);
+        INSERT INTO client_tokens (name, token_sha256, mode, created_at, trusted_at, person_id, org_id) VALUES ('hal-pc','h','full',1,2,17,1);
         INSERT INTO catalogs (name, repo_path, org_id, created_at) VALUES ('personal', '/tmp/x', NULL, 1);
         INSERT INTO client_catalog_grants (client_id, catalog_id, granted_at)
           SELECT t.id, c.id, 1 FROM client_tokens t, catalogs c WHERE t.name IN ('eve-pc','fay-pc','gus-pc','hal-pc') AND c.name='personal';
@@ -3844,17 +3917,47 @@ mod tests {
             q("SELECT r.name FROM roles r JOIN clients c ON c.id = r.client_id WHERE c.client_id='fleet' ORDER BY r.name"),
             ["org-admin", "org-member", "org-viewer"]
         );
-        // Live members land in their subgroup; the removed one does not.
+        // Live members land in their subgroup; the removed one does not, nor
+        // does ivy, disabled before the upgrade with her row still live (the
+        // old `disable_person` left it): her row ends instead, as does ada's
+        // row of an org that no longer exists (2).
         assert_eq!(
             q("SELECT p.name || ':' || g.name FROM group_members m JOIN groups g ON g.id=m.group_id
                JOIN people p ON p.id=m.person_id ORDER BY p.name"),
             ["ada:admins", "bob:viewers"]
         );
         assert_eq!(
+            q("SELECT person_id || '@' || org_id FROM org_members WHERE removed_at IS NULL ORDER BY person_id"),
+            ["10@1", "11@1"]
+        );
+        // Re-enabling ivy gives back nothing: no group, no role, no live
+        // membership of acme (spec §3).
+        s.enable_person(18).unwrap();
+        assert_eq!(s.org_role(1, 18).unwrap(), None);
+        assert!(s.groups_of(18).unwrap().is_empty());
+        assert!(s.effective_roles(18).unwrap().is_empty());
+        // Step 5 ran, found the projection equal, and is not run again.
+        assert_eq!(
+            q(&format!(
+                "SELECT value FROM settings WHERE key = '{REALM_UPGRADE_FLAG}'"
+            )),
+            ["1"]
+        );
+        assert_eq!(
             q("SELECT g.name FROM groups g JOIN groups o ON o.id=g.parent_id WHERE o.org_id=1 ORDER BY g.name"),
             ["admins", "members", "viewers"]
         );
-        // The owner is fleet-admin; ada (trusted device) is fleet-trusted.
+        // The owner is fleet-admin; ada (trusted unbound full device) is
+        // fleet-trusted. gus's trusted device is readonly and hal's is bound
+        // to an org: neither made its person trusted before 181, so neither
+        // does now.
+        assert_eq!(
+            q(
+                "SELECT p.name FROM user_role_mappings u JOIN roles r ON r.id=u.role_id
+               JOIN people p ON p.id=u.person_id WHERE r.name='fleet-trusted' ORDER BY p.name"
+            ),
+            ["ada"]
+        );
         let owner = s.personal_owner_id().unwrap().unwrap();
         assert_eq!(
             q(&format!("SELECT r.name FROM user_role_mappings u JOIN roles r ON r.id=u.role_id WHERE u.person_id={owner}")),
@@ -3896,6 +3999,87 @@ mod tests {
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(q(shape), before);
+    }
+
+    /// Hardening: migration 181's Rust half is gated by a flag written with
+    /// its rows, not by the version the open started from. A database that
+    /// is already at 181 (a later migration failed, or the process died
+    /// after 181 committed) still gets the backfill on its next open; a
+    /// second open runs nothing (a mapping removed since stays removed).
+    #[test]
+    fn migration_181s_backfill_runs_once_even_when_181_already_committed() {
+        let s = store_at_version(181);
+        s.conn
+            .execute_batch(
+                "INSERT INTO people (id, name, is_personal_owner, created_at) VALUES (14,'eve',0,1);
+                 INSERT INTO client_tokens (name, token_sha256, mode, created_at, person_id) VALUES ('eve-pc','e','full',1,14);
+                 INSERT INTO catalogs (name, repo_path, org_id, created_at) VALUES ('personal', '/tmp/x', NULL, 1);
+                 INSERT INTO client_catalog_grants (client_id, catalog_id, granted_at)
+                   SELECT t.id, c.id, 1 FROM client_tokens t, catalogs c WHERE t.name = 'eve-pc';",
+            )
+            .unwrap();
+        let mapped = |s: &Store| -> i64 {
+            s.conn
+                .query_row(
+                    "SELECT COUNT(*) FROM user_role_mappings u JOIN roles r ON r.id = u.role_id \
+                     WHERE r.name = 'assets-admin' AND u.person_id = 14",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let flag = |s: &Store| -> Option<String> {
+            s.conn
+                .query_row(
+                    "SELECT value FROM settings WHERE key = ?1",
+                    [REALM_UPGRADE_FLAG],
+                    |r| r.get(0),
+                )
+                .optional()
+                .unwrap()
+        };
+        assert_eq!(flag(&s), None);
+        s.migrate().unwrap();
+        assert_eq!(mapped(&s), 1, "the backfill ran although 181 was recorded");
+        assert_eq!(flag(&s).as_deref(), Some("1"));
+        s.conn
+            .execute_batch("DELETE FROM user_role_mappings WHERE person_id = 14;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(mapped(&s), 0, "a second open does not run it again");
+        assert_eq!(flag(&s).as_deref(), Some("1"));
+    }
+
+    /// Spec §2 step 5: a projection that differs from `org_members` fails
+    /// the open, naming the person, writes nothing (the flag stays unset,
+    /// so the next open checks again), and is not advised away as a corrupt
+    /// file.
+    #[test]
+    fn migration_181_refuses_an_org_members_row_its_groups_do_not_give() {
+        let s = store_at_version(181);
+        s.conn
+            .execute_batch(
+                "INSERT INTO people (id, name, is_personal_owner, created_at) VALUES (10,'ada',0,1);
+                 INSERT INTO orgs (id, name, isolate_sessions, created_at) VALUES (1,'acme',0,1);
+                 INSERT INTO org_members (org_id, person_id, role, added_at, shares_since) VALUES (1,10,'admin',5,5);",
+            )
+            .unwrap();
+        let err = s.migrate().expect_err("the projection differs");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("migration 181") && msg.contains("\"ada\""),
+            "{msg}"
+        );
+        assert_eq!(super::open_failure_advice(&err, "delete it"), "");
+        let flagged: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM settings WHERE key = ?1",
+                [REALM_UPGRADE_FLAG],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(flagged, 0);
     }
 
     #[test]

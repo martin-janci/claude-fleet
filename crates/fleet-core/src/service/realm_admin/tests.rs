@@ -420,3 +420,64 @@ fn an_org_admin_is_refused_every_action_outside_their_slots() {
     root.user = Some("mo".into());
     assert_eq!(code(run(&root, &store, ann)), codes::E_FORBIDDEN);
 }
+
+/// Final review I4: the fence follows group ancestry. An org named
+/// `acme/eu` (made before `/` was refused, by hand here) has the root
+/// `/orgs/acme/eu`, which a path prefix would read as acme's: acme's admin
+/// sees neither its groups nor its members, nor a member's standing in it.
+#[test]
+fn an_org_admins_fence_follows_ancestry_not_a_path_prefix() {
+    let (store, acme, _) = fixture();
+    let ann = person(&store, "ann");
+    {
+        let s = store.lock().unwrap();
+        assert_eq!(
+            s.add_org("acme/eu", None, false).unwrap_err().code,
+            codes::E_INVALID
+        );
+        let eu = s.add_org("acme-eu", None, false).unwrap().id;
+        s.conn_for_test()
+            .execute_batch(&format!(
+                "UPDATE orgs SET name = 'acme/eu' WHERE id = {eu};
+                 UPDATE groups SET name = 'acme/eu' WHERE org_id = {eu};"
+            ))
+            .unwrap();
+        let mo = s.get_person_by_name("mo").unwrap().unwrap().id;
+        s.set_org_member(eu, mo, "admin", None).unwrap();
+        let zed = s.create_person("zed", None).unwrap().id;
+        s.set_org_member(eu, zed, "member", None).unwrap();
+    }
+    let fleet = Me {
+        device: None,
+        person: Some(person(&store, "root")),
+        authority: Authority::Fleet,
+    };
+    let all = run(&args("list_groups"), &store, fleet)
+        .unwrap()
+        .to_string();
+    assert!(all.contains("/orgs/acme/eu/admins"), "{all}");
+    let me = Me {
+        device: None,
+        person: Some(ann),
+        authority: Authority::Org {
+            org: acme,
+            hub: false,
+        },
+    };
+    let groups = run(&args("list_groups"), &store, me).unwrap().to_string();
+    assert!(groups.contains("/orgs/acme/admins"), "{groups}");
+    assert!(!groups.contains("/orgs/acme/eu"), "{groups}");
+    let users = run(&args("list_users"), &store, me).unwrap().to_string();
+    assert!(
+        users.contains("\"mo\"") && !users.contains("\"zed\""),
+        "{users}"
+    );
+    assert!(!users.contains("/orgs/acme/eu"), "{users}");
+    let mut roles = args("effective_roles");
+    roles.user = Some("mo".into());
+    let roles = run(&roles, &store, me).unwrap().to_string();
+    assert!(!roles.contains("/orgs/acme/eu"), "{roles}");
+    let mut get = args("get_user");
+    get.user = Some("zed".into());
+    assert_eq!(code(run(&get, &store, me)), codes::E_FORBIDDEN);
+}

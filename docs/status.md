@@ -168,8 +168,11 @@ those groups (`store/realm.rs`); `set_org_member`, `remove_org_member` and
 `fleet-hub org member` keep their shape and write group membership.
 `Caller.is_fleet_admin` (the realm role `fleet-admin`; the hub's owner
 always) decides fleet-wide administration where the single owner did, from
-a device bound to no org — a fleet admin who is or was an org member has
-their devices fenced like any member's; only the owner is exempt.
+a device bound to no org; every fleet admin is exempt from the org fence on
+devices, as the owner is, so one who is or was an org member keeps their
+device's own binding. An org admin trusts a member's device only while
+everything of that person is inside the org, and the org fence follows
+group ancestry (new org names refuse `/`).
 Trust and the personal asset grant are the person's (`fleet-trusted`,
 `assets-admin`): a device is trusted when its person holds the role and
 the device is `full`, and untrusting is refused while a group still grants

@@ -531,6 +531,12 @@ impl Store {
     /// took — no device, no grant, no group membership, no role mapping:
     /// each is given back on purpose, by whoever administers it.
     ///
+    /// Defensively, in the same transaction as the lift, it deletes any
+    /// group membership and direct role mapping still naming the person and
+    /// ends any live `org_members` row (the projection): a person disabled
+    /// before migration 181, or by a path that left rows behind, must not
+    /// come back with the org roles those rows would give.
+    ///
     /// `E_NOTFOUND` for an unknown id; an already-live person comes back
     /// unchanged; `E_EXISTS` when a live person has since taken their name
     /// or their email address (`idx_people_live_name`, and Task 2's live
@@ -540,7 +546,16 @@ impl Store {
         if row.disabled_at.is_none() {
             return Ok(row);
         }
-        match self.conn.execute(
+        let tx = self.immediate_transaction()?;
+        tx.execute(
+            "DELETE FROM group_members WHERE person_id = ?1",
+            rusqlite::params![id],
+        )?;
+        tx.execute(
+            "DELETE FROM user_role_mappings WHERE person_id = ?1",
+            rusqlite::params![id],
+        )?;
+        match tx.execute(
             "UPDATE people SET disabled_at = NULL WHERE id = ?1 AND disabled_at IS NOT NULL",
             rusqlite::params![id],
         ) {
@@ -560,6 +575,10 @@ impl Store {
             }
             Err(e) => return Err(e.into()),
         }
+        // With no group left, the projection ends every live row.
+        super::realm::reproject_org_memberships_in_tx(&tx, id, None)?;
+        tx.commit()?;
+        super::session_grants::bump_grant_generation();
         self.get_person(id)?.ok_or_else(|| person_not_found(id))
     }
 

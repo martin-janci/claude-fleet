@@ -1027,17 +1027,25 @@ impl Store {
     /// missing mapping.
     #[allow(clippy::type_complexity)]
     pub fn realm_sets(&self) -> Result<(Vec<i64>, Vec<i64>, Vec<i64>), IpcError> {
+        Ok((
+            self.fleet_admins()?,
+            holders_in_tx(&self.conn, ROLE_FLEET_TRUSTED)?,
+            holders_in_tx(&self.conn, ROLE_ASSETS_ADMIN)?,
+        ))
+    }
+
+    /// Every person who administers the fleet: the live holders of
+    /// `fleet-admin` and the personal owner, ascending ids. Also the set the
+    /// org fence exempts (`store::effective_device`): a fleet admin's device
+    /// keeps its own binding whatever orgs they are or were in.
+    pub fn fleet_admins(&self) -> Result<Vec<i64>, IpcError> {
         let mut admins = holders_in_tx(&self.conn, ROLE_FLEET_ADMIN)?;
         if let Some(owner) = personal_owner_in_tx(&self.conn)? {
             if let Err(at) = admins.binary_search(&owner) {
                 admins.insert(at, owner);
             }
         }
-        Ok((
-            admins,
-            holders_in_tx(&self.conn, ROLE_FLEET_TRUSTED)?,
-            holders_in_tx(&self.conn, ROLE_ASSETS_ADMIN)?,
-        ))
+        Ok(admins)
     }
 
     /// Whether `person` administers the fleet: the personal owner, or a live
@@ -1285,7 +1293,96 @@ pub(crate) fn reproject_org_memberships_in_tx(
     Ok(())
 }
 
+/// Spec §2 migration step 5: for every live person, the org roles their
+/// groups give ([`org_roles_from_groups_in_tx`]) against their live
+/// `org_members` rows. `Some` names the first person (by id) that differs.
+pub(crate) fn projection_mismatch_in_tx(conn: &Connection) -> Result<Option<String>, IpcError> {
+    let people: Vec<(i64, String)> = {
+        let mut stmt =
+            conn.prepare("SELECT id, name FROM people WHERE disabled_at IS NULL ORDER BY id")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    let mut live = conn.prepare(
+        "SELECT org_id, role FROM org_members \
+          WHERE person_id = ?1 AND removed_at IS NULL ORDER BY org_id",
+    )?;
+    for (id, name) in people {
+        let groups = org_roles_from_groups_in_tx(conn, id)?;
+        let rows: Vec<(i64, String)> = live
+            .query_map(rusqlite::params![id], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        if groups != rows {
+            return Ok(Some(format!(
+                "person {id} ({name:?}): groups give {groups:?}, org_members has {rows:?}"
+            )));
+        }
+    }
+    Ok(None)
+}
+
+/// What an org admin may see of the group tree: org `org`'s root group and
+/// every group under it, decided by ANCESTRY — `parent_id` walked up to the
+/// root whose `org_id` is the org — never by a path prefix. An org created
+/// before `/` was refused in org names can be called `acme/eu`, so the path
+/// `/orgs/acme/eu` is another org's root, not a group of `acme`
+/// (`realm_admin` and `org_admin { list_people }` both read this).
+#[derive(Debug, Clone)]
+pub struct OrgGroupFence {
+    pub org: i64,
+    ids: BTreeSet<i64>,
+    /// The paths of the groups inside that no group outside shares: what a
+    /// `via` (`group:<path>`) may name. A path two groups share is shown to
+    /// nobody fenced (fail closed).
+    paths: BTreeSet<String>,
+}
+
+impl OrgGroupFence {
+    /// Is `group` (an id) inside the org's tree?
+    pub fn covers(&self, group: i64) -> bool {
+        self.ids.contains(&group)
+    }
+
+    /// May an effective role's `via` be shown: `direct` and `composite:…`
+    /// always; `group:<path>` only for a group inside the tree.
+    pub fn shows_via(&self, via: &str) -> bool {
+        via.strip_prefix("group:")
+            .is_none_or(|p| self.paths.contains(p))
+    }
+}
+
 impl Store {
+    /// The fence of org `org`'s group tree ([`OrgGroupFence`]). An org with
+    /// no root group covers nothing.
+    pub fn org_group_fence(&self, org: i64) -> Result<OrgGroupFence, IpcError> {
+        let groups = self.list_groups()?;
+        let by_id: BTreeMap<i64, &GroupRow> = groups.iter().map(|g| (g.id, g)).collect();
+        let inside = |g: &GroupRow| -> bool {
+            let mut cur = Some(g);
+            for _ in 0..=MAX_GROUP_DEPTH {
+                let Some(x) = cur else { return false };
+                if x.org_id == Some(org) {
+                    return true;
+                }
+                cur = x.parent_id.and_then(|p| by_id.get(&p).copied());
+            }
+            false
+        };
+        let mut ids = BTreeSet::new();
+        let mut paths = BTreeSet::new();
+        let mut outside = BTreeSet::new();
+        for g in &groups {
+            if inside(g) {
+                ids.insert(g.id);
+                paths.insert(g.path.clone());
+            } else {
+                outside.insert(g.path.as_str());
+            }
+        }
+        paths.retain(|p| !outside.contains(p.as_str()));
+        Ok(OrgGroupFence { org, ids, paths })
+    }
+
     /// The direct computation the `org_members` projection must equal: the
     /// org roles `person` holds through the org groups, per org the highest.
     pub fn org_roles_from_groups(&self, person: i64) -> Result<Vec<(i64, String)>, IpcError> {

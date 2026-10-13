@@ -796,6 +796,59 @@ fn require_org_device(s: &Store, row: &ClientTokenRow, me: Me<'_>) -> Result<(),
     Ok(())
 }
 
+/// Under [`Authority::Org`], trusting a device of `person` (or pairing one
+/// trusted) is refused unless the trust stays inside the org: trust is the
+/// PERSON's (`fleet-trusted`, identity sub-project 1), so it reaches every
+/// `full` device of theirs. Allowed only when every live device of the
+/// person is fenced to `org` (as the auth layer reads it), they hold no
+/// live membership of another org, and they are no fleet admin.
+/// Untrusting narrows, so it is never asked; [`Authority::Fleet`] passes.
+pub fn require_trust_inside_org(
+    s: &Store,
+    person: Option<i64>,
+    me: Me<'_>,
+) -> Result<(), IpcError> {
+    let Authority::Org { org, .. } = me.authority else {
+        return Ok(());
+    };
+    let refuse = |who: String| {
+        let org_name = s
+            .get_org(org)
+            .ok()
+            .flatten()
+            .map(|o| o.name)
+            .unwrap_or_else(|| format!("org {org}"));
+        IpcError::new(
+            codes::E_FORBIDDEN,
+            format!(
+                "trust is the person's; {who} has a device or a membership outside \
+                 {org_name:?}, so trusting them is a fleet admin's call"
+            ),
+        )
+    };
+    // A device of nobody is never trusted (and `set_client_trust` refuses
+    // it); refused here first, fail closed.
+    let Some(p) = person else {
+        return Err(refuse("this device's person".into()));
+    };
+    let who = s
+        .get_person(p)?
+        .map(|r| format!("{:?}", r.name))
+        .unwrap_or_else(|| format!("person {p}"));
+    let device_outside = s
+        .auth_client_tokens()?
+        .iter()
+        .any(|c| c.person_id == Some(p) && c.org_id != Some(org));
+    let member_elsewhere = s
+        .memberships_of(p)?
+        .iter()
+        .any(|m| m.is_live() && m.org_id != org);
+    if device_outside || member_elsewhere || s.is_fleet_admin(p)? {
+        return Err(refuse(who));
+    }
+    Ok(())
+}
+
 /// Whether `person` already has an identity on this hub beyond `org`: a
 /// device (live or revoked, so sessions it owned stay theirs) or a live
 /// membership of another org. An org admin may invite a new person and pair
@@ -1035,26 +1088,22 @@ pub fn list_people(s: &Store) -> Result<Vec<PersonSummary>, IpcError> {
 }
 
 /// What an org admin may learn of their members' realm standing: only the
-/// groups under their org's root group, and only the roles held directly,
-/// through a composite or through one of those groups — as `realm_admin`'s
-/// org fence shows them.
+/// groups in their org's group tree, and only the roles held directly,
+/// through a composite or through one of those groups — the same
+/// [`crate::store::OrgGroupFence`] `realm_admin` applies, which decides by
+/// group ancestry, not by path.
 fn fence_realm_to_org(s: &Store, org: i64, people: &mut [PersonSummary]) -> Result<(), IpcError> {
-    let root = s
-        .list_groups()?
-        .into_iter()
-        .filter(|g| g.org_id == Some(org))
-        .map(|g| g.path)
-        .min_by_key(|p| p.len());
-    let covers = |path: &str| {
-        root.as_deref()
-            .is_some_and(|r| path == r || path.strip_prefix(r).is_some_and(|t| t.starts_with('/')))
-    };
+    let fence = s.org_group_fence(org)?;
     for p in people.iter_mut() {
-        p.groups.retain(|g| covers(g));
+        p.groups = s
+            .groups_of(p.id)?
+            .into_iter()
+            .filter(|g| fence.covers(g.id))
+            .map(|g| g.path)
+            .collect();
         p.roles.retain_mut(|r| {
             let had = !r.via.is_empty();
-            r.via
-                .retain(|v| v.strip_prefix("group:").is_none_or(covers));
+            r.via.retain(|v| fence.shows_via(v));
             !(had && r.via.is_empty())
         });
         p.roles_display = p.roles.iter().map(EffectiveRoleSummary::display).collect();
@@ -1447,6 +1496,9 @@ fn run_action(
                 ));
             }
             require_org_device(s, &row, me)?;
+            if on {
+                require_trust_inside_org(s, row.person_id, me)?;
+            }
             s.set_client_trust(&row.name, on)?;
             device_json(s, &row.name, me)
         }

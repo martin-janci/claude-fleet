@@ -1537,19 +1537,22 @@ their own `fleet-admin`, and it never leaves the hub's owner or its last
 holder.
 
 `fleet-hub realm role map fleet-admin --user ada` makes a colleague one,
-and it reaches the whole fleet only when ada is in no org and never was.
-A person who is, or was, a member of an org has their devices fenced by
-those memberships like any member's (*Companies: members and roles*): a
-live member's device acts on their org, with that org's authority at
-most, whatever roles they hold, and taking them out of the org does not
-unfence it — a former member's devices read nothing of any org. Binding
-the device elsewhere does not change that either. Only the hub's owner is
-exempt.
+whatever orgs ada is or was in: a fleet admin is exempt from the org fence
+on devices (*Companies: members and roles*), as the hub's owner is, so
+ada's devices keep their own binding — one bound to no org administers the
+fleet, one the operator bound to an org stays bound to it. Unmapping the
+role fences ada's devices by their memberships again from the next request.
 
 **Trust and the personal asset grant are the person's** (realm roles
 `fleet-trusted` and `assets-admin`; see *Trusted* and the asset grant under
 *Clients*). Nobody untrusts a device of their own person through
-`org_admin`: that would untrust the device in their hand too.
+`org_admin`: that would untrust the device in their hand too. Because
+trust reaches every `full` device of the person, an org admin trusts a
+member's device (or pairs one trusted) only while every device of that
+member is fenced to the org and they are in no other org; otherwise it is a
+fleet admin's call (`E_FORBIDDEN`). Untrusting is always theirs. Migration
+181 made a person trusted only for a trusted `full` device of theirs bound
+to no org — a trusted org-bound device never vouched for their others.
 
 **Device tokens expire.** A paired device's token stops resolving after
 `auth.device_token_ttl_days` (default 90; `0` never) without a request, or
@@ -1607,11 +1610,10 @@ three roles:
 A member's **devices follow their memberships**: a colleague's phone is fenced
 to the org they are in (to one of them, when they are in several — `bind_device`
 picks which), and a viewer's phone is read-only whatever it was paired as. The
-hub's owner and a person in no org (who never was in one) keep whatever their
-device was bound to, so an upgrade changes nobody. This holds for a fleet
-admin too: only the hub's owner is exempt, so a colleague given
-`fleet-admin` administers the fleet only while they are in no org and never
-were. A person taken out of their last org keeps their
+hub's owner, every other fleet admin, and a person in no org (who never was
+in one) keep whatever their device was bound to, so an upgrade changes
+nobody, and a fleet admin who is also an org member still administers the
+fleet from a device bound to no org. A person taken out of their last org keeps their
 row and their sessions, but their devices then read nothing of any org — a
 departed colleague does not fall back to the whole fleet's work.
 

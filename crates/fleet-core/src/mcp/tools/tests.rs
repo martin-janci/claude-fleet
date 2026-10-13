@@ -19714,6 +19714,90 @@ async fn a_fleet_admin_role_grants_and_revokes_fleet_reach() {
     assert!(!present::visible_to(&after, "set_setting"));
 }
 
+/// Final review I2: every fleet admin is exempt from the org fence, as the
+/// owner is. A second fleet admin who IS an Acme member, and one who WAS
+/// one, both administer the fleet from an unbound device — `org_admin`
+/// reaches an org they are not in, and an `Access::Person` tool is served —
+/// and lose it once the role is unmapped. A plain member stays fenced.
+#[tokio::test]
+async fn a_fleet_admin_who_is_or_was_an_org_member_administers_the_fleet() {
+    use crate::mcp::auth::{apply_realm, resolve_token, sha256_hex, RealmSets};
+    use crate::store::{Principal, RoleRef, NO_ORG, ROLE_FLEET_ADMIN};
+    let (tools, _guards, store) = client_tools();
+    let (acme, beta, fa, ann, wes) = {
+        let s = store.lock().unwrap();
+        let acme = s.add_org("Acme", None, false).unwrap().id;
+        let beta = s.add_org("Beta", None, false).unwrap().id;
+        let fa = s
+            .role(RoleRef::Realm(ROLE_FLEET_ADMIN))
+            .unwrap()
+            .unwrap()
+            .id;
+        let mut ids = Vec::new();
+        for name in ["ann", "wes", "pat"] {
+            let p = s.create_person(name, None).unwrap().id;
+            let dev = format!("{name}-phone");
+            s.insert_client_token(&dev, &sha256_hex(&format!("{name}-tok")), "full")
+                .unwrap();
+            s.set_client_person(&dev, Some(p)).unwrap();
+            s.set_client_trust(&dev, true).unwrap();
+            s.set_org_member(acme, p, "member", None).unwrap();
+            ids.push(p);
+        }
+        s.remove_org_member(acme, ids[1]).unwrap();
+        for p in [ids[0], ids[1]] {
+            s.map_role(Principal::Person(p), fa).unwrap();
+        }
+        (acme, beta, fa, ids[0], ids[1])
+    };
+    let caller = |tok: &str| {
+        let s = store.lock().unwrap();
+        let rows = s.auth_client_tokens().unwrap();
+        let mut c = resolve_token(tok, "master", &[], &rows, s.personal_owner_id().unwrap())
+            .expect("the device resolves");
+        apply_realm(&mut c, &RealmSets::from_vecs(s.realm_sets().unwrap()));
+        c
+    };
+    let list_orgs =
+        |c: Caller| tools.org_admin(Extension(c), Parameters(org_admin_args("list_orgs")));
+    for tok in ["ann-tok", "wes-tok"] {
+        let c = caller(tok);
+        assert!(c.is_fleet_admin && c.is_person_device(), "{tok}: {c:?}");
+        let v = result_json(&list_orgs(c.clone()).await.expect("the fleet's reach"));
+        assert!(
+            v.as_array()
+                .unwrap()
+                .iter()
+                .any(|o| o["id"].as_i64() == Some(beta)),
+            "{tok}: an org they are not in: {v}"
+        );
+        assert!(present::visible_to(&c, "set_setting"), "{tok}");
+        assert!(enforce_admin(&c, "set_setting").is_ok(), "{tok}");
+    }
+    let pat = caller("pat-tok");
+    assert_eq!(pat.client.as_ref().unwrap().org_id, Some(acme), "fenced");
+    assert!(!present::visible_to(&pat, "set_setting"));
+    assert!(
+        list_orgs(pat).await.is_err(),
+        "a member administers nothing"
+    );
+
+    for p in [ann, wes] {
+        store
+            .lock()
+            .unwrap()
+            .unmap_role(Principal::Person(p), fa)
+            .unwrap();
+    }
+    for (tok, org) in [("ann-tok", acme), ("wes-tok", NO_ORG)] {
+        let c = caller(tok);
+        assert!(!c.is_fleet_admin, "{tok}");
+        assert_eq!(c.client.as_ref().unwrap().org_id, Some(org), "{tok}");
+        assert!(!present::visible_to(&c, "set_setting"), "{tok}");
+        assert!(list_orgs(c).await.is_err(), "{tok}: the role is gone");
+    }
+}
+
 /// Phase D, the tool's half of the gate: a person's device that administers
 /// no org is refused every action, lists included; an org admin's device
 /// reaches its own org, and pairs devices only for that org's members.

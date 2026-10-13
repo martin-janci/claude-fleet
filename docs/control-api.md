@@ -1241,7 +1241,9 @@ Index by area (names only; see the reference for details):
   bind, hand over or take a grant from the device the call comes through.
   Trust is the device's person's (realm role `fleet-trusted`):
   `set_device_trust` and `pair_device { trusted }` trust every `full`
-  device of that person, untrusting is refused (`E_VALIDATE`) while a group
+  device of that person — so an org admin's are refused (`E_FORBIDDEN`)
+  unless every device of the person is fenced to their org and the person
+  is in no other org —, untrusting is refused (`E_VALIDATE`) while a group
   or composite still grants the role, and untrusting a device of the
   caller's own person is refused (`E_INVALID_STATE`), since it would
   untrust the device in hand too. `grant_catalog` on `personal` is the

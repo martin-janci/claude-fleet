@@ -137,14 +137,17 @@ impl Store {
         let tx = self.conn.unchecked_transaction()?;
         let epoch = self.auth_epoch()?;
         let hosts = self.list_host_tokens()?;
-        // As the auth layer must see them: org and mode from memberships
-        // (org administration phase D).
-        let clients = self.auth_client_tokens()?;
-        // Named tokens (migration 157); expiry is judged per request.
-        let controls = self.auth_control_tokens()?;
         // Who holds the realm roles (identity sub-project 1): every realm
         // table moves the epoch, so the sets are the ones at this epoch too.
+        // Read before the devices: the fleet admins are exempt from the org
+        // fence below.
         let realm = self.realm_sets()?;
+        // As the auth layer must see them: org and mode from memberships
+        // (org administration phase D), a fleet admin's device keeping its
+        // own binding.
+        let clients = self.auth_client_tokens_exempting(&realm.0)?;
+        // Named tokens (migration 157); expiry is judged per request.
+        let controls = self.auth_control_tokens()?;
         // When a device token expires: the `auth.device_token_%` settings
         // move the epoch too (migration 183).
         let device_policy = self.device_token_policy()?;

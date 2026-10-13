@@ -1339,6 +1339,21 @@ impl FleetTools {
                         None,
                     ));
                 }
+                // A trusted code makes the PERSON trusted: only while every
+                // device and membership of theirs is inside the org (the
+                // first-device rule above already implies it; checked by
+                // the one rule set_device_trust uses, so the two never
+                // drift).
+                if args.trusted == Some(true) {
+                    let me = crate::service::org_admin::Me {
+                        device: None,
+                        person: None,
+                        authority,
+                    };
+                    let p = s.get_person_by_name(person).map_err(to_mcp_err)?;
+                    crate::service::org_admin::require_trust_inside_org(&s, p.map(|p| p.id), me)
+                        .map_err(to_mcp_err)?;
+                }
                 Some(org)
             }
         };

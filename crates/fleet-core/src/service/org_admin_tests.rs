@@ -1658,3 +1658,144 @@ fn people_carry_their_groups_and_roles_fenced_to_an_org_admins_org() {
         assert!(!text.contains(&beta_root), "{text} leaks Beta: {bob:?}");
     }
 }
+
+/// Final review I3: trust is the person's, so an org admin trusts a device
+/// only while every live device of its person is fenced to their org and
+/// the person is in no other org. Untrusting stays allowed; a fleet
+/// admin's authority is unchanged.
+#[test]
+fn an_org_admin_trusts_only_a_person_held_inside_their_org() {
+    let c = company();
+    let me = c.jane();
+    let trust = |device: &str, on: bool| {
+        let mut a = args("set_device_trust");
+        a.device = Some(device.into());
+        a.trusted = Some(on);
+        a
+    };
+    let trusted = |st: &Mutex<Store>, p: i64| {
+        st.lock()
+            .unwrap()
+            .people_with_realm_role(crate::store::ROLE_FLEET_TRUSTED)
+            .unwrap()
+            .contains(&p)
+    };
+    // Everything of bob's is inside Acme: allowed.
+    assert_eq!(
+        run(&trust("bob-phone", true), &c.st, me).unwrap()["trusted"],
+        true
+    );
+    assert!(trusted(&c.st, c.bob));
+    run(&trust("bob-phone", false), &c.st, me).expect("untrusting narrows");
+
+    // A person with no membership whose one device the operator bound to
+    // Acme, and who also holds a device bound to nobody: trusting the Acme
+    // device would trust the unbound one fleet-wide.
+    let zed = {
+        let s = c.st.lock().unwrap();
+        let zed = s.create_person("zed", None).unwrap().id;
+        for name in ["zed-phone", "zed-laptop"] {
+            s.insert_client_token(name, &format!("digest-{name}"), "full")
+                .unwrap();
+            s.set_client_person(name, Some(zed)).unwrap();
+        }
+        s.set_client_org("zed-phone", Some(c.acme)).unwrap();
+        zed
+    };
+    let e = run(&trust("zed-phone", true), &c.st, me).expect_err("an unbound device");
+    assert_eq!(e.code, "E_FORBIDDEN");
+    assert!(
+        e.message.contains("trust is the person's") && e.message.contains("\"zed\""),
+        "{e:?}"
+    );
+    assert!(!trusted(&c.st, zed));
+
+    // bob in Beta too: his phone acts on Acme, but trust would reach his
+    // Beta standing.
+    c.st.lock()
+        .unwrap()
+        .set_org_member(c.beta, c.bob, "member", None)
+        .unwrap();
+    assert_eq!(
+        err_code(run(&trust("bob-phone", true), &c.st, me)),
+        "E_FORBIDDEN"
+    );
+    assert!(!trusted(&c.st, c.bob));
+    run(&trust("bob-phone", false), &c.st, me).expect("untrusting is never asked");
+
+    // The fleet's authority is unchanged.
+    let fleet = Me {
+        device: None,
+        person: None,
+        authority: Authority::Fleet,
+    };
+    assert_eq!(
+        run(&trust("bob-phone", true), &c.st, fleet).unwrap()["trusted"],
+        true
+    );
+    assert_eq!(
+        run(&trust("zed-phone", true), &c.st, fleet).unwrap()["trusted"],
+        true
+    );
+}
+
+/// Final review I4: the org fence follows group ancestry, not a path
+/// prefix. An org named `Acme/eu` (made before `/` was refused, so by hand
+/// here) has the root `/orgs/Acme/eu`, which reads like a group of `Acme`:
+/// Acme's admin sees none of its groups in a member's standing.
+#[test]
+fn list_people_fences_an_org_admin_by_ancestry_not_by_path() {
+    let c = company();
+    let eu = {
+        let s = c.st.lock().unwrap();
+        assert_eq!(
+            s.add_org("Acme/eu", None, false).unwrap_err().code,
+            codes::E_INVALID,
+            "a new org name has no `/`"
+        );
+        let eu = s.add_org("Acme-eu", None, false).unwrap().id;
+        s.conn_for_test()
+            .execute_batch(&format!(
+                "UPDATE orgs SET name = 'Acme/eu' WHERE id = {eu};
+                 UPDATE groups SET name = 'Acme/eu' WHERE org_id = {eu};"
+            ))
+            .unwrap();
+        s.set_org_member(eu, c.bob, "admin", None).unwrap();
+        let zoe = s.create_person("zoe", None).unwrap().id;
+        s.set_org_member(eu, zoe, "member", None).unwrap();
+        eu
+    };
+    let all = list_people(&c.st.lock().unwrap()).unwrap();
+    let bob = all.iter().find(|p| p.name == "bob").unwrap();
+    assert!(
+        bob.groups.iter().any(|g| g == "/orgs/Acme/eu/admins"),
+        "the fleet sees it: {bob:?}"
+    );
+    let v = run(&args("list_people"), &c.st, c.jane()).unwrap();
+    let people: Vec<PersonSummary> = serde_json::from_value(v).unwrap();
+    assert!(
+        people.iter().all(|p| p.name != "zoe"),
+        "only Acme's members"
+    );
+    let bob = people.iter().find(|p| p.name == "bob").unwrap();
+    assert_eq!(
+        bob.groups,
+        vec!["/orgs/Acme/members".to_string()],
+        "{bob:?}"
+    );
+    for text in bob
+        .roles_display
+        .iter()
+        .chain(bob.roles.iter().flat_map(|r| &r.via))
+    {
+        assert!(
+            !text.contains("/orgs/Acme/eu"),
+            "{text} leaks {eu}: {bob:?}"
+        );
+    }
+    // The existing name stays: an update that leaves it unchanged passes.
+    c.st.lock()
+        .unwrap()
+        .update_org(eu, Some("Acme/eu"), Some("#112233"), None)
+        .expect("an existing name is left alone");
+}

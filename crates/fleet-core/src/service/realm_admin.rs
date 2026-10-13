@@ -262,33 +262,29 @@ pub fn run(args: &RealmAdminArgs, store: &Mutex<Store>, me: Me<'_>) -> Result<Va
 
 // ---- the org fence -----------------------------------------------------------
 
-/// What an org admin sees: the org and the path of its root group.
+/// What an org admin sees: the org and its group tree, by ancestry
+/// ([`crate::store::OrgGroupFence`], shared with `org_admin { list_people }`).
 struct OrgFence {
     org: i64,
-    root: Option<String>,
+    groups: crate::store::OrgGroupFence,
 }
 
 impl OrgFence {
     fn of(s: &Store, org: i64) -> Result<Self, IpcError> {
-        let root = s
-            .list_groups()?
-            .into_iter()
-            .filter(|g| g.org_id == Some(org))
-            .map(|g| g.path)
-            .min_by_key(|p| p.len());
-        Ok(OrgFence { org, root })
+        Ok(OrgFence {
+            org,
+            groups: s.org_group_fence(org)?,
+        })
     }
 
-    fn covers(&self, path: &str) -> bool {
-        self.root
-            .as_deref()
-            .is_some_and(|r| path == r || path.strip_prefix(r).is_some_and(|t| t.starts_with('/')))
+    fn covers(&self, g: &GroupRow) -> bool {
+        self.groups.covers(g.id)
     }
 
     /// A `via` of an effective role an org admin may see: not a group
     /// outside their org.
     fn shows_via(&self, via: &str) -> bool {
-        via.strip_prefix("group:").is_none_or(|p| self.covers(p))
+        self.groups.shows_via(via)
     }
 
     fn member(&self, s: &Store, person: i64) -> Result<(), IpcError> {
@@ -302,7 +298,7 @@ impl OrgFence {
     }
 
     fn group(&self, g: &GroupRow) -> Result<(), IpcError> {
-        if self.covers(&g.path) {
+        if self.covers(g) {
             return Ok(());
         }
         Err(IpcError::new(
@@ -453,8 +449,8 @@ fn user_json(
     let groups: Vec<String> = s
         .groups_of(p.id)?
         .into_iter()
+        .filter(|g| fence.is_none_or(|f| f.covers(g)))
         .map(|g| g.path)
-        .filter(|path| fence.is_none_or(|f| f.covers(path)))
         .collect();
     let mut v = json!({
         "name": p.name,
@@ -531,7 +527,7 @@ fn read(
             let rows = s
                 .list_groups()?
                 .iter()
-                .filter(|g| fence.is_none_or(|f| f.covers(&g.path)))
+                .filter(|g| fence.is_none_or(|f| f.covers(g)))
                 .map(|g| group_json(s, g))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Value::Array(rows))

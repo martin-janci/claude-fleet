@@ -226,6 +226,16 @@ pub fn validate_org_name(name: &str) -> Result<String, IpcError> {
             format!("an org name is 1–{ORG_NAME_MAX_CHARS} characters, one line"),
         ));
     }
+    // The org's group is `/orgs/<name>`: a `/` would make its path read as
+    // a group inside another org (identity sub-project 1). An org named
+    // before this rule keeps its name (`update_org` passes it unchanged);
+    // the org fence decides by group ancestry, so it is safe either way.
+    if n.contains('/') {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "an org name has no `/`: it is the name of the org's group, /orgs/<name>",
+        ));
+    }
     Ok(n.to_string())
 }
 
@@ -416,6 +426,8 @@ impl Store {
     ) -> Result<OrgRow, IpcError> {
         let cur = self.get_org(id)?.ok_or_else(|| org_not_found(id))?;
         let name = match name {
+            // Unchanged: an org named before `/` was refused keeps its name.
+            Some(n) if n.trim() == cur.name => cur.name,
             Some(n) => {
                 let n = validate_org_name(n)?;
                 let taken: bool = self.conn.query_row(

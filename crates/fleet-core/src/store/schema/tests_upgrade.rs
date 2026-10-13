@@ -145,13 +145,18 @@ fn the_chain_from_pre_work_graph_to_latest_is_fast_complete_and_sound() {
     assert_eq!(store.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
     integrity_ok(&store);
 
-    // No pre-existing row was lost or duplicated. One settings row is
-    // the chain's own, not a pre-existing one: migration 183 writes
-    // `auth.device_token_ttl_since`, the start of every device token's
-    // idle clock (identity sub-project 1).
+    // No pre-existing row was lost or duplicated. Two settings rows are
+    // the chain's own, not pre-existing ones (identity sub-project 1):
+    // migration 183 writes `auth.device_token_ttl_since`, the start of
+    // every device token's idle clock, and migration 181's Rust half
+    // records that it ran (`realm.upgrade_backfilled`).
     for (table, n) in &m.counts {
         let sql = if *table == "settings" {
-            "SELECT COUNT(*) FROM settings WHERE key <> 'auth.device_token_ttl_since'".to_string()
+            format!(
+                "SELECT COUNT(*) FROM settings WHERE key NOT IN \
+                 ('auth.device_token_ttl_since', '{}')",
+                super::REALM_UPGRADE_FLAG
+            )
         } else {
             format!("SELECT COUNT(*) FROM {table}")
         };
@@ -164,6 +169,17 @@ fn the_chain_from_pre_work_graph_to_latest_is_fast_complete_and_sound() {
         ),
         1,
         "migration 183 starts the device idle clock"
+    );
+    assert_eq!(
+        count(
+            &store,
+            &format!(
+                "SELECT COUNT(*) FROM settings WHERE key = '{}'",
+                super::REALM_UPGRADE_FLAG
+            )
+        ),
+        1,
+        "migration 181's Rust half ran once"
     );
     // No migration after 044 updates a session row (row_version would bump).
     //
