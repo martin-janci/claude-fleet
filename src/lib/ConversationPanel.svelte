@@ -3060,10 +3060,13 @@
 
 <style>
   .composer-above {
-    /* Not shrunk by flex (a short pane used to squeeze it to two lines, so
-       an expanded task group opened out of sight): its own cap sizes it,
-       with a floor that fits a header, a receipt and a row. */
-    flex: 0 0 auto;
+    /* Its own cap sizes it, with a floor that fits a header, a receipt and
+       a row. It shrinks only once the transcript is down to its floor
+       (`.thread-area` has basis 0), so on a pane too short for everything
+       it yields before the composer is pushed out. It used to lose to the
+       transcript's content height and sit at two lines, so an expanded
+       task group opened out of sight. */
+    flex: 0 1 auto;
     min-height: 0;
     /* The transcript keeps the rest; the tray scrolls. */
     max-height: clamp(min(6.5rem, 30%), 40%, 22rem);
@@ -3126,7 +3129,7 @@
     /* Basis 0: the transcript takes what is left, however long it is, and
        never less than a few lines. */
     flex: 1 1 0;
-    min-height: min(5rem, 25%);
+    min-height: clamp(2.5rem, 25% - 1rem, 5rem);
     display: flex;
     flex-direction: column;
   }
