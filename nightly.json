@@ -1,16 +1,21 @@
 {
   "schema": 1,
   "track": "nightly",
-  "sequence": 19,
-  "generated_at": "2026-10-13T09:29:54Z",
-  "expires_at": "2026-10-27T09:29:54Z",
-  "current": "0.6.3-dev.280.desktop.g02b6f19",
-  "recommended": "0.6.3-dev.280.desktop.g02b6f19",
+  "sequence": 20,
+  "generated_at": "2026-10-13T14:58:32Z",
+  "expires_at": "2026-10-27T14:58:32Z",
+  "current": "0.6.3-dev.321.desktop.g033290f",
+  "recommended": "0.6.3-dev.321.desktop.g033290f",
   "minimum_supported": {},
   "mandatory": [],
   "rollback": null,
   "withdrawn": [],
   "releases": [
+    {
+      "version": "0.6.3-dev.321.desktop.g033290f",
+      "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.3-dev.321.desktop.g033290f/release-manifest.json",
+      "manifest_sha256": "511364c9b658a579ececa8dc1b5430a303ebebe9e1edd602c80c9827a54c552e"
+    },
     {
       "version": "0.6.3-dev.280.desktop.g02b6f19",
       "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.3-dev.280.desktop.g02b6f19/release-manifest.json",
