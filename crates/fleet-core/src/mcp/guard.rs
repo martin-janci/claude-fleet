@@ -2629,6 +2629,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_master_with_no_named_owner_is_refused_a_person_tool() {
+        let mut m = crate::mcp::Caller::master();
+        assert!(access_allows(&m, "set_account_nickname"));
+        m.is_fleet_admin = false;
+        assert!(!access_allows(&m, "set_account_nickname"));
+    }
+
+    #[test]
     fn readonly_allow_list_admits_reads_and_refuses_mutations() {
         for t in ["list_sessions", "capture_session", "inbox", "repo_file"] {
             assert!(is_readonly_tool(t), "{t} must be readonly");

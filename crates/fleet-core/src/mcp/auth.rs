@@ -279,10 +279,13 @@ impl Caller {
         self.is_fleet_admin && self.is_person_device()
     }
 
-    /// [`Self::is_fleet_admin_device`] or the master: the two callers that
-    /// administer the fleet (`Access::Person`).
+    /// The callers that administer the fleet (`Access::Person`): the master
+    /// or a person device, and in both cases only while `is_fleet_admin`
+    /// holds. A master counts only while the hub names its owner; with no
+    /// owner the flag is false and the gate refuses rather than opens (see
+    /// the `Access::Person` arm of `access_allows`).
     pub fn is_master_or_fleet_admin_device(&self) -> bool {
-        self.is_master() || self.is_fleet_admin_device()
+        self.is_fleet_admin && (self.is_master() || self.is_person_device())
     }
 
     /// WHO this caller is, as a `people` row id (multi-user M1): the person
@@ -911,6 +914,11 @@ mod tests {
         c.is_fleet_admin = false;
         assert!(!c.is_fleet_admin_device());
         assert!(!c.is_master_or_fleet_admin_device());
+        // A master on a hub that names no owner refuses rather than opens.
+        let mut m = Caller::master();
+        m.is_fleet_admin = false;
+        assert!(!m.is_fleet_admin_device());
+        assert!(!m.is_master_or_fleet_admin_device());
     }
 
     /// The hub's personal owner as these tests see it (multi-user M1). Any

@@ -424,7 +424,7 @@ fn group_json(s: &Store, g: &GroupRow) -> Result<Value, IpcError> {
 fn roles_json(s: &Store, person: i64, fence: Option<&OrgFence>) -> Result<Vec<Value>, IpcError> {
     let mut out = Vec::new();
     for e in s.effective_roles(person)? {
-        let mut via: Vec<String> = e.via.clone();
+        let mut via: Vec<String> = e.via;
         if let Some(f) = fence {
             if !f.keep_role_vias(&mut via) {
                 continue;
