@@ -2,8 +2,10 @@
 //! what the tidy planner reads, the UI-only archive of a live session, snooze
 //! and never per link, the last touch, and reopened work.
 //!
-//! Nothing here deletes a row. Archive, snooze and never are flags on the
-//! live link; a reopen is a stamp on the item plus a `reopened` journal row.
+//! Archive, snooze and never are flags on the live link; a reopen is a stamp
+//! on the item plus a `reopened` journal row. The one deletion is
+//! [`Store::remove_ended_links`] (TASK-263): a link whose session is gone,
+//! removed on purpose by the control API.
 //! A per-session keep (work graph M11.3) is a `tidy_kept` timeline event
 //! whose detail is the unix second it holds until: no column, no migration.
 
@@ -552,6 +554,71 @@ impl Store {
             "UPDATE work_items SET reopened_at = NULL WHERE id = ?1 AND reopened_at IS NOT NULL",
             rusqlite::params![item_id],
         )? > 0)
+    }
+    /// Stamp (`on`) or clear `archived_at` on ENDED confirmed links, by id
+    /// (TASK-263): the control API's archive of a task whose sessions are
+    /// gone, which `archive_session_links` cannot reach (no session). A live
+    /// link, another state or an unknown id is skipped, never an error — the
+    /// caller resolved the ids it may touch. Idempotent: an archived link
+    /// keeps its first stamp. Returns how many rows changed.
+    pub fn archive_ended_links(&self, ids: &[i64], on: bool) -> Result<usize, IpcError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let ids_json = serde_json::to_string(ids)
+            .map_err(|e| IpcError::new(codes::E_SERIALIZE, e.to_string()))?;
+        let n = if on {
+            self.conn.execute(
+                "UPDATE work_links SET archived_at = ?1 WHERE ended_at IS NOT NULL \
+                   AND state = 'confirmed' AND archived_at IS NULL \
+                   AND id IN (SELECT value FROM json_each(?2))",
+                rusqlite::params![now_unix(), ids_json],
+            )?
+        } else {
+            self.conn.execute(
+                "UPDATE work_links SET archived_at = NULL WHERE ended_at IS NOT NULL \
+                   AND state = 'confirmed' AND archived_at IS NOT NULL \
+                   AND id IN (SELECT value FROM json_each(?1))",
+                rusqlite::params![ids_json],
+            )?
+        };
+        Ok(n)
+    }
+
+    /// Delete ENDED links by id (TASK-263): the control API's removal of a
+    /// link whose session is gone — a detection that was wrong, say. The
+    /// snapshot goes with the row, so the key can no longer be resumed from
+    /// that session. A live link or an unknown id is skipped. A placement of
+    /// a bare key no link names any more is swept with it. Returns how many
+    /// rows went.
+    pub fn remove_ended_links(&self, ids: &[i64]) -> Result<usize, IpcError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let ids_json = serde_json::to_string(ids)
+            .map_err(|e| IpcError::new(codes::E_SERIALIZE, e.to_string()))?;
+        let n = self.conn.execute(
+            "DELETE FROM work_links WHERE ended_at IS NOT NULL \
+               AND id IN (SELECT value FROM json_each(?1))",
+            rusqlite::params![ids_json],
+        )?;
+        if n > 0 {
+            self.sweep_orphan_placements()?;
+        }
+        Ok(n)
+    }
+
+    /// A link's `archived_at`; `None` for an unarchived or unknown link.
+    pub fn work_link_archived_at(&self, link_id: i64) -> Result<Option<i64>, IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT archived_at FROM work_links WHERE id = ?1",
+                rusqlite::params![link_id],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten())
     }
 }
 
