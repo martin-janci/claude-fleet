@@ -4074,7 +4074,10 @@ mod tests {
             t(serde_json::json!({"action": "boot", "host": "mac", "name": "iPhone 17"})).as_deref(),
             Some("boot · mac/iPhone 17")
         );
-        assert_eq!(t(serde_json::json!({"action": "list"})).as_deref(), Some("list"));
+        assert_eq!(
+            t(serde_json::json!({"action": "list"})).as_deref(),
+            Some("list")
+        );
         assert_eq!(t(serde_json::json!({"device": "x"})), None);
     }
 
