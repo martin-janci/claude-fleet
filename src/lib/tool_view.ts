@@ -4,6 +4,7 @@
 // list. Everything here takes the strings `session_tool_detail` returns and
 // never throws on a shape it does not expect — the caller falls back to the
 // raw text.
+import { DEVICE_TOOL } from './debug_devices';
 
 export interface DiffRow {
   kind: 'ctx' | 'add' | 'del' | 'gap';
@@ -213,9 +214,11 @@ export function parseFileList(result: string): string[] | null {
 }
 
 /** Which detail layout a call gets. */
-export type DetailKind = 'edit' | 'bash' | 'read' | 'files' | 'todos' | 'raw';
+export type DetailKind = 'edit' | 'bash' | 'read' | 'files' | 'todos' | 'device' | 'raw';
 
 export function detailKind(name: string, hasEdit: boolean, hasCommand: boolean): DetailKind {
+  // A session's `debug_devices` call (debug_devices.ts): drawn as a device.
+  if (name === DEVICE_TOOL) return 'device';
   if (hasEdit) return 'edit';
   if (hasCommand) return 'bash';
   if (name === 'Read') return 'read';

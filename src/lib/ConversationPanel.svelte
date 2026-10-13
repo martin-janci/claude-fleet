@@ -30,6 +30,7 @@
   import { onTimelineEvent, onConversationsChanged } from './live_events';
   import type { SessionEvent } from './timeline';
   import ConversationHeader from './ConversationHeader.svelte';
+  import SessionDevices from './SessionDevices.svelte';
   import ToolLine from './ToolLine.svelte';
   import SubagentBlock from './SubagentBlock.svelte';
   import CopyButton from './CopyButton.svelte';
@@ -2252,6 +2253,8 @@
       <button type="button" class="dismiss" aria-label="Dismiss" data-testid="conv-switch-dismiss" onclick={() => (switchNotice = null)}>×</button>
     </div>
   {/if}
+  <!-- The debug devices this session holds or waits for; nothing when none. -->
+  <SessionDevices {session} />
   <div class="thread-area">
   {#if bgEntry}
     <BackgroundDetail entry={bgEntry} onBack={() => (background = null)} onOpenSession={goToSession} />
