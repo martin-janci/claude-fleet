@@ -178,7 +178,10 @@ run_update_scripts() {
     return
   fi
   step cargo build -p fleet-update --bin fleet-release --locked
-  step env FLEET_RELEASE=target/debug/fleet-release FLEET_HUB=target/debug/fleet-hub \
+  # Where cargo put them: the Buildkite builder keeps its target directory
+  # outside the checkout (deploy/buildkite/hooks/environment).
+  local target_dir="${CARGO_TARGET_DIR:-$ROOT/target}"
+  step env FLEET_RELEASE="$target_dir/debug/fleet-release" FLEET_HUB="$target_dir/debug/fleet-hub" \
     bash scripts/release-update-scripts-test.sh
 }
 
