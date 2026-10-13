@@ -274,7 +274,9 @@ write `{"kind": "setting", "proposal": <its id>, "note"?}`; the person
 confirms Apply, you never apply it yourself) or `wizard` (one of the app's
 own forms: `add_host`, `add_project`, `get_started`, `new_session`,
 `pair_device`) or `dashboard` (widgets over `work { stats }` the person can
-pin; see below). Each is one JSON object, `{"spec": "fleet.ui/1", "kind": …}`; a
+pin; see below) or `device` (`{"kind": "device", "device": <ref>, "title"?,
+"note"?}`: a debug device drawn live, with a screenshot on a click; use it
+to show the person what you test on). Each is one JSON object, `{"spec": "fleet.ui/1", "kind": …}`; a
 broken one shows as code with the reason. Format: `docs/chat-blocks.md`.
 Use `ask` instead when you need the answers before you continue.
 

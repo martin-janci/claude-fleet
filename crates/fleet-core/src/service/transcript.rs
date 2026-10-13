@@ -2014,7 +2014,9 @@ fn edit_detail(name: &str, input: &serde_json::Value) -> Option<EditDetail> {
 /// blocks of other ids are skipped.
 pub fn parse_tool_detail(lines: &str, id: &str) -> Option<ToolDetail> {
     let mut detail: Option<ToolDetail> = None;
-    let mut result: Option<(Option<String>, bool, (Vec<ToolImage>, u32))> = None;
+    // The result's text, whether it is an error, and its images.
+    type ToolResult = (Option<String>, bool, (Vec<ToolImage>, u32));
+    let mut result: Option<ToolResult> = None;
     for line in lines.lines() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;

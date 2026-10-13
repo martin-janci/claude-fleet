@@ -492,6 +492,38 @@
         "title",
         "widgets"
       ]
+    },
+    {
+      "description": "A debug device (`docs/debug-devices.md`), drawn live from the\nperson's own list: its state, who holds or waits for it, and a\nscreenshot or a mirror on a click.",
+      "type": "object",
+      "properties": {
+        "device": {
+          "description": "An id (`#12`), label, name, serial or key, optionally as\n`host/that`: what `debug_devices` takes as `device`.",
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "const": "device"
+        },
+        "note": {
+          "description": "Markdown under the device: what to look at on it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "description": "A heading over the device; its own title when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "device"
+      ]
     }
   ],
   "required": [

@@ -225,7 +225,9 @@ phone:
   from its own host only, and cannot share a device to itself.
 - **Claims** are advisory leases: while one holds (30 minutes by default, up
   to a day), every other caller gets `E_CONFLICT` naming the holder and its
-  note. Each use by the holder extends it. A session that proves its tmux
+  note. A person may still read a held device, `screenshot` and `logs`,
+  without touching the claim, so the chat can show what a session tests on;
+  another session may not. Each use by the holder extends it. A session that proves its tmux
   pane holds the claim as itself (`host:<alias>#<session>`), so two sessions
   on one host do not share a claim. Only the holder or a person releases
   one.
