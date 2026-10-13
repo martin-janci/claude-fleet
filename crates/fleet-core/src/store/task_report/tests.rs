@@ -84,3 +84,40 @@ fn an_items_pr_reading_comes_from_its_runs_worker() {
         (Some("x"), 2, Some(9))
     );
 }
+
+#[test]
+fn the_latest_result_is_the_newest_done_task_with_a_report() {
+    let s = Store::open_in_memory().unwrap();
+    let item = s.create_local_work_item(None, "queue").unwrap().id;
+    assert_eq!(s.latest_item_result(item).unwrap(), None);
+    let mk = |nonce: &str, role: &str, state: &str, report: bool| {
+        let t = s.insert_task(None, None, "p", nonce).unwrap();
+        s.set_task_run(t.id, item, 1, role).unwrap();
+        s.finish_task(t.id, state, Some("r"), None).unwrap();
+        if report {
+            let r = TaskReport {
+                summary: role.into(),
+                outcome: "done".into(),
+                ..Default::default()
+            };
+            s.set_task_report(t.id, &r).unwrap();
+        }
+        t.id
+    };
+    let _plain = mk("n1", "implement", "done", false);
+    assert_eq!(
+        s.latest_item_result(item).unwrap(),
+        None,
+        "a paragraph alone is no result"
+    );
+    let first = mk("n2", "implement", "done", true);
+    assert_eq!(s.latest_item_result(item).unwrap().unwrap().id, first);
+    let second = mk("n3", "wrapup", "done", true);
+    assert_eq!(s.latest_item_result(item).unwrap().unwrap().id, second);
+    let _failed = mk("n4", "implement", "failed", true);
+    assert_eq!(
+        s.latest_item_result(item).unwrap().unwrap().id,
+        second,
+        "only a done task is a result"
+    );
+}

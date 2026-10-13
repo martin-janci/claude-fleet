@@ -164,3 +164,49 @@ fn the_script_reads_a_real_checkout_against_its_base() {
         Some("no checkout")
     );
 }
+
+#[test]
+fn a_report_keeps_done_decisions_remaining_and_context() {
+    let v = serde_json::json!({
+        "summary": "Added the gate.",
+        "outcome": "partial",
+        "done": ["gate.rs with completion_gate"],
+        "decisions": ["the gate never moves an item itself"],
+        "remaining": ["Windows path of the probe"],
+        "context": ["verify.rs computes on read"],
+    });
+    let r = report_from_value(&v).unwrap();
+    assert_eq!(r.done, vec!["gate.rs with completion_gate"]);
+    assert_eq!(r.decisions, vec!["the gate never moves an item itself"]);
+    assert_eq!(r.remaining, vec!["Windows path of the probe"]);
+    assert_eq!(r.context, vec!["verify.rs computes on read"]);
+}
+
+#[test]
+fn a_report_stored_before_the_new_keys_still_reads() {
+    let old = r#"{"summary":"x","outcome":"done","followups":["a"]}"#;
+    let r: crate::store::TaskReport = serde_json::from_str(old).unwrap();
+    assert!(r.done.is_empty() && r.decisions.is_empty());
+    assert!(r.remaining.is_empty() && r.context.is_empty());
+    assert_eq!(r.followups, vec!["a"]);
+}
+
+#[test]
+fn the_instruction_names_every_key_the_parser_reads() {
+    let text = run_instruction("abc");
+    for key in [
+        "summary",
+        "outcome",
+        "done",
+        "decisions",
+        "remaining",
+        "context",
+        "tests_run",
+        "warnings",
+        "blockers",
+        "followups",
+        "confidence",
+    ] {
+        assert!(text.contains(&format!("\"{key}\"")), "{key} missing");
+    }
+}
