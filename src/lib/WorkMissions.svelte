@@ -31,7 +31,11 @@
   import { hosts } from './hosts';
   import { shortAge, timeAgo } from './session_status';
   import { createWorkTask, onWorkChangedDebounced } from './work';
-  import { NEWER_HUB, isOlderHub, readErrorText as rawErrorText } from './work_view';
+  import { NEWER_HUB, isOlderHub, openTask, readErrorText as rawErrorText } from './work_view';
+  import { get } from 'svelte/store';
+  import { sessions as sessionRows } from './sessions';
+  import { selectSessionExplicitly } from './selection';
+  import { push } from './toasts';
   import type { IpcError } from './result';
   import {
     finalMoveQuestion,
@@ -100,6 +104,9 @@
     ownerLine,
     runsOf,
     runStateLabel,
+    sessionsByItem,
+    missionTaskId,
+    type FinishSession,
     type GraphNode,
     type Mission,
     type MissionDetail,
@@ -158,8 +165,9 @@
     rowDetails = next;
   }
 
-  // The detail's tabs (the board's Plan / Runs / Log / Repos).
-  type DetailTab = 'plan' | 'runs' | 'log' | 'repos';
+  // The detail's tabs (the board's Plan / Runs / Log / Repos, and its live
+  // child sessions).
+  type DetailTab = 'plan' | 'runs' | 'sessions' | 'log' | 'repos';
   let detailTab = $state<DetailTab>('plan');
   const runs = $derived(detail ? runsOf(detail) : []);
   function personName(id: number): string | null {
@@ -263,6 +271,26 @@
   const waves = $derived(detail ? wavesOf(detail) : []);
   const proposals = $derived(detail ? openProposals(detail) : []);
   const itemById = $derived(new Map((detail?.items ?? []).map((i) => [i.id, i])));
+  // Its child sessions: the live sessions on its member items, in every
+  // state (`MissionDetail.sessions`; empty from an older hub).
+  const liveSessions = $derived(detail?.sessions ?? []);
+  const liveByItem = $derived(sessionsByItem(detail));
+
+  /** Open a member task as the rest of Work does: select it, show its detail. */
+  function openItem(itemId: number) {
+    const links = (liveByItem.get(itemId) ?? []).map((s) => ({ session_id: s.session_id, state: 'active' }));
+    openTask(missionTaskId(itemId), links);
+  }
+
+  /** Open one of its sessions in the center pane. */
+  function openSession(s: FinishSession) {
+    const row = get(sessionRows).find((r) => r.id === s.session_id);
+    if (!row) {
+      push({ kind: 'info', message: `${s.tmux_name} is gone: the session is no longer in the fleet.` });
+      return;
+    }
+    selectSessionExplicitly(row, { task: missionTaskId(s.item_id) });
+  }
   // The last "Accept all", for Undo: the hub takes it back only while
   // nothing has touched those tasks (`store::ACCEPT_UNDO_SECS`).
   let lastAccepted = $state<number[]>([]);
@@ -863,7 +891,7 @@
       </dl>
 
       <div class="view-switch tabs" role="tablist" aria-label="Mission" use:tablistKeys data-testid="mission-tabs">
-        {#each [['plan', 'Plan', null], ['runs', 'Runs', runs.length], ['log', 'Log', null], ['repos', 'Repos', (mission.repos ?? []).length]] as const as [key, label, count] (key)}
+        {#each [['plan', 'Plan', null], ['runs', 'Runs', runs.length], ['sessions', 'Sessions', liveSessions.length], ['log', 'Log', null], ['repos', 'Repos', (mission.repos ?? []).length]] as const as [key, label, count] (key)}
           <button
             type="button"
             role="tab"
@@ -1089,6 +1117,8 @@
           onlanechange={(by) => {
             if (mission) laneOverride = { mission: mission.id, by };
           }}
+          onopenitem={openItem}
+          onopensession={openSession}
         />
       {/if}
       {#each showGraph ? [] : waves as w (w.wave)}
@@ -1104,7 +1134,16 @@
                     <Loader name="comet-trails" size={20} label="Working on it" testid="mission-trails" />
                   {/if}
                   <span class="main">
-                    <span class="title">{it.key ? `${it.key} · ` : ''}{it.title}</span>
+                    <span class="title-row">
+                      <button
+                        class="title linkish"
+                        type="button"
+                        title="Open the task"
+                        data-testid="mission-node-open"
+                        onclick={() => openItem(it.id)}>{it.key ? `${it.key} · ` : ''}{it.title}</button
+                      >
+                      {@render sessionLinks(it.id)}
+                    </span>
                     {#if (n.waiting_for ?? []).length > 0}
                       <span class="muted small" data-testid="mission-waits">waits for {(n.waiting_for ?? []).map(titleOf).join(', ')}</span>
                     {/if}
@@ -1253,9 +1292,52 @@
               <li data-testid="mission-run" data-state={r.state}>
                 <span class="node-dot"><StatusDot state={toneOf(r.state)} label={runStateLabel(r.state)} /></span>
                 <span class="main">
-                  <span class="title">{r.item_id != null ? titleOf(r.item_id) : `Task run ${r.task_id}`}</span>
+                  {#if r.item_id != null}
+                    {@const itemId = r.item_id}
+                    <span class="title-row">
+                      <button
+                        class="title linkish"
+                        type="button"
+                        title="Open the task"
+                        data-testid="mission-run-open"
+                        onclick={() => openItem(itemId)}>{titleOf(itemId)}</button
+                      >
+                      {@render sessionLinks(itemId)}
+                    </span>
+                  {:else}
+                    <span class="title">Task run {r.task_id}</span>
+                  {/if}
                   <span class="muted small"
                     >{r.role}{r.attempt ? ` #${r.attempt}` : ''} · {runStateLabel(r.state)}{#if r.at != null} · {shortAge(r.at)}{/if}{#if r.actor} · by {r.actor === 'loop' ? 'the loop' : r.actor}{/if}</span
+                  >
+                </span>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      {:else if detailTab === 'sessions'}
+        {#if liveSessions.length === 0}
+          <p class="muted small" data-testid="mission-sessions-empty">No session is working on this mission's tasks.</p>
+        {:else}
+          <ul class="runs" aria-label="Sessions" data-testid="mission-sessions">
+            {#each liveSessions as s (s.session_id)}
+              <li data-testid="mission-session">
+                <span class="main">
+                  <button
+                    class="title linkish"
+                    type="button"
+                    title="Open the session"
+                    data-testid="mission-session-open"
+                    onclick={() => openSession(s)}>{s.tmux_name}</button
+                  >
+                  <span class="muted small"
+                    >{s.host_alias} · {s.kind} · <button
+                      class="linkish"
+                      type="button"
+                      title="Open the task"
+                      data-testid="mission-session-task"
+                      onclick={() => openItem(s.item_id)}>{titleOf(s.item_id)}</button
+                    ></span
                   >
                 </span>
               </li>
@@ -1484,7 +1566,33 @@
   {/if}
 </div>
 
+<!-- A task's live sessions, each one click away (beside its title). -->
+{#snippet sessionLinks(itemId: number)}
+  {#each liveByItem.get(itemId) ?? [] as s (s.session_id)}
+    <button
+      class="btn btn--chip sess-link"
+      type="button"
+      title="Open {s.tmux_name} on {s.host_alias}"
+      data-testid="mission-task-session"
+      data-session-id={s.session_id}
+      onclick={() => openSession(s)}>Session</button
+    >
+  {/each}
+{/snippet}
+
 <style>
+  .title-row { display: flex; align-items: center; gap: 0.4rem; min-width: 0; }
+  .linkish {
+    padding: 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .linkish:hover, .linkish:focus-visible { color: var(--accent); text-decoration: underline; }
+  .sess-link { flex: none; }
   .loop { display: flex; flex-direction: column; gap: 0.3rem; border-left: 2px solid var(--border); padding-left: 0.5rem; }
   .steps, .cards { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.2rem; }
   .steps li, .cards li { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }

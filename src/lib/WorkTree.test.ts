@@ -252,6 +252,28 @@ describe('WorkTree', () => {
     expect(get(taskDetailOpen)).toBe(false);
   });
 
+  it('under the Session pref a row opens its live session, and the ticket when it is gone', async () => {
+    const { workRowClick } = await import('./prefs');
+    workRowClick.set('session');
+    try {
+      render(WorkTree);
+      await flush();
+      await fireEvent.click(screen.getAllByTestId('work-task-row')[0]);
+      expect(get(selectedSession)?.id).toBe(7);
+      expect(get(selectedTaskId)).toBe('item:12');
+      expect(get(taskDetailOpen)).toBe(false);
+      // The session left the fleet: the row opens the ticket.
+      clearSelection();
+      sessions.set([]);
+      await fireEvent.click(screen.getAllByTestId('work-task-row')[0]);
+      expect(get(selectedSession)).toBeNull();
+      expect(get(selectedTaskId)).toBe('item:12');
+      expect(get(taskDetailOpen)).toBe(true);
+    } finally {
+      workRowClick.set('ticket');
+    }
+  });
+
   it('a task row selects it and opens its detail', async () => {
     render(WorkTree);
     await flush();

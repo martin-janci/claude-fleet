@@ -3,12 +3,13 @@
   // waves as columns, each task a box tinted by its state, each dependency
   // an arrow, and the longest unfinished chain marked as the critical path.
   // Hovering or focusing a task lights up what it waits for and what waits
-  // on it; choosing one shows its line below the graph.
+  // on it; choosing one shows its line below the graph, whose title opens
+  // the task and whose Session links open its live sessions.
   //
   // Read-only: every write (an edge, a hold, Start wave) stays in the list,
   // so this view adds a picture, never a second way to change the mission.
   // Text a person or a tracker wrote is rendered as text, never as markup.
-  import type { MissionDetail } from './missions';
+  import type { FinishSession, MissionDetail } from './missions';
   import { attemptLine, nodeCountWord, nodeLabel, verificationLabel } from './missions';
   import StatusChip from './kit/StatusChip.svelte';
   import StatusDot from './kit/StatusDot.svelte';
@@ -30,9 +31,13 @@
     laneBy: LaneBy;
     repoName?: (id: number) => string | null;
     onlanechange?: (by: LaneBy) => void;
+    /** Open a task (a work item) the way the rest of the app does. */
+    onopenitem?: (itemId: number) => void;
+    /** Open one of a task's live sessions. */
+    onopensession?: (s: FinishSession) => void;
   }
 
-  let { detail, laneBy, repoName = () => null, onlanechange }: Props = $props();
+  let { detail, laneBy, repoName = () => null, onlanechange, onopenitem, onopensession }: Props = $props();
 
   const LANE_LABEL: Record<LaneBy, string> = { repo: 'Repo', assignee: 'Assignee', none: 'None' };
 
@@ -43,6 +48,7 @@
   let selected = $state<number | null>(null);
   const lit = $derived(hover != null ? chainOf(graphNodes, hover) : null);
   const chosen = $derived(layout.nodes.find((n) => n.item_id === selected) ?? null);
+  const chosenSessions = $derived(chosen ? (detail.sessions ?? []).filter((s) => s.item_id === chosen.item_id) : []);
 
   const pct = $derived(layout.progress.total ? layout.progress.done / layout.progress.total : 0);
   const summary = $derived(
@@ -163,7 +169,28 @@
   {#if chosen}
     <div class="chosen" role="status" data-testid="mission-graph-chosen">
       <StatusChip state={toneOf(chosen.state)} label={nodeLabel(chosen.state)} />
-      <span class="title">{chosen.key ? `${chosen.key} · ` : ''}{chosen.title}</span>
+      {#if onopenitem}
+        <button
+          class="title linkish"
+          type="button"
+          title="Open the task"
+          data-testid="mission-graph-chosen-open"
+          onclick={() => onopenitem(chosen.item_id)}>{chosen.key ? `${chosen.key} · ` : ''}{chosen.title}</button
+        >
+      {:else}
+        <span class="title">{chosen.key ? `${chosen.key} · ` : ''}{chosen.title}</span>
+      {/if}
+      {#if onopensession}
+        {#each chosenSessions as s (s.session_id)}
+          <button
+            class="chip sess"
+            type="button"
+            title="Open {s.tmux_name} on {s.host_alias}"
+            data-testid="mission-graph-chosen-session"
+            onclick={() => onopensession(s)}>Session · {s.tmux_name}</button
+          >
+        {/each}
+      {/if}
       <span class="muted small">W{chosen.wave} · {chosen.lane}</span>
       {#if (chosen.node.waiting_for ?? []).length > 0}
         <span class="muted small">waits for {(chosen.node.waiting_for ?? []).map(titleOf).join(', ')}</span>
@@ -196,6 +223,11 @@
   .chip.crit { background: var(--accent-soft); color: var(--fg); }
   .lanes { display: inline-flex; align-items: center; gap: 6px; font-size: var(--text-xs); }
   .muted { color: var(--fg-muted); }
+  .linkish {
+    padding: 0; border: 0; background: none; font: inherit; color: var(--accent); cursor: pointer; text-align: left;
+  }
+  .linkish:hover { text-decoration: underline; }
+  .chip.sess { border: 0; cursor: pointer; color: var(--accent); }
   .small { font-size: var(--text-2xs); }
   .empty { font-size: var(--text-sm); }
 
