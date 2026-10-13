@@ -100,6 +100,10 @@ rustls-native-certs = "0.8"
 # Asset catalog (docs/superpowers/specs/2026-09-14-asset-catalog-design.md)
 serde_yaml = "0.9"
 sha2 = "0.10"
+# Signature check of the SSO ID token against the issuer's JWKS (mcp/oidc/jwks.rs).
+# Not a new crate: ring 0.17 is already in Cargo.lock through tokio-rustls /
+# rustls, so the "no second TLS stack / no new crate" policy above holds.
+ring = "0.17"
 # The `nl-detect` feature's language detector (see `[features]`).
 lingua = { version = "1.8", optional = true, default-features = false, features = [
   "english",

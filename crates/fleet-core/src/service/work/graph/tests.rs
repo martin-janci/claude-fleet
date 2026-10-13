@@ -25,6 +25,7 @@ fn person(store: &Mutex<Store>, id: i64) -> ViewScope {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     }
     .view_scope(&lock(store).unwrap())
     .unwrap()
@@ -226,6 +227,7 @@ fn a_scoped_caller_never_accepts() {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     }
     .view_scope(&lock(&st).unwrap())
     .unwrap();

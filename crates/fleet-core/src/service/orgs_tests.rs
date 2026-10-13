@@ -682,7 +682,9 @@ fn org_details_carry_the_overview_and_devices_only_for_the_administrator() {
         .unwrap();
         s.upsert_catalog("acme-assets", "/c/acme", None, Some(a.id))
             .unwrap();
-        s.insert_client_token("acme-phone", "digest-1", "readonly")
+        // Trust is a person's, carried by a full device (identity
+        // sub-project 1).
+        s.insert_owned_client_token("acme-phone", "digest-1", "full")
             .unwrap();
         s.set_client_org("acme-phone", Some(a.id)).unwrap();
         s.set_client_trust("acme-phone", true).unwrap();
@@ -701,7 +703,7 @@ fn org_details_carry_the_overview_and_devices_only_for_the_administrator() {
         Some(
             &[OrgDevice {
                 name: "acme-phone".into(),
-                mode: "readonly".into(),
+                mode: "full".into(),
                 trusted: true,
                 last_seen_at: None,
             }][..]
@@ -828,7 +830,8 @@ fn an_orgs_overview_carries_its_spend_series_and_what_needs_an_admin() {
             ("ada-mac", "full", true),
             ("wall-tv", "readonly", false),
         ] {
-            s.insert_client_token(name, &format!("digest-{name}"), mode)
+            // Each its own person's: trust is the person's.
+            s.insert_owned_client_token(name, &format!("digest-{name}"), mode)
                 .unwrap();
             s.set_client_org(name, Some(org)).unwrap();
             s.set_client_trust(name, trusted).unwrap();

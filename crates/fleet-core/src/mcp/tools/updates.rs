@@ -236,7 +236,7 @@ impl FleetTools {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             authority_for(
                 &s,
-                caller.is_personal_owner && caller.is_person_device(),
+                caller.is_fleet_admin && caller.is_person_device(),
                 caller.person(),
                 caller.client.as_ref().and_then(|c| c.org_id),
             )
@@ -245,7 +245,7 @@ impl FleetTools {
         .ok_or_else(|| {
             mcp_err(
                 codes::E_FORBIDDEN,
-                "update_policy is for the hub owner's own device, or an org admin's for \
+                "update_policy is for a fleet admin's own device, or an org admin's for \
                  their org; this device administers no org",
                 None,
             )

@@ -516,6 +516,7 @@ fn caller_view_scope_follows_the_table() {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: person == Some(owner),
+        is_fleet_admin: person == Some(owner),
     };
     let own_device = device(Some(owner)).view_scope(&s).unwrap();
     assert_eq!(own_device.person, Some(owner));
@@ -537,6 +538,7 @@ fn caller_view_scope_follows_the_table() {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     }
     .view_scope(&s)
     .unwrap();
@@ -574,6 +576,7 @@ fn the_pane_header_resolves_to_one_row_or_to_none() {
             mode: TokenMode::Full,
             pane: pane.map(str::to_string),
             is_personal_owner: false,
+            is_fleet_admin: false,
         }
         .view_scope(&s)
         .unwrap()
@@ -592,6 +595,7 @@ fn the_pane_header_resolves_to_one_row_or_to_none() {
         mode: TokenMode::Full,
         pane: Some("%17".into()),
         is_personal_owner: false,
+        is_fleet_admin: false,
     }
     .view_scope(&s)
     .unwrap();

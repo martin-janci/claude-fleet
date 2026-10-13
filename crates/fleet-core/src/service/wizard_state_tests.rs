@@ -25,6 +25,7 @@ fn device(store: &Mutex<Store>, person: i64, name: &str) -> ViewScope {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     }
     .view_scope(&lock(store).unwrap())
     .unwrap()

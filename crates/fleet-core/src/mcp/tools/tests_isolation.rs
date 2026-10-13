@@ -81,6 +81,7 @@ impl Who {
             mode: TokenMode::Full,
             pane: Some(pane.into()),
             is_personal_owner: false,
+            is_fleet_admin: false,
         };
         // Every paired client here is the hub's one person's device.
         // A device bound to NOBODY is a refusing scope (M1, T2's default
@@ -100,6 +101,7 @@ impl Who {
             mode,
             pane: None,
             is_personal_owner: org_id.is_none(),
+            is_fleet_admin: org_id.is_none(),
         };
         match self {
             Who::Master => Caller::master(),
@@ -2308,6 +2310,7 @@ async fn run_matrix(isolate: bool) {
                 mode: TokenMode::Full,
                 pane: None,
                 is_personal_owner: false,
+                is_fleet_admin: false,
             };
             let ctx = crate::service::hooks::HookContext {
                 caller: &c,
@@ -5482,6 +5485,7 @@ async fn a_per_host_token_still_cannot_read_another_hosts_tickets_in_its_org() {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     };
     let r =
         fx.t.work(

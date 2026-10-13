@@ -303,6 +303,12 @@ pub struct GcReport {
     /// sweeps above; `#[serde(default)]` for the same wire reason.
     #[serde(default)]
     pub swept_downloads: usize,
+    /// Admin events past `auth.audit_retention_days` swept this sweep
+    /// (`Store::sweep_admin_events`, the identity audit log). Ungated like
+    /// the retention sweeps above; `#[serde(default)]` for the same wire
+    /// reason.
+    #[serde(default)]
+    pub swept_admin_events: usize,
 }
 
 /// Run one sweep against `exec`. Reads rows/hosts/controller under one brief
@@ -456,6 +462,9 @@ pub async fn sweep_with(
     // The decision record (Jev evaluation, D37): `decide.retention_days`
     // (0 = forever), bounded per tick, one batch per lock.
     report.swept_decision_runs = crate::service::decide::sweep_runs(store, now);
+    // The admin audit log: `auth.audit_retention_days` (0 = forever). One
+    // statement under one brief lock, like the decision record's.
+    report.swept_admin_events = sweep_admin_events(store, now);
     // File downloads past `downloads.keep_secs`, and bytes no row owns.
     report.swept_downloads = crate::service::downloads::sweep(store, now);
     // Wizard drafts nobody resumed within `wizard_state::KEEP_SECS` (G7.2).
@@ -465,6 +474,27 @@ pub async fn sweep_with(
         Err(e) => tracing::warn!(error = %e, "[gc] wizard draft purge failed"),
     }
     report
+}
+
+/// Admin events older than `auth.audit_retention_days` (`0` keeps them
+/// forever). Errors are logged, never raised: the sweep goes on.
+fn sweep_admin_events(store: &Mutex<Store>, now: i64) -> usize {
+    let Ok(s) = store.lock() else {
+        return 0;
+    };
+    let days = settings::get_string(&s, settings::AUDIT_RETENTION_DAYS)
+        .parse::<i64>()
+        .unwrap_or(365);
+    if days <= 0 {
+        return 0;
+    }
+    match s.sweep_admin_events(now.saturating_sub(days.saturating_mul(86_400))) {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(error = %e, "[gc] admin events sweep failed");
+            0
+        }
+    }
 }
 
 /// Single-flight guard mirroring `service::usage`'s: at most one sweep pass
@@ -560,6 +590,7 @@ pub async fn maybe_sweep(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> Opt
             swept_work_events = report.swept_work_events,
             tidied = report.tidied,
             swept_decision_runs = report.swept_decision_runs,
+            swept_admin_events = report.swept_admin_events,
             "[gc] sweep"
         );
     }
@@ -923,6 +954,7 @@ mod tests {
                 tidied: 0,
                 swept_decision_runs: 0,
                 swept_downloads: 0,
+                swept_admin_events: 0,
             }
         );
         assert_eq!(exec.inspects.load(Ordering::SeqCst), 1);
@@ -1007,6 +1039,7 @@ mod tests {
                 tidied: 0,
                 swept_decision_runs: 0,
                 swept_downloads: 0,
+                swept_admin_events: 0,
             }
         );
         assert_eq!(exec.kills.load(Ordering::SeqCst), 0);
@@ -1067,6 +1100,7 @@ mod tests {
                 tidied: 0,
                 swept_decision_runs: 0,
                 swept_downloads: 0,
+                swept_admin_events: 0,
             }
         );
         let s = store.lock().unwrap();
@@ -1128,6 +1162,7 @@ mod tests {
                 tidied: 0,
                 swept_decision_runs: 0,
                 swept_downloads: 0,
+                swept_admin_events: 0,
             },
             "the retention sweep must run regardless of gc.enabled"
         );
@@ -1262,6 +1297,52 @@ mod tests {
             ev.iter().any(|e| e.kind == "message_undeliverable"),
             "the sender must learn its message was never taken by the peer: {ev:?}"
         );
+    }
+
+    /// Identity sub-project 1: the admin audit log is kept for
+    /// `auth.audit_retention_days` (365 by default; 0 = forever), swept on
+    /// every install like the other retention windows.
+    #[tokio::test]
+    async fn sweep_drops_admin_events_past_their_retention() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let now = 400 * 86_400;
+        let seed = |ts: i64| {
+            store
+                .lock()
+                .unwrap()
+                .conn_ref()
+                .execute(
+                    "INSERT INTO admin_events (ts, action, resource_type, resource_id) \
+                     VALUES (?1, 'create', 'person', 'ada')",
+                    [ts],
+                )
+                .unwrap();
+        };
+        let left = || {
+            store
+                .lock()
+                .unwrap()
+                .admin_events(&crate::store::AdminEventQuery {
+                    limit: 10,
+                    ..Default::default()
+                })
+                .unwrap()
+                .len()
+        };
+        seed(now - 366 * 86_400);
+        seed(now - 364 * 86_400);
+        let disabled = GcConfig {
+            enabled: false,
+            ..CFG
+        };
+        let exec = fake(false);
+        let report = sweep_with(&store, &exec, &disabled, now).await;
+        assert_eq!(report.swept_admin_events, 1, "only the older one goes");
+        assert_eq!(left(), 1);
+        settings::set(&store.lock().unwrap(), settings::AUDIT_RETENTION_DAYS, "0").unwrap();
+        let report = sweep_with(&store, &exec, &disabled, now * 10).await;
+        assert_eq!(report.swept_admin_events, 0, "0 keeps them forever");
+        assert_eq!(left(), 1);
     }
 
     #[tokio::test]

@@ -99,8 +99,8 @@ invalidates the hub's token cache (`auth_epoch`), a rotation does.
 login pane fleet opens on the host (`start_login`, `login_status`,
 `login_key`, `login_code`, `end_login`), or an Anthropic API key checked
 with Anthropic and written to the host only (`api_key`, with an optional
-`daily_limit_usd`; `daily_limit` changes it). Served to the master and the
-hub owner's devices; everything but `login_status` needs the master or a
+`daily_limit_usd`; `daily_limit` changes it). Served to the master and a
+fleet admin's devices; everything but `login_status` needs the master or a
 trusted full device. The key and the code are never logged or returned.
 
 ### Environment
@@ -114,7 +114,7 @@ master's alone, a device gets `E_FORBIDDEN`. A change applies when a session
 next starts or restarts. `new_session { env }` sets session-scope plain
 values for the session it starts, and a form's `secret` field with an
 `env_target` stores its answer as the session's secret variable
-([forms.md](forms.md#secrets)). Served to the master and the hub owner's
+([forms.md](forms.md#secrets)). Served to the master and a fleet admin's
 devices; a write needs the master or a trusted full device.
 
 ### Named tokens
@@ -150,7 +150,7 @@ once, with **Copy token** and **Copy as env line** (`FLEET_MCP_TOKEN=…`); the
 store keeps only its SHA-256, and nothing logs it. The table lists each with
 its scope, hosts, expiry and when it was last used (to the minute);
 **Revoke** ends it on its next request. On a desktop paired with a hub the
-same panel creates the hub's tokens, from the owner's trusted full device,
+same panel creates the hub's tokens, from a fleet admin's trusted full device,
 Read or Act only.
 
 ## Connecting a client
@@ -352,7 +352,7 @@ Index by area (names only; see the reference for details):
   usage and cost per session, host and day), `list_hosts`, `discover_hosts`,
   `add_host`, `remove_host`, `merge_host` (fold a renamed alias into another),
   `probe_host`, `check_host` (a host's health checklist over the hub's SSH:
-  tmux, agents on PATH, fleet's hooks; the hub owner's devices, contract
+  tmux, agents on PATH, fleet's hooks; a fleet admin's devices, contract
   17), `hide_host`, `provision_hosts`, `wizard_state` (a wizard
   left half-way, Add host or Add a project, kept on the hub so it resumes
   on the person's other device; not served to a per-host token),
@@ -360,7 +360,7 @@ Index by area (names only; see the reference for details):
   a project: `{host_alias, confidence_pct, run_id}` or null; a person's
   device only, never a per-host token; hub contract 17),
   `list_accounts`, `set_account_nickname` (an account's label on every
-  device; the hub owner's devices, contract 17), `account_usage` (each account's latest plan usage: the
+  device; a fleet admin's devices, contract 17), `account_usage` (each account's latest plan usage: the
   5-hour and weekly windows with their reset times, status and when it was
   fetched, as the hub's usage poll last answered; never fetches; hub
   contract 11), `check_account_headroom` (whether starting or switching a
@@ -934,9 +934,13 @@ Index by area (names only; see the reference for details):
   and what each one's token may do — the stored token digest is never
   returned; a read, but master token only, since it enumerates every paired
   device), `revoke_client` (revoke one by name; master token only),
-  `set_client_trust` (grant or withdraw trust in one by name — a trusted
+  `set_client_trust` (grant or withdraw trust by a device's name — a trusted
   client's prompts are delivered without the untrusted-content marker; master
-  token only). A paired client is never the master, so every tool in this
+  token only). Trust is the device's person's (realm role `fleet-trusted`,
+  identity sub-project 1): it reaches every `full` device of that person,
+  and untrusting is refused while a group still grants it. `list_clients`
+  still shows each row's `trusted_at`, a mirror kept for one release.
+  A paired client is never the master, so every tool in this
   group — like the rest of fleet admin — stays out of a phone's reach. The
   `fleet-hub pair`, `fleet-hub client list`, `fleet-hub client revoke` and
   `fleet-hub client trust|untrust` commands are thin wrappers around these
@@ -947,10 +951,10 @@ Index by area (names only; see the reference for details):
   to peer tokens only), `list_peer_links` (this hub's links to other fleets'
   hubs — fleet, role, state, pending count, last exchange and error, the
   last round trip and the messages carried today and in all, never a token;
-  a read for the master and the hub owner's own device, since it names other
+  a read for the master and a fleet admin's device, since it names other
   fleets), `link_peer` / `unlink_peer` (link a hub with the one-time code its
   owner minted, or remove a link and fail what waits for it; the master or
-  the owner's trusted full device). Settings → Federation shows and drives
+  a fleet admin's trusted full device). Settings → Federation shows and drives
   them from a paired desktop; the `fleet-hub peer add|list|remove` commands
   drive the same links straight on `state.db`.
 - **Updates** — `update_status` (the fleet's application updates: the
@@ -962,7 +966,7 @@ Index by area (names only; see the reference for details):
   `unpin`; `update_now` to install at once; `refresh` to re-read the signed
   channel now), and `update_policy` (a person's device: `list`, `set` or
   `clear` the update policy of the org it administers — an org admin's own
-  org, or any org from the hub owner's device). `update_status {
+  org, or any org from a fleet admin's device). `update_status {
   target }` answers for one target (`client:<id>`, `agent:<alias>`,
   `hub:self`) with its whole decision — status, reason code, the release it
   would be offered and whether it is mandatory — the dashboard's "why"; a
@@ -1144,7 +1148,7 @@ Index by area (names only; see the reference for details):
   after a project's PRs (`docs/superpowers/specs/2026-10-08-pr-shepherd-design.md`):
   `status` (rules, recent episodes and merges), `grant { project_id, level:
   watch|nudge|merge, hours?, recipes? }`, `revoke { project_id }`,
-  `pause_all`. Served only to the hub owner's own paired device, never to
+  `pause_all`. Served only to a fleet admin's paired device, never to
   the master an agent holds (the operator has `fleet-hub shepherd`); a write
   needs a trusted full device.
 - **Agents** — `agents`, the built-in agents (the PR reviewer, the support
@@ -1156,7 +1160,7 @@ Index by area (names only; see the reference for details):
   config?, hours? }`, `revoke { id }`, `pause_all`, `approve { id }`,
   `reject { id }`. An approved action is carried out by its agent on the
   next run pass (the reviewer posts the review, unless the pull request's
-  head moved on). Served only to the hub owner's own paired device, never
+  head moved on). Served only to a fleet admin's paired device, never
   to the master an agent holds (the operator has `fleet-hub agents`); a
   write needs a trusted full device.
 - **Chat forms** — `ask`. Chat forms: open a `fleet.form/1` form in your own session's chat and wait for a person's answers; the person's side lists, gets, answers and declines. See `docs/forms.md`.
@@ -1200,19 +1204,20 @@ Index by area (names only; see the reference for details):
   already has is `E_INVALID`; a newer proposal for a key replaces its
   pending one, and at most 50 wait (`E_RATE_LIMITED`). `why` is at most
   500 characters and shown to the person as written.
-  **Who** (declarative pages P6): the master token, and the HUB OWNER's own
-  paired device — a client bound to no org whose person is this hub's owner
-  (multi-user M1), such as the desktop paired with a hub or a phone — reach
+  **Who** (declarative pages P6): the master token, and a FLEET ADMIN's
+  paired device — a client bound to no org whose person holds the realm
+  role `fleet-admin` (identity sub-project 1; this hub's owner always
+  does), such as the desktop paired with a hub or a phone — reach
   `get_settings` and `set_setting`; a per-host token, an org-bound client and
-  a second person's device never do (the settings are the whole fleet's). A
+  the device of a person who is not a fleet admin never do (the settings are the whole fleet's). A
   device of either mode reads; a `full` device proposes; only a device the
   operator **trusts** (`fleet-hub client trust <name>`) writes directly and
   decides proposals, and its writes are audited as `person` with `client
   <name>`. The UX agent's operator client is an agent: it proposes only.
   Four more tools are served to a paired device and not to the master (who
   has `fleet-hub settings` on the hub machine, and whose tool list is
-  budgeted), on the same terms — the owner's own device, never a
-  colleague's: `setting_proposals` (pending, each with the key's value now,
+  budgeted), on the same terms — a fleet admin's device, never the
+  device of a colleague who is not one: `setting_proposals` (pending, each with the key's value now,
   and `can_write` for this device), `setting_history` (`key`, `limit`),
   `decide_setting_proposals` (`accept`, `reject`; trusted only) and
   `list_pages` (the page specs, data source shapes, resources and page
@@ -1221,8 +1226,8 @@ Index by area (names only; see the reference for details):
   The ticks and sweeps read their settings every pass, so a change takes
   effect on the next one. On a hub, this is how `reports.*` and `work.*`,
   which have no flag, are set.
-- **`org_admin`** — the company's administration from the hub owner's
-  own device (org administration phase B,
+- **`org_admin`** — the company's administration from a fleet admin's
+  device (org administration phase B,
   `docs/superpowers/specs/2026-10-06-org-administration-design.md`). Served
   to that device and not to the master, who has `fleet-hub org|client|person`
   and `work_admin`. Orgs: `work_admin`'s org actions under the same names
@@ -1241,20 +1246,33 @@ Index by area (names only; see the reference for details):
   when new) and `grant_catalog { device, catalog, on }`. People:
   `list_people`, `rename_person { person_id, name, display_name }` and
   `disable_person` (revokes their devices and the shares made to them;
-  never the owner). Any of the owner's `full` devices lists (a readonly
+  never the owner), and `enable_person { person_id }` (lifts the disable
+  only: no device, share, group, membership or role comes back; `E_EXISTS`
+  while a live person holds their name or email). Any of a fleet admin's
+  `full` devices lists (a readonly
   device is refused the tool, which is not readonly); a change needs a
   **trusted `full`** device, and none may revoke, untrust, make read-only,
   bind, hand over or take a grant from the device the call comes through.
+  Trust is the device's person's (realm role `fleet-trusted`):
+  `set_device_trust` and `pair_device { trusted }` trust every `full`
+  device of that person — so an org admin's are refused (`E_FORBIDDEN`)
+  unless every device of the person is fenced to their org and the person
+  is in no other org —, untrusting is refused (`E_VALIDATE`) while a group
+  or composite still grants the role, and untrusting a device of the
+  caller's own person is refused (`E_INVALID_STATE`), since it would
+  untrust the device in hand too. `grant_catalog` on `personal` is the
+  person's realm role `assets-admin` in the same way; an org catalog's
+  grant stays the device's.
 
   **Phase D — members and an org admin.** The row is `Access::Device` (a
   person's device, bound to an org or not), and the tool decides the
-  authority: the hub owner's unbound device administers the fleet, as
+  authority: a fleet admin's unbound device administers the fleet, as
   above; a device fenced to an org its person administers acts on that org
   only, and is refused everything else (`E_FORBIDDEN`) — rules, tracker
   routing, `bound_sees_unassigned`, other orgs, people's names and
-  disabling, and the two hub-owner switches stay the hub owner's; routing a
-  host (`assign_host` / `unassign_host`) is a host administrator's (the hub
-  owner, or an admin of the org that owns the hub). Its lists name its own
+  disabling, and the two hub-owner switches stay a fleet admin's; routing a
+  host (`assign_host` / `unassign_host`) is a host administrator's (a fleet
+  admin, or an admin of the org that owns the hub). Its lists name its own
   org's devices and members only, and `pair_device` pairs for a member of
   the org (`person` required), fenced to it. Members: `list_members { org }`,
   `set_member { org, person | person_id, role: admin|member|viewer }` (adds,
@@ -1262,9 +1280,49 @@ Index by area (names only; see the reference for details):
   person, keep_grants }` (revokes what was shared with them on the org's
   sessions unless `keep_grants`), `member_grants` (`{ watch, answer, drive }`
   counts), `revoke_member_grants` and `narrow_member_grants` — downward
-  only. An org admin never changes their own membership or the hub owner's.
-  Hub owner only: `set_hub_org { org }` (no org: none), and `update_org`'s
+  only. An org admin never changes their own membership or a fleet admin's;
+  `set_member` / `remove_member` write the org's managed group
+  (`/orgs/<org>/admins|members|viewers`), of which the membership is a
+  projection. Fleet admin only: `set_hub_org { org }` (no org: none), and `update_org`'s
   `owns_hub` / `admins_see_unclaimed`.
+- **`realm_admin`** — the realm model (identity sub-project 1): users,
+  the group tree, realm and client roles, role mappings and the admin
+  audit log. Served to a person's device and not to the master, who has
+  `fleet-hub realm`; like `org_admin`, the tool decides the authority and a
+  change needs a **trusted `full`** device. Actions: `list_users`,
+  `get_user { user }`, `update_user { user, profile }` (`profile`:
+  `email`, `email_verified`, `first_name`, `last_name`, `attributes`;
+  `null` clears a text field), `enable_user`, `disable_user`;
+  `list_groups`, `get_group { group }`, `create_group { name, parent }`,
+  `rename_group { group, name }`, `move_group { group, parent }`,
+  `delete_group`, `add_member { group, user }`, `remove_member`;
+  `list_roles`, `create_role { name, client, description }`,
+  `update_role { role, description }`, `delete_role`,
+  `add_composite { role, child }`, `remove_composite`; `map_role` /
+  `unmap_role { role, user | group }`; `effective_roles { user }` (each
+  role with `via`: `direct`, `group:<path>`, `composite:<role>`); and
+  `audit { since, limit }` (newest first, 100 by default, at most 500).
+  A user is named by person name, a group by path (`/orgs/acme/members`;
+  `parent: ""` is the top level), a role as `fleet-admin` (a realm role)
+  or `<client>:<name>` (`fleet:org-admin`). `list_groups` rows are `{ path,
+  name, managed, org_id, members, roles }`; `list_users` rows are `{ name,
+  uuid, email, enabled, groups, roles }`.
+
+  The `fleet` client's `org-admin` / `org-member` / `org-viewer` roles
+  are never mapped by hand (`E_VALIDATE`): an org's managed groups
+  `/orgs/<org>/admins|members|viewers` carry them, and `add_member` /
+  `remove_member` on one of those changes the org membership itself (the
+  role from the subgroup's name; removing revokes what was shared with
+  them on the org's sessions, as `org_admin`'s `remove_member` does). Any
+  other managed group, renaming, moving or deleting one, and mapping or
+  unmapping a role on one, is `E_FORBIDDEN`: its roles come from the org. A fleet admin's device reaches every action; an org
+  admin's reads its org's subtree and live members only and changes who is
+  in its org's three groups — never their own membership or a fleet
+  admin's — and is refused everything else (`E_FORBIDDEN`). Nobody removes
+  their own `fleet-admin` (an unmapping, leaving or deleting a group, a
+  composite) or disables themselves, and `fleet-admin` never leaves the
+  personal owner or its last holder. Every change records an admin event,
+  which `audit` reads.
 - **`guide`** — step-by-step guides in Settings → Guides (declarative
   pages, layout `guide`; `docs/pages.md` → *Guides*). Any token, a host's
   own included, calls `catalog` (the rules, every setting's key, label and
@@ -1925,12 +1983,12 @@ automatically on app start.
   worker that already exists: review round 15, F21 — nothing an LLM composes
   reaches a session without a person), and every tool above return
   `E_CONFIRM_REQUIRED` until a person approves them: on the desktop in its
-  dialog or Control's cards, and on a hub from the owner's paired device,
+  dialog or Control's cards, and on a hub from a fleet admin's paired device,
   which lists the waiting calls with `mcp_confirms` (each with `nonce`,
   `tool`, `summary`, `caller`, `operator`, `asked_at`) and answers one with
   `answer_mcp_confirm` (`nonce`, `approved`; `false` when it was already
   answered or expired). `control_route` (redesign step 9.9, Jev K2,
-  `decide.jev.control_route`) tells the owner's device where a message just
+  `decide.jev.control_route`) tells a fleet admin's device where a message just
   sent in Control goes: `propose {text}` answers `{outcome: proposed | ask |
   none, target?, proposal?, targets, run_id?}` over the active missions and
   running sessions, and `follow {run_id, chosen}` records the person's pick.
@@ -1952,7 +2010,7 @@ automatically on app start.
   draws them as chips and cards. `control_handoffs` (`limit?`, default 50)
   lists them newest first, each with its target's state now (a mission's
   name and state, a task's or the tree's items with their status and
-  proposal state); like `mcp_confirms` it answers the owner's own device
+  proposal state); like `mcp_confirms` it answers a fleet admin's device
   only, since a receipt quotes the operator's prompt. Each new receipt sends
   an empty `handoff:changed` event. No other caller's calls leave one.
 - **File modes.** `~/.claude.json`, its backup and `~/.claude/settings.json`

@@ -64,6 +64,7 @@ fn host_caller(alias: &str, mode: TokenMode) -> Caller {
         mode,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     }
 }
 
@@ -91,6 +92,7 @@ fn client_caller(name: &str, mode: TokenMode) -> Caller {
         mode,
         pane: None,
         is_personal_owner: true,
+        is_fleet_admin: true,
     }
 }
 
@@ -105,6 +107,7 @@ fn another_person(mut c: Caller) -> Caller {
         cl.person_id = Some(OWNER_PERSON + 1);
     }
     c.is_personal_owner = false;
+    c.is_fleet_admin = false;
     c
 }
 
@@ -1213,6 +1216,7 @@ fn a_client_name_cannot_forge_a_second_audit_line() {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     };
     // Both shapes of the detail string: with a summary and without one. Both
     // tool names here must be MUTATING (not in `guard::READONLY_TOOLS`) — a
@@ -3671,6 +3675,56 @@ async fn revoke_client_returns_the_row_it_revoked_and_hides_the_hash() {
     assert!(err.message.starts_with("E_NOTFOUND"), "{}", err.message);
 }
 
+/// Identity sub-project 1: the master's device writes are admin events,
+/// with no actor (the master is nobody) and `by: master`.
+#[tokio::test]
+async fn the_masters_revoke_and_trust_are_admin_events() {
+    let (tools, _guards, store) = client_tools();
+    {
+        let s = store.lock().unwrap();
+        s.insert_client_token("mac-desktop", "aa11", "full")
+            .unwrap();
+        s.set_client_person("mac-desktop", s.personal_owner_id().unwrap())
+            .unwrap();
+    }
+    tools
+        .set_client_trust(Parameters(SetClientTrustParams {
+            name: "mac-desktop".into(),
+            trusted: true,
+        }))
+        .await
+        .expect("trust");
+    tools
+        .revoke_client(Parameters(RevokeClientParams {
+            name: "mac-desktop".into(),
+        }))
+        .await
+        .expect("revoke");
+    tools
+        .revoke_client(Parameters(RevokeClientParams {
+            name: "mac-desktop".into(),
+        }))
+        .await
+        .expect_err("a refused revoke records nothing");
+    let ev = store
+        .lock()
+        .unwrap()
+        .admin_events(&crate::store::AdminEventQuery {
+            limit: 10,
+            ..Default::default()
+        })
+        .unwrap();
+    let actions: Vec<&str> = ev.iter().map(|e| e.action.as_str()).collect();
+    assert_eq!(actions, ["revoke_client", "set_client_trust"]);
+    for e in &ev {
+        assert_eq!(e.resource_type, "device");
+        assert_eq!(e.resource_id, "mac-desktop");
+        assert_eq!((e.actor_person, e.actor_device), (None, None));
+        assert_eq!(e.representation["by"], "master");
+    }
+    assert_eq!(ev[1].representation["trusted"], true);
+}
+
 /// A paired client the operator vouched for delivers its text unmarked —
 /// with or without `raw` — while an ordinary client is marked and refused
 /// `raw`, and a per-host token is refused `raw` as before.
@@ -3707,6 +3761,7 @@ fn a_trusted_client_delivers_unmarked_and_an_ordinary_one_does_not() {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     };
     let err = apply_marker("body".into(), "an agent on host mefistos", &host, true)
         .expect_err("a host token is never trusted");
@@ -3756,6 +3811,9 @@ async fn set_client_trust_grants_and_withdraws_and_list_clients_shows_it() {
     {
         let s = store.lock().unwrap();
         s.insert_client_token("mac-desktop", "aa11", "full")
+            .unwrap();
+        // Trust is a person's (identity sub-project 1).
+        s.set_client_person("mac-desktop", s.personal_owner_id().unwrap())
             .unwrap();
     }
     let r = tools
@@ -3815,6 +3873,7 @@ fn marker_origin_can_never_be_split_by_a_client_name() {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     };
     let origin = marker_origin(&c);
     assert!(
@@ -3838,6 +3897,7 @@ fn marker_origin_can_never_be_split_by_a_client_name() {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     };
     let origin = marker_origin(&sneaky);
     assert_eq!(origin, "the paired client evil x y z", "{origin:?}");
@@ -4459,6 +4519,8 @@ fn the_served_definition_budget_stays_bounded() {
     /// promotion, `promote` / `tracker_id` / `container`) each inside the
     /// old budget, together over it: measured 118,264 bytes for 145 tools
     /// (815 a tool).
+    /// The identity realm branch (org_admin's `enable_person`, the realm /
+    /// trust prose) lands inside the same 825.
     const BYTES_PER_TOOL: usize = 825;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
@@ -8895,6 +8957,7 @@ fn production_operator() -> Caller {
         cl.person_id = None;
     }
     c.is_personal_owner = false;
+    c.is_fleet_admin = false;
     c
 }
 
@@ -10047,6 +10110,7 @@ fn settings_reach_a_persons_device_and_never_a_host_or_an_org_bound_client() {
     // `access_allows` as one boolean).
     let mut ownerless = Caller::master();
     ownerless.is_personal_owner = false;
+    ownerless.is_fleet_admin = false;
     assert!(!can(&ownerless, "get_settings"));
     assert!(!can(&ownerless, "set_setting"));
 }
@@ -10402,6 +10466,7 @@ async fn add_project_and_list_github_repos_are_fenced_to_the_callers_host_and_or
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     };
     for who in [host_caller("hosta", TokenMode::Full), bound_a] {
         forbidden(
@@ -10878,6 +10943,7 @@ fn device_of(person: i64, owner: i64) -> Caller {
         // together, because a caller where they disagree cannot be produced
         // by the resolver and must not be produced by a test either.
         is_personal_owner: person == owner,
+        is_fleet_admin: person == owner,
     }
 }
 
@@ -13124,6 +13190,7 @@ fn pane_caller(pane: Option<&str>) -> Caller {
         mode: TokenMode::Full,
         pane: pane.map(str::to_string),
         is_personal_owner: false,
+        is_fleet_admin: false,
     }
 }
 
@@ -14956,6 +15023,7 @@ fn the_result_gate_runs_for_a_paired_client_bound_to_no_org() {
         c.person_id = None;
     }
     unbound.is_personal_owner = false;
+    unbound.is_fleet_admin = false;
     let mut res = {
         let s = t.store.lock().unwrap();
         unfiltered_rows(&s, &[a_row, b_row])
@@ -16431,6 +16499,7 @@ async fn fleet_health_for_an_org_bound_client_counts_only_its_own_sessions() {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     };
     let t = test_tools(g.store);
     let out = t.fleet_health(Extension(bound)).await.expect("the roll-up");
@@ -19470,6 +19539,276 @@ fn org_admin_reaches_a_persons_full_device_only() {
     }
 }
 
+/// Identity sub-project 1: `realm_admin` is served where `org_admin` is —
+/// a person's full device, bound to an org or not — and never to the master
+/// (it has `fleet-hub realm`), a host's token, a readonly device, a machine
+/// token or a device that proves no person.
+#[test]
+fn realm_admin_reaches_a_persons_full_device_only() {
+    let can = |c: &Caller| {
+        enforce_mode(c, "realm_admin")
+            .and_then(|()| enforce_admin(c, "realm_admin"))
+            .is_ok()
+            && present::visible_to(c, "realm_admin")
+    };
+    assert!(can(&client_caller("laptop", TokenMode::Full)));
+    assert!(can(&trusted(client_caller("laptop", TokenMode::Full))));
+    assert!(can(&org_bound(trusted(client_caller(
+        "acme",
+        TokenMode::Full
+    )))));
+    assert!(!can(&Caller::master()), "not served to the master");
+    assert!(!can(&client_caller("phone", TokenMode::Readonly)));
+    assert!(!can(&host_caller("hosta", TokenMode::Full)));
+    let mut nobody = client_caller("lost", TokenMode::Full);
+    if let Some(c) = nobody.client.as_mut() {
+        c.person_id = None;
+    }
+    assert!(!can(&nobody), "a device that proves no person");
+    for machine in [
+        client_caller("hub-b", TokenMode::Peer),
+        client_caller("fleet-updater", TokenMode::Updater),
+    ] {
+        assert!(!can(&machine), "{:?}", machine.mode);
+    }
+}
+
+/// The tool's half: a fleet admin's device lists the realm but changes it
+/// only once trusted, and its change is audited with the device; a device
+/// whose person administers nothing is refused, lists included.
+#[tokio::test]
+async fn realm_admin_changes_need_a_trusted_fleet_admin_device() {
+    use crate::mcp::auth::{apply_realm, resolve_token, sha256_hex, RealmSets};
+    use crate::service::realm_admin::RealmAdminArgs;
+    use crate::store::{AdminEventQuery, Principal, RoleRef, ROLE_FLEET_ADMIN};
+    const TOK: &str = "ada-laptop-tok";
+    let (tools, _guards, store) = client_tools();
+    let ada = {
+        let s = store.lock().unwrap();
+        let ada = s.create_person("ada", None).unwrap().id;
+        s.insert_client_token("ada-laptop", &sha256_hex(TOK), "full")
+            .unwrap();
+        s.set_client_person("ada-laptop", Some(ada)).unwrap();
+        ada
+    };
+    let caller = || {
+        let s = store.lock().unwrap();
+        let rows = s.auth_client_tokens().unwrap();
+        let mut c = resolve_token(TOK, "master", &[], &rows, s.personal_owner_id().unwrap())
+            .expect("the device resolves");
+        apply_realm(&mut c, &RealmSets::from_vecs(s.realm_sets().unwrap()));
+        c
+    };
+    let call = |c: Caller, action: &str| {
+        let args = RealmAdminArgs {
+            action: action.into(),
+            name: Some("eng".into()),
+            ..Default::default()
+        };
+        tools.realm_admin(Extension(c), Parameters(args))
+    };
+    assert!(
+        call(caller(), "list_groups").await.is_err(),
+        "administers nothing"
+    );
+    {
+        let s = store.lock().unwrap();
+        let fa = s
+            .role(RoleRef::Realm(ROLE_FLEET_ADMIN))
+            .unwrap()
+            .unwrap()
+            .id;
+        s.map_role(Principal::Person(ada), fa).unwrap();
+    }
+    let v = result_json(&call(caller(), "list_groups").await.expect("lists"));
+    assert!(v.to_string().contains("/orgs"), "{v}");
+    assert!(
+        call(caller(), "create_group").await.is_err(),
+        "an untrusted device lists only"
+    );
+    store
+        .lock()
+        .unwrap()
+        .set_client_trust("ada-laptop", true)
+        .unwrap();
+    call(caller(), "create_group")
+        .await
+        .expect("trusted: changes");
+    let s = store.lock().unwrap();
+    let ev = &s
+        .admin_events(&AdminEventQuery {
+            limit: 1,
+            ..Default::default()
+        })
+        .unwrap()[0];
+    assert_eq!(
+        (ev.action.as_str(), ev.resource_id.as_str()),
+        ("create_group", "/eng")
+    );
+    assert_eq!(ev.actor_person, Some(ada));
+    assert!(ev.actor_device.is_some(), "the device it came through");
+}
+
+/// Identity sub-project 1: a SECOND person's trusted full device
+/// administers the fleet exactly while that person holds the realm role
+/// `fleet-admin` — `org_admin` answers with the fleet's reach (an org they
+/// are not a member of) and an `Access::Person` tool is served — and loses
+/// both on the next call once the role is taken away. The caller is built
+/// the way `authorize` builds it: resolved from the store's rows, then
+/// `apply_realm` over `Store::realm_sets`.
+#[tokio::test]
+async fn a_fleet_admin_role_grants_and_revokes_fleet_reach() {
+    use crate::mcp::auth::{apply_realm, resolve_token, sha256_hex, RealmSets};
+    use crate::store::{Principal, RoleRef, ROLE_FLEET_ADMIN};
+    const TOK: &str = "ada-phone-tok";
+    let (tools, _guards, store) = client_tools();
+    let (acme, ada, fa) = {
+        let s = store.lock().unwrap();
+        let acme = s.add_org("Acme", None, false).unwrap().id;
+        let ada = s.create_person("ada", None).unwrap().id;
+        s.insert_client_token("ada-phone", &sha256_hex(TOK), "full")
+            .unwrap();
+        s.set_client_person("ada-phone", Some(ada)).unwrap();
+        s.set_client_trust("ada-phone", true).unwrap();
+        let fa = s
+            .role(RoleRef::Realm(ROLE_FLEET_ADMIN))
+            .unwrap()
+            .unwrap()
+            .id;
+        (acme, ada, fa)
+    };
+    let caller = || {
+        let s = store.lock().unwrap();
+        let rows = s.auth_client_tokens().unwrap();
+        let mut c = resolve_token(TOK, "master", &[], &rows, s.personal_owner_id().unwrap())
+            .expect("the device resolves");
+        apply_realm(&mut c, &RealmSets::from_vecs(s.realm_sets().unwrap()));
+        c
+    };
+    let list_orgs =
+        |c: Caller| tools.org_admin(Extension(c), Parameters(org_admin_args("list_orgs")));
+
+    let before = caller();
+    assert!(!before.is_personal_owner && !before.is_fleet_admin);
+    assert!(
+        list_orgs(before.clone()).await.is_err(),
+        "administers nothing"
+    );
+    assert!(!present::visible_to(&before, "set_setting"));
+
+    store
+        .lock()
+        .unwrap()
+        .map_role(Principal::Person(ada), fa)
+        .unwrap();
+    let admin = caller();
+    assert!(admin.is_fleet_admin && !admin.is_personal_owner);
+    let v = result_json(&list_orgs(admin.clone()).await.expect("the fleet's reach"));
+    assert!(
+        v.as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o["id"].as_i64() == Some(acme)),
+        "an org ada is not a member of: {v}"
+    );
+    assert!(present::visible_to(&admin, "set_setting"));
+    assert!(enforce_admin(&admin, "set_setting").is_ok());
+
+    store
+        .lock()
+        .unwrap()
+        .unmap_role(Principal::Person(ada), fa)
+        .unwrap();
+    let after = caller();
+    assert!(!after.is_fleet_admin);
+    assert!(list_orgs(after.clone()).await.is_err(), "the role is gone");
+    assert!(!present::visible_to(&after, "set_setting"));
+}
+
+/// Final review I2: every fleet admin is exempt from the org fence, as the
+/// owner is. A second fleet admin who IS an Acme member, and one who WAS
+/// one, both administer the fleet from an unbound device — `org_admin`
+/// reaches an org they are not in, and an `Access::Person` tool is served —
+/// and lose it once the role is unmapped. A plain member stays fenced.
+#[tokio::test]
+async fn a_fleet_admin_who_is_or_was_an_org_member_administers_the_fleet() {
+    use crate::mcp::auth::{apply_realm, resolve_token, sha256_hex, RealmSets};
+    use crate::store::{Principal, RoleRef, NO_ORG, ROLE_FLEET_ADMIN};
+    let (tools, _guards, store) = client_tools();
+    let (acme, beta, fa, ann, wes) = {
+        let s = store.lock().unwrap();
+        let acme = s.add_org("Acme", None, false).unwrap().id;
+        let beta = s.add_org("Beta", None, false).unwrap().id;
+        let fa = s
+            .role(RoleRef::Realm(ROLE_FLEET_ADMIN))
+            .unwrap()
+            .unwrap()
+            .id;
+        let mut ids = Vec::new();
+        for name in ["ann", "wes", "pat"] {
+            let p = s.create_person(name, None).unwrap().id;
+            let dev = format!("{name}-phone");
+            s.insert_client_token(&dev, &sha256_hex(&format!("{name}-tok")), "full")
+                .unwrap();
+            s.set_client_person(&dev, Some(p)).unwrap();
+            s.set_client_trust(&dev, true).unwrap();
+            s.set_org_member(acme, p, "member", None).unwrap();
+            ids.push(p);
+        }
+        s.remove_org_member(acme, ids[1]).unwrap();
+        for p in [ids[0], ids[1]] {
+            s.map_role(Principal::Person(p), fa).unwrap();
+        }
+        (acme, beta, fa, ids[0], ids[1])
+    };
+    let caller = |tok: &str| {
+        let s = store.lock().unwrap();
+        let rows = s.auth_client_tokens().unwrap();
+        let mut c = resolve_token(tok, "master", &[], &rows, s.personal_owner_id().unwrap())
+            .expect("the device resolves");
+        apply_realm(&mut c, &RealmSets::from_vecs(s.realm_sets().unwrap()));
+        c
+    };
+    let list_orgs =
+        |c: Caller| tools.org_admin(Extension(c), Parameters(org_admin_args("list_orgs")));
+    for tok in ["ann-tok", "wes-tok"] {
+        let c = caller(tok);
+        assert!(c.is_fleet_admin && c.is_person_device(), "{tok}: {c:?}");
+        let v = result_json(&list_orgs(c.clone()).await.expect("the fleet's reach"));
+        assert!(
+            v.as_array()
+                .unwrap()
+                .iter()
+                .any(|o| o["id"].as_i64() == Some(beta)),
+            "{tok}: an org they are not in: {v}"
+        );
+        assert!(present::visible_to(&c, "set_setting"), "{tok}");
+        assert!(enforce_admin(&c, "set_setting").is_ok(), "{tok}");
+    }
+    let pat = caller("pat-tok");
+    assert_eq!(pat.client.as_ref().unwrap().org_id, Some(acme), "fenced");
+    assert!(!present::visible_to(&pat, "set_setting"));
+    assert!(
+        list_orgs(pat).await.is_err(),
+        "a member administers nothing"
+    );
+
+    for p in [ann, wes] {
+        store
+            .lock()
+            .unwrap()
+            .unmap_role(Principal::Person(p), fa)
+            .unwrap();
+    }
+    for (tok, org) in [("ann-tok", acme), ("wes-tok", NO_ORG)] {
+        let c = caller(tok);
+        assert!(!c.is_fleet_admin, "{tok}");
+        assert_eq!(c.client.as_ref().unwrap().org_id, Some(org), "{tok}");
+        assert!(!present::visible_to(&c, "set_setting"), "{tok}");
+        assert!(list_orgs(c).await.is_err(), "{tok}: the role is gone");
+    }
+}
+
 /// Phase D, the tool's half of the gate: a person's device that administers
 /// no org is refused every action, lists included; an org admin's device
 /// reaches its own org, and pairs devices only for that org's members.
@@ -19500,6 +19839,7 @@ async fn org_admin_refuses_a_device_that_administers_nothing() {
         c.org_id = Some(acme);
     }
     admin.is_personal_owner = false;
+    admin.is_fleet_admin = false;
     let mut members = org_admin_args("list_members");
     members.org_id = Some(acme);
     let v = result_json(&call(admin.clone(), members).await.expect("her org"));
@@ -19519,6 +19859,21 @@ async fn org_admin_refuses_a_device_that_administers_nothing() {
         call(admin, pair).await.is_err(),
         "whose device must be named"
     );
+    // Identity sub-project 1: the one code minted is an admin event, by
+    // jane; the refused mints are none.
+    let ev = store
+        .lock()
+        .unwrap()
+        .admin_events(&crate::store::AdminEventQuery {
+            limit: 10,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(ev.len(), 1, "{ev:?}");
+    assert_eq!(ev[0].action, "pair_device");
+    assert_eq!(ev[0].resource_type, "device");
+    assert_eq!(ev[0].resource_id, "bob-phone");
+    assert_eq!(ev[0].actor_person, Some(jane));
 }
 
 /// Review r04 F1/F2: an org admin invites new people and pairs their first
@@ -19554,6 +19909,7 @@ async fn org_admin_never_takes_over_a_person_who_already_exists() {
         c.org_id = Some(acme);
     }
     admin.is_personal_owner = false;
+    admin.is_fleet_admin = false;
     let forbidden = |r: Result<CallToolResult, McpError>, what: &str| {
         let e = r.expect_err(what);
         assert!(format!("{e:?}").contains("E_FORBIDDEN"), "{what}: {e:?}");
@@ -20112,6 +20468,7 @@ async fn update_policy_is_an_org_admins_for_their_own_org() {
         c.org_id = Some(acme);
     }
     admin.is_personal_owner = false;
+    admin.is_fleet_admin = false;
 
     // Her org, by default: manual for the desktops.
     let mut set = update_policy_args("set");
@@ -20142,6 +20499,7 @@ async fn update_policy_is_an_org_admins_for_their_own_org() {
         c.org_id = Some(acme);
     }
     untrusted.is_personal_owner = false;
+    untrusted.is_fleet_admin = false;
     let v = result_json(
         &call(untrusted.clone(), update_policy_args("list"))
             .await

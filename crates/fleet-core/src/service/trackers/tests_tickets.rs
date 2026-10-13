@@ -35,6 +35,7 @@ fn vs(store: &Mutex<Store>, scope: &OrgScope) -> ViewScope {
             mode: crate::mcp::auth::TokenMode::Full,
             pane: None,
             is_personal_owner: false,
+            is_fleet_admin: false,
         }
         .view_scope(&store.lock().unwrap())
         .expect("a host scope"),

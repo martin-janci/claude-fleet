@@ -309,6 +309,7 @@ mod tests {
             mode: TokenMode::Full,
             pane: None,
             is_personal_owner: false,
+            is_fleet_admin: false,
         };
         let payload = HookPayload {
             session_id: Some("s1".into()),
@@ -672,6 +673,7 @@ mod tests {
             mode: TokenMode::Full,
             pane: None,
             is_personal_owner: false,
+            is_fleet_admin: false,
         };
         let res = handle_hook(
             State(state),

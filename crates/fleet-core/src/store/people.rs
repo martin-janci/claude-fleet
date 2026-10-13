@@ -73,10 +73,34 @@ pub struct PersonRow {
     /// migration 100) sessions point at it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled_at: Option<i64>,
+    /// The user's `id` in a Keycloak realm export; the integer `id` stays
+    /// internal. Filled by `Store::backfill_realm_uuids` and at creation.
+    pub uuid: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    pub email_verified: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_name: Option<String>,
+    /// Keycloak's user attributes: an object of string arrays.
+    pub attributes: serde_json::Value,
+}
+
+/// A partial profile update ([`Store::update_person_profile`]). The outer
+/// `None` leaves a field unchanged, `Some(None)` clears it.
+#[derive(Debug, Clone, Default)]
+pub struct PersonProfile {
+    pub email: Option<Option<String>>,
+    pub email_verified: Option<bool>,
+    pub first_name: Option<Option<String>>,
+    pub last_name: Option<Option<String>>,
+    pub attributes: Option<serde_json::Value>,
 }
 
 /// Every `PersonRow` column, in [`map_person`] order.
-const PERSON_COLUMNS: &str = "id, name, display_name, is_personal_owner, created_at, disabled_at";
+const PERSON_COLUMNS: &str = "id, name, display_name, is_personal_owner, created_at, \
+     disabled_at, uuid, email, email_verified, first_name, last_name, attributes";
 
 fn map_person(row: &rusqlite::Row) -> rusqlite::Result<PersonRow> {
     Ok(PersonRow {
@@ -86,6 +110,13 @@ fn map_person(row: &rusqlite::Row) -> rusqlite::Result<PersonRow> {
         is_personal_owner: row.get::<_, i64>(3)? != 0,
         created_at: row.get(4)?,
         disabled_at: row.get(5)?,
+        uuid: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+        email: row.get(7)?,
+        email_verified: row.get::<_, i64>(8)? != 0,
+        first_name: row.get(9)?,
+        last_name: row.get(10)?,
+        attributes: serde_json::from_str(&row.get::<_, String>(11)?)
+            .unwrap_or_else(|_| serde_json::json!({})),
     })
 }
 
@@ -170,13 +201,123 @@ impl Store {
             ));
         }
         self.conn.execute(
-            "INSERT INTO people (name, display_name, is_personal_owner, created_at) \
-             VALUES (?1, ?2, 0, ?3)",
-            rusqlite::params![name, display_name, now_unix()],
+            "INSERT INTO people (name, display_name, is_personal_owner, created_at, uuid) \
+             VALUES (?1, ?2, 0, ?3, ?4)",
+            rusqlite::params![
+                name,
+                display_name,
+                now_unix(),
+                uuid::Uuid::new_v4().to_string()
+            ],
         )?;
         let id = self.conn.last_insert_rowid();
         self.get_person(id)?
             .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "person vanished right after insert"))
+    }
+
+    /// Change a person's Keycloak profile. Validates first (`E_VALIDATE`),
+    /// `E_NOTFOUND` for no such person, `E_EXISTS` when the email is already
+    /// held by another LIVE person (case-insensitively). Returns the
+    /// reloaded row.
+    pub fn update_person_profile(&self, id: i64, p: &PersonProfile) -> Result<PersonRow, IpcError> {
+        let bad = |m: String| IpcError::new(codes::E_VALIDATE, m);
+        if let Some(Some(e)) = &p.email {
+            let mut parts = e.split('@');
+            let (local, domain, extra) = (parts.next(), parts.next(), parts.next());
+            let ok = matches!((local, domain, extra), (Some(l), Some(d), None) if !l.is_empty() && !d.is_empty());
+            if !ok || e.chars().any(breaks_a_line) || e.chars().count() > 254 {
+                return Err(bad(format!("{e:?} is not a valid email address")));
+            }
+        }
+        for (label, v) in [("first name", &p.first_name), ("last name", &p.last_name)] {
+            if let Some(Some(n)) = v {
+                if n.chars().count() > 128 || n.chars().any(breaks_a_line) {
+                    return Err(bad(format!(
+                        "the {label} must be at most 128 characters on one line"
+                    )));
+                }
+            }
+        }
+        let attributes = match &p.attributes {
+            None => None,
+            Some(v) => {
+                let obj = v
+                    .as_object()
+                    .ok_or_else(|| bad("attributes must be an object".into()))?;
+                if obj.len() > 64 {
+                    return Err(bad("attributes may have at most 64 keys".into()));
+                }
+                for (k, val) in obj {
+                    let arr = val.as_array().ok_or_else(|| {
+                        bad(format!("attribute {k:?} must be an array of strings"))
+                    })?;
+                    for item in arr {
+                        let t = item.as_str().ok_or_else(|| {
+                            bad(format!("attribute {k:?} must be an array of strings"))
+                        })?;
+                        if t.chars().count() > 1024 {
+                            return Err(bad(format!(
+                                "a value of attribute {k:?} is longer than 1024 characters"
+                            )));
+                        }
+                    }
+                }
+                Some(v.to_string())
+            }
+        };
+        if self.get_person(id)?.is_none() {
+            return Err(IpcError::new(
+                codes::E_NOTFOUND,
+                format!("no person with id {id}"),
+            ));
+        }
+        let mut sets: Vec<&str> = Vec::new();
+        let mut args: Vec<rusqlite::types::Value> = Vec::new();
+        let mut push = |col: &'static str, v: rusqlite::types::Value| {
+            args.push(v);
+            sets.push(col);
+        };
+        let text = |o: &Option<String>| match o {
+            Some(s) => rusqlite::types::Value::Text(s.clone()),
+            None => rusqlite::types::Value::Null,
+        };
+        if let Some(e) = &p.email {
+            push("email = ?", text(e));
+        }
+        if let Some(b) = p.email_verified {
+            push(
+                "email_verified = ?",
+                rusqlite::types::Value::Integer(b as i64),
+            );
+        }
+        if let Some(n) = &p.first_name {
+            push("first_name = ?", text(n));
+        }
+        if let Some(n) = &p.last_name {
+            push("last_name = ?", text(n));
+        }
+        if let Some(a) = attributes {
+            push("attributes = ?", rusqlite::types::Value::Text(a));
+        }
+        if !sets.is_empty() {
+            args.push(rusqlite::types::Value::Integer(id));
+            let sql = format!("UPDATE people SET {} WHERE id = ?", sets.join(", "));
+            match self.conn.execute(&sql, rusqlite::params_from_iter(args)) {
+                Ok(_) => {}
+                Err(rusqlite::Error::SqliteFailure(e, _))
+                    if e.code == rusqlite::ErrorCode::ConstraintViolation
+                        && e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
+                {
+                    return Err(IpcError::new(
+                        codes::E_EXISTS,
+                        "another person already uses that email address",
+                    ));
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        self.get_person(id)?
+            .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "person vanished during update"))
     }
 
     /// One person by id, disabled or not.
@@ -331,10 +472,8 @@ impl Store {
         }
         let at = now_unix();
         let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
-            "UPDATE people SET disabled_at = COALESCE(disabled_at, ?2) WHERE id = ?1",
-            rusqlite::params![id, at],
-        )?;
+        // `disabled_at` is stamped below, with the realm rows, so the
+        // fleet-admin check sees who held the role before this person left.
         // Half of "disabled" is that no device of theirs answers any more —
         // through the one function that knows what revoking a device means,
         // not a second `UPDATE` of our own.
@@ -362,7 +501,84 @@ impl Store {
         // not that authority either — it narrows, it names no session, and it
         // is reached only by disabling the recipient.
         super::session_grants::revoke_live_grants_to_person(&tx, id, at)?;
+        // Realm (identity sub-project 1): every group membership and direct
+        // role mapping ends, and with them every org membership, which
+        // `org_members` projects. Refused (`E_FORBIDDEN`, the transaction
+        // dropped) when they are the last live holder of `fleet-admin`.
+        super::realm::keeping_fleet_admin(&tx, || {
+            tx.execute(
+                "UPDATE people SET disabled_at = COALESCE(disabled_at, ?2) WHERE id = ?1",
+                rusqlite::params![id, at],
+            )?;
+            tx.execute(
+                "DELETE FROM group_members WHERE person_id = ?1",
+                rusqlite::params![id],
+            )?;
+            tx.execute(
+                "DELETE FROM user_role_mappings WHERE person_id = ?1",
+                rusqlite::params![id],
+            )?;
+            Ok(())
+        })?;
+        super::realm::reproject_org_memberships_in_tx(&tx, id, None)?;
         tx.commit()?;
+        super::session_grants::bump_grant_generation();
+        self.get_person(id)?.ok_or_else(|| person_not_found(id))
+    }
+
+    /// Lift a person's disable (identity sub-project 1): they may sign in
+    /// and be paired a device again. It restores NOTHING `disable_person`
+    /// took — no device, no grant, no group membership, no role mapping:
+    /// each is given back on purpose, by whoever administers it.
+    ///
+    /// Defensively, in the same transaction as the lift, it deletes any
+    /// group membership and direct role mapping still naming the person and
+    /// ends any live `org_members` row (the projection): a person disabled
+    /// before migration 181, or by a path that left rows behind, must not
+    /// come back with the org roles those rows would give.
+    ///
+    /// `E_NOTFOUND` for an unknown id; an already-live person comes back
+    /// unchanged; `E_EXISTS` when a live person has since taken their name
+    /// or their email address (`idx_people_live_name`, and Task 2's live
+    /// email index).
+    pub fn enable_person(&self, id: i64) -> Result<PersonRow, IpcError> {
+        let row = self.get_person(id)?.ok_or_else(|| person_not_found(id))?;
+        if row.disabled_at.is_none() {
+            return Ok(row);
+        }
+        let tx = self.immediate_transaction()?;
+        tx.execute(
+            "DELETE FROM group_members WHERE person_id = ?1",
+            rusqlite::params![id],
+        )?;
+        tx.execute(
+            "DELETE FROM user_role_mappings WHERE person_id = ?1",
+            rusqlite::params![id],
+        )?;
+        match tx.execute(
+            "UPDATE people SET disabled_at = NULL WHERE id = ?1 AND disabled_at IS NOT NULL",
+            rusqlite::params![id],
+        ) {
+            Ok(_) => {}
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::ConstraintViolation
+                    && e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
+            {
+                return Err(IpcError::new(
+                    codes::E_EXISTS,
+                    format!(
+                        "person {id} ({:?}) cannot be re-enabled: a live person now holds \
+                         that name or email address; rename one of them first",
+                        row.name
+                    ),
+                ));
+            }
+            Err(e) => return Err(e.into()),
+        }
+        // With no group left, the projection ends every live row.
+        super::realm::reproject_org_memberships_in_tx(&tx, id, None)?;
+        tx.commit()?;
+        super::session_grants::bump_grant_generation();
         self.get_person(id)?.ok_or_else(|| person_not_found(id))
     }
 
@@ -458,11 +674,26 @@ impl Store {
                 ),
             ));
         }
-        self.conn.execute(
-            "INSERT INTO people (name, is_personal_owner, created_at) VALUES (?1, 1, ?2)",
-            rusqlite::params![PERSONAL_OWNER_NAME, now_unix()],
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO people (name, is_personal_owner, created_at, uuid) \
+             VALUES (?1, 1, ?2, ?3)",
+            rusqlite::params![
+                PERSONAL_OWNER_NAME,
+                now_unix(),
+                uuid::Uuid::new_v4().to_string()
+            ],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        let id = tx.last_insert_rowid();
+        // Identity sub-project 1: the owner administers the fleet through
+        // the realm role, as migration 181 maps the owner it finds.
+        tx.execute(
+            "INSERT OR IGNORE INTO user_role_mappings (person_id, role_id) \
+             SELECT ?1, id FROM roles WHERE client_id IS NULL AND name = ?2",
+            rusqlite::params![id, super::realm::ROLE_FLEET_ADMIN],
+        )?;
+        tx.commit()?;
+        Ok(id)
     }
 
     /// Bind the live client named `name` to `person` (multi-user M1), or
@@ -546,6 +777,125 @@ mod tests {
 
     fn store() -> Store {
         Store::open_in_memory().expect("store")
+    }
+
+    #[test]
+    fn enable_person_restores_sign_in_but_not_devices() {
+        let s = Store::open_in_memory().unwrap();
+        let ada = s.create_person("ada", None).unwrap().id;
+        s.disable_person(ada).unwrap();
+        let p = s.enable_person(ada).unwrap();
+        assert!(p.disabled_at.is_none());
+        assert!(s.groups_of(ada).unwrap().is_empty());
+        let bob = s.create_person("bob", None).unwrap().id;
+        s.disable_person(bob).unwrap();
+        s.create_person("bob", None).unwrap();
+        assert_eq!(
+            s.enable_person(bob).unwrap_err().code,
+            codes::E_EXISTS,
+            "the name is taken by a live person"
+        );
+    }
+
+    #[test]
+    fn enable_person_restores_no_device_membership_or_role() {
+        let s = store();
+        let org = s.add_org("Acme", None, false).unwrap().id;
+        let ada = s.create_person("ada", None).unwrap().id;
+        s.set_org_member(org, ada, "member", None).unwrap();
+        s.insert_client_token("ada-phone", "digest-ada-phone", "full")
+            .unwrap();
+        s.set_client_person("ada-phone", Some(ada)).unwrap();
+        assert!(!s.groups_of(ada).unwrap().is_empty());
+        s.disable_person(ada).unwrap();
+        let again = s.enable_person(ada).unwrap();
+        assert!(again.disabled_at.is_none());
+        assert!(s.groups_of(ada).unwrap().is_empty(), "no group comes back");
+        assert!(
+            s.org_member(org, ada).unwrap().is_none_or(|m| !m.is_live()),
+            "no org membership comes back"
+        );
+        assert!(
+            !s.active_client_tokens()
+                .unwrap()
+                .iter()
+                .any(|c| c.person_id == Some(ada)),
+            "no device comes back"
+        );
+        // Already live: unchanged. Unknown: not found.
+        assert_eq!(s.enable_person(ada).unwrap(), again);
+        assert_eq!(s.enable_person(9_999).unwrap_err().code, codes::E_NOTFOUND);
+    }
+
+    #[test]
+    fn enable_person_is_refused_when_a_live_person_took_the_email() {
+        let s = store();
+        let ada = s.create_person("ada", None).unwrap().id;
+        let email = |e: &str| PersonProfile {
+            email: Some(Some(e.into())),
+            ..Default::default()
+        };
+        s.update_person_profile(ada, &email("ada@example.com"))
+            .unwrap();
+        s.disable_person(ada).unwrap();
+        let ann = s.create_person("ann", None).unwrap().id;
+        s.update_person_profile(ann, &email("ADA@example.com"))
+            .unwrap();
+        assert_eq!(s.enable_person(ada).unwrap_err().code, codes::E_EXISTS);
+        assert!(s.get_person(ada).unwrap().unwrap().disabled_at.is_some());
+    }
+
+    #[test]
+    fn a_profile_update_validates_email_and_attributes() {
+        let s = store();
+        let p = s.create_person("ada", None).unwrap();
+        let r = s
+            .update_person_profile(
+                p.id,
+                &PersonProfile {
+                    email: Some(Some("Ada@Example.com".into())),
+                    first_name: Some(Some("Ada".into())),
+                    attributes: Some(serde_json::json!({"team": ["core"]})),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(r.email.as_deref(), Some("Ada@Example.com"));
+        assert_eq!(r.attributes["team"][0], "core");
+        let bad = |pp: PersonProfile| s.update_person_profile(p.id, &pp).unwrap_err().code;
+        assert_eq!(
+            bad(PersonProfile {
+                email: Some(Some("no-at".into())),
+                ..Default::default()
+            }),
+            codes::E_VALIDATE
+        );
+        assert_eq!(
+            bad(PersonProfile {
+                attributes: Some(serde_json::json!({"k": "not-an-array"})),
+                ..Default::default()
+            }),
+            codes::E_VALIDATE
+        );
+        let other = s.create_person("bob", None).unwrap();
+        assert_eq!(
+            s.update_person_profile(
+                other.id,
+                &PersonProfile {
+                    email: Some(Some("ada@example.com".into())),
+                    ..Default::default()
+                }
+            )
+            .unwrap_err()
+            .code,
+            codes::E_EXISTS
+        );
+        assert_eq!(
+            s.update_person_profile(9999, &PersonProfile::default())
+                .unwrap_err()
+                .code,
+            codes::E_NOTFOUND
+        );
     }
 
     /// Migration 098's insert: every hub has a personal owner from the

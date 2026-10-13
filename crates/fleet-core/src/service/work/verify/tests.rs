@@ -19,6 +19,7 @@ fn person(store: &Mutex<Store>, id: i64) -> ViewScope {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     }
     .view_scope(&lock(store).unwrap())
     .unwrap()
@@ -228,6 +229,7 @@ fn only_a_person_records_a_check_and_only_of_a_real_line() {
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
     }
     .view_scope(&lock(&st).unwrap())
     .unwrap();

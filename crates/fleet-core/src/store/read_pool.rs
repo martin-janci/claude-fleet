@@ -129,19 +129,57 @@ impl Store {
             Vec<HostTokenRow>,
             Vec<ClientTokenRow>,
             Vec<super::ControlTokenRow>,
+            (Vec<i64>, Vec<i64>, Vec<i64>),
+            crate::mcp::auth::DeviceTokenPolicy,
         ),
         crate::ipc_error::IpcError,
     > {
         let tx = self.conn.unchecked_transaction()?;
         let epoch = self.auth_epoch()?;
         let hosts = self.list_host_tokens()?;
+        // Who holds the realm roles (identity sub-project 1): every realm
+        // table moves the epoch, so the sets are the ones at this epoch too.
+        // Read before the devices: the fleet admins are exempt from the org
+        // fence below.
+        let realm = self.realm_sets()?;
         // As the auth layer must see them: org and mode from memberships
-        // (org administration phase D).
-        let clients = self.auth_client_tokens()?;
+        // (org administration phase D), a fleet admin's device keeping its
+        // own binding.
+        let clients = self.auth_client_tokens_exempting(&realm.0)?;
         // Named tokens (migration 157); expiry is judged per request.
         let controls = self.auth_control_tokens()?;
+        // When a device token expires: the `auth.device_token_%` settings
+        // move the epoch too (migration 183).
+        let device_policy = self.device_token_policy()?;
         tx.commit()?;
-        Ok((epoch, hosts, clients, controls))
+        Ok((epoch, hosts, clients, controls, realm, device_policy))
+    }
+
+    /// When a paired device's token expires (identity sub-project 1, spec
+    /// §3): `auth.device_token_ttl_days` and `auth.device_token_max_age_days`
+    /// as their effective values (stored, else the registered default; `0`
+    /// is off), and `auth.device_token_ttl_since`, which migration 183
+    /// writes (missing or unreadable: `0`, no floor).
+    pub fn device_token_policy(
+        &self,
+    ) -> Result<crate::mcp::auth::DeviceTokenPolicy, crate::ipc_error::IpcError> {
+        use crate::service::settings;
+        let secs = |key: &str| -> Result<Option<i64>, crate::ipc_error::IpcError> {
+            let raw = self.get_setting(key)?;
+            let days = settings::resolve(key, raw.as_deref())
+                .parse::<i64>()
+                .unwrap_or(0);
+            Ok((days > 0).then(|| days.saturating_mul(86_400)))
+        };
+        let since = self
+            .get_setting(settings::DEVICE_TOKEN_TTL_SINCE)?
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .unwrap_or(0);
+        Ok(crate::mcp::auth::DeviceTokenPolicy {
+            ttl_secs: secs(settings::DEVICE_TOKEN_TTL_DAYS)?,
+            max_age_secs: secs(settings::DEVICE_TOKEN_MAX_AGE_DAYS)?,
+            since,
+        })
     }
 }
 
@@ -184,16 +222,18 @@ mod tests {
             .insert_client_token("phone", &"a".repeat(64), "full")
             .unwrap();
         moved(&s, "pairing a client");
-        s.set_client_trust("phone", true).unwrap();
-        moved(&s, "trusting a client");
-        s.set_client_trust("phone", false).unwrap();
-        moved(&s, "untrusting a client");
         // Multi-user M1: whose device this is decides which sessions the
         // caller may read, so migration 098's own trigger has to move the
         // epoch for it too.
         let owner = s.personal_owner_id().unwrap().expect("096 mints one");
         s.set_client_person("phone", Some(owner)).unwrap();
         moved(&s, "binding a client to a person");
+        // Trust is the person's realm role (identity sub-project 1), so it
+        // needs the binding above.
+        s.set_client_trust("phone", true).unwrap();
+        moved(&s, "trusting a client");
+        s.set_client_trust("phone", false).unwrap();
+        moved(&s, "untrusting a client");
         s.set_client_person("phone", None).unwrap();
         moved(&s, "unbinding a client from a person");
         s.touch_client_token(row.id, 1_000).unwrap();
@@ -232,7 +272,7 @@ mod tests {
         s.insert_client_token("old", &"c".repeat(64), "full")
             .unwrap();
         s.revoke_client_token("old").unwrap();
-        let (epoch, hosts, clients, _) = s.auth_snapshot().unwrap();
+        let (epoch, hosts, clients, _, _, _) = s.auth_snapshot().unwrap();
         assert_eq!(epoch, s.auth_epoch().unwrap());
         assert_eq!(hosts.len(), 1);
         let names: Vec<_> = clients.iter().map(|c| c.name.as_str()).collect();

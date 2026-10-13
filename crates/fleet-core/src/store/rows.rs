@@ -1593,6 +1593,17 @@ pub struct ClientTokenRow {
     pub person_id: Option<i64>,
 }
 
+impl ClientTokenRow {
+    /// Whether this device is trusted (identity sub-project 1): `full`, and
+    /// its person among `trusted_people` — the holders of the realm role
+    /// `fleet-trusted` (`Store::people_with_realm_role`). The rule
+    /// `auth::apply_realm` decides a caller by; for lists and answers that
+    /// show a device's trust. `trusted_at` is only its mirror.
+    pub fn trusted_by(&self, trusted_people: &[i64]) -> bool {
+        self.mode == "full" && self.person_id.is_some_and(|p| trusted_people.contains(&p))
+    }
+}
+
 /// One inter-session message (migration 015). The store is the source of
 /// truth; pane delivery, if requested, happens separately and best-effort.
 #[derive(Debug, Clone, serde::Serialize)]

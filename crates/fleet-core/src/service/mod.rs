@@ -76,6 +76,7 @@ pub mod prompt_origin;
 pub mod provision;
 pub mod prs;
 pub mod quick_replies;
+pub mod realm_admin;
 #[cfg(test)]
 mod reconcile_tests;
 pub mod repair;

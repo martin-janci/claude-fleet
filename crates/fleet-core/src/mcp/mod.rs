@@ -43,6 +43,7 @@ use tokio_util::sync::CancellationToken;
 
 pub use auth::normalize_allowed_hosts;
 pub use auth::Caller;
+pub use auth::RealmSets;
 #[cfg(test)]
 pub use auth::TokenMode;
 pub use events_route::{EventFeed, EventHistory, EventSubscriber, EventsState};
@@ -274,6 +275,34 @@ async fn authorize(
                 clients: Arc::new(s.auth_client_tokens().unwrap_or_default()),
                 controls: Arc::new(s.auth_control_tokens().unwrap_or_default()),
                 personal_owner: s.personal_owner_id().unwrap_or_default(),
+                // Empty sets on a failed read: no device holds a realm role
+                // (fail closed).
+                realm: s
+                    .realm_sets()
+                    .map(token_cache::RealmSets::from_vecs)
+                    .unwrap_or_default(),
+                // On a failed read, the policy of the cache's last good
+                // snapshot when there is a cache (all off would let every
+                // idle device back in); with no cache, all off, logged.
+                device_policy: match s.device_token_policy() {
+                    Ok(p) => p,
+                    Err(e) => match state.tokens.as_ref() {
+                        Some(cache) => {
+                            tracing::warn!(
+                                error = %e.message,
+                                "[mcp] could not read the device-token policy; using the last one read"
+                            );
+                            cache.last_device_policy()
+                        }
+                        None => {
+                            tracing::warn!(
+                                error = %e.message,
+                                "[mcp] could not read the device-token policy; no device expires on this request"
+                            );
+                            auth::DeviceTokenPolicy::default()
+                        }
+                    },
+                },
             }
         }
     };
@@ -339,6 +368,35 @@ async fn authorize(
             return Err(status);
         }
     };
+    // Identity sub-project 1: the caller's realm roles, before any gate
+    // reads them — for the `/hook?token=` fallback as for the header form.
+    auth::apply_realm(&mut caller, &rows.realm);
+    // Identity sub-project 1: a paired device's token expires after
+    // `auth.device_token_ttl_days` unused, or `auth.device_token_max_age_days`
+    // after pairing — a 401 like an unknown token, so the app pairs again.
+    // Before the liveness stamp below, which must never revive it. Only a
+    // device is a client caller: the master, host and named tokens are not.
+    if let Some(client) = caller.client.as_ref() {
+        let now = crate::store::now_unix();
+        if let Some(row) = rows.clients.iter().find(|r| r.id == client.id) {
+            // The cached row's `last_seen_at` is as old as its snapshot (a
+            // stamp moves no epoch); this process's own stamps are newer.
+            let seen = state.tokens.as_ref().and_then(|c| c.last_touched(row.id));
+            let expired = if seen > row.last_seen_at {
+                let row = crate::store::ClientTokenRow {
+                    last_seen_at: seen,
+                    ..row.clone()
+                };
+                auth::device_token_expired(&row, &rows.device_policy, now)
+            } else {
+                auth::device_token_expired(row, &rows.device_policy, now)
+            };
+            if expired {
+                tracing::info!(device = %client.name, "[mcp] device token expired; pair again");
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+        }
+    }
     // Liveness for the pairing UI ("last seen"). Best-effort and rate-limited
     // in the store (at most one write a minute per client); a second brief
     // sync lock, again released before the `.await` below.
@@ -1367,6 +1425,12 @@ mod tests {
             let owner = s.personal_owner_id().unwrap().expect("096 mints one");
             assert_eq!(desk.person_id, Some(owner));
             assert_eq!(kiosk.person_id, Some(owner));
+            // Identity sub-project 1: the trust went to the PERSON, after
+            // the binding; `trusted_at` above is only its mirror.
+            assert!(s
+                .people_with_realm_role(crate::store::ROLE_FLEET_TRUSTED)
+                .unwrap()
+                .contains(&owner));
         }
 
         // A code minted for a person this hub has never heard of: the
@@ -1443,6 +1507,67 @@ mod tests {
             retried.contains("200 OK"),
             "the name stays free:\n{retried}"
         );
+
+        // Identity sub-project 1: each redemption's writes are admin events,
+        // in its own transaction — the rolled-back one left none, the
+        // retried one left exactly its `pair`.
+        {
+            let s = store.lock().unwrap();
+            let ev = s
+                .admin_events(&crate::store::AdminEventQuery {
+                    limit: 50,
+                    ..Default::default()
+                })
+                .unwrap();
+            let of = |device: &str| -> Vec<(String, String)> {
+                let mut v: Vec<(String, String)> = ev
+                    .iter()
+                    .filter(|e| e.resource_id == device || e.representation["name"] == device)
+                    .map(|e| (e.action.clone(), e.resource_type.clone()))
+                    .collect();
+                v.sort();
+                v
+            };
+            let pair = ("pair".to_string(), "device".to_string());
+            assert_eq!(of("kiosk"), std::slice::from_ref(&pair));
+            assert_eq!(
+                of("desk"),
+                [pair.clone(), ("set_client_trust".into(), "device".into())]
+            );
+            assert_eq!(
+                of("orphan"),
+                std::slice::from_ref(&pair),
+                "the failed attempt left none"
+            );
+            let ada = s.get_person_by_name("ada").unwrap().unwrap();
+            let laptop = s
+                .active_client_tokens()
+                .unwrap()
+                .into_iter()
+                .find(|r| r.name == "ada-laptop")
+                .unwrap();
+            let provision = ev
+                .iter()
+                .find(|e| e.action == "provision")
+                .expect("the new person is an event");
+            assert_eq!(provision.resource_id, ada.id.to_string());
+            assert_eq!(provision.actor_device, Some(laptop.id));
+            let paired = ev
+                .iter()
+                .find(|e| e.action == "pair" && e.resource_id == "ada-laptop")
+                .unwrap();
+            assert_eq!(
+                paired.actor_person,
+                Some(ada.id),
+                "the device is its own actor"
+            );
+            assert_eq!(paired.actor_device, Some(laptop.id));
+            assert!(
+                ev.iter().all(|e| e.representation.get("token").is_none()
+                    && e.representation.get("code").is_none()),
+                "{ev:?}"
+            );
+        }
 
         // A camera scan opens `GET /pair`, which must explain what to do
         // rather than answer 405. No secret is in it: the code lives in the

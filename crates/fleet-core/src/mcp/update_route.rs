@@ -213,6 +213,7 @@ mod tests {
             mode: TokenMode::Peer,
             pane: None,
             is_personal_owner: false,
+            is_fleet_admin: false,
         }
     }
 

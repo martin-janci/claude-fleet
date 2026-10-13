@@ -12,4 +12,4 @@ CREATE TABLE IF NOT EXISTS work_close_dismissals (
   dismissed_at INTEGER NOT NULL
 );
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (180);
+INSERT OR IGNORE INTO schema_version (version) VALUES (184);

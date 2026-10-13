@@ -262,6 +262,14 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `decide.retention_days` | `90` | 0–3650 days, `0` = forever | fleet | Days a decision record (ids and numbers, never text) is kept. |
 | `decide.jev.floors` | `` | text, up to 8192 characters | fleet | Per-feature confidence floors fitted from runs a person confirmed, corrected or rejected (fleet-hub decide floor fit). A fitted floor only raises a feature's built-in one, and only for the question version and model it was fitted against. |
 
+## Identity and audit
+
+| Setting | Default | Range | Scope | What it does |
+|---|---|---|---|---|
+| `auth.audit_retention_days` | `365` | 0–3650 days, `0` = forever | fleet | Days an administrative change (who changed which person, group, role or device) is kept. |
+| `auth.device_token_ttl_days` | `90` | 0–3650 days, `0` = never | fleet | Days a paired device may go unused before it is signed out and must be paired again. Peer hubs and updaters are never signed out. |
+| `auth.device_token_max_age_days` | `0` | 0–3650 days, `0` = off | fleet | Days after pairing a device is signed out, however often it is used. Peer hubs and updaters are never signed out. |
+
 ## Hub daemon (read-only)
 
 | Setting | Default | Range | Scope | What it does |

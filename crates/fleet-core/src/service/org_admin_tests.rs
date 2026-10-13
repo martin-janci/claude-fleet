@@ -43,6 +43,7 @@ fn every_action_parses_and_assign_client_is_not_one() {
         "list_people",
         "rename_person",
         "disable_person",
+        "enable_person",
     ] {
         assert!(Action::parse(a).is_ok(), "{a}");
     }
@@ -82,7 +83,10 @@ fn org_actions_run_orgs_admin_and_take_an_org_by_name() {
 #[test]
 fn devices_list_their_org_person_and_grants_and_never_a_machine_token() {
     let st = store();
-    device(&st, "phone", "full");
+    st.lock()
+        .unwrap()
+        .insert_owned_client_token("phone", "digest-phone", "full")
+        .unwrap();
     device(&st, "link", "peer");
     let org = {
         let s = st.lock().unwrap();
@@ -121,13 +125,17 @@ fn devices_list_their_org_person_and_grants_and_never_a_machine_token() {
 #[test]
 fn the_device_in_hand_cannot_be_locked_out_through_itself() {
     let st = store();
-    device(&st, "desk", "full");
-    st.lock()
-        .unwrap()
-        .upsert_catalog("personal", "/p", None, None)
-        .unwrap();
+    // Trust and the personal grant are a person's: desk is dee's.
+    let dee = {
+        let s = st.lock().unwrap();
+        s.upsert_catalog("personal", "/p", None, None).unwrap();
+        s.insert_owned_client_token("desk", "digest-desk", "full")
+            .unwrap()
+            .person_id
+    };
     let me = Me {
         device: Some("desk"),
+        person: dee,
         ..Me::LOCAL
     };
     let mut a = args("revoke_device");
@@ -176,6 +184,53 @@ fn the_device_in_hand_cannot_be_locked_out_through_itself() {
         .unwrap()["revoked"],
         "desk"
     );
+}
+
+/// The personal grant is the person's (`assets-admin`): taking it from a
+/// SIBLING device of the caller's own person is a lock-out like the device
+/// in hand; another person's device, and the desktop's own store, are not.
+#[test]
+fn taking_the_personal_grant_from_ones_own_person_is_a_lock_out() {
+    let st = store();
+    let me_person = {
+        let s = st.lock().unwrap();
+        s.upsert_catalog("personal", "/p", None, None).unwrap();
+        let me_person = s
+            .insert_owned_client_token("desk", "digest-desk", "full")
+            .unwrap()
+            .person_id;
+        s.insert_client_token("laptop", "digest-laptop", "full")
+            .unwrap();
+        s.set_client_person("laptop", me_person).unwrap();
+        s.insert_owned_client_token("eve-phone", "digest-eve", "full")
+            .unwrap();
+        s.set_client_assets_admin("laptop", true).unwrap();
+        s.set_client_assets_admin("eve-phone", true).unwrap();
+        me_person
+    };
+    let me = Me {
+        device: Some("desk"),
+        person: me_person,
+        ..Me::LOCAL
+    };
+    let mut g = args("grant_catalog");
+    g.device = Some("laptop".into());
+    g.catalog = Some("personal".into());
+    g.on = Some(false);
+    assert_eq!(err_code(run(&g, &st, me)), "E_INVALID_STATE");
+    assert!(st
+        .lock()
+        .unwrap()
+        .people_with_realm_role(crate::store::ROLE_ASSETS_ADMIN)
+        .unwrap()
+        .contains(&me_person.unwrap()));
+    g.device = Some("eve-phone".into());
+    assert!(run(&g, &st, me).unwrap()["catalogs"]
+        .as_array()
+        .is_none_or(|c| c.is_empty()));
+    // The desktop's own store names no person: exempt.
+    g.device = Some("laptop".into());
+    run(&g, &st, Me::LOCAL).unwrap();
 }
 
 #[test]
@@ -476,6 +531,7 @@ fn an_org_admin_manages_their_own_orgs_members_and_nobody_elses() {
         ("assign_host", Some(c.acme)),
         ("bind_device", Some(c.acme)),
         ("disable_person", None),
+        ("enable_person", None),
         ("rename_person", None),
         ("set_hub_org", Some(c.acme)),
         ("set_admins_see_unclaimed", Some(c.acme)),
@@ -572,11 +628,13 @@ fn an_org_admin_renames_and_sets_the_mode_of_their_members_devices_only() {
 fn a_device_is_renamed_with_its_grants_and_its_mode_changes() {
     let st = store();
     device(&st, "phone", "readonly");
-    device(&st, "desk", "full");
-    st.lock()
-        .unwrap()
-        .upsert_catalog("personal", "/p", None, None)
-        .unwrap();
+    {
+        // The personal grant is a person's (`assets-admin`): desk has one.
+        let s = st.lock().unwrap();
+        s.insert_owned_client_token("desk", "digest-desk", "full")
+            .unwrap();
+        s.upsert_catalog("personal", "/p", None, None).unwrap();
+    }
     let mut g = args("grant_catalog");
     g.device = Some("desk".into());
     g.catalog = Some("personal".into());
@@ -1103,6 +1161,7 @@ fn person_view(c: &Company, person: i64) -> crate::service::view_scope::ViewScop
         mode: TokenMode::Full,
         pane: None,
         is_personal_owner: false,
+        is_fleet_admin: false,
         api: None,
     };
     caller.view_scope(&c.st.lock().unwrap()).unwrap()
@@ -1368,24 +1427,375 @@ fn a_device_says_what_app_it_runs_once_it_has_called_the_hub() {
     assert_eq!(device_app("agent", "0.6.1"), None, "an agent is no device");
 }
 
+/// Trust is the person's (identity sub-project 1): trusting ada's laptop
+/// trusts her phone too, so neither is "not trusted yet"; ben's phone,
+/// whose person nobody vouched for, is. A readonly device can never be
+/// trusted, so it is never listed as waiting for it.
 #[test]
 fn a_members_row_names_the_devices_not_trusted_yet_and_the_org_counts_them() {
     let st = store();
     device(&st, "ada-phone", "full");
     device(&st, "ada-laptop", "full");
+    device(&st, "ben-phone", "full");
+    device(&st, "ben-tv", "readonly");
     {
         let s = st.lock().unwrap();
         let org = s.add_org("Acme", None, false).unwrap();
         let ada = s.create_person("ada", None).unwrap();
+        let ben = s.create_person("ben", None).unwrap();
         s.set_client_person("ada-phone", Some(ada.id)).unwrap();
         s.set_client_person("ada-laptop", Some(ada.id)).unwrap();
+        s.set_client_person("ben-phone", Some(ben.id)).unwrap();
+        s.set_client_person("ben-tv", Some(ben.id)).unwrap();
         s.set_client_trust("ada-laptop", true).unwrap();
         s.set_org_member(org.id, ada.id, "member", None).unwrap();
+        s.set_org_member(org.id, ben.id, "member", None).unwrap();
     }
     let orgs = run(&args("list_orgs"), &st, Me::LOCAL).unwrap();
     let acme = &orgs[0];
-    assert_eq!(acme["member_count"], 1);
-    let ada = &acme["members"][0];
-    assert_eq!(ada["untrusted_devices"], serde_json::json!(["ada-phone"]));
+    assert_eq!(acme["member_count"], 2);
+    let member = |name: &str| {
+        acme["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["name"] == name)
+            .unwrap_or_else(|| panic!("{name} in {acme}"))
+            .clone()
+    };
+    let ada = member("ada");
+    assert_eq!(ada["untrusted_devices"], serde_json::json!([]));
     assert_eq!(ada["devices"].as_array().unwrap().len(), 2);
+    let ben = member("ben");
+    assert_eq!(ben["untrusted_devices"], serde_json::json!(["ben-phone"]));
+}
+
+/// Trust is the person's, so untrusting ANOTHER device of the caller's own
+/// person would untrust the device in hand too: refused like the device in
+/// hand. Another person's device, and trusting, stay allowed.
+#[test]
+fn untrusting_a_device_of_ones_own_person_is_a_lock_out() {
+    let st = store();
+    let (me_person, other) = {
+        let s = st.lock().unwrap();
+        let me_person = s
+            .insert_owned_client_token("desk", "digest-desk", "full")
+            .unwrap()
+            .person_id;
+        s.insert_client_token("laptop", "digest-laptop", "full")
+            .unwrap();
+        s.set_client_person("laptop", me_person).unwrap();
+        let other = s
+            .insert_owned_client_token("eve-phone", "digest-eve", "full")
+            .unwrap();
+        s.set_client_trust("laptop", true).unwrap();
+        s.set_client_trust("eve-phone", true).unwrap();
+        (me_person, other)
+    };
+    let me = Me {
+        device: Some("desk"),
+        person: me_person,
+        ..Me::LOCAL
+    };
+    let mut a = args("set_device_trust");
+    a.device = Some("laptop".into());
+    a.trusted = Some(false);
+    assert_eq!(err_code(run(&a, &st, me)), "E_INVALID_STATE");
+    assert!(st
+        .lock()
+        .unwrap()
+        .people_with_realm_role(crate::store::ROLE_FLEET_TRUSTED)
+        .unwrap()
+        .contains(&me_person.unwrap()));
+    a.trusted = Some(true);
+    assert_eq!(run(&a, &st, me).unwrap()["trusted"], true);
+    a.device = Some(other.name.clone());
+    a.trusted = Some(false);
+    assert_eq!(run(&a, &st, me).unwrap()["trusted"], false);
+}
+
+fn events(st: &Mutex<Store>) -> Vec<crate::store::AdminEventRow> {
+    st.lock()
+        .unwrap()
+        .admin_events(&crate::store::AdminEventQuery {
+            limit: 50,
+            ..Default::default()
+        })
+        .unwrap()
+}
+
+/// Identity sub-project 1: every write through `run` leaves one admin
+/// event naming who did it, through which device, and to what.
+#[test]
+fn a_write_records_one_admin_event_and_a_read_none() {
+    let c = company();
+    let me = c.jane();
+    run(&c.with_org("list_members", c.acme), &c.st, me).unwrap();
+    assert!(events(&c.st).is_empty(), "a read records nothing");
+    let mut set = c.with_org("set_member", c.acme);
+    set.person_id = Some(c.bob);
+    set.role = Some("viewer".into());
+    run(&set, &c.st, me).unwrap();
+    let ev = events(&c.st);
+    assert_eq!(ev.len(), 1, "{ev:?}");
+    assert_eq!(ev[0].action, "set_member");
+    assert_eq!(ev[0].resource_type, "org_member");
+    assert_eq!(ev[0].resource_id, format!("{}/{}", c.acme, c.bob));
+    assert_eq!(ev[0].actor_person, Some(c.jane));
+    let phone =
+        c.st.lock()
+            .unwrap()
+            .active_client_tokens()
+            .unwrap()
+            .into_iter()
+            .find(|t| t.name == "jane-phone")
+            .unwrap()
+            .id;
+    assert_eq!(ev[0].actor_device, Some(phone));
+    assert_eq!(ev[0].representation["role"], "viewer");
+    // A refused write records nothing.
+    let mut myself = c.with_org("set_member", c.acme);
+    myself.person_id = Some(c.jane);
+    myself.role = Some("viewer".into());
+    assert!(run(&myself, &c.st, me).is_err());
+    assert_eq!(events(&c.st).len(), 1);
+}
+
+#[test]
+fn enable_person_is_the_fleets_and_is_recorded() {
+    let c = company();
+    c.st.lock().unwrap().disable_person(c.bob).unwrap();
+    let mut en = args("enable_person");
+    en.person_id = Some(c.bob);
+    assert_eq!(err_code(run(&en, &c.st, c.jane())), "E_FORBIDDEN");
+    let out = run(&en, &c.st, Me::LOCAL).unwrap();
+    assert!(out["disabled_at"].is_null(), "{out}");
+    let ev = events(&c.st);
+    assert_eq!(ev.len(), 1);
+    assert_eq!(ev[0].action, "enable_person");
+    assert_eq!(ev[0].resource_type, "person");
+    assert_eq!(ev[0].resource_id, c.bob.to_string());
+    assert_eq!(
+        ev[0].actor_person, None,
+        "the desktop's own store has no actor"
+    );
+    assert!(
+        c.st.lock()
+            .unwrap()
+            .org_member(c.acme, c.bob)
+            .unwrap()
+            .is_none_or(|m| !m.is_live()),
+        "re-enabling restores no membership"
+    );
+}
+
+#[test]
+fn a_set_org_setting_event_never_keeps_the_value() {
+    let st = store();
+    let mut add = args("add_org");
+    add.name = Some("Acme".into());
+    run(&add, &st, Me::LOCAL).unwrap();
+    let ev = events(&st);
+    assert_eq!(ev[0].resource_type, "org");
+    assert_eq!(ev[0].resource_id, "Acme");
+    let mut set = args("set_org_setting");
+    set.org = Some("Acme".into());
+    set.key = Some(crate::service::settings::BUDGET_ORG_DAILY_USD.into());
+    set.value = Some("25".into());
+    run(&set, &st, Me::LOCAL).unwrap();
+    let ev = events(&st);
+    assert_eq!(ev.len(), 2);
+    assert_eq!(ev[0].action, "set_org_setting");
+    assert_eq!(
+        ev[0].representation["key"],
+        crate::service::settings::BUDGET_ORG_DAILY_USD
+    );
+    assert!(ev[0].representation.get("value").is_none(), "{:?}", ev[0]);
+}
+
+/// Identity sub-project 1 (Task 12): Settings → People shows each person's
+/// groups and effective roles; an org admin learns only their own org's.
+#[test]
+fn people_carry_their_groups_and_roles_fenced_to_an_org_admins_org() {
+    let c = company();
+    let beta_root = {
+        let s = c.st.lock().unwrap();
+        s.set_org_member(c.beta, c.bob, "admin", None).unwrap();
+        s.list_groups()
+            .unwrap()
+            .into_iter()
+            .filter(|g| g.org_id == Some(c.beta))
+            .map(|g| g.path)
+            .min_by_key(|p| p.len())
+            .expect("Beta has a root group")
+    };
+    let all = list_people(&c.st.lock().unwrap()).unwrap();
+    let bob = all.iter().find(|p| p.name == "bob").unwrap();
+    assert_eq!(bob.groups.len(), 2, "{bob:?}");
+    assert!(
+        bob.groups.iter().any(|g| g.starts_with(&beta_root)),
+        "{bob:?}"
+    );
+    assert!(!bob.roles.is_empty(), "{bob:?}");
+    assert_eq!(bob.roles_display.len(), bob.roles.len());
+    assert!(
+        bob.roles_display.iter().any(|r| r.contains(" (via group:")),
+        "{bob:?}"
+    );
+
+    // Jane administers Acme: bob's Beta standing is not hers to see.
+    let v = run(&args("list_people"), &c.st, c.jane()).unwrap();
+    let people: Vec<PersonSummary> = serde_json::from_value(v).unwrap();
+    let bob = people.iter().find(|p| p.name == "bob").unwrap();
+    assert_eq!(bob.groups.len(), 1, "{bob:?}");
+    assert!(!bob.groups[0].starts_with(&beta_root), "{bob:?}");
+    assert!(!bob.roles.is_empty(), "{bob:?}");
+    for text in bob
+        .roles_display
+        .iter()
+        .chain(bob.roles.iter().flat_map(|r| &r.via))
+    {
+        assert!(!text.contains(&beta_root), "{text} leaks Beta: {bob:?}");
+    }
+}
+
+/// Final review I3: trust is the person's, so an org admin trusts a device
+/// only while every live device of its person is fenced to their org and
+/// the person is in no other org. Untrusting stays allowed; a fleet
+/// admin's authority is unchanged.
+#[test]
+fn an_org_admin_trusts_only_a_person_held_inside_their_org() {
+    let c = company();
+    let me = c.jane();
+    let trust = |device: &str, on: bool| {
+        let mut a = args("set_device_trust");
+        a.device = Some(device.into());
+        a.trusted = Some(on);
+        a
+    };
+    let trusted = |st: &Mutex<Store>, p: i64| {
+        st.lock()
+            .unwrap()
+            .people_with_realm_role(crate::store::ROLE_FLEET_TRUSTED)
+            .unwrap()
+            .contains(&p)
+    };
+    // Everything of bob's is inside Acme: allowed.
+    assert_eq!(
+        run(&trust("bob-phone", true), &c.st, me).unwrap()["trusted"],
+        true
+    );
+    assert!(trusted(&c.st, c.bob));
+    run(&trust("bob-phone", false), &c.st, me).expect("untrusting narrows");
+
+    // A person with no membership whose one device the operator bound to
+    // Acme, and who also holds a device bound to nobody: trusting the Acme
+    // device would trust the unbound one fleet-wide.
+    let zed = {
+        let s = c.st.lock().unwrap();
+        let zed = s.create_person("zed", None).unwrap().id;
+        for name in ["zed-phone", "zed-laptop"] {
+            s.insert_client_token(name, &format!("digest-{name}"), "full")
+                .unwrap();
+            s.set_client_person(name, Some(zed)).unwrap();
+        }
+        s.set_client_org("zed-phone", Some(c.acme)).unwrap();
+        zed
+    };
+    let e = run(&trust("zed-phone", true), &c.st, me).expect_err("an unbound device");
+    assert_eq!(e.code, "E_FORBIDDEN");
+    assert!(
+        e.message.contains("trust is the person's") && e.message.contains("\"zed\""),
+        "{e:?}"
+    );
+    assert!(!trusted(&c.st, zed));
+
+    // bob in Beta too: his phone acts on Acme, but trust would reach his
+    // Beta standing.
+    c.st.lock()
+        .unwrap()
+        .set_org_member(c.beta, c.bob, "member", None)
+        .unwrap();
+    assert_eq!(
+        err_code(run(&trust("bob-phone", true), &c.st, me)),
+        "E_FORBIDDEN"
+    );
+    assert!(!trusted(&c.st, c.bob));
+    run(&trust("bob-phone", false), &c.st, me).expect("untrusting is never asked");
+
+    // The fleet's authority is unchanged.
+    let fleet = Me {
+        device: None,
+        person: None,
+        authority: Authority::Fleet,
+    };
+    assert_eq!(
+        run(&trust("bob-phone", true), &c.st, fleet).unwrap()["trusted"],
+        true
+    );
+    assert_eq!(
+        run(&trust("zed-phone", true), &c.st, fleet).unwrap()["trusted"],
+        true
+    );
+}
+
+/// Final review I4: the org fence follows group ancestry, not a path
+/// prefix. An org named `Acme/eu` (made before `/` was refused, so by hand
+/// here) has the root `/orgs/Acme/eu`, which reads like a group of `Acme`:
+/// Acme's admin sees none of its groups in a member's standing.
+#[test]
+fn list_people_fences_an_org_admin_by_ancestry_not_by_path() {
+    let c = company();
+    let eu = {
+        let s = c.st.lock().unwrap();
+        assert_eq!(
+            s.add_org("Acme/eu", None, false).unwrap_err().code,
+            codes::E_INVALID,
+            "a new org name has no `/`"
+        );
+        let eu = s.add_org("Acme-eu", None, false).unwrap().id;
+        s.conn_for_test()
+            .execute_batch(&format!(
+                "UPDATE orgs SET name = 'Acme/eu' WHERE id = {eu};
+                 UPDATE groups SET name = 'Acme/eu' WHERE org_id = {eu};"
+            ))
+            .unwrap();
+        s.set_org_member(eu, c.bob, "admin", None).unwrap();
+        let zoe = s.create_person("zoe", None).unwrap().id;
+        s.set_org_member(eu, zoe, "member", None).unwrap();
+        eu
+    };
+    let all = list_people(&c.st.lock().unwrap()).unwrap();
+    let bob = all.iter().find(|p| p.name == "bob").unwrap();
+    assert!(
+        bob.groups.iter().any(|g| g == "/orgs/Acme/eu/admins"),
+        "the fleet sees it: {bob:?}"
+    );
+    let v = run(&args("list_people"), &c.st, c.jane()).unwrap();
+    let people: Vec<PersonSummary> = serde_json::from_value(v).unwrap();
+    assert!(
+        people.iter().all(|p| p.name != "zoe"),
+        "only Acme's members"
+    );
+    let bob = people.iter().find(|p| p.name == "bob").unwrap();
+    assert_eq!(
+        bob.groups,
+        vec!["/orgs/Acme/members".to_string()],
+        "{bob:?}"
+    );
+    for text in bob
+        .roles_display
+        .iter()
+        .chain(bob.roles.iter().flat_map(|r| &r.via))
+    {
+        assert!(
+            !text.contains("/orgs/Acme/eu"),
+            "{text} leaks {eu}: {bob:?}"
+        );
+    }
+    // The existing name stays: an update that leaves it unchanged passes.
+    c.st.lock()
+        .unwrap()
+        .update_org(eu, Some("Acme/eu"), Some("#112233"), None)
+        .expect("an existing name is left alone");
 }

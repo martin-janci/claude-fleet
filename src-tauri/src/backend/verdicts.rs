@@ -631,6 +631,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         Verdict::Routed { tool: "org_admin" },
     ),
     ("list_people", Verdict::Routed { tool: "org_admin" }),
+    // Identity sub-project 1: Settings → Groups, read-only.
+    ("list_groups", Verdict::Routed { tool: "realm_admin" }),
     ("add_person", Verdict::Routed { tool: "org_admin" }),
     ("rename_person", Verdict::Routed { tool: "org_admin" }),
     ("disable_person", Verdict::Routed { tool: "org_admin" }),
