@@ -65,7 +65,7 @@ passed; `passed` otherwise. Enforcement:
 - The mission loop keeps its own close step (`orchestrate/steps.rs`).
 
 **D4. A follow-up is a sibling item with one lineage column.**
-`work_items.origin_task_id` (migration 184) points at the task that carried
+`work_items.origin_task_id` (migration 185) points at the task that carried
 the result. Origin session, origin item and origin result all follow from
 that row. The new item takes the source item's `parent_id` and `project_id`,
 origin `manual`. Creating the same follow-up twice answers the existing item.
