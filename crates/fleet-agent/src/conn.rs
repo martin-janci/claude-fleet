@@ -1715,11 +1715,8 @@ mod tests {
     }
 
     /// Held for the whole of a test that drives the report ring — see
-    /// [`quiet_agent`]. Async-aware because it is held across the awaits
-    /// those tests are made of; `tokio::sync` primitives are not tied to one
-    /// runtime, so a `#[tokio::test]` waiting here is woken by whichever
-    /// other test's runtime releases it.
-    static REPORT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    /// [`quiet_agent`]. The ring's own tests take it too.
+    use crate::report::TEST_RING_LOCK as REPORT_LOCK;
 
     /// A pair whose agent DOES flush reports. Take [`REPORT_LOCK`] first,
     /// and empty the ring of whatever earlier tests left in it.
