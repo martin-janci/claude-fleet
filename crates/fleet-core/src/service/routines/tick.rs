@@ -9,7 +9,7 @@ use super::fix::{
     turn_code, E_NO_SESSION, E_PROMPT_NOT_DELIVERED, E_PROMPT_NOT_QUEUED, E_RUN_BUDGET,
     E_RUN_STALE, E_RUN_TIME_CAP, E_SESSION_LOST, E_SESSION_REMOVED,
 };
-use super::{record_skip, repo_matches, usd, EVENTS, PR_EVENTS};
+use super::{decide, record_skip, repo_matches, usd, Decision, EVENTS, PR_EVENTS};
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::{lock, IpcError};
 use crate::service::decide::routine_run_outcome::{self, PaneReader, TmuxPanes};
@@ -240,6 +240,21 @@ pub async fn fire_with(
         error_code: code.as_deref(),
         host_alias: Some(&host),
     })?;
+    let started = format!("started on {host}");
+    decide(
+        &s,
+        r,
+        Decision {
+            trigger,
+            verdict: if state == "failed" { "failed" } else { "fired" },
+            reason: Some(reason.as_deref().unwrap_or(&started)),
+            trigger_ref,
+            session_id,
+            run_id: Some(run.id),
+            ..Decision::default()
+        },
+        now,
+    );
     // A fresh session takes no turn until something is typed into it: the
     // queued prompt alone sat there unread. Typed in the background (the
     // REPL takes seconds, a trust dialog waits for a person); a run whose
@@ -537,30 +552,42 @@ async fn retry_failed(deps: &Deps, now: i64) -> Result<(), IpcError> {
 }
 
 /// Whether an event on session `sid` may fire `r`: a session its owner
-/// owns, never one a routine started.
-fn event_fires(s: &Store, r: &RoutineRow, sid: i64) -> Result<bool, IpcError> {
+/// owns, never one a routine started. `Err` says why not, in words.
+fn event_fires(s: &Store, r: &RoutineRow, sid: i64) -> Result<Result<(), String>, IpcError> {
     let Some(row) = s.get_session_by_id(sid)? else {
-        return Ok(false);
+        return Ok(Err(format!("session {sid} is gone")));
     };
     if row.origin.as_deref() == Some("routine") {
-        return Ok(false);
+        return Ok(Err(format!(
+            "a routine started session {sid}; routines never fire on each other"
+        )));
     }
     Ok(match (row.owner_person_id, r.owner_person_id) {
-        (Some(session_owner), Some(owner)) => session_owner == owner,
+        (Some(session_owner), Some(owner)) if session_owner == owner => Ok(()),
+        (Some(_), Some(_)) => Err(format!(
+            "session {sid} is someone else's, not the routine owner's"
+        )),
         // An unowned routine exists only on a hub with no people, where
         // every session is the hub's own.
-        (_, None) => s.personal_owner_id()?.is_none(),
-        (None, Some(_)) => false,
+        (_, None) => {
+            if s.personal_owner_id()?.is_none() {
+                Ok(())
+            } else {
+                Err("an unowned routine fires only on a hub with no people".into())
+            }
+        }
+        (None, Some(_)) => Err(format!("session {sid} has no owner")),
     })
 }
 
 /// One event that may fire an event routine: the run's `trigger_ref`, the
 /// subject its rate counts (`pr:<id>:` or `session:<id>:`), and the line
 /// added under its prompt.
-struct EventFire {
-    reference: String,
-    subject: String,
-    context: Option<String>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct EventFire {
+    pub reference: String,
+    pub subject: String,
+    pub context: Option<String>,
 }
 
 /// What a pull request event says, for the line under the prompt.
@@ -584,16 +611,17 @@ fn pr_event_words(kind: &str, pr: &crate::store::PullRequestRow) -> String {
 /// `event_author: anyone`, any PR seen on a host of the routine's org,
 /// never one a routine's session opened. An unassigned routine has no org
 /// to widen to: anyone is its owner's.
-fn event_fire(
+/// `Err` says why it may not, in words.
+pub(super) fn event_fire(
     s: &Store,
     r: &RoutineRow,
     kind: &str,
     eid: i64,
     sid: i64,
     detail: Option<&str>,
-) -> Result<Option<EventFire>, IpcError> {
+) -> Result<Result<EventFire, String>, IpcError> {
     if !PR_EVENTS.contains(&kind) {
-        return Ok(event_fires(s, r, sid)?.then(|| EventFire {
+        return Ok(event_fires(s, r, sid)?.map(|()| EventFire {
             reference: format!("session:{sid}:{eid}"),
             subject: format!("session:{sid}:"),
             context: None,
@@ -604,11 +632,17 @@ fn event_fire(
         .transpose()?
         .flatten()
     else {
-        return Ok(None);
+        return Ok(Err(match detail {
+            Some(u) => format!("no pull request is known at {u}"),
+            None => "the event names no pull request".into(),
+        }));
     };
     if let Some(f) = r.event_repo.as_deref() {
         if !repo_matches(f, pr.repo.as_deref()) {
-            return Ok(None);
+            return Ok(Err(format!(
+                "its repo {} is not {f}",
+                pr.repo.as_deref().unwrap_or("(unknown)")
+            )));
         }
     }
     let anyone = r.event_author.as_deref() == Some("anyone") && r.org_id.is_some();
@@ -620,11 +654,20 @@ fn event_fire(
         let by_routine = s
             .get_session_by_id(sid)?
             .is_some_and(|row| row.origin.as_deref() == Some("routine"));
-        in_org && !by_routine
+        if !in_org {
+            Err(format!(
+                "{} was not seen on a host of the routine's organisation",
+                pr.url
+            ))
+        } else if by_routine {
+            Err(format!("a routine's session opened {}", pr.url))
+        } else {
+            Ok(())
+        }
     } else {
         event_fires(s, r, sid)?
     };
-    Ok(passes.then(|| EventFire {
+    Ok(passes.map(|()| EventFire {
         reference: format!("pr:{}:{eid}", pr.id),
         subject: format!("pr:{}:", pr.id),
         context: Some(format!(
@@ -674,7 +717,7 @@ async fn tick_cron(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError> {
 /// One event routine, under its lease: fire once per new event of its
 /// kind that it may see, then move its cursor past what it read.
 pub(super) async fn tick_event(deps: &Deps, r: &RoutineRow, now: i64) -> Result<(), IpcError> {
-    let (r, fires) = {
+    let (r, kind, fires) = {
         let s = lock(&deps.store)?;
         if !s.take_routine_lease(r.id, crate::service::tick::lease_clock(now))? {
             return Ok(());
@@ -692,8 +735,7 @@ pub(super) async fn tick_event(deps: &Deps, r: &RoutineRow, now: i64) -> Result<
             s.release_routine_lease(r.id)?;
             return Ok(());
         };
-        let kind = kind.as_str();
-        let events = s.events_of_kind_after(r.event_cursor, kind, EVENTS_PER_PASS)?;
+        let events = s.events_of_kind_after(r.event_cursor, &kind, EVENTS_PER_PASS)?;
         let Some(&(last, _, _)) = events.last() else {
             // Nothing of this kind since the cursor: move it to the newest
             // event anyway (same lock, so nothing slipped in between), or a
@@ -709,26 +751,61 @@ pub(super) async fn tick_event(deps: &Deps, r: &RoutineRow, now: i64) -> Result<
         s.set_routine_event_cursor(r.id, last)?;
         let mut fires = Vec::new();
         for (eid, sid, detail) in events {
-            if let Some(f) = event_fire(&s, &r, kind, eid, sid, detail.as_deref())? {
-                fires.push(f);
+            match event_fire(&s, &r, &kind, eid, sid, detail.as_deref())? {
+                Ok(f) => fires.push((eid, sid, f)),
+                Err(why) => decide(
+                    &s,
+                    &r,
+                    Decision {
+                        trigger: "event",
+                        verdict: "filtered",
+                        reason: Some(&format!("{kind} #{eid}: {why}")),
+                        event_id: Some(eid),
+                        session_id: Some(sid),
+                        ..Decision::default()
+                    },
+                    now,
+                ),
             }
         }
-        (r, fires)
+        (r, kind, fires)
     };
     let r = &r;
     let mut res = Ok(());
-    for f in fires {
+    for (eid, sid, f) in fires {
         // An error here ends the pass, not the lease: it is released below,
         // so the routine is not held for the lease's two minutes. A fire
         // inside the rate is dropped like a busy one; it reads the runs this
-        // pass already started, so two events of one PR fire once.
+        // pass already started, so two events of one PR fire once. A drop
+        // is a decision, not a run: it says why in the routine's trace.
         let busy = lock(&deps.store).and_then(|s| {
-            if let Some(rate) = r.event_rate_secs {
-                if s.routine_fired_on_since(r.id, &f.subject, now - rate)? {
-                    return Ok(true);
+            let why = match r.event_rate_secs {
+                Some(rate) if s.routine_fired_on_since(r.id, &f.subject, now - rate)? => {
+                    Some(format!(
+                        "it already ran for {} in the last {}",
+                        f.subject.trim_end_matches(':'),
+                        cap_words(rate)
+                    ))
                 }
+                _ => refusal(&s, r, now)?,
+            };
+            if let Some(why) = &why {
+                decide(
+                    &s,
+                    r,
+                    Decision {
+                        trigger: "event",
+                        verdict: "dropped",
+                        reason: Some(&format!("{kind} #{eid}: {why}")),
+                        trigger_ref: Some(&f.reference),
+                        event_id: Some(eid),
+                        session_id: Some(sid),
+                        ..Decision::default()
+                    },
+                    now,
+                );
             }
-            refusal(&s, r, now).map(|w| w.is_some())
+            Ok(why.is_some())
         });
         match busy {
             Ok(true) => continue,

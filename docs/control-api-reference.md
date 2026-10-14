@@ -53,7 +53,7 @@ Which agent hosts (transport "agent") have a fleet-agent connected: since (unix 
 
 ### `agents`
 
-The agents (PR reviewer, support, fleet agents from the catalog): status {agent?, limit?} (rules, newest jobs, actions waiting for a person), grant {agent: review | support | fleet, scope: gh:<owner>/<repo> | jira:<tracker id>:<PROJECT> | <instance name>, host, level: watch | propose | act, project_id?, config?, hours?, definition? (fleet), bindings? (fleet: one per store role; each MCP binding is asked for its tools on the host first)}, revoke {id}, pause_all, approve {id}, reject {id}. The owner's own device; writes need a trusted full device.
+The agents (PR reviewer, support, fleet agents from the catalog): status {agent?, limit?} (rules, newest jobs, actions waiting for a person), explain (per rule: polls or why not, next poll, last poll error, jobs by state, the next and the last failed job), job {id} (one job whole, its proposed actions included), grant {agent: review | support | fleet, scope: gh:<owner>/<repo> | jira:<tracker id>:<PROJECT> | <instance name>, host, level: watch | propose | act, project_id?, config?, hours?, definition? (fleet), bindings? (fleet: one per store role; each MCP binding is asked for its tools on the host first)}, revoke {id}, pause_all, approve {id}, reject {id}. The owner's own device; writes need a trusted full device.
 
 Parameters: `action`, `agent`, `bindings`, `config`, `definition`, `host`, `hours`, `id`, `level`, `limit`, `project_id`, `scope`
 
@@ -433,7 +433,7 @@ Parameters: `allow_unlayered`, `host_alias`, `kind`, `name`
 
 ### `pr_shepherd`
 
-The PR shepherd's standing rules per project: status (rules, episodes, merges), grant {project_id, level: watch | nudge | merge, hours?, recipes?}, revoke {project_id}, pause_all. The owner's own device; writes need a trusted full device.
+The PR shepherd's standing rules per project: status (rules, episodes, merges), explain (what the next tick makes of each session in a ruled project, and why), grant {project_id, level: watch | nudge | merge, hours?, recipes?}, revoke {project_id}, pause_all. The owner's own device; writes need a trusted full device.
 
 Parameters: `action`, `hours`, `level`, `limit`, `project_id`, `recipes`
 
@@ -649,9 +649,9 @@ Parameters: `anchor_uuid`, `confirm_nonce`, `mode`, `new_worktree`, `session_id`
 
 ### `routines`
 
-Routines: a saved prompt that starts a session on cron, a session or PR event or Run now. list; get {routine_id}: runs and fixes; runs {routine_id, limit?}; failing: Inbox; budget: fleet spend today; save {routine, routine_id?}: the whole routine; preview: save's dry run; delete; set_enabled {enabled}; skip_next {skip?}; run_now; set_run_outcome {run_id, outcome}: a person's did_work | nothing | needs_person (needs_person lands it in the Inbox). Pause all stops the schedule, not run_now. E_NOTFOUND, E_INVALID.
+Routines: a saved prompt that starts a session on cron, a session or PR event or Run now. list; get {routine_id}: runs and fixes; runs {routine_id, limit?}; failing: Inbox; budget: fleet spend today; save {routine, routine_id?}: the whole routine; preview: save's dry run; delete; set_enabled {enabled}; skip_next {skip?}; run_now; set_run_outcome {run_id, outcome}: a person's did_work | nothing | needs_person (needs_person lands it in the Inbox). Debugging, nothing written: explain {routine_id, limit?}: why it does or does not fire, check by check, its recent events judged and its decision trace; decisions {routine_id, limit?}: the trace alone; dry_run {routine_id, event_id?}: what a fire now would start and the exact prompt. Pause all stops the schedule, not run_now. E_NOTFOUND, E_INVALID.
 
-Parameters: `action`, `enabled`, `limit`, `outcome`, `routine`, `routine_id`, `run_id`, `skip`
+Parameters: `action`, `enabled`, `event_id`, `limit`, `outcome`, `routine`, `routine_id`, `run_id`, `skip`
 
 ### `run_prompt`
 
@@ -1245,6 +1245,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::runs::list_runs`
 - `commands::agents::agents_status`
 - `commands::agents::agents_decide`
+- `commands::agents::agents_debug`
 - `commands::routines::routines`
 - `commands::tasks::list_tasks`
 - `commands::tasks::cancel_task`

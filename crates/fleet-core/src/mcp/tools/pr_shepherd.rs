@@ -9,7 +9,8 @@ use crate::service::pr_shepherd::admin::{self, ShepherdArgs};
 #[tool_router(router = pr_shepherd_router, vis = "pub(super)")]
 impl FleetTools {
     #[tool(description = "The PR shepherd's standing rules per project: \
-        status (rules, episodes, merges), grant {project_id, level: watch | \
+        status (rules, episodes, merges), explain (what the next tick makes \
+        of each session in a ruled project, and why), grant {project_id, level: watch | \
         nudge | merge, hours?, recipes?}, revoke {project_id}, pause_all. \
         The owner's own device; writes need a trusted full device.")]
     pub(super) async fn pr_shepherd(

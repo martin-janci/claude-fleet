@@ -5,9 +5,10 @@
   // Automation board): the routines on the left, yours then the built-in
   // ones (the fleet's own loops, 8.4), with Filters and Group; one routine
   // in the middle with its switch, Run now, Skip next and Edit, then Runs,
-  // Definition and Limits; its limits and kill switches on the right. A
-  // failed run carries Fix, Retry and Pause, as in the Inbox. New starts
-  // from a template (the first is Morning PR sweep) or a blank one.
+  // Definition, Limits and Debug (why it does or does not fire); its limits
+  // and kill switches on the right. A failed run carries Fix, Retry and
+  // Pause, as in the Inbox. New starts from a template (the first is
+  // Morning PR sweep) or a blank one.
   import { onDestroy, onMount } from 'svelte';
   import { get } from 'svelte/store';
   import { hosts } from '../hosts';
@@ -28,6 +29,7 @@
   import type { OfState } from '../kit/status';
   import NewRoutineMenu from './NewRoutineMenu.svelte';
   import RoutineEventTrigger from './RoutineEventTrigger.svelte';
+  import RoutineDebug from './RoutineDebug.svelte';
   import DestructiveConfirm from '../forms/DestructiveConfirm.svelte';
   import type { IpcError } from '../result';
   import { accountByUuid } from '../accounts';
@@ -849,7 +851,7 @@
         </header>
 
         <div class="tabs" role="tablist" aria-label="Routine" use:tablistKeys>
-          {#each [['runs', 'Runs'], ['definition', 'Definition'], ['limits', 'Limits']] as [id, label] (id)}
+          {#each [['runs', 'Runs'], ['definition', 'Definition'], ['limits', 'Limits'], ['debug', 'Debug']] as [id, label] (id)}
             <button type="button" role="tab" aria-selected={tab === id} data-testid={`routine-tab-${id}`} onclick={() => (tab = id as RoutineTab)}
               >{label}</button
             >
@@ -973,6 +975,8 @@
             <dt>Account</dt><dd>{r.profile ?? "the host's own"}</dd>
           </dl>
           <p class="prompt mono">{r.prompt}</p>
+        {:else if tab === 'debug'}
+          <RoutineDebug routineId={r.id} {clock} />
         {:else}
           <dl class="of-kv" data-testid="routine-limits">
             <dt>Per run</dt><dd>{r.budget_run_micros !== undefined ? dollars(r.budget_run_micros) : 'No limit'}</dd>

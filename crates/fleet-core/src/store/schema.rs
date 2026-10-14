@@ -2056,6 +2056,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/185_fleet_agent_rules.sql"),
         already_applied: Some(agent_rules_has_definition),
     },
+    // Routine debugging: the scheduler's decisions per routine, capped.
+    // A new table, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        186,
+        include_str!("../../migrations/186_routine_decisions.sql"),
+    ),
 ];
 
 /// The settings row [`Store::finish_realm_upgrade`] writes once migration

@@ -48,8 +48,15 @@
 //! pass, once, and Pause all stops that too; `autonomy` adds a line to the
 //! prompt saying how far the run may go (report, ask before push, push). A
 //! failed run carries an error code, read as a named fix ([`fix`]).
+//!
+//! **Debugging** ([`debug`], migration 186): every scheduler decision is a
+//! row of the routine's trace (`routine_decisions`, the newest 200), the
+//! event fires dropped and the events filtered out included, and
+//! `explain` / `dry_run` answer "why did it (not) fire?" and "what would a
+//! fire do now?" without starting anything.
 
 pub mod cron;
+pub mod debug;
 pub mod fix;
 pub mod outcome;
 pub mod tick;
@@ -58,12 +65,14 @@ use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs;
 use crate::service::view_scope::ViewScope;
 use crate::store::{
-    NewRoutineRun, RoutineFields, RoutineRow, RoutineRunRow, Store, PR_EVENT_CI_FAILED,
-    PR_EVENT_CI_PASSED, PR_EVENT_MERGED, PR_EVENT_REVIEW, ROUTINE_OVERLAPS, ROUTINE_TRIGGERS,
+    NewRoutineDecision, NewRoutineRun, RoutineFields, RoutineRow, RoutineRunRow, Store,
+    PR_EVENT_CI_FAILED, PR_EVENT_CI_PASSED, PR_EVENT_MERGED, PR_EVENT_REVIEW, ROUTINE_OVERLAPS,
+    ROUTINE_TRIGGERS,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
+pub use debug::{decisions, dry_run, explain, RoutineDryRun, RoutineExplain};
 pub use tick::{spawn_routine_tick, tick_once, Deps, LiveSpawn, Spawn};
 
 /// The session timeline kinds an event routine may fire on.
@@ -1023,7 +1032,7 @@ pub(crate) fn record_skip(
     reason: &str,
     now: i64,
 ) -> Result<RoutineRunRow, IpcError> {
-    s.insert_routine_run(&NewRoutineRun {
+    let run = s.insert_routine_run(&NewRoutineRun {
         routine_id: r.id,
         trigger,
         trigger_ref,
@@ -1034,7 +1043,52 @@ pub(crate) fn record_skip(
         at: now,
         error_code: None,
         host_alias: None,
-    })
+    })?;
+    decide(
+        s,
+        r,
+        Decision {
+            trigger,
+            verdict: "skipped",
+            reason: Some(reason),
+            trigger_ref,
+            run_id: Some(run.id),
+            ..Decision::default()
+        },
+        now,
+    );
+    Ok(run)
+}
+
+/// One scheduler decision for a routine's trace (migration 186).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Decision<'a> {
+    pub trigger: &'a str,
+    pub verdict: &'a str,
+    pub reason: Option<&'a str>,
+    pub trigger_ref: Option<&'a str>,
+    pub event_id: Option<i64>,
+    pub session_id: Option<i64>,
+    pub run_id: Option<i64>,
+}
+
+/// Record `d` in `r`'s trace. The trace explains, it never decides: a
+/// write that fails is logged and the fire goes on.
+pub(crate) fn decide(s: &Store, r: &RoutineRow, d: Decision<'_>, now: i64) {
+    let row = NewRoutineDecision {
+        routine_id: r.id,
+        at: now,
+        trigger: d.trigger,
+        verdict: d.verdict,
+        reason: d.reason,
+        trigger_ref: d.trigger_ref,
+        event_id: d.event_id,
+        session_id: d.session_id,
+        run_id: d.run_id,
+    };
+    if let Err(e) = s.insert_routine_decision(&row) {
+        tracing::warn!(routine = r.id, error = %e.message, "[routines] recording a decision failed");
+    }
 }
 
 /// Dollars, for a reason a person reads.

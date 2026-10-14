@@ -165,6 +165,18 @@ pub struct Seen {
     pub last_merge: HashMap<i64, i64>,
 }
 
+/// What the planner makes of one candidate this tick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Judged {
+    /// Nothing to do about it, in words: no rule, nothing wrong, or this
+    /// episode is already recorded.
+    Ignored(String),
+    /// Something to do, not yet ripe, in words: looked at again next tick.
+    Waiting(String),
+    /// Do this.
+    Act(Box<Planned>),
+}
+
 /// Pure: decide what to do this tick. `rules` are the rules in force,
 /// by project id. A candidate whose episode is not yet ripe (the session
 /// is busy, just went idle, or holds unpushed commits) gets nothing and is
@@ -175,72 +187,185 @@ pub fn plan(
     seen: &Seen,
     now: i64,
 ) -> Vec<Planned> {
-    let mut out = Vec::new();
-    for c in candidates {
-        let Some(rule) = rules.get(&c.project_id) else {
+    candidates
+        .iter()
+        .filter_map(|c| match judge(c, rules, seen, now) {
+            Judged::Act(p) => Some(*p),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Pure: [`plan`] for one candidate, saying why when it does nothing.
+pub fn judge(
+    c: &Candidate,
+    rules: &HashMap<i64, ShepherdRuleRow>,
+    seen: &Seen,
+    now: i64,
+) -> Judged {
+    let Some(rule) = rules.get(&c.project_id) else {
+        return Judged::Ignored("its project has no rule in force".into());
+    };
+    let Some(condition) = condition_of(&c.evidence) else {
+        return Judged::Ignored("its PR has no conflict, is not behind and is not red".into());
+    };
+    let Some(head) = c.evidence.head_oid.clone().filter(|h| !h.is_empty()) else {
+        return Judged::Ignored("its PR reading has no head commit".into());
+    };
+    if seen
+        .episodes
+        .contains(&(c.session_id, head.clone(), condition.as_str()))
+    {
+        return Judged::Ignored(format!(
+            "its {} on {} is already recorded: a new push starts a new episode",
+            condition.as_str(),
+            short(&head)
+        ));
+    }
+    // The worktree is ahead of what GitHub judged: a fix is under way,
+    // and this reading is about to be stale.
+    let unpushed = c.evidence.ahead.is_some_and(|a| a > 0)
+        || c.evidence
+            .local_head
+            .as_deref()
+            .is_some_and(|l| !l.is_empty() && l != head);
+    if unpushed {
+        return Judged::Waiting("its worktree holds commits not pushed yet".into());
+    }
+    let action = if rule.level == "watch" {
+        Action::Record("watched".into())
+    } else if !c.live {
+        Action::Record("skipped:no_session".into())
+    } else if c.is_controller {
+        Action::Record("skipped:controller".into())
+    } else if c.busy {
+        return Judged::Waiting("it is mid-turn, asking a question or stuck".into());
+    } else if c.idle_since.is_none_or(|t| now - t < IDLE_GRACE_SECS) {
+        return Judged::Waiting(format!("it has not been idle for {IDLE_GRACE_SECS} s yet"));
+    } else if seen.nudges.get(&c.session_id).copied().unwrap_or(0) >= MAX_NUDGES_PER_DAY {
+        Action::Record("skipped:budget".into())
+    } else {
+        let failing: Vec<String> = c
+            .evidence
+            .checks
+            .failing
+            .iter()
+            .map(|f| f.name.clone())
+            .collect();
+        Action::Nudge(prompts::prompt_for(
+            condition,
+            c.pr_url.as_deref(),
+            &head,
+            &failing,
+            rule.recipes.as_deref(),
+        ))
+    };
+    Judged::Act(Box::new(Planned {
+        session_id: c.session_id,
+        host_alias: c.host_alias.clone(),
+        tmux_name: c.tmux_name.clone(),
+        head_oid: head,
+        pr_url: c.pr_url.clone(),
+        condition,
+        action,
+        org_id: c.org_id,
+        evidence: c.evidence.clone(),
+    }))
+}
+
+/// A commit's first 8 characters.
+fn short(oid: &str) -> &str {
+    oid.get(..8).unwrap_or(oid)
+}
+
+/// One session in a project with a rule, as `pr_shepherd { action:
+/// explain }` reads it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionVerdict {
+    pub session_id: i64,
+    pub host_alias: String,
+    pub tmux_name: String,
+    pub project_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_url: Option<String>,
+    /// conflict | behind | ci_red, when its PR has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
+    /// `ignored` | `waiting` | `acts`.
+    pub verdict: String,
+    /// Why, or what it would do: `nudge`, or the outcome it would record.
+    pub detail: String,
+}
+
+/// `pr_shepherd { action: explain }`: what the next tick would make of
+/// each session in a project with a rule in force, and why. Nothing is sent.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ShepherdExplain {
+    /// `automation.paused`: the shepherd sends and merges nothing.
+    pub automation_paused: bool,
+    /// The `pr_shepherd` loop in the process that answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduler: Option<crate::service::loops::LoopHealth>,
+    #[serde(default)]
+    pub sessions: Vec<SessionVerdict>,
+}
+
+/// [`ShepherdExplain`], from a store the caller holds.
+pub fn explain(s: &Store, now: i64) -> ShepherdExplain {
+    let (candidates, rules, seen) = snapshot(s, now);
+    let mut sessions = Vec::new();
+    // A session in a ruled project with no PR reading is no candidate:
+    // say so, rather than leave it out.
+    let read: HashSet<i64> = candidates.iter().map(|c| c.session_id).collect();
+    for r in s.list_all_sessions().unwrap_or_default() {
+        let Some(pid) = r.project_id.filter(|p| rules.contains_key(p)) else {
             continue;
         };
-        let Some(condition) = condition_of(&c.evidence) else {
-            continue;
-        };
-        let Some(head) = c.evidence.head_oid.clone().filter(|h| !h.is_empty()) else {
-            continue;
-        };
-        if seen
-            .episodes
-            .contains(&(c.session_id, head.clone(), condition.as_str()))
-        {
-            continue;
+        if !read.contains(&r.id) {
+            sessions.push(SessionVerdict {
+                session_id: r.id,
+                host_alias: r.host_alias.clone(),
+                tmux_name: r.tmux_name.clone(),
+                project_id: pid,
+                pr_url: r.pr_url.clone(),
+                condition: None,
+                verdict: "ignored".into(),
+                detail: "reconcile has no PR reading for it yet".into(),
+            });
         }
-        // The worktree is ahead of what GitHub judged: a fix is under way,
-        // and this reading is about to be stale.
-        let unpushed = c.evidence.ahead.is_some_and(|a| a > 0)
-            || c.evidence
-                .local_head
-                .as_deref()
-                .is_some_and(|l| !l.is_empty() && l != head);
-        if unpushed {
-            continue;
-        }
-        let action = if rule.level == "watch" {
-            Action::Record("watched".into())
-        } else if !c.live {
-            Action::Record("skipped:no_session".into())
-        } else if c.is_controller {
-            Action::Record("skipped:controller".into())
-        } else if c.busy || c.idle_since.is_none_or(|t| now - t < IDLE_GRACE_SECS) {
-            continue;
-        } else if seen.nudges.get(&c.session_id).copied().unwrap_or(0) >= MAX_NUDGES_PER_DAY {
-            Action::Record("skipped:budget".into())
-        } else {
-            let failing: Vec<String> = c
-                .evidence
-                .checks
-                .failing
-                .iter()
-                .map(|f| f.name.clone())
-                .collect();
-            Action::Nudge(prompts::prompt_for(
-                condition,
-                c.pr_url.as_deref(),
-                &head,
-                &failing,
-                rule.recipes.as_deref(),
-            ))
+    }
+    for c in &candidates {
+        let (verdict, detail) = match judge(c, &rules, &seen, now) {
+            Judged::Ignored(why) => ("ignored", why),
+            Judged::Waiting(why) => ("waiting", why),
+            Judged::Act(p) => (
+                "acts",
+                match p.action {
+                    Action::Nudge(_) => "nudge: send its session one fix prompt".to_string(),
+                    Action::Record(o) => format!("record {o}"),
+                },
+            ),
         };
-        out.push(Planned {
+        sessions.push(SessionVerdict {
             session_id: c.session_id,
             host_alias: c.host_alias.clone(),
             tmux_name: c.tmux_name.clone(),
-            head_oid: head,
+            project_id: c.project_id,
             pr_url: c.pr_url.clone(),
-            condition,
-            action,
-            org_id: c.org_id,
-            evidence: c.evidence.clone(),
+            condition: condition_of(&c.evidence).map(|k| k.as_str().to_string()),
+            verdict: verdict.into(),
+            detail,
         });
     }
-    out
+    sessions.sort_by_key(|v| v.session_id);
+    ShepherdExplain {
+        automation_paused: crate::service::loops::paused(s),
+        scheduler: crate::service::loops::registry()
+            .snapshot()
+            .into_iter()
+            .find(|l| l.name == "pr_shepherd"),
+        sessions,
+    }
 }
 
 /// What a send did.

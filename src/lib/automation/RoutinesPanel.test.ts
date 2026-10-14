@@ -38,6 +38,27 @@ const bad: RoutineRunRow = { id: 1, routine_id: 3, trigger: 'cron', state: 'fail
 const argsOf = (action: string) =>
   inv.mock.calls.map((c) => c[1]?.args).filter((a) => a?.action === action).at(-1);
 
+/** What `explain` and `dry_run` answer (the Debug tab). */
+const explainAnswer = {
+  routine_id: 3,
+  name: 'Morning PR sweep',
+  trigger: 'cron',
+  summary: 'Does not fire: Pause all is on (automation.paused): the scheduler starts nothing; Run now still works.',
+  state: 'block',
+  checks: [
+    { name: 'enabled', state: 'ok', detail: 'it is on' },
+    { name: 'automation', state: 'block', detail: 'Pause all is on (automation.paused): the scheduler starts nothing; Run now still works' },
+  ],
+  decisions: [{ id: 9, routine_id: 3, at: 1000, trigger: 'cron', verdict: 'skipped', reason: 'a person skipped it', run_id: 4 }],
+};
+const dryAnswer = {
+  routine_id: 3,
+  starts: true,
+  session: { host_alias: 'mac', project_id: 1 },
+  prompt: 'Review every open PR. Never push.',
+  scheduled_only: [{ name: 'automation', state: 'block', detail: 'Pause all is on' }],
+};
+
 /** What `preview` answers in these tests (G2.3's dry run). */
 let previewAnswer: Record<string, unknown> = { next_runs: [], utc_offset_min: 0, logins: [] };
 
@@ -56,6 +77,10 @@ function route(list: RoutineRow[] = [sweep], runs: RoutineRunRow[] = [ok, bad], 
         return { ...sweep, id: 8, name: a.args.routine!.name };
       case 'preview':
         return previewAnswer;
+      case 'explain':
+        return explainAnswer;
+      case 'dry_run':
+        return dryAnswer;
       default:
         return list[0];
     }
@@ -159,6 +184,25 @@ describe('Routines (8.6)', () => {
     expect(screen.queryByTestId('routine-run-pause')).toBeNull();
     await fireEvent.click(screen.getByTestId('routine-tab-limits'));
     expect(screen.getByTestId('routine-limits').textContent).toContain('$2.00');
+  });
+});
+
+describe('the Debug tab (migration 186)', () => {
+  it('says why a routine does not fire, lists its checks and trace, and dry-runs it', async () => {
+    render(RoutinesPanel);
+    await screen.findByTestId('routine-title');
+    await fireEvent.click(screen.getByTestId('routine-tab-debug'));
+    expect((await screen.findByTestId('routine-debug-summary')).textContent).toContain('Pause all is on');
+    expect(argsOf('explain')).toEqual({ action: 'explain', routine_id: 3, limit: 50 });
+    expect(screen.getByTestId('routine-check-automation').textContent).toContain('Pause all');
+    expect(screen.getByTestId('routine-debug-decisions').textContent).toContain('Skipped · a person skipped it');
+    await fireEvent.click(screen.getByTestId('routine-debug-dry-run'));
+    expect((await screen.findByTestId('routine-dry-run-prompt')).textContent).toBe('Review every open PR. Never push.');
+    expect(argsOf('dry_run')).toEqual({ action: 'dry_run', routine_id: 3 });
+    const dry = screen.getByTestId('routine-dry-run').textContent ?? '';
+    expect(dry).toContain('starts a session on mac');
+    expect(dry).toContain('A scheduled fire also needs pause all: Pause all is on.');
+    expect(argsOf('run_now')).toBeUndefined();
   });
 });
 
