@@ -1807,6 +1807,14 @@ fn with_native_defaults(
             }
             None => own,
         });
+        // A follow-up's brief opens with what its origin task left (design
+        // 2026-10-13 D5), in at most half the budget; the rest is cut first.
+        let max = crate::service::work::handover::BRIEF_MAX_CHARS;
+        if let Some(o) = crate::service::work::handover::origin_facts(&s, &item, scope)? {
+            let head = crate::service::work::handover::origin_section(&o, max / 2);
+            let rest = out.brief.take().unwrap_or_default();
+            out.brief = Some(format!("{head}\n\n{rest}").chars().take(max).collect());
+        }
     }
     Ok(out)
 }
