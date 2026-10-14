@@ -18,8 +18,7 @@
 - No `eprintln!` (repo lint `no_eprintln_tests.rs`); use `tracing`.
 - Never hold the `Mutex<Store>` guard across an `.await`.
 - Keep `json_response` at its default `false` (SSE framing carries the 15 s keep-alive that long polls need).
-- Commit messages: Conventional Commits, ending with the line
-  `Claude-Session: https://claude.ai/code/session_01LnFcQ2QC6QszexSkn2embn`.
+- Commit messages: Conventional Commits.
 - Branch: `feat/mcp-hooks-modernize` (already checked out in this worktree, based on `origin/main`).
 
 ---
@@ -197,9 +196,7 @@ git commit -m "feat(mcp): stateless streamable HTTP and protocol 2025-11-25
 
 No Mcp-Session-Id is issued or required: an app restart, port/token
 change or tunnel bounce no longer leaves clients holding a dead session
-(404 until reconnect). SSE framing stays for the keep-alive on long polls.
-
-Claude-Session: https://claude.ai/code/session_01LnFcQ2QC6QszexSkn2embn"
+(404 until reconnect). SSE framing stays for the keep-alive on long polls."
 ```
 
 ---
@@ -436,9 +433,7 @@ Per the MCP spec, tool-execution failures are CallToolResult
 { is_error: true } (shown to the model as the tool's output), while
 JSON-RPC errors stay reserved for unknown tools and malformed arguments.
 The text block keeps the documented 'E_CODE: message' line; structured
-content carries { code, message, details }.
-
-Claude-Session: https://claude.ai/code/session_01LnFcQ2QC6QszexSkn2embn"
+content carries { code, message, details }."
 ```
 
 ---
@@ -699,9 +694,7 @@ git commit -m "feat(mcp): bound every tool call with a per-class wall clock
 60 s for reads and single round trips, 300 s for session lifecycle /
 provisioning / host probes, 660 s for the self-bounded long polls. On
 elapse the caller gets an E_TIMEOUT tool result instead of hanging until
-its own MCP_TOOL_TIMEOUT.
-
-Claude-Session: https://claude.ai/code/session_01LnFcQ2QC6QszexSkn2embn"
+its own MCP_TOOL_TIMEOUT."
 ```
 
 ---
@@ -767,9 +760,7 @@ Expected: rust all green (≈1280 tests), frontend 76 files green, build ok.
 
 ```bash
 git add docs/control-api.md
-git commit -m "docs(control-api): stateless transport, is_error tool results, wall clocks
-
-Claude-Session: https://claude.ai/code/session_01LnFcQ2QC6QszexSkn2embn"
+git commit -m "docs(control-api): stateless transport, is_error tool results, wall clocks"
 git push -u origin HEAD
 gh pr create --base main --head feat/mcp-hooks-modernize --title "feat(mcp): stateless transport, is_error tool results, per-call wall clock" --body "<summary of the three commits, the local CI results, and the session link on the last line>"
 gh pr merge <num> --merge --admin

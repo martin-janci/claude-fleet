@@ -15,7 +15,7 @@
 - Backend build on `claude-fleet-trn`: `cd src-tauri && source ~/.local/tauri-sysroot/env.sh && export RUSTUP_TOOLCHAIN=stable-x86_64-unknown-linux-gnu` before any `cargo` command.
 - No tool-description change (`reference_is_current` must keep passing); no `eprintln!` (use `tracing`); never hold the store guard across an `.await`; no new migration.
 - Status / stuck strings come from `ClaudeStatus::as_str()` / `StuckKind::as_str()` in `service/pane_intel.rs`, never literals in new code.
-- Commits: Conventional Commits, last line `Claude-Session: https://claude.ai/code/session_01LnFcQ2QC6QszexSkn2embn`.
+- Commits: Conventional Commits.
 - Branch `feat/hook-events` (already checked out, based on `origin/main` at `7f041eb`).
 
 ---

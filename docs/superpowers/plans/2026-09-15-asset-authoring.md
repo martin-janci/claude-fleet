@@ -19,7 +19,7 @@
 - Lint: errors block save (`E_LINT`, details = the report); warnings never block. Templates must lint clean except the plugin_ref `TODO` fields.
 - No `eprintln!`; codes in `ipc_error::codes` (`E_LINT` new). No new MCP tools; `docs/control-api-reference.md` regenerated for the command list (`REGEN_DOCS=1 cargo test --manifest-path Cargo.toml reference_is_current`).
 - Build/verify on this host after `cd src-tauri && source /home/dev/.local/tauri-sysroot/env.sh && export RUSTUP_TOOLCHAIN=stable-x86_64-unknown-linux-gnu`; run cargo in the foreground. Base: 1436 Rust tests, 1219 frontend tests. Frontend: `CI=true pnpm install --frozen-lockfile` once, then `pnpm run check && pnpm run test && pnpm run build`.
-- Commits: Conventional Commits ending with `Claude-Session: https://claude.ai/code/session_015qiY9nS4iAUqiuLXumrMvS`. Never touch version fields or CHANGELOG.md.
+- Commits: Conventional Commits. Never touch version fields or CHANGELOG.md.
 
 ## File Structure
 

@@ -97,9 +97,7 @@ git add shared/src/commonMain/kotlin/dev/claudefleet/mobile/model/Conversation.k
 git commit -m "feat(model): decode each turn's prompt uuid
 
 The truncation anchor for the reply actions. Optional, so a hub that
-predates it still decodes and the phone falls back to Copy and Quote.
-
-Claude-Session: https://claude.ai/code/session_012PBjHSukJW9dyjDaEPpvDy"
+predates it still decodes and the phone falls back to Copy and Quote."
 ```
 
 ---
@@ -249,9 +247,7 @@ git commit -m "feat(net): call rewind_conversation, gated on the hub version
 
 Gated on the version and not on a missing prompt_uuid: a missing anchor
 legitimately means \"keep the whole transcript\" when forking the newest
-turn, so absence cannot double as \"unsupported\".
-
-Claude-Session: https://claude.ai/code/session_012PBjHSukJW9dyjDaEPpvDy"
+turn, so absence cannot double as \"unsupported\"."
 ```
 
 ---
@@ -437,9 +433,7 @@ git add shared/src/commonMain/kotlin/dev/claudefleet/mobile/ui/ReplyActions.kt s
 git commit -m "feat(ui): the which-buttons rule for reply actions
 
 The desktop's nine cases, one for one, so the two platforms cannot drift
-without a test going red.
-
-Claude-Session: https://claude.ai/code/session_012PBjHSukJW9dyjDaEPpvDy"
+without a test going red."
 ```
 
 ---
@@ -588,9 +582,7 @@ git commit -m "feat(ui): reply actions on the phone
 
 Copy, Quote, Retry, Fork here, Rewind here under every reply, against the
 hub's rewind_conversation. Destructive actions are gated twice: on the hub
-version and on the token being full.
-
-Claude-Session: https://claude.ai/code/session_012PBjHSukJW9dyjDaEPpvDy"
+version and on the token being full."
 gh pr create --fill
 ```
 

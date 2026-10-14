@@ -21,7 +21,7 @@
 - Read-only towards hosts. Nothing in this plan writes to any host's config. The importer writes only into the local catalog repo working tree and never commits.
 - Rust verification: `cargo` on this headless box fails in the gtk build script. Run every `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` step on a machine with the Tauri system libraries (the developer's desktop, or a fleet host that has them). Do not skip Rust verification steps; if they cannot run where you are, say so explicitly in the task report.
 - Frontend verification runs anywhere: `pnpm run check && pnpm run test && pnpm run build`. Pre-existing failures in `session_ui.test.ts` / `App.test.ts` (`localStorage is undefined`) are not yours; compare against `main` if unsure.
-- Commit after every task with a Conventional Commit message, ending with the line `Claude-Session: https://claude.ai/code/session_015qiY9nS4iAUqiuLXumrMvS`. Never bump versions or edit `CHANGELOG.md` by hand.
+- Commit after every task with a Conventional Commit message. Never bump versions or edit `CHANGELOG.md` by hand.
 
 ## File Structure
 
@@ -666,9 +666,7 @@ Expected: 6 tests pass. If `serde(flatten)` with the internally tagged enum fail
 ```bash
 cd src-tauri && cargo fmt && cargo clippy --all-targets -- -D warnings
 git add Cargo.toml Cargo.lock src/service/mod.rs src/service/catalog
-git commit -m "feat(catalog): IR model for skills, agents, hooks, MCP servers and plugin refs
-
-Claude-Session: https://claude.ai/code/session_015qiY9nS4iAUqiuLXumrMvS"
+git commit -m "feat(catalog): IR model for skills, agents, hooks, MCP servers and plugin refs"
 ```
 
 ---
@@ -965,9 +963,7 @@ Expected: 4 tests pass.
 ```bash
 cd src-tauri && cargo fmt && cargo clippy --all-targets -- -D warnings
 git add src/service/catalog/harness
-git commit -m "feat(catalog): render plan, host snapshot and Harness trait
-
-Claude-Session: https://claude.ai/code/session_015qiY9nS4iAUqiuLXumrMvS"
+git commit -m "feat(catalog): render plan, host snapshot and Harness trait"
 ```
 
 ---
@@ -1417,9 +1413,7 @@ Expected: 10 tests pass. If `serde_yaml` quotes `Make a worktree.` differently t
 ```bash
 cd src-tauri && cargo fmt && cargo clippy --all-targets -- -D warnings
 git add src/service/catalog/harness/claude.rs
-git commit -m "feat(catalog): Claude Code renderer for all asset kinds
-
-Claude-Session: https://claude.ai/code/session_015qiY9nS4iAUqiuLXumrMvS"
+git commit -m "feat(catalog): Claude Code renderer for all asset kinds"
 ```
 
 ---
@@ -1607,9 +1601,7 @@ Expected: all harness tests pass (Tasks 2, 3, 4).
 ```bash
 cd src-tauri && cargo fmt && cargo clippy --all-targets -- -D warnings
 git add src/service/catalog/harness/codex.rs
-git commit -m "feat(catalog): experimental Codex renderer for skills and MCP servers
-
-Claude-Session: https://claude.ai/code/session_015qiY9nS4iAUqiuLXumrMvS"
+git commit -m "feat(catalog): experimental Codex renderer for skills and MCP servers"
 ```
 
 ---
@@ -2010,9 +2002,7 @@ Expected: 4 tests pass (`git` must be on PATH).
 ```bash
 cd src-tauri && cargo fmt && cargo clippy --all-targets -- -D warnings
 git add src/service/catalog
-git commit -m "feat(catalog): load and write the catalog repo, git clone/pull/head
-
-Claude-Session: https://claude.ai/code/session_015qiY9nS4iAUqiuLXumrMvS"
+git commit -m "feat(catalog): load and write the catalog repo, git clone/pull/head"
 ```
 
 ---
@@ -2328,9 +2318,7 @@ Expected: all pass, including `migrate_is_idempotent` at 18 and `open_in_memory_
 ```bash
 cd src-tauri && cargo fmt && cargo clippy --all-targets -- -D warnings
 git add migrations/018_asset_catalog.sql src/store.rs src/events.rs src/service/health.rs
-git commit -m "feat(store): catalog_config and asset_inventory tables (migration 018) with row events
-
-Claude-Session: https://claude.ai/code/session_015qiY9nS4iAUqiuLXumrMvS"
+git commit -m "feat(store): catalog_config and asset_inventory tables (migration 018) with row events"
 ```
 
 ---
@@ -2785,9 +2773,7 @@ Expected: all catalog tests pass.
 ```bash
 cd src-tauri && cargo fmt && cargo clippy --all-targets -- -D warnings
 git add src/service/catalog
-git commit -m "feat(catalog): Claude host scan and per-asset drift state computation
-
-Claude-Session: https://claude.ai/code/session_015qiY9nS4iAUqiuLXumrMvS"
+git commit -m "feat(catalog): Claude host scan and per-asset drift state computation"
 ```
 
 ---
@@ -3218,9 +3204,7 @@ Expected: all pass. The `scan_hosts_scans_local_and_persists_rows` test runs the
 ```bash
 cd src-tauri && cargo fmt && cargo clippy --all-targets -- -D warnings
 git add src/service/catalog src/store.rs
-git commit -m "feat(catalog): configure/load/list/get service functions and host scan runner
-
-Claude-Session: https://claude.ai/code/session_015qiY9nS4iAUqiuLXumrMvS"
+git commit -m "feat(catalog): configure/load/list/get service functions and host scan runner"
 ```
 
 ---
@@ -3825,9 +3809,7 @@ Expected: all pass, including the round-trip test. If `serde_yaml` renders the d
 ```bash
 cd src-tauri && cargo fmt && cargo clippy --all-targets -- -D warnings
 git add src/service/catalog
-git commit -m "feat(catalog): import skills, agents, hooks, MCP servers and plugins from ~/.claude
-
-Claude-Session: https://claude.ai/code/session_015qiY9nS4iAUqiuLXumrMvS"
+git commit -m "feat(catalog): import skills, agents, hooks, MCP servers and plugins from ~/.claude"
 ```
 
 ---
@@ -3951,9 +3933,7 @@ Expected: clean build, all tests pass. The `doc_gen` test that string-parses `ge
 
 ```bash
 git add src-tauri/src/commands src-tauri/src/lib.rs
-git commit -m "feat(catalog): Tauri IPC commands for catalog configure/load/list/get/import/scan
-
-Claude-Session: https://claude.ai/code/session_015qiY9nS4iAUqiuLXumrMvS"
+git commit -m "feat(catalog): Tauri IPC commands for catalog configure/load/list/get/import/scan"
 ```
 
 ---
@@ -4053,9 +4033,7 @@ Expected: `docs/control-api-reference.md` changes to include the three tools; al
 
 ```bash
 git add src-tauri/src/mcp/tools.rs docs/control-api-reference.md
-git commit -m "feat(mcp): list_assets, scan_assets and import_assets tools
-
-Claude-Session: https://claude.ai/code/session_015qiY9nS4iAUqiuLXumrMvS"
+git commit -m "feat(mcp): list_assets, scan_assets and import_assets tools"
 ```
 
 ---
@@ -4336,9 +4314,7 @@ Expected: PASS, no type errors.
 
 ```bash
 git add src/lib/assets.ts src/lib/assets.test.ts src/lib/events.ts src/lib/events.test.ts
-git commit -m "feat(ui): assets store and catalog/inventory row events
-
-Claude-Session: https://claude.ai/code/session_015qiY9nS4iAUqiuLXumrMvS"
+git commit -m "feat(ui): assets store and catalog/inventory row events"
 ```
 
 ---
@@ -4913,9 +4889,7 @@ Expected: the four new tests pass; `check` clean; the full suite shows only the 
 
 ```bash
 git add src/lib/AssetsPanel.svelte src/lib/AssetList.svelte src/lib/AssetDetail.svelte src/lib/ImportDialog.svelte src/lib/AssetsPanel.test.ts src/App.svelte
-git commit -m "feat(ui): Assets tab with catalog list, host matrix, previews and import dialog
-
-Claude-Session: https://claude.ai/code/session_015qiY9nS4iAUqiuLXumrMvS"
+git commit -m "feat(ui): Assets tab with catalog list, host matrix, previews and import dialog"
 ```
 
 ---
@@ -4959,9 +4933,7 @@ Add to the Tools table, after the last existing row:
 
 ```bash
 git add docs/concepts.md docs/control-api.md
-git commit -m "docs: describe the asset catalog and its MCP tools
-
-Claude-Session: https://claude.ai/code/session_015qiY9nS4iAUqiuLXumrMvS"
+git commit -m "docs: describe the asset catalog and its MCP tools"
 ```
 
 ---
