@@ -24,10 +24,21 @@ pub struct Config {
     /// heartbeat.
     #[serde(default = "default_report_errors")]
     pub report_errors: bool,
+    /// The loopback port the hook relay listens on (`127.0.0.1:<port>`), which
+    /// the hub then writes into this host's Claude Code hooks instead of its
+    /// public URL (`crate::hook_relay`). `0` turns the relay off. Absent from
+    /// a config written before the relay existed, which then gets the
+    /// default: an upgrade alone is enough.
+    #[serde(default = "default_hook_port")]
+    pub hook_port: u16,
 }
 
 pub fn default_report_errors() -> bool {
     true
+}
+
+pub fn default_hook_port() -> u16 {
+    crate::hook_relay::DEFAULT_PORT
 }
 
 /// Why a config was refused.
@@ -301,6 +312,7 @@ mod tests {
             insecure: false,
             ca_file: None,
             report_errors: true,
+            hook_port: default_hook_port(),
         }
     }
 
@@ -517,5 +529,16 @@ mod tests {
             serde_json::from_str(r#"{"hub":"https://h","token":"t","report_errors":false}"#)
                 .unwrap();
         assert!(!c.report_errors);
+    }
+
+    /// A config written before the hook relay existed gets it on upgrade;
+    /// `0` turns it off and stays off.
+    #[test]
+    fn hook_port_defaults_to_the_relay_and_reads_back() {
+        let c: Config = serde_json::from_str(r#"{"hub":"https://h","token":"t"}"#).unwrap();
+        assert_eq!(c.hook_port, crate::hook_relay::DEFAULT_PORT);
+        let c: Config =
+            serde_json::from_str(r#"{"hub":"https://h","token":"t","hook_port":0}"#).unwrap();
+        assert_eq!(c.hook_port, 0);
     }
 }

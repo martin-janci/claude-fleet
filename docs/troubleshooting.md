@@ -15,6 +15,7 @@ it.
 | Host shows **offline** / probe fails | SSH host unreachable or key auth not configured | Fix `~/.ssh/config`; verify `ssh <alias>` works in a terminal. (`E_HOST_OFFLINE`) |
 | `claude` or `tmux` **missing** on a host | Binary not installed or not on `PATH` for non-interactive SSH sessions | Install the missing tool on the host; confirm it is on the default `PATH`. (`E_CLAUDE_CLI`) |
 | **Provisioning failed** | Cannot write `~/.claude.json`, `~/.claude/CLAUDE.md`, `~/.tmux.conf`, or the skills directory | Read the `detail` string in the per-host result; fix the permissions or path involved. (`E_PROVISION`) |
+| Claude Code logs **`HTTP hook blocked: <hub> resolves to <ip> (private/link-local address)`**; sessions on that host change state only on reconcile | The hub's public name resolves to a private address (an in-cluster ingress, a split-horizon DNS name), and Claude Code refuses http hooks to such a host | Upgrade the hub and the host's `fleet-agent` to a release newer than 0.6.2 (the hook relay): the agent relays the hooks on `127.0.0.1:4181`, and the hub rewrites the host's hooks to it within five minutes. See [HTTP hook blocked](#http-hook-blocked-private--link-local-address). |
 | Tunnel shows **"down — retrying"** | Control API is disabled, or the host `sshd` blocks remote port forwarding | Enable the Control API in Settings; check `AllowTcpForwarding` / `GatewayPorts` in the host's `sshd_config`. |
 | Tunnel shows **"flapping"** | `ssh` keeps exiting before the connection is established — most often an orphaned tunnel from an earlier app instance still holding the remote port | The supervisor terminates the orphan itself on the next attempt. If it persists, read the badge's reason (the last `ssh` stderr) and see [Tunnel shows "flapping"](#tunnel-shows-flapping). |
 | **MCP bind error** — server enabled but not listening | Port 4180 (or configured port) already in use | Change the port in **Settings → Control API**. The `bind_error` field in `McpStatus` shows the exact OS error. |
@@ -84,6 +85,51 @@ which step failed. Typical causes:
 - `~/.claude.json` contains invalid JSON that cannot be parsed (check with
   `cat ~/.claude.json | python3 -m json.tool` on the remote host).
 - The connection dropped mid-transfer (retry usually succeeds).
+
+### HTTP hook blocked (private / link-local address)
+
+Claude Code refuses a `type: "http"` hook whose host resolves to a private or
+link-local address, and says so in its own log:
+
+```
+HTTP hook blocked: fleet.example.com resolves to 192.168.221.5 (private/link-local address). Loopback (127.0.0.1, ::1) is allowed for local dev.
+```
+
+A hub with a public URL writes that URL's `/hook` into every host's hooks, so
+a hub whose public name resolves to a private address — an in-cluster ingress,
+a split-horizon DNS name, a VPN address — has every http hook on such a host
+dropped: `Stop`, `UserPromptSubmit`, `SessionEnd`, `PostToolUse`,
+`Notification`, `PreCompact`, `PostCompact` and `StopFailure`. The session
+then changes state only when reconcile reads its pane, `hooks_silent` turns
+true in `fleet_health`, and `safe_kill_session` never finalizes. The
+`SessionStart` hook is a `curl` command and still arrives, and so does the MCP
+entry, which is why the host otherwise looks healthy.
+
+**The fix is the agent's hook relay.** A `fleet-agent` that has it listens on
+`127.0.0.1:4181` (its config's `hook_port`, `--hook-port` on `install` /
+`run`; `0` turns it off), says so in its `hello`, and forwards each hook POST
+to the hub's `/hook` over HTTPS — the same name and TLS trust it already
+dials `wss://<hub>/agent` with, so if the agent connects, the hooks arrive.
+The hub records the port on the host row and points that host's hooks at
+`http://127.0.0.1:4181/hook`, which Claude Code allows. Steps:
+
+1. Upgrade the hub, then the agent (`fleet-agent update`, or the hub's
+   `install_agent` / a reinstall) to a release newer than 0.6.2.
+2. Nothing else: when the agent reconnects with a relay port the host reads
+   `provision_stale`, and the hub's content refresh rewrites its hooks
+   within five minutes. `fleet-hub provision --host <alias> --content-only`
+   does it at once. Claude Code picks the new hooks up live.
+3. Check: `jq '.hooks.Stop' ~/.claude/settings.json` on the host shows
+   `http://127.0.0.1:4181/hook`, and `last_hook_at` in `list_hosts` moves on
+   the next turn.
+
+If the agent log says `hook relay not started`, the port is taken (a second
+agent on the same machine, or another service): set another `hook_port` in
+the agent's config and restart it. Until then the hub keeps that host's hooks
+on its public URL. An SSH host is not affected by any of this: its hooks
+post to `127.0.0.1` through its reverse tunnel, or to the public URL on a
+public hub — so an SSH host behind such a hub needs that name to resolve to a
+public address, or to be moved onto the agent transport.
 
 ### Tunnel shows "down — retrying"
 

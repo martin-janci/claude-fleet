@@ -532,6 +532,20 @@ async fn serve(socket: WebSocket, session: Session, limits: Limits, hello_deadli
         if let Err(e) = s.set_host_agent_version(&alias, &hello.agent_version) {
             tracing::debug!(host = %alias, error = %e, "[agent] agent_version not stamped");
         }
+        // The hook relay: where this host's hooks can post on loopback. A
+        // change makes the host stale, so the next refresh pass rewrites its
+        // hooks at the new address (`HubBase::for_host`).
+        match s.set_host_agent_hook_port(&alias, hello.hook_port) {
+            Ok(true) => tracing::info!(
+                host = %alias,
+                port = ?hello.hook_port,
+                "[agent] hook relay changed; the host's hooks will be refreshed"
+            ),
+            Ok(false) => {}
+            Err(e) => {
+                tracing::debug!(host = %alias, error = %e, "[agent] hook_port not stamped")
+            }
+        }
     }
     // Two channels into the writer. The registry holds the ONLY sender of
     // the first, so the writer sees it close exactly when the registry lets
@@ -699,15 +713,18 @@ async fn first_hello(
                         host_name,
                         os,
                         proto,
+                        hook_port,
                     }) => Ok(AgentHello {
                         agent_version: hello_field(&agent_version),
                         host_name: hello_field(&host_name),
                         os: hello_field(&os),
                         proto,
+                        // Port 0 is no port: nothing listens there.
+                        hook_port: hook_port.filter(|p| *p != 0),
                     }),
                     Ok(other) => Err(format!("the first frame must be hello, got {other:?}")),
                     Err(e) => Err(format!("the first frame did not decode: {e}")),
-                }
+                };
             }
             // tungstenite answers these itself; they are not the protocol's.
             Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => continue,
@@ -1387,6 +1404,7 @@ mod tests {
             host_name: "laptop.local".into(),
             os: "linux".into(),
             proto,
+            hook_port: None,
         }
     }
 
@@ -1790,6 +1808,32 @@ mod tests {
     }
 
     // ── registration ───────────────────────────────────────────────────────
+
+    /// The hook relay: the port a hello reports lands on the host row, where
+    /// provisioning reads it; port 0 is no port.
+    #[tokio::test]
+    async fn a_hello_s_hook_relay_port_is_stamped_on_the_host_row() {
+        let hub = hub().await;
+        let port_of = |hub: &Hub| hub.store.lock().unwrap().agent_hook_port("laptop").unwrap();
+        for (version, sent, want) in [("1.0.0", Some(4181), Some(4181)), ("1.0.1", Some(0), None)] {
+            let mut ws = dial(hub.addr, Some(LAPTOP_TOKEN))
+                .await
+                .expect("the upgrade");
+            let mut hello = hello_as(version);
+            if let AgentFrame::Hello { hook_port, .. } = &mut hello {
+                *hook_port = sent;
+            }
+            send(&mut ws, &hello).await;
+            wait_until(&format!("laptop is registered as {version}"), || {
+                hub.registry
+                    .snapshot()
+                    .iter()
+                    .any(|s| s.alias == "laptop" && s.agent_version == version)
+            })
+            .await;
+            assert_eq!(port_of(&hub), want, "hello carried {sent:?}");
+        }
+    }
 
     #[tokio::test]
     async fn a_per_host_token_upgrades_and_registers_under_its_own_alias() {
@@ -2407,6 +2451,7 @@ mod tests {
             host_name: "h".repeat(MIN_INBOUND_BYTES),
             os: "linux".into(),
             proto: fleet_proto::PROTO_VERSION,
+            hook_port: None,
         };
         send(&mut ws, &hello).await;
         assert!(closed_by_hub(&mut ws).await);

@@ -83,7 +83,7 @@ Frames are JSON, one request and one response per id:
 
 | Agent → hub | Meaning |
 |---|---|
-| `hello { agent_version, host_name, os, proto }` | First frame after the upgrade |
+| `hello { agent_version, host_name, os, proto, hook_port? }` | First frame after the upgrade. `hook_port`: the loopback port the agent relays Claude Code hooks on, when it bound one (`fleet-agent` `hook_relay`) |
 | `result { id, exit_code, stdout_b64, stderr_b64, truncated, chunks? }` | One per request |
 | `result_chunk { id, stdout_b64, stderr_b64 }` | Proto 2: one piece of a result, ahead of its `result` |
 | `pong { id }` | |

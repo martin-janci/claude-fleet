@@ -409,6 +409,7 @@ mod tests {
             insecure: false,
             ca_file: None,
             report_errors: true,
+            hook_port: crate::config::default_hook_port(),
         }
     }
 

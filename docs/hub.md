@@ -566,7 +566,11 @@ Then, from that client:
 On a hub with a public URL, provisioning writes `https://<domain>/hook` and
 `https://<domain>/mcp` directly into each host's hook block and MCP entry —
 no reverse SSH tunnel is started, because every host can already reach the
-hub's public address.
+hub's public address. One exception: an agent host whose `fleet-agent` runs
+the hook relay gets `http://127.0.0.1:<port>/hook` in its hook block instead
+(its MCP entry stays public), because Claude Code refuses an http hook whose
+host resolves to a private address — see *A host that cannot be reached* →
+*The hook relay*.
 
 Re-running `provision_hosts` (for example after changing the public URL) is
 safe: it replaces only fleet's own hook entries — an `http` hook to
@@ -817,6 +821,48 @@ the same loop, just in the foreground, under whatever supervises it instead.)
   update`: the hub decides (`update.agent.mode`, pins), the agent installs
   the signed release and goes back to the previous one when it does not
   reconnect. See `docs/updates.md` → *The agent updates itself*.
+
+### The hook relay
+
+Claude Code refuses a `type: "http"` hook whose host resolves to a private or
+link-local address (`HTTP hook blocked: … resolves to 192.168.x.x
+(private/link-local address)`); loopback it allows. A hub whose public name
+resolves to an in-cluster ingress or a split-horizon address is exactly that,
+so the hooks provisioning writes at `https://<hub>/hook` were all dropped and
+the hub learned a session's state only from reconcile (*Troubleshooting* →
+*HTTP hook blocked*).
+
+So `fleet-agent` relays them:
+
+- It listens on `127.0.0.1:4181` — the config's `hook_port`, or
+  `--hook-port` on `install` / `run`; `0` turns the relay off. A config
+  written before the relay existed gets the default, so upgrading the agent
+  is enough. A port that is taken is logged (`hook relay not started`) and
+  the agent runs on without it.
+- It reports the port in its `hello` (`hook_port`, an optional field: an
+  older hub ignores it). The hub stores it on the host row
+  (`hosts.agent_hook_port`, migration 191); a change makes the host
+  `provision_stale`, so the next content refresh (at most five minutes)
+  rewrites the host's hooks at `http://127.0.0.1:<port>/hook`. The SessionStart
+  `curl` hook and the worker guard use the same URL.
+- Each hook POST is forwarded to the hub's own `/hook` over HTTPS, with the
+  name, port and TLS trust (`--ca-file`) the agent dials `/agent` with, so a
+  host whose agent connects has working hooks whatever its DNS says. Only
+  `POST /hook` crosses, with only `Authorization`, `Content-Type`,
+  `X-Fleet-Pane` and `X-Fleet-Sync`; the bearer is the hook's own host
+  token, checked by the hub as before, and the agent adds no credential. A
+  request carrying an `Origin`, or a `Host` that is not loopback, is refused
+  (a browser aimed at the port). The hub's answer — status, `Content-Type`,
+  body — goes back unchanged, since Claude reads it.
+- The relay does not ride the agent's WebSocket: each hook is one short
+  HTTPS request, so a hook still arrives while the agent is reconnecting.
+  While the agent itself is stopped (an upgrade's restart) its host's hooks
+  fail, which Claude Code treats as a non-blocking error; reconcile covers
+  the gap.
+
+Only a hub with a public URL uses the relay, and only for agent hosts. An SSH
+host is unchanged: it posts to `127.0.0.1` through its reverse tunnel on a
+loopback hub, or to the public URL directly on a public hub.
 
 ### Protocol version negotiation
 
