@@ -78,6 +78,7 @@ pub const LOOPS: &[LoopSpec] = &[
     ),
     acts("playbooks", "Stuck playbooks"),
     acts("auto_restore", "Bring killed sessions back"),
+    acts("operator_feed", "Tell Control what changed"),
     acts("pr_shepherd", "PR shepherd"),
     acts("agents_poll", "Agents: find work"),
     acts("agents_run", "Agents: run jobs"),

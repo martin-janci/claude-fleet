@@ -340,6 +340,49 @@
       "danger": {
         "level": "none"
       },
+      "default": "true",
+      "help": "Control's agent gets a short note when a session it started finishes, gets stuck, fails or is lost, when a mission it handed off waits on you, or when a host goes down or runs low. Only while it is idle, and never while automation is paused.",
+      "key": "control.react_to_events",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Tell Control what changed",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "true"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "60",
+      "help": "The shortest time between two notes to Control's agent. What happens in between goes out together in the next one.",
+      "key": "control.feed_min_interval_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Time between notes to Control",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "seconds",
+      "value": "60",
+      "zero": "no wait"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "false",
       "help": "Press Enter for sessions stuck on a \"Press Enter\" prompt. Auth menus, trust prompts and reconnects are always notify-only.",
       "key": "playbooks.press_enter",
@@ -5178,7 +5221,7 @@
     },
     {
       "id": "settings.control_api",
-      "intro": "The embedded MCP server an AI assistant drives the fleet through (read-only here), and how Control's chat goes on when you do not answer.",
+      "intro": "The embedded MCP server an AI assistant drives the fleet through (read-only here), how Control's chat goes on when you do not answer, and what Control's agent hears about the fleet.",
       "layout": "category",
       "parent": "settings",
       "sections": [
@@ -5215,6 +5258,23 @@
             }
           ],
           "title": "Chat"
+        },
+        {
+          "items": [
+            {
+              "key": "control.react_to_events",
+              "type": "field"
+            },
+            {
+              "key": "control.feed_min_interval_secs",
+              "type": "field",
+              "when": {
+                "key": "control.react_to_events",
+                "truthy": true
+              }
+            }
+          ],
+          "title": "Fleet events"
         }
       ],
       "spec": "fleet.page/1",

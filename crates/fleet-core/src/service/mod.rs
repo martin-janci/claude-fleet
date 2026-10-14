@@ -63,6 +63,7 @@ pub mod names;
 pub mod nl;
 pub mod onboarding;
 pub mod operator;
+pub mod operator_feed;
 pub mod org_admin;
 pub mod org_needs;
 pub mod org_spend;

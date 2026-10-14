@@ -373,6 +373,14 @@ pub const ORCHESTRATOR_HEADLESS_MODEL: &str = "orchestrator.headless_model";
 /// [`CONTROL_AUTO_CONTINUE_MINUTES`] (`src/lib/auto_continue.ts`).
 pub const CONTROL_AUTO_CONTINUE: &str = "control.auto_continue";
 pub const CONTROL_AUTO_CONTINUE_MINUTES: &str = "control.auto_continue_minutes";
+/// Control's session hears, as one compact `[fleet events]` digest typed at
+/// its next idle moment, what changed for the sessions it started or handed
+/// work to, the missions it handed off and the fleet's hosts
+/// (`service::operator_feed`). Off: it learns only when it asks.
+pub const CONTROL_REACT_TO_EVENTS: &str = "control.react_to_events";
+/// The fewest seconds between two digests: events in between wait and go
+/// out together in the next one.
+pub const CONTROL_FEED_MIN_INTERVAL_SECS: &str = "control.feed_min_interval_secs";
 pub const PLAYBOOK_OOM_RECREATE: &str = "playbooks.oom_recreate";
 /// Recreates the `oom` playbook may run on one session per 24 h
 /// (`service::playbooks::OOM_ATTEMPT_WINDOW_SECS`). `0` refuses every
@@ -959,6 +967,23 @@ pub const SPECS: &[Spec] = &[
         "How long Control's chat waits for your answer before it sends the recommended option.",
     )
     .unit(Unit::Minutes),
+    Spec::new(
+        CONTROL_REACT_TO_EVENTS,
+        "true",
+        Kind::Bool,
+        "Tell Control what changed",
+        "Control's agent gets a short note when a session it started finishes, gets stuck, fails or is lost, when a mission it handed off waits on you, or when a host goes down or runs low. Only while it is idle, and never while automation is paused.",
+    ),
+    Spec::new(
+        CONTROL_FEED_MIN_INTERVAL_SECS,
+        "60",
+        Kind::Secs,
+        "Time between notes to Control",
+        "The shortest time between two notes to Control's agent. What happens in between goes out together in the next one.",
+    )
+    .unit(Unit::Seconds)
+    .zero("no wait")
+    .tags(&[Tag::Advanced]),
     Spec::new(
         PLAYBOOK_PRESS_ENTER,
         "false",

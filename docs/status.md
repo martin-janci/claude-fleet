@@ -249,6 +249,22 @@ Control's own session is restarted through `restart_session` and gets a
 `[fleet]` note in its conversation. No migration; the controller is still
 never restored without `force`.
 
+**The operator feed** is landed and ON by default (`control.react_to_events`,
+`service/operator_feed.rs`, loop `operator_feed`): Control's own session gets
+one compact `[fleet events]` digest, through the deferred queue so only
+while it is idle, when a session it started (`origin = 'operator'`) or
+briefed (a `control_handoffs` receipt) finishes a turn, waits on an answer,
+fails, is lost, auto-restored or past restoring; when a mission it handed off
+waits on a person; or when a host goes unreachable or low on disk or memory.
+At most one per `control.feed_min_interval_secs` (60) and 6 an hour; none
+while one is still queued, none while paused, never about the operator
+itself, and never a session's own words (names and vocabulary only). The
+cursor and the already-reported host/mission conditions live in the
+`control.feed_state` setting; no migration. The digest is typed as fleet's
+(`prompt_origin::FLEET_PROMPT_MARKS`); the operator's `CLAUDE.md` has a
+*Fleet events* section, which an operator born earlier gets at its next
+birth.
+
 The work graph's M0–M3 are landed (work links anchored on participants,
 group-by-work, and M2's work journal, carry rules, handover brief and resume
 — `work` / `work_link` actions, `service/work/`; M3's trackers: Jira Cloud
