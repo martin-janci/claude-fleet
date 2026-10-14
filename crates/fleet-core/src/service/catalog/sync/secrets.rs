@@ -138,7 +138,7 @@ impl std::fmt::Debug for Substituted {
 /// (lower-case, empty, unterminated) is left untouched, exactly as
 /// `find_placeholders` would ignore it. Unknown names are left as `${NAME}`
 /// and recorded in `missing` (once each, in first-seen order).
-fn substitute_str(
+pub(crate) fn substitute_str(
     text: &str,
     values: &BTreeMap<String, String>,
     missing: &mut Vec<String>,

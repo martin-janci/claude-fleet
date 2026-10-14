@@ -34,6 +34,7 @@ function rule(over: Partial<AgentRule> = {}): AgentRule {
     granted_by: 'console',
     granted_at: 0,
     expires_at: null,
+    bindings: '[]',
     active: true,
     ...over,
   };

@@ -270,6 +270,8 @@ fn fx_at(config: &str, project: bool, level: &str) -> Fx {
             granted_by: "t".into(),
             granted_at: 0,
             expires_at: None,
+            definition: None,
+            bindings: "[]".into(),
         })
         .unwrap();
     let rule = s.agent_rule(id).unwrap().unwrap();

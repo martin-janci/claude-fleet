@@ -413,6 +413,9 @@ impl Harness for Claude {
             Kind::McpServer => self.render_mcp(asset, &mut plan),
             Kind::PluginRef => self.render_plugin(asset, &mut plan),
             Kind::Command => self.render_command(asset, &mut plan),
+            Kind::FleetAgent => plan
+                .warnings
+                .push("a fleet agent's definition is the hub's: nothing to install".into()),
         }
         Ok(plan)
     }
@@ -540,6 +543,8 @@ impl Harness for Claude {
             .into_iter()
             .map(|(kind, name)| {
                 let (hash, secret_like, fleet_owned) = match kind {
+                    // Never installed, so never found on a host.
+                    Kind::FleetAgent => (None, false, false),
                     Kind::Skill => (
                         dir_hash(snap, &format!("{SKILLS_DIR}/{name}/")),
                         false,
