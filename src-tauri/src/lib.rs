@@ -502,6 +502,7 @@ pub fn run() {
             commands::missions::delete_mission,
             commands::missions::set_work_dep,
             commands::missions::set_work_hold,
+            commands::missions::set_work_archived,
             commands::missions::accept_work_proposals,
             commands::missions::undo_work_accept,
             commands::missions::set_work_done_when,

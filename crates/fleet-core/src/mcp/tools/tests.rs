@@ -12138,6 +12138,9 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     // gate; a tree is `propose`'s, stored in the proposing session's name.
     ("work_link", "dep", &["Drive"]),
     ("work_link", "hold", &["Drive"]),
+    // Archiving a ticket (migration 190): a person's tidy-up of the item,
+    // so its sessions pass `hold`'s gate.
+    ("work_link", "archive_item", &["Drive"]),
     ("work_link", "done_when", &["Drive"]),
     ("work_link", "propose_tree", &["Drive"]),
     // The two conversation-addressed arms of the `own` tier: a resume

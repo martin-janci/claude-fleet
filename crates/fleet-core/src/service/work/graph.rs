@@ -328,7 +328,7 @@ pub(super) fn actor(scope: &ViewScope) -> String {
 }
 
 /// The item, if `scope` may see it; else exactly an unknown id.
-pub(super) fn visible_item(s: &Store, scope: &ViewScope, id: i64) -> Result<WorkItemRow, IpcError> {
+pub(crate) fn visible_item(s: &Store, scope: &ViewScope, id: i64) -> Result<WorkItemRow, IpcError> {
     match s.get_work_item(id)? {
         Some(i) if item_visible(&scope.org, s, &i)? => Ok(i),
         _ => Err(orgs::not_found("work item", id)),
