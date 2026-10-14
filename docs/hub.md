@@ -841,7 +841,7 @@ So `fleet-agent` relays them:
   the agent runs on without it.
 - It reports the port in its `hello` (`hook_port`, an optional field: an
   older hub ignores it). The hub stores it on the host row
-  (`hosts.agent_hook_port`, migration 190); a change makes the host
+  (`hosts.agent_hook_port`, migration 191); a change makes the host
   `provision_stale`, so the next content refresh (at most five minutes)
   rewrites the host's hooks at `http://127.0.0.1:<port>/hook`. The SessionStart
   `curl` hook and the worker guard use the same URL.

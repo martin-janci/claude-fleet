@@ -613,6 +613,15 @@ export async function keepWorkOpen(itemId: number): Promise<Result<WorkItemRow>>
   return r;
 }
 
+/** Archive a ticket or task (`on: false` unarchives). An archived one leaves
+ *  the ticket lists and hides in the Work view behind the Archived switch,
+ *  unless a session is running on it. Kept on the hub: every device sees it. */
+export async function setWorkArchived(itemId: number, on: boolean): Promise<Result<{ item_id: number; changed: boolean }>> {
+  const r = await invokeCmd<{ item_id: number; changed: boolean }>('set_work_archived', { args: { item_id: itemId, on } });
+  if (r.ok) bumpWorkChanged();
+  return r;
+}
+
 /** A person's edit of a native item: each field left out stays as it is;
  *  `notes: ''`, `assignees: []` and `due_at: ''` clear them. A tracker's ticket is
  *  refused, `E_INVALID`, naming it: its text is its tracker's. */

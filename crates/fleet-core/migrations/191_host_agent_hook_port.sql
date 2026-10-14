@@ -5,4 +5,4 @@
 -- private address. NULL = no relay (an SSH host, an older agent, or one
 -- whose relay is off or could not bind).
 ALTER TABLE hosts ADD COLUMN agent_hook_port INTEGER;
-INSERT OR IGNORE INTO schema_version (version) VALUES (190);
+INSERT OR IGNORE INTO schema_version (version) VALUES (191);

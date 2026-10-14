@@ -5235,6 +5235,24 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             }),
         ),
         (
+            "set_work_archived",
+            "work_link",
+            json!({ "session_id": null, "action": "archive_item", "key": null, "item_id": 3,
+                    "link_id": null, "source": null, "on": true }),
+            r#"{"item_id":3,"changed":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::set_work_archived(
+                    b,
+                    commands::missions::SetWorkArchivedArgs {
+                        item_id: 3,
+                        on: true,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "accept_work_proposals",
             "work_link",
             json!({ "session_id": null, "action": "accept_many", "key": null, "item_id": null,

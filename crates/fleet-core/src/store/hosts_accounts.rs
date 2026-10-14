@@ -354,7 +354,7 @@ impl Store {
     }
 
     /// The hook relay port the host's fleet-agent reported in its hello
-    /// (migration 190), `None` for no relay. A CHANGE also forgets a
+    /// (migration 191), `None` for no relay. A CHANGE also forgets a
     /// provisioned host's fingerprint, in the same statement, so it reads
     /// `provision_stale` and the stale-host refresh rewrites its hooks at the
     /// new address (`HubBase::for_host`) without anybody asking. Returns

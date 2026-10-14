@@ -5,6 +5,7 @@
 
 pub mod abandon;
 pub mod agent_handover;
+pub mod archive;
 pub mod attachments;
 pub mod brief_draft;
 pub mod buckets;
@@ -80,7 +81,8 @@ pub struct WorkArgs {
     /// Tickets: one tracker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tracker_id: Option<i64>,
-    /// mine|sprint|recent|filter:<id>
+    /// mine|sprint|recent|archived|filter:<id> (`archived`: the tickets a
+    /// person archived, which every other view leaves out)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view: Option<String>,
     /// Tickets: text filter.
@@ -211,7 +213,7 @@ pub struct WorkLinkArgs {
     /// Start: worktree name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
-    /// trust_project: on/off.
+    /// trust_project: on/off; hold and archive_item: on (default) or off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on: Option<bool>,
     /// Link across orgs anyway.
@@ -576,6 +578,7 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "handover",
     "archive",
     "unarchive",
+    "archive_item",
     "snooze",
     "never",
     "dismiss",
@@ -722,6 +725,7 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     // Orchestration O2: the mission graph.
     ("set_work_dep", "work_link", "dep"),
     ("set_work_hold", "work_link", "hold"),
+    ("set_work_archived", "work_link", "archive_item"),
     ("accept_work_proposals", "work_link", "accept_many"),
     ("undo_work_accept", "work_link", "undo_accept"),
     // Orchestration O3: acceptance conditions and a person's check.

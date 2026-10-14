@@ -157,6 +157,32 @@ describe('WorkTaskDetail', () => {
     expect(calls('set_work_status')).toEqual([{ item_id: 77, status: 'done' }]);
   });
 
+  it('Archive archives the ticket on the hub; an archived one says so and offers Unarchive', async () => {
+    let archivedAt: number | null = null;
+    handlers.work_task = () => ({ ...trackerTask, task: { ...trackerTask.task, archived_at: archivedAt } });
+    handlers.set_work_archived = (a) => {
+      archivedAt = a.on ? 1790000000 : null;
+      return { item_id: a.item_id, changed: true };
+    };
+    render(WorkTaskDetail, { taskId: 'ABC-12' });
+    await flush();
+    const itemId = trackerTask.task.item_id;
+    expect(screen.queryByTestId('work-task-archived-chip')).toBeNull();
+    expect(screen.getByTestId('work-task-archive').textContent).toBe('Archive');
+    await fireEvent.click(screen.getByTestId('work-task-archive'));
+    await flush();
+    expect(calls('set_work_archived')).toEqual([{ item_id: itemId, on: true }]);
+    expect(screen.getByTestId('work-task-archived-chip')).toBeTruthy();
+    expect(screen.getByTestId('work-task-archive').textContent).toBe('Unarchive');
+    await fireEvent.click(screen.getByTestId('work-task-archive'));
+    await flush();
+    expect(calls('set_work_archived')).toEqual([
+      { item_id: itemId, on: true },
+      { item_id: itemId, on: false },
+    ]);
+    expect(screen.queryByTestId('work-task-archived-chip')).toBeNull();
+  });
+
   it('a task nobody is asked about, and a ticket, show no close question', async () => {
     render(WorkTaskDetail, { taskId: 'item:77' });
     await flush();

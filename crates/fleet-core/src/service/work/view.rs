@@ -320,13 +320,19 @@ pub struct WorkTask {
     pub placement_version: i64,
     pub sessions: Vec<TaskLink>,
     pub sessions_more: u32,
-    /// No active session, and the task is done or every one of its links
-    /// (at least one of them ended) is archived: the tree hides it when
-    /// asked to (`filters.archived: false`). Judged over every link, not
-    /// only the caller's: a fenced caller must not see a task as archived
-    /// while another host or org still works on it.
+    /// No active session, and the task is done, a person archived it
+    /// ([`Self::archived_at`]), or every one of its links (at least one of
+    /// them ended) is archived: the tree hides it when asked to
+    /// (`filters.archived: false`). Judged over every link, not only the
+    /// caller's: a fenced caller must not see a task as archived while
+    /// another host or org still works on it.
     #[serde(default)]
     pub archived: bool,
+    /// When a person archived the task's item (`work_link { archive_item }`,
+    /// migration 190): what *Unarchive* undoes. `None` for a task archived
+    /// only because it is done or its links are. An older hub never sends it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<i64>,
     /// "Finished — close?" (CF-5): fleet's own work nobody has closed whose
     /// sessions have all ended. Never set on a tracker's ticket, on work
     /// whose status a person or a job set, or after *Keep open* until a
@@ -2526,8 +2532,11 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
     let status_category = item.and_then(|i| item_status(g, i));
     // Over every link: `counts.active` is the caller's, and a session on a
     // host or in an org it cannot see still keeps the task in work.
+    let archived_at = item.and_then(|i| i.item.archived_at);
     let archived = !b.all.iter().any(|(_, st)| *st == "active")
-        && (status_category.as_deref() == Some("done") || all_links_archived(&b.all));
+        && (status_category.as_deref() == Some("done")
+            || archived_at.is_some()
+            || all_links_archived(&b.all));
     let close_suggested = close_suggested(g, item, status_category.as_deref(), &b.all);
     let (blocked, blocked_by) = match item {
         Some(i) if status_category.as_deref() != Some("done") => blocked_on(g, i.item.id),
@@ -2644,6 +2653,7 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
         sessions_more: listed.len() as u32,
         sessions: Vec::new(),
         archived,
+        archived_at,
         close_suggested,
         origin,
         project_id,

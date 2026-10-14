@@ -3474,6 +3474,22 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    m.row(
+        "work_link",
+        "archive_item",
+        move |fx, _| json!({ "action": "archive_item", "item_id": fx.item_b }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "a session does not archive"),
+                Who::BoundA => is_code(who, a, "E_NOTFOUND", "another org's item"),
+                _ => is_ok(who, a, "archive_item"),
+            }
+        },
+    )
+    .await;
     for action in ["accept_many", "undo_accept"] {
         m.row(
             "work_link",

@@ -1484,6 +1484,41 @@ fn a_done_task_without_an_active_session_is_archived() {
     assert!(d.task.archived);
 }
 
+/// A task a person archived (`work_link { archive_item }`) is archived
+/// though it is not done and no link is: hidden while hiding, listed by
+/// Archived, carrying `archived_at` for Unarchive. A session active on it
+/// keeps it in the tree.
+#[test]
+fn a_task_a_person_archived_is_archived_until_unarchived() {
+    let w = world();
+    w.st.lock().unwrap().set_item_archived(w.t2, true).unwrap();
+    let p = page(&w, &OrgScope::All, hiding());
+    assert!(!keys(&p).contains(&"TK-2".to_string()), "{:?}", keys(&p));
+    assert_eq!(p.archived_hidden, 1);
+    let only = page(
+        &w,
+        &OrgScope::All,
+        WorkTreeFilters {
+            archived_only: Some(true),
+            ..Default::default()
+        },
+    );
+    let t = task_of(&only, "TK-2");
+    assert!(t.archived);
+    assert!(t.archived_at.is_some());
+
+    link(&w, w.s1, w.t2, true);
+    let busy = page(&w, &OrgScope::All, hiding());
+    assert!(
+        !task_of(&busy, "TK-2").archived,
+        "a live session keeps it in work"
+    );
+
+    w.st.lock().unwrap().set_item_archived(w.t2, false).unwrap();
+    let back = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    assert_eq!(task_of(&back, "TK-2").archived_at, None);
+}
+
 /// A client from before the archive (a fleet-mobile that never sends
 /// `archived` and has no "N hidden" row) keeps seeing every task: absent
 /// is not a request to hide.
