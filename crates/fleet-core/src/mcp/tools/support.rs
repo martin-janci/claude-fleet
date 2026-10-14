@@ -1252,6 +1252,12 @@ pub(super) fn enforce_admin(caller: &Caller, tool: &str) -> Result<(), McpError>
              admin's; on the hub machine use fleet-hub org|client|person ({} refused)",
             caller.label()
         )
+    } else if access == Some(guard::Access::PersonOrAdmin) {
+        format!(
+            "{tool} is for the fleet's operator or a person's own paired device, not a \
+             host's token ({} refused)",
+            caller.label()
+        )
     } else if access == Some(guard::Access::HostToken) {
         // Multi-user M1 (T12). Says which caller it IS for, because the
         // refused one is usually the operator reaching for a claim: their

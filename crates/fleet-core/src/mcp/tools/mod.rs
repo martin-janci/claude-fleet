@@ -78,6 +78,8 @@ mod tests_catalog_admin;
 #[cfg(test)]
 mod tests_changesets;
 #[cfg(test)]
+mod tests_env_vars;
+#[cfg(test)]
 mod tests_isolation;
 #[cfg(test)]
 mod tests_read_pool;

@@ -110,6 +110,15 @@ pub enum Access {
     /// org, and anybody else is refused there — a row cannot say "an admin
     /// of the org this device is bound to", because that is a store read.
     Device,
+    /// [`Access::Person`] ∪ [`Access::Device`]: the master or a fleet
+    /// admin's own device, and also ANY person's paired device. It exists for
+    /// `env_vars`, whose `person` scope is every person's own (their git
+    /// identity, their `GH_TOKEN`): the tool then lets a non-admin caller
+    /// list, set and unset only its own person's rows
+    /// (`service::env::EnvCaller`), and the shared scopes stay the admin's.
+    /// Never a per-host token (the agent in a session is not the person it
+    /// works for) nor a single-purpose token.
+    PersonOrAdmin,
 }
 
 /// Whether `caller` may call `tool` by its row's [`Access`] — the one
@@ -187,16 +196,25 @@ pub fn access_allows(caller: &crate::mcp::Caller, tool: &str) -> bool {
         Some(Access::HostToken) => caller.host_alias.is_some(),
         // Phase D: WHAT the caller is (a person's device); whose authority it
         // carries is the tool's question (`org_admin::authority_for`).
-        Some(Access::Device) => {
-            caller.host_alias.is_none()
-                && !caller.mode.is_single_purpose()
-                && caller
-                    .client
-                    .as_ref()
-                    .is_some_and(|c| c.person_id.is_some())
+        Some(Access::Device) => is_a_persons_device(caller),
+        // The union of the two arms above it names; what each may do is the
+        // tool's question (`env_vars`: a person's own rows only).
+        Some(Access::PersonOrAdmin) => {
+            caller.is_master_or_fleet_admin_device() || is_a_persons_device(caller)
         }
         Some(Access::Master) | None => caller.is_master(),
     }
+}
+
+/// [`Access::Device`]'s shape: a paired device that proves a person — not
+/// the master, a per-host token or a single-purpose token.
+fn is_a_persons_device(caller: &crate::mcp::Caller) -> bool {
+    caller.host_alias.is_none()
+        && !caller.mode.is_single_purpose()
+        && caller
+            .client
+            .as_ref()
+            .is_some_and(|c| c.person_id.is_some())
 }
 
 /// Wall-clock class a tool call is bounded to. The caps themselves
@@ -797,12 +815,13 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
-    // Session environment variables (spec 2026-10-11): a person's, like the
-    // fleet's settings; a write needs a trusted full device, a reference
-    // the master (checked in the tool).
+    // Session environment variables (spec 2026-10-11): the shared scopes are
+    // an admin's, like the fleet's settings (a write needs a trusted full
+    // device, a reference the master); the `person` scope is every person's
+    // own, so any person's device reaches the tool (checked in the tool).
     ToolPolicy {
         name: "env_vars",
-        access: Access::Person,
+        access: Access::PersonOrAdmin,
         readonly: false,
         confirm: false,
         deadline: Deadline::Quick,

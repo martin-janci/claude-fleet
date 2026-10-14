@@ -88,10 +88,28 @@ tasks are never suggested.
 
 ## Environment
 
-Every session fleet starts gets environment variables from four scopes,
-`global` < `host` < `project` (`owner/repo`) < `session`, the narrower
-winning (Settings › Environment; the `env_vars` tool; `new_session { env }`
-for a session's own plain values). An entry is a plain value, a secret
+Every session fleet starts gets environment variables from five scopes,
+`global` < `host` < `project` (`owner/repo`) < `person` < `session`, the
+narrower winning (Settings › Environment; the `env_vars` tool; `new_session
+{ env }` for a session's own plain values). `person` is the session
+OWNER's (`sessions.owner_person_id` at launch, keyed by the person's id): it
+beats a host or project default and loses only to one session's own
+override. An unclaimed session gets no person scope, and a disabled
+person's is no longer applied. Each person lists, sets and unsets only their
+own person variables (scope key empty or `me`), from any of their paired
+devices; nobody else — the hub owner included — reads or writes them, and
+the shared scopes stay a fleet admin's.
+
+**Recipe: per-person git identity and `GH_TOKEN`.** Each person sets, with
+scope `person`, `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`,
+`GIT_COMMITTER_EMAIL` (plain) and `GH_TOKEN` (secret). Their sessions then
+commit as them, and `gh` — and git over https through gh's credential
+helper (`gh auth setup-git`) — pushes and opens PRs under their GitHub
+account. Keep a fleet-wide or per-host `GH_TOKEN` (or the host's own
+environment) as the fallback for unclaimed sessions and people who set none:
+the launch file is sourced by the pane command, so a person's value
+overrides whatever the host, pod or tmux server exported, and a person
+without one keeps that. An entry is a plain value, a secret
 (write-only: never listed again) or, from the master only, a reference
 (`env:NAME` or `file:/abs`) that the hub or desktop starting the session
 reads at launch, trimmed; an unresolved reference refuses the start
