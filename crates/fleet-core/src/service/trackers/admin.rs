@@ -644,7 +644,13 @@ fn org_audit_target(
             "org_rule",
             args.rule_id.map(|i| i.to_string()).unwrap_or_default(),
         ),
-        _ => ("org", org()),
+        // A device, as `org_admin::audited_resource` records a bind.
+        OrgAction::AssignClient => ("device", name.clone()),
+        OrgAction::UpdateOrg
+        | OrgAction::RemoveOrg
+        | OrgAction::AssignHost
+        | OrgAction::UnassignHost
+        | OrgAction::AssignTracker => ("org", org()),
     })
 }
 
@@ -863,10 +869,21 @@ pub(crate) mod tests {
         };
         call("list_orgs", json!({}));
         assert!(events().is_empty(), "a read records nothing");
-        let out = call("add_org", json!({ "name": "acme" }));
+        let out = call(
+            "add_org",
+            json!({
+                "name": "acme",
+                "secret": "s3cret",
+                "credential_ref": "vault:acme",
+                "site_url": "https://acme.example",
+            }),
+        );
         let org = out["id"].as_i64().unwrap();
         let ev = events();
         assert_eq!(ev.len(), 1);
+        for key in ["secret", "credential_ref", "site_url"] {
+            assert!(ev[0].representation.get(key).is_none(), "{key} leaked");
+        }
         assert_eq!(
             (
                 ev[0].action.as_str(),
@@ -887,7 +904,7 @@ pub(crate) mod tests {
         assert_eq!(ev[0].action, "assign_client");
         assert_eq!(
             (ev[0].resource_type.as_str(), ev[0].resource_id.as_str()),
-            ("org", org.to_string().as_str())
+            ("device", "phone")
         );
         let rule = call("add_rule", json!({ "org_id": org, "owner": "acme" }));
         let rid = rule["id"].as_i64().unwrap();

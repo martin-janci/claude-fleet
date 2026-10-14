@@ -920,6 +920,54 @@ fn members_carry_shares_since_and_their_devices_for_an_administrator() {
     assert!(json.get("shares_since").is_some(), "{json}");
 }
 
+/// A fleet admin's device inside an org is the fleet admin's to see: an org
+/// admin's member list leaves it out, as the org's device list does.
+#[test]
+fn an_org_admins_member_list_leaves_out_a_fleet_admins_devices() {
+    let st = Mutex::new(Store::open_in_memory().unwrap());
+    let (acme, root2) = {
+        let s = st.lock().unwrap();
+        let acme = s.add_org("Acme", None, false).unwrap().id;
+        let jane = s.create_person("jane", None).unwrap().id;
+        s.set_org_member(acme, jane, "admin", None).unwrap();
+        s.insert_client_token("jane-phone", "digest-1", "full")
+            .unwrap();
+        s.set_client_person("jane-phone", Some(jane)).unwrap();
+        let root2 = s.create_person("root2", None).unwrap().id;
+        let fa = s
+            .role(crate::store::RoleRef::Realm(crate::store::ROLE_FLEET_ADMIN))
+            .unwrap()
+            .unwrap();
+        s.map_role(crate::store::Principal::Person(root2), fa.id)
+            .unwrap();
+        s.set_org_member(acme, root2, "member", None).unwrap();
+        s.insert_client_token("root2-phone", "digest-2", "full")
+            .unwrap();
+        s.set_client_person("root2-phone", Some(root2)).unwrap();
+        s.set_client_org("root2-phone", Some(acme)).unwrap();
+        (acme, root2)
+    };
+    let devices_of = |view: AdminView| -> Vec<String> {
+        let d = org_details(&st, &vs(&OrgScope::All), view).unwrap();
+        let d = d.iter().find(|d| d.org.id == acme).unwrap();
+        let m = d.members.as_ref().unwrap();
+        m.iter()
+            .find(|m| m.person_id == root2)
+            .unwrap()
+            .devices
+            .clone()
+            .expect("an administrator is told the devices")
+    };
+    let org_admin = AdminView::Person {
+        roles: [(acme, "admin".to_string())].into_iter().collect(),
+    };
+    assert!(devices_of(org_admin).is_empty());
+    assert_eq!(
+        devices_of(AdminView::Admin),
+        vec!["root2-phone".to_string()]
+    );
+}
+
 /// Redesign 11.8: spend by person is all or nothing. The fleet's
 /// administrator who sees every session gets the table; an org's own admin
 /// (who does not see every session on the hub) and anyone else get no key

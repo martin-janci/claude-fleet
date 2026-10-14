@@ -442,8 +442,12 @@ fn run_direct(
     match cmd {
         OrgCmd::Member { cmd } => match cmd {
             MemberCmd::List { org, json } => {
-                let members =
-                    fleet_core::service::org_admin::list_members(&store, *org).map_err(e)?;
+                let members = fleet_core::service::org_admin::list_members(
+                    &store,
+                    *org,
+                    fleet_core::service::org_admin::Me::LOCAL,
+                )
+                .map_err(e)?;
                 if *json {
                     out::line(&serde_json::to_string_pretty(&members).map_err(|e| e.to_string())?);
                 } else if members.is_empty() {

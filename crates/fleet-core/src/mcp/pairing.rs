@@ -735,6 +735,16 @@ pub async fn handle_pair(
                 // gain a device or a membership outside it (TASK-264). A
                 // fleet-authority mint (`fenced_org: None`) skips it.
                 if let Some(org) = req.fenced_org {
+                    // The person may have left the org since the mint.
+                    if let Some(p) = row.person_id {
+                        if s.org_role(org, p)?.is_none() {
+                            return Err(crate::ipc_error::IpcError::new(
+                                crate::ipc_error::codes::E_FORBIDDEN,
+                                "the person is not a member of your org any more; \
+                                 add them first (set_member)",
+                            ));
+                        }
+                    }
                     crate::service::org_admin::require_trust_inside_org(
                         s,
                         row.person_id,

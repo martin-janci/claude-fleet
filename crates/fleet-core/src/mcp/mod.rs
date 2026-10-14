@@ -1685,6 +1685,48 @@ mod tests {
             assert_eq!(pairs, 1, "exactly one pair event");
         }
 
+        // The person left the org between the fenced mint and the redeem:
+        // refused, no row, no `pair` event.
+        let dave = {
+            let s = store.lock().unwrap();
+            let dave = s.create_person("dave", None).unwrap().id;
+            s.set_org_member(acme, dave, "member", None).unwrap();
+            dave
+        };
+        let left = pairings.mint(pairing::MintRequest {
+            person: Some("dave"),
+            org_id: Some(acme),
+            minter: pairing::Minter {
+                fenced_org: Some(acme),
+                ..mint_req("x", "full", true).minter
+            },
+            ..mint_req("dave-phone", "full", true)
+        });
+        store.lock().unwrap().remove_org_member(acme, dave).unwrap();
+        let gone = round_trip(addr, &pair_req(&left.code, "phone.invalid")).await;
+        assert!(gone.contains("403"), "{gone}");
+        assert!(body_of(&gone).contains("not a member"), "{gone}");
+        {
+            let s = store.lock().unwrap();
+            assert!(
+                !s.list_client_tokens(true)
+                    .unwrap()
+                    .iter()
+                    .any(|r| r.name == "dave-phone"),
+                "the refused redeem left no row"
+            );
+            let ev = s
+                .admin_events(&crate::store::AdminEventQuery {
+                    limit: 400,
+                    ..Default::default()
+                })
+                .unwrap();
+            assert!(
+                !ev.iter().any(|e| e.resource_id == "dave-phone"),
+                "no pair event for the refused redeem"
+            );
+        }
+
         // A camera scan opens `GET /pair`, which must explain what to do
         // rather than answer 405. No secret is in it: the code lives in the
         // URL fragment, which a browser never sends.

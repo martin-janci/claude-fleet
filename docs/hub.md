@@ -1256,8 +1256,8 @@ What a client may do:
   device, never an org-bound client; only the master token may
   `add_catalog` or `remove_catalog` (a removal drops every other client's
   grant on that catalog, and only the master could add it back). `client
-  list`'s ASSETS column is the personal grant; `catalog list` shows every
-  grant.
+  list`'s ASSETS column is the person's effective `assets-admin` grant;
+  `catalog list` shows every grant.
 - A prompt typed on a phone reaches an agent **marked** as untrusted input,
   naming the client it came from, unless you have **trusted** that client.
   `raw: true` is the master token's alone.
@@ -1579,13 +1579,21 @@ the master's `revoke_client` / `set_client_trust`, pairing, SSO
 provisioning and `fleet-hub person|client|realm` is an admin event
 (`admin_events`, migration 182): when, the acting person and device (none
 for the operator on the hub machine), the action, the resource's type and
-id, and what the change said, with every key that could hold a secret
-dropped and the text cut at 4096 characters. The events come from
+id, and what the change said, with the change scrubbed before it is stored: a key
+that names a secret is dropped at any depth, whatever its case; a
+`{key, value}` pair keeps its value only when the key names no secret
+(`secret`, `password`, `token`, `api_key`), and every other `value` is
+dropped; `user:pass@` in a URL becomes `***@`; a string longer than 512
+characters is cut and ends in `…`; and a change whose text is still longer
+than 4096 characters is stored as `{"truncated":true,"chars":n}` rather than
+cut in the middle of its JSON. The events come from
 `org_admin` (`pair_device` included), `realm_admin`, the master's
-`revoke_client` and `set_client_trust`, redeeming a pairing code, an SSO
-sign-in that creates a person and its account link, and the hub CLI's
-`person rename|disable|enable|link-sso|unlink-sso`, `client
-grant|ungrant|bind-person|unbind-person` and `realm` commands. The table is
+`revoke_client`, `set_client_trust` and `pair_client` (the mint), the
+master's `work_admin` org writes (recorded `by: master`), redeeming a
+pairing code, an SSO sign-in that creates a person and its account link,
+and the hub CLI's `person rename|disable|enable|link-sso|unlink-sso`,
+`client grant|ungrant|bind-person|unbind-person`, `fleet-hub org …` and
+`client bind` (recorded `by: operator`) and `realm` commands. The table is
 append-only in SQL: an update aborts, and a delete aborts except in the
 retention sweep, which drops events older than `auth.audit_retention_days`
 (default 365; `0` keeps them forever). Read it with `realm_admin { audit }`

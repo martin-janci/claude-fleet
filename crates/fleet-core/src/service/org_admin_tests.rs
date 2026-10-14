@@ -597,6 +597,15 @@ fn an_org_admin_sees_and_acts_on_their_orgs_devices_only() {
         .collect();
     assert_eq!(listed.len(), 2, "{listed:?}");
     assert!(!listed.contains(&"root2-phone".to_string()), "{listed:?}");
+    // Nor does the member list carry the fleet admin's device.
+    let members = list_members(&c.st.lock().unwrap(), c.acme, me).unwrap();
+    assert!(
+        members
+            .iter()
+            .all(|m| !m.devices.contains(&"root2-phone".to_string())),
+        "{members:?}"
+    );
+    assert!(members.iter().any(|m| m.name == "root2"), "{members:?}");
     for name in ["owner-phone", "eve-phone", "root2-phone"] {
         let mut a = args("revoke_device");
         a.device = Some(name.into());

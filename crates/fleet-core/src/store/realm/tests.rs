@@ -637,6 +637,11 @@ fn moving_a_tall_subtree_under_a_deep_parent_is_refused() {
         s.list_groups().is_ok(),
         "the listing still works after the refusal"
     );
+    // The exact boundary: two tall under the 62-deep chain is 64, accepted.
+    let p = s.create_group(None, "p", None).unwrap().id;
+    let _q = s.create_group(Some(p), "q", None).unwrap().id;
+    s.move_group(p, deep).unwrap();
+    assert!(s.list_groups().is_ok());
     // One group tall fits where three did not.
     let lone = s.create_group(None, "lone", None).unwrap().id;
     s.move_group(lone, deep).unwrap();

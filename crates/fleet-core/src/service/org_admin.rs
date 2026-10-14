@@ -648,10 +648,15 @@ pub(crate) fn is_fleet_admins_device(admins: &[i64], c: &crate::store::ClientTok
         .is_some_and(|p| admins.binary_search(&p).is_ok())
 }
 
-/// The live members of `org`, admins first.
-pub fn list_members(s: &Store, org: i64) -> Result<Vec<MemberSummary>, IpcError> {
+/// The live members of `org`, admins first. An org admin is not shown a
+/// fleet admin's devices, as `list_devices` hides them.
+pub fn list_members(s: &Store, org: i64, me: Me<'_>) -> Result<Vec<MemberSummary>, IpcError> {
     let owner = s.personal_owner_id()?;
-    let devices = s.active_client_tokens()?;
+    let mut devices = s.active_client_tokens()?;
+    if matches!(me.authority, Authority::Org { .. }) {
+        let admins = s.fleet_admins()?;
+        devices.retain(|d| !is_fleet_admins_device(&admins, d));
+    }
     let mut out = Vec::new();
     for m in s.org_members(org)? {
         let Some(p) = s.get_person(m.person_id)? else {
@@ -1381,7 +1386,7 @@ fn run_action(
             let org = org_of(s, args)?.ok_or_else(|| {
                 IpcError::new(codes::E_INVALID, "list_members needs org_id or org")
             })?;
-            let mut members = list_members(s, org)?;
+            let mut members = list_members(s, org, me)?;
             count_member_sessions(s, org, me.person, &mut members)?;
             to_json(&members)
         }
@@ -1403,7 +1408,7 @@ fn run_action(
             }
             s.set_org_member(org, person, role, me.person)?;
             tracing::info!(org, person, role = %role, "[org_admin] set a member");
-            to_json(&list_members(s, org)?)
+            to_json(&list_members(s, org, me)?)
         }
         Action::RemoveMember => {
             let org = org_of(s, args)?.ok_or_else(|| {
