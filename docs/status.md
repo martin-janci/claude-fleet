@@ -918,7 +918,10 @@ Automation › Agents lists the catalog's fleet agents with their instances;
 *New instance* and *Edit* open the grant form (`fleet_agents/form.rs`, the
 `agents_fleet` command), *Revoke* and *Run now* act on an instance; an
 agent drafts one in a chat with a `wizard: fleet_agent` block, which the
-person sends; the phone lists the instances with Revoke.
+person sends; the phone lists the instances with Revoke. Step 6 in part: the
+`github_prs` and `github_comments` sources, `pr_comment` and `pr_labels`,
+and comments and new items on trackers other than Jira; not `pr_review`,
+polling other trackers, or restating the built-in agents.
 
 Session state machine hardening (plan A, #343) is landed: a `working` row
 with no activity for `reconcile.stale_working_secs` turns `idle` with

@@ -25,6 +25,9 @@ use super::grant::Sources;
 use super::records;
 use super::template;
 use crate::ipc_error::{lock, IpcError};
+use crate::service::agents::review::labels::LabelsRequest;
+use crate::service::agents::review::plan::OpenPr;
+use crate::service::agents::review::{PrComment, ReviewHost, SshReviewHost};
 use crate::service::agents::support::{LiveSupportHost, SupportHost};
 use crate::service::agents::vehicle::{self, PrintOutcome, PrintRun};
 use crate::service::agents::workspace::Prepared;
@@ -124,7 +127,7 @@ impl Cursor {
 
 // ── the trigger, PURE ──
 
-fn render_opt(t: Option<&str>, ctx: &Value) -> String {
+pub fn render_opt(t: Option<&str>, ctx: &Value) -> String {
     t.map(|t| template::render(t, ctx)).unwrap_or_default()
 }
 
@@ -479,6 +482,27 @@ pub trait FleetHost: Send + Sync {
     ) -> Result<String, String>;
     /// An MCP entry's tools on `host`, whole (`name`, `inputSchema` …).
     async fn list_tools(&self, host: &str, entry: &Value) -> Result<Vec<Value>, String>;
+    /// A tracker's provider (`jira_cloud`, `github`, `linear` …).
+    fn tracker_provider(&self, tracker: i64) -> Option<String>;
+    /// GitHub, with `host`'s `gh`: a repo's open pull requests.
+    async fn open_prs(&self, host: &str, repo: &str) -> Result<Vec<OpenPr>, String>;
+    /// GitHub: a repo's issue and PR comments updated since `since` (RFC 3339).
+    async fn pr_comments_since(
+        &self,
+        host: &str,
+        repo: &str,
+        since: &str,
+    ) -> Result<Vec<PrComment>, String>;
+    /// GitHub: comment on an issue or pull request.
+    async fn pr_comment(
+        &self,
+        host: &str,
+        repo: &str,
+        number: i64,
+        body: &str,
+    ) -> Result<(), String>;
+    /// GitHub: add and remove labels.
+    async fn set_pr_labels(&self, req: &LabelsRequest) -> Result<(), String>;
     /// The support agent's host: issues, workspaces, writes and the run.
     fn base(&self) -> &dyn SupportHost;
 }
@@ -488,6 +512,8 @@ pub struct LiveFleetHost {
     pub store: Arc<Mutex<Store>>,
     pub ssh: Arc<SshClient>,
     pub base: LiveSupportHost,
+    /// The PR reviewer's `gh` calls.
+    pub gh: SshReviewHost,
 }
 
 #[async_trait::async_trait]
@@ -534,6 +560,62 @@ impl FleetHost for LiveFleetHost {
         super::probe::listed_tool_defs(&self.on_stdin(host, body).await?)
     }
 
+    fn tracker_provider(&self, tracker: i64) -> Option<String> {
+        let s = lock(&self.store).ok()?;
+        Some(s.get_tracker(tracker).ok()??.provider)
+    }
+
+    async fn open_prs(&self, host: &str, repo: &str) -> Result<Vec<OpenPr>, String> {
+        self.gh.open_prs(host, repo).await
+    }
+
+    async fn pr_comments_since(
+        &self,
+        host: &str,
+        repo: &str,
+        since: &str,
+    ) -> Result<Vec<PrComment>, String> {
+        self.gh.comments_since(host, repo, since).await
+    }
+
+    async fn pr_comment(
+        &self,
+        host: &str,
+        repo: &str,
+        number: i64,
+        body: &str,
+    ) -> Result<(), String> {
+        let script = format!(
+            "gh api --method POST {} --input - >/dev/null",
+            crate::shell::quote(&format!("repos/{repo}/issues/{number}/comments"))
+        );
+        let out = self
+            .ssh
+            .run_with_stdin(
+                host,
+                &["bash", "-lc", &crate::shell::quote(&script)],
+                json!({ "body": body }).to_string().into_bytes(),
+                std::time::Duration::from_secs(15),
+                std::time::Duration::from_secs(120),
+                64 * 1024,
+            )
+            .await
+            .map_err(|e| e.message)?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&out.stderr)
+                .trim()
+                .chars()
+                .take(300)
+                .collect())
+        }
+    }
+
+    async fn set_pr_labels(&self, req: &LabelsRequest) -> Result<(), String> {
+        self.gh.set_labels(req).await
+    }
+
     fn base(&self) -> &dyn SupportHost {
         &self.base
     }
@@ -571,6 +653,10 @@ pub fn agent(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> AgentImpl {
             store: Arc::clone(store),
             ssh: Arc::clone(ssh),
         },
+        gh: SshReviewHost {
+            store: Arc::clone(store),
+            ssh: Arc::clone(ssh),
+        },
     });
     AgentImpl {
         name: AGENT,
@@ -589,7 +675,7 @@ pub fn agent(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> AgentImpl {
     }
 }
 
-fn keep_subject(
+pub(super) fn keep_subject(
     store: &Mutex<Store>,
     rule_id: i64,
     dedup_key: &str,
@@ -807,6 +893,39 @@ impl AgentPoller for FleetPoller {
                     }
                     None => Vec::new(),
                 }
+            }
+            TriggerSource::GithubPrs | TriggerSource::GithubComments => {
+                let repo = super::github::repo_of(&inst, &ctx)?;
+                let planned = if d.trigger.source == TriggerSource::GithubPrs {
+                    let prs = self.host.open_prs(&rule.host_alias, &repo).await?;
+                    super::github::plan_pr_jobs(rule.id, &repo, &prs, now)
+                } else {
+                    let since = super::github::comments_since(c.since);
+                    let comments = self
+                        .host
+                        .pr_comments_since(&rule.host_alias, &repo, &since)
+                        .await?;
+                    super::github::plan_comment_jobs(rule.id, &inst, &ctx, &repo, &comments, now)?
+                };
+                let mut jobs = Vec::new();
+                for (job, subject) in planned {
+                    let seen = {
+                        let s = lock(&self.store).map_err(|e| e.message)?;
+                        s.agent_record(
+                            &subjects_namespace(rule.id),
+                            SUBJECT_KIND,
+                            &job.dedup_key,
+                            now,
+                        )
+                        .map_err(|e| e.to_string())?
+                        .is_some()
+                    };
+                    if !seen {
+                        keep_subject(&self.store, rule.id, &job.dedup_key, &subject, now)?;
+                        jobs.push(job);
+                    }
+                }
+                jobs
             }
             TriggerSource::Manual => Vec::new(),
             other => return Err(format!("trigger source {} is not built yet", other.word())),

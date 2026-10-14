@@ -1,7 +1,8 @@
 # Configurable agents: design
 
-Status: steps 1 to 5 built, 2026-10-14 (the phone's part in
-martin-janci/fleet-mobile). Step 6 not built.
+Status: steps 1 to 5 built, and step 6's GitHub sources, PR comments and
+labels, and writes to other trackers, 2026-10-14 (the phone's part in
+martin-janci/fleet-mobile). The rest of step 6 not built.
 Asked for by the owner after the built-in reviewer and support agent landed
 (`2026-10-11-review-and-support-agents-design.md`, PRs
 martin-janci/claude-fleet#871, martin-janci/fleet-mobile#217,
@@ -579,6 +580,25 @@ run real instances.
    - `tracker_*` on GitHub, Linear and Asana;
    - restating the built-in agents as definitions (*Migration*);
    - a definition gallery.
+
+   Built (`service/fleet_agents/github.rs`, `actions.rs`): `github_prs`
+   makes a job per open, non-draft pull request at each new head (the key
+   carries the head's sha); `github_comments` a job per new issue or PR
+   comment carrying a phrase or matching the regex, never a bot's or a
+   fleet agent's own (its marker). Both go through the PR reviewer's `gh`
+   calls on the rule's host and keep the subject when they find it
+   (`repo, number, title, head_sha, base_ref, head_ref, author, url`, and a
+   comment's `comment`). `pr_comment` (`target` is the number) posts the
+   body with the instance's marker; `pr_labels` takes `labels` with `-name`
+   for a removal. Both are sent only to the trigger's repo or one of
+   `limits.repos`. On a tracker that is not Jira (GitHub, Linear, Asana)
+   `tracker_comment` sends the same text plain (`WriteOp::Comment`) and
+   `tracker_issue` creates an item in the project (`WriteOp::CreateItem`);
+   an issue link is Jira's, so a link, or an issue with one, is refused
+   there. Not built: `pr_review` (the reviewer's placed, verified review
+   stays the PR reviewer's), polling a tracker that is not Jira (its
+   provider has no `issue_threads`), restating the built-in agents, and a
+   gallery.
 
 ## Not in scope
 

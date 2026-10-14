@@ -124,6 +124,45 @@ pub struct McpCallPayload {
     pub body: String,
 }
 
+/// `pr_comment`: a comment on a pull request (or an issue) of the repo.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrCommentPayload {
+    pub action: String,
+    pub repo: String,
+    pub number: i64,
+    pub body: String,
+}
+
+/// `pr_labels`: labels to add and remove (`-name` in the action's list).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrLabelsPayload {
+    pub action: String,
+    pub repo: String,
+    pub number: i64,
+    pub add: Vec<String>,
+    pub remove: Vec<String>,
+    pub body: String,
+}
+
+/// Whether a tracker provider is Jira (rich comments, issue links).
+pub fn is_jira(provider: Option<&str>) -> bool {
+    provider.is_none_or(|p| p.starts_with("jira"))
+}
+
+/// The repos `pr_*` writes may land in: the trigger's, and `limits.repos`,
+/// rendered over the inputs.
+pub fn write_repos(inst: &Instance, now: i64) -> Vec<String> {
+    let ctx = inst.ctx(now);
+    let d = &inst.loaded().definition;
+    d.trigger
+        .repo
+        .iter()
+        .chain(d.limits.repos.iter())
+        .map(|r| template::render(r, &ctx).trim().to_string())
+        .filter(|r| !r.is_empty())
+        .collect()
+}
+
 /// One action planned from an answer.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Planned {
@@ -400,9 +439,68 @@ pub fn plan(
                 };
                 Ok((serde_json::to_string(&p).unwrap_or_default(), body))
             }
-            ActionKind::PrReview | ActionKind::PrComment | ActionKind::PrLabels => {
-                Err(skip("pr actions are not built yet"))
+            ActionKind::PrComment | ActionKind::PrLabels => {
+                let repo = d
+                    .trigger
+                    .repo
+                    .as_deref()
+                    .map(|t| template::render(t, &ctx).trim().to_string())
+                    .unwrap_or_default();
+                let number: i64 = r(&a.target)
+                    .trim_start_matches('#')
+                    .parse()
+                    .map_err(|_| skip("the target is not a pull request number"))?;
+                if !super::github::repo_ok(&repo) {
+                    return Err(skip("the trigger's repo is not owner/repo"));
+                }
+                if a.kind == ActionKind::PrComment {
+                    let text = body_text();
+                    if text.is_empty() {
+                        return Err(skip("the body is empty"));
+                    }
+                    let mark = format!("\n\n{}", marker(instance));
+                    let body = format!(
+                        "{}{mark}",
+                        fit(&text, max.saturating_sub(mark.chars().count()))
+                    );
+                    let p = PrCommentPayload {
+                        action: a.id.clone(),
+                        repo,
+                        number,
+                        body: body.clone(),
+                    };
+                    Ok((serde_json::to_string(&p).unwrap_or_default(), body))
+                } else {
+                    let all = labels_of(a.labels.as_ref(), &ctx);
+                    let remove: Vec<String> = all
+                        .iter()
+                        .filter_map(|l| l.strip_prefix('-').map(str::to_string))
+                        .collect();
+                    let add: Vec<String> =
+                        all.into_iter().filter(|l| !l.starts_with('-')).collect();
+                    if add.is_empty() && remove.is_empty() {
+                        return Err(skip("no label to change"));
+                    }
+                    let body = add
+                        .iter()
+                        .map(|l| format!("+{l}"))
+                        .chain(remove.iter().map(|l| format!("−{l}")))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let p = PrLabelsPayload {
+                        action: a.id.clone(),
+                        repo,
+                        number,
+                        add,
+                        remove,
+                        body: body.clone(),
+                    };
+                    Ok((serde_json::to_string(&p).unwrap_or_default(), body))
+                }
             }
+            ActionKind::PrReview => Err(skip(
+                "pr_review is the PR reviewer's: not built for a fleet agent",
+            )),
         })();
         match made {
             Ok((payload, body)) => {
@@ -582,16 +680,21 @@ impl FleetExecutor {
                 if !fits(&c.body) {
                     return refuse(format!("the comment is over {max} characters"));
                 }
-                match write(
-                    c.tracker,
+                let op = if is_jira(self.host.tracker_provider(c.tracker).as_deref()) {
                     WriteOp::RichComment {
                         key: c.key,
                         adf: c.adf,
                         wiki: c.body,
-                    },
-                )
-                .await
-                {
+                    }
+                } else {
+                    // GitHub, Linear, Asana: the same text, plain.
+                    WriteOp::Comment {
+                        key: c.key,
+                        external_id: None,
+                        body: c.body,
+                    }
+                };
+                match write(c.tracker, op).await {
                     Ok(_) => ActionResult::Executed,
                     Err(e) => ActionResult::Failed(e),
                 }
@@ -611,6 +714,26 @@ impl FleetExecutor {
                     if !in_limits(&l.to) {
                         return refuse(format!("{} is outside limits.write_projects", l.to));
                     }
+                }
+                let jira = is_jira(self.host.tracker_provider(i.tracker).as_deref());
+                if !jira {
+                    if i.link.is_some() {
+                        return refuse("an issue link is Jira's: this tracker has none");
+                    }
+                    return match write(
+                        i.tracker,
+                        WriteOp::CreateItem {
+                            container: Some(i.project.clone()),
+                            parent: None,
+                            title: i.summary.clone(),
+                            description: i.body.clone(),
+                        },
+                    )
+                    .await
+                    {
+                        Ok(_) => ActionResult::Executed,
+                        Err(e) => ActionResult::Failed(e),
+                    };
                 }
                 let created = match write(
                     i.tracker,
@@ -662,6 +785,9 @@ impl FleetExecutor {
                         "{} or {} is outside limits.write_projects",
                         l.from, l.to
                     ));
+                }
+                if !is_jira(self.host.tracker_provider(l.tracker).as_deref()) {
+                    return refuse("an issue link is Jira's: this tracker has none");
                 }
                 match write(
                     l.tracker,
@@ -778,8 +904,55 @@ impl FleetExecutor {
                     Err(e) => ActionResult::Failed(e),
                 }
             }
-            ActionKind::PrReview | ActionKind::PrComment | ActionKind::PrLabels => {
-                ActionResult::Failed("pr actions are not built yet".into())
+            ActionKind::PrComment | ActionKind::PrLabels => {
+                let repos = write_repos(inst, now);
+                let (repo, number) = match raw.get("repo").and_then(Value::as_str) {
+                    Some(r) => (
+                        r.to_string(),
+                        raw.get("number").and_then(Value::as_i64).unwrap_or(0),
+                    ),
+                    None => return ActionResult::Failed("payload: no repo".into()),
+                };
+                if !repos.contains(&repo) {
+                    return refuse(format!(
+                        "{repo} is neither the trigger's repo nor in limits.repos"
+                    ));
+                }
+                if def_action.kind == ActionKind::PrComment {
+                    let c = payload!(PrCommentPayload);
+                    if !fits(&c.body) {
+                        return refuse(format!("the comment is over {max} characters"));
+                    }
+                    match self
+                        .host
+                        .pr_comment(&rule.host_alias, &repo, number, &c.body)
+                        .await
+                    {
+                        Ok(()) => ActionResult::Executed,
+                        Err(e) => ActionResult::Failed(e),
+                    }
+                } else {
+                    let l = payload!(PrLabelsPayload);
+                    let req = crate::service::agents::review::labels::LabelsRequest {
+                        host: rule.host_alias.clone(),
+                        repo,
+                        number,
+                        sha: subject
+                            .get("head_sha")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        add: l.add,
+                        remove: l.remove,
+                    };
+                    match self.host.set_pr_labels(&req).await {
+                        Ok(()) => ActionResult::Executed,
+                        Err(e) => ActionResult::Failed(e),
+                    }
+                }
+            }
+            ActionKind::PrReview => {
+                ActionResult::Failed("pr_review is not built for a fleet agent".into())
             }
         }
     }

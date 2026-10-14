@@ -29,6 +29,7 @@ pub mod answer;
 pub mod bindings;
 pub mod definition;
 pub mod form;
+pub mod github;
 pub mod grant;
 pub mod probe;
 pub mod records;

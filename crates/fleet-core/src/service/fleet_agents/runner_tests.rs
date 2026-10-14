@@ -100,6 +100,13 @@ struct World {
     call_answer: Mutex<String>,
     /// What tools/list answers.
     tools: Mutex<Vec<Value>>,
+    /// The tracker's provider (`jira_cloud` unless set).
+    provider: Mutex<Option<String>>,
+    /// GitHub: the open pull requests and the comments a poll reads.
+    prs: Mutex<Vec<crate::service::agents::review::plan::OpenPr>>,
+    comments: Mutex<Vec<crate::service::agents::review::PrComment>>,
+    /// GitHub writes, in order.
+    gh_writes: Mutex<Vec<String>>,
 }
 
 #[async_trait::async_trait]
@@ -134,6 +141,52 @@ impl FleetHost for World {
     }
     async fn list_tools(&self, _: &str, _: &Value) -> Result<Vec<Value>, String> {
         Ok(self.tools.lock().unwrap().clone())
+    }
+    fn tracker_provider(&self, _: i64) -> Option<String> {
+        Some(
+            self.provider
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| "jira_cloud".into()),
+        )
+    }
+    async fn open_prs(
+        &self,
+        _: &str,
+        repo: &str,
+    ) -> Result<Vec<crate::service::agents::review::plan::OpenPr>, String> {
+        self.gh_writes.lock().unwrap().push(format!("list {repo}"));
+        Ok(self.prs.lock().unwrap().clone())
+    }
+    async fn pr_comments_since(
+        &self,
+        _: &str,
+        repo: &str,
+        since: &str,
+    ) -> Result<Vec<crate::service::agents::review::PrComment>, String> {
+        self.gh_writes
+            .lock()
+            .unwrap()
+            .push(format!("comments {repo} since {since}"));
+        Ok(self.comments.lock().unwrap().clone())
+    }
+    async fn pr_comment(&self, _: &str, repo: &str, number: i64, body: &str) -> Result<(), String> {
+        self.gh_writes
+            .lock()
+            .unwrap()
+            .push(format!("comment {repo}#{number}: {body}"));
+        Ok(())
+    }
+    async fn set_pr_labels(
+        &self,
+        req: &crate::service::agents::review::labels::LabelsRequest,
+    ) -> Result<(), String> {
+        self.gh_writes.lock().unwrap().push(format!(
+            "labels {}#{} +{:?} -{:?}",
+            req.repo, req.number, req.add, req.remove
+        ));
+        Ok(())
     }
     fn base(&self) -> &dyn SupportHost {
         &self.base
@@ -215,6 +268,10 @@ fn fx(loaded: Loaded, config: Value, bindings: Value, project: bool) -> Fx {
         calls: Mutex::default(),
         call_answer: Mutex::default(),
         tools: Mutex::default(),
+        provider: Mutex::default(),
+        prs: Mutex::default(),
+        comments: Mutex::default(),
+        gh_writes: Mutex::default(),
     });
     Fx {
         store: Arc::new(Mutex::new(s)),
@@ -931,4 +988,195 @@ fn arguments_are_checked_against_the_tools_schema() {
     assert!(!actions::check_arguments(&schema, &json!([1])).is_empty());
     assert_eq!(actions::project_of("BUG-12"), "BUG");
     assert_eq!(actions::fit("abcdef", 4), "abc…");
+}
+
+// ── step 6: GitHub sources and PR actions, other trackers ──
+
+fn pr(number: i64, sha: &str, draft: bool) -> crate::service::agents::review::plan::OpenPr {
+    crate::service::agents::review::plan::OpenPr {
+        number,
+        title: format!("PR {number}"),
+        head_sha: sha.into(),
+        is_draft: draft,
+        base_ref: "main".into(),
+        head_ref: "feat".into(),
+        author: Some("eva".into()),
+    }
+}
+
+/// A definition triggered by `trigger` with a pr_comment and a pr_labels action.
+fn gh_fx(trigger: Value) -> Fx {
+    let d = definition::parse_value(&json!({
+        "inputs": [{ "name": "repo", "type": "text", "label": "Repo", "required": true }],
+        "trigger": trigger,
+        "run": { "workspace": "home", "output_schema": { "type": "object",
+            "required": ["summary"], "properties": { "summary": { "type": "string" },
+                "risky": { "type": "boolean" } } } },
+        "actions": [
+            { "id": "say", "do": "pr_comment", "target": "{{subject.number}}",
+              "body": "Summary: {{answer.summary}}", "auto": true },
+            { "id": "flag", "when": { "field": "risky", "truthy": true }, "do": "pr_labels",
+              "target": "{{subject.number}}", "labels": ["risky", "-safe"] }
+        ],
+        "limits": { "repos": ["acme/other"] }
+    }))
+    .unwrap();
+    assert_eq!(
+        definition::problems(&d, &BTreeMap::new()),
+        Vec::<String>::new()
+    );
+    let loaded = Loaded {
+        name: "gh".into(),
+        definition: d,
+        skill: "Read the PR.".into(),
+        templates: BTreeMap::new(),
+    };
+    fx(loaded, json!({ "repo": "acme/pos" }), json!([]), false)
+}
+
+#[tokio::test]
+async fn a_pr_at_a_new_head_is_one_job_and_a_draft_none() {
+    let f = gh_fx(json!({ "source": "github_prs", "repo": "{{repo}}" }));
+    *f.world.prs.lock().unwrap() = vec![pr(4, "abc", false), pr(5, "def", true)];
+    let p = f.poller();
+    let first = p
+        .poll(&f.rule, Some(&f.cursor(100, None)), 200)
+        .await
+        .unwrap();
+    let keys: Vec<&str> = first.jobs.iter().map(|j| j.dedup_key.as_str()).collect();
+    assert_eq!(keys, [format!("r{}:gh:acme/pos#4@abc", f.rule.id)]);
+    let again = p
+        .poll(&f.rule, Some(&f.cursor(200, None)), 300)
+        .await
+        .unwrap();
+    assert!(again.jobs.is_empty(), "the same head is not new");
+    *f.world.prs.lock().unwrap() = vec![pr(4, "abd", false)];
+    let pushed = p
+        .poll(&f.rule, Some(&f.cursor(300, None)), 400)
+        .await
+        .unwrap();
+    assert_eq!(pushed.jobs.len(), 1, "a push is a new job");
+}
+
+#[tokio::test]
+async fn a_comment_that_asks_is_a_job_and_a_bots_or_agents_never() {
+    let f = gh_fx(json!({ "source": "github_comments", "repo": "acme/pos",
+        "match": { "any_phrase": "/review" } }));
+    let c = |id: i64, body: &str, user_type: &str| crate::service::agents::review::PrComment {
+        id,
+        number: 4,
+        body: body.into(),
+        user_type: user_type.into(),
+    };
+    *f.world.comments.lock().unwrap() = vec![
+        c(1, "please /review", "User"),
+        c(2, "/review", "Bot"),
+        c(3, "/review done\n\n[fleet-agent:inst]", "User"),
+        c(4, "lgtm", "User"),
+    ];
+    let polled = f
+        .poller()
+        .poll(&f.rule, Some(&f.cursor(1000, None)), 2000)
+        .await
+        .unwrap();
+    let keys: Vec<&str> = polled.jobs.iter().map(|j| j.dedup_key.as_str()).collect();
+    assert_eq!(keys, [format!("r{}:gh:acme/pos#4#c1", f.rule.id)]);
+    let asked = f.world.gh_writes.lock().unwrap()[0].clone();
+    assert_eq!(
+        asked, "comments acme/pos since 1970-01-01T00:14:40Z",
+        "the window opens at the last poll less the slack"
+    );
+    assert!(
+        super::github::repo_ok("acme/pos")
+            && !super::github::repo_ok("acme")
+            && !super::github::repo_ok("a/..")
+    );
+}
+
+#[tokio::test]
+async fn a_pr_answer_comments_and_labels_within_the_repos() {
+    let f = gh_fx(json!({ "source": "github_prs", "repo": "{{repo}}" })).at("act");
+    *f.world.prs.lock().unwrap() = vec![pr(4, "abc", false)];
+    // The kept subject lives from now (the run reads it at now).
+    let now = crate::store::now_unix();
+    let polled = f
+        .poller()
+        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
+        .await
+        .unwrap();
+    let jobs = f.claim(&polled.jobs);
+    *f.world.base.answer.lock().unwrap() = Some(PrintOutcome::Answered {
+        text: r#"{"summary":"Looks fine","risky":true}"#.into(),
+        cost_micros: 0,
+    });
+    let out = f.runner().run(&jobs[0], Some(&f.rule)).await;
+    let RunOutcome::Done { result, .. } = out else {
+        panic!("{out:?}")
+    };
+    let r: Value = serde_json::from_str(&result.unwrap()).unwrap();
+    assert_eq!(r["subject"]["head_sha"], "abc");
+    assert_eq!(
+        states(&r),
+        [
+            ("say".to_string(), "approved".to_string()),
+            ("flag".to_string(), "pending".to_string())
+        ]
+    );
+    let ex = f.executor();
+    for a in f.actions() {
+        assert_eq!(ex.execute(&a).await, ActionResult::Executed, "{}", a.kind);
+    }
+    let writes = f.world.gh_writes.lock().unwrap().clone();
+    assert!(
+        writes
+            .iter()
+            .any(|w| w.starts_with("comment acme/pos#4: Summary: Looks fine")
+                && w.ends_with("[fleet-agent:inst]")),
+        "{writes:?}"
+    );
+    assert!(
+        writes
+            .iter()
+            .any(|w| w == "labels acme/pos#4 +[\"risky\"] -[\"safe\"]"),
+        "{writes:?}"
+    );
+    // Another repo than the trigger's or limits.repos is refused.
+    let mut a = f
+        .actions()
+        .into_iter()
+        .find(|a| a.kind == "pr_comment")
+        .unwrap();
+    let mut p: Value = serde_json::from_str(&a.payload).unwrap();
+    p["repo"] = "evil/repo".into();
+    a.payload = p.to_string();
+    assert!(matches!(ex.execute(&a).await, ActionResult::Failed(e) if e.contains("limits.repos")));
+    p["repo"] = "acme/other".into();
+    a.payload = p.to_string();
+    assert_eq!(ex.execute(&a).await, ActionResult::Executed, "limits.repos");
+}
+
+#[tokio::test]
+async fn another_tracker_gets_a_plain_comment_and_no_link() {
+    let (f, _) = l2_run("propose", found()).await;
+    *f.world.provider.lock().unwrap() = Some("github".into());
+    let ex = f.executor();
+    let by_kind = |k: &str| f.actions().into_iter().find(|a| a.kind == k).unwrap();
+    assert_eq!(
+        ex.execute(&by_kind("tracker_comment")).await,
+        ActionResult::Executed
+    );
+    let writes = f.world.base.writes.lock().unwrap().clone();
+    assert!(
+        matches!(&writes[0], (3, WriteOp::Comment { key, body, .. }) if key == "L2S-7" && body.contains("Gateway key expired"))
+    );
+    // The bug links to the ticket: links are Jira's.
+    match ex.execute(&by_kind("tracker_issue")).await {
+        ActionResult::Failed(e) => assert!(e.contains("Jira's"), "{e}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        f.world.base.writes.lock().unwrap().len(),
+        1,
+        "nothing created"
+    );
 }

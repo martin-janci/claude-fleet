@@ -240,6 +240,7 @@ export function actionTitle(a: Pick<AgentAction, 'kind' | 'payload'>): string {
   if (a.kind === 'tracker_link' && p) return `Link ${p.from} to ${p.to} (${String(p.link_type ?? '').toLowerCase()})`;
   if (a.kind === 'record' && p) return `Remember ${p.key} in ${p.store}`;
   if (a.kind === 'mcp_call' && p) return `Call ${p.binding}.${p.tool}`;
+  if (a.kind === 'pr_comment' && p) return `Comment on ${p.repo}#${p.number}`;
   return a.kind.replace(/_/g, ' ');
 }
 
