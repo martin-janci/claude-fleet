@@ -170,6 +170,14 @@ with no Buildkite involved. It runs in CI's `version-consistency` job.
 
 * **Free space:** `rm -rf /srv/ci/target/claude-fleet`. The next build is
   cold.
+* **Temp files on tmpfs:** the step points `TMPDIR` at
+  `/dev/shm/claude-fleet-ci` (`BUILDER_TMPDIR`) when it has
+  `BUILDER_MIN_TMPFS_GB` (default 4) free, and empties it first. On ext4 the
+  tests' tempdir SQLite stores queue behind the journal and the hub and
+  desktop test targets slow to a crawl. Without the room it says so and uses
+  `/tmp`.
+* **Job timeout:** 75 minutes (`timeout_in_minutes` in
+  `.buildkite/pipeline.yml`). A cold test compile takes about 23 minutes of it.
 * **Toolchain bump** (`rust-toolchain.toml`): nothing to do. rustup installs
   the new pin on the next build, and cargo rebuilds everything once. Old
   toolchains stay in `/srv/ci/rustup` until `rustup toolchain uninstall`.
