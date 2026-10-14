@@ -3913,6 +3913,71 @@ async fn list_clients_reports_the_persons_trust_not_the_devices_column() {
         "a readonly device is never trusted"
     );
     assert_eq!(by("desk")["assets_admin"], false);
+
+    // The catalog grant is the person's too: granted through the desk, it
+    // reaches the phone, never the readonly kiosk, and not an org-bound phone.
+    {
+        let s = store.lock().unwrap();
+        s.set_client_assets_admin("desk", true).unwrap();
+    }
+    let list = || async {
+        let out = tools
+            .list_clients(Parameters(ListClientsParams {
+                include_revoked: true,
+            }))
+            .await
+            .unwrap();
+        result_json(&out)
+    };
+    let rows = list().await;
+    let by = |n: &str| {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == n)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(by("desk")["assets_admin"], true);
+    assert_eq!(by("phone")["assets_admin"], true);
+    assert_eq!(by("kiosk")["assets_admin"], false, "readonly");
+    {
+        let s = store.lock().unwrap();
+        let org = s.add_org("A", None, false).unwrap();
+        s.set_client_org("phone", Some(org.id)).unwrap();
+    }
+    let rows = list().await;
+    let by = |n: &str| {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == n)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(by("phone")["assets_admin"], false, "org-bound");
+
+    // A revoked device holds neither, though its person still does.
+    let out = tools
+        .revoke_client(Parameters(RevokeClientParams {
+            name: "desk".into(),
+        }))
+        .await
+        .unwrap();
+    let v = result_json(&out);
+    assert_eq!(v["trusted"], false, "{v}");
+    assert_eq!(v["assets_admin"], false, "{v}");
+    let rows = list().await;
+    let by = |n: &str| {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == n)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(by("desk")["trusted"], false);
+    assert_eq!(by("desk")["assets_admin"], false);
 }
 
 /// A client name reaches the receiving agent inside the untrusted-content

@@ -1555,7 +1555,8 @@ pub(super) struct ClientSummary {
     /// Per-device mirror, kept one release; `trusted` is what the hub decides by.
     pub(super) trusted_at: Option<i64>,
     /// The person's effective trust (their `fleet-trusted` role), false for
-    /// a device that cannot carry it.
+    /// a device that cannot carry it; a revoked device holds neither this
+    /// nor `assets_admin`.
     pub(super) trusted: bool,
     /// The org the client is bound to (work graph M14); absent: unbound.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1583,7 +1584,7 @@ impl ClientSummary {
         trusted_people: &[i64],
         assets_admins: &[i64],
     ) -> Self {
-        let trusted = r.trusted_by(trusted_people);
+        let trusted = r.revoked_at.is_none() && r.trusted_by(trusted_people);
         // Mirrors `LIVE_GRANT_ELIGIBLE` in `store/clients.rs`: live, full,
         // bound to no org.
         let assets_admin = r.revoked_at.is_none()
