@@ -478,6 +478,14 @@ pub const MOVE_WAIT_MAX_MINS: &str = "move.wait_max_mins";
 /// on it asks first and offers the login with headroom (redesign step 4.4,
 /// `service::account_limits`).
 pub const ACCOUNTS_PAUSE_AT: &str = "accounts.pause_at";
+/// Resume a session whose account ran out under the login on its host with
+/// the most headroom, without asking (`service::account_switch`). The
+/// fleet's switch; each person can still turn it off for their own sessions
+/// (`people.auto_switch_account`, migration 187).
+pub const ACCOUNTS_AUTO_SWITCH: &str = "accounts.auto_switch";
+/// With [`ACCOUNTS_AUTO_SWITCH`], move an idle session once its account
+/// passes `accounts.pause_at`, not only once it is out.
+pub const ACCOUNTS_AUTO_SWITCH_EARLY: &str = "accounts.auto_switch_early";
 pub const USAGE_ENABLED: &str = "usage.enabled";
 /// Copy conversation text into the hub's search index, so a search finds
 /// what was said in any session (search phase 3, `service::search_index`).
@@ -694,6 +702,9 @@ pub const DECIDE_JEV_TRACKER_DUPLICATE: &str = "decide.jev.tracker_duplicate";
 /// `resume_or_new`'s mode (N2: resume a past session of the work key the
 /// New session dialog plans, or start fresh; gap plan G7.10).
 pub const DECIDE_JEV_RESUME_OR_NEW: &str = "decide.jev.resume_or_new";
+/// `limit_switch`'s mode: which login an out-of-credit session resumes
+/// under when `accounts.auto_switch` switches it (`service::account_switch`).
+pub const DECIDE_JEV_LIMIT_SWITCH: &str = "decide.jev.limit_switch";
 /// What a feature's mode may be: the store's `decision_runs.mode` words
 /// (one list; `decide::FeatureMode` and the TS mirror are tied to it by
 /// `the_mode_vocabulary_is_the_stores`). `auto` is not offered: no feature
@@ -1241,6 +1252,20 @@ pub const SPECS: &[Spec] = &[
         "Used share of an account's 5-hour or weekly window at which starting a session on it asks first and offers the login with the most headroom.",
     )
     .unit(Unit::Percent),
+    Spec::new(
+        ACCOUNTS_AUTO_SWITCH,
+        "false",
+        Kind::Bool,
+        "Switch accounts automatically",
+        "When a session's account runs out, resume it under the login on its host with the most headroom without asking. Each person can still turn it off for their own sessions on the Accounts page.",
+    ),
+    Spec::new(
+        ACCOUNTS_AUTO_SWITCH_EARLY,
+        "false",
+        Kind::Bool,
+        "Switch before the limit",
+        "Also move an idle session once its account passes \"Ask before starting at\", so its next turn does not stall at the limit. A working session is never moved.",
+    ),
     Spec::new(
         USAGE_PRICES_JSON,
         "{}",
@@ -1830,6 +1855,15 @@ pub const SPECS: &[Spec] = &[
     )
     .tags(&[Tag::Experimental, Tag::Ai])
     .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_LIMIT_SWITCH,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: login for an automatic switch",
+        "Asking which login an out-of-credit session should resume under when it is switched automatically. The login with the most headroom is used either way; Jev's pick is recorded beside it so the two can be compared.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: record only for now")]),
     Spec::new(
         DECIDE_JEV_UNASSIGNED,
         "false",

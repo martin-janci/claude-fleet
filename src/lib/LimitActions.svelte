@@ -3,7 +3,9 @@
   // board draws them: Switch account resumes the conversation under the login
   // on its host with the most headroom, after the person sees which one; Wait
   // folds the buttons into "Waiting until <reset>". Nothing moves without the
-  // second press: AI proposes, a person confirms.
+  // second press: AI proposes, a person confirms. With automatic switching
+  // on (`account_switch.ts`) the row says where the fleet will move it, or
+  // that no login has room, so nobody presses Switch for nothing.
   import { restartSession, type SessionRow } from './sessions';
   import { push, pushError } from './toasts';
   import { hubStatus, hubActionBlocked } from './hub';
@@ -19,6 +21,7 @@
     type HostLogin,
   } from './account_limits';
   import { nowTick } from './now_tick';
+  import { autoSwitchState, loadAutoSwitch, switchesAutomatically } from './account_switch';
 
   let {
     sess,
@@ -38,6 +41,27 @@
   );
   let busy = $state(false);
   let target = $state<HostLogin | null>(null);
+
+  const auto = $derived(switchesAutomatically($autoSwitchState));
+  /** Where the automatic switch will take it: `undefined` while unknown,
+   *  `null` when no login on the host has room. */
+  let autoTarget = $state<HostLogin | null | undefined>(undefined);
+  $effect(() => {
+    void loadAutoSwitch();
+  });
+  $effect(() => {
+    if (!auto) {
+      autoTarget = undefined;
+      return;
+    }
+    let live = true;
+    void switchTarget(sess).then((t) => {
+      if (live) autoTarget = t;
+    });
+    return () => {
+      live = false;
+    };
+  });
   // A wait holds for the limit it was chosen for: while its reset is ahead,
   // or it is this limit's reset. A later limit (the row paused again after
   // the reset) asks afresh rather than "Waiting until <past time>".
@@ -90,14 +114,22 @@
     <button class="btn btn--quiet" data-testid="limit-switch-cancel" disabled={busy} onclick={cancel}>Cancel</button>
   {:else if waiting != null}
     <span class="waiting" data-testid="limit-waiting">Waiting until {resetText(waiting)}</span>
+  {:else if auto && autoTarget === null}
+    <span class="auto" data-testid="limit-auto-none">No other login on {sess.host_alias} has room</span>
+    {#if resetsAt != null}
+      <button class="btn btn--quiet" data-testid="limit-wait" onclick={wait}>Wait until {resetText(resetsAt)}</button>
+    {/if}
   {:else}
+    {#if auto && autoTarget}
+      <span class="auto" data-testid="limit-auto">Moves to {loginLabel(autoTarget, accountName)} automatically</span>
+    {/if}
     <button
       class="btn btn--chip"
       data-testid="limit-switch"
       disabled={busy || restartBlocked !== null}
       title={restartBlocked ?? 'Resume this conversation under the login on its host with the most headroom'}
       onclick={propose}
-    >Switch account</button>
+    >{auto && autoTarget ? 'Switch now' : 'Switch account'}</button>
     {#if resetsAt != null}
       <button class="btn btn--quiet" data-testid="limit-wait" onclick={wait}>Wait until {resetText(resetsAt)}</button>
     {/if}
@@ -115,6 +147,7 @@
     font-size: var(--text-2xs);
   }
   .ask,
+  .auto,
   .waiting {
     color: var(--fg-muted);
   }

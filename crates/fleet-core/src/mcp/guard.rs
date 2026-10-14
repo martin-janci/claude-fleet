@@ -704,6 +704,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Automatic account switching: the caller's own answer, on their
+    // `people` row. A person's tool, not a host token's.
+    ToolPolicy {
+        name: "auto_switch_account",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // Control's Library (Orbit Fleet 9.7): the files a person put on a
     // host. A person's, like the downloads it sits beside, so a host's token
     // is not served it (`NOT_FOR_HOST_TOKENS`).
@@ -1856,6 +1865,7 @@ pub const NOT_FOR_HOST_TOKENS: &[&str] = &[
     "session_ask_access",
     "access_requests",
     "session_presence",
+    "auto_switch_account",
     // The Automation screen's Runs list is a person's: a host's Claude has
     // `list_tasks` for the tasks it dispatched, and proves no person, so
     // its scope would show it next to nothing here anyway.

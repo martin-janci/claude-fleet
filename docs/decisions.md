@@ -983,6 +983,34 @@ Code: `service/decide/resume_or_new.rs`, the `resume_or_new` tool, the
 desktop's `resume_or_new_propose` / `resume_or_new_follow`, and the notice
 in `src/lib/NewSessionDialog.svelte`; gap plan G7.10.
 
+## `limit_switch` — the login an out-of-credit session moves to
+
+With `accounts.auto_switch` on (docs/accounts.md, *Switch automatically*),
+a session paused at its account's limit is resumed under another login on
+its host. With `decide.jev.limit_switch` on and two or more logins that
+qualify, Jev is asked which one, right before the restart.
+
+- **Rule first.** The logins that qualify are the rule's: another account,
+  a reading under `accounts.pause_at`, not at a limit, not past a daily
+  spend limit. One login is that login, and nobody is asked. None: nothing
+  switches.
+- **Question.** A choice over the qualifying logins: `own` (the host's
+  login) and `p:<profile>`.
+- **What is sent.** Per option, the percent of its account's tighter window
+  used, rounded down to a tenth, and whether it is the host's own login. No
+  account name, email or uuid.
+- **Baseline.** The rule's pick: the least used login, the host's own on a
+  tie.
+- **Modes.** Shadow records. Assist is recorded the same way for now: the
+  switch is automatic, so the rule's pick is the one used until the
+  comparison shows Jev's is better (D35: a model answer never runs an
+  action by itself).
+- **What is recorded.** Subject `session` `<id>`; Jev's pick also lands in
+  the `account_switched` timeline event's `jev` field.
+
+Code: `service/decide/limit_switch.rs`, called from
+`service/account_switch.rs`.
+
 ## Context order for a drafted brief (J4) — a rule, not a Jev use case
 
 The test map's J4 (ranking context for a brief) is **built as a rule, not
@@ -1098,6 +1126,7 @@ redesign's transition plan.
 | `decide.jev.main_ticket` | `off` | `off` / `shadow` / `assist` | fleet | Proposing the main ticket in Review when a session's first prompt names several. A branch naming one decides without Jev. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.tracker_duplicate` | `off` | `off` / `shadow` / `assist` | fleet | Flagging in Review a new local task that may be the same work as an open tracker ticket. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.resume_or_new` | `off` | `off` / `shadow` / `assist` | fleet | Proposing, in New session, whether to resume a past session of the same work or start fresh. A single recent past session decides without Jev. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.limit_switch` | `off` | `off` / `shadow` / `assist` | fleet | Asking which login an out-of-credit session should resume under when it is switched automatically. The login with the most headroom is used either way; Jev's pick is recorded beside it so the two can be compared. Experimental. |
 | `decide.jev.unassigned` | `false` | on / off | fleet | Also send sessions and tickets that belong to no organisation. Experimental. Asks to confirm. |
 | `decide.jev.unassigned_reply` | `false` | on / off | fleet | Also send the reply text of sessions that belong to no organisation (turn outcome), on top of sending unassigned sessions at all. Experimental. Asks to confirm. |
 | `decide.jev.timeout_ms` | `1500` | 100–30000 ms | fleet | How long one call may take. A call is never retried. |

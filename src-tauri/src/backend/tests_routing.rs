@@ -993,6 +993,26 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // Off for the signed-in person: the hub resolves who that is from
+        // the connection, never from the request.
+        (
+            "auto_switch_account",
+            "auto_switch_account",
+            json!({ "enabled": false }),
+            r#"{"enabled":false,"continue_after":false,"fleet_enabled":true}"#,
+            Box::new(|b, s, _| {
+                let v = block_on(commands::account_switch::routed::auto_switch_account(
+                    b,
+                    s,
+                    fleet_core::service::account_switch::AutoSwitchArgs {
+                        enabled: Some(false),
+                        continue_after: None,
+                    },
+                ))?;
+                assert!(!v.enabled && v.fleet_enabled);
+                Ok(())
+            }),
+        ),
         (
             "search",
             "search",
@@ -7571,6 +7591,10 @@ const SOURCES: &[(&str, &str)] = &[
     (
         "commands/presence.rs",
         include_str!("../commands/presence.rs"),
+    ),
+    (
+        "commands/account_switch.rs",
+        include_str!("../commands/account_switch.rs"),
     ),
     (
         "commands/updates.rs",

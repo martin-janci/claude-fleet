@@ -81,6 +81,12 @@ Chat forms: `form` (fleet.form/1) opens a form in YOUR session's chat and waits 
 
 Parameters: `answer`, `cancel`, `decline`, `draft`, `form`, `get`, `list`, `note`, `timeout_s`, `values`, `wait`, `why`
 
+### `auto_switch_account`
+
+Your own answer to automatic account switching: when one of your sessions' Claude account runs out, resume it under the login on its host with the most headroom. Pass enabled to turn it on or off for your sessions; leave it out to read it. continue_after: also type 'Continue where you left off.' into a switched session whose turn the limit cut off (off by default). It only acts while the fleet's accounts.auto_switch is on too. Returns { enabled, continue_after, fleet_enabled }.
+
+Parameters: `continue_after`, `enabled`
+
 ### `broadcast_prompt`
 
 Send one prompt to every matching work session (not the controller), skipping blocked or stuck ones unless status="blocked". Returns per-session results. Rate-limited per caller (default one call per 30 s; E_RATE_LIMITED with retry_after_secs). Marked untrusted unless raw=true (master token only). May return E_CONFIRM_REQUIRED when desktop confirmation is on.
@@ -1240,6 +1246,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::env_vars::env_var_unset`
 - `commands::add_account::add_account`
 - `commands::presence::session_presence`
+- `commands::account_switch::auto_switch_account`
 - `commands::pages::setting_history`
 - `commands::pages::set_fleet_setting`
 - `commands::runs::list_runs`

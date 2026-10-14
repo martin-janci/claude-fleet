@@ -1051,6 +1051,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "session_presence",
         },
     ),
+    // A person's own answer to automatic account switching, kept on the
+    // hub that does the switching.
+    (
+        "auto_switch_account",
+        Verdict::Routed {
+            tool: "auto_switch_account",
+        },
+    ),
     (
         "list_debug_devices",
         Verdict::Routed {

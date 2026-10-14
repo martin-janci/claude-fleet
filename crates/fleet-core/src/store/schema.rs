@@ -149,6 +149,28 @@ fn people_has_uuid(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 187: `people` already has its
+/// `auto_switch_account` column. See [`Migration`].
+fn people_has_auto_switch(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('people') WHERE name = 'auto_switch_account'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 188: `people` already has its
+/// `auto_switch_continue` column. See [`Migration`].
+fn people_has_auto_switch_continue(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('people') WHERE name = 'auto_switch_continue'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 042: `sessions` already has its
 /// `row_version` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
 /// See [`Migration`].
@@ -2062,6 +2084,20 @@ const MIGRATIONS: &[Migration] = &[
         186,
         include_str!("../../migrations/186_routine_decisions.sql"),
     ),
+    // Automatic account switching: a person's own opt-out
+    // (`people.auto_switch_account`). ADD COLUMN, so guarded.
+    Migration {
+        version: 187,
+        sql: include_str!("../../migrations/187_people_auto_switch.sql"),
+        already_applied: Some(people_has_auto_switch),
+    },
+    // Automatic account switching: "continue" after a switch, per person
+    // (`people.auto_switch_continue`). ADD COLUMN, so guarded.
+    Migration {
+        version: 188,
+        sql: include_str!("../../migrations/188_people_auto_switch_continue.sql"),
+        already_applied: Some(people_has_auto_switch_continue),
+    },
 ];
 
 /// The settings row [`Store::finish_realm_upgrade`] writes once migration

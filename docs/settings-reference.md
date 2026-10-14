@@ -145,6 +145,8 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | Setting | Default | Range | Scope | What it does |
 |---|---|---|---|---|
 | `accounts.pause_at` | `90` | 50–100% | fleet | Used share of an account's 5-hour or weekly window at which starting a session on it asks first and offers the login with the most headroom. |
+| `accounts.auto_switch` | `false` | on / off | fleet | When a session's account runs out, resume it under the login on its host with the most headroom without asking. Each person can still turn it off for their own sessions on the Accounts page. |
+| `accounts.auto_switch_early` | `false` | on / off | fleet | Also move an idle session once its account passes "Ask before starting at", so its next turn does not stall at the limit. A working session is never moved. |
 
 ## Error reports
 
@@ -248,6 +250,7 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `decide.jev.main_ticket` | `off` | `off` / `shadow` / `assist` | fleet | Proposing the main ticket in Review when a session's first prompt names several. A branch naming one decides without Jev. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.tracker_duplicate` | `off` | `off` / `shadow` / `assist` | fleet | Flagging in Review a new local task that may be the same work as an open tracker ticket. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.resume_or_new` | `off` | `off` / `shadow` / `assist` | fleet | Proposing, in New session, whether to resume a past session of the same work or start fresh. A single recent past session decides without Jev. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.limit_switch` | `off` | `off` / `shadow` / `assist` | fleet | Asking which login an out-of-credit session should resume under when it is switched automatically. The login with the most headroom is used either way; Jev's pick is recorded beside it so the two can be compared. Experimental. |
 | `decide.jev.unassigned` | `false` | on / off | fleet | Also send sessions and tickets that belong to no organisation. Experimental. Asks to confirm. |
 | `decide.jev.unassigned_reply` | `false` | on / off | fleet | Also send the reply text of sessions that belong to no organisation (turn outcome), on top of sending unassigned sessions at all. Experimental. Asks to confirm. |
 | `decide.jev.timeout_ms` | `1500` | 100–30000 ms | fleet | How long one call may take. A call is never retried. |

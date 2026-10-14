@@ -370,6 +370,14 @@ Index by area (names only; see the reference for details):
   or past the line fails `E_ACCOUNT_LIMIT`, naming the account and the
   login with headroom, unless `over_limit_ok: true` says the person chose
   it; `agent: "agy"` fails `E_UNSUPPORTED` until its adapter is validated),
+  `auto_switch_account` (`enabled?`: your own answer to automatic account
+  switching, on unless you turned it off; with the fleet's
+  `accounts.auto_switch` on too, a session of yours paused at its
+  account's limit is resumed under the login on its host with the most
+  headroom; `continue_after?` also types "Continue where you left off."
+  into a switched session whose turn the limit cut off, off by default;
+  returns `{ enabled, continue_after, fleet_enabled }`; a person's device only,
+  never a per-host token),
   `agent_status` (which agent hosts have a `fleet-agent`
   connected; see *`/agent`* above), `install_agent` (install `fleet-agent`
   on a host the hub reaches over SSH and move the host onto it; a job read
