@@ -635,11 +635,11 @@ from its pane (per-host token + `X-Fleet-Pane`, `FleetTools::own_session`):
 and `list_tasks` mark the caller's own rows (`is_self`,
 `is_self_requester` / `is_self_worker`). An agent sets the status of,
 edits, comments on, renames and plans (`set_parent`, `bucket_add` /
-`bucket_remove`) a local task its own session is on (a confirmed, live link)
-even when the task is shared with sessions it cannot drive
+`bucket_remove`, `dep`) a local task its own session is on (a confirmed, live
+link) even when the task is shared with sessions it cannot drive
 (`own_session_works_on`); any other sprint or release membership stays a
-person's, and `bucket_admin`, `dep`, `hold` and `done_when` still refuse a
-per-host token. Not yet: the new task's brief
+person's, a task in a mission stays its owner's (`require_mission_change`),
+and `bucket_admin`, `hold` and `done_when` still refuse a per-host token. Not yet: the new task's brief
 waiting for the next prompt (J3), own tasks in ⌘K.
 C0: the operator is born with the `fleet-brainstorm` skill
 (`skills/fleet-brainstorm/SKILL.md`, written to its directory's

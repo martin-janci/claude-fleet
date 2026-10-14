@@ -262,6 +262,29 @@ fn one_line(s: &str) -> String {
 /// else. `None` when nothing identifying is in the input.
 pub fn tool_target(name: &str, input: Option<&serde_json::Value>) -> Option<String> {
     let map = input?.as_object()?;
+    // fleet's own `debug_devices`: what it did to which device
+    // (`screenshot · bench pixel`), as the chat's device card reads it.
+    if name.ends_with("__debug_devices") {
+        let s = |k: &str| map.get(k).and_then(|v| v.as_str()).map(str::trim);
+        let action = match (s("action"), map.get("queue").and_then(|q| q.as_bool())) {
+            (Some("claim"), Some(true)) => "wait in line",
+            (Some(a), _) if !a.is_empty() => a,
+            _ => return None,
+        };
+        let what = s("device")
+            .filter(|d| !d.is_empty())
+            .map(str::to_string)
+            .or_else(|| match (s("host"), s("name")) {
+                (Some(h), Some(n)) => Some(format!("{h}/{n}")),
+                (Some(h), None) => Some(h.to_string()),
+                _ => None,
+            });
+        let line = match what {
+            Some(w) => format!("{action} · {w}"),
+            None => action.to_string(),
+        };
+        return Some(cap_chars(one_line(&line).as_str(), TOOL_TARGET_MAX_CHARS));
+    }
     // Only `SendMessage`: a `to` in some other tool's input is not known to
     // name what that tool touched.
     let addressee: &[&str] = if name == "SendMessage" { &["to"] } else { &[] };
@@ -1860,8 +1883,13 @@ pub async fn fetch_conversation_for_row(
 
 /// Cap on every text field of a [`ToolDetail`] (chars; "…" appended when cut).
 pub const TOOL_DETAIL_MAX_CHARS: usize = 8_000;
-/// Most bytes of matching transcript lines [`fetch_tool_detail`] reads.
-pub const TOOL_DETAIL_READ_BYTES: usize = 2 * 1_048_576;
+/// Most bytes of matching transcript lines [`fetch_tool_detail`] reads:
+/// room for a result carrying a screenshot ([`TOOL_DETAIL_IMAGE_BYTES`]).
+pub const TOOL_DETAIL_READ_BYTES: usize = 6 * 1_048_576;
+/// Most images a [`ToolDetail`] carries, and the most base64 bytes of each;
+/// a result with more, or a bigger one, counts it in `images_omitted`.
+pub const TOOL_DETAIL_MAX_IMAGES: usize = 2;
+pub const TOOL_DETAIL_IMAGE_BYTES: usize = 4 * 1_048_576;
 
 /// One tool call's input and result, read on demand (`session_tool_detail`)
 /// so the conversation poll never carries them.
@@ -1879,6 +1907,63 @@ pub struct ToolDetail {
     /// Result text (string or joined text blocks), ≤ 8 000 chars; None until it arrives.
     pub result: Option<String>,
     pub is_error: bool,
+    /// The result's image blocks (a debug device's screenshot), each as
+    /// base64 with its type: at most [`TOOL_DETAIL_MAX_IMAGES`], each at
+    /// most [`TOOL_DETAIL_IMAGE_BYTES`] of base64.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ToolImage>,
+    /// Images of the result left out by those caps.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub images_omitted: u32,
+}
+
+/// One image of a tool result.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ToolImage {
+    /// `image/png`, `image/jpeg`, ...
+    pub mime: String,
+    /// Base64, as the transcript holds it.
+    pub data: String,
+}
+
+fn is_zero_u32(n: &u32) -> bool {
+    *n == 0
+}
+
+/// PURE: the image blocks of a tool_result's content, within the caps,
+/// and how many were left out. Claude Code writes an image as
+/// `{"type":"image","source":{"type":"base64","media_type","data"}}`; an
+/// MCP-shaped `{"type":"image","mimeType","data"}` is read too.
+fn tool_result_images(block: &serde_json::Value) -> (Vec<ToolImage>, u32) {
+    let Some(parts) = block.get("content").and_then(|c| c.as_array()) else {
+        return (vec![], 0);
+    };
+    let mut kept = Vec::new();
+    let mut omitted = 0u32;
+    for p in parts
+        .iter()
+        .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("image"))
+    {
+        let src = p.get("source").unwrap_or(p);
+        let mime = src
+            .get("media_type")
+            .or_else(|| src.get("mimeType"))
+            .and_then(|m| m.as_str())
+            .filter(|m| m.starts_with("image/") && m.len() <= 64);
+        let data = src.get("data").and_then(|d| d.as_str());
+        match (mime, data) {
+            (Some(mime), Some(data))
+                if kept.len() < TOOL_DETAIL_MAX_IMAGES && data.len() <= TOOL_DETAIL_IMAGE_BYTES =>
+            {
+                kept.push(ToolImage {
+                    mime: mime.to_string(),
+                    data: data.to_string(),
+                });
+            }
+            _ => omitted += 1,
+        }
+    }
+    (kept, omitted)
 }
 
 /// The file change of an Edit / MultiEdit / Write call.
@@ -1929,7 +2014,9 @@ fn edit_detail(name: &str, input: &serde_json::Value) -> Option<EditDetail> {
 /// blocks of other ids are skipped.
 pub fn parse_tool_detail(lines: &str, id: &str) -> Option<ToolDetail> {
     let mut detail: Option<ToolDetail> = None;
-    let mut result: Option<(Option<String>, bool)> = None;
+    // The result's text, whether it is an error, and its images.
+    type ToolResult = (Option<String>, bool, (Vec<ToolImage>, u32));
+    let mut result: Option<ToolResult> = None;
     for line in lines.lines() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
@@ -1965,23 +2052,27 @@ pub fn parse_tool_detail(lines: &str, id: &str) -> Option<ToolDetail> {
                         command,
                         result: None,
                         is_error: false,
+                        images: vec![],
+                        images_omitted: 0,
                     });
                 }
                 Some("tool_result")
                     if b.get("tool_use_id").and_then(|x| x.as_str()) == Some(id) =>
                 {
                     let is_error = b.get("is_error").and_then(|e| e.as_bool()) == Some(true);
-                    result = Some((tool_result_text(b), is_error));
+                    result = Some((tool_result_text(b), is_error, tool_result_images(b)));
                 }
                 _ => {}
             }
         }
     }
     let mut d = detail?;
-    if let Some((text, is_error)) = result {
+    if let Some((text, is_error, (images, omitted))) = result {
         // A result with no text blocks (e.g. only an image) still arrived.
         d.result = Some(cap_chars(&text.unwrap_or_default(), TOOL_DETAIL_MAX_CHARS));
         d.is_error = is_error;
+        d.images = images;
+        d.images_omitted = omitted;
     }
     Some(d)
 }
@@ -3971,6 +4062,28 @@ mod tests {
     }
 
     #[test]
+    fn a_debug_device_call_names_its_action_and_device() {
+        let t = |v: serde_json::Value| tool_target("mcp__claude-fleet__debug_devices", Some(&v));
+        assert_eq!(
+            t(serde_json::json!({"action": "screenshot", "device": "bench pixel"})).as_deref(),
+            Some("screenshot · bench pixel")
+        );
+        assert_eq!(
+            t(serde_json::json!({"action": "claim", "device": "#3", "queue": true})).as_deref(),
+            Some("wait in line · #3")
+        );
+        assert_eq!(
+            t(serde_json::json!({"action": "boot", "host": "mac", "name": "iPhone 17"})).as_deref(),
+            Some("boot · mac/iPhone 17")
+        );
+        assert_eq!(
+            t(serde_json::json!({"action": "list"})).as_deref(),
+            Some("list")
+        );
+        assert_eq!(t(serde_json::json!({"device": "x"})), None);
+    }
+
+    #[test]
     fn tool_target_prefers_what_the_tool_touched() {
         let j = |v: serde_json::Value| Some(v);
         assert_eq!(
@@ -4967,6 +5080,62 @@ mod tests {
         assert_eq!(d.command.unwrap().chars().count(), 8_001);
         assert_eq!(d.result.unwrap().chars().count(), 8_001);
         assert!(d.input.chars().count() <= 8_001);
+    }
+
+    #[test]
+    fn a_results_images_ride_along_within_their_caps() {
+        let img = |data: &str| {
+            serde_json::json!({"type": "image",
+                "source": {"type": "base64", "media_type": "image/png", "data": data}})
+        };
+        let big = "A".repeat(TOOL_DETAIL_IMAGE_BYTES + 1);
+        let lines = jl(&[
+            tool_use(
+                "t",
+                "toolu_6",
+                "mcp__claude-fleet__debug_devices",
+                serde_json::json!({"action": "screenshot", "device": "pixel"}),
+            ),
+            tool_result(
+                "t",
+                "toolu_6",
+                serde_json::json!([
+                    {"type": "text", "text": "Pixel on mac: 3 bytes"},
+                    img("iVBO"),
+                    {"type": "image", "mimeType": "image/jpeg", "data": "/9j/"},
+                    img("third"),
+                    img(&big),
+                ]),
+                false,
+            ),
+        ]);
+        let d = parse_tool_detail(&lines, "toolu_6").unwrap();
+        assert_eq!(d.result.as_deref(), Some("Pixel on mac: 3 bytes"));
+        assert_eq!(
+            d.images,
+            vec![
+                ToolImage {
+                    mime: "image/png".into(),
+                    data: "iVBO".into()
+                },
+                ToolImage {
+                    mime: "image/jpeg".into(),
+                    data: "/9j/".into()
+                },
+            ]
+        );
+        assert_eq!(d.images_omitted, 2);
+        // A detail without images serialises as before.
+        let plain = parse_tool_detail(
+            &jl(&[
+                tool_use("t", "toolu_7", "Bash", serde_json::json!({"command": "ls"})),
+                tool_result("t", "toolu_7", serde_json::json!("ok"), false),
+            ]),
+            "toolu_7",
+        )
+        .unwrap();
+        let v = serde_json::to_value(&plain).unwrap();
+        assert!(v.get("images").is_none() && v.get("images_omitted").is_none());
     }
 
     #[test]

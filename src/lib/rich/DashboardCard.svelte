@@ -14,7 +14,7 @@
   import { workspace } from '../workspace';
   import {
     dashboardChanges,
-    ensurePinned,
+    followPinned,
     MAX_PINNED,
     pinDashboard,
     pinnedDashboards,
@@ -36,8 +36,9 @@
   let busy = $state(false);
   let failure = $state<string | null>(null);
 
-  // Whether it is pinned already decides the button: read the pins once.
-  onMount(() => void ensurePinned());
+  // Whether it is pinned already decides the button: follow the pins, so a
+  // pin made on another device turns it into Pinned or Replace at once.
+  onMount(() => followPinned());
 
   async function pin() {
     busy = true;

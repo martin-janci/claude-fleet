@@ -123,6 +123,14 @@ export const CONFIRM_CHANGED_EVENT = 'confirm:changed';
  */
 export const HANDOFF_CHANGED_EVENT = 'handoff:changed';
 
+/**
+ * `dashboards:changed` (persona design step 7): the person pinned, replaced
+ * or unpinned a dashboard, on this device or another. An empty frame;
+ * `dashboards.ts` listens to it on its own and re-reads `dashboards`, which
+ * on a hub-backed desktop is the hub's.
+ */
+export const DASHBOARDS_CHANGED_EVENT = 'dashboards:changed';
+
 /** The payload of `update:changed`: what moved, never the row itself. */
 /** `what` is observed | pin | channel today; a newer hub may add others. */
 export type UpdateChanged = { what: string; target?: string };

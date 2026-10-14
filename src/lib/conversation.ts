@@ -157,6 +157,11 @@ export interface ToolDetail {
   /** Null until the result arrives. */
   result: string | null;
   is_error: boolean;
+  /** The result's images (a debug device's screenshot): base64 with its
+   *  type, at most 2. Absent from an older backend. */
+  images?: { mime: string; data: string }[];
+  /** Images of the result left out by the backend's caps. */
+  images_omitted?: number;
 }
 
 /** The input and result of tool call `toolUseId`; `claudeSessionId` looks in
@@ -684,6 +689,8 @@ const TOOL_VERBS: Record<string, string> = {
   WebSearch: 'Search web',
   TodoWrite: 'Update todos',
   'mcp__claude-fleet__ask': 'Form',
+  // debug_devices.ts `DEVICE_TOOL`: a session driving a debug device.
+  'mcp__claude-fleet__debug_devices': 'Device',
 };
 
 /** The short verb a tool line leads with; `mcp__srv__tool` → `srv · tool`. */

@@ -6,9 +6,10 @@
 //   asks a run for. Normalised exactly as `report_from_value` does there.
 // - A `fleet.ui/1` block: a fenced ```fleet-ui block (or a ```json block
 //   whose object says `"spec": "fleet.ui/1"`) holding one display block —
-//   report, steps, guide, callout, facts, choices, form, progress, results
-//   or error. docs/chat-blocks.md is the format; the Rust twin of the check
-//   is crates/fleet-core/src/pages/chat_blocks.rs, and both run
+//   report, steps, guide, callout, facts, choices, form, progress, results,
+//   error, setting, wizard, dashboard or device. docs/chat-blocks.md is the
+//   format; the Rust twin of the check is
+//   crates/fleet-core/src/pages/chat_blocks.rs, and both run
 //   docs/chat-block-examples/blocks.json.
 // - A work handover: the text between `WORK_HANDOVER_BEGIN_<nonce>` and
 //   `WORK_HANDOVER_END_<nonce>` lines, the shape agent_handover.rs asks a
@@ -148,10 +149,14 @@ export type UiBlock =
   /** A dashboard the agent proposes (persona design, step 5): widgets over
    *  `work_stats`, drawn live by the app, pinned only by the person
    *  (`rich/DashboardCard.svelte`). The block names filters, never numbers. */
-  | ({ kind: 'dashboard'; why?: string } & Dashboard);
+  | ({ kind: 'dashboard'; why?: string } & Dashboard)
+  /** A debug device (`docs/debug-devices.md`) drawn live from the person's
+   *  own list by its reference (`rich/DeviceCard.svelte`): the block names
+   *  the device, never its state. */
+  | { kind: 'device'; device: string; title?: string; note?: string };
 
 export type UiKind = UiBlock['kind'];
-export const UI_KINDS: UiKind[] = ['report', 'steps', 'guide', 'callout', 'facts', 'choices', 'form', 'progress', 'results', 'error', 'setting', 'wizard', 'dashboard'];
+export const UI_KINDS: UiKind[] = ['report', 'steps', 'guide', 'callout', 'facts', 'choices', 'form', 'progress', 'results', 'error', 'setting', 'wizard', 'dashboard', 'device'];
 /** A progress `id`, an error `code` and a guide's `page`: a key, never prose. */
 const KEY_RE = /^[A-Za-z0-9_.:-]+$/;
 const KEY_MAX = 64;
@@ -655,7 +660,9 @@ function checkForm(v: unknown, p: Problems): FormSpec | null {
 
 // ── A dashboard's widgets (persona design, step 5; chat_blocks.rs `widget`) ─
 
-export const DASH_WIDGET_KINDS = ['stat', 'groups', 'buckets'] as const;
+export const DASH_WIDGET_KINDS = ['stat', 'groups', 'buckets', 'burnup'] as const;
+/** A burn-up's longest window (`BURNUP_MAX_DAYS` in stats.rs). */
+export const DASH_BURNUP_MAX_DAYS = 90;
 export const DASH_STAT_VALUES = ['total', 'open', 'needs_you', 'pct_done', 'cost', ...WORK_STAGES] as const;
 export const DASH_GROUP_SHOWS = ['stages', 'done'] as const;
 export const DASH_BUCKET_STATES = ['planned', 'active', 'closed', 'released'] as const;
@@ -760,6 +767,11 @@ function dashWidget(o: Record<string, unknown>, p: Problems, at: string): Widget
         query: query as unknown as Extract<Widget, { kind: 'buckets' }>['query'],
         ...(states ? { states } : {}),
       };
+    }
+    case 'burnup': {
+      const days = num(o, 'days', p, at, { min: 2 });
+      if (days !== undefined && days > DASH_BURNUP_MAX_DAYS) p.add(at, `\`days\` must be at most ${DASH_BURNUP_MAX_DAYS}`);
+      return { kind, title, query, ...(days !== undefined ? { days } : {}) };
     }
     default:
       return null;
@@ -906,6 +918,11 @@ export function checkUiBlock(raw: string): Check {
         (w): w is Widget => w !== null,
       );
       block = { kind: 'dashboard', id, title, intro, widgets, ...(why ? { why } : {}) };
+      break;
+    }
+    case 'device': {
+      const device = str(v, 'device', p, '', { required: true, max: 200 }) ?? '';
+      block = { kind: 'device', device: device.trim(), title: str(v, 'title', p, '', { max: 120 }), note: str(v, 'note', p, '', { max: 2000 }) };
       break;
     }
   }

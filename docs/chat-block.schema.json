@@ -492,6 +492,38 @@
         "title",
         "widgets"
       ]
+    },
+    {
+      "description": "A debug device (`docs/debug-devices.md`), drawn live from the\nperson's own list: its state, who holds or waits for it, and a\nscreenshot or a mirror on a click.",
+      "type": "object",
+      "properties": {
+        "device": {
+          "description": "An id (`#12`), label, name, serial or key, optionally as\n`host/that`: what `debug_devices` takes as `device`.",
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "const": "device"
+        },
+        "note": {
+          "description": "Markdown under the device: what to look at on it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "description": "A heading over the device; its own title when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "device"
+      ]
     }
   ],
   "required": [
@@ -708,6 +740,36 @@
             "kind",
             "title",
             "query"
+          ]
+        },
+        {
+          "description": "A burn-up: for each of the last `days` days, the query's tasks and\nhow many of them were done by the day's end, from their status\nhistory (`work { stats, since }`).",
+          "type": "object",
+          "properties": {
+            "days": {
+              "description": "2–90 (default 14).",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "burnup"
+            },
+            "query": {
+              "$ref": "#/$defs/DashQuery",
+              "default": {}
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "title"
           ]
         },
         {

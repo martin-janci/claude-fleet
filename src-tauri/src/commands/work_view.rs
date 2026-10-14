@@ -207,6 +207,10 @@ pub struct WorkBucketsArgs {
 pub struct WorkStatsArgs {
     #[serde(default)]
     pub filters: Option<WorkTreeFilters>,
+    /// A burn-up from this unix time to now, at most 90 days (persona
+    /// dashboards step 8).
+    #[serde(default)]
+    pub since: Option<i64>,
 }
 
 /// `work_bucket`: one bucket with its members, past ones too.
@@ -972,11 +976,12 @@ pub(crate) mod routed {
     ) -> Result<WorkStats, IpcError> {
         let wire = WorkArgs {
             filters: args.filters.clone(),
+            since: args.since,
             ..read("stats")
         };
         match backend.hub() {
             Some(hub) => hub.route("work_stats", &wire).await,
-            None => stats::stats(store, &internal_view(), args.filters.as_ref()),
+            None => stats::stats(store, &internal_view(), args.filters.as_ref(), args.since),
         }
     }
 

@@ -295,9 +295,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: clippy, rustfmt
+      # SAVE THE CACHE WHEN THE TESTS FAIL TOO. rust-cache saves on a green job
+      # only, and a new Cargo.lock means a new key with nothing under it. On
+      # 2026-10-13 main's `cargo test` was red for three runs after a lockfile
+      # change, so the macOS and Windows legs (which no PR run seeds) compiled
+      # from nothing every time: 22m41s of build in front of 4 minutes of
+      # tests, 28-54 minutes a leg, read as "CI is stuck". A red test step
+      # still compiled the dependencies; keep them.
+      #
+      # ONLY MAIN SAVES. A PR restores main's cache (same key, or the prefix
+      # when it changes Cargo.lock) and its own copy is readable by that PR
+      # alone, so saving it buys nothing: on 2026-10-13 two PRs each held a
+      # 1.2 GB duplicate of main's Linux cache and the repo sat at 9.9 GB of
+      # GitHub's 10 GB, one save from evicting a cache main does use.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: .
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all --check
       # macOS lints in the `clippy` job below, in parallel with these tests.
       - run: cargo clippy --workspace --all-targets -- -D warnings
@@ -335,6 +350,8 @@ jobs:
         with:
           workspaces: .
           key: windows
+          # See `rust` above.
+          cache-on-failure: true
       # Clippy runs in the `clippy` job below, in parallel with these tests.
       # --no-fail-fast: every crate's failures in one run, not only the first
       # failing test binary's.
@@ -446,6 +463,9 @@ jobs:
         with:
           workspaces: .
           key: hub-headless
+          # See `rust` above.
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo build -p fleet-hub --locked
       - run: cargo test -p fleet-core -p fleet-hub --locked
       - run: cargo build -p fleet-agent --locked
