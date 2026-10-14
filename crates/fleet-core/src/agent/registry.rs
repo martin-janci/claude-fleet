@@ -38,6 +38,11 @@ pub struct AgentHello {
     /// check. Kept on the connection as [`Connection::proto`], the
     /// negotiated version [`AgentRegistry::negotiated_proto`] reads back.
     pub proto: u32,
+    /// The loopback port the agent relays hooks on (`fleet-agent`'s
+    /// `hook_relay`), when it bound one. Stamped on the host row
+    /// (`Store::set_host_agent_hook_port`) so provisioning points the host's
+    /// hooks at it (`HubBase::for_host`).
+    pub hook_port: Option<u16>,
 }
 
 /// One row of [`AgentRegistry::snapshot`] — what `agent_status` (Task 8) and

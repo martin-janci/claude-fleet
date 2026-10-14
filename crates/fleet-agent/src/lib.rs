@@ -14,6 +14,7 @@ pub mod cli;
 pub mod config;
 pub mod conn;
 pub mod exec;
+pub mod hook_relay;
 pub mod install;
 pub mod report;
 pub mod self_update;

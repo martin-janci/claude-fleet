@@ -353,6 +353,48 @@ impl Store {
         self.emit_host(alias, |bus, row| bus.host_probed(row))
     }
 
+    /// The hook relay port the host's fleet-agent reported in its hello
+    /// (migration 190), `None` for no relay. A CHANGE also forgets a
+    /// provisioned host's fingerprint, in the same statement, so it reads
+    /// `provision_stale` and the stale-host refresh rewrites its hooks at the
+    /// new address (`HubBase::for_host`) without anybody asking. Returns
+    /// whether it changed; an unchanged report (every reconnect) writes
+    /// nothing.
+    pub fn set_host_agent_hook_port(
+        &self,
+        alias: &str,
+        port: Option<u16>,
+    ) -> Result<bool, rusqlite::Error> {
+        let changed = self.conn.execute(
+            "UPDATE hosts SET agent_hook_port = ?1, \
+             provision_fingerprint = CASE WHEN provisioned = 1 THEN NULL \
+                                          ELSE provision_fingerprint END \
+             WHERE alias = ?2 AND agent_hook_port IS NOT ?1",
+            rusqlite::params![port, alias],
+        )? > 0;
+        if changed {
+            self.emit_host(alias, |bus, row| bus.host_probed(row))?;
+        }
+        Ok(changed)
+    }
+
+    /// The hook relay port of an AGENT host, as its last hello reported it;
+    /// `None` for an SSH host (whatever an earlier agent left behind) or an
+    /// agent without a relay.
+    pub fn agent_hook_port(&self, alias: &str) -> Result<Option<u16>, rusqlite::Error> {
+        let port: Option<Option<i64>> = self
+            .conn
+            .prepare_cached(
+                "SELECT agent_hook_port FROM hosts WHERE alias = ?1 AND transport = 'agent'",
+            )?
+            .query_row([alias], |r| r.get(0))
+            .optional()?;
+        Ok(port
+            .flatten()
+            .and_then(|p| u16::try_from(p).ok())
+            .filter(|p| *p != 0))
+    }
+
     pub fn set_host_hidden(&self, alias: &str, hidden: bool) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "UPDATE hosts SET hidden=?1 WHERE alias=?2",
@@ -1264,6 +1306,45 @@ mod tests {
         let row = s.get_host_row("h").unwrap().unwrap();
         assert_eq!(row.last_hook_at, Some(1_700_000_100));
         assert_eq!(row.agent_version.as_deref(), Some("0.2.26"));
+    }
+
+    /// The hook relay port reads back only for an agent host, and a change
+    /// of it — never a repeat — makes a provisioned host stale, so its hooks
+    /// are rewritten at the new address.
+    #[test]
+    fn a_changed_agent_hook_port_makes_the_host_stale_once() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("h", Some("h")).unwrap();
+        s.set_host_provisioned("h", true).unwrap();
+        let stale = |s: &Store| s.get_host_row("h").unwrap().unwrap().provision_stale;
+        assert!(!stale(&s));
+
+        assert!(s.set_host_agent_hook_port("h", Some(4181)).unwrap());
+        assert_eq!(
+            s.agent_hook_port("h").unwrap(),
+            None,
+            "an SSH host has no relay, whatever is stored"
+        );
+        assert!(stale(&s), "a new relay port is owed a refresh");
+
+        s.set_host_transport("h", "agent").unwrap();
+        assert_eq!(s.agent_hook_port("h").unwrap(), Some(4181));
+        s.set_host_provisioned("h", true).unwrap();
+        assert!(
+            !s.set_host_agent_hook_port("h", Some(4181)).unwrap(),
+            "a reconnect reporting the same port writes nothing"
+        );
+        assert!(!stale(&s));
+
+        assert!(s.set_host_agent_hook_port("h", None).unwrap());
+        assert_eq!(s.agent_hook_port("h").unwrap(), None);
+        assert!(stale(&s), "a relay that went away is owed a refresh too");
+
+        // A host never provisioned stays that way: nothing to refresh.
+        s.insert_host("fresh", Some("fresh")).unwrap();
+        assert!(s.set_host_agent_hook_port("fresh", Some(4181)).unwrap());
+        let row = s.get_host_row("fresh").unwrap().unwrap();
+        assert!(!row.provisioned && !row.provision_stale);
     }
 
     #[test]

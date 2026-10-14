@@ -1547,6 +1547,7 @@ dependencies = [
  "fleet-update",
  "fleet-updater",
  "futures-util",
+ "httparse",
  "libc",
  "rcgen",
  "rustls-pki-types",

@@ -138,6 +138,19 @@ impl Endpoint {
     pub fn port(&self) -> u16 {
         self.at.port()
     }
+
+    /// The `Host` header for a plain HTTP request to the hub: the same
+    /// authority, spelled the same way, as the WebSocket dial sends.
+    pub fn authority(&self) -> &str {
+        self.at.authority_as_written()
+    }
+
+    /// The hub's `/hook` path: the dial path with `/agent` replaced, so a hub
+    /// mounted under a prefix keeps it.
+    pub fn hook_path(&self) -> String {
+        let path = self.at.path();
+        format!("{}/hook", path.strip_suffix("/agent").unwrap_or(path))
+    }
 }
 
 /// Why a dial did not produce a socket.
@@ -199,22 +212,7 @@ impl Dialer {
 
     async fn dial_once(&self) -> Result<Socket, DialError> {
         let ep = &self.endpoint;
-        let tcp = tokio::net::TcpStream::connect((ep.host(), ep.port()))
-            .await
-            .map_err(|e| DialError::Failed(format!("{}:{}: {e}", ep.host(), ep.port())))?;
-        let _ = tcp.set_nodelay(true);
-        let io: Box<dyn Io> = match &self.tls {
-            None => Box::new(tcp),
-            Some(tls) => {
-                let name = rustls_pki_types::ServerName::try_from(ep.host().to_string())
-                    .map_err(|e| DialError::Failed(format!("{}: {e}", ep.host())))?;
-                let stream = tls
-                    .connect(name, tcp)
-                    .await
-                    .map_err(|e| DialError::Failed(format!("TLS with {}: {e}", ep.host())))?;
-                Box::new(stream)
-            }
-        };
+        let io = self.connect_io().await?;
         let mut request = ep
             .url()
             .into_client_request()
@@ -241,6 +239,30 @@ impl Dialer {
             }),
             Err(e) => Err(DialError::Failed(format!("{}: {e}", ep.url()))),
         }
+    }
+
+    /// A fresh TCP (and, for an `https`/`wss` hub, TLS) stream to the hub —
+    /// the same host, port and trust the WebSocket dial uses. The hook relay
+    /// (`crate::hook_relay`) sends its one HTTP request per hook over one.
+    pub(crate) async fn connect_io(&self) -> Result<Box<dyn Io>, DialError> {
+        let ep = &self.endpoint;
+        let tcp = tokio::net::TcpStream::connect((ep.host(), ep.port()))
+            .await
+            .map_err(|e| DialError::Failed(format!("{}:{}: {e}", ep.host(), ep.port())))?;
+        let _ = tcp.set_nodelay(true);
+        let io: Box<dyn Io> = match &self.tls {
+            None => Box::new(tcp),
+            Some(tls) => {
+                let name = rustls_pki_types::ServerName::try_from(ep.host().to_string())
+                    .map_err(|e| DialError::Failed(format!("{}: {e}", ep.host())))?;
+                let stream = tls
+                    .connect(name, tcp)
+                    .await
+                    .map_err(|e| DialError::Failed(format!("TLS with {}: {e}", ep.host())))?;
+                Box::new(stream)
+            }
+        };
+        Ok(io)
     }
 }
 
@@ -316,6 +338,9 @@ pub struct Agent {
     /// Gates the heartbeat flush in `serve` only — `crate::report::ring()`
     /// fills from the installed layer regardless.
     pub report_errors: bool,
+    /// The port the hook relay bound (`crate::hook_relay`), told to the hub in
+    /// every `hello`. Unset while there is no relay.
+    hook_port: std::sync::OnceLock<u16>,
 }
 
 /// One `exec` counted in [`Agent::running`] for as long as it lives.
@@ -348,7 +373,14 @@ impl Agent {
             stopping: tokio::sync::watch::Sender::new(false),
             running: tokio::sync::watch::Sender::new(0),
             report_errors,
+            hook_port: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Record the port the hook relay bound, so every later `hello` carries
+    /// it. Set once; a second call is ignored.
+    pub fn set_hook_port(&self, port: u16) {
+        let _ = self.hook_port.set(port);
     }
 
     /// Resolves once [`Agent::stop`] has been called.
@@ -498,6 +530,7 @@ where
         host_name: host_name(),
         os: std::env::consts::OS.to_string(),
         proto: fleet_proto::PROTO_VERSION,
+        hook_port: agent.hook_port.get().copied(),
     };
     let hello = encode_agent_frame(&hello).expect("a hello is three short strings and a number");
     if let Err(e) = sink.send(Message::Text(hello.into())).await {
@@ -1333,12 +1366,37 @@ pub async fn run(
         tokio::spawn(async move { u.run(&config, link).await });
     }
     let endpoint = Endpoint::parse(&config.hub, config.insecure)?;
-    let dialer = Dialer::new(endpoint, config.token, config.ca_file.as_deref())?;
+    let dialer = Arc::new(Dialer::new(
+        endpoint,
+        config.token,
+        config.ca_file.as_deref(),
+    )?);
     let agent = Agent::with_report_errors(
         std::env::var_os("HOME").map(PathBuf::from),
         exec::MAX_CONCURRENT,
         config.report_errors,
     );
+    // Bound before the first dial, so the first `hello` already says where
+    // the hooks can post. A port that is taken (a second agent on this
+    // machine, another service) is logged and left: the hub then keeps this
+    // host's hooks on its public URL, as before the relay existed.
+    if config.hook_port != 0 {
+        match crate::hook_relay::bind(config.hook_port).await {
+            Ok(listener) => {
+                agent.set_hook_port(config.hook_port);
+                tracing::info!(
+                    port = config.hook_port,
+                    "[agent] hook relay listening on 127.0.0.1"
+                );
+                tokio::spawn(crate::hook_relay::serve(listener, Arc::clone(&dialer)));
+            }
+            Err(e) => tracing::warn!(
+                port = config.hook_port,
+                error = %e,
+                "[agent] hook relay not started; the hub keeps this host's hooks on its public URL"
+            ),
+        }
+    }
     let stop = shutdown_signal()?;
     tokio::select! {
         never = run_with(&dialer, &agent, &notifier, Beats::heartbeat, tokio::time::sleep) => match never {},
@@ -1878,9 +1936,11 @@ mod tests {
                     host_name,
                     os,
                     proto,
+                    hook_port,
                 },
                 _,
             )) => {
+                assert_eq!(hook_port, None, "no relay bound in this test");
                 assert_eq!(agent_version, env!("CARGO_PKG_VERSION"));
                 assert!(!host_name.is_empty());
                 assert_eq!(os, std::env::consts::OS);

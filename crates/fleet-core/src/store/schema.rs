@@ -717,6 +717,16 @@ fn sessions_has_pinned_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 190.
+fn hosts_has_agent_hook_port(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'agent_hook_port'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 125.
 fn sessions_has_last_viewed_at(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -2114,6 +2124,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 189,
         sql: include_str!("../../migrations/189_session_pinned.sql"),
         already_applied: Some(sessions_has_pinned_at),
+    },
+    // The hook relay: `hosts.agent_hook_port`, from an agent's `hello`.
+    // ADD COLUMN, so guarded.
+    Migration {
+        version: 190,
+        sql: include_str!("../../migrations/190_host_agent_hook_port.sql"),
+        already_applied: Some(hosts_has_agent_hook_port),
     },
 ];
 
@@ -3792,6 +3809,26 @@ mod tests {
         assert!(old.touch_session_viewed(id, stamped + 5).unwrap());
         assert_eq!(row().last_viewed_at, Some(stamped + 5));
         assert_eq!(row().row_version, before + 1, "the trigger watches it");
+    }
+
+    /// 190 on a database stopped at 189: every host arrives with no hook
+    /// relay, and one can then be stamped.
+    #[test]
+    fn migration_190_adds_an_empty_hook_relay_port() {
+        let old = Store::open_in_memory().expect("open");
+        old.insert_host("h", Some("h")).unwrap();
+        old.set_host_transport("h", "agent").unwrap();
+        old.conn
+            .execute_batch(
+                "ALTER TABLE hosts DROP COLUMN agent_hook_port;\
+                 DELETE FROM schema_version WHERE version >= 190;",
+            )
+            .unwrap();
+        old.migrate().expect("190 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert_eq!(old.agent_hook_port("h").unwrap(), None);
+        assert!(old.set_host_agent_hook_port("h", Some(4181)).unwrap());
+        assert_eq!(old.agent_hook_port("h").unwrap(), Some(4181));
     }
 
     /// 189 on a database stopped at 188: every row arrives unpinned, a pin

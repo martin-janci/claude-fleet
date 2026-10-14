@@ -46,6 +46,9 @@ futures-util = { version = "0.3", default-features = false, features = ["std", "
 # from the host's own CA bundle (see conn.rs), not from a bundled root crate.
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 rustls-pki-types = { version = "1", features = ["std"] }
+# The hook relay's HTTP/1.1 heads, both directions (`hook_relay.rs`). Already
+# in the lock as tungstenite's own header parser, so nothing new is compiled.
+httparse = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "std", "registry"] }
 

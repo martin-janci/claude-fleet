@@ -497,7 +497,12 @@ pub async fn provision_content_only(
             )
         })?
     };
-    let base = &base.with_start_context(&*lock(store)?);
+    // How SessionStart installs and, on an agent host with a hook relay,
+    // where the hooks post.
+    let base = &{
+        let s = lock(store)?;
+        base.with_start_context(&s).for_host(&s, host)
+    };
     let force = force_git_tree(store);
     provision_skills(ssh, host, force).await?;
     provision_claude_md(ssh, host).await?;
@@ -917,7 +922,11 @@ pub async fn provision_host_with_token(
         ));
     }
     // `work.session_start_context` (M4.5) decides how SessionStart installs.
-    let base = &base.with_start_context(&*lock(store)?);
+    // ...and, on an agent host with a hook relay, where its hooks post.
+    let base = &{
+        let s = lock(store)?;
+        base.with_start_context(&s).for_host(&s, host)
+    };
     provision_one_with(ssh, host, base, &token, force_git_tree(store)).await?;
     commit_host_token(store, host, &token, minted)?;
     // A public hub is reached directly; only a loopback hub needs the
@@ -3860,6 +3869,98 @@ mod tests {
             tunnels.snapshot().is_empty(),
             "an agent host has no way to reach an ssh -R tunnel: {:?}",
             tunnels.snapshot()
+        );
+    }
+
+    /// Everything a provisioning sent the host: scripts and uploaded bodies.
+    fn sent(fake: &FakeSsh) -> String {
+        fake.calls()
+            .iter()
+            .map(|c| format!("{}\n{}\n", c.command(), c.stdin_str().unwrap_or_default()))
+            .collect()
+    }
+
+    /// The hook relay (2026-10-14): on a public hub, an agent host whose
+    /// fleet-agent reported a relay port gets its hooks at
+    /// `http://127.0.0.1:<port>/hook` — Claude Code refuses an http hook
+    /// whose host resolves to a private address, which the public name may —
+    /// while its MCP entry stays on the public URL. An SSH host on the same
+    /// hub, or an agent host without a relay, keeps the public `/hook`.
+    #[tokio::test]
+    async fn an_agent_host_with_a_hook_relay_gets_loopback_hooks() {
+        let public = HubBase::public("https://fleet.example.com", PORT).unwrap();
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            for h in ["relay", "plain-agent", "ssh-h"] {
+                s.insert_host(h, Some(h)).unwrap();
+                s.upsert_host_token(h, &format!("{TOKEN}-{h}")).unwrap();
+            }
+            s.set_host_transport("relay", "agent").unwrap();
+            s.set_host_transport("plain-agent", "agent").unwrap();
+            s.set_host_agent_hook_port("relay", Some(4181)).unwrap();
+            // Left behind by an agent before the host moved back to SSH.
+            s.set_host_agent_hook_port("ssh-h", Some(4181)).unwrap();
+        }
+        let relay_hook = "http://127.0.0.1:4181/hook";
+        let public_hook = "https://fleet.example.com/hook";
+
+        // Full provisioning: hooks on the relay, the MCP entry public.
+        let fake = fresh_host();
+        provision_host_with_token(&store, &fake, &quiet_tunnels(), "relay", &public, false)
+            .await
+            .unwrap();
+        let all = sent(&fake);
+        assert!(all.contains(relay_hook), "hooks post to the relay");
+        assert!(!all.contains(public_hook), "no hook at the public URL");
+        assert!(
+            all.contains("https://fleet.example.com/mcp"),
+            "the MCP entry is not an http hook and stays public"
+        );
+
+        // The unattended content refresh writes the same.
+        let fake = fresh_host();
+        provision_content_only(&store, &fake, "relay", &public)
+            .await
+            .unwrap();
+        let all = sent(&fake);
+        assert!(all.contains(relay_hook) && !all.contains(public_hook));
+
+        for host in ["plain-agent", "ssh-h"] {
+            let fake = fresh_host();
+            provision_content_only(&store, &fake, host, &public)
+                .await
+                .unwrap();
+            let all = sent(&fake);
+            assert!(all.contains(public_hook), "{host} keeps the public URL");
+            assert!(!all.contains("127.0.0.1:4181"), "{host} has no relay");
+        }
+    }
+
+    /// A loopback hub (the desktop) never uses a relay port: its hooks are
+    /// on 127.0.0.1 already, through the reverse tunnel.
+    #[test]
+    fn only_a_public_base_takes_the_hook_relay() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("a", Some("a")).unwrap();
+        s.set_host_transport("a", "agent").unwrap();
+        s.set_host_agent_hook_port("a", Some(4181)).unwrap();
+        assert_eq!(
+            base().for_host(&s, "a").hook_url(),
+            "http://127.0.0.1:4180/hook"
+        );
+        let public = HubBase::public("https://fleet.example.com", PORT).unwrap();
+        assert_eq!(
+            public.for_host(&s, "a").hook_url(),
+            "http://127.0.0.1:4181/hook"
+        );
+        assert_eq!(
+            public.for_host(&s, "a").mcp_url(),
+            "https://fleet.example.com/mcp"
+        );
+        assert_eq!(
+            public.for_host(&s, "unknown").hook_url(),
+            "https://fleet.example.com/hook"
         );
     }
 
