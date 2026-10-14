@@ -1590,7 +1590,7 @@ fn enable_person_is_the_fleets_and_is_recorded() {
 }
 
 #[test]
-fn a_set_org_setting_event_never_keeps_the_value() {
+fn a_set_org_setting_event_says_what_the_setting_became() {
     let st = store();
     let mut add = args("add_org");
     add.name = Some("Acme".into());
@@ -1610,7 +1610,7 @@ fn a_set_org_setting_event_never_keeps_the_value() {
         ev[0].representation["key"],
         crate::service::settings::BUDGET_ORG_DAILY_USD
     );
-    assert!(ev[0].representation.get("value").is_none(), "{:?}", ev[0]);
+    assert_eq!(ev[0].representation["value"], "25", "{:?}", ev[0]);
 }
 
 /// Identity sub-project 1 (Task 12): Settings → People shows each person's

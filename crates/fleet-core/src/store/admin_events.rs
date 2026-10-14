@@ -20,9 +20,19 @@ pub const ADMIN_EVENTS_MAX_LIMIT: u32 = 500;
 /// Longest representation stored, in characters of its JSON text.
 pub const REPRESENTATION_MAX_CHARS: usize = 4096;
 
+/// Longest string leaf kept in a representation; longer ones end in `…`.
+pub const STRING_LEAF_MAX_CHARS: usize = 512;
+
 /// Keys a representation never keeps, on top of the control API audit's
 /// own skip list (`mcp::guard::SKIP_KEYS`: `code`, `secret`, `value`,
-/// `api_key`, `confirm_nonce`).
+/// `api_key`, `confirm_nonce`, `ref`), matched case-insensitively.
+///
+/// `value` is the one exception to that skip list: it is KEPT only when its
+/// object has a `key` sibling (the settings-write shape `{key, value}`)
+/// whose lowercase text contains none of `secret`, `password`, `token`,
+/// `api_key`. In every other object `value` is dropped: an env-var style
+/// `{name, value}` pair is a secret by nature, and only `set_org_setting`
+/// needs to say what a setting became.
 const SECRET_KEYS: &[&str] = &["token", "token_sha256", "password", "client_secret"];
 
 /// One administrative change, as a caller records it.
@@ -55,9 +65,10 @@ pub struct AdminEventRow {
     pub action: String,
     pub resource_type: String,
     pub resource_id: String,
-    /// The scrubbed representation. A text cut at
-    /// [`REPRESENTATION_MAX_CHARS`] is no longer JSON and reads back as a
-    /// JSON string holding the cut text.
+    /// The scrubbed representation, always JSON: string leaves are bounded
+    /// at [`STRING_LEAF_MAX_CHARS`], and a text still longer than
+    /// [`REPRESENTATION_MAX_CHARS`] is stored as
+    /// `{"truncated":true,"chars":<len>}` instead of being cut mid-way.
     pub representation: serde_json::Value,
 }
 
@@ -75,29 +86,91 @@ pub struct AdminEventQuery {
 }
 
 fn is_secret_key(k: &str) -> bool {
-    crate::mcp::guard::SKIP_KEYS.contains(&k) || SECRET_KEYS.contains(&k)
+    let k = k.to_ascii_lowercase();
+    (k != "value" && crate::mcp::guard::SKIP_KEYS.contains(&k.as_str()))
+        || SECRET_KEYS.contains(&k.as_str())
 }
 
-/// `v` without any key that could hold a secret, at any depth.
+/// Is an object's `value` a plain setting value: it has a string `key`
+/// sibling that names no secret?
+fn value_is_plain(m: &serde_json::Map<String, serde_json::Value>) -> bool {
+    m.get("key").and_then(|v| v.as_str()).is_some_and(|s| {
+        let s = s.to_ascii_lowercase();
+        !["secret", "password", "token", "api_key"]
+            .iter()
+            .any(|w| s.contains(w))
+    })
+}
+
+/// `user:pass@` after a URL scheme becomes `***@`; anything else is left.
+fn redact_url_userinfo(s: &str) -> String {
+    let Some(scheme_end) = s.find("://") else {
+        return s.to_string();
+    };
+    let scheme = &s[..scheme_end];
+    if !scheme
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic())
+        || !scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))
+    {
+        return s.to_string();
+    }
+    let rest = &s[scheme_end + 3..];
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    match rest[..authority_end].rfind('@') {
+        Some(at) if !rest[..at].contains(char::is_whitespace) => {
+            format!("{scheme}://***@{}", &rest[at + 1..])
+        }
+        _ => s.to_string(),
+    }
+}
+
+fn scrub_str(s: &str) -> serde_json::Value {
+    let s = redact_url_userinfo(s);
+    if s.chars().count() > STRING_LEAF_MAX_CHARS {
+        let mut cut: String = s.chars().take(STRING_LEAF_MAX_CHARS).collect();
+        cut.push('…');
+        serde_json::Value::String(cut)
+    } else {
+        serde_json::Value::String(s)
+    }
+}
+
+/// `v` without any key that could hold a secret, at any depth, with URL
+/// credentials redacted and string leaves bounded.
 pub fn scrub(v: &serde_json::Value) -> serde_json::Value {
     match v {
-        serde_json::Value::Object(m) => serde_json::Value::Object(
-            m.iter()
-                .filter(|(k, _)| !is_secret_key(k))
-                .map(|(k, v)| (k.clone(), scrub(v)))
-                .collect(),
-        ),
+        serde_json::Value::Object(m) => {
+            let keep_value = value_is_plain(m);
+            serde_json::Value::Object(
+                m.iter()
+                    .filter(|(k, _)| {
+                        if k.eq_ignore_ascii_case("value") {
+                            keep_value
+                        } else {
+                            !is_secret_key(k)
+                        }
+                    })
+                    .map(|(k, v)| (k.clone(), scrub(v)))
+                    .collect(),
+            )
+        }
         serde_json::Value::Array(a) => serde_json::Value::Array(a.iter().map(scrub).collect()),
+        serde_json::Value::String(s) => scrub_str(s),
         other => other.clone(),
     }
 }
 
-/// The text stored for `v`: scrubbed, then cut at
-/// [`REPRESENTATION_MAX_CHARS`].
+/// The text stored for `v`: scrubbed JSON, or a `truncated` marker when it
+/// is longer than [`REPRESENTATION_MAX_CHARS`].
 fn representation_text(v: &serde_json::Value) -> String {
     let text = scrub(v).to_string();
-    if text.chars().count() > REPRESENTATION_MAX_CHARS {
-        text.chars().take(REPRESENTATION_MAX_CHARS).collect()
+    let n = text.chars().count();
+    if n > REPRESENTATION_MAX_CHARS {
+        serde_json::json!({ "truncated": true, "chars": n }).to_string()
     } else {
         text
     }
@@ -213,6 +286,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{json, Value};
 
     #[test]
     fn admin_events_are_append_only_except_for_the_sweep() {
@@ -273,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn a_nested_secret_is_dropped_and_a_long_representation_is_cut() {
+    fn a_nested_secret_is_dropped_and_a_long_leaf_is_cut() {
         let v = serde_json::json!({
             "args": {"password": "p", "keep": 1, "list": [{"client_secret": "c", "ok": true}]},
             "token_sha256": "abc",
@@ -298,11 +372,47 @@ mod tests {
                 ..Default::default()
             })
             .unwrap()[0];
-        let text = row
-            .representation
+        let note = row.representation["note"]
             .as_str()
-            .expect("cut text reads as a string");
-        assert_eq!(text.chars().count(), REPRESENTATION_MAX_CHARS);
+            .expect("still an object");
+        assert_eq!(note.chars().count(), STRING_LEAF_MAX_CHARS + 1);
+    }
+
+    #[test]
+    fn the_scrub_keeps_a_plain_setting_value_and_drops_every_other_value() {
+        let kept = scrub(&json!({ "key": "work.auto_tidy", "value": "on" }));
+        assert_eq!(kept["value"], "on");
+        let dropped = scrub(&json!({ "key": "tracker.api_token", "value": "abc" }));
+        assert!(dropped.get("value").is_none());
+        let dropped = scrub(&json!({ "name": "Client_Secret", "value": "abc" }));
+        assert!(dropped.get("value").is_none());
+        let dropped = scrub(&json!({ "name": "HOME", "value": "/x" }));
+        assert!(dropped.get("value").is_none());
+        let dropped = scrub(&json!({ "value": "abc" }));
+        assert!(dropped.get("value").is_none());
+        let case = scrub(&json!({ "Token": "abc", "Password": "x", "CODE": "1" }));
+        assert_eq!(case, json!({}));
+    }
+
+    #[test]
+    fn the_scrub_redacts_url_credentials_and_keeps_the_rest_of_the_url() {
+        let v = scrub(&json!({ "remote": "https://user:tok@github.com/o/r.git", "note": "a@b" }));
+        assert_eq!(v["remote"], "https://***@github.com/o/r.git");
+        assert_eq!(v["note"], "a@b", "an e-mail is not a URL");
+    }
+
+    #[test]
+    fn a_long_representation_stays_json() {
+        let long = "x".repeat(10_000);
+        let v = scrub(&json!({ "notes": long }));
+        let s = v["notes"].as_str().unwrap();
+        assert!(s.chars().count() <= STRING_LEAF_MAX_CHARS + 1 && s.ends_with('…'));
+        let many: serde_json::Map<String, Value> = (0..200)
+            .map(|i| (format!("k{i}"), json!("y".repeat(400))))
+            .collect();
+        let text = representation_text(&Value::Object(many));
+        let parsed: Value = serde_json::from_str(&text).expect("still JSON");
+        assert_eq!(parsed["truncated"], true);
     }
 
     #[test]
