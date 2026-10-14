@@ -601,7 +601,16 @@ impl FleetTools {
         &self,
         Parameters(p): Parameters<PairClientParams>,
     ) -> Result<CallToolResult, McpError> {
-        ok_json(&self.mint_pairing(p, "pair_client")?)
+        ok_json(&self.mint_pairing(
+            p,
+            "pair_client",
+            crate::mcp::pairing::Minter {
+                person: None,
+                device: None,
+                via: "pair_client",
+                fenced_org: None,
+            },
+        )?)
     }
 
     /// Mint a pairing code: `pair_client`'s body, shared with `org_admin {
@@ -611,6 +620,7 @@ impl FleetTools {
         &self,
         p: PairClientParams,
         tool: &str,
+        minter: crate::mcp::pairing::Minter<'_>,
     ) -> Result<serde_json::Value, McpError> {
         // Validate BEFORE auditing: the name reaches a `tracing` line, and a
         // refused mint must not be able to put a line break (or an ANSI
@@ -738,7 +748,26 @@ impl FleetTools {
             org_id: p.org_id,
             person: person.as_deref(),
             ttl,
+            minter,
         });
+        // A master mint is an administrative write. `pair_device` records its
+        // own `pair_device` event (in `org_admin`), so only `pair_client`
+        // records here: one row per write. Never the code or the token.
+        if tool == "pair_client" {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            s.record_admin_event_or_log(&crate::store::AdminEvent {
+                actor_person: minter.person,
+                actor_device: minter.device,
+                action: "pair_client",
+                resource_type: "pairing",
+                resource_id: &name,
+                representation: serde_json::json!({
+                    "name": name, "mode": mode, "trusted": p.trusted, "org_id": p.org_id,
+                    "person": req.person, "ttl_s": ttl.as_secs(), "via": minter.via,
+                    "by": "master",
+                }),
+            });
+        }
         Ok(serde_json::json!({
             "url": crate::mcp::pair_url(&base.url, &req.code),
             "code": req.code,
@@ -1190,7 +1219,7 @@ impl FleetTools {
                 .clone()
                 .or(args.name.clone())
                 .unwrap_or_default();
-            let out = self.pair_device(args, authority)?;
+            let out = self.pair_device(args, authority, me)?;
             // The code lives in memory until it is redeemed; minting it is
             // still an administrative act, recorded with who minted it (the
             // redemption records the device row's own events).
@@ -1271,6 +1300,7 @@ impl FleetTools {
         &self,
         args: crate::service::org_admin::OrgAdminArgs,
         authority: crate::service::org_admin::Authority,
+        me: crate::service::org_admin::Me<'_>,
     ) -> Result<serde_json::Value, McpError> {
         let mode = args.mode.clone().unwrap_or_else(|| "full".into());
         if !matches!(mode.as_str(), "full" | "answer" | "readonly") {
@@ -1383,6 +1413,16 @@ impl FleetTools {
             .clone()
             .or(args.name.clone())
             .ok_or_else(|| mcp_err(codes::E_INVALID, "pair_device needs device", None))?;
+        let minter_device = match me.device {
+            Some(d) => lock(&self.store)
+                .map_err(to_mcp_err)?
+                .active_client_tokens()
+                .map_err(to_mcp_err)?
+                .into_iter()
+                .find(|c| c.name == d)
+                .map(|c| c.id),
+            None => None,
+        };
         let mut out = self.mint_pairing(
             PairClientParams {
                 name,
@@ -1393,6 +1433,15 @@ impl FleetTools {
                 person: args.person.clone().filter(|p| !p.trim().is_empty()),
             },
             "org_admin",
+            crate::mcp::pairing::Minter {
+                person: me.person,
+                device: minter_device,
+                via: "org_admin",
+                fenced_org: match authority {
+                    crate::service::org_admin::Authority::Org { org, .. } => Some(org),
+                    crate::service::org_admin::Authority::Fleet => None,
+                },
+            },
         )?;
         let url = out["url"].as_str().unwrap_or_default().to_string();
         out["qr"] = qr_rows(&url)?;

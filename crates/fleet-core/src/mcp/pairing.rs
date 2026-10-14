@@ -137,6 +137,22 @@ pub struct MintRequest<'a> {
     pub person: Option<&'a str>,
     /// How long the code stays valid; it also dies on first use.
     pub ttl: Duration,
+    /// Who minted it (TASK-264): rides on the code to the redeem's event.
+    pub minter: Minter<'a>,
+}
+
+/// Who minted a code, carried on it so the redeem's event can say.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Minter<'a> {
+    /// The person who asked for the code; `None` for the operator on the hub.
+    pub person: Option<i64>,
+    /// The device they asked through, when through one (its client id).
+    pub device: Option<i64>,
+    /// Which surface: `pair_client` (master), `org_admin` (pair_device), `oidc` (a sign-in).
+    pub via: &'a str,
+    /// An org admin's mint is fenced to their org: the redeem re-checks a
+    /// trusted code against it. `None`: fleet authority.
+    pub fenced_org: Option<i64>,
 }
 
 /// One minted, not-yet-used pairing code.
@@ -154,6 +170,14 @@ pub struct PairingRequest {
     /// The person the client is bound to once paired (multi-user M1,
     /// `fleet-hub pair --person`), by name — see [`MintRequest::person`].
     pub person: Option<String>,
+    /// The person who minted the code, when one did (see [`Minter`]).
+    pub minted_by_person: Option<i64>,
+    /// The device they minted it through.
+    pub minted_by_device: Option<i64>,
+    /// The surface it was minted through (`pair_client`, `org_admin`, `oidc`).
+    pub minted_via: String,
+    /// The org an org admin's mint is fenced to; `None`: fleet authority.
+    pub fenced_org: Option<i64>,
     pub expires_at: Instant,
 }
 
@@ -294,6 +318,10 @@ struct Pending {
     trusted: bool,
     org_id: Option<i64>,
     person: Option<String>,
+    minter_person: Option<i64>,
+    minter_device: Option<i64>,
+    via: String,
+    fenced_org: Option<i64>,
     expires_at: Instant,
 }
 
@@ -343,6 +371,10 @@ impl PendingPairings {
                 trusted: req.trusted,
                 org_id: req.org_id,
                 person: req.person.map(str::to_string),
+                minter_person: req.minter.person,
+                minter_device: req.minter.device,
+                via: req.minter.via.to_string(),
+                fenced_org: req.minter.fenced_org,
                 expires_at,
             },
         );
@@ -353,6 +385,10 @@ impl PendingPairings {
             trusted: req.trusted,
             org_id: req.org_id,
             person: req.person.map(str::to_string),
+            minted_by_person: req.minter.person,
+            minted_by_device: req.minter.device,
+            minted_via: req.minter.via.to_string(),
+            fenced_org: req.minter.fenced_org,
             expires_at,
         }
     }
@@ -386,6 +422,10 @@ impl PendingPairings {
             trusted: entry.trusted,
             org_id: entry.org_id,
             person: entry.person,
+            minted_by_person: entry.minter_person,
+            minted_by_device: entry.minter_device,
+            minted_via: entry.via,
+            fenced_org: entry.fenced_org,
             expires_at: entry.expires_at,
         })
     }
@@ -621,8 +661,9 @@ pub async fn handle_pair(
             };
             // Every write below is an admin event (identity sub-project 1),
             // in this same transaction. The redeemed device is the actor of
-            // its own pairing; who minted the code is not carried on it (the
-            // `org_admin { pair_device }` event records that).
+            // its own pairing; who minted the code rides on it since TASK-264
+            // (`minted_by_*`, `minted_via`), and the mint itself is its own
+            // `pair_client` / `pair_device` event.
             let device_id = row.id;
             let event = |action: &str,
                          resource_type: &str,
@@ -677,6 +718,9 @@ pub async fn handle_pair(
                     "org_id": row.org_id,
                     "person_id": row.person_id,
                     "trusted": req.trusted,
+                    "minted_by_person": req.minted_by_person,
+                    "minted_by_device": req.minted_by_device,
+                    "minted_via": req.minted_via,
                 }),
             )?;
             // The trust grant rides on the same code the operator minted:
@@ -766,6 +810,7 @@ mod tests {
             org_id: None,
             person: Some("owner"),
             ttl,
+            minter: Minter::default(),
         })
     }
 
@@ -1006,6 +1051,7 @@ mod tests {
             org_id: None,
             person: Some("ada"),
             ttl: Duration::from_secs(600),
+            minter: Minter::default(),
         });
         // A hub link is nobody's device, and carries no person.
         let link = p.mint(MintRequest {
@@ -1015,6 +1061,7 @@ mod tests {
             org_id: None,
             person: None,
             ttl: Duration::from_secs(600),
+            minter: Minter::default(),
         });
         assert_eq!(colleague.person.as_deref(), Some("ada"));
         assert_eq!(link.person, None);

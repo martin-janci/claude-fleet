@@ -3187,6 +3187,44 @@ fn pair_params(name: &str) -> PairClientParams {
     }
 }
 
+/// A master mint is an administrative write: one `pair_client` event, with
+/// no code in it, and the redeem's `pair` event names the minter (TASK-264).
+#[tokio::test]
+async fn pairing_a_client_records_the_mint_and_the_redeem_names_the_minter() {
+    let (t, _guards, store) = client_tools();
+    let out = t
+        .pair_client(Parameters(pair_params("phone")))
+        .await
+        .unwrap();
+    let v = result_json(&out);
+    let ev = store
+        .lock()
+        .unwrap()
+        .admin_events(&crate::store::AdminEventQuery {
+            limit: 10,
+            ..Default::default()
+        })
+        .unwrap();
+    let mint = ev
+        .iter()
+        .find(|e| e.action == "pair_client")
+        .expect("the mint is recorded");
+    assert_eq!(
+        (mint.resource_type.as_str(), mint.resource_id.as_str()),
+        ("pairing", "phone")
+    );
+    assert!(
+        mint.representation.get("code").is_none(),
+        "the code never reaches the log"
+    );
+    assert_eq!(mint.representation["via"], "pair_client");
+    let dump = mint.representation.to_string();
+    assert!(
+        !dump.contains(v["code"].as_str().unwrap()),
+        "the code is nowhere in the event: {dump}"
+    );
+}
+
 /// The JSON a tool result carries.
 pub(super) fn result_json(r: &CallToolResult) -> serde_json::Value {
     serde_json::from_str(text_of(&r.content[0])).expect("tool result is JSON")

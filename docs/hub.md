@@ -1591,10 +1591,17 @@ retention sweep, which drops events older than `auth.audit_retention_days`
 (default 365; `0` keeps them forever). Read it with `realm_admin { audit }`
 or `fleet-hub realm audit`.
 
-What is not recorded yet: a pairing code carries no minter, so a code
-minted by `pair_client` or `fleet-hub pair` leaves no event until it is
-redeemed (and then names the device, not who minted it); `fleet-hub client
-bind` (a device's org) records none, and neither do `fleet-hub org …`
+A pairing code carries its minter (person, device, surface and, for an
+org admin, the org it is fenced to). The master's `pair_client` records a
+`pair_client` event at the mint (name, mode, trust, org, person, lifetime and
+the surface; never the code), `org_admin { pair_device }` records its own
+`pair_device` event, and the `pair` event at the redeem names who minted the
+code (`minted_by_person`, `minted_by_device`) and through which surface
+(`minted_via`: `pair_client`, `org_admin` or `oidc`). A code minted on the hub
+machine by `fleet-hub pair` has no minter and leaves no mint event.
+
+What is not recorded yet: `fleet-hub client
+bind' (a device's org) records none, and neither do `fleet-hub org …`
 (`member add|rm|grants`, `own-hub`, `unclaimed-count`, and the org,
 rule, host and tracker commands it routes through `work_admin`) and the
 master's `work_admin` org actions — though their `org_admin` equivalents

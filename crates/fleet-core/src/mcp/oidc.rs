@@ -34,7 +34,7 @@
 //! Configuration is the hub's environment ([`OidcConfig::from_lookup`]):
 //! the client secret must not sit in `state.db` next to the data it guards.
 
-use super::pairing::{MintRequest, PairState};
+use super::pairing::{MintRequest, Minter, PairState};
 use crate::net::https::{DirectTransport, HttpTransport, Method, Request};
 use crate::store::{PersonRow, Store};
 use axum::http::{header, StatusCode};
@@ -1066,6 +1066,12 @@ pub async fn handle_callback(
             org_id: None,
             person: Some(&person.name),
             ttl: CODE_TTL,
+            minter: Minter {
+                person: Some(person.id),
+                device: None,
+                via: "oidc",
+                fenced_org: None,
+            },
         })
     };
     let pair_url = super::pairing::pair_url(&state.base_url, &minted.code);

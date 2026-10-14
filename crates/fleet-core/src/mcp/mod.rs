@@ -1165,6 +1165,12 @@ mod tests {
             org_id: None,
             person: Some("owner"),
             ttl: std::time::Duration::from_secs(600),
+            minter: pairing::Minter {
+                person: Some(42),
+                device: None,
+                via: "test",
+                fenced_org: None,
+            },
         }
     }
 
@@ -1562,6 +1568,8 @@ mod tests {
                 "the device is its own actor"
             );
             assert_eq!(paired.actor_device, Some(laptop.id));
+            assert_eq!(paired.representation["minted_by_person"], 42);
+            assert_eq!(paired.representation["minted_via"], "test");
             assert!(
                 ev.iter().all(|e| e.representation.get("token").is_none()
                     && e.representation.get("code").is_none()),
