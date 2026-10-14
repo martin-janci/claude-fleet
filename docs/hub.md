@@ -1597,15 +1597,24 @@ org admin, the org it is fenced to). The master's `pair_client` records a
 the surface; never the code), `org_admin { pair_device }` records its own
 `pair_device` event, and the `pair` event at the redeem names who minted the
 code (`minted_by_person`, `minted_by_device`) and through which surface
-(`minted_via`: `pair_client`, `org_admin` or `oidc`). A code minted on the hub
-machine by `fleet-hub pair` has no minter and leaves no mint event.
+(`minted_via`: `pair_client`, `org_admin` or `oidc`). `fleet-hub pair` calls
+the hub's `pair_client` tool over `/mcp`, so a code it mints is recorded like any
+other `pair_client` mint, with `via: "pair_client"`; the operator on the hub
+machine is no person or device, so the event has no actor.
 
-What is not recorded yet: `fleet-hub client
-bind' (a device's org) records none, and neither do `fleet-hub org …`
-(`member add|rm|grants`, `own-hub`, `unclaimed-count`, and the org,
-rule, host and tracker commands it routes through `work_admin`) and the
-master's `work_admin` org actions — though their `org_admin` equivalents
-do.
+The org commands are covered on both paths. The master's `work_admin` org
+writes (`add_org`, `update_org`, `remove_org`, `add_rule`, `remove_rule`,
+`assign_host`, `unassign_host`, `assign_tracker`, `assign_client`), which
+`fleet-hub org add|set|rm|rule|host|tracker` and `fleet-hub client bind` take,
+record one event each with `by: "master"` and no actor; a read (`list_orgs`)
+records none. The hub CLI's direct commands record one event each with
+`by: "operator"`: `org member add` (`set_member`), `member rm`
+(`remove_member`), `member grants --narrow|--revoke`
+(`narrow_member_grants`, `revoke_member_grants`; the bare count is a read),
+`own-hub` (`set_hub_org`) and `unclaimed-count` (`set_admins_see_unclaimed`).
+Both paths log the shape `org_admin` does for the same write (an org, an org
+rule, an `org_member` as `<org>/<person>`, the hub). The `work_admin`
+representation keeps only the org fields, never a tracker credential.
 
 ### Companies: members and roles
 

@@ -477,6 +477,14 @@ fn run_direct(
                 let m = store
                     .set_org_member(*org, p, role.as_str(), None)
                     .map_err(e)?;
+                crate::person::record(
+                    &store,
+                    "set_member",
+                    "org_member",
+                    &format!("{org}/{p}"),
+                    json!({ "org_id": org, "person_id": p, "person": name,
+                            "role": m.role, "by": "operator" }),
+                );
                 out::line(&format!(
                     "{name} is {} of org {org}; their devices are fenced to it from their next request",
                     m.role
@@ -496,6 +504,15 @@ fn run_direct(
                 } else {
                     store.revoke_person_grants_in_org(p, *org).map_err(e)?
                 };
+                crate::person::record(
+                    &store,
+                    "remove_member",
+                    "org_member",
+                    &format!("{org}/{p}"),
+                    json!({ "org_id": org, "person_id": p, "person": name,
+                            "keep_grants": keep_grants, "revoked_grants": revoked,
+                            "by": "operator" }),
+                );
                 out::line(&format!(
                     "{name} left org {org}; {revoked} grant(s) on its sessions revoked; their own \
                      sessions are still theirs"
@@ -510,11 +527,27 @@ fn run_direct(
                 let p = person(name, false)?;
                 if *revoke {
                     let n = store.revoke_person_grants_in_org(p, *org).map_err(e)?;
+                    crate::person::record(
+                        &store,
+                        "revoke_member_grants",
+                        "grant",
+                        &format!("{org}/{p}"),
+                        json!({ "org_id": org, "person_id": p, "person": name,
+                                "revoked": n, "by": "operator" }),
+                    );
                     out::line(&format!(
                         "revoked {n} grant(s) to {name} on org {org}'s sessions"
                     ));
                 } else if *narrow {
                     let n = store.narrow_person_grants_in_org(p, *org).map_err(e)?;
+                    crate::person::record(
+                        &store,
+                        "narrow_member_grants",
+                        "grant",
+                        &format!("{org}/{p}"),
+                        json!({ "org_id": org, "person_id": p, "person": name,
+                                "narrowed": n, "by": "operator" }),
+                    );
                     out::line(&format!("narrowed {n} grant(s) to {name} to watch"));
                 } else {
                     let (watch, answer, drive) = store.person_grants_in_org(p, *org).map_err(e)?;
@@ -532,6 +565,14 @@ fn run_direct(
                 _ => return Err("give the org's id, or --none".into()),
             };
             store.set_hub_owner_org(org).map_err(e)?;
+            // As `org_admin { set_hub_org }` logs it: `none` is an empty id.
+            crate::person::record(
+                &store,
+                "set_hub_org",
+                "hub",
+                &org.map(|o| o.to_string()).unwrap_or_default(),
+                json!({ "org_id": org, "by": "operator" }),
+            );
             out::line(&match org {
                 Some(o) => format!("org {o} owns this hub: its admins administer hosts"),
                 None => "no company owns this hub: its owner administers hosts".into(),
@@ -541,6 +582,13 @@ fn run_direct(
             store
                 .set_org_admins_see_unclaimed(*org, state.on())
                 .map_err(e)?;
+            crate::person::record(
+                &store,
+                "set_admins_see_unclaimed",
+                "org",
+                &org.to_string(),
+                json!({ "org_id": org, "admins_see_unclaimed": state.on(), "by": "operator" }),
+            );
             out::line(&format!(
                 "org {org}'s admins {} the unclaimed count on its hosts",
                 if state.on() {
@@ -635,6 +683,71 @@ mod tests {
         let mut all = vec!["t"];
         all.extend_from_slice(args);
         T::try_parse_from(all).map(|t| t.cmd)
+    }
+
+    /// Each direct write (`member add|rm|grants`, `own-hub`,
+    /// `unclaimed-count`) is one admin event with no actor, shaped as
+    /// `org_admin`'s equivalent; a read (`member grants` bare) is none.
+    #[test]
+    fn direct_org_writes_are_recorded_as_operator_events() {
+        use fleet_core::store::AdminEventQuery;
+        let dir = tempfile::tempdir().unwrap();
+        let opts = HubOptions {
+            data_dir: Some(dir.path().to_path_buf()),
+            ..HubOptions::default()
+        };
+        let env = HashMap::new();
+        drop(crate::serve::open_store(&opts, &env).unwrap());
+        let org = {
+            let s = crate::serve::open_store(&opts, &env).unwrap();
+            s.add_org("acme", None, false).unwrap().id
+        };
+        let go = |a: &[&str]| run_direct(&parse(a).unwrap(), &opts, &env).unwrap();
+        let o = org.to_string();
+        go(&["member", "add", &o, "ada", "--role", "admin"]);
+        go(&["member", "grants", &o, "ada"]);
+        go(&["member", "grants", &o, "ada", "--narrow"]);
+        go(&["member", "grants", &o, "ada", "--revoke"]);
+        go(&["own-hub", &o]);
+        go(&["own-hub", "--none"]);
+        go(&["unclaimed-count", &o, "on"]);
+        go(&["member", "rm", &o, "ada"]);
+        let s = crate::serve::open_store(&opts, &env).unwrap();
+        let ada = s.get_person_by_name("ada").unwrap().unwrap().id;
+        let ev = s
+            .admin_events(&AdminEventQuery {
+                limit: 50,
+                ..Default::default()
+            })
+            .unwrap();
+        let got: Vec<(&str, &str, String)> = ev
+            .iter()
+            .rev()
+            .map(|e| {
+                (
+                    e.action.as_str(),
+                    e.resource_type.as_str(),
+                    e.resource_id.clone(),
+                )
+            })
+            .collect();
+        let member = format!("{org}/{ada}");
+        assert_eq!(
+            got,
+            [
+                ("set_member", "org_member", member.clone()),
+                ("narrow_member_grants", "grant", member.clone()),
+                ("revoke_member_grants", "grant", member.clone()),
+                ("set_hub_org", "hub", o.clone()),
+                ("set_hub_org", "hub", String::new()),
+                ("set_admins_see_unclaimed", "org", o.clone()),
+                ("remove_member", "org_member", member),
+            ]
+        );
+        assert!(ev
+            .iter()
+            .all(|e| e.actor_person.is_none() && e.actor_device.is_none()));
+        assert!(ev.iter().all(|e| e.representation["by"] == "operator"));
     }
 
     fn args(a: &[&str]) -> Value {

@@ -600,9 +600,82 @@ pub fn admin_sync(
             codes::E_INTERNAL,
             "retention runs outside the admin lock; use service::work::retention",
         )),
-        AdminAction::Org(o) => crate::service::orgs::admin(o, args, &s),
+        AdminAction::Org(o) => {
+            let out = crate::service::orgs::admin(o, args, &s)?;
+            if let Some((resource_type, resource_id)) = org_audit_target(o, args) {
+                s.record_admin_event_or_log(&crate::store::AdminEvent {
+                    actor_person: None,
+                    actor_device: None,
+                    action: args.action.as_str(),
+                    resource_type,
+                    resource_id: &resource_id,
+                    representation: org_audit_representation(args),
+                });
+            }
+            Ok(out)
+        }
         AdminAction::Bucket(b) => crate::service::work::buckets::admin(b, args, &s),
     }
+}
+
+/// Which resource a `work_admin` org WRITE is recorded against: the same
+/// mapping `org_admin::audited_resource` uses for the same actions, so the
+/// two paths to one write log one shape. `None` for a read.
+fn org_audit_target(
+    action: crate::service::orgs::OrgAction,
+    args: &WorkAdminArgs,
+) -> Option<(&'static str, String)> {
+    use crate::service::orgs::OrgAction;
+    let name = args
+        .name
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string();
+    let org = || match args.org_id {
+        Some(i) => i.to_string(),
+        None => name.clone(),
+    };
+    Some(match action {
+        OrgAction::ListOrgs => return None,
+        OrgAction::AddOrg => ("org", name.clone()),
+        OrgAction::AddRule => ("org_rule", org()),
+        OrgAction::RemoveRule => (
+            "org_rule",
+            args.rule_id.map(|i| i.to_string()).unwrap_or_default(),
+        ),
+        _ => ("org", org()),
+    })
+}
+
+/// What an org write says, for the log: only the org actions' own fields.
+/// `WorkAdminArgs` also carries a tracker `secret` and `credential_ref`; an
+/// allowlist keeps them out whatever `scrub` would later do, and `by` names
+/// the path (the master's `work_admin`, not a person).
+fn org_audit_representation(args: &WorkAdminArgs) -> serde_json::Value {
+    const KEYS: &[&str] = &[
+        "action",
+        "name",
+        "org_id",
+        "color",
+        "isolate_sessions",
+        "owner",
+        "repo",
+        "path_prefix",
+        "host_alias",
+        "rule_id",
+        "auto_tidy",
+        "jev",
+        "jev_reply",
+        "bound_sees_unassigned",
+        "tracker_id",
+    ];
+    let mut rep = serde_json::to_value(args).unwrap_or_default();
+    if let Some(m) = rep.as_object_mut() {
+        m.retain(|k, _| KEYS.contains(&k.as_str()));
+        m.insert("by".into(), "master".into());
+    }
+    rep
 }
 
 /// `work_admin { action: update }` on a store the caller has locked: the
@@ -763,6 +836,76 @@ pub(crate) mod tests {
             action: action.into(),
             ..Default::default()
         }
+    }
+
+    /// Every org WRITE through `work_admin` (the master's path, and the one
+    /// `fleet-hub org rule|host|tracker` and `client bind` take) records one
+    /// admin event; a read records none (TASK-264).
+    #[test]
+    fn work_admin_org_writes_record_one_admin_event_each() {
+        let st = Mutex::new(Store::open_in_memory().unwrap());
+        let call = |action: &str, extra: serde_json::Value| {
+            let mut v = json!({ "action": action });
+            v.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let a: WorkAdminArgs = serde_json::from_value(v).unwrap();
+            admin_sync(&a, &st).unwrap()
+        };
+        let events = || {
+            st.lock()
+                .unwrap()
+                .admin_events(&crate::store::AdminEventQuery {
+                    limit: 50,
+                    ..Default::default()
+                })
+                .unwrap()
+        };
+        call("list_orgs", json!({}));
+        assert!(events().is_empty(), "a read records nothing");
+        let out = call("add_org", json!({ "name": "acme" }));
+        let org = out["id"].as_i64().unwrap();
+        let ev = events();
+        assert_eq!(ev.len(), 1);
+        assert_eq!(
+            (
+                ev[0].action.as_str(),
+                ev[0].resource_type.as_str(),
+                ev[0].resource_id.as_str()
+            ),
+            ("add_org", "org", "acme")
+        );
+        assert_eq!((ev[0].actor_person, ev[0].actor_device), (None, None));
+        assert_eq!(ev[0].representation["by"], "master");
+        st.lock()
+            .unwrap()
+            .insert_client_token("phone", "h", "full")
+            .unwrap();
+        call("assign_client", json!({ "name": "phone", "org_id": org }));
+        let ev = events();
+        assert_eq!(ev.len(), 2);
+        assert_eq!(ev[0].action, "assign_client");
+        assert_eq!(
+            (ev[0].resource_type.as_str(), ev[0].resource_id.as_str()),
+            ("org", org.to_string().as_str())
+        );
+        let rule = call("add_rule", json!({ "org_id": org, "owner": "acme" }));
+        let rid = rule["id"].as_i64().unwrap();
+        let ev = events();
+        assert_eq!(
+            (ev[0].action.as_str(), ev[0].resource_type.as_str()),
+            ("add_rule", "org_rule")
+        );
+        assert_eq!(ev[0].resource_id, org.to_string());
+        call("remove_rule", json!({ "rule_id": rid }));
+        let ev = events();
+        assert_eq!(ev.len(), 4);
+        assert_eq!(ev[0].resource_id, rid.to_string());
+        // A failed write records nothing.
+        let bad: WorkAdminArgs =
+            serde_json::from_value(json!({ "action": "remove_rule", "rule_id": 9999 })).unwrap();
+        assert!(admin_sync(&bad, &st).is_err());
+        assert_eq!(events().len(), 4);
     }
 
     fn fixture(name: &str) -> serde_json::Value {
