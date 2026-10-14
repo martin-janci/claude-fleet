@@ -4812,6 +4812,190 @@ async fn run_matrix(isolate: bool) {
             .unwrap();
     }
 
+    // ── Task result (design 2026-10-13) ────────────────────────────────
+    // Last, because each row writes: a wrap-up request is a `tasks` row and
+    // a follow-up a new local item, which the rows above must not see.
+    //
+    // Finish task: `handover`'s fences, since it is the same pane write. A
+    // caller past them records a `wrapup` task for the session's item (the
+    // delivery then fails here, which closes it again).
+    let wrapped = |fx: &Fx, who: Who, a: &Answer, item: i64| {
+        assert!(
+            !matches!(
+                code(a),
+                "E_FORBIDDEN" | "E_NOTFOUND" | "E_INVALID" | "E_NOT_ALIVE"
+            ),
+            "{who:?}: {a:?}"
+        );
+        let s = fx.t.store.lock().unwrap();
+        let asked = s
+            .item_tasks(item, crate::service::work::wrapup::WRAPUP_ROLE)
+            .unwrap();
+        assert!(!asked.is_empty(), "{who:?}: no wrap-up recorded");
+    };
+    m.row(
+        "work_link",
+        "wrap_up",
+        |fx, who| {
+            let sid = match who {
+                Who::HostNone => fx.s_n,
+                _ => fx.s_a,
+            };
+            json!({ "action": "wrap_up", "session_id": sid })
+        },
+        move |fx, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostB => is_code(who, a, "E_NOTFOUND", "another host's session"),
+                Who::BoundB => is_code(who, a, "E_NOTFOUND", "another org's session"),
+                // s_n works on a bare key with no item: past the fences, and
+                // refused for that, never for whose session it is.
+                Who::HostNone => assert!(
+                    !matches!(code(a), "E_FORBIDDEN" | "E_NOTFOUND"),
+                    "{who:?}: {a:?}"
+                ),
+                _ => wrapped(fx, who, a, fx.item_a),
+            }
+        },
+    )
+    .await;
+    // Host A on s_x (A's session carrying B's ticket): B's work is not A's
+    // to read, so the session reads as linked to nothing.
+    let x = call(
+        &fx,
+        Who::HostA,
+        "work_link",
+        json!({ "action": "wrap_up", "session_id": fx.s_x }),
+    )
+    .await;
+    is_code(Who::HostA, &x, "E_INVALID", "B's work on an A session");
+    let hidden = call(
+        &fx,
+        Who::HostA,
+        "work_link",
+        json!({ "action": "wrap_up", "session_id": fx.s_b }),
+    )
+    .await;
+    let unknown = call(
+        &fx,
+        Who::HostA,
+        "work_link",
+        json!({ "action": "wrap_up", "session_id": 999_999 }),
+    )
+    .await;
+    same_as_unknown(&hidden, &unknown, &fx.s_b.to_string(), "999999");
+    // A finished, reported task of B's ticket: what `result` reads and a
+    // follow-up is made from.
+    let result_b = {
+        let s = fx.t.store.lock().unwrap();
+        let t = crate::service::tasks::create_task(&s, None, Some(fx.s_b), "matrix run").unwrap();
+        s.set_task_run(t.id, fx.item_b, 1, "implement").unwrap();
+        s.finish_task(t.id, "done", Some("r"), None).unwrap();
+        s.set_task_report(
+            t.id,
+            &crate::store::TaskReport {
+                summary: "matrix result".into(),
+                followups: vec!["Matrix follow-up".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        t.id
+    };
+    // The result view: the item's org fence, as `task`'s.
+    m.row(
+        "work",
+        "result",
+        |fx, _| json!({ "action": "result", "item_id": fx.item_b }),
+        move |_, who, a| match who {
+            w if w.is_unbound() => {
+                assert!(
+                    text(a).contains(&format!("\"task_id\":{result_b}")),
+                    "{a:?}"
+                )
+            }
+            Who::HostB | Who::BoundB => {
+                assert!(text(a).contains("matrix result"), "{who:?}: {a:?}")
+            }
+            _ => is_code(who, a, "E_NOTFOUND", "another org's item"),
+        },
+    )
+    .await;
+    // No oracle: B's item, and B's session, answer org-A readers exactly as
+    // unknown ones.
+    for who in [Who::HostA, Who::BoundA] {
+        let hidden = call(
+            &fx,
+            who,
+            "work",
+            json!({ "action": "result", "item_id": fx.item_b }),
+        )
+        .await;
+        let unknown = call(
+            &fx,
+            who,
+            "work",
+            json!({ "action": "result", "item_id": 987_654 }),
+        )
+        .await;
+        same_as_unknown(&hidden, &unknown, &fx.item_b.to_string(), "987654");
+    }
+    let hidden = call(
+        &fx,
+        Who::HostA,
+        "work",
+        json!({ "action": "result", "session_id": fx.s_b }),
+    )
+    .await;
+    let unknown = call(
+        &fx,
+        Who::HostA,
+        "work",
+        json!({ "action": "result", "session_id": 999_999 }),
+    )
+    .await;
+    same_as_unknown(&hidden, &unknown, &fx.s_b.to_string(), "999999");
+    // A follow-up: whoever sees the task's item may make one (a per-host
+    // token included, as for a subtask); asking twice answers one item.
+    m.row(
+        "work_link",
+        "followup",
+        |_, _| json!({ "action": "followup", "task_id": result_b, "index": 0 }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                w if w.is_unbound() || matches!(w, Who::HostB | Who::BoundB) => {
+                    assert!(text(a).contains("Matrix follow-up"), "{who:?}: {a:?}")
+                }
+                _ => is_code(who, a, "E_NOTFOUND", "another org's task"),
+            }
+        },
+    )
+    .await;
+    {
+        let s = fx.t.store.lock().unwrap();
+        assert_eq!(s.followups_of(result_b).unwrap().len(), 1, "one item");
+    }
+    let hidden = call(
+        &fx,
+        Who::HostA,
+        "work_link",
+        json!({ "action": "followup", "task_id": result_b, "index": 0 }),
+    )
+    .await;
+    let unknown = call(
+        &fx,
+        Who::HostA,
+        "work_link",
+        json!({ "action": "followup", "task_id": 999_999, "index": 0 }),
+    )
+    .await;
+    same_as_unknown(&hidden, &unknown, &result_b.to_string(), "999999");
+
     // Coverage: every action of the three tools has a row.
     let want: BTreeSet<(String, String)> = WORK_ACTIONS
         .iter()

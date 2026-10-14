@@ -12210,6 +12210,11 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     // The tree's own tasks, counted (persona dashboards).
     ("work", "stats", &["ViewScope"]),
     ("work", "task", &["ViewScope"]),
+    // One item's task result (design 2026-10-13). `{ session_id }` reads one
+    // named session's item and is gated per row (`Read`); in both forms the
+    // worker session and its PR are shown only when the caller's whole view
+    // sees that session (`hide_unseen_worker`).
+    ("work", "result", &["Read", "ViewScope"]),
     ("work", "review", &["ViewScope"]),
     ("work", "context", &["ViewScope"]),
     ("work", "resume_plan", &["ViewScope"]),
@@ -12284,6 +12289,8 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     ("work_link", "decide_batch", &["Drive"]),
     // Types a prompt into the pane and waits for the reply.
     ("work_link", "handover", &["Drive"]),
+    // Finish task: the same pane write as `handover` (design 2026-10-13 D2).
+    ("work_link", "wrap_up", &["Drive"]),
     // Names new work ON a session: a per-session work-graph write, and
     // `share.ts` already says `name_session_work: 'drive'`.
     ("work_link", "name", &["Drive"]),
@@ -12759,6 +12766,14 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
         "a NEW work item: a standalone task has no links and no sessions, and \
          a subtask is checked against its PARENT ITEM; the arm refuses every \
          scoped caller outright (`work::local::create_task`'s two guards)",
+    ),
+    (
+        "work_link",
+        "followup",
+        "a NEW sibling work item made from a task's result (design 2026-10-13 \
+         D4): the source task's ITEM is fenced by the caller's org scope \
+         (`status::item_visible`, outside it an unknown task); no session is \
+         named or answered",
     ),
     (
         "work_link",

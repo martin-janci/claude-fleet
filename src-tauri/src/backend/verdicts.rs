@@ -364,6 +364,11 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "request_work_handover",
         Verdict::Routed { tool: "work_link" },
     ),
+    // Task result (design 2026-10-13): Finish task, the result view and a
+    // follow-up made from it, each the same on a paired desktop.
+    ("request_work_result", Verdict::Routed { tool: "work_link" }),
+    ("work_result", Verdict::Routed { tool: "work" }),
+    ("create_followup_task", Verdict::Routed { tool: "work_link" }),
     // Work graph M13.4c: a Claude-written summary of past work (on demand,
     // D10). Routed: the run happens on the session's own host, which the
     // hub reaches.
