@@ -349,6 +349,32 @@ pub async fn check_stores(
     }
 }
 
+/// [`grant`], from the grant form's `answers` when the arguments carry
+/// them (`form::answers_to_args`), else from the arguments themselves.
+pub async fn grant_or_answers(
+    store: &Mutex<Store>,
+    ssh: &crate::ssh::SshClient,
+    args: &AgentsArgs,
+    granted_by: &str,
+    now: i64,
+) -> Result<AgentsChanged, IpcError> {
+    let Some(answers) = &args.answers else {
+        return grant(store, ssh, args, granted_by, now).await;
+    };
+    let answers = answers
+        .as_object()
+        .ok_or_else(|| invalid("answers must be an object"))?;
+    let def_name = args
+        .definition
+        .as_deref()
+        .ok_or_else(|| invalid("a fleet grant names its definition"))?;
+    let sources = Sources::from_catalog(def_name, &[])?;
+    let ctx = super::form::FormContext::read(store)?;
+    let from_form =
+        super::form::answers_to_args(&sources.definition, &ctx, answers).map_err(invalid)?;
+    grant(store, ssh, &from_form, granted_by, now).await
+}
+
 /// The whole grant: read, check, ask the stores, write. `granted_by` names
 /// the device or the console.
 pub async fn grant(

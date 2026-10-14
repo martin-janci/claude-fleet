@@ -18,9 +18,12 @@ impl FleetTools {
         id>:<PROJECT> | <instance name>, host, level: watch | propose | act, \
         project_id?, config?, hours?, definition? (fleet), bindings? (fleet: \
         one per store role; each MCP binding is asked for its tools on the \
-        host first)}, revoke {id}, pause_all, approve {id}, reject {id}, run \
-        {id, request?} (a manual or scheduled fleet agent, now). The owner's \
-        own device; writes need a trusted full device.")]
+        host first; or answers: the grant form's)}, definitions (the \
+        catalog's fleet agents), form {definition, id?} (a fleet agent's \
+        grant form, prefilled from rule id), revoke {id}, pause_all, approve \
+        {id}, reject {id}, run {id, request?} (a manual or scheduled fleet \
+        agent, now). The owner's own device; writes need a trusted full \
+        device.")]
     pub(super) async fn agents(
         &self,
         Extension(caller): Extension<Caller>,
@@ -46,10 +49,15 @@ impl FleetTools {
             .map_or_else(|| "device".to_string(), |c| format!("device:{}", c.name));
         let now = crate::store::now_unix();
         if args.action == "grant" && args.agent.as_deref() == Some("fleet") {
-            let done =
-                crate::service::fleet_agents::grant::grant(&self.store, &self.ssh, &args, &by, now)
-                    .await
-                    .map_err(to_mcp_err)?;
+            let done = crate::service::fleet_agents::grant::grant_or_answers(
+                &self.store,
+                &self.ssh,
+                &args,
+                &by,
+                now,
+            )
+            .await
+            .map_err(to_mcp_err)?;
             return ok_json_compact(&done);
         }
         ok_json_compact(&admin::call(&self.store, &args, &by, now).map_err(to_mcp_err)?)

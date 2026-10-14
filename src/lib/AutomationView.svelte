@@ -25,7 +25,8 @@
   import StartRules from './StartRules.svelte';
   import AgentActions from './automation/AgentActions.svelte';
   import AgentsDebug from './automation/AgentsDebug.svelte';
-  import { agents as agentsStatus, jobLine, loadAgents, ruleLine } from './agents';
+  import FleetAgents from './automation/FleetAgents.svelte';
+  import { agents as agentsStatus, jobLine, loadAgents, ruleAgentName, ruleLine } from './agents';
   import { fleetSettings, loadFleetSettings } from './fleet_settings';
   import { listRuns, outcomeLabel, type RunOutcome, type RunRow } from './runs';
   import { goTo } from './destination';
@@ -315,12 +316,13 @@
                 {#each $agentsStatus.rules as r (r.id)}
                   <li data-testid="agent-rule">
                     <StatusDot state={r.active ? 'done' : 'idle'} label={null} />
-                    <span class="main"><strong>{r.agent === 'review' ? 'PR reviewer' : 'Support'}</strong> <span class="summary">{ruleLine(r)}</span></span>
+                    <span class="main"><strong>{ruleAgentName(r)}</strong> <span class="summary">{ruleLine(r)}</span></span>
                     <span class="meta state">rule {r.id}</span>
                   </li>
                 {/each}
               </ul>
             {/if}
+            <FleetAgents rules={$agentsStatus.rules} />
             {#if $agentsStatus.pending.length > 0}
               <h3 class="sub">Waiting for you</h3>
               <AgentActions />

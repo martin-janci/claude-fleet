@@ -20,11 +20,15 @@
 //! Step 4 is the actions ([`actions`]): the answer's writes planned,
 //! queued by the rule's level and sent by the `fleet` executor after its
 //! send-time checks, with the loop guard.
+//!
+//! Step 5 is the grant form ([`form`]): an instance as a `fleet.form/1`
+//! form (New instance / Edit), its answers turned into the grant.
 
 pub mod actions;
 pub mod answer;
 pub mod bindings;
 pub mod definition;
+pub mod form;
 pub mod grant;
 pub mod probe;
 pub mod records;

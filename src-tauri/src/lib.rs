@@ -667,6 +667,7 @@ pub fn run() {
             commands::agents::agents_status,
             commands::agents::agents_decide,
             commands::agents::agents_debug,
+            commands::agents::agents_fleet,
             commands::routines::routines,
             commands::tasks::list_tasks,
             commands::tasks::cancel_task,

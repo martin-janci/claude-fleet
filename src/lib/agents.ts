@@ -8,6 +8,8 @@
 // `fleet_core::service::agents::admin` and `fleet_core::store::Agent*Row`.
 import { derived, writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
+import type { FormSpec, Values } from './forms/forms';
+import type { Wizard } from './forms/wizards';
 import type { LoopHealth } from './ipc';
 
 /** `fleet`: an instance of a catalog fleet agent (configurable agents,
@@ -278,4 +280,62 @@ export function agentState(kind: AgentKind, status: AgentsStatus | null): string
   if (working > 0) parts.push(`${working} working`);
   if (kind === 'review' && pending > 0) parts.push(`${pending} waiting for you`);
   return parts.join(' · ');
+}
+
+// ---- fleet agents (configurable agents, step 5; the `agents_fleet` command) --
+
+/** A fleet agent of the catalog (`fleet_agents::form::DefinitionView`). */
+export interface FleetDefinition {
+  name: string;
+  description: string;
+  /** Its trigger's source; null when it does not load. */
+  trigger: string | null;
+  /** What is wrong with it; empty when it can be granted. */
+  problems: string[];
+  /** What it may write, in words. */
+  writes: string;
+}
+
+function fleetCmd<T>(action: string, a: { definition?: string; id?: number; answers?: Values } = {}): Promise<Result<T>> {
+  return invokeCmd<T>('agents_fleet', {
+    action,
+    definition: a.definition ?? null,
+    id: a.id ?? null,
+    answers: a.answers ?? null,
+  });
+}
+
+export function fleetDefinitions(): Promise<Result<FleetDefinition[]>> {
+  return fleetCmd<FleetDefinition[]>('definitions');
+}
+
+/** A definition's grant form; `id` prefills it from that instance (Edit). */
+export function fleetForm(definition: string, id?: number): Promise<Result<FormSpec>> {
+  return fleetCmd<FormSpec>('form', { definition, id });
+}
+
+/** Start (or, same instance name, change) an instance from the form's answers. */
+export function grantFleet(definition: string, answers: Values): Promise<Result<{ changed: number; id?: number }>> {
+  return fleetCmd('grant', { definition, answers });
+}
+
+export function revokeAgentRule(id: number): Promise<Result<{ changed: number }>> {
+  return fleetCmd('revoke', { id });
+}
+
+/** Run a manual (or scheduled) fleet agent now. */
+export function runFleetAgent(id: number): Promise<Result<{ job: string }>> {
+  return fleetCmd('run', { id });
+}
+
+/** A grant form as the dialog's wizard. */
+export function fleetWizard(spec: FormSpec): Wizard {
+  return { id: 'fleet_agent', spec, sending: 'Checking its stores…', loader: 'sonar' };
+}
+
+/** A rule's agent in words: the built-in one's name, or a fleet agent's definition. */
+export function ruleAgentName(r: Pick<AgentRule, 'agent' | 'definition'>): string {
+  if (r.agent === 'review') return 'PR reviewer';
+  if (r.agent === 'support') return 'Support';
+  return r.definition ?? r.agent;
 }

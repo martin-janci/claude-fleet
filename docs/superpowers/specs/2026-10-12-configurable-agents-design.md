@@ -1,7 +1,8 @@
 # Configurable agents: design
 
-Status: steps 1 (definitions), 2 (store bindings), 3 (generic runner) and 4
-(actions) built, 2026-10-14. Steps 5 and 6 not built.
+Status: steps 1 to 4 built, and step 5's grant form with the desktop's
+New instance / Edit, 2026-10-14. The phone's and the chat's paths of step 5,
+and step 6, not built.
 Asked for by the owner after the built-in reviewer and support agent landed
 (`2026-10-11-review-and-support-agents-design.md`, PRs
 martin-janci/claude-fleet#871, martin-janci/fleet-mobile#217,
@@ -541,6 +542,32 @@ run real instances.
    cut at the end), and the `pr_*` actions (step 6).
 5. **Forms and UI**: `grant_form`, *New instance* / *Edit* in Automation ›
    Agents, the phone's Inbox and instance list, the chat draft path.
+   Built: `service/fleet_agents/form.rs`. `grant_form(definition,
+   FormContext, rule?)` is PURE: the steps *What* (`f_instance` and the
+   inputs; a `tracker`, `project` or `host` input is a select of what fleet
+   has), *Where* (`f_host`, and `f_project` for a project workspace),
+   *Stores* (per role `f_store_<role>`: a select of the catalog's MCP
+   servers with an optional `f_env_<role>` textarea of `NAME=${SECRET}`
+   lines, or for a fleet role `rule` / the shared namespaces in use / a
+   typed `shared:<name>`; an optional role left empty is not bound) and *How
+   much* (`f_level`, `f_hours`, under a line naming every write and which
+   run unattended at act). With a rule it is the Edit form, prefilled.
+   `answers_to_args` checks the answers against the same form
+   (`forms::check_answers`) and returns the `agents` grant. The grant form
+   asks for no secret value: an override names a secret of the hub's store,
+   so nothing secret is ever in an answer (a change from *F*, which put new
+   secrets in `secret` fields). Inputs may not be named `f_…`, and a role is
+   at most 30 characters (`f_store_<role>` is a field name). The `agents`
+   tool gains `definitions`, `form {definition, id?}` and a fleet `grant`
+   with `answers`; the desktop command `agents_fleet` (routed to `agents`)
+   carries definitions, form, grant, revoke and run. Automation › Agents
+   lists the catalog's fleet agents (`automation/FleetAgents.svelte`), each
+   with *New instance* (disabled with the problems when it does not load),
+   its instances under it with *Edit*, *Revoke* and, for a manual or
+   scheduled one, *Run now*; the form is a `WizardDialog`, and a store that
+   fails the grant's check is the dialog's error. Not built yet: the
+   phone's instance list (its Inbox already shows the actions) and the
+   chat's `ask { draft }` path.
 6. **Later**:
    - `github_*` sources and `pr_*` actions for generic agents;
    - `tracker_*` on GitHub, Linear and Asana;

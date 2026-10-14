@@ -76,6 +76,7 @@
     "agent_installs",
     "agents_debug",
     "agents_decide",
+    "agents_fleet",
     "agents_status",
     "answer_form",
     "api_tokens",
