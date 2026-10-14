@@ -17,7 +17,7 @@
 // backend command that exists today; one whose backend does not exist yet
 // (a read-only link) is not listed, never shown as a dead button.
 import { derived, get, writable, type Readable } from 'svelte/store';
-import { hasNoPane, isInactiveAgent, type SessionRow } from './sessions';
+import { hasNoPane, isInactiveAgent, isPinned, pinSession, type SessionRow } from './sessions';
 import { hostByAlias } from './hosts';
 import { canMoveSession, moveBlockedReason } from './moveEligibility';
 import { hubActionBlocked, hubBlock, hubStatus, type HubStatus } from './hub';
@@ -43,6 +43,7 @@ export type SessionActionId =
   | 'change_model'
   | 'recreate'
   | 'move'
+  | 'pin'
   | 'share'
   | 'copy_transcript'
   | 'archive'
@@ -75,6 +76,7 @@ export const ROW_ACTIONS: readonly SessionActionDef[] = [
   { id: 'repair', label: 'Repair workspace…', detailsTestId: 'repair-from-details', synonyms: ['repair', 'worktree', 'fix'] },
   { id: 'label', label: 'Rename and label…', detailsTestId: 'label-from-details', synonyms: ['label', 'name', 'rename', 'tag'] },
   { id: 'rename', label: 'Rename tmux session', detailsTestId: 'rename-from-details', synonyms: ['tmux'] },
+  { id: 'pin', label: 'Pin', detailsTestId: 'pin-from-details', synonyms: ['pin', 'unpin', 'keep', 'favorite', 'star'] },
   { id: 'share', label: 'Share…', detailsTestId: 'share-from-details', synonyms: ['share', 'grant', 'watch', 'answer', 'drive', 'steer', 'visibility', 'private'] },
   { id: 'copy_transcript', label: 'Copy transcript', detailsTestId: 'copy-transcript-from-details', synonyms: ['copy', 'transcript', 'conversation', 'export'] },
   { id: 'archive', label: 'Archive', detailsTestId: 'archive-from-details', synonyms: ['archive', 'done', 'hide'] },
@@ -145,6 +147,7 @@ const GATES: Record<SessionActionId, { action: SessionAction; local?: boolean; m
   change_model: { action: 'send_prompt' },
   recreate: { action: 'recreate_session' },
   move: { action: 'move_session', move: true },
+  pin: { action: 'pin_session' },
   share: { action: 'session_share' },
   // A read: a watcher may copy what they may read.
   copy_transcript: { action: 'session_conversation' },
@@ -165,6 +168,31 @@ export function noOtherLogin(s: SessionRow, host: HostLogins): string | null {
   return `${s.host_alias} has no other login. Add a login profile under Accounts first.`;
 }
 
+/** Why a pinned session cannot be closed. */
+export const PINNED_BLOCK = 'Pinned: unpin it first';
+
+/** Why closing `s` (kill, safe remove) is refused for its pin, or null. */
+export function pinnedBlock(s: Pick<SessionRow, 'pinned_at'>): string | null {
+  return isPinned(s) ? PINNED_BLOCK : null;
+}
+
+/** The pin action's label for `s`: Unpin when it is pinned. */
+export function pinLabel(s: Pick<SessionRow, 'pinned_at'>): string {
+  return isPinned(s) ? 'Unpin' : 'Pin';
+}
+
+/** Pin `s`, or unpin it when it is pinned. Answers whether it worked. */
+export async function toggleSessionPin(s: SessionRow): Promise<boolean> {
+  if (sessionActionBlocked('pin', s, get(hubStatus), get(hubConnection), get(sessionBlocked)) !== null) return false;
+  const pinned = !isPinned(s);
+  const r = await pinSession(s.id, pinned);
+  if (!r.ok) {
+    pushError(r.error, pinned ? 'Pinning failed' : 'Unpinning failed');
+    return false;
+  }
+  return true;
+}
+
 /** Why the action is disabled for this row, or null. */
 export function sessionActionBlocked(
   id: SessionActionId,
@@ -180,7 +208,12 @@ export function sessionActionBlocked(
     : g.local
       ? hubBlock(g.action as Parameters<typeof hubBlock>[0], status)
       : hubActionBlocked(g.action as Parameters<typeof hubActionBlocked>[0], status, conn);
-  return hub ?? blockedOf(s, g.action) ?? (id === 'switch_account' ? noOtherLogin(s, host) : null);
+  return (
+    hub ??
+    blockedOf(s, g.action) ??
+    (id === 'switch_account' ? noOtherLogin(s, host) : null) ??
+    (id === 'kill' || id === 'safe_remove' ? pinnedBlock(s) : null)
+  );
 }
 
 export interface SessionMenuItem extends SessionActionDef {
@@ -194,6 +227,7 @@ export const sessionMenuItems: Readable<(s: SessionRow) => SessionMenuItem[]> = 
     (s: SessionRow) =>
       ROW_ACTIONS.filter((a) => sessionActionShown(a.id, s)).map((a) => ({
         ...a,
+        label: a.id === 'pin' ? pinLabel(s) : a.label,
         blocked: sessionActionBlocked(a.id, s, $status, $conn, $blocked, $hosts.get(s.host_alias)),
       })),
 );

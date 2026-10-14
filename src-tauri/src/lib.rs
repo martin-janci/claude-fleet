@@ -429,6 +429,7 @@ pub fn run() {
             commands::sessions::set_session_tags,
             commands::sessions::decide_related_session,
             commands::sessions::touch_session_viewed,
+            commands::sessions::pin_session,
             commands::work::session_work_links,
             commands::work::link_session_work,
             commands::work::reject_session_work,

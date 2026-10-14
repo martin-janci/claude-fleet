@@ -306,6 +306,13 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "touch_session_viewed",
         },
     ),
+    // Pin / unpin (Pinned section): the hub's own `pin_session`, `drive`.
+    (
+        "pin_session",
+        Verdict::Routed {
+            tool: "pin_session",
+        },
+    ),
     (
         "session_history",
         Verdict::Routed {

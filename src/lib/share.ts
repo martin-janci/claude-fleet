@@ -157,6 +157,8 @@ const SESSION_TIER = {
   // The row's one `last_viewed_at` (redesign 2.3): a watcher looking must not
   // clear what the owner has not seen yet.
   touch_session_viewed: 'drive',
+  // The row's one pin: it decides whether the owner's own kill goes through.
+  pin_session: 'drive',
   repair_session: 'drive',
   dismiss_ghost_session: 'drive',
   adopt_session: 'own',

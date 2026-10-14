@@ -244,6 +244,32 @@ impl FleetTools {
         ok_json(&row)
     }
 
+    #[tool(description = "Pin or unpin a session. A pinned session is \
+        listed in the Pinned section, and kill_session, safe_kill_session and \
+        tidy-up refuse it (E_PINNED) until it is unpinned. Returns the row.")]
+    pub(super) async fn pin_session(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<sessions::PinSessionArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        // `drive`: the pin is on the ROW, one for everybody, and it decides
+        // whether the owner's own kill goes through.
+        self.resolve_target_row(
+            &caller,
+            Some(args.session_id),
+            None,
+            None,
+            Reach::Drive,
+            "the session pinned",
+        )?;
+        audit(
+            "pin_session",
+            &format!("session_id={} pinned={}", args.session_id, args.pinned),
+        );
+        let row = sessions::pin_session(args, &self.store).map_err(to_mcp_err)?;
+        ok_json(&row)
+    }
+
     #[tool(description = "Restart a tmux session in place (kill and \
         recreate): for a wedged Claude REPL whose tmux and worktree are \
         fine; cheaper than recreate_session. Returns the updated row.")]

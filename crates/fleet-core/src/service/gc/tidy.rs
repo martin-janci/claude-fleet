@@ -376,6 +376,9 @@ pub fn protection(s: &TidySession, ctx: &TidyContext<'_>) -> Option<&'static str
     if is(ctx.operator) {
         return Some("operator");
     }
+    if r.pinned_at.is_some() {
+        return Some("pinned");
+    }
     if s.in_progress {
         return Some("in_progress");
     }

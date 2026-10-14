@@ -153,6 +153,12 @@ pub async fn safe_kill_session(
             &args.tmux_name,
             "safe_kill_session",
         )?;
+        crate::service::sessions::refuse_if_pinned(
+            &s,
+            &args.host_alias,
+            &args.tmux_name,
+            "safe_kill_session",
+        )?;
     }
 
     // Read + state-update happens under one lock; the SSH send afterwards is
@@ -385,6 +391,14 @@ pub async fn discard_kill_session(
 
     let (session_id, removable, project_base) = {
         let s = lock(store)?;
+        // Before the worktree goes: the kill at the end would refuse a
+        // pinned session, but only after its files were removed.
+        crate::service::sessions::refuse_if_pinned(
+            &s,
+            &args.host_alias,
+            &args.tmux_name,
+            "discard_kill_session",
+        )?;
         let row = s
             .get_session(&args.tmux_name, &args.host_alias)?
             .ok_or_else(|| {

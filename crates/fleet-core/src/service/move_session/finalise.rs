@@ -140,6 +140,13 @@ pub(super) async fn finalise_source(
                 None => None,
             }
         };
+        // A pin follows the session: the target took it at the carry step,
+        // so the source's is lifted, or its kill would refuse (E_PINNED).
+        if let Ok(s) = store.lock() {
+            if let Err(e) = s.set_session_pinned(a.source_row_id, None) {
+                tracing::warn!(session_id = a.source_row_id, error = %e, "[move_session] unpinning the source failed");
+            }
+        }
         let killed = match hooks
             .kill_tmux_session(store, a.source_host, a.source_tmux_name)
             .await

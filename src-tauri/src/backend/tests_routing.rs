@@ -3069,7 +3069,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
     use fleet_core::service::safe_kill::SafeKillSessionArgs;
     use fleet_core::service::sessions::{
         AdoptSessionArgs, DiscoverLostSessionsArgs, DismissGhostSessionArgs, KillSessionArgs,
-        LostTargetArgs, NewSessionArgs, PlaceTranscriptArgs, RecreateSessionArgs,
+        LostTargetArgs, NewSessionArgs, PinSessionArgs, PlaceTranscriptArgs, RecreateSessionArgs,
         RenameSessionArgs, RestartSessionArgs, RestoreHostSessionsArgs, SendPromptArgs,
         SetFriendlyNameArgs, SetSessionTagsArgs, SpawnReviewArgs, TouchSessionViewedArgs,
     };
@@ -3645,6 +3645,23 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                 block_on(commands::sessions::routed::touch_session_viewed(
                     b,
                     TouchSessionViewedArgs { session_id: 7 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "pin_session",
+            "pin_session",
+            json!({ "session_id": 7, "pinned": true }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::pin_session(
+                    b,
+                    PinSessionArgs {
+                        session_id: 7,
+                        pinned: true,
+                    },
                     s,
                 ))
                 .map(|_| ())

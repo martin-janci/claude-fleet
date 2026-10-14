@@ -3890,3 +3890,54 @@ describe('the Sessions board: tabs, agent, organisation, the running cap', () =>
     expect(screen.queryByTestId('group-more')).toBeNull();
   });
 });
+
+describe('Pinned sessions', () => {
+  it('lifts pinned sessions into a Pinned section at the top, oldest pin first', async () => {
+    const loose = sessionFor(1, 'dev-loose');
+    const later = { ...sessionFor(1, 'dev-later'), pinned_at: 200 };
+    const first = { ...sessionFor(null, 'dev-first'), pinned_at: 100 };
+    mockBackend(fakeProjects, [loose, later, first]);
+    render(Sidebar);
+    await tick(); await tick();
+    const section = await screen.findByTestId('pinned-sessions');
+    expect(within(section).getByTestId('pinned-toggle').textContent).toContain('Pinned (2)');
+    const pinned = within(section).getAllByTestId('sess-row').map((r) => r.textContent ?? '');
+    expect(pinned[0]).toContain('dev-first');
+    expect(pinned[1]).toContain('dev-later');
+    // Each row shows once: the tree and Other sessions no longer hold them.
+    const all = screen.getAllByTestId('sess-row').map((r) => r.textContent ?? '');
+    expect(all.filter((t) => t.includes('dev-later'))).toHaveLength(1);
+    expect(all.filter((t) => t.includes('dev-first'))).toHaveLength(1);
+    expect(all.some((t) => t.includes('dev-loose'))).toBe(true);
+    expect(screen.queryByTestId('orphan-sessions')).toBeNull();
+    await fireEvent.click(within(section).getByTestId('pinned-toggle'));
+    expect(within(section).queryAllByTestId('sess-row')).toHaveLength(0);
+  });
+
+  it('keeps the filters: a search narrows the Pinned section too', async () => {
+    const a = { ...sessionFor(1, 'dev-alpha'), pinned_at: 100 };
+    const b = { ...sessionFor(1, 'dev-beta'), pinned_at: 200 };
+    mockBackend(fakeProjects, [a, b]);
+    render(Sidebar);
+    await tick(); await tick();
+    await screen.findByTestId('pinned-sessions');
+    const search = screen.getByPlaceholderText(/search/i) as HTMLInputElement;
+    await fireEvent.input(search, { target: { value: 'beta' } });
+    await waitFor(() => {
+      const rows = within(screen.getByTestId('pinned-sessions')).getAllByTestId('sess-row');
+      expect(rows).toHaveLength(1);
+      expect(rows[0].textContent).toContain('dev-beta');
+    });
+  });
+
+  it("a pinned row's Kill is disabled with the reason", async () => {
+    const p = { ...sessionFor(1, 'dev-pinned'), pinned_at: 100 };
+    mockBackend(fakeProjects, [p]);
+    render(Sidebar);
+    await tick(); await tick();
+    const section = await screen.findByTestId('pinned-sessions');
+    const kill = within(section).getByLabelText('Kill') as HTMLButtonElement;
+    expect(kill.disabled).toBe(true);
+    expect(kill.title).toBe('Pinned: unpin it first');
+  });
+});

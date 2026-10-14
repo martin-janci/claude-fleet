@@ -134,6 +134,9 @@ pub mod codes {
     pub const E_PARTICIPANT_UNKNOWN: &str = "E_PARTICIPANT_UNKNOWN";
     /// The participant resolved, but is tombstoned — the endpoint is gone.
     pub const E_PARTICIPANT_RETIRED: &str = "E_PARTICIPANT_RETIRED";
+    /// The session is pinned: nothing closes it (kill, safe kill, discard)
+    /// until a person unpins it.
+    pub const E_PINNED: &str = "E_PINNED";
     /// A safe-kill is already in progress for the session.
     pub const E_SAFE_KILL_IN_PROGRESS: &str = "E_SAFE_KILL_IN_PROGRESS";
     /// Clipboard read/write failed.

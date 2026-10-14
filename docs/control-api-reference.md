@@ -425,6 +425,12 @@ What is a peer session doing: claude_status, current_activity, stuck_kind, conte
 
 Parameters: `session_id`
 
+### `pin_session`
+
+Pin or unpin a session. A pinned session is listed in the Pinned section, and kill_session, safe_kill_session and tidy-up refuse it (E_PINNED) until it is unpinned. Returns the row.
+
+Parameters: `pinned`, `session_id`
+
 ### `place_transcript`
 
 Restore into a project: copy a conversation discover_lost_sessions found (not resumable where it ran) under the directory Claude Code keys that project's root by, on the same host, so claude --resume finds it there. Never moves or overwrites a transcript. Then resume with new_session { host_alias, project_id, name: tmux_name, resume_claude_session_id }.
@@ -1015,6 +1021,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::set_session_tags`
 - `commands::sessions::decide_related_session`
 - `commands::sessions::touch_session_viewed`
+- `commands::sessions::pin_session`
 - `commands::work::session_work_links`
 - `commands::work::link_session_work`
 - `commands::work::reject_session_work`

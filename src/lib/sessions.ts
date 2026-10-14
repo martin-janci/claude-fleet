@@ -259,6 +259,10 @@ export interface SessionRow {
   /** What a finished turn came to when hooks said nothing (migration 129,
    *  J2 in step 5.11); a hook event always wins over it. */
   turn_outcome?: TurnOutcome | null;
+  /** When a person pinned the session (migration 189), unix seconds; absent
+   *  or null when not pinned. A pinned session sits in the Pinned section
+   *  and the hub refuses to close it (`E_PINNED`) until it is unpinned. */
+  pinned_at?: number | null;
   /** What a rule, Jev or an LLM proposes about the session, one per
    *  feature (redesign 2.8). Absent when nothing proposes anything. */
   proposals?: DecisionProposal[];
@@ -596,6 +600,21 @@ export async function touchSessionViewed(sessionId: number): Promise<Result<Sess
   });
   if (r.ok) acceptCommandRow(r.value);
   return r;
+}
+
+/** Pin or unpin the session. A pinned session is listed in the Pinned
+ *  section and the hub refuses to kill it until it is unpinned. */
+export async function pinSession(sessionId: number, pinned: boolean): Promise<Result<SessionRow>> {
+  const r = await invokeCmd<SessionRow>('pin_session', {
+    args: { session_id: sessionId, pinned },
+  });
+  if (r.ok) acceptCommandRow(r.value);
+  return r;
+}
+
+/** Whether the session is pinned. */
+export function isPinned(row: Pick<SessionRow, 'pinned_at'>): boolean {
+  return row.pinned_at != null;
 }
 
 /** Restart the session in place. With `profile`, resume its conversation

@@ -707,6 +707,16 @@ fn sessions_has_turn_outcome(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 189.
+fn sessions_has_pinned_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'pinned_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 125.
 fn sessions_has_last_viewed_at(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -2097,6 +2107,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 188,
         sql: include_str!("../../migrations/188_people_auto_switch_continue.sql"),
         already_applied: Some(people_has_auto_switch_continue),
+    },
+    // Pinned sessions: `sessions.pinned_at` (one ADD COLUMN, guarded, and
+    // the row-version trigger re-issued).
+    Migration {
+        version: 189,
+        sql: include_str!("../../migrations/189_session_pinned.sql"),
+        already_applied: Some(sessions_has_pinned_at),
     },
 ];
 
@@ -3775,6 +3792,41 @@ mod tests {
         assert!(old.touch_session_viewed(id, stamped + 5).unwrap());
         assert_eq!(row().last_viewed_at, Some(stamped + 5));
         assert_eq!(row().row_version, before + 1, "the trigger watches it");
+    }
+
+    /// 189 on a database stopped at 188: every row arrives unpinned, a pin
+    /// keeps its first stamp, and the row-version trigger watches it.
+    #[test]
+    fn migration_189_adds_an_empty_pin() {
+        let old = Store::open_in_memory().expect("open");
+        old.upsert_host("h").unwrap();
+        let id = old
+            .upsert_session("w", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        old.conn
+            .execute_batch(
+                "DROP TRIGGER sessions_row_version_bump;\
+                 ALTER TABLE sessions DROP COLUMN pinned_at;\
+                 DELETE FROM schema_version WHERE version >= 189;",
+            )
+            .unwrap();
+        old.migrate().expect("189 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let row = || old.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row().pinned_at, None);
+        assert!(!old.is_session_pinned("w", "h").unwrap());
+        let before = row().row_version;
+        assert!(old.set_session_pinned(id, Some(100)).unwrap());
+        assert_eq!(row().row_version, before + 1, "the trigger watches it");
+        assert!(
+            !old.set_session_pinned(id, Some(200)).unwrap(),
+            "a pin keeps its first stamp"
+        );
+        assert_eq!(row().pinned_at, Some(100));
+        assert!(old.is_session_pinned("w", "h").unwrap());
+        assert!(old.set_session_pinned(id, None).unwrap());
+        assert!(!old.set_session_pinned(id, None).unwrap());
+        assert_eq!(row().pinned_at, None);
     }
 
     /// 129 on a database stopped at 128: `turn_outcome` arrives empty, the

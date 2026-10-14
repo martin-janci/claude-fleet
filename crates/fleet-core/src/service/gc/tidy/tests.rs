@@ -353,6 +353,9 @@ fn every_protection_is_named() {
     };
     let mut s = done_session(1);
     assert_eq!(protection(&s, &ctx), None);
+    s.row.pinned_at = Some(1);
+    assert_eq!(protection(&s, &ctx), Some("pinned"));
+    s.row.pinned_at = None;
     s.row.safe_kill_state = Some("requested".into());
     assert_eq!(protection(&s, &ctx), Some("safe_kill_in_flight"));
     s.row.safe_kill_state = None;
