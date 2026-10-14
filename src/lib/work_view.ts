@@ -1900,3 +1900,16 @@ export function noteWorkEvents(events: readonly { type: string }[]): void {
 export function noteWorkChanged(changes: readonly WorkChanged[]): void {
   if (changes.length > 0) bumpWorkChanged(...new Set(changes.map((c) => c.what)));
 }
+
+/** A person archived it (Archive in the task pane; `archived_at`). The List,
+ *  the Board and Control read with `archived: true` so Done keeps its rows,
+ *  which would mix these back in: they leave out the tasks this says, unless
+ *  the Archived switch is on (`show`). */
+export function personArchived(t: Pick<WorkTask, 'archived_at'>): boolean {
+  return t.archived_at != null;
+}
+
+/** [tasks] without the person-archived ones, unless [show]. */
+export function withoutPersonArchived<T extends Pick<WorkTask, 'archived_at'>>(tasks: readonly T[], show: boolean): T[] {
+  return show ? [...tasks] : tasks.filter((t) => !personArchived(t));
+}
