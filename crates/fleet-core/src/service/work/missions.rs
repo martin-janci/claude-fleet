@@ -95,6 +95,11 @@ pub struct MissionDetail {
     /// from an older hub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish: Option<MissionFinish>,
+    /// The sessions running on its member items that this caller may see,
+    /// in every state (a running mission's workers included): what the
+    /// detail's Sessions list opens. Empty, and absent, from an older hub.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sessions: Vec<FinishSession>,
 }
 
 /// A finished mission's leftovers, as far as the caller may see them.
@@ -111,7 +116,7 @@ pub struct MissionFinish {
     pub prs: Vec<PullRequestRow>,
 }
 
-/// One live session of a finished mission.
+/// One live session on a mission's member item.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FinishSession {
     pub session_id: i64,
@@ -254,8 +259,9 @@ pub fn mission(
     let events = s.mission_events(id, before_event, MISSION_EVENTS_PAGE)?;
     let may_change = may_change_mission(&s, scope, &mission)?;
     let plan = super::orchestrate::plan_for(&s, &mission)?;
+    let sessions = live_sessions(&s, scope, id)?;
     let finish = if crate::store::MISSION_FINAL_STATES.contains(&mission.state.as_str()) {
-        Some(finish(&s, scope, id)?)
+        Some(finish(&s, scope, id, sessions.clone())?)
     } else {
         None
     };
@@ -268,13 +274,13 @@ pub fn mission(
         may_change,
         plan,
         finish,
+        sessions,
     })
 }
 
-/// A finished mission's live sessions and pull requests, each behind the
-/// session's own fence: a session the caller may not see is not listed, and
-/// a PR is listed only where `prs` would list it.
-fn finish(s: &Store, scope: &ViewScope, id: i64) -> Result<MissionFinish, IpcError> {
+/// The running sessions on mission `id`'s member items that `scope` may
+/// see, each behind the session's own fence.
+fn live_sessions(s: &Store, scope: &ViewScope, id: i64) -> Result<Vec<FinishSession>, IpcError> {
     let mut sessions = Vec::new();
     for (sid, item_id) in s.mission_live_sessions(id)? {
         let Some(row) = s.get_session_by_id(sid)? else {
@@ -299,6 +305,18 @@ fn finish(s: &Store, scope: &ViewScope, id: i64) -> Result<MissionFinish, IpcErr
             worktree_kb,
         });
     }
+    Ok(sessions)
+}
+
+/// A finished mission's live sessions and pull requests, each behind the
+/// session's own fence: a session the caller may not see is not listed, and
+/// a PR is listed only where `prs` would list it.
+fn finish(
+    s: &Store,
+    scope: &ViewScope,
+    id: i64,
+    sessions: Vec<FinishSession>,
+) -> Result<MissionFinish, IpcError> {
     let mut prs = Vec::new();
     for url in s.mission_pr_urls(id)? {
         if let Some(pr) = s.pull_request_by_url(&url)? {

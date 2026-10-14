@@ -934,8 +934,13 @@ Index by area (names only; see the reference for details):
   members the caller sees that joined or left after the start). An agent
   asked "how is the sprint going" reads this and answers with a `results`
   card (`docs/chat-blocks.md`). Every change of an item's stored status is
-  also logged by triggers in `work_status_log` (migration 170), so later
-  burn-up and cycle-time reads have history to draw from.
+  also logged by triggers in `work_status_log` (migration 170). With
+  `since` (a unix time at most 90 days back), the answer also carries
+  `burnup`: one `{ day, total, done }` a day from `since`'s day to today
+  (`day` is the UTC midnight), the matching tasks there were and how many
+  were done by the day's end, from that history. History starts the day
+  migration 170 ran: a task with no history row counts for the whole window
+  in the stage it has now.
   `work { action: "local_items" }` lists local items (`id`, `key`, `title`,
   `created_at`, `updated_at`, `live_sessions`), newest change first.
   Readonly tokens cannot name or rename. A per-host token names work only on
@@ -1211,7 +1216,8 @@ Index by area (names only; see the reference for details):
   | `unpin {id}`. A pin checks the block as the app draws it, refuses a
   built-in's id and keeps at most 20 per person. The agent (Control's
   operator) reads them; its `pin` and `unpin` answer `E_FORBIDDEN`. Not
-  served to a per-host token.
+  served to a per-host token. A pin or an unpin emits an empty
+  `dashboards:changed` event, and the person's open devices re-read.
 - **Operator settings** — `get_settings` (every registered key of the
   settings registry, `service/settings.rs`, with its effective value; a
   read, but master token only, since the values name hosts and their
@@ -1422,6 +1428,12 @@ derive from them.
   pull requests its work opened, as `prs { list }` rows behind the same
   fence. A finished mission reopens with `work_link { mission_state,
   status: paused }`; it does not go straight back to active.
+- **`sessions`** (on `work { mission }`, any state; optional, absent when
+  there are none and from an older hub): the mission's child sessions, the
+  running sessions on its member items that the caller may see, with the
+  same fields as `finish.sessions` (`session_id`, `item_id`, `host_alias`,
+  `tmux_name`, `kind`, `worktree_kb?`). A running mission's workers show
+  here; `finish.sessions` stays for a finished one.
 
 ### Errors and limits
 

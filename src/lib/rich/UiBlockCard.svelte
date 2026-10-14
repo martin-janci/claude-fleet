@@ -17,6 +17,7 @@
   import type { Values } from '../forms/forms';
   import Markdown from '../MarkdownView.svelte';
   import DashboardCard from './DashboardCard.svelte';
+  import DeviceCard from './DeviceCard.svelte';
   import ErrorCard from './ErrorCard.svelte';
   import GuidePageCard from './GuidePageCard.svelte';
   import ProgressCard from './ProgressCard.svelte';
@@ -161,6 +162,8 @@
   <SettingCard {block} />
 {:else if block.kind === 'dashboard'}
   <DashboardCard {block} />
+{:else if block.kind === 'device'}
+  <DeviceCard {block} live={sessionId !== null} />
 {:else if block.kind === 'wizard'}
   <!-- Step 10.12: one of the app's wizards as a form; its last button runs
        the wizard, and how it went fills the composer for the agent. -->

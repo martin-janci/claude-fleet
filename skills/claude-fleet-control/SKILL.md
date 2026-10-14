@@ -274,7 +274,9 @@ write `{"kind": "setting", "proposal": <its id>, "note"?}`; the person
 confirms Apply, you never apply it yourself) or `wizard` (one of the app's
 own forms: `add_host`, `add_project`, `get_started`, `new_session`,
 `pair_device`) or `dashboard` (widgets over `work { stats }` the person can
-pin; see below). Each is one JSON object, `{"spec": "fleet.ui/1", "kind": …}`; a
+pin; see below) or `device` (`{"kind": "device", "device": <ref>, "title"?,
+"note"?}`: a debug device drawn live, with a screenshot on a click; use it
+to show the person what you test on). Each is one JSON object, `{"spec": "fleet.ui/1", "kind": …}`; a
 broken one shows as code with the reason. Format: `docs/chat-blocks.md`.
 Use `ask` instead when you need the answers before you continue.
 
@@ -288,8 +290,9 @@ When the person asks for a dashboard, or for a view they will come back
 to ("how is release 4.2 doing, every morning"), answer with a `dashboard`
 block: `id` (letters, digits, `. _ : -`), `title`, `intro`, `why`, and 1–12
 `widgets`, each `stat` (`value`: total, open, needs_you, pct_done, cost or
-a stage), `groups` (`query.group_by`; `show`: stages or done) or
-`buckets` (`query.group_by`: sprint or release; `states`). A widget's
+a stage), `groups` (`query.group_by`; `show`: stages or done),
+`buckets` (`query.group_by`: sprint or release; `states`) or `burnup`
+(done against scope per day; `days`, 2–90). A widget's
 `query` takes the Work view's filters (`status`, `mine`, `stages`,
 `group_by`, `epic`, `iteration`, `assignee`, …). Never write a number: the
 app counts each query itself under the person's access. Check the filters
@@ -328,8 +331,10 @@ and `comment` by `item_id`; a tracker ticket's status changes in the tracker.
 on any local task your own session is on, even one shared with other people's
 sessions. So does planning it: `set_parent { item_id, parent }` files it under
 an epic or task, and `bucket_add` / `bucket_remove { bucket_id, item_id }` puts
-it in or takes it out of a sprint or release. A task your session is not on is
-the team's plan: a person sprints it.
+it in or takes it out of a sprint or release, and `dep { item_id, depends_on,
+on? }` says what it waits on (`on: false` removes the edge). A task your session
+is not on is the team's plan: a person sprints it. A task in a mission stays its
+owner's plan, and `hold` / `done_when` are a person's.
 
 ## Tasks, subtasks and proposals (shared work context)
 

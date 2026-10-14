@@ -20,7 +20,8 @@ export type PanelId =
   | 'ticket-keys'
   | 'hub'
   | 'mcp'
-  | 'diagnostics';
+  | 'diagnostics'
+  | 'debug-devices';
 
 export interface SettingsLeaf {
   id: string;
@@ -107,7 +108,7 @@ export const SETTINGS_TREE: readonly SettingsGroup[] = [
       { id: 'groups', label: 'Groups', page: 'settings.groups' },
       { id: 'devices', label: 'Devices', page: 'settings.devices' },
       { id: 'federation', label: 'Federation', page: 'settings.federation' },
-      { id: 'debug-devices', label: 'Debug devices', page: 'debug_devices' },
+      { id: 'debug-devices', label: 'Debug devices', panel: 'debug-devices', page: 'debug_devices' },
     ],
   },
   {

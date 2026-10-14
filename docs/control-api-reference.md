@@ -775,7 +775,7 @@ Parameters: `session_id`, `since`
 
 ### `session_tool_detail`
 
-One tool call's input and result (omitted by session_conversation): { id, name, input, edit {file_path, old, new} | null, command | null, result | null, is_error }; texts capped at 8000 chars. Read-only. Errors: as session_conversation, E_NOTFOUND.
+One tool call's input and result (omitted by session_conversation): { id, name, input, edit {file_path, old, new} | null, command | null, result | null, is_error, images? [{mime, data}], images_omitted? }; texts capped at 8000 chars, images (a screenshot) at 2 of 4 MiB base64. Read-only. Errors: as session_conversation, E_NOTFOUND.
 
 Parameters: `claude_session_id`, `session_id`, `tool_use_id`
 

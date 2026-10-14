@@ -727,6 +727,8 @@ fn tool_detail_from_rollout(lines: &str, id: &str) -> Option<ToolDetail> {
                     command: command.map(|c| cap(c, TOOL_DETAIL_MAX_CHARS)),
                     result: None,
                     is_error: false,
+                    images: vec![],
+                    images_omitted: 0,
                 });
             }
             // The first output after the call is its own.
