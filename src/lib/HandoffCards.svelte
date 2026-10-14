@@ -21,7 +21,7 @@
   action); the created-task card says who proposed it and takes a group.
 -->
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import Loader from './Loader.svelte';
   import { durationMs, effectiveMotion } from './motion';
   import { fliesIn } from './handoff_flight';
@@ -254,6 +254,20 @@
   );
   const tasksOpen = $derived(tasksForced || (tasksChoice ?? tasks.length <= TASKS_OPEN_UP_TO));
 
+  let groupHead = $state<HTMLButtonElement | null>(null);
+  /** Opening the group scrolls its header to the top of the tray, so the
+   *  rows it opened are what the person sees, not the space below the fold. */
+  async function toggleTasks() {
+    tasksChoice = !tasksOpen;
+    if (!tasksChoice) return;
+    await tick();
+    const head = groupHead;
+    const tray = head?.closest<HTMLElement>('[data-testid="conv-composer-above"]');
+    if (!head || !tray) return;
+    const top = head.getBoundingClientRect().top - tray.getBoundingClientRect().top + tray.scrollTop;
+    tray.scrollTo?.({ top: Math.max(0, top - 4), behavior: 'smooth' });
+  }
+
   function minutesLeft(h: ControlHandoff): number {
     const at = Math.max(...undoable(h, nowSec).map((i) => i.accepted_at ?? 0));
     return Math.max(1, Math.ceil((at + ACCEPT_UNDO_SECS - nowSec) / 60));
@@ -391,7 +405,8 @@
           aria-controls={listId}
           data-testid="handoff-task-toggle"
           disabled={tasksForced}
-          onclick={() => (tasksChoice = !tasksOpen)}
+          bind:this={groupHead}
+          onclick={toggleTasks}
         >
           <span class="chev" aria-hidden="true">{tasksOpen ? '▾' : '▸'}</span>
           <span>{taskSummary(tasks.map((h) => h.item!.status))}</span>
@@ -613,14 +628,20 @@
     gap: 2px;
   }
   .group-head {
-    align-self: flex-start;
-    display: inline-flex;
+    /* Stays at the top of the tray while its rows scroll, so the fold is
+       always one press away. Full width, so its background covers them. */
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    align-self: stretch;
+    display: flex;
     align-items: center;
     gap: var(--space-1);
-    padding: 2px var(--space-1);
+    padding: 4px var(--space-1);
     border: 0;
     border-radius: var(--radius-sm);
-    background: none;
+    background: var(--bg);
+    text-align: start;
     color: var(--fg-muted);
     font: inherit;
     font-size: var(--text-xs);

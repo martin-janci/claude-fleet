@@ -390,6 +390,29 @@ describe('the task group', () => {
     expect(screen.getAllByTestId('handoff-task-card')[0].closest('ul')!.hidden).toBe(false);
   });
 
+  // Control chat UX (2026-10-13): opening the group in a short tray used to
+  // open its rows below the fold, so it looked like nothing happened.
+  it('opening the group scrolls its header to the top of the tray', async () => {
+    receipts = [1, 2, 3, 4, 5, 6].map((i) => task(i, 'in_progress'));
+    const tray = document.createElement('div');
+    tray.dataset.testid = 'conv-composer-above';
+    const scrollTo = vi.fn();
+    tray.scrollTo = scrollTo as unknown as typeof tray.scrollTo;
+    document.body.appendChild(tray);
+    try {
+      render(HandoffCards, { target: tray });
+      const toggle = await screen.findByTestId('handoff-task-toggle');
+      await fireEvent.click(toggle);
+      await vi.waitFor(() => expect(scrollTo).toHaveBeenCalledTimes(1));
+      // Folding it again leaves the tray where it is.
+      await fireEvent.click(toggle);
+      expect(toggle.getAttribute('aria-expanded')).toBe('false');
+      expect(scrollTo).toHaveBeenCalledTimes(1);
+    } finally {
+      tray.remove();
+    }
+  });
+
   it('never folds a new task that still asks owner and due', async () => {
     receipts = [1, 2, 3, 4, 5].map((i) => task(i, 'in_progress')).concat(task(6, 'todo', now - 30));
     render(HandoffCards);
