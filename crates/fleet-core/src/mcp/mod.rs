@@ -1644,6 +1644,47 @@ mod tests {
         assert!(ok.contains("200 OK"), "{ok}");
         assert!(body_of(&ok).contains("\"trusted\":true"), "{ok}");
 
+        // The fence is not over-strict: carol's devices and live memberships
+        // are all inside acme, so a fenced trusted code redeems trusted.
+        {
+            let s = store.lock().unwrap();
+            let carol = s.create_person("carol", None).unwrap().id;
+            s.set_org_member(acme, carol, "member", None).unwrap();
+        }
+        let fenced_ok = pairings.mint(pairing::MintRequest {
+            person: Some("carol"),
+            org_id: Some(acme),
+            minter: pairing::Minter {
+                fenced_org: Some(acme),
+                ..mint_req("x", "full", true).minter
+            },
+            ..mint_req("carol-phone", "full", true)
+        });
+        let passed = round_trip(addr, &pair_req(&fenced_ok.code, "phone.invalid")).await;
+        assert!(passed.contains("200 OK"), "{passed}");
+        assert!(body_of(&passed).contains("\"trusted\":true"), "{passed}");
+        {
+            let s = store.lock().unwrap();
+            assert!(
+                s.active_client_tokens()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r.name == "carol-phone"),
+                "the fenced redeem stored its row"
+            );
+            let ev = s
+                .admin_events(&crate::store::AdminEventQuery {
+                    limit: 300,
+                    ..Default::default()
+                })
+                .unwrap();
+            let pairs = ev
+                .iter()
+                .filter(|e| e.action == "pair" && e.resource_id == "carol-phone")
+                .count();
+            assert_eq!(pairs, 1, "exactly one pair event");
+        }
+
         // A camera scan opens `GET /pair`, which must explain what to do
         // rather than answer 405. No secret is in it: the code lives in the
         // URL fragment, which a browser never sends.
