@@ -24,7 +24,7 @@ pub const MAX_RULE_HOURS: i64 = 24 * 90;
 #[derive(Debug, Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "PrShepherdParams")]
 pub struct ShepherdArgs {
-    /// status | grant | revoke | pause_all.
+    /// status | explain | grant | revoke | pause_all.
     pub action: String,
     /// grant, revoke.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -46,7 +46,7 @@ pub struct ShepherdArgs {
 impl ShepherdArgs {
     /// Whether the action only reads.
     pub fn is_read(&self) -> bool {
-        self.action == "status"
+        matches!(self.action.as_str(), "status" | "explain")
     }
 }
 
@@ -196,11 +196,12 @@ pub fn call(
     };
     match args.action.as_str() {
         "status" => to_json(serde_json::to_value(status(store, args, now)?)),
+        "explain" => to_json(serde_json::to_value(super::explain(&*lock(store)?, now))),
         "grant" => to_json(serde_json::to_value(grant(store, args, granted_by, now)?)),
         "revoke" => to_json(serde_json::to_value(revoke(store, args)?)),
         "pause_all" => to_json(serde_json::to_value(pause_all(store)?)),
         other => Err(invalid(format!(
-            "unknown pr_shepherd action {other:?}: status | grant | revoke | pause_all"
+            "unknown pr_shepherd action {other:?}: status | explain | grant | revoke | pause_all"
         ))),
     }
 }

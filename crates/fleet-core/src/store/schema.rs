@@ -149,7 +149,7 @@ fn people_has_uuid(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 186: `people` already has its
+/// `already_applied` guard of migration 187: `people` already has its
 /// `auto_switch_account` column. See [`Migration`].
 fn people_has_auto_switch(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -160,7 +160,7 @@ fn people_has_auto_switch(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 187: `people` already has its
+/// `already_applied` guard of migration 188: `people` already has its
 /// `auto_switch_continue` column. See [`Migration`].
 fn people_has_auto_switch_continue(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -2078,18 +2078,24 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/185_fleet_agent_rules.sql"),
         already_applied: Some(agent_rules_has_definition),
     },
+    // Routine debugging: the scheduler's decisions per routine, capped.
+    // A new table, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        186,
+        include_str!("../../migrations/186_routine_decisions.sql"),
+    ),
     // Automatic account switching: a person's own opt-out
     // (`people.auto_switch_account`). ADD COLUMN, so guarded.
     Migration {
-        version: 186,
-        sql: include_str!("../../migrations/186_people_auto_switch.sql"),
+        version: 187,
+        sql: include_str!("../../migrations/187_people_auto_switch.sql"),
         already_applied: Some(people_has_auto_switch),
     },
     // Automatic account switching: "continue" after a switch, per person
     // (`people.auto_switch_continue`). ADD COLUMN, so guarded.
     Migration {
-        version: 187,
-        sql: include_str!("../../migrations/187_people_auto_switch_continue.sql"),
+        version: 188,
+        sql: include_str!("../../migrations/188_people_auto_switch_continue.sql"),
         already_applied: Some(people_has_auto_switch_continue),
     },
 ];

@@ -1157,6 +1157,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     // agent actions. The hub serves `agents` to the owner's own device only.
     ("agents_status", Verdict::Routed { tool: "agents" }),
     ("agents_decide", Verdict::Routed { tool: "agents" }),
+    // Debugging the agents: explain and job, both reads of the same tool.
+    ("agents_debug", Verdict::Routed { tool: "agents" }),
     // Orbit Fleet 8.6: the Automation screen's Routines and the Inbox's failed runs.
     ("routines", Verdict::Routed { tool: "routines" }),
     // ── tasks ───────────────────────────────────────────────────────────────

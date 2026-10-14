@@ -74,6 +74,7 @@
     "add_work_to_bucket",
     "adopt_session",
     "agent_installs",
+    "agents_debug",
     "agents_decide",
     "agents_status",
     "answer_form",

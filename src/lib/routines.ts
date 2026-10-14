@@ -14,6 +14,7 @@ import { goTo } from './destination';
 import { automationTab } from './automation';
 import type { RunRow } from './runs';
 import type { OfState } from './kit/status';
+import type { LoopHealth } from './ipc';
 
 export type RoutineTrigger = 'cron' | 'event' | 'manual';
 export type RoutineOverlap = 'skip' | 'parallel';
@@ -224,6 +225,7 @@ type Args = {
   limit?: number;
   run_id?: number;
   outcome?: string;
+  event_id?: number;
 };
 
 function call<T>(args: Args): Promise<Result<T>> {
@@ -249,6 +251,136 @@ export const runRoutineNow = (id: number) => call<RoutineRunRow>({ action: 'run_
 export type PersonOutcome = 'did_work' | 'nothing' | 'needs_person';
 export const setRunOutcome = (id: number, runId: number, outcome: PersonOutcome) =>
   call<RoutineRunRow>({ action: 'set_run_outcome', routine_id: id, run_id: runId, outcome });
+
+// ---- debugging (migration 186; `service::routines::debug`) -----------------
+
+/** One check a fire passes or fails, in the scheduler's order. */
+export interface RoutineCheck {
+  /** enabled | automation | scheduler | schedule | event | overlap | day_budget | fleet_budget | account | host */
+  name: string;
+  state: 'ok' | 'warn' | 'block';
+  detail: string;
+}
+
+/** What one timeline event does to an event routine. */
+export interface EventVerdict {
+  event_id: number;
+  kind: string;
+  session_id: number;
+  at: number;
+  /** The routine's cursor is past it. */
+  read: boolean;
+  fires: boolean;
+  reason?: string;
+  reference?: string;
+}
+
+export interface EventExplain {
+  kind: string;
+  cursor: number;
+  /** Counted for an unrestricted caller only. */
+  unread?: number;
+  recent: EventVerdict[];
+}
+
+/** One scheduler decision in a routine's trace. */
+export interface RoutineDecision {
+  id: number;
+  routine_id: number;
+  at: number;
+  trigger: string;
+  verdict: 'fired' | 'failed' | 'skipped' | 'dropped' | 'filtered';
+  reason?: string;
+  trigger_ref?: string;
+  event_id?: number;
+  session_id?: number;
+  run_id?: number;
+}
+
+export interface RoutineExplain {
+  routine_id: number;
+  name: string;
+  trigger: string;
+  summary: string;
+  state: 'ok' | 'warn' | 'block';
+  checks: RoutineCheck[];
+  next_run_at?: number;
+  scheduler?: LoopHealth;
+  event?: EventExplain;
+  decisions: RoutineDecision[];
+}
+
+export interface RoutineDryRun {
+  routine_id: number;
+  starts: boolean;
+  reason?: string;
+  note?: string;
+  session: { host_alias: string; project_id: number; profile?: string; owner_person_id?: number };
+  prompt: string;
+  event?: EventVerdict;
+  /** What only a scheduled fire must also pass; Run now skips them. */
+  scheduled_only: RoutineCheck[];
+}
+
+export const explainRoutine = (id: number, limit?: number) =>
+  call<RoutineExplain>({ action: 'explain', routine_id: id, ...(limit !== undefined ? { limit } : {}) });
+export const routineDecisions = (id: number, limit?: number) =>
+  call<RoutineDecision[]>({ action: 'decisions', routine_id: id, ...(limit !== undefined ? { limit } : {}) });
+export const dryRunRoutine = (id: number, eventId?: number) =>
+  call<RoutineDryRun>({ action: 'dry_run', routine_id: id, ...(eventId !== undefined ? { event_id: eventId } : {}) });
+
+/** A check's name, as the Debug tab lists it. */
+export function checkLabel(name: string): string {
+  return (
+    (
+      {
+        enabled: 'Turned on',
+        automation: 'Pause all',
+        scheduler: 'Scheduler',
+        schedule: 'Schedule',
+        event: 'Event',
+        overlap: 'Overlap',
+        day_budget: 'Day budget',
+        fleet_budget: 'Fleet budget',
+        account: 'Account',
+        host: 'Host',
+      } as Record<string, string>
+    )[name] ?? name
+  );
+}
+
+/** A decision's verdict, in the trace's words. */
+export function decisionLabel(verdict: string): string {
+  return (
+    (
+      {
+        fired: 'Started',
+        failed: 'Start failed',
+        skipped: 'Skipped',
+        dropped: 'Dropped',
+        filtered: 'Not its event',
+      } as Record<string, string>
+    )[verdict] ?? verdict
+  );
+}
+
+/** A check's or decision's dot. */
+export function debugDot(state: string): OfState {
+  switch (state) {
+    case 'ok':
+    case 'fired':
+      return 'done';
+    case 'warn':
+    case 'skipped':
+    case 'dropped':
+      return 'waiting';
+    case 'block':
+    case 'failed':
+      return 'failed';
+    default:
+      return 'idle';
+  }
+}
 
 /** The Change menu's choices, in the run list's words. */
 export const PERSON_OUTCOMES: readonly { value: PersonOutcome; label: string }[] = [
@@ -330,7 +462,7 @@ export interface RoutinesRequest {
   template?: string;
   at: number;
 }
-export type RoutineTab = 'runs' | 'definition' | 'limits';
+export type RoutineTab = 'runs' | 'definition' | 'limits' | 'debug';
 
 export const routinesRequest = writable<RoutinesRequest | null>(null);
 

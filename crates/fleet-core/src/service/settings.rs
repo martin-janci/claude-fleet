@@ -481,7 +481,7 @@ pub const ACCOUNTS_PAUSE_AT: &str = "accounts.pause_at";
 /// Resume a session whose account ran out under the login on its host with
 /// the most headroom, without asking (`service::account_switch`). The
 /// fleet's switch; each person can still turn it off for their own sessions
-/// (`people.auto_switch_account`, migration 186).
+/// (`people.auto_switch_account`, migration 187).
 pub const ACCOUNTS_AUTO_SWITCH: &str = "accounts.auto_switch";
 /// With [`ACCOUNTS_AUTO_SWITCH`], move an idle session once its account
 /// passes `accounts.pause_at`, not only once it is out.
