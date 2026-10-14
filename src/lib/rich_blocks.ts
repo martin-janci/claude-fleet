@@ -42,6 +42,14 @@ const REPORT_SCAN_LINES = 400;
 export interface TaskReport {
   summary: string;
   outcome: ReportOutcome;
+  /** What the worker says it did. */
+  done: string[];
+  /** Choices the worker made that the next task must keep. */
+  decisions: string[];
+  /** Work the task did not finish. */
+  remaining: string[];
+  /** Facts a fresh session needs to continue; not shown on the card. */
+  context: string[];
   tests_run: string[];
   warnings: string[];
   blockers: string[];
@@ -197,6 +205,10 @@ export function reportFromValue(v: unknown): TaskReport | null {
   return {
     summary: typeof v.summary === 'string' ? clip(v.summary, SUMMARY_MAX_CHARS) : '',
     outcome,
+    done: reportList(v.done),
+    decisions: reportList(v.decisions),
+    remaining: reportList(v.remaining),
+    context: reportList(v.context),
     tests_run: reportList(v.tests_run),
     warnings: reportList(v.warnings),
     blockers: reportList(v.blockers),

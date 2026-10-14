@@ -1265,11 +1265,11 @@ describe('task result', () => {
     expect(headline({ ...base, gate: { ...base.gate, state: 'unverified' } }))
       .toEqual({ label: 'Reported done, not verified', tone: 'warning' });
     expect(headline({ ...base, report: { ...base.report, outcome: 'partial' } }))
-      .toEqual({ label: 'Partly done', tone: 'warning' });
+      .toEqual({ label: 'Needs you · partly done', tone: 'warning' });
     expect(headline({ ...base, report: { ...base.report, outcome: 'failed' } }))
       .toEqual({ label: 'Failed', tone: 'danger' });
     expect(headline({ ...base, report: { ...base.report, outcome: 'blocked' } }))
-      .toEqual({ label: 'Blocked', tone: 'danger' });
+      .toEqual({ label: 'Needs you · blocked', tone: 'danger' });
   });
 });
 ```
@@ -1291,10 +1291,13 @@ export function validationLines(v: TaskResultView) {
 }
 
 export function headline(v: TaskResultView): { label: string; tone: 'success' | 'warning' | 'danger' } {
+  // The words ReportCard gives an outcome (`outcomeLabel` in mission_triage.ts):
+  // "Failed", "Needs you · blocked", "Needs you · partly done". "Blocked" and
+  // "Partly done" as labels fail src/lib/copy_lint.test.ts.
   switch (v.report.outcome) {
-    case 'failed': return { label: 'Failed', tone: 'danger' };
-    case 'blocked': return { label: 'Blocked', tone: 'danger' };
-    case 'partial': return { label: 'Partly done', tone: 'warning' };
+    case 'failed':
+    case 'blocked': return { label: outcomeLabel(v.report.outcome), tone: 'danger' };
+    case 'partial': return { label: outcomeLabel('partial'), tone: 'warning' };
   }
   if (v.gate.state === 'blocked') return { label: 'Completion blocked', tone: 'danger' };
   if (v.gate.state === 'unverified') return { label: 'Reported done, not verified', tone: 'warning' };
