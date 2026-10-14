@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { importHost, importOnlyFor, KIND_LABEL, KIND_ORDER, type AssetKind, type ImportReport } from './assets';
+  import { HOST_KINDS, importHost, importOnlyFor, KIND_LABEL, type AssetKind, type ImportReport } from './assets';
   import { hosts } from './hosts';
   import Modal from './Modal.svelte';
   import TransferMark from './TransferMark.svelte';
@@ -21,10 +21,10 @@
   let busy = $state(false);
   // G2.6: What to import, one box per kind. A caller's own `only` (one
   // asset's Import button) wins and the boxes are not shown.
-  let what = $state<AssetKind[]>([...KIND_ORDER]);
+  let what = $state<AssetKind[]>([...HOST_KINDS]);
   const asked = $derived(only.length > 0 ? only : importOnlyFor(what));
   function toggle(k: AssetKind, on: boolean) {
-    what = on ? KIND_ORDER.filter((x) => x === k || what.includes(x)) : what.filter((x) => x !== k);
+    what = on ? HOST_KINDS.filter((x) => x === k || what.includes(x)) : what.filter((x) => x !== k);
     report = null;
   }
 
@@ -53,7 +53,7 @@
     {:else}
       <fieldset class="what" data-testid="import-what">
         <legend>What</legend>
-        {#each KIND_ORDER as k (k)}
+        {#each HOST_KINDS as k (k)}
           <label><input type="checkbox" checked={what.includes(k)} onchange={(e) => toggle(k, (e.currentTarget as HTMLInputElement).checked)} data-testid="import-what-{k}" />{KIND_LABEL[k]}</label>
         {/each}
       </fieldset>

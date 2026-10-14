@@ -114,6 +114,15 @@ scans hosts read-only for what is actually installed, and shows each asset
 as in sync, drifted, missing or unsupported per host. Assets found on a host
 but not in the catalog are listed as unmanaged and can be imported.
 
+A **fleet agent** (`kind: fleet_agent`, folder `fleet-agents/<name>/` with
+`asset.yaml` and `skill.md`) is a configurable agent's definition: its
+inputs, the stores it needs, its trigger, its run and the actions its answer
+may become (`docs/superpowers/specs/2026-10-12-configurable-agents-design.md`).
+It is the hub's alone: no harness installs it on a host, so it is always in
+sync. The catalog checks it when it loads it, an invalid one is listed as a
+problem, and `fleet-hub agents define <dir>` checks one by hand. An example
+is in `docs/fleet-agent-examples/`.
+
 Skills, agents and MCP servers have an optional `install_as` field naming the
 identifier a harness installs them under, when it differs from the catalog
 name (the Claude Code skill/agent directory or `mcpServers.<key>`; the Codex

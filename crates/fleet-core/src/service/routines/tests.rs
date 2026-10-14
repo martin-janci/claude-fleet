@@ -2196,7 +2196,7 @@ async fn a_failed_run_stays_failed_whatever_a_person_says() {
     assert_eq!(run_row(&f, run.id).outcome.as_deref(), Some("failed"));
 }
 
-// ---- Debugging (migration 185): the trace, explain, dry_run ----
+// ---- Debugging (migration 186): the trace, explain, dry_run ----
 
 fn verdicts(f: &Fx, id: i64) -> Vec<(String, String)> {
     let mut rows = lock(&f.store).unwrap().routine_decisions(id, 200).unwrap();

@@ -295,7 +295,7 @@ describe('the calm Inbox names the next routine (G7.15)', () => {
   });
 });
 
-describe('the Debug tab words (migration 185)', () => {
+describe('the Debug tab words (migration 186)', () => {
   it('names every check and verdict, and dots them', async () => {
     const { checkLabel, decisionLabel, debugDot } = await import('./routines');
     expect(checkLabel('automation')).toBe('Pause all');

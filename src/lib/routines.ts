@@ -252,7 +252,7 @@ export type PersonOutcome = 'did_work' | 'nothing' | 'needs_person';
 export const setRunOutcome = (id: number, runId: number, outcome: PersonOutcome) =>
   call<RoutineRunRow>({ action: 'set_run_outcome', routine_id: id, run_id: runId, outcome });
 
-// ---- debugging (migration 185; `service::routines::debug`) -----------------
+// ---- debugging (migration 186; `service::routines::debug`) -----------------
 
 /** One check a fire passes or fails, in the scheduler's order. */
 export interface RoutineCheck {

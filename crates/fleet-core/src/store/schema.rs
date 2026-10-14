@@ -766,6 +766,18 @@ fn peer_links_has_msgs_total(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 185: `agent_rules` already has
+/// `definition`. 185 rebuilds the table, so a re-run only records the
+/// version.
+fn agent_rules_has_definition(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('agent_rules') WHERE name = 'definition'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 142: `session_grants`' CHECK
 /// already admits 'answer'. 142 rebuilds the table, so a re-run only records
 /// the version.
@@ -2036,11 +2048,19 @@ const MIGRATIONS: &[Migration] = &[
         184,
         include_str!("../../migrations/184_work_close_dismissals.sql"),
     ),
+    // Configurable agents, step 2: `agent_rules` and `agent_jobs` admit
+    // 'fleet' (a CHECK, so both are rebuilt and the migration is guarded);
+    // rules gain `definition` and `bindings`; `agent_records` is new.
+    Migration {
+        version: 185,
+        sql: include_str!("../../migrations/185_fleet_agent_rules.sql"),
+        already_applied: Some(agent_rules_has_definition),
+    },
     // Routine debugging: the scheduler's decisions per routine, capped.
     // A new table, `IF NOT EXISTS`, safe to re-run.
     Migration::plain(
-        185,
-        include_str!("../../migrations/185_routine_decisions.sql"),
+        186,
+        include_str!("../../migrations/186_routine_decisions.sql"),
     ),
 ];
 

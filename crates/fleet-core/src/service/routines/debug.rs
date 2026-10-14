@@ -1,7 +1,7 @@
 //! Debugging a routine: `explain` says what it does next or why it does
 //! nothing, check by check, with the events an event routine would read
 //! and the trace of what the scheduler decided (`routine_decisions`,
-//! migration 185); `dry_run` says what a fire right now would start and
+//! migration 186); `dry_run` says what a fire right now would start and
 //! the exact prompt it would type, without starting anything. Both only
 //! read: a person debugging a routine never spends a run on it.
 //!

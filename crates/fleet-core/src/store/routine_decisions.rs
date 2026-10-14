@@ -1,4 +1,4 @@
-//! What the routines' scheduler decided, per routine (migration 185): the
+//! What the routines' scheduler decided, per routine (migration 186): the
 //! trace `routines { action: explain }` reads to answer "why did it (not)
 //! fire?". The rules themselves are `service::routines::tick`'s.
 

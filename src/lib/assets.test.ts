@@ -375,8 +375,8 @@ describe('Toolkit form helpers', () => {
   });
 
   it('the What boxes and the commit message', async () => {
-    const { importOnlyFor, commitMessageFor, KIND_ORDER } = await import('./assets');
-    expect(importOnlyFor(KIND_ORDER)).toEqual([]);
+    const { importOnlyFor, commitMessageFor, HOST_KINDS } = await import('./assets');
+    expect(importOnlyFor(HOST_KINDS)).toEqual([]);
     expect(importOnlyFor(['skill', 'command'])).toEqual(['skill:*', 'command:*']);
     expect(commitMessageFor([])).toBe('catalog: commit pending changes');
     expect(

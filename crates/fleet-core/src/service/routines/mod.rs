@@ -49,7 +49,7 @@
 //! prompt saying how far the run may go (report, ask before push, push). A
 //! failed run carries an error code, read as a named fix ([`fix`]).
 //!
-//! **Debugging** ([`debug`], migration 185): every scheduler decision is a
+//! **Debugging** ([`debug`], migration 186): every scheduler decision is a
 //! row of the routine's trace (`routine_decisions`, the newest 200), the
 //! event fires dropped and the events filtered out included, and
 //! `explain` / `dry_run` answer "why did it (not) fire?" and "what would a
@@ -1060,7 +1060,7 @@ pub(crate) fn record_skip(
     Ok(run)
 }
 
-/// One scheduler decision for a routine's trace (migration 185).
+/// One scheduler decision for a routine's trace (migration 186).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Decision<'a> {
     pub trigger: &'a str,

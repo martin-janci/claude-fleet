@@ -26,4 +26,4 @@ CREATE TABLE IF NOT EXISTS routine_decisions (
 CREATE INDEX IF NOT EXISTS routine_decisions_by_routine
   ON routine_decisions (routine_id, id);
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (185);
+INSERT OR IGNORE INTO schema_version (version) VALUES (186);

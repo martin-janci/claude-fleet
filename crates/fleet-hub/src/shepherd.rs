@@ -145,7 +145,7 @@ fn run_on(store: &Store, cmd: ShepherdCmd, now: i64) -> Result<ExitCode, String>
             }
             for v in &e.sessions {
                 out::line(&format!(
-                    "session {}	{}	{}	{}	{}",
+                    "session {}\t{}\t{}\t{}\t{}",
                     v.session_id,
                     v.tmux_name,
                     v.verdict,

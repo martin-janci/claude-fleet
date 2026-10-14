@@ -782,7 +782,7 @@ the Inbox. `runs` (8.3, migration 141) lists tasks, missions, Jev,
 project, and optionally a host, before Jev K1 is asked; after five starts
 of the same prefix in the same project, the start preview offers the rule.
 The New layout's Automation screen holds Routines, Rules, Runs and Agents.
-Debugging them (migration 185): a routine's trace of every scheduler
+Debugging them (migration 186): a routine's trace of every scheduler
 decision (`routine_decisions`, the newest 200, dropped and filtered event
 fires included), `routines { explain | decisions | dry_run }` and the
 routine's Debug tab; `agents { explain | job }` (the desktop's
@@ -890,6 +890,20 @@ the support agent scans a catalog MCP server (`graylog`) for new errors
 (`scan`) and proposes known-error entries for its KB repo (`kb`). Not
 built: outbound Slack/Teams notifications (a new channel of the 11.9
 matrix, the owner's call).
+
+Configurable agents (spec `docs/superpowers/specs/2026-10-12-configurable-agents-design.md`),
+steps 1 and 2 of 6: a `fleet_agent` catalog asset is a typed, validated
+definition (inputs, store roles, trigger, run, actions, limits;
+`service/fleet_agents/`), listed in Assets and checked by `fleet-hub agents
+define`. An instance is an `agent_rules` row with `agent = fleet` (migration
+185: `definition`, `bindings`), granted through the `agents` tool or
+`fleet-hub agents grant fleet <instance> --definition … --values … --bindings
+…`: the input values are checked against the definition's form, each MCP
+binding is rendered with the host's secrets and asked for its tools on the
+host, and fleet stores bind `rule` or `shared:<name>` namespaces of
+`agent_records`, which a run reads through `fleet-records` (`/agent-records`,
+run tokens). Nothing runs an instance yet: the generic runner, the actions
+and the grant form are steps 3 to 5.
 
 Session state machine hardening (plan A, #343) is landed: a `working` row
 with no activity for `reconcile.stale_working_secs` turns `idle` with

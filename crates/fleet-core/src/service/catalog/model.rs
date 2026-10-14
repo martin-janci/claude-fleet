@@ -40,16 +40,20 @@ pub enum Kind {
     /// A slash command (gap plan G2.6): a prompt a person runs as
     /// `/name`, with an argument hint and an allowed-tools list.
     Command,
+    /// A configurable agent's definition (`service::fleet_agents`): kept by
+    /// the hub, never installed on a host.
+    FleetAgent,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 6] = [
+    pub const ALL: [Kind; 7] = [
         Kind::Skill,
         Kind::Agent,
         Kind::Hook,
         Kind::McpServer,
         Kind::PluginRef,
         Kind::Command,
+        Kind::FleetAgent,
     ];
 
     /// Directory inside the catalog repo that holds this kind.
@@ -61,6 +65,7 @@ impl Kind {
             Kind::McpServer => "mcp",
             Kind::PluginRef => "plugins",
             Kind::Command => "commands",
+            Kind::FleetAgent => "fleet-agents",
         }
     }
 
@@ -77,13 +82,23 @@ impl Kind {
             Kind::McpServer => "mcp_server",
             Kind::PluginRef => "plugin_ref",
             Kind::Command => "command",
+            Kind::FleetAgent => "fleet_agent",
         }
     }
 
-    /// Skills, agents and commands are folders (asset.yaml + body); the
-    /// rest are single files.
+    /// Skills, agents, commands and fleet agents are folders (asset.yaml +
+    /// body); the rest are single files.
     pub fn is_folder(&self) -> bool {
-        matches!(self, Kind::Skill | Kind::Agent | Kind::Command)
+        matches!(
+            self,
+            Kind::Skill | Kind::Agent | Kind::Command | Kind::FleetAgent
+        )
+    }
+
+    /// Whether assets of this kind are installed on hosts. A fleet agent's
+    /// definition is the hub's alone: every harness renders it as nothing.
+    pub fn installs_on_hosts(&self) -> bool {
+        !matches!(self, Kind::FleetAgent)
     }
 }
 
@@ -261,6 +276,23 @@ pub enum AssetSpec {
         /// session's own model.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+    },
+    /// A configurable agent's definition; its skill is the body
+    /// (`skill.md`). The fields are kept as JSON here and typed and checked
+    /// by `service::fleet_agents::definition`.
+    FleetAgent {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        inputs: Vec<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        stores: Vec<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        trigger: serde_json::Value,
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        run: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        actions: Vec<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        limits: serde_json::Value,
     },
 }
 
@@ -445,6 +477,7 @@ impl Asset {
             AssetSpec::McpServer { .. } => Kind::McpServer,
             AssetSpec::PluginRef { .. } => Kind::PluginRef,
             AssetSpec::Command { .. } => Kind::Command,
+            AssetSpec::FleetAgent { .. } => Kind::FleetAgent,
         };
         if spec_kind != file.header.kind {
             return Err("kind field does not match the kind-specific fields".into());
@@ -590,8 +623,60 @@ impl Asset {
                     }
                 }
             }
+            AssetSpec::FleetAgent { .. } => out.extend(self.fleet_agent_problems()),
         }
         out
+    }
+
+    /// A fleet agent's definition, typed, and its skill's templates: what
+    /// is wrong with them (`service::fleet_agents::definition::problems`).
+    pub fn fleet_agent_problems(&self) -> Vec<String> {
+        if !matches!(self.spec, AssetSpec::FleetAgent { .. }) {
+            return Vec::new();
+        }
+        self.fleet_agent().err().unwrap_or_default()
+    }
+
+    /// A fleet agent loaded: its definition, skill and templates, or every
+    /// problem (an asset of another kind is one).
+    pub fn fleet_agent(
+        &self,
+    ) -> Result<crate::service::fleet_agents::definition::Loaded, Vec<String>> {
+        use crate::service::fleet_agents::definition;
+        let AssetSpec::FleetAgent {
+            inputs,
+            stores,
+            trigger,
+            run,
+            actions,
+            limits,
+        } = &self.spec
+        else {
+            return Err(vec![format!("{} is not a fleet agent", self.header.name)]);
+        };
+        let mut obj = serde_json::Map::new();
+        obj.insert("inputs".into(), inputs.clone().into());
+        obj.insert("stores".into(), stores.clone().into());
+        obj.insert("trigger".into(), trigger.clone());
+        obj.insert("actions".into(), actions.clone().into());
+        if !run.is_null() {
+            obj.insert("run".into(), run.clone());
+        }
+        if !limits.is_null() {
+            obj.insert("limits".into(), limits.clone());
+        }
+        let d = definition::parse_value(&serde_json::Value::Object(obj)).map_err(|e| vec![e])?;
+        let (templates, skill) = definition::split_skill(&self.body).map_err(|e| vec![e])?;
+        let p = definition::problems(&d, &templates);
+        if !p.is_empty() {
+            return Err(p);
+        }
+        Ok(definition::Loaded {
+            name: self.header.name.clone(),
+            definition: d,
+            skill,
+            templates,
+        })
     }
 }
 

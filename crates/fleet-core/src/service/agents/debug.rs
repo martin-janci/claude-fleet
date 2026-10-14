@@ -293,6 +293,8 @@ mod tests {
                 granted_by: "test".into(),
                 granted_at: 1,
                 expires_at: Some(1_000),
+                definition: None,
+                bindings: "[]".into(),
             })
             .unwrap();
         (Mutex::new(s), id)

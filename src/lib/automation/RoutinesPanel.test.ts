@@ -187,7 +187,7 @@ describe('Routines (8.6)', () => {
   });
 });
 
-describe('the Debug tab (migration 185)', () => {
+describe('the Debug tab (migration 186)', () => {
   it('says why a routine does not fire, lists its checks and trace, and dry-runs it', async () => {
     render(RoutinesPanel);
     await screen.findByTestId('routine-title');
