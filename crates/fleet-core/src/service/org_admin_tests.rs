@@ -569,6 +569,22 @@ fn an_org_admin_sees_and_acts_on_their_orgs_devices_only() {
         s.insert_client_token("eve-phone", "digest-eve", "full")
             .unwrap();
         s.set_client_person("eve-phone", Some(eve)).unwrap();
+        // A second fleet admin (the realm role, not the owner) with a device
+        // in the org: hidden from the org admin like the owner's.
+        let root2 = s.create_person("root2", None).unwrap().id;
+        let fa = s
+            .role(crate::store::RoleRef::Realm(crate::store::ROLE_FLEET_ADMIN))
+            .unwrap()
+            .unwrap();
+        s.map_role(crate::store::Principal::Person(root2), fa.id)
+            .unwrap();
+        s.set_org_member(c.acme, root2, "member", None).unwrap();
+        s.insert_client_token("root2-phone", "digest-root2", "full")
+            .unwrap();
+        s.set_client_person("root2-phone", Some(root2)).unwrap();
+        // A fleet admin's device keeps its stored binding (the membership
+        // rule exempts it), so it is in the org by that binding alone.
+        s.set_client_org("root2-phone", Some(c.acme)).unwrap();
     }
     let me = c.jane();
     let listed: Vec<String> = list_devices(&c.st.lock().unwrap(), me)
@@ -580,7 +596,17 @@ fn an_org_admin_sees_and_acts_on_their_orgs_devices_only() {
         })
         .collect();
     assert_eq!(listed.len(), 2, "{listed:?}");
-    for name in ["owner-phone", "eve-phone"] {
+    assert!(!listed.contains(&"root2-phone".to_string()), "{listed:?}");
+    // Nor does the member list carry the fleet admin's device.
+    let members = list_members(&c.st.lock().unwrap(), c.acme, me).unwrap();
+    assert!(
+        members
+            .iter()
+            .all(|m| !m.devices.contains(&"root2-phone".to_string())),
+        "{members:?}"
+    );
+    assert!(members.iter().any(|m| m.name == "root2"), "{members:?}");
+    for name in ["owner-phone", "eve-phone", "root2-phone"] {
         let mut a = args("revoke_device");
         a.device = Some(name.into());
         assert_eq!(err_code(run(&a, &c.st, me)), "E_FORBIDDEN", "{name}");
@@ -1590,7 +1616,7 @@ fn enable_person_is_the_fleets_and_is_recorded() {
 }
 
 #[test]
-fn a_set_org_setting_event_never_keeps_the_value() {
+fn a_set_org_setting_event_says_what_the_setting_became() {
     let st = store();
     let mut add = args("add_org");
     add.name = Some("Acme".into());
@@ -1610,7 +1636,7 @@ fn a_set_org_setting_event_never_keeps_the_value() {
         ev[0].representation["key"],
         crate::service::settings::BUDGET_ORG_DAILY_USD
     );
-    assert!(ev[0].representation.get("value").is_none(), "{:?}", ev[0]);
+    assert_eq!(ev[0].representation["value"], "25", "{:?}", ev[0]);
 }
 
 /// Identity sub-project 1 (Task 12): Settings → People shows each person's

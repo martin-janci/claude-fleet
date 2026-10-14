@@ -3188,6 +3188,44 @@ fn pair_params(name: &str) -> PairClientParams {
     }
 }
 
+/// A master mint is an administrative write: one `pair_client` event, with
+/// no code in it, and the redeem's `pair` event names the minter (TASK-264).
+#[tokio::test]
+async fn pairing_a_client_records_the_mint_and_the_redeem_names_the_minter() {
+    let (t, _guards, store) = client_tools();
+    let out = t
+        .pair_client(Parameters(pair_params("phone")))
+        .await
+        .unwrap();
+    let v = result_json(&out);
+    let ev = store
+        .lock()
+        .unwrap()
+        .admin_events(&crate::store::AdminEventQuery {
+            limit: 10,
+            ..Default::default()
+        })
+        .unwrap();
+    let mint = ev
+        .iter()
+        .find(|e| e.action == "pair_client")
+        .expect("the mint is recorded");
+    assert_eq!(
+        (mint.resource_type.as_str(), mint.resource_id.as_str()),
+        ("pairing", "phone")
+    );
+    assert!(
+        mint.representation.get("code").is_none(),
+        "the code never reaches the log"
+    );
+    assert_eq!(mint.representation["via"], "pair_client");
+    let dump = mint.representation.to_string();
+    assert!(
+        !dump.contains(v["code"].as_str().unwrap()),
+        "the code is nowhere in the event: {dump}"
+    );
+}
+
 /// The JSON a tool result carries.
 pub(super) fn result_json(r: &CallToolResult) -> serde_json::Value {
     serde_json::from_str(text_of(&r.content[0])).expect("tool result is JSON")
@@ -3856,6 +3894,131 @@ async fn set_client_trust_grants_and_withdraws_and_list_clients_shows_it() {
     assert!(err.message.starts_with("E_NOTFOUND"), "{}", err.message);
 }
 
+/// Trust and the catalog grant are the PERSON's (identity sub-project 1):
+/// every full device of a trusted person lists as trusted, whatever its own
+/// `trusted_at` mirror says, and a readonly one never does.
+#[tokio::test]
+async fn list_clients_reports_the_persons_trust_not_the_devices_column() {
+    let (tools, _guards, store) = client_tools();
+    {
+        let s = store.lock().unwrap();
+        let owner = s.personal_owner_id().unwrap();
+        for (name, mode) in [("desk", "full"), ("phone", "full"), ("kiosk", "readonly")] {
+            s.insert_client_token(name, &format!("h-{name}"), mode)
+                .unwrap();
+            s.set_client_person(name, owner).unwrap();
+        }
+    }
+    // Trust granted through ONE device: the person becomes trusted.
+    tools
+        .set_client_trust(Parameters(SetClientTrustParams {
+            name: "desk".into(),
+            trusted: true,
+        }))
+        .await
+        .unwrap();
+    let out = tools
+        .list_clients(Parameters(ListClientsParams {
+            include_revoked: false,
+        }))
+        .await
+        .unwrap();
+    let rows = result_json(&out);
+    let by = |n: &str| {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == n)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(by("desk")["trusted"], true);
+    assert!(
+        by("desk")["trusted_at"].is_i64(),
+        "the mirror column is still shown"
+    );
+    assert_eq!(
+        by("phone")["trusted"],
+        true,
+        "the person's other full device"
+    );
+    assert!(
+        by("phone")["trusted_at"].is_null(),
+        "...though its own mirror says nothing"
+    );
+    assert_eq!(
+        by("kiosk")["trusted"],
+        false,
+        "a readonly device is never trusted"
+    );
+    assert_eq!(by("desk")["assets_admin"], false);
+
+    // The catalog grant is the person's too: granted through the desk, it
+    // reaches the phone, never the readonly kiosk, and not an org-bound phone.
+    {
+        let s = store.lock().unwrap();
+        s.set_client_assets_admin("desk", true).unwrap();
+    }
+    let list = || async {
+        let out = tools
+            .list_clients(Parameters(ListClientsParams {
+                include_revoked: true,
+            }))
+            .await
+            .unwrap();
+        result_json(&out)
+    };
+    let rows = list().await;
+    let by = |n: &str| {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == n)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(by("desk")["assets_admin"], true);
+    assert_eq!(by("phone")["assets_admin"], true);
+    assert_eq!(by("kiosk")["assets_admin"], false, "readonly");
+    {
+        let s = store.lock().unwrap();
+        let org = s.add_org("A", None, false).unwrap();
+        s.set_client_org("phone", Some(org.id)).unwrap();
+    }
+    let rows = list().await;
+    let by = |n: &str| {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == n)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(by("phone")["assets_admin"], false, "org-bound");
+
+    // A revoked device holds neither, though its person still does.
+    let out = tools
+        .revoke_client(Parameters(RevokeClientParams {
+            name: "desk".into(),
+        }))
+        .await
+        .unwrap();
+    let v = result_json(&out);
+    assert_eq!(v["trusted"], false, "{v}");
+    assert_eq!(v["assets_admin"], false, "{v}");
+    let rows = list().await;
+    let by = |n: &str| {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == n)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(by("desk")["trusted"], false);
+    assert_eq!(by("desk")["assets_admin"], false);
+}
+
 /// A client name reaches the receiving agent inside the untrusted-content
 /// marker line. Names are validated at mint, but `marker_origin` is the last
 /// line of defence for a row that predates the validation.
@@ -4502,10 +4665,14 @@ fn list_host_worktrees_is_open_to_a_paired_client_in_either_mode() {
 /// added a tool, so every open PR conflicted with every merge to main
 /// (2026-10-08). A new tool of ordinary size now fits on its own; an
 /// unusually long one, or descriptions grown in place, still fail here.
+///
+/// The per-tool budget binds BOTH the master and a full client: a phone pays
+/// for the client surface on every request, and the `Device`-only tools
+/// (`org_admin`, `update_policy`, the settings tools) were never measured.
 #[test]
 fn the_served_definition_budget_stays_bounded() {
     /// Definition bytes per tool served to the master token (the widest
-    /// surface). Lowered from 815 on 2026-10-10: dropping `null` from
+    /// surface) and to a full client. Lowered from 815 on 2026-10-10: dropping `null` from
     /// optional parameters' types and `"minimum": 0` from unsigned ones
     /// (`present::drop_optional_null`) measured 106,006 bytes for 135 tools
     /// (785 a tool), down from 110,022. Raise it only from a measurement the
@@ -4521,8 +4688,20 @@ fn the_served_definition_budget_stays_bounded() {
     /// old budget, together over it: measured 118,264 bytes for 145 tools
     /// (815 a tool).
     /// The identity realm branch (org_admin's `enable_person`, the realm /
-    /// trust prose) lands inside the same 825.
-    const BYTES_PER_TOOL: usize = 825;
+    /// trust prose) landed inside the same 825 for the master.
+    /// Raised to 841 on 2026-10-13 when the budget began to bind the full
+    /// client's surface too: the client full surface, which also serves
+    /// `org_admin`, `realm_admin` and `update_policy`, measured 124,773 bytes
+    /// for 150 tools (831 a tool); the master stays at 818 a tool. Their
+    /// descriptions and parameter docs keep every fact an agent cannot infer
+    /// (refusal rules, units, scopes, error codes) rather than shrink to 825.
+    /// Raised to 851 on 2026-10-14: main took #900 (routine, agent and PR
+    /// shepherd debugging, longer `routines` / `pr_shepherd` descriptions)
+    /// while the identity follow-ups (#901) were in review; merged, the
+    /// client full surface measured 126,178 bytes for 150 tools (841 a
+    /// tool, 0 bytes of headroom) and the master 120,969 bytes for 147
+    /// tools (822 a tool).
+    const BYTES_PER_TOOL: usize = 851;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -4541,8 +4720,8 @@ fn the_served_definition_budget_stays_bounded() {
         (tools.len(), bytes)
     }
     let (served, bytes) = definition_bytes(&Caller::master());
-    let budget = served * BYTES_PER_TOOL;
     let (ro_served, ro_bytes) = definition_bytes(&host_caller("h", TokenMode::Readonly));
+    let (client_served, client_bytes) = definition_bytes(&client_caller("phone", TokenMode::Full));
     for (label, (n, b)) in [
         ("master", (served, bytes)),
         (
@@ -4566,20 +4745,26 @@ fn the_served_definition_budget_stays_bounded() {
     // The measured number, stated as such: every raise of the constant above
     // quotes one of these, so the next one has a figure to quote rather than
     // a baseline inherited from an older entry.
-    println!(
-        "master surface measured at {bytes} bytes for {served} tools ({} a tool), \
-         of the {budget} budget ({} bytes of headroom)",
-        bytes / served.max(1),
-        budget.saturating_sub(bytes)
-    );
-    assert!(
-        bytes <= budget,
-        "the tool surface grew to {bytes} bytes for {served} tools, over the {budget} \
-         budget ({BYTES_PER_TOOL} a tool): trim a description, or raise \
-         BYTES_PER_TOOL on purpose — to {} (the measurement plus 10 bytes a tool), \
-         and say in the commit message what was measured and when",
-        bytes / served.max(1) + 10
-    );
+    for (label, n, b) in [
+        ("master", served, bytes),
+        ("client full", client_served, client_bytes),
+    ] {
+        let budget = n * BYTES_PER_TOOL;
+        println!(
+            "{label} surface measured at {b} bytes for {n} tools ({} a tool), \
+             of the {budget} budget ({} bytes of headroom)",
+            b / n.max(1),
+            budget.saturating_sub(b)
+        );
+        assert!(
+            b <= budget,
+            "the {label} tool surface grew to {b} bytes for {n} tools, over the {budget} \
+             budget ({BYTES_PER_TOOL} a tool): trim a description, or raise \
+             BYTES_PER_TOOL on purpose — to {} (the measurement plus 10 bytes a tool), \
+             and say in the commit message what was measured and when",
+            b / n.max(1) + 10
+        );
+    }
     assert!(
         ro_bytes < bytes / 2,
         "a readonly token must be served a much smaller surface: {ro_bytes} of {bytes}"

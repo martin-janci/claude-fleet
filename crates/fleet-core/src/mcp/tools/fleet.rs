@@ -373,9 +373,7 @@ impl FleetTools {
         // owner's, like every fleet-wide setting since M1: a second
         // person's device or an org-bound one reads it, never replaces it
         // (review r04 F4).
-        if p.set.is_some()
-            && !(caller.is_master() || (caller.is_fleet_admin && caller.is_person_device()))
-        {
+        if p.set.is_some() && !caller.is_master_or_fleet_admin_device() {
             return Err(to_mcp_err(IpcError::new(
                 codes::E_FORBIDDEN,
                 "quick replies are the hub owner's: another person's or an org's device \
@@ -603,7 +601,16 @@ impl FleetTools {
         &self,
         Parameters(p): Parameters<PairClientParams>,
     ) -> Result<CallToolResult, McpError> {
-        ok_json(&self.mint_pairing(p, "pair_client")?)
+        ok_json(&self.mint_pairing(
+            p,
+            "pair_client",
+            crate::mcp::pairing::Minter {
+                person: None,
+                device: None,
+                via: "pair_client",
+                fenced_org: None,
+            },
+        )?)
     }
 
     /// Mint a pairing code: `pair_client`'s body, shared with `org_admin {
@@ -613,6 +620,7 @@ impl FleetTools {
         &self,
         p: PairClientParams,
         tool: &str,
+        minter: crate::mcp::pairing::Minter<'_>,
     ) -> Result<serde_json::Value, McpError> {
         // Validate BEFORE auditing: the name reaches a `tracing` line, and a
         // refused mint must not be able to put a line break (or an ANSI
@@ -740,7 +748,26 @@ impl FleetTools {
             org_id: p.org_id,
             person: person.as_deref(),
             ttl,
+            minter,
         });
+        // A master mint is an administrative write. `pair_device` records its
+        // own `pair_device` event (in `org_admin`), so only `pair_client`
+        // records here: one row per write. Never the code or the token.
+        if tool == "pair_client" {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            s.record_admin_event_or_log(&crate::store::AdminEvent {
+                actor_person: minter.person,
+                actor_device: minter.device,
+                action: "pair_client",
+                resource_type: "pairing",
+                resource_id: &name,
+                representation: serde_json::json!({
+                    "name": name, "mode": mode, "trusted": p.trusted, "org_id": p.org_id,
+                    "person": req.person, "ttl_s": ttl.as_secs(), "via": minter.via,
+                    "by": "master",
+                }),
+            });
+        }
         Ok(serde_json::json!({
             "url": crate::mcp::pair_url(&base.url, &req.code),
             "code": req.code,
@@ -757,7 +784,9 @@ impl FleetTools {
         The token digest is never returned: a token exists in plaintext only \
         in the /pair response that minted it. Read-only but master token \
         only (it names every paired device). Rows: { id, name, mode, \
-        created_at, last_seen_at, revoked_at, trusted_at, org_id, person_id }.")]
+        created_at, last_seen_at, revoked_at, trusted, assets_admin, org_id, \
+        person_id, trusted_at, assets_admin_at }; trusted/assets_admin are the \
+        person's, the _at columns the per-device mirror.")]
     pub(super) async fn list_clients(
         &self,
         Parameters(p): Parameters<ListClientsParams>,
@@ -766,12 +795,21 @@ impl FleetTools {
             "list_clients",
             &format!("include_revoked={}", p.include_revoked),
         );
-        let rows = {
+        let (rows, trusted_people, assets_admins) = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
-            s.list_client_tokens(p.include_revoked)
-                .map_err(to_mcp_err)?
+            (
+                s.list_client_tokens(p.include_revoked)
+                    .map_err(to_mcp_err)?,
+                s.people_with_realm_role(crate::store::ROLE_FLEET_TRUSTED)
+                    .map_err(to_mcp_err)?,
+                s.people_with_realm_role(crate::store::ROLE_ASSETS_ADMIN)
+                    .map_err(to_mcp_err)?,
+            )
         };
-        let out: Vec<ClientSummary> = rows.into_iter().map(ClientSummary::from).collect();
+        let out: Vec<ClientSummary> = rows
+            .into_iter()
+            .map(|r| ClientSummary::from_row(r, &trusted_people, &assets_admins))
+            .collect();
         ok_json_compact(&out)
     }
 
@@ -798,10 +836,16 @@ impl FleetTools {
                 resource_id: &row.name,
                 representation: serde_json::json!({ "name": p.name, "by": "master" }),
             });
-            row
+            let trusted_people = s
+                .people_with_realm_role(crate::store::ROLE_FLEET_TRUSTED)
+                .map_err(to_mcp_err)?;
+            let assets_admins = s
+                .people_with_realm_role(crate::store::ROLE_ASSETS_ADMIN)
+                .map_err(to_mcp_err)?;
+            ClientSummary::from_row(row, &trusted_people, &assets_admins)
         };
         tracing::info!(client = %row.name, "[mcp] revoked a client token");
-        ok_json(&ClientSummary::from(row))
+        ok_json(&row)
     }
 
     #[tool(description = "Grant or withdraw trust in a paired client by \
@@ -832,14 +876,20 @@ impl FleetTools {
                     "by": "master",
                 }),
             });
-            row
+            let trusted_people = s
+                .people_with_realm_role(crate::store::ROLE_FLEET_TRUSTED)
+                .map_err(to_mcp_err)?;
+            let assets_admins = s
+                .people_with_realm_role(crate::store::ROLE_ASSETS_ADMIN)
+                .map_err(to_mcp_err)?;
+            ClientSummary::from_row(row, &trusted_people, &assets_admins)
         };
         tracing::info!(
             client = %row.name,
             trusted = row.trusted_at.is_some(),
             "[mcp] changed a client's trust"
         );
-        ok_json(&ClientSummary::from(row))
+        ok_json(&row)
     }
 
     // ---- operator settings ----
@@ -1143,7 +1193,7 @@ impl FleetTools {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             oa::authority_for(
                 &s,
-                caller.is_fleet_admin && caller.is_person_device(),
+                caller.is_fleet_admin_device(),
                 caller.person(),
                 caller.client.as_ref().and_then(|c| c.org_id),
             )
@@ -1169,7 +1219,7 @@ impl FleetTools {
                 .clone()
                 .or(args.name.clone())
                 .unwrap_or_default();
-            let out = self.pair_device(args, authority)?;
+            let out = self.pair_device(args, authority, me)?;
             // The code lives in memory until it is redeemed; minting it is
             // still an administrative act, recorded with who minted it (the
             // redemption records the device row's own events).
@@ -1220,7 +1270,7 @@ impl FleetTools {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             oa::authority_for(
                 &s,
-                caller.is_fleet_admin && caller.is_person_device(),
+                caller.is_fleet_admin_device(),
                 caller.person(),
                 caller.client.as_ref().and_then(|c| c.org_id),
             )
@@ -1250,6 +1300,7 @@ impl FleetTools {
         &self,
         args: crate::service::org_admin::OrgAdminArgs,
         authority: crate::service::org_admin::Authority,
+        me: crate::service::org_admin::Me<'_>,
     ) -> Result<serde_json::Value, McpError> {
         let mode = args.mode.clone().unwrap_or_else(|| "full".into());
         if !matches!(mode.as_str(), "full" | "answer" | "readonly") {
@@ -1362,6 +1413,16 @@ impl FleetTools {
             .clone()
             .or(args.name.clone())
             .ok_or_else(|| mcp_err(codes::E_INVALID, "pair_device needs device", None))?;
+        let minter_device = match me.device {
+            Some(d) => lock(&self.store)
+                .map_err(to_mcp_err)?
+                .active_client_tokens()
+                .map_err(to_mcp_err)?
+                .into_iter()
+                .find(|c| c.name == d)
+                .map(|c| c.id),
+            None => None,
+        };
         let mut out = self.mint_pairing(
             PairClientParams {
                 name,
@@ -1372,6 +1433,15 @@ impl FleetTools {
                 person: args.person.clone().filter(|p| !p.trim().is_empty()),
             },
             "org_admin",
+            crate::mcp::pairing::Minter {
+                person: me.person,
+                device: minter_device,
+                via: "org_admin",
+                fenced_org: match authority {
+                    crate::service::org_admin::Authority::Org { org, .. } => Some(org),
+                    crate::service::org_admin::Authority::Fleet => None,
+                },
+            },
         )?;
         let url = out["url"].as_str().unwrap_or_default().to_string();
         out["qr"] = qr_rows(&url)?;

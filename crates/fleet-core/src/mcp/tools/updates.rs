@@ -236,7 +236,7 @@ impl FleetTools {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             authority_for(
                 &s,
-                caller.is_fleet_admin && caller.is_person_device(),
+                caller.is_fleet_admin_device(),
                 caller.person(),
                 caller.client.as_ref().and_then(|c| c.org_id),
             )
