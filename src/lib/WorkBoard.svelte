@@ -51,6 +51,7 @@
     workTree,
     workViewFilters,
     activeWorkViewId,
+    withoutPersonArchived,
     type WorkTask,
   } from './work_view';
   import { facetSentence, workFacets } from './filter_facets';
@@ -163,7 +164,9 @@
       return;
     }
     error = null;
-    tasks = Array.isArray(r.value?.tasks) ? r.value.tasks : [];
+    // The board reads archived rows so Done keeps its cards; tasks a person
+    // archived stay hidden until the Archived switch is on.
+    tasks = withoutPersonArchived(Array.isArray(r.value?.tasks) ? r.value.tasks : [], get(workViewFilters).archived === true);
     readScope = want;
     more = !!r.value?.next_cursor;
     // What the hub now says wins over a placement made before it answered.
