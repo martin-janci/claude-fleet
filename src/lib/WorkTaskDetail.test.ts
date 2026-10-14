@@ -142,6 +142,51 @@ describe('WorkTaskDetail', () => {
     expect((screen.getByTestId('edit-task-title') as HTMLInputElement).value).toBe('Clean up the CI cache');
   });
 
+  it('draws the task’s result above the last outcome, and opens a follow-up’s task', async () => {
+    handlers.work_result = () => ({
+      task_id: 5,
+      item_id: 77,
+      session_id: 9,
+      role: 'wrapup',
+      at: 0,
+      marker: 'FLEET_TASK_DONE_x',
+      report: {
+        summary: 'Cache cleaned.',
+        outcome: 'done',
+        done: [],
+        decisions: [],
+        remaining: [],
+        context: [],
+        tests_run: [],
+        warnings: [],
+        blockers: [],
+        followups: ['Prune weekly'],
+        confidence: null,
+      },
+      evidence: null,
+      prs: [],
+      gate: { state: 'passed', checks: [], open_children: [] },
+      followups: [{ text: 'Prune weekly', item_id: 81 }],
+    });
+    render(WorkTaskDetail, { taskId: 'item:77' });
+    await flush();
+    expect(calls('work_result')).toEqual([{ item_id: 77 }]);
+    await fireEvent.click(screen.getByTestId('work-task-tab-activity'));
+    const panel = screen.getByTestId('work-task-result');
+    expect(within(panel).getByTestId('task-result-headline').textContent).toContain('Task completed');
+    expect(within(panel).getByTestId('task-result-mark-done')).toBeTruthy();
+    expect(screen.queryByTestId('work-task-no-activity')).toBeNull();
+    await fireEvent.click(within(panel).getByTestId('task-result-followup-open-81'));
+    expect(get(selectedTaskId)).toBe('item:81');
+  });
+
+  it('a task with no result shows no result panel', async () => {
+    render(WorkTaskDetail, { taskId: 'item:77' });
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-task-tab-activity'));
+    expect(screen.queryByTestId('work-task-result')).toBeNull();
+  });
+
   it('finished local work asks to be closed: Mark done sets the status, Keep open does not', async () => {
     handlers.work_task = () => ({ ...localTask, task: { ...localTask.task, close_suggested: true, sessions: [] } });
     handlers.set_work_status = () => ({ id: 77 });

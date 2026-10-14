@@ -8,6 +8,7 @@ vi.mock('./clipboard', () => ({ copyText: vi.fn(() => Promise.resolve(true)) }))
 import RichText from './RichText.svelte';
 import { composerDrafts } from './conversation';
 import { TASK_223 } from './handover_fixture';
+import type { TaskResultView } from './task_result';
 
 const ui = (o: Record<string, unknown>) => '```fleet-ui\n' + JSON.stringify({ spec: 'fleet.ui/1', ...o }) + '\n```';
 
@@ -39,6 +40,44 @@ describe('RichText', () => {
     expect(screen.getByTestId('rich-report-tests').textContent).toContain('link check');
     expect(screen.queryByTestId('rich-report-blockers')).toBeNull();
     expect(screen.queryByTestId('md-copy')).toBeNull(); // no raw JSON code block
+  });
+
+  it('draws the report a task result was read from as the result panel', () => {
+    const result: TaskResultView = {
+      task_id: 1,
+      item_id: 2,
+      session_id: 3,
+      role: 'wrapup',
+      at: 0,
+      marker: 'FLEET_TASK_DONE_9d2404fdfabee30f21062b4435f38952',
+      report: {
+        summary: 'Wrote docs/missions.md.',
+        outcome: 'done',
+        done: [],
+        decisions: [],
+        remaining: [],
+        context: [],
+        tests_run: [],
+        warnings: [],
+        blockers: [],
+        followups: [],
+        confidence: null,
+      },
+      evidence: null,
+      prs: [],
+      gate: { state: 'unverified', checks: [], open_children: [] },
+      followups: [],
+    };
+    render(RichText, { source: TASK_DONE, sessionId: 3, result, resultTitle: 'Missions docs' });
+    expect(screen.getByTestId('task-result-headline').textContent).toContain('Reported done, not verified');
+    expect(screen.queryByTestId('rich-report-outcome')).toBeNull();
+  });
+
+  it('keeps a report card for a report the result was not read from', () => {
+    const result = { marker: 'FLEET_TASK_DONE_00000000000000000000000000000000' } as TaskResultView;
+    render(RichText, { source: TASK_DONE, sessionId: 3, result });
+    expect(screen.getByTestId('rich-report-outcome')).toBeTruthy();
+    expect(screen.queryByTestId('task-result-headline')).toBeNull();
   });
 
   it('puts a follow-up in the composer, and offers no button without a session', async () => {
