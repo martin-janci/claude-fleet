@@ -42,6 +42,8 @@
   import WorkButton from './WorkButton.svelte';
   import { tablistKeys } from './tablist_keys';
   import MarkdownView from './MarkdownView.svelte';
+  import TaskResultPanel from './TaskResultPanel.svelte';
+  import { workResult, type TaskResultView } from './task_result';
   import Icon from './kit/Icon.svelte';
   import { copyText } from './clipboard';
   import { finishesWhen } from './handoffs';
@@ -152,6 +154,24 @@
     if (now && now !== id && (detail?.aliases ?? []).includes(id)) selectedTaskId.set(now);
     // Picked without its links (a subtask, a review row): its live session opens now.
     if (now) taskLinksLoaded(now, detail?.task.sessions ?? []);
+    void loadResult(detail?.task.item_id ?? null);
+  }
+
+  // The task's result (design 2026-10-13, D6): the newest finished task of
+  // the item that carries a report, read with the detail and on every
+  // re-read of it. A failed read keeps nothing: the activity tab then shows
+  // the last outcome alone, as before.
+  let result = $state<TaskResultView | null>(null);
+  let resultSeq = 0;
+  async function loadResult(itemId: number | null) {
+    const mine = ++resultSeq;
+    if (itemId == null) {
+      result = null;
+      return;
+    }
+    const r = await workResult({ itemId });
+    if (mine !== resultSeq) return;
+    result = r.ok ? r.value : null;
   }
 
   // K5 (redesign 6.9): the group Jev proposes for a task no person and no
@@ -220,6 +240,7 @@
     detail = null;
     error = null;
     refreshError = null;
+    result = null;
     void load(id);
   });
 
@@ -953,7 +974,7 @@
 
     {#if tab === 'activity'}
       <div class="pane-body">
-        {#if !detail?.last_outcome && !detail?.placement && (detail?.steps ?? []).length === 0 && events.length === 0}
+        {#if !result && !detail?.last_outcome && !detail?.placement && (detail?.steps ?? []).length === 0 && events.length === 0}
           <p class="muted" data-testid="work-task-no-activity">Nothing has happened on this task yet.</p>
         {/if}
         {#if events.length > 0}
@@ -967,6 +988,19 @@
           <p class="muted small" data-testid="work-task-activity-placed">
             Placed in {detail.placement.group}{#if detail.placement.updated_by}&nbsp;by {detail.placement.updated_by}{/if}{#if detail.placement.updated_at}&nbsp;{timeAgo(detail.placement.updated_at)}{/if}
           </p>
+        {/if}
+
+        {#if result}
+          <section aria-label="Result" data-testid="work-task-result">
+            <TaskResultPanel
+              {result}
+              title={task.title ?? task.key ?? ''}
+              sessionId={result.session_id}
+              canMarkDone={task.kind === 'local' && task.item_id != null && task.status_category !== 'done'}
+              onOpenTask={(id) => selectedTaskId.set(`item:${id}`)}
+              onChanged={() => void load(taskId)}
+            />
+          </section>
         {/if}
 
         {#if detail?.last_outcome}
