@@ -11286,6 +11286,7 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     ("set_friendly_name", &["Drive"]),
     ("spawn_review", &["Own"]),
     ("touch_session_viewed", &["Drive"]),
+    ("pin_session", &["Drive"]),
     // forms.rs
     // `list` and `get` and `wait` read the form's session; `answer` and
     // `decline` drive it.

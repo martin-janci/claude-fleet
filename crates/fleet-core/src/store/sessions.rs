@@ -729,6 +729,47 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Pin the session at `at`, or unpin it with `None` (migration 189).
+    /// Pinning an already pinned row keeps its first stamp, so the Pinned
+    /// section's order does not shift. Answers whether the row changed; a
+    /// change emits `session_updated`.
+    pub fn set_session_pinned(&self, id: i64, at: Option<i64>) -> Result<bool, rusqlite::Error> {
+        let n = match at {
+            Some(at) => self.conn.execute(
+                "UPDATE sessions SET pinned_at = ?1 WHERE id = ?2 AND pinned_at IS NULL",
+                rusqlite::params![at, id],
+            )?,
+            None => self.conn.execute(
+                "UPDATE sessions SET pinned_at = NULL WHERE id = ?1 AND pinned_at IS NOT NULL",
+                [id],
+            )?,
+        };
+        if n > 0 {
+            self.emit_session(id)?;
+        }
+        Ok(n > 0)
+    }
+
+    /// Whether the session `tmux_name` on `host_alias` is pinned. A row that
+    /// does not exist is not pinned.
+    pub fn is_session_pinned(
+        &self,
+        tmux_name: &str,
+        host_alias: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT pinned_at IS NOT NULL FROM sessions \
+                 WHERE tmux_name = ?1 AND host_alias = ?2",
+                rusqlite::params![tmux_name, host_alias],
+                |r| r.get::<_, bool>(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
     /// Forget that a session was viewed, so its last finished turn reads as
     /// unread again and lands in the Inbox (G7.9: a person sends a routine
     /// run Jev read as "nothing to do" to the Inbox). Answers whether the row

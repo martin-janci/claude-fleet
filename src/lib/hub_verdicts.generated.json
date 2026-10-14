@@ -229,6 +229,7 @@
     "pair_device",
     "pause_all_missions",
     "pause_download",
+    "pin_session",
     "place_transcript",
     "place_work",
     "plan_mission",

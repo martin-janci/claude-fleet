@@ -71,7 +71,10 @@
     archiveOneSession,
     copySessionTranscript,
     noOtherLogin,
+    pinLabel,
+    pinnedBlock,
     sendModelChange,
+    toggleSessionPin,
     sessionActionRequest,
     takeSessionAction,
     type SessionActionId,
@@ -116,7 +119,9 @@
   // STORE, not the bare function, so a revoke or a narrow re-disables these
   // without a re-list — a grant change moves no column on the row.
   const inspectSafeKillBlocked = $derived(
-    hubBlock('inspect_safe_kill', $hubStatus) ?? $sessionBlocked(session, 'inspect_safe_kill'),
+    hubBlock('inspect_safe_kill', $hubStatus) ??
+      $sessionBlocked(session, 'inspect_safe_kill') ??
+      pinnedBlock(session),
   );
   const discardKillBlocked = $derived(
     hubBlock('discard_kill_session', $hubStatus) ?? $sessionBlocked(session, 'discard_kill_session'),
@@ -128,10 +133,24 @@
 
   // These route to the hub, so they stay enabled on a hub client — but only
   // while the live connection to it is up (`hubActionBlocked`).
+  // A pinned session is never closed: the hub refuses it (`E_PINNED`), so
+  // the button says why instead.
   const killBlocked = $derived(
     hubActionBlocked('kill_session', $hubStatus, $hubConnection) ??
-      $sessionBlocked(session, 'kill_session'),
+      $sessionBlocked(session, 'kill_session') ??
+      pinnedBlock(session),
   );
+  const pinBlocked = $derived(
+    hubActionBlocked('pin_session', $hubStatus, $hubConnection) ??
+      $sessionBlocked(session, 'pin_session'),
+  );
+  let pinning = $state(false);
+  async function onTogglePin() {
+    if (pinning || pinBlocked !== null) return;
+    pinning = true;
+    await toggleSessionPin(session);
+    pinning = false;
+  }
   const restartBlocked = $derived(
     hubActionBlocked('restart_session', $hubStatus, $hubConnection) ??
       $sessionBlocked(session, 'restart_session'),
@@ -828,6 +847,7 @@
     recreate: { blocked: () => recreateBlocked, run: askRecreate },
     move: { blocked: () => moveBlocked, run: openMove },
     share: { blocked: () => shareBlocked, run: openShare },
+    pin: { blocked: () => pinBlocked, run: () => void onTogglePin() },
     remove_from_list: { blocked: () => dismissAgentBlocked, run: () => void onRemoveFromList() },
     safe_remove: { blocked: () => inspectSafeKillBlocked, run: () => void askSafeKill() },
     kill: { blocked: () => killBlocked, run: askKill },
@@ -852,6 +872,19 @@
      and dialogs below, so nothing moves between them but the layout. -->
 {#snippet act(testid: string, label: string, run: () => void, blocked: string | null, title = '', cls = 'btn btn--quiet is-bounded')}
   <button class={cls} onclick={run} disabled={blocked !== null} title={blocked ?? title} data-testid={testid}>{label}</button>
+{/snippet}
+
+<!-- Pin / Unpin: drawn here rather than through `act`, whose label is a
+     literal; this one names the state it moves to. -->
+{#snippet pinButton()}
+  {@const blocked = pinning ? 'Saving…' : pinBlocked}
+  <button
+    class="btn btn--quiet is-bounded"
+    onclick={onTogglePin}
+    disabled={blocked !== null}
+    title={blocked ?? 'A pinned session sits in the Pinned section and cannot be killed until it is unpinned'}
+    data-testid="pin-from-details">{pinLabel(session)}</button
+  >
 {/snippet}
 
 {#snippet tagChips()}
@@ -1036,6 +1069,9 @@
     <footer class="insp-foot">
       {@render act('share-from-details', 'Share…', openShare, shareBlocked, 'Share this session with one person — watch or drive, revocable, and never a terminal')}
       <span class="grow"></span>
+      {#if session.kind !== 'external'}
+        {@render pinButton()}
+      {/if}
       {#if canArchive}
         {@render act('archive-from-details', 'Archive', onArchive, archiving ? 'Archiving…' : archiveActionBlocked, 'Put this session in its work’s Done; it keeps running, with Undo')}
       {/if}
@@ -1329,6 +1365,7 @@
       {/if}
       {#if session.kind !== 'external'}
         <div class="danger-row">
+          {@render pinButton()}
           {#if canArchive}
             {@render act('archive-from-details', 'Archive', onArchive, archiving ? 'Archiving…' : archiveActionBlocked, 'Put this session in its work’s Done; it keeps running, with Undo')}
           {/if}

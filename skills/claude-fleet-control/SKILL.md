@@ -73,7 +73,7 @@ steer      send_prompt run_prompt queue_prompt queued_prompts wait_for_session
 coordinate send_message inbox wait_for_reply dispatch_task wait_for_task
            list_tasks cancel_task set_session_tags session_history
            register_self work work_link decide_related_session runs routines
-           start_rules prs
+           start_rules prs pin_session
 recover    restart_session recreate_session repair_session move_session
            resolve_move dismiss_ghost_session safe_kill_session kill_session
            restore_host_sessions discover_lost_sessions place_transcript

@@ -15,6 +15,7 @@
     sameSession,
     hasNoPane,
     sessionAgent,
+    isPinned,
     type SessionRow,
   } from './sessions';
   import { describePurge, purgeHostsForProject } from './purge';
@@ -373,7 +374,7 @@
   });
   const tabsShown = $derived(!focus && (backendMode($hubStatus) !== 'local' || tabCounts.shared > 0));
   const tab = $derived(tabsShown ? $scopeTab : 'all');
-  const rowPredicate = $derived.by((): SessionPredicate => {
+  const listPredicate = $derived.by((): SessionPredicate => {
     if (!splitShared) return rowBase;
     // Shared with me: the tree and the groups hold nothing; the shared
     // group below is the list.
@@ -381,6 +382,29 @@
     const mine = tab === 'mine';
     return bothPredicates((s) => (mine ? inScopeTab('mine', $accessOf(s)) : !isSharedWithMe(s)), rowBase);
   });
+  // ── Pinned ──
+  // Pinned sessions leave the tree and the groups for the Pinned section at
+  // the top, under the same filters, search and tab; in focus they stay put,
+  // as shared ones do. An `external` row is never offered a pin.
+  const splitPinned = $derived(!focus);
+  const rowPredicate = $derived(
+    splitPinned ? bothPredicates((s) => s.kind === 'external' || !isPinned(s), listPredicate) : listPredicate,
+  );
+  const pinnedRows = $derived.by((): SessionRow[] => {
+    if (!splitPinned) return [];
+    const q = viewSearch;
+    const base = listPredicate;
+    return $sessions
+      .filter(
+        (s) =>
+          s.kind !== 'external' &&
+          isPinned(s) &&
+          sessionVisible(s, viewHost, viewBg, base, viewScope) &&
+          sessionMatchesSearch(s, q, projectLabelOf(s.project_id)),
+      )
+      .sort((a, b) => (a.pinned_at ?? 0) - (b.pinned_at ?? 0) || a.id - b.id);
+  });
+  let pinnedOpen = $state(true);
 
   // What narrows the list, for the empty state (the chrome shows the same
   // facets as chips).
@@ -503,6 +527,7 @@
     for (const list of filteredSessionsByProject.values()) for (const s of list) ids.add(s.id);
     for (const g of workGroups) for (const s of g.sessions) ids.add(s.id);
     for (const s of orphanSessions) ids.add(s.id);
+    for (const s of pinnedRows) ids.add(s.id);
     return ids;
   });
   $effect(() => {
@@ -566,7 +591,10 @@
    * and an illegitimate bulk-kill one, and a selection that refused it
    * outright would take the first away to prevent the second.
    */
-  const bulkKillTargets = $derived(bulkTargets(selectedRows, 'kill_session', $sessionBlocked));
+  // A pinned row is never closed: Kill and Clean up pass it by.
+  const bulkKillTargets = $derived(
+    bulkTargets(selectedRows, 'kill_session', $sessionBlocked).filter((s) => !isPinned(s)),
+  );
   const bulkPromptTargets = $derived(bulkTargets(selectedRows, 'send_prompt', $sessionBlocked));
 
   /** Clean up was accepted. A direct remove already dropped the row, so
@@ -1023,7 +1051,7 @@
   // raises the badge (`inbox.ts`); the rest is counted in one line.
   const inboxPool = $derived(
     $sidebarView === 'inbox'
-      ? [...filtered.flatMap((r) => sessionsForProject(r.project.id)), ...orphanSessions, ...sharedWithMe]
+      ? [...pinnedRows, ...filtered.flatMap((r) => sessionsForProject(r.project.id)), ...orphanSessions, ...sharedWithMe]
       : [],
   );
   const inboxList = $derived(inboxRows(inboxPool, attentionOpts));
@@ -1063,7 +1091,7 @@
   // element there; snapshot every row's place before the groups re-render so
   // the new one slides from where the old one was (motion_catalog.slideIn).
   $effect.pre(() => {
-    void [flatGroups, workGroups, inboxList, orphanSessions];
+    void [flatGroups, workGroups, inboxList, orphanSessions, pinnedRows];
     untrack(() => snapshotRows(sidebarEl));
   });
   // A folded mass loss is its own Restore line below, not "12 paused" here.
@@ -1723,6 +1751,26 @@
         <SummarizeButton workKey={key} link={l} />
       </div>
     {/snippet}
+    {#if pinnedRows.length > 0}
+      <div class="orphan-section pinned-section" data-testid="pinned-sessions">
+        <button
+          class="section-header section-toggle"
+          data-testid="pinned-toggle"
+          aria-expanded={pinnedOpen}
+          onclick={() => (pinnedOpen = !pinnedOpen)}
+        >
+          <span class="caret" class:collapsed={!pinnedOpen}>▾</span>
+          Pinned ({pinnedRows.length})
+        </button>
+        {#if pinnedOpen}
+          <div class="tree" role="tree" aria-label="Pinned">
+            {#each pinnedRows as sess (sess.id)}
+              {@render sessionRow(sess)}
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {/if}
     {#if workGroups.length > 0 || pastOnlyGroups.length > 0}
       <ul class="tree work-tree" data-testid="work-groups" role="tree" aria-label="Work">
         {#each workGroups as g (g.key)}

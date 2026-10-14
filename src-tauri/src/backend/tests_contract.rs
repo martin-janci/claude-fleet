@@ -104,6 +104,8 @@ pub(crate) fn sample_session() -> SessionRow {
         last_viewed_at: Some(1_700_000_100),
         // Some, so the golden pins the name J2's answer reads.
         turn_outcome: Some("finished".into()),
+        // Some, so the golden pins the name the Pinned section reads.
+        pinned_at: Some(1_700_000_200),
         // One, so the golden pins the proposal shape every row carries.
         proposals: vec![fleet_core::store::DecisionProposal {
             feature: "turn_outcome".into(),
@@ -1467,6 +1469,7 @@ fn a_session_rows_wire_names_are_these_exact_seventy_two() {
         "parent_session_id",
         "pending_form",
         "pending_input",
+        "pinned_at",
         "pr_url",
         "project_id",
         "prompt_submit_seq",
@@ -1503,7 +1506,7 @@ fn a_session_rows_wire_names_are_these_exact_seventy_two() {
         "worktree_key",
     ];
     let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-    assert_eq!(expected.len(), 72, "the list above lost or gained a line");
+    assert_eq!(expected.len(), 73, "the list above lost or gained a line");
     assert_eq!(wire_keys(&sample_session()), expected);
 }
 

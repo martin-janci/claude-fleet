@@ -43,10 +43,10 @@ use fleet_core::service::safe_kill::{
 };
 use fleet_core::service::sessions::{
     self, AdoptSessionArgs, DiscoverLostSessionsArgs, DismissGhostSessionArgs, KillSessionArgs,
-    LostCandidate, LostTargetArgs, NewSessionArgs, PlaceTranscriptArgs, PlacedTranscript,
-    RecreateSessionArgs, RenameSessionArgs, RestartSessionArgs, RestoreHostSessionsArgs,
-    RestoreReport, SendPromptArgs, SetFriendlyNameArgs, SetSessionTagsArgs, SpawnReviewArgs,
-    TouchSessionViewedArgs,
+    LostCandidate, LostTargetArgs, NewSessionArgs, PinSessionArgs, PlaceTranscriptArgs,
+    PlacedTranscript, RecreateSessionArgs, RenameSessionArgs, RestartSessionArgs,
+    RestoreHostSessionsArgs, RestoreReport, SendPromptArgs, SetFriendlyNameArgs,
+    SetSessionTagsArgs, SpawnReviewArgs, TouchSessionViewedArgs,
 };
 use fleet_core::ssh::SshClient;
 use fleet_core::store::{DeferredPromptRow, SessionRow, Store};
@@ -174,6 +174,17 @@ pub async fn touch_session_viewed(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<SessionRow, IpcError> {
     routed::touch_session_viewed(&backend, args, &store).await
+}
+
+/// Pin or unpin a session: a pinned one sits in the Pinned section and
+/// nothing closes it until it is unpinned.
+#[tauri::command]
+pub async fn pin_session(
+    args: PinSessionArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<SessionRow, IpcError> {
+    routed::pin_session(&backend, args, &store).await
 }
 
 #[tauri::command]
@@ -914,6 +925,17 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("touch_session_viewed", &args).await,
             None => sessions::touch_session_viewed(args, store),
+        }
+    }
+
+    pub async fn pin_session(
+        backend: &FleetBackend,
+        args: PinSessionArgs,
+        store: &Mutex<Store>,
+    ) -> Result<SessionRow, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("pin_session", &args).await,
+            None => sessions::pin_session(args, store),
         }
     }
 
