@@ -738,6 +738,7 @@ async fn call(fx: &Fx, who: Who, tool: &str, args: Value) -> Answer {
         "rename_session" => fx.t.rename_session(ext, p!()).await,
         "set_friendly_name" => fx.t.set_friendly_name(ext, p!()).await,
         "touch_session_viewed" => fx.t.touch_session_viewed(ext, p!()).await,
+        "pin_session" => fx.t.pin_session(ext, p!()).await,
         "restart_session" => fx.t.restart_session(ext, p!()).await,
         "rewind_conversation" => fx.t.rewind_conversation(ext, p!()).await,
         "spawn_review" => fx.t.spawn_review(ext, p!()).await,
@@ -1311,6 +1312,12 @@ async fn run_matrix() {
     .await;
     m.gated("repair_session", Reach::Drive, row).await;
     m.gated("touch_session_viewed", Reach::Drive, row).await;
+    m.gated(
+        "pin_session",
+        Reach::Drive,
+        |fx, _| json!({ "session_id": fx.row, "pinned": true }),
+    )
+    .await;
     m.gated("dismiss_ghost_session", Reach::Drive, row).await;
     m.gated("adopt_session", Reach::Own, row).await;
     m.gated("lost_target", Reach::Own, row).await;

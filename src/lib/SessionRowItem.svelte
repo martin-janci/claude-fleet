@@ -13,6 +13,7 @@
     sessions,
     type SessionRow,
   } from './sessions';
+  import { pinnedBlock } from './session_actions';
   import { get } from 'svelte/store';
   import { selectedSession } from './selection';
   import { hostByAlias } from './hosts';
@@ -246,7 +247,8 @@
   // next re-list.
   const killBlocked = $derived(
     hubActionBlocked('kill_session', $hubStatus, $hubConnection) ??
-      $sessionBlocked(sess, 'kill_session'),
+      $sessionBlocked(sess, 'kill_session') ??
+      pinnedBlock(sess),
   );
   const restartBlocked = $derived(
     hubActionBlocked('restart_session', $hubStatus, $hubConnection) ??

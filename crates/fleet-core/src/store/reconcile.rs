@@ -1254,6 +1254,7 @@ mod tests {
             origin_ref: None,
             last_viewed_at: None,
             turn_outcome: None,
+            pinned_at: None,
             proposals: Vec::new(),
             pending_form: None,
             form_draft: None,

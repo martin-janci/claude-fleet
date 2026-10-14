@@ -380,6 +380,8 @@ export const ROUTED_ACTIONS = [
   'set_session_tags',
   // Link / Not related on a related-session proposal (M15 G4.3).
   'decide_related_session',
+  // Pin / unpin a session (the Pinned section).
+  'pin_session',
   'restart_session',
   'rewind_conversation',
   'spawn_review',

@@ -970,6 +970,14 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Pins or unpins the row: a write, so a readonly token may not call it.
+    ToolPolicy {
+        name: "pin_session",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // Stamps the row's `last_viewed_at`: a write, though a harmless one.
     ToolPolicy {
         name: "touch_session_viewed",

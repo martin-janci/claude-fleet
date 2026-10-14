@@ -281,5 +281,10 @@
 //!   `secret` field takes `env_target`. A revision-17 hub serves no
 //!   `env_vars` and ignores `env`, so the desktop's minimum stays 16: there
 //!   the Environment page's actions fail as an unknown tool, and nothing
-//!   else changes.
+//!   else changes. Pinned sessions are new at this revision without a bump:
+//!   the `pin_session` tool and the row's `pinned_at` (additive, absent when
+//!   not pinned). A hub without the tool answers the desktop's Pin with
+//!   `E_HUB_PROTOCOL`, shown as its error; a row without `pinned_at` reads
+//!   as not pinned, so a phone that predates it simply shows no Pinned
+//!   section.
 pub const CONTRACT_REVISION: u32 = 18;

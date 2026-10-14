@@ -515,6 +515,7 @@ fn row(
         origin_ref: None,
         last_viewed_at: None,
         turn_outcome: None,
+        pinned_at: None,
         proposals: Vec::new(),
         pending_form: None,
         form_draft: None,
@@ -8539,4 +8540,94 @@ mod env_launch {
         let body = std::fs::read_to_string(env_file_of(&h.home(), pane)).unwrap();
         assert!(body.contains("export G='gv'"), "{body}");
     }
+}
+
+/// A pinned session is never closed: Kill refuses it with `E_PINNED` before
+/// tmux is touched, and it goes through once the pin is lifted.
+#[tokio::test]
+async fn a_pinned_session_refuses_kill_until_unpinned() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("mefistos").unwrap();
+    let deps = identity_deps(
+        "mefistos",
+        vec![tmux_session("x")],
+        Some(boot_a_pid(Some(1))),
+        vec![],
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    let id = store
+        .lock()
+        .unwrap()
+        .get_session("x", "mefistos")
+        .unwrap()
+        .expect("row")
+        .id;
+    let row = pin_session(
+        PinSessionArgs {
+            session_id: id,
+            pinned: true,
+        },
+        &store,
+    )
+    .unwrap();
+    assert!(row.pinned_at.is_some());
+
+    let ssh = Arc::new(SshClient::new());
+    let kill = || KillSessionArgs {
+        host_alias: "mefistos".into(),
+        name: "x".into(),
+        force: true,
+    };
+    let e = kill_session_with(kill(), &store, &ssh, &deps)
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_PINNED, "{}", e.message);
+    assert!(store
+        .lock()
+        .unwrap()
+        .get_session_by_id(id)
+        .unwrap()
+        .is_some_and(|r| r.status == "running"));
+
+    let row = pin_session(
+        PinSessionArgs {
+            session_id: id,
+            pinned: false,
+        },
+        &store,
+    )
+    .unwrap();
+    assert_eq!(row.pinned_at, None);
+    let deps = identity_deps("mefistos", vec![], Some(boot_a_pid(Some(1))), vec![]);
+    assert_eq!(
+        kill_session_with(kill(), &store, &ssh, &deps)
+            .await
+            .unwrap(),
+        id
+    );
+}
+
+/// Pinning a session whose safe kill is under way is refused: that kill
+/// removes the worktree before a pin could stop it.
+#[test]
+fn a_session_being_safe_killed_cannot_be_pinned() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("h").unwrap();
+        let id = s
+            .upsert_session("w", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.set_safe_kill_requested(id, "n", 1).unwrap();
+        id
+    };
+    let e = pin_session(
+        PinSessionArgs {
+            session_id: id,
+            pinned: true,
+        },
+        &store,
+    )
+    .unwrap_err();
+    assert_eq!(e.code, codes::E_SAFE_KILL_IN_PROGRESS);
 }
