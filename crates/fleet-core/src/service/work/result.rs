@@ -95,7 +95,8 @@ pub fn result_for_item(
 /// primary work item, `None` when it has none or the item has no result.
 ///
 /// This is the ORG half of the session fence (the read of
-/// `wrapup::request`); the person half is the caller's.
+/// `wrapup::request`); the person half is the caller's
+/// `resolve_row_person_gated(.., Reach::Read, ..)`.
 pub fn result_for_session(
     store: &Mutex<Store>,
     scope: &OrgScope,
