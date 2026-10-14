@@ -641,6 +641,13 @@ pub struct MemberSummary {
     pub private_sessions: u32,
 }
 
+/// A fleet admin's device, the hub owner's among them (`Store::fleet_admins`
+/// lists the owner): an org admin neither lists nor acts on it.
+pub(crate) fn is_fleet_admins_device(admins: &[i64], c: &crate::store::ClientTokenRow) -> bool {
+    c.person_id
+        .is_some_and(|p| admins.binary_search(&p).is_ok())
+}
+
 /// The live members of `org`, admins first.
 pub fn list_members(s: &Store, org: i64) -> Result<Vec<MemberSummary>, IpcError> {
     let owner = s.personal_owner_id()?;
@@ -779,7 +786,8 @@ fn require_org_device(s: &Store, row: &ClientTokenRow, me: Me<'_>) -> Result<(),
         .find(|c| c.id == row.id)
         .and_then(|c| c.org_id);
     // Any fleet admin's device is off-limits to an org admin, not only the
-    // hub owner's.
+    // hub owner's: the same rule as `is_fleet_admins_device`, which
+    // `list_devices` applies to the whole set.
     let admins = match row.person_id {
         Some(p) => s.is_fleet_admin(p)?,
         None => false,
@@ -984,13 +992,13 @@ fn device_row(s: &Store, name: &str, me: Me<'_>, what: &str) -> Result<ClientTok
 pub fn list_devices(s: &Store, me: Me<'_>) -> Result<Vec<DeviceSummary>, IpcError> {
     // The org a device is fenced to is the one its person's memberships make
     // it (phase D), so that is the org shown — and an org admin lists only
-    // their org's devices, never the hub owner's.
+    // their org's devices, never a fleet admin's (the hub owner's among them).
     let effective: std::collections::BTreeMap<i64, Option<i64>> = s
         .auth_client_tokens()?
         .into_iter()
         .map(|c| (c.id, c.org_id))
         .collect();
-    let owner = s.personal_owner_id()?;
+    let admins = s.fleet_admins()?;
     let trusted_people = s.people_with_realm_role(crate::store::ROLE_FLEET_TRUSTED)?;
     let orgs: std::collections::BTreeMap<i64, String> =
         s.list_orgs()?.into_iter().map(|o| (o.id, o.name)).collect();
@@ -1020,7 +1028,7 @@ pub fn list_devices(s: &Store, me: Me<'_>) -> Result<Vec<DeviceSummary>, IpcErro
         .filter(|c| match me.authority {
             Authority::Fleet => true,
             Authority::Org { org, .. } => {
-                c.org_id == Some(org) && !(c.person_id.is_some() && c.person_id == owner)
+                c.org_id == Some(org) && !is_fleet_admins_device(&admins, c)
             }
         })
         .map(|c| {

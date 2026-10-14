@@ -569,6 +569,22 @@ fn an_org_admin_sees_and_acts_on_their_orgs_devices_only() {
         s.insert_client_token("eve-phone", "digest-eve", "full")
             .unwrap();
         s.set_client_person("eve-phone", Some(eve)).unwrap();
+        // A second fleet admin (the realm role, not the owner) with a device
+        // in the org: hidden from the org admin like the owner's.
+        let root2 = s.create_person("root2", None).unwrap().id;
+        let fa = s
+            .role(crate::store::RoleRef::Realm(crate::store::ROLE_FLEET_ADMIN))
+            .unwrap()
+            .unwrap();
+        s.map_role(crate::store::Principal::Person(root2), fa.id)
+            .unwrap();
+        s.set_org_member(c.acme, root2, "member", None).unwrap();
+        s.insert_client_token("root2-phone", "digest-root2", "full")
+            .unwrap();
+        s.set_client_person("root2-phone", Some(root2)).unwrap();
+        // A fleet admin's device keeps its stored binding (the membership
+        // rule exempts it), so it is in the org by that binding alone.
+        s.set_client_org("root2-phone", Some(c.acme)).unwrap();
     }
     let me = c.jane();
     let listed: Vec<String> = list_devices(&c.st.lock().unwrap(), me)
@@ -580,7 +596,8 @@ fn an_org_admin_sees_and_acts_on_their_orgs_devices_only() {
         })
         .collect();
     assert_eq!(listed.len(), 2, "{listed:?}");
-    for name in ["owner-phone", "eve-phone"] {
+    assert!(!listed.contains(&"root2-phone".to_string()), "{listed:?}");
+    for name in ["owner-phone", "eve-phone", "root2-phone"] {
         let mut a = args("revoke_device");
         a.device = Some(name.into());
         assert_eq!(err_code(run(&a, &c.st, me)), "E_FORBIDDEN", "{name}");

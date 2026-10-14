@@ -1654,7 +1654,7 @@ fn org_details_locked(
             }
         })
         .transpose()?;
-    let owner = s.personal_owner_id()?;
+    let admins = s.fleet_admins()?;
     // Trust is the person's (`fleet-trusted`): a device shows trusted when
     // the auth layer would decide it so (`ClientTokenRow::trusted_by`).
     let trusted_people = if clients.is_some() {
@@ -1687,7 +1687,9 @@ fn org_details_locked(
             clients.as_ref().filter(|_| administers).map(|cs| {
                 cs.iter()
                     .filter(|c| c.org_id == Some(o.id))
-                    .filter(|c| admin || !(c.person_id.is_some() && c.person_id == owner))
+                    .filter(|c| {
+                        admin || !crate::service::org_admin::is_fleet_admins_device(&admins, c)
+                    })
                     .filter(|c| crate::store::machine_token_kind(&c.mode).is_none())
                     .collect()
             });
