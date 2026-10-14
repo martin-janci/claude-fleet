@@ -441,7 +441,9 @@ not stop it halfway. One pass:
    minutes.
 5. Otherwise `current` goes back to the previous release and the unit
    restarts on it; the release is not retried by itself. The tmux servers
-   and Claude sessions survive both restarts (`KillMode=process`).
+   and Claude sessions survive both restarts (`KillMode=process`; under
+   `--user` they are in scopes of their own anyway, see `docs/hub.md` →
+   *Out of memory*).
 
 `fleet-agent update --status` prints the state (`/var/lib/fleet-agent-update/`);
 `--clear` forgets a rollback failure once an operator has sorted it out.
