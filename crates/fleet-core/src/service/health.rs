@@ -284,6 +284,42 @@ const VERSION_FRESH_SECS: i64 = 86_400;
 /// keep the two equal.
 pub const HEALTH_SAMPLE_FRESH_SECS: i64 = 3600;
 
+/// The used-memory line [`mem_low`] judges against until the threshold has a
+/// setting of its own: available memory at or under 10 % of physical.
+pub const DEFAULT_MEM_LOW_PCT: f64 = 10.0;
+
+/// Available memory as a percent of physical, from the host's last FRESH
+/// health sample ([`HEALTH_SAMPLE_FRESH_SECS`]): `MemAvailable / MemTotal`
+/// on Linux (macOS samples no available memory yet). `None` when either
+/// number is missing or the sample is stale — an old reading says nothing
+/// about whether a restore would fit now.
+pub fn mem_avail_pct(row: &HostRow, now: i64) -> Option<f64> {
+    let fresh = row
+        .health_at
+        .is_some_and(|at| now - at <= HEALTH_SAMPLE_FRESH_SECS);
+    let (avail, total) = (row.mem_avail_kb?, row.mem_total_kb?);
+    (fresh && total > 0).then(|| (avail as f64 * 100.0 / total as f64).clamp(0.0, 100.0))
+}
+
+/// How busy the host's CPUs are, in percent, from its last fresh sample:
+/// the 1-minute load average over the online CPUs, capped at 100. `None`
+/// when either is missing or the sample is stale.
+pub fn cpu_busy_pct(row: &HostRow, now: i64) -> Option<f64> {
+    let fresh = row
+        .health_at
+        .is_some_and(|at| now - at <= HEALTH_SAMPLE_FRESH_SECS);
+    let (load, cpus) = (row.load_1m?, row.cpu_count?);
+    (fresh && cpus > 0).then(|| (load * 100.0 / cpus as f64).clamp(0.0, 100.0))
+}
+
+/// Whether the host is short of memory: available memory at or under
+/// `low_pct` of physical ([`mem_avail_pct`]). Unknown is not low. The
+/// auto-restore tick asks this before resuming a session the host killed
+/// (`service::auto_restore`): restoring into the same shortage only loops.
+pub fn mem_low(row: &HostRow, low_pct: f64, now: i64) -> bool {
+    mem_avail_pct(row, now).is_some_and(|p| p <= low_pct)
+}
+
 /// `2.1.282` → `[2, 1, 282]`; `None` when not a dotted number.
 fn version_parts(v: &str) -> Option<Vec<i64>> {
     let first = v.split_whitespace().next()?;

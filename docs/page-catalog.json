@@ -3321,6 +3321,47 @@
       ]
     },
     {
+      "default_widget": "switch",
+      "key": "recovery.auto_restore",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Bring killed sessions back",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "recovery.grace_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Wait before bringing back",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "recovery.max_attempts",
+      "kind": {
+        "max": 20,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Automatic restore budget",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
       "default_widget": "duration",
       "key": "agents.poll_interval_secs",
       "kind": {
@@ -4841,6 +4882,24 @@
         "type": "choice"
       },
       "label": "Jev: login for an automatic switch",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "decide.jev.restore_timing",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: when to bring a killed session back",
       "widgets": [
         "select",
         "radio",

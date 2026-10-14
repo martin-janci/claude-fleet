@@ -81,6 +81,20 @@ pub struct CancelQueuedPromptArgs {
     pub id: i64,
 }
 
+/// Whose words a queued body is, for the typing step: one fleet composed
+/// itself (`prompt_origin::FLEET_PROMPT_MARKS`, e.g. the auto-restore note
+/// or Control's event digest) goes in as [`prompt::Origin::Fleet`], which
+/// neither names the session nor counts as a person touching it; anything
+/// else is a person's. Read off the body because the queue keeps no origin
+/// column, and the mark is what every later reader keys on anyway.
+fn origin_of(body: &str) -> prompt::Origin {
+    if crate::service::prompt_origin::is_fleet_prompt(body) {
+        prompt::Origin::Fleet
+    } else {
+        prompt::Origin::Person
+    }
+}
+
 /// May a prompt be typed into this row now? PURE.
 pub fn idle_for_prompt(row: &SessionRow) -> bool {
     row.status == "running"
@@ -153,7 +167,7 @@ pub async fn queue_prompt(
                 &row.tmux_name,
                 &body,
                 true,
-                prompt::Origin::Person,
+                origin_of(&body),
             )
             .await
         }
@@ -242,7 +256,7 @@ pub async fn deliver_due(
                 &row.tmux_name,
                 &body,
                 true,
-                prompt::Origin::Person,
+                origin_of(&body),
             )
             .await
         }
@@ -416,6 +430,15 @@ mod tests {
             prompt: p.into(),
             ..Default::default()
         }
+    }
+
+    /// A body fleet composed is typed as fleet's, so it neither names the
+    /// session nor touches it; every other body is a person's.
+    #[test]
+    fn a_fleet_marked_body_is_typed_as_fleets() {
+        assert_eq!(origin_of("[fleet events] 1 update"), prompt::Origin::Fleet);
+        assert_eq!(origin_of("[fleet] restarted"), prompt::Origin::Fleet);
+        assert_eq!(origin_of("status?"), prompt::Origin::Person);
     }
 
     #[tokio::test]

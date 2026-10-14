@@ -161,8 +161,10 @@ pub struct SessionRow {
     #[serde(default)]
     pub lost_at: Option<i64>,
     /// Why the row was marked lost (migration 036): `host_reboot` |
-    /// `tmux_server_gone` | `missing` | `killed`. `None` while the row is
-    /// live (or never lost).
+    /// `tmux_server_gone` | `process_died` (its agent was killed under it:
+    /// hooks alive, no SessionEnd — `store::reconcile::PROCESS_DIED_CASE`) |
+    /// `missing` | `killed`. `None` while the row is live (or never lost).
+    /// [`RESUMABLE_LOST_REASONS`] are the ones kept to the lost TTL.
     #[serde(default)]
     pub lost_reason: Option<String>,
     #[serde(default)]
@@ -651,6 +653,13 @@ impl SessionRow {
         } == *other
     }
 }
+
+/// The `lost_reason`s a row is kept for, to `sessions.lost_ttl_secs`, so it
+/// can be resumed: a host reboot, the tmux server exiting, and one agent
+/// killed under its pane (`process_died`). Phase 2 of
+/// `Store::ghost_and_clean` spares them (its SQL spells the same list), and
+/// the auto-restore tick (`service::auto_restore`) brings them back.
+pub const RESUMABLE_LOST_REASONS: [&str; 3] = ["process_died", "tmux_server_gone", "host_reboot"];
 
 /// What losing a session clears, in every path that loses one (a host's
 /// sessions lost, a kill, a reconcile ghosting): the pane-derived state,
@@ -1923,8 +1932,8 @@ pub struct HostReconcile<'a> {
     /// (only used when `reachable`).
     pub keep: &'a [String],
     /// Unix-epoch cutoff (see [`Store::ghost_and_clean`]'s `lost_ttl_cutoff`
-    /// doc) at or above which a resumable mass-loss row (`claude_session_id
-    /// IS NOT NULL`, `lost_reason IN ('host_reboot','tmux_server_gone')`,
+    /// doc) at or above which a resumable row (`claude_session_id IS NOT
+    /// NULL`, `lost_reason IN ('host_reboot','tmux_server_gone','process_died')`,
     /// `lost_at >= cutoff`) is spared Phase 2's hard-delete. `None` (the
     /// default) disables the exemption entirely — today's behaviour.
     pub lost_ttl_cutoff: Option<i64>,

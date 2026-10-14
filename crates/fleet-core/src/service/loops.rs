@@ -77,6 +77,7 @@ pub const LOOPS: &[LoopSpec] = &[
         "Expires unanswered forms; deletes their secrets and env files from hosts. Pausing leaves secrets behind.",
     ),
     acts("playbooks", "Stuck playbooks"),
+    acts("auto_restore", "Bring killed sessions back"),
     acts("pr_shepherd", "PR shepherd"),
     acts("agents_poll", "Agents: find work"),
     acts("agents_run", "Agents: run jobs"),

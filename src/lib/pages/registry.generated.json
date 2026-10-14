@@ -106,7 +106,7 @@
         "level": "none"
       },
       "default": "1209600",
-      "help": "How long a resumable session lost to a host reboot or the tmux server exiting is kept before it is deleted, counted from when it was lost.",
+      "help": "How long a resumable session lost to a host reboot, the tmux server exiting or its process being killed (out of memory) is kept before it is deleted, counted from when it was lost.",
       "key": "sessions.lost_ttl_secs",
       "kind": {
         "max": 315360000,
@@ -387,6 +387,71 @@
         "type": "int"
       },
       "label": "Out-of-memory budget",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "count",
+      "value": "2",
+      "zero": "never"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "true",
+      "help": "Resume a session on its own when its host killed the process (out of memory), its tmux server stopped or the host rebooted, and note it on the session's timeline. Control's own session is restarted and told what happened.",
+      "key": "recovery.auto_restore",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Bring killed sessions back",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "true"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "60",
+      "help": "How long after a session is lost before it is brought back, so a reboot is recognised as one and the memory that ran out can settle.",
+      "key": "recovery.grace_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Wait before bringing back",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "seconds",
+      "value": "60",
+      "zero": "at once"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "2",
+      "help": "Automatic restores one session may get per 24 hours, failed ones included. Past it the session waits for a person.",
+      "key": "recovery.max_attempts",
+      "kind": {
+        "max": 20,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Automatic restore budget",
       "modified": false,
       "restart": "none",
       "scope": "fleet",
@@ -3067,6 +3132,47 @@
       "value": "off"
     },
     {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Asking whether a killed session due back on a loaded host, or one whose recovery failed, should resume now, wait or move. Off: wait while loaded. Assist follows the answer, never past the low-memory floor; a move is only noted.",
+      "key": "decide.jev.restore_timing",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: when to bring a killed session back",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: follow, within limits"
+        ]
+      ],
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
       "ai": "never",
       "danger": {
         "level": "confirm",
@@ -4038,7 +4144,7 @@
     },
     {
       "id": "settings.automation",
-      "intro": "Playbooks, the idle-session GC and workspace repair run from the background tick. Everything here is off by default.",
+      "intro": "Playbooks, recovery, the idle-session GC and workspace repair run from the background tick. Everything but recovery is off by default.",
       "layout": "category",
       "parent": "settings",
       "sections": [
@@ -4085,6 +4191,31 @@
             }
           ],
           "title": "Playbooks"
+        },
+        {
+          "items": [
+            {
+              "key": "recovery.auto_restore",
+              "type": "field"
+            },
+            {
+              "key": "recovery.grace_secs",
+              "type": "field",
+              "when": {
+                "key": "recovery.auto_restore",
+                "truthy": true
+              }
+            },
+            {
+              "key": "recovery.max_attempts",
+              "type": "field",
+              "when": {
+                "key": "recovery.auto_restore",
+                "truthy": true
+              }
+            }
+          ],
+          "title": "Recovery"
         },
         {
           "items": [
@@ -4880,6 +5011,11 @@
             {
               "hint": "Records which login Jev would resume an out-of-credit session under, beside the one with the most headroom that is used.",
               "key": "decide.jev.limit_switch",
+              "type": "field"
+            },
+            {
+              "hint": "A killed session due back on a loaded host, or after a failed recovery: resume now, wait or move.",
+              "key": "decide.jev.restore_timing",
               "type": "field"
             },
             {

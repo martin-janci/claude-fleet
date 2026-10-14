@@ -132,6 +132,16 @@ describe('blockedCopy', () => {
     }
   });
 
+  it('says a lost agent recovers by itself, and still offers Restart', () => {
+    const auto = blockedCopy('lost');
+    expect(auto.title).toContain('restarts it by itself');
+    expect(auto.title).toContain('mid-sentence');
+    expect(auto.next).toBe('restart');
+    const manual = blockedCopy('lost', 'local', null, false);
+    expect(manual.title).toContain('Automatic recovery is off');
+    expect(manual.next).toBe('restart');
+  });
+
   it('says where the agent would have to run, not merely that it is not running', () => {
     const t = blockedCopy('no_host').title;
     expect(t).toContain('local');

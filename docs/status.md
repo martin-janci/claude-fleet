@@ -229,6 +229,25 @@ restart, migration 036 + `lost_reason`) and **recovery** —
 `recreate_session`, `discover_lost_sessions` scans a host's Claude transcripts
 for conversations fleet has no row for, and `new_session` takes a
 `resume_claude_session_id`; the UI for both is in `HostDetail`.
+**Automatic recovery** is landed and ON by default (`recovery.auto_restore`,
+`service/auto_restore.rs`): a session whose agent the host killed — OOM,
+systemd-oomd killing one pane in its own scope — is recorded
+`lost_reason = 'process_died'` (hooks alive, no SessionEnd,
+`store::reconcile::PROCESS_DIED_CASE`), kept to `sessions.lost_ttl_secs`
+like a reboot, and resumed by the tick after `recovery.grace_secs` (60) with
+the mass-loss reasons, at most `recovery.max_attempts` (2) per session per
+day. A host under load (memory short of the low-memory floor) DEFERS the
+restore instead: no attempt is spent, one `auto_restore_deferred` event per
+episode names the reason, the lost TTL counts from that deferral (one
+extension per episode) and the tick resumes it once the load drops. With
+`decide.jev.restore_timing` (off by default, docs/decisions.md) Jev is asked
+recover now / defer / move for a due restore on a loaded host or after a
+failed one; assist follows within bounds (never past the memory floor; a
+move is recorded, not carried out). Each attempt leaves one
+`auto_restored` / `auto_restore_failed` / `auto_restore_skipped` event;
+Control's own session is restarted through `restart_session` and gets a
+`[fleet]` note in its conversation. No migration; the controller is still
+never restored without `force`.
 
 The work graph's M0–M3 are landed (work links anchored on participants,
 group-by-work, and M2's work journal, carry rules, handover brief and resume

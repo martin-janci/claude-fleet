@@ -96,6 +96,7 @@ export interface SessionRow {
   worktree_key: string | null;
   lost_at: number | null;
   /** Why the row was marked lost: "host_reboot" | "tmux_server_gone" |
+   *  "process_died" (its agent was killed under it: out of memory, oomd) |
    *  "missing" | "killed" | null (never lost, or still live). */
   lost_reason?: string | null;
   // Claude agent fields — null when claude CLI not installed or session not managed by Claude Code
@@ -389,6 +390,8 @@ export function lostReasonLabel(reason: string | null | undefined): string | nul
       return 'host rebooted';
     case 'tmux_server_gone':
       return 'tmux server stopped';
+    case 'process_died':
+      return 'its process stopped (out of memory or killed)';
     case 'local_disabled':
       return 'local host is off on this hub';
     default:

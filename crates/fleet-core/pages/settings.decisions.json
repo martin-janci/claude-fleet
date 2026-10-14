@@ -139,6 +139,11 @@
         },
         {
           "type": "field",
+          "key": "decide.jev.restore_timing",
+          "hint": "A killed session due back on a loaded host, or after a failed recovery: resume now, wait or move."
+        },
+        {
+          "type": "field",
           "key": "decide.jev.unassigned"
         },
         {

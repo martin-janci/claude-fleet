@@ -311,8 +311,9 @@ pub const RECONCILE_STALE_WORKING_SECS: &str = "reconcile.stale_working_secs";
 /// How long a `stale_working` stamp asks for a look before the tick lifts
 /// it on its own. An attach or any hook lifts it sooner. `0` = never by age.
 pub const RECONCILE_STALE_WORKING_TTL_SECS: &str = "reconcile.stale_working_ttl_secs";
-/// How long a resumable mass-loss row (`lost_reason` `host_reboot` /
-/// `tmux_server_gone`, with a `claude_session_id`, any kind but `external`)
+/// How long a resumable lost row (`lost_reason` `host_reboot` /
+/// `tmux_server_gone` / `process_died`, with a `claude_session_id`, any kind
+/// but `external`)
 /// is kept before Phase 2
 /// hard-deletes it, counted from `lost_at` (when it was lost) — not extra
 /// time added on top of the usual one-cycle grace. Default 14 days. Wired
@@ -377,6 +378,18 @@ pub const PLAYBOOK_OOM_RECREATE: &str = "playbooks.oom_recreate";
 /// (`service::playbooks::OOM_ATTEMPT_WINDOW_SECS`). `0` refuses every
 /// recreate while keeping the refusals on the timeline.
 pub const PLAYBOOK_OOM_MAX_ATTEMPTS: &str = "playbooks.oom_max_attempts";
+/// Bring a session back on its own when the host killed its process (out of
+/// memory, oomd), its tmux server went or the host rebooted
+/// (`service::auto_restore`). Off: such sessions wait for a person's Restore.
+pub const RECOVERY_AUTO_RESTORE: &str = "recovery.auto_restore";
+/// Seconds after `lost_at` before the auto-restore tick acts: long enough
+/// for a reboot or a lost tmux server to be classified as one (a later pass
+/// relabels the row) and for the memory that killed it to settle.
+pub const RECOVERY_GRACE_SECS: &str = "recovery.grace_secs";
+/// Automatic restores one session may get per 24 h
+/// (`service::auto_restore::ATTEMPT_WINDOW_SECS`); failures count. `0`
+/// stops every attempt while the toggle keeps recording why.
+pub const RECOVERY_MAX_ATTEMPTS: &str = "recovery.max_attempts";
 /// Agents (`service::agents`): seconds between two polls of one rule;
 /// `0` stops every agent's polling.
 pub const AGENTS_POLL_INTERVAL_SECS: &str = "agents.poll_interval_secs";
@@ -705,6 +718,10 @@ pub const DECIDE_JEV_RESUME_OR_NEW: &str = "decide.jev.resume_or_new";
 /// `limit_switch`'s mode: which login an out-of-credit session resumes
 /// under when `accounts.auto_switch` switches it (`service::account_switch`).
 pub const DECIDE_JEV_LIMIT_SWITCH: &str = "decide.jev.limit_switch";
+/// `restore_timing`'s mode: whether a session the host killed is resumed
+/// now, held back while its host is loaded, or moved
+/// (`service::auto_restore`, `decide::restore_timing`).
+pub const DECIDE_JEV_RESTORE_TIMING: &str = "decide.jev.restore_timing";
 /// What a feature's mode may be: the store's `decision_runs.mode` words
 /// (one list; `decide::FeatureMode` and the TS mirror are tied to it by
 /// `the_mode_vocabulary_is_the_stores`). `auto` is not offered: no feature
@@ -856,7 +873,7 @@ pub const SPECS: &[Spec] = &[
         "1209600",
         Kind::Secs,
         "Keep lost sessions",
-        "How long a resumable session lost to a host reboot or the tmux server exiting is kept before it is deleted, counted from when it was lost.",
+        "How long a resumable session lost to a host reboot, the tmux server exiting or its process being killed (out of memory) is kept before it is deleted, counted from when it was lost.",
     )
     .unit(Unit::Hours)
     .zero("removed on the next pass"),
@@ -962,6 +979,32 @@ pub const SPECS: &[Spec] = &[
         Kind::Int { min: 0, max: 20 },
         "Out-of-memory budget",
         "Recreates one session may get per 24 hours. A session that is working, or finished a turn after the flag, is never recreated.",
+    )
+    .unit(Unit::Count)
+    .zero("never"),
+    Spec::new(
+        RECOVERY_AUTO_RESTORE,
+        "true",
+        Kind::Bool,
+        "Bring killed sessions back",
+        "Resume a session on its own when its host killed the process (out of memory), its tmux server stopped or the host rebooted, and note it on the session's timeline. Control's own session is restarted and told what happened.",
+    ),
+    Spec::new(
+        RECOVERY_GRACE_SECS,
+        "60",
+        Kind::Secs,
+        "Wait before bringing back",
+        "How long after a session is lost before it is brought back, so a reboot is recognised as one and the memory that ran out can settle.",
+    )
+    .unit(Unit::Seconds)
+    .zero("at once")
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        RECOVERY_MAX_ATTEMPTS,
+        "2",
+        Kind::Int { min: 0, max: 20 },
+        "Automatic restore budget",
+        "Automatic restores one session may get per 24 hours, failed ones included. Past it the session waits for a person.",
     )
     .unit(Unit::Count)
     .zero("never"),
@@ -1864,6 +1907,15 @@ pub const SPECS: &[Spec] = &[
     )
     .tags(&[Tag::Experimental, Tag::Ai])
     .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: record only for now")]),
+    Spec::new(
+        DECIDE_JEV_RESTORE_TIMING,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: when to bring a killed session back",
+        "Asking whether a killed session due back on a loaded host, or one whose recovery failed, should resume now, wait or move. Off: wait while loaded. Assist follows the answer, never past the low-memory floor; a move is only noted.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: follow, within limits")]),
     Spec::new(
         DECIDE_JEV_UNASSIGNED,
         "false",
@@ -3277,6 +3329,8 @@ mod tests {
         assert_eq!(resolve(DECIDE_JEV_MAIN_TICKET, None), "off");
         assert_eq!(resolve(DECIDE_JEV_TRACKER_DUPLICATE, None), "off");
         assert_eq!(resolve(DECIDE_JEV_RESUME_OR_NEW, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_RESTORE_TIMING, None), "off");
+        assert!(validate(DECIDE_JEV_RESTORE_TIMING, "auto").is_err());
         assert!(validate(DECIDE_JEV_RESUME_OR_NEW, "auto").is_err());
         assert!(validate(DECIDE_JEV_MAIN_TICKET, "auto").is_err());
         assert!(validate(DECIDE_JEV_RESTORE_TARGET, "auto").is_err());
