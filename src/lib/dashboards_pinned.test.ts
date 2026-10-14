@@ -5,12 +5,26 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { get } from 'svelte/store';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+vi.mock('@tauri-apps/api/event', () => {
+  const handlers = new Map<string, (e: { payload: unknown }) => void>();
+  return {
+    listen: vi.fn(async (name: string, cb: (e: { payload: unknown }) => void) => {
+      handlers.set(name, cb);
+      return () => handlers.delete(name);
+    }),
+    emit: vi.fn(async (name: string, payload: unknown) => {
+      handlers.get(name)?.({ payload });
+    }),
+  };
+});
 import { invoke } from '@tauri-apps/api/core';
+import { emit } from '@tauri-apps/api/event';
 import {
   BUILTIN_DASHBOARDS,
   changePrompt,
   dashboardBlock,
   dashboardChanges,
+  followPinned,
   loadPinned,
   pinDashboard,
   pinStateOf,
@@ -127,5 +141,22 @@ describe('pinned dashboards', () => {
       const c = checkUiBlock(JSON.stringify(dashboardBlock(d)));
       expect(c.ok ? [] : c.problems, d.id).toEqual([]);
     }
+  });
+
+  it('follows the pins: another device’s pin arrives as a frame, and the last release stops', async () => {
+    const stop = followPinned();
+    const second = followPinned();
+    await vi.waitFor(() => expect(mock).toHaveBeenCalledTimes(1));
+    expect(get(pinnedDashboards)).toEqual([]);
+    // Pinned on the phone: the hub sends an empty frame and the list re-reads.
+    rows.set('dash.release-42', { id: 'dash.release-42', title: 'R', spec: dashboardBlock(release), pinned_at: 7 });
+    await emit('dashboards:changed', {});
+    await vi.waitFor(() => expect(get(pinnedDashboards).map((p) => p.id)).toEqual(['dash.release-42']));
+    stop();
+    await emit('dashboards:changed', {});
+    expect(mock.mock.calls.filter((c) => c[1].args.action === 'list').length).toBe(3);
+    second();
+    await emit('dashboards:changed', {});
+    expect(mock.mock.calls.filter((c) => c[1].args.action === 'list').length).toBe(3);
   });
 });

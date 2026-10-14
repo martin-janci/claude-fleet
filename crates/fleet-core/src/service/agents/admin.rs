@@ -23,16 +23,17 @@ const STATUS_DEFAULT_LIMIT: u32 = 20;
 pub const MAX_RULE_HOURS: i64 = 24 * 90;
 
 /// `agents { action, agent?, scope?, level?, host?, project_id?, config?,
-/// hours?, id?, limit? }`.
+/// hours?, definition?, bindings?, id?, limit? }`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "AgentsParams")]
 pub struct AgentsArgs {
-    /// status | grant | revoke | pause_all | approve | reject.
+    /// status | explain | job | grant | revoke | pause_all | approve | reject.
     pub action: String,
-    /// grant: review | support; status: only this agent's jobs.
+    /// grant: review | support | fleet; status: only this agent's jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
-    /// grant: gh:<owner>/<repo> (review) | jira:<tracker id>:<PROJECT> (support).
+    /// grant: gh:<owner>/<repo> (review) | jira:<tracker id>:<PROJECT> (support) |
+    /// the instance name (fleet).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
     /// grant: watch | propose | act (default watch).
@@ -44,13 +45,22 @@ pub struct AgentsArgs {
     /// grant: the project whose checkout runs use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<i64>,
-    /// grant: the agent's options, a JSON object.
+    /// grant: the agent's options, a JSON object; for fleet, the instance's
+    /// input values.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<serde_json::Value>,
     /// grant: the rule ends after this many hours (default never).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hours: Option<i64>,
-    /// revoke: a rule's id; approve, reject: an action's id.
+    /// grant (fleet): the catalog fleet_agent the rule runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition: Option<String>,
+    /// grant (fleet): one binding per store role, a JSON array of
+    /// {role, server, name?, env?} (an MCP server; env maps its placeholders
+    /// to secret names, `${NAME}`) or {role, namespace: rule | shared:<name>}.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bindings: Option<serde_json::Value>,
+    /// revoke: a rule's id; approve, reject: an action's id; job: a job's id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<i64>,
     /// status: jobs and actions, ≤ 200 (default 20).
@@ -61,7 +71,7 @@ pub struct AgentsArgs {
 impl AgentsArgs {
     /// Whether the action only reads.
     pub fn is_read(&self) -> bool {
-        self.action == "status"
+        matches!(self.action.as_str(), "status" | "explain" | "job")
     }
 }
 
@@ -173,6 +183,17 @@ pub fn validate_grant(
             AGENT_KINDS.join(", ")
         )));
     }
+    if agent == "fleet" {
+        // A fleet agent's grant renders its stores and asks each on the
+        // host: `service::fleet_agents::grant`, which the `agents` tool and
+        // `fleet-hub agents grant fleet` call.
+        return Err(invalid(
+            "a fleet agent is granted with its stores checked (fleet_agents::grant)",
+        ));
+    }
+    if args.definition.is_some() || args.bindings.is_some() {
+        return Err(invalid("definition and bindings are for agent fleet"));
+    }
     let scope = args
         .scope
         .as_deref()
@@ -251,6 +272,8 @@ pub fn validate_grant(
         granted_by: granted_by.to_string(),
         granted_at: now,
         expires_at: args.hours.map(|h| now + h * 3600),
+        definition: None,
+        bindings: "[]".into(),
     })
 }
 
@@ -350,13 +373,19 @@ pub fn call(
     };
     match args.action.as_str() {
         "status" => to_json(serde_json::to_value(status(store, args, now)?)),
+        "explain" => to_json(serde_json::to_value(super::debug::explain(store, now)?)),
+        "job" => {
+            let id = args.id.ok_or_else(|| invalid("job needs id"))?;
+            to_json(serde_json::to_value(super::debug::job(store, id, now)?))
+        }
         "grant" => to_json(serde_json::to_value(grant(store, args, by, now)?)),
         "revoke" => to_json(serde_json::to_value(revoke(store, args)?)),
         "pause_all" => to_json(serde_json::to_value(pause_all(store)?)),
         "approve" => to_json(serde_json::to_value(decide(store, args, true, by, now)?)),
         "reject" => to_json(serde_json::to_value(decide(store, args, false, by, now)?)),
         other => Err(invalid(format!(
-            "unknown agents action {other:?}: status | grant | revoke | pause_all | approve | reject"
+            "unknown agents action {other:?}: status | explain | job | grant | revoke | pause_all | \
+             approve | reject"
         ))),
     }
 }

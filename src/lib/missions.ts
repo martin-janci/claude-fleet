@@ -202,9 +202,13 @@ export interface MissionDetail {
   /** A finished mission's live sessions and pull requests (G3.7); absent
    *  while it runs, and from an older hub. */
   finish?: MissionFinish | null;
+  /** The live sessions on its member items the caller may see, in every
+   *  state (a running mission's workers included); absent when there are
+   *  none, and from an older hub. */
+  sessions?: FinishSession[];
 }
 
-/** One live session of a finished mission (`missions::FinishSession`). */
+/** One live session on a mission's member item (`missions::FinishSession`). */
 export interface FinishSession {
   session_id: number;
   item_id: number;
@@ -487,6 +491,8 @@ export interface MissionNow {
   step: string | null;
   waiting: boolean;
   trails: boolean;
+  /** Its live child sessions (`MissionDetail.sessions`); 0 from an older hub. */
+  sessions: number;
 }
 
 export function missionNow(detail: MissionDetail): MissionNow {
@@ -499,6 +505,7 @@ export function missionNow(detail: MissionDetail): MissionNow {
     step: item ? item.title : null,
     waiting: waitsOnPerson(detail),
     trails: working !== undefined && nodes.has(working.item_id),
+    sessions: (detail.sessions ?? []).length,
   };
 }
 
@@ -635,6 +642,21 @@ export function openMission(id: number): void {
   showWorkView();
   missionOpenRequest.set({ id });
 }
+
+/** A mission's live sessions (`detail.sessions`) by the member item each
+ *  works on, in the hub's order. Empty from an older hub. */
+export function sessionsByItem(detail: Pick<MissionDetail, 'sessions'> | null | undefined): Map<number, FinishSession[]> {
+  const out = new Map<number, FinishSession[]>();
+  for (const s of detail?.sessions ?? []) {
+    const list = out.get(s.item_id);
+    if (list) list.push(s);
+    else out.set(s.item_id, [s]);
+  }
+  return out;
+}
+
+/** The task id the Work view opens a mission's member item by. */
+export const missionTaskId = (itemId: number): string => `item:${itemId}`;
 
 /** The Missions tab in Work, no mission picked. */
 export function openMissionsTab(): void {

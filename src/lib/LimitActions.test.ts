@@ -11,6 +11,7 @@ import LimitActions from './LimitActions.svelte';
 import { headroomForAccount, moveToAccount, moveToHeadroom, resetText, waitingOut } from './account_limits';
 import type { Result } from './result';
 import { RESET_WEEK, session } from './hosts_fixture';
+import { autoSwitchState } from './account_switch';
 
 const invoke = mockedInvoke as ReturnType<typeof vi.fn>;
 const name = (u: string) => (u === 'acc-spare' ? 'spare@x' : 'own@x');
@@ -35,6 +36,35 @@ function answer(headroom: unknown) {
 beforeEach(() => {
   invoke.mockReset();
   waitingOut.set(new Map());
+  autoSwitchState.set(null);
+});
+
+describe('LimitActions with automatic switching on', () => {
+  const on = { enabled: true, continue_after: false, fleet_enabled: true };
+
+  it('says where the fleet will move it and keeps Switch now', async () => {
+    answer(over(spare));
+    autoSwitchState.set(on);
+    render(LimitActions, { props: { sess: session('mac', 'a'), resetsAt: RESET_WEEK, accountName: name } });
+    await vi.waitFor(() => expect(screen.getByTestId('limit-auto').textContent).toContain('spare (spare@x)'));
+    expect(screen.getByTestId('limit-switch').textContent).toBe('Switch now');
+  });
+
+  it('says when no login has room, and offers only Wait', async () => {
+    answer(over(null));
+    autoSwitchState.set(on);
+    render(LimitActions, { props: { sess: session('mac', 'a'), resetsAt: RESET_WEEK, accountName: name } });
+    await vi.waitFor(() => expect(screen.getByTestId('limit-auto-none').textContent).toContain('mac'));
+    expect(screen.queryByTestId('limit-switch')).toBeNull();
+    expect(screen.getByTestId('limit-wait')).toBeTruthy();
+  });
+
+  it('off for the person, the row is as before', () => {
+    autoSwitchState.set({ ...on, enabled: false });
+    render(LimitActions, { props: { sess: session('mac', 'a'), resetsAt: RESET_WEEK, accountName: name } });
+    expect(screen.queryByTestId('limit-auto')).toBeNull();
+    expect(screen.getByTestId('limit-switch').textContent).toBe('Switch account');
+  });
 });
 
 describe('LimitActions', () => {

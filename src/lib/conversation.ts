@@ -5,6 +5,7 @@ import type { ClaudeStatus, StuckKind, SessionAgent, SessionRow } from './sessio
 import { stuckKindLabel, contextLevel, type ContextLevel } from './attention';
 import type { SessionEvent } from './timeline';
 import { promptFirstLine, type TaskRow } from './tasks';
+import { parseSwitchDetail } from './account_switch';
 
 export type ConvItem =
   | { kind: 'text'; text: string }
@@ -157,6 +158,11 @@ export interface ToolDetail {
   /** Null until the result arrives. */
   result: string | null;
   is_error: boolean;
+  /** The result's images (a debug device's screenshot): base64 with its
+   *  type, at most 2. Absent from an older backend. */
+  images?: { mime: string; data: string }[];
+  /** Images of the result left out by the backend's caps. */
+  images_omitted?: number;
 }
 
 /** The input and result of tool call `toolUseId`; `claudeSessionId` looks in
@@ -684,6 +690,8 @@ const TOOL_VERBS: Record<string, string> = {
   WebSearch: 'Search web',
   TodoWrite: 'Update todos',
   'mcp__claude-fleet__ask': 'Form',
+  // debug_devices.ts `DEVICE_TOOL`: a session driving a debug device.
+  'mcp__claude-fleet__debug_devices': 'Device',
 };
 
 /** The short verb a tool line leads with; `mcp__srv__tool` → `srv · tool`. */
@@ -1438,6 +1446,28 @@ export function inlineEventFor(
     }
     case 'conversation_ended':
       return { id: e.id, at: e.at, label: `Conversation ended (${e.detail ?? 'unknown'})`, detail: null, tone: 'info' };
+    // Automatic account switching: the account ran out, and fleet resumed
+    // the conversation under another login on the host (or could not).
+    case 'account_switched':
+    case 'account_switch_failed': {
+      const d = parseSwitchDetail(e.detail);
+      const login = d ? (d.profile ? `profile ${d.profile}` : "the host's own login") : null;
+      return e.kind === 'account_switched'
+        ? {
+            id: e.id,
+            at: e.at,
+            label: 'Account ran out: switched automatically',
+            detail: login && `now on ${login}${d?.continued ? ' · told to continue' : ''}`,
+            tone: 'info',
+          }
+        : {
+            id: e.id,
+            at: e.at,
+            label: 'Account ran out: automatic switch failed',
+            detail: d?.error ?? null,
+            tone: 'warn',
+          };
+    }
     default:
       return null;
   }

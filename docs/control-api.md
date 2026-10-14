@@ -370,6 +370,14 @@ Index by area (names only; see the reference for details):
   or past the line fails `E_ACCOUNT_LIMIT`, naming the account and the
   login with headroom, unless `over_limit_ok: true` says the person chose
   it; `agent: "agy"` fails `E_UNSUPPORTED` until its adapter is validated),
+  `auto_switch_account` (`enabled?`: your own answer to automatic account
+  switching, on unless you turned it off; with the fleet's
+  `accounts.auto_switch` on too, a session of yours paused at its
+  account's limit is resumed under the login on its host with the most
+  headroom; `continue_after?` also types "Continue where you left off."
+  into a switched session whose turn the limit cut off, off by default;
+  returns `{ enabled, continue_after, fleet_enabled }`; a person's device only,
+  never a per-host token),
   `agent_status` (which agent hosts have a `fleet-agent`
   connected; see *`/agent`* above), `install_agent` (install `fleet-agent`
   on a host the hub reaches over SSH and move the host onto it; a job read
@@ -718,8 +726,11 @@ Index by area (names only; see the reference for details):
   With a brief, the ticket's context (its description
   fenced as untrusted) rides the first hook's `additionalContext` and a short
   start prompt is typed only into a ready REPL. A per-host token reads,
-  looks up and starts only tickets linked to sessions on its own host, and
-  starts only there (`E_FORBIDDEN` says why); it never receives `work:*`
+  looks up and starts only tickets linked to sessions on its own host, or
+  that a session there has an open run on (`work_link { run }`), and
+  starts only there (`E_FORBIDDEN` says why). A session with an open run on
+  a mission's step also reads that mission (`work { mission }`), until the
+  run ends; it never changes it. A per-host token never receives `work:*`
   frames on `/events`. Events: `work:item`, `work:tracker`,
   `work:tracker_removed` — emitted only when something a reader sees
   changed; a session's `work` carries its item's `kind` (`tracker` | `local`
@@ -931,8 +942,13 @@ Index by area (names only; see the reference for details):
   members the caller sees that joined or left after the start). An agent
   asked "how is the sprint going" reads this and answers with a `results`
   card (`docs/chat-blocks.md`). Every change of an item's stored status is
-  also logged by triggers in `work_status_log` (migration 170), so later
-  burn-up and cycle-time reads have history to draw from.
+  also logged by triggers in `work_status_log` (migration 170). With
+  `since` (a unix time at most 90 days back), the answer also carries
+  `burnup`: one `{ day, total, done }` a day from `since`'s day to today
+  (`day` is the UTC midnight), the matching tasks there were and how many
+  were done by the day's end, from that history. History starts the day
+  migration 170 ran: a task with no history row counts for the whole window
+  in the stage it has now.
   `work { action: "local_items" }` lists local items (`id`, `key`, `title`,
   `created_at`, `updated_at`, `live_sessions`), newest change first.
   Readonly tokens cannot name or rename. A per-host token names work only on
@@ -1089,6 +1105,23 @@ Index by area (names only; see the reference for details):
   never `run_now`. Read and changed by the owner and the org's admins, read
   by the org's members, never served to a per-host token; the routine's
   org is its host's.
+  Debugging (migration 186), all reads that start nothing: every scheduler
+  decision is a row of the routine's trace (`fired`, `failed`, `skipped`,
+  `dropped` for an event fire the routine was busy, over budget or inside
+  its rate for, `filtered` for an event that was not its owner's, its
+  repo's or its organisation's; the newest 200). `explain { routine_id,
+  limit? }` answers `summary`, the worst `state` (`ok` | `warn` | `block`)
+  and its `checks` in the scheduler's order (`enabled`, `automation`,
+  `scheduler`, `schedule` or `event`, `overlap`, `day_budget`,
+  `fleet_budget`, `account`, `host`), an event routine's `event` (its
+  cursor, its ten newest events of its kind with whether each fires it
+  and why not), and `decisions`; `decisions { routine_id, limit? }` is
+  the trace alone; `dry_run { routine_id, event_id? }` answers whether a
+  fire now `starts`, the `session` it would start, the exact `prompt` it
+  would type (the autonomy line and the PR line included) and the checks
+  only a scheduled fire must also pass. An event or decision on a session
+  the caller may not read is left out, and `dry_run` on such an event
+  answers `E_NOTFOUND`.
 - **Start rules** — `start_rules`, by `action` (Orbit Fleet 8.11): a task
   key pattern (`PD-*`, `*` for any run of characters, any case) that names
   the project, and optionally the host, a start of a matching task lands
@@ -1158,7 +1191,9 @@ Index by area (names only; see the reference for details):
   token.
 - **PR shepherd** — `pr_shepherd`, the standing rules that let fleet look
   after a project's PRs (`docs/superpowers/specs/2026-10-08-pr-shepherd-design.md`):
-  `status` (rules, recent episodes and merges), `grant { project_id, level:
+  `status` (rules, recent episodes and merges), `explain` (what the next
+  tick makes of each session in a ruled project: `acts`, `waiting` or
+  `ignored`, and why; nothing is sent), `grant { project_id, level:
   watch|nudge|merge, hours?, recipes? }`, `revoke { project_id }`,
   `pause_all`. Served only to a fleet admin's paired device, never to
   the master an agent holds (the operator has `fleet-hub shepherd`); a write
@@ -1167,7 +1202,10 @@ Index by area (names only; see the reference for details):
   agent) and the standing rules they work under
   (`docs/superpowers/specs/2026-10-11-review-and-support-agents-design.md`):
   `status { agent?, limit? }` (rules, newest jobs, actions waiting for a
-  person), `grant { agent: review|support, scope: gh:<owner>/<repo> |
+  person), `explain` (per rule: whether it polls and why not, its next poll,
+  its last poll error since the process started, its jobs by state, the
+  next pending and the last failed job), `job { id }` (one job, its
+  proposed actions included), `grant { agent: review|support, scope: gh:<owner>/<repo> |
   jira:<tracker id>:<PROJECT>, host, level: watch|propose|act, project_id?,
   config?, hours? }`, `revoke { id }`, `pause_all`, `approve { id }`,
   `reject { id }`. An approved action is carried out by its agent on the
@@ -1186,7 +1224,8 @@ Index by area (names only; see the reference for details):
   | `unpin {id}`. A pin checks the block as the app draws it, refuses a
   built-in's id and keeps at most 20 per person. The agent (Control's
   operator) reads them; its `pin` and `unpin` answer `E_FORBIDDEN`. Not
-  served to a per-host token.
+  served to a per-host token. A pin or an unpin emits an empty
+  `dashboards:changed` event, and the person's open devices re-read.
 - **Operator settings** — `get_settings` (every registered key of the
   settings registry, `service/settings.rs`, with its effective value; a
   read, but master token only, since the values name hosts and their
@@ -1397,6 +1436,12 @@ derive from them.
   pull requests its work opened, as `prs { list }` rows behind the same
   fence. A finished mission reopens with `work_link { mission_state,
   status: paused }`; it does not go straight back to active.
+- **`sessions`** (on `work { mission }`, any state; optional, absent when
+  there are none and from an older hub): the mission's child sessions, the
+  running sessions on its member items that the caller may see, with the
+  same fields as `finish.sessions` (`session_id`, `item_id`, `host_alias`,
+  `tmux_name`, `kind`, `worktree_kb?`). A running mission's workers show
+  here; `finish.sessions` stays for a finished one.
 
 ### Errors and limits
 
@@ -1808,6 +1853,11 @@ timeline instead of a reply. See `docs/hub.md` → *Link two hubs*.
    loopback end); on a `fleet-hub` daemon with a public URL configured it is
    that public URL instead (e.g. `https://fleet.example.com`), since every
    host can already reach it directly.
+   The same entry is merged into every login profile's own
+   `~/.claude-profiles/<name>/.claude.json` (backup beside it, same mode): a
+   session started under a profile reads that file, not `~/.claude.json`. A
+   profile whose entry is already current is not rewritten. A profile added
+   after the last full provisioning gets the entry at the next one.
 4. **`~/.tmux.conf` clipboard passthrough** — ensures `set -g set-clipboard on` is present (appended if missing, file created if absent) so OSC 52 clipboard writes from inside tmux reach the host clipboard.
 5. **Hooks in `~/.claude/settings.json`** — merges fleet's `Stop`, `UserPromptSubmit`, `PostToolUse(EnterWorktree|ExitWorktree|TaskCreate|TaskUpdate|TodoWrite)`, `SessionEnd(logout|prompt_input_exit|other|clear|resume)`, `StopFailure`, `Notification(permission_prompt|elicitation_dialog|elicitation_url_dialog|quota_auto_resume_stale|quota_auto_resume_disabled|quota_auto_resume_fired)`, `PreCompact` and `PostCompact` hooks as Claude Code `type: "http"` hooks, leaving the user's own hooks alone. Each entry POSTs the hook payload to `http://127.0.0.1:<port>/hook` with `"headers": { "Authorization": "Bearer <host-token>" }` and a 5 s timeout — the token never appears in a process argv. `SessionStart` is the one event Claude Code refuses to fire as `type: "http"`, so it is instead installed as an async `curl` command hook that reads its bearer header from `~/.claude/fleet-hook.headers` (mode `0600`) rather than embedding it in the command string (see *Hook contract*). On a remote host the URL's `127.0.0.1:<port>` is the reverse tunnel's loopback end (step 6); on a `fleet-hub` daemon with a public URL, the URL is that public URL's `/hook` instead (e.g. `https://fleet.example.com/hook`) and no tunnel is used. Any older fleet entry for the same port (including the pre-0.3 `curl … /hook?token=` command form) is replaced, so re-running upgrades in place; the file and the headers file are written `0600`. Required for `safe_kill_session` to finalize, for real-time `idle` / `working` status, `turn_seq`, task completion and conversation tracking (`session_conversations`) on every host that runs Claude Code. **Settings → Install Hook (local)** performs only this step for the `local` host, using the `local` host token. **Hosts provisioned before the `UserPromptSubmit` hook existed must be re-provisioned** (no rotate needed) to get the busy signal; until then their status only flips to `working` on the next reconcile pass. **Hosts provisioned before the `SessionEnd` / `StopFailure` / `Notification` hooks existed must be re-provisioned** to get `stopped`, API-error turn completion and hook-driven `blocked`. **Hosts provisioned before the `SessionStart` / `PreCompact` / `PostCompact` hooks existed must be re-provisioned** to get conversation tracking across `/clear`, `/resume` and compaction (see *Hook contract*). **Hosts provisioned before the task-tool matcher (`TaskCreate|TaskUpdate|TodoWrite`) existed must be re-provisioned** to capture agent steps live; until then (the host reads `provision_stale`) the Stop hook backfills them from the transcript tail. The worker guard (orchestration §7.2) is a `PreToolUse(Bash)` command hook: a `case` prefilter posts the hook body synchronously (1 s connect, 3 s cap, `|| true`) only for a command that mentions `gh pr`, `git … push` or a tracker CLI, and prints the hub's answer — `permissionDecision: "deny"` for a mission's worker running a person's step, nothing otherwise. **Hosts provisioned before it existed must be re-provisioned** to get it.
 6. **Reverse SSH tunnel** (remote hosts only, loopback hubs only) — starts an `ssh -R` tunnel so the remote host's `127.0.0.1:<port>` is forwarded to the central machine's MCP server. The server stays bound to `127.0.0.1` on the central machine; remote hosts reach it only through this authenticated tunnel. A `fleet-hub` daemon configured with a public URL skips this step entirely — every host already reaches the hub's public address directly.

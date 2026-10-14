@@ -1411,7 +1411,7 @@ pub struct UpdateAdminParams {
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct RoutinesParams {
-    /// list | get | runs | failing | budget | save | preview | delete | set_enabled | skip_next | run_now | set_run_outcome.
+    /// list | get | runs | failing | budget | save | preview | delete | set_enabled | skip_next | run_now | set_run_outcome | explain | decisions | dry_run.
     pub action: String,
     /// Every action but list, and save or preview of a change.
     #[serde(default)]
@@ -1425,9 +1425,14 @@ pub struct RoutinesParams {
     /// skip_next: false takes the skip back (default true).
     #[serde(default)]
     pub skip: Option<bool>,
-    /// runs: how many, newest first (default 20, at most 200).
+    /// runs: how many, newest first (default 20, at most 200); explain,
+    /// decisions: how many decisions (default 30, at most 200).
     #[serde(default)]
     pub limit: Option<i64>,
+    /// dry_run: the session event to try an event routine on (default its
+    /// kind's newest).
+    #[serde(default)]
+    pub event_id: Option<i64>,
     /// set_run_outcome: the run, one of this routine's.
     #[serde(default)]
     pub run_id: Option<i64>,

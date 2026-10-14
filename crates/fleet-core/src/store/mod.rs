@@ -11,6 +11,7 @@ use std::sync::Arc;
 mod access_requests;
 mod account_usage_snapshots;
 mod admin_events;
+mod agent_records;
 mod agents;
 mod aux_usage;
 pub mod backup;
@@ -58,6 +59,7 @@ mod realm;
 mod reconcile;
 mod reports;
 mod review_prs;
+mod routine_decisions;
 mod routines;
 mod rows;
 mod runs;
@@ -102,10 +104,14 @@ mod work_view;
 pub use access_requests::{AccessRequestRow, ACCESS_REQUEST_COOLDOWN_SECS};
 pub use account_usage_snapshots::{UsageSnapshotRow, USAGE_HISTORY_KEEP_SECS};
 pub use admin_events::{AdminEvent, AdminEventQuery, AdminEventRow, ADMIN_EVENTS_MAX_LIMIT};
+pub use agent_records::{
+    AgentRecordRow, NewAgentRecord, AGENT_RECORDS_MAX_LIMIT, AGENT_RECORD_KEY_MAX,
+    AGENT_RECORD_VALUE_MAX,
+};
 pub use agents::{
     AgentActionRow, AgentCursorRow, AgentJobEnd, AgentJobRow, AgentRuleRow, NewAgentJob,
-    NewAgentRule, AGENT_ACTION_STATES, AGENT_CONFIG_MAX_CHARS, AGENT_JOB_STATES, AGENT_KINDS,
-    AGENT_LEVELS, AGENT_SCOPE_MAX_CHARS,
+    NewAgentRule, AGENT_ACTION_STATES, AGENT_BINDINGS_MAX_CHARS, AGENT_CONFIG_MAX_CHARS,
+    AGENT_DEFINITION_MAX_CHARS, AGENT_JOB_STATES, AGENT_KINDS, AGENT_LEVELS, AGENT_SCOPE_MAX_CHARS,
 };
 pub use aux_usage::{
     AuxUsageRow, NewAuxUsage, AUX_ORIGINS, AUX_ORIGIN_BRIEF, AUX_ORIGIN_COMMIT_MESSAGE,
@@ -210,6 +216,9 @@ pub use reports::{ReportFilter, ReportRow};
 pub use review_prs::{
     NewReviewRecord, ReviewPrRow, ReviewRecordRow, TestExemptionRow, REVIEW_PR_STATUSES,
     REVIEW_SKIP_REASONS,
+};
+pub use routine_decisions::{
+    NewRoutineDecision, RoutineDecisionRow, ROUTINE_DECISIONS_KEPT, ROUTINE_DECISION_VERDICTS,
 };
 pub use routines::{
     NewRoutineRun, RoutineFields, RoutineRow, RoutineRunRow, ROUTINE_LEASE_SECS, ROUTINE_OVERLAPS,

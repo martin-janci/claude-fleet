@@ -58,7 +58,8 @@
   import { selectSessionExplicitly } from './selection';
   import { pushError } from './toasts';
   import { accountsPageRequest, accountsPausedRequest } from './account_pill';
-  import { requestHostsView } from './app_views';
+  import { requestHostsView, openSettingsAt } from './app_views';
+  import { autoSwitchState, loadAutoSwitch, setAutoSwitch, type AutoSwitchPatch } from './account_switch';
   import AddAccountDialog from './AddAccountDialog.svelte';
   import { untrack } from 'svelte';
   import { get } from 'svelte/store';
@@ -118,6 +119,20 @@
       live = false;
     };
   });
+
+  // Automatic switching: this person's own answer, and whether the fleet
+  // has it on at all. Hidden until it is read (an older hub has no tool).
+  const autoSwitch = $derived($autoSwitchState);
+  let autoSwitchBusy = $state(false);
+  $effect(() => {
+    void loadAutoSwitch(true);
+  });
+  async function changeAutoSwitch(patch: AutoSwitchPatch) {
+    autoSwitchBusy = true;
+    const r = await setAutoSwitch(patch);
+    autoSwitchBusy = false;
+    if (!r.ok) pushError(r.error, 'Changing automatic switching failed');
+  }
 
   const pausedOf = (a: AccountSummary): SessionRow[] =>
     pausedSessions(a, $attentionFacts?.limited_accounts, now);
@@ -316,6 +331,45 @@
          profile on a host. -->
     <button type="button" class="btn" data-testid="accounts-add" onclick={() => (adding = true)}>+ Add account…</button>
   </header>
+
+  {#if autoSwitch}
+    <div class="auto-switch" data-testid="accounts-auto-switch">
+      <label>
+        <input
+          type="checkbox"
+          data-testid="accounts-auto-switch-toggle"
+          checked={autoSwitch.enabled}
+          disabled={autoSwitchBusy}
+          onchange={(e) => void changeAutoSwitch({ enabled: e.currentTarget.checked })}
+        />
+        Switch my sessions automatically when their account runs out
+      </label>
+      <label class="nested" title="Only a session whose turn the limit cut off; one that had finished is just resumed">
+        <input
+          type="checkbox"
+          data-testid="accounts-auto-switch-continue"
+          checked={autoSwitch.continue_after}
+          disabled={autoSwitchBusy || !autoSwitch.enabled}
+          onchange={(e) => void changeAutoSwitch({ continue_after: e.currentTarget.checked })}
+        />
+        then tell it to continue where it stopped
+      </label>
+      {#if !autoSwitch.fleet_enabled}
+        <span class="sub" data-testid="accounts-auto-switch-fleet-off">
+          Off for this fleet ·
+          <button type="button" class="link" onclick={() => openSettingsAt('settings.limits', 'accounts.auto_switch')}
+            >Turn on in Settings</button
+          >
+        </span>
+      {:else}
+        <span class="sub">
+          {autoSwitch.enabled
+            ? 'A paused session resumes under the login on its host with the most headroom.'
+            : 'Paused sessions wait for you to press Switch account.'}
+        </span>
+      {/if}
+    </div>
+  {/if}
 
   {#if adding}
     <AddAccountDialog onclose={() => (adding = false)} />
@@ -570,6 +624,24 @@
     gap: var(--space-2);
     padding: var(--space-3) var(--space-4);
     border-bottom: 1px solid var(--border);
+  }
+  .auto-switch {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--space-1) var(--space-3);
+    padding: var(--space-2) var(--space-4);
+    border-bottom: 1px solid var(--border);
+    font-size: var(--text-sm);
+  }
+  .auto-switch label.nested {
+    color: var(--fg-muted);
+  }
+  .auto-switch label {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    cursor: pointer;
   }
   .hosts-link {
     margin-left: auto;

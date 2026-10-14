@@ -551,4 +551,33 @@ describe('WorkBoard G3.5: add per column, select, start, PR chip', () => {
     expect(card('Login fails').querySelector('[data-testid="work-board-agent"]')?.textContent).toBe(' · Claude Code');
     sessions.set([]);
   });
+
+  it('a card opens its live session under the Session row-click pref, else the ticket', async () => {
+    const { sessions } = await import('./sessions');
+    const { session } = await import('./hosts_fixture');
+    const { workRowClick } = await import('./prefs');
+    const { clearSelection, selectedSession, taskFocused } = await import('./selection');
+    sessions.set([session('mefistos', 'abc-12 login', { id: 7 })]);
+    try {
+      render(WorkBoard);
+      await flush();
+      // Default: the ticket.
+      await fireEvent.click(card('Login fails'));
+      expect(get(selectedTaskId)).toBe('item:12');
+      expect(get(taskFocused)).toBe(true);
+      clearSelection();
+      workRowClick.set('session');
+      await fireEvent.click(card('Login fails'));
+      expect(get(selectedSession)?.id).toBe(7);
+      expect(get(taskFocused)).toBe(false);
+      // A card with no live session opens its ticket.
+      await fireEvent.click(card('Write notes'));
+      expect(get(selectedTaskId)).toBe('item:1');
+      expect(get(taskFocused)).toBe(true);
+    } finally {
+      workRowClick.set('ticket');
+      clearSelection();
+      sessions.set([]);
+    }
+  });
 });

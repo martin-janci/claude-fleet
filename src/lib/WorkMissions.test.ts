@@ -12,6 +12,10 @@ import { expectAccessible } from './a11y_check';
 import { expectLastButton, expectOnePrimary } from './action_hierarchy_check';
 import { hosts } from './hosts';
 import { projects } from './projects';
+import { get } from 'svelte/store';
+import { sessions as sessionStore } from './sessions';
+import { session } from './hosts_fixture';
+import { clearSelection, selectedSession, selectedTaskId, taskFocused } from './selection';
 import {
   filterMissions,
   missionFilterChoices,
@@ -484,6 +488,114 @@ describe('WorkMissions', () => {
       await fireEvent.click(screen.getByTestId('mission-view-list'));
       await flush();
       expect(screen.getAllByTestId('mission-wave')).toHaveLength(3);
+    });
+  });
+
+  describe('tasks and child sessions open from the detail', () => {
+    const liveDetail = () => ({
+      mission: mission({ state: 'active' }),
+      items: [item(10, 'Payments v2'), item(12, 'API'), item(13, 'UI')],
+      graph: {
+        nodes: [
+          { item_id: 10, state: 'ready', wave: 1 },
+          { item_id: 12, state: 'running', wave: 1, attempt: { task_id: 70, role: 'implement', attempt: 1, state: 'started' } },
+          { item_id: 13, state: 'waiting', wave: 2, depends_on: [12], waiting_for: [12] },
+        ],
+        waves: 2,
+      },
+      events: [],
+      may_change: true,
+      sessions: [{ session_id: 7, item_id: 12, host_alias: 'mefistos', tmux_name: 'pay-api', kind: 'claude' }],
+    });
+
+    beforeEach(() => {
+      clearSelection();
+      sessionStore.set([session('mefistos', 'pay-api', { id: 7 })]);
+    });
+    afterEach(() => {
+      clearSelection();
+      sessionStore.set([]);
+    });
+
+    async function open() {
+      current = mission({ state: 'active' });
+      handlers.work_mission = liveDetail;
+      render(WorkMissions);
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+    }
+
+    it('a task title opens the task; its Session link opens its live session', async () => {
+      await open();
+      const titles = screen.getAllByTestId('mission-node-open');
+      expect(titles.map((b) => b.textContent)).toEqual(['Payments v2', 'API', 'UI']);
+      await fireEvent.click(titles[2]);
+      expect(get(selectedTaskId)).toBe('item:13');
+      expect(get(taskFocused)).toBe(true);
+
+      // Only the task with a live session has the link.
+      const links = screen.getAllByTestId('mission-task-session');
+      expect(links).toHaveLength(1);
+      expect(links[0].getAttribute('data-session-id')).toBe('7');
+      await fireEvent.click(links[0]);
+      expect(get(selectedSession)?.id).toBe(7);
+      expect(get(selectedTaskId)).toBe('item:12');
+      expect(get(taskFocused)).toBe(false);
+    });
+
+    it('a run opens its task; the Sessions tab lists the child sessions', async () => {
+      await open();
+      expect(screen.getByTestId('mission-tab-sessions').textContent).toBe('Sessions1');
+      await fireEvent.click(screen.getByTestId('mission-tab-runs'));
+      await fireEvent.click(screen.getByTestId('mission-run-open'));
+      expect(get(selectedTaskId)).toBe('item:12');
+      expect(screen.getByTestId('mission-task-session')).toBeTruthy();
+
+      await fireEvent.click(screen.getByTestId('mission-tab-sessions'));
+      const rows = screen.getAllByTestId('mission-session');
+      expect(rows).toHaveLength(1);
+      expect(rows[0].textContent).toContain('pay-api');
+      expect(rows[0].textContent).toContain('mefistos');
+      expect(rows[0].textContent).toContain('API');
+      clearSelection();
+      await fireEvent.click(screen.getByTestId('mission-session-open'));
+      expect(get(selectedSession)?.id).toBe(7);
+      await fireEvent.click(screen.getByTestId('mission-session-task'));
+      expect(get(selectedTaskId)).toBe('item:12');
+      expect(get(taskFocused)).toBe(true);
+    });
+
+    it('the graph\'s chosen task opens the task and its session', async () => {
+      await open();
+      await fireEvent.click(screen.getByTestId('mission-view-graph'));
+      await flush();
+      await fireEvent.click(screen.getAllByTestId('mission-graph-node').find((n) => n.textContent?.includes('API'))!);
+      await fireEvent.click(screen.getByTestId('mission-graph-chosen-open'));
+      expect(get(selectedTaskId)).toBe('item:12');
+      await fireEvent.click(screen.getByTestId('mission-graph-chosen-session'));
+      expect(get(selectedSession)?.id).toBe(7);
+      await fireEvent.click(screen.getByTestId('mission-view-list'));
+    });
+
+    it('a mission from an older hub has no sessions and says so', async () => {
+      handlers.work_mission = () => ({ ...liveDetail(), sessions: undefined });
+      current = mission({ state: 'active' });
+      render(WorkMissions);
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      expect(screen.queryAllByTestId('mission-task-session')).toHaveLength(0);
+      expect(screen.getByTestId('mission-tab-sessions').textContent).toBe('Sessions');
+      await fireEvent.click(screen.getByTestId('mission-tab-sessions'));
+      expect(screen.getByTestId('mission-sessions-empty')).toBeTruthy();
+    });
+
+    it('a session that left the fleet is not opened', async () => {
+      await open();
+      sessionStore.set([]);
+      await fireEvent.click(screen.getByTestId('mission-task-session'));
+      expect(get(selectedSession)).toBeNull();
     });
   });
 

@@ -963,3 +963,51 @@ fn spend_by_person_goes_only_to_an_administrator_who_sees_every_session() {
         assert!(json.get("spend_by_person").is_none(), "{who}: {json}");
     }
 }
+
+/// A run is work the host's sessions do: its worker reads the item it was
+/// started on by the task that names it, with no link at all, and only
+/// while the run is open.
+#[test]
+fn an_open_run_on_the_host_makes_its_item_readable_there() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("h-a").unwrap();
+    s.upsert_host("h-b").unwrap();
+    let worker = s
+        .upsert_session("dev-o-r--w", "h-a", None, None, 1, 1, "running", None)
+        .unwrap();
+    let item = s
+        .create_native_item(&crate::store::NativeItem {
+            title: "Queue schema",
+            parent_id: None,
+            project_id: None,
+            notes: None,
+        })
+        .unwrap();
+    let key = item.key.clone().expect("a native task has a key");
+    let here = host(None, &[]);
+    let there = OrgScope::Host {
+        alias: "h-b".into(),
+        org: None,
+        isolated: Default::default(),
+    };
+    let visible = |scope: &OrgScope| {
+        (
+            require_key(&s, scope, &key).is_ok(),
+            crate::service::trackers::tickets::item_visible(scope, &s, &item).unwrap(),
+            s.work_item_ids_on_host(scope.host().unwrap())
+                .unwrap()
+                .contains(&item.id),
+        )
+    };
+
+    assert_eq!(visible(&here), (false, false, false));
+
+    let task = crate::service::work::run::record_run(&s, worker, "do it", item.id, 1, "implement")
+        .unwrap();
+    assert_eq!(visible(&here), (true, true, true));
+    // The fence is the host's: another host's token reads nothing of it.
+    assert_eq!(visible(&there), (false, false, false));
+
+    crate::service::tasks::fail_task(&s, task.id, "boom").unwrap();
+    assert_eq!(visible(&here), (false, false, false));
+}

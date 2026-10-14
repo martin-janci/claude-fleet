@@ -1,15 +1,18 @@
 <!-- One task in the Work list (redesign board "Work · tasks with filters
      open", manual: SessionRow): the status dot, key and title, where it
      stands and why, then chips for its live session, its pull request and
-     what it cost. The whole row selects the task; a session chip opens that
-     session. Shared by the grouped tree and the List layout. -->
+     what it cost. The whole row selects the task (or, under the
+     `work.rowClick` pref, opens its live session); a session chip opens
+     that session either way. Shared by the grouped tree and the List
+     layout. -->
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import StatusDot from './kit/StatusDot.svelte';
   import { STATE_WORD } from './kit/status';
   import { sessions } from './sessions';
   import { unavailableLabel, shownKey } from './trackers';
-  import { costChip, linkTone, liveLinks, occurrenceTitle, prChip, taskLine, taskTone } from './work_row';
+  import { workRowClick } from './prefs';
+  import { costChip, linkTone, liveLinks, occurrenceTitle, prChip, rowClickSession, rowSessionLink, taskLine, taskTone } from './work_row';
   import { isOccurrenceOf, taskLabel, trackerDown, trackerDownLabel, type WorkTask, type WorkTaskLink } from './work_view';
 
   let {
@@ -48,6 +51,17 @@
   const rollup = $derived((t.children_total ?? 0) > 0 ? `${t.children_done ?? 0}/${t.children_total} done` : null);
   const lit = $derived(live.some((l) => isOccurrenceOf(l, currentSessionId)));
   const shown = $derived(title ?? (t.title || (t.key ? '' : t.task_id)));
+  /** The session the "+N" row's first chip opens: its primary, else the first. */
+  const first = $derived(rowSessionLink(t));
+
+  /** The row's own click: the ticket, or its live session under the pref
+   *  (the caller's `onopen` falls back to the ticket when the session is
+   *  not in the fleet any more). */
+  function onrow() {
+    const l = onopen ? rowClickSession(t, $workRowClick) : null;
+    if (l) onopen?.(l);
+    else onselect();
+  }
 </script>
 
 <div class="of-row work-row" class:lit aria-selected={selected ? 'true' : undefined} data-testid="work-task-body">
@@ -59,7 +73,7 @@
       data-testid="work-task-row"
       aria-current={selected ? 'true' : undefined}
       title={t.unavailable ? unavailableLabel(t.unavailable_reason) : taskLabel(t)}
-      onclick={onselect}
+      onclick={onrow}
     >
       <span class="l1">
         {#if t.key}<span class="key" title={t.key}>{shownKey(t)}</span>{/if}
@@ -88,14 +102,27 @@
             onclick={() => onopen?.(l)}
             ><StatusDot state={linkTone(l)} size={6} label={null} />{l.name ?? `session ${l.session_id}`}</button
           >
-        {:else if live.length > 1}
+        {:else if live.length > 1 && first}
+          <!-- Its primary session in one click, then the rest on the task. -->
+          <button
+            class="of-chip chip-btn"
+            class:current={isOccurrenceOf(first, currentSessionId)}
+            type="button"
+            data-testid="work-occurrence"
+            data-kind={first.primary ? 'primary' : 'secondary'}
+            data-session-id={first.session_id ?? ''}
+            title={occurrenceTitle(first)}
+            onclick={() => onopen?.(first)}
+            ><StatusDot state={linkTone(first)} size={6} label={null} />{first.name ?? `session ${first.session_id}`}</button
+          >
           <button
             class="of-chip chip-btn"
             type="button"
             data-testid="work-task-sessions"
             title={live.map((l) => l.name ?? `session ${l.session_id}`).join(', ')}
+            aria-label="{live.length} sessions: show the task"
             onclick={onselect}
-            ><StatusDot state={live.some((l) => l.needs_you) ? 'waiting' : 'working'} size={6} label={null} />{live.length} sessions</button
+            ><StatusDot state={live.some((l) => l.needs_you) ? 'waiting' : 'working'} size={6} label={null} />+{live.length - 1}</button
           >
         {/if}
         {#if pr}

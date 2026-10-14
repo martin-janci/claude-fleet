@@ -676,6 +676,29 @@ describe('inlineEventFor', () => {
     expect(inlineEventFor(e('turn_done', 'x'), { latestId: 1, blocked: false })).toBeNull();
     expect(inlineEventFor(e('compact_done', 'auto'), { latestId: 1, blocked: false })).toBeNull();
   });
+
+  it('says when an account ran out and fleet switched the login', () => {
+    const ok = JSON.stringify({ from_account: 'a', to_account: 'b', profile: 'work', used_pct: 12, error: null });
+    expect(inlineEventFor(e('account_switched', ok), { latestId: 1, blocked: false })).toMatchObject({
+      label: 'Account ran out: switched automatically',
+      detail: 'now on profile work',
+      tone: 'info',
+    });
+    const own = JSON.stringify({ from_account: 'a', to_account: 'b', profile: null, used_pct: 12, error: null });
+    expect(inlineEventFor(e('account_switched', own), { latestId: 1, blocked: false })?.detail).toBe(
+      "now on the host's own login",
+    );
+    const carry = JSON.stringify({ from_account: 'a', to_account: 'b', profile: 'w', used_pct: 1, error: null, continue: true });
+    expect(inlineEventFor(e('account_switched', carry), { latestId: 1, blocked: false })?.detail).toBe(
+      'now on profile w · told to continue',
+    );
+    const bad = JSON.stringify({ from_account: 'a', to_account: 'b', profile: 'work', used_pct: 12, error: 'E_SSH' });
+    expect(inlineEventFor(e('account_switch_failed', bad), { latestId: 1, blocked: false })).toMatchObject({
+      label: 'Account ran out: automatic switch failed',
+      detail: 'E_SSH',
+      tone: 'warn',
+    });
+  });
 });
 
 describe('buildThread', () => {

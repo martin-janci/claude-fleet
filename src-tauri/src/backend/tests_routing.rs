@@ -993,6 +993,26 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // Off for the signed-in person: the hub resolves who that is from
+        // the connection, never from the request.
+        (
+            "auto_switch_account",
+            "auto_switch_account",
+            json!({ "enabled": false }),
+            r#"{"enabled":false,"continue_after":false,"fleet_enabled":true}"#,
+            Box::new(|b, s, _| {
+                let v = block_on(commands::account_switch::routed::auto_switch_account(
+                    b,
+                    s,
+                    fleet_core::service::account_switch::AutoSwitchArgs {
+                        enabled: Some(false),
+                        continue_after: None,
+                    },
+                ))?;
+                assert!(!v.enabled && v.fleet_enabled);
+                Ok(())
+            }),
+        ),
         (
             "search",
             "search",
@@ -1211,6 +1231,21 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                     s,
                     Some("review".into()),
                     Some(5),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "agents_debug",
+            "agents",
+            json!({ "action": "explain" }),
+            r#"{"automation_paused":false,"poll_interval_secs":300,"max_concurrent":2,"max_retries":3,"loops":[],"rules":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::agents::routed::agents_debug(
+                    b,
+                    s,
+                    "explain".into(),
+                    None,
                 ))
                 .map(|_| ())
             }),
@@ -2236,7 +2271,7 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
         (
             "work_stats",
             "work",
-            json!({ "session_id": null, "key": null, "action": "stats", "filters": { "group_by": "sprint" } }),
+            json!({ "session_id": null, "key": null, "action": "stats", "filters": { "group_by": "sprint" }, "since": 1700000000 }),
             r#"{"group_by":"sprint","total":0,"stages":{"backlog":0,"in_progress":0,"in_review":0,"blocked":0,"done":0},"pct_done":0,"needs_you":0,"cost_micros":0,"groups":[],"generated_at":1}"#,
             Box::new(|b, s, _| {
                 block_on(commands::work_view::routed::work_stats(
@@ -2246,6 +2281,7 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                             group_by: Some("sprint".into()),
                             ..Default::default()
                         }),
+                        since: Some(1_700_000_000),
                     },
                     s,
                 ))
@@ -7555,6 +7591,10 @@ const SOURCES: &[(&str, &str)] = &[
     (
         "commands/presence.rs",
         include_str!("../commands/presence.rs"),
+    ),
+    (
+        "commands/account_switch.rs",
+        include_str!("../commands/account_switch.rs"),
     ),
     (
         "commands/updates.rs",

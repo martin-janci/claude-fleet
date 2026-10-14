@@ -10,6 +10,7 @@
 
 pub mod account_limits;
 pub mod account_spend;
+pub mod account_switch;
 pub mod account_usage;
 pub mod account_usage_poll;
 pub mod add_account;
@@ -38,6 +39,7 @@ pub mod drafts;
 pub mod editor;
 pub mod env;
 pub mod evidence;
+pub mod fleet_agents;
 pub mod forms;
 pub mod fresh;
 pub mod gc;

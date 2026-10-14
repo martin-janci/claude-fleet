@@ -134,6 +134,11 @@
         },
         {
           "type": "field",
+          "key": "decide.jev.limit_switch",
+          "hint": "Records which login Jev would resume an out-of-credit session under, beside the one with the most headroom that is used."
+        },
+        {
+          "type": "field",
           "key": "decide.jev.unassigned"
         },
         {

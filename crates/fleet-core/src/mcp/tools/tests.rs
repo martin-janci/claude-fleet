@@ -2853,6 +2853,7 @@ fn router_sum_serves_every_tool() {
         include_str!("wizard_state.rs"),
         include_str!("dashboards.rs"),
         include_str!("presence.rs"),
+        include_str!("account_switch.rs"),
         include_str!("library.rs"),
         include_str!("runs.rs"),
         include_str!("search.rs"),
@@ -18214,9 +18215,10 @@ async fn an_agent_writes_its_own_shared_task() {
     }
 }
 
-/// Planning its own task: an agent files it under a parent and puts it in
-/// or takes it out of a sprint, even when the task is shared with a session
-/// it cannot drive. A task its session is not on stays the team's plan.
+/// Planning its own task: an agent files it under a parent, puts it in or
+/// takes it out of a sprint and says what it waits on, even when the task is
+/// shared with a session it cannot drive. A task its session is not on stays
+/// the team's plan.
 #[tokio::test]
 async fn an_agent_plans_its_own_shared_task() {
     let g = gate_fixture();
@@ -18260,13 +18262,17 @@ async fn an_agent_plans_its_own_shared_task() {
     let plan = |who: Caller, action: &str, item: i64| {
         let args = match action {
             "set_parent" => serde_json::json!({ "action": action, "item_id": item, "parent": "" }),
+            "dep" => {
+                let on = if item == shared { bobs } else { shared };
+                serde_json::json!({ "action": action, "item_id": item, "depends_on": on })
+            }
             _ => serde_json::json!({ "action": action, "item_id": item, "bucket_id": sprint }),
         };
         call(who, args)
     };
     let me = pane_caller(Some("%7"));
 
-    for action in ["set_parent", "bucket_add", "bucket_remove"] {
+    for action in ["set_parent", "bucket_add", "bucket_remove", "dep"] {
         plan(me.clone(), action, shared)
             .await
             .unwrap_or_else(|e| panic!("{action}: its own task, shared with Bob's: {e:?}"));
@@ -18275,14 +18281,78 @@ async fn an_agent_plans_its_own_shared_task() {
             (me.clone(), bobs, "a task its session is not on"),
         ] {
             let e = format!("{:?}", plan(who, action, item).await.expect_err(what));
-            let want = if action == "set_parent" {
-                "E_NOTFOUND"
-            } else {
-                "a session does not plan"
+            let want = match action {
+                "set_parent" => "E_NOTFOUND",
+                "dep" => "a session does not run missions",
+                _ => "a session does not plan",
             };
             assert!(e.contains(want), "{action}, {what}: {e}");
         }
     }
+}
+
+/// An agent's own task inside a mission stays its owner's plan: the
+/// own-task exception lets `dep` past the session refusal, and the
+/// mission's own fence (`require_mission_change`) still refuses it.
+#[tokio::test]
+async fn an_agents_own_task_in_a_mission_keeps_its_dependencies_a_persons() {
+    let g = gate_fixture();
+    let a_row = g.a_row;
+    let own = g
+        .store
+        .name_session_work(a_row, Some("LOC-1"), "In a mission")
+        .unwrap()
+        .0
+        .id;
+    let other = g
+        .store
+        .name_session_work(g.b_row, Some("LOC-2"), "Another")
+        .unwrap()
+        .0
+        .id;
+    let mission = g
+        .store
+        .create_mission(
+            &crate::store::NewMission {
+                org_id: None,
+                owner_person_id: Some(g.ada),
+                root_item_id: None,
+                name: "Ada's mission",
+                goal: "ship",
+                non_goals: None,
+                done_when: &[],
+                mode: None,
+                level: None,
+            },
+            "test",
+        )
+        .unwrap()
+        .id;
+    g.store
+        .set_mission_item(mission, own, true, "test")
+        .unwrap();
+    let t = test_tools(g.store);
+    let e = t
+        .work_link(
+            Extension(pane_caller(Some("%7"))),
+            Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "action": "dep", "item_id": own, "depends_on": other,
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .expect_err("a mission's plan is its owner's");
+    let e = format!("{e:?}");
+    assert!(
+        e.contains("E_FORBIDDEN") || e.contains("E_NOTFOUND"),
+        "the mission fence answers: {e}"
+    );
+    assert!(
+        !e.contains("does not run missions"),
+        "not the session refusal: {e}"
+    );
 }
 
 /// **A local item whose only link was UNLINKED is nobody's to write**

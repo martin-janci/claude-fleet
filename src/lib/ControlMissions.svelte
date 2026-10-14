@@ -2,7 +2,8 @@
   Running missions in Control's Views panel (Orbit Fleet redesign step 9.12,
   Control part): each active mission with its current step, Comet trails
   beside that step while it runs, and "Waits for you" instead of the trails
-  while it waits on a person (no loader then). The mission itself lives in
+  while it waits on a person (no loader then), and how many child sessions
+  work on it. The mission itself lives in
   Work; its name opens it there.
 -->
 <script lang="ts">
@@ -48,6 +49,9 @@
           {:else if m.step}
             {#if m.trails}<Loader name="comet-trails" size={20} label="Working on it" testid="control-mission-trails" />{/if}
             <span class="step">{m.step}</span>
+          {/if}
+          {#if m.sessions > 0}
+            <span class="muted" data-testid="control-mission-sessions">· {m.sessions} {m.sessions === 1 ? 'session' : 'sessions'}</span>
           {/if}
         </li>
       {/each}

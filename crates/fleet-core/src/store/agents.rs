@@ -6,8 +6,9 @@
 use super::Store;
 use rusqlite::{params, OptionalExtension, Row};
 
-/// The built-in agents a rule may name.
-pub const AGENT_KINDS: [&str; 2] = ["review", "support"];
+/// The agents a rule may name: the built-in ones, and `fleet`, a catalog
+/// `fleet_agent` definition (the rule's `definition`).
+pub const AGENT_KINDS: [&str; 3] = ["review", "support", "fleet"];
 
 /// What a rule lets its agent do, least first.
 pub const AGENT_LEVELS: [&str; 3] = ["watch", "propose", "act"];
@@ -30,6 +31,12 @@ pub const AGENT_ACTION_STATES: [&str; 6] = [
 /// Longest `config` JSON a rule carries (the migration's CHECK).
 pub const AGENT_CONFIG_MAX_CHARS: usize = 8000;
 
+/// Longest `bindings` JSON a rule carries (migration 185's CHECK).
+pub const AGENT_BINDINGS_MAX_CHARS: usize = 8000;
+
+/// Longest `definition` name (migration 185's CHECK).
+pub const AGENT_DEFINITION_MAX_CHARS: usize = 100;
+
 /// Longest `scope` text (the migration's CHECK).
 pub const AGENT_SCOPE_MAX_CHARS: usize = 300;
 
@@ -47,6 +54,16 @@ pub struct AgentRuleRow {
     pub granted_by: String,
     pub granted_at: i64,
     pub expires_at: Option<i64>,
+    /// `fleet`: the catalog definition the rule runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition: Option<String>,
+    /// `fleet`: the store bindings, a JSON array (`[]` otherwise).
+    #[serde(default = "no_bindings")]
+    pub bindings: String,
+}
+
+fn no_bindings() -> String {
+    "[]".into()
 }
 
 impl AgentRuleRow {
@@ -68,6 +85,10 @@ pub struct NewAgentRule {
     pub granted_by: String,
     pub granted_at: i64,
     pub expires_at: Option<i64>,
+    /// `fleet` only (and then required).
+    pub definition: Option<String>,
+    /// A JSON array; `[]` for a built-in agent.
+    pub bindings: String,
 }
 
 /// Where a rule's poller stopped.
@@ -148,7 +169,7 @@ pub struct AgentActionRow {
 }
 
 const RULE_COLS: &str = "id, agent, scope, level, host_alias, project_id, config, \
-                         granted_by, granted_at, expires_at";
+                         granted_by, granted_at, expires_at, definition, bindings";
 const JOB_COLS: &str = "id, rule_id, agent, subject, trigger, dedup_key, state, attempts, \
                         next_attempt_at, lease_until, error_kind, error, result, cost_micros, \
                         created_at, updated_at";
@@ -167,6 +188,8 @@ fn rule_row(r: &Row<'_>) -> rusqlite::Result<AgentRuleRow> {
         granted_by: r.get(7)?,
         granted_at: r.get(8)?,
         expires_at: r.get(9)?,
+        definition: r.get(10)?,
+        bindings: r.get(11)?,
     })
 }
 
@@ -240,15 +263,34 @@ impl Store {
         if !serde_json::from_str::<serde_json::Value>(&rule.config).is_ok_and(|v| v.is_object()) {
             return Err(invalid("config must be a JSON object".into()));
         }
+        match (&rule.definition, rule.agent == "fleet") {
+            (Some(d), true) if !d.is_empty() && d.chars().count() <= AGENT_DEFINITION_MAX_CHARS => {
+            }
+            (None, false) => {}
+            _ => {
+                return Err(invalid(
+                    "a fleet rule names its definition, and only a fleet rule does".into(),
+                ))
+            }
+        }
+        if rule.bindings.chars().count() > AGENT_BINDINGS_MAX_CHARS
+            || !serde_json::from_str::<serde_json::Value>(&rule.bindings)
+                .is_ok_and(|v| v.is_array())
+        {
+            return Err(invalid(format!(
+                "bindings must be a JSON array of at most {AGENT_BINDINGS_MAX_CHARS} characters"
+            )));
+        }
         self.conn.query_row(
             "INSERT INTO agent_rules \
                (agent, scope, level, host_alias, project_id, config, granted_by, granted_at, \
-                expires_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+                expires_at, definition, bindings) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
              ON CONFLICT(agent, scope) DO UPDATE SET level = excluded.level, \
                host_alias = excluded.host_alias, project_id = excluded.project_id, \
                config = excluded.config, granted_by = excluded.granted_by, \
-               granted_at = excluded.granted_at, expires_at = excluded.expires_at \
+               granted_at = excluded.granted_at, expires_at = excluded.expires_at, \
+               definition = excluded.definition, bindings = excluded.bindings \
              RETURNING id",
             params![
                 rule.agent,
@@ -259,7 +301,9 @@ impl Store {
                 rule.config,
                 rule.granted_by,
                 rule.granted_at,
-                rule.expires_at
+                rule.expires_at,
+                rule.definition,
+                rule.bindings
             ],
             |r| r.get(0),
         )
@@ -504,6 +548,64 @@ impl Store {
             .optional()
     }
 
+    /// Rule `rule_id`'s jobs counted by state: `(state, count)`, by state.
+    pub fn agent_job_counts(&self, rule_id: i64) -> Result<Vec<(String, i64)>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT state, COUNT(*) FROM agent_jobs WHERE rule_id = ?1 \
+             GROUP BY state ORDER BY state",
+        )?;
+        let rows = stmt.query_map(params![rule_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
+    }
+
+    /// Rule `rule_id`'s newest job in `state`.
+    pub fn newest_agent_job_in(
+        &self,
+        rule_id: i64,
+        state: &str,
+    ) -> Result<Option<AgentJobRow>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT {JOB_COLS} FROM agent_jobs WHERE rule_id = ?1 AND state = ?2 \
+                     ORDER BY updated_at DESC, id DESC LIMIT 1"
+                ),
+                params![rule_id, state],
+                job_row,
+            )
+            .optional()
+    }
+
+    /// Rule `rule_id`'s pending job that runs first: the earliest
+    /// `next_attempt_at`.
+    pub fn next_pending_agent_job(
+        &self,
+        rule_id: i64,
+    ) -> Result<Option<AgentJobRow>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT {JOB_COLS} FROM agent_jobs WHERE rule_id = ?1 AND state = 'pending' \
+                     ORDER BY next_attempt_at, id LIMIT 1"
+                ),
+                params![rule_id],
+                job_row,
+            )
+            .optional()
+    }
+
+    /// The actions job `job_id` proposed, oldest first.
+    pub fn agent_actions_of_job(
+        &self,
+        job_id: i64,
+    ) -> Result<Vec<AgentActionRow>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ACTION_COLS} FROM agent_actions WHERE job_id = ?1 ORDER BY id"
+        ))?;
+        let rows = stmt.query_map(params![job_id], action_row)?;
+        rows.collect()
+    }
+
     /// Queue a write job `job_id` proposes. `payload` must be JSON.
     pub fn insert_agent_action(
         &self,
@@ -654,6 +756,8 @@ mod tests {
             granted_by: "console".into(),
             granted_at: 100,
             expires_at: None,
+            definition: None,
+            bindings: "[]".into(),
         }
     }
 
@@ -699,6 +803,35 @@ mod tests {
         r.config = "{".into();
         assert!(s.grant_agent_rule(&r).is_err());
         assert!(s.list_agent_rules().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_fleet_rule_names_its_definition_and_keeps_its_bindings() {
+        let s = Store::open_in_memory().unwrap();
+        let mut r = rule("fleet", "l2-prod");
+        assert!(s.grant_agent_rule(&r).is_err(), "no definition");
+        r.definition = Some("l2-support".into());
+        r.bindings = r#"[{"role":"memory","namespace":"rule"}]"#.into();
+        let id = s.grant_agent_rule(&r).unwrap();
+        let mut staging = r.clone();
+        staging.scope = "l2-staging".into();
+        assert_ne!(s.grant_agent_rule(&staging).unwrap(), id, "two instances");
+        let row = s.agent_rule(id).unwrap().unwrap();
+        assert_eq!(row.definition.as_deref(), Some("l2-support"));
+        assert_eq!(row.bindings, r.bindings);
+        let mut bad = rule("review", "gh:o/r");
+        bad.definition = Some("l2-support".into());
+        assert!(s.grant_agent_rule(&bad).is_err(), "a built-in names none");
+        let mut bad = r.clone();
+        bad.bindings = "{}".into();
+        assert!(s.grant_agent_rule(&bad).is_err(), "bindings is an array");
+        assert_eq!(
+            s.agent_rule(s.grant_agent_rule(&rule("review", "gh:o/r")).unwrap())
+                .unwrap()
+                .unwrap()
+                .bindings,
+            "[]"
+        );
     }
 
     #[test]

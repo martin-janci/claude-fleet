@@ -225,3 +225,27 @@ fn the_builtin_ids_are_the_apps() {
     }
     assert!(ts.contains(&format!("MAX_PINNED = {MAX_PINNED}")));
 }
+
+#[test]
+fn a_pin_and_an_unpin_tell_the_persons_devices_with_an_empty_frame() {
+    let bus = std::sync::Arc::new(crate::events::RecordingEventBus::new());
+    let st = Mutex::new(Store::open_with_bus_in_memory(bus.clone()).unwrap());
+    let me = ViewScope::internal();
+    let count = || {
+        bus.names()
+            .iter()
+            .filter(|n| **n == "dashboards:changed")
+            .count()
+    };
+    pin(&st, &me, &pin_args(block("dash.r42", "R")), None).unwrap();
+    assert_eq!(count(), 1);
+    // Unpinning what is not pinned changes nothing and says nothing.
+    assert!(!unpin(&st, &me, "dash.other").unwrap());
+    assert_eq!(count(), 1);
+    assert!(unpin(&st, &me, "dash.r42").unwrap());
+    assert_eq!(count(), 2);
+    assert_eq!(
+        crate::events::RowChange::DashboardsChanged.payload(),
+        json!({})
+    );
+}

@@ -18,7 +18,7 @@ use tauri::State;
 /// The `routines` tool's arguments, as the tool reads them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RoutinesArgs {
-    /// list | get | runs | failing | budget | save | preview | delete | set_enabled | skip_next | run_now | set_run_outcome
+    /// list | get | runs | failing | budget | save | preview | delete | set_enabled | skip_next | run_now | set_run_outcome | explain | decisions | dry_run
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routine_id: Option<i64>,
@@ -30,6 +30,8 @@ pub struct RoutinesArgs {
     pub skip: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -121,6 +123,21 @@ pub(crate) mod routed {
                 let deps = Deps::live(Arc::clone(store), Arc::clone(ssh), Arc::clone(reg));
                 json(svc::run_now(&deps, &scope, id()?, fleet_core::store::now_unix()).await?)
             }
+            "explain" => json(svc::explain(
+                store,
+                &scope,
+                id()?,
+                args.limit,
+                fleet_core::store::now_unix(),
+            )?),
+            "decisions" => json(svc::decisions(store, &scope, id()?, args.limit)?),
+            "dry_run" => json(svc::dry_run(
+                store,
+                &scope,
+                id()?,
+                args.event_id,
+                fleet_core::store::now_unix(),
+            )?),
             "set_run_outcome" => {
                 let run_id = args
                     .run_id
@@ -142,7 +159,8 @@ pub(crate) mod routed {
                 codes::E_INVALID,
                 format!(
                     "action must be list | get | runs | failing | budget | save | preview | delete | \
-                     set_enabled | skip_next | run_now | set_run_outcome, got {other:?}"
+                     set_enabled | skip_next | run_now | set_run_outcome | explain | decisions | \
+                     dry_run, got {other:?}"
                 ),
             )),
         }

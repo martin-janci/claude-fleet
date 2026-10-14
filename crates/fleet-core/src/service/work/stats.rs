@@ -11,6 +11,13 @@
 //! Grouped by sprint or release, each group also carries its bucket's
 //! health: its dates, the share of its time gone, and how many items joined
 //! or left it after it started (scope change).
+//!
+//! With `since`, the answer also carries a burn-up (persona dashboards, step
+//! 8): for each day from `since`'s to today, how many of these tasks there were
+//! and how many were done at the day's end, read from `work_status_log`
+//! (migration 170). History starts the day that migration ran: a task with
+//! no history row (older, or a bare tracker key) counts for the whole window
+//! in the stage it has now.
 
 use super::buckets;
 use super::view::{self, GroupRef, WorkTask, WorkTreeFilters};
@@ -24,6 +31,9 @@ use std::sync::Mutex;
 /// At most this many groups come back; the rest are counted in `total`
 /// and named by `groups_more`.
 pub const STATS_MAX_GROUPS: usize = 200;
+/// The longest burn-up, in days.
+pub const BURNUP_MAX_DAYS: u32 = 90;
+const DAY: i64 = 86_400;
 
 /// Tasks per stage (`WorkTask::stage`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,6 +112,58 @@ pub struct WorkStats {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub groups_more: u32,
     pub generated_at: i64,
+    /// With `since`: one point a day, oldest first, today last.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burnup: Option<Vec<BurnupDay>>,
+}
+
+/// One day of a burn-up: the tasks there were and the ones done by its end.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BurnupDay {
+    /// The day's start, unix seconds (UTC midnight).
+    pub day: i64,
+    pub total: u32,
+    pub done: u32,
+}
+
+/// PURE: the burn-up of `tasks` over the `days` days ending today. `logs`
+/// is each item's `(at, category)` history, oldest first.
+pub fn burnup_of(
+    tasks: &[WorkTask],
+    logs: &std::collections::HashMap<i64, Vec<(i64, String)>>,
+    days: u32,
+    now: i64,
+) -> Vec<BurnupDay> {
+    let today = now.div_euclid(DAY) * DAY;
+    let days = days.clamp(1, BURNUP_MAX_DAYS) as i64;
+    (0..days)
+        .map(|k| {
+            let day = today - (days - 1 - k) * DAY;
+            // The day's end; today's is now.
+            let end = (day + DAY).min(now + 1);
+            let (mut total, mut done) = (0u32, 0u32);
+            for t in tasks {
+                match t
+                    .item_id
+                    .and_then(|id| logs.get(&id))
+                    .filter(|h| !h.is_empty())
+                {
+                    Some(h) => {
+                        let Some((_, cat)) = h.iter().take_while(|(at, _)| *at < end).last() else {
+                            continue; // not there yet
+                        };
+                        total += 1;
+                        done += u32::from(cat == "done");
+                    }
+                    None => {
+                        total += 1;
+                        done += u32::from(t.stage == "done");
+                    }
+                }
+            }
+            BurnupDay { day, total, done }
+        })
+        .collect()
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -169,6 +231,7 @@ pub fn stats_of(tasks: &[WorkTask], group_by: &str, now: i64) -> WorkStats {
         groups,
         groups_more,
         generated_at: now,
+        burnup: None,
     }
 }
 
@@ -199,16 +262,39 @@ pub fn health_of(
     }
 }
 
-/// `work { action: stats, filters? }`.
+/// PURE: how many days a burn-up from `since` to `now` spans, both days
+/// counted; `None` past [`BURNUP_MAX_DAYS`] or after now.
+pub fn burnup_days(since: i64, now: i64) -> Option<u32> {
+    let span = now.div_euclid(DAY) - since.div_euclid(DAY) + 1;
+    (1..=i64::from(BURNUP_MAX_DAYS))
+        .contains(&span)
+        .then_some(span as u32)
+}
+
+/// `work { action: stats, filters?, since? }`.
 pub fn stats(
     store: &Mutex<Store>,
     scope: &ViewScope,
     filters: Option<&WorkTreeFilters>,
+    since: Option<i64>,
 ) -> Result<WorkStats, IpcError> {
     let filters = filters.cloned().unwrap_or_default();
     let (tasks, now) = view::matching_tasks(store, scope, &filters)?;
     let group_by = filters.group_by.clone().unwrap_or_else(|| "group".into());
     let mut out = stats_of(&tasks, &group_by, now);
+    if let Some(since) = since {
+        let days = burnup_days(since, now).ok_or_else(|| {
+            IpcError::new(
+                crate::ipc_error::codes::E_INVALID,
+                format!(
+                    "a burn-up starts at most {BURNUP_MAX_DAYS} days ago, and not later than now"
+                ),
+            )
+        })?;
+        let ids: Vec<i64> = tasks.iter().filter_map(|t| t.item_id).collect();
+        let logs = crate::ipc_error::lock(store)?.status_logs(&ids)?;
+        out.burnup = Some(burnup_of(&tasks, &logs, days, now));
+    }
     if matches!(group_by.as_str(), "sprint" | "release") {
         for g in &mut out.groups {
             let Some(id) = g

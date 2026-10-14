@@ -68,6 +68,9 @@ pub mod host_placement;
 #[cfg(test)]
 mod host_placement_tests;
 pub mod jev;
+pub mod limit_switch;
+#[cfg(test)]
+mod limit_switch_tests;
 pub mod lost_target;
 #[cfg(test)]
 mod lost_target_tests;
@@ -194,6 +197,9 @@ pub enum Feature {
     /// Resume a past session of the work key a new session plans, or start
     /// fresh (N2, gap plan G7.10).
     ResumeOrNew,
+    /// Which login an out-of-credit session resumes under when it is
+    /// switched automatically (`service::account_switch`).
+    LimitSwitch,
 }
 
 impl Feature {
@@ -218,6 +224,7 @@ impl Feature {
         Feature::MainTicket,
         Feature::TrackerDuplicate,
         Feature::ResumeOrNew,
+        Feature::LimitSwitch,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -242,6 +249,7 @@ impl Feature {
             Feature::MainTicket => "main_ticket",
             Feature::TrackerDuplicate => "tracker_duplicate",
             Feature::ResumeOrNew => "resume_or_new",
+            Feature::LimitSwitch => "limit_switch",
         }
     }
 
@@ -272,6 +280,7 @@ impl Feature {
             Feature::MainTicket => settings::DECIDE_JEV_MAIN_TICKET,
             Feature::TrackerDuplicate => settings::DECIDE_JEV_TRACKER_DUPLICATE,
             Feature::ResumeOrNew => settings::DECIDE_JEV_RESUME_OR_NEW,
+            Feature::LimitSwitch => settings::DECIDE_JEV_LIMIT_SWITCH,
         }
     }
 

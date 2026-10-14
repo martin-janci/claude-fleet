@@ -15,8 +15,13 @@ impl FleetTools {
         save {routine, routine_id?}: the whole routine; preview: save's dry \
         run; delete; set_enabled {enabled}; skip_next {skip?}; run_now; \
         set_run_outcome {run_id, outcome}: a person's did_work | nothing | \
-        needs_person (needs_person lands it in the Inbox). Pause all stops \
-        the schedule, not run_now. E_NOTFOUND, E_INVALID.")]
+        needs_person (needs_person lands it in the Inbox). Debugging, nothing \
+        written: explain {routine_id, limit?}: why it does or does not fire, \
+        check by check, its recent events judged and its decision trace; \
+        decisions {routine_id, limit?}: the trace alone; dry_run \
+        {routine_id, event_id?}: what a fire now would start and the exact \
+        prompt. Pause all stops the schedule, not run_now. E_NOTFOUND, \
+        E_INVALID.")]
     pub(super) async fn routines(
         &self,
         Extension(caller): Extension<Caller>,
@@ -117,6 +122,17 @@ impl FleetTools {
                     .map_err(to_mcp_err)?;
                 ok_json_compact(&run)
             }
+            "explain" => ok_json_compact(
+                &routines::explain(store, &scope, id()?, p.limit, crate::store::now_unix())
+                    .map_err(to_mcp_err)?,
+            ),
+            "decisions" => ok_json_compact(
+                &routines::decisions(store, &scope, id()?, p.limit).map_err(to_mcp_err)?,
+            ),
+            "dry_run" => ok_json_compact(
+                &routines::dry_run(store, &scope, id()?, p.event_id, crate::store::now_unix())
+                    .map_err(to_mcp_err)?,
+            ),
             "set_run_outcome" => {
                 let run_id = p
                     .run_id
@@ -141,7 +157,8 @@ impl FleetTools {
                 codes::E_INVALID,
                 format!(
                     "action must be list | get | runs | failing | budget | save | preview | delete | \
-                     set_enabled | skip_next | run_now | set_run_outcome, got {other:?}"
+                     set_enabled | skip_next | run_now | set_run_outcome | explain | decisions | \
+                     dry_run, got {other:?}"
                 ),
                 None,
             )),

@@ -53,9 +53,9 @@ Which agent hosts (transport "agent") have a fleet-agent connected: since (unix 
 
 ### `agents`
 
-The built-in agents (PR reviewer, support): status {agent?, limit?} (rules, newest jobs, actions waiting for a person), grant {agent: review | support, scope: gh:<owner>/<repo> | jira:<tracker id>:<PROJECT>, host, level: watch | propose | act, project_id?, config?, hours?}, revoke {id}, pause_all, approve {id}, reject {id}. The owner's own device; writes need a trusted full device.
+The agents (PR reviewer, support, fleet agents from the catalog): status {agent?, limit?} (rules, newest jobs, actions waiting for a person), explain (per rule: polls or why not, next poll, last poll error, jobs by state, the next and the last failed job), job {id} (one job whole, its proposed actions included), grant {agent: review | support | fleet, scope: gh:<owner>/<repo> | jira:<tracker id>:<PROJECT> | <instance name>, host, level: watch | propose | act, project_id?, config?, hours?, definition? (fleet), bindings? (fleet: one per store role; each MCP binding is asked for its tools on the host first)}, revoke {id}, pause_all, approve {id}, reject {id}. The owner's own device; writes need a trusted full device.
 
-Parameters: `action`, `agent`, `config`, `host`, `hours`, `id`, `level`, `limit`, `project_id`, `scope`
+Parameters: `action`, `agent`, `bindings`, `config`, `definition`, `host`, `hours`, `id`, `level`, `limit`, `project_id`, `scope`
 
 ### `answer_mcp_confirm`
 
@@ -80,6 +80,12 @@ Parameters: `confirm_nonce`, `force_partial`, `plan_id`
 Chat forms: `form` (fleet.form/1) opens a form in YOUR session's chat and waits ≤600 s for the person's answers (status answered | pending | declined | cancelled | expired; on pending call `wait`). `draft` shows it while written. `cancel` withdraws. A person's side: list, get, answer, decline. Spec: docs/forms.md.
 
 Parameters: `answer`, `cancel`, `decline`, `draft`, `form`, `get`, `list`, `note`, `timeout_s`, `values`, `wait`, `why`
+
+### `auto_switch_account`
+
+Your own answer to automatic account switching: when one of your sessions' Claude account runs out, resume it under the login on its host with the most headroom. Pass enabled to turn it on or off for your sessions; leave it out to read it. continue_after: also type 'Continue where you left off.' into a switched session whose turn the limit cut off (off by default). It only acts while the fleet's accounts.auto_switch is on too. Returns { enabled, continue_after, fleet_enabled }.
+
+Parameters: `continue_after`, `enabled`
 
 ### `broadcast_prompt`
 
@@ -433,7 +439,7 @@ Parameters: `allow_unlayered`, `host_alias`, `kind`, `name`
 
 ### `pr_shepherd`
 
-The PR shepherd's standing rules per project: status (rules, episodes, merges), grant {project_id, level: watch | nudge | merge, hours?, recipes?}, revoke {project_id}, pause_all. The owner's own device; writes need a trusted full device.
+The PR shepherd's standing rules per project: status (rules, episodes, merges), explain (what the next tick makes of each session in a ruled project, and why), grant {project_id, level: watch | nudge | merge, hours?, recipes?}, revoke {project_id}, pause_all. The owner's own device; writes need a trusted full device.
 
 Parameters: `action`, `hours`, `level`, `limit`, `project_id`, `recipes`
 
@@ -649,9 +655,9 @@ Parameters: `anchor_uuid`, `confirm_nonce`, `mode`, `new_worktree`, `session_id`
 
 ### `routines`
 
-Routines: a saved prompt that starts a session on cron, a session or PR event or Run now. list; get {routine_id}: runs and fixes; runs {routine_id, limit?}; failing: Inbox; budget: fleet spend today; save {routine, routine_id?}: the whole routine; preview: save's dry run; delete; set_enabled {enabled}; skip_next {skip?}; run_now; set_run_outcome {run_id, outcome}: a person's did_work | nothing | needs_person (needs_person lands it in the Inbox). Pause all stops the schedule, not run_now. E_NOTFOUND, E_INVALID.
+Routines: a saved prompt that starts a session on cron, a session or PR event or Run now. list; get {routine_id}: runs and fixes; runs {routine_id, limit?}; failing: Inbox; budget: fleet spend today; save {routine, routine_id?}: the whole routine; preview: save's dry run; delete; set_enabled {enabled}; skip_next {skip?}; run_now; set_run_outcome {run_id, outcome}: a person's did_work | nothing | needs_person (needs_person lands it in the Inbox). Debugging, nothing written: explain {routine_id, limit?}: why it does or does not fire, check by check, its recent events judged and its decision trace; decisions {routine_id, limit?}: the trace alone; dry_run {routine_id, event_id?}: what a fire now would start and the exact prompt. Pause all stops the schedule, not run_now. E_NOTFOUND, E_INVALID.
 
-Parameters: `action`, `enabled`, `limit`, `outcome`, `routine`, `routine_id`, `run_id`, `skip`
+Parameters: `action`, `enabled`, `event_id`, `limit`, `outcome`, `routine`, `routine_id`, `run_id`, `skip`
 
 ### `run_prompt`
 
@@ -775,7 +781,7 @@ Parameters: `session_id`, `since`
 
 ### `session_tool_detail`
 
-One tool call's input and result (omitted by session_conversation): { id, name, input, edit {file_path, old, new} | null, command | null, result | null, is_error }; texts capped at 8000 chars. Read-only. Errors: as session_conversation, E_NOTFOUND.
+One tool call's input and result (omitted by session_conversation): { id, name, input, edit {file_path, old, new} | null, command | null, result | null, is_error, images? [{mime, data}], images_omitted? }; texts capped at 8000 chars, images (a screenshot) at 2 of 4 MiB base64. Read-only. Errors: as session_conversation, E_NOTFOUND.
 
 Parameters: `claude_session_id`, `session_id`, `tool_use_id`
 
@@ -1240,11 +1246,13 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::env_vars::env_var_unset`
 - `commands::add_account::add_account`
 - `commands::presence::session_presence`
+- `commands::account_switch::auto_switch_account`
 - `commands::pages::setting_history`
 - `commands::pages::set_fleet_setting`
 - `commands::runs::list_runs`
 - `commands::agents::agents_status`
 - `commands::agents::agents_decide`
+- `commands::agents::agents_debug`
 - `commands::routines::routines`
 - `commands::tasks::list_tasks`
 - `commands::tasks::cancel_task`

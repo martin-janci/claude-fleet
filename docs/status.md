@@ -143,8 +143,12 @@ account's sessions, switched-on routines and spend today from the
 `usage_daily_account` roll-up (`account_spend`, local only, so a paired
 desktop shows no $), and an account at its limit says how many sessions it
 paused, with Show and *Switch to <account>* (step 4.4's bulk move, one
-click). Not built: a hub vault for setup-tokens and API keys,
-and automatic switching when an account hits its limit.
+click). Automatic switching is landed and OFF by default
+(`accounts.auto_switch`, docs/accounts.md → *Switch automatically*; each
+person can turn it off for their own sessions, migration 187, and ask for
+"continue" after a switch, migration 188; Jev's pick
+is recorded only, `decide.jev.limit_switch`). Not built: a hub vault for
+setup-tokens and API keys.
 
 Single sign-on (docs/hub.md → *Sign in with Keycloak*): a hub with
 `FLEET_HUB_OIDC_ISSUER` set lets a person pair a device by signing in with
@@ -635,11 +639,11 @@ from its pane (per-host token + `X-Fleet-Pane`, `FleetTools::own_session`):
 and `list_tasks` mark the caller's own rows (`is_self`,
 `is_self_requester` / `is_self_worker`). An agent sets the status of,
 edits, comments on, renames and plans (`set_parent`, `bucket_add` /
-`bucket_remove`) a local task its own session is on (a confirmed, live link)
-even when the task is shared with sessions it cannot drive
+`bucket_remove`, `dep`) a local task its own session is on (a confirmed, live
+link) even when the task is shared with sessions it cannot drive
 (`own_session_works_on`); any other sprint or release membership stays a
-person's, and `bucket_admin`, `dep`, `hold` and `done_when` still refuse a
-per-host token. Not yet: the new task's brief
+person's, a task in a mission stays its owner's (`require_mission_change`),
+and `bucket_admin`, `hold` and `done_when` still refuse a per-host token. Not yet: the new task's brief
 waiting for the next prompt (J3), own tasks in ⌘K.
 C0: the operator is born with the `fleet-brainstorm` skill
 (`skills/fleet-brainstorm/SKILL.md`, written to its directory's
@@ -782,6 +786,12 @@ the Inbox. `runs` (8.3, migration 141) lists tasks, missions, Jev,
 project, and optionally a host, before Jev K1 is asked; after five starts
 of the same prefix in the same project, the start preview offers the rule.
 The New layout's Automation screen holds Routines, Rules, Runs and Agents.
+Debugging them (migration 186): a routine's trace of every scheduler
+decision (`routine_decisions`, the newest 200, dropped and filtered event
+fires included), `routines { explain | decisions | dry_run }` and the
+routine's Debug tab; `agents { explain | job }` (the desktop's
+`agents_debug`, Automation › Agents › Debug, with each rule's last poll
+error per process) and `pr_shepherd { explain }` (no UI). All read only.
 
 Reply actions are landed (#338): Copy, Quote, Retry, Fork here and Rewind
 here under each reply; Fork, Rewind and Retry are one operation,
@@ -884,6 +894,20 @@ the support agent scans a catalog MCP server (`graylog`) for new errors
 (`scan`) and proposes known-error entries for its KB repo (`kb`). Not
 built: outbound Slack/Teams notifications (a new channel of the 11.9
 matrix, the owner's call).
+
+Configurable agents (spec `docs/superpowers/specs/2026-10-12-configurable-agents-design.md`),
+steps 1 and 2 of 6: a `fleet_agent` catalog asset is a typed, validated
+definition (inputs, store roles, trigger, run, actions, limits;
+`service/fleet_agents/`), listed in Assets and checked by `fleet-hub agents
+define`. An instance is an `agent_rules` row with `agent = fleet` (migration
+185: `definition`, `bindings`), granted through the `agents` tool or
+`fleet-hub agents grant fleet <instance> --definition … --values … --bindings
+…`: the input values are checked against the definition's form, each MCP
+binding is rendered with the host's secrets and asked for its tools on the
+host, and fleet stores bind `rule` or `shared:<name>` namespaces of
+`agent_records`, which a run reads through `fleet-records` (`/agent-records`,
+run tokens). Nothing runs an instance yet: the generic runner, the actions
+and the grant form are steps 3 to 5.
 
 Session state machine hardening (plan A, #343) is landed: a `working` row
 with no activity for `reconcile.stale_working_secs` turns `idle` with

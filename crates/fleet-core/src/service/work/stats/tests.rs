@@ -80,7 +80,7 @@ fn filters(by: &str) -> WorkTreeFilters {
 fn stats_agree_with_the_board() {
     let w = world();
     let f = filters("org");
-    let st = stats(&w.st, &vs(&OrgScope::All), Some(&f)).unwrap();
+    let st = stats(&w.st, &vs(&OrgScope::All), Some(&f), None).unwrap();
     let page = tree(
         &w.st,
         &vs(&OrgScope::All),
@@ -105,7 +105,7 @@ fn stats_agree_with_the_board() {
 #[test]
 fn stats_group_by_person_largest_first_and_none_last_among_equals() {
     let w = world();
-    let st = stats(&w.st, &vs(&OrgScope::All), Some(&filters("person"))).unwrap();
+    let st = stats(&w.st, &vs(&OrgScope::All), Some(&filters("person")), None).unwrap();
     assert_eq!(st.group_by, "person");
     let labels: Vec<(&str, u32)> = st
         .groups
@@ -140,7 +140,7 @@ fn a_sprint_group_carries_its_health_and_scope_change() {
         }
         id
     };
-    let st = stats(&w.st, &vs(&OrgScope::All), Some(&filters("sprint"))).unwrap();
+    let st = stats(&w.st, &vs(&OrgScope::All), Some(&filters("sprint")), None).unwrap();
     let g = st
         .groups
         .iter()
@@ -167,6 +167,7 @@ fn another_orgs_client_counts_nothing_it_cannot_open() {
             sees_unassigned: false,
         }),
         Some(&filters("org")),
+        None,
     )
     .unwrap();
     assert_eq!(st.total, 0);
@@ -195,4 +196,68 @@ fn health_reads_time_gone_and_scope_change_from_dates() {
         health_of(&bucket(None, Some(200)), &[], 150).pct_time_elapsed,
         None
     );
+}
+
+/// A real task of the test world, as `burnup_of` reads it: only its item
+/// and its stage matter.
+fn task(item_id: Option<i64>, stage: &str) -> WorkTask {
+    let w = world();
+    let (tasks, _) = view::matching_tasks(&w.st, &vs(&OrgScope::All), &filters("group")).unwrap();
+    let mut t = tasks.into_iter().next().expect("the world has tasks");
+    t.item_id = item_id;
+    t.stage = stage.into();
+    t
+}
+
+#[test]
+fn a_burnup_counts_each_day_from_the_status_history() {
+    const D: i64 = 86_400;
+    let now = 100 * D + 3600; // an hour into day 100
+                              // Item 1 was there all along and finished on day 99; item 2 came on day
+                              // 99 and is still open; item 3 has no history (older than the log) and
+                              // is done now; item 4 arrives later today, after `now`.
+    let mut logs = std::collections::HashMap::new();
+    logs.insert(
+        1,
+        vec![
+            (90 * D, "todo".to_string()),
+            (99 * D + 10, "done".to_string()),
+        ],
+    );
+    logs.insert(2, vec![(99 * D + 5, "todo".to_string())]);
+    logs.insert(4, vec![(now + 60, "todo".to_string())]);
+    let tasks = [
+        task(Some(1), "done"),
+        task(Some(2), "backlog"),
+        task(Some(3), "done"),
+        task(Some(4), "backlog"),
+    ];
+    let b = burnup_of(&tasks, &logs, 3, now);
+    let got: Vec<(i64, u32, u32)> = b.iter().map(|d| (d.day / D, d.total, d.done)).collect();
+    assert_eq!(got, [(98, 2, 1), (99, 3, 2), (100, 3, 2)]);
+}
+
+#[test]
+fn stats_with_since_carry_a_burnup_from_the_real_log_and_refuse_a_long_one() {
+    let w = world();
+    let mut f = filters("group");
+    f.archived = Some(true);
+    let now = crate::store::now_unix();
+    let st = stats(&w.st, &vs(&OrgScope::All), Some(&f), Some(now - 6 * 86_400)).unwrap();
+    let b = st.burnup.expect("a burn-up with days");
+    assert_eq!(b.len(), 7);
+    // Every ticket was written today, so today counts all five, one done.
+    let today = b.last().unwrap();
+    assert_eq!((today.total, today.done), (st.total, st.stages.done));
+    assert!(b.windows(2).all(|p| p[1].day - p[0].day == 86_400));
+    // Without since there is none; a window past the cap is refused.
+    assert!(stats(&w.st, &vs(&OrgScope::All), Some(&f), None)
+        .unwrap()
+        .burnup
+        .is_none());
+    let long_ago = now - i64::from(BURNUP_MAX_DAYS) * 86_400;
+    let e = stats(&w.st, &vs(&OrgScope::All), Some(&f), Some(long_ago)).unwrap_err();
+    assert_eq!(e.code, crate::ipc_error::codes::E_INVALID);
+    assert_eq!(burnup_days(now, now), Some(1));
+    assert_eq!(burnup_days(now + 2 * 86_400, now), None);
 }

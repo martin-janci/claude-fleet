@@ -409,3 +409,180 @@ fn a_finished_mission_lists_its_live_sessions_and_its_prs_and_reopens() {
     assert_eq!(r.finished_at, None);
     assert_eq!(mission(&st, &me, m.id, None).unwrap().finish, None);
 }
+
+#[test]
+fn every_mission_lists_its_live_sessions_behind_their_fence() {
+    const HOST: &str = "sessions-test-host";
+    let st = store();
+    let (ana, bo) = people(&st);
+    let me = person(&st, None, ana);
+    let m = new_mission(&st, &me, None);
+    let (task, mine, theirs) = {
+        let s = lock(&st).unwrap();
+        let task = s.create_local_work_item(None, "ledger").unwrap().id;
+        let mine = live_session(&s, HOST, "pay-ledger", task);
+        let theirs = live_session(&s, HOST, "pay-audit", task);
+        for (owner, sid) in [(ana, mine), (bo, theirs)] {
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET owner_person_id = ?1 WHERE id = ?2",
+                    rusqlite::params![owner, sid],
+                )
+                .unwrap();
+        }
+        (task, mine, theirs)
+    };
+    // A draft with no member sessions: nothing, and absent from the JSON.
+    let draft = mission(&st, &me, m.id, None).unwrap();
+    assert!(draft.sessions.is_empty());
+    let json = serde_json::to_value(&draft).unwrap();
+    assert!(json.get("sessions").is_none(), "{json}");
+
+    let mut args = by_id("mission_item", m.id);
+    args.item_id = Some(task);
+    item(&args, &st, &me).unwrap();
+    let mut st_args = by_id("mission_state", m.id);
+    st_args.status = Some("active".into());
+    set_state(&st_args, &st, &me).unwrap();
+
+    // Running: its workers are listed though there is no finish block.
+    let all = mission(&st, &ViewScope::internal(), m.id, None).unwrap();
+    assert_eq!(all.finish, None);
+    assert_eq!(
+        all.sessions
+            .iter()
+            .map(|x| x.session_id)
+            .collect::<Vec<_>>(),
+        [mine, theirs]
+    );
+    assert_eq!(all.sessions[0].item_id, task);
+    assert_eq!(all.sessions[0].host_alias, HOST);
+    assert_eq!(all.sessions[0].tmux_name, "pay-ledger");
+    let json = serde_json::to_value(&all).unwrap();
+    assert_eq!(json["sessions"][1]["session_id"], theirs);
+    assert_eq!(json["sessions"][1]["item_id"], task);
+    assert_eq!(json["sessions"][1]["tmux_name"], "pay-audit");
+
+    // Ana sees her own session only.
+    let d = mission(&st, &me, m.id, None).unwrap();
+    assert_eq!(
+        d.sessions.iter().map(|x| x.session_id).collect::<Vec<_>>(),
+        [mine]
+    );
+
+    // A session that stops running leaves the list.
+    lock(&st)
+        .unwrap()
+        .conn_ref()
+        .execute(
+            "UPDATE sessions SET status = 'stopped' WHERE id = ?1",
+            [mine],
+        )
+        .unwrap();
+    assert!(mission(&st, &me, m.id, None).unwrap().sessions.is_empty());
+
+    // Finished: the same list as the finish block's.
+    st_args.status = Some("completed".into());
+    set_state(&st_args, &st, &me).unwrap();
+    let all = mission(&st, &ViewScope::internal(), m.id, None).unwrap();
+    assert_eq!(all.sessions, all.finish.unwrap().sessions);
+    assert_eq!(
+        all.sessions
+            .iter()
+            .map(|x| x.session_id)
+            .collect::<Vec<_>>(),
+        [theirs]
+    );
+}
+
+/// A per-host token standing in session `proven` on host `h`: the row
+/// carries the pane the token's header names, as a provisioned host's does.
+fn worker_scope(store: &Mutex<Store>, proven: i64) -> ViewScope {
+    let s = lock(store).unwrap();
+    let pane = format!("%{proven}");
+    s.conn_ref()
+        .execute(
+            "UPDATE sessions SET tmux_pane_id = ?1 WHERE id = ?2",
+            rusqlite::params![pane, proven],
+        )
+        .unwrap();
+    let scope = Caller {
+        api: None,
+        host_alias: Some("h".into()),
+        client: None,
+        mode: TokenMode::Full,
+        pane: Some(pane),
+        is_personal_owner: false,
+        is_fleet_admin: false,
+    }
+    .view_scope(&s)
+    .unwrap();
+    assert_eq!(scope.proven_session, Some(proven));
+    scope
+}
+
+/// A worker names no person, so the person rule never passes for it; the
+/// session a mission started must still read the plan it was started on.
+#[test]
+fn a_worker_reads_the_mission_it_has_an_open_run_on_and_nothing_more() {
+    let st = store();
+    let (ana, _) = people(&st);
+    let m = new_mission(&st, &person(&st, None, ana), None);
+    let root = m.root_item_id.unwrap();
+    let (worker, bystander) = {
+        let s = lock(&st).unwrap();
+        s.upsert_host("h").unwrap();
+        (
+            s.upsert_session("dev-o-r--w", "h", None, None, 1, 1, "running", None)
+                .unwrap(),
+            s.upsert_session("dev-o-r--x", "h", None, None, 2, 2, "running", None)
+                .unwrap(),
+        )
+    };
+    let me = worker_scope(&st, worker);
+
+    // Before its run: the unknown id, and an empty list.
+    assert_eq!(
+        mission(&st, &me, m.id, None).unwrap_err().code,
+        codes::E_NOTFOUND
+    );
+    assert!(missions(&st, &me).unwrap().is_empty());
+
+    let task =
+        super::super::run::record_run(&lock(&st).unwrap(), worker, "do it", root, 1, "implement")
+            .unwrap();
+
+    let d = mission(&st, &me, m.id, None).unwrap();
+    assert_eq!(d.mission.id, m.id);
+    assert!(!d.may_change, "a worker reads, it does not run the mission");
+    assert_eq!(missions(&st, &me).unwrap().len(), 1);
+    // Reading is all it got.
+    assert_eq!(
+        set_state(
+            &WorkLinkArgs {
+                status: Some("active".into()),
+                ..by_id("mission_state", m.id)
+            },
+            &st,
+            &me
+        )
+        .unwrap_err()
+        .code,
+        codes::E_FORBIDDEN
+    );
+
+    // Another session on the same host proves another pane: nothing.
+    let other = worker_scope(&st, bystander);
+    assert_eq!(
+        mission(&st, &other, m.id, None).unwrap_err().code,
+        codes::E_NOTFOUND
+    );
+    assert!(missions(&st, &other).unwrap().is_empty());
+
+    // Once the run ended, so did the read.
+    crate::service::tasks::fail_task(&lock(&st).unwrap(), task.id, "boom").unwrap();
+    assert_eq!(
+        mission(&st, &me, m.id, None).unwrap_err().code,
+        codes::E_NOTFOUND
+    );
+}

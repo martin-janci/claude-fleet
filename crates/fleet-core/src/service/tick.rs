@@ -340,6 +340,10 @@ pub fn spawn_reconcile_tick(
                 // registered with git (removed without ExitWorktree). One
                 // read-only probe per reachable host; detached and rate-limited.
                 service::worktree_prune::maybe_run(store, ssh);
+                // Opt-in (`accounts.auto_switch`): resume a session whose
+                // account ran out under the login with the most headroom.
+                // Detached and rate-limited.
+                service::account_switch::maybe_run(store, ssh);
             }
         })
         .await;

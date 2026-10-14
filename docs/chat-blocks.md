@@ -12,14 +12,15 @@ it are drawn as cards instead:
 - **A `fleet.ui/1` block.** A fenced ```` ```fleet-ui ```` block (or a
   ```` ```json ```` block whose object has `"spec": "fleet.ui/1"`) holding one
   block: a tutorial, a guide, a callout, facts, choices, a form, a report,
-  a job's progress, results, an error, a settings change, a wizard or a
-  dashboard.
+  a job's progress, results, an error, a settings change, a wizard, a
+  dashboard or a debug device.
 
 A card is a view of the reply. Nothing is stored and nothing is sent from
 one, with two exceptions: a `setting` card applies a settings change an
 agent proposed, after the person confirms it, and a `wizard` card runs one of
 the app's wizards when the person presses its last button, and a
-`dashboard` card pins a dashboard on a click. A card that acts (choices, a form, a follow-up) only fills the
+`dashboard` card pins a dashboard on a click, and a `device` card takes a
+screenshot or opens a mirror of a debug device on a click. A card that acts (choices, a form, a follow-up) only fills the
 session's composer, and the person presses Enter. It acts only when the
 composer is on screen for the conversation shown. An earlier conversation
 or a row with no REPL draws the card with its actions turned off.
@@ -47,6 +48,7 @@ it closes.
 | apply a settings change you proposed | `setting` |
 | run one of the app's wizards (add a project, a host, a session, …) | `wizard` |
 | keep a view of work to come back to (a sprint, a release, an epic) | `dashboard` |
+| look at a debug device you are testing on (its state, its screen) | `device` |
 
 A block's form is not `ask`: you do not wait for it, and its answers arrive
 as the person's next prompt. Use it when the answers can wait for the next
@@ -317,6 +319,12 @@ Each widget has a `kind`, a `title` (≤ 80) and a `query`:
   done against time gone, the dates, the goal and the scope change since
   the start. `states` keeps only `planned`, `active`, `closed` or
   `released` ones.
+- `{ "kind": "burnup", "title", "query"?, "days"? }`: the query's tasks
+  and how many were done, day by day over the last `days` days (2–90,
+  default 14), as two lines on one axis (scope dashed, done solid), from
+  the tasks' status history (`work { stats, since }`). History starts the
+  day the hub began keeping it; a task older than that counts for the whole
+  window in its stage now.
 
 A `query` is the Work view's filters (`work { tree }`'s `filters`): `org`
 (an id or `none`), `status` (`any`, `open`, `todo`, `in_progress`, `done`),
@@ -336,7 +344,7 @@ page re-reads when work changes.
 pin }` over the control API, `docs/control-api.md`), so every device of
 theirs shows it in the Dashboards page's picker; a standalone desktop, or a
 hub that does not serve `dashboards` yet, keeps it in the desktop's own
-store. A block whose `id` is a pinned dashboard's is offered as its
+store. Another open device of the person's updates at once (`dashboards:changed`). A block whose `id` is a pinned dashboard's is offered as its
 replacement and says what it changes (`adds “Spent”, removes “By person”`);
 one the same as the pinned one says *Pinned*. A block may not take a
 built-in's id (`dash.developer`, `dash.tester`, `dash.pm`, `dash.scrum`,
@@ -356,6 +364,28 @@ built-in goes as a copy with the id `<its id>.mine`.
     { "kind": "stat", "title": "Open", "query": { "status": "open", "epic": "PAY-12" }, "value": "open" },
     { "kind": "groups", "title": "By person", "query": { "group_by": "person", "epic": "PAY-12" }, "show": "stages" },
     { "kind": "buckets", "title": "Release", "query": { "group_by": "release" }, "states": ["planned"] } ] }
+```
+
+### `device`: a debug device
+
+| Key | Required | Meaning |
+|---|---|---|
+| `device` | yes | ≤ 200 chars: an id (`#12`), label, name, serial or key, optionally `host/that`, as `debug_devices` takes it |
+| `title` | no | ≤ 120 chars; the device's own title when absent |
+| `note` | no | Markdown, ≤ 2000: what to look at on it |
+
+The card reads the device from the person's own device list (not from the
+block), so it shows what is true when it is drawn: its host, its state (and
+what a device that is not ready needs), who holds it and for how long, and
+who waits in its line. *Screenshot* shows the screen as it is now, under
+the card, with *Refresh*; *Mirror* opens a scrcpy window of an Android
+device (`docs/debug-devices.md`, *Mirror*), which claims it while it runs.
+A reference that names no device, or several, says so. The block never
+claims or releases anything.
+
+```json
+{ "spec": "fleet.ui/1", "kind": "device", "device": "mac-mini/bench pixel",
+  "title": "The login screen", "note": "Check the **Sign in** button is enabled." }
 ```
 
 ## Checking a block

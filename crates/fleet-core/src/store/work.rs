@@ -248,7 +248,7 @@ pub struct WorkItemRow {
     /// `points | hours`; set exactly when `estimate` is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimate_unit: Option<String>,
-    /// The task whose result this follow-up was made from (migration 185);
+    /// The task whose result this follow-up was made from (migration 189);
     /// `None` for every item not made from a result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_task_id: Option<i64>,

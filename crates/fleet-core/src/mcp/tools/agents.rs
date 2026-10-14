@@ -9,12 +9,17 @@ use crate::service::agents::admin::{self, AgentsArgs};
 
 #[tool_router(router = agents_router, vis = "pub(super)")]
 impl FleetTools {
-    #[tool(description = "The built-in agents (PR reviewer, support): status \
-        {agent?, limit?} (rules, newest jobs, actions waiting for a person), \
-        grant {agent: review | support, scope: gh:<owner>/<repo> | \
-        jira:<tracker id>:<PROJECT>, host, level: watch | propose | act, \
-        project_id?, config?, hours?}, revoke {id}, pause_all, approve {id}, \
-        reject {id}. The owner's own device; writes need a trusted full device.")]
+    #[tool(description = "The agents (PR reviewer, support, fleet agents from \
+        the catalog): status {agent?, limit?} (rules, newest jobs, actions \
+        waiting for a person), explain (per rule: polls or why not, next poll, \
+        last poll error, jobs by state, the next and the last failed job), job \
+        {id} (one job whole, its proposed actions included), grant {agent: \
+        review | support | fleet, scope: gh:<owner>/<repo> | jira:<tracker \
+        id>:<PROJECT> | <instance name>, host, level: watch | propose | act, \
+        project_id?, config?, hours?, definition? (fleet), bindings? (fleet: \
+        one per store role; each MCP binding is asked for its tools on the \
+        host first)}, revoke {id}, pause_all, approve {id}, reject {id}. The \
+        owner's own device; writes need a trusted full device.")]
     pub(super) async fn agents(
         &self,
         Extension(caller): Extension<Caller>,
@@ -39,6 +44,13 @@ impl FleetTools {
             .as_ref()
             .map_or_else(|| "device".to_string(), |c| format!("device:{}", c.name));
         let now = crate::store::now_unix();
+        if args.action == "grant" && args.agent.as_deref() == Some("fleet") {
+            let done =
+                crate::service::fleet_agents::grant::grant(&self.store, &self.ssh, &args, &by, now)
+                    .await
+                    .map_err(to_mcp_err)?;
+            return ok_json_compact(&done);
+        }
         ok_json_compact(&admin::call(&self.store, &args, &by, now).map_err(to_mcp_err)?)
     }
 }

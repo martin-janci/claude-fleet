@@ -99,7 +99,7 @@ pub struct WorkArgs {
     /// Lookup: a ticket URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// Today: unix start.
+    /// Today, stats burn-up: unix start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<i64>,
     /// item:<id> or ref:<KEY>; reject: item:<id> merges into it.

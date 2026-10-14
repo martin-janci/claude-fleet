@@ -301,8 +301,9 @@ impl FleetTools {
 
     #[tool(description = "One tool call's input and result (omitted by \
         session_conversation): { id, name, input, edit {file_path, old, new} \
-        | null, command | null, result | null, is_error }; texts capped at \
-        8000 chars. Read-only. Errors: as session_conversation, E_NOTFOUND.")]
+        | null, command | null, result | null, is_error, images? [{mime, \
+        data}], images_omitted? }; texts capped at 8000 chars, images (a \
+        screenshot) at 2 of 4 MiB base64. Read-only. Errors: as session_conversation, E_NOTFOUND.")]
     pub(super) async fn session_tool_detail(
         &self,
         Extension(caller): Extension<Caller>,
@@ -1272,8 +1273,13 @@ impl FleetTools {
             }
             // Persona dashboards: the tree's own filtering, counted.
             WorkAction::Stats => ok_json_compact(
-                &w::stats::stats(self.reader(), &view_scope, args.filters.as_ref())
-                    .map_err(to_mcp_err)?,
+                &w::stats::stats(
+                    self.reader(),
+                    &view_scope,
+                    args.filters.as_ref(),
+                    args.since,
+                )
+                .map_err(to_mcp_err)?,
             ),
             // Missions (orchestration O1): a mission is a PERSON's, so the
             // whole `view_scope` — its owner, its org's members, the org
@@ -1719,9 +1725,21 @@ impl FleetTools {
         // An edge of the graph, or a hold (orchestration O2): a person's plan,
         // so never a per-host or peer token (`mission_caller`); the item's
         // own sessions pass the drive gate, as for `set_status`.
+        //
+        // One exception for `dep`: an agent declares what its OWN task
+        // waits on (`set_status`'s rule: its session is on the task through
+        // a confirmed, live link). A task in a mission is still its owner's
+        // to change (`require_mission_change`, inside), and `hold` stays a
+        // person's.
         if args.action == "dep" {
-            mission_caller(&caller)?;
-            self.require_drive_on_item_sessions(&caller, graph_item(&args)?)?;
+            let own = match args.item_id {
+                Some(item_id) => self.own_session_works_on(&caller, item_id)?,
+                None => false,
+            };
+            if !own {
+                mission_caller(&caller)?;
+                self.require_drive_on_item_sessions(&caller, graph_item(&args)?)?;
+            }
             let view_scope = self.view_scope(&caller)?;
             return ok_json(
                 &crate::service::work::graph::dep(&args, &self.store, &view_scope)
