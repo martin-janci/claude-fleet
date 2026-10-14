@@ -30,7 +30,21 @@ is removed. Watch, TV and Vision simulators are not listed.
 
 ## The Debug devices page
 
-The desktop's **Debug devices** page lists every device, newest scan first.
+Settings › Organisations › **Debug devices** opens with the **device
+board**: every device as a card, grouped by host, with its state (and what
+a device that is not ready needs), who holds it and for how long, and who
+waits in its line (your own place too). Filter by state or platform and
+search by name, host or model; the board reloads every 30 seconds while it
+is on screen, and **Rescan all** scans every host now. On a card:
+**Screenshot** (a thumbnail; click it for the full size), **Claim** or
+**Wait in line** (with an optional note), **Leave line**, **Release**,
+**Mirror** / **Stop mirror**, **Logs**, and **Start** / **Stop** for an
+emulator or simulator. On a paired desktop your own claims are held under
+your device's name, which the board cannot tell from another person's, so
+it offers them as anyone's (Release asks first).
+
+Under the board, the generated **Debug devices** page lists every device,
+newest scan first, and edits it.
 Opening it rescans any host whose last scan is more than five minutes old in
 the background; **Rescan host** on a device scans its host now. On a device
 you can:
@@ -177,6 +191,27 @@ token installs from its own host only; up to 2 GiB packed. A host reached
 through `fleet-agent` cannot receive a copy (the agent does not pipe stdin
 yet), so build on the device's host or install from it.
 
+## In the chat
+
+A session's work with devices shows in its Conversation view, desktop and
+phone:
+
+- **Each `debug_devices` call** is a row naming what it did
+  (`screenshot · bench pixel`, `wait in line · #3`). Expanded, it shows the
+  device as the call left it (state, holder, line), a list as a list, a
+  command's output as output, and the screenshot it took as an image
+  (`session_tool_detail` answers a result's images: at most 2, of 4 MiB
+  base64 each; any tool's images show the same way).
+- **The device strip**, under the conversation's header, lists the devices
+  the session holds (state, time left, its note) and those it waits for
+  (its place, who holds them), with **Screenshot**, **Mirror** and
+  **Release…** on a held one. It reloads every 30 seconds and shows nothing
+  when the session holds and waits for nothing.
+- **A `device` card** an agent writes in its reply
+  (`{"spec": "fleet.ui/1", "kind": "device", "device": "bench pixel"}`,
+  `docs/chat-blocks.md`) draws that device live from your own list, with
+  **Screenshot** and **Mirror**.
+
 ## Who may use what
 
 - **A person** (the desktop, the master token, a paired phone or desktop)
@@ -190,7 +225,9 @@ yet), so build on the device's host or install from it.
   from its own host only, and cannot share a device to itself.
 - **Claims** are advisory leases: while one holds (30 minutes by default, up
   to a day), every other caller gets `E_CONFLICT` naming the holder and its
-  note. Each use by the holder extends it. A session that proves its tmux
+  note. A person may still read a held device, `screenshot` and `logs`,
+  without touching the claim, so the chat can show what a session tests on;
+  another session may not. Each use by the holder extends it. A session that proves its tmux
   pane holds the claim as itself (`host:<alias>#<session>`), so two sessions
   on one host do not share a claim. Only the holder or a person releases
   one.
@@ -250,7 +287,7 @@ confirmation says.
   Until then those answer `E_NO_ROUTE`.
 - Input beyond scrcpy's window: taps and typing from a session stay
   `adb shell input` and `simctl io`.
-- The phone app (fleet-mobile) shows no device page yet; it reads the same
-  `debug_devices` tool.
+- The phone app (fleet-mobile) has its own device sheet and the same chat
+  cards, over the same `debug_devices` tool; it does not mirror.
 - No push when a turn comes: a waiting session reads the device again to
   find it holds the claim.

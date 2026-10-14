@@ -157,6 +157,11 @@ pub enum RowChange {
     /// `control_handoffs` (Access::PersonDevice), so what was sent never
     /// rides a stream. Kind `handoff`, host-bound hidden.
     HandoffChanged,
+    /// A person pinned, replaced or unpinned a dashboard (persona design
+    /// step 7). Carries nothing: that person's devices re-read `dashboards`
+    /// (Access::Client, the caller's own rows), so no dashboard rides a
+    /// stream. Kind `dashboards`, host-bound hidden.
+    DashboardsChanged,
 }
 
 /// The payload of `update:changed`.
@@ -571,6 +576,7 @@ impl RowChange {
             RowChange::LocalWorkspaceChanged(_) => "local_workspace:changed",
             RowChange::ConfirmChanged => "confirm:changed",
             RowChange::HandoffChanged => "handoff:changed",
+            RowChange::DashboardsChanged => "dashboards:changed",
         }
     }
 
@@ -632,7 +638,9 @@ impl RowChange {
             RowChange::UpdateDecision(u) => to_value(u),
             RowChange::DownloadChanged(id) => serde_json::json!({ "id": id }),
             RowChange::LocalWorkspaceChanged(id) => serde_json::json!({ "id": id }),
-            RowChange::ConfirmChanged | RowChange::HandoffChanged => serde_json::json!({}),
+            RowChange::ConfirmChanged
+            | RowChange::HandoffChanged
+            | RowChange::DashboardsChanged => serde_json::json!({}),
         }
     }
 }
@@ -731,6 +739,10 @@ pub trait EventBus: Send + Sync {
     /// See [`RowChange::HandoffChanged`].
     fn handoff_changed(&self) {
         self.emit(&RowChange::HandoffChanged);
+    }
+    /// See [`RowChange::DashboardsChanged`].
+    fn dashboards_changed(&self) {
+        self.emit(&RowChange::DashboardsChanged);
     }
 
     /// Flush a single deferred `RowChange`. Used by batched (transactional)
@@ -940,7 +952,7 @@ impl AttentionInputs {
 /// at COMPILE time: the match there is exhaustive, so a new variant does not
 /// build until it has an arm, and the arm's literal is const-checked against
 /// this list and [`EVENT_KINDS`].
-pub const EVENT_NAMES: [&str; 34] = [
+pub const EVENT_NAMES: [&str; 35] = [
     "session:created",
     "session:updated",
     "session:killed",
@@ -975,12 +987,13 @@ pub const EVENT_NAMES: [&str; 34] = [
     "local_workspace:changed",
     "confirm:changed",
     "handoff:changed",
+    "dashboards:changed",
 ];
 
 /// Every event kind — the part of a [`RowChange::name`] before the `:`, which
 /// is what the `/events` route's `?kinds=` filter matches on.
 /// `event_kinds_cover_every_name` keeps it in step with the variants.
-pub const EVENT_KINDS: [&str; 21] = [
+pub const EVENT_KINDS: [&str; 22] = [
     "session",
     "host",
     "account",
@@ -1002,6 +1015,7 @@ pub const EVENT_KINDS: [&str; 21] = [
     "local_workspace",
     "confirm",
     "handoff",
+    "dashboards",
 ];
 
 /// Seconds since the Unix epoch (0 on a clock set before 1970).
@@ -1358,7 +1372,9 @@ impl EventBus for RecordingEventBus {
             }
             RowChange::UpdateDecision(u) => format!("{}:{}", u.target, u.status),
             RowChange::DownloadChanged(id) | RowChange::LocalWorkspaceChanged(id) => id.to_string(),
-            RowChange::ConfirmChanged | RowChange::HandoffChanged => String::new(),
+            RowChange::ConfirmChanged
+            | RowChange::HandoffChanged
+            | RowChange::DashboardsChanged => String::new(),
         };
         self.names.lock().unwrap().push(e.name());
         self.events
@@ -1567,6 +1583,7 @@ mod tests {
                 RowChange::LocalWorkspaceChanged(_) => pinned_name!("local_workspace:changed"),
                 RowChange::ConfirmChanged => pinned_name!("confirm:changed"),
                 RowChange::HandoffChanged => pinned_name!("handoff:changed"),
+                RowChange::DashboardsChanged => pinned_name!("dashboards:changed"),
             }
         }
         // And for every variant a test can build without a full store row,

@@ -21,7 +21,7 @@
     changePrompt,
     pinnedDashboards,
     shownDashboard,
-    loadPinned,
+    followPinned,
     unpinDashboard,
     type Dashboard,
     type PinnedDashboard,
@@ -48,9 +48,9 @@
     void askAgent(changePrompt(dash, widget));
   }
 
-  // Pinned on another device since this window last read them: re-read on
-  // every visit.
-  onMount(() => void loadPinned());
+  // Pinned on another device: read on every visit, and again whenever the
+  // hub says the person's pins moved (`dashboards:changed`).
+  onMount(() => followPinned());
 
   async function unpin() {
     if (!pinned) return;

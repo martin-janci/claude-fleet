@@ -632,9 +632,30 @@ fn usable(
     reference: &str,
     any_state: bool,
 ) -> Result<DebugDevice, IpcError> {
+    usable_as(store, asker, reference, any_state, false)
+}
+
+/// [`usable`] for a read that changes nothing on the device (a screenshot,
+/// its logs): a person may look at a device another holds, so the device
+/// strip and the chat's cards can show what a session is testing on; the
+/// claim is neither checked nor extended. A host's session still needs the
+/// claim, as for any use.
+fn readable(store: &Mutex<Store>, asker: &Asker, reference: &str) -> Result<DebugDevice, IpcError> {
+    usable_as(store, asker, reference, false, !asker.is_host())
+}
+
+fn usable_as(
+    store: &Mutex<Store>,
+    asker: &Asker,
+    reference: &str,
+    any_state: bool,
+    skip_claim: bool,
+) -> Result<DebugDevice, IpcError> {
     let s = lock(store)?;
     let d = resolve(&s, asker, reference)?;
-    check_claim(&s, asker, &d)?;
+    if !skip_claim {
+        check_claim(&s, asker, &d)?;
+    }
     if !any_state && !d.ready {
         return Err(IpcError::new(
             codes::E_INVALID_STATE,
@@ -857,7 +878,7 @@ pub async fn logs(
     filter: Option<&str>,
     contains: Option<&str>,
 ) -> Result<RunOutput, IpcError> {
-    let d = usable(store, asker, reference, false)?;
+    let d = readable(store, asker, reference)?;
     let target = target_of(&d)?;
     let script = scripts::logs_script(
         &target,
@@ -877,7 +898,7 @@ pub async fn screenshot(
     asker: &Asker,
     reference: &str,
 ) -> Result<(DebugDevice, Vec<u8>, &'static str), IpcError> {
-    let d = usable(store, asker, reference, false)?;
+    let d = readable(store, asker, reference)?;
     let target = target_of(&d)?;
     let out = run_on(
         ssh,

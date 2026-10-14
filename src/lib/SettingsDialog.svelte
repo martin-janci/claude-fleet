@@ -39,6 +39,7 @@
   import type { Values } from './forms/forms';
   import McpSettings from './McpSettings.svelte';
   import TicketKeys from './TicketKeys.svelte';
+  import DebugDevicesBoard from './DebugDevicesBoard.svelte';
   import AppearanceSettings from './AppearanceSettings.svelte';
   import UpdateCheck from './UpdateCheck.svelte';
   import { loadHostTokens } from './host_actions';
@@ -979,6 +980,13 @@
     {#if panel === 'ticket-keys'}
       <div class="panel" data-testid="settings-panel-ticket-keys">
         <TicketKeys />
+      </div>
+    {/if}
+
+    <!-- Mounted only while open: its 30 s refresh stops when another leaf is. -->
+    {#if panel === 'debug-devices'}
+      <div class="panel" data-testid="settings-panel-debug-devices">
+        <DebugDevicesBoard />
       </div>
     {/if}
 
