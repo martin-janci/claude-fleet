@@ -171,11 +171,15 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// The production agents: the PR reviewer. The support agent lands in
-    /// step 6 of the design.
+    /// The production agents: the PR reviewer, the support agent and the
+    /// generic runner of the catalog's fleet agents.
     pub fn live(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> Self {
         Registry {
-            agents: vec![review::agent(store, ssh), support::agent(store, ssh)],
+            agents: vec![
+                review::agent(store, ssh),
+                support::agent(store, ssh),
+                crate::service::fleet_agents::runner::agent(store, ssh),
+            ],
         }
     }
 

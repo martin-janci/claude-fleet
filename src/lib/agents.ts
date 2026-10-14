@@ -8,6 +8,8 @@
 // `fleet_core::service::agents::admin` and `fleet_core::store::Agent*Row`.
 import { derived, writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
+import type { FormSpec, Values } from './forms/forms';
+import type { Wizard } from './forms/wizards';
 import type { LoopHealth } from './ipc';
 
 /** `fleet`: an instance of a catalog fleet agent (configurable agents,
@@ -61,7 +63,8 @@ export interface AgentJob {
 export interface AgentAction {
   id: number;
   job_id: number;
-  /** `post_review`, `pr_labels`, `pr_description`, `debate_reply`, `jira_comment`, `jira_create_bug`, `jira_link`, `kb_learn`. */
+  /** `post_review`, `pr_labels`, `pr_description`, `debate_reply`, `jira_comment`, `jira_create_bug`, `jira_link`, `kb_learn`;
+   *  a fleet agent's `tracker_comment`, `tracker_issue`, `tracker_link`, `record`, `mcp_call`. */
   kind: string;
   /** Exactly what will be sent, JSON text. */
   payload: string;
@@ -228,6 +231,16 @@ export function actionTitle(a: Pick<AgentAction, 'kind' | 'payload'>): string {
       : `File a bug in ${p.project} for a logged error: ${p.summary}`;
   if (a.kind === 'jira_link' && p) return `Link ${p.bug_key} to ${p.source_key} (${String(p.link_type ?? '').toLowerCase()})`;
   if (a.kind === 'kb_learn' && p) return `Teach the support KB: ${p.path}`;
+  // A fleet agent's (configurable agents, step 4).
+  if (a.kind === 'tracker_comment' && p) return `Comment on ${p.key}`;
+  if (a.kind === 'tracker_issue' && p) {
+    const to = (p.link as { to?: string } | null | undefined)?.to;
+    return `File a ${String(p.issue_type ?? 'Task').toLowerCase()} in ${p.project}${to ? ` for ${to}` : ''}: ${p.summary}`;
+  }
+  if (a.kind === 'tracker_link' && p) return `Link ${p.from} to ${p.to} (${String(p.link_type ?? '').toLowerCase()})`;
+  if (a.kind === 'record' && p) return `Remember ${p.key} in ${p.store}`;
+  if (a.kind === 'mcp_call' && p) return `Call ${p.binding}.${p.tool}`;
+  if (a.kind === 'pr_comment' && p) return `Comment on ${p.repo}#${p.number}`;
   return a.kind.replace(/_/g, ' ');
 }
 
@@ -268,4 +281,62 @@ export function agentState(kind: AgentKind, status: AgentsStatus | null): string
   if (working > 0) parts.push(`${working} working`);
   if (kind === 'review' && pending > 0) parts.push(`${pending} waiting for you`);
   return parts.join(' · ');
+}
+
+// ---- fleet agents (configurable agents, step 5; the `agents_fleet` command) --
+
+/** A fleet agent of the catalog (`fleet_agents::form::DefinitionView`). */
+export interface FleetDefinition {
+  name: string;
+  description: string;
+  /** Its trigger's source; null when it does not load. */
+  trigger: string | null;
+  /** What is wrong with it; empty when it can be granted. */
+  problems: string[];
+  /** What it may write, in words. */
+  writes: string;
+}
+
+function fleetCmd<T>(action: string, a: { definition?: string; id?: number; answers?: Values } = {}): Promise<Result<T>> {
+  return invokeCmd<T>('agents_fleet', {
+    action,
+    definition: a.definition ?? null,
+    id: a.id ?? null,
+    answers: a.answers ?? null,
+  });
+}
+
+export function fleetDefinitions(): Promise<Result<FleetDefinition[]>> {
+  return fleetCmd<FleetDefinition[]>('definitions');
+}
+
+/** A definition's grant form; `id` prefills it from that instance (Edit). */
+export function fleetForm(definition: string, id?: number): Promise<Result<FormSpec>> {
+  return fleetCmd<FormSpec>('form', { definition, id });
+}
+
+/** Start (or, same instance name, change) an instance from the form's answers. */
+export function grantFleet(definition: string, answers: Values): Promise<Result<{ changed: number; id?: number }>> {
+  return fleetCmd('grant', { definition, answers });
+}
+
+export function revokeAgentRule(id: number): Promise<Result<{ changed: number }>> {
+  return fleetCmd('revoke', { id });
+}
+
+/** Run a manual (or scheduled) fleet agent now. */
+export function runFleetAgent(id: number): Promise<Result<{ job: string }>> {
+  return fleetCmd('run', { id });
+}
+
+/** A grant form as the dialog's wizard. */
+export function fleetWizard(spec: FormSpec): Wizard {
+  return { id: 'fleet_agent', spec, sending: 'Checking its stores…', loader: 'sonar' };
+}
+
+/** A rule's agent in words: the built-in one's name, or a fleet agent's definition. */
+export function ruleAgentName(r: Pick<AgentRule, 'agent' | 'definition'>): string {
+  if (r.agent === 'review') return 'PR reviewer';
+  if (r.agent === 'support') return 'Support';
+  return r.definition ?? r.agent;
 }

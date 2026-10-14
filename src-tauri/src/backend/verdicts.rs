@@ -1166,6 +1166,9 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("agents_decide", Verdict::Routed { tool: "agents" }),
     // Debugging the agents: explain and job, both reads of the same tool.
     ("agents_debug", Verdict::Routed { tool: "agents" }),
+    // Configurable agents step 5: the catalog's fleet agents, their grant
+    // form and an instance's grant, revoke and manual run.
+    ("agents_fleet", Verdict::Routed { tool: "agents" }),
     // Orbit Fleet 8.6: the Automation screen's Routines and the Inbox's failed runs.
     ("routines", Verdict::Routed { tool: "routines" }),
     // ── tasks ───────────────────────────────────────────────────────────────

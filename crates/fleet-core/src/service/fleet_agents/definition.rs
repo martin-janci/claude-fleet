@@ -854,6 +854,12 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
     if d.inputs.len() > MAX_INPUTS {
         out.push(format!("inputs: at most {MAX_INPUTS}"));
     }
+    for i in d.inputs.iter().filter(|i| i.name.starts_with("f_")) {
+        out.push(format!(
+            "inputs › {}: f_ names are the grant form's own",
+            i.name
+        ));
+    }
     for i in d.inputs.iter().filter(|i| i.kind.is_reference()) {
         if i.options.is_some() || i.max_len.is_some() || i.placeholder.is_some() {
             out.push(format!(
@@ -875,8 +881,9 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
     let mut roles: Vec<&str> = Vec::new();
     for s in &d.stores {
         let at = format!("stores › {}", s.role);
-        if !name_ok(&s.role, 40) {
-            out.push(format!("{at}: a role is [a-z][a-z0-9_]*, at most 40"));
+        // ≤ 30: the grant form names its fields `f_store_<role>`.
+        if !name_ok(&s.role, 30) {
+            out.push(format!("{at}: a role is [a-z][a-z0-9_]*, at most 30"));
         }
         if roles.contains(&s.role.as_str()) {
             out.push(format!("{at}: the role appears twice"));

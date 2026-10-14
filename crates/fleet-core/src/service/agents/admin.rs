@@ -23,11 +23,12 @@ const STATUS_DEFAULT_LIMIT: u32 = 20;
 pub const MAX_RULE_HOURS: i64 = 24 * 90;
 
 /// `agents { action, agent?, scope?, level?, host?, project_id?, config?,
-/// hours?, definition?, bindings?, id?, limit? }`.
+/// hours?, definition?, bindings?, answers?, id?, request?, limit? }`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "AgentsParams")]
 pub struct AgentsArgs {
-    /// status | explain | job | grant | revoke | pause_all | approve | reject.
+    /// status | explain | job | definitions | form | grant | revoke | pause_all |
+    /// approve | reject | run.
     pub action: String,
     /// grant: review | support | fleet; status: only this agent's jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -60,7 +61,14 @@ pub struct AgentsArgs {
     /// to secret names, `${NAME}`) or {role, namespace: rule | shared:<name>}.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bindings: Option<serde_json::Value>,
-    /// revoke: a rule's id; approve, reject: an action's id; job: a job's id.
+    /// grant (fleet): the grant form's answers (`form`), in place of scope,
+    /// host, level, project_id, config, hours and bindings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answers: Option<serde_json::Value>,
+    /// run: a person's request to a manual fleet agent (≤ 4000 chars).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<String>,
+    /// revoke, run: a rule's id; approve, reject: an action's id; job: a job's id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<i64>,
     /// status: jobs and actions, ≤ 200 (default 20).
@@ -71,7 +79,10 @@ pub struct AgentsArgs {
 impl AgentsArgs {
     /// Whether the action only reads.
     pub fn is_read(&self) -> bool {
-        matches!(self.action.as_str(), "status" | "explain" | "job")
+        matches!(
+            self.action.as_str(),
+            "status" | "explain" | "job" | "definitions" | "form"
+        )
     }
 }
 
@@ -361,6 +372,61 @@ pub fn decide(
     Ok(row)
 }
 
+/// Queue a job for a fleet rule whose trigger is `manual` (or `schedule`:
+/// run it now), with the person's request.
+pub fn run_now(
+    store: &Mutex<Store>,
+    args: &AgentsArgs,
+    now: i64,
+) -> Result<serde_json::Value, IpcError> {
+    let id = args.id.ok_or_else(|| invalid("run needs id"))?;
+    let rule = lock(store)?
+        .agent_rule(id)
+        .map_err(db)?
+        .filter(|r| r.active_at(now))
+        .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("no active rule {id}")))?;
+    let Some(def) = rule.definition.as_deref() else {
+        return Err(invalid(format!("rule {id} is a built-in agent's")));
+    };
+    let binds = crate::service::fleet_agents::bindings::parse(&rule.bindings).map_err(invalid)?;
+    let sources = crate::service::fleet_agents::grant::Sources::from_catalog(def, &binds)?;
+    let job = crate::service::fleet_agents::runner::queue_manual(
+        store,
+        &rule,
+        sources.definition.definition.trigger.source,
+        args.request.as_deref(),
+        now,
+    )?;
+    Ok(serde_json::json!({ "changed": 1, "id": id, "job": job }))
+}
+
+/// A fleet agent's grant form: `definition`'s, prefilled from rule `id`
+/// when given (Edit).
+pub fn fleet_form(
+    store: &Mutex<Store>,
+    args: &AgentsArgs,
+) -> Result<crate::pages::forms::FormSpec, IpcError> {
+    use crate::service::fleet_agents::{form, grant::Sources};
+    let rule = match args.id {
+        Some(id) => Some(
+            lock(store)?
+                .agent_rule(id)
+                .map_err(db)?
+                .filter(|r| r.agent == "fleet")
+                .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("no fleet rule {id}")))?,
+        ),
+        None => None,
+    };
+    let def = args
+        .definition
+        .as_deref()
+        .or(rule.as_ref().and_then(|r| r.definition.as_deref()))
+        .ok_or_else(|| invalid("form needs definition (or a fleet rule's id)"))?;
+    let sources = Sources::from_catalog(def, &[])?;
+    let ctx = form::FormContext::read(store)?;
+    Ok(form::grant_form(&sources.definition, &ctx, rule.as_ref()))
+}
+
 /// Dispatch one call. The caller has already checked the device may write.
 pub fn call(
     store: &Mutex<Store>,
@@ -383,9 +449,14 @@ pub fn call(
         "pause_all" => to_json(serde_json::to_value(pause_all(store)?)),
         "approve" => to_json(serde_json::to_value(decide(store, args, true, by, now)?)),
         "reject" => to_json(serde_json::to_value(decide(store, args, false, by, now)?)),
+        "run" => run_now(store, args, now),
+        "definitions" => to_json(serde_json::to_value(
+            crate::service::fleet_agents::form::definitions()?,
+        )),
+        "form" => to_json(serde_json::to_value(fleet_form(store, args)?)),
         other => Err(invalid(format!(
             "unknown agents action {other:?}: status | explain | job | grant | revoke | pause_all | \
-             approve | reject"
+             approve | reject | run | definitions | form"
         ))),
     }
 }

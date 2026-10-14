@@ -65,6 +65,14 @@ pub enum AgentsCmd {
     Approve { id: i64 },
     /// Reject an action an agent proposed, by its id.
     Reject { id: i64 },
+    /// Run a fleet agent whose trigger is manual (or scheduled: now), by
+    /// its rule's id.
+    Run {
+        id: i64,
+        /// What the person asks of it; the run reads it as its subject.
+        #[arg(long)]
+        request: Option<String>,
+    },
     /// Per rule: whether it polls and why not, its next poll and its jobs
     /// by state. Its last poll error lives in the running hub's process:
     /// ask the hub (`agents { action: explain }`) to see it.
@@ -142,6 +150,10 @@ pub async fn run(
             ));
             return Ok(ExitCode::SUCCESS);
         }
+    }
+    if matches!(cmd, AgentsCmd::Run { .. }) {
+        // A fleet agent's definition lives in the catalog.
+        fleet_core::service::catalog::load(false, &store).map_err(|e| e.message)?;
     }
     run_on(&store, cmd, now)
 }
@@ -281,6 +293,18 @@ fn run_on(store: &Mutex<Store>, cmd: AgentsCmd, now: i64) -> Result<ExitCode, St
             out::line(&format!(
                 "rule {id}: {agent} on {scope} at {level}{}",
                 hours.map(|h| format!(" for {h} h")).unwrap_or_default()
+            ));
+        }
+        AgentsCmd::Run { id, request } => {
+            let a = AgentsArgs {
+                id: Some(id),
+                request,
+                ..args("run")
+            };
+            let v = admin::run_now(store, &a, now).map_err(err)?;
+            out::line(&format!(
+                "rule {id}: job {} queued",
+                v["job"].as_str().unwrap_or_default()
             ));
         }
         AgentsCmd::Revoke { id } => {

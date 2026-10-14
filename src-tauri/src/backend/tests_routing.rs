@@ -1251,6 +1251,24 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "agents_fleet",
+            "agents",
+            json!({ "action": "form", "definition": "l2-support" }),
+            r#"{"spec":"fleet.form/1","title":"x","steps":[]}"#,
+            Box::new(|b, s, ssh| {
+                block_on(commands::agents::routed::agents_fleet(
+                    b,
+                    s,
+                    ssh,
+                    "form".into(),
+                    Some("l2-support".into()),
+                    None,
+                    None,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "agents_decide",
             "agents",
             json!({ "action": "reject", "id": 7 }),

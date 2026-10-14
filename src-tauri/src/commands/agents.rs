@@ -8,6 +8,7 @@
 use crate::backend::FleetBackend;
 use fleet_core::ipc_error::IpcError;
 use fleet_core::service::agents::admin::{self, AgentsArgs, AgentsStatus};
+use fleet_core::ssh::SshClient;
 use fleet_core::store::{AgentActionRow, Store};
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -49,8 +50,77 @@ pub async fn agents_decide(
     routed::agents_decide(&backend, &store, id, approve).await
 }
 
+/// The catalog's fleet agents (configurable agents, step 5):
+/// `definitions` (the list), `form` (a definition's grant form,
+/// `definition`, prefilled from rule `id` for Edit), `grant` (the form's
+/// `answers`; each MCP binding is asked for its tools on the host first),
+/// `revoke` (rule `id`) and `run` (a manual fleet agent's rule `id` now).
+#[tauri::command]
+pub async fn agents_fleet(
+    action: String,
+    definition: Option<String>,
+    id: Option<i64>,
+    answers: Option<serde_json::Value>,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<serde_json::Value, IpcError> {
+    routed::agents_fleet(&backend, &store, &ssh, action, definition, id, answers).await
+}
+
 pub(crate) mod routed {
     use super::*;
+
+    pub fn fleet_args(
+        action: String,
+        definition: Option<String>,
+        id: Option<i64>,
+        answers: Option<serde_json::Value>,
+    ) -> AgentsArgs {
+        AgentsArgs {
+            agent: (action == "grant").then(|| "fleet".to_string()),
+            action,
+            definition,
+            id,
+            answers,
+            ..Default::default()
+        }
+    }
+
+    pub async fn agents_fleet(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        ssh: &SshClient,
+        action: String,
+        definition: Option<String>,
+        id: Option<i64>,
+        answers: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, IpcError> {
+        if !matches!(
+            action.as_str(),
+            "definitions" | "form" | "grant" | "revoke" | "run"
+        ) {
+            return Err(IpcError::new(
+                fleet_core::ipc_error::codes::E_INVALID,
+                format!("agents_fleet action must be definitions | form | grant | revoke | run, got {action:?}"),
+            ));
+        }
+        let args = fleet_args(action, definition, id, answers);
+        if let Some(hub) = backend.hub() {
+            return hub.route("agents_fleet", &args).await;
+        }
+        let now = fleet_core::store::now_unix();
+        if args.action == "grant" {
+            let done = fleet_core::service::fleet_agents::grant::grant_or_answers(
+                store, ssh, &args, "desktop", now,
+            )
+            .await?;
+            return serde_json::to_value(done).map_err(|e| {
+                IpcError::new(fleet_core::ipc_error::codes::E_INTERNAL, e.to_string())
+            });
+        }
+        admin::call(store, &args, "desktop", now)
+    }
 
     pub fn status_args(agent: Option<String>, limit: Option<u32>) -> AgentsArgs {
         AgentsArgs {

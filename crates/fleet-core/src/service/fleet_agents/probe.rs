@@ -8,6 +8,9 @@
 //! and runs it), as a run's MCP config does (`agents::vehicle`): nothing
 //! secret is in an argument a host's `ps` shows. An `http` server is asked
 //! with `curl` from the host, the same way.
+//!
+//! [`call_script`] is the same script for one `tools/call`: a fleet
+//! agent's `mcp_scan` trigger asks its store that way.
 
 use super::definition::{StoreRole, WriteTool};
 use crate::shell::quote;
@@ -16,16 +19,17 @@ use serde_json::{json, Value};
 /// How long the server may take to list its tools.
 pub const PROBE_SECS: u64 = 30;
 
-/// The response line the script waits for.
+/// The response line the script waits for: the request's.
 const LIST_ID: i64 = 2;
 
-fn messages() -> [Value; 3] {
+/// `initialize`, `initialized`, then `last` (whose id is [`LIST_ID`]).
+fn messages(last: Value) -> [Value; 3] {
     [
         json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
             "protocolVersion": "2025-06-18", "capabilities": {},
             "clientInfo": { "name": "claude-fleet", "version": "1" } } }),
         json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
-        json!({ "jsonrpc": "2.0", "id": LIST_ID, "method": "tools/list" }),
+        last,
     ]
 }
 
@@ -45,20 +49,46 @@ pub fn launcher() -> String {
 /// PURE: the script (sent on stdin) that lists a rendered entry's tools and
 /// prints the `tools/list` response line.
 pub fn script(entry: &Value) -> Result<String, String> {
+    request_script(
+        entry,
+        json!({ "jsonrpc": "2.0", "id": LIST_ID, "method": "tools/list" }),
+        PROBE_SECS,
+    )
+}
+
+/// PURE: the script (sent on stdin) that calls `tool` with `arguments` and
+/// prints the `tools/call` response line, within `secs`.
+pub fn call_script(
+    entry: &Value,
+    tool: &str,
+    arguments: &Value,
+    secs: u64,
+) -> Result<String, String> {
+    request_script(
+        entry,
+        json!({ "jsonrpc": "2.0", "id": LIST_ID, "method": "tools/call",
+            "params": { "name": tool, "arguments": arguments } }),
+        secs,
+    )
+}
+
+fn request_script(entry: &Value, last: Value, secs: u64) -> Result<String, String> {
     let s = |k: &str| entry.get(k).and_then(Value::as_str);
     match s("type").unwrap_or("stdio") {
-        "stdio" => stdio_script(entry),
+        "stdio" => stdio_script(entry, last, secs),
         "http" => http_script(
             s("url")
                 .filter(|u| !u.is_empty())
                 .ok_or("the server has no url")?,
             entry.get("headers"),
+            last,
+            secs,
         ),
-        other => Err(format!("a {other} MCP server cannot be checked")),
+        other => Err(format!("a {other} MCP server cannot be asked")),
     }
 }
 
-fn stdio_script(entry: &Value) -> Result<String, String> {
+fn stdio_script(entry: &Value, last: Value, secs: u64) -> Result<String, String> {
     let command = entry
         .get("command")
         .and_then(Value::as_str)
@@ -88,7 +118,10 @@ fn stdio_script(entry: &Value) -> Result<String, String> {
             quote(v.as_str().ok_or("an env value is not a string")?)
         ));
     }
-    let lines: Vec<String> = messages().iter().map(|m| quote(&m.to_string())).collect();
+    let lines: Vec<String> = messages(last)
+        .iter()
+        .map(|m| quote(&m.to_string()))
+        .collect();
     Ok(format!(
         "{exports}out=$(mktemp) || exit 1\n\
          trap 'rm -f \"$out\"' EXIT\n\
@@ -96,13 +129,18 @@ fn stdio_script(entry: &Value) -> Result<String, String> {
          | timeout {kill} {argv} > \"$out\" 2>/dev/null\n\
          grep -E '\"id\": ?{LIST_ID}[,}}]' \"$out\" | head -n1\n",
         msgs = lines.join(" "),
-        t = PROBE_SECS,
-        kill = PROBE_SECS + 5,
+        t = secs,
+        kill = secs + 5,
         argv = argv.join(" "),
     ))
 }
 
-fn http_script(url: &str, headers: Option<&Value>) -> Result<String, String> {
+fn http_script(
+    url: &str,
+    headers: Option<&Value>,
+    last: Value,
+    secs: u64,
+) -> Result<String, String> {
     // The headers (a bearer token, typically) go into a curl config file,
     // never onto curl's command line.
     let mut cfg = String::new();
@@ -117,12 +155,12 @@ fn http_script(url: &str, headers: Option<&Value>) -> Result<String, String> {
         return Err("the url cannot be sent".into());
     }
     cfg.push_str(&format!("url = \"{url}\"\n"));
-    let [init, inited, list] = messages();
+    let [init, inited, list] = messages(last);
     let post = |body: &Value, keep_session: bool| {
         format!(
             "curl -sS --max-time {t} -K \"$cfg\" -H 'Content-Type: application/json' \
              -H 'Accept: application/json, text/event-stream' {sid} -D \"$hdr\" --data-binary {b}",
-            t = PROBE_SECS,
+            t = secs,
             sid = if keep_session {
                 "${sid:+-H \"Mcp-Session-Id: $sid\"}"
             } else {
@@ -146,8 +184,9 @@ fn http_script(url: &str, headers: Option<&Value>) -> Result<String, String> {
     ))
 }
 
-/// PURE: the tool names of the `tools/list` response line.
-pub fn listed_tools(stdout: &str) -> Result<Vec<String>, String> {
+/// PURE: the tools of the `tools/list` response line, whole (`name`,
+/// `inputSchema` …).
+pub fn listed_tool_defs(stdout: &str) -> Result<Vec<Value>, String> {
     let line = stdout
         .lines()
         .map(str::trim)
@@ -160,11 +199,15 @@ pub fn listed_tools(stdout: &str) -> Result<Vec<String>, String> {
             e.get("message").and_then(Value::as_str).unwrap_or("error")
         ));
     }
-    let tools = v
-        .pointer("/result/tools")
+    v.pointer("/result/tools")
         .and_then(Value::as_array)
-        .ok_or("tools/list: no tools")?;
-    Ok(tools
+        .cloned()
+        .ok_or_else(|| "tools/list: no tools".into())
+}
+
+/// PURE: the tool names of the `tools/list` response line.
+pub fn listed_tools(stdout: &str) -> Result<Vec<String>, String> {
+    Ok(listed_tool_defs(stdout)?
         .iter()
         .filter_map(|t| t.get("name").and_then(Value::as_str).map(str::to_string))
         .collect())

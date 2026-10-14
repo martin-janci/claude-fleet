@@ -896,7 +896,7 @@ built: outbound Slack/Teams notifications (a new channel of the 11.9
 matrix, the owner's call).
 
 Configurable agents (spec `docs/superpowers/specs/2026-10-12-configurable-agents-design.md`),
-steps 1 and 2 of 6: a `fleet_agent` catalog asset is a typed, validated
+steps 1 to 5 of 6: a `fleet_agent` catalog asset is a typed, validated
 definition (inputs, store roles, trigger, run, actions, limits;
 `service/fleet_agents/`), listed in Assets and checked by `fleet-hub agents
 define`. An instance is an `agent_rules` row with `agent = fleet` (migration
@@ -906,8 +906,22 @@ define`. An instance is an `agent_rules` row with `agent = fleet` (migration
 binding is rendered with the host's secrets and asked for its tools on the
 host, and fleet stores bind `rule` or `shared:<name>` namespaces of
 `agent_records`, which a run reads through `fleet-records` (`/agent-records`,
-run tokens). Nothing runs an instance yet: the generic runner, the actions
-and the grant form are steps 3 to 5.
+run tokens). Step 3, the generic runner, runs instances: the agent
+runtime's `fleet` agent polls `tracker_comments`, `tracker_assigned`,
+`mcp_scan` and `schedule` triggers, takes `manual` jobs from `agents run`,
+and keeps each run's answer checked against `run.output_schema`. Step 4,
+the actions: the answer's `tracker_comment`, `tracker_issue`,
+`tracker_link`, `record` and `mcp_call` writes are queued by the rule's
+level and sent by the `fleet` executor after its send-time checks (limits,
+body size, write tools, the tool's `inputSchema`), with a loop guard. Step 5:
+Automation › Agents lists the catalog's fleet agents with their instances;
+*New instance* and *Edit* open the grant form (`fleet_agents/form.rs`, the
+`agents_fleet` command), *Revoke* and *Run now* act on an instance; an
+agent drafts one in a chat with a `wizard: fleet_agent` block, which the
+person sends; the phone lists the instances with Revoke. Step 6 in part: the
+`github_prs` and `github_comments` sources, `pr_comment` and `pr_labels`,
+and comments and new items on trackers other than Jira; not `pr_review`,
+polling other trackers, or restating the built-in agents.
 
 Session state machine hardening (plan A, #343) is landed: a `working` row
 with no activity for `reconcile.stale_working_secs` turns `idle` with

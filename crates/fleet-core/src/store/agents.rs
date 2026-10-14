@@ -521,6 +521,25 @@ impl Store {
         rows.collect()
     }
 
+    /// How many runs of `agent` on `subject` ended (done or needing a
+    /// person) since `since`, `except_job` left out: the fleet agents' loop
+    /// guard.
+    pub fn count_agent_subject_runs(
+        &self,
+        agent: &str,
+        subject: &str,
+        since: i64,
+        except_job: i64,
+    ) -> Result<i64, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM agent_jobs \
+             WHERE agent = ?1 AND subject = ?2 AND id <> ?3 AND updated_at >= ?4 \
+               AND state IN ('done', 'needs_person')",
+            params![agent, subject, except_job, since],
+            |r| r.get(0),
+        )
+    }
+
     /// When the newest finished run (`done` or `needs_person`) of another
     /// job on `subject` ended: the loop guard's per-subject cooldown.
     pub fn last_agent_subject_run(

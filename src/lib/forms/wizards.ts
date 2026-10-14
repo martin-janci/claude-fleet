@@ -27,8 +27,12 @@ export type WizardId =
   | 'new_token'
   | 'add_account';
 
+/** A wizard whose spec comes from the backend when it opens: a fleet
+ *  agent's grant form (`agents_fleet { action: form }`). */
+export type DynamicWizardId = 'fleet_agent';
+
 export interface Wizard {
-  id: WizardId;
+  id: WizardId | DynamicWizardId;
   spec: FormSpec;
   /** The last button while it runs, with a Comet before it. */
   sending: string;

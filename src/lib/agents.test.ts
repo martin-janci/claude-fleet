@@ -100,6 +100,21 @@ describe('agents (design step 5)', () => {
     expect(actionTitle({ kind: 'kb_learn', payload: '{"path":"errors/pay-NPE-3.yaml"}' })).toBe(
       'Teach the support KB: errors/pay-NPE-3.yaml',
     );
+    expect(actionTitle({ kind: 'tracker_comment', payload: '{"key":"L2S-7","body":"x"}' })).toBe('Comment on L2S-7');
+    expect(
+      actionTitle({
+        kind: 'tracker_issue',
+        payload: '{"project":"BUG","issue_type":"Bug","summary":"Key expired","link":{"to":"L2S-7","link_type":"Causes"}}',
+      }),
+    ).toBe('File a bug in BUG for L2S-7: Key expired');
+    expect(actionTitle({ kind: 'tracker_link', payload: '{"from":"BUG-9","to":"L2S-7","link_type":"Causes"}' })).toBe(
+      'Link BUG-9 to L2S-7 (causes)',
+    );
+    expect(actionTitle({ kind: 'record', payload: '{"store":"memory","key":"NPE"}' })).toBe('Remember NPE in memory');
+    expect(actionTitle({ kind: 'mcp_call', payload: '{"binding":"kb","tool":"add_known_error"}' })).toBe(
+      'Call kb.add_known_error',
+    );
+    expect(actionTitle({ kind: 'pr_comment', payload: '{"repo":"o/r","number":4,"body":"x"}' })).toBe('Comment on o/r#4');
     expect(actionTitle({ kind: 'jira_create_bug', payload: '{"project":"PD","source_key":null,"summary":"x"}' })).toBe(
       'File a bug in PD for a logged error: x',
     );
