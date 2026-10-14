@@ -4694,7 +4694,13 @@ fn the_served_definition_budget_stays_bounded() {
     /// for 150 tools (831 a tool); the master stays at 818 a tool. Their
     /// descriptions and parameter docs keep every fact an agent cannot infer
     /// (refusal rules, units, scopes, error codes) rather than shrink to 825.
-    const BYTES_PER_TOOL: usize = 841;
+    /// Raised to 851 on 2026-10-14: main took #900 (routine, agent and PR
+    /// shepherd debugging, longer `routines` / `pr_shepherd` descriptions)
+    /// while the identity follow-ups (#901) were in review; merged, the
+    /// client full surface measured 126,178 bytes for 150 tools (841 a
+    /// tool, 0 bytes of headroom) and the master 120,969 bytes for 147
+    /// tools (822 a tool).
+    const BYTES_PER_TOOL: usize = 851;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
