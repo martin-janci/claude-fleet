@@ -642,3 +642,48 @@ fn moving_a_tall_subtree_under_a_deep_parent_is_refused() {
     s.move_group(lone, deep).unwrap();
     assert!(s.list_groups().is_ok());
 }
+
+/// An org named before `/` was refused has a root group `acme/eu` whose path
+/// `/orgs/acme/eu` reads like group `eu` under org `acme`. The lookup must
+/// never answer one for the other.
+#[test]
+fn group_by_path_never_answers_a_different_group_than_the_path_names() {
+    let s = s();
+    s.add_org("acme", None, false).unwrap();
+    let acme_root = s.group_by_path("/orgs/acme").unwrap().unwrap();
+    // A legacy root beside it, written as migration-era data would be.
+    s.conn
+        .execute(
+            "INSERT INTO groups (uuid, name, parent_id, managed, org_id, created_at) \
+             VALUES ('u-legacy', 'acme/eu', ?1, 1, NULL, 0)",
+            rusqlite::params![acme_root.parent_id],
+        )
+        .unwrap();
+    let legacy: i64 = s
+        .conn
+        .query_row("SELECT id FROM groups WHERE uuid = 'u-legacy'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    // The legacy root alone: its path string is `/orgs/acme/eu`, but no
+    // segment walk reaches it, so the path answers nothing.
+    assert_eq!(s.group(legacy).unwrap().unwrap().path, "/orgs/acme/eu");
+    assert!(s.group_by_path("/orgs/acme/eu").unwrap().is_none());
+    // Group `eu` under acme: the path strings now collide.
+    // (`create_group` refuses a managed parent, so write the row directly.)
+    s.conn
+        .execute(
+            "INSERT INTO groups (uuid, name, parent_id, managed, created_at) \
+             VALUES ('u-eu', 'eu', ?1, 0, 0)",
+            rusqlite::params![acme_root.id],
+        )
+        .unwrap();
+    let eu = s.group_by_path("/orgs/acme/eu").unwrap().unwrap();
+    assert_eq!(eu.path, "/orgs/acme/eu");
+    assert_ne!(eu.id, legacy);
+    let found = s.group_by_path("/orgs/acme/eu").unwrap().unwrap();
+    assert_eq!(found.id, eu.id, "the segment walk finds the nested group");
+    assert_eq!(found.path, "/orgs/acme/eu");
+    // A trailing slash is not normalised away.
+    assert!(s.group_by_path("/orgs/acme/eu/").unwrap().is_none());
+}

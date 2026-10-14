@@ -607,7 +607,13 @@ impl Store {
             }
         }
         match cur {
-            Some(id) => load_group(&self.conn, id),
+            Some(id) => {
+                // Fail closed: a legacy name holding '/' can make two groups
+                // spell one path; the group found by walking segments is
+                // answered only when its own path is the path asked for.
+                let g = load_group(&self.conn, id)?;
+                Ok(g.filter(|g| g.path == path))
+            }
             None => Ok(None),
         }
     }
