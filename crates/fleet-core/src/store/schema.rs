@@ -149,7 +149,7 @@ fn people_has_uuid(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 185: `people` already has its
+/// `already_applied` guard of migration 186: `people` already has its
 /// `auto_switch_account` column. See [`Migration`].
 fn people_has_auto_switch(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -160,7 +160,7 @@ fn people_has_auto_switch(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 186: `people` already has its
+/// `already_applied` guard of migration 187: `people` already has its
 /// `auto_switch_continue` column. See [`Migration`].
 fn people_has_auto_switch_continue(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -782,6 +782,18 @@ fn routine_runs_has_outcome_source(conn: &Connection) -> rusqlite::Result<bool> 
 fn peer_links_has_msgs_total(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('peer_links') WHERE name = 'msgs_total'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 185: `agent_rules` already has
+/// `definition`. 185 rebuilds the table, so a re-run only records the
+/// version.
+fn agent_rules_has_definition(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('agent_rules') WHERE name = 'definition'",
         [],
         |r| r.get(0),
     )?;
@@ -2058,18 +2070,26 @@ const MIGRATIONS: &[Migration] = &[
         184,
         include_str!("../../migrations/184_work_close_dismissals.sql"),
     ),
+    // Configurable agents, step 2: `agent_rules` and `agent_jobs` admit
+    // 'fleet' (a CHECK, so both are rebuilt and the migration is guarded);
+    // rules gain `definition` and `bindings`; `agent_records` is new.
+    Migration {
+        version: 185,
+        sql: include_str!("../../migrations/185_fleet_agent_rules.sql"),
+        already_applied: Some(agent_rules_has_definition),
+    },
     // Automatic account switching: a person's own opt-out
     // (`people.auto_switch_account`). ADD COLUMN, so guarded.
     Migration {
-        version: 185,
-        sql: include_str!("../../migrations/185_people_auto_switch.sql"),
+        version: 186,
+        sql: include_str!("../../migrations/186_people_auto_switch.sql"),
         already_applied: Some(people_has_auto_switch),
     },
     // Automatic account switching: "continue" after a switch, per person
     // (`people.auto_switch_continue`). ADD COLUMN, so guarded.
     Migration {
-        version: 186,
-        sql: include_str!("../../migrations/186_people_auto_switch_continue.sql"),
+        version: 187,
+        sql: include_str!("../../migrations/187_people_auto_switch_continue.sql"),
         already_applied: Some(people_has_auto_switch_continue),
     },
 ];

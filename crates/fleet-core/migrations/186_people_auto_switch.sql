@@ -6,4 +6,4 @@
 -- it off for their own sessions. Unowned (unclaimed) sessions follow the
 -- personal owner's answer.
 ALTER TABLE people ADD COLUMN auto_switch_account INTEGER NOT NULL DEFAULT 1;
-INSERT OR IGNORE INTO schema_version (version) VALUES (185);
+INSERT OR IGNORE INTO schema_version (version) VALUES (186);

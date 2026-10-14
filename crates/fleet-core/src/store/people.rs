@@ -770,7 +770,7 @@ impl Store {
         })
     }
 
-    // ---- automatic account switching (migration 185) ----
+    // ---- automatic account switching (migration 186) ----
 
     /// A person's own answer to automatic account switching
     /// (`people.auto_switch_account`): on unless they turned it off.
@@ -801,7 +801,7 @@ impl Store {
 
     /// Whether a person wants "continue" typed after an automatic switch
     /// cut their session's turn off (`people.auto_switch_continue`,
-    /// migration 186): off unless they turned it on. `E_NOTFOUND` for an
+    /// migration 187): off unless they turned it on. `E_NOTFOUND` for an
     /// unknown person.
     pub fn person_auto_switch_continue(&self, id: i64) -> Result<bool, IpcError> {
         self.conn

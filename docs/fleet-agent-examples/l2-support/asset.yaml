@@ -1,0 +1,76 @@
+kind: fleet_agent
+name: l2-support
+description: L2 investigation of support tickets, with logs, a tenant registry and a knowledge base per instance.
+inputs:
+  - { name: jira_tracker, type: tracker, label: Jira, required: true }
+  - { name: project, type: text, label: Jira project key, required: true }
+  - { name: phrases, type: text, label: Trigger phrases, value: "Tech help!, /analyze" }
+  - { name: bug_project, type: text, label: Bug project }
+stores:
+  - { role: logs, kind: mcp, label: Logs, required: true, read_tools: [search_logs] }
+  - { role: tenants, kind: mcp, label: Tenant registry, read_tools: [resolve_tenant, lookup_client] }
+  - role: kb
+    kind: mcp
+    label: Knowledge base
+    read_tools: [search_known_errors, search_docs]
+    write_tools: [add_known_error]
+  - { role: memory, kind: fleet, label: Fingerprints }
+trigger:
+  source: tracker_comments
+  tracker: "{{jira_tracker}}"
+  query: 'project = "{{project}}"'
+  match: { any_phrase: "{{phrases}}" }
+run:
+  workspace: project
+  max_turns: 40
+  timeout_secs: 900
+  context:
+    - { store: memory, key: "{{subject.key}}" }
+  output_schema:
+    type: object
+    required: [summary, rootCause, confidence, severity]
+    properties:
+      summary: { type: string, maxLength: 300 }
+      rootCause: { type: string }
+      confidence: { enum: [high, medium, low] }
+      severity: { enum: [critical, major, minor] }
+      suggestedFix: { type: string }
+      exceptionClass: { type: string }
+      needsMoreInfo: { type: string }
+actions:
+  - id: ask
+    when: { field: needsMoreInfo, truthy: true }
+    do: tracker_comment
+    target: "{{subject.key}}"
+    body: "❓ {{answer.needsMoreInfo}}"
+    auto: true
+    stop: true
+  - id: comment
+    do: tracker_comment
+    target: "{{subject.key}}"
+    body_template: investigation
+    auto: true
+  - id: bug
+    when: { all: [ { field: confidence, eq: high }, { field: exceptionClass, truthy: true } ] }
+    do: tracker_issue
+    project: "{{bug_project}}"
+    issue_type: Bug
+    summary: "{{answer.exceptionClass}}: {{answer.summary}}"
+    body: "{{answer.rootCause}}"
+    link: { to: "{{subject.key}}", link_type: Causes }
+  - id: learn
+    when: { all: [ { field: confidence, eq: high }, { field: exceptionClass, truthy: true } ] }
+    do: mcp_call
+    store: kb
+    tool: add_known_error
+    arguments: { exception: "{{answer.exceptionClass}}", rootCause: "{{answer.rootCause}}", issueKey: "{{subject.key}}" }
+  - id: remember
+    when: { field: exceptionClass, truthy: true }
+    do: record
+    store: memory
+    key: "{{answer.exceptionClass}}"
+    value: { ticket: "{{subject.key}}", seen: "{{now}}" }
+    auto: true
+limits:
+  max_body_chars: 5000
+  write_projects: ["{{project}}", "{{bug_project}}"]

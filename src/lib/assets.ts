@@ -3,14 +3,19 @@ import { writable } from 'svelte/store';
 import { invokeCmd, invokeCmdAbortable, type Result } from './result';
 import type { SessionRow } from './sessions';
 
-export type AssetKind = 'skill' | 'agent' | 'command' | 'hook' | 'mcp_server' | 'plugin_ref';
-export const KIND_ORDER: AssetKind[] = ['skill', 'agent', 'command', 'hook', 'mcp_server', 'plugin_ref'];
+export type AssetKind = 'skill' | 'agent' | 'command' | 'hook' | 'mcp_server' | 'plugin_ref' | 'fleet_agent';
+export const KIND_ORDER: AssetKind[] = ['skill', 'agent', 'command', 'hook', 'mcp_server', 'plugin_ref', 'fleet_agent'];
+/** The kinds a host can hold: a fleet agent's definition is the hub's
+ *  alone (`Kind::installs_on_hosts`), so it is never imported from one. */
+export const HOST_KINDS: AssetKind[] = KIND_ORDER.filter((k) => k !== 'fleet_agent');
 export const KIND_LABEL: Record<AssetKind, string> = {
   skill: 'Skills', agent: 'Agents', command: 'Commands', hook: 'Hooks', mcp_server: 'MCP servers', plugin_ref: 'Plugins',
+  fleet_agent: 'Fleet agents',
 };
 /** One of a kind, for a form's Kind select ("Skill", "MCP server"). */
 export const KIND_ONE: Record<AssetKind, string> = {
   skill: 'Skill', agent: 'Agent', command: 'Command', hook: 'Hook', mcp_server: 'MCP server', plugin_ref: 'Plugin',
+  fleet_agent: 'Fleet agent',
 };
 
 /** The harnesses an asset can target (`service/catalog/harness`), as the
@@ -46,7 +51,7 @@ export function withHarness(targets: unknown, harness: string, on: boolean): Tar
 /** The Import form's What boxes (G2.6): every kind the importer reads, as
  *  `only` entries (`<kind>:*`). All ticked imports everything (`[]`). */
 export function importOnlyFor(kinds: readonly AssetKind[]): string[] {
-  return kinds.length === KIND_ORDER.length ? [] : kinds.map((k) => `${k}:*`);
+  return kinds.length === HOST_KINDS.length ? [] : kinds.map((k) => `${k}:*`);
 }
 export interface CatalogConfigRow {
   repo_path: string;
@@ -496,6 +501,9 @@ export const KIND_FIELDS: Record<AssetKind, string[]> = {
   mcp_server: ['transport', 'url', 'command', 'args', 'env'],
   plugin_ref: ['harness', 'marketplace', 'plugin'],
   command: ['allowed_tools', 'argument_hint', 'model'],
+  // A configurable agent's definition (inputs, stores, trigger, run, actions,
+  // limits) is YAML the editor keeps as it is; the body is its skill.md.
+  fleet_agent: [],
 };
 
 /** The most recently loaded repo status (dirty/ahead/behind/head), refreshed

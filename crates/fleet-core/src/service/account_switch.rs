@@ -5,7 +5,7 @@
 //! **Who it applies to.** Two answers, both needed:
 //! * the fleet's, `accounts.auto_switch` (off by default), which the owner
 //!   turns on in Settings › Limits;
-//! * the session owner's own, `people.auto_switch_account` (migration 185,
+//! * the session owner's own, `people.auto_switch_account` (migration 186,
 //!   on by default), which every person, the owner included, can turn off
 //!   for their own sessions on the Accounts page. A session nobody owns
 //!   (`unclaimed`) follows the personal owner's answer.
@@ -36,7 +36,7 @@
 //! logins and accounts by profile and uuid only.
 //!
 //! **Carry on.** A person can also ask for the session to continue
-//! (`people.auto_switch_continue`, migration 186, off by default). Then,
+//! (`people.auto_switch_continue`, migration 187, off by default). Then,
 //! when the session's last turn was cut off by the limit (its newest turn
 //! end is a `stop_failure` of class `rate_limit`, not a `turn_done`), a
 //! switch that went through queues [`CONTINUE_PROMPT`] as a deferred

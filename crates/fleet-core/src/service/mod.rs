@@ -39,6 +39,7 @@ pub mod drafts;
 pub mod editor;
 pub mod env;
 pub mod evidence;
+pub mod fleet_agents;
 pub mod forms;
 pub mod fresh;
 pub mod gc;
