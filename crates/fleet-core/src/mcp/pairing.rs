@@ -730,6 +730,24 @@ pub async fn handle_pair(
             // a person-less trusted code fails here and the whole
             // redemption rolls back.
             let row = if req.trusted {
+                // An org admin's trusted code is checked against the org at
+                // REDEEM, not only at mint: between the two the person can
+                // gain a device or a membership outside it (TASK-264). A
+                // fleet-authority mint (`fenced_org: None`) skips it.
+                if let Some(org) = req.fenced_org {
+                    crate::service::org_admin::require_trust_inside_org(
+                        s,
+                        row.person_id,
+                        crate::service::org_admin::Me {
+                            device: None,
+                            person: req.minted_by_person,
+                            authority: crate::service::org_admin::Authority::Org {
+                                org,
+                                hub: false,
+                            },
+                        },
+                    )?;
+                }
                 let row = s.set_client_trust(&row.name, true)?;
                 event(
                     "set_client_trust",
@@ -772,6 +790,16 @@ pub async fn handle_pair(
                     "person_id": row.person_id,
                     "hub": state.base_url.as_str(),
                 })),
+            )
+                .into_response()
+        }
+        Err(e) if e.code == crate::ipc_error::codes::E_FORBIDDEN => {
+            // The org fence refused the trust grant; the whole redemption
+            // rolled back, so no token was stored and none is in the answer.
+            tracing::warn!(error = %e.message, "[mcp] a pairing was refused by the org fence");
+            (
+                StatusCode::FORBIDDEN,
+                axum::Json(serde_json::json!({ "error": e.message })),
             )
                 .into_response()
         }

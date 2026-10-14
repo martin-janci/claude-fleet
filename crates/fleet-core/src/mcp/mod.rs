@@ -1577,6 +1577,73 @@ mod tests {
             );
         }
 
+        // TASK-264: a trusted code an org admin minted is re-checked against
+        // the org at REDEEM. Between mint and redeem bob gains a device in
+        // another org, so the redeem is refused and rolls back whole. (A membership of
+        // `other` is what makes the device read as outside `acme`: a lone
+        // membership would pull every device of bob's into it.)
+        let (acme, other, bob) = {
+            let s = store.lock().unwrap();
+            let acme = s.add_org("acme", None, false).unwrap().id;
+            let other = s.add_org("other-org", None, false).unwrap().id;
+            let bob = s.create_person("bob", None).unwrap().id;
+            s.set_org_member(acme, bob, "member", None).unwrap();
+            (acme, other, bob)
+        };
+        let fenced = pairings.mint(pairing::MintRequest {
+            person: Some("bob"),
+            org_id: Some(acme),
+            minter: pairing::Minter {
+                fenced_org: Some(acme),
+                ..mint_req("x", "full", true).minter
+            },
+            ..mint_req("bob-phone", "full", true)
+        });
+        {
+            let s = store.lock().unwrap();
+            s.insert_client_token("bob-other", &"c".repeat(64), "full")
+                .unwrap();
+            s.set_client_person("bob-other", Some(bob)).unwrap();
+            s.set_client_org("bob-other", Some(other)).unwrap();
+            s.set_org_member(other, bob, "member", None).unwrap();
+        }
+        let refused = round_trip(addr, &pair_req(&fenced.code, "phone.invalid")).await;
+        assert!(refused.contains("403"), "{refused}");
+        assert!(
+            body_of(&refused).contains("trust is the person's"),
+            "{refused}"
+        );
+        assert!(!refused.contains("\"token\""), "{refused}");
+        {
+            let s = store.lock().unwrap();
+            assert!(
+                !s.list_client_tokens(true)
+                    .unwrap()
+                    .iter()
+                    .any(|r| r.name == "bob-phone"),
+                "the refused redeem rolled the client row back"
+            );
+            let ev = s
+                .admin_events(&crate::store::AdminEventQuery {
+                    limit: 200,
+                    ..Default::default()
+                })
+                .unwrap();
+            assert!(
+                !ev.iter().any(|e| e.resource_id == "bob-phone"),
+                "no pair event for the refused redeem"
+            );
+        }
+        // The same mint by a fleet authority (no fence) redeems trusted.
+        let unfenced = pairings.mint(pairing::MintRequest {
+            person: Some("bob"),
+            org_id: Some(acme),
+            ..mint_req("bob-phone", "full", true)
+        });
+        let ok = round_trip(addr, &pair_req(&unfenced.code, "phone.invalid")).await;
+        assert!(ok.contains("200 OK"), "{ok}");
+        assert!(body_of(&ok).contains("\"trusted\":true"), "{ok}");
+
         // A camera scan opens `GET /pair`, which must explain what to do
         // rather than answer 405. No secret is in it: the code lives in the
         // URL fragment, which a browser never sends.
