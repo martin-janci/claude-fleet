@@ -1251,6 +1251,24 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "agents_fleet",
+            "agents",
+            json!({ "action": "form", "definition": "l2-support" }),
+            r#"{"spec":"fleet.form/1","title":"x","steps":[]}"#,
+            Box::new(|b, s, ssh| {
+                block_on(commands::agents::routed::agents_fleet(
+                    b,
+                    s,
+                    ssh,
+                    "form".into(),
+                    Some("l2-support".into()),
+                    None,
+                    None,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "agents_decide",
             "agents",
             json!({ "action": "reject", "id": 7 }),
@@ -3069,7 +3087,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
     use fleet_core::service::safe_kill::SafeKillSessionArgs;
     use fleet_core::service::sessions::{
         AdoptSessionArgs, DiscoverLostSessionsArgs, DismissGhostSessionArgs, KillSessionArgs,
-        LostTargetArgs, NewSessionArgs, PlaceTranscriptArgs, RecreateSessionArgs,
+        LostTargetArgs, NewSessionArgs, PinSessionArgs, PlaceTranscriptArgs, RecreateSessionArgs,
         RenameSessionArgs, RestartSessionArgs, RestoreHostSessionsArgs, SendPromptArgs,
         SetFriendlyNameArgs, SetSessionTagsArgs, SpawnReviewArgs, TouchSessionViewedArgs,
     };
@@ -3645,6 +3663,23 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                 block_on(commands::sessions::routed::touch_session_viewed(
                     b,
                     TouchSessionViewedArgs { session_id: 7 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "pin_session",
+            "pin_session",
+            json!({ "session_id": 7, "pinned": true }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::pin_session(
+                    b,
+                    PinSessionArgs {
+                        session_id: 7,
+                        pinned: true,
+                    },
                     s,
                 ))
                 .map(|_| ())
@@ -5193,6 +5228,24 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     commands::missions::SetWorkHoldArgs {
                         item_id: 3,
                         on: false,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "set_work_archived",
+            "work_link",
+            json!({ "session_id": null, "action": "archive_item", "key": null, "item_id": 3,
+                    "link_id": null, "source": null, "on": true }),
+            r#"{"item_id":3,"changed":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::set_work_archived(
+                    b,
+                    commands::missions::SetWorkArchivedArgs {
+                        item_id: 3,
+                        on: true,
                     },
                     s,
                 ))

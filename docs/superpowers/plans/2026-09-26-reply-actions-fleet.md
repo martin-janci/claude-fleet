@@ -184,9 +184,7 @@ git commit -m "feat(transcript): carry each turn's prompt uuid as a truncation a
 Every truncation Fork/Rewind/Retry need is \"keep strictly before some
 prompt\", so one optional field per turn is enough. Set at the single parser
 site that opens a turn with a prompt; None everywhere else, which is what
-makes Rewind absent on a compact boundary.
-
-Claude-Session: https://claude.ai/code/session_012PBjHSukJW9dyjDaEPpvDy"
+makes Rewind absent on a compact boundary."
 ```
 
 ---
@@ -515,9 +513,7 @@ Reuses transcript::locate_script for resolution and adds one awk pass:
 copy the head, stop before the anchor, rewrite sessionId (and cwd for a
 cross-worktree fork). Replacements are index-based and literal, because a
 cwd is full of regex metacharacters. Writes to a temp file and moves on
-success, so a missing anchor leaves nothing for --resume to find.
-
-Claude-Session: https://claude.ai/code/session_012PBjHSukJW9dyjDaEPpvDy"
+success, so a missing anchor leaves nothing for --resume to find."
 ```
 
 ---
@@ -881,9 +877,7 @@ git commit -m "feat(rewind): one engine for fork, rewind and retry
 Rewind rebinds this session to the truncated copy and restarts its pane;
 fork spawns a new session on it. Retry is the caller doing rewind then
 send_prompt, so it inherits the refusals rather than repeating them —
-including the mid-turn one, which fork is deliberately exempt from.
-
-Claude-Session: https://claude.ai/code/session_012PBjHSukJW9dyjDaEPpvDy"
+including the mid-turn one, which fork is deliberately exempt from."
 ```
 
 ---
@@ -1138,9 +1132,7 @@ git commit -m "feat(mcp): rewind_conversation tool
 
 One tool with a mode rather than two, to keep the definition-budget raise to
 a single addition. Rewind is confirm-gated like restart_session, since it
-rebuilds a live pane; fork is not, since it starts something new.
-
-Claude-Session: https://claude.ai/code/session_012PBjHSukJW9dyjDaEPpvDy"
+rebuilds a live pane; fork is not, since it starts something new."
 ```
 
 ---
@@ -1286,9 +1278,7 @@ Expected: PASS. `every_command_has_a_verdict` and `every_commands_body_does_what
 git add src-tauri/src src/lib/sessions.ts src/lib/sessions.test.ts src/lib/hub_verdicts.generated.json docs/hub.md
 git commit -m "feat: route rewind_conversation from the desktop
 
-Routed, not local-only: the hub holds the session and the transcript both.
-
-Claude-Session: https://claude.ai/code/session_012PBjHSukJW9dyjDaEPpvDy"
+Routed, not local-only: the hub holds the session and the transcript both."
 ```
 
 ---
@@ -1749,9 +1739,7 @@ git commit -m "feat(ui): reply action row — copy, quote, retry, fork, rewind
 
 The which-buttons logic is a pure function so its edges are testable: fork
 anchors on the NEXT later prompt (so this turn is kept), rewind on its own,
-and index 0 hides rewind only when the window is not truncated.
-
-Claude-Session: https://claude.ai/code/session_012PBjHSukJW9dyjDaEPpvDy"
+and index 0 hides rewind only when the window is not truncated."
 ```
 
 ---
@@ -1905,9 +1893,7 @@ git commit -m "feat(ui): fork sheet — choose the new session's worktree
 
 Defaults to a new worktree: two live Claude sessions editing one checkout is
 the standard way to lose work. The sheet is fork's confirmation, so there is
-no second dialog.
-
-Claude-Session: https://claude.ai/code/session_012PBjHSukJW9dyjDaEPpvDy"
+no second dialog."
 gh pr create --fill
 ```
 

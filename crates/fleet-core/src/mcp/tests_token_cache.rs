@@ -466,3 +466,42 @@ async fn a_device_this_hub_saw_is_not_idle_though_its_row_reads_old() {
     let r = hub.accepted(PHONE_TOK).await;
     assert!(r.contains("caller=client:phone"), "{r}");
 }
+
+/// A stamp `touch_due` claimed but the busy writer could not write is put
+/// back as it was: a good earlier stamp survives, a first one is forgotten.
+#[test]
+fn a_stamp_the_writer_was_too_busy_for_is_restored_not_erased() {
+    use super::token_cache::TOUCH_INTERVAL_SECS;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.db");
+    let _store = Store::open_with_bus(&path, Arc::new(NoopEventBus)).unwrap();
+    let pool = Arc::new(ReadPool::open(&path, READ_POOL_SIZE).unwrap().unwrap());
+    let c = TokenCache::new(pool).unwrap();
+    assert_eq!(
+        c.touch_due(7, 1_000),
+        Some(None),
+        "first touch: due, nothing before"
+    );
+    assert_eq!(c.last_touched(7), Some(1_000));
+    // Well past the interval: due again, and the old stamp comes back.
+    let later = 1_000 + TOUCH_INTERVAL_SECS + 1;
+    let prev = c.touch_due(7, later);
+    assert_eq!(prev, Some(Some(1_000)));
+    c.untouch(7, prev.unwrap());
+    assert_eq!(
+        c.last_touched(7),
+        Some(1_000),
+        "the good stamp survives a busy writer"
+    );
+    // And a first stamp the writer was busy for is forgotten.
+    let first = c.touch_due(8, later).unwrap();
+    c.untouch(8, first);
+    assert_eq!(c.last_touched(8), None);
+    // Claimed again and written this time: the next request is inside the interval.
+    assert_eq!(c.touch_due(7, later), Some(Some(1_000)));
+    assert_eq!(
+        c.touch_due(7, later + 1),
+        None,
+        "not due inside the interval"
+    );
+}

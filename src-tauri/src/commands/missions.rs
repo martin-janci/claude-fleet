@@ -103,6 +103,13 @@ pub struct SetWorkHoldArgs {
     pub on: bool,
 }
 
+/// `set_work_archived`: archive a ticket or task (`on: false` unarchives).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SetWorkArchivedArgs {
+    pub item_id: i64,
+    pub on: bool,
+}
+
 /// `accept_work_proposals` and `undo_work_accept`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorkProposalsArgs {
@@ -287,6 +294,15 @@ pub async fn set_work_dep(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<GraphChange, IpcError> {
     routed::set_work_dep(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn set_work_archived(
+    args: SetWorkArchivedArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<GraphChange, IpcError> {
+    routed::set_work_archived(&backend, args, &store).await
 }
 
 #[tauri::command]
@@ -606,6 +622,25 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("set_work_hold", &wire).await,
             None => graph::hold(&wire, store, &internal_view()),
+        }
+    }
+
+    pub async fn set_work_archived(
+        backend: &FleetBackend,
+        args: SetWorkArchivedArgs,
+        store: &Mutex<Store>,
+    ) -> Result<GraphChange, IpcError> {
+        let wire = WorkLinkArgs {
+            action: "archive_item".into(),
+            item_id: Some(args.item_id),
+            on: Some(args.on),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("set_work_archived", &wire).await,
+            None => {
+                fleet_core::service::work::archive::archive_item(&wire, store, &internal_view())
+            }
         }
     }
 

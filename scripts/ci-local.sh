@@ -177,10 +177,10 @@ run_update_scripts() {
     echo "ci-local: minisign not found; skipping scripts/release-update-scripts-test.sh" >&2
     return
   fi
-  step cargo build -p fleet-update --bin fleet-release --locked
-  # Where cargo put them: the Buildkite builder keeps its target directory
-  # outside the checkout (deploy/buildkite/hooks/environment).
+  # The same target dir cargo built into: CARGO_TARGET_DIR when set (a relay
+  # or a shared builder), else the repo's own.
   local target_dir="${CARGO_TARGET_DIR:-$ROOT/target}"
+  step cargo build -p fleet-update --bin fleet-release --locked
   step env FLEET_RELEASE="$target_dir/debug/fleet-release" FLEET_HUB="$target_dir/debug/fleet-hub" \
     bash scripts/release-update-scripts-test.sh
 }

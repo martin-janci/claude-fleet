@@ -96,7 +96,7 @@ pub struct AuthRows {
 /// How often, at most, `authorize` stamps one client's `last_seen_at` — the
 /// same minute the store's own guard in `touch_client_token` enforces, kept
 /// here too so a request that is not due never touches the writer's lock.
-const TOUCH_INTERVAL_SECS: i64 = 60;
+pub(super) const TOUCH_INTERVAL_SECS: i64 = 60;
 
 /// Token rows kept in memory, validated against the auth epoch per request.
 pub struct TokenCache {
@@ -225,69 +225,79 @@ impl TokenCache {
 
     /// Whether client `id` is due a `last_seen_at` stamp at `now`. Marks it
     /// stamped when it is, so concurrent requests from one phone do not all
-    /// go for the writer; [`Self::untouch`] takes that back when the stamp
-    /// could not be written.
-    pub fn touch_due(&self, id: i64, now: i64) -> bool {
+    /// go for the writer; the previous stamp is returned so that
+    /// [`Self::untouch`] can put it back when the write could not happen.
+    pub fn touch_due(&self, id: i64, now: i64) -> Option<Option<i64>> {
         let mut t = self.touched.lock().unwrap_or_else(|p| p.into_inner());
         match t.get(&id) {
-            Some(&at) if now - at < TOUCH_INTERVAL_SECS => false,
-            _ => {
-                t.insert(id, now);
-                true
+            Some(&at) if now - at < TOUCH_INTERVAL_SECS => None,
+            _ => Some(t.insert(id, now)),
+        }
+    }
+
+    /// Put back the stamp [`Self::touch_due`] replaced (the writer was busy):
+    /// the good stamp before it is kept, a first one is forgotten, and the
+    /// next request tries again either way.
+    pub fn untouch(&self, id: i64, prev: Option<i64>) {
+        let mut t = self.touched.lock().unwrap_or_else(|p| p.into_inner());
+        match prev {
+            Some(at) => {
+                t.insert(id, at);
+            }
+            None => {
+                t.remove(&id);
             }
         }
     }
 
-    /// Forget a stamp that was not written (the writer was busy), so the
-    /// next request tries again.
-    pub fn untouch(&self, id: i64) {
-        self.touched
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(&id);
-    }
-
     /// [`Self::touch_due`] for a host token, by alias.
-    pub fn host_touch_due(&self, alias: &str, now: i64) -> bool {
+    pub fn host_touch_due(&self, alias: &str, now: i64) -> Option<Option<i64>> {
         let mut t = self.touched_hosts.lock().unwrap_or_else(|p| p.into_inner());
         match t.get(alias) {
-            Some(&at) if now - at < TOUCH_INTERVAL_SECS => false,
-            _ => {
-                t.insert(alias.to_string(), now);
-                true
+            Some(&at) if now - at < TOUCH_INTERVAL_SECS => None,
+            _ => Some(t.insert(alias.to_string(), now)),
+        }
+    }
+
+    /// [`Self::untouch`] for a host token, by alias.
+    pub fn host_untouch(&self, alias: &str, prev: Option<i64>) {
+        let mut t = self.touched_hosts.lock().unwrap_or_else(|p| p.into_inner());
+        match prev {
+            Some(at) => {
+                t.insert(alias.to_string(), at);
+            }
+            None => {
+                t.remove(alias);
             }
         }
     }
 
     /// [`Self::touch_due`] for a named token, by id.
-    pub fn control_touch_due(&self, id: i64, now: i64) -> bool {
+    pub fn control_touch_due(&self, id: i64, now: i64) -> Option<Option<i64>> {
         let mut t = self
             .touched_controls
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         match t.get(&id) {
-            Some(&at) if now - at < TOUCH_INTERVAL_SECS => false,
-            _ => {
-                t.insert(id, now);
-                true
-            }
+            Some(&at) if now - at < TOUCH_INTERVAL_SECS => None,
+            _ => Some(t.insert(id, now)),
         }
     }
 
     /// [`Self::untouch`] for a named token.
-    pub fn control_untouch(&self, id: i64) {
-        self.touched_controls
+    pub fn control_untouch(&self, id: i64, prev: Option<i64>) {
+        let mut t = self
+            .touched_controls
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(&id);
-    }
-
-    /// [`Self::untouch`] for a host token, by alias.
-    pub fn host_untouch(&self, alias: &str) {
-        self.touched_hosts
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(alias);
+            .unwrap_or_else(|p| p.into_inner());
+        match prev {
+            Some(at) => {
+                t.insert(id, at);
+            }
+            None => {
+                t.remove(&id);
+            }
+        }
     }
 }
 

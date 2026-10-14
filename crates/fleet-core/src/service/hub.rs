@@ -41,6 +41,11 @@ pub struct HubBase {
     /// `work.session_start_context` setting (work graph M4.5), off by
     /// default. Set by the provisioning entry points from the store.
     pub session_start_context: bool,
+    /// The loopback port this host's fleet-agent relays hooks on, when the
+    /// host is an agent host whose agent reported one (`hello.hook_port`).
+    /// Set per host by [`HubBase::for_host`]; with it, [`HubBase::hook_url`]
+    /// is `http://127.0.0.1:<port>/hook` instead of the public URL's.
+    pub hook_relay: Option<u16>,
 }
 
 impl HubBase {
@@ -62,6 +67,7 @@ impl HubBase {
             port,
             public: false,
             session_start_context: false,
+            hook_relay: None,
         }
     }
 
@@ -126,6 +132,7 @@ impl HubBase {
             port,
             public: true,
             session_start_context: false,
+            hook_relay: None,
         })
     }
 
@@ -146,8 +153,36 @@ impl HubBase {
         format!("{}/mcp", self.url)
     }
 
+    /// Where `host`'s Claude Code hooks should post: this base with
+    /// [`HubBase::hook_relay`] set when the host is an agent host whose
+    /// fleet-agent relays hooks on loopback (`Store::agent_hook_port`).
+    ///
+    /// Only a public hub uses the relay. Claude Code refuses an http hook
+    /// whose host resolves to a private or link-local address, which a
+    /// public name in front of an in-cluster ingress does; loopback it
+    /// allows, so the agent carries the hook the last hop. A loopback hub
+    /// (the desktop) already writes `127.0.0.1`, and an SSH host reaches it
+    /// through its reverse tunnel, so neither changes.
+    pub fn for_host(&self, store: &Store, host: &str) -> Self {
+        let hook_relay = if self.public {
+            store.agent_hook_port(host).ok().flatten()
+        } else {
+            None
+        };
+        Self {
+            hook_relay,
+            ..self.clone()
+        }
+    }
+
+    /// The URL fleet's hooks post to: the agent's loopback relay when this
+    /// base was made [`HubBase::for_host`] an agent host that has one, else
+    /// this base's own `/hook`.
     pub fn hook_url(&self) -> String {
-        format!("{}/hook", self.url)
+        match self.hook_relay {
+            Some(port) if self.public => format!("http://127.0.0.1:{port}/hook"),
+            _ => format!("{}/hook", self.url),
+        }
     }
 
     /// The authority part (`host[:port]`), for the Host allowlist.

@@ -97,7 +97,7 @@ pub enum Access {
     /// **The master is deliberately out.** Its path to a claim is
     /// `fleet-hub session claim`, which writes through `state.db` on the hub
     /// machine — shell access there being the authority §4.5 already
-    /// concedes — and every byte of the master's tool surface is budgeted
+    /// concedes — and every byte of the master's and a full client's tool surface is budgeted
     /// (`the_served_definition_budget_stays_bounded`), the same reasoning
     /// [`Access::PersonDevice`] records one variant up.
     HostToken,
@@ -158,9 +158,7 @@ pub fn access_allows(caller: &crate::mcp::Caller, tool: &str) -> bool {
         // on a hub with a second person handed that person the whole fleet's
         // settings. The boolean is false when the hub cannot say who its
         // owner is, so that state refuses rather than opens.
-        Some(Access::Person) => {
-            caller.is_fleet_admin && (caller.is_master() || caller.is_person_device())
-        }
+        Some(Access::Person) => caller.is_master_or_fleet_admin_device(),
         // Two conjuncts, narrowing two different axes, and BOTH are needed:
         //
         // - `is_fleet_admin` (the owner's `is_personal_owner` before identity
@@ -173,13 +171,13 @@ pub fn access_allows(caller: &crate::mcp::Caller, tool: &str) -> bool {
         // - `is_person_device` narrows WHAT the caller is: a paired client,
         //   which is what keeps the MASTER out of this arm by design (the
         //   operator has `fleet-hub settings` on the hub machine, and every
-        //   byte of the master's tool surface is budgeted —
-        //   `the_served_definition_budget_stays_bounded`). It also keeps out
+        //   byte of the master's and a full client's tool surface is
+        //   budgeted — `the_served_definition_budget_stays_bounded`). It also keeps out
         //   a per-host token, an org-bound client and a single-purpose token.
         //
         // A device that reaches these still has to be trusted to write
         // anything (`settings_writer`).
-        Some(Access::PersonDevice) => caller.is_fleet_admin && caller.is_person_device(),
+        Some(Access::PersonDevice) => caller.is_fleet_admin_device(),
         // Multi-user M1 (T12): a per-host token, and only one. `host_alias`
         // is `Some` for exactly that shape of caller — the master carries
         // neither field and a paired client carries `client` — so this arm
@@ -965,6 +963,14 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
     // not call it.
     ToolPolicy {
         name: "set_friendly_name",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Pins or unpins the row: a write, so a readonly token may not call it.
+    ToolPolicy {
+        name: "pin_session",
         access: Access::Client,
         readonly: false,
         confirm: false,
@@ -2639,6 +2645,14 @@ pub fn redact_args(args: Option<&serde_json::Map<String, serde_json::Value>>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_master_with_no_named_owner_is_refused_a_person_tool() {
+        let mut m = crate::mcp::Caller::master();
+        assert!(access_allows(&m, "set_account_nickname"));
+        m.is_fleet_admin = false;
+        assert!(!access_allows(&m, "set_account_nickname"));
+    }
 
     #[test]
     fn readonly_allow_list_admits_reads_and_refuses_mutations() {

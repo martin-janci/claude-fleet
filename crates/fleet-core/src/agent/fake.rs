@@ -140,6 +140,7 @@ pub fn hello() -> AgentHello {
         host_name: "fake-host".into(),
         os: "linux".into(),
         proto: fleet_proto::PROTO_VERSION,
+        hook_port: None,
     }
 }
 

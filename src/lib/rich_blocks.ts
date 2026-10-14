@@ -153,7 +153,14 @@ export type UiBlock =
   | { kind: 'setting'; proposal: number; note?: string }
   /** One of the app's own wizards as a form in the chat (step 10.12): the
    *  spec is the app's, never the block's (`forms/WizardChatCard.svelte`). */
-  | { kind: 'wizard'; wizard: ChatWizardId; why?: string; values?: Record<string, string | number | boolean> }
+  | {
+      kind: 'wizard';
+      wizard: ChatWizardId;
+      /** `fleet_agent` only: the catalog fleet agent the form grants an instance of. */
+      definition?: string;
+      why?: string;
+      values?: Record<string, string | number | boolean>;
+    }
   /** A dashboard the agent proposes (persona design, step 5): widgets over
    *  `work_stats`, drawn live by the app, pinned only by the person
    *  (`rich/DashboardCard.svelte`). The block names filters, never numbers. */
@@ -916,9 +923,15 @@ export function checkUiBlock(raw: string): Check {
     }
     case 'wizard': {
       const wizard = oneOf(v, 'wizard', p, '', CHAT_WIZARD_IDS);
+      const fleet = wizard === 'fleet_agent';
+      let definition: string | undefined;
+      if (v.definition === undefined || v.definition === null) {
+        if (fleet) p.add('', 'a `fleet_agent` wizard names its `definition`');
+      } else if (!fleet) p.add('', '`definition` is for the `fleet_agent` wizard');
+      else definition = key(v, 'definition', p, '');
       const why = str(v, 'why', p, '', { max: 500 });
       const values = draftedValues(v.values, p);
-      if (wizard) block = { kind: 'wizard', wizard, why, ...(values ? { values } : {}) };
+      if (wizard) block = { kind: 'wizard', wizard, why, ...(definition ? { definition } : {}), ...(values ? { values } : {}) };
       break;
     }
     case 'dashboard': {

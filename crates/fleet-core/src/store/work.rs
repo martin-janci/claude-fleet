@@ -248,7 +248,11 @@ pub struct WorkItemRow {
     /// `points | hours`; set exactly when `estimate` is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimate_unit: Option<String>,
-    /// The task whose result this follow-up was made from (migration 189);
+    /// When a person archived it (migration 190): out of the ticket views
+    /// and archived in the Work tree until unarchived. `None` = not archived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<i64>,
+    /// The task whose result this follow-up was made from (migration 192);
     /// `None` for every item not made from a result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_task_id: Option<i64>,
@@ -620,12 +624,12 @@ pub(super) const ITEM_COLUMNS: &str =
      assignees, iteration, updated_ext, status_changed_at, fetched_at, unavailable_at, \
      unavailable_reason, status_set_by, status_set_at, origin, project_id, notes, task_id, \
      proposal_state, proposed_by, proposal_why, held_at, done_when, due_at, display_key, priority, \
-     labels, estimate, estimate_unit, origin_task_id";
+     labels, estimate, estimate_unit, archived_at, origin_task_id";
 
 /// How many columns [`ITEM_COLUMNS`] names. A query that appends its own
 /// columns after the list indexes them as `ITEM_COLUMN_COUNT + n` — never a
 /// literal, because a literal silently shifts when a column is added here.
-pub(super) const ITEM_COLUMN_COUNT: usize = 41;
+pub(super) const ITEM_COLUMN_COUNT: usize = 42;
 
 /// A JSON array column as a list; anything unreadable is empty.
 fn json_list(raw: Option<String>) -> Vec<String> {
@@ -675,11 +679,38 @@ pub(super) fn map_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkItemRow> {
         labels: json_list(r.get(37)?),
         estimate: r.get::<_, Option<f64>>(38)?.and_then(Estimate::new),
         estimate_unit: r.get(39)?,
-        origin_task_id: r.get(40)?,
+        archived_at: r.get(40)?,
+        origin_task_id: r.get(41)?,
     })
 }
 
 impl Store {
+    /// Archive an item (`on`), or unarchive it. `Ok(false)`: nothing
+    /// changed (already so); `E_NOTFOUND` for no such item. An archive keeps
+    /// its first stamp.
+    pub fn set_item_archived(&self, item_id: i64, on: bool) -> Result<bool, IpcError> {
+        let changed = if on {
+            self.conn.execute(
+                "UPDATE work_items SET archived_at = ?1, updated_at = ?1 \
+                 WHERE id = ?2 AND archived_at IS NULL",
+                rusqlite::params![now_unix(), item_id],
+            )?
+        } else {
+            self.conn.execute(
+                "UPDATE work_items SET archived_at = NULL, updated_at = ?1 \
+                 WHERE id = ?2 AND archived_at IS NOT NULL",
+                rusqlite::params![now_unix(), item_id],
+            )?
+        } == 1;
+        if !changed && self.get_work_item(item_id)?.is_none() {
+            return Err(IpcError::new(
+                codes::E_NOTFOUND,
+                format!("work item {item_id} not found"),
+            ));
+        }
+        Ok(changed)
+    }
+
     /// Where shipped work came from (gap plan G3.2, Today's "from Morning
     /// PR sweep"): the routine whose newest run started the participant's
     /// session, else `mission <name>` when the item is a mission's task.

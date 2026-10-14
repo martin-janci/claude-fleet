@@ -1182,7 +1182,7 @@ impl AdminView {
         caller: &crate::mcp::auth::Caller,
         store: &Mutex<Store>,
     ) -> Result<Self, IpcError> {
-        if caller.is_master() || (caller.is_person_device() && caller.is_fleet_admin) {
+        if caller.is_master_or_fleet_admin_device() {
             return Ok(AdminView::Admin);
         }
         let Some(p) = caller.person() else {
@@ -1654,7 +1654,7 @@ fn org_details_locked(
             }
         })
         .transpose()?;
-    let owner = s.personal_owner_id()?;
+    let admins = s.fleet_admins()?;
     // Trust is the person's (`fleet-trusted`): a device shows trusted when
     // the auth layer would decide it so (`ClientTokenRow::trusted_by`).
     let trusted_people = if clients.is_some() {
@@ -1679,15 +1679,19 @@ fn org_details_locked(
         let administers = devices.administers(o.id);
         let my_role = devices.role(o.id).map(str::to_string);
         let member_devices = clients.as_deref().filter(|_| administers);
+        // An org admin is not shown a fleet admin's devices.
+        let hidden: &[i64] = if admin { &[] } else { &admins };
         let members = (admin || my_role.is_some())
-            .then(|| org_member_list(s, o.id, member_devices, &trusted_people))
+            .then(|| org_member_list(s, o.id, member_devices, &trusted_people, hidden))
             .transpose()?;
         // The devices fenced to it, as its administrators are shown them.
         let org_clients: Option<Vec<&crate::store::ClientTokenRow>> =
             clients.as_ref().filter(|_| administers).map(|cs| {
                 cs.iter()
                     .filter(|c| c.org_id == Some(o.id))
-                    .filter(|c| admin || !(c.person_id.is_some() && c.person_id == owner))
+                    .filter(|c| {
+                        admin || !crate::service::org_admin::is_fleet_admins_device(&admins, c)
+                    })
                     .filter(|c| crate::store::machine_token_kind(&c.mode).is_none())
                     .collect()
             });
@@ -1964,6 +1968,7 @@ fn org_member_list(
     org: i64,
     devices: Option<&[crate::store::ClientTokenRow]>,
     trusted_people: &[i64],
+    hidden_admins: &[i64],
 ) -> Result<Vec<OrgMember>, IpcError> {
     let mut out = Vec::new();
     for m in s.org_members(org)? {
@@ -1974,6 +1979,9 @@ fn org_member_list(
             let theirs: Option<Vec<&crate::store::ClientTokenRow>> = devices.map(|cs| {
                 cs.iter()
                     .filter(|c| c.person_id == Some(p.id) && c.revoked_at.is_none())
+                    .filter(|c| {
+                        !crate::service::org_admin::is_fleet_admins_device(hidden_admins, c)
+                    })
                     .filter(|c| crate::store::machine_token_kind(&c.mode).is_none())
                     .collect()
             });

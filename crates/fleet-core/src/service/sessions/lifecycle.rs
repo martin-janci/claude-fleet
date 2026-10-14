@@ -1669,6 +1669,7 @@ pub(super) async fn kill_session_with(
             &args.name,
             "kill_session",
         )?;
+        refuse_if_pinned(&s, &args.host_alias, &args.name, "kill_session")?;
     }
     // Look up id BEFORE killing so we can return it after. Read the controller
     // under the same lock and refuse to nuke ourselves unless forced.
@@ -1929,6 +1930,69 @@ pub fn touch_session_viewed(
             format!("session {} not found", args.session_id),
         )
     })
+}
+
+/// `pin_session`: pin or unpin a session.
+#[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "PinSessionParams")]
+pub struct PinSessionArgs {
+    /// The session to pin or unpin.
+    pub session_id: i64,
+    /// `true` pins it, `false` unpins it.
+    pub pinned: bool,
+}
+
+/// Pin or unpin a session (migration 189). A pinned session sits in the
+/// Pinned section and nothing closes it until it is unpinned. Pinning a
+/// session whose safe kill is already under way is refused: that kill
+/// removes the worktree before the pin could stop it. Answers the row as
+/// it now stands; a call that changes nothing still answers it.
+pub fn pin_session(args: PinSessionArgs, store: &Mutex<Store>) -> Result<SessionRow, IpcError> {
+    let s = lock(store)?;
+    let row = s.get_session_by_id(args.session_id)?.ok_or_else(|| {
+        IpcError::new(
+            codes::E_NOTFOUND,
+            format!("session {} not found", args.session_id),
+        )
+    })?;
+    if args.pinned && row.safe_kill_state.as_deref() == Some("requested") {
+        return Err(IpcError::new(
+            codes::E_SAFE_KILL_IN_PROGRESS,
+            "a safe kill is already closing this session; it cannot be pinned",
+        ));
+    }
+    let at = args.pinned.then(now_unix);
+    if s.set_session_pinned(row.id, at)? {
+        let _ = s.insert_session_event(
+            row.id,
+            if args.pinned { "pinned" } else { "unpinned" },
+            None,
+        );
+    }
+    s.get_session_by_id(row.id)?.ok_or_else(|| {
+        IpcError::new(
+            codes::E_NOTFOUND,
+            format!("session {} not found", args.session_id),
+        )
+    })
+}
+
+/// Refuse to close a pinned session: `what` names the action for the
+/// message. A session that does not exist is left for the caller's own
+/// lookup to report.
+pub fn refuse_if_pinned(
+    store: &Store,
+    host_alias: &str,
+    tmux_name: &str,
+    what: &str,
+) -> Result<(), IpcError> {
+    if store.is_session_pinned(tmux_name, host_alias)? {
+        return Err(IpcError::new(
+            codes::E_PINNED,
+            format!("{what} refused: {tmux_name} on {host_alias} is pinned. Unpin it first."),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize)]

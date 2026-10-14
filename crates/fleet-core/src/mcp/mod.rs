@@ -412,7 +412,7 @@ async fn authorize(
             // is never waits on it — a stamp the writer was too busy for is
             // retried by the next request.
             Some(cache) => {
-                if cache.touch_due(client.id, now) {
+                if let Some(prev) = cache.touch_due(client.id, now) {
                     match state.store.try_lock() {
                         Ok(s) => {
                             if let Err(e) = s.touch_client_token(client.id, now) {
@@ -423,7 +423,7 @@ async fn authorize(
                             }
                             record_client_header(&s, &caller, request.headers(), now);
                         }
-                        Err(_) => cache.untouch(client.id),
+                        Err(_) => cache.untouch(client.id, prev),
                     }
                 }
             }
@@ -452,10 +452,10 @@ async fn authorize(
         };
         match state.tokens.as_ref() {
             Some(cache) => {
-                if cache.host_touch_due(alias, now) {
+                if let Some(prev) = cache.host_touch_due(alias, now) {
                     match state.store.try_lock() {
                         Ok(s) => stamp(&s),
-                        Err(_) => cache.host_untouch(alias),
+                        Err(_) => cache.host_untouch(alias, prev),
                     }
                 }
             }
@@ -484,10 +484,10 @@ async fn authorize(
         };
         match state.tokens.as_ref() {
             Some(cache) => {
-                if cache.control_touch_due(api.id, now) {
+                if let Some(prev) = cache.control_touch_due(api.id, now) {
                     match state.store.try_lock() {
                         Ok(s) => stamp(&s),
-                        Err(_) => cache.control_untouch(api.id),
+                        Err(_) => cache.control_untouch(api.id, prev),
                     }
                 }
             }
@@ -1178,6 +1178,12 @@ mod tests {
             org_id: None,
             person: Some("owner"),
             ttl: std::time::Duration::from_secs(600),
+            minter: pairing::Minter {
+                person: Some(42),
+                device: None,
+                via: "test",
+                fenced_org: None,
+            },
         }
     }
 
@@ -1575,10 +1581,162 @@ mod tests {
                 "the device is its own actor"
             );
             assert_eq!(paired.actor_device, Some(laptop.id));
+            assert_eq!(paired.representation["minted_by_person"], 42);
+            assert_eq!(paired.representation["minted_via"], "test");
             assert!(
                 ev.iter().all(|e| e.representation.get("token").is_none()
                     && e.representation.get("code").is_none()),
                 "{ev:?}"
+            );
+        }
+
+        // TASK-264: a trusted code an org admin minted is re-checked against
+        // the org at REDEEM. Between mint and redeem bob gains a device in
+        // another org, so the redeem is refused and rolls back whole. (A membership of
+        // `other` is what makes the device read as outside `acme`: a lone
+        // membership would pull every device of bob's into it.)
+        let (acme, other, bob) = {
+            let s = store.lock().unwrap();
+            let acme = s.add_org("acme", None, false).unwrap().id;
+            let other = s.add_org("other-org", None, false).unwrap().id;
+            let bob = s.create_person("bob", None).unwrap().id;
+            s.set_org_member(acme, bob, "member", None).unwrap();
+            (acme, other, bob)
+        };
+        let fenced = pairings.mint(pairing::MintRequest {
+            person: Some("bob"),
+            org_id: Some(acme),
+            minter: pairing::Minter {
+                fenced_org: Some(acme),
+                ..mint_req("x", "full", true).minter
+            },
+            ..mint_req("bob-phone", "full", true)
+        });
+        {
+            let s = store.lock().unwrap();
+            s.insert_client_token("bob-other", &"c".repeat(64), "full")
+                .unwrap();
+            s.set_client_person("bob-other", Some(bob)).unwrap();
+            s.set_client_org("bob-other", Some(other)).unwrap();
+            s.set_org_member(other, bob, "member", None).unwrap();
+        }
+        let refused = round_trip(addr, &pair_req(&fenced.code, "phone.invalid")).await;
+        assert!(refused.contains("403"), "{refused}");
+        assert!(
+            body_of(&refused).contains("trust is the person's"),
+            "{refused}"
+        );
+        assert!(!refused.contains("\"token\""), "{refused}");
+        {
+            let s = store.lock().unwrap();
+            assert!(
+                !s.list_client_tokens(true)
+                    .unwrap()
+                    .iter()
+                    .any(|r| r.name == "bob-phone"),
+                "the refused redeem rolled the client row back"
+            );
+            let ev = s
+                .admin_events(&crate::store::AdminEventQuery {
+                    limit: 200,
+                    ..Default::default()
+                })
+                .unwrap();
+            assert!(
+                !ev.iter().any(|e| e.resource_id == "bob-phone"),
+                "no pair event for the refused redeem"
+            );
+        }
+        // The same mint by a fleet authority (no fence) redeems trusted.
+        let unfenced = pairings.mint(pairing::MintRequest {
+            person: Some("bob"),
+            org_id: Some(acme),
+            ..mint_req("bob-phone", "full", true)
+        });
+        let ok = round_trip(addr, &pair_req(&unfenced.code, "phone.invalid")).await;
+        assert!(ok.contains("200 OK"), "{ok}");
+        assert!(body_of(&ok).contains("\"trusted\":true"), "{ok}");
+
+        // The fence is not over-strict: carol's devices and live memberships
+        // are all inside acme, so a fenced trusted code redeems trusted.
+        {
+            let s = store.lock().unwrap();
+            let carol = s.create_person("carol", None).unwrap().id;
+            s.set_org_member(acme, carol, "member", None).unwrap();
+        }
+        let fenced_ok = pairings.mint(pairing::MintRequest {
+            person: Some("carol"),
+            org_id: Some(acme),
+            minter: pairing::Minter {
+                fenced_org: Some(acme),
+                ..mint_req("x", "full", true).minter
+            },
+            ..mint_req("carol-phone", "full", true)
+        });
+        let passed = round_trip(addr, &pair_req(&fenced_ok.code, "phone.invalid")).await;
+        assert!(passed.contains("200 OK"), "{passed}");
+        assert!(body_of(&passed).contains("\"trusted\":true"), "{passed}");
+        {
+            let s = store.lock().unwrap();
+            assert!(
+                s.active_client_tokens()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r.name == "carol-phone"),
+                "the fenced redeem stored its row"
+            );
+            let ev = s
+                .admin_events(&crate::store::AdminEventQuery {
+                    limit: 300,
+                    ..Default::default()
+                })
+                .unwrap();
+            let pairs = ev
+                .iter()
+                .filter(|e| e.action == "pair" && e.resource_id == "carol-phone")
+                .count();
+            assert_eq!(pairs, 1, "exactly one pair event");
+        }
+
+        // The person left the org between the fenced mint and the redeem:
+        // refused, no row, no `pair` event.
+        let dave = {
+            let s = store.lock().unwrap();
+            let dave = s.create_person("dave", None).unwrap().id;
+            s.set_org_member(acme, dave, "member", None).unwrap();
+            dave
+        };
+        let left = pairings.mint(pairing::MintRequest {
+            person: Some("dave"),
+            org_id: Some(acme),
+            minter: pairing::Minter {
+                fenced_org: Some(acme),
+                ..mint_req("x", "full", true).minter
+            },
+            ..mint_req("dave-phone", "full", true)
+        });
+        store.lock().unwrap().remove_org_member(acme, dave).unwrap();
+        let gone = round_trip(addr, &pair_req(&left.code, "phone.invalid")).await;
+        assert!(gone.contains("403"), "{gone}");
+        assert!(body_of(&gone).contains("not a member"), "{gone}");
+        {
+            let s = store.lock().unwrap();
+            assert!(
+                !s.list_client_tokens(true)
+                    .unwrap()
+                    .iter()
+                    .any(|r| r.name == "dave-phone"),
+                "the refused redeem left no row"
+            );
+            let ev = s
+                .admin_events(&crate::store::AdminEventQuery {
+                    limit: 400,
+                    ..Default::default()
+                })
+                .unwrap();
+            assert!(
+                !ev.iter().any(|e| e.resource_id == "dave-phone"),
+                "no pair event for the refused redeem"
             );
         }
 

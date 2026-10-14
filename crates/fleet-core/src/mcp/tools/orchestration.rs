@@ -975,7 +975,7 @@ impl FleetTools {
 
     #[tool(description = "Work links: {session_id} → its live links; \
         {key} → ended (past) links; neither → recently ended. action \
-        context|resume_plan {key}; purge_impact; tickets (cached); lookup \
+        context|resume_plan {key}; purge_impact; tickets (cached; view: mine|sprint|recent|archived); lookup \
         {key|url}; trackers; scopes; orgs; org_suggestions; today {since}; card {key}; \
         describe {key} (the tracker's whole description, cached); \
         tracker_comments {key} (the ticket's own comments, live); \
@@ -1352,7 +1352,8 @@ impl FleetTools {
         a Claude-written summary of past work. archive|unarchive (UI only; with \
         no session_id: the ended links of link_id|key|item_id|task_id), unlink \
         {link_id} with no session_id removes an ended link; snooze {days}|never \
-        (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe \
+        (tidy-up); dismiss {item_id} (reopened); archive_item {item_id, on?}: a person \
+        archives a ticket or task (on: false unarchives); tidy_apply {items}: kills (safe \
         kill when dirty). set_status {item_id, status, status_name?}: a person's status for \
         work with no ticket, or a ticket moved at its tracker; keep_open {item_id} answers close_suggested. edit {item_id, title?, notes?, assignees?, \
         due_at?, priority?, labels?, estimate?, estimate_unit?}: a person edits work with no ticket. attach {item_id, name, \
@@ -1752,6 +1753,24 @@ impl FleetTools {
             let view_scope = self.view_scope(&caller)?;
             return ok_json(
                 &crate::service::work::graph::hold(&args, &self.store, &view_scope)
+                    .map_err(to_mcp_err)?,
+            );
+        }
+        // Archiving a ticket or task (migration 190): a person tidying their
+        // lists, so never a per-host or peer token; the item's own sessions
+        // pass the drive gate, as for `hold`.
+        if args.action == "archive_item" {
+            if caller.host_alias.is_some() || caller.mode == crate::mcp::auth::TokenMode::Peer {
+                return Err(mcp_err(
+                    "E_FORBIDDEN",
+                    "a person archives tickets, from the desktop or the phone",
+                    None,
+                ));
+            }
+            self.require_drive_on_item_sessions(&caller, graph_item(&args)?)?;
+            let view_scope = self.view_scope(&caller)?;
+            return ok_json(
+                &crate::service::work::archive::archive_item(&args, &self.store, &view_scope)
                     .map_err(to_mcp_err)?,
             );
         }

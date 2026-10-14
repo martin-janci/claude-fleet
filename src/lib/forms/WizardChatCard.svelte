@@ -29,6 +29,7 @@
     report,
     onended,
     drafted = null,
+    definition = null,
   }: {
     id: ChatWizardId;
     /** Who opened it ("Control", the session's agent). */
@@ -43,20 +44,24 @@
      *  new project for acme/pos on mercury"): written in as drafted
      *  defaults the person checks before the last button (G7.4). */
     drafted?: Values | null;
+    /** `fleet_agent`: the catalog fleet agent whose grant form this is. */
+    definition?: string | null;
   } = $props();
 
 
   let ready = $state<ChatWizard | null>(null);
   let failed = $state<string | null>(null);
   let sending = $state<string | null>(null);
-  const title = $derived(WIZARDS[id].spec.title);
+  const title = $derived(
+    ready?.wizard.spec.title ?? (id === 'fleet_agent' ? `New ${definition ?? 'fleet agent'} instance` : WIZARDS[id].spec.title),
+  );
   const spec = $derived(
     ready ? (drafted && Object.keys(drafted).length ? withDrafted(ready.wizard.spec, drafted, from, 'your message') : ready.wizard.spec) : null,
   );
 
   onMount(() => {
     let live = true;
-    chatWizard(id).then(
+    chatWizard(id, definition).then(
       (w) => {
         if (live) ready = w;
       },

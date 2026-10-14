@@ -151,3 +151,32 @@ describe('the row menu', () => {
     expect(kill.title).not.toBe('');
   });
 });
+
+describe('Pin', () => {
+  it('the menu offers Pin, and Unpin once pinned; a pinned row cannot be killed or safe-removed', () => {
+    const items = (s: SessionRow) => new Map(get(sessionMenuItems)(s).map((i) => [i.id, i]));
+    const loose = items(work);
+    expect(loose.get('pin')?.label).toBe('Pin');
+    expect(loose.get('kill')?.blocked).toBeNull();
+    const pinned = items({ ...work, pinned_at: 100 });
+    expect(pinned.get('pin')?.label).toBe('Unpin');
+    expect(pinned.get('pin')?.blocked).toBeNull();
+    expect(pinned.get('kill')?.blocked).toBe('Pinned: unpin it first');
+    expect(pinned.get('safe_remove')?.blocked).toBe('Pinned: unpin it first');
+    // An external row is never offered a pin.
+    expect(items(external).has('pin')).toBe(false);
+  });
+
+  it('a pinned session keeps the menu and Details in step', async () => {
+    const s = { ...work, pinned_at: 100 };
+    sessions.set([s]);
+    render(SessionDetails, { props: { session: s } });
+    await tick();
+    const fromDetails = detailsActions();
+    const fromMenu = new Map(
+      get(sessionMenuItems)(s).map((i) => [i.id, { disabled: i.blocked !== null, title: i.blocked ?? '' }]),
+    );
+    expect(fromMenu).toEqual(fromDetails);
+    expect((screen.getByTestId('pin-from-details') as HTMLButtonElement).textContent).toBe('Unpin');
+  });
+});

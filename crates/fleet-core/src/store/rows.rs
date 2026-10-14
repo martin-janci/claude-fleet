@@ -395,6 +395,13 @@ pub struct SessionRow {
     /// wins over it. `None` when nothing answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_outcome: Option<String>,
+    /// When a person pinned the session (migration 189), unix seconds;
+    /// `None` = not pinned. A pinned session sits in the Pinned section and
+    /// nothing closes it: kill, safe kill and discard refuse it
+    /// (`E_PINNED`), and the idle killer and tidy-up skip it. Absent from
+    /// an older hub, which has no pins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_at: Option<i64>,
     /// What a rule, Jev or an LLM proposes about this session, one per
     /// feature (step 2.8): read from `decision_runs`, never stored on the
     /// row. A person confirms or changes each; none ever acts. Empty, and
@@ -745,7 +752,8 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
     crate::proposals_sql!("session", "CAST(sessions.id AS TEXT)"),
     " AS proposals, \
      (SELECT json_object('draft', d.draft, 'why', d.why, 'updated_at', d.updated_at) \
-        FROM form_drafts d WHERE d.session_id = sessions.id) AS form_draft"
+        FROM form_drafts d WHERE d.session_id = sessions.id) AS form_draft, \
+     pinned_at"
 );
 
 /// Decode `sessions.pr_evidence`. Malformed text (never written by us)
@@ -867,6 +875,7 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
         form_draft: row
             .get::<_, Option<String>>(74)?
             .and_then(|j| serde_json::from_str(&j).ok()),
+        pinned_at: row.get(75)?,
     })
     .map(|mut r| {
         // A link's org is its tracker item's, else the session's (M5).

@@ -454,6 +454,17 @@ pub enum AgentFrame {
         /// acceptance, is the safer default here.
         #[serde(default)]
         proto: u32,
+        /// The loopback port on which this agent relays Claude Code's hook
+        /// POSTs to the hub (`http://127.0.0.1:<port>/hook`), when it bound
+        /// one. The hub then writes that URL into the host's hooks instead
+        /// of its public URL: Claude Code refuses an http hook whose host
+        /// resolves to a private or link-local address, and a hub's public
+        /// name often does (an in-cluster ingress). Absent — an older agent,
+        /// or one whose relay is off or could not bind — keeps the public
+        /// URL. An optional field: an older hub ignores it, so
+        /// `PROTO_VERSION` does not move for it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hook_port: Option<u16>,
     },
     /// One per request, carrying that request's `id`.
     Result {

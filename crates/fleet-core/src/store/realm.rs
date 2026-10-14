@@ -31,7 +31,16 @@ pub const ORG_ROLES: [(&str, &str); 3] = [
 /// Longest role / group name and deepest group nesting.
 const MAX_NAME_LEN: usize = 64;
 const MAX_DESCRIPTION_LEN: usize = 512;
-const MAX_GROUP_DEPTH: usize = 64;
+pub(crate) const MAX_GROUP_DEPTH: usize = 64;
+
+/// `client:name` for a client role, the bare name for a realm role: the one
+/// spelling of a role reference (`fleet:org-admin`, `fleet-admin`).
+pub fn role_ref(client: Option<&str>, name: &str) -> String {
+    match client {
+        Some(c) => format!("{c}:{name}"),
+        None => name.to_string(),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoleRow {
@@ -281,6 +290,21 @@ fn map_group_row(r: &rusqlite::Row) -> rusqlite::Result<GroupRow> {
         managed: r.get::<_, i64>(5)? != 0,
         org_id: r.get(6)?,
     })
+}
+
+/// How tall the subtree rooted at `id` is: the group itself counts 1, a leaf
+/// child 2, and so on. Capped at `MAX_GROUP_DEPTH + 1`, where the walk stops.
+pub(crate) fn subtree_height_in_tx(conn: &Connection, id: i64) -> Result<usize, IpcError> {
+    let h: i64 = conn.query_row(
+        "WITH RECURSIVE t(id, d) AS (
+             SELECT ?1, 1
+             UNION ALL
+             SELECT g.id, t.d + 1 FROM groups g JOIN t ON g.parent_id = t.id WHERE t.d <= ?2
+         ) SELECT max(d) FROM t",
+        rusqlite::params![id, MAX_GROUP_DEPTH as i64],
+        |r| r.get(0),
+    )?;
+    Ok(h.max(1) as usize)
 }
 
 /// `/a/b/c` for a group, walking `parent_id` (at most 64 levels).
@@ -583,7 +607,13 @@ impl Store {
             }
         }
         match cur {
-            Some(id) => load_group(&self.conn, id),
+            Some(id) => {
+                // Fail closed: a legacy name holding '/' can make two groups
+                // spell one path; the group found by walking segments is
+                // answered only when its own path is the path asked for.
+                let g = load_group(&self.conn, id)?;
+                Ok(g.filter(|g| g.path == path))
+            }
             None => Ok(None),
         }
     }
@@ -711,6 +741,12 @@ impl Store {
                     rusqlite::params![x],
                     |r| r.get(0),
                 )?;
+            }
+            // The whole subtree moves: its tallest branch must still fit
+            // under the parent, or `list_groups` (which walks every path)
+            // refuses the realm.
+            if steps + subtree_height_in_tx(c, id)? > MAX_GROUP_DEPTH {
+                return Err(invalid("group nesting too deep"));
             }
         }
         if sibling_named(c, parent, &g.name, Some(id))? {
@@ -1348,6 +1384,15 @@ impl OrgGroupFence {
     pub fn shows_via(&self, via: &str) -> bool {
         via.strip_prefix("group:")
             .is_none_or(|p| self.paths.contains(p))
+    }
+
+    /// Fence a role's `via` list in place: drop every `via` the fence does
+    /// not show. Returns whether the role is still shown; a role whose every
+    /// via was fenced out is not (a role with no via never had one to fence).
+    pub fn keep_role_vias(&self, via: &mut Vec<String>) -> bool {
+        let had = !via.is_empty();
+        via.retain(|v| self.shows_via(v));
+        !(had && via.is_empty())
     }
 }
 

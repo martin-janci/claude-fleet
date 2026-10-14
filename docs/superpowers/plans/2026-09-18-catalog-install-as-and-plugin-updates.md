@@ -15,7 +15,7 @@
 - Install name rule: `[A-Za-z0-9._-]+`, not `.` or `..`, never on `hook` / `plugin_ref`; validation error code `E_INVALID` at command boundaries, `Asset::validate` message `install_as must match [A-Za-z0-9._-] and not be . or ..` / `install_as is not allowed for <kind>`.
 - Manifest keys, inventory rows, plan actions, the UI and the authoring session all keep the catalog `name`; only host paths and config keys use `install_name()`.
 - `latest` plugin refs never produce `plugin_update`.
-- No `eprintln!`; `Store` mutex never held across an `.await`; scripts contain no single quotes; commit messages end with `Claude-Session: https://claude.ai/code/session_01YBfzniZTvavDZZzCgumQcd`.
+- No `eprintln!`; `Store` mutex never held across an `.await`; scripts contain no single quotes.
 - Build/test on this host: `source /home/dev/.local/tauri-sysroot/env.sh && export RUSTUP_TOOLCHAIN=stable-x86_64-unknown-linux-gnu` (plus cargo on PATH), then `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`; frontend `pnpm run check && pnpm run test && pnpm run build`. Foreground only.
 
 ---

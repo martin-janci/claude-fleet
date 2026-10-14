@@ -22,7 +22,7 @@
 - MCP: tools added are exactly `plan_sync`, `apply_sync`, `set_secret`. `apply_sync` joins `CONFIRM_TOOLS` (count test 7 → 8) and is admin-only when no `host_alias` is given; `set_secret` is admin-only; none join `READONLY_TOOLS`. Regenerate `docs/control-api-reference.md` (`REGEN_DOCS=1 cargo test --manifest-path Cargo.toml reference_is_current`) and keep the tool-count guard test honest.
 - No `eprintln!` in production code (use `tracing`). Use `ipc_error::codes` and `IpcError::lock()`. New codes: `E_SYNC_PLAN_STALE`, `E_SECRET_MISSING`.
 - Build/verify on this host only after `cd src-tauri && source /home/dev/.local/tauri-sysroot/env.sh` in the same shell (plus `export RUSTUP_TOOLCHAIN=stable-x86_64-unknown-linux-gnu` if cargo complains about a root-owned rustup). CI mirror: `scripts/ci-local.sh` (or `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test` plus `CI=true pnpm install --frozen-lockfile && pnpm run check && pnpm run test && pnpm run build`). Base: 1348 Rust tests, 1187 frontend tests.
-- Commits: Conventional Commits, each ending with `Claude-Session: https://claude.ai/code/session_015qiY9nS4iAUqiuLXumrMvS`. Never touch version fields or CHANGELOG.md.
+- Commits: Conventional Commits. Never touch version fields or CHANGELOG.md.
 
 ## File Structure
 

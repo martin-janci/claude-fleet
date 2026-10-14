@@ -11,14 +11,31 @@
 //! `agent = fleet`) binds each store role ([`bindings`]); a grant checks the
 //! input values and the bindings and asks each MCP binding for its tools on
 //! the host ([`grant`], [`probe`]); the fleet store's read server serves a
-//! run ([`records`]). Nothing runs an instance yet (step 3).
+//! run ([`records`]).
+//!
+//! Step 3 is the generic runner ([`runner`]): the `fleet` agent of the
+//! agent runtime, whose poller turns each rule's trigger into jobs and whose
+//! runner runs them and checks the answer against `run.output_schema`.
+//!
+//! Step 4 is the actions ([`actions`]): the answer's writes planned,
+//! queued by the rule's level and sent by the `fleet` executor after its
+//! send-time checks, with the loop guard.
+//!
+//! Step 5 is the grant form ([`form`]): an instance as a `fleet.form/1`
+//! form (New instance / Edit), its answers turned into the grant.
 
+pub mod actions;
 pub mod answer;
 pub mod bindings;
 pub mod definition;
+pub mod form;
+pub mod github;
 pub mod grant;
 pub mod probe;
 pub mod records;
+pub mod runner;
+#[cfg(test)]
+mod runner_tests;
 pub mod template;
 #[cfg(test)]
 mod tests;

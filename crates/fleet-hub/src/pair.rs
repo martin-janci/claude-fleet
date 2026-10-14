@@ -372,6 +372,15 @@ pub fn client_table(rows: &[serde_json::Value]) -> String {
             .and_then(|v| v.as_i64())
             .map_or_else(|| "-".to_string(), |p| format!("person {p}"))
     };
+    // The person's effective role, not the per-device mirror column; a row
+    // from an older hub has no such key and reads as `no`.
+    let yes_no = |r: &serde_json::Value, k: &str| {
+        if r.get(k).and_then(|v| v.as_bool()).unwrap_or(false) {
+            "yes".to_string()
+        } else {
+            "no".to_string()
+        }
+    };
     let cells: Vec<Vec<String>> = rows
         .iter()
         .map(|r| {
@@ -380,8 +389,8 @@ pub fn client_table(rows: &[serde_json::Value]) -> String {
                 field(r, "mode"),
                 person(r),
                 org(r),
-                time(r, "trusted_at"),
-                time(r, "assets_admin_at"),
+                yes_no(r, "trusted"),
+                yes_no(r, "assets_admin"),
                 time(r, "created_at"),
                 time(r, "last_seen_at"),
                 time(r, "revoked_at"),
@@ -1049,7 +1058,8 @@ mod tests {
                 "id": 2, "name": "phone", "mode": "full",
                 "created_at": 1_700_000_000, "last_seen_at": 1_700_000_600,
                 "revoked_at": serde_json::Value::Null,
-                "trusted_at": 1_700_000_300, "person_id": 1
+                "trusted_at": 1_700_000_300, "trusted": true,
+                "assets_admin": false, "person_id": 1
             }),
             serde_json::json!({
                 "id": 1, "name": "old kiosk", "mode": "readonly",
@@ -1080,16 +1090,22 @@ mod tests {
             "{t}"
         );
         assert!(lines[1].contains("2023-11-14 22:13Z"), "{t}");
-        // TRUSTED is a time for a vouched-for client, a dash otherwise (and
-        // a dash for a row from a hub that predates the column).
-        assert!(lines[1].contains("2023-11-14 22:18Z"), "{t}");
+        // TRUSTED and ASSETS are the person's effective role, yes or no (no
+        // for a row from a hub that predates the columns); the per-device
+        // `trusted_at` mirror is not shown.
+        assert!(!t.contains("2023-11-14 22:18Z"), "{t}");
+        assert!(
+            lines[1].contains(" yes ") && lines[1].contains(" no "),
+            "{t}"
+        );
+        assert!(!lines[2].contains("yes"), "{t}");
         // PERSON is the person id for a bound device; a row from a hub that
         // predates the column reads as a dash, counted above.
         assert!(lines[1].contains("person 1"), "{t}");
         assert_eq!(
             lines[2].split_whitespace().filter(|c| *c == "-").count(),
-            5,
-            "a dash for PERSON, ORG, TRUSTED, ASSETS and LAST SEEN:\n{t}"
+            3,
+            "a dash for PERSON, ORG and LAST SEEN:\n{t}"
         );
         // A live client's revoked column is a dash, not an empty gap.
         assert!(lines[1].trim_end().ends_with('-'), "{t}");

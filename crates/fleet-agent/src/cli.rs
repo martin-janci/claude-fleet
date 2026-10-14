@@ -79,6 +79,10 @@ pub struct RunArgs {
     /// A PEM bundle to trust instead of the system roots.
     #[arg(long)]
     pub ca_file: Option<PathBuf>,
+    /// The loopback port the hook relay listens on (127.0.0.1); `0` turns
+    /// it off. With --hub only: a --config run reads it from the config.
+    #[arg(long, requires = "hub")]
+    pub hook_port: Option<u16>,
 }
 
 #[derive(Debug, Args)]
@@ -119,6 +123,11 @@ pub struct InstallArgs {
     /// what the hub decides for this host (`fleet-agent update`).
     #[arg(long)]
     pub auto_update: bool,
+    /// The loopback port (127.0.0.1) on which the agent relays this host's
+    /// Claude Code hooks to the hub; `0` turns the relay off and leaves the
+    /// hooks on the hub's public URL.
+    #[arg(long)]
+    pub hook_port: Option<u16>,
 }
 
 #[derive(Debug, Args)]
@@ -187,6 +196,7 @@ pub fn run_config(
                 insecure: args.insecure,
                 ca_file: args.ca_file.clone(),
                 report_errors: config::default_report_errors(),
+                hook_port: args.hook_port.unwrap_or_else(config::default_hook_port),
             };
             config::check_token(&config.token).map_err(|e| e.to_string())?;
             config
@@ -240,6 +250,7 @@ pub fn install_plan(
         insecure: args.insecure,
         ca_file: args.ca_file.clone(),
         report_errors: config::default_report_errors(),
+        hook_port: args.hook_port.unwrap_or_else(config::default_hook_port),
     };
     let (scope, mut layout, owner) = if args.user {
         let home = env

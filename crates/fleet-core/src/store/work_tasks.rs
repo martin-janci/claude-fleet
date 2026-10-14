@@ -306,7 +306,7 @@ pub(super) struct NativeRow<'a> {
     pub proposal_state: Option<&'a str>,
     pub proposed_by: Option<&'a str>,
     pub proposal_why: Option<&'a str>,
-    /// The task whose result this item follows up (migration 189).
+    /// The task whose result this item follows up (migration 192).
     pub origin_task_id: Option<i64>,
 }
 

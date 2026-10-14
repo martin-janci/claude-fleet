@@ -59,8 +59,7 @@ fn token_minter(caller: &Caller) -> Result<Minter, IpcError> {
     if caller.is_master() {
         return Ok(Minter::Admin);
     }
-    if caller.is_person_device()
-        && caller.is_fleet_admin
+    if caller.is_fleet_admin_device()
         && caller.is_trusted_client()
         && caller.mode == TokenMode::Full
     {

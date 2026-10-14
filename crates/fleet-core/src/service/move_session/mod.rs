@@ -3392,6 +3392,17 @@ async fn move_session_inner(
                 );
             }
         }
+        // A pinned session stays pinned where it lands; finalise lifts the
+        // source's pin before its kill.
+        if snap.row.pinned_at.is_some() {
+            if let Err(e) = s.set_session_pinned(row.id, snap.row.pinned_at) {
+                tracing::warn!(
+                    session_id = row.id,
+                    error = %e,
+                    "[move_session] copying the pin failed"
+                );
+            }
+        }
         s.set_parent_session_id(row.id, Some(snap.row.id))?;
         row
     };

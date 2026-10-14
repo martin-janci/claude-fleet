@@ -697,6 +697,7 @@ mod tests {
                 labels: Vec::new(),
                 estimate: None,
                 estimate_unit: None,
+                archived_at: None,
                 display_key: None,
                 origin_task_id: None,
             },

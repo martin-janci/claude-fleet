@@ -4,5 +4,7 @@
 // last button that runs in the chat (`chat_wizard_runs.ts`). `link_hub`
 // stays in Settings › Hub. Kept apart from wizards.ts so the block check
 // does not pull every spec in.
-export const CHAT_WIZARD_IDS = ['add_host', 'add_project', 'get_started', 'new_session', 'pair_device'] as const;
+// `fleet_agent` has no spec file: its form is a catalog fleet agent's grant
+// form, built by the hub when the card opens (`definition` names it).
+export const CHAT_WIZARD_IDS = ['add_host', 'add_project', 'fleet_agent', 'get_started', 'new_session', 'pair_device'] as const;
 export type ChatWizardId = (typeof CHAT_WIZARD_IDS)[number];

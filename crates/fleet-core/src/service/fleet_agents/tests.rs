@@ -527,3 +527,173 @@ mod grants {
         assert!(e.message.contains("for agent fleet"), "{}", e.message);
     }
 }
+
+mod grant_form {
+    //! Step 5: the grant form of the example, and its answers as the grant.
+    use super::super::form::{self, answers_to_args, grant_form, FormContext};
+    use super::example;
+    use crate::pages::forms;
+    use crate::store::AgentRuleRow;
+    use serde_json::{json, Value};
+
+    fn loaded() -> super::super::definition::Loaded {
+        let (yaml, skill) = example();
+        super::load(&yaml, &skill).unwrap()
+    }
+
+    fn ctx() -> FormContext {
+        FormContext {
+            hosts: vec!["mercury".into(), "venus".into()],
+            projects: vec![(5, "acme/pos".into())],
+            trackers: vec![(3, "Acme Jira".into())],
+            servers: vec!["graylog".into(), "kb".into(), "tenants".into()],
+            shared: vec!["shared:l2-fingerprints".into()],
+        }
+    }
+
+    fn names(spec: &forms::FormSpec) -> Vec<Vec<String>> {
+        spec.steps
+            .iter()
+            .map(|s| s.fields.iter().map(|f| f.name.clone()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn the_form_is_valid_and_asks_what_where_stores_and_how_much() {
+        let spec = grant_form(&loaded(), &ctx(), None);
+        assert_eq!(forms::validate(&spec), Vec::<String>::new());
+        let titles: Vec<&str> = spec.steps.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(titles, ["What", "Where", "Stores", "How much"]);
+        assert_eq!(
+            names(&spec),
+            [
+                vec![
+                    "f_instance",
+                    "jira_tracker",
+                    "project",
+                    "phrases",
+                    "bug_project"
+                ],
+                vec!["f_host", "f_project"],
+                vec![
+                    "f_store_logs",
+                    "f_env_logs",
+                    "f_store_tenants",
+                    "f_env_tenants",
+                    "f_store_kb",
+                    "f_env_kb",
+                    "f_store_memory"
+                ],
+                vec!["f_level", "f_hours"],
+            ]
+        );
+        let tracker = &spec.steps[0].fields[1];
+        assert_eq!(
+            tracker.kind,
+            forms::FieldType::Select,
+            "a tracker input lists the trackers"
+        );
+        let memory = spec.steps[2].fields.last().unwrap();
+        assert_eq!(memory.value, Some(json!("rule")));
+        assert!(memory.other, "a new shared namespace can be typed");
+        let how = spec.steps[3].intro.as_deref().unwrap();
+        assert!(
+            how.contains("calls kb.add_known_error") && how.contains("(unattended at act)"),
+            "{how}"
+        );
+        assert_eq!(spec.submit.as_deref(), Some("Start"));
+    }
+
+    fn answers() -> serde_json::Map<String, Value> {
+        json!({
+            "f_instance": "l2-prod", "jira_tracker": "3", "project": "L2S",
+            "f_host": "mercury", "f_project": "acme/pos",
+            "f_store_logs": "graylog", "f_env_logs": "GRAYLOG_API_TOKEN=${GRAYLOG_PROD_TOKEN}\n",
+            "f_store_kb": "kb", "f_store_memory": "shared:l2-fingerprints",
+            "f_level": "propose", "f_hours": 24
+        })
+        .as_object()
+        .unwrap()
+        .clone()
+    }
+
+    #[test]
+    fn the_answers_are_the_grant() {
+        let a = answers_to_args(&loaded(), &ctx(), &answers()).unwrap();
+        assert_eq!(
+            (
+                a.agent.as_deref(),
+                a.scope.as_deref(),
+                a.host.as_deref(),
+                a.level.as_deref()
+            ),
+            (
+                Some("fleet"),
+                Some("l2-prod"),
+                Some("mercury"),
+                Some("propose")
+            )
+        );
+        assert_eq!((a.project_id, a.hours), (Some(5), Some(24)));
+        assert_eq!(a.definition.as_deref(), Some("l2-support"));
+        let config = a.config.unwrap();
+        assert_eq!(config["jira_tracker"], "3");
+        assert!(config.get("f_host").is_none(), "only the inputs");
+        let b = a.bindings.unwrap();
+        assert_eq!(
+            b,
+            json!([
+                { "role": "logs", "server": "graylog", "env": { "GRAYLOG_API_TOKEN": "${GRAYLOG_PROD_TOKEN}" } },
+                { "role": "kb", "server": "kb" },
+                { "role": "memory", "namespace": "shared:l2-fingerprints" }
+            ]),
+            "tenants left empty is not bound"
+        );
+        let mut missing = answers();
+        missing.remove("f_store_logs");
+        assert!(answers_to_args(&loaded(), &ctx(), &missing)
+            .unwrap_err()
+            .contains("f_store_logs"));
+        let mut bad_env = answers();
+        bad_env.insert("f_env_logs".into(), "no equals sign".into());
+        assert!(answers_to_args(&loaded(), &ctx(), &bad_env).is_err());
+        assert!(form::parse_env("A=${B}\n\n C = ${D} ").unwrap().len() == 2);
+    }
+
+    #[test]
+    fn edit_prefills_the_form_from_the_instance() {
+        let rule = AgentRuleRow {
+            id: 9,
+            agent: "fleet".into(),
+            scope: "l2-prod".into(),
+            level: "act".into(),
+            host_alias: "venus".into(),
+            project_id: Some(5),
+            config: r#"{"jira_tracker":"3","project":"L2S"}"#.into(),
+            granted_by: "x".into(),
+            granted_at: 0,
+            expires_at: None,
+            definition: Some("l2-support".into()),
+            bindings: json!([{ "role": "logs", "server": "graylog", "env": { "A": "${B}" } },
+                { "role": "memory", "namespace": "rule" }])
+            .to_string(),
+        };
+        let spec = grant_form(&loaded(), &ctx(), Some(&rule));
+        let value = |name: &str| {
+            spec.steps
+                .iter()
+                .flat_map(|s| s.fields.iter())
+                .find(|f| f.name == name)
+                .and_then(|f| f.value.clone())
+        };
+        assert_eq!(value("f_instance"), Some(json!("l2-prod")));
+        assert_eq!(value("f_host"), Some(json!("venus")));
+        assert_eq!(value("f_project"), Some(json!("acme/pos")));
+        assert_eq!(value("f_level"), Some(json!("act")));
+        assert_eq!(value("project"), Some(json!("L2S")));
+        assert_eq!(value("f_store_logs"), Some(json!("graylog")));
+        assert_eq!(value("f_env_logs"), Some(json!("A=${B}")));
+        assert_eq!(spec.submit.as_deref(), Some("Save"));
+        assert_eq!(forms::validate(&spec), Vec::<String>::new());
+    }
+}

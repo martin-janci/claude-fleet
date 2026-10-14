@@ -239,9 +239,13 @@ export interface WorkTask {
   counts?: { active?: number; ended?: number; suggested?: number };
   needs_you?: boolean;
   review?: boolean;
-  /** Done, or every session link archived, with nothing running: hidden
-   *  from the tree unless `filters.archived` (or `status: done`). */
+  /** Done, archived by a person, or every session link archived, with
+   *  nothing running: hidden from the tree unless `filters.archived` (or
+   *  `status: done`). */
   archived?: boolean;
+  /** When a person archived it (Archive in the task pane); Unarchive clears
+   *  it. Absent when not archived, or from an older hub. */
+  archived_at?: number | null;
   /** "Finished — close?": fleet's own work nobody closed whose sessions have
    *  all ended (absent from an older hub). Answered by Done or Keep open. */
   close_suggested?: boolean;

@@ -59,6 +59,7 @@ fn agent_frames() -> Vec<AgentFrame> {
             host_name: "laptop".into(),
             os: "linux".into(),
             proto: PROTO_VERSION,
+            hook_port: None,
         },
         AgentFrame::Result {
             chunks: 0,
@@ -592,6 +593,7 @@ fn a_hello_without_proto_decodes_as_zero() {
             host_name: "laptop".into(),
             os: "linux".into(),
             proto: 0,
+            hook_port: None,
         }
     );
 }
@@ -609,6 +611,7 @@ fn a_hello_with_only_its_kind_decodes_with_empty_informational_fields() {
             host_name: String::new(),
             os: String::new(),
             proto: 0,
+            hook_port: None,
         }
     );
 }
@@ -686,6 +689,7 @@ fn the_optional_fields_are_still_always_written() {
         host_name: String::new(),
         os: String::new(),
         proto: 0,
+        hook_port: None,
     })
     .expect("encodes");
     assert_eq!(
@@ -703,10 +707,34 @@ fn a_hello_with_proto_round_trips_it() {
         host_name: "laptop".into(),
         os: "linux".into(),
         proto: 7,
+        hook_port: None,
     };
     let text = encode_agent_frame(&frame).expect("encodes");
     assert!(text.contains(r#""proto":7"#), "{text}");
     assert_eq!(decode_agent_frame(&text).expect("decodes"), frame);
+}
+
+/// `hook_port` is optional both ways: an agent without a hook relay writes
+/// nothing (the wire of every older agent is unchanged), one with a relay
+/// round-trips its port, and a hello without it decodes as `None`.
+#[test]
+fn a_hello_s_hook_port_is_optional_and_round_trips() {
+    let frame = AgentFrame::Hello {
+        agent_version: "1.2.3".into(),
+        host_name: "laptop".into(),
+        os: "linux".into(),
+        proto: PROTO_VERSION,
+        hook_port: Some(4181),
+    };
+    let text = encode_agent_frame(&frame).expect("encodes");
+    assert!(text.contains(r#""hook_port":4181"#), "{text}");
+    assert_eq!(decode_agent_frame(&text).expect("decodes"), frame);
+
+    let bare = decode_agent_frame(r#"{"kind":"hello","proto":2}"#).expect("decodes");
+    let AgentFrame::Hello { hook_port, .. } = bare else {
+        unreachable!()
+    };
+    assert_eq!(hook_port, None);
 }
 
 #[test]

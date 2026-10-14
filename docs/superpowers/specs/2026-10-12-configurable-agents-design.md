@@ -1,7 +1,8 @@
 # Configurable agents: design
 
-Status: steps 1 (definitions) and 2 (store bindings) built, 2026-10-13. Steps 3
-to 6 not built.
+Status: steps 1 to 5 built, and step 6's GitHub sources, PR comments and
+labels, and writes to other trackers, 2026-10-14 (the phone's part in
+martin-janci/fleet-mobile). The rest of step 6 not built.
 Asked for by the owner after the built-in reviewer and support agent landed
 (`2026-10-11-review-and-support-agents-design.md`, PRs
 martin-janci/claude-fleet#871, martin-janci/fleet-mobile#217,
@@ -470,18 +471,134 @@ run real instances.
    change to the control API's callers is involved. The admin path
    (`admin::validate_grant`) refuses `agent: fleet`; the `agents` tool and
    `fleet-hub agents grant fleet` route it to `fleet_agents::grant`.
-3. **Generic runner**: trigger sources `tracker_comments`, `tracker_assigned`,
+3. **Generic runner** (built): trigger sources `tracker_comments`, `tracker_assigned`,
    `mcp_scan`, `schedule`, `manual`; prompt assembly; answer validation
    against `output_schema`.
-4. **Actions**: `tracker_*`, `record` and `mcp_call` with their guardrails;
+   `service/fleet_agents/runner.rs` is the agent runtime's `fleet` agent
+   (`Registry::live`). Its poller reads a rule's instance from the catalog
+   on every poll; the first poll only sets the clock (a JSON cursor:
+   `since`, and the last `scan`). `tracker_comments` reads the issues the
+   trigger's query finds updated since the last poll and makes a job per
+   new comment carrying a phrase (comma separated, any case) or matching
+   the regex on a line; `tracker_assigned` one per issue assigned to the
+   account. `mcp_scan` calls the store's tool every `every_mins` (the
+   rendered binding, the script on stdin as the grant's check:
+   `probe::call_script`), takes the answer's list of entries and makes a
+   job per entry whose `key_template` key is new. `schedule` fires the
+   newest cron slot since the last poll (missed slots do not pile up).
+   `manual` jobs come from a person: `agents { action: run, id, request? }`
+   or `fleet-hub agents run <id> --request …` (a `schedule` rule can be run
+   now the same way). Job keys start with `r<rule id>:`, so two instances
+   never share a job. A scan entry, a schedule slot and a request are kept
+   as the job's subject in the namespace `job:rule:<id>` of
+   `agent_records`, which no binding can name. The runner reads an issue
+   afresh (the asking comment by its id), runs the `run.context` lookups,
+   renders the bindings with the host's secrets, issues a `fleet-records`
+   token for the run and revokes it after, prepares the workspace (a
+   project's checkout at `main`, or the home), and runs `claude -p` with
+   the skill as its system prompt and only the read tools allowed. The
+   prompt carries the subject and the context records as JSON data, the
+   stores the run may read and the `output_schema`. The answer is the
+   first JSON object of the reply that matches the schema, trimmed to it;
+   none is a permanent failure that names the mismatch. The job's result is
+   `{subject, answer}`. Not yet: `run.max_parallel` (the runtime's global
+   concurrency applies), `tracker_query` and the GitHub sources (step 6),
+   and every write: until step 4 a `propose` or `act` rule behaves as
+   `watch`.
+4. **Actions** (built): `tracker_*`, `record` and `mcp_call` with their guardrails;
    the generic loop guard.
+   `service/fleet_agents/actions.rs`. `plan` (PURE) renders each action
+   whose `when` holds over the answer into its payload: `tracker_comment`
+   (`{action, tracker, key, body, adf}`; the body ends with the instance's
+   marker line `[fleet-agent:<instance>]` and is cut to fit
+   `max_body_chars`), `tracker_issue` (issue type `Task` unless set; an
+   optional `link` to another issue), `tracker_link`, `record` (into the
+   rule's namespace for the role) and `mcp_call` (`{binding, tool,
+   arguments}`, its body the call as a person reads it). The tracker is the
+   action's, else the trigger's, else the first `tracker` input's. A taken
+   `stop` action ends the list; an action whose target, key or body renders
+   empty is skipped with the reason. The runner queues them after a checked
+   answer: kept in the job's result at `watch`, `pending` at `propose`,
+   approved at once at `act` when `auto` (an `mcp_call` only when its store
+   marks the tool `auto_ok`). The job's result is `{subject, answer,
+   actions}` with what became of each. The `fleet` executor checks again
+   when it sends: the rule still there, active and above `watch`; the
+   definition still asking for that action; the tracker the instance's; an
+   issue or link inside `limits.write_projects` (a comment or a link may
+   also land on the job's own subject); the body within `max_body_chars`; a
+   record into the rule's own namespace; an `mcp_call`'s tool among the
+   role's `write_tools`, its arguments within 16 KiB and valid against the
+   tool's `inputSchema`. One change from *E*: the schema is the one the
+   server lists **when the action is sent** (a `tools/list` just before the
+   `tools/call`), not one stored at grant time, so a server upgraded since
+   the grant is checked against what it takes now. The check is the schema's
+   object shape: required properties, `additionalProperties: false`, and
+   each given property's declared type. A new issue is linked after it is
+   created; a failed link says the issue was made. The loop guard: a
+   tracker poll never turns a comment carrying a fleet agent's marker into
+   a job, and the runner skips a subject that already ran five times in a
+   day. The Inbox names the new kinds (`actionTitle`). Not yet: the
+   shortening of a template by its longest optional sections (a body is
+   cut at the end), and the `pr_*` actions (step 6).
 5. **Forms and UI**: `grant_form`, *New instance* / *Edit* in Automation ›
    Agents, the phone's Inbox and instance list, the chat draft path.
+   Built: `service/fleet_agents/form.rs`. `grant_form(definition,
+   FormContext, rule?)` is PURE: the steps *What* (`f_instance` and the
+   inputs; a `tracker`, `project` or `host` input is a select of what fleet
+   has), *Where* (`f_host`, and `f_project` for a project workspace),
+   *Stores* (per role `f_store_<role>`: a select of the catalog's MCP
+   servers with an optional `f_env_<role>` textarea of `NAME=${SECRET}`
+   lines, or for a fleet role `rule` / the shared namespaces in use / a
+   typed `shared:<name>`; an optional role left empty is not bound) and *How
+   much* (`f_level`, `f_hours`, under a line naming every write and which
+   run unattended at act). With a rule it is the Edit form, prefilled.
+   `answers_to_args` checks the answers against the same form
+   (`forms::check_answers`) and returns the `agents` grant. The grant form
+   asks for no secret value: an override names a secret of the hub's store,
+   so nothing secret is ever in an answer (a change from *F*, which put new
+   secrets in `secret` fields). Inputs may not be named `f_…`, and a role is
+   at most 30 characters (`f_store_<role>` is a field name). The `agents`
+   tool gains `definitions`, `form {definition, id?}` and a fleet `grant`
+   with `answers`; the desktop command `agents_fleet` (routed to `agents`)
+   carries definitions, form, grant, revoke and run. Automation › Agents
+   lists the catalog's fleet agents (`automation/FleetAgents.svelte`), each
+   with *New instance* (disabled with the problems when it does not load),
+   its instances under it with *Edit*, *Revoke* and, for a manual or
+   scheduled one, *Run now*; the form is a `WizardDialog`, and a store that
+   fails the grant's check is the dialog's error. The chat path is a
+   `wizard` block with `wizard: fleet_agent` and the `definition`
+   (`docs/chat-blocks.md`), not `ask { draft }`: an agent drafts the
+   answers (`values`), the person's device asks the hub for the form when
+   the card opens and its last button grants from that device, so the
+   answer becomes the grant without an agent ever holding the grant. The
+   phone (fleet-mobile) lists the rules under Automation › Agents, a fleet
+   agent's instance by its definition, with Revoke, and its Inbox names a
+   fleet agent's actions; a new instance and Edit stay with the desktop's
+   form or a chat card.
 6. **Later**:
    - `github_*` sources and `pr_*` actions for generic agents;
    - `tracker_*` on GitHub, Linear and Asana;
    - restating the built-in agents as definitions (*Migration*);
    - a definition gallery.
+
+   Built (`service/fleet_agents/github.rs`, `actions.rs`): `github_prs`
+   makes a job per open, non-draft pull request at each new head (the key
+   carries the head's sha); `github_comments` a job per new issue or PR
+   comment carrying a phrase or matching the regex, never a bot's or a
+   fleet agent's own (its marker). Both go through the PR reviewer's `gh`
+   calls on the rule's host and keep the subject when they find it
+   (`repo, number, title, head_sha, base_ref, head_ref, author, url`, and a
+   comment's `comment`). `pr_comment` (`target` is the number) posts the
+   body with the instance's marker; `pr_labels` takes `labels` with `-name`
+   for a removal. Both are sent only to the trigger's repo or one of
+   `limits.repos`. On a tracker that is not Jira (GitHub, Linear, Asana)
+   `tracker_comment` sends the same text plain (`WriteOp::Comment`) and
+   `tracker_issue` creates an item in the project (`WriteOp::CreateItem`);
+   an issue link is Jira's, so a link, or an issue with one, is refused
+   there. Not built: `pr_review` (the reviewer's placed, verified review
+   stays the PR reviewer's), polling a tracker that is not Jira (its
+   provider has no `issue_threads`), restating the built-in agents, and a
+   gallery.
 
 ## Not in scope
 

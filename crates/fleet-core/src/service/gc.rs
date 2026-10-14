@@ -125,6 +125,10 @@ pub fn plan(
         if r.status != "running" || r.safe_kill_state.is_some() || r.kind == "external" {
             continue;
         }
+        // A person pinned it: nothing closes it unattended.
+        if r.pinned_at.is_some() {
+            continue;
+        }
         if !reachable_hosts.contains(&r.host_alias) {
             continue;
         }
@@ -703,6 +707,7 @@ mod tests {
             origin_ref: None,
             last_viewed_at: None,
             turn_outcome: None,
+            pinned_at: None,
             proposals: Vec::new(),
             pending_form: None,
             form_draft: None,
@@ -749,6 +754,18 @@ mod tests {
         let mut no_status = row(2, "external", None, 0);
         no_status.claude_status = None;
         assert!(plan(&[ext, no_status], &CFG, None, &local(), 1_000_000).is_empty());
+    }
+
+    #[test]
+    fn pinned_rows_are_never_collected() {
+        let mut pinned = row(1, "bg", Some(0), 0);
+        pinned.pinned_at = Some(1);
+        let loose = row(2, "bg", Some(0), 0);
+        let planned = plan(&[pinned, loose], &CFG, None, &local(), 1_000_000);
+        assert_eq!(
+            planned.iter().map(|p| p.session_id).collect::<Vec<_>>(),
+            vec![2]
+        );
     }
 
     #[test]

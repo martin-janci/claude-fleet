@@ -268,7 +268,8 @@ change settings shows the change with no Apply.
 
 | Key | Required | Meaning |
 |---|---|---|
-| `wizard` | yes | `add_host`, `add_project`, `get_started`, `new_session` or `pair_device` |
+| `wizard` | yes | `add_host`, `add_project`, `fleet_agent`, `get_started`, `new_session` or `pair_device` |
+| `definition` | `fleet_agent` only | The catalog fleet agent whose instance the form starts |
 | `why` | no | ≤ 500 chars, why you open it, in one sentence |
 | `values` | no | Up to 20 answers read from the person's own message, by field name: text (≤ 500), a number or true/false |
 
@@ -293,6 +294,18 @@ label (*by the agent · from your message*), and the person checks it before
 the last button. A name the wizard does not have, a secret field, or a value
 its field refuses (a host it does not offer) is dropped, and that field
 starts empty.
+
+`fleet_agent` opens a catalog fleet agent's grant form (*New instance* in
+Automation › Agents; `docs/superpowers/specs/2026-10-12-configurable-agents-design.md`
+→ *F*): `{"spec": "fleet.ui/1", "kind": "wizard", "wizard": "fleet_agent",
+"definition": "l2-support", "values": {"f_instance": "l2-prod", "project":
+"L2S"}}`. It has no spec file: the person's device asks the hub for the
+definition's form when the card opens, and its last button grants the
+instance from that device (each MCP store is asked for its tools on the host
+first; a failure is the card's error). The form's own fields are `f_instance`,
+`f_host`, `f_project`, `f_store_<role>`, `f_env_<role>`, `f_level` and
+`f_hours`; the definition's inputs keep their names. You draft; only the
+person grants.
 
 ### `dashboard`: a dashboard to pin
 

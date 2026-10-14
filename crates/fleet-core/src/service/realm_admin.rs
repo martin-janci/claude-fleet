@@ -281,10 +281,10 @@ impl OrgFence {
         self.groups.covers(g.id)
     }
 
-    /// A `via` of an effective role an org admin may see: not a group
-    /// outside their org.
-    fn shows_via(&self, via: &str) -> bool {
-        self.groups.shows_via(via)
+    /// Fence a role's `via` list to what an org admin may see: not a group
+    /// outside their org. False when the role is then not shown at all.
+    fn keep_role_vias(&self, via: &mut Vec<String>) -> bool {
+        self.groups.keep_role_vias(via)
     }
 
     fn member(&self, s: &Store, person: i64) -> Result<(), IpcError> {
@@ -374,10 +374,7 @@ fn role(s: &Store, r: &str) -> Result<RoleRow, IpcError> {
 }
 
 fn role_ref(r: &RoleRow) -> String {
-    match &r.client {
-        Some(c) => format!("{c}:{}", r.name),
-        None => r.name.clone(),
-    }
+    crate::store::role_ref(r.client.as_deref(), &r.name)
 }
 
 fn managed_err() -> IpcError {
@@ -427,13 +424,11 @@ fn group_json(s: &Store, g: &GroupRow) -> Result<Value, IpcError> {
 fn roles_json(s: &Store, person: i64, fence: Option<&OrgFence>) -> Result<Vec<Value>, IpcError> {
     let mut out = Vec::new();
     for e in s.effective_roles(person)? {
-        let via: Vec<&String> = e
-            .via
-            .iter()
-            .filter(|v| fence.is_none_or(|f| f.shows_via(v)))
-            .collect();
-        if via.is_empty() && !e.via.is_empty() {
-            continue;
+        let mut via: Vec<String> = e.via;
+        if let Some(f) = fence {
+            if !f.keep_role_vias(&mut via) {
+                continue;
+            }
         }
         out.push(json!({ "name": e.role.name, "client": e.role.client, "via": via }));
     }

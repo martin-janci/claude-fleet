@@ -585,6 +585,57 @@ fn views_are_evaluated_from_the_cache() {
     );
 }
 
+/// An archived ticket leaves every view for `archived`, still answers a
+/// search, and comes back on unarchive; an archived task leaves the
+/// caller's own tasks.
+#[test]
+fn an_archived_ticket_is_listed_under_archived_only() {
+    let fx = Fx::new();
+    let (abc1, task) = {
+        let s = fx.store.lock().unwrap();
+        let abc1 = s.work_item_by_key("ABC-1").unwrap().unwrap().id;
+        let task = s.create_local_work_item(None, "Release notes").unwrap().id;
+        assert!(s.set_item_archived(abc1, true).unwrap());
+        assert!(s.set_item_archived(task, true).unwrap());
+        (abc1, task)
+    };
+    assert_eq!(fx.keys(Some("mine"), &OrgScope::All), vec!["ABC-4"]);
+    assert_eq!(fx.keys(Some("recent"), &OrgScope::All), vec!["ABC-2"]);
+    assert_eq!(fx.keys(Some("archived"), &OrgScope::All), vec!["ABC-1"]);
+    assert_eq!(
+        fx.keys(None, &OrgScope::All).len(),
+        4,
+        "a search still finds it"
+    );
+    let titles: Vec<String> = crate::service::trackers::tickets::tickets_and_tasks(
+        &fx.store,
+        None,
+        None,
+        Some("release"),
+        None,
+        true,
+        &crate::service::view_scope::org_only_view(&OrgScope::All),
+    )
+    .unwrap()
+    .into_iter()
+    .map(|t| t.item.title)
+    .collect();
+    assert!(
+        titles.is_empty(),
+        "an archived task is not offered: {titles:?}"
+    );
+    {
+        let s = fx.store.lock().unwrap();
+        assert!(s.set_item_archived(abc1, false).unwrap());
+        assert!(s.set_item_archived(task, false).unwrap());
+    }
+    assert_eq!(
+        fx.keys(Some("mine"), &OrgScope::All),
+        vec!["ABC-1", "ABC-4"]
+    );
+    assert!(fx.keys(Some("archived"), &OrgScope::All).is_empty());
+}
+
 /// The scoping matrix: master and paired clients see everything; host A
 /// sees only what is linked on host A, and nothing when nothing is.
 #[tokio::test]

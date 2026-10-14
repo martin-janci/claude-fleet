@@ -566,7 +566,11 @@ Then, from that client:
 On a hub with a public URL, provisioning writes `https://<domain>/hook` and
 `https://<domain>/mcp` directly into each host's hook block and MCP entry —
 no reverse SSH tunnel is started, because every host can already reach the
-hub's public address.
+hub's public address. One exception: an agent host whose `fleet-agent` runs
+the hook relay gets `http://127.0.0.1:<port>/hook` in its hook block instead
+(its MCP entry stays public), because Claude Code refuses an http hook whose
+host resolves to a private address — see *A host that cannot be reached* →
+*The hook relay*.
 
 Re-running `provision_hosts` (for example after changing the public URL) is
 safe: it replaces only fleet's own hook entries — an `http` hook to
@@ -817,6 +821,48 @@ the same loop, just in the foreground, under whatever supervises it instead.)
   update`: the hub decides (`update.agent.mode`, pins), the agent installs
   the signed release and goes back to the previous one when it does not
   reconnect. See `docs/updates.md` → *The agent updates itself*.
+
+### The hook relay
+
+Claude Code refuses a `type: "http"` hook whose host resolves to a private or
+link-local address (`HTTP hook blocked: … resolves to 192.168.x.x
+(private/link-local address)`); loopback it allows. A hub whose public name
+resolves to an in-cluster ingress or a split-horizon address is exactly that,
+so the hooks provisioning writes at `https://<hub>/hook` were all dropped and
+the hub learned a session's state only from reconcile (*Troubleshooting* →
+*HTTP hook blocked*).
+
+So `fleet-agent` relays them:
+
+- It listens on `127.0.0.1:4181` — the config's `hook_port`, or
+  `--hook-port` on `install` / `run`; `0` turns the relay off. A config
+  written before the relay existed gets the default, so upgrading the agent
+  is enough. A port that is taken is logged (`hook relay not started`) and
+  the agent runs on without it.
+- It reports the port in its `hello` (`hook_port`, an optional field: an
+  older hub ignores it). The hub stores it on the host row
+  (`hosts.agent_hook_port`, migration 191); a change makes the host
+  `provision_stale`, so the next content refresh (at most five minutes)
+  rewrites the host's hooks at `http://127.0.0.1:<port>/hook`. The SessionStart
+  `curl` hook and the worker guard use the same URL.
+- Each hook POST is forwarded to the hub's own `/hook` over HTTPS, with the
+  name, port and TLS trust (`--ca-file`) the agent dials `/agent` with, so a
+  host whose agent connects has working hooks whatever its DNS says. Only
+  `POST /hook` crosses, with only `Authorization`, `Content-Type`,
+  `X-Fleet-Pane` and `X-Fleet-Sync`; the bearer is the hook's own host
+  token, checked by the hub as before, and the agent adds no credential. A
+  request carrying an `Origin`, or a `Host` that is not loopback, is refused
+  (a browser aimed at the port). The hub's answer — status, `Content-Type`,
+  body — goes back unchanged, since Claude reads it.
+- The relay does not ride the agent's WebSocket: each hook is one short
+  HTTPS request, so a hook still arrives while the agent is reconnecting.
+  While the agent itself is stopped (an upgrade's restart) its host's hooks
+  fail, which Claude Code treats as a non-blocking error; reconcile covers
+  the gap.
+
+Only a hub with a public URL uses the relay, and only for agent hosts. An SSH
+host is unchanged: it posts to `127.0.0.1` through its reverse tunnel on a
+loopback hub, or to the public URL directly on a public hub.
 
 ### Protocol version negotiation
 
@@ -1246,15 +1292,18 @@ What a client may do:
   The personal grant is the device's person's (identity sub-project 1):
   it maps the realm role `assets-admin` to them, so each of their `full`
   devices bound to no org manages the personal catalog; an org catalog's
-  grant stays the one device's. The ASSETS column (and the
-  `catalog_grantees` list for `personal`) still reads the per-device row
-  kept as a mirror for one release.
+  grant stays the one device's. The ASSETS column of `client list` (and the
+  `assets_admin` field of `list_clients`) shows the person's effective
+  grant; the `catalog_grantees` list for `personal` follows the role too
+  (every eligible device of an `assets-admin` person; an org catalog's
+  list is still the devices holding a grant row), so it never names a
+  client the grant check would refuse.
   `list_catalogs` is open to the master or a person's own unbound full
   device, never an org-bound client; only the master token may
   `add_catalog` or `remove_catalog` (a removal drops every other client's
   grant on that catalog, and only the master could add it back). `client
-  list`'s ASSETS column is the personal grant; `catalog list` shows every
-  grant.
+  list`'s ASSETS column is the person's effective `assets-admin` grant;
+  `catalog list` shows every grant.
 - A prompt typed on a phone reaches an agent **marked** as untrusted input,
   naming the client it came from, unless you have **trusted** that client.
   `raw: true` is the master token's alone.
@@ -1275,8 +1324,10 @@ What a client may do:
   had a trusted live device (migration 181), so their other `full` devices
   are trusted from then on. The change takes effect on the client's next
   call; the session timeline still records the call as `client:<name>`, and
-  `client list` still shows the per-device `trusted_at` column, which is
-  kept as a mirror for one release and is not what the hub reads. Trust a device
+  `client list` (and `list_clients`) show the person's effective trust in the
+  TRUSTED column (`trusted`); the per-device `trusted_at` / `assets_admin_at`
+  fields stay in `list_clients` as a mirror for one release and are not what
+  the hub reads. Trust a device
   whose keyboard is yours — the desktop app paired to this hub, your phone —
   never a token an agent holds: what makes an agent's output safe to relay
   is precisely the marker. A fresh pairing is untrusted, and a hub older than
@@ -1574,26 +1625,50 @@ the master's `revoke_client` / `set_client_trust`, pairing, SSO
 provisioning and `fleet-hub person|client|realm` is an admin event
 (`admin_events`, migration 182): when, the acting person and device (none
 for the operator on the hub machine), the action, the resource's type and
-id, and what the change said, with every key that could hold a secret
-dropped and the text cut at 4096 characters. The events come from
+id, and what the change said, with the change scrubbed before it is stored: a key
+that names a secret is dropped at any depth, whatever its case; a
+`{key, value}` pair keeps its value only when the key names no secret
+(`secret`, `password`, `token`, `api_key`), and every other `value` is
+dropped; `user:pass@` in a URL becomes `***@`; a string longer than 512
+characters is cut and ends in `…`; and a change whose text is still longer
+than 4096 characters is stored as `{"truncated":true,"chars":n}` rather than
+cut in the middle of its JSON. The events come from
 `org_admin` (`pair_device` included), `realm_admin`, the master's
-`revoke_client` and `set_client_trust`, redeeming a pairing code, an SSO
-sign-in that creates a person and its account link, and the hub CLI's
-`person rename|disable|enable|link-sso|unlink-sso`, `client
-grant|ungrant|bind-person|unbind-person` and `realm` commands. The table is
+`revoke_client`, `set_client_trust` and `pair_client` (the mint), the
+master's `work_admin` org writes (recorded `by: master`), redeeming a
+pairing code, an SSO sign-in that creates a person and its account link,
+and the hub CLI's `person rename|disable|enable|link-sso|unlink-sso`,
+`client grant|ungrant|bind-person|unbind-person`, `fleet-hub org …` and
+`client bind` (recorded `by: operator`) and `realm` commands. The table is
 append-only in SQL: an update aborts, and a delete aborts except in the
 retention sweep, which drops events older than `auth.audit_retention_days`
 (default 365; `0` keeps them forever). Read it with `realm_admin { audit }`
 or `fleet-hub realm audit`.
 
-What is not recorded yet: a pairing code carries no minter, so a code
-minted by `pair_client` or `fleet-hub pair` leaves no event until it is
-redeemed (and then names the device, not who minted it); `fleet-hub client
-bind` (a device's org) records none, and neither do `fleet-hub org …`
-(`member add|rm|grants`, `own-hub`, `unclaimed-count`, and the org,
-rule, host and tracker commands it routes through `work_admin`) and the
-master's `work_admin` org actions — though their `org_admin` equivalents
-do.
+A pairing code carries its minter (person, device, surface and, for an
+org admin, the org it is fenced to). The master's `pair_client` records a
+`pair_client` event at the mint (name, mode, trust, org, person, lifetime and
+the surface; never the code), `org_admin { pair_device }` records its own
+`pair_device` event, and the `pair` event at the redeem names who minted the
+code (`minted_by_person`, `minted_by_device`) and through which surface
+(`minted_via`: `pair_client`, `org_admin` or `oidc`). `fleet-hub pair` calls
+the hub's `pair_client` tool over `/mcp`, so a code it mints is recorded like any
+other `pair_client` mint, with `via: "pair_client"`; the operator on the hub
+machine is no person or device, so the event has no actor.
+
+The org commands are covered on both paths. The master's `work_admin` org
+writes (`add_org`, `update_org`, `remove_org`, `add_rule`, `remove_rule`,
+`assign_host`, `unassign_host`, `assign_tracker`, `assign_client`), which
+`fleet-hub org add|set|rm|rule|host|tracker` and `fleet-hub client bind` take,
+record one event each with `by: "master"` and no actor; a read (`list_orgs`)
+records none. The hub CLI's direct commands record one event each with
+`by: "operator"`: `org member add` (`set_member`), `member rm`
+(`remove_member`), `member grants --narrow|--revoke`
+(`narrow_member_grants`, `revoke_member_grants`; the bare count is a read),
+`own-hub` (`set_hub_org`) and `unclaimed-count` (`set_admins_see_unclaimed`).
+Both paths log the shape `org_admin` does for the same write (an org, an org
+rule, an `org_member` as `<org>/<person>`, the hub). The `work_admin`
+representation keeps only the org fields, never a tracker credential.
 
 ### Companies: members and roles
 
@@ -3762,7 +3837,7 @@ deliberately.
 - **Client tokens.** A paired device holds a third kind of token: named,
   revocable, `full` or `readonly`, never the master and never fleet admin.
   Only its SHA-256 is stored. A client may additionally be *trusted*
-  (`client_tokens.trusted_at`), which drops the untrusted-content marker
+  (its person holds `fleet-trusted`; `client_tokens.trusted_at` is the mirror), which drops the untrusted-content marker
   from what it sends and nothing else — it widens what an agent will believe,
   not what the token may call, so grant it to a device you type on and not
   to a token an agent holds. What crosses the room in the QR is a

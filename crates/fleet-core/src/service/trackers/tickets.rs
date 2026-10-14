@@ -41,6 +41,9 @@ pub const TICKETS_DEFAULT_LIMIT: usize = 50;
 pub const TICKETS_MAX_LIMIT: usize = 200;
 /// The `recent` view's window.
 pub const RECENT_DAYS: i64 = 14;
+/// The view of the tickets a person archived (`work_link { archive_item }`),
+/// which every other view leaves out.
+pub const ARCHIVED_VIEW: &str = "archived";
 
 /// Whether this item's tracker can serve a full description, and under which
 /// key. A tracker fleet cannot identify, one with no key to name, or one
@@ -199,6 +202,10 @@ fn views_of(
     t: Option<&TrackerRow>,
     now: i64,
 ) -> Vec<String> {
+    // A person archived it (migration 190): out of every list but its own.
+    if item.archived_at.is_some() {
+        return vec![ARCHIVED_VIEW.to_string()];
+    }
     let mine = t
         .and_then(|t| t.config.account_id.as_deref())
         .is_some_and(|me| meta.assignee_id.as_deref() == Some(me));
@@ -287,7 +294,7 @@ pub fn tickets_and_tasks(
                 Some("proposed") => item.proposal_state.as_deref() == Some("accepted"),
                 _ => true,
             };
-            if !own {
+            if !own || item.archived_at.is_some() {
                 continue;
             }
             if let Some(q) = q {

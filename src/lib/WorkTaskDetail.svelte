@@ -47,7 +47,7 @@
   import Icon from './kit/Icon.svelte';
   import { copyText } from './clipboard';
   import { finishesWhen } from './handoffs';
-  import { keepWorkOpen, setWorkStatus, type WorkItemStatus } from './work';
+  import { keepWorkOpen, setWorkArchived, setWorkStatus, type WorkItemStatus } from './work';
   import { listStartRules, ruleProject, type StartRuleView } from './start_rules';
   import { projects } from './projects';
   import {
@@ -463,6 +463,22 @@
     else void load(taskId);
   }
 
+  // Archive: a person's tidy-up of the lists, kept on the hub. The ticket
+  // leaves the ticket lists and hides behind the Work view's Archived switch;
+  // Unarchive brings it back. Nothing changes in its tracker.
+  const archiveBlocked = $derived(hubActionBlocked('set_work_archived', $hubStatus, $hubConnection));
+  let archiveBusy = $state(false);
+  async function toggleArchived() {
+    const t = task;
+    if (!t || t.item_id == null || archiveBusy) return;
+    archiveBusy = true;
+    statusError = null;
+    const r = await setWorkArchived(t.item_id, t.archived_at == null);
+    archiveBusy = false;
+    if (!r.ok) statusError = readErrorText(r.error);
+    else void load(taskId);
+  }
+
   // The Delivery block and the start rule that would place a start.
   const rowsById = $derived(new Map($sessions.map((r) => [r.id, r])));
   const delivery = $derived(task ? deliveryOf(task, detail?.last_outcome, rowsById, nowSec) : null);
@@ -587,6 +603,19 @@
             onclick={() => (promoting = true)}>Promote to ticket…</button
           >
         {/if}
+        {#if task?.item_id != null}
+          <button
+            class="btn"
+            type="button"
+            data-testid="work-task-archive"
+            disabled={archiveBlocked !== null || archiveBusy}
+            title={archiveBlocked ??
+              (task.archived_at != null
+                ? 'Bring it back to the ticket lists and the Work view'
+                : 'Hide it from the ticket lists and the Work view (the Archived filter still shows it); nothing changes in its tracker')}
+            onclick={() => void toggleArchived()}>{task.archived_at != null ? 'Unarchive' : 'Archive'}</button
+          >
+        {/if}
       </div>
     </div>
     {#if task}
@@ -609,6 +638,7 @@
           <span class="chip chip--status chip--{task.status_category ?? 'todo'}" data-testid="work-task-status">{taskStatus(task)}</span>
         {/if}
         {#if task.resolution}<span class="chip">{task.resolution}</span>{/if}
+        {#if task.archived_at != null}<span class="chip" data-testid="work-task-archived-chip" title="Archived {timeAgo(task.archived_at)}">Archived</span>{/if}
         {#if task.priority === 'urgent' || task.priority === 'high'}
           <span class="chip chip--prio-{task.priority}" data-testid="work-task-priority-chip"
             ><span class="prio-dot prio-dot--{task.priority}" aria-hidden="true"></span>{priorityLabel(task.priority)}</span

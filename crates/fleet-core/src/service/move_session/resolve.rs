@@ -495,6 +495,13 @@ async fn undo(
     let source_id = source_id_for(&target, &partial)?;
     let source = fetch_source(store, target.id, source_id, &partial)?;
 
+    // The target carries the source's pin from the move's carry step; the
+    // source still holds its own, so lift the target's for the kill.
+    if let Ok(s) = store.lock() {
+        if let Err(e) = s.set_session_pinned(target.id, None) {
+            tracing::warn!(session_id = target.id, error = %e, "[move_session] unpinning the undone target failed");
+        }
+    }
     // The kill only — no worktree, transcript, carried file or script of any
     // kind touches the target.
     hooks

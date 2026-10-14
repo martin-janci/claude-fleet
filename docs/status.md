@@ -195,11 +195,15 @@ managed subgroups' membership and narrowed reads; writes need a trusted
 `full` device), `fleet-hub realm user|group|role|effective|audit`, and the
 desktop's read-only Settings → Groups and People's *Roles* section.
 Breaking: trusting a device trusts every `full` device of its person; SSO
-no longer auto-provisions; device tokens expire after 90 idle days. Known
-gaps: a pairing code carries no minter (a mint by `pair_client` or
-`fleet-hub pair` records no event), `fleet-hub client bind`, `fleet-hub
-org …` and the master's `work_admin` org actions record none, and `list_clients` and `catalog_grantees` for `personal` still show
-the per-device trust / grant mirror. Not built: sub-projects 2–6 (the
+no longer auto-provisions; device tokens expire after 90 idle days. Follow-ups (TASK-264, `docs/superpowers/plans/2026-10-13-identity-followups.md`):
+a pairing code carries its minter (`pair_client` records the mint, the
+redeem's `pair` event names it, and an org admin's trusted code is re-checked
+against the org at redeem); `fleet-hub client bind`, `fleet-hub org …` and
+the master's `work_admin` org actions record admin events; `list_clients`,
+`fleet-hub client list` and `catalog_grantees` for `personal` show the
+person's trust and grant (the per-device `trusted_at` / `assets_admin_at`
+mirror columns stay one release); the audit scrub keeps a plain setting's
+value and redacts URL credentials. Not built: sub-projects 2–6 (the
 hub's own IdP, fleet clients on OIDC, passkeys and e-mail, brokering, and
 editing administration with realm export / import — the spec's roadmap);
 logout at the provider and an SSO button in the desktop or mobile app.
@@ -896,7 +900,7 @@ built: outbound Slack/Teams notifications (a new channel of the 11.9
 matrix, the owner's call).
 
 Configurable agents (spec `docs/superpowers/specs/2026-10-12-configurable-agents-design.md`),
-steps 1 and 2 of 6: a `fleet_agent` catalog asset is a typed, validated
+steps 1 to 5 of 6: a `fleet_agent` catalog asset is a typed, validated
 definition (inputs, store roles, trigger, run, actions, limits;
 `service/fleet_agents/`), listed in Assets and checked by `fleet-hub agents
 define`. An instance is an `agent_rules` row with `agent = fleet` (migration
@@ -906,8 +910,22 @@ define`. An instance is an `agent_rules` row with `agent = fleet` (migration
 binding is rendered with the host's secrets and asked for its tools on the
 host, and fleet stores bind `rule` or `shared:<name>` namespaces of
 `agent_records`, which a run reads through `fleet-records` (`/agent-records`,
-run tokens). Nothing runs an instance yet: the generic runner, the actions
-and the grant form are steps 3 to 5.
+run tokens). Step 3, the generic runner, runs instances: the agent
+runtime's `fleet` agent polls `tracker_comments`, `tracker_assigned`,
+`mcp_scan` and `schedule` triggers, takes `manual` jobs from `agents run`,
+and keeps each run's answer checked against `run.output_schema`. Step 4,
+the actions: the answer's `tracker_comment`, `tracker_issue`,
+`tracker_link`, `record` and `mcp_call` writes are queued by the rule's
+level and sent by the `fleet` executor after its send-time checks (limits,
+body size, write tools, the tool's `inputSchema`), with a loop guard. Step 5:
+Automation › Agents lists the catalog's fleet agents with their instances;
+*New instance* and *Edit* open the grant form (`fleet_agents/form.rs`, the
+`agents_fleet` command), *Revoke* and *Run now* act on an instance; an
+agent drafts one in a chat with a `wizard: fleet_agent` block, which the
+person sends; the phone lists the instances with Revoke. Step 6 in part: the
+`github_prs` and `github_comments` sources, `pr_comment` and `pr_labels`,
+and comments and new items on trackers other than Jira; not `pr_review`,
+polling other trackers, or restating the built-in agents.
 
 Session state machine hardening (plan A, #343) is landed: a `working` row
 with no activity for `reconcile.stale_working_secs` turns `idle` with

@@ -43,10 +43,15 @@ pub const KINDS: &[&str] = &[
 pub const CHAT_WIZARDS: &[&str] = &[
     "add_host",
     "add_project",
+    "fleet_agent",
     "get_started",
     "new_session",
     "pair_device",
 ];
+/// The chat wizards whose spec is not a file but built when the card opens:
+/// `fleet_agent` is a catalog fleet agent's grant form (configurable agents,
+/// step 5), named by the block's `definition`.
+pub const DYNAMIC_CHAT_WIZARDS: &[&str] = &["fleet_agent"];
 const TONES: &[&str] = &["info", "tip", "success", "warning", "danger"];
 pub const PROGRESS_STATES: &[&str] = &["running", "waiting", "done", "failed"];
 pub const PROGRESS_STEP_STATES: &[&str] = &["pending", "running", "done", "failed", "skipped"];
@@ -247,6 +252,11 @@ pub enum BlockKind {
     /// step's button.
     Wizard {
         wizard: ChatWizard,
+        /// `fleet_agent` only: the catalog fleet agent whose instance the
+        /// form grants (its grant form is the hub's, built when the card
+        /// opens; the person's device sends it).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        definition: Option<String>,
         /// Why the agent opens it, in one sentence.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         why: Option<String>,
@@ -395,6 +405,7 @@ pub struct DashQuery {
 pub enum ChatWizard {
     AddHost,
     AddProject,
+    FleetAgent,
     GetStarted,
     NewSession,
     PairDevice,
@@ -674,6 +685,15 @@ pub fn check(v: &Value) -> Result<(), Vec<String>> {
         }
         "wizard" => {
             p.one_of(o, "wizard", "", CHAT_WIZARDS, true);
+            let fleet = o.get("wizard").and_then(Value::as_str) == Some("fleet_agent");
+            match o.get("definition") {
+                None | Some(Value::Null) if fleet => {
+                    p.add("", "a `fleet_agent` wizard names its `definition`")
+                }
+                None | Some(Value::Null) => {}
+                Some(_) if !fleet => p.add("", "`definition` is for the `fleet_agent` wizard"),
+                Some(_) => p.key(o, "definition", ""),
+            }
             p.str(o, "why", "", false, 500);
             drafted_values(&mut p, o.get("values"));
         }
