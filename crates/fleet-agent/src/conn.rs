@@ -1365,6 +1365,9 @@ pub async fn run(
         let (config, link) = (config.clone(), notifier.link());
         tokio::spawn(async move { u.run(&config, link).await });
     }
+    // Under systemd --user, keeps the tmux servers the hub starts out of this
+    // unit's cgroup, so an oom-kill of the agent is not one of every session.
+    tokio::spawn(crate::scope::run());
     let endpoint = Endpoint::parse(&config.hub, config.insecure)?;
     let dialer = Arc::new(Dialer::new(
         endpoint,

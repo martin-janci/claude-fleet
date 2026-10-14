@@ -812,6 +812,21 @@ the same loop, just in the foreground, under whatever supervises it instead.)
   within 10 s. The unit uses `KillMode=process`, so systemd itself stops
   only the agent: the tmux servers the agent started, and with them your
   Claude sessions, survive a restart or an upgrade.
+- **Out of memory.** `KillMode` does not stop systemd-oomd, which kills a
+  whole cgroup. So under `install --user` the agent moves every tmux server
+  it started into a scope of its own, `fleet-tmux-<pid>.scope`, and each
+  pane's process tree into `fleet-tmux-<pid>-pane-<pid>.scope`, all in the
+  agent's slice (`systemctl --user list-units 'fleet-tmux-*'`). It sweeps
+  every 5 s, through the user manager's D-Bus API (`busctl`). Under memory
+  pressure oomd then kills the one pane that is growing; the agent, the
+  tmux server and the other sessions live on. The unit also carries
+  `ManagedOOMPreference=avoid`, which systemd honours for a system unit
+  only. A system unit, a host without cgroup v2 or `busctl`, or
+  `FLEET_AGENT_TMUX_SCOPES=0` in the unit's environment leaves tmux in the
+  agent's cgroup, as before. An existing host picks this up by upgrading
+  the binary (the next sweep moves its running servers, no session
+  restarts); re-run `fleet-agent install` once as well, to add the
+  `ManagedOOMPreference` line to the unit.
 - **No terminal.** The desktop's terminal view attaches over SSH, and an
   agent host has none. Sessions, prompts, captures, provisioning and
   everything else in the MCP API work. The interactive terminal does not.
