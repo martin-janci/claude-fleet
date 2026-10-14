@@ -199,7 +199,7 @@ Ensure the UX agent's operator session exists on a reachable host; returns its r
 
 ### `env_vars`
 
-Session environment variables for the next start; global < host < project < session. list; set {scope, scope_key, name, value|ref, secret?}; unset {scope, scope_key, name}. Secrets and refs are never listed; ref (env:NAME|file:/abs) is master-only. E_INVALID, E_FORBIDDEN.
+Session environment variables for the next start; global < host < project < person < session (person: the session owner's, yours only, scope_key '' = you). list; set {scope, scope_key, name, value|ref, secret?}; unset {scope, scope_key, name}. Secrets and refs are never listed; ref (env:NAME|file:/abs) is master-only. E_INVALID, E_FORBIDDEN.
 
 Parameters: `action`, `name`, `ref`, `scope`, `scope_key`, `secret`, `value`
 

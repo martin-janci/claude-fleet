@@ -727,6 +727,18 @@ fn hosts_has_agent_hook_port(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 192: `env_vars`' CHECK already
+/// admits the `person` scope. 192 rebuilds the table, so a re-run must not.
+fn env_vars_has_person_scope(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'env_vars' \
+         AND sql LIKE '%''person''%'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 125.
 fn sessions_has_last_viewed_at(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -2147,6 +2159,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 191,
         sql: include_str!("../../migrations/191_host_agent_hook_port.sql"),
         already_applied: Some(hosts_has_agent_hook_port),
+    },
+    // Person-scoped environment variables: `env_vars.scope` gains 'person'
+    // (a CHECK change, so a table rebuild; guarded).
+    Migration {
+        version: 192,
+        sql: include_str!("../../migrations/192_env_vars_person_scope.sql"),
+        already_applied: Some(env_vars_has_person_scope),
     },
 ];
 
@@ -3984,6 +4003,78 @@ mod tests {
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(s.get_person_by_name("ada").unwrap().unwrap().uuid, ada.uuid);
+    }
+
+    #[test]
+    fn migration_192_admits_the_person_scope_and_keeps_every_row() {
+        let s = store_at_version(191);
+        s.upsert_host("h").unwrap();
+        s.conn
+            .execute_batch(
+                "INSERT INTO sessions (id, tmux_name, host_alias, created_at, last_activity_at, status) \
+                   VALUES (7, 't', 'h', 0, 0, 'running'); \
+                 INSERT INTO env_vars (id, scope, scope_key, name, value, secret, updated_at) \
+                   VALUES (11, 'global', '', 'A', 'g', 0, 1), (12, 'session', '7', 'B', 's', 1, 2);",
+            )
+            .unwrap();
+        assert!(
+            s.conn
+                .execute(
+                    "INSERT INTO env_vars (scope, scope_key, name, value, updated_at) \
+                     VALUES ('person', '1', 'P', 'v', 0)",
+                    [],
+                )
+                .is_err(),
+            "191's CHECK refuses the person scope"
+        );
+        s.migrate().unwrap();
+        let rows = |s: &Store| -> Vec<(i64, String, String)> {
+            s.conn
+                .prepare("SELECT id, scope, name FROM env_vars ORDER BY id")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        assert_eq!(
+            rows(&s),
+            [
+                (11, "global".into(), "A".into()),
+                (12, "session".into(), "B".into())
+            ]
+        );
+        let ada: i64 = s
+            .conn
+            .query_row(
+                "INSERT INTO people (name, is_personal_owner, created_at) VALUES ('ada', 0, 1) \
+                 RETURNING id",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        s.set_env_var(
+            "person",
+            &ada.to_string(),
+            "GIT_AUTHOR_NAME",
+            &crate::store::EnvValue::Plain("Ada".into()),
+        )
+        .unwrap();
+        // Re-running records 192 without rebuilding again.
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 192;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(rows(&s).len(), 3);
+        // Both triggers are in place: the session's and the person's rows go
+        // with their owner.
+        s.conn
+            .execute("DELETE FROM sessions WHERE id = 7", [])
+            .unwrap();
+        s.conn
+            .execute("DELETE FROM people WHERE id = ?1", [ada])
+            .unwrap();
+        assert_eq!(rows(&s), [(11, "global".into(), "A".into())]);
     }
 
     #[test]

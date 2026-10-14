@@ -42,10 +42,38 @@ impl EnvFile {
     }
 }
 
+/// The person whose `person` scope a launch sources: the session row's
+/// owner at launch time when the row exists (restart, recreate, repair,
+/// move), else `owner` — the owner a create path is about to record (a new
+/// session, a review). An unclaimed session has none, and a disabled
+/// person's identity is not lent to anything still running under their
+/// name.
+fn launch_person(
+    s: &Store,
+    session: Option<i64>,
+    owner: Option<i64>,
+) -> Result<Option<i64>, IpcError> {
+    let row = match session {
+        Some(id) => s.get_session_by_id(id)?,
+        None => None,
+    };
+    let person = match row {
+        Some(row) => row.owner_person_id,
+        None => owner,
+    };
+    let Some(id) = person else {
+        return Ok(None);
+    };
+    Ok(s.get_person(id)?
+        .filter(|p| p.disabled_at.is_none())
+        .map(|p| p.id))
+}
+
 pub fn resolve(
     store: &Mutex<Store>,
     host: &str,
     project: Option<&str>,
+    owner: Option<i64>,
     session: Option<i64>,
     extra: &BTreeMap<String, String>,
 ) -> Result<EnvFile, IpcError> {
@@ -54,7 +82,11 @@ pub fn resolve(
         check_env_value(v)?;
     }
     // Read rows under the lock; resolve references (file/env reads) after it.
-    let rows = lock(store)?.env_for_launch(host, project, session)?;
+    let rows = {
+        let s = lock(store)?;
+        let person = launch_person(&s, session, owner)?;
+        s.env_for_launch(host, project, person, session)?
+    };
     let mut merged: BTreeMap<String, Secret> = BTreeMap::new();
     for (name, src) in rows {
         let v = match src {
@@ -277,22 +309,34 @@ pub fn check(
     session: Option<i64>,
 ) -> Result<(), IpcError> {
     let project = project_slug(store, project_id)?;
-    resolve(store, host, project.as_deref(), session, &BTreeMap::new()).map(|_| ())
+    resolve(
+        store,
+        host,
+        project.as_deref(),
+        None,
+        session,
+        &BTreeMap::new(),
+    )
+    .map(|_| ())
 }
 
 /// Resolve, write the file and wrap `pane_cmd`. An empty set returns
-/// `pane_cmd` unchanged and writes nothing.
+/// `pane_cmd` unchanged and writes nothing. `owner` is the person a create
+/// path records as the new row's owner; with an existing `session` row its
+/// own owner is read instead ([`launch_person`]).
+#[allow(clippy::too_many_arguments)]
 pub async fn prepare(
     store: &Mutex<Store>,
     ssh: &dyn SshExec,
     host: &str,
     project_id: Option<i64>,
+    owner: Option<i64>,
     session: Option<i64>,
     extra: &BTreeMap<String, String>,
     pane_cmd: &str,
 ) -> Result<String, IpcError> {
     let project = project_slug(store, project_id)?;
-    let file = resolve(store, host, project.as_deref(), session, extra)?;
+    let file = resolve(store, host, project.as_deref(), owner, session, extra)?;
     if file.is_empty() {
         return Ok(pane_cmd.to_string());
     }
@@ -316,10 +360,10 @@ pub async fn prepare(
 pub struct EnvVarsArgs {
     /// list | set | unset.
     pub action: String,
-    /// global | host | project | session.
+    /// global | host | project | person | session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
-    /// '' (global), host alias, owner/repo or session id.
+    /// '' (global), host alias, owner/repo, ''|me (person) or session id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope_key: Option<String>,
     /// The variable.
@@ -384,14 +428,50 @@ impl EnvVarUnsetArgs {
     }
 }
 
+/// Who is calling [`run`], as the tool or the desktop command resolved it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EnvCaller {
+    /// May set a reference (the master, or the standalone desktop): it makes
+    /// the controlling process read its own files or environment at launch
+    /// (review r04 S1's rule for tracker secrets).
+    pub refs_allowed: bool,
+    /// May list and change the `global`, `host`, `project` and `session`
+    /// scopes: the master or a fleet admin's own device. (A write there also
+    /// needs a trusted full device, which the tool checks.)
+    pub admin: bool,
+    /// The caller's own person (`people.id`): the one `person` scope it may
+    /// list, set or unset. `None` for a caller that speaks for no person.
+    pub person: Option<i64>,
+}
+
+/// The `scope_key` a `person`-scope call acts on: the caller's own person,
+/// named as `''` / `me` or by its id. Any other person's is refused, the
+/// admin's included: a person's identity (git author, `GH_TOKEN`) is theirs.
+fn own_person_key(c: &EnvCaller, key: Option<&str>) -> Result<String, IpcError> {
+    let Some(me) = c.person else {
+        return Err(IpcError::new(
+            codes::E_FORBIDDEN,
+            "the person scope is a person's own, and this caller speaks for no person",
+        ));
+    };
+    match key.unwrap_or("").trim() {
+        "" | "me" => Ok(me.to_string()),
+        k if k == me.to_string() => Ok(me.to_string()),
+        _ => Err(IpcError::new(
+            codes::E_FORBIDDEN,
+            "a person's variables are their own: scope_key '' or 'me' (or your own person id)",
+        )),
+    }
+}
+
 /// `list` / `set` / `unset` for the tool and the desktop command. A
-/// reference is accepted only with `refs_allowed` (the master, or the
-/// standalone desktop): it makes the controlling process read its own files
-/// or environment at launch (review r04 S1's rule for tracker secrets).
+/// reference is accepted only with [`EnvCaller::refs_allowed`]; the scopes
+/// other than `person` are an admin's ([`EnvCaller::admin`]); the `person`
+/// scope is the caller's own only, listed and changed by nobody else.
 pub fn run(
     store: &Mutex<Store>,
     a: &EnvVarsArgs,
-    refs_allowed: bool,
+    caller: &EnvCaller,
 ) -> Result<serde_json::Value, IpcError> {
     use crate::store::EnvValue;
     let need = |v: &Option<String>, what: &str| {
@@ -402,11 +482,40 @@ pub fn run(
             )
         })
     };
+    // The scope and key a write acts on, after the person/admin rule.
+    let target = |scope: &str| -> Result<String, IpcError> {
+        if scope == "person" {
+            own_person_key(caller, a.scope_key.as_deref())
+        } else if caller.admin {
+            Ok(a.scope_key.clone().unwrap_or_default())
+        } else {
+            Err(IpcError::new(
+                codes::E_FORBIDDEN,
+                "only a fleet admin changes the global, host, project and session scopes; \
+                 your own variables are scope person",
+            ))
+        }
+    };
     match a.action.as_str() {
-        "list" => Ok(serde_json::to_value(lock(store)?.list_env_vars()?).unwrap_or_default()),
+        "list" => {
+            let me = caller.person.map(|id| id.to_string());
+            let rows: Vec<_> = lock(store)?
+                .list_env_vars()?
+                .into_iter()
+                .filter(|r| {
+                    if r.scope == "person" {
+                        me.as_deref() == Some(r.scope_key.as_str())
+                    } else {
+                        caller.admin
+                    }
+                })
+                .collect();
+            Ok(serde_json::to_value(rows).unwrap_or_default())
+        }
         "set" => {
             let (scope, name) = (need(&a.scope, "scope")?, need(&a.name, "name")?);
-            let key = a.scope_key.clone().unwrap_or_default();
+            let key = target(&scope)?;
+            let refs_allowed = caller.refs_allowed;
             let v = match (&a.value, &a.r#ref) {
                 (Some(_), Some(_)) | (None, None) => {
                     return Err(IpcError::new(
@@ -439,7 +548,7 @@ pub fn run(
         }
         "unset" => {
             let (scope, name) = (need(&a.scope, "scope")?, need(&a.name, "name")?);
-            let key = a.scope_key.clone().unwrap_or_default();
+            let key = target(&scope)?;
             let removed = lock(store)?.unset_env_var(&scope, &key, &name)?;
             Ok(serde_json::json!({ "removed": removed }))
         }
@@ -459,6 +568,19 @@ mod tests {
     fn store() -> Mutex<Store> {
         Mutex::new(Store::open_in_memory().unwrap())
     }
+
+    /// A fleet admin's device: shared scopes, no references.
+    const DEVICE: EnvCaller = EnvCaller {
+        refs_allowed: false,
+        admin: true,
+        person: Some(1),
+    };
+    /// The master: everything, references included.
+    const MASTER: EnvCaller = EnvCaller {
+        refs_allowed: true,
+        admin: true,
+        person: Some(1),
+    };
 
     #[test]
     fn render_round_trips_awkward_values_through_sh() {
@@ -557,7 +679,7 @@ mod tests {
                 &EnvValue::Ref(format!("file:{}", path.display())),
             )
             .unwrap();
-        let e = resolve(&s, "local", None, None, &BTreeMap::new()).unwrap_err();
+        let e = resolve(&s, "local", None, None, None, &BTreeMap::new()).unwrap_err();
         assert_eq!(e.code, codes::E_INVALID);
         assert!(
             e.message.contains("NULLY") && !e.message.contains("ret-tail"),
@@ -574,11 +696,13 @@ mod tests {
             .set_env_var("global", "", "A", &EnvValue::Plain("g".into()))
             .unwrap();
         let extra = BTreeMap::from([("A".to_string(), "x".to_string())]);
-        let f = resolve(&s, "local", None, None, &extra).unwrap();
+        let f = resolve(&s, "local", None, None, None, &extra).unwrap();
         assert!(f.render().contains("export A='x'"));
         let bad = BTreeMap::from([("PATH".to_string(), "x".to_string())]);
         assert_eq!(
-            resolve(&s, "local", None, None, &bad).unwrap_err().code,
+            resolve(&s, "local", None, None, None, &bad)
+                .unwrap_err()
+                .code,
             codes::E_INVALID
         );
     }
@@ -597,7 +721,7 @@ mod tests {
             .unwrap()
             .set_env_var("global", "", "TOKEN", &EnvValue::Ref(reference.into()))
             .unwrap();
-        let e = resolve(&s, "local", None, None, &BTreeMap::new()).unwrap_err();
+        let e = resolve(&s, "local", None, None, None, &BTreeMap::new()).unwrap_err();
         assert_eq!(e.code, codes::E_ENV_UNRESOLVED);
         assert!(
             e.message.contains("TOKEN") && !e.message.contains("nonexistent"),
@@ -620,7 +744,7 @@ mod tests {
                 &EnvValue::Ref("env:FLEET_ENV_TEST_REF_7731".into()),
             )
             .unwrap();
-        let f = resolve(&s, "local", None, None, &BTreeMap::new()).unwrap();
+        let f = resolve(&s, "local", None, None, None, &BTreeMap::new()).unwrap();
         assert!(f.render().contains("export R='from-env'"));
     }
 
@@ -640,7 +764,7 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(
-            resolve(&s, "local", None, None, &BTreeMap::new())
+            resolve(&s, "local", None, None, None, &BTreeMap::new())
                 .unwrap_err()
                 .code,
             codes::E_INVALID
@@ -649,7 +773,7 @@ mod tests {
 
     #[test]
     fn an_empty_set_leaves_the_pane_command_alone() {
-        let f = resolve(&store(), "local", None, None, &BTreeMap::new()).unwrap();
+        let f = resolve(&store(), "local", None, None, None, &BTreeMap::new()).unwrap();
         assert!(f.is_empty());
     }
 
@@ -665,30 +789,30 @@ mod tests {
             r#ref: r.map(Into::into),
             secret: Some(secret),
         };
-        let out = run(&s, &set("A", Some("plain"), false, None), false).unwrap();
+        let out = run(&s, &set("A", Some("plain"), false, None), &DEVICE).unwrap();
         assert_eq!(out["applies"], "on the next start or restart");
         assert!(!out.to_string().contains("plain"), "{out}");
-        run(&s, &set("S", Some("top-secret-1"), true, None), false).unwrap();
+        run(&s, &set("S", Some("top-secret-1"), true, None), &DEVICE).unwrap();
         let list = EnvVarsArgs {
             action: "list".into(),
             ..Default::default()
         };
-        let listed = run(&s, &list, false).unwrap().to_string();
+        let listed = run(&s, &list, &DEVICE).unwrap().to_string();
         assert!(
             listed.contains("plain") && !listed.contains("top-secret-1"),
             "{listed}"
         );
-        let e = run(&s, &set("R", None, true, Some("env:X")), false).unwrap_err();
+        let e = run(&s, &set("R", None, true, Some("env:X")), &DEVICE).unwrap_err();
         assert_eq!(
             e.code,
             codes::E_FORBIDDEN,
             "a device may not set a reference"
         );
         assert!(!e.message.contains("env:X"), "{}", e.message);
-        run(&s, &set("R", None, true, Some("env:X")), true).unwrap();
-        let both = run(&s, &set("B", Some("v"), false, Some("env:X")), true).unwrap_err();
+        run(&s, &set("R", None, true, Some("env:X")), &MASTER).unwrap();
+        let both = run(&s, &set("B", Some("v"), false, Some("env:X")), &MASTER).unwrap_err();
         assert_eq!(both.code, codes::E_INVALID);
-        let neither = run(&s, &set("B", None, false, None), true).unwrap_err();
+        let neither = run(&s, &set("B", None, false, None), &MASTER).unwrap_err();
         assert_eq!(neither.code, codes::E_INVALID);
         let unset = EnvVarsArgs {
             action: "unset".into(),
@@ -696,15 +820,15 @@ mod tests {
             name: Some("A".into()),
             ..Default::default()
         };
-        assert_eq!(run(&s, &unset, false).unwrap()["removed"], true);
-        assert_eq!(run(&s, &unset, false).unwrap()["removed"], false);
+        assert_eq!(run(&s, &unset, &DEVICE).unwrap()["removed"], true);
+        assert_eq!(run(&s, &unset, &DEVICE).unwrap()["removed"], false);
         let missing = run(
             &s,
             &EnvVarsArgs {
                 action: "unset".into(),
                 ..Default::default()
             },
-            false,
+            &DEVICE,
         )
         .unwrap_err();
         assert_eq!(missing.code, codes::E_INVALID);
@@ -714,10 +838,319 @@ mod tests {
                 action: "dump".into(),
                 ..Default::default()
             },
-            true,
+            &MASTER,
         )
         .unwrap_err();
         assert_eq!(bogus.code, codes::E_INVALID);
+    }
+
+    fn person_set(key: Option<&str>, name: &str, value: &str, secret: bool) -> EnvVarsArgs {
+        EnvVarsArgs {
+            action: "set".into(),
+            scope: Some("person".into()),
+            scope_key: key.map(Into::into),
+            name: Some(name.into()),
+            value: Some(value.into()),
+            r#ref: None,
+            secret: Some(secret),
+        }
+    }
+
+    fn listed(s: &Mutex<Store>, c: &EnvCaller) -> Vec<(String, String, String)> {
+        let list = EnvVarsArgs {
+            action: "list".into(),
+            ..Default::default()
+        };
+        run(s, &list, c)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                (
+                    r["scope"].as_str().unwrap().to_string(),
+                    r["scope_key"].as_str().unwrap().to_string(),
+                    r["name"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_person_sets_lists_and_unsets_only_their_own_person_scope() {
+        let s = store();
+        let ada = EnvCaller {
+            person: Some(5),
+            ..Default::default()
+        };
+        let bob = EnvCaller {
+            person: Some(6),
+            ..Default::default()
+        };
+        // '' and 'me' are the caller's own person; the stored key is the id.
+        let out = run(&s, &person_set(None, "GIT_AUTHOR_NAME", "Ada", false), &ada).unwrap();
+        assert_eq!(out["scope_key"], "5");
+        run(
+            &s,
+            &person_set(Some("me"), "GH_TOKEN", "ghp_ada_secret_1", true),
+            &ada,
+        )
+        .unwrap();
+        run(
+            &s,
+            &person_set(Some("6"), "GIT_AUTHOR_NAME", "Bob", false),
+            &bob,
+        )
+        .unwrap();
+        // Another person's key is refused, for a set and an unset alike,
+        // and so is an admin's reach into someone else's person scope.
+        for (who, key) in [(&bob, "5"), (&MASTER, "5"), (&ada, "6")] {
+            let e = run(&s, &person_set(Some(key), "GH_TOKEN", "stolen", true), who).unwrap_err();
+            assert_eq!(e.code, codes::E_FORBIDDEN, "{who:?} on {key}");
+            let unset = EnvVarsArgs {
+                action: "unset".into(),
+                scope: Some("person".into()),
+                scope_key: Some(key.into()),
+                name: Some("GH_TOKEN".into()),
+                ..Default::default()
+            };
+            assert_eq!(run(&s, &unset, who).unwrap_err().code, codes::E_FORBIDDEN);
+        }
+        // A non-admin person may not touch the shared scopes.
+        let mut global = person_set(None, "X", "v", false);
+        global.scope = Some("global".into());
+        assert_eq!(run(&s, &global, &ada).unwrap_err().code, codes::E_FORBIDDEN);
+        run(&s, &global, &MASTER).unwrap();
+        // Each lists their own rows only; the admin also sees the shared
+        // scopes, but never another person's.
+        assert_eq!(
+            listed(&s, &ada),
+            [
+                ("person".into(), "5".into(), "GH_TOKEN".into()),
+                ("person".into(), "5".into(), "GIT_AUTHOR_NAME".into())
+            ]
+        );
+        assert_eq!(
+            listed(&s, &bob),
+            [("person".into(), "6".into(), "GIT_AUTHOR_NAME".into())]
+        );
+        assert_eq!(
+            listed(&s, &MASTER),
+            [("global".into(), "".into(), "X".into())]
+        );
+        // The secret is never echoed back.
+        let raw = run(
+            &s,
+            &EnvVarsArgs {
+                action: "list".into(),
+                ..Default::default()
+            },
+            &ada,
+        )
+        .unwrap()
+        .to_string();
+        assert!(
+            raw.contains("Ada") && !raw.contains("ghp_ada_secret_1"),
+            "{raw}"
+        );
+        // A caller with no person has no person scope.
+        let nobody = EnvCaller {
+            admin: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            run(&s, &person_set(None, "A", "v", false), &nobody)
+                .unwrap_err()
+                .code,
+            codes::E_FORBIDDEN
+        );
+        let unset = EnvVarsArgs {
+            action: "unset".into(),
+            scope: Some("person".into()),
+            scope_key: Some("me".into()),
+            name: Some("GH_TOKEN".into()),
+            ..Default::default()
+        };
+        assert_eq!(run(&s, &unset, &ada).unwrap()["removed"], true);
+    }
+
+    /// A session row on host `h` owned by `owner` (`None`: unclaimed).
+    fn session_row(s: &Mutex<Store>, id: i64, owner: Option<i64>) {
+        let st = s.lock().unwrap();
+        st.upsert_host("h").unwrap();
+        st.conn_for_test()
+            .execute(
+                "INSERT INTO sessions (id, tmux_name, host_alias, created_at, last_activity_at, \
+                 status, owner_person_id) VALUES (?1, ?2, 'h', 0, 0, 'running', ?3)",
+                rusqlite::params![id, format!("t{id}"), owner],
+            )
+            .unwrap();
+    }
+
+    fn person(s: &Mutex<Store>, name: &str) -> i64 {
+        s.lock()
+            .unwrap()
+            .conn_for_test()
+            .query_row(
+                "INSERT INTO people (name, is_personal_owner, created_at) VALUES (?1, 0, 1) \
+                 RETURNING id",
+                [name],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn a_launch_sources_its_owners_person_scope_and_an_unclaimed_one_none() {
+        let s = store();
+        let ada = person(&s, "ada");
+        let bob = person(&s, "bob");
+        {
+            let st = s.lock().unwrap();
+            st.set_env_var(
+                "host",
+                "h",
+                "GH_TOKEN",
+                &EnvValue::Secret(Secret::new("host-fallback")),
+            )
+            .unwrap();
+            st.set_env_var(
+                "person",
+                &ada.to_string(),
+                "GH_TOKEN",
+                &EnvValue::Secret(Secret::new("ada-token")),
+            )
+            .unwrap();
+            st.set_env_var(
+                "person",
+                &ada.to_string(),
+                "GIT_AUTHOR_EMAIL",
+                &EnvValue::Plain("ada@x".into()),
+            )
+            .unwrap();
+            st.set_env_var(
+                "person",
+                &bob.to_string(),
+                "GIT_AUTHOR_EMAIL",
+                &EnvValue::Plain("bob@x".into()),
+            )
+            .unwrap();
+        }
+        session_row(&s, 1, Some(ada));
+        session_row(&s, 2, None);
+        let none = BTreeMap::new();
+        // An existing row: its owner at launch time (restart, recreate, move).
+        let owned = resolve(&s, "h", None, None, Some(1), &none)
+            .unwrap()
+            .render();
+        assert!(owned.contains("export GH_TOKEN='ada-token'"), "{owned}");
+        assert!(owned.contains("GIT_AUTHOR_EMAIL='ada@x'") && !owned.contains("bob@x"));
+        // The row's owner wins over a stated one.
+        let row_wins = resolve(&s, "h", None, Some(bob), Some(1), &none)
+            .unwrap()
+            .render();
+        assert!(row_wins.contains("ada@x") && !row_wins.contains("bob@x"));
+        // Unclaimed: the host fallback, no person scope.
+        let unclaimed = resolve(&s, "h", None, None, Some(2), &none)
+            .unwrap()
+            .render();
+        assert!(
+            unclaimed.contains("export GH_TOKEN='host-fallback'"),
+            "{unclaimed}"
+        );
+        assert!(!unclaimed.contains("GIT_AUTHOR_EMAIL"));
+        // A create path names the owner it is about to record.
+        let created = resolve(&s, "h", None, Some(bob), None, &none)
+            .unwrap()
+            .render();
+        assert!(created.contains("bob@x") && created.contains("host-fallback"));
+        // A session-scope value still wins over the person's.
+        s.lock()
+            .unwrap()
+            .set_env_var(
+                "session",
+                "1",
+                "GH_TOKEN",
+                &EnvValue::Plain("one-off".into()),
+            )
+            .unwrap();
+        let over = resolve(&s, "h", None, None, Some(1), &none)
+            .unwrap()
+            .render();
+        assert!(over.contains("export GH_TOKEN='one-off'"), "{over}");
+        // A change of owner applies at the next launch.
+        s.lock()
+            .unwrap()
+            .conn_for_test()
+            .execute(
+                "UPDATE sessions SET owner_person_id = ?1 WHERE id = 1",
+                [bob],
+            )
+            .unwrap();
+        let moved = resolve(&s, "h", None, None, Some(1), &none)
+            .unwrap()
+            .render();
+        assert!(moved.contains("bob@x") && !moved.contains("ada@x"));
+        // A disabled person's identity is not used.
+        s.lock()
+            .unwrap()
+            .conn_for_test()
+            .execute("UPDATE people SET disabled_at = 1 WHERE id = ?1", [bob])
+            .unwrap();
+        let gone = resolve(&s, "h", None, None, Some(1), &none)
+            .unwrap()
+            .render();
+        assert!(!gone.contains("bob@x"), "{gone}");
+    }
+
+    #[tokio::test]
+    async fn a_person_secret_reaches_the_env_file_never_the_pane_command() {
+        use crate::ssh_fake::FakeSsh;
+        let s = store();
+        let ada = person(&s, "ada");
+        s.lock()
+            .unwrap()
+            .set_env_var(
+                "person",
+                &ada.to_string(),
+                "GH_TOKEN",
+                &EnvValue::Secret(Secret::new("ghp_never_in_argv")),
+            )
+            .unwrap();
+        let fake = FakeSsh::new();
+        fake.with_home("/home/ada");
+        let cmd = prepare(
+            &s,
+            &fake,
+            "h",
+            None,
+            Some(ada),
+            None,
+            &BTreeMap::new(),
+            "claude",
+        )
+        .await
+        .unwrap();
+        assert!(
+            cmd.contains(".claude-fleet/env/") && cmd.ends_with("claude"),
+            "{cmd}"
+        );
+        assert!(!cmd.contains("ghp_never_in_argv"), "{cmd}");
+        let calls = fake.calls();
+        for call in &calls {
+            assert!(
+                !call.command().contains("ghp_never_in_argv"),
+                "a secret in an ssh argv: {}",
+                call.command()
+            );
+        }
+        // It travelled as the env file's bytes on stdin instead.
+        assert!(calls.iter().any(|c| c
+            .stdin
+            .as_deref()
+            .is_some_and(
+                |b| String::from_utf8_lossy(b).contains("export GH_TOKEN='ghp_never_in_argv'")
+            )));
     }
 
     fn noted(v: &[(&str, i64)]) -> NotedHosts {

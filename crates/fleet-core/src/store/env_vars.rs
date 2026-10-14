@@ -7,7 +7,13 @@ use super::{now_unix, Secret, Store};
 use crate::ipc_error::{codes, IpcError};
 use serde::Serialize;
 
-pub const ENV_SCOPES: &[&str] = &["global", "host", "project", "session"];
+/// Every scope, in precedence order: a later one wins over an earlier one
+/// for the same name. `person` (migration 192) is the session OWNER's
+/// (`sessions.owner_person_id`, keyed by `people.id` as text): it sits above
+/// the host and project defaults, so a person's identity (git author,
+/// `GH_TOKEN`) replaces a fleet-wide or per-host fallback, and below
+/// `session`, so one session's explicit override still wins.
+pub const ENV_SCOPES: &[&str] = &["global", "host", "project", "person", "session"];
 const RESERVED: &[&str] = &[
     "PATH",
     "HOME",
@@ -93,14 +99,15 @@ pub fn check_env_scope(scope: &str, key: &str) -> Result<(), IpcError> {
             key.split_once('/'),
             Some((o, r)) if !o.is_empty() && !r.is_empty() && !r.contains('/')
         ),
-        "session" => key.parse::<i64>().map(|id| id > 0).unwrap_or(false),
+        "session" | "person" => key.parse::<i64>().map(|id| id > 0).unwrap_or(false),
         _ => false,
     };
     if ok {
         Ok(())
     } else {
         Err(invalid(format!(
-            "scope {scope:?} needs scope_key: '' (global), a host alias, owner/repo (project) or a session id"
+            "scope {scope:?} needs scope_key: '' (global), a host alias, owner/repo (project), \
+             a person id (person) or a session id"
         )))
     }
 }
@@ -182,20 +189,25 @@ impl Store {
     }
 
     /// The merged set for one launch, narrower scope winning, sorted by name.
+    /// `person` is the session owner's `people.id` (`None`: an unclaimed
+    /// session, which gets no person scope).
     pub fn env_for_launch(
         &self,
         host: &str,
         project: Option<&str>,
+        person: Option<i64>,
         session: Option<i64>,
     ) -> Result<Vec<(String, EnvSource)>, IpcError> {
         let session = session.map(|id| id.to_string());
+        let person = person.map(|id| id.to_string());
         let mut st = self.conn.prepare(
             "SELECT scope, name, value, credential_ref FROM env_vars \
              WHERE scope = 'global' OR (scope = 'host' AND scope_key = ?1) \
-                OR (scope = 'project' AND scope_key = ?2) OR (scope = 'session' AND scope_key = ?3)",
+                OR (scope = 'project' AND scope_key = ?2) OR (scope = 'session' AND scope_key = ?3) \
+                OR (scope = 'person' AND scope_key = ?4)",
         )?;
         let mut merged: BTreeMap<String, (u8, EnvSource)> = BTreeMap::new();
-        let rows = st.query_map(rusqlite::params![host, project, session], |r| {
+        let rows = st.query_map(rusqlite::params![host, project, session, person], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -271,17 +283,30 @@ mod tests {
         s.set_env_var("session", "7", "A", &plain("s")).unwrap();
         s.set_env_var("global", "", "B", &plain("gb")).unwrap();
         s.set_env_var("host", "other", "C", &plain("no")).unwrap();
-        let get = |h, p, sid| {
-            s.env_for_launch(h, p, sid)
+        s.set_env_var("person", "3", "A", &plain("me")).unwrap();
+        s.set_env_var("person", "4", "D", &plain("not-mine"))
+            .unwrap();
+        let get = |h, p, who, sid| {
+            s.env_for_launch(h, p, who, sid)
                 .unwrap()
                 .into_iter()
                 .map(|(n, v)| format!("{n}={}", val(&v)))
                 .collect::<Vec<_>>()
         };
-        assert_eq!(get("mercury", Some("o/r"), Some(7)), ["A=s", "B=gb"]);
-        assert_eq!(get("mercury", Some("o/r"), None), ["A=p", "B=gb"]);
-        assert_eq!(get("mercury", None, None), ["A=h", "B=gb"]);
-        assert_eq!(get("local", None, None), ["A=g", "B=gb"]);
+        // global < host < project < person < session.
+        assert_eq!(
+            get("mercury", Some("o/r"), Some(3), Some(7)),
+            ["A=s", "B=gb"]
+        );
+        assert_eq!(get("mercury", Some("o/r"), Some(3), None), ["A=me", "B=gb"]);
+        assert_eq!(get("mercury", Some("o/r"), None, None), ["A=p", "B=gb"]);
+        assert_eq!(get("mercury", None, None, None), ["A=h", "B=gb"]);
+        assert_eq!(get("local", None, None, None), ["A=g", "B=gb"]);
+        // Only the owner's person rows, never another person's.
+        assert_eq!(
+            get("local", None, Some(4), None),
+            ["A=g", "B=gb", "D=not-mine"]
+        );
     }
 
     #[test]
@@ -351,6 +376,9 @@ mod tests {
         assert!(s.set_env_var("global", "x", "A", &plain("v")).is_err());
         assert!(s.set_env_var("host", "", "A", &plain("v")).is_err());
         assert!(s.set_env_var("session", "abc", "A", &plain("v")).is_err());
+        assert!(s.set_env_var("person", "", "A", &plain("v")).is_err());
+        assert!(s.set_env_var("person", "me", "A", &plain("v")).is_err());
+        assert!(s.set_env_var("person", "0", "A", &plain("v")).is_err());
         assert!(s
             .set_env_var("project", "norepo", "A", &plain("v"))
             .is_err());

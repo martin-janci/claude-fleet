@@ -5650,7 +5650,7 @@
     },
     {
       "id": "settings.env",
-      "intro": "Environment variables for the sessions fleet starts: global, per host, per project or per session, the narrower winning. A change applies when a session next starts or restarts. A secret is write-only.",
+      "intro": "Environment variables for the sessions fleet starts: global, per host, per project, per person (the session owner's own: a git identity and a secret GH_TOKEN) or per session, the narrower winning. A change applies when a session next starts or restarts. A secret is write-only.",
       "layout": "master_detail",
       "parent": "settings",
       "resource": "env_var",
@@ -9115,6 +9115,10 @@
             "name": "scope",
             "options": [
               [
+                "person",
+                "Me (my sessions)"
+              ],
+              [
                 "global",
                 "Global"
               ],
@@ -9134,7 +9138,7 @@
             "label": "Host or owner/repo",
             "max": 255,
             "name": "scope_key",
-            "placeholder": "mercury · owner/repo · empty for global",
+            "placeholder": "empty for me or global · mercury · owner/repo",
             "required": false,
             "type": "text"
           },
@@ -9207,7 +9211,7 @@
           "badge": {
             "when": "label"
           },
-          "help": "Where it applies: everywhere, one host, one project or one session.",
+          "help": "Where it applies: everywhere, one host, one project, the sessions one person owns, or one session.",
           "id": "scope",
           "label": "Scope",
           "options": [
@@ -9224,6 +9228,10 @@
               "Project"
             ],
             [
+              "person",
+              "Person"
+            ],
+            [
               "session",
               "Session"
             ]
@@ -9231,7 +9239,7 @@
           "type": "choice"
         },
         {
-          "help": "The host alias, owner/repo or session id; empty for global.",
+          "help": "The host alias, owner/repo, person id or session id; empty for global.",
           "id": "scope_key",
           "label": "Applies to",
           "max": 255,
@@ -9275,7 +9283,7 @@
           "type": "time"
         }
       ],
-      "help": "Set in every session fleet starts, by scope: global, then host, then project (owner/repo), then session; the narrower wins. A change applies when a session next starts or restarts. A secret's value is never shown again.",
+      "help": "Set in every session fleet starts, by scope: global, then host, then project (owner/repo), then person (the session owner's own, e.g. GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL and a secret GH_TOKEN), then session; the narrower wins. A person sees and changes only their own person variables. A change applies when a session next starts or restarts. A secret's value is never shown again.",
       "id": "env_var",
       "id_field": "id",
       "label": "Environment variable",
