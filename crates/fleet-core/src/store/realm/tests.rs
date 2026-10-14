@@ -334,42 +334,103 @@ fn disabling_a_person_ends_every_group_membership_and_mapping() {
     assert_eq!(mapped, 0);
 }
 
-/// Random membership writes: the projected `org_members` always equals the
-/// direct computation from the groups.
+/// Random writes through every writer that can change a membership
+/// (membership set/remove, disable/enable, org removal and creation, group
+/// create/move/member): the projected `org_members` always equals the direct
+/// computation from the groups, and its `shares_since` follows the role.
 #[test]
 fn the_projection_equals_the_direct_computation() {
     use rand::{RngExt, SeedableRng};
     let s = s();
-    let orgs: Vec<i64> = (0..3)
+    let mut orgs: Vec<i64> = (0..3)
         .map(|i| s.add_org(&format!("o{i}"), None, false).unwrap().id)
         .collect();
     let people: Vec<i64> = (0..4)
         .map(|i| s.create_person(&format!("p{i}"), None).unwrap().id)
         .collect();
     let mut rng = rand::rngs::StdRng::seed_from_u64(7);
-    for _ in 0..300 {
-        let (o, p) = (orgs[rng.random_range(0..3)], people[rng.random_range(0..4)]);
-        match rng.random_range(0..4) {
+    let mut free_groups: Vec<i64> = Vec::new();
+    for step in 0..600 {
+        let o = orgs[rng.random_range(0..orgs.len())];
+        let p = people[rng.random_range(0..people.len())];
+        let enabled = s.get_person(p).unwrap().unwrap().disabled_at.is_none();
+        match rng.random_range(0..9) {
             0 => {
                 s.remove_org_member(o, p).unwrap();
             }
-            n => {
-                s.set_org_member(o, p, ["admin", "member", "viewer"][n - 1], None)
-                    .unwrap();
+            1..=3 => {
+                let role = ["admin", "member", "viewer"][rng.random_range(0..3)];
+                // A disabled person may be refused a membership.
+                let r = s.set_org_member(o, p, role, None);
+                if enabled {
+                    r.unwrap();
+                }
+            }
+            4 => {
+                if enabled {
+                    s.disable_person(p).unwrap();
+                } else {
+                    s.enable_person(p).unwrap();
+                }
+            }
+            5 => {
+                // An unmanaged group, sometimes moved under another: it must
+                // not change the projection.
+                let g = s.create_group(None, &format!("g{step}"), None).unwrap().id;
+                if let Some(&target) = free_groups.first() {
+                    let _ = s.move_group(g, Some(target));
+                }
+                free_groups.push(g);
+            }
+            6 => {
+                // The org may be refused removal; then it stays.
+                if s.remove_org(o).is_ok() {
+                    let n = s.add_org(&format!("o{step}"), None, false).unwrap().id;
+                    orgs.retain(|x| *x != o);
+                    orgs.push(n);
+                }
+            }
+            7 => {
+                // Membership of an unmanaged group moves nothing.
+                if !free_groups.is_empty() {
+                    let g = free_groups[rng.random_range(0..free_groups.len())];
+                    s.with_tx(|c| s.add_group_member_in_tx(c, g, p, None))
+                        .unwrap();
+                }
+            }
+            _ => {
+                let _ = s.set_org_member(o, p, "member", None);
             }
         }
         for &p in &people {
-            let mut direct = s.org_roles_from_groups(p).unwrap();
-            let mut projected: Vec<(i64, String)> = s
+            let enabled = s.get_person(p).unwrap().unwrap().disabled_at.is_none();
+            let live: Vec<_> = s
                 .memberships_of(p)
                 .unwrap()
                 .into_iter()
                 .filter(|m| m.removed_at.is_none())
-                .map(|m| (m.org_id, m.role))
                 .collect();
+            for m in &live {
+                // Admins and members can receive org shares; viewers cannot.
+                assert_eq!(
+                    m.shares_since.is_some(),
+                    matches!(m.role.as_str(), "admin" | "member"),
+                    "step {step}: shares_since follows the role: {m:?}"
+                );
+            }
+            let mut direct = s.org_roles_from_groups(p).unwrap();
+            let mut projected: Vec<(i64, String)> =
+                live.into_iter().map(|m| (m.org_id, m.role)).collect();
             direct.sort();
             projected.sort();
-            assert_eq!(direct, projected);
+            if enabled {
+                assert_eq!(direct, projected, "step {step}");
+            } else {
+                assert!(
+                    direct.is_empty() && projected.is_empty(),
+                    "step {step}: a disabled person holds nothing: {direct:?} / {projected:?}"
+                );
+            }
         }
     }
 }
@@ -390,11 +451,11 @@ fn only_the_projection_writes_org_members() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
     walk(&root, &mut files);
-    let writes = [
-        "INSERT INTO org_members",
-        "UPDATE org_members",
-        "DELETE FROM org_members",
-    ];
+    // Every spelling of a write, whitespace-insensitive, case-insensitive.
+    let re = regex::Regex::new(
+        r"(?i)\b(insert(\s+or\s+\w+)?\s+into|replace\s+into|update|delete\s+from)\s+org_members\b",
+    )
+    .unwrap();
     let mut offenders = Vec::new();
     for f in files {
         let rel = f
@@ -402,13 +463,21 @@ fn only_the_projection_writes_org_members() {
             .unwrap()
             .to_string_lossy()
             .replace('\\', "/");
-        if rel == "store/realm.rs" || rel.contains("tests") {
+        if rel == "store/realm.rs"
+            || rel.ends_with("/tests.rs")
+            || rel.contains("/tests/")
+            || rel.ends_with("_tests.rs")
+        {
             continue;
         }
         let text = std::fs::read_to_string(&f).unwrap();
-        // Production code only: drop everything from the first `#[cfg(test)]`.
+        // Production code only: `#[cfg(test)]` opens a module that runs to the
+        // file's end in this crate (one test module per file, last), so the
+        // text before the first marker is the production text. A file that
+        // keeps production code after it is the bug this comment is for.
         let prod = text.split("#[cfg(test)]").next().unwrap();
-        if writes.iter().any(|w| prod.contains(w)) {
+        let flat = prod.split_whitespace().collect::<Vec<_>>().join(" ");
+        if re.is_match(&flat) {
             offenders.push(rel);
         }
     }
