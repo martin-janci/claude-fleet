@@ -1552,7 +1552,11 @@ pub(super) struct ClientSummary {
     pub(super) created_at: i64,
     pub(super) last_seen_at: Option<i64>,
     pub(super) revoked_at: Option<i64>,
+    /// Per-device mirror, kept one release; `trusted` is what the hub decides by.
     pub(super) trusted_at: Option<i64>,
+    /// The person's effective trust (their `fleet-trusted` role), false for
+    /// a device that cannot carry it.
+    pub(super) trusted: bool,
     /// The org the client is bound to (work graph M14); absent: unbound.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) org_id: Option<i64>,
@@ -1560,6 +1564,9 @@ pub(super) struct ClientSummary {
     /// (`catalog_admin`, migration 074); absent: not granted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) assets_admin_at: Option<i64>,
+    /// The person's effective catalog grant (their `assets-admin` role) on
+    /// an eligible device.
+    pub(super) assets_admin: bool,
     /// WHOSE device this is (multi-user M1, migration 100); absent: nobody's,
     /// which means it sees no private session at all. `fleet-hub client list`
     /// prints it, and `fleet-hub client bind-person` changes it.
@@ -1567,8 +1574,22 @@ pub(super) struct ClientSummary {
     pub(super) person_id: Option<i64>,
 }
 
-impl From<crate::store::ClientTokenRow> for ClientSummary {
-    fn from(r: crate::store::ClientTokenRow) -> Self {
+impl ClientSummary {
+    /// `trusted_people` / `assets_admins` are the holders of the
+    /// `fleet-trusted` / `assets-admin` realm roles, read under the same
+    /// store lock as `r`.
+    pub(super) fn from_row(
+        r: crate::store::ClientTokenRow,
+        trusted_people: &[i64],
+        assets_admins: &[i64],
+    ) -> Self {
+        let trusted = r.trusted_by(trusted_people);
+        // Mirrors `LIVE_GRANT_ELIGIBLE` in `store/clients.rs`: live, full,
+        // bound to no org.
+        let assets_admin = r.revoked_at.is_none()
+            && r.mode == "full"
+            && r.org_id.is_none()
+            && r.person_id.is_some_and(|p| assets_admins.contains(&p));
         Self {
             id: r.id,
             name: r.name,
@@ -1577,8 +1598,10 @@ impl From<crate::store::ClientTokenRow> for ClientSummary {
             last_seen_at: r.last_seen_at,
             revoked_at: r.revoked_at,
             trusted_at: r.trusted_at,
+            trusted,
             org_id: r.org_id,
             assets_admin_at: r.assets_admin_at,
+            assets_admin,
             person_id: r.person_id,
         }
     }

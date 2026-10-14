@@ -755,7 +755,9 @@ impl FleetTools {
         The token digest is never returned: a token exists in plaintext only \
         in the /pair response that minted it. Read-only but master token \
         only (it names every paired device). Rows: { id, name, mode, \
-        created_at, last_seen_at, revoked_at, trusted_at, org_id, person_id }.")]
+        created_at, last_seen_at, revoked_at, trusted, assets_admin, org_id, \
+        person_id, trusted_at, assets_admin_at }; trusted/assets_admin are the \
+        person's, the _at columns the per-device mirror.")]
     pub(super) async fn list_clients(
         &self,
         Parameters(p): Parameters<ListClientsParams>,
@@ -764,12 +766,21 @@ impl FleetTools {
             "list_clients",
             &format!("include_revoked={}", p.include_revoked),
         );
-        let rows = {
+        let (rows, trusted_people, assets_admins) = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
-            s.list_client_tokens(p.include_revoked)
-                .map_err(to_mcp_err)?
+            (
+                s.list_client_tokens(p.include_revoked)
+                    .map_err(to_mcp_err)?,
+                s.people_with_realm_role(crate::store::ROLE_FLEET_TRUSTED)
+                    .map_err(to_mcp_err)?,
+                s.people_with_realm_role(crate::store::ROLE_ASSETS_ADMIN)
+                    .map_err(to_mcp_err)?,
+            )
         };
-        let out: Vec<ClientSummary> = rows.into_iter().map(ClientSummary::from).collect();
+        let out: Vec<ClientSummary> = rows
+            .into_iter()
+            .map(|r| ClientSummary::from_row(r, &trusted_people, &assets_admins))
+            .collect();
         ok_json_compact(&out)
     }
 
@@ -796,10 +807,16 @@ impl FleetTools {
                 resource_id: &row.name,
                 representation: serde_json::json!({ "name": p.name, "by": "master" }),
             });
-            row
+            let trusted_people = s
+                .people_with_realm_role(crate::store::ROLE_FLEET_TRUSTED)
+                .map_err(to_mcp_err)?;
+            let assets_admins = s
+                .people_with_realm_role(crate::store::ROLE_ASSETS_ADMIN)
+                .map_err(to_mcp_err)?;
+            ClientSummary::from_row(row, &trusted_people, &assets_admins)
         };
         tracing::info!(client = %row.name, "[mcp] revoked a client token");
-        ok_json(&ClientSummary::from(row))
+        ok_json(&row)
     }
 
     #[tool(description = "Grant or withdraw trust in a paired client by \
@@ -830,14 +847,20 @@ impl FleetTools {
                     "by": "master",
                 }),
             });
-            row
+            let trusted_people = s
+                .people_with_realm_role(crate::store::ROLE_FLEET_TRUSTED)
+                .map_err(to_mcp_err)?;
+            let assets_admins = s
+                .people_with_realm_role(crate::store::ROLE_ASSETS_ADMIN)
+                .map_err(to_mcp_err)?;
+            ClientSummary::from_row(row, &trusted_people, &assets_admins)
         };
         tracing::info!(
             client = %row.name,
             trusted = row.trusted_at.is_some(),
             "[mcp] changed a client's trust"
         );
-        ok_json(&ClientSummary::from(row))
+        ok_json(&row)
     }
 
     // ---- operator settings ----

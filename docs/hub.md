@@ -1246,9 +1246,10 @@ What a client may do:
   The personal grant is the device's person's (identity sub-project 1):
   it maps the realm role `assets-admin` to them, so each of their `full`
   devices bound to no org manages the personal catalog; an org catalog's
-  grant stays the one device's. The ASSETS column (and the
-  `catalog_grantees` list for `personal`) still reads the per-device row
-  kept as a mirror for one release.
+  grant stays the one device's. The ASSETS column of `client list` (and the
+  `assets_admin` field of `list_clients`) shows the person's effective
+  grant; the `catalog_grantees` list for `personal` still reads the
+  per-device row kept as a mirror for one release.
   `list_catalogs` is open to the master or a person's own unbound full
   device, never an org-bound client; only the master token may
   `add_catalog` or `remove_catalog` (a removal drops every other client's
@@ -1275,8 +1276,10 @@ What a client may do:
   had a trusted live device (migration 181), so their other `full` devices
   are trusted from then on. The change takes effect on the client's next
   call; the session timeline still records the call as `client:<name>`, and
-  `client list` still shows the per-device `trusted_at` column, which is
-  kept as a mirror for one release and is not what the hub reads. Trust a device
+  `client list` (and `list_clients`) show the person's effective trust in the
+  TRUSTED column (`trusted`); the per-device `trusted_at` / `assets_admin_at`
+  fields stay in `list_clients` as a mirror for one release and are not what
+  the hub reads. Trust a device
   whose keyboard is yours — the desktop app paired to this hub, your phone —
   never a token an agent holds: what makes an agent's output safe to relay
   is precisely the marker. A fresh pairing is untrusted, and a hub older than
@@ -3762,7 +3765,7 @@ deliberately.
 - **Client tokens.** A paired device holds a third kind of token: named,
   revocable, `full` or `readonly`, never the master and never fleet admin.
   Only its SHA-256 is stored. A client may additionally be *trusted*
-  (`client_tokens.trusted_at`), which drops the untrusted-content marker
+  (its person holds `fleet-trusted`; `client_tokens.trusted_at` is the mirror), which drops the untrusted-content marker
   from what it sends and nothing else — it widens what an agent will believe,
   not what the token may call, so grant it to a device you type on and not
   to a token an agent holds. What crosses the room in the QR is a

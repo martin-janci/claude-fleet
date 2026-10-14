@@ -279,7 +279,7 @@ Parameters: `all_catalogs`
 
 ### `list_clients`
 
-Paired client devices and what each token may do. The token digest is never returned: a token exists in plaintext only in the /pair response that minted it. Read-only but master token only (it names every paired device). Rows: { id, name, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id, person_id }.
+Paired client devices and what each token may do. The token digest is never returned: a token exists in plaintext only in the /pair response that minted it. Read-only but master token only (it names every paired device). Rows: { id, name, mode, created_at, last_seen_at, revoked_at, trusted, assets_admin, org_id, person_id, trusted_at, assets_admin_at }; trusted/assets_admin are the person's, the _at columns the per-device mirror.
 
 Parameters: `include_revoked`
 

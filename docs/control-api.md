@@ -959,7 +959,9 @@ Index by area (names only; see the reference for details):
   token only). Trust is the device's person's (realm role `fleet-trusted`,
   identity sub-project 1): it reaches every `full` device of that person,
   and untrusting is refused while a group still grants it. `list_clients`
-  still shows each row's `trusted_at`, a mirror kept for one release.
+  rows carry `trusted` and `assets_admin`, the person's effective trust and
+  catalog grant; `trusted_at` / `assets_admin_at` are the per-device mirror,
+  kept for one release.
   A paired client is never the master, so every tool in this
   group — like the rest of fleet admin — stays out of a phone's reach. The
   `fleet-hub pair`, `fleet-hub client list`, `fleet-hub client revoke` and

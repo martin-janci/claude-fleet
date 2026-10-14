@@ -3855,6 +3855,66 @@ async fn set_client_trust_grants_and_withdraws_and_list_clients_shows_it() {
     assert!(err.message.starts_with("E_NOTFOUND"), "{}", err.message);
 }
 
+/// Trust and the catalog grant are the PERSON's (identity sub-project 1):
+/// every full device of a trusted person lists as trusted, whatever its own
+/// `trusted_at` mirror says, and a readonly one never does.
+#[tokio::test]
+async fn list_clients_reports_the_persons_trust_not_the_devices_column() {
+    let (tools, _guards, store) = client_tools();
+    {
+        let s = store.lock().unwrap();
+        let owner = s.personal_owner_id().unwrap();
+        for (name, mode) in [("desk", "full"), ("phone", "full"), ("kiosk", "readonly")] {
+            s.insert_client_token(name, &format!("h-{name}"), mode)
+                .unwrap();
+            s.set_client_person(name, owner).unwrap();
+        }
+    }
+    // Trust granted through ONE device: the person becomes trusted.
+    tools
+        .set_client_trust(Parameters(SetClientTrustParams {
+            name: "desk".into(),
+            trusted: true,
+        }))
+        .await
+        .unwrap();
+    let out = tools
+        .list_clients(Parameters(ListClientsParams {
+            include_revoked: false,
+        }))
+        .await
+        .unwrap();
+    let rows = result_json(&out);
+    let by = |n: &str| {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == n)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(by("desk")["trusted"], true);
+    assert!(
+        by("desk")["trusted_at"].is_i64(),
+        "the mirror column is still shown"
+    );
+    assert_eq!(
+        by("phone")["trusted"],
+        true,
+        "the person's other full device"
+    );
+    assert!(
+        by("phone")["trusted_at"].is_null(),
+        "...though its own mirror says nothing"
+    );
+    assert_eq!(
+        by("kiosk")["trusted"],
+        false,
+        "a readonly device is never trusted"
+    );
+    assert_eq!(by("desk")["assets_admin"], false);
+}
+
 /// A client name reaches the receiving agent inside the untrusted-content
 /// marker line. Names are validated at mint, but `marker_origin` is the last
 /// line of defence for a row that predates the validation.
