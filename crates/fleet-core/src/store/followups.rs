@@ -15,7 +15,7 @@ fn clean(t: &str) -> String {
 }
 
 /// The title as compared: [`clean`], case folded.
-fn norm(t: &str) -> String {
+pub(crate) fn norm(t: &str) -> String {
     clean(t).to_lowercase()
 }
 
