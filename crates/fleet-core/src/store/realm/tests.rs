@@ -435,6 +435,29 @@ fn the_projection_equals_the_direct_computation() {
     }
 }
 
+/// The production text of a source file: everything before the LAST
+/// `#[cfg(test)]` that opens a module body (`mod name {`, optionally `pub` /
+/// `pub(crate)`); a file with no such module is whole. A `#[cfg(test)]` on a
+/// `use`, an item or a `mod name;` declaration stays in the text, so the
+/// guard sees every production line (`store/mod.rs` has one on line 5).
+fn production_text(text: &str) -> &str {
+    let re =
+        regex::Regex::new(r"(?s)#\[cfg\(test\)\]\s*(pub(\(crate\))?\s+)?mod\s+\w+\s*\{").unwrap();
+    match re.find_iter(text).last() {
+        Some(m) => &text[..m.start()],
+        None => text,
+    }
+}
+
+#[test]
+fn production_text_cuts_at_the_last_test_module_body() {
+    let src = "#[cfg(test)]\nuse x;\nfn prod() {}\n#[cfg(test)]\nmod decl;\nfn more() {}\n#[cfg(test)]\npub(crate) mod tests {\n  UPDATE org_members\n}\n";
+    let p = production_text(src);
+    assert!(p.contains("use x;") && p.contains("fn prod") && p.contains("fn more"));
+    assert!(!p.contains("org_members"));
+    assert_eq!(production_text("fn a() {}"), "fn a() {}");
+}
+
 /// Nothing but the projection writes org_members.
 #[test]
 fn only_the_projection_writes_org_members() {
@@ -471,11 +494,7 @@ fn only_the_projection_writes_org_members() {
             continue;
         }
         let text = std::fs::read_to_string(&f).unwrap();
-        // Production code only: `#[cfg(test)]` opens a module that runs to the
-        // file's end in this crate (one test module per file, last), so the
-        // text before the first marker is the production text. A file that
-        // keeps production code after it is the bug this comment is for.
-        let prod = text.split("#[cfg(test)]").next().unwrap();
+        let prod = production_text(&text);
         let flat = prod.split_whitespace().collect::<Vec<_>>().join(" ");
         if re.is_match(&flat) {
             offenders.push(rel);
