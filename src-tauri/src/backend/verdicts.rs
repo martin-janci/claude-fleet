@@ -462,6 +462,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     // Orchestration O2: the mission graph's writes.
     ("set_work_dep", Verdict::Routed { tool: "work_link" }),
     ("set_work_hold", Verdict::Routed { tool: "work_link" }),
+    ("set_work_archived", Verdict::Routed { tool: "work_link" }),
     (
         "accept_work_proposals",
         Verdict::Routed { tool: "work_link" },

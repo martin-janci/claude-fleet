@@ -434,6 +434,8 @@ export const ROUTED_ACTIONS = [
   // The board: a native item's status, set by dragging its card.
   'set_work_status',
   'keep_work_open',
+  // Archive / Unarchive a ticket or task (the hub's work_link archive_item).
+  'set_work_archived',
   // Task editing: a native item's title, notes and assignees.
   'edit_work_item',
   // Task comments: kept in fleet; deleting is the author's own.

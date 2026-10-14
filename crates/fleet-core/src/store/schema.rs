@@ -913,6 +913,16 @@ fn work_items_has_done_when(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 190.
+fn work_items_has_archived_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'archived_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 116.
 fn work_items_has_held_at(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -2114,6 +2124,12 @@ const MIGRATIONS: &[Migration] = &[
         version: 189,
         sql: include_str!("../../migrations/189_session_pinned.sql"),
         already_applied: Some(sessions_has_pinned_at),
+    },
+    // Archived tickets: `work_items.archived_at` (one ADD COLUMN, guarded).
+    Migration {
+        version: 190,
+        sql: include_str!("../../migrations/190_work_item_archived.sql"),
+        already_applied: Some(work_items_has_archived_at),
     },
 ];
 
@@ -3827,6 +3843,32 @@ mod tests {
         assert!(old.set_session_pinned(id, None).unwrap());
         assert!(!old.set_session_pinned(id, None).unwrap());
         assert_eq!(row().pinned_at, None);
+    }
+
+    /// 190 on a database stopped at 189: every item arrives unarchived, and
+    /// an archive keeps its first stamp until it is cleared.
+    #[test]
+    fn migration_190_adds_an_empty_archive() {
+        let old = Store::open_in_memory().expect("open");
+        let id = old.create_local_work_item(None, "t").unwrap().id;
+        old.conn
+            .execute_batch(
+                "ALTER TABLE work_items DROP COLUMN archived_at;\
+                 DELETE FROM schema_version WHERE version >= 190;",
+            )
+            .unwrap();
+        old.migrate().expect("190 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let item = || old.get_work_item(id).unwrap().unwrap();
+        assert_eq!(item().archived_at, None);
+        assert!(old.set_item_archived(id, true).unwrap());
+        assert!(
+            !old.set_item_archived(id, true).unwrap(),
+            "keeps its first stamp"
+        );
+        assert!(item().archived_at.is_some());
+        assert!(old.set_item_archived(id, false).unwrap());
+        assert_eq!(item().archived_at, None);
     }
 
     /// 129 on a database stopped at 128: `turn_outcome` arrives empty, the
