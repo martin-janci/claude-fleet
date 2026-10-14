@@ -18,8 +18,9 @@ impl FleetTools {
         id>:<PROJECT> | <instance name>, host, level: watch | propose | act, \
         project_id?, config?, hours?, definition? (fleet), bindings? (fleet: \
         one per store role; each MCP binding is asked for its tools on the \
-        host first)}, revoke {id}, pause_all, approve {id}, reject {id}. The \
-        owner's own device; writes need a trusted full device.")]
+        host first)}, revoke {id}, pause_all, approve {id}, reject {id}, run \
+        {id, request?} (a manual or scheduled fleet agent, now). The owner's \
+        own device; writes need a trusted full device.")]
     pub(super) async fn agents(
         &self,
         Extension(caller): Extension<Caller>,

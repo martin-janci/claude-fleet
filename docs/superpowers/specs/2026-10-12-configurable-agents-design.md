@@ -1,7 +1,7 @@
 # Configurable agents: design
 
-Status: steps 1 (definitions) and 2 (store bindings) built, 2026-10-13. Steps 3
-to 6 not built.
+Status: steps 1 (definitions), 2 (store bindings) and 3 (generic runner) built,
+2026-10-14. Steps 4 to 6 not built.
 Asked for by the owner after the built-in reviewer and support agent landed
 (`2026-10-11-review-and-support-agents-design.md`, PRs
 martin-janci/claude-fleet#871, martin-janci/fleet-mobile#217,
@@ -470,9 +470,40 @@ run real instances.
    change to the control API's callers is involved. The admin path
    (`admin::validate_grant`) refuses `agent: fleet`; the `agents` tool and
    `fleet-hub agents grant fleet` route it to `fleet_agents::grant`.
-3. **Generic runner**: trigger sources `tracker_comments`, `tracker_assigned`,
+3. **Generic runner** (built): trigger sources `tracker_comments`, `tracker_assigned`,
    `mcp_scan`, `schedule`, `manual`; prompt assembly; answer validation
    against `output_schema`.
+   `service/fleet_agents/runner.rs` is the agent runtime's `fleet` agent
+   (`Registry::live`). Its poller reads a rule's instance from the catalog
+   on every poll; the first poll only sets the clock (a JSON cursor:
+   `since`, and the last `scan`). `tracker_comments` reads the issues the
+   trigger's query finds updated since the last poll and makes a job per
+   new comment carrying a phrase (comma separated, any case) or matching
+   the regex on a line; `tracker_assigned` one per issue assigned to the
+   account. `mcp_scan` calls the store's tool every `every_mins` (the
+   rendered binding, the script on stdin as the grant's check:
+   `probe::call_script`), takes the answer's list of entries and makes a
+   job per entry whose `key_template` key is new. `schedule` fires the
+   newest cron slot since the last poll (missed slots do not pile up).
+   `manual` jobs come from a person: `agents { action: run, id, request? }`
+   or `fleet-hub agents run <id> --request …` (a `schedule` rule can be run
+   now the same way). Job keys start with `r<rule id>:`, so two instances
+   never share a job. A scan entry, a schedule slot and a request are kept
+   as the job's subject in the namespace `job:rule:<id>` of
+   `agent_records`, which no binding can name. The runner reads an issue
+   afresh (the asking comment by its id), runs the `run.context` lookups,
+   renders the bindings with the host's secrets, issues a `fleet-records`
+   token for the run and revokes it after, prepares the workspace (a
+   project's checkout at `main`, or the home), and runs `claude -p` with
+   the skill as its system prompt and only the read tools allowed. The
+   prompt carries the subject and the context records as JSON data, the
+   stores the run may read and the `output_schema`. The answer is the
+   first JSON object of the reply that matches the schema, trimmed to it;
+   none is a permanent failure that names the mismatch. The job's result is
+   `{subject, answer}`. Not yet: `run.max_parallel` (the runtime's global
+   concurrency applies), `tracker_query` and the GitHub sources (step 6),
+   and every write: until step 4 a `propose` or `act` rule behaves as
+   `watch`.
 4. **Actions**: `tracker_*`, `record` and `mcp_call` with their guardrails;
    the generic loop guard.
 5. **Forms and UI**: `grant_form`, *New instance* / *Edit* in Automation ›

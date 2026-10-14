@@ -53,9 +53,9 @@ Which agent hosts (transport "agent") have a fleet-agent connected: since (unix 
 
 ### `agents`
 
-The agents (PR reviewer, support, fleet agents from the catalog): status {agent?, limit?} (rules, newest jobs, actions waiting for a person), explain (per rule: polls or why not, next poll, last poll error, jobs by state, the next and the last failed job), job {id} (one job whole, its proposed actions included), grant {agent: review | support | fleet, scope: gh:<owner>/<repo> | jira:<tracker id>:<PROJECT> | <instance name>, host, level: watch | propose | act, project_id?, config?, hours?, definition? (fleet), bindings? (fleet: one per store role; each MCP binding is asked for its tools on the host first)}, revoke {id}, pause_all, approve {id}, reject {id}. The owner's own device; writes need a trusted full device.
+The agents (PR reviewer, support, fleet agents from the catalog): status {agent?, limit?} (rules, newest jobs, actions waiting for a person), explain (per rule: polls or why not, next poll, last poll error, jobs by state, the next and the last failed job), job {id} (one job whole, its proposed actions included), grant {agent: review | support | fleet, scope: gh:<owner>/<repo> | jira:<tracker id>:<PROJECT> | <instance name>, host, level: watch | propose | act, project_id?, config?, hours?, definition? (fleet), bindings? (fleet: one per store role; each MCP binding is asked for its tools on the host first)}, revoke {id}, pause_all, approve {id}, reject {id}, run {id, request?} (a manual or scheduled fleet agent, now). The owner's own device; writes need a trusted full device.
 
-Parameters: `action`, `agent`, `bindings`, `config`, `definition`, `host`, `hours`, `id`, `level`, `limit`, `project_id`, `scope`
+Parameters: `action`, `agent`, `bindings`, `config`, `definition`, `host`, `hours`, `id`, `level`, `limit`, `project_id`, `request`, `scope`
 
 ### `answer_mcp_confirm`
 
