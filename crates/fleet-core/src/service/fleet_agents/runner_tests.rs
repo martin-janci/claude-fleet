@@ -24,6 +24,8 @@ struct Base {
     answer: Mutex<Option<PrintOutcome>>,
     last: Mutex<Option<(PrintRun, String)>>,
     log: Mutex<Vec<String>>,
+    /// Writes sent, in order.
+    writes: Mutex<Vec<(i64, WriteOp)>>,
 }
 
 #[async_trait::async_trait]
@@ -69,8 +71,13 @@ impl SupportHost for Base {
         self.log.lock().unwrap().push(format!("cleanup {job_id}"));
     }
     async fn prune(&self, _: &str, _: &str) {}
-    async fn write(&self, _: i64, _: &WriteOp) -> Result<WriteOutcome, String> {
-        Err("no writes in step 3".into())
+    async fn write(&self, tracker: i64, op: &WriteOp) -> Result<WriteOutcome, String> {
+        self.writes.lock().unwrap().push((tracker, op.clone()));
+        Ok(WriteOutcome {
+            remote_id: Some("BUG-9".into()),
+            url: None,
+            key: None,
+        })
     }
     async fn run_script(&self, _: &str, _: &str, _: u64) -> Result<String, String> {
         Err("no scripts".into())
@@ -91,6 +98,8 @@ struct World {
     base: Base,
     calls: Mutex<Vec<(Value, String, Value)>>,
     call_answer: Mutex<String>,
+    /// What tools/list answers.
+    tools: Mutex<Vec<Value>>,
 }
 
 #[async_trait::async_trait]
@@ -122,6 +131,9 @@ impl FleetHost for World {
             .unwrap()
             .push((entry.clone(), tool.to_string(), args.clone()));
         Ok(self.call_answer.lock().unwrap().clone())
+    }
+    async fn list_tools(&self, _: &str, _: &Value) -> Result<Vec<Value>, String> {
+        Ok(self.tools.lock().unwrap().clone())
     }
     fn base(&self) -> &dyn SupportHost {
         &self.base
@@ -202,6 +214,7 @@ fn fx(loaded: Loaded, config: Value, bindings: Value, project: bool) -> Fx {
         base: Base::default(),
         calls: Mutex::default(),
         call_answer: Mutex::default(),
+        tools: Mutex::default(),
     });
     Fx {
         store: Arc::new(Mutex::new(s)),
@@ -580,4 +593,342 @@ async fn a_person_runs_a_manual_agent_with_a_request() {
     let tracker = super::definition::TriggerSource::TrackerComments;
     assert!(queue_manual(&f.store, &f.rule, tracker, None, 100).is_err());
     assert!(queue_manual(&f.store, &f.rule, src, Some(&"x".repeat(4001)), 100).is_err());
+}
+
+// ── step 4: actions ──
+
+use super::actions::{self, FleetExecutor};
+use crate::service::agents::{ActionResult, AgentExecutor};
+
+impl Fx {
+    /// The same rule at `level`.
+    fn at(mut self, level: &str) -> Fx {
+        {
+            let s = self.store.lock().unwrap();
+            let r = &self.rule;
+            s.grant_agent_rule(&NewAgentRule {
+                agent: r.agent.clone(),
+                scope: r.scope.clone(),
+                level: level.into(),
+                host_alias: r.host_alias.clone(),
+                project_id: r.project_id,
+                config: r.config.clone(),
+                granted_by: r.granted_by.clone(),
+                granted_at: r.granted_at,
+                expires_at: r.expires_at,
+                definition: r.definition.clone(),
+                bindings: r.bindings.clone(),
+            })
+            .unwrap();
+            self.rule = s.agent_rule(r.id).unwrap().unwrap();
+        }
+        self
+    }
+    fn executor(&self) -> FleetExecutor {
+        FleetExecutor {
+            store: Arc::clone(&self.store),
+            host: self.world.clone(),
+        }
+    }
+    fn actions(&self) -> Vec<crate::store::AgentActionRow> {
+        self.store
+            .lock()
+            .unwrap()
+            .list_agent_actions(None, 50)
+            .unwrap()
+    }
+}
+
+/// The example at `level`, its ticket asked about, the model answering `answer`.
+async fn l2_run(level: &str, answer: Value) -> (Fx, Value) {
+    let f = fx(
+        l2(),
+        json!({ "jira_tracker": "3", "project": "L2S", "bug_project": "BUG" }),
+        json!([
+            { "role": "logs", "server": "graylog", "name": "logs-prod",
+              "env": { "GRAYLOG_API_TOKEN": "${GRAYLOG_PROD_TOKEN}" } },
+            { "role": "kb", "server": "kb" },
+            { "role": "memory", "namespace": "rule" }
+        ]),
+        true,
+    )
+    .at(level);
+    *f.world.base.threads.lock().unwrap() = vec![thread(&[("1", "Tech help!", 1500)])];
+    *f.world.base.answer.lock().unwrap() = Some(PrintOutcome::Answered {
+        text: answer.to_string(),
+        cost_micros: 0,
+    });
+    let jobs = f.claim(&[crate::store::NewAgentJob {
+        rule_id: f.rule.id,
+        agent: AGENT.into(),
+        subject: "tracker:3:L2S-7".into(),
+        trigger: "comment".into(),
+        dedup_key: format!("r{}:tracker:3:L2S-7#c1", f.rule.id),
+        not_before: 0,
+    }]);
+    let out = f.runner().run(&jobs[0], Some(&f.rule)).await;
+    let RunOutcome::Done { result, .. } = out else {
+        panic!("{out:?}")
+    };
+    let r: Value = serde_json::from_str(&result.unwrap()).unwrap();
+    (f, r)
+}
+
+fn found() -> Value {
+    json!({ "summary": "Gateway key expired", "rootCause": "The payment key expired at 9:00",
+        "confidence": "high", "severity": "critical", "suggestedFix": "Rotate the key",
+        "exceptionClass": "KeyExpiredException" })
+}
+
+fn states(r: &Value) -> Vec<(String, String)> {
+    r["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| {
+            (
+                a["id"].as_str().unwrap().to_string(),
+                a["state"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn at_watch_the_actions_are_only_kept_in_the_result() {
+    let (f, r) = l2_run("watch", found()).await;
+    let want: Vec<(String, String)> = ["comment", "bug", "learn", "remember"]
+        .iter()
+        .map(|a| (a.to_string(), "kept".to_string()))
+        .collect();
+    assert_eq!(states(&r), want, "ask's `when` does not hold");
+    assert!(f.actions().is_empty());
+    let comment = r["actions"][0]["body"].as_str().unwrap();
+    assert!(comment.contains("*Gateway key expired*") && comment.contains("Rotate the key"));
+    assert!(comment.ends_with("[fleet-agent:inst]"), "{comment}");
+}
+
+#[tokio::test]
+async fn at_propose_a_person_gets_each_and_at_act_the_auto_ones_run() {
+    let (f, r) = l2_run("propose", found()).await;
+    assert!(states(&r).iter().all(|(_, s)| s == "pending"));
+    let kinds: Vec<String> = f.actions().iter().map(|a| a.kind.clone()).collect();
+    assert_eq!(kinds.len(), 4);
+    assert!(
+        kinds.contains(&"tracker_issue".to_string()) && kinds.contains(&"mcp_call".to_string())
+    );
+
+    let (f, r) = l2_run("act", found()).await;
+    let st = states(&r);
+    let of = |id: &str| st.iter().find(|(a, _)| a == id).unwrap().1.clone();
+    assert_eq!(of("comment"), "approved");
+    assert_eq!(of("remember"), "approved");
+    assert_eq!(of("bug"), "pending", "not auto");
+    assert_eq!(
+        of("learn"),
+        "pending",
+        "an mcp_call is never auto without auto_ok"
+    );
+    drop(f);
+
+    // needsMoreInfo: the question, and nothing after it (stop).
+    let mut ask = found();
+    ask["needsMoreInfo"] = "Which terminal?".into();
+    let (_f, r) = l2_run("act", ask).await;
+    assert_eq!(states(&r), [("ask".to_string(), "approved".to_string())]);
+}
+
+#[tokio::test]
+async fn the_executor_sends_what_was_approved_within_limits() {
+    let (f, _) = l2_run("propose", found()).await;
+    let ex = f.executor();
+    let by_kind = |k: &str| f.actions().into_iter().find(|a| a.kind == k).unwrap();
+    // The comment on the subject.
+    assert_eq!(
+        ex.execute(&by_kind("tracker_comment")).await,
+        ActionResult::Executed
+    );
+    // The bug in BUG, linked to the ticket.
+    assert_eq!(
+        ex.execute(&by_kind("tracker_issue")).await,
+        ActionResult::Executed
+    );
+    let writes = f.world.base.writes.lock().unwrap().clone();
+    assert!(matches!(&writes[0], (3, WriteOp::RichComment { key, .. }) if key == "L2S-7"));
+    assert!(
+        matches!(&writes[1], (3, WriteOp::CreateIssue { project, labels, .. }) if project == "BUG" && labels.is_empty())
+    );
+    assert!(
+        matches!(&writes[2], (3, WriteOp::LinkIssues { inward, outward, link_type })
+        if inward == "BUG-9" && outward == "L2S-7" && link_type == "Causes")
+    );
+    // The record into the rule's own namespace.
+    assert_eq!(ex.execute(&by_kind("record")).await, ActionResult::Executed);
+    let rec = f
+        .store
+        .lock()
+        .unwrap()
+        .agent_record(
+            &format!("rule:{}", f.rule.id),
+            "record",
+            "KeyExpiredException",
+            crate::store::now_unix(),
+        )
+        .unwrap()
+        .unwrap();
+    assert!(rec.value.contains("L2S-7") && rec.written_by_job.is_some());
+    // The mcp_call: the tool's inputSchema decides.
+    let learn = by_kind("mcp_call");
+    *f.world.tools.lock().unwrap() = vec![json!({ "name": "add_known_error", "inputSchema": {
+        "type": "object", "required": ["exception", "rootCause"], "additionalProperties": false,
+        "properties": { "exception": { "type": "string" }, "rootCause": { "type": "string" },
+            "issueKey": { "type": "string" } } } })];
+    *f.world.call_answer.lock().unwrap() = json!({ "jsonrpc": "2.0", "id": 2,
+        "result": { "content": [{ "type": "text", "text": "ok" }] } })
+    .to_string();
+    assert_eq!(ex.execute(&learn).await, ActionResult::Executed);
+    let (entry, tool, args) = f.world.calls.lock().unwrap()[0].clone();
+    assert_eq!(
+        (tool.as_str(), args["issueKey"].as_str()),
+        ("add_known_error", Some("L2S-7"))
+    );
+    assert_eq!(entry["env"]["TOKEN"], "kb-tok");
+    *f.world.tools.lock().unwrap() = vec![json!({ "name": "add_known_error", "inputSchema": {
+        "type": "object", "required": ["fingerprint"], "properties": {} } })];
+    match ex.execute(&learn).await {
+        ActionResult::Failed(e) => assert!(e.contains("fingerprint is required"), "{e}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn the_executor_refuses_what_the_rule_no_longer_allows() {
+    let (f, _) = l2_run("propose", found()).await;
+    let ex = f.executor();
+    let mut comment = f
+        .actions()
+        .into_iter()
+        .find(|a| a.kind == "tracker_comment")
+        .unwrap();
+    // A key outside the rule's projects and not the subject.
+    let mut p: Value = serde_json::from_str(&comment.payload).unwrap();
+    p["key"] = "HR-1".into();
+    comment.payload = p.to_string();
+    match ex.execute(&comment).await {
+        ActionResult::Failed(e) => assert!(e.contains("outside limits.write_projects"), "{e}"),
+        other => panic!("{other:?}"),
+    }
+    p["key"] = "L2S-7".into();
+    p["tracker"] = 4.into();
+    comment.payload = p.to_string();
+    assert!(
+        matches!(ex.execute(&comment).await, ActionResult::Failed(e) if e.contains("not the instance's"))
+    );
+    p["tracker"] = 3.into();
+    p["body"] = "x".repeat(6000).into();
+    comment.payload = p.to_string();
+    assert!(
+        matches!(ex.execute(&comment).await, ActionResult::Failed(e) if e.contains("over 5000"))
+    );
+    let mut rec = f
+        .actions()
+        .into_iter()
+        .find(|a| a.kind == "record")
+        .unwrap();
+    let mut rp: Value = serde_json::from_str(&rec.payload).unwrap();
+    rp["namespace"] = "shared:someone-else".into();
+    rec.payload = rp.to_string();
+    assert!(
+        matches!(ex.execute(&rec).await, ActionResult::Failed(e) if e.contains("not the rule's namespace"))
+    );
+    // Back at watch, nothing goes out.
+    let f = f.at("watch");
+    let any = f.actions().remove(0);
+    assert!(matches!(
+        f.executor().execute(&any).await,
+        ActionResult::Expired(_)
+    ));
+    assert!(f.world.base.writes.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn the_loop_guard_ignores_its_own_comments_and_caps_a_subject() {
+    let f = l2_fx();
+    *f.world.base.threads.lock().unwrap() = vec![thread(&[(
+        "9",
+        "Tech help! was answered\n\n[fleet-agent:other]",
+        1500,
+    )])];
+    let polled = f
+        .poller()
+        .poll(&f.rule, Some(&f.cursor(1000, None)), 2000)
+        .await
+        .unwrap();
+    assert!(polled.jobs.is_empty(), "a fleet agent's own comment");
+    // Five finished runs today (one at a time: one running job per
+    // subject): the sixth is skipped.
+    let now = crate::store::now_unix();
+    for i in 0..5 {
+        let s = f.store.lock().unwrap();
+        s.record_agent_poll(
+            f.rule.id,
+            0,
+            None,
+            &[crate::store::NewAgentJob {
+                rule_id: f.rule.id,
+                agent: AGENT.into(),
+                subject: "tracker:3:L2S-7".into(),
+                trigger: "comment".into(),
+                dedup_key: format!("done{i}"),
+                not_before: 0,
+            }],
+        )
+        .unwrap();
+        let claimed = s.claim_agent_jobs(&[AGENT], now, 10, 60).unwrap();
+        assert_eq!(claimed.len(), 1);
+        s.finish_agent_job(
+            claimed[0].id,
+            &crate::store::AgentJobEnd::Final {
+                state: "done",
+                result: None,
+                error_kind: None,
+                error: None,
+            },
+            0,
+            now,
+        )
+        .unwrap();
+    }
+    let job = f.claim(&[crate::store::NewAgentJob {
+        rule_id: f.rule.id,
+        agent: AGENT.into(),
+        subject: "tracker:3:L2S-7".into(),
+        trigger: "comment".into(),
+        dedup_key: "sixth".into(),
+        not_before: 0,
+    }]);
+    match f.runner().run(&job[0], Some(&f.rule)).await {
+        RunOutcome::Skipped { reason } => assert!(reason.contains("loop guard"), "{reason}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn arguments_are_checked_against_the_tools_schema() {
+    let schema = json!({ "type": "object", "required": ["a"], "additionalProperties": false,
+        "properties": { "a": { "type": "string" }, "n": { "type": ["integer", "null"] } } });
+    assert!(actions::check_arguments(&schema, &json!({ "a": "x", "n": 3 })).is_empty());
+    assert!(actions::check_arguments(&schema, &json!({ "a": "x", "n": null })).is_empty());
+    let p = actions::check_arguments(&schema, &json!({ "n": 1.5, "z": 1 }));
+    assert_eq!(
+        p,
+        [
+            "a is required",
+            "n is not integer or null",
+            "z is not a parameter"
+        ]
+    );
+    assert!(!actions::check_arguments(&schema, &json!([1])).is_empty());
+    assert_eq!(actions::project_of("BUG-12"), "BUG");
+    assert_eq!(actions::fit("abcdef", 4), "abc…");
 }

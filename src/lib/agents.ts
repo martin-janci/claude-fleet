@@ -61,7 +61,8 @@ export interface AgentJob {
 export interface AgentAction {
   id: number;
   job_id: number;
-  /** `post_review`, `pr_labels`, `pr_description`, `debate_reply`, `jira_comment`, `jira_create_bug`, `jira_link`, `kb_learn`. */
+  /** `post_review`, `pr_labels`, `pr_description`, `debate_reply`, `jira_comment`, `jira_create_bug`, `jira_link`, `kb_learn`;
+   *  a fleet agent's `tracker_comment`, `tracker_issue`, `tracker_link`, `record`, `mcp_call`. */
   kind: string;
   /** Exactly what will be sent, JSON text. */
   payload: string;
@@ -228,6 +229,15 @@ export function actionTitle(a: Pick<AgentAction, 'kind' | 'payload'>): string {
       : `File a bug in ${p.project} for a logged error: ${p.summary}`;
   if (a.kind === 'jira_link' && p) return `Link ${p.bug_key} to ${p.source_key} (${String(p.link_type ?? '').toLowerCase()})`;
   if (a.kind === 'kb_learn' && p) return `Teach the support KB: ${p.path}`;
+  // A fleet agent's (configurable agents, step 4).
+  if (a.kind === 'tracker_comment' && p) return `Comment on ${p.key}`;
+  if (a.kind === 'tracker_issue' && p) {
+    const to = (p.link as { to?: string } | null | undefined)?.to;
+    return `File a ${String(p.issue_type ?? 'Task').toLowerCase()} in ${p.project}${to ? ` for ${to}` : ''}: ${p.summary}`;
+  }
+  if (a.kind === 'tracker_link' && p) return `Link ${p.from} to ${p.to} (${String(p.link_type ?? '').toLowerCase()})`;
+  if (a.kind === 'record' && p) return `Remember ${p.key} in ${p.store}`;
+  if (a.kind === 'mcp_call' && p) return `Call ${p.binding}.${p.tool}`;
   return a.kind.replace(/_/g, ' ');
 }
 

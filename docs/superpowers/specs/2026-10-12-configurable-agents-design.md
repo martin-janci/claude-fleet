@@ -1,7 +1,7 @@
 # Configurable agents: design
 
-Status: steps 1 (definitions), 2 (store bindings) and 3 (generic runner) built,
-2026-10-14. Steps 4 to 6 not built.
+Status: steps 1 (definitions), 2 (store bindings), 3 (generic runner) and 4
+(actions) built, 2026-10-14. Steps 5 and 6 not built.
 Asked for by the owner after the built-in reviewer and support agent landed
 (`2026-10-11-review-and-support-agents-design.md`, PRs
 martin-janci/claude-fleet#871, martin-janci/fleet-mobile#217,
@@ -504,8 +504,41 @@ run real instances.
    concurrency applies), `tracker_query` and the GitHub sources (step 6),
    and every write: until step 4 a `propose` or `act` rule behaves as
    `watch`.
-4. **Actions**: `tracker_*`, `record` and `mcp_call` with their guardrails;
+4. **Actions** (built): `tracker_*`, `record` and `mcp_call` with their guardrails;
    the generic loop guard.
+   `service/fleet_agents/actions.rs`. `plan` (PURE) renders each action
+   whose `when` holds over the answer into its payload: `tracker_comment`
+   (`{action, tracker, key, body, adf}`; the body ends with the instance's
+   marker line `[fleet-agent:<instance>]` and is cut to fit
+   `max_body_chars`), `tracker_issue` (issue type `Task` unless set; an
+   optional `link` to another issue), `tracker_link`, `record` (into the
+   rule's namespace for the role) and `mcp_call` (`{binding, tool,
+   arguments}`, its body the call as a person reads it). The tracker is the
+   action's, else the trigger's, else the first `tracker` input's. A taken
+   `stop` action ends the list; an action whose target, key or body renders
+   empty is skipped with the reason. The runner queues them after a checked
+   answer: kept in the job's result at `watch`, `pending` at `propose`,
+   approved at once at `act` when `auto` (an `mcp_call` only when its store
+   marks the tool `auto_ok`). The job's result is `{subject, answer,
+   actions}` with what became of each. The `fleet` executor checks again
+   when it sends: the rule still there, active and above `watch`; the
+   definition still asking for that action; the tracker the instance's; an
+   issue or link inside `limits.write_projects` (a comment or a link may
+   also land on the job's own subject); the body within `max_body_chars`; a
+   record into the rule's own namespace; an `mcp_call`'s tool among the
+   role's `write_tools`, its arguments within 16 KiB and valid against the
+   tool's `inputSchema`. One change from *E*: the schema is the one the
+   server lists **when the action is sent** (a `tools/list` just before the
+   `tools/call`), not one stored at grant time, so a server upgraded since
+   the grant is checked against what it takes now. The check is the schema's
+   object shape: required properties, `additionalProperties: false`, and
+   each given property's declared type. A new issue is linked after it is
+   created; a failed link says the issue was made. The loop guard: a
+   tracker poll never turns a comment carrying a fleet agent's marker into
+   a job, and the runner skips a subject that already ran five times in a
+   day. The Inbox names the new kinds (`actionTitle`). Not yet: the
+   shortening of a template by its longest optional sections (a body is
+   cut at the end), and the `pr_*` actions (step 6).
 5. **Forms and UI**: `grant_form`, *New instance* / *Edit* in Automation ›
    Agents, the phone's Inbox and instance list, the chat draft path.
 6. **Later**:

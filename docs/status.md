@@ -896,7 +896,7 @@ built: outbound Slack/Teams notifications (a new channel of the 11.9
 matrix, the owner's call).
 
 Configurable agents (spec `docs/superpowers/specs/2026-10-12-configurable-agents-design.md`),
-steps 1 to 3 of 6: a `fleet_agent` catalog asset is a typed, validated
+steps 1 to 4 of 6: a `fleet_agent` catalog asset is a typed, validated
 definition (inputs, store roles, trigger, run, actions, limits;
 `service/fleet_agents/`), listed in Assets and checked by `fleet-hub agents
 define`. An instance is an `agent_rules` row with `agent = fleet` (migration
@@ -909,8 +909,12 @@ host, and fleet stores bind `rule` or `shared:<name>` namespaces of
 run tokens). Step 3, the generic runner, runs instances: the agent
 runtime's `fleet` agent polls `tracker_comments`, `tracker_assigned`,
 `mcp_scan` and `schedule` triggers, takes `manual` jobs from `agents run`,
-and keeps each run's answer checked against `run.output_schema`. Nothing is
-written outside fleet yet: the actions and the grant form are steps 4 and 5.
+and keeps each run's answer checked against `run.output_schema`. Step 4,
+the actions: the answer's `tracker_comment`, `tracker_issue`,
+`tracker_link`, `record` and `mcp_call` writes are queued by the rule's
+level and sent by the `fleet` executor after its send-time checks (limits,
+body size, write tools, the tool's `inputSchema`), with a loop guard. The
+grant form and the Agents tab's instances are step 5.
 
 Session state machine hardening (plan A, #343) is landed: a `working` row
 with no activity for `reconcile.stale_working_secs` turns `idle` with

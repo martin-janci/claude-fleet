@@ -239,7 +239,11 @@ pub fn plan_tracker_jobs(
             for t in threads {
                 for c in &t.comments {
                     let fresh = c.created.is_none_or(|at| at >= since - POLL_SLACK_SECS);
-                    if fresh && comment_matches(&c.body, &phrases, regex.as_ref()) {
+                    // The loop guard: a fleet agent's own comment asks nothing.
+                    if fresh
+                        && !super::actions::is_agent_comment(&c.body)
+                        && comment_matches(&c.body, &phrases, regex.as_ref())
+                    {
                         jobs.push(job(&t.key, "comment", format!("c{}", c.id)));
                     }
                 }
@@ -473,7 +477,9 @@ pub trait FleetHost: Send + Sync {
         tool: &str,
         arguments: &Value,
     ) -> Result<String, String>;
-    /// The support agent's host: issues, workspaces and the run itself.
+    /// An MCP entry's tools on `host`, whole (`name`, `inputSchema` …).
+    async fn list_tools(&self, host: &str, entry: &Value) -> Result<Vec<Value>, String>;
+    /// The support agent's host: issues, workspaces, writes and the run.
     fn base(&self) -> &dyn SupportHost;
 }
 
@@ -520,6 +526,22 @@ impl FleetHost for LiveFleetHost {
         arguments: &Value,
     ) -> Result<String, String> {
         let body = super::probe::call_script(entry, tool, arguments, SCAN_CALL_SECS)?;
+        self.on_stdin(host, body).await
+    }
+
+    async fn list_tools(&self, host: &str, entry: &Value) -> Result<Vec<Value>, String> {
+        let body = super::probe::script(entry)?;
+        super::probe::listed_tool_defs(&self.on_stdin(host, body).await?)
+    }
+
+    fn base(&self) -> &dyn SupportHost {
+        &self.base
+    }
+}
+
+impl LiveFleetHost {
+    /// A probe script run on `host`, sent on stdin (it carries secrets).
+    async fn on_stdin(&self, host: &str, body: String) -> Result<String, String> {
         let out = self
             .ssh
             .run_with_stdin(
@@ -538,14 +560,9 @@ impl FleetHost for LiveFleetHost {
             .map_err(|e| e.message)?;
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
-
-    fn base(&self) -> &dyn SupportHost {
-        &self.base
-    }
 }
 
-/// The generic runner as the runtime registers it. Actions are step 4: no
-/// executor yet.
+/// The generic runner as the runtime registers it.
 pub fn agent(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> AgentImpl {
     let host: Arc<dyn FleetHost> = Arc::new(LiveFleetHost {
         store: Arc::clone(store),
@@ -563,9 +580,12 @@ pub fn agent(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> AgentImpl {
         })),
         runner: Some(Box::new(FleetRunner {
             store: Arc::clone(store),
+            host: Arc::clone(&host),
+        })),
+        executor: Some(Box::new(super::actions::FleetExecutor {
+            store: Arc::clone(store),
             host,
         })),
-        executor: None,
     }
 }
 
@@ -895,6 +915,19 @@ impl FleetRunner {
             Ok(i) => i,
             Err(e) => return failed(ErrorKind::Permanent, e),
         };
+        // The loop guard's second half: a subject runs a few times a day at most.
+        let runs = lock(&self.store)
+            .ok()
+            .and_then(|s| {
+                s.count_agent_subject_runs(AGENT, &job.subject, now - 86_400, job.id)
+                    .ok()
+            })
+            .unwrap_or(0);
+        if runs >= super::actions::MAX_RUNS_PER_SUBJECT_DAY {
+            return RunOutcome::Skipped {
+                reason: format!("loop guard: {} already ran {runs} times today", job.subject),
+            };
+        }
         let subject = match self.subject(job, rule, now).await {
             Ok(s) => s,
             Err(o) => return o,
@@ -966,16 +999,61 @@ impl FleetRunner {
             Err(o) => return o,
         };
         match parse_answer(&text, &d.run.output_schema) {
-            Ok(answer) => RunOutcome::Done {
-                result: Some(json!({ "subject": subject, "answer": answer }).to_string()),
-                cost_micros: cost,
-            },
+            Ok(answer) => {
+                let actions = self.queue_actions(job, rule, &inst, &subject, &answer, now);
+                RunOutcome::Done {
+                    result: Some(
+                        json!({ "subject": subject, "answer": answer, "actions": actions })
+                            .to_string(),
+                    ),
+                    cost_micros: cost,
+                }
+            }
             Err(e) => RunOutcome::Failed {
                 kind: ErrorKind::Permanent,
                 message: e,
                 cost_micros: cost,
             },
         }
+    }
+
+    /// The answer's actions: kept in the result at `watch`, queued for a
+    /// person at `propose`, approved at once at `act` when `auto` (see
+    /// [`super::actions::plan`]). Answers what became of each.
+    fn queue_actions(
+        &self,
+        job: &AgentJobRow,
+        rule: &AgentRuleRow,
+        inst: &Instance,
+        subject: &Value,
+        answer: &Value,
+        now: i64,
+    ) -> Value {
+        let (planned, unplanned) =
+            super::actions::plan(inst, rule.id, &rule.scope, subject, answer, now);
+        let s = lock(&self.store).ok();
+        let mut out: Vec<Value> = Vec::new();
+        for p in &planned {
+            let state = match (rule.level.as_str(), &s) {
+                ("watch", _) => "kept".to_string(),
+                (_, None) => "not queued: store lock".to_string(),
+                (level, Some(s)) => {
+                    let queued = if level == "act" && p.auto {
+                        s.insert_approved_agent_action(job.id, p.kind, &p.payload, "rule:act", now)
+                            .map(|_| "approved")
+                    } else {
+                        s.insert_agent_action(job.id, p.kind, &p.payload, now)
+                            .map(|_| "pending")
+                    };
+                    queued.map_or_else(|e| format!("not queued: {e}"), str::to_string)
+                }
+            };
+            out.push(json!({ "id": p.id, "do": p.kind, "body": p.body, "state": state }));
+        }
+        for u in unplanned {
+            out.push(json!({ "id": u.id, "state": "skipped", "why": u.why }));
+        }
+        Value::Array(out)
     }
 
     async fn run_in_workspace(

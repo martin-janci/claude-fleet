@@ -15,9 +15,13 @@
 //!
 //! Step 3 is the generic runner ([`runner`]): the `fleet` agent of the
 //! agent runtime, whose poller turns each rule's trigger into jobs and whose
-//! runner runs them and checks the answer against `run.output_schema`. The
-//! actions are step 4.
+//! runner runs them and checks the answer against `run.output_schema`.
+//!
+//! Step 4 is the actions ([`actions`]): the answer's writes planned,
+//! queued by the rule's level and sent by the `fleet` executor after its
+//! send-time checks, with the loop guard.
 
+pub mod actions;
 pub mod answer;
 pub mod bindings;
 pub mod definition;

@@ -184,8 +184,9 @@ fn http_script(
     ))
 }
 
-/// PURE: the tool names of the `tools/list` response line.
-pub fn listed_tools(stdout: &str) -> Result<Vec<String>, String> {
+/// PURE: the tools of the `tools/list` response line, whole (`name`,
+/// `inputSchema` …).
+pub fn listed_tool_defs(stdout: &str) -> Result<Vec<Value>, String> {
     let line = stdout
         .lines()
         .map(str::trim)
@@ -198,11 +199,15 @@ pub fn listed_tools(stdout: &str) -> Result<Vec<String>, String> {
             e.get("message").and_then(Value::as_str).unwrap_or("error")
         ));
     }
-    let tools = v
-        .pointer("/result/tools")
+    v.pointer("/result/tools")
         .and_then(Value::as_array)
-        .ok_or("tools/list: no tools")?;
-    Ok(tools
+        .cloned()
+        .ok_or_else(|| "tools/list: no tools".into())
+}
+
+/// PURE: the tool names of the `tools/list` response line.
+pub fn listed_tools(stdout: &str) -> Result<Vec<String>, String> {
+    Ok(listed_tool_defs(stdout)?
         .iter()
         .filter_map(|t| t.get("name").and_then(Value::as_str).map(str::to_string))
         .collect())
