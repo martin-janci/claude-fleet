@@ -2195,3 +2195,234 @@ async fn a_failed_run_stays_failed_whatever_a_person_says() {
     );
     assert_eq!(run_row(&f, run.id).outcome.as_deref(), Some("failed"));
 }
+
+// ---- Debugging (migration 186): the trace, explain, dry_run ----
+
+fn verdicts(f: &Fx, id: i64) -> Vec<(String, String)> {
+    let mut rows = lock(&f.store).unwrap().routine_decisions(id, 200).unwrap();
+    rows.reverse();
+    rows.into_iter()
+        .map(|d| (d.verdict, d.reason.unwrap_or_default()))
+        .collect()
+}
+
+fn check<'a>(e: &'a RoutineExplain, name: &str) -> &'a debug::RoutineCheck {
+    e.checks
+        .iter()
+        .find(|c| c.name == name)
+        .unwrap_or_else(|| panic!("no {name} check: {:?}", e.checks))
+}
+
+#[tokio::test]
+async fn the_trace_says_why_an_event_did_not_fire_and_what_did() {
+    let f = fx();
+    let r = pr_routine(&f, "pr_ci_failed", |i| i.event_rate_secs = Some(H));
+    let mine = pr_session(&f, "mine", f.ana);
+    let theirs = pr_session(&f, "theirs", f.bo);
+    let fail = |f: &Fx, sid: i64, url: &str| {
+        see_pr(f, sid, url, "OPEN", None, Some("pending"));
+        see_pr(f, sid, url, "OPEN", None, Some("failing"));
+    };
+    fail(&f, mine, PR);
+    fail(&f, theirs, "https://github.com/acme/web/pull/43");
+    tick_once(&f.deps, OCT8).await;
+    // Inside the rate: dropped, and the trace says so.
+    fail(&f, mine, PR);
+    tick_once(&f.deps, OCT8 + 60).await;
+    assert_eq!(runs_of(&f, r.id).len(), 1);
+    let v = verdicts(&f, r.id);
+    let kinds: Vec<&str> = v.iter().map(|(k, _)| k.as_str()).collect();
+    // A pass judges its batch first, then fires: bo's PR is filtered as
+    // it is read, before ana's fires.
+    assert_eq!(kinds, ["filtered", "fired", "dropped"], "{v:?}");
+    assert!(v[0].1.contains("someone else's"), "{v:?}");
+    assert!(v[1].1.starts_with("started on mac"), "{v:?}");
+    assert!(v[2].1.contains("already ran for pr:"), "{v:?}");
+    // A skip is a decision too, with its run.
+    let ana = person(&f.store, None, f.ana);
+    let mut i = input(&f);
+    i.budget_day_micros = Some(1_000_000);
+    let c = new_routine(&f, i);
+    let first = run_now(&f.deps, &ana, c.id, OCT8 + H).await.unwrap();
+    spend(&f, first.session_id.unwrap(), 2_000_000);
+    event(&f, first.session_id.unwrap(), "turn_done");
+    tick_once(&f.deps, OCT8 + H + 20).await;
+    let skipped = run_now(&f.deps, &ana, c.id, OCT8 + 2 * H).await.unwrap();
+    assert_eq!(skipped.state, "skipped");
+    let d = lock(&f.store).unwrap().routine_decisions(c.id, 1).unwrap();
+    assert_eq!(d[0].verdict, "skipped");
+    assert_eq!(d[0].run_id, Some(skipped.id));
+}
+
+#[tokio::test]
+async fn explain_names_the_check_that_stops_a_routine() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let ana = person(&f.store, None, f.ana);
+    let e = explain(&f.store, &ana, r.id, None, OCT8).unwrap();
+    assert_eq!(check(&e, "enabled").state, "ok");
+    assert!(e.summary.starts_with("Fires at its next"), "{}", e.summary);
+    assert_eq!(e.next_run_at, r.next_run_at);
+    lock(&f.store)
+        .unwrap()
+        .set_setting(crate::service::settings::AUTOMATION_PAUSED, "true")
+        .unwrap();
+    let e = explain(&f.store, &ana, r.id, None, OCT8).unwrap();
+    assert_eq!(e.state, "block");
+    assert_eq!(check(&e, "automation").state, "block");
+    assert!(e.summary.contains("Pause all is on"), "{}", e.summary);
+    lock(&f.store)
+        .unwrap()
+        .set_setting(crate::service::settings::AUTOMATION_PAUSED, "false")
+        .unwrap();
+    skip_next(&f.store, &ana, r.id, true).unwrap();
+    let e = explain(&f.store, &ana, r.id, None, OCT8).unwrap();
+    assert_eq!(check(&e, "schedule").state, "warn");
+    assert!(e.summary.contains("Skip next"), "{}", e.summary);
+    set_enabled(&f.store, &ana, r.id, false).unwrap();
+    let e = explain(&f.store, &ana, r.id, None, OCT8).unwrap();
+    assert!(
+        e.summary.starts_with("Does not fire: it is off"),
+        "{}",
+        e.summary
+    );
+    // Someone else's routine is not there at all.
+    let bo = person(&f.store, None, f.bo);
+    assert_eq!(
+        explain(&f.store, &bo, r.id, None, OCT8).unwrap_err().code,
+        codes::E_NOTFOUND
+    );
+    assert_eq!(
+        dry_run(&f.store, &bo, r.id, None, OCT8).unwrap_err().code,
+        codes::E_NOTFOUND
+    );
+}
+
+#[tokio::test]
+async fn explain_judges_the_events_its_owner_may_read_only() {
+    let f = fx();
+    let r = pr_routine(&f, "pr_review", |i| i.event_repo = Some("acme/web".into()));
+    let mine = pr_session(&f, "mine", f.ana);
+    let theirs = pr_session(&f, "theirs", f.bo);
+    see_pr(&f, mine, PR, "OPEN", None, None);
+    see_pr(&f, mine, PR, "OPEN", Some("APPROVED"), None);
+    let other = "https://github.com/acme/api/pull/7";
+    see_pr(&f, mine, other, "OPEN", None, None);
+    see_pr(&f, mine, other, "OPEN", Some("APPROVED"), None);
+    let hidden = "https://github.com/acme/web/pull/99";
+    see_pr(&f, theirs, hidden, "OPEN", None, None);
+    see_pr(&f, theirs, hidden, "OPEN", Some("APPROVED"), None);
+    let ana = person(&f.store, None, f.ana);
+    let e = explain(&f.store, &ana, r.id, None, OCT8).unwrap();
+    let ev = e.event.expect("an event routine explains its events");
+    assert_eq!(ev.kind, "pr_review");
+    assert_eq!(ev.unread, None, "a person is not told every person's count");
+    assert_eq!(
+        ev.recent.len(),
+        2,
+        "bo's session is left out: {:?}",
+        ev.recent
+    );
+    assert!(ev.recent.iter().all(|v| v.session_id == mine && !v.read));
+    let (fires, filtered): (Vec<_>, Vec<_>) = ev.recent.iter().partition(|v| v.fires);
+    assert_eq!(fires.len(), 1);
+    assert!(
+        filtered[0]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("acme/api is not acme/web"),
+        "{filtered:?}"
+    );
+    // The internal reader counts the backlog.
+    let all = explain(&f.store, &ViewScope::internal(), r.id, None, OCT8).unwrap();
+    assert_eq!(all.event.unwrap().unread, Some(3));
+    // The pass's filtered decision about bo's session is not shown to ana.
+    tick_once(&f.deps, OCT8 + 20).await;
+    let d = decisions(&f.store, &ana, r.id, None).unwrap();
+    assert!(d.iter().all(|d| d.session_id != Some(theirs)), "{d:?}");
+    assert!(d.iter().any(|d| d.verdict == "fired"), "{d:?}");
+    let all = decisions(&f.store, &ViewScope::internal(), r.id, None).unwrap();
+    assert!(all.iter().any(|d| d.session_id == Some(theirs)), "{all:?}");
+}
+
+#[tokio::test]
+async fn dry_run_says_what_a_fire_would_start_and_writes_nothing() {
+    let f = fx();
+    let r = pr_routine(&f, "pr_review", |i| i.autonomy = Some(0));
+    let mine = pr_session(&f, "mine", f.ana);
+    let theirs = pr_session(&f, "theirs", f.bo);
+    see_pr(&f, mine, PR, "OPEN", None, None);
+    see_pr(&f, mine, PR, "OPEN", Some("CHANGES_REQUESTED"), None);
+    see_pr(
+        &f,
+        theirs,
+        "https://github.com/acme/web/pull/43",
+        "OPEN",
+        None,
+        None,
+    );
+    see_pr(
+        &f,
+        theirs,
+        "https://github.com/acme/web/pull/43",
+        "OPEN",
+        Some("APPROVED"),
+        None,
+    );
+    let ana = person(&f.store, None, f.ana);
+    let d = dry_run(&f.store, &ana, r.id, None, OCT8).unwrap();
+    assert!(d.starts, "{d:?}");
+    assert_eq!(d.session.host_alias, "mac");
+    assert_eq!(d.session.owner_person_id, Some(f.ana));
+    let ev = d
+        .event
+        .clone()
+        .expect("its kind's newest event ana may read");
+    assert_eq!(ev.session_id, mine);
+    assert!(ev.fires);
+    assert!(d.prompt.starts_with("Review my open PRs"), "{}", d.prompt);
+    assert!(
+        d.prompt.ends_with(&format!(
+            "Started because pull request {PR} got a review asking for changes."
+        )),
+        "{}",
+        d.prompt
+    );
+    assert!(d.scheduled_only.iter().any(|c| c.name == "event"));
+    assert!(runs_of(&f, r.id).is_empty(), "a dry run starts nothing");
+    assert!(f.fake.started.lock().unwrap().is_empty());
+    assert!(lock(&f.store)
+        .unwrap()
+        .routine_decisions(r.id, 10)
+        .unwrap()
+        .is_empty());
+    // An event on bo's session answers like one that does not exist.
+    let bo_event = lock(&f.store)
+        .unwrap()
+        .recent_events_of_kind("pr_review", 10)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.1 == theirs)
+        .unwrap()
+        .0;
+    let err = dry_run(&f.store, &ana, r.id, Some(bo_event), OCT8).unwrap_err();
+    assert_eq!(err.code, codes::E_NOTFOUND);
+    assert_eq!(
+        dry_run(&f.store, &ana, r.id, Some(9_999_999), OCT8)
+            .unwrap_err()
+            .message,
+        err.message.replace(&bo_event.to_string(), "9999999")
+    );
+    // A cron routine takes no event.
+    let c = new_routine(&f, input(&f));
+    assert_eq!(
+        dry_run(&f.store, &ana, c.id, Some(bo_event), OCT8)
+            .unwrap_err()
+            .code,
+        codes::E_INVALID
+    );
+    let d = dry_run(&f.store, &ana, c.id, None, OCT8).unwrap();
+    assert!(d.event.is_none());
+    assert_eq!(d.prompt, c.prompt);
+}

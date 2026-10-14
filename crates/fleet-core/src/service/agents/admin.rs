@@ -27,7 +27,7 @@ pub const MAX_RULE_HOURS: i64 = 24 * 90;
 #[derive(Debug, Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "AgentsParams")]
 pub struct AgentsArgs {
-    /// status | grant | revoke | pause_all | approve | reject.
+    /// status | explain | job | grant | revoke | pause_all | approve | reject.
     pub action: String,
     /// grant: review | support | fleet; status: only this agent's jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -60,7 +60,7 @@ pub struct AgentsArgs {
     /// to secret names, `${NAME}`) or {role, namespace: rule | shared:<name>}.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bindings: Option<serde_json::Value>,
-    /// revoke: a rule's id; approve, reject: an action's id.
+    /// revoke: a rule's id; approve, reject: an action's id; job: a job's id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<i64>,
     /// status: jobs and actions, ≤ 200 (default 20).
@@ -71,7 +71,7 @@ pub struct AgentsArgs {
 impl AgentsArgs {
     /// Whether the action only reads.
     pub fn is_read(&self) -> bool {
-        self.action == "status"
+        matches!(self.action.as_str(), "status" | "explain" | "job")
     }
 }
 
@@ -373,13 +373,19 @@ pub fn call(
     };
     match args.action.as_str() {
         "status" => to_json(serde_json::to_value(status(store, args, now)?)),
+        "explain" => to_json(serde_json::to_value(super::debug::explain(store, now)?)),
+        "job" => {
+            let id = args.id.ok_or_else(|| invalid("job needs id"))?;
+            to_json(serde_json::to_value(super::debug::job(store, id, now)?))
+        }
         "grant" => to_json(serde_json::to_value(grant(store, args, by, now)?)),
         "revoke" => to_json(serde_json::to_value(revoke(store, args)?)),
         "pause_all" => to_json(serde_json::to_value(pause_all(store)?)),
         "approve" => to_json(serde_json::to_value(decide(store, args, true, by, now)?)),
         "reject" => to_json(serde_json::to_value(decide(store, args, false, by, now)?)),
         other => Err(invalid(format!(
-            "unknown agents action {other:?}: status | grant | revoke | pause_all | approve | reject"
+            "unknown agents action {other:?}: status | explain | job | grant | revoke | pause_all | \
+             approve | reject"
         ))),
     }
 }

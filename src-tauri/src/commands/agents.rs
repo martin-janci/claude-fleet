@@ -24,6 +24,19 @@ pub async fn agents_status(
     routed::agents_status(&backend, &store, agent, limit).await
 }
 
+/// Debugging the agents: `explain` (per rule: whether it polls and why
+/// not, its last poll error, its jobs by state) or `job` (one job whole,
+/// `id`, its proposed actions included). Only reads.
+#[tauri::command]
+pub async fn agents_debug(
+    action: String,
+    id: Option<i64>,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<serde_json::Value, IpcError> {
+    routed::agents_debug(&backend, &store, action, id).await
+}
+
 /// Approve (`approve: true`) or reject a pending action. An approved one
 /// is carried out by its agent on the next run pass.
 #[tauri::command]
@@ -45,6 +58,34 @@ pub(crate) mod routed {
             agent,
             limit,
             ..Default::default()
+        }
+    }
+
+    pub fn debug_args(action: String, id: Option<i64>) -> AgentsArgs {
+        AgentsArgs {
+            action,
+            id,
+            ..Default::default()
+        }
+    }
+
+    pub async fn agents_debug(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        action: String,
+        id: Option<i64>,
+    ) -> Result<serde_json::Value, IpcError> {
+        // Only the reads: this command never grants, revokes or answers.
+        if !matches!(action.as_str(), "explain" | "job") {
+            return Err(IpcError::new(
+                fleet_core::ipc_error::codes::E_INVALID,
+                format!("agents_debug action must be explain | job, got {action:?}"),
+            ));
+        }
+        let args = debug_args(action, id);
+        match backend.hub() {
+            Some(hub) => hub.route("agents_debug", &args).await,
+            None => admin::call(store, &args, "desktop", fleet_core::store::now_unix()),
         }
     }
 

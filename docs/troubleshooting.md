@@ -29,6 +29,7 @@ it.
 | **⚠ Sync skipping items — <tracker>**, or a tracker's last pass says `… skipped` | One item (or a few) cannot be stored; the rest of the tracker syncs, the item is retried every pass | Find the item in the log (the view and the external id) and the reason in `last_error`. See [Sync skips items](#sync-skips-items). |
 | A phone or `/events` client got **`lagged`** (or `resumed: false`) right after a tracker was added | The first sync of a new tracker sends one `work:item` frame per ticket and briefly fills the replay ring | Expected once per tracker (decision D18): the client re-lists and carries on. See [`lagged` after a first sync](#lagged-after-a-trackers-first-sync). |
 | Start or Resume says **"… is being started or resumed already"** | Another device (or a double click) is starting or resuming the same ticket right now; fleet refuses the second so the key never gets two sessions (`E_EXISTS`) | Wait for that session to come up, then jump to it; retry only if it failed. |
+| A **routine did not fire** (or fired when it should not), or an **agent rule finds nothing** | A guard stopped it (Pause all, a budget, the overlap rule, the account line), its event was filtered out (not its owner's session, the repo filter, the rate), or the agent's poll is failing | Open the routine's **Debug** tab, or Automation › Agents › **Debug**. See [Debugging routines and automated tasks](#debugging-routines-and-automated-tasks). |
 | **Why is this session linked to X?** | Detection linked or suggested it from a branch, a URL, a prompt or the PR | Click the work chip: the popover lists each link's evidence and rule. See [Why is this session linked to X?](#why-is-this-session-linked-to-x) |
 | *(Developers)* `Failed to resolve import "@tauri-apps/plugin-clipboard-manager"` in `App.test.ts` / `clipboard_native.test.ts` | Stale `node_modules` after pulling | Run `pnpm install --frozen-lockfile` (pnpm 10; `corepack pnpm@10 install --frozen-lockfile` if your pnpm is older), then re-run `pnpm test`. `localStorage` is polyfilled in `vitest.setup.ts`, so a missing-`localStorage` failure is not expected. |
 
@@ -547,6 +548,45 @@ not grouped the session.
   (`work.classify_nudge`); its answer is only ever a suggestion.
 
 See the [work guide → Linking and detection](work-graph.md#linking-and-detection).
+
+### Debugging routines and automated tasks
+
+Everything here only reads: nothing starts a run, sends a nudge or changes
+a rule.
+
+- **A routine** — Automation › Routines › the routine › **Debug** (or the
+  `routines` tool's `explain`, `decisions` and `dry_run`). The summary line
+  names the first check that stops a fire; the checks list says, in the
+  scheduler's order, whether it is on, whether Pause all is on, whether
+  the scheduler has passed in this process (on a paired desktop, the hub's),
+  its schedule or event, the overlap rule, both budgets, the account line
+  and the host. **Decisions** is the scheduler's trace, newest first:
+  *Started*, *Start failed*, *Skipped* (a run row says why), *Dropped* (an
+  event fire the routine was busy, over budget or inside its rate for) and
+  *Not its event* (another person's session, a session a routine started,
+  a PR outside its repo filter or organisation). An event routine also
+  lists its newest events with what each does to it; **Try** dry-runs it on
+  one. **Dry run** shows the session a fire now would start and the exact
+  prompt it would type.
+- **An agent rule** — Automation › Agents › **Debug** (or `agents {
+  action: explain }` / `job { id }`). Each rule says whether it polls (its
+  grant may have expired, Pause all may be on, `agents.poll_interval_secs`
+  may be 0), when it polls next, its last poll error (kept until a poll
+  succeeds, per process) and its jobs by state; the last failed job opens
+  whole, with its error and its proposed actions.
+- **The PR shepherd** — `pr_shepherd { action: explain }` (the owner's
+  device) says, per session in a project with a rule, whether the next
+  tick acts, waits (mid-turn, not idle long enough, unpushed commits) or
+  ignores it (nothing wrong, no PR reading yet, the episode already
+  recorded).
+- **The loops themselves** — Automation › Routines lists the built-in
+  loops with their last run and error (`fleet_health.loops`).
+- **On the hub's console** — `fleet-hub routine list | explain <id> |
+  decisions <id> | dry-run <id> [--event N]`, `fleet-hub agents explain |
+  job <id>` and `fleet-hub shepherd explain` read `state.db` directly. They
+  run in their own process, so the scheduler's loop health and an agent
+  rule's last poll error (both kept by the running hub) are not in them:
+  ask the hub over the control API for those.
 
 ### Releases and tags
 

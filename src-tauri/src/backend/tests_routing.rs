@@ -1216,6 +1216,21 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "agents_debug",
+            "agents",
+            json!({ "action": "explain" }),
+            r#"{"automation_paused":false,"poll_interval_secs":300,"max_concurrent":2,"max_retries":3,"loops":[],"rules":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::agents::routed::agents_debug(
+                    b,
+                    s,
+                    "explain".into(),
+                    None,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "agents_decide",
             "agents",
             json!({ "action": "reject", "id": 7 }),
