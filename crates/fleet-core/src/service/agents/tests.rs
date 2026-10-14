@@ -102,6 +102,8 @@ fn store_with_rule(expires_at: Option<i64>) -> (Mutex<Store>, i64) {
             granted_by: "console".into(),
             granted_at: 0,
             expires_at,
+            definition: None,
+            bindings: "[]".into(),
         })
         .unwrap();
     (Mutex::new(s), id)

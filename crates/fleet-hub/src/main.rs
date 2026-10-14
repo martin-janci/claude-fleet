@@ -585,7 +585,7 @@ async fn main() -> ExitCode {
         Cmd::Decide { cmd, opts } => decide::run(cmd, &opts, &env).await,
         Cmd::Settings { cmd, opts } => settings::run(cmd, &opts, &env),
         Cmd::Guides { cmd, opts } => guides::run(cmd, &opts, &env),
-        Cmd::Agents { cmd, opts } => agents::run(cmd, &opts, &env),
+        Cmd::Agents { cmd, opts } => agents::run(cmd, &opts, &env).await,
         Cmd::Shepherd { cmd, opts } => shepherd::run(cmd, &opts, &env),
         Cmd::Update { cmd, opts } => update::run(cmd, &opts, &env).await,
         Cmd::Reports {

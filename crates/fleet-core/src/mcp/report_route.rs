@@ -349,6 +349,47 @@ mod tests {
         .unwrap()
     }
 
+    /// `/agent-records` takes a live run token and nothing else: not the
+    /// master, not a host's token.
+    #[tokio::test]
+    async fn the_records_route_takes_only_a_run_token() {
+        use crate::service::fleet_agents::records::{self, RunGrant};
+        let (addr, _store) = app().await;
+        let now = crate::store::now_unix();
+        let token = records::issue(
+            RunGrant {
+                rule_id: 1,
+                stores: [("memory".to_string(), "rule:1".to_string())].into(),
+                expires_at: now + 600,
+            },
+            now,
+        );
+        let list = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        for other in ["s3cret", "host-tok", "nope"] {
+            assert_eq!(
+                http(addr, "POST", "/agent-records", other, list).await.0,
+                401
+            );
+        }
+        let (st, body) = http(addr, "POST", "/agent-records", &token, list).await;
+        assert_eq!(st, 200);
+        assert!(body.contains(r#""name":"find""#), "{body}");
+        let note = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+        assert_eq!(
+            http(addr, "POST", "/agent-records", &token, note).await.0,
+            202
+        );
+        assert_eq!(
+            http(addr, "POST", "/agent-records", &token, "[1]").await.0,
+            400
+        );
+        records::revoke(&token);
+        assert_eq!(
+            http(addr, "POST", "/agent-records", &token, list).await.0,
+            401
+        );
+    }
+
     #[tokio::test]
     async fn a_readonly_client_may_post_and_the_master_reads_it_back() {
         let (addr, _store) = app().await;

@@ -19,6 +19,7 @@ mod listener;
 pub mod metrics;
 pub mod oidc;
 pub mod pairing;
+pub mod records_route;
 pub mod report_route;
 pub mod settings;
 #[cfg(test)]
@@ -754,7 +755,19 @@ fn build_app(
         // (`update_route::handle_poke`).
         .route(
             "/update/poke",
-            axum::routing::post(update_route::handle_poke).with_state(report_state),
+            axum::routing::post(update_route::handle_poke).with_state(report_state.clone()),
+        )
+        // `/agent-records`: a fleet agent run's `fleet-records` server.
+        // Outside `authorize` on purpose: what it takes is a RUN token
+        // (`service::fleet_agents::records`), which no hub token is and
+        // which opens one rule's fleet stores for one run, read-only.
+        .route(
+            crate::service::fleet_agents::records::ROUTE,
+            axum::routing::post(records_route::handle_records)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    records_route::BODY_MAX,
+                ))
+                .with_state(report_state),
         )
         .route(
             "/pair",

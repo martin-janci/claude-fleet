@@ -123,6 +123,29 @@ pub fn template(kind: Kind, name: &str) -> Asset {
             body: "Do this with $ARGUMENTS.\n".to_string(),
             resources: Vec::new(),
         },
+        Kind::FleetAgent => Asset {
+            header: header("Describe what this agent does and when it runs."),
+            spec: AssetSpec::FleetAgent {
+                inputs: Vec::new(),
+                stores: Vec::new(),
+                trigger: serde_json::json!({ "source": "manual" }),
+                run: serde_json::json!({
+                    "workspace": "home",
+                    "output_schema": {
+                        "type": "object",
+                        "required": ["summary"],
+                        "properties": { "summary": { "type": "string" } }
+                    }
+                }),
+                actions: Vec::new(),
+                limits: serde_json::Value::Null,
+            },
+            body: format!(
+                "# {name}\n\nWhat to look at, what to decide, and how to answer: with only the JSON \
+                 object your output schema describes.\n"
+            ),
+            resources: Vec::new(),
+        },
     }
 }
 
