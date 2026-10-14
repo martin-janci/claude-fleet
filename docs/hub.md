@@ -1248,8 +1248,10 @@ What a client may do:
   devices bound to no org manages the personal catalog; an org catalog's
   grant stays the one device's. The ASSETS column of `client list` (and the
   `assets_admin` field of `list_clients`) shows the person's effective
-  grant; the `catalog_grantees` list for `personal` still reads the
-  per-device row kept as a mirror for one release.
+  grant; the `catalog_grantees` list for `personal` follows the role too
+  (every eligible device of an `assets-admin` person; an org catalog's
+  list is still the devices holding a grant row), so it never names a
+  client the grant check would refuse.
   `list_catalogs` is open to the master or a person's own unbound full
   device, never an org-bound client; only the master token may
   `add_catalog` or `remove_catalog` (a removal drops every other client's

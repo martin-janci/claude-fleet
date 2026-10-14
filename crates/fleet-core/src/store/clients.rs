@@ -679,20 +679,57 @@ impl Store {
         )
     }
 
-    /// The live clients holding a grant on `catalog_id`, by name. Filters
-    /// with the same eligibility predicate (`LIVE_GRANT_ELIGIBLE`) as
-    /// [`Self::client_may_admin_catalog`]: this must never list a client
-    /// that predicate would refuse.
+    /// The live clients that may manage `catalog_id`, by name. A PERSONAL
+    /// catalog (`org_id IS NULL`): every eligible device of a person holding
+    /// the realm role `assets-admin` (identity sub-project 1; the grant row
+    /// is only a mirror). An org catalog: the devices holding a grant row on
+    /// it. Both branches filter with `LIVE_GRANT_ELIGIBLE`, so this never
+    /// lists a client [`Self::client_may_admin_catalog`] /
+    /// [`Self::client_is_assets_admin`] would refuse. A catalog that does
+    /// not exist lists nobody.
     pub fn catalog_grantees(&self, catalog_id: i64) -> Result<Vec<String>, rusqlite::Error> {
-        self.conn
-            .prepare_cached(&format!(
-                "SELECT t.name FROM client_tokens t JOIN client_catalog_grants g ON g.client_id = t.id
-                 WHERE g.catalog_id = ?1 AND {elig}
-                 ORDER BY t.name",
-                elig = Self::LIVE_GRANT_ELIGIBLE,
-            ))?
-            .query_map([catalog_id], |r| r.get(0))?
-            .collect()
+        let personal: Option<bool> = self
+            .conn
+            .query_row(
+                "SELECT org_id IS NULL FROM catalogs WHERE id = ?1",
+                [catalog_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match personal {
+            None => Ok(Vec::new()),
+            Some(false) => self
+                .conn
+                .prepare_cached(&format!(
+                    "SELECT t.name FROM client_tokens t JOIN client_catalog_grants g ON g.client_id = t.id
+                     WHERE g.catalog_id = ?1 AND {elig}
+                     ORDER BY t.name",
+                    elig = Self::LIVE_GRANT_ELIGIBLE,
+                ))?
+                .query_map([catalog_id], |r| r.get(0))?
+                .collect(),
+            Some(true) => {
+                let holders =
+                    super::realm::realm_role_holders(&self.conn, super::ROLE_ASSETS_ADMIN)?;
+                let mut stmt = self.conn.prepare_cached(&format!(
+                    "SELECT t.name, t.person_id FROM client_tokens t
+                     WHERE t.person_id IS NOT NULL AND {elig}
+                     ORDER BY t.name",
+                    elig = Self::LIVE_GRANT_ELIGIBLE,
+                ))?;
+                let rows = stmt.query_map([], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                })?;
+                let mut names = Vec::new();
+                for row in rows {
+                    let (name, person) = row?;
+                    if holders.contains(&person) {
+                        names.push(name);
+                    }
+                }
+                Ok(names)
+            }
+        }
     }
 
     /// Bind the live client named `name` to `org` (work graph M14), or
@@ -1343,6 +1380,35 @@ mod tests {
         s.set_client_assets_admin("desk", true).unwrap();
         s.revoke_client_token("desk").unwrap();
         assert!(!s.client_is_assets_admin(desk.id).unwrap());
+    }
+
+    /// A personal catalog's grantees follow the realm role (identity
+    /// sub-project 1): every eligible device of a person holding
+    /// `assets-admin`, not just the device the grant went through.
+    #[test]
+    fn a_personal_catalogs_grantees_are_every_eligible_device_of_an_assets_admin() {
+        let s = store();
+        s.set_catalog_config("/p", None).unwrap();
+        let personal = s.personal_catalog().unwrap().unwrap().id;
+        let owner = s.personal_owner_id().unwrap().unwrap();
+        for (name, mode) in [("desk", "full"), ("phone", "full"), ("kiosk", "readonly")] {
+            s.insert_client_token(name, &format!("h-{name}"), mode)
+                .unwrap();
+            s.set_client_person(name, Some(owner)).unwrap();
+        }
+        assert!(s.catalog_grantees(personal).unwrap().is_empty());
+        s.set_client_assets_admin("desk", true).unwrap();
+        assert_eq!(
+            s.catalog_grantees(personal).unwrap(),
+            vec!["desk".to_string(), "phone".to_string()]
+        );
+        let acme = s.add_org("acme", None, false).unwrap().id;
+        s.set_client_org("phone", Some(acme)).unwrap();
+        assert_eq!(
+            s.catalog_grantees(personal).unwrap(),
+            vec!["desk".to_string()]
+        );
+        assert!(s.catalog_grantees(9999).unwrap().is_empty());
     }
 
     /// Migration 093: a grant names one catalog, is read live, and holds
