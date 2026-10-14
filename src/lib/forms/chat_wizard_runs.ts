@@ -16,6 +16,7 @@ import { runAddProject } from './add_project_wizard';
 import { newSessionWizard, runNewSession } from './new_session_wizard';
 import { pairDeviceWizard, runPairDevice } from './pair_device_wizard';
 import { getStartedWizard, runGetStarted } from './get_started_wizard';
+import { fleetForm, fleetWizard, grantFleet, loadAgents } from '../agents';
 
 export interface ChatWizard {
   wizard: Wizard;
@@ -27,6 +28,7 @@ export interface ChatWizard {
 export const CHAT_WIZARD_READS: Record<ChatWizardId, string> = {
   add_host: 'your SSH config',
   add_project: 'your hosts',
+  fleet_agent: 'the catalog and your hosts',
   get_started: 'your hosts and projects',
   new_session: 'your hosts and projects',
   pair_device: 'your orgs',
@@ -48,9 +50,31 @@ export function addProjectChatWizard(hostList: readonly { alias: string }[]): Wi
   return { ...w, spec: withChoices(w.spec, { host: host.length ? host : [['local', 'This machine']], repos: [] }) };
 }
 
-/** The wizard `id` with its choices, ready to show. */
-export async function chatWizard(id: ChatWizardId): Promise<ChatWizard> {
+/** A fleet agent's grant form, and its last button: the grant (each MCP
+ *  store is asked for its tools on the host first; a failure is the card's
+ *  error). Only a person's own device sends it. */
+async function fleetAgentChatWizard(definition: string | null | undefined): Promise<ChatWizard> {
+  if (!definition) throw new Error('the block names no fleet agent');
+  const r = await fleetForm(definition);
+  if (!r.ok) throw new Error(r.error.message);
+  return {
+    wizard: fleetWizard(r.value),
+    run: async (values, onprogress) => {
+      onprogress?.('Checking its stores on the host…');
+      const g = await grantFleet(definition, values);
+      if (!g.ok) return { ok: false, error: g.error.message };
+      void loadAgents();
+      return { ok: true, summary: `${definition} instance ${String(values.f_instance ?? '')} started` };
+    },
+  };
+}
+
+/** The wizard `id` with its choices, ready to show; `definition` names a
+ *  `fleet_agent`'s catalog agent. */
+export async function chatWizard(id: ChatWizardId, definition?: string | null): Promise<ChatWizard> {
   switch (id) {
+    case 'fleet_agent':
+      return fleetAgentChatWizard(definition);
     case 'add_host': {
       const r = await discoverHosts();
       return { wizard: addHostWizard(r.ok ? r.value : []), run: runAddHost };

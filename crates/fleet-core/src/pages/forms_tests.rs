@@ -189,8 +189,11 @@ fn every_wizard_spec_is_valid() {
 /// file, and the app's list (`chat_wizard_ids.ts`) is the same, in order.
 #[test]
 fn every_chat_wizard_has_a_spec_and_the_app_lists_the_same() {
-    use super::chat_blocks::CHAT_WIZARDS;
-    for id in CHAT_WIZARDS {
+    use super::chat_blocks::{CHAT_WIZARDS, DYNAMIC_CHAT_WIZARDS};
+    for id in CHAT_WIZARDS
+        .iter()
+        .filter(|w| !DYNAMIC_CHAT_WIZARDS.contains(w))
+    {
         let spec = cases(&format!("src/lib/forms/wizards/{id}.json"));
         if let Err(problems) = parse(&spec) {
             panic!("{id}: {problems:?}");

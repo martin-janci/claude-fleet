@@ -1,8 +1,7 @@
 # Configurable agents: design
 
-Status: steps 1 to 4 built, and step 5's grant form with the desktop's
-New instance / Edit, 2026-10-14. The phone's and the chat's paths of step 5,
-and step 6, not built.
+Status: steps 1 to 5 built, 2026-10-14 (the phone's part in
+martin-janci/fleet-mobile). Step 6 not built.
 Asked for by the owner after the built-in reviewer and support agent landed
 (`2026-10-11-review-and-support-agents-design.md`, PRs
 martin-janci/claude-fleet#871, martin-janci/fleet-mobile#217,
@@ -565,9 +564,16 @@ run real instances.
    with *New instance* (disabled with the problems when it does not load),
    its instances under it with *Edit*, *Revoke* and, for a manual or
    scheduled one, *Run now*; the form is a `WizardDialog`, and a store that
-   fails the grant's check is the dialog's error. Not built yet: the
-   phone's instance list (its Inbox already shows the actions) and the
-   chat's `ask { draft }` path.
+   fails the grant's check is the dialog's error. The chat path is a
+   `wizard` block with `wizard: fleet_agent` and the `definition`
+   (`docs/chat-blocks.md`), not `ask { draft }`: an agent drafts the
+   answers (`values`), the person's device asks the hub for the form when
+   the card opens and its last button grants from that device, so the
+   answer becomes the grant without an agent ever holding the grant. The
+   phone (fleet-mobile) lists the rules under Automation › Agents, a fleet
+   agent's instance by its definition, with Revoke, and its Inbox names a
+   fleet agent's actions; a new instance and Edit stay with the desktop's
+   form or a chat card.
 6. **Later**:
    - `github_*` sources and `pr_*` actions for generic agents;
    - `tracker_*` on GitHub, Linear and Asana;

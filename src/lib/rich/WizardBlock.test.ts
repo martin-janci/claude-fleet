@@ -45,6 +45,49 @@ describe('a wizard block', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 
+  it('opens a fleet agent\'s grant form from the hub, drafted, and grants from the person\'s device', async () => {
+    inv.mockImplementation(async (cmd: string, a: { action?: string }) => {
+      if (cmd !== 'agents_fleet') return null;
+      if (a.action === 'form')
+        return {
+          spec: 'fleet.form/1',
+          title: 'New l2-support instance',
+          submit: 'Start',
+          steps: [
+            {
+              title: 'What',
+              fields: [
+                { name: 'f_instance', type: 'text', label: 'Instance', required: true },
+                { name: 'project', type: 'text', label: 'Jira project key', required: true },
+              ],
+            },
+          ],
+        };
+      if (a.action === 'grant') return { changed: 1, id: 7 };
+      return { rules: [], jobs: [], pending: [] };
+    });
+    render(RichText, {
+      props: {
+        source: ui({ kind: 'wizard', wizard: 'fleet_agent', definition: 'l2-support', why: 'You asked for the L2 agent.', values: { f_instance: 'l2-prod', project: 'L2S' } }),
+        sessionId: 4,
+      },
+    });
+    const card = await screen.findByTestId('wizard-chat-card');
+    expect(card.dataset.wizard).toBe('fleet_agent');
+    await waitFor(() => expect(screen.getByTestId('chat-form')).toHaveTextContent('New l2-support instance'));
+    expect(inv).toHaveBeenCalledWith('agents_fleet', { action: 'form', definition: 'l2-support', id: null, answers: null });
+    expect((screen.getByTestId('form-field-f_instance') as HTMLInputElement).value).toBe('l2-prod');
+    await fireEvent.click(screen.getByTestId('form-submit'));
+    await screen.findByTestId('chat-form-outcome');
+    expect(inv).toHaveBeenCalledWith('agents_fleet', {
+      action: 'grant',
+      definition: 'l2-support',
+      id: null,
+      answers: { f_instance: 'l2-prod', project: 'L2S' },
+    });
+    expect(composerDrafts.get(4)).toBe('Done in the "New l2-support instance" form: l2-support instance l2-prod started');
+  });
+
   it('is a line, not a form, where the composer is not on screen', () => {
     render(RichText, { props: { source: ui({ kind: 'wizard', wizard: 'new_session' }), sessionId: null } });
     expect(screen.getByTestId('rich-wizard-off')).toHaveTextContent('New session: opens in the live conversation.');
