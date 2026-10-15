@@ -28,7 +28,7 @@ import { showWorkView } from './work_view';
 import { openMissionsTab } from './missions';
 import { sessionMatchesSearch } from './search';
 
-export type ControlViewId = 'needs-you' | 'session' | 'tasks' | 'missions' | 'routines' | 'prs' | 'library' | 'today';
+export type ControlViewId = 'needs-you' | 'session' | 'tasks' | 'missions' | 'hosts' | 'routines' | 'prs' | 'library' | 'today';
 
 export interface ControlViewDef {
   id: ControlViewId;
@@ -46,6 +46,7 @@ export const CONTROL_VIEWS: readonly ControlViewDef[] = [
   { id: 'prs', label: 'Pull requests', glyph: '⑂', step: '9.4', landed: true },
   { id: 'tasks', label: 'Tasks', glyph: '☑', step: 'G3.10', landed: true },
   { id: 'missions', label: 'Missions', glyph: '◇', step: 'thread room', landed: true },
+  { id: 'hosts', label: 'Hosts', glyph: '◎', step: 'thread room', landed: true },
   { id: 'routines', label: 'Routines', glyph: '◷', step: 'G3.10', landed: true },
   { id: 'library', label: 'Library', glyph: '◧', step: '9.7', landed: true },
   { id: 'today', label: 'Today briefing', glyph: '☀', step: '9.4', landed: true },

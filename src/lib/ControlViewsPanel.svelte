@@ -27,6 +27,8 @@
   import { sidebarView } from './work_view';
   import { leave } from './destination';
   import ControlMissionView from './ControlMissionView.svelte';
+  import ControlHostsView from './ControlHostsView.svelte';
+  import { requestHostsView } from './app_views';
   import StatusDot from './kit/StatusDot.svelte';
   import { sessionState } from './handoffs';
   import { sessions } from './sessions';
@@ -87,7 +89,7 @@
 
   /** The views that live somewhere else too; the Library and Today live
    *  only here. */
-  const HAS_PLACE: ReadonlySet<ControlViewId> = new Set(['needs-you', 'session', 'tasks', 'missions', 'routines', 'prs']);
+  const HAS_PLACE: ReadonlySet<ControlViewId> = new Set(['needs-you', 'session', 'tasks', 'missions', 'hosts', 'routines', 'prs']);
 
   /** The Session tab's strip: the sessions beside the one in focus. */
   const siblings = $derived($selectedSession ? threadSiblings($selectedSession, $sessions) : []);
@@ -120,6 +122,8 @@
       openRoutines();
     } else if (id === 'missions') {
       openElsewhere('missions');
+    } else if (id === 'hosts') {
+      requestHostsView(null);
     }
   }
 
@@ -342,6 +346,8 @@
       <ControlTasksView />
     {:else if active === 'missions'}
       <ControlMissionView />
+    {:else if active === 'hosts'}
+      <ControlHostsView />
     {:else if active === 'routines'}
       <ControlRoutinesView />
     {:else if active === 'prs'}

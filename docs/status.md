@@ -31,7 +31,14 @@ the 9.4 views) is resizable 320–640 px (`layout.control-right`), pins Needs
 you · Session · Pull requests (`ui.controlRoomViews`) and opens any session
 the chat names in its Session tab with a strip of its siblings
 (`control_room.openInControl`), a mission in its Missions view with the
-full task graph. ⌘⇧T opens Control with Today on the right. New became the default in step 7.6 (#657) and Classic
+full task graph. ⌘⇧T opens Control with Today on the right. The status bar
+has a host chip beside Shortcuts (`HostHealthChip.svelte`, `host_health.ts`):
+CPU, memory and disk of the selected session's host (in Control, of the
+session on the right, else the operator's host) from the host row's health
+sample (migration 193), the worst other host in trouble (offline, `mem_low`,
+`cpu_saturated`, disk past `health.disk_low_pct`; judged on a fresh sample
+only), and every host in a popover; Control's right panel has the same list
+as its Hosts view. New became the default in step 7.6 (#657) and Classic
 was removed in step 13.1 (#699). The redesign's backend is not behind
 the switch: M2's session facts (`sessions.agent`, `origin`,
 `last_viewed_at`, `turn_outcome`; migrations 121, 124, 125, 129) and
