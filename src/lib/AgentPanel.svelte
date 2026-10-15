@@ -38,7 +38,7 @@
   } from './operator';
   import { openSettingsAt, requestHostsView, requestNewSessionOnHost } from './app_views';
   import { hosts } from './hosts';
-  import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
+  import { fleetSettings, hubHasSetting, hubSettingKeys, settingBool, SETTING_KEYS } from './fleet_settings';
   import { agentContext, type AgentContextInput } from './agent_context';
   import { OPERATOR_COMMANDS } from './operator';
   import { insertIntoComposer } from './conversation';
@@ -118,7 +118,11 @@
           $operatorState as OperatorBlocked,
           $operatorHost,
           $operatorFallback,
-          settingBool($fleetSettings, SETTING_KEYS.recoveryAutoRestore),
+          // Only a hub that has auto-restore (0.6.3+) restarts the agent by
+          // itself; an older one answers without the key, and promising a
+          // restart that never comes left Control looking handled while stuck.
+          hubHasSetting($hubSettingKeys, SETTING_KEYS.recoveryAutoRestore) &&
+            settingBool($fleetSettings, SETTING_KEYS.recoveryAutoRestore),
         )
       : null,
   );

@@ -397,16 +397,34 @@ export type FleetSettings = Record<string, string>;
 
 export const fleetSettings = writable<FleetSettings>({ ...SETTING_DEFAULTS });
 
+/** The keys the hub (or the local store) actually answered with, `null`
+ *  until the first answer. `fleetSettings` fills every missing key from
+ *  SETTING_DEFAULTS, so it cannot tell an older hub that has no such setting
+ *  from one where it is at its default; this can. A feature the hub may not
+ *  have yet (`recovery.auto_restore` on a hub before 0.6.3) checks it with
+ *  `hubHasSetting` before the UI promises what the hub would do. */
+export const hubSettingKeys = writable<ReadonlySet<string> | null>(null);
+
+function took(map: FleetSettings): void {
+  fleetSettings.set({ ...SETTING_DEFAULTS, ...map });
+  hubSettingKeys.set(new Set(Object.keys(map)));
+}
+
 export async function loadFleetSettings(): Promise<Result<FleetSettings>> {
   const r = await invokeCmd<FleetSettings>('get_fleet_settings');
-  if (r.ok && r.value) fleetSettings.set({ ...SETTING_DEFAULTS, ...r.value });
+  if (r.ok && r.value) took(r.value);
   return r;
 }
 
 export async function setFleetSetting(key: SettingKey, value: string): Promise<Result<FleetSettings>> {
   const r = await invokeCmd<FleetSettings>('set_fleet_setting', { key, value });
-  if (r.ok && r.value) fleetSettings.set({ ...SETTING_DEFAULTS, ...r.value });
+  if (r.ok && r.value) took(r.value);
   return r;
+}
+
+/** PURE: the hub answered with `key`, so it has the feature behind it. */
+export function hubHasSetting(keys: ReadonlySet<string> | null, key: SettingKey): boolean {
+  return keys?.has(key) ?? false;
 }
 
 export function settingBool(map: FleetSettings, key: SettingKey): boolean {
