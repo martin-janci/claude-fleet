@@ -2593,3 +2593,106 @@ async fn only_who_sees_the_routine_reads_its_runs_trace() {
         );
     }
 }
+
+// ── A run's work in its trace (`work_steps`) ──────────────────────────────
+
+fn transcript(lines: &[serde_json::Value]) -> crate::service::transcript::Conversation {
+    let jsonl = lines
+        .iter()
+        .map(|l| l.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    crate::service::transcript::Conversation {
+        turns: crate::service::transcript::parse_conversation(&jsonl),
+        truncated: false,
+        context: None,
+        events: Vec::new(),
+    }
+}
+
+#[test]
+fn a_transcript_yields_its_finished_tools_with_their_times() {
+    use serde_json::json;
+    let conv = transcript(&[
+        json!({"type":"user","timestamp":"2026-10-08T10:00:00Z","message":{"role":"user","content":"go"}}),
+        json!({"type":"assistant","timestamp":"2026-10-08T10:00:05Z","message":{"content":[
+            {"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo test"}}]}}),
+        json!({"type":"user","timestamp":"2026-10-08T10:00:47Z","message":{"content":[
+            {"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}),
+        json!({"type":"assistant","timestamp":"2026-10-08T10:00:50Z","message":{"content":[
+            {"type":"tool_use","id":"t2","name":"Read","input":{"file_path":"/a/b.rs"}}]}}),
+        json!({"type":"user","timestamp":"2026-10-08T10:00:51Z","message":{"content":[
+            {"type":"tool_result","tool_use_id":"t2","content":"no such file","is_error":true}]}}),
+        json!({"type":"assistant","timestamp":"2026-10-08T10:00:52Z","message":{"content":[
+            {"type":"tool_use","id":"t3","name":"Edit","input":{"file_path":"/a/c.rs"}}]}}),
+    ]);
+    let calls = work_steps::tool_calls(&conv);
+    // t3 has no result yet: it is the session's current activity, not a step.
+    assert_eq!(
+        calls.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+        ["t1", "t2"]
+    );
+    assert_eq!(calls[0].name, "Bash");
+    assert!(!calls[0].error && calls[1].error);
+    let step = work_steps::tool_step(&calls[0], 0);
+    assert_eq!(
+        (step.phase, step.kind, step.actor),
+        ("working", "tool_call", "claude")
+    );
+    assert_eq!(step.duration_ms, Some(42_000));
+    assert_eq!(step.at, calls[0].ended_at.unwrap());
+    let failed = work_steps::tool_step(&calls[1], 0);
+    assert_eq!(failed.kind, "error");
+    assert!(failed.summary.ends_with("failed"), "{}", failed.summary);
+}
+
+struct FakeTools(Vec<work_steps::ToolCall>);
+
+#[async_trait::async_trait]
+impl work_steps::ToolReader for FakeTools {
+    async fn tools(&self, _row: &SessionRow) -> Result<Vec<work_steps::ToolCall>, IpcError> {
+        Ok(self.0.clone())
+    }
+}
+
+fn call(id: &str, at: i64) -> work_steps::ToolCall {
+    work_steps::ToolCall {
+        id: id.into(),
+        name: "Bash".into(),
+        summary: format!("Bash({id})"),
+        target: None,
+        error: false,
+        at: Some(at),
+        ended_at: Some(at + 3),
+    }
+}
+
+#[tokio::test]
+async fn an_open_runs_tools_land_in_its_trace_once_each() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let ana = person(&f.store, None, f.ana);
+    let run = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    typing_done().await;
+    // A call from before the run started is not the run's.
+    let reader = FakeTools(vec![call("old", OCT8 - 100), call("a", OCT8 + 5)]);
+    work_steps::read_open(&f.store, &reader, OCT8 + 20).await;
+    let reader = FakeTools(vec![
+        call("old", OCT8 - 100),
+        call("a", OCT8 + 5),
+        call("b", OCT8 + 30),
+    ]);
+    work_steps::read_open(&f.store, &reader, OCT8 + 40).await;
+    let work: Vec<_> = trace_of(&f, run.id)
+        .into_iter()
+        .filter(|(p, _, _)| p == "working")
+        .map(|(_, _, s)| s)
+        .collect();
+    assert_eq!(work, ["Bash(a)", "Bash(b)"]);
+    // A settled run is read no more.
+    event(&f, run.session_id.unwrap(), "turn_done");
+    tick_once(&f.deps, OCT8 + 60).await;
+    let reader = FakeTools(vec![call("c", OCT8 + 70)]);
+    work_steps::read_open(&f.store, &reader, OCT8 + 80).await;
+    assert!(!trace_of(&f, run.id).iter().any(|(_, _, s)| s == "Bash(c)"));
+}

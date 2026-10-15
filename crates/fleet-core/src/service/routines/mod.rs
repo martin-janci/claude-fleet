@@ -61,6 +61,7 @@ pub mod fix;
 pub mod outcome;
 pub mod tick;
 pub mod trace;
+pub mod work_steps;
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs;

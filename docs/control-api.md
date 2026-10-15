@@ -1219,6 +1219,10 @@ Index by area (names only; see the reference for details):
   and a run of a source that keeps no trace, answers `E_NOTFOUND`. Every new
   step emits `run:changed` with the run's id only. A trace is kept 14 days
   and at most 2000 steps per run (phase boundaries past that still land).
+  While a routine run is open, each tool its session finishes is a `working`
+  step (`tool_call`, or `error` when the tool failed; `actor` `claude`,
+  `data.tool_use_id`, `data.tool`, `duration_ms`); the tool running now is
+  the session row's `current_activity`.
 - **PR shepherd** — `pr_shepherd`, the standing rules that let fleet look
   after a project's PRs (`docs/superpowers/specs/2026-10-08-pr-shepherd-design.md`):
   `status` (rules, recent episodes and merges), `explain` (what the next

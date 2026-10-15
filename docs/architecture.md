@@ -439,7 +439,9 @@ bullet for the area you are about to change.
   logs and never fails the run: `routines/trace.rs` from the scheduler
   (`tick::fire_with`, `record_skip`, `close_coded`, `outcome::record_with`,
   Jev's read in `decide/routine_run_outcome.rs`) and `agents/trace.rs` from
-  `agents::run_with`. The store caps a run at `RUN_TRACE_MAX_STEPS` (phase
+  `agents::run_with`; an open routine run's finished tools come from its
+  session's transcript tail (`routines/work_steps.rs`, one pass at a time
+  off the scheduler tick, deduplicated by `tool_use` id). The store caps a run at `RUN_TRACE_MAX_STEPS` (phase
   rows still land), replaces `data` over 4 KB with a note and drops rows
   past `RUN_TRACE_KEEP_SECS` on each run's first step. Reading uses
   `runs::reach`, so a trace is served exactly where its run is listed.
