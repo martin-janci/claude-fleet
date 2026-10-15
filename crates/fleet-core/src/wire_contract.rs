@@ -287,7 +287,7 @@
 //!   `E_HUB_PROTOCOL`, shown as its error; a row without `pinned_at` reads
 //!   as not pinned, so a phone that predates it simply shows no Pinned
 //!   section.
-//!   Host load (migration 192) is additive at this revision without a
+//!   Host load (migration 193) is additive at this revision without a
 //!   bump: a host row and its `host:pinged` ping carry `cpu_pct`,
 //!   `mem_pressure`, `mem_low` and `cpu_saturated`, and `fleet_health`'s
 //!   `hosts[]` adds `cpu_pct`, `mem_used_pct`, `mem_pressure`, `mem_low`

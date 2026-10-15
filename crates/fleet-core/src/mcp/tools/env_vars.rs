@@ -1,8 +1,12 @@
 //! MCP tool: env_vars (spec 2026-10-11-session-env-and-secrets-design.md,
-//! `service::env`). Session environment variables by scope. A person's tool
-//! (`Access::Person`: the master and a paired device bound to no org); a
-//! write needs the hub owner's trusted full device (`owner_device_admin`),
-//! and a reference is the master's alone. A value is never in the audit line.
+//! `service::env`). Session environment variables by scope.
+//! `Access::PersonOrAdmin`: the master, a fleet admin's device, and any
+//! person's paired device. The shared scopes (global, host, project,
+//! session) are the admin's: listed to an admin only, and a write needs the
+//! hub owner's trusted full device (`owner_device_admin`). The `person`
+//! scope is each person's own (`owner_for`), listed and changed by that
+//! person only. A reference is the master's alone. A value is never in the
+//! audit line.
 
 use super::*;
 use crate::service::env;
@@ -11,9 +15,10 @@ use crate::service::env;
 impl FleetTools {
     #[tool(
         description = "Session environment variables for the next start; global < host < \
-        project < session. list; set {scope, scope_key, name, value|ref, secret?}; unset \
-        {scope, scope_key, name}. Secrets and refs are never listed; ref (env:NAME|file:/abs) \
-        is master-only. E_INVALID, E_FORBIDDEN."
+        project < person < session (person: the session owner's, yours only, scope_key '' = \
+        you). list; set {scope, scope_key, name, value|ref, secret?}; unset {scope, scope_key, \
+        name}. Secrets and refs are never listed; ref (env:NAME|file:/abs) is master-only. \
+        E_INVALID, E_FORBIDDEN."
     )]
     pub(super) async fn env_vars(
         &self,
@@ -30,9 +35,18 @@ impl FleetTools {
                 p.name
             ),
         );
-        if p.action != "list" {
+        let personal = p.scope.as_deref() == Some("person");
+        if p.action != "list" && !personal {
             super::fleet::owner_device_admin(&caller, "changing session environment variables")?;
         }
-        ok_json_compact(&env::run(&self.store, &p, caller.is_master()).map_err(to_mcp_err)?)
+        let who = {
+            let s = crate::ipc_error::lock(&self.store).map_err(to_mcp_err)?;
+            env::EnvCaller {
+                refs_allowed: caller.is_master(),
+                admin: caller.is_master_or_fleet_admin_device(),
+                person: super::fleet::owner_for(&caller, &s),
+            }
+        };
+        ok_json_compact(&env::run(&self.store, &p, &who).map_err(to_mcp_err)?)
     }
 }

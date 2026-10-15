@@ -974,7 +974,7 @@ mod tests {
         let launch = st
             .lock()
             .unwrap()
-            .env_for_launch("h", None, Some(sid))
+            .env_for_launch("h", None, None, Some(sid))
             .unwrap();
         assert_eq!(launch.len(), 1, "the session gets it at launch");
     }

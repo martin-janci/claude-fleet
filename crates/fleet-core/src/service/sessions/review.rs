@@ -85,6 +85,9 @@ pub async fn spawn_review(
         &**ssh,
         &source.host_alias,
         source.project_id,
+        // The review is recorded as the source owner's (below), so it runs
+        // under that person's identity.
+        source.owner_person_id,
         None,
         &Default::default(),
         &pane,

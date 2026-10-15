@@ -1308,7 +1308,7 @@ pub struct HostRow {
     pub last_probe_error_code: Option<String>,
     #[serde(default)]
     pub last_probe_error: Option<String>,
-    /// Host load (migration 192), from the same sample as the rest: CPU
+    /// Host load (migration 193), from the same sample as the rest: CPU
     /// busy percent over the last interval and memory pressure 0–100
     /// (`tmux::HostHealthSample`), `None` when the host cannot tell. Used
     /// memory and disk percents follow from `mem_avail_kb` / `mem_total_kb`
@@ -1372,7 +1372,7 @@ pub struct HostHealth {
     /// ping omits it.
     #[serde(default)]
     pub agents_on_path: Option<Vec<String>>,
-    /// Migration 192 (host load). Per-field default: an older hub's ping
+    /// Migration 193 (host load). Per-field default: an older hub's ping
     /// omits them.
     #[serde(default)]
     pub cpu_pct: Option<f64>,
@@ -1503,7 +1503,7 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
         last_reachable_at: row.get(34)?,
         last_probe_error_code: row.get(35)?,
         last_probe_error: row.get(36)?,
-        // Migration 192 (host load).
+        // Migration 193 (host load).
         cpu_pct: row.get(37)?,
         mem_pressure: row.get(38)?,
         mem_low: row.get::<_, i64>(39)? != 0,

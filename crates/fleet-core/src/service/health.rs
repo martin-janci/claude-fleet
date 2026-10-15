@@ -263,7 +263,7 @@ pub struct HostHealthRow {
     /// are set or the host could not tell.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub auth_overrides: Vec<String>,
-    /// Host load (migration 192), for a status-bar chip: CPU busy percent,
+    /// Host load (migration 193), for a status-bar chip: CPU busy percent,
     /// used memory percent and memory pressure (0–100), rounded, from the
     /// last sample; `None` when the host cannot tell. Disk used percent is
     /// [`Self::disk_home_pct`].
@@ -288,7 +288,7 @@ pub struct HostHealthThresholds {
     pub disk_low_pct: u8,
     pub claude_max_behind: i64,
     pub hooks_silent_secs: i64,
-    /// `health.mem_low_pct` (migration 192).
+    /// `health.mem_low_pct` (migration 193).
     pub mem_low_pct: f64,
 }
 
@@ -315,7 +315,7 @@ pub const DEFAULT_CPU_BUSY_PCT: f64 = 90.0;
 /// spike now.
 pub const CPU_SUSTAINED_WINDOW_SECS: i64 = 300;
 
-/// The `health.*` load lines in force (migration 192): what `mem_low` and
+/// The `health.*` load lines in force (migration 193): what `mem_low` and
 /// `cpu_saturated` are judged against, wherever they are judged.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HostLoadLimits {
@@ -390,7 +390,7 @@ pub fn mem_avail_pct(row: &HostRow, now: i64) -> Option<f64> {
 }
 
 /// How busy the host's CPUs are, in percent, from its last FRESH sample
-/// (migration 192: the `/proc/stat` delta on Linux, summed `ps` %CPU on
+/// (migration 193: the `/proc/stat` delta on Linux, summed `ps` %CPU on
 /// macOS). `None` when unknown or stale; never guessed from the load
 /// average, which counts processes waiting on disk too.
 pub fn cpu_busy_pct(row: &HostRow, now: i64) -> Option<f64> {

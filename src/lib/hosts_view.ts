@@ -364,7 +364,7 @@ export function healthLine(h: HostRow, now: number): string {
   const disk = diskMeter(h);
   if (disk) parts.push(`disk ${disk.text}`);
   if (h.load_1m != null) parts.push(`load ${h.load_1m.toFixed(1)}`);
-  // Host load (migration 192): the numbers a status-bar chip will read,
+  // Host load (migration 193): the numbers a status-bar chip will read,
   // with the judgment beside them while the sample is fresh.
   const fresh = healthSampleFresh(h, now);
   if (h.cpu_pct != null) {

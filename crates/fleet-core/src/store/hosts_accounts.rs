@@ -267,7 +267,7 @@ impl Store {
     /// transaction's `update_host_probe_in_tx` announces the row and puts
     /// this sample on the ping.
     ///
-    /// Host load (migration 192) needs the sample before this one: Linux
+    /// Host load (migration 193) needs the sample before this one: Linux
     /// CPU busy percent is the delta of two `/proc/stat` readings
     /// (`health::cpu_from_ticks`), and `cpu_saturated` asks that the
     /// previous sample was over the line too, so one spike does not mark a
@@ -1299,7 +1299,7 @@ mod tests {
         );
     }
 
-    /// Host load (migration 192): Linux CPU is the delta of two counter
+    /// Host load (migration 193): Linux CPU is the delta of two counter
     /// readings, saturation needs two readings in a row over
     /// `health.cpu_busy_pct` (the previous one recent), and memory is low
     /// at or under `health.mem_low_pct` — both settings read when the

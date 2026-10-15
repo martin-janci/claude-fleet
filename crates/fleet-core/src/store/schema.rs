@@ -727,7 +727,19 @@ fn hosts_has_agent_hook_port(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 192: its columns arrive together,
+/// `already_applied` guard of migration 192: `env_vars`' CHECK already
+/// admits the `person` scope. 192 rebuilds the table, so a re-run must not.
+fn env_vars_has_person_scope(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'env_vars' \
+         AND sql LIKE '%''person''%'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 193: its columns arrive together,
 /// so the first one answers for all.
 fn hosts_has_cpu_pct(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -2159,11 +2171,18 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/191_host_agent_hook_port.sql"),
         already_applied: Some(hosts_has_agent_hook_port),
     },
+    // Person-scoped environment variables: `env_vars.scope` gains 'person'
+    // (a CHECK change, so a table rebuild; guarded).
+    Migration {
+        version: 192,
+        sql: include_str!("../../migrations/192_env_vars_person_scope.sql"),
+        already_applied: Some(env_vars_has_person_scope),
+    },
     // Host load: CPU utilisation, memory pressure and the `mem_low` /
     // `cpu_saturated` judgments on `hosts`. ADD COLUMNs, so guarded.
     Migration {
-        version: 192,
-        sql: include_str!("../../migrations/192_host_cpu_and_memory_load.sql"),
+        version: 193,
+        sql: include_str!("../../migrations/193_host_cpu_and_memory_load.sql"),
         already_applied: Some(hosts_has_cpu_pct),
     },
 ];
@@ -3845,10 +3864,10 @@ mod tests {
         assert_eq!(row().row_version, before + 1, "the trigger watches it");
     }
 
-    /// 192 on a database stopped at 191: every host arrives with its load
+    /// 193 on a database stopped at 192: every host arrives with its load
     /// unknown and neither judgment raised, and a sample then fills them.
     #[test]
-    fn migration_192_adds_unknown_host_load() {
+    fn migration_193_adds_unknown_host_load() {
         let old = Store::open_in_memory().expect("open");
         old.insert_host("h", Some("h")).unwrap();
         old.conn
@@ -3859,10 +3878,10 @@ mod tests {
                  ALTER TABLE hosts DROP COLUMN mem_pressure;\
                  ALTER TABLE hosts DROP COLUMN mem_low;\
                  ALTER TABLE hosts DROP COLUMN cpu_saturated;\
-                 DELETE FROM schema_version WHERE version >= 192;",
+                 DELETE FROM schema_version WHERE version >= 193;",
             )
             .unwrap();
-        old.migrate().expect("192 on an existing DB");
+        old.migrate().expect("193 on an existing DB");
         assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
         let row = old.get_host_row("h").unwrap().unwrap();
         assert_eq!((row.cpu_pct, row.mem_pressure), (None, None));
@@ -4041,6 +4060,81 @@ mod tests {
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(s.get_person_by_name("ada").unwrap().unwrap().uuid, ada.uuid);
+    }
+
+    #[test]
+    fn migration_192_admits_the_person_scope_and_keeps_every_row() {
+        let s = store_at_version(191);
+        s.conn
+            .execute_batch(
+                // Raw SQL, not `upsert_host`: a typed host read selects
+                // HOST_COLUMNS, which names columns a later migration (193)
+                // adds, so it fails on a store pinned to 191.
+                "INSERT INTO hosts (alias, reachable) VALUES ('h', 1); \
+                 INSERT INTO sessions (id, tmux_name, host_alias, created_at, last_activity_at, status) \
+                   VALUES (7, 't', 'h', 0, 0, 'running'); \
+                 INSERT INTO env_vars (id, scope, scope_key, name, value, secret, updated_at) \
+                   VALUES (11, 'global', '', 'A', 'g', 0, 1), (12, 'session', '7', 'B', 's', 1, 2);",
+            )
+            .unwrap();
+        assert!(
+            s.conn
+                .execute(
+                    "INSERT INTO env_vars (scope, scope_key, name, value, updated_at) \
+                     VALUES ('person', '1', 'P', 'v', 0)",
+                    [],
+                )
+                .is_err(),
+            "191's CHECK refuses the person scope"
+        );
+        s.migrate().unwrap();
+        let rows = |s: &Store| -> Vec<(i64, String, String)> {
+            s.conn
+                .prepare("SELECT id, scope, name FROM env_vars ORDER BY id")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        assert_eq!(
+            rows(&s),
+            [
+                (11, "global".into(), "A".into()),
+                (12, "session".into(), "B".into())
+            ]
+        );
+        let ada: i64 = s
+            .conn
+            .query_row(
+                "INSERT INTO people (name, is_personal_owner, created_at) VALUES ('ada', 0, 1) \
+                 RETURNING id",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        s.set_env_var(
+            "person",
+            &ada.to_string(),
+            "GIT_AUTHOR_NAME",
+            &crate::store::EnvValue::Plain("Ada".into()),
+        )
+        .unwrap();
+        // Re-running records 192 without rebuilding again.
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 192;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(rows(&s).len(), 3);
+        // Both triggers are in place: the session's and the person's rows go
+        // with their owner.
+        s.conn
+            .execute("DELETE FROM sessions WHERE id = 7", [])
+            .unwrap();
+        s.conn
+            .execute("DELETE FROM people WHERE id = ?1", [ada])
+            .unwrap();
+        assert_eq!(rows(&s), [(11, "global".into(), "A".into())]);
     }
 
     #[test]

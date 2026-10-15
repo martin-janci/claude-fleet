@@ -1459,6 +1459,7 @@ const ENV_SCOPES: &[(&str, &str)] = &[
     ("global", "Global"),
     ("host", "Host"),
     ("project", "Project"),
+    ("person", "Person"),
     ("session", "Session"),
 ];
 
@@ -1470,7 +1471,7 @@ const ENV_VAR: ResourceType = ResourceType {
     id: "env_var",
     label: "Environment variable",
     plural: "Environment variables",
-    help: "Set in every session fleet starts, by scope: global, then host, then project (owner/repo), then session; the narrower wins. A change applies when a session next starts or restarts. A secret's value is never shown again.",
+    help: "Set in every session fleet starts, by scope: global, then host, then project (owner/repo), then person (the session owner's own, e.g. GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL and a secret GH_TOKEN), then session; the narrower wins. A person sees and changes only their own person variables. A change applies when a session next starts or restarts. A secret's value is never shown again.",
     list: "env_vars_list",
     id_field: "id",
     title_field: "name",
@@ -1478,8 +1479,8 @@ const ENV_VAR: ResourceType = ResourceType {
     empty: "No variables. Add one to have it in every session fleet starts.",
     fields: &[
         FieldSpec::new("name", "Name", "The variable's name.", FieldKind::Text { max: 128 }),
-        FieldSpec::new("scope", "Scope", "Where it applies: everywhere, one host, one project or one session.", FieldKind::Choice { options: ENV_SCOPES }).badge(Badge::Label),
-        FieldSpec::new("scope_key", "Applies to", "The host alias, owner/repo or session id; empty for global.", FieldKind::Text { max: 255 }),
+        FieldSpec::new("scope", "Scope", "Where it applies: everywhere, one host, one project, the sessions one person owns, or one session.", FieldKind::Choice { options: ENV_SCOPES }).badge(Badge::Label),
+        FieldSpec::new("scope_key", "Applies to", "The host alias, owner/repo, person id or session id; empty for global.", FieldKind::Text { max: 255 }),
         FieldSpec::new("value", "Value", "Shown for a plain value only.", FieldKind::Text { max: 32768 }),
         FieldSpec::new("secret", "Secret", "Write-only: never shown again.", FieldKind::Bool { on_off: false, default: false }).badge(Badge::True { text: "secret" }),
         FieldSpec::new("is_ref", "Reference", "Read from the hub's environment or a file on it when a session starts.", FieldKind::Bool { on_off: false, default: false }).badge(Badge::True { text: "ref" }),
@@ -1494,8 +1495,8 @@ const ENV_VAR: ResourceType = ResourceType {
             ("secret", Bind::Param("secret")),
         ])
         .params(&[
-            param("scope", "Scope", ParamKind::Choice { options: &[("global", "Global"), ("host", "Host"), ("project", "Project")] }, true),
-            param("scope_key", "Host or owner/repo", text(255, "mercury · owner/repo · empty for global"), false),
+            param("scope", "Scope", ParamKind::Choice { options: &[("person", "Me (my sessions)"), ("global", "Global"), ("host", "Host"), ("project", "Project")] }, true),
+            param("scope_key", "Host or owner/repo", text(255, "empty for me or global · mercury · owner/repo"), false),
             param("name", "Name", text(128, "DATABASE_URL"), true),
             param("value", "Value", ParamKind::Secret, true),
             param("secret", "Keep it secret (never shown again)", ParamKind::Toggle { default: true }, false),

@@ -705,7 +705,7 @@ pub const AUTH_OVERRIDE_VARS: [&str; 7] = [
 /// `agents=` lists which agent CLIs `command -v` finds (Orbit Fleet 12.4;
 /// the names are [`crate::service::host_check::AGENT_BINARIES`]).
 ///
-/// Host load (migration 192): `memkb=` falls back on macOS to
+/// Host load (migration 193): `memkb=` falls back on macOS to
 /// `kern.memorystatus_level` (the percent of memory the kernel counts as
 /// available) of `hw.memsize`; `cpustat=` is the aggregate `cpu` line of
 /// `/proc/stat` (counters the store differences between samples);
@@ -3359,7 +3359,7 @@ mod tests {
         let h = parse_host_health(&stdout);
         assert!(h.cpu_count.is_some_and(|n| n >= 1), "{stdout}");
         assert!(h.mem_total_kb.is_some_and(|n| n > 0), "{stdout}");
-        // Host load (migration 192): the CPU counters are always there on
+        // Host load (migration 193): the CPU counters are always there on
         // Linux; PSI only on a kernel built with it, so it is not asserted.
         assert!(
             h.cpu_total_ticks.is_some_and(|t| t > 0) && h.cpu_busy_ticks.is_some(),

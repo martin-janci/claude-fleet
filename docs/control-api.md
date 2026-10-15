@@ -106,16 +106,26 @@ trusted full device. The key and the code are never logged or returned.
 ### Environment
 
 `env_vars` sets the environment variables every session fleet starts gets,
-by scope (`global` < `host` < `project` as `owner/repo` < `session`, the
-narrower winning): `list`, `set { scope, scope_key, name, value | ref,
-secret? }`, `unset`. A secret or a reference is never listed again; a
+by scope (`global` < `host` < `project` as `owner/repo` < `person` <
+`session`, the narrower winning): `list`, `set { scope, scope_key, name,
+value | ref, secret? }`, `unset`. `person` is the session owner's at launch
+(`scope_key` is the person's id; pass `''` or `me` for your own): every
+person's paired device reaches the tool for its OWN person rows only —
+listing shows them nobody else's, and a set or unset naming another
+person's id is `E_FORBIDDEN`, the master's included. The other four scopes
+are listed to and changed by a fleet admin only. Recipe: a person sets
+`GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` / `GIT_COMMITTER_NAME` /
+`GIT_COMMITTER_EMAIL` and a secret `GH_TOKEN` with scope `person`, and their
+sessions commit and open PRs as them, over any host-level fallback. A hub
+older than this answers scope `person` with `E_INVALID`. A secret or a reference is never listed again; a
 reference (`env:NAME` or `file:/abs`, read by the hub at launch) is the
 master's alone, a device gets `E_FORBIDDEN`. A change applies when a session
 next starts or restarts. `new_session { env }` sets session-scope plain
 values for the session it starts, and a form's `secret` field with an
 `env_target` stores its answer as the session's secret variable
-([forms.md](forms.md#secrets)). Served to the master and a fleet admin's
-devices; a write needs the master or a trusted full device.
+([forms.md](forms.md#secrets)). Served to the master and every person's
+paired device, never a host's token; a write outside `person` needs the
+master or a trusted full device.
 
 ### Named tokens
 
@@ -1920,7 +1930,7 @@ reported. `fleet_health.hosts[]` judges them per host:
 
 The host row and its `host:pinged` ping carry the raw `cpu_pct` and
 `mem_pressure` and the two judgments `mem_low` / `cpu_saturated` as they
-were made when the sample was written (migration 192); trust them only
+were made when the sample was written (migration 193); trust them only
 while `health_at` is within the hour.
 
 The desktop's "older than the fleet" mark trusts a `claude_version_at`
