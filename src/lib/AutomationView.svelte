@@ -12,7 +12,7 @@
   the start rules (8.11, StartRules).
 -->
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
   import RunLanes from './automation/RunLanes.svelte';
   import RunTimeline from './automation/RunTimeline.svelte';
@@ -47,12 +47,14 @@
   import {
     automationTab,
     builtInAgents,
+    runsRequest,
     loadAutomation,
     money,
     setAutomationPaused,
     spendMicros,
     type AutomationState,
     type AutomationTab,
+    type RunsView,
   } from './automation';
   import { windowHidden } from './window_hidden';
   import { routineBudget, type FleetBudget } from './routines';
@@ -71,7 +73,7 @@
   let busy = $state(false);
   let nowSec = $state(Math.floor(Date.now() / 1000));
   /** The Runs tab's view: every run on one clock, or the plain list. */
-  let runsView = $state<'lanes' | 'orbit' | 'list'>('lanes');
+  let runsView = $state<RunsView>('lanes');
   /** The routines, for the orbit map's next fires; read when it opens. */
   let orbitRoutines = $state<RoutineRow[]>([]);
   /** The lanes' window back from now, in seconds. */
@@ -168,7 +170,18 @@
     };
   });
 
-  function showView(v: 'lanes' | 'orbit' | 'list') {
+  // Control's Orbit view asked for Runs in a view, maybe on one run.
+  $effect(() => {
+    const req = $runsRequest;
+    if (!req) return;
+    untrack(() => {
+      runsRequest.set(null);
+      showView(req.view);
+      openRunId = req.run ?? null;
+    });
+  });
+
+  function showView(v: RunsView) {
     runsView = v;
     if (v === 'orbit') void listRoutines().then((r) => (orbitRoutines = r.ok && Array.isArray(r.value) ? r.value : []));
     runs = null;
