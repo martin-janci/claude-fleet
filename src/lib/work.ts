@@ -615,9 +615,15 @@ export async function keepWorkOpen(itemId: number): Promise<Result<WorkItemRow>>
 
 /** Archive a ticket or task (`on: false` unarchives). An archived one leaves
  *  the ticket lists and hides in the Work view behind the Archived switch,
- *  unless a session is running on it. Kept on the hub: every device sees it. */
-export async function setWorkArchived(itemId: number, on: boolean): Promise<Result<{ item_id: number; changed: boolean }>> {
-  const r = await invokeCmd<{ item_id: number; changed: boolean }>('set_work_archived', { args: { item_id: itemId, on } });
+ *  unless a session is running on it. Kept on the hub: every device sees it.
+ *  A bare task (a key with no item behind it) goes by its task id, and the
+ *  hub archives its ended links. */
+export async function setWorkArchived(
+  target: { itemId: number } | { taskId: string },
+  on: boolean,
+): Promise<Result<{ item_id: number | null; changed: boolean }>> {
+  const at = 'itemId' in target ? { item_id: target.itemId } : { task_id: target.taskId };
+  const r = await invokeCmd<{ item_id: number | null; changed: boolean }>('set_work_archived', { args: { ...at, on } });
   if (r.ok) bumpWorkChanged();
   return r;
 }
