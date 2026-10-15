@@ -405,6 +405,96 @@ fleet-updater pair <url-or-code>   redeem `fleet-hub pair --mode updater`'s code
 hub-headless job) drives a real Docker daemon through a good image, one that
 crashes on start and one that migrates and never gets ready.
 
+## fleet-updater on Kubernetes
+
+The same `fleet-updater` updates a hub run as a one-replica StatefulSet:
+`FLEET_UPDATER_BACKEND=kubernetes` (or nothing, in a pod with a service
+account). It decides, verifies, backs up, gates, reports and rolls back
+exactly as above; only what it does to the hub differs. It talks to the API
+server directly (`KUBERNETES_SERVICE_HOST`, the service account's token and
+CA), with no kubectl.
+
+| phase | what happens |
+|---|---|
+| `downloading` | nothing: the kubelet pulls the image when the new pod starts, with the pod's own pull secrets |
+| `verifying` | the signed manifest's digest is a digest |
+| `ready` | the StatefulSet is not mid-rollout and has one replica, `<sts>-0` runs its current revision; `fleet-hub backup --prefix pre-<version> --json` runs in the hub container (`pods/exec`), and the copy must be visible through the updater's mount of the hub's volume claim |
+| `installing` | a strategic-merge patch sets every selected container and init container to `<image>@<digest>` (the old images, the replicas and the revision are kept in the state file); then it waits (`FLEET_UPDATER_K8S_ROLLOUT_TIMEOUT_SECS`, 300 s) for the controller to replace `<sts>-0` on the new revision. Under `updateStrategy: OnDelete` it deletes the pod itself |
+| `validating` | the gates: within `FLEET_UPDATER_READY_TIMEOUT_SECS` (300 s here: the pull happens inside it) the hub container's `status.containerStatuses[].imageID` must carry the signed digest (and every container started from the hub's image the same one), the pod must be Running and Ready with no restart, and `fleet-hub healthcheck --ready --json` (through `pods/exec`) must name the manifest's version, commit and build; then the soak |
+
+**Which containers switch.** The hub container (`FLEET_UPDATER_K8S_CONTAINER`,
+default `fleet-hub`) and every other container or init container whose image
+is on the same repository, so `init` (`fleet-hub init`) moves with it and a
+sidecar on another image does not. `FLEET_UPDATER_K8S_CONTAINERS=a,b` names
+them instead.
+
+**Rollback.** The candidate's logs are kept (the crashed container's
+`--previous` ones too) and it goes on the bad list. Then the StatefulSet is
+scaled to 0 and the updater waits for the pod to go (deleting it after
+`FLEET_UPDATER_K8S_STOP_TIMEOUT_SECS`, 120 s). When the candidate may have
+migrated the database, the backup is restored while nothing runs:
+`state.db*` moved aside to `failed-<version>-<time>/` on the hub's volume,
+never deleted, and the backup copied in. Then the images are patched back to
+exactly what they were (a tag stays a tag, so the template matches its old
+revision) with the replicas back to 1, and the previous build must pass the
+gates. Scaling down first means a fresh pod comes back, so the StatefulSet's
+own trap — a rollout it will not undo while a broken pod is waiting — never
+arises. `rollback_failed` scales to 0 and leaves the StatefulSet, the claim
+and every file for an operator; scale it back up once it is sorted, then
+`kubectl exec deploy/fleet-updater -- fleet-updater clear`.
+
+**Why it mounts the hub's claim.** The backup is written by the hub (only
+it opens SQLite), but the restore must happen while the hub is stopped, so
+something else needs the files. The updater mounts `data-<sts>-0` too: a
+ReadWriteOnce claim binds to a node, not a pod, so two pods on that node may
+share it (not a `ReadWriteOncePod` claim, which allows one). On more than
+one node, schedule the updater on the hub's node. It runs as the hub's uid
+(1000), so a restored database stays the hub's.
+
+**Setting it up** (`deploy/kubernetes/fleet-updater.yaml`: a ServiceAccount,
+a Role limited to the hub's StatefulSet and pod by name — `statefulsets`
+get/patch, `pods` get/delete, `pods/exec` get/create, `pods/log` get, nothing
+cluster-wide — its RoleBinding, a 64 Mi claim for the state, and the
+Deployment):
+
+```bash
+kubectl apply -f deploy/kubernetes/fleet-updater.yaml   # edit namespace / names first
+kubectl -n <ns> exec fleet-hub-0 -c fleet-hub -- fleet-hub pair --name updater --mode updater
+kubectl -n <ns> exec deploy/fleet-updater -- fleet-updater pair 'https://<your hub>/pair#<code>'
+kubectl -n <ns> logs -f deploy/fleet-updater
+```
+
+Until it is paired, `fleet-updater run` waits for a token instead of
+exiting, so the pod stays up to be exec'd into. `FLEET_UPDATER_TOKEN_FILE`
+pointing at a mounted Secret works as well. What it installs is the hub's
+policy, as for Docker: with `update.track = dev` and `update.hub.mode =
+notify` (`set_setting`), it installs a pin, a required update or a rollback,
+and reports every other release as `available`.
+
+**Afterwards**, the image in your own manifest (or Helm values, or Git for
+Argo CD / Flux) is no longer what runs: set it to what `kubectl exec
+deploy/fleet-updater -- fleet-updater status` reports before you next apply
+it, or the older build goes back onto a database the newer one may have
+migrated. A GitOps controller with self-heal reverts the updater's patch at
+once — exclude the StatefulSet's container images from it (Argo CD
+`ignoreDifferences` on `/spec/template/spec/containers/*/image` and
+`initContainers`) or leave updates to Git.
+
+| variable | default | what it does |
+|---|---|---|
+| `FLEET_UPDATER_BACKEND` | `kubernetes` in a pod with a service account, else `docker` | which runtime |
+| `FLEET_UPDATER_K8S_NAMESPACE` | the pod's own | the hub's namespace |
+| `FLEET_UPDATER_K8S_STATEFULSET` | `fleet-hub` | the hub's StatefulSet (its pod is `<name>-0`) |
+| `FLEET_UPDATER_K8S_CONTAINER` | `fleet-hub` | the hub container: exec, logs, the digest gate |
+| `FLEET_UPDATER_K8S_CONTAINERS` | every container on the hub's image repository | the containers whose image is switched, comma-separated |
+| `FLEET_UPDATER_K8S_ROLLOUT_TIMEOUT_SECS` | `300` | for the controller to replace the pod after a patch |
+| `FLEET_UPDATER_K8S_STOP_TIMEOUT_SECS` | `120` | for the pod to go after a scale to 0, before it is deleted |
+| `FLEET_UPDATER_READY_TIMEOUT_SECS` | `300` | as above; longer here since the pull is inside it |
+
+The other variables (`FLEET_UPDATER_HUB_URL`, `_HUB_HOST`, `_HUB_DATA`,
+`_STATE_DIR`, `_SOAK_SECS`, `_KEEP_BACKUPS`, …) mean what they mean for
+Docker.
+
 ## The agent updates itself
 
 `fleet-agent update` is one pass of the same loop for an agent host (S9).

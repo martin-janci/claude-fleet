@@ -187,13 +187,30 @@ impl Url {
         if authority.contains('@') {
             return Err(format!("{url}: credentials in a URL are refused"));
         }
-        let (host, port) = match authority.rsplit_once(':') {
-            Some((h, p)) if !h.is_empty() => (
-                h,
-                p.parse::<u16>()
+        let default = if tls { 443 } else { 80 };
+        // `[fd00::1]:443`: an IPv6 literal keeps its colons inside brackets
+        // (KUBERNETES_SERVICE_HOST on an IPv6 cluster).
+        let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
+            let (h, after) = rest
+                .split_once(']')
+                .ok_or_else(|| format!("{url}: unclosed [ in the host"))?;
+            let port = match after.strip_prefix(':') {
+                Some(p) => p
+                    .parse::<u16>()
                     .map_err(|_| format!("{url}: bad port {p:?}"))?,
-            ),
-            _ => (authority, if tls { 443 } else { 80 }),
+                None if after.is_empty() => default,
+                None => return Err(format!("{url}: junk after the host")),
+            };
+            (h, port)
+        } else {
+            match authority.rsplit_once(':') {
+                Some((h, p)) if !h.is_empty() => (
+                    h,
+                    p.parse::<u16>()
+                        .map_err(|_| format!("{url}: bad port {p:?}"))?,
+                ),
+                _ => (authority, default),
+            }
         };
         if host.is_empty() {
             return Err(format!("{url}: no host"));
@@ -209,10 +226,15 @@ impl Url {
     /// The `Host:` header value.
     pub fn authority(&self) -> String {
         let default = if self.tls { 443 } else { 80 };
-        if self.port == default {
-            self.host.clone()
+        let host = if self.host.contains(':') {
+            format!("[{}]", self.host)
         } else {
-            format!("{}:{}", self.host, self.port)
+            self.host.clone()
+        };
+        if self.port == default {
+            host
+        } else {
+            format!("{host}:{}", self.port)
         }
     }
 }
@@ -268,33 +290,50 @@ impl Client {
         max_bytes: u64,
     ) -> Result<Response, String> {
         let u = Url::parse(url)?;
-        let host = self.host_header.clone().unwrap_or_else(|| u.authority());
+        let host = self.host_for(&u);
         let fut = async {
-            let tcp = tokio::net::TcpStream::connect((u.host.as_str(), u.port))
+            let stream = self.connect(&u).await?;
+            exchange(stream, method, &host, &u.path, headers, body, max_bytes)
                 .await
-                .map_err(|e| format!("{}: {e}", u.authority()))?;
-            if u.tls {
-                let tls = self
-                    .tls
-                    .as_ref()
-                    .ok_or_else(|| format!("{url}: TLS is not set up for this client"))?;
-                let name = rustls_pki_types::ServerName::try_from(u.host.clone())
-                    .map_err(|e| format!("{}: {e}", u.host))?;
-                let stream = tls
-                    .connect(name, tcp)
-                    .await
-                    .map_err(|e| format!("{}: TLS: {e}", u.authority()))?;
-                exchange(stream, method, &host, &u.path, headers, body, max_bytes).await
-            } else {
-                exchange(tcp, method, &host, &u.path, headers, body, max_bytes).await
-            }
-            .map_err(|e| format!("{url}: {e}"))
+                .map_err(|e| format!("{url}: {e}"))
         };
         tokio::time::timeout(self.timeout, fut)
             .await
             .map_err(|_| format!("{url}: timed out"))?
     }
+
+    /// The `Host:` this client sends to `u`.
+    pub fn host_for(&self, u: &Url) -> String {
+        self.host_header.clone().unwrap_or_else(|| u.authority())
+    }
+
+    /// A connection to `u`'s host, TLS when it is `https://`, for a caller
+    /// that speaks more than one request and one answer over it (the
+    /// Kubernetes exec WebSocket). No timeout of its own.
+    pub async fn connect(&self, u: &Url) -> Result<Box<dyn Io>, String> {
+        let tcp = tokio::net::TcpStream::connect((u.host.as_str(), u.port))
+            .await
+            .map_err(|e| format!("{}: {e}", u.authority()))?;
+        if !u.tls {
+            return Ok(Box::new(tcp));
+        }
+        let tls = self
+            .tls
+            .as_ref()
+            .ok_or_else(|| format!("{}: TLS is not set up for this client", u.authority()))?;
+        let name = rustls_pki_types::ServerName::try_from(u.host.clone())
+            .map_err(|e| format!("{}: {e}", u.host))?;
+        let stream = tls
+            .connect(name, tcp)
+            .await
+            .map_err(|e| format!("{}: TLS: {e}", u.authority()))?;
+        Ok(Box::new(stream))
+    }
 }
+
+/// A byte stream [`Client::connect`] hands out: TCP, or TLS over it.
+pub trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
 
 fn connector(ca_file: Option<&std::path::Path>) -> Result<tokio_rustls::TlsConnector, String> {
     use rustls_pki_types::pem::PemObject;
@@ -393,6 +432,13 @@ mod tests {
         assert!(Url::parse("ftp://x").is_err());
         assert!(Url::parse("http://user:pw@x/").is_err());
         assert!(Url::parse("http://x:notaport/").is_err());
+        // An IPv6 literal (an IPv6 cluster's KUBERNETES_SERVICE_HOST).
+        let u = Url::parse("https://[fd00::1]:6443/api").unwrap();
+        assert_eq!((u.host.as_str(), u.port), ("fd00::1", 6443));
+        assert_eq!(u.authority(), "[fd00::1]:6443");
+        let u = Url::parse("https://[fd00::1]/").unwrap();
+        assert_eq!((u.port, u.authority().as_str()), (443, "[fd00::1]"));
+        assert!(Url::parse("https://[fd00::1/").is_err());
     }
 
     #[tokio::test]

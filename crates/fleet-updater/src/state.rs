@@ -68,7 +68,8 @@ pub struct Build {
     /// The manifest digest pulled (`sha256:…`).
     #[serde(default)]
     pub digest: Option<String>,
-    /// The local image id (`sha256:…`) the container must run.
+    /// What the runtime must report it runs (`runtime::Seen::image_id`):
+    /// Docker's local image id, or on Kubernetes the pod's image digest.
     #[serde(default)]
     pub image_id: Option<String>,
     /// From the release manifest, for the identity gate.
@@ -85,7 +86,8 @@ pub struct Build {
 pub struct Previous {
     pub version: Version,
     pub image_id: String,
-    /// The `containers/create` body that runs it again (`spec::create_body`).
+    /// What runs it again: the `containers/create` body (`spec::create_body`),
+    /// or the StatefulSet's replicas and images (`kube::KubeRuntime`).
     pub spec: Value,
     /// The schema the database had when the backup was taken.
     #[serde(default)]

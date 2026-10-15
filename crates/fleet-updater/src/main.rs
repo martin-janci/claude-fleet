@@ -9,7 +9,8 @@
 //! fleet-updater --standalone … no hub above: read the published channel
 //! ```
 //!
-//! Configuration is the environment (docs/updates.md → *fleet-updater*).
+//! Configuration is the environment (docs/updates.md → *fleet-updater*, and
+//! *fleet-updater on Kubernetes* for `FLEET_UPDATER_BACKEND=kubernetes`).
 
 // `#[async_trait]` expands each async trait method into a `#[must_use]` fn that
 // returns a boxed future, which is already `#[must_use]`; clippy 1.99 flags that
@@ -18,8 +19,11 @@
 
 mod docker;
 mod engine;
+mod kube;
+mod runtime;
 mod spec;
 mod state;
+mod ws;
 
 use fleet_updater::common::{self, trusted_keys, FileSequences};
 use fleet_updater::{http, net};
@@ -31,8 +35,10 @@ use std::time::Duration;
 use fleet_update::decide::{Pin, Policy};
 use fleet_update::{GitUpdateChannel, HubUpdateChannel, Mode, Track, UpdateChannel, Version};
 
-use crate::docker::{Docker, EngineDocker};
+use crate::docker::{ContainerRuntime, Docker, EngineDocker};
 use crate::engine::{log, Config, Outcome, Updater};
+use crate::kube::{ApiServer, KubeConfig, KubeRuntime};
+use crate::runtime::Runtime;
 use crate::state::State;
 
 const CHANNEL_BASE_URL: &str =
@@ -150,12 +156,16 @@ async fn real_main(cmd: &str, standalone: bool) -> Result<ExitCode, String> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    let docker = EngineDocker::from_env()?;
-    let container = hub_container(&docker).await;
+    let backend = backend()?;
     let data_mount =
         PathBuf::from(env("FLEET_UPDATER_HUB_DATA").unwrap_or_else(|| "/hub-data".into()));
-    let mut cfg = Config::defaults(&container, &data_mount, &state_dir);
-    cfg.ready_timeout = env_secs("FLEET_UPDATER_READY_TIMEOUT_SECS", 90)?;
+    let mut cfg = Config::defaults(&data_mount, &state_dir);
+    // On Kubernetes the image is pulled inside the gates' wait, not before.
+    let ready_default = match backend {
+        Backend::Docker => 90,
+        Backend::Kubernetes => 300,
+    };
+    cfg.ready_timeout = env_secs("FLEET_UPDATER_READY_TIMEOUT_SECS", ready_default)?;
     cfg.soak = env_secs("FLEET_UPDATER_SOAK_SECS", 120)?;
     cfg.interval = env_secs("FLEET_UPDATER_INTERVAL_SECS", 21_600)?.max(Duration::from_secs(60));
     if let Some(k) = env("FLEET_UPDATER_KEEP_BACKUPS") {
@@ -214,7 +224,21 @@ async fn real_main(cmd: &str, standalone: bool) -> Result<ExitCode, String> {
         ))
     } else {
         let url = env("FLEET_UPDATER_HUB_URL").unwrap_or_else(|| "http://fleet-hub:4180".into());
-        let token = token(&state_dir)?;
+        let token = match token(&state_dir) {
+            Ok(t) => t,
+            // The loop waits to be paired rather than exiting: a pod (or a
+            // compose service with a restart policy) that exits only
+            // restarts, and `fleet-updater pair` needs it running to be
+            // exec'd into.
+            Err(e) if cmd == "run" && e.starts_with(NO_TOKEN) => {
+                log!("{e}; waiting for it");
+                match wait_for_token(&state_dir).await {
+                    Some(t) => t,
+                    None => return Ok(ExitCode::SUCCESS),
+                }
+            }
+            Err(e) => return Err(e),
+        };
         let host = net::hub_host_header(
             env("FLEET_UPDATER_HUB_HOST").as_deref(),
             env("FLEET_HUB_PUBLIC_URL").as_deref(),
@@ -226,14 +250,82 @@ async fn real_main(cmd: &str, standalone: bool) -> Result<ExitCode, String> {
         ))
     };
 
-    let mut u = Updater::new(docker, channel, cfg, state);
+    match backend {
+        Backend::Docker => {
+            let docker = EngineDocker::from_env()?;
+            let container = hub_container(&docker).await;
+            let rt = ContainerRuntime::new(docker, &container);
+            run(Updater::new(rt, channel, cfg, state), cmd, standalone).await
+        }
+        Backend::Kubernetes => {
+            let rt = KubeRuntime::new(ApiServer::in_cluster()?, kube_config()?)?;
+            run(Updater::new(rt, channel, cfg, state), cmd, standalone).await
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Backend {
+    Docker,
+    Kubernetes,
+}
+
+/// `FLEET_UPDATER_BACKEND`, else Kubernetes inside a pod that has a
+/// service account, else Docker.
+fn backend() -> Result<Backend, String> {
+    backend_from(
+        env("FLEET_UPDATER_BACKEND").as_deref(),
+        env("KUBERNETES_SERVICE_HOST").is_some() && Path::new(kube::SA_DIR).join("token").is_file(),
+    )
+}
+
+fn backend_from(named: Option<&str>, in_pod: bool) -> Result<Backend, String> {
+    match named {
+        Some("docker") => Ok(Backend::Docker),
+        Some("kubernetes" | "k8s") => Ok(Backend::Kubernetes),
+        Some(b) => Err(format!("FLEET_UPDATER_BACKEND={b}: docker or kubernetes")),
+        None if in_pod => Ok(Backend::Kubernetes),
+        None => Ok(Backend::Docker),
+    }
+}
+
+/// The StatefulSet to update, from `FLEET_UPDATER_K8S_*`.
+fn kube_config() -> Result<KubeConfig, String> {
+    let namespace = env("FLEET_UPDATER_K8S_NAMESPACE")
+        .or_else(kube::own_namespace)
+        .ok_or(
+            "FLEET_UPDATER_K8S_NAMESPACE is not set and the service account names no namespace",
+        )?;
+    let sts = env("FLEET_UPDATER_K8S_STATEFULSET").unwrap_or_else(|| "fleet-hub".into());
+    let mut k = KubeConfig::new(&namespace, &sts);
+    if let Some(c) = env("FLEET_UPDATER_K8S_CONTAINER") {
+        k.container = c;
+    }
+    k.containers = env("FLEET_UPDATER_K8S_CONTAINERS").map(|v| {
+        v.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect()
+    });
+    k.rollout_timeout = env_secs("FLEET_UPDATER_K8S_ROLLOUT_TIMEOUT_SECS", 300)?;
+    k.stop_timeout = env_secs("FLEET_UPDATER_K8S_STOP_TIMEOUT_SECS", 120)?;
+    Ok(k)
+}
+
+async fn run<R: Runtime>(
+    mut u: Updater<R>,
+    cmd: &str,
+    standalone: bool,
+) -> Result<ExitCode, String> {
     if cmd == "clear" {
         u.clear();
         log!("cleared; the next pass checks again");
         return Ok(ExitCode::SUCCESS);
     }
     log!(
-        "watching {container} ({}; soak {} s)",
+        "watching {} ({}; soak {} s)",
+        u.runtime.describe(),
         if standalone {
             "standalone, the published channel"
         } else {
@@ -252,7 +344,7 @@ async fn real_main(cmd: &str, standalone: bool) -> Result<ExitCode, String> {
     }
     // `update_admin update_now` on the hub drops this in its data dir: the
     // next pass starts at once instead of after `wait`.
-    let trigger = data_mount.join(common::UPDATE_NOW_FILE);
+    let trigger = u.cfg.data_mount.join(common::UPDATE_NOW_FILE);
     common::take_trigger(&trigger);
     loop {
         let (o, wait) = u.tick().await;
@@ -292,12 +384,28 @@ fn token(state_dir: &Path) -> Result<String, String> {
     match std::fs::read_to_string(&f) {
         Ok(t) if !t.trim().is_empty() => Ok(t.trim().to_string()),
         Ok(_) => Err(format!("{} is empty", f.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(
-            "no updater token: run `fleet-hub pair --name updater --mode updater` in the hub, then \
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(format!(
+            "{NO_TOKEN}: run `fleet-hub pair --name updater --mode updater` in the hub, then \
              `fleet-updater pair <the URL it printed>` (or set FLEET_UPDATER_TOKEN), or run --standalone"
-                .into(),
-        ),
+        )),
         Err(e) => Err(format!("{}: {e}", f.display())),
+    }
+}
+
+const NO_TOKEN: &str = "no updater token";
+
+/// Until `fleet-updater pair` (run beside this process) saves a token;
+/// `None` when asked to stop first.
+async fn wait_for_token(state_dir: &Path) -> Option<String> {
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(10)) => {}
+            _ = shutdown() => return None,
+        }
+        if let Ok(t) = token(state_dir) {
+            log!("paired; starting");
+            return Some(t);
+        }
     }
 }
 
@@ -329,6 +437,18 @@ async fn shutdown() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_backend_is_named_or_found() {
+        assert_eq!(backend_from(None, false).unwrap(), Backend::Docker);
+        assert_eq!(backend_from(None, true).unwrap(), Backend::Kubernetes);
+        assert_eq!(backend_from(Some("docker"), true).unwrap(), Backend::Docker);
+        assert_eq!(
+            backend_from(Some("kubernetes"), false).unwrap(),
+            Backend::Kubernetes
+        );
+        assert!(backend_from(Some("nomad"), false).is_err());
+    }
 
     #[test]
     fn the_token_comes_from_the_state_volume_when_nothing_else_names_one() {

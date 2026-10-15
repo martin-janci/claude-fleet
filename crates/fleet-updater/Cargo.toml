@@ -6,7 +6,7 @@ version = "0.1.0"
 # holds it to this exception. Its image is tagged with the release version by
 # hub-image.yml all the same.
 publish = false
-description = "The claude-fleet hub's update sidecar: pulls a signed release by digest, swaps the hub container, gates it on readiness, and rolls back (with the database) when it fails"
+description = "The claude-fleet hub's update sidecar: installs a signed release by digest (a Docker container or a Kubernetes StatefulSet), gates it on readiness, and rolls back (with the database) when it fails"
 authors = ["martin-janci"]
 edition = "2021"
 license = "MIT"
@@ -15,8 +15,12 @@ license = "MIT"
 #
 # Small and auditable on purpose: fleet-update for the decision and the
 # signatures, a hand-written HTTP/1.1 client for the Docker Engine API over
-# its unix socket and for the hub, and no fleet-core (F5: no fleet business
-# logic here). Every crate below is already in the workspace's Cargo.lock.
+# its unix socket, for the Kubernetes API (plus a read-only WebSocket for
+# pods/exec, `ws.rs`) and for the hub, and no fleet-core (F5: no fleet
+# business logic here). No `kube` / `k8s-openapi`: they would bring a
+# hyper/tower client stack and the generated types of the whole API into
+# this image's build for the dozen fields of two objects the updater
+# reads. Every crate below is already in the workspace's Cargo.lock.
 # A library (`src/lib.rs`: the shared HTTP client, the hub channel, pairing,
 # and the binary target that `fleet-agent update` and `fleet-hub update
 # apply` run) and the Docker sidecar binary on top of it.
@@ -38,6 +42,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net",
 # and `--standalone`'s GitHub fetches. Roots from the image's CA bundle.
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 rustls-pki-types = { version = "1", features = ["std"] }
+# The exec WebSocket's Sec-WebSocket-Key (kube.rs, ws.rs); already in the
+# lockfile through fleet-update.
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"

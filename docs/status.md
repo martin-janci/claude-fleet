@@ -1125,6 +1125,23 @@ containers for one service. `scripts/updater-e2e.sh` (CI hub-headless,
 built: its own self-update (its token does not reach `/events`, so it
 keeps to its interval).
 
+**fleet-updater on Kubernetes is built, opt-in, and has not run against a
+real cluster yet.** `FLEET_UPDATER_BACKEND=kubernetes` (auto-detected in a
+pod with a service account) drives a one-replica StatefulSet with the same
+state machine (`engine.rs` now runs on a `runtime::Runtime`: the compose
+container is `docker::ContainerRuntime`, the StatefulSet
+`kube::KubeRuntime`): the API server over HTTPS with the service account's
+token and CA (`kube::ApiServer`, no kubectl, no `kube`/`k8s-openapi`), the
+backup and readiness through `pods/exec` over a hand-written WebSocket
+(`ws.rs`, `v4.channel.k8s.io`), a strategic-merge patch of every container on
+the hub's repository to the signed `image@digest`, the gate on the pod's
+`imageID`, and a rollback that scales to 0, restores the backup through the
+updater's own mount of the hub's claim, and patches the old images back.
+`deploy/kubernetes/fleet-updater.yaml` is the example (namespace
+`papayapos-fleet`, RBAC limited to the hub's StatefulSet and pod by name).
+Tested against a simulated API server and kubelet (`kube::tests`); no
+kind/k3d run in CI.
+
 **S7 is landed:** the desktop updates itself (`src-tauri/src/self_update.rs`,
 `update_check` / `update_install`, both `SameInBoth`; `src/lib/updates.ts`,
 `UpdateBanner.svelte`). Paired it posts `/update/check` through
