@@ -8,7 +8,7 @@
 <script lang="ts">
   import { sessions } from './sessions';
   import { insertIntoComposer } from './conversation';
-  import { focusSession } from './session_focus';
+  import { openInControl } from './control_room';
   import { requestHostsView } from './app_views';
   import { dismissedSuggestions, fleetSuggestions, type Suggestion } from './control_suggestions';
 
@@ -32,7 +32,7 @@
         </div>
         <div class="acts">
           {#if s.kind === 'ci'}
-            <button type="button" class="btn btn--quiet" data-testid="control-suggestion-open" onclick={() => focusSession(s.sessionId, s.label)}
+            <button type="button" class="btn btn--quiet" data-testid="control-suggestion-open" onclick={() => openInControl(s.sessionId, s.label)}
               >Open session</button
             >
           {:else}

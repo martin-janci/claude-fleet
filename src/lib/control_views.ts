@@ -28,7 +28,7 @@ import { showWorkView } from './work_view';
 import { openMissionsTab } from './missions';
 import { sessionMatchesSearch } from './search';
 
-export type ControlViewId = 'needs-you' | 'session' | 'tasks' | 'routines' | 'prs' | 'library' | 'today';
+export type ControlViewId = 'needs-you' | 'session' | 'tasks' | 'missions' | 'routines' | 'prs' | 'library' | 'today';
 
 export interface ControlViewDef {
   id: ControlViewId;
@@ -42,10 +42,11 @@ export interface ControlViewDef {
 
 export const CONTROL_VIEWS: readonly ControlViewDef[] = [
   { id: 'needs-you', label: 'Needs you', glyph: '▤', step: '9.4', landed: true },
-  { id: 'session', label: 'Session in focus', glyph: '▢', step: '9.4', landed: true },
-  { id: 'tasks', label: 'Tasks', glyph: '☑', step: 'G3.10', landed: true },
-  { id: 'routines', label: 'Routines', glyph: '◷', step: 'G3.10', landed: true },
+  { id: 'session', label: 'Session', glyph: '▢', step: '9.4', landed: true },
   { id: 'prs', label: 'Pull requests', glyph: '⑂', step: '9.4', landed: true },
+  { id: 'tasks', label: 'Tasks', glyph: '☑', step: 'G3.10', landed: true },
+  { id: 'missions', label: 'Missions', glyph: '◇', step: 'thread room', landed: true },
+  { id: 'routines', label: 'Routines', glyph: '◷', step: 'G3.10', landed: true },
   { id: 'library', label: 'Library', glyph: '◧', step: '9.7', landed: true },
   { id: 'today', label: 'Today briefing', glyph: '☀', step: '9.4', landed: true },
 ];
@@ -86,14 +87,19 @@ export interface ControlViewsLayout {
   hidden: ControlViewId[];
   /** The view on show. */
   active: ControlViewId;
-  /** ✕ closes the column; the header's Views button opens it again. */
+  /** The edge button (or a drag to zero) hides the panel; the button on
+   *  the chat's edge brings it back. */
   open: boolean;
 }
+
+/** Thread room (2026-10-14): the tabs a fresh layout pins. The rest wait
+ *  in the "+" menu, and choosing one there pins it as a tab. */
+export const PINNED_BY_DEFAULT: readonly ControlViewId[] = ['needs-you', 'session', 'prs'];
 
 const landedIds = (): ControlViewId[] => CONTROL_VIEWS.filter((v) => v.landed).map((v) => v.id);
 
 export function defaultLayout(): ControlViewsLayout {
-  return { order: landedIds(), hidden: [], active: 'needs-you', open: true };
+  return { order: landedIds(), hidden: landedIds().filter((id) => !PINNED_BY_DEFAULT.includes(id)), active: 'needs-you', open: true };
 }
 
 const isViewId = (v: unknown): v is ControlViewId => CONTROL_VIEWS.some((d) => d.id === v);
@@ -116,8 +122,11 @@ export function normalizeLayout(raw: unknown): ControlViewsLayout {
 
 const isAnyObject = (v: unknown): v is object => v !== null && typeof v === 'object';
 
-export const controlViews = writable<ControlViewsLayout>(normalizeLayout(readPref<object | null>('ui.controlViews', null, isAnyObject)));
-controlViews.subscribe((v) => writePref('ui.controlViews', v));
+// Its own key since the Thread room: the 9.4 strip's stored layout showed
+// every view, and the room pins three tabs.
+const LAYOUT_KEY = 'ui.controlRoomViews';
+export const controlViews = writable<ControlViewsLayout>(normalizeLayout(readPref<object | null>(LAYOUT_KEY, null, isAnyObject)));
+controlViews.subscribe((v) => writePref(LAYOUT_KEY, v));
 
 /** The views the strip shows, in order. */
 export function shownViews(l: ControlViewsLayout): ControlViewDef[] {

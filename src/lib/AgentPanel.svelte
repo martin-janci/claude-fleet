@@ -10,7 +10,8 @@
   // add/open host open the Hosts view; replace kills the agent's session
   // after an inline confirm (a kill is always confirmed) and starts a new one.
   //
-  // It is drawn inline in the right column. Until step 13.1 it was also
+  // It is drawn in Control's centre (the Thread room, 2026-10-14), as a
+  // chat: ConversationPanel's `look="chat"`. Until step 13.1 it was also
   // Classic's floating sheet, with a grip, maximize and close.
   //
   // The sheet used to own a composer of its own, because the chip's prefix
@@ -51,11 +52,32 @@
   import { takeControlCommand } from './control_slash';
   import { linkableTasks, type TaskLink } from './control_task_link';
   import { workTree } from './work_view';
+  import { sessions } from './sessions';
+  import { openInControl } from './control_room';
+  import { selectView } from './control_views';
+  import type { ChatRef } from './chat_refs';
 
   // Gap plan G3.9: the box's words in Control. `#KEY` names a task and
   // `@name` a host or session in Control's commands; `/` opens them.
   const CONTROL_HINT = '# task · @ host · / command · ↵ send';
-  const CONTROL_PLACEHOLDER = 'Ask the fleet, or start a task…';
+  // Thread room: the old header's line ("talk to the fleet · it hands work
+  // to sessions and missions") is the box's placeholder now.
+  const CONTROL_PLACEHOLDER = 'Ask the fleet, or hand off work: it goes to sessions and missions…';
+
+  /** A `#`/`@` chip in the chat: a session (or the session on a task)
+   *  opens in the right panel's Session tab, a host in the Hosts view, a
+   *  task with no live session in the panel's Tasks view. */
+  function openRef(ref: ChatRef) {
+    if (ref.kind === 'session') {
+      openInControl(ref.id, ref.label);
+    } else if (ref.kind === 'host') {
+      requestHostsView(ref.alias);
+    } else {
+      const live = $sessions.find((s) => s.status !== 'ghost' && (s.work?.key === ref.key || s.work?.display_key === ref.key));
+      if (live) openInControl(live.id);
+      else selectView('tasks');
+    }
+  }
 
   /** G7.8: the tasks `#` offers, read from the Work tree when first typed. */
   async function linkTasks(): Promise<TaskLink[]> {
@@ -159,6 +181,8 @@
 
 {#snippet chip()}
   {#if firstRun && session}
+    <!-- Thread room (board A2Empty): the empty chat's starters, centred
+         under the greeting. -->
     <div class="first-run" data-testid="control-first-run">
       <p class="first-title">Ask Control about your fleet</p>
       <p class="first-sub">It reads every session, task and routine, and can start, send or plan work for you.</p>
@@ -273,12 +297,14 @@
       placeholder={CONTROL_PLACEHOLDER}
       {linkTasks}
       daySeparators={true}
+      look="chat"
+      onOpenRef={openRef}
     />
   {/if}
 </div>
 
 <style>
-  /* Fills Control's right column. */
+  /* Fills Control's centre: the chat's own column centres itself. */
   .agent-panel {
     display: flex;
     flex-direction: column;
@@ -286,8 +312,7 @@
     height: 100%;
     min-height: 0;
     box-sizing: border-box;
-    padding: 0.75rem;
-    background: var(--bg-pane);
+    background: var(--bg);
     color: var(--fg);
   }
   .blocked-state {
@@ -323,14 +348,17 @@
   }
   .first-run {
     flex-basis: 100%;
-    padding: var(--space-2) var(--space-3);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-md);
-    background: var(--bg-raise);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    padding: var(--space-4) var(--space-3);
   }
   .first-title {
     margin: 0;
-    font-weight: 500;
+    font-size: var(--text-xl);
+    line-height: var(--text-xl-lh);
+    font-weight: 600;
   }
   .first-sub {
     margin: 2px 0 var(--space-2);
@@ -341,6 +369,7 @@
     display: flex;
     gap: var(--space-1);
     flex-wrap: wrap;
+    justify-content: center;
   }
   .chip {
     align-self: flex-start;

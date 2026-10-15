@@ -24,6 +24,9 @@ import { sessions, type SessionRow } from './sessions';
 import { sessionFocus } from './session_focus';
 import { missionOpenRequest } from './missions';
 import { destination } from './destination';
+import { selectedSession } from './selection';
+import { controlViews } from './control_views';
+import { controlMission } from './control_room';
 import { selectedTaskId, sidebarView } from './work_view';
 import { get } from 'svelte/store';
 import { motionPref } from './motion';
@@ -70,8 +73,13 @@ describe('handoff chips', () => {
     expect(chip.textContent).toContain('Working');
     sessions.set([session(3, 'completed', 'fix-ci')]);
     await waitFor(() => expect(screen.getByTestId('handoff-session').textContent).toContain('Done'));
+    destination.set('control');
     await fireEvent.click(screen.getByTestId('handoff-session'));
-    expect(get(sessionFocus)?.id).toBe(3);
+    // Thread room: it opens in Control's Session tab, and Control stays.
+    expect(get(selectedSession)?.id).toBe(3);
+    expect(get(controlViews).active).toBe('session');
+    expect(get(destination)).toBe('control');
+    expect(get(sessionFocus)).toBeNull();
   });
 
   it('a session that is gone says it ended', async () => {
@@ -92,10 +100,12 @@ describe('handoff chips', () => {
     expect(chip.textContent).toContain('Working');
     destination.set('control');
     await fireEvent.click(chip);
-    expect(get(missionOpenRequest)).toEqual({ id: 5 });
-    // Control covers Work: the chip leaves it, or nothing shows.
-    expect(get(destination)).toBe('session');
-    expect(get(sidebarView)).toBe('work');
+    // Thread room: the mission opens in Control's Missions view; Work's
+    // copy is one "Open in Work" away there.
+    expect(get(controlMission)).toBe(5);
+    expect(get(controlViews).active).toBe('missions');
+    expect(get(destination)).toBe('control');
+    expect(get(missionOpenRequest)).toBeNull();
   });
 
   it("a task card's Open in Work leaves Control for the task in Work", async () => {

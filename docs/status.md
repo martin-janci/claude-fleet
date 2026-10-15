@@ -13,11 +13,25 @@ layout is built but OFF by default: Settings → Appearance → Layout picks
 Classic or New (`ui.layout`, default `classic`, `src/lib/prefs.ts`). New has
 a rail (`src/lib/rail.ts`: Control, Inbox, Sessions, Work, Automation,
 Accounts, Toolkit, Settings), the session inspector, and Get started with a
-first-run tour (10.5). Control is the operator's place: its Chat and Today
-tabs, the Views panel (9.4, 9.5), confirmations as cards (9.2), "Sent to a
-session" and "Sent to a mission" receipts (9.3, migration 140), tasks in
-Control (9.6) and the Library (9.7, `library_items`, migration 143, the
-`library` tool). New became the default in step 7.6 (#657) and Classic
+first-run tour (10.5). Control is the operator's place: confirmations as
+cards (9.2), "Sent to a session" and "Sent to a mission" receipts (9.3,
+migration 140), tasks in Control (9.6) and the Library (9.7,
+`library_items`, migration 143, the `library` tool). Since 2026-10-14 it is
+a Thread room (direction A; parity map
+`control-chat-first/2026-10-14/control-parity.md`, frontend only): its own
+left column (`ControlThreads.svelte`, `control_threads.ts`) lists Main chat
+and the threads Control handed out (sessions with `origin = 'operator'`,
+the sessions and missions its `control_handoffs` name) grouped Needs you /
+Working / Done today with All · Needs you · Missions chips and today's
+routine spend; it replaces the sessions list only while Control is open and
+folds away. The centre is the same AgentPanel over ConversationPanel in its
+`look="chat"` (720 px column, bubbles, the agent's prose beside the mark,
+tool calls folded, `#`/`@` chips). The right panel (`ControlViewsPanel`,
+the 9.4 views) is resizable 320–640 px (`layout.control-right`), pins Needs
+you · Session · Pull requests (`ui.controlRoomViews`) and opens any session
+the chat names in its Session tab with a strip of its siblings
+(`control_room.openInControl`), a mission in its Missions view with the
+full task graph. ⌘⇧T opens Control with Today on the right. New became the default in step 7.6 (#657) and Classic
 was removed in step 13.1 (#699). The redesign's backend is not behind
 the switch: M2's session facts (`sessions.agent`, `origin`,
 `last_viewed_at`, `turn_outcome`; migrations 121, 124, 125, 129) and

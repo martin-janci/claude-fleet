@@ -28,11 +28,14 @@ const { box, focus, enqueue, mission, getMission, decideCard } = vi.hoisted(() =
 });
 vi.mock('./outbox', () => ({ outbox: { store: box, enqueue: (...a: unknown[]) => enqueue(...a) } }));
 vi.mock('./missions', () => ({
-  openMission: (...a: unknown[]) => mission(...a),
   getMission: (...a: unknown[]) => getMission(...a),
   decideMissionCard: (...a: unknown[]) => decideCard(...a),
 }));
-vi.mock('./session_focus', () => ({ focusSession: (...a: unknown[]) => focus(...a) }));
+// Thread room: a receipt's session and mission open in Control's right panel.
+vi.mock('./control_room', () => ({
+  openInControl: (...a: unknown[]) => focus(...a),
+  openMissionInControl: (...a: unknown[]) => mission(...a),
+}));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import ControlRouteReceipts from './ControlRouteReceipts.svelte';

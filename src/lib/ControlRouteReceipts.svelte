@@ -15,8 +15,7 @@
   import { onMount } from 'svelte';
   import ProposedBy from './ProposedBy.svelte';
   import { outbox, type OutboxMessage } from './outbox';
-  import { focusSession } from './session_focus';
-  import { openMission } from './missions';
+  import { openInControl, openMissionInControl } from './control_room';
   import { CONTROL, choose, handOn, optionOf, receipts, routeSent, shownOption, targetOf, type Receipt } from './control_route';
 
   let { sessionId }: { sessionId: number } = $props();
@@ -65,11 +64,11 @@
     const t = r.handed ?? targetOf(r.route, shownOption(r));
     if (!t) return;
     if (t.kind === 'mission') {
-      openMission(t.id);
+      openMissionInControl(t.id);
       if (r.chosen === null) void choose(r.key, optionOf(t));
       return;
     }
-    if (focusSession(t.id, t.name) && r.chosen === null) void choose(r.key, optionOf(t));
+    if (openInControl(t.id, t.name) && r.chosen === null) void choose(r.key, optionOf(t));
   }
 
   function pick(r: Receipt, option: string) {

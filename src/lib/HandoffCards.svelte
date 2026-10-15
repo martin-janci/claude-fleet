@@ -57,8 +57,7 @@
   import { placeWork, workTask, workTreeMeta, type DuplicateHint } from './work_view';
   import { proposedByLabel } from './ai_proposal';
   import { sessions } from './sessions';
-  import { focusSession } from './session_focus';
-  import { openMission } from './missions';
+  import { openInControl, openMissionInControl } from './control_room';
   import { showTaskInWorkView } from './work_view';
   import ReviewDialog from './ReviewDialog.svelte';
   import { hubActionBlocked, hubStatus } from './hub';
@@ -140,12 +139,13 @@
 
   function openSession(h: ControlHandoff) {
     const c = sessionChip(h, $sessions);
-    if (h.session_id != null) focusSession(h.session_id, c.name);
+    // Thread room: the session opens in Control's right panel, in place.
+    if (h.session_id != null) openInControl(h.session_id, c.name);
   }
 
   function openMissionChip(h: ControlHandoff) {
     if (h.mission_id == null) return;
-    openMission(h.mission_id);
+    openMissionInControl(h.mission_id);
   }
 
   // ── G3.11: duplicates on the plan card ──
@@ -431,11 +431,24 @@
                 <span class="what">#TASK</span>
                 <span class="target">{item.title}</span>
               </button>
-              <span class="live" title={liveLong} data-testid="handoff-task-live"
-                ><span class="sr-only">{liveLong}</span><span aria-hidden="true"
-                  >{live.length > 0 ? live.map((x) => `${displayName(x, true)} · ${x.host_alias}`).join(', ') : STATE_WORD[state]}</span
-                ></span
-              >
+              {#if live.length > 0}
+                <!-- Thread room: the task's live session opens in Control's
+                     right panel. -->
+                <button
+                  type="button"
+                  class="live live-open"
+                  title="{liveLong}. Open it beside the chat"
+                  data-testid="handoff-task-live"
+                  onclick={() => openInControl(live[0].id, displayName(live[0], true))}
+                  ><span class="sr-only">{liveLong}</span><span aria-hidden="true"
+                    >{live.map((x) => `${displayName(x, true)} · ${x.host_alias}`).join(', ')}</span
+                  ></button
+                >
+              {:else}
+                <span class="live" title={liveLong} data-testid="handoff-task-live"
+                  ><span class="sr-only">{liveLong}</span><span aria-hidden="true">{STATE_WORD[state]}</span></span
+                >
+              {/if}
               <div class="actions">
                 {#if taskUndoable(item, nowSec)}
                   <Button variant="quiet" size="sm" disabled={busy === h.id} onclick={() => void taskAction(h, () => undoWorkAccept([item.id]))} testid="handoff-task-undo"
@@ -709,6 +722,18 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     color: var(--fg-muted);
+  }
+  .live-open {
+    border: 0;
+    padding: 0;
+    background: none;
+    font: inherit;
+    cursor: pointer;
+    text-align: left;
+  }
+  .live-open:hover {
+    color: var(--fg);
+    text-decoration: underline;
   }
   /* The row's actions show on hover or focus; they stay in the tab order. */
   .task-card .actions {
