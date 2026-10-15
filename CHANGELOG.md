@@ -8,6 +8,286 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.6.3-dev.440.desktop.g4a007bf] - 2026-10-15
+
+### Added
+- **automation:** run lanes, a run timeline and the orbit map on Runs
+- **runs:** trace the tools an open routine run's session finishes
+- **control:** add an autonomy chip to Control's composer
+- **control:** fold fleet events and draw task graphs in the chat
+- **status-bar:** show host health beside Shortcuts
+- **control:** lay Control out as a Thread room
+- **runs:** record a trace of each routine and agent run
+- **hosts:** sample CPU and memory pressure and judge host load
+- **control:** tell the operator what changed in the fleet
+- **recovery:** bring killed sessions back by themselves
+- **env:** person-scoped session environment variables
+- **fleet-agent:** relay Claude Code hooks on loopback for hubs behind private DNS
+- **work:** archive a ticket or task; it leaves the lists until unarchived
+- **fleet-agents:** GitHub sources, PR comments and labels, other trackers (step 6)
+- **fleet-agents:** a chat card drafts an instance (step 5, chat path)
+- **fleet-agents:** the grant form and the Agents tab's instances (step 5)
+- **fleet-agents:** actions and the loop guard (step 4)
+- **sessions:** pin a session; pinned sessions get their own section and are never closed
+- **fleet-agents:** the generic runner (step 3)
+- **audit:** work_admin's org writes and the CLI's direct org commands record admin events
+- **audit:** a pairing code carries its minter; the mint is recorded and the redeem names it
+- **clients:** list_clients and client list show the person's trust and catalog grant
+- **accounts:** switch before the limit; never restart a session waiting on a dialog
+- **fleet-hub:** routine, agents and shepherd debugging on the console
+- **fleet-agents:** store bindings and instance grants (step 2)
+- **automation:** debug routines, agents and the PR shepherd
+- **accounts:** continue after an automatic switch, and say what will happen
+- **dashboards:** a burn-up widget from the status history
+- **debug-devices:** a person reads a held device; regenerated docs
+- **accounts:** switch an out-of-credit session to another login automatically
+- **fleet-agents:** configurable agent definitions (step 1)
+- **missions:** open tasks and child sessions from a mission; Work row-click pref
+- **debug-devices:** device cards, the session's device strip and the device block in the chat
+- **dashboards:** a pin on one device shows on the others at once
+- **debug-devices:** a device board above the Debug devices page
+- **work:** an agent declares what its own task waits on
+- **work:** archive or remove a work link whose session is gone over the control API
+- **work:** suggest closing finished work, and an Archived section (CF-5)
+- **work:** draft the new task's title from its notes, and attach files (CF-4)
+- **work:** move a ticket at its tracker from the Board (CF-6)
+- **desktop:** read-only groups page and a person's groups and effective roles
+- **hub:** fleet-hub realm — groups, roles, mappings and audit from the hub machine
+- **realm:** realm_admin — users, groups, roles, mappings and audit over MCP
+- **auth:** device tokens expire after idle days; SSO no longer auto-provisions
+- **agent-install:** a tracker's host may be moved to an agent
+- **trackers:** allow via_host / via_cli on a fleet-agent host
+- **agent:** AgentTransport pipes stdin through the exec frame
+- **work:** promote a task to a Linear or GitHub ticket too
+- **realm:** an append-only admin audit log, and re-enabling a person
+- **debug-devices:** a queue beside the claim
+- **realm:** trust and assets-admin are the person's, granted as realm roles
+- **realm:** the fleet-admin role, not the single owner, administers the fleet
+- **realm:** org membership is a projection of the org's groups
+- **realm:** store API for roles, groups, mappings and effective roles
+- **realm:** roles, groups and mappings, seeded from orgs and devices
+- **people:** a person carries a Keycloak user profile and uuid
+- **env:** a move checks the target's environment among its opening checks
+- **env:** Settings › Environment page and docs
+- **env:** routed env_vars commands and hub contract 18
+- **env:** env_vars tool, new_session env and a form's env_target; the sweep keeps a host noted mid-pass
+- **env:** sweep env files from hosts and mask stored secrets in diagnostics
+- **work:** promote a task of fleet's own to a Jira or Asana ticket
+- **dashboards:** pinned dashboards live on the hub, per person
+- **env:** repair, review and move launch with the session's environment
+- **env:** sessions source their environment on create, restart and recreate
+- **agents:** the support agent scans logs and teaches its KB (step 8, part 2)
+- **env:** resolve, render and wrap a session's environment
+- **env:** env_vars table and store
+- **debug-devices:** Mirror action opens scrcpy over SSH or locally
+- **update:** a release pokes the hub, the hub wakes its updater; read a phone's check
+- **agents:** the reviewer labels, describes and debates tests (step 8, part 1)
+- **device-mirror:** mirror lifecycle over the relay
+- **agents:** the support agent writes to Jira (step 7)
+- **debug-devices:** start a host's adb server on demand
+- **decide:** frame free text as quoted data in every adapter that sends it
+- **device-mirror:** adb wire preflight and local tool lookup
+- **work:** an agent plans its own shared task
+- **relay:** SSH dialer over ssh -W
+- **agents:** the support agent's read side (step 6)
+- **relay:** loopback relay listener and the mirror's error codes
+- **agents:** the agents in Automation and their actions in the Inbox (step 5)
+- **work:** a ticket start briefs Claude with its comments and attachments
+- **update:** hub reads dev/nightly channels every 15 min; Check for updates re-reads now
+- **chat:** the agent proposes a dashboard, the person pins it
+- **agents:** the PR reviewer posts, by the rule's level (step 4)
+- **work:** an agent renames its own shared task
+- **work:** an agent edits and comments on its own shared task
+- **agents:** the PR reviewer, read side (step 3)
+- **control:** go on with the recommended option when nobody answers
+- **agents:** the run vehicle and a run's own workspace (step 2)
+- **work:** an agent sets the status of its own shared task
+- **ui:** a dashboard per workspace, drawn from work stats
+- **missions:** the operator saves a mission for the owner, approved by a person
+- **missions:** headless review and test runs in the implementer's checkout
+- **agents:** agent runtime for the reviewer and support agents (step 1)
+- **work:** count the board's tasks (work stats) and log status history
+- **decide:** haiku as a live second opinion beside Jev, in shadow
+- **ui:** workspace switcher for Developer, Tester, PM, Scrum master, PO
+- **work:** tracker comments in the task detail, read and posted back
+- **work:** priority, labels and estimate on tasks
+- **work:** a session agent finds and recognises its own tasks
+- **decide:** option-order perturbation, cost per right answer, J3 split question, J1 quoted-data framing
+- **work:** rename ticket prefixes from Settings, the hub CLI and work_admin
+- **work:** Jira-style ticket keys administered by fleet
+- **work:** place by item_id or group id, unplace, and honest confirm refusals
+- **hub:** add host, account nickname and host checklist from a paired desktop
+- **routines:** a deleted routine keeps its runs
+- **downloads:** G7.15 Pause on a copy in flight
+- **work:** task attachments, files and images kept in fleet
+- **hub:** serve the phone's hub data (repair progress, Meta keys, Codex bg agents, week stats, host proposal)
+- **toolkit:** asset editor Discard and Lint, confirmed snippet Remove, push after each change, layers that apply by organisation
+- **help:** context help at a shared session's composer
+- **hub:** sign in with Keycloak (OIDC) to pair a device
+- **help:** gate context help behind Writing help's work.context_help
+- **conversation:** fit the composer to Codex sessions
+- **control:** one chip row above the box
+- **wizards:** wizard_state resumes Add host and Add a project on another device
+- **agent:** update itself without systemd, and never refuse a newer hub
+- **work:** task detail redesign: header, Markdown, properties rail
+- **search:** full-text index, `search` tool and ⌘K Everywhere
+- **share:** G7.11 Read / Answer / Steer, Private, and Trust now
+- **sessions:** G7.10 close the session, files and new-session gaps
+- **missions:** mission Filters, the finished PR block, Jev unsure and Done today in Review
+- **work:** drafted name prefilled, branch mates, brief drafting in the task, board chips
+- **ui:** G7.8 mission hand-on, PR origin, Library folders, task cards, # link
+- **ui:** G7.9 Done today, Tidy Reopened and Expire, routine outcome, PR line
+- **forms:** undo on every dialog, form hints, receipts, live progress and drafted wizards
+- **orgs:** G7.14 people & devices, members, federation and debug-device gaps
+- **work:** start and placement rules name host fallback, account, model and agent
+- **states:** G7.15 wizard agents, guide provenance and undo, calm states, AI change line
+- **toolkit:** G7.13 + Add skill, layer tabs, Automation limits, Hub status header
+- **hosts:** G7.12 host tabs, integrations form, base path check, paused panel, reviewer agent
+- **work:** one person does not see another's device names
+- **work:** personal sprints, and an org decides whether its members plan
+- **help:** Haiku context help at the shell and composer prompt lines
+- **work:** local work three levels deep (epic → task → subtask)
+- **work:** task comments, and Activity lists what happened to a task
+- **search:** sprints, epics, types and sort in Work; one session rule; ⌘K planning rows
+- **search:** ⌘K finds own tasks and any cached ticket; accent-blind matching
+- **work:** epics for local items, one level deep
+- **work:** scope the board to a sprint or the backlog
+- **work:** plan tasks into sprints and releases from the Work view
+
+### Changed
+- **routing:** drive run_trace through the routed-read cases
+- stop adding Claude-Session trailers to commits and PRs
+- **mcp:** raise BYTES_PER_TOOL to 851 after main's #900 landed beside #901
+- **pairing:** a fenced trusted code for a person wholly inside the org still redeems trusted
+- **realm:** the writer guard scans production text up to the last test module body
+- **realm:** the projection property test covers every writer; the guard reads every spelling
+- **identity:** one fleet-admin-device predicate, one role_ref, one via fence
+- **mcp:** keep the agent-facing facts in the client tool surface; budget raised to 841
+- **mcp:** the definition budget bounds the full-client surface too
+- keep the rust cache when tests fail, and save it from main only
+- **ci-local:** the update-scripts step uses the cargo target dir it built into
+- cargo fmt
+- **debug-devices:** tool results carry images; a device chat block; shared device helpers
+- **wip:** JWKS verification scaffold and identity handover note
+- **work:** the isolation matrix and routing test follow the ticket move (CF-6)
+- **hub:** the realm CLI's run/print glue and every table render
+- **auth:** Task 9 edits before the third main merge (to be squashed)
+- **ci:** ignore RUSTSEC-2024-0449 (unsafe-libyaml, via serde_yaml) in cargo deny
+- **agent-e2e:** stdin reaches the real agent's child and is closed
+- **dashboards:** the merged Caller literal names is_fleet_admin
+- **audit:** Task 8 fix round 1 edits, part 2 (to be squashed)
+- **mcp:** raise the tool byte budget to 825 (ported from #875)
+- **work:** a To do ticket for the status filter test
+- **mcp:** raise the tool byte budget to 825 for #873 and #874 together
+- **audit:** Task 8 fix round 1 edits (to be amended)
+- **env:** the router sum, the resource command list and the control API guide name the new tool and commands
+- **pages:** the env_var resource routes on a paired desktop, like linked hubs
+- **env:** regenerate the control API reference, schemas, page docs, verdicts and the contract golden
+- **wip:** JWKS verification scaffold and identity handover note
+- **decide:** set JevRequest.order_salt in haiku_shadow_tests
+- **search:** gate the local-shell transcript pass test to unix
+- **fleet-core:** one headless agent seam for fleet's claude -p runs
+- strip the Claude Projects attribution lines from PR descriptions
+- **pages:** regenerate the page registry for the agent-updates default
+- **work:** build the device-name test's scopes through Caller::view_scope
+- **search:** build the marks list with Array.from (main's DOM lib)
+- **accounts:** tolerate a closed pipe when a refused profile exits before reading stdin
+- **hub-e2e:** skip the agent install leg off Linux
+
+### Fixed
+- **provision:** keep a symlinked ~/.claude.json a symlink
+- **agent:** move tmux servers and panes into their own systemd scopes
+- **work:** hide archived tickets in the left panel until Show archived (#908)
+- **deps:** bump rustls to 0.23.46 past RUSTSEC-2026-0349
+- **identity:** final-review fixes: org admins no longer see a fleet admin's devices in member lists; a fenced trusted redeem refuses a person who left the org; audit-log docs follow the scrub; minor audit and test gaps
+- **pairing:** a trusted code minted by an org admin is re-checked against the org at redeem
+- **org_admin:** device lists hide every fleet admin's devices, as require_org_device already does
+- **catalog:** a personal catalog's grantees follow the assets-admin role
+- **clients:** a revoked device lists neither trust nor the catalog grant
+- **realm:** group_by_path answers only a group whose own path is the one asked
+- **audit:** the scrub keeps plain values, redacts URL credentials and stores JSON always
+- **realm:** moving a group bounds the moved subtree's height, not only the parent's depth
+- **mcp:** a liveness stamp the writer was busy for is restored, not erased
+- **identity:** the master counts as a fleet admin only while the hub names its owner
+- **control:** let the tray yield on very short panes, test the scroll on open
+- **a11y:** the image lightbox drops its outline without a :focus rule
+- **work:** keep the per-host item read off a full scan of work_links
+- **control:** keep the tray above the composer readable on short panes
+- **provision:** write the fleet MCP entry into login profiles
+- **work:** let a mission's worker read its step and its mission
+- **work:** group a task with no session under its project's repo
+- **sso:** verify the ID token's signature against the issuer's JWKS
+- **realm:** fleet admins are exempt from the org fence; re-enable restores nothing; an org admin's trust stays inside the org; the org fence follows group ancestry
+- **realm:** a managed group never takes a role mapping; the org-authority sweep over every realm_admin action
+- **ci:** main's macOS and Windows legs pass again
+- **ssh:** route run_with_stdin to a fleet-agent host instead of refusing
+- **dashboards:** keep the tool surface within its budget
+- **work:** the status filter counts a live bare key as in progress
+- **realm:** untrust refuses while a group still trusts the person; grant_catalog personal off keeps the device in hand
+- **realm:** org roles and the seeded structure are reachable only through the org wrappers
+- **realm:** the uuid backfill never lowers the auth epoch; assets-admin backfill matches client_is_assets_admin
+- **env:** each environment command routes by its own name
+- **sso:** verify the ID token's signature against the issuer's JWKS
+- **device-mirror:** trust a held claim only on a standalone desktop
+- **device-mirror:** never release a claim the mirror does not own
+- **env:** refuse before the workspace step; pin the created project so relaunches keep its scope
+- **provision:** a remote secret file ends 0600 after the atomic upload
+- **work:** a task with no status and no live session leaves the Board and List
+- **env:** wrap's helper cannot clobber a user variable; referenced values are checked
+- **device-mirror:** keep a live mirror's claim; kill scrcpy on quit
+- **device-mirror:** unix-only path test; bound adb version
+- **update:** on dev and nightly every target asks again within 15 minutes
+- **ui:** workspace switcher menu escapes the clipping rail
+- **work:** give the task page a gutter and a calmer header
+- **sessions:** offer Restart anyway when the target is the fleet controller
+- **control:** Open in Work and mission links leave Control for Work
+- **work:** starting a fleet task briefs Claude with its title and notes
+- **conversation:** keep the Less toggle with the last quick-prompt chip
+- **conversation:** fill the collapsed quick-prompt row instead of stopping at three
+- **missions:** show a running headless check to whoever sees the implementer
+- **work:** a group label that already names a group is refused, not duplicated
+- **decide:** port #849's order_salt line so the test target compiles
+- **test:** haiku shadow test sets JevRequest::order_salt
+- **decide:** give haiku_shadow_tests' JevRequest the order_salt field
+- **work:** two test: lines no longer deadlock an item
+- **repo:** gate the remote_branches test helper to unix like git_fixture
+- **work:** clippy unnecessary_sort_by in the ticket prefix overview
+- **decide:** shuffle Jev choice options and gate on the top probability
+- **hosts:** re-provision stale hosts automatically, and from a paired desktop
+- **sessions:** recover and clean up ghost sessions
+- **hub-client:** a 204 answers at once; the mirror fetches real artifacts
+- **hub:** a contract-17 desktop keeps working against a contract-16 hub
+- **routines:** type a run's prompt into its session
+- **chat:** set the conversation at the manual's reading size
+- **control:** cap the tray above the composer and fold task cards into a group
+- **agent:** welcome an older agent at its own protocol version
+- **hosts:** host detail tabs answer the arrow keys
+
+### Documentation
+- **status:** the identity follow-ups replace the known gaps
+- **plans:** identity sub-project 1 follow-ups (TASK-264)
+- **identity:** fleet administration needs a device bound to no org; the audit log's real coverage
+- the realm model, per-person trust, device-token expiry and the audit log
+- a fleet-agent host takes stdin (CF-3 plan)
+- **spec:** configurable agents with per-instance stores
+- **plan:** handover for session env and secrets (tasks 1–5 done)
+- **plan:** identity realm model implementation plan; spec follows the code survey
+- **debug-devices:** the device mirror
+- **spec:** identity realm model and user-management hardening
+- **plan:** session environment variables and secrets
+- **spec:** fold the code survey into the env design
+- **update:** the updater asks every 15 minutes at most on dev and nightly
+- **spec:** session environment variables and secrets design
+- **plan:** device mirror PR 1 — relay core, SSH and local routes
+- **spec:** device mirror (scrcpy) over SSH and the hub
+- list work_stats in the control-API reference
+- **spec:** reviewer and support agents design
+- regenerate the control-api reference on main
+- **control-api:** regenerate the tool reference (work_link description drifted on main)
+- **skills:** add migration-conflicts skill for renumbering colliding migrations
+- **control-api:** name wizard_state in the tool index
+- G6.2 bring status, the transition plan and the phone parity audit up to date
+- **redesign:** G6.1 re-run the canvas audit against main
 ## [0.6.2] - 2026-10-10
 
 ### Added
@@ -3503,6 +3783,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.6.3-dev.440.desktop.g4a007bf]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.3-dev.440.desktop.g4a007bf
 [0.6.2]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.2
 [0.6.1]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.1
 [0.6.0]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.0
