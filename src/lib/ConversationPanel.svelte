@@ -154,6 +154,7 @@
   import OrbitMark from './kit/OrbitMark.svelte';
   import { hosts as hostRows } from './hosts';
   import { refIndex, refSegments, type ChatRef } from './chat_refs';
+  import { fleetLine, parseFleetPrompt } from './fleet_events';
 
   let {
     session,
@@ -2363,6 +2364,7 @@
             {@const groups = groupItems(turn.items)}
             {@const replyText = groups.flatMap((x) => (x.kind === 'text' ? [x.text] : [])).join('\n\n')}
             {@const duration = turnRunning ? null : turnDuration(turn.at, turn.ended_at)}
+            {@const fleet = chatLook ? parseFleetPrompt(turn.prompt) : null}
             {#if showDivider && turnAnchor(turn) === dividerAnchor}
               <div class="new-divider" data-testid="conv-new-divider" role="separator" aria-label="New since you last looked"><span>New</span></div>
             {/if}
@@ -2372,7 +2374,35 @@
               data-match={matchKeys.has(key) || undefined}
               data-current-match={currentMatch === key || undefined}
             >
-              {#if turn.prompt !== null}
+              {#if fleet}
+                <!-- Thread room: fleet's own prompt (`[fleet events]` /
+                     `[fleet]`, fleet_events.ts) is not the person talking:
+                     one folded line that opens into the events. -->
+                <details class="fleet-events" data-testid="conv-fleet-events">
+                  <summary
+                    ><span class="fe-rule" aria-hidden="true"></span><span class="fe-line">{fleetLine(fleet)}</span
+                    >{#if turn.at}<time datetime={turn.at}>{relativeTime(turn.at, nowMs)}</time>{/if}<span class="fe-rule" aria-hidden="true"
+                    ></span></summary
+                  >
+                  <ul class="fe-list">
+                    {#each fleet.events as e, k (k)}
+                      {@const sid = e.sessionId}
+                      <li data-testid="conv-fleet-event">
+                        {#if sid != null && onOpenRef && $sessions.some((x) => x.id === sid)}
+                          <button
+                            type="button"
+                            class="fe-open"
+                            data-testid="conv-fleet-event-open"
+                            title="Open this session beside the chat"
+                            onclick={() => onOpenRef?.({ kind: 'session', id: sid, label: e.text })}>{e.text}</button
+                          >
+                        {:else}{e.text}{/if}
+                      </li>
+                    {/each}
+                    {#if fleet.more > 0}<li class="fe-more">… and {fleet.more} more</li>{/if}
+                  </ul>
+                </details>
+              {:else if turn.prompt !== null}
                 {@const long = isLongPrompt(turn.prompt)}
                 <div class="prompt" data-testid="conv-prompt">
                   <div class="prompt-head">
@@ -3223,6 +3253,74 @@
   .chat-look .turn:hover .footer-actions,
   .chat-look .footer-actions:focus-within {
     opacity: 1;
+  }
+  .fleet-events {
+    margin: 0 0 0.8rem;
+    padding-left: 34px;
+  }
+  .fleet-events summary {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    list-style: none;
+    cursor: pointer;
+    color: var(--fg-muted);
+    font-size: var(--text-xs);
+  }
+  .fleet-events summary::-webkit-details-marker {
+    display: none;
+  }
+  .fleet-events summary:hover .fe-line {
+    color: var(--fg);
+  }
+  .fleet-events summary:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+    outline-offset: 2px;
+  }
+  .fe-rule {
+    flex: 1 1 auto;
+    height: 1px;
+    background: var(--border);
+  }
+  .fe-line::after {
+    content: ' ▸';
+  }
+  .fleet-events[open] .fe-line::after {
+    content: ' ▾';
+  }
+  .fe-list {
+    margin: var(--space-2) 0 0;
+    padding: var(--space-2) var(--space-3);
+    list-style: none;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: var(--bg-pane);
+    font-size: var(--text-xs);
+    line-height: var(--text-xs-lh);
+    color: var(--fg-2);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .fe-more {
+    color: var(--fg-muted);
+  }
+  .fe-open {
+    border: 0;
+    padding: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .fe-open:hover {
+    color: var(--fg);
+    text-decoration: underline;
+  }
+  .fe-open:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+    outline-offset: 1px;
   }
   .ref-chip {
     display: inline;

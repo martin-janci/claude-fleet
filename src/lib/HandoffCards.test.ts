@@ -431,3 +431,53 @@ describe('the task group', () => {
     expect(screen.getByTestId('handoff-task-owner')).toBeTruthy();
   });
 });
+
+// Thread room (2026-10-14): the task graph card in the chat.
+describe('task graph card', () => {
+  it('a mission receipt shows its graph, and Open full graph opens it in Control', async () => {
+    receipts = [{ id: 2, at: now, kind: 'mission', tool: 'work_link', mission_id: 5, mission_name: 'Ship 9.x', mission_state: 'active' }];
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd === 'control_handoffs') return receipts;
+      if (cmd === 'work_mission')
+        return {
+          mission: { id: 5, name: 'Ship 9.x', state: 'active' },
+          items: [{ id: 1, title: 'Fix flake' }, { id: 2, title: 'Push tag' }],
+          graph: { nodes: [{ item_id: 1, state: 'done', wave: 1 }, { item_id: 2, state: 'proposed', wave: 2 }] },
+        };
+      return null;
+    });
+    render(HandoffCards);
+    const card = await screen.findByTestId('task-graph-card');
+    expect(card.dataset.kind).toBe('mission');
+    expect(screen.getAllByTestId('task-graph-step').map((s) => s.textContent)).toEqual([
+      expect.stringContaining('Fix flake'),
+      expect.stringContaining('Push tag'),
+    ]);
+    expect(screen.getByTestId('task-graph-progress').textContent).toBe('1 of 2 done');
+    await fireEvent.click(screen.getByTestId('task-graph-open'));
+    expect(get(controlMission)).toBe(5);
+    expect(get(controlViews).active).toBe('missions');
+  });
+
+  it('a proposed tree also shows as a graph', async () => {
+    receipts = [
+      {
+        id: 4,
+        at: now,
+        kind: 'tree',
+        tool: 'propose_tree',
+        item: { id: 10, title: 'Release', status: 'todo' },
+        items: [
+          { id: 11, title: 'Build', status: 'todo', proposal_state: 'proposed' },
+          { id: 12, title: 'Tag', status: 'todo', proposal_state: 'proposed', depends_on: [11] },
+        ],
+      },
+    ];
+    render(HandoffCards);
+    const card = await screen.findByTestId('task-graph-card');
+    expect(card.dataset.kind).toBe('tree');
+    expect(card.textContent).toContain('Task graph · Release');
+    expect(screen.getAllByTestId('task-graph-step')).toHaveLength(2);
+  });
+});
+

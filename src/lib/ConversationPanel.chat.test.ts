@@ -88,4 +88,35 @@ describe('ConversationPanel, chat look', () => {
       { kind: 'task', key: 'PD-2592' },
     ]);
   });
+
+  it("fleet's own prompt is a folded \"Fleet · N events\" line, not the person's bubble", async () => {
+    const digest = [
+      '[fleet events] What changed since the last note.',
+      `- session fix-flake on mercury (#${flake.id}, you started it) finished a turn`,
+      '- host mercury is low on memory (6% available)',
+      '- … and 2 more.',
+    ].join('\n');
+    mockedConv.mockResolvedValue({ ok: true, value: conv(digest) });
+    const onOpenRef = vi.fn();
+    render(ConversationPanel, { session: operator, visible: true, look: 'chat', onOpenRef });
+    const fold = (await screen.findByTestId('conv-fleet-events')) as HTMLDetailsElement;
+    expect(screen.queryByTestId('conv-prompt')).toBeNull();
+    expect(fold.open).toBe(false);
+    expect(fold.querySelector('summary')!.textContent).toContain('Fleet · 4 events');
+    expect(screen.getAllByTestId('conv-fleet-event').map((e) => e.textContent?.trim())).toEqual([
+      `session fix-flake on mercury (#${flake.id}, you started it) finished a turn`,
+      'host mercury is low on memory (6% available)',
+    ]);
+    await fireEvent.click(screen.getByTestId('conv-fleet-event-open'));
+    expect(onOpenRef.mock.calls[0][0]).toMatchObject({ kind: 'session', id: flake.id });
+    // Control's reaction still reads as its reply.
+    expect(screen.getByTestId('conv-text').textContent).toContain('On it.');
+  });
+
+  it("the transcript look leaves fleet's prompt as it was typed", async () => {
+    mockedConv.mockResolvedValue({ ok: true, value: conv('[fleet] Your session was restarted automatically.') });
+    render(ConversationPanel, { session: operator, visible: true });
+    expect((await screen.findByTestId('conv-prompt')).textContent).toContain('[fleet] Your session was restarted');
+    expect(screen.queryByTestId('conv-fleet-events')).toBeNull();
+  });
 });
