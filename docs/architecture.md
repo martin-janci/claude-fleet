@@ -432,6 +432,17 @@ bullet for the area you are about to change.
   (`RunsReach`); `service::runs::reach` derives them from the `ViewScope`
   (sessions it sees, missions and routines it may read, whole-fleet
   spend).
+- **Run traces** (`store/run_trace.rs`, `service/run_trace.rs`, migration
+  194, `runs { trace }`, desktop `run_trace` → hub `runs`, event
+  `run:changed`): one append-only row per step of a run, keyed by its runs
+  id (`routine:418`, `agent:91`). Writers call `run_trace::record`, which
+  logs and never fails the run: `routines/trace.rs` from the scheduler
+  (`tick::fire_with`, `record_skip`, `close_coded`, `outcome::record_with`,
+  Jev's read in `decide/routine_run_outcome.rs`) and `agents/trace.rs` from
+  `agents::run_with`. The store caps a run at `RUN_TRACE_MAX_STEPS` (phase
+  rows still land), replaces `data` over 4 KB with a note and drops rows
+  past `RUN_TRACE_KEEP_SECS` on each run's first step. Reading uses
+  `runs::reach`, so a trace is served exactly where its run is listed.
 - **Debug devices** (guide `docs/debug-devices.md`; `service/debug_devices/`,
   `store/debug_devices.rs`, migration 120, `mcp/tools/devices.rs`, contract
   revision 10): a scan runs `scripts::scan_script` on a host (adb,

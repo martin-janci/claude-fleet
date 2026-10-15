@@ -9,10 +9,11 @@ use super::fix::{
     turn_code, E_NO_SESSION, E_PROMPT_NOT_DELIVERED, E_PROMPT_NOT_QUEUED, E_RUN_BUDGET,
     E_RUN_STALE, E_RUN_TIME_CAP, E_SESSION_LOST, E_SESSION_REMOVED,
 };
-use super::{decide, record_skip, repo_matches, usd, Decision, EVENTS, PR_EVENTS};
+use super::{decide, record_skip, repo_matches, trace, usd, Decision, EVENTS, PR_EVENTS};
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::{lock, IpcError};
 use crate::service::decide::routine_run_outcome::{self, PaneReader, TmuxPanes};
+use crate::service::run_trace::Step;
 use crate::service::sessions::NewSessionArgs;
 use crate::ssh::SshClient;
 use crate::store::{NewRoutineRun, RoutineRow, RoutineRunRow, SessionOrigin, SessionRow, Store};
@@ -167,7 +168,7 @@ pub async fn fire_with(
     context: Option<&str>,
     now: i64,
 ) -> Result<RoutineRunRow, IpcError> {
-    let (owner, _starting, plan) = {
+    let (owner, _starting, plan, checks) = {
         let s = lock(&deps.store)?;
         let (host, note) = match plan(&s, r, now)? {
             Plan::Skip(why) => {
@@ -175,6 +176,7 @@ pub async fn fire_with(
             }
             Plan::Start { host, note } => (host, note),
         };
+        let checks = super::debug::fire_checks(&s, r, now).unwrap_or_default();
         // Its run row is written only once the session exists, so a second
         // fire while this one spawns (Run now during a scheduled fire, a
         // double click) would pass `routine_run_open` too: the claim is
@@ -190,10 +192,13 @@ pub async fn fire_with(
             Some(p) => Some(p),
             None => s.personal_owner_id()?,
         };
-        (owner, starting, (host, note))
+        (owner, starting, (host, note), checks)
     };
     let (mut host, mut note) = plan;
+    let mut steps = vec![trace::placement_step(r, &host, note.as_deref(), now)];
+    let started = std::time::Instant::now();
     let mut spawned = deps.spawn.spawn(session_args(r, &host, owner)).await;
+    steps.push(spawn_step(&host, &spawned, started, now));
     // The start failed on the routine's own host: its fallback takes the
     // run, once (G3.8).
     if let (Err(e), Some(fb)) = (&spawned, r.fallback_host.as_deref()) {
@@ -203,7 +208,10 @@ pub async fn fire_with(
                 r.host_alias, e.message
             ));
             host = fb.to_string();
+            steps.push(trace::placement_step(r, &host, note.as_deref(), now));
+            let started = std::time::Instant::now();
             spawned = deps.spawn.spawn(session_args(r, &host, owner)).await;
+            steps.push(spawn_step(&host, &spawned, started, now));
         }
     }
     let s = lock(&deps.store)?;
@@ -214,6 +222,16 @@ pub async fn fire_with(
             let prompt = run_prompt(r, context);
             match s.enqueue_handover(row.id, &prompt, Some(&meta)) {
                 Ok(handover) => {
+                    steps.push(
+                        Step::new(
+                            now,
+                            "prompt",
+                            "prompt",
+                            "hub",
+                            "Prompt queued for its session",
+                        )
+                        .data(serde_json::json!({ "chars": prompt.chars().count() })),
+                    );
                     let id = row.id;
                     typing = Some((row, prompt, handover));
                     ("running", note, None, Some(id))
@@ -240,6 +258,9 @@ pub async fn fire_with(
         error_code: code.as_deref(),
         host_alias: Some(&host),
     })?;
+    let mut trace_steps = trace::opening(r, &run, &checks, None, now);
+    trace_steps.append(&mut steps);
+    trace::write(&s, &run, trace_steps);
     let started = format!("started on {host}");
     decide(
         &s,
@@ -265,12 +286,50 @@ pub async fn fire_with(
         let spawn = Arc::clone(&deps.spawn);
         let run_id = run.id;
         crate::rt::spawn(async move {
-            if let Err(why) = spawn.deliver(&row, &prompt, handover).await {
-                undelivered(&store, run_id, &why, crate::store::now_unix());
+            let started = std::time::Instant::now();
+            let delivered = spawn.deliver(&row, &prompt, handover).await;
+            let ms = started.elapsed().as_millis() as i64;
+            let now = crate::store::now_unix();
+            let step = match &delivered {
+                Ok(()) => Step::new(
+                    now,
+                    "prompt",
+                    "prompt",
+                    "hub",
+                    "Prompt typed into the session",
+                ),
+                Err(why) => Step::new(
+                    now,
+                    "prompt",
+                    "error",
+                    "hub",
+                    format!("Its prompt was not delivered: {why}"),
+                ),
+            };
+            if let Ok(s) = lock(&store) {
+                trace::write_one(&s, run_id, step.ms(ms));
+            }
+            if let Err(why) = delivered {
+                undelivered(&store, run_id, &why, now);
             }
         });
     }
     Ok(run)
+}
+
+/// The trace step of one start of a run's session on `host`.
+fn spawn_step(
+    host: &str,
+    spawned: &Result<SessionRow, IpcError>,
+    started: std::time::Instant,
+    now: i64,
+) -> Step {
+    let ms = started.elapsed().as_millis() as i64;
+    let result = spawned
+        .as_ref()
+        .map(|row| row.id)
+        .map_err(|e| e.message.as_str());
+    trace::spawn_step(host, result, ms, now)
 }
 
 /// Fail run `run_id` whose prompt was not typed, unless it has already
@@ -417,7 +476,25 @@ fn close(
     cost_micros: i64,
     now: i64,
 ) -> Result<(), IpcError> {
+    close_coded(s, id, state, reason, None, cost_micros, now)
+}
+
+/// [`close`], with the error code a failed close records, for its trace.
+fn close_coded(
+    s: &Store,
+    id: i64,
+    state: &str,
+    reason: Option<&str>,
+    code: Option<&str>,
+    cost_micros: i64,
+    now: i64,
+) -> Result<(), IpcError> {
     s.finish_routine_run(id, state, reason, cost_micros, now)?;
+    trace::write_one(
+        s,
+        id,
+        trace::settle_step(state, reason, code, cost_micros, now),
+    );
     super::outcome::on_close(s, id, now)
 }
 
@@ -431,7 +508,7 @@ fn fail(
     now: i64,
 ) -> Result<(), IpcError> {
     s.set_routine_run_error_code(id, code)?;
-    close(s, id, "failed", Some(reason), cost_micros, now)
+    close_coded(s, id, "failed", Some(reason), Some(code), cost_micros, now)
 }
 
 /// A turn to stop: a run past its time cap (G3.8), `(host, tmux name)`.
@@ -538,7 +615,7 @@ async fn retry_failed(deps: &Deps, now: i64) -> Result<(), IpcError> {
             continue;
         };
         let reference = format!("retry:{}", run.id);
-        fire(
+        let retry = fire(
             deps,
             &r,
             &run.trigger,
@@ -547,6 +624,19 @@ async fn retry_failed(deps: &Deps, now: i64) -> Result<(), IpcError> {
             now,
         )
         .await?;
+        let s = lock(&deps.store)?;
+        trace::write_one(
+            &s,
+            run.id,
+            Step::new(
+                now,
+                "outcome",
+                "retry",
+                "scheduler",
+                format!("Retried as run #{}", retry.id),
+            )
+            .data(serde_json::json!({ "retry_run_id": retry.id, "retry_state": retry.state })),
+        );
     }
     Ok(())
 }

@@ -739,7 +739,7 @@ fn env_vars_has_person_scope(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 193: its columns arrive together,
+/// `already_applied` guard of migration 194: its columns arrive together,
 /// so the first one answers for all.
 fn hosts_has_cpu_pct(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -2184,6 +2184,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 193,
         sql: include_str!("../../migrations/193_host_cpu_and_memory_load.sql"),
         already_applied: Some(hosts_has_cpu_pct),
+    },
+    // Run traces: `run_trace`, one row per step of a run (trigger, checks,
+    // placement, start, prompt, work, settle, outcome). A new table.
+    Migration {
+        version: 194,
+        sql: include_str!("../../migrations/194_run_trace.sql"),
+        already_applied: None,
     },
 ];
 

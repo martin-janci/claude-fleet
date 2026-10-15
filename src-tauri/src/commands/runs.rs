@@ -6,6 +6,7 @@
 
 use crate::backend::FleetBackend;
 use fleet_core::ipc_error::IpcError;
+use fleet_core::service::run_trace::{self, RunTrace, TraceArgs};
 use fleet_core::service::runs::{self, RunsArgs, RunsPage};
 use fleet_core::store::Store;
 use std::sync::{Arc, Mutex};
@@ -19,6 +20,17 @@ pub async fn list_runs(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<RunsPage, IpcError> {
     routed::list_runs(&backend, &store, args.unwrap_or_default()).await
+}
+
+/// One run's steps (run traces): a routine or agent run, oldest first,
+/// from `after_seq` on.
+#[tauri::command]
+pub async fn run_trace(
+    args: TraceArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<RunTrace, IpcError> {
+    routed::run_trace(&backend, &store, args).await
 }
 
 pub(crate) mod routed {
@@ -44,6 +56,27 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("list_runs", &tool_args(&args)?).await,
             None => runs::list(store, &ViewScope::internal(), &args),
+        }
+    }
+
+    /// The tool's arguments: `{action: "trace", run_id, after_seq?, limit?}`.
+    pub fn trace_args(args: &TraceArgs) -> Result<serde_json::Value, IpcError> {
+        let mut v = serde_json::to_value(args)
+            .map_err(|e| IpcError::new(codes::E_INTERNAL, format!("run_trace: {e}")))?;
+        if let Some(m) = v.as_object_mut() {
+            m.insert("action".into(), "trace".into());
+        }
+        Ok(v)
+    }
+
+    pub async fn run_trace(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: TraceArgs,
+    ) -> Result<RunTrace, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("run_trace", &trace_args(&args)?).await,
+            None => run_trace::read(store, &ViewScope::internal(), &args),
         }
     }
 }

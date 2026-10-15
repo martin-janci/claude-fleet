@@ -117,7 +117,26 @@ pub fn record(
     source: OutcomeSource,
     now: i64,
 ) -> Result<bool, IpcError> {
+    record_with(s, run, outcome, source, None, now)
+}
+
+/// [`record`], naming the Jev decision that answered, for the run's trace.
+pub fn record_with(
+    s: &Store,
+    run: &RoutineRunRow,
+    outcome: RunOutcome,
+    source: OutcomeSource,
+    decision_id: Option<i64>,
+    now: i64,
+) -> Result<bool, IpcError> {
     let changed = s.set_routine_run_outcome(run.id, outcome.as_str(), source.as_str())?;
+    if changed {
+        super::trace::write_one(
+            s,
+            run.id,
+            super::trace::outcome_step(outcome.as_str(), source.as_str(), decision_id, now),
+        );
+    }
     // The exit or a rule replaced Jev's answer: that is its follow-up.
     if changed
         && source != OutcomeSource::Jev

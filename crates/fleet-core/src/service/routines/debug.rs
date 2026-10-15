@@ -305,7 +305,11 @@ fn scheduled_checks(
 }
 
 /// The checks every fire asks, Run now's too: [`tick::plan`]'s, one by one.
-fn fire_checks(s: &Store, r: &RoutineRow, now: i64) -> Result<Vec<RoutineCheck>, IpcError> {
+pub(super) fn fire_checks(
+    s: &Store,
+    r: &RoutineRow,
+    now: i64,
+) -> Result<Vec<RoutineCheck>, IpcError> {
     let mut out = Vec::new();
     out.push(if r.overlap != "skip" {
         RoutineCheck::new("overlap", "ok", "its runs may overlap")

@@ -284,6 +284,7 @@
     "revoke_org_share",
     "rewind_conversation",
     "routines",
+    "run_trace",
     "safe_kill_session",
     "save_download",
     "save_mission",

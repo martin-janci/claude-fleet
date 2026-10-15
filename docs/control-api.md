@@ -1185,7 +1185,7 @@ Index by area (names only; see the reference for details):
   gone. A row is served to whoever may see the session that opened it; a PR
   whose session is gone only to the hub's own reader or the person of a
   one-person hub. A read: nothing here merges or closes a PR.
-- **Runs** — `runs`, by `action` (`list` today; Orbit Fleet 8.3). One
+- **Runs** — `runs`, by `action` (`list`, `trace`; Orbit Fleet 8.3). One
   newest-first list of everything that ran on the fleet's behalf: dispatched
   tasks, a mission's steps and brakes, Jev's decisions, fleet's own
   `claude -p` runs (the planner, a summary) and routine fires. `list { since?, until?, kind?,
@@ -1204,6 +1204,21 @@ Index by area (names only; see the reference for details):
   mission's rows need the mission, a routine's fires the routine, and runs that belong to no session or
   mission need whole-fleet spend. A person's, never served to a per-host
   token.
+  `trace { run_id, after_seq?, limit? (≤ 2000, 500) }` answers a routine or
+  agent run's steps, oldest first: `{ run_id, steps, more }` (migration
+  194, `service::run_trace`). Each step carries `seq`, `attempt`,
+  `parent_ref?` (the run a retry retries), `at`, `phase` (`trigger` |
+  `checks` | `placement` | `spawn` | `prompt` | `working` | `settle` |
+  `outcome`), `kind` (`trigger`, `check`, `placement`, `spawn`, `prompt`,
+  `tool_call`, `thinking`, `waiting`, `decision`, `settle`, `retry`,
+  `error`, `note`), `actor` (`scheduler` | `hub` | `claude` | `jev` | `rule`
+  | `person`), a one-line `summary`, `data?` (a JSON object of at most 4 KB),
+  `duration_ms?`, `cost_micros?` and `decision_id?` (the Jev decision it
+  records). Read on with `after_seq` set to the last `seq` while `more` is
+  true. The run must be one the caller's `list` would show; any other id,
+  and a run of a source that keeps no trace, answers `E_NOTFOUND`. Every new
+  step emits `run:changed` with the run's id only. A trace is kept 14 days
+  and at most 2000 steps per run (phase boundaries past that still land).
 - **PR shepherd** — `pr_shepherd`, the standing rules that let fleet look
   after a project's PRs (`docs/superpowers/specs/2026-10-08-pr-shepherd-design.md`):
   `status` (rules, recent episodes and merges), `explain` (what the next
