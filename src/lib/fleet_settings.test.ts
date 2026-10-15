@@ -7,6 +7,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import {
+  hubHasSetting,
   fleetSettings,
   basePathError,
   hoursToSecs,
@@ -170,5 +171,13 @@ describe('projects settings helpers (W5 G3)', () => {
     expect(projectPathPreview('/p', 'github')).toBe('/p/<owner>/<repo>');
     expect(projectsDefaultRoot('github')).toBe('~/projects/github.com');
     expect(projectsDefaultRoot('flat')).toBe('~/projects');
+  });
+});
+
+describe('hubHasSetting', () => {
+  it('knows a setting only once the hub answered with it', () => {
+    expect(hubHasSetting(null, 'recovery.auto_restore')).toBe(false);
+    expect(hubHasSetting(new Set(['control.auto_continue']), 'recovery.auto_restore')).toBe(false);
+    expect(hubHasSetting(new Set(['recovery.auto_restore']), 'recovery.auto_restore')).toBe(true);
   });
 });
