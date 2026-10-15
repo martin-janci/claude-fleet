@@ -1,0 +1,170 @@
+# fleet-updater for a hub run as a Kubernetes StatefulSet
+# (docs/updates.md → "fleet-updater on Kubernetes").
+#
+# Assumes the hub as deployed in namespace papayapos-fleet:
+#   statefulset/fleet-hub, 1 replica, pod fleet-hub-0, containers `init`
+#   (init container) and `fleet-hub`, both ghcr.io/martin-janci/fleet-hub;
+#   its data on the claim data-fleet-hub-0 at /var/lib/fleet-hub;
+#   service fleet-hub:4180; public URL https://fleet.papayapos.dev.
+# Another namespace or name: edit `namespace:`, the resourceNames below, the
+# claim name and the env.
+#
+#   kubectl apply -f deploy/kubernetes/fleet-updater.yaml
+#   kubectl -n papayapos-fleet exec fleet-hub-0 -c fleet-hub -- \
+#     fleet-hub pair --name updater --mode updater
+#   kubectl -n papayapos-fleet exec deploy/fleet-updater -- \
+#     fleet-updater pair 'https://fleet.papayapos.dev/pair#<code>'
+#   kubectl -n papayapos-fleet logs -f deploy/fleet-updater
+#
+# What it may do, and nothing cluster-wide: read and patch the hub's
+# StatefulSet (its images and replicas), read and delete the hub's pod
+# (delete: an OnDelete StatefulSet, or a pod that will not go after a scale
+# to zero), exec into it (`fleet-hub backup`, `fleet-hub healthcheck`), and
+# read its logs.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fleet-updater
+  namespace: papayapos-fleet
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: fleet-updater
+  namespace: papayapos-fleet
+rules:
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    resourceNames: ["fleet-hub"]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    resourceNames: ["fleet-hub-0"]
+    verbs: ["get", "delete"]
+  # The exec WebSocket is a GET, authorized as `get`; a cluster with the
+  # AuthorizePodWebsocketUpgradeCreatePermission gate also wants `create`,
+  # the verb kubectl's POST has always needed.
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    resourceNames: ["fleet-hub-0"]
+    verbs: ["get", "create"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    resourceNames: ["fleet-hub-0"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fleet-updater
+  namespace: papayapos-fleet
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: fleet-updater
+subjects:
+  - kind: ServiceAccount
+    name: fleet-updater
+    namespace: papayapos-fleet
+---
+# The updater's own state: state.json (what ran before and how to bring it
+# back, the bad list, unsent reports), the pairing token, failed hubs' logs.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fleet-updater-state
+  namespace: papayapos-fleet
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 64Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fleet-updater
+  namespace: papayapos-fleet
+  labels:
+    app.kubernetes.io/name: fleet-updater
+spec:
+  replicas: 1
+  # Never two: both would mount the same claims and run the same install.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fleet-updater
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fleet-updater
+    spec:
+      serviceAccountName: fleet-updater
+      # An install in flight finishes (or rolls back) before it stops; it
+      # also resumes from its state file if it is killed.
+      terminationGracePeriodSeconds: 300
+      # The hub's own uid: the restored database and the pruned backups
+      # stay the hub's.
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      # data-fleet-hub-0 is ReadWriteOnce: one node, any number of pods on
+      # it. On a cluster of more than one node, schedule this pod on the
+      # hub's node, e.g.:
+      # nodeSelector:
+      #   kubernetes.io/hostname: <the hub's node>
+      containers:
+        - name: updater
+          # Pin a release rather than following latest, as for the hub.
+          image: ghcr.io/martin-janci/fleet-updater:latest
+          args: ["run"]
+          env:
+            - name: FLEET_UPDATER_BACKEND
+              value: kubernetes
+            - name: FLEET_UPDATER_K8S_STATEFULSET
+              value: fleet-hub
+            # Optional: FLEET_UPDATER_K8S_NAMESPACE (default: this pod's),
+            # FLEET_UPDATER_K8S_CONTAINER (default fleet-hub),
+            # FLEET_UPDATER_K8S_CONTAINERS (default: every container and
+            # init container on the hub's image repository).
+            - name: FLEET_UPDATER_HUB_URL
+              value: http://fleet-hub:4180
+            # The Host the hub accepts (its public name).
+            - name: FLEET_UPDATER_HUB_HOST
+              value: fleet.papayapos.dev
+            - name: FLEET_UPDATER_HUB_DATA
+              value: /hub-data
+            - name: FLEET_UPDATER_STATE_DIR
+              value: /var/lib/fleet-updater
+          volumeMounts:
+            - name: hub-data
+              mountPath: /hub-data
+            - name: state
+              mountPath: /var/lib/fleet-updater
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        # The hub's data: `fleet-hub backup` writes the pre-update backup
+        # there, and a rollback restores it from there while the hub is
+        # scaled to zero.
+        - name: hub-data
+          persistentVolumeClaim:
+            claimName: data-fleet-hub-0
+        - name: state
+          persistentVolumeClaim:
+            claimName: fleet-updater-state

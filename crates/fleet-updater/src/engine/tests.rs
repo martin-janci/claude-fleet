@@ -18,7 +18,7 @@ use fleet_update::{Mode, ReasonCode, Source, Track, UpdateError};
 use serde_json::json;
 
 use super::*;
-use crate::docker::{DockerError, ExecOutput};
+use crate::docker::{ContainerRuntime, Docker, DockerError, ExecOutput};
 
 const IMAGE: &str = "ghcr.io/test/fleet-hub";
 const NAME: &str = "hub-fleet-hub-1";
@@ -266,14 +266,14 @@ impl Docker for FakeDocker {
 
 /// The hub, as far as the updater sees it: one decision, and the reports.
 #[derive(Clone)]
-struct FakeChannel(Arc<Mutex<Hub>>);
+pub(crate) struct FakeChannel(pub(crate) Arc<Mutex<Hub>>);
 
-struct Hub {
-    outcome: Option<CheckOutcome>,
-    reports: Vec<Report>,
-    down: bool,
+pub(crate) struct Hub {
+    pub(crate) outcome: Option<CheckOutcome>,
+    pub(crate) reports: Vec<Report>,
+    pub(crate) down: bool,
     /// Checks get through, reports do not (the hub restarting under them).
-    reports_down: bool,
+    pub(crate) reports_down: bool,
 }
 
 #[async_trait]
@@ -318,7 +318,7 @@ fn manifest(version: &str, schema_to: Option<i64>) -> ReleaseManifest {
     m
 }
 
-fn outcome(
+pub(crate) fn outcome(
     status: Status,
     mode: Mode,
     code: ReasonCode,
@@ -374,7 +374,7 @@ fn outcome(
 struct Rig {
     world: Arc<Mutex<World>>,
     hub: Arc<Mutex<Hub>>,
-    u: Updater<FakeDocker>,
+    u: Updater<ContainerRuntime<FakeDocker>>,
     _dirs: (tempfile::TempDir, tempfile::TempDir),
 }
 
@@ -430,11 +430,11 @@ fn rig(next: Behaviour, next_schema: i64) -> Rig {
         down: false,
         reports_down: false,
     }));
-    let mut cfg = Config::defaults(NAME, data.path(), state.path());
+    let mut cfg = Config::defaults(data.path(), state.path());
     cfg.platform = Platform::new("linux", "x86_64", "oci");
     cfg.poll = Duration::from_secs(1);
     let u = Updater::new(
-        FakeDocker(world.clone()),
+        ContainerRuntime::new(FakeDocker(world.clone()), NAME),
         Box::new(FakeChannel(hub.clone())),
         cfg,
         State::load(state.path()).unwrap(),
@@ -474,7 +474,7 @@ impl Rig {
     }
 }
 
-fn automatic(version: &str, schema_to: Option<i64>) -> CheckOutcome {
+pub(crate) fn automatic(version: &str, schema_to: Option<i64>) -> CheckOutcome {
     outcome(
         Status::UpdateAvailable,
         Mode::Automatic,
@@ -738,7 +738,7 @@ async fn an_interrupted_validation_is_finished_after_a_restart() {
     s.save(&state_dir).unwrap();
     let cfg = r.u.cfg.clone();
     let mut u = Updater::new(
-        FakeDocker(r.world.clone()),
+        ContainerRuntime::new(FakeDocker(r.world.clone()), NAME),
         Box::new(FakeChannel(r.hub.clone())),
         cfg,
         State::load(&state_dir).unwrap(),

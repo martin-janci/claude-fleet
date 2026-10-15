@@ -31,12 +31,7 @@ impl From<String> for DockerError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExecOutput {
-    pub exit_code: i64,
-    pub stdout: String,
-    pub stderr: String,
-}
+pub use crate::runtime::ExecOutput;
 
 #[async_trait]
 pub trait Docker: Send + Sync {
@@ -345,6 +340,185 @@ impl Docker for EngineDocker {
         let (mut out, err) = demux(&r.body);
         out.extend_from_slice(&err);
         Ok(String::from_utf8_lossy(&out).into_owned())
+    }
+}
+
+// ── the hub as a container ──
+
+/// The compose deployment: the hub is one container, recreated on the new
+/// image (design §8.2).
+pub struct ContainerRuntime<D: Docker> {
+    pub docker: D,
+    /// The hub container's name (compose's `<project>-fleet-hub-1`).
+    pub container: String,
+    pub stop_timeout_secs: u64,
+}
+
+impl<D: Docker> ContainerRuntime<D> {
+    pub fn new(docker: D, container: &str) -> Self {
+        ContainerRuntime {
+            docker,
+            container: container.to_string(),
+            stop_timeout_secs: 30,
+        }
+    }
+
+    async fn current(&self) -> Result<Option<Value>, String> {
+        self.docker
+            .inspect_container(&self.container)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// The running container's id (exec and logs address it by id).
+    async fn id(&self) -> Result<String, String> {
+        let c = self
+            .current()
+            .await?
+            .ok_or_else(|| format!("no container named {}", self.container))?;
+        Ok(container_id(&c).unwrap_or(&self.container).to_string())
+    }
+
+    /// Stop and remove the hub, create it again from `spec` on `image`.
+    async fn replace(&self, spec: &Value, image: &str) -> Result<(), String> {
+        let name = self.container.clone();
+        if let Some(c) = self.current().await? {
+            let id = container_id(&c).unwrap_or(&name).to_string();
+            self.docker
+                .stop(&id, self.stop_timeout_secs)
+                .await
+                .map_err(|e| e.to_string())?;
+            self.docker.remove(&id).await.map_err(|e| e.to_string())?;
+        }
+        let mut body = spec.clone();
+        body["Image"] = Value::String(image.to_string());
+        let id = self
+            .docker
+            .create(&name, &body)
+            .await
+            .map_err(|e| e.to_string())?;
+        self.docker.start(&id).await.map_err(|e| e.to_string())
+    }
+}
+
+#[async_trait]
+impl<D: Docker> crate::runtime::Runtime for ContainerRuntime<D> {
+    fn describe(&self) -> String {
+        self.container.clone()
+    }
+
+    async fn inspect(&self) -> Result<Option<crate::runtime::Seen>, String> {
+        use crate::runtime::{Run, Seen};
+        let Some(c) = self.current().await? else {
+            return Ok(None);
+        };
+        let image_id = container_image_id(&c).map(String::from);
+        let digest = match &image_id {
+            Some(id) => self
+                .docker
+                .inspect_image(id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|i| first_repo_digest(&i)),
+            None => None,
+        };
+        let run = if is_running(&c) {
+            Run::Running
+        } else {
+            let code = c
+                .pointer("/State/ExitCode")
+                .and_then(Value::as_i64)
+                .unwrap_or(-1);
+            Run::Down(format!("it exited (code {code})"))
+        };
+        Ok(Some(Seen {
+            image_id,
+            digest,
+            run,
+            restarts: restart_count(&c),
+            health: health(&c).map(String::from),
+        }))
+    }
+
+    async fn exec(&self, cmd: &[String]) -> Result<ExecOutput, String> {
+        let id = self.id().await?;
+        self.docker.exec(&id, cmd).await.map_err(|e| e.to_string())
+    }
+
+    async fn fetch(&self, image: &str, digest: &str) -> Result<(), String> {
+        self.docker
+            .pull(image, digest)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn verify(&self, image: &str, digest: &str) -> Result<String, String> {
+        let reference = format!("{image}@{digest}");
+        let img = self
+            .docker
+            .inspect_image(&reference)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("{reference} is not there after the pull"))?;
+        if !has_repo_digest(&img, image, digest) {
+            return Err(format!("the pulled image does not carry {reference}"));
+        }
+        Ok(str_at(&img, &["Id"])
+            .ok_or("the pulled image has no Id")?
+            .to_string())
+    }
+
+    async fn snapshot(&self) -> Result<crate::runtime::Snapshot, String> {
+        let c = self
+            .current()
+            .await?
+            .ok_or_else(|| format!("no container named {}", self.container))?;
+        if !is_running(&c) {
+            return Err("the hub is not running, so it cannot take a backup".into());
+        }
+        let old_image_id = container_image_id(&c)
+            .ok_or("the hub container names no image")?
+            .to_string();
+        let old_image = self
+            .docker
+            .inspect_image(&old_image_id)
+            .await
+            .map_err(|e| e.to_string())?
+            .unwrap_or(Value::Null);
+        let spec = crate::spec::create_body(&c, &old_image, &old_image_id);
+        let data_dir = container_env(&c, "FLEET_HUB_DATA_DIR")
+            .unwrap_or(crate::engine::HUB_DATA_DIR)
+            .into();
+        Ok(crate::runtime::Snapshot {
+            image_id: old_image_id,
+            spec,
+            data_dir,
+        })
+    }
+
+    async fn install(&self, spec: &Value, image: &str) -> Result<(), String> {
+        self.replace(spec, image).await
+    }
+
+    async fn reinstate(&self, prev: &crate::state::Previous) -> Result<(), String> {
+        self.replace(&prev.spec, &prev.image_id).await
+    }
+
+    async fn stop(&self) -> Result<(), String> {
+        if let Some(c) = self.current().await? {
+            let id = container_id(&c).unwrap_or(&self.container).to_string();
+            self.docker
+                .stop(&id, self.stop_timeout_secs)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    async fn logs(&self, tail: u32) -> Result<String, String> {
+        let id = self.id().await?;
+        self.docker.logs(&id, tail).await.map_err(|e| e.to_string())
     }
 }
 
