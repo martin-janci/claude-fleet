@@ -11,6 +11,7 @@ export const lazyViews = {
   automation: () => import('./AutomationView.svelte'),
   dashboard: () => import('./DashboardView.svelte'),
   board: () => import('./WorkBoard.svelte'),
+  missions: () => import('./MissionRoom.svelte'),
 } satisfies Record<string, Loader>;
 
 /** Load every view now, so a later mount renders on its first frame. */

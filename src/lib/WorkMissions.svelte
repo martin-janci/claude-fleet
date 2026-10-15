@@ -1,158 +1,71 @@
+<!--
+  Work → Missions, the left column (Thread room for Work, 2026-10-15; board
+  W1Missions): the sidebar's Missions tab lists the missions grouped Needs
+  you / Working / Draft and paused / Done this week (and a folded Earlier),
+  each row with its state, the reason it is where it is (`missionReason`),
+  a progress meter and N/M. A row opens the mission's room in the right
+  column (MissionRoom, the `missions` destination); "+ New" opens the New
+  mission form there. Filters, the Group choice and the loop footer with
+  Pause all stay here.
+
+  Text a person or a tracker wrote (names) is rendered as text, never as
+  markup.
+-->
 <script lang="ts">
-  import Skeleton from './states/Skeleton.svelte';
-  import Icon from './kit/Icon.svelte';
-  import StatusDot from './kit/StatusDot.svelte';
-  import { tablistKeys } from './tablist_keys';
-  // Missions (orchestration O1, design 2026-10-07 §9): the Work view's third
-  // tab. A mission is a goal over a root task: its member tasks, the repos
-  // it may run in, its lifecycle and its log, and its loop (O4–O8): the
-  // next steps a person presses (Start wave), the confirm queue of the
-  // planner's cards, and the grant that lets the loop act by itself.
-  //
-  // Text a person or a tracker wrote (names, goals, task titles) is rendered
-  // as text, never as markup.
   import { onDestroy, onMount } from 'svelte';
+  import Skeleton from './states/Skeleton.svelte';
+  import StatusDot from './kit/StatusDot.svelte';
+  import Meter from './kit/Meter.svelte';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import { myPersonId } from './access';
   import { orgs } from './orgs';
-  import { projects } from './projects';
   import { readPref, writePref } from './prefs';
-  import ReleaseNote from './ReleaseNote.svelte';
-  import MissionFinish from './MissionFinish.svelte';
-  import MissionTriage from './MissionTriage.svelte';
-  import type { NextStep } from './mission_triage';
-  import MissionGraph from './MissionGraph.svelte';
-  import Loader from './Loader.svelte';
-  import { defaultLaneBy, toneOf, type LaneBy } from './mission_graph';
-  import { importLine, importMissionPlan, type PlanRow } from './plan_import';
-  import PlanImportForm from './PlanImportForm.svelte';
-  import QuestionCard from './kit/QuestionCard.svelte';
-  import { hosts } from './hosts';
-  import { shortAge, timeAgo } from './session_status';
-  import { createWorkTask, onWorkChangedDebounced } from './work';
-  import { NEWER_HUB, isOlderHub, openTask, readErrorText as rawErrorText } from './work_view';
-  import { get } from 'svelte/store';
-  import { sessions as sessionRows } from './sessions';
-  import { selectSessionExplicitly } from './selection';
-  import { push } from './toasts';
-  import type { IpcError } from './result';
+  import { onWorkChangedDebounced } from './work';
+  import { goTo } from './destination';
+  import { readErrorText as rawErrorText } from './work_view';
   import {
-    finalMoveQuestion,
-    splitMoves,
-    createMission,
-    deleteMission,
-    doneWhenRows,
-    eventSentence,
-    getMission,
-    isFinal,
-    listMissions,
-    moveLabel,
-    progressLabel,
-    setMissionItem,
-    setMissionRepo,
-    setMissionState,
-    stateLabel,
-    updateMission,
-    acceptWorkProposals,
-    nodeLabel,
-    openProposals,
-    setWorkDep,
-    setWorkHold,
-    undoWorkAccept,
-    wavesOf,
-    attemptLine,
-    checkGlyph,
-    checkable,
-    setWorkDoneWhen,
-    verificationLabel,
-    verifyWorkItem,
-    cardLine,
-    decideMissionCard,
-    dollars,
-    grantMission,
-    pauseAllMissions,
-    planMission,
-    retryWorkItem,
-    revokeMissionGrant,
-    startMissionWave,
-    stepKey,
-    stepLine,
-    plannerError,
-    plannerRefusal,
-    withoutConfigKeys,
-    autonomyWords,
-    policyWith,
-    wakeLabel,
-    missionOpenRequest,
-    POLICY_DEFAULT_PARALLEL,
-    POLICY_MAX_PARALLEL,
-    POLICY_MIN_WAKE_SECS,
-    type HumanError,
-    type MissionCard,
-    trailNodes,
-    missionGroups,
     filterMissions,
+    getMission,
+    loopFooter,
     missionFilterChoices,
     missionFilterCount,
-    type MissionFilters,
+    missionOpenRequest,
     missionsToExplain,
-    missionReason,
-    loopFooter,
-    plannerLine,
-    brakesLine,
-    ownerLine,
-    runsOf,
-    runStateLabel,
-    sessionsByItem,
-    missionTaskId,
-    type FinishSession,
-    type GraphNode,
-    type Mission,
+    pauseAllMissions,
+    stateLabel,
+    withoutConfigKeys,
     type MissionDetail,
+    type MissionFilters,
   } from './missions';
+  import {
+    loadMissionList,
+    missionList,
+    missionRowLine,
+    missionTone,
+    openMissionRoom,
+    roomGroups,
+    roomMissionId,
+    rowProgress,
+    startNewMission,
+    workMissionsOpen,
+  } from './mission_room';
 
-  /** An error's text for a notice, with no settings key in it (step 1.3). */
-  const readErrorText = (e: IpcError) => withoutConfigKeys(rawErrorText(e));
-
-  let missions = $state.raw<Mission[]>([]);
-  let loaded = $state(false);
-  let error = $state<string | null>(null);
-  /** The last planner press that failed, in words (step 1.3). */
-  let plannerFailure = $state<HumanError | null>(null);
-  let plannerDetails = $state(false);
+  const missions = $derived($missionList.missions);
   let notice = $state<string | null>(null);
   let busy = $state(false);
 
-  let selectedId = $state<number | null>(null);
-  let detail = $state.raw<MissionDetail | null>(null);
-
-  // The board's list (gap G3.6): grouped by state, each row with the reason
-  // it is where it is. The reason needs the mission's detail, read for the
-  // missions still going (`missionsToExplain`), as Control does.
+  // Grouped by where each mission stands (board W1), or one flat list.
   type Grouping = 'state' | 'none';
   const isGrouping = (v: unknown): v is Grouping => v === 'state' || v === 'none';
   let grouping = $state<Grouping>(readPref<Grouping>('work.missions.group', 'state', isGrouping));
   $effect(() => writePref('work.missions.group', grouping));
-  let finishedOpen = $state(false);
+  let earlierOpen = $state(false);
+
+  // The reason a row gives needs the mission's detail, read for the
+  // missions still going (`missionsToExplain`), as Control does.
   let rowDetails = $state.raw<Map<number, MissionDetail>>(new Map());
   let explainSeq = 0;
-  // The board's Filters (G7.7): needs you, mine, organisation, repository
-  // and mode, over the list as read.
-  let filters = $state<MissionFilters>({});
-  let filtersOpen = $state(false);
-  const filterCount = $derived(missionFilterCount(filters));
-  const filterChoices = $derived(missionFilterChoices(missions));
-  const shown = $derived(filterMissions(missions, filters, $myPersonId));
-  const orgName = (id: number) => (id === 0 ? 'No organisation' : ($orgs.find((o) => o.id === id)?.name ?? `Organisation ${id}`));
-  const numOrNull = (v: string) => (v === '' ? null : Number(v));
-  const groups = $derived(
-    grouping === 'state'
-      ? missionGroups(shown)
-      : [{ key: 'all' as const, label: '', missions: [...shown].sort((a, b) => b.updated_at - a.updated_at || b.id - a.id) }],
-  );
-  const footer = $derived(loopFooter([...rowDetails.values()]));
-
   async function explainRows() {
     const mine = ++explainSeq;
     const want = missionsToExplain(missions);
@@ -164,1382 +77,218 @@
     });
     rowDetails = next;
   }
+  // Each list read explains its rows again.
+  let lastList: unknown = null;
+  $effect(() => {
+    const list = $missionList.missions;
+    if (list === lastList) return;
+    lastList = list;
+    void explainRows();
+  });
 
-  // The detail's tabs (the board's Plan / Runs / Log / Repos, and its live
-  // child sessions).
-  type DetailTab = 'plan' | 'runs' | 'sessions' | 'log' | 'repos';
-  let detailTab = $state<DetailTab>('plan');
-  const runs = $derived(detail ? runsOf(detail) : []);
-  function personName(id: number): string | null {
-    for (const o of $orgs) {
-      const p = (o.members ?? []).find((x) => x.person_id === id);
-      if (p) return p.display_name || p.name;
-    }
-    return null;
-  }
-  const owner = $derived(
-    detail
-      ? ownerLine(
-          detail.mission,
-          $myPersonId,
-          personName,
-          (id) => $orgs.find((o) => o.id === id)?.name ?? null,
-        )
-      : null,
+  // The Filters (G7.7): needs you, mine, organisation, repository and mode.
+  let filters = $state<MissionFilters>({});
+  let filtersOpen = $state(false);
+  const filterCount = $derived(missionFilterCount(filters));
+  const filterChoices = $derived(missionFilterChoices(missions));
+  const shown = $derived(filterMissions(missions, filters, $myPersonId));
+  const orgName = (id: number) => (id === 0 ? 'No organisation' : ($orgs.find((o) => o.id === id)?.name ?? `Organisation ${id}`));
+  const numOrNull = (v: string) => (v === '' ? null : Number(v));
+
+  let nowSec = $state(Math.floor(Date.now() / 1000));
+  const groups = $derived(
+    grouping === 'state'
+      ? roomGroups(shown, rowDetails, nowSec)
+      : [{ key: 'all' as const, label: '', missions: [...shown].sort((a, b) => b.updated_at - a.updated_at || b.id - a.id) }],
   );
-
-  let creating = $state(false);
-  let newName = $state('');
-  let newGoal = $state('');
-  // G2.5: the New mission form can ask the planner for the first tasks
-  // (off by default: the planner proposes, a person confirms its cards) and
-  // import a plan into the new mission.
-  let newPlanner = $state(false);
-  let newImportOpen = $state(false);
-  let newImportText = $state('');
-  let newImportRows = $state<PlanRow[] | null>(null);
-
-  let editing = $state(false);
-  let editGoal = $state('');
-  let editNonGoals = $state('');
-  let editDoneWhen = $state('');
-  let editLevel = $state(0);
-  let editMode = $state('finite');
-  /** Runs open at once, and a continuous mission's wake interval in minutes
-   *  ('' = no timer) (step 1.8). */
-  let editParallel = $state(POLICY_DEFAULT_PARALLEL);
-  let editWakeMins = $state<number | null>(null);
-  const minWakeMins = POLICY_MIN_WAKE_SECS / 60;
-  const wakeBad = $derived(
-    editMode === 'continuous' && editWakeMins != null && !(editWakeMins >= minWakeMins),
-  );
-  const parallelBad = $derived(!(Number.isInteger(editParallel) && editParallel >= 1 && editParallel <= POLICY_MAX_PARALLEL));
-
-  let newTask = $state('');
-  let repoPick = $state<number | ''>('');
-  let repoRole = $state('');
-  let confirmDelete = $state(false);
-  // Parity row P19: Complete, Mark failed and Cancel live in a
-  // ⋯ menu beside Edit and Pause, and each asks before it ends the mission.
-  let moreOpen = $state(false);
-  let confirmMove = $state<string | null>(null);
-  let moreEl = $state<HTMLElement>();
+  const footer = $derived(loopFooter([...rowDetails.values()]));
+  const anyActive = $derived(missions.some((m) => m.state === 'active'));
 
   const saveBlocked = $derived(!!hubActionBlocked('save_mission', $hubStatus, $hubConnection));
   const changeBlocked = $derived(!!hubActionBlocked('set_mission_state', $hubStatus, $hubConnection));
 
-  const mission = $derived(detail?.mission ?? null);
-
-  // The task graph: List keeps every write, Graph draws
-  // lanes × waves with the critical path. The choice outlives the mission;
-  // the lanes reset to the mission's own default when another one opens.
-  type TasksView = 'list' | 'graph';
-  const isTasksView = (v: unknown): v is TasksView => v === 'list' || v === 'graph';
-  let tasksView = $state<TasksView>(readPref<TasksView>('work.missions.view', 'list', isTasksView));
-  $effect(() => writePref('work.missions.view', tasksView));
-  const showGraph = $derived(tasksView === 'graph');
-  let laneOverride = $state<{ mission: number; by: LaneBy } | null>(null);
-  const laneBy = $derived(
-    laneOverride && laneOverride.mission === mission?.id ? laneOverride.by : detail ? defaultLaneBy(detail) : 'none',
-  );
-  // Import plan: a markdown step table read into the mission's tasks.
-  let importOpen = $state(false);
-  let importText = $state('');
-  let importResult = $state<string | null>(null);
-  let importUnknown = $state<string[]>([]);
-  let importRows = $state<PlanRow[] | null>(null);
-  const importBlocked = $derived(!!hubActionBlocked('import_mission_plan', $hubStatus, $hubConnection));
-
-  async function runImport() {
-    if (!mission || !importRows || importRows.length === 0) return;
-    const out = await act(importMissionPlan(mission.id, importRows));
-    if (out) {
-      importResult = importLine(out);
-      importUnknown = out.unknown_needs ?? [];
-      importText = '';
-      importOpen = false;
-      tasksView = 'graph';
-    }
-  }
-
-  function repoName(id: number): string | null {
-    const own = (mission?.repos ?? []).find((r) => r.project_id === id);
-    if (own) return own.name;
-    const p = $projects.find((x) => x.project.id === id)?.project;
-    return p ? `${p.owner}/${p.repo}` : null;
-  }
-  const waves = $derived(detail ? wavesOf(detail) : []);
-  const proposals = $derived(detail ? openProposals(detail) : []);
-  const itemById = $derived(new Map((detail?.items ?? []).map((i) => [i.id, i])));
-  // Its child sessions: the live sessions on its member items, in every
-  // state (`MissionDetail.sessions`; empty from an older hub).
-  const liveSessions = $derived(detail?.sessions ?? []);
-  const liveByItem = $derived(sessionsByItem(detail));
-
-  /** Open a member task as the rest of Work does: select it, show its detail. */
-  function openItem(itemId: number) {
-    const links = (liveByItem.get(itemId) ?? []).map((s) => ({ session_id: s.session_id, state: 'active' }));
-    openTask(missionTaskId(itemId), links);
-  }
-
-  /** Open one of its sessions in the center pane. */
-  function openSession(s: FinishSession) {
-    const row = get(sessionRows).find((r) => r.id === s.session_id);
-    if (!row) {
-      push({ kind: 'info', message: `${s.tmux_name} is gone: the session is no longer in the fleet.` });
-      return;
-    }
-    selectSessionExplicitly(row, { task: missionTaskId(s.item_id) });
-  }
-  // The last "Accept all", for Undo: the hub takes it back only while
-  // nothing has touched those tasks (`store::ACCEPT_UNDO_SECS`).
-  let lastAccepted = $state<number[]>([]);
-
-  function titleOf(id: number): string {
-    const it = itemById.get(id);
-    if (it) return it.title;
-    const o = (detail?.graph?.outside ?? []).find((x) => x.id === id);
-    return o ? (o.key ?? o.title) : `#${id}`;
-  }
-
-  /** The members `n` may start waiting for: not itself, not already. */
-  function depChoices(n: GraphNode): { id: number; title: string }[] {
-    const already = new Set(n.depends_on ?? []);
-    return (detail?.items ?? [])
-      .filter((i) => i.id !== n.item_id && !already.has(i.id) && i.proposal_state !== 'rejected')
-      .map((i) => ({ id: i.id, title: i.title }));
-  }
-
-  async function setDep(itemId: number, dependsOn: number, on: boolean) {
-    await act(setWorkDep(itemId, dependsOn, on));
-  }
-
-  // The task whose condition lines are being edited, and their text.
-  let condsFor = $state<number | null>(null);
-  let condText = $state('');
-
-  function editConds(itemId: number) {
-    condsFor = itemId;
-    condText = (itemById.get(itemId)?.done_when ?? []).join('\n');
-  }
-
-  async function saveConds() {
-    if (condsFor == null) return;
-    if (await act(setWorkDoneWhen(condsFor, doneWhenRows(condText)))) condsFor = null;
-  }
-
-  async function check(itemId: number, line: string, ok: boolean) {
-    await act(verifyWorkItem(itemId, line, ok));
-  }
-
-  async function setHold(itemId: number, on: boolean) {
-    await act(setWorkHold(itemId, on));
-  }
-
-  async function acceptAll() {
-    const ids = proposals;
-    if (await act(acceptWorkProposals(ids))) lastAccepted = ids;
-  }
-
-  async function undoAccept() {
-    const ids = lastAccepted;
-    if (await act(undoWorkAccept(ids))) lastAccepted = [];
-  }
-  // The loop (orchestration O4–O6).
-  const plan = $derived(detail?.plan ?? null);
-  /** The header's autonomy in words: "Runs at L1 · L3 asked · L1 ceiling". */
-  const autonomy = $derived(plan ? autonomyWords(plan.autonomy) : null);
-  const pressable = $derived((plan?.steps ?? []).filter((s) => s.kind !== 'ask'));
-  const openCards = $derived((plan?.cards ?? []).filter((c) => c.state === 'open'));
-  // Comet trails beside the mission's current steps (redesign step 9.12):
-  // only while it runs, never while it waits on a person.
-  const trails = $derived(detail ? trailNodes(detail) : new Set<number>());
-  let answers = $state<Record<number, string>>({});
-  let granting = $state(false);
-  let grantLevel = $state(2);
-  let grantHours = $state(8);
-  let grantBudget = $state('');
-  /** Hosts the grant lets the loop run on; none ticked: any host. */
-  let grantHosts = $state<string[]>([]);
-
-  /** A short report of what a press did, failures first. */
-  function reportSteps(results: { ok: boolean; detail: string }[] | undefined) {
-    const bad = (results ?? []).filter((r) => !r.ok);
-    if (bad.length > 0) notice = bad.map((r) => r.detail).join(' · ');
-    else if ((results ?? []).length === 0) notice = 'Nothing to start right now.';
-  }
-
-  async function startWave(step?: string) {
-    if (!mission) return;
-    const out = await act(startMissionWave(mission.id, step));
-    if (out) reportSteps(out.results);
-  }
-
-  async function retry(itemId: number) {
-    const out = await act(retryWorkItem(itemId));
-    if (out && !out.ok) notice = out.detail;
-  }
-
-  /** Redesign 9.10: a step picked on the stuck card, through the action a
-   *  person already has. Nothing is completed, cancelled or verified here. */
-  function triageStep(step: NextStep) {
-    if (step === 'retry') {
-      const failed = (detail?.graph?.nodes ?? [])
-        .filter((n) => n.state === 'failed')
-        .sort((a, b) => (b.attempt?.task_id ?? 0) - (a.attempt?.task_id ?? 0))[0];
-      if (failed) void retry(failed.item_id);
-      else void askPlanner();
-    } else if (step === 'split') {
-      void askPlanner();
-    } else if (step === 'give_up') {
-      pickFinal('cancelled');
-    } else {
-      document.querySelector('[data-testid="mission-loop"]')?.scrollIntoView({ block: 'nearest' });
-    }
-  }
-
-  async function askPlanner() {
-    if (!mission) return;
-    plannerFailure = null;
-    plannerDetails = false;
-    busy = true;
-    notice = null;
-    try {
-      const r = await planMission(mission.id);
-      if (!r.ok) {
-        plannerFailure = isOlderHub(r.error) ? { title: "The planner couldn't run", text: NEWER_HUB, details: `${r.error.code} · ${r.error.message}` } : plannerError(r.error);
-        if (r.error.code === 'E_CONFLICT') await load();
-        return;
-      }
-      if (r.value.refused) plannerFailure = plannerRefusal(r.value.refused);
-      await load();
-    } finally {
-      busy = false;
-    }
-  }
-
-  // G2.5: a mission's question answered on its page, as the session's
-  // question card is: its options, your own words, or Skip.
-  let ownWords = $state<Record<number, boolean>>({});
-  function askOptions(c: MissionCard): string[] {
-    const o = (c.payload as { options?: unknown } | null | undefined)?.options;
-    return Array.isArray(o) ? o.filter((x): x is string => typeof x === 'string' && x.trim() !== '').slice(0, 6) : [];
-  }
-  async function answerWith(c: MissionCard, option: string) {
-    answers = { ...answers, [c.id]: option };
-    await decide(c, true);
-  }
-
-  async function decide(c: MissionCard, ok: boolean) {
-    const note = c.kind === 'ask' && ok ? (answers[c.id] ?? '').trim() : undefined;
-    if (c.kind === 'ask' && ok && !note) {
-      notice = 'Write an answer first.';
-      return;
-    }
-    const out = await act(decideMissionCard(c.id, ok, note));
-    if (out?.state === 'refused') notice = out.note ?? 'Refused';
-  }
-
-  async function grant() {
-    if (!mission) return;
-    const cents = Math.round(Number(grantBudget) * 100);
-    const out = await act(
-      grantMission(mission.id, {
-        level: grantLevel,
-        hours: grantHours,
-        ...(grantBudget.trim() && cents > 0 ? { budget_cents: cents } : {}),
-        ...(grantHosts.length > 0 ? { hosts: [...grantHosts] } : {}),
-      }),
-    );
-    if (out) {
-      granting = false;
-      grantHosts = [];
-    }
-  }
-
-  async function revokeGrant() {
-    if (mission) await act(revokeMissionGrant(mission.id));
+  function open(id: number) {
+    openMissionRoom(id);
   }
 
   async function pauseAll() {
-    const out = await act(pauseAllMissions());
-    if (out) notice = out.length ? `Paused ${out.length} mission${out.length === 1 ? '' : 's'}.` : 'No active mission to pause.';
-  }
-  const mayChange = $derived(!!detail?.may_change && !!mission && !isFinal(mission.state));
-  const split = $derived(mission ? splitMoves(mission.state) : { inline: [], menu: [] });
-
-  function pickFinal(to: string) {
-    moreOpen = false;
-    confirmMove = to;
-  }
-
-  async function confirmFinal() {
-    const to = confirmMove;
-    confirmMove = null;
-    if (to) await move(to);
-  }
-
-  function moreKey(e: KeyboardEvent) {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      e.stopPropagation();
-      moreOpen = false;
-      moreEl?.querySelector<HTMLElement>('[data-testid="mission-more"]')?.focus();
-      return;
-    }
-    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
-    const all = Array.from(moreEl?.querySelectorAll<HTMLElement>('[role=menuitem]:not(:disabled)') ?? []);
-    if (!all.length) return;
-    e.preventDefault();
-    const i = all.indexOf(document.activeElement as HTMLElement);
-    all[(i + (e.key === 'ArrowDown' ? 1 : all.length - 1)) % all.length].focus();
-  }
-
-  $effect(() => {
-    if (!moreOpen) return;
-    moreEl?.querySelector<HTMLElement>('[role=menuitem]:not(:disabled)')?.focus();
-    const away = (e: PointerEvent) => {
-      if (moreEl && !moreEl.contains(e.target as Node)) moreOpen = false;
-    };
-    window.addEventListener('pointerdown', away, true);
-    return () => window.removeEventListener('pointerdown', away, true);
-  });
-  const repoChoices = $derived(
-    $projects
-      .map((p) => p.project)
-      .filter((p) => !(mission?.repos ?? []).some((r) => r.project_id === p.id)),
-  );
-
-  async function load() {
-    const r = await listMissions();
-    loaded = true;
-    if (r.ok) {
-      missions = Array.isArray(r.value) ? r.value : [];
-      error = null;
-      if (selectedId != null && !missions.some((m) => m.id === selectedId)) {
-        selectedId = null;
-        detail = null;
-      }
-      if (selectedId == null) void explainRows();
-    } else {
-      error = readErrorText(r.error);
-    }
-    if (selectedId != null) await loadDetail(selectedId);
-  }
-
-  // Bumped per request and by Back: a late answer for a mission no longer
-  // open (Back pressed, another opened, a newer load) is dropped (review r07).
-  let detailSeq = 0;
-
-  async function loadDetail(id: number) {
-    const mine = ++detailSeq;
-    const r = await getMission(id);
-    if (mine !== detailSeq || selectedId !== id) return;
-    if (r.ok) {
-      detail = r.value;
-    } else {
-      notice = readErrorText(r.error);
-      detail = null;
-      selectedId = null;
-    }
-  }
-
-  async function open(id: number) {
-    lastAccepted = [];
-    selectedId = id;
-    detailTab = 'plan';
-    editing = false;
-    confirmDelete = false;
-    moreOpen = false;
-    confirmMove = null;
-    notice = null;
-    plannerFailure = null;
-    importOpen = false;
-    importText = '';
-    importResult = null;
-    importUnknown = [];
-    await loadDetail(id);
-  }
-
-  function back() {
-    detailSeq++;
-    selectedId = null;
-    detail = null;
-    editing = false;
-    notice = null;
-    plannerFailure = null;
-    void explainRows();
-  }
-
-  /** Run one write; on success re-read the list and the open mission. */
-  async function act<T>(p: Promise<import('./result').Result<T>>): Promise<T | null> {
     busy = true;
     notice = null;
     try {
-      const r = await p;
+      const r = await pauseAllMissions();
       if (!r.ok) {
-        notice = readErrorText(r.error);
-        if (r.error.code === 'E_CONFLICT') await load();
-        return null;
+        notice = withoutConfigKeys(rawErrorText(r.error));
+        return;
       }
-      await load();
-      return r.value;
+      const n = r.value.length;
+      notice = n ? `Paused ${n} mission${n === 1 ? '' : 's'}.` : 'No active mission to pause.';
+      await loadMissionList();
     } finally {
       busy = false;
     }
   }
 
-  async function create() {
-    const name = newName.trim();
-    const goal = newGoal.trim();
-    if (!name || !goal) {
-      notice = 'A mission needs a name and a goal.';
-      return;
-    }
-    if (newImportOpen && newImportText.trim() && !newImportRows) {
-      notice = 'The plan is not ready to import: see the rows above.';
-      return;
-    }
-    const m = await act(createMission({ name, goal }));
-    if (m) {
-      const rows = newImportOpen ? newImportRows : null;
-      const planner = newPlanner;
-      creating = false;
-      newName = '';
-      newGoal = '';
-      newPlanner = false;
-      newImportOpen = false;
-      newImportText = '';
-      await open(m.id);
-      if (rows && rows.length > 0) {
-        const out = await act(importMissionPlan(m.id, rows));
-        if (out) {
-          importResult = importLine(out);
-          importUnknown = out.unknown_needs ?? [];
-          tasksView = 'graph';
-        }
-      }
-      // The planner drafts the first tasks as cards to confirm.
-      if (planner) await askPlanner();
-    }
-  }
-
-  function startEdit() {
-    if (!mission) return;
-    editGoal = mission.goal;
-    editNonGoals = mission.non_goals ?? '';
-    editDoneWhen = (mission.done_when ?? []).join('\n');
-    editLevel = mission.level;
-    editMode = mission.mode;
-    editParallel = mission.policy?.max_parallel ?? POLICY_DEFAULT_PARALLEL;
-    const wake = mission.policy?.wake_every_secs;
-    editWakeMins = wake ? Math.round(wake / 60) : null;
-    editing = true;
-  }
-
-  async function saveEdit() {
-    if (!mission || wakeBad || parallelBad) return;
-    const wakeSecs = editMode === 'continuous' && editWakeMins != null ? Math.round(editWakeMins * 60) : null;
-    const m = await act(
-      updateMission(
-        mission.id,
-        {
-          goal: editGoal,
-          non_goals: editNonGoals,
-          done_when: doneWhenRows(editDoneWhen),
-          level: editLevel,
-          mode: editMode,
-          policy: policyWith(mission.policy, { max_parallel: editParallel, wake_every_secs: wakeSecs }),
-        },
-        mission.version,
-      ),
-    );
-    if (m) editing = false;
-  }
-
-  async function move(to: string) {
-    if (!mission) return;
-    await act(setMissionState(mission.id, to, mission.version));
-  }
-
-  async function addTask() {
-    if (!mission?.root_item_id) return;
-    const title = newTask.trim();
-    if (!title) return;
-    busy = true;
-    const t = await createWorkTask({ title, parent: `item:${mission.root_item_id}` });
-    busy = false;
-    if (!t.ok) {
-      notice = readErrorText(t.error);
-      return;
-    }
-    if (await act(setMissionItem(mission.id, t.value.id, true))) newTask = '';
-  }
-
-  async function removeItem(itemId: number) {
-    if (!mission) return;
-    await act(setMissionItem(mission.id, itemId, false));
-  }
-
-  async function addRepo() {
-    if (!mission || repoPick === '') return;
-    if (await act(setMissionRepo(mission.id, repoPick, true, repoRole))) {
-      repoPick = '';
-      repoRole = '';
-    }
-  }
-
-  async function removeRepo(projectId: number) {
-    if (!mission) return;
-    await act(setMissionRepo(mission.id, projectId, false));
-  }
-
-  async function remove() {
-    if (!mission) return;
-    if (await act(deleteMission(mission.id))) back();
-  }
-
-  // A "Sent to a mission" chip in Control asked for this one (redesign 9.3).
+  // A "Sent to a mission" chip in Control, or "Open in Work ↗", asked for
+  // the Missions tab (redesign 9.3): the room shows the mission named.
   $effect(() => {
     const r = $missionOpenRequest;
     if (!r) return;
     missionOpenRequest.set(null);
-    if (r.id != null) void open(r.id);
+    if (r.id != null) openMissionRoom(r.id);
+    else goTo('missions');
   });
 
   let stopWatching: (() => void) | null = null;
+  let clock: ReturnType<typeof setInterval> | undefined;
   onMount(() => {
-    void load();
-    stopWatching = onWorkChangedDebounced(() => void load(), () => 500, () => 3000);
+    void loadMissionList();
+    stopWatching = onWorkChangedDebounced(() => void loadMissionList(), () => 500, () => 3000);
+    clock = setInterval(() => (nowSec = Math.floor(Date.now() / 1000)), 60_000);
   });
-  onDestroy(() => stopWatching?.());
+  onDestroy(() => {
+    stopWatching?.();
+    clearInterval(clock);
+  });
 </script>
 
 <div class="missions" data-testid="work-missions">
+  <div class="bar">
+    {#if missions.length > 0}
+      <button
+        class="btn btn--quiet filters-btn"
+        type="button"
+        aria-expanded={filtersOpen}
+        data-testid="missions-filters"
+        onclick={() => (filtersOpen = !filtersOpen)}
+        >Filters{#if filterCount > 0}&nbsp;<span class="count" data-testid="missions-filters-count">{filterCount}</span>{/if}</button
+      >
+      <label class="group-pick muted small"
+        >Group
+        <select bind:value={grouping} data-testid="missions-group">
+          <option value="state">State</option>
+          <option value="none">None</option>
+        </select></label
+      >
+    {/if}
+    <span class="grow"></span>
+    <button
+      class="btn btn--quiet new"
+      type="button"
+      disabled={saveBlocked}
+      title="New mission"
+      data-testid="mission-new"
+      onclick={startNewMission}>+ New</button
+    >
+  </div>
   {#if notice}
-    <p class="notice" role="status" data-testid="mission-notice">{notice}</p>
+    <p class="notice" role="status" data-testid="missions-notice">{notice}</p>
+  {/if}
+  {#if filtersOpen && missions.length > 0}
+    <div class="filters" role="group" aria-label="Filter missions" data-testid="missions-filters-panel">
+      <label class="check"><input type="checkbox" bind:checked={filters.needsYou} data-testid="missions-filter-needs-you" /> Needs you</label>
+      {#if $myPersonId != null}
+        <label class="check"><input type="checkbox" bind:checked={filters.mine} data-testid="missions-filter-mine" /> Mine</label>
+      {/if}
+      {#if filterChoices.orgIds.length > 1}
+        <label class="muted small"
+          >Organisation
+          <select
+            data-testid="missions-filter-org"
+            value={filters.orgId ?? ''}
+            onchange={(e) => (filters.orgId = numOrNull((e.currentTarget as HTMLSelectElement).value))}
+          >
+            <option value="">Any</option>
+            {#each filterChoices.orgIds as id (id)}<option value={id}>{orgName(id)}</option>{/each}
+          </select></label
+        >
+      {/if}
+      {#if filterChoices.repos.length > 0}
+        <label class="muted small"
+          >Repository
+          <select
+            data-testid="missions-filter-repo"
+            value={filters.projectId ?? ''}
+            onchange={(e) => (filters.projectId = numOrNull((e.currentTarget as HTMLSelectElement).value))}
+          >
+            <option value="">Any</option>
+            {#each filterChoices.repos as r (r.project_id)}<option value={r.project_id}>{r.name}</option>{/each}
+          </select></label
+        >
+      {/if}
+      {#if filterChoices.modes.length > 1}
+        <label class="muted small"
+          >Mode
+          <select data-testid="missions-filter-mode" bind:value={filters.mode}>
+            <option value={null}>Any</option>
+            {#each filterChoices.modes as mode (mode)}<option value={mode}>{mode === 'continuous' ? 'Continuous' : mode === 'finite' ? 'Finite' : mode}</option>{/each}
+          </select></label
+        >
+      {/if}
+      {#if filterCount > 0}
+        <button class="btn btn--quiet" type="button" data-testid="missions-filters-clear" onclick={() => (filters = {})}>Clear</button>
+      {/if}
+    </div>
   {/if}
 
-  {#if mission && detail}
-    <div class="detail" data-testid="mission-detail">
-      <div class="head">
-        <button class="btn btn--quiet" type="button" data-testid="mission-back" onclick={back}>‹ Missions</button>
-        <span class="badge" data-testid="mission-state">{stateLabel(mission.state, detail.phase)}</span>
-      </div>
-      <h3 class="name">{mission.name}</h3>
-      <p class="meta muted">
-        {#if mission.mode === 'plan'}<span data-testid="mission-plan-mode">Plan, tracked here and not run by fleet</span>{:else}{#if mission.mode === 'continuous'}Continuous{#if wakeLabel(mission.policy?.wake_every_secs)}, wakes {wakeLabel(mission.policy?.wake_every_secs)}{/if} · {/if}L{mission.level} asked
-        · {mission.policy?.max_parallel ?? POLICY_DEFAULT_PARALLEL} at once{/if}
-        {#if progressLabel(mission)} · {progressLabel(mission)}{/if}
-        · updated {timeAgo(mission.updated_at)}
-      </p>
-
-      {#if !isFinal(mission.state) && mission.state !== 'draft'}
-        <!-- Redesign 9.10: a stuck mission's card; Jev proposes, a person picks. -->
-        <MissionTriage missionId={mission.id} reload={detail.events?.[0]?.id ?? 0} onstep={triageStep} />
-      {/if}
-
-      {#if editing}
-        <label class="field">Goal<textarea rows="3" bind:value={editGoal} data-testid="mission-edit-goal"></textarea></label>
-        <label class="field">Not in scope<textarea rows="2" bind:value={editNonGoals}></textarea></label>
-        <label class="field"
-          >Done when (one condition per line)<textarea rows="3" bind:value={editDoneWhen} data-testid="mission-edit-done-when"
-          ></textarea></label
-        >
-        <div class="row">
-          <label class="field inline"
-            >Autonomy
-            <select bind:value={editLevel} data-testid="mission-edit-level">
-              <option value={0}>L0 · asks for everything</option>
-              <option value={1}>L1 · You press Start</option>
-              <option value={2}>L2 · runs within a grant</option>
-              <option value={3}>L3 · reviews and integrates</option>
-            </select></label
-          >
-          <label class="field inline"
-            >Mode
-            <select bind:value={editMode}>
-              <option value="finite">Finite</option>
-              <option value="continuous">Continuous</option>
-              <option value="plan">Plan (tracked, not run)</option>
-            </select></label
-          >
-          <label class="field inline"
-            >Parallel runs
-            <input
-              type="number"
-              min="1"
-              max={POLICY_MAX_PARALLEL}
-              bind:value={editParallel}
-              class="role"
-              data-testid="mission-edit-parallel"
-            /></label
-          >
-          {#if editMode === 'continuous'}
-            <label class="field inline"
-              >Wake every (min)
-              <input
-                type="number"
-                min={minWakeMins}
-                placeholder="no timer"
-                bind:value={editWakeMins}
-                class="role"
-                data-testid="mission-edit-wake"
-              /></label
-            >
-          {/if}
-        </div>
-        {#if wakeBad}<p class="muted small" role="alert" data-testid="mission-edit-wake-bad">A continuous mission wakes at most every {minWakeMins} minutes.</p>{/if}
-        {#if parallelBad}<p class="muted small" role="alert">Parallel runs is 1 to {POLICY_MAX_PARALLEL}.</p>{/if}
-        <div class="row">
-          <button class="btn btn--primary" type="button" disabled={busy || saveBlocked || wakeBad || parallelBad} data-testid="mission-edit-save" onclick={() => void saveEdit()}
-            >Save</button
-          >
-          <button class="btn btn--quiet" type="button" onclick={() => (editing = false)}>Cancel</button>
-        </div>
-      {:else}
-        <p class="goal">{mission.goal}</p>
-        {#if mission.non_goals}<p class="muted">Not in scope: {mission.non_goals}</p>{/if}
-        {#if (mission.done_when ?? []).length > 0}
-          <ul class="done-when" aria-label="Done when">
-            {#each mission.done_when ?? [] as c, i (i)}<li>☐ {c}</li>{/each}
-          </ul>
-        {/if}
-        {#if mayChange}
-          <div class="row">
-            <button class="btn btn--quiet" type="button" disabled={busy || saveBlocked} data-testid="mission-edit" onclick={startEdit}
-              >Edit</button
-            >
-              {#each split.inline as to (to)}
-                <button
-                  class="btn btn--chip"
-                  type="button"
-                  disabled={busy || changeBlocked}
-                  data-testid="mission-move-{to}"
-                  onclick={() => void move(to)}>{moveLabel(mission.state, to)}</button
-                >
-              {/each}
-              {#if split.menu.length > 0}
-                <!-- svelte-ignore a11y_no_static_element_interactions -->
-                <span class="more" bind:this={moreEl} onkeydown={moreKey}>
-                  <button
-                    class="btn btn--quiet"
-                    type="button"
-                    aria-label="More mission actions"
-                    aria-haspopup="menu"
-                    aria-expanded={moreOpen}
-                    disabled={busy || changeBlocked}
-                    data-testid="mission-more"
-                    onclick={() => (moreOpen = !moreOpen)}>⋯</button
-                  >
-                  {#if moreOpen}
-                    <span class="more-menu" role="menu" aria-label="Mission actions" data-testid="mission-more-menu">
-                      {#each split.menu as to (to)}
-                        <button
-                          type="button"
-                          role="menuitem"
-                          class="mi"
-                          class:danger={to !== 'completed'}
-                          data-testid="mission-menu-{to}"
-                          onclick={() => pickFinal(to)}>{moveLabel(mission.state, to)}…</button
-                        >
-                      {/each}
-                    </span>
-                  {/if}
-                </span>
-              {/if}
-          </div>
-          {#if confirmMove}
-            <div class="row confirm-move" role="alertdialog" aria-label="Confirm" data-testid="mission-move-confirm-row">
-              <span>{finalMoveQuestion(mission.name, confirmMove)}</span>
-              <button
-                class="btn"
-                class:btn--danger={confirmMove !== 'completed'}
-                type="button"
-                disabled={busy || changeBlocked}
-                data-testid="mission-move-confirm"
-                onclick={() => void confirmFinal()}>{moveLabel(mission.state, confirmMove)}</button
-              >
-              <button class="btn btn--quiet" type="button" data-testid="mission-move-keep" onclick={() => (confirmMove = null)}>Keep</button>
-            </div>
-          {/if}
-        {/if}
-      {/if}
-
-      {#if isFinal(mission.state)}
-        <!-- Gap G3.7: the Finish board. Reopen moves it back to paused. -->
-        <MissionFinish
-          {detail}
-          completed={missions.filter((m) => isFinal(m.state)).length}
-          mayChange={!!detail.may_change}
-          reopenBlocked={changeBlocked}
-          nameOf={personName}
-          onreopen={() => move('paused')}
-          onarchived={load}
-        />
-      {/if}
-
-      <dl class="kv" data-testid="mission-facts">
-        {#if owner}<dt>Owner</dt><dd data-testid="mission-owner">{owner}</dd>{/if}
-        {#if mission.mode !== 'plan'}
-          <dt>Planner</dt><dd data-testid="mission-planner-runs">{plannerLine(detail)}</dd>
-          <dt>Brakes</dt>
-          <dd data-testid="mission-brakes"
-            >{brakesLine(mission.policy, plan?.autonomy.grant?.revoked_at == null ? plan?.autonomy.grant?.budget_micros : null)}</dd
-          >
-        {/if}
-      </dl>
-
-      <div class="view-switch tabs" role="tablist" aria-label="Mission" use:tablistKeys data-testid="mission-tabs">
-        {#each [['plan', 'Plan', null], ['runs', 'Runs', runs.length], ['sessions', 'Sessions', liveSessions.length], ['log', 'Log', null], ['repos', 'Repos', (mission.repos ?? []).length]] as const as [key, label, count] (key)}
-          <button
-            type="button"
-            role="tab"
-            aria-selected={detailTab === key}
-            data-testid="mission-tab-{key}"
-            onclick={() => (detailTab = key)}>{label}{#if count}<span class="count">{count}</span>{/if}</button
-          >
-        {/each}
-      </div>
-
-      {#if detailTab === 'plan'}
-      {#if plan}
-        <section class="loop" data-testid="mission-loop">
-          <p class="muted small" data-testid="mission-autonomy">
-            {autonomy?.runs} · {autonomy?.limits} · spent {dollars(plan.cost_micros)}{#if plan.autonomy.grant?.budget_micros}
-              of {dollars(plan.autonomy.grant.budget_micros)}{/if} · {plan.counts.open} running
-          </p>
-          {#if autonomy?.hint}<p class="muted small" data-testid="mission-autonomy-hint">{autonomy.hint}</p>{/if}
-          {#if mayChange}
-            <div class="row">
-              {#if mission.state === 'active' && pressable.length > 0}
-                <!-- Redesign 1.5: the mission's one primary (the edit form's
-                     Save takes over while it is open). -->
-                <button class="btn" class:btn--primary={!editing} type="button" disabled={busy || changeBlocked} data-testid="mission-start-wave" onclick={() => void startWave()}
-                  >Start wave ({pressable.length})</button
-                >
-              {/if}
-              <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-plan" onclick={() => void askPlanner()}
-                >Ask the planner</button
-              >
-              {#if plan.autonomy.grant}
-                <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-revoke" onclick={() => void revokeGrant()}
-                  >End the grant (L{plan.autonomy.grant.level}, until {new Date(plan.autonomy.grant.expires_at * 1000).toLocaleString()})</button
-                >
-              {:else}
-                <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-grant" onclick={() => (granting = !granting)}
-                  >Grant…</button
-                >
-              {/if}
-            </div>
-            {#if granting}
-              <form class="row" data-testid="mission-grant-form" onsubmit={(e) => (e.preventDefault(), void grant())}>
-                <label class="field inline"
-                  >Level
-                  <select bind:value={grantLevel}>
-                    <option value={1}>L1 · You press every step</option>
-                    <option value={2}>L2 · runs, retries, reviews</option>
-                    <option value={3}>L3 · also creates tasks</option>
-                  </select></label
-                >
-                <label class="field inline">Hours <input type="number" min="1" max="168" bind:value={grantHours} class="role" /></label>
-                <label class="field inline">Budget $ <input placeholder="none" bind:value={grantBudget} class="role" data-testid="mission-grant-budget" /></label>
-                {#if $hosts.length > 0}
-                  <fieldset class="field inline hosts" data-testid="mission-grant-hosts">
-                    <legend>Hosts <span class="muted small">(none ticked: any)</span></legend>
-                    {#each $hosts as h (h.alias)}
-                      <label class="host"
-                        ><input type="checkbox" value={h.alias} bind:group={grantHosts} data-testid="mission-grant-host" /> {h.alias}</label
-                      >
-                    {/each}
-                  </fieldset>
-                {/if}
-                <button class="btn" type="submit" disabled={busy} data-testid="mission-grant-save">Sign</button>
-              </form>
-            {/if}
-          {/if}
-          {#if plannerFailure}
-            <div class="planner-error" role="alert" data-testid="mission-planner-error">
-              <p class="title">{plannerFailure.title}</p>
-              <p>{plannerFailure.text}</p>
-              <div class="row">
-                {#if mayChange}
-                  <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-planner-retry" onclick={() => void askPlanner()}
-                    >Retry</button
-                  >
-                {/if}
-                <button
-                  class="btn btn--quiet"
-                  type="button"
-                  aria-expanded={plannerDetails}
-                  data-testid="mission-planner-details"
-                  onclick={() => (plannerDetails = !plannerDetails)}>Details</button
-                >
-                <button class="btn btn--quiet" type="button" aria-label="Dismiss" data-testid="mission-planner-dismiss" onclick={() => (plannerFailure = null)}
-                  >✕</button
-                >
-              </div>
-              {#if plannerDetails}<pre class="details" data-testid="mission-planner-details-text">{plannerFailure.details}</pre>{/if}
-            </div>
-          {/if}
-          {#if (plan.steps ?? []).length > 0}
-            <ul class="steps" aria-label="Next steps" data-testid="mission-steps">
-              {#each plan.steps ?? [] as st (stepKey(st))}
-                <li data-testid="mission-step" data-kind={st.kind}>
-                  <span>{stepLine(st)}</span>
-                  {#if mayChange && mission.state === 'active' && st.kind !== 'ask'}
-                    <button class="btn btn--chip" type="button" disabled={busy || changeBlocked} onclick={() => void startWave(stepKey(st))}>Go</button>
-                  {/if}
-                </li>
-              {/each}
-            </ul>
-          {/if}
-          {#if openCards.length > 0}
-            <h4>Waiting for you</h4>
-            <ul class="cards" data-testid="mission-cards">
-              {#each openCards as c (c.id)}
-                <li data-testid="mission-card" data-kind={c.kind}>
-                  {#if c.kind === 'ask' && detail.may_change}
-                    {@const options = askOptions(c)}
-                    <QuestionCard
-                      question={cardLine(c)}
-                      age={`${c.source === 'planner' ? 'Planner' : 'Fleet'} · asked ${shortAge(c.created_at)}`}
-                      label="Question from the mission"
-                      testid="mission-card-question"
-                      answers={[
-                        ...options.map((o, i) => ({
-                          label: o,
-                          testid: 'mission-card-option',
-                          disabled: busy || changeBlocked,
-                          onselect: () => void answerWith(c, o),
-                          kbd: String(i + 1),
-                        })),
-                        { label: 'Skip', testid: 'mission-card-skip', disabled: busy || changeBlocked, onselect: () => void decide(c, false) },
-                      ]}
-                      onownwords={() => (ownWords = { ...ownWords, [c.id]: true })}
-                    >
-                      {#if ownWords[c.id] || options.length === 0}
-                        <span class="row">
-                          <input placeholder="Your answer" aria-label="Your answer" bind:value={answers[c.id]} data-testid="mission-card-answer" />
-                          <button class="btn btn--chip" type="button" disabled={busy || changeBlocked} data-testid="mission-card-apply" onclick={() => void decide(c, true)}
-                            >Answer</button
-                          >
-                        </span>
-                      {/if}
-                    </QuestionCard>
-                  {:else}
-                  <span class="muted small">{c.source === 'planner' ? 'Planner' : 'Fleet'}</span>
-                  <span>{cardLine(c)}</span>
-                  {#if detail.may_change}
-                    <button class="btn btn--chip" type="button" disabled={busy || changeBlocked} data-testid="mission-card-apply" onclick={() => void decide(c, true)}
-                      >Apply</button
-                    >
-                    <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-card-dismiss" onclick={() => void decide(c, false)}
-                      >Dismiss</button
-                    >
-                  {/if}
-                  {/if}
-                </li>
-              {/each}
-            </ul>
-          {/if}
-        </section>
-      {/if}
-
-      <h4>Tasks</h4>
-      {#if mayChange}
-        <div class="import" data-testid="mission-import">
-          {#if !importOpen}
-            <button class="btn btn--quiet" type="button" disabled={busy || importBlocked} data-testid="mission-import-open" onclick={() => (importOpen = true)}
-              >Import plan…</button
-            >
-          {:else}
-            <PlanImportForm bind:text={importText} bind:ready={importRows} />
-            <span class="row">
-              <button
-                class="btn"
-                type="button"
-                disabled={busy || importBlocked || !importRows}
-                data-testid="mission-import-run"
-                onclick={() => void runImport()}>Import {importRows?.length ?? 0} steps</button
-              >
-              <button class="btn btn--quiet" type="button" onclick={() => ((importOpen = false), (importText = ''))}>Cancel</button>
-            </span>
-            {#if mission.mode !== 'plan'}
-              <p class="muted small">A {mission.mode} mission holds 30 tasks; make it a Plan to hold up to 200.</p>
-            {/if}
-          {/if}
-          {#if importResult}
-            <p class="muted small" role="status" data-testid="mission-import-result">{importResult}</p>
-          {/if}
-          {#if importUnknown.length > 0}
-            <p class="muted small" data-testid="mission-import-unknown">Needs that name no step: {importUnknown.join(', ')}</p>
-          {/if}
-        </div>
-      {/if}
-      {#if mayChange && proposals.length > 0}
-        <div class="row proposals" data-testid="mission-proposals">
-          <span>{proposals.length} proposed {proposals.length === 1 ? 'task waits' : 'tasks wait'} for you.</span>
-          <button class="btn btn--chip" type="button" disabled={busy} data-testid="mission-accept-all" onclick={() => void acceptAll()}
-            >Accept all</button
-          >
-        </div>
-      {/if}
-      {#if lastAccepted.length > 0}
-        <div class="row" role="status" data-testid="mission-accepted">
-          <span>Accepted {lastAccepted.length}.</span>
-          <button class="btn btn--quiet" type="button" disabled={busy} data-testid="mission-undo-accept" onclick={() => void undoAccept()}
-            >Undo</button
-          >
-        </div>
-      {/if}
-        <div class="view-switch" role="tablist" aria-label="Show tasks as" use:tablistKeys>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tasksView === 'list'}
-            data-testid="mission-view-list"
-            onclick={() => (tasksView = 'list')}>List</button
-          >
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tasksView === 'graph'}
-            data-testid="mission-view-graph"
-            onclick={() => (tasksView = 'graph')}>Graph</button
-          >
-        </div>
-      {#if showGraph && detail}
-        <MissionGraph
-          {detail}
-          {laneBy}
-          {repoName}
-          onlanechange={(by) => {
-            if (mission) laneOverride = { mission: mission.id, by };
-          }}
-          onopenitem={openItem}
-          onopensession={openSession}
-        />
-      {/if}
-      {#each showGraph ? [] : waves as w (w.wave)}
-        <div class="wave" data-testid="mission-wave">
-          {#if waves.length > 1}<span class="wave-head">W{w.wave}</span>{/if}
-          <ul class="items" data-testid="mission-items">
-            {#each w.nodes as n (n.item_id)}
-              {@const it = itemById.get(n.item_id)}
-              {#if it}
-                <li data-testid="mission-node" data-state={n.state}>
-                  <span class="node-dot" title={nodeLabel(n.state)}><StatusDot state={toneOf(n.state)} label={nodeLabel(n.state)} /></span>
-                  {#if trails.has(n.item_id)}
-                    <Loader name="comet-trails" size={20} label="Working on it" testid="mission-trails" />
-                  {/if}
-                  <span class="main">
-                    <span class="title-row">
-                      <button
-                        class="title linkish"
-                        type="button"
-                        title="Open the task"
-                        data-testid="mission-node-open"
-                        onclick={() => openItem(it.id)}>{it.key ? `${it.key} · ` : ''}{it.title}</button
-                      >
-                      {@render sessionLinks(it.id)}
-                    </span>
-                    {#if (n.waiting_for ?? []).length > 0}
-                      <span class="muted small" data-testid="mission-waits">waits for {(n.waiting_for ?? []).map(titleOf).join(', ')}</span>
-                    {/if}
-                    {#if n.attempt}
-                      <span class="muted small" data-testid="mission-attempt" title={n.attempt.summary ?? ''}
-                        >{attemptLine(n.attempt)}</span
-                      >
-                    {/if}
-                    {#if n.verification}
-                      <span class="vbadge v-{n.verification.state}" data-testid="mission-verified"
-                        >{verificationLabel(n.verification.state)}</span
-                      >
-                      <ul class="checks" data-testid="mission-checks">
-                        {#each n.verification.checks as c (c.line)}
-                          <li class="c-{c.state}">
-                            <span class="glyph" aria-label={c.state}>{checkGlyph(c.state)}</span>
-                            <span class="line">{c.line}</span>
-                            <span class="muted small">{c.detail}</span>
-                            {#if detail?.may_change && checkable(c)}
-                              <button
-                                class="btn btn--chip"
-                                type="button"
-                                disabled={busy}
-                                data-testid="mission-check"
-                                onclick={() => void check(n.item_id, c.line, true)}>Met</button
-                              >
-                            {/if}
-                          </li>
-                        {/each}
-                      </ul>
-                    {/if}
-                    {#if condsFor === n.item_id}
-                      <form class="conds" onsubmit={(e) => (e.preventDefault(), void saveConds())}>
-                        <textarea
-                          rows="3"
-                          placeholder={'ci\nreview\ntest:cargo test\nperson'}
-                          bind:value={condText}
-                          data-testid="mission-conds-text"
-                        ></textarea>
-                        <span class="row">
-                          <button class="btn" type="submit" disabled={busy} data-testid="mission-conds-save">Save</button>
-                          <button class="btn btn--quiet" type="button" onclick={() => (condsFor = null)}>Cancel</button>
-                        </span>
-                      </form>
-                    {/if}
-                    {#if mayChange && (n.depends_on ?? []).length > 0}
-                      <span class="deps">
-                        {#each n.depends_on ?? [] as d (d)}
-                          <button
-                            class="btn btn--chip dep"
-                            type="button"
-                            title="Stop waiting for {titleOf(d)}"
-                            disabled={busy}
-                            data-testid="mission-dep-remove"
-                            onclick={() => void setDep(n.item_id, d, false)}>after {titleOf(d)} ×</button
-                          >
-                        {/each}
-                      </span>
-                    {/if}
-                  </span>
-                  {#if mayChange && condsFor !== n.item_id}
-                    <button
-                      class="btn btn--quiet btn--icon"
-                      type="button"
-                      aria-label="Done when…"
-                      title="Done when: the conditions that verify this task"
-                      disabled={busy}
-                      data-testid="mission-conds"
-                      onclick={() => editConds(n.item_id)}><Icon name="checklist" size={14} /></button
-                    >
-                  {/if}
-                  {#if it.id === mission.root_item_id}
-                    <span class="muted small">root</span>
-                  {:else if mayChange}
-                    {@const choices = depChoices(n)}
-                    {#if choices.length > 0}
-                      <select
-                        class="dep-pick"
-                        aria-label="Waits for"
-                        disabled={busy}
-                        data-testid="mission-dep-add"
-                        onchange={(e) => {
-                          const v = Number((e.currentTarget as HTMLSelectElement).value);
-                          (e.currentTarget as HTMLSelectElement).value = '';
-                          if (v) void setDep(n.item_id, v, true);
-                        }}
-                      >
-                        <option value="">after…</option>
-                        {#each choices as c (c.id)}<option value={c.id}>{c.title}</option>{/each}
-                      </select>
-                    {/if}
-                    {#if n.state === 'failed' && mission.state === 'active'}
-                      <button
-                        class="btn btn--quiet btn--icon"
-                        type="button"
-                        aria-label="Retry"
-                        title="Try again, with the last failure in the prompt"
-                        disabled={busy || changeBlocked}
-                        data-testid="mission-retry"
-                        onclick={() => void retry(it.id)}>↻</button
-                      >
-                    {/if}
-                    {#if n.state !== 'done'}
-                      <button
-                        class="btn btn--quiet btn--icon"
-                        type="button"
-                        aria-label={it.held_at ? 'Release' : 'Hold'}
-                        title={it.held_at ? 'Release' : 'Hold: never start this on its own'}
-                        disabled={busy}
-                        data-testid="mission-hold"
-                        onclick={() => void setHold(it.id, !it.held_at)}><Icon name={it.held_at ? 'play' : 'pause'} size={14} /></button
-                      >
-                    {/if}
-                    <button
-                      class="btn btn--quiet btn--icon"
-                      type="button"
-                      aria-label="Take out of the mission"
-                      title="Take out of the mission"
-                      disabled={busy}
-                      onclick={() => void removeItem(it.id)}>×</button
-                    >
-                  {/if}
-                </li>
-              {/if}
-            {/each}
-          </ul>
-        </div>
-      {/each}
-      {#if (detail.graph?.outside ?? []).length > 0}
-        <p class="muted small" data-testid="mission-outside">
-          Waits on work outside the mission: {(detail.graph?.outside ?? []).map((o) => (o.key ? `${o.key} · ${o.title}` : o.title)).join(', ')}
-        </p>
-      {/if}
-      {#if mayChange && mission.root_item_id}
-        <form class="row" onsubmit={(e) => (e.preventDefault(), void addTask())}>
-          <input placeholder="New task" bind:value={newTask} data-testid="mission-new-task" />
-          <button class="btn" type="submit" disabled={busy || !newTask.trim()}>Add</button>
-        </form>
-      {/if}
-      {:else if detailTab === 'runs'}
-        {#if runs.length === 0}
-          <p class="muted small" data-testid="mission-runs-empty">No runs yet. Start wave starts the first.</p>
-        {:else}
-          <ul class="runs" aria-label="Runs" data-testid="mission-runs">
-            {#each runs as r (r.task_id)}
-              <li data-testid="mission-run" data-state={r.state}>
-                <span class="node-dot"><StatusDot state={toneOf(r.state)} label={runStateLabel(r.state)} /></span>
-                <span class="main">
-                  {#if r.item_id != null}
-                    {@const itemId = r.item_id}
-                    <span class="title-row">
-                      <button
-                        class="title linkish"
-                        type="button"
-                        title="Open the task"
-                        data-testid="mission-run-open"
-                        onclick={() => openItem(itemId)}>{titleOf(itemId)}</button
-                      >
-                      {@render sessionLinks(itemId)}
-                    </span>
-                  {:else}
-                    <span class="title">Task run {r.task_id}</span>
-                  {/if}
-                  <span class="muted small"
-                    >{r.role}{r.attempt ? ` #${r.attempt}` : ''} · {runStateLabel(r.state)}{#if r.at != null} · {shortAge(r.at)}{/if}{#if r.actor} · by {r.actor === 'loop' ? 'the loop' : r.actor}{/if}</span
-                  >
-                </span>
-              </li>
-            {/each}
-          </ul>
-        {/if}
-      {:else if detailTab === 'sessions'}
-        {#if liveSessions.length === 0}
-          <p class="muted small" data-testid="mission-sessions-empty">No session is working on this mission's tasks.</p>
-        {:else}
-          <ul class="runs" aria-label="Sessions" data-testid="mission-sessions">
-            {#each liveSessions as s (s.session_id)}
-              <li data-testid="mission-session">
-                <span class="main">
-                  <button
-                    class="title linkish"
-                    type="button"
-                    title="Open the session"
-                    data-testid="mission-session-open"
-                    onclick={() => openSession(s)}>{s.tmux_name}</button
-                  >
-                  <span class="muted small"
-                    >{s.host_alias} · {s.kind} · <button
-                      class="linkish"
-                      type="button"
-                      title="Open the task"
-                      data-testid="mission-session-task"
-                      onclick={() => openItem(s.item_id)}>{titleOf(s.item_id)}</button
-                    ></span
-                  >
-                </span>
-              </li>
-            {/each}
-          </ul>
-        {/if}
-      {:else if detailTab === 'repos'}
-      {#if (mission.repos ?? []).length === 0}
-        <p class="muted small">No repo allowed yet: a run needs at least one.</p>
-      {:else}
-        <ul class="repos" data-testid="mission-repos">
-          {#each mission.repos ?? [] as r (r.project_id)}
-            <li>
-              <span class="title">{r.name}</span>
-              {#if r.role}<span class="muted small">{r.role}</span>{/if}
-              {#if mayChange}
-                <button
-                  class="btn btn--quiet btn--icon"
-                  type="button"
-                  aria-label="Remove repo"
-                  title="Remove repo"
-                  disabled={busy}
-                  onclick={() => void removeRepo(r.project_id)}>×</button
-                >
-              {/if}
-            </li>
-          {/each}
-        </ul>
-      {/if}
-      {#if mayChange && repoChoices.length > 0}
-        <div class="row">
-          <select bind:value={repoPick} data-testid="mission-repo-pick">
-            <option value="">Add a repo…</option>
-            {#each repoChoices as p (p.id)}<option value={p.id}>{p.owner}/{p.repo}</option>{/each}
-          </select>
-          <input class="role" placeholder="role" bind:value={repoRole} />
-          <button class="btn" type="button" disabled={busy || repoPick === ''} data-testid="mission-repo-add" onclick={() => void addRepo()}
-            >Add</button
-          >
-        </div>
-      {/if}
-
-      {:else}
-      <ul class="events" data-testid="mission-events">
-        {#each detail.events ?? [] as e (e.id)}
-          <li><span class="muted small">{shortAge(e.at)}</span> {eventSentence(e)}</li>
-        {/each}
-      </ul>
-      {/if}
-
-      {#if detail.may_change && mission.state === 'completed'}
-        <!-- Redesign 9.11: Finish's release note, drafted on demand. -->
-        <h4>Release note</h4>
-        <ReleaseNote missionId={mission.id} />
-      {/if}
-
-      {#if detail.may_change && (mission.state === 'draft' || isFinal(mission.state))}
-        {#if confirmDelete}
-          <div class="row">
-            <span>Delete {mission.name}? Its tasks stay.</span>
-            <button class="btn btn--danger" type="button" disabled={busy} data-testid="mission-delete-confirm" onclick={() => void remove()}
-              >Delete</button
-            >
-            <button class="btn btn--quiet" type="button" onclick={() => (confirmDelete = false)}>Keep</button>
-          </div>
-        {:else}
-          <button class="btn btn--quiet" type="button" data-testid="mission-delete" onclick={() => (confirmDelete = true)}>Delete…</button>
-        {/if}
-      {/if}
-    </div>
-  {:else}
-    <div class="bar">
-      {#if creating}
-        <form class="create" onsubmit={(e) => (e.preventDefault(), void create())}>
-          <input placeholder="Name" bind:value={newName} data-testid="mission-new-name" />
-          <textarea rows="3" placeholder="Goal: what is true when it is done" bind:value={newGoal} data-testid="mission-new-goal"
-          ></textarea>
-          <label class="check"
-            ><input type="checkbox" bind:checked={newPlanner} data-testid="mission-new-planner" /> Let the planner draft the first tasks
-            <span class="muted small">(you confirm each one)</span></label
-          >
-          {#if newImportOpen}
-            <PlanImportForm bind:text={newImportText} bind:ready={newImportRows} testid="mission-new-import" />
-          {:else}
-            <button class="btn btn--quiet" type="button" data-testid="mission-new-import-open" onclick={() => (newImportOpen = true)}
-              >Import a plan…</button
-            >
-          {/if}
-          <div class="row">
-            <button class="btn btn--primary" type="submit" disabled={busy || saveBlocked} data-testid="mission-create">Create</button>
-            <button class="btn btn--quiet" type="button" onclick={() => (creating = false)}>Cancel</button>
-          </div>
-        </form>
-      {:else}
-        <button class="btn btn--primary" type="button" disabled={saveBlocked} data-testid="mission-new" onclick={() => (creating = true)}>New mission</button>
-        {#if missions.length > 0}
-          <button
-            class="btn btn--quiet filters-btn"
-            type="button"
-            aria-expanded={filtersOpen}
-            data-testid="missions-filters"
-            onclick={() => (filtersOpen = !filtersOpen)}
-            >Filters{#if filterCount > 0}&nbsp;<span class="count" data-testid="missions-filters-count">{filterCount}</span>{/if}</button
-          >
-          <label class="group-pick muted small"
-            >Group
-            <select bind:value={grouping} data-testid="missions-group">
-              <option value="state">State</option>
-              <option value="none">None</option>
-            </select></label
-          >
-        {/if}
-      {/if}
-    </div>
-    {#if filtersOpen && missions.length > 0}
-      <div class="filters" role="group" aria-label="Filter missions" data-testid="missions-filters-panel">
-        <label class="check"><input type="checkbox" bind:checked={filters.needsYou} data-testid="missions-filter-needs-you" /> Needs you</label>
-        {#if $myPersonId != null}
-          <label class="check"><input type="checkbox" bind:checked={filters.mine} data-testid="missions-filter-mine" /> Mine</label>
-        {/if}
-        {#if filterChoices.orgIds.length > 1}
-          <label class="muted small"
-            >Organisation
-            <select
-              data-testid="missions-filter-org"
-              value={filters.orgId ?? ''}
-              onchange={(e) => (filters.orgId = numOrNull((e.currentTarget as HTMLSelectElement).value))}
-            >
-              <option value="">Any</option>
-              {#each filterChoices.orgIds as id (id)}<option value={id}>{orgName(id)}</option>{/each}
-            </select></label
-          >
-        {/if}
-        {#if filterChoices.repos.length > 0}
-          <label class="muted small"
-            >Repository
-            <select
-              data-testid="missions-filter-repo"
-              value={filters.projectId ?? ''}
-              onchange={(e) => (filters.projectId = numOrNull((e.currentTarget as HTMLSelectElement).value))}
-            >
-              <option value="">Any</option>
-              {#each filterChoices.repos as r (r.project_id)}<option value={r.project_id}>{r.name}</option>{/each}
-            </select></label
-          >
-        {/if}
-        {#if filterChoices.modes.length > 1}
-          <label class="muted small"
-            >Mode
-            <select data-testid="missions-filter-mode" bind:value={filters.mode}>
-              <option value={null}>Any</option>
-              {#each filterChoices.modes as mode (mode)}<option value={mode}>{mode === 'continuous' ? 'Continuous' : mode === 'finite' ? 'Finite' : mode}</option>{/each}
-            </select></label
-          >
-        {/if}
-        {#if filterCount > 0}
-          <button class="btn btn--quiet" type="button" data-testid="missions-filters-clear" onclick={() => (filters = {})}>Clear</button>
-        {/if}
-      </div>
-    {/if}
-    {#if error}
+  <div class="list-scroll">
+    {#if $missionList.error}
       <div class="state error" role="alert" data-testid="missions-error">
-        <p>{error}</p>
-        <button class="btn" type="button" onclick={() => void load()}>Retry</button>
+        <p>{$missionList.error}</p>
+        <button class="btn" type="button" onclick={() => void loadMissionList()}>Retry</button>
       </div>
-    {:else if !loaded}
+    {:else if !$missionList.loaded}
       <div data-testid="missions-loading"><Skeleton rows={3} label="Loading missions" /></div>
     {:else if missions.length === 0}
-      <p class="muted" data-testid="missions-empty">
-        No missions yet. A mission is a goal with the tasks that reach it; create one to gather the work.
-      </p>
+      <p class="muted empty" data-testid="missions-empty">No missions yet. A mission is a goal with the tasks that reach it.</p>
     {:else}
       {#each groups as g (g.key)}
-        {@const folds = g.key === 'finished'}
+        {@const folds = g.key === 'earlier'}
         {#if g.label}
           {#if folds}
             <button
               class="sec sec--fold"
               type="button"
-              aria-expanded={finishedOpen}
+              aria-expanded={earlierOpen}
               data-testid="missions-group-{g.key}"
-              onclick={() => (finishedOpen = !finishedOpen)}
-              >{g.label} <span class="count">{g.missions.length}</span> <span aria-hidden="true">{finishedOpen ? '⌄' : '›'}</span></button
+              onclick={() => (earlierOpen = !earlierOpen)}
+              >{g.label} <span class="count">{g.missions.length}</span> <span aria-hidden="true">{earlierOpen ? '⌄' : '›'}</span></button
             >
           {:else}
             <h4 class="sec" data-testid="missions-group-{g.key}">{g.label} <span class="count">{g.missions.length}</span></h4>
           {/if}
         {/if}
-        {#if !folds || finishedOpen}
+        {#if !folds || earlierOpen}
           <ul class="list" aria-label={g.label || 'Missions'}>
             {#each g.missions as m (m.id)}
-              {@const why = missionReason(m, rowDetails.get(m.id))}
+              {@const d = rowDetails.get(m.id)}
+              {@const why = missionRowLine(m, d)}
+              {@const progress = rowProgress(m)}
+              {@const on = $workMissionsOpen && $roomMissionId === m.id}
               <li>
-                <button class="open" type="button" data-testid="mission-row" data-state={m.state} onclick={() => void open(m.id)}>
+                <button
+                  class="open"
+                  class:on
+                  type="button"
+                  aria-current={on ? 'true' : undefined}
+                  data-testid="mission-row"
+                  data-state={m.state}
+                  data-group={g.key}
+                  onclick={() => open(m.id)}
+                >
+                  <span class="dot"><StatusDot state={missionTone(m, d)} size={7} /></span>
                   <span class="main">
                     <span class="row-head">
                       <span class="title">{m.name}</span>
                       {#if grouping === 'none'}<span class="badge">{stateLabel(m.state)}</span>{/if}
-                      {#if progressLabel(m)}<span class="muted small tnum">{progressLabel(m)}</span>{/if}
                     </span>
-                    {#if why}<span class="muted small reason" data-testid="mission-reason">{why}</span>{/if}
+                    <span class="reason" class:waiting={g.key === 'needs'} data-testid="mission-reason">{why}</span>
                   </span>
+                  {#if progress}
+                    <span class="progress" data-testid="mission-progress">
+                      <Meter value={progress.value} level={m.state === 'failed' ? 'crit' : 'ok'} label={progress.label} />
+                      <span class="tnum">{progress.text}</span>
+                    </span>
+                  {/if}
                 </button>
               </li>
             {/each}
@@ -1547,169 +296,241 @@
         {/if}
       {/each}
       {#if shown.length < missions.length}
-        <p class="muted small" data-testid="missions-hidden">
+        <p class="muted small hidden-line" data-testid="missions-hidden">
           {missions.length - shown.length} hidden by filters ·
           <button class="link" type="button" data-testid="missions-hidden-show" onclick={() => (filters = {})}>Show all</button>
         </p>
       {/if}
-      {#if footer || missions.some((m) => m.state === 'active')}
-        <div class="row list-foot" data-testid="missions-footer">
-          {#if footer}<span class="muted small" data-testid="missions-loop">{footer}</span>{/if}
-          {#if missions.some((m) => m.state === 'active')}
-            <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="missions-pause-all" onclick={() => void pauseAll()}
-              >Pause all</button
-            >
-          {/if}
-        </div>
-      {/if}
     {/if}
+  </div>
+  {#if footer || anyActive}
+    <div class="list-foot" data-testid="missions-footer">
+      {#if footer}<span class="muted small" data-testid="missions-loop">{footer}</span>{/if}
+      {#if anyActive}
+        <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="missions-pause-all" onclick={() => void pauseAll()}
+          >Pause all</button
+        >
+      {/if}
+    </div>
   {/if}
 </div>
 
-<!-- A task's live sessions, each one click away (beside its title). -->
-{#snippet sessionLinks(itemId: number)}
-  {#each liveByItem.get(itemId) ?? [] as s (s.session_id)}
-    <button
-      class="btn btn--chip sess-link"
-      type="button"
-      title="Open {s.tmux_name} on {s.host_alias}"
-      data-testid="mission-task-session"
-      data-session-id={s.session_id}
-      onclick={() => openSession(s)}>Session</button
-    >
-  {/each}
-{/snippet}
-
 <style>
-  .title-row { display: flex; align-items: center; gap: 0.4rem; min-width: 0; }
-  .linkish {
+  .missions {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    height: 100%;
+    font-size: var(--text-xs);
+  }
+  .bar {
+    display: flex;
+    gap: 0.4rem;
+    align-items: center;
+    flex-wrap: wrap;
+    padding: 0.4rem 0.5rem;
+  }
+  .grow {
+    flex: 1 1 auto;
+  }
+  .new {
+    flex: none;
+  }
+  .list-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    padding-bottom: var(--space-2);
+  }
+  ul {
+    list-style: none;
+    margin: 0;
     padding: 0;
+  }
+  .open {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    width: calc(100% - 12px);
+    margin: 0 6px;
+    padding: 8px 10px;
     border: 0;
-    background: none;
+    border-radius: var(--radius-md);
+    background: transparent;
+    color: var(--fg);
     font: inherit;
-    color: inherit;
     text-align: left;
     cursor: pointer;
   }
-  .linkish:hover, .linkish:focus-visible { color: var(--accent); text-decoration: underline; }
-  .sess-link { flex: none; }
-  .loop { display: flex; flex-direction: column; gap: 0.3rem; border-left: 2px solid var(--border); padding-left: 0.5rem; }
-  .steps, .cards { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.2rem; }
-  .steps li, .cards li { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
-  .cards input { flex: 1 1 8rem; min-width: 0; }
-  .missions { display: flex; flex-direction: column; gap: 0.5rem; padding: 0.5rem; font-size: var(--text-xs); }
-  .more { position: relative; display: inline-flex; }
-  .more-menu {
-    position: absolute; top: calc(100% + 4px); left: 0; z-index: 30; min-width: 11rem; padding: 0.25rem;
-    display: flex; flex-direction: column; background: var(--bg); border: 1px solid var(--border);
-    border-radius: var(--radius-md); box-shadow: var(--shadow-pop);
+  .open:hover {
+    background: var(--bg-hover);
   }
-  .mi {
-    text-align: left; border: none; background: transparent; color: var(--fg); cursor: pointer;
-    font: inherit; font-size: var(--text-xs); padding: 0.35rem 0.5rem; border-radius: var(--radius-sm);
+  .open.on {
+    background: var(--accent-soft);
   }
-  .mi:hover, .mi:focus-visible { background: var(--bg-hover); }
-  .mi.danger { color: var(--danger); }
-  .btn--chip.danger { color: var(--danger); }
-  .confirm-move { margin-top: 0.3rem; font-size: var(--text-xs); }
-  .bar, .row { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
-  .create { display: flex; flex-direction: column; gap: 0.4rem; width: 100%; }
-  .check { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
-  input, textarea, select {
+  .open:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+    outline-offset: -2px;
+  }
+  .dot {
+    flex: none;
+    margin-top: 5px;
+    line-height: 0;
+  }
+  .main {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .row-head {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    min-width: 0;
+  }
+  .title {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: var(--text-sm);
+    font-weight: 500;
+    line-height: var(--text-sm-lh);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .reason {
+    color: var(--fg-muted);
+    font-size: var(--text-xs);
+    line-height: var(--text-xs-lh);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .reason.waiting {
+    color: var(--status-waiting);
+  }
+  .progress {
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 3px;
+    width: 3rem;
+    margin-top: 4px;
+  }
+  .progress :global(.of-meter) {
+    width: 100%;
+  }
+  .tnum {
+    color: var(--fg-muted);
+    font-size: var(--text-2xs);
+    font-variant-numeric: tabular-nums;
+  }
+  .badge {
+    font-size: var(--text-2xs);
+    padding: 0.05rem 0.4rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-pill);
+    white-space: nowrap;
+  }
+  .sec {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0;
+    padding: 14px 14px 6px;
+    color: var(--fg-muted);
+    font-size: var(--text-2xs);
+    font-weight: 500;
+    letter-spacing: 0.02em;
+  }
+  .sec--fold {
     font: inherit;
-    padding: 0.25rem 0.4rem;
+    font-size: var(--text-2xs);
+    background: none;
+    border: 0;
+    cursor: pointer;
+  }
+  .count {
+    font-size: var(--text-2xs);
+    font-weight: 500;
+    padding: 0 5px;
+    border-radius: var(--radius-sm);
+    background: var(--count-bg);
+    color: var(--fg-2);
+  }
+  .group-pick {
+    display: inline-flex;
+    gap: 0.3rem;
+    align-items: center;
+  }
+  select,
+  input {
+    font: inherit;
+    padding: 0.15rem 0.3rem;
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     background: var(--bg);
     color: var(--fg);
   }
-  .row input { flex: 1 1 8rem; min-width: 0; }
-  .row input.role { flex: 0 1 6rem; }
-  .field { display: flex; flex-direction: column; gap: 0.2rem; }
-  .field.inline { flex: 1 1 10rem; }
-  ul { list-style: none; margin: 0; padding: 0; }
-  .list li, .items li, .repos li { border-bottom: 1px solid var(--border); }
-  .items li, .repos li { display: flex; gap: 0.4rem; align-items: center; padding: 0.25rem 0; }
-  .open {
+  .check {
     display: flex;
-    gap: 0.5rem;
+    gap: 0.4rem;
     align-items: center;
-    width: 100%;
-    padding: 0.35rem 0.2rem;
+  }
+  .filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    align-items: center;
+    margin: 0 0.5rem 0.4rem;
+    padding: 0.3rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+  }
+  .filters label {
+    display: inline-flex;
+    gap: 0.3rem;
+    align-items: center;
+  }
+  .link {
     background: none;
-    border: none;
-    color: inherit;
+    border: 0;
+    padding: 0;
+    color: var(--accent);
     font: inherit;
-    text-align: left;
     cursor: pointer;
   }
-  .open:hover { background: var(--bg-hover); }
-  .title { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
-  .name { margin: 0.25rem 0 0; overflow-wrap: anywhere; }
-  .goal { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-  .head { display: flex; justify-content: space-between; align-items: center; }
-  .badge { font-size: var(--text-2xs); padding: 0.05rem 0.4rem; border: 1px solid var(--border); border-radius: var(--radius-pill); white-space: nowrap; }
-  h4 { margin: 0.5rem 0 0; font-size: var(--text-2xs); text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-muted); }
-  .done-when li { padding: 0.1rem 0; }
-  .events li { padding: 0.1rem 0; }
-  .glyph { width: 1.1rem; text-align: center; flex: 0 0 auto; color: var(--fg-muted); }
-  .node-dot { display: inline-flex; align-items: center; height: 1lh; flex: 0 0 auto; }
-  .main { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; }
-  .deps { display: flex; flex-wrap: wrap; gap: 0.2rem; margin-top: 0.15rem; }
-  .dep { font-size: var(--text-2xs); }
-  .dep-pick { max-width: 7rem; font-size: var(--text-2xs); }
-  .import { display: flex; flex-direction: column; gap: 0.3rem; margin-bottom: 0.4rem; }
-  /* The design system's Tabs (of-tabs). */
-  .view-switch { display: flex; gap: 20px; border-bottom: 1px solid var(--border); margin-bottom: 0.4rem; }
-  .view-switch button {
-    font: inherit; font-size: var(--text-sm); color: var(--fg-muted); background: none; border: 0; cursor: pointer;
-    padding: 6px 0; border-bottom: 2px solid transparent; margin-bottom: -1px;
+  .hidden-line,
+  .empty {
+    padding: var(--space-2) 14px;
   }
-  .view-switch button:hover { color: var(--fg); }
-  .view-switch button[aria-selected='true'] { color: var(--fg); border-bottom-color: var(--accent); font-weight: 500; }
-  .tabs { margin-top: 0.5rem; }
-  .count {
-    font-size: var(--text-2xs); font-weight: 500; padding: 0 5px; margin-left: 4px; border-radius: var(--radius-sm);
-    background: var(--bg-hover); color: var(--fg-muted);
+  .list-foot {
+    display: flex;
+    gap: 0.4rem;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    padding: 8px 14px;
+    border-top: 1px solid var(--border);
   }
-  .sec { display: flex; align-items: center; gap: 4px; margin: 0.5rem 0 0; }
-  .sec--fold {
-    font: inherit; font-size: var(--text-2xs); text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-muted);
-    background: none; border: 0; padding: 0; cursor: pointer;
+  .muted {
+    color: var(--fg-muted);
+    margin: 0;
   }
-  .row-head { display: flex; gap: 0.5rem; align-items: center; }
-  .reason { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .tnum { font-variant-numeric: tabular-nums; }
-  .list-foot { justify-content: space-between; border-top: 1px solid var(--border); padding-top: 0.3rem; }
-  .group-pick { display: inline-flex; gap: 0.3rem; align-items: center; }
-  .filters-btn { margin-left: auto; }
-  .link { background: none; border: 0; padding: 0; color: var(--accent); font: inherit; cursor: pointer; }
-  .filters { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; padding: 0.3rem 0.5rem; border: 1px solid var(--border); border-radius: var(--radius-sm); }
-  .filters label { display: inline-flex; gap: 0.3rem; align-items: center; }
-  .kv { display: grid; grid-template-columns: 5rem minmax(0, 1fr); gap: 0.2rem 0.6rem; margin: 0.3rem 0 0; font-size: var(--text-2xs); }
-  .kv dt { color: var(--fg-muted); }
-  .kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
-  .runs li { display: flex; gap: 0.4rem; align-items: center; padding: 0.25rem 0; border-bottom: 1px solid var(--border); }
-  .wave { display: flex; flex-direction: column; gap: 0.1rem; }
-  .wave-head { font-size: var(--text-2xs); color: var(--fg-muted); margin-top: 0.3rem; }
-  .vbadge { font-size: var(--text-2xs); align-self: flex-start; padding: 0 0.35rem; border: 1px solid var(--border); border-radius: var(--radius-pill); }
-  .vbadge.v-verified { color: var(--status-done); border-color: var(--status-done); }
-  .vbadge.v-failed { color: var(--danger); border-color: var(--danger); }
-  .checks li { display: flex; gap: 0.3rem; align-items: baseline; border: none; padding: 0; font-size: var(--text-2xs); }
-  .checks .line { font-family: var(--font-mono); }
-  .checks .c-pass .glyph { color: var(--status-done); }
-  .checks .c-fail .glyph { color: var(--danger); }
-  .conds { display: flex; flex-direction: column; gap: 0.2rem; margin-top: 0.2rem; }
-  .proposals { padding: 0.3rem 0.4rem; border: 1px dashed var(--border); border-radius: var(--radius-sm); }
-  .muted { color: var(--fg-muted); margin: 0; }
-  .small { font-size: var(--text-2xs); }
-  .meta { font-size: var(--text-2xs); }
-  .notice { margin: 0; color: var(--danger); }
-  .state.error p { color: var(--danger); margin: 0 0 0.3rem; }
-  .hosts { border: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
-  .hosts legend { padding: 0; margin-right: var(--space-1); float: left; }
-  .planner-error { border: 1px solid var(--danger); border-radius: var(--radius-md); padding: var(--space-2) var(--space-3); margin: var(--space-2) 0; }
-  .planner-error p { margin: 0 0 var(--space-1); }
-  .planner-error .title { color: var(--danger); font-weight: 600; }
-  .planner-error .details { margin: var(--space-1) 0 0; white-space: pre-wrap; word-break: break-word; font-size: var(--text-xs); color: var(--fg-muted); }
+  .small {
+    font-size: var(--text-2xs);
+  }
+  .notice {
+    margin: 0 0.5rem;
+    color: var(--fg-muted);
+  }
+  .state.error {
+    padding: var(--space-2) 14px;
+  }
+  .state.error p {
+    color: var(--danger);
+    margin: 0 0 0.3rem;
+  }
 </style>

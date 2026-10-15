@@ -6,7 +6,7 @@
 // drag to zero. Any session the chat names (a handoff chip, a child card, a
 // `#`/`@` chip, a thread row) opens in the right panel's Session tab, in
 // place: Control stays, nothing is told to navigate.
-import { get, writable } from 'svelte/store';
+import { get, writable, type Writable } from 'svelte/store';
 import { readPref, writePref } from './prefs';
 import { sessions } from './sessions';
 import { selectSession } from './selection';
@@ -29,15 +29,38 @@ const isBool = (v: unknown): v is boolean => typeof v === 'boolean';
 export const clampRight = (px: number): number => Math.round(Math.min(RIGHT_MAX, Math.max(RIGHT_MIN, px)));
 export const clampLeft = (px: number): number => Math.round(Math.min(LEFT_MAX, Math.max(LEFT_MIN, px)));
 
-/** The right panel's width, px. */
-export const controlRightPx = writable<number>(clampRight(readPref('layout.control-right', RIGHT_DEFAULT, isNumber)));
-/** The left column's width, px. */
-export const controlLeftPx = writable<number>(clampLeft(readPref('layout.control-left', LEFT_DEFAULT, isNumber)));
-/** The left column folded to its edge button. */
-export const controlLeftCollapsed = writable<boolean>(readPref('layout.control-left-collapsed', false, isBool));
+/**
+ * A resizable right panel's width, kept in `prefKey` (Control's, and Work →
+ * Missions' room, which reuses it). A drag writes on every frame; the pref
+ * is written once it settles. `drag` is one step on the handle, which sits
+ * on the panel's LEFT edge, so a drag to the left widens it: `raw` is the
+ * drag's running width, unclamped, and below `RIGHT_HIDE_BELOW` the panel
+ * hides (`onHide`) and keeps its last width for when it comes back.
+ * Answers the new running width.
+ */
+export function rightPanelWidth(
+  prefKey: string,
+  onHide: () => void,
+  fallback = RIGHT_DEFAULT,
+): { px: Writable<number>; drag: (raw: number, delta: number) => number } {
+  const px = writable<number>(clampRight(readPref(prefKey, fallback, isNumber)));
+  persist(px, prefKey);
+  return {
+    px,
+    drag(raw, delta) {
+      const next = raw - delta;
+      if (next < RIGHT_HIDE_BELOW) {
+        onHide();
+        return RIGHT_MIN;
+      }
+      px.set(clampRight(next));
+      return next;
+    },
+  };
+}
 
 // A drag writes on every frame; the pref is written once it settles.
-function persist(store: typeof controlRightPx, key: string): void {
+function persist(store: Writable<number>, key: string): void {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let first = true;
   store.subscribe((px) => {
@@ -49,25 +72,23 @@ function persist(store: typeof controlRightPx, key: string): void {
     timer = setTimeout(() => writePref(key, px), 200);
   });
 }
-persist(controlRightPx, 'layout.control-right');
+
+const controlRight = rightPanelWidth('layout.control-right', () => setViewsOpen(false));
+/** The right panel's width, px. */
+export const controlRightPx = controlRight.px;
+/** The left column's width, px. */
+export const controlLeftPx = writable<number>(clampLeft(readPref('layout.control-left', LEFT_DEFAULT, isNumber)));
+/** The left column folded to its edge button. */
+export const controlLeftCollapsed = writable<boolean>(readPref('layout.control-left-collapsed', false, isBool));
+
 persist(controlLeftPx, 'layout.control-left');
 controlLeftCollapsed.subscribe((v) => writePref('layout.control-left-collapsed', v));
 
 /**
- * One drag step on the right panel's handle (the handle sits on its LEFT
- * edge, so a drag to the left widens it). `raw` is the drag's running
- * width, unclamped: below `RIGHT_HIDE_BELOW` the panel hides and keeps its
- * last width for when it comes back. Answers the new running width.
+ * One drag step on Control's right panel's handle (`rightPanelWidth`'s
+ * `drag`): below `RIGHT_HIDE_BELOW` the views panel hides.
  */
-export function dragRight(raw: number, delta: number): number {
-  const next = raw - delta;
-  if (next < RIGHT_HIDE_BELOW) {
-    setViewsOpen(false);
-    return RIGHT_MIN;
-  }
-  controlRightPx.set(clampRight(next));
-  return next;
-}
+export const dragRight = controlRight.drag;
 
 export function dragLeft(delta: number): void {
   controlLeftPx.update((px) => clampLeft(px + delta));
