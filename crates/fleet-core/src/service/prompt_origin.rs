@@ -54,6 +54,25 @@ pub const HARNESS_TAGS: &[&str] = &[
     "ide_selection",
 ];
 
+/// The marks fleet opens a prompt of its OWN with, when it types one into a
+/// session on nobody's behalf: a note after an automatic restart
+/// (`service::auto_restore`, `[fleet]`) or a digest of what happened to the
+/// sessions Control started (`service::operator_feed`, `[fleet events]`).
+/// Such a prompt reaches the UserPromptSubmit hook like a person's, so it is
+/// recognised here, once, for every reader: it is nobody's first prompt,
+/// work-detection signal or census text ([`human_part`] answers `None`), it
+/// is typed as fleet's (`sessions::prompt::Origin::Fleet`: no name, no
+/// touch), and a client can draw it as an event rather than as the person
+/// talking. Only at the HEAD of the prompt, like a harness block: a person
+/// who quotes one mid-sentence keeps their prompt.
+pub const FLEET_PROMPT_MARKS: &[&str] = &["[fleet events]", "[fleet]"];
+
+/// Whether `prompt` opens with one of [`FLEET_PROMPT_MARKS`].
+pub fn is_fleet_prompt(prompt: &str) -> bool {
+    let t = prompt.trim_start();
+    FLEET_PROMPT_MARKS.iter().any(|m| t.starts_with(m))
+}
+
 /// Whether `tag` is one Claude Code opens a user turn with
 /// ([`HARNESS_TAGS`]). The one predicate: the transcript parser asks it too.
 pub fn is_harness_tag(tag: &str) -> bool {
@@ -72,6 +91,9 @@ pub fn is_harness_tag(tag: &str) -> bool {
 /// still sees the key. A command without arguments is the harness's echo.
 pub fn human_part(prompt: &str) -> Option<Cow<'_, str>> {
     let mut t = prompt.trim();
+    if is_fleet_prompt(t) {
+        return None;
+    }
     let mut name: Option<&str> = None;
     let mut args: Option<&str> = None;
     while let Some((tag, inner, rest)) = split_harness_block(t) {
@@ -314,5 +336,22 @@ mod tests {
         assert!(!is_harness(""));
         assert!(!is_harness("   "));
         assert_eq!(human_part("  ").as_deref(), None);
+    }
+
+    /// Fleet's own prompts are nobody's words; a mention mid-prompt is.
+    #[test]
+    fn a_fleet_marked_prompt_is_not_the_persons() {
+        for p in [
+            "[fleet events] 2 updates from sessions you started:",
+            "  [fleet] Your session was restarted automatically",
+        ] {
+            assert!(is_fleet_prompt(p), "{p}");
+            assert_eq!(human_part(p), None, "{p}");
+            assert!(is_harness(p), "{p}");
+        }
+        let quoted = "why did you print [fleet events] at me?";
+        assert!(!is_fleet_prompt(quoted));
+        assert_eq!(human_part(quoted).as_deref(), Some(quoted));
+        assert!(!is_fleet_prompt("[fleetwood] mac"));
     }
 }

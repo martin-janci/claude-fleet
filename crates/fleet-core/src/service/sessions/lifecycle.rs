@@ -1762,7 +1762,8 @@ pub(super) async fn kill_session_with(
         record_kill(&s, id, claude_sid.as_deref());
         match s.mark_session_killed(id, now_unix()) {
             // Already a ghost before this kill, with no tmux left: a
-            // resumable loss (`host_reboot`, `tmux_server_gone`) is exempt
+            // resumable loss (`host_reboot`, `tmux_server_gone`,
+            // `process_died`) is exempt
             // from the reap for the lost-session TTL, so the person's Kill
             // would leave it listed for days. They asked for it gone.
             Ok(None) if tmux_gone => {

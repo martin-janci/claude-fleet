@@ -739,6 +739,17 @@ fn env_vars_has_person_scope(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 193: its columns arrive together,
+/// so the first one answers for all.
+fn hosts_has_cpu_pct(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'cpu_busy_ticks'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 125.
 fn sessions_has_last_viewed_at(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -2166,6 +2177,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 192,
         sql: include_str!("../../migrations/192_env_vars_person_scope.sql"),
         already_applied: Some(env_vars_has_person_scope),
+    },
+    // Host load: CPU utilisation, memory pressure and the `mem_low` /
+    // `cpu_saturated` judgments on `hosts`. ADD COLUMNs, so guarded.
+    Migration {
+        version: 193,
+        sql: include_str!("../../migrations/193_host_cpu_and_memory_load.sql"),
+        already_applied: Some(hosts_has_cpu_pct),
     },
 ];
 
@@ -3846,6 +3864,45 @@ mod tests {
         assert_eq!(row().row_version, before + 1, "the trigger watches it");
     }
 
+    /// 193 on a database stopped at 192: every host arrives with its load
+    /// unknown and neither judgment raised, and a sample then fills them.
+    #[test]
+    fn migration_193_adds_unknown_host_load() {
+        let old = Store::open_in_memory().expect("open");
+        old.insert_host("h", Some("h")).unwrap();
+        old.conn
+            .execute_batch(
+                "ALTER TABLE hosts DROP COLUMN cpu_busy_ticks;\
+                 ALTER TABLE hosts DROP COLUMN cpu_total_ticks;\
+                 ALTER TABLE hosts DROP COLUMN cpu_pct;\
+                 ALTER TABLE hosts DROP COLUMN mem_pressure;\
+                 ALTER TABLE hosts DROP COLUMN mem_low;\
+                 ALTER TABLE hosts DROP COLUMN cpu_saturated;\
+                 DELETE FROM schema_version WHERE version >= 193;",
+            )
+            .unwrap();
+        old.migrate().expect("193 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let row = old.get_host_row("h").unwrap().unwrap();
+        assert_eq!((row.cpu_pct, row.mem_pressure), (None, None));
+        assert!(!row.mem_low && !row.cpu_saturated);
+        old.set_host_health(
+            "h",
+            &crate::tmux::HostHealthSample {
+                mem_avail_kb: Some(100),
+                mem_total_kb: Some(10_000),
+                cpu_pct: Some(40.0),
+                mem_pressure: Some(12.5),
+                ..Default::default()
+            },
+            1_700_000_000,
+        )
+        .unwrap();
+        let row = old.get_host_row("h").unwrap().unwrap();
+        assert_eq!((row.cpu_pct, row.mem_pressure), (Some(40.0), Some(12.5)));
+        assert!(row.mem_low && !row.cpu_saturated);
+    }
+
     /// 191 on a database stopped at 190: every host arrives with no hook
     /// relay, and one can then be stamped.
     #[test]
@@ -4008,10 +4065,13 @@ mod tests {
     #[test]
     fn migration_192_admits_the_person_scope_and_keeps_every_row() {
         let s = store_at_version(191);
-        s.upsert_host("h").unwrap();
         s.conn
             .execute_batch(
-                "INSERT INTO sessions (id, tmux_name, host_alias, created_at, last_activity_at, status) \
+                // Raw SQL, not `upsert_host`: a typed host read selects
+                // HOST_COLUMNS, which names columns a later migration (193)
+                // adds, so it fails on a store pinned to 191.
+                "INSERT INTO hosts (alias, reachable) VALUES ('h', 1); \
+                 INSERT INTO sessions (id, tmux_name, host_alias, created_at, last_activity_at, status) \
                    VALUES (7, 't', 'h', 0, 0, 'running'); \
                  INSERT INTO env_vars (id, scope, scope_key, name, value, secret, updated_at) \
                    VALUES (11, 'global', '', 'A', 'g', 0, 1), (12, 'session', '7', 'B', 's', 1, 2);",

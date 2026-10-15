@@ -120,14 +120,21 @@ export function blockedCopy(
   b: OperatorBlocked,
   host = 'local',
   fallback: string | null = null,
+  autoRestore = true,
 ): { title: string; action: string; next: OperatorNextStep } {
   switch (b) {
     case 'absent':
       return { title: 'The agent is not running.', action: 'Wake the agent', next: 'wake' };
     case 'lost':
+      // `recovery.auto_restore` (service::auto_restore): the hub restarts the
+      // agent by itself a minute after it was lost and queues it a note, so it
+      // reads the end of its conversation and tells you in one line what
+      // happened — recovered, not silently. The button stays for when that is
+      // off, or the budget (`recovery.max_attempts` a day) is spent.
       return {
-        title:
-          "The agent's session was lost. It is not brought back silently, because it may have stopped mid-sentence.",
+        title: autoRestore
+          ? "The agent's session was lost. Fleet restarts it by itself within a minute or two and tells it what happened, since it may have stopped mid-sentence. If it stays lost, its daily restore budget is spent: restart it here."
+          : "The agent's session was lost. Automatic recovery is off, so it waits for you; it may have stopped mid-sentence, and is told so when restarted.",
         action: 'Restart the agent',
         next: 'restart',
       };

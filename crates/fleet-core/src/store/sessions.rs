@@ -322,7 +322,8 @@ impl Store {
 
     /// One-shot: mark every non-ghost row of `host_alias` NOT in `keep_names`
     /// as lost, recording WHY (`reason`, one of `host_reboot` /
-    /// `tmux_server_gone` / `missing`). Loss also clears `claude_status`,
+    /// `tmux_server_gone` / `missing`; `process_died` is Phase 1's alone,
+    /// see `store::reconcile::PROCESS_DIED_CASE`). Loss also clears `claude_status`,
     /// `stuck_kind`/`stuck_since`, `current_activity` and `pending_input`: a
     /// ghost has no pane to vouch for them (F4). Called by the reboot/vanished-tmux
     /// detector (Task 6) instead of waiting out the normal one-cycle ghost
@@ -349,7 +350,11 @@ impl Store {
     /// (still dismissable) — erring toward keeping is the feature's point.
     /// A row fleet itself killed carries `lost_reason = 'killed'`
     /// ([`Self::mark_session_killed`]): fleet knows that loss is not
-    /// ambiguous, so it is never reclassified. Same kind
+    /// ambiguous, so it is never reclassified. Nor is a `process_died`
+    /// ghost: it is already resumable and kept to the TTL, so the failed
+    /// pass cost it nothing, and unlike a `missing` ghost it is not "at most
+    /// one pass old" — reclassifying it would relabel an agent killed hours
+    /// before a reboot as lost to that reboot. Same kind
     /// filter and same BE-3 guard as the main mark. Reclassified rows DO
     /// change on the wire (`lost_reason` is a `SessionRow` field), so a
     /// `SessionUpdated` is emitted for each of them too, after the tx

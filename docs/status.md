@@ -229,6 +229,55 @@ restart, migration 036 + `lost_reason`) and **recovery** —
 `recreate_session`, `discover_lost_sessions` scans a host's Claude transcripts
 for conversations fleet has no row for, and `new_session` takes a
 `resume_claude_session_id`; the UI for both is in `HostDetail`.
+**Automatic recovery** is landed and ON by default (`recovery.auto_restore`,
+`service/auto_restore.rs`): a session whose agent the host killed — OOM,
+systemd-oomd killing one pane in its own scope — is recorded
+`lost_reason = 'process_died'` (hooks alive, no SessionEnd,
+`store::reconcile::PROCESS_DIED_CASE`), kept to `sessions.lost_ttl_secs`
+like a reboot, and resumed by the tick after `recovery.grace_secs` (60) with
+the mass-loss reasons, at most `recovery.max_attempts` (2) per session per
+day. A host under load (memory under `health.mem_low_pct`, or CPU
+saturated) DEFERS the
+restore instead: no attempt is spent, one `auto_restore_deferred` event per
+episode names the reason, the lost TTL counts from that deferral (one
+extension per episode) and the tick resumes it once the load drops. With
+`decide.jev.restore_timing` (off by default, docs/decisions.md) Jev is asked
+recover now / defer / move for a due restore on a loaded host or after a
+failed one; assist follows within bounds (never past the memory floor; a
+move is recorded, not carried out). Each attempt leaves one
+`auto_restored` / `auto_restore_failed` / `auto_restore_skipped` event;
+Control's own session is restarted through `restart_session` and gets a
+`[fleet]` note in its conversation. No migration; the controller is still
+never restored without `force`.
+
+**The operator feed** is landed and ON by default (`control.react_to_events`,
+`service/operator_feed.rs`, loop `operator_feed`): Control's own session gets
+one compact `[fleet events]` digest, through the deferred queue so only
+while it is idle, when a session it started (`origin = 'operator'`) or
+briefed (a `control_handoffs` receipt) finishes a turn, waits on an answer,
+fails, is lost, auto-restored or past restoring; when a mission it handed off
+waits on a person; or when a host goes unreachable or low on disk or memory.
+At most one per `control.feed_min_interval_secs` (60) and 6 an hour; none
+while one is still queued, none while paused, never about the operator
+itself, and never a session's own words (names and vocabulary only). The
+cursor and the already-reported host/mission conditions live in the
+`control.feed_state` setting; no migration. The digest is typed as fleet's
+(`prompt_origin::FLEET_PROMPT_MARKS`); the operator's `CLAUDE.md` has a
+*Fleet events* section, which an operator born earlier gets at its next
+birth.
+
+**Host load** is landed (migration 193): the health sample adds CPU busy
+percent (Linux `/proc/stat` deltas, macOS summed `ps` %CPU), available
+memory on macOS too (`kern.memorystatus_level`) and memory pressure (Linux
+PSI `some avg10`, the macOS pressure level), all NULL when the host cannot
+tell; the script is shared, so SSH, `local` and agent hosts all get it with
+no proto change. `mem_low` (`health.mem_low_pct`, 10) and `cpu_saturated`
+(`health.cpu_busy_pct`, 90, two samples in a row) are judged when the sample
+is written (`Store::set_host_health`) and carried on the host row, the ping
+and `fleet_health.hosts[]` (with `cpu_pct`, `mem_used_pct`, `mem_pressure`)
+for a future status-bar chip; the automatic restore defers on either, the
+operator feed reports `mem_low`. The desktop shows the numbers only in the
+host's Health line.
 
 The work graph's M0–M3 are landed (work links anchored on participants,
 group-by-work, and M2's work journal, carry rules, handover brief and resume

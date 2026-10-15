@@ -4,7 +4,7 @@
   "title": "Control API",
   "parent": "settings",
   "layout": "category",
-  "intro": "The embedded MCP server an AI assistant drives the fleet through (read-only here), and how Control's chat goes on when you do not answer.",
+  "intro": "The embedded MCP server an AI assistant drives the fleet through (read-only here), how Control's chat goes on when you do not answer, and what Control's agent hears about the fleet.",
   "sections": [
     {
       "title": "Server",
@@ -37,6 +37,23 @@
         {
           "type": "field",
           "key": "control.auto_continue_minutes"
+        }
+      ]
+    },
+    {
+      "title": "Fleet events",
+      "items": [
+        {
+          "type": "field",
+          "key": "control.react_to_events"
+        },
+        {
+          "type": "field",
+          "key": "control.feed_min_interval_secs",
+          "when": {
+            "key": "control.react_to_events",
+            "truthy": true
+          }
         }
       ]
     }

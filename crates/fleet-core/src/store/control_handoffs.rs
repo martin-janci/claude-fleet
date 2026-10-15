@@ -104,6 +104,22 @@ pub struct ControlHandoffRow {
     pub preview: Option<String>,
 }
 
+/// One timeline event of a session Control answers for, with the names the
+/// operator feed's digest shows ([`Store::operator_feed_events`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedEventRow {
+    pub id: i64,
+    pub session_id: i64,
+    pub at: i64,
+    pub kind: String,
+    pub detail: Option<String>,
+    pub tmux_name: String,
+    pub host_alias: String,
+    /// Control started it (`origin = 'operator'`), rather than only handed
+    /// it work.
+    pub started_by_control: bool,
+}
+
 /// The first non-empty line of `text`, cut to [`HANDOFF_PREVIEW_MAX`]
 /// characters with an ellipsis; `None` for blank text.
 pub fn handoff_preview(text: &str) -> Option<String> {
@@ -197,6 +213,85 @@ impl Store {
             out.push(row);
         }
         Ok(out)
+    }
+
+    /// Timeline events of the sessions Control answers for, strictly after
+    /// `after_id`, OLDEST first by id: the operator feed's cursor read
+    /// (`service::operator_feed`). A session counts when Control started it
+    /// (`origin = 'operator'`) or handed it work (a `control_handoffs`
+    /// receipt names it); `exclude` (the operator's own row) never does, so
+    /// the feed cannot report Control to itself. Only `kinds` are read, and
+    /// paging by id is what keeps a `limit` from skipping a row, as
+    /// [`Store::session_events_after`] explains.
+    pub fn operator_feed_events(
+        &self,
+        after_id: i64,
+        exclude: Option<i64>,
+        kinds: &[&str],
+        limit: i64,
+    ) -> Result<Vec<FeedEventRow>> {
+        if kinds.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Numbered from ?4: a bare `?` would take the number after the largest
+        // seen so far (?2 here), colliding with the ?3 that follows.
+        let marks = (4..4 + kinds.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT e.id, e.session_id, e.at, e.kind, e.detail, s.tmux_name, s.host_alias, \
+                    s.origin = 'operator' \
+             FROM session_events e JOIN sessions s ON s.id = e.session_id \
+             WHERE e.id > ?1 AND e.session_id IS NOT ?2 AND e.kind IN ({marks}) \
+               AND (s.origin = 'operator' OR e.session_id IN \
+                    (SELECT session_id FROM control_handoffs WHERE session_id IS NOT NULL)) \
+             ORDER BY e.id ASC LIMIT ?3"
+        );
+        let mut params: Vec<rusqlite::types::Value> =
+            vec![after_id.into(), exclude.into(), limit.into()];
+        params.extend(
+            kinds
+                .iter()
+                .map(|k| rusqlite::types::Value::from(k.to_string())),
+        );
+        let mut st = self.conn.prepare_cached(&sql)?;
+        let rows = st
+            .query_map(rusqlite::params_from_iter(params), |r| {
+                Ok(FeedEventRow {
+                    id: r.get(0)?,
+                    session_id: r.get(1)?,
+                    at: r.get(2)?,
+                    kind: r.get(3)?,
+                    detail: r.get(4)?,
+                    tmux_name: r.get(5)?,
+                    host_alias: r.get(6)?,
+                    started_by_control: r.get::<_, Option<bool>>(7)?.unwrap_or(false),
+                })
+            })?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// The newest timeline event id fleet-wide (`0` for none): where the
+    /// operator feed's cursor starts, so turning it on does not replay the
+    /// past.
+    pub fn newest_session_event_id(&self) -> Result<i64> {
+        self.conn
+            .prepare_cached("SELECT COALESCE(MAX(id), 0) FROM session_events")?
+            .query_row([], |r| r.get(0))
+    }
+
+    /// The missions Control handed off (a receipt names them), newest
+    /// receipt first, without repeats.
+    pub fn handed_off_mission_ids(&self) -> Result<Vec<i64>> {
+        self.conn
+            .prepare_cached(
+                "SELECT mission_id FROM control_handoffs WHERE mission_id IS NOT NULL \
+                 GROUP BY mission_id ORDER BY MAX(id) DESC",
+            )?
+            .query_map([], |r| r.get(0))?
+            .collect()
     }
 
     fn handoff_item(&self, id: i64) -> Result<Option<HandoffItem>> {

@@ -3292,6 +3292,33 @@
     },
     {
       "default_widget": "switch",
+      "key": "control.react_to_events",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Tell Control what changed",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "control.feed_min_interval_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Time between notes to Control",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
       "key": "playbooks.press_enter",
       "kind": {
         "type": "bool"
@@ -3323,6 +3350,47 @@
         "type": "int"
       },
       "label": "Out-of-memory budget",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "recovery.auto_restore",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Bring killed sessions back",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "recovery.grace_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Wait before bringing back",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "recovery.max_attempts",
+      "kind": {
+        "max": 20,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Automatic restore budget",
       "widgets": [
         "number",
         "readonly"
@@ -3869,6 +3937,34 @@
         "type": "int"
       },
       "label": "Disk low at",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "health.mem_low_pct",
+      "kind": {
+        "max": 50,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Memory low at",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "health.cpu_busy_pct",
+      "kind": {
+        "max": 100,
+        "min": 50,
+        "type": "int"
+      },
+      "label": "CPU busy at",
       "widgets": [
         "number",
         "readonly"
@@ -4849,6 +4945,24 @@
         "type": "choice"
       },
       "label": "Jev: login for an automatic switch",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "decide.jev.restore_timing",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: when to bring a killed session back",
       "widgets": [
         "select",
         "radio",

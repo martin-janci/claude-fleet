@@ -349,6 +349,14 @@ function days(secs: number): string {
   return secs >= 86400 ? `${Math.floor(secs / 86400)}d` : formatAge(secs);
 }
 
+/** Used memory as a whole percent of physical, or null when either number is unknown. */
+export function memUsedPct(h: Pick<HostRow, 'mem_avail_kb' | 'mem_total_kb'>): number | null {
+  const avail = h.mem_avail_kb ?? null;
+  const total = h.mem_total_kb ?? null;
+  if (avail === null || total === null || total <= 0) return null;
+  return Math.min(100, Math.max(0, Math.round(100 - (avail * 100) / total)));
+}
+
 /** One line for the Health block; only the parts the host answered. */
 export function healthLine(h: HostRow, now: number): string {
   if (h.health_at == null) return 'not sampled yet';
@@ -356,6 +364,17 @@ export function healthLine(h: HostRow, now: number): string {
   const disk = diskMeter(h);
   if (disk) parts.push(`disk ${disk.text}`);
   if (h.load_1m != null) parts.push(`load ${h.load_1m.toFixed(1)}`);
+  // Host load (migration 193): the numbers a status-bar chip will read,
+  // with the judgment beside them while the sample is fresh.
+  const fresh = healthSampleFresh(h, now);
+  if (h.cpu_pct != null) {
+    parts.push(`cpu ${Math.round(h.cpu_pct)}%${fresh && h.cpu_saturated ? ' (saturated)' : ''}`);
+  }
+  const mem = memUsedPct(h);
+  if (mem != null) {
+    const pressure = h.mem_pressure != null && h.mem_pressure >= 1 ? `, pressure ${Math.round(h.mem_pressure)}%` : '';
+    parts.push(`mem ${mem}% used${pressure}${fresh && h.mem_low ? ' (low)' : ''}`);
+  }
   if (h.uptime_secs != null) parts.push(`up ${days(h.uptime_secs)}`);
   if (h.transport === 'agent' && h.agent_version) parts.push(`agent ${h.agent_version}`);
   if (!parts.length) parts.push('nothing readable');

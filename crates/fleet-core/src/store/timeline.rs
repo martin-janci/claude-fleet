@@ -39,6 +39,10 @@ impl Store {
     /// - host-reboot restore (`service::sessions::restore`, Task 3):
     ///   `session_restored`, `session_restore_failed` (detail is the error
     ///   message).
+    /// - automatic recovery (`service::auto_restore`): `auto_restored`
+    ///   (detail is the `lost_reason`), `auto_restore_failed` (`<reason>:
+    ///   <error>`), `auto_restore_skipped` (detail is why: `memory_low`,
+    ///   `budget_spent`), one per attempt or refusal.
     /// - workspace repair (`service::repair::{EVENT_REPAIRED,
     ///   EVENT_REPAIR_FAILED}`): `workspace_repaired`, `workspace_repair_failed`.
     /// - move_session (`service::move_session::{EVENT_MOVED,
@@ -250,6 +254,47 @@ impl Store {
             rusqlite::params![session_id],
             |r| r.get(0),
         )?)
+    }
+
+    /// How many of `session_id`'s events of one of `kinds` were written at or
+    /// after `since`: the auto-restore tick's attempt budget
+    /// (`service::auto_restore`). Read through the `(session_id, at)` index.
+    pub fn count_session_events_since(
+        &self,
+        session_id: i64,
+        kinds: &[&str],
+        since: i64,
+    ) -> Result<u32, crate::ipc_error::IpcError> {
+        if kinds.is_empty() {
+            return Ok(0);
+        }
+        let sql = format!(
+            "SELECT COUNT(*) FROM session_events \
+             WHERE session_id = ?1 AND at >= ?2 AND kind IN ({})",
+            in_clause(kinds.len())
+        );
+        let params = params_then(rusqlite::params![session_id, since], kinds);
+        let n: i64 = self.conn.query_row(&sql, params.as_slice(), |r| r.get(0))?;
+        Ok(n as u32)
+    }
+
+    /// The details of `session_id`'s `kind` events written at or after
+    /// `since` (rows with no detail left out): which refusals the
+    /// auto-restore tick already wrote for the current loss episode.
+    pub fn session_event_details_since(
+        &self,
+        session_id: i64,
+        kind: &str,
+        since: i64,
+    ) -> Result<Vec<String>, crate::ipc_error::IpcError> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT detail FROM session_events \
+             WHERE session_id = ?1 AND at >= ?2 AND kind = ?3 AND detail IS NOT NULL",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![session_id, since, kind], |r| {
+            r.get::<_, String>(0)
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// The id of the latest conversation boundary for `session_id`. A

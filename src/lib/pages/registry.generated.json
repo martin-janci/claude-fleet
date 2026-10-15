@@ -106,7 +106,7 @@
         "level": "none"
       },
       "default": "1209600",
-      "help": "How long a resumable session lost to a host reboot or the tmux server exiting is kept before it is deleted, counted from when it was lost.",
+      "help": "How long a resumable session lost to a host reboot, the tmux server exiting or its process being killed (out of memory) is kept before it is deleted, counted from when it was lost.",
       "key": "sessions.lost_ttl_secs",
       "kind": {
         "max": 315360000,
@@ -340,6 +340,49 @@
       "danger": {
         "level": "none"
       },
+      "default": "true",
+      "help": "Control's agent gets a short note when a session it started finishes, gets stuck, fails or is lost, when a mission it handed off waits on you, or when a host goes down or runs low. Only while it is idle, and never while automation is paused.",
+      "key": "control.react_to_events",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Tell Control what changed",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "true"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "60",
+      "help": "The shortest time between two notes to Control's agent. What happens in between goes out together in the next one.",
+      "key": "control.feed_min_interval_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Time between notes to Control",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "seconds",
+      "value": "60",
+      "zero": "no wait"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "false",
       "help": "Press Enter for sessions stuck on a \"Press Enter\" prompt. Auth menus, trust prompts and reconnects are always notify-only.",
       "key": "playbooks.press_enter",
@@ -387,6 +430,71 @@
         "type": "int"
       },
       "label": "Out-of-memory budget",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "count",
+      "value": "2",
+      "zero": "never"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "true",
+      "help": "Resume a session on its own when its host killed the process (out of memory), its tmux server stopped or the host rebooted, and note it on the session's timeline. Control's own session is restarted and told what happened.",
+      "key": "recovery.auto_restore",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Bring killed sessions back",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "true"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "60",
+      "help": "How long after a session is lost before it is brought back, so a reboot is recognised as one and the memory that ran out can settle.",
+      "key": "recovery.grace_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Wait before bringing back",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "seconds",
+      "value": "60",
+      "zero": "at once"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "2",
+      "help": "Automatic restores one session may get per 24 hours, failed ones included. Past it the session waits for a person.",
+      "key": "recovery.max_attempts",
+      "kind": {
+        "max": 20,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Automatic restore budget",
       "modified": false,
       "restart": "none",
       "scope": "fleet",
@@ -1249,6 +1357,50 @@
       "restart": "none",
       "scope": "fleet",
       "tags": [],
+      "unit": "percent",
+      "value": "90"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "10",
+      "help": "Available share of a host's memory at or under which the host reads as memory low. Sessions killed there are brought back only once it recovers.",
+      "key": "health.mem_low_pct",
+      "kind": {
+        "max": 50,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Memory low at",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "percent",
+      "value": "10"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "90",
+      "help": "Busy share of a host's CPUs at which the host reads as saturated, when two samples in a row reach it.",
+      "key": "health.cpu_busy_pct",
+      "kind": {
+        "max": 100,
+        "min": 50,
+        "type": "int"
+      },
+      "label": "CPU busy at",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "advanced"
+      ],
       "unit": "percent",
       "value": "90"
     },
@@ -3067,6 +3219,47 @@
       "value": "off"
     },
     {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Asking whether a killed session due back on a loaded host, or one whose recovery failed, should resume now, wait or move. Off: wait while loaded. Assist follows the answer, never past the low-memory floor; a move is only noted.",
+      "key": "decide.jev.restore_timing",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: when to bring a killed session back",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: follow, within limits"
+        ]
+      ],
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
       "ai": "never",
       "danger": {
         "level": "confirm",
@@ -4038,7 +4231,7 @@
     },
     {
       "id": "settings.automation",
-      "intro": "Playbooks, the idle-session GC and workspace repair run from the background tick. Everything here is off by default.",
+      "intro": "Playbooks, recovery, the idle-session GC and workspace repair run from the background tick. Everything but recovery is off by default.",
       "layout": "category",
       "parent": "settings",
       "sections": [
@@ -4085,6 +4278,31 @@
             }
           ],
           "title": "Playbooks"
+        },
+        {
+          "items": [
+            {
+              "key": "recovery.auto_restore",
+              "type": "field"
+            },
+            {
+              "key": "recovery.grace_secs",
+              "type": "field",
+              "when": {
+                "key": "recovery.auto_restore",
+                "truthy": true
+              }
+            },
+            {
+              "key": "recovery.max_attempts",
+              "type": "field",
+              "when": {
+                "key": "recovery.auto_restore",
+                "truthy": true
+              }
+            }
+          ],
+          "title": "Recovery"
         },
         {
           "items": [
@@ -4260,6 +4478,14 @@
           "items": [
             {
               "key": "health.disk_low_pct",
+              "type": "field"
+            },
+            {
+              "key": "health.mem_low_pct",
+              "type": "field"
+            },
+            {
+              "key": "health.cpu_busy_pct",
               "type": "field"
             },
             {
@@ -4883,6 +5109,11 @@
               "type": "field"
             },
             {
+              "hint": "A killed session due back on a loaded host, or after a failed recovery: resume now, wait or move.",
+              "key": "decide.jev.restore_timing",
+              "type": "field"
+            },
+            {
               "key": "decide.jev.unassigned",
               "type": "field"
             },
@@ -5042,7 +5273,7 @@
     },
     {
       "id": "settings.control_api",
-      "intro": "The embedded MCP server an AI assistant drives the fleet through (read-only here), and how Control's chat goes on when you do not answer.",
+      "intro": "The embedded MCP server an AI assistant drives the fleet through (read-only here), how Control's chat goes on when you do not answer, and what Control's agent hears about the fleet.",
       "layout": "category",
       "parent": "settings",
       "sections": [
@@ -5079,6 +5310,23 @@
             }
           ],
           "title": "Chat"
+        },
+        {
+          "items": [
+            {
+              "key": "control.react_to_events",
+              "type": "field"
+            },
+            {
+              "key": "control.feed_min_interval_secs",
+              "type": "field",
+              "when": {
+                "key": "control.react_to_events",
+                "truthy": true
+              }
+            }
+          ],
+          "title": "Fleet events"
         }
       ],
       "spec": "fleet.page/1",

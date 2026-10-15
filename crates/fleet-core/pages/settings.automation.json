@@ -4,7 +4,7 @@
   "title": "Automation",
   "parent": "settings",
   "layout": "category",
-  "intro": "Playbooks, the idle-session GC and workspace repair run from the background tick. Everything here is off by default.",
+  "intro": "Playbooks, recovery, the idle-session GC and workspace repair run from the background tick. Everything but recovery is off by default.",
   "sections": [
     {
       "title": "Pause all",
@@ -47,6 +47,31 @@
           "type": "notice",
           "tone": "info",
           "text": "Auth menus, trust prompts and reconnects are always notify-only."
+        }
+      ]
+    },
+    {
+      "title": "Recovery",
+      "items": [
+        {
+          "type": "field",
+          "key": "recovery.auto_restore"
+        },
+        {
+          "type": "field",
+          "key": "recovery.grace_secs",
+          "when": {
+            "key": "recovery.auto_restore",
+            "truthy": true
+          }
+        },
+        {
+          "type": "field",
+          "key": "recovery.max_attempts",
+          "when": {
+            "key": "recovery.auto_restore",
+            "truthy": true
+          }
         }
       ]
     },

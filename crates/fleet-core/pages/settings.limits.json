@@ -33,6 +33,14 @@
         },
         {
           "type": "field",
+          "key": "health.mem_low_pct"
+        },
+        {
+          "type": "field",
+          "key": "health.cpu_busy_pct"
+        },
+        {
+          "type": "field",
           "key": "health.hooks_silent_secs"
         },
         {

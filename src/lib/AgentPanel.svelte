@@ -37,6 +37,7 @@
   } from './operator';
   import { openSettingsAt, requestHostsView, requestNewSessionOnHost } from './app_views';
   import { hosts } from './hosts';
+  import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
   import { agentContext, type AgentContextInput } from './agent_context';
   import { OPERATOR_COMMANDS } from './operator';
   import { insertIntoComposer } from './conversation';
@@ -90,7 +91,12 @@
 
   const blocked = $derived(
     $operatorState !== 'ready' && $operatorState !== 'waking' && $operatorState !== 'unknown'
-      ? blockedCopy($operatorState as OperatorBlocked, $operatorHost, $operatorFallback)
+      ? blockedCopy(
+          $operatorState as OperatorBlocked,
+          $operatorHost,
+          $operatorFallback,
+          settingBool($fleetSettings, SETTING_KEYS.recoveryAutoRestore),
+        )
       : null,
   );
   // Which function a blocked-state button runs, keyed on `blocked.next`
