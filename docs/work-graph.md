@@ -1041,8 +1041,8 @@ open subtasks (a subtask counts unless it is done or a rejected proposal):
 | **unverified** | no line failed and no subtask is open, but not every line has passed yet |
 | **blocked** | a line failed, or a subtask is open |
 
-An **agent** (a per-host token) setting a local task to `done` while the
-gate has not passed is refused with `E_INVALID_STATE`, and the refusal
+An **agent** (a per-host token, the operator, or a peer hub) setting a
+local task to `done` while the gate has not passed is refused with `E_INVALID_STATE`, and the refusal
 names what is in the way ("this task is not done yet: `test:cargo test` is
 fail; subtask "…" is open. Report it instead; a person marks it done."). A
 subtask the agent's organisation may not see is named only as "a subtask
@@ -1060,8 +1060,8 @@ done, the validation (the gate's lines, then the tests the session says it
 ran, marked *reported*), decisions, what is left, the changes, the PR of
 the session that did it (state, CI, review), and the follow-ups. It
 appears in the conversation in place of the plain report card for the turn
-that carries the result, and as **Result** on the task page, above *Last
-outcome*. A report with no task behind it keeps the plain report card.
+that carries the result, and as **Result** on the task page in place of
+*Last outcome*. A report with no task behind it keeps the plain report card.
 
 The wire is `work { action: result, item_id | session_id }` (the desktop's
 `work_result`), which answers nothing until a finished task carries a
@@ -1084,7 +1084,9 @@ even when the original is a tracker ticket) and remembers the task it came
 from (`work_items.origin_task_id`, migration 195). Creating the same
 follow-up twice (whitespace and case aside) answers the task made the
 first time. A report line longer than a title is cut, and kept whole in
-the new task's notes.
+the new task's notes. A follow-up is made from its task's text, so it
+follows the same person rule as the result: someone who may not read the
+task gets the answer for an unknown task.
 
 When the follow-up is started, its brief **opens with what its origin
 left**, under *Follows KEY*: the origin's title, its outcome and summary,
@@ -1093,7 +1095,8 @@ its decisions, what it left undone, its context lines, its commits (at most
 brief stays under its 4,000 characters, and all of it is fenced as
 untrusted. **No conversation text travels**: not the origin's prompts, not
 its transcript, only the result and what git said. An origin outside the
-starter's scope is left out of the brief.
+starter's scope, or whose task the starter may not read (the result's
+person rule), is left out of the brief.
 
 | You do | Desktop command | MCP action |
 |---|---|---|
