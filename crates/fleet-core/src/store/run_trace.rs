@@ -176,6 +176,26 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// The `tool_use` ids run `run_ref`'s trace already records: its
+    /// `working` steps' `data.tool_use_id`.
+    pub fn run_trace_tool_ids(
+        &self,
+        run_ref: &str,
+    ) -> Result<std::collections::HashSet<String>, IpcError> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT json_extract(data, '$.tool_use_id') FROM run_trace \
+             WHERE run_ref = ?1 AND phase = 'working' AND data IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([run_ref], |r| r.get::<_, Option<String>>(0))?;
+        let mut out = std::collections::HashSet::new();
+        for id in rows {
+            if let Some(id) = id? {
+                out.insert(id);
+            }
+        }
+        Ok(out)
+    }
+
     /// The newest phase each of `run_refs` reached: `(run_ref, phase)`.
     /// A run with no trace is absent.
     pub fn run_trace_phases(&self, run_refs: &[String]) -> Result<Vec<(String, String)>, IpcError> {

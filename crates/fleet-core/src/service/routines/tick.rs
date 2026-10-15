@@ -40,6 +40,11 @@ pub trait Spawn: Send + Sync {
     fn panes(&self) -> Option<Arc<dyn PaneReader>> {
         None
     }
+    /// Reads the tools an open run's session finished, for its trace;
+    /// `None` where no transcript can be read (tests).
+    fn tools(&self) -> Option<Arc<dyn super::work_steps::ToolReader>> {
+        None
+    }
     /// Stops the turn of a run past its time cap (G3.8): Escape in its
     /// pane, so the session stays for a person to read. Nothing in tests.
     async fn stop_turn(&self, _host_alias: &str, _tmux_name: &str) -> Result<(), IpcError> {
@@ -72,6 +77,12 @@ impl Spawn for LiveSpawn {
     }
     fn panes(&self) -> Option<Arc<dyn PaneReader>> {
         Some(Arc::new(TmuxPanes {
+            ssh: Arc::clone(&self.ssh),
+        }))
+    }
+    fn tools(&self) -> Option<Arc<dyn super::work_steps::ToolReader>> {
+        Some(Arc::new(super::work_steps::TranscriptTools {
+            store: Arc::clone(&self.store),
             ssh: Arc::clone(&self.ssh),
         }))
     }
@@ -939,6 +950,11 @@ pub async fn tick_once(deps: &Deps, now: i64) {
         Err(e) => (Vec::new(), Err(e.to_string())),
     };
     stop_turns(deps, stop).await;
+    // The open runs' work goes into their traces, off this path; it only
+    // reads, so it runs while paused too.
+    if let Some(tools) = deps.spawn.tools() {
+        super::work_steps::spawn_pass(&deps.store, tools, now);
+    }
     let (due, events) = match work {
         Ok(Some(w)) => w,
         Ok(None) => return,
