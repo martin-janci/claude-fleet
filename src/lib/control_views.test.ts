@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { get } from 'svelte/store';
 import {
+  CONTROL_VIEWS,
   controlViews,
   defaultLayout,
   fleetFolds,
@@ -29,17 +30,23 @@ import { session } from './hosts_fixture';
 
 beforeEach(() => controlViews.set(defaultLayout()));
 
+const ALL = CONTROL_VIEWS.filter((v) => v.landed).map((v) => v.id);
+
 describe('control views layout', () => {
-  it('starts on Needs you with every view shown, Library included (9.7)', () => {
+  it('starts on Needs you with three tabs pinned and the rest in "+" (Thread room)', () => {
     const l = defaultLayout();
-    expect(l.order).toEqual(['needs-you', 'session', 'tasks', 'routines', 'prs', 'library', 'today']);
+    expect(l.order).toEqual(ALL);
+    expect(shownViews(l).map((v) => v.id)).toEqual(['needs-you', 'session', 'prs']);
+    expect(l.hidden).toEqual(ALL.filter((id) => !['needs-you', 'session', 'prs'].includes(id)));
     expect(l.active).toBe('needs-you');
     expect(l.open).toBe(true);
+    // Every view is still there, Library (9.7) and Missions included.
+    expect(ALL).toEqual(expect.arrayContaining(['library', 'missions', 'tasks', 'routines', 'today']));
   });
 
   it('makes a stored layout whole: unknown ids dropped, new views appended, a hidden active replaced', () => {
     const l = normalizeLayout({ order: ['today', 'bogus', 'today', 'library'], hidden: ['today', 'x'], active: 'today', open: false });
-    expect(l.order).toEqual(['today', 'library', 'needs-you', 'session', 'tasks', 'routines', 'prs']);
+    expect(l.order).toEqual(['today', 'library', ...ALL.filter((id) => id !== 'today' && id !== 'library')]);
     expect(l.hidden).toEqual(['today']);
     expect(l.active).toBe('library');
     expect(l.open).toBe(false);
@@ -47,13 +54,10 @@ describe('control views layout', () => {
   });
 
   it('"+" turns views off and on, and never the last one', () => {
+    controlViews.set({ ...defaultLayout(), hidden: [] });
     toggleView('prs');
-    expect(shownViews(get(controlViews)).map((v) => v.id)).toEqual(['needs-you', 'session', 'tasks', 'routines', 'library', 'today']);
-    toggleView('needs-you');
-    toggleView('session');
-    toggleView('tasks');
-    toggleView('routines');
-    toggleView('library');
+    expect(shownViews(get(controlViews)).map((v) => v.id)).toEqual(ALL.filter((id) => id !== 'prs'));
+    for (const id of ALL) if (id !== 'prs' && id !== 'today') toggleView(id);
     expect(get(controlViews).active).toBe('today');
     toggleView('today');
     expect(shownViews(get(controlViews)).map((v) => v.id)).toEqual(['today']);
@@ -63,7 +67,10 @@ describe('control views layout', () => {
 
   it('"+" reorders within the strip and stops at its ends', () => {
     moveView('today', -1);
-    expect(get(controlViews).order).toEqual(['needs-you', 'session', 'tasks', 'routines', 'prs', 'today', 'library']);
+    const i = ALL.indexOf('today');
+    const want = [...ALL];
+    [want[i - 1], want[i]] = [want[i], want[i - 1]];
+    expect(get(controlViews).order).toEqual(want);
     moveView('needs-you', -1);
     expect(get(controlViews).order[0]).toBe('needs-you');
   });

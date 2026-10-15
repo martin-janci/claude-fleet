@@ -6,7 +6,7 @@
 -->
 <script lang="ts">
   import { commandReceipts, dismissCommandReceipt, openCommandResult, undoCommand } from './control_slash';
-  import { focusSession } from './session_focus';
+  import { openInControl } from './control_room';
 </script>
 
 {#if $commandReceipts.length > 0}
@@ -21,7 +21,7 @@
             type="button"
             class="link"
             data-testid="control-command-open"
-            onclick={() => openCommandResult(r, (id, label) => void focusSession(id, label))}
+            onclick={() => openCommandResult(r, (id, label) => void openInControl(id, label))}
             >{r.open.kind === 'task' ? 'Open in Work ↗' : 'Open session ↗'}</button
           >
         {/if}

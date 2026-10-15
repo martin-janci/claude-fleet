@@ -104,6 +104,7 @@
   import HubUnavailableBanner from './lib/HubUnavailableBanner.svelte';
   import { startHubConnection, setGapHandler, hubConnection } from './lib/hub_connection';
   import StatusBarMark from './lib/StatusBarMark.svelte';
+  import HostHealthChip from './lib/HostHealthChip.svelte';
   import ShellHeader from './lib/ShellHeader.svelte';
   import StartupSplash from './lib/StartupSplash.svelte';
   import UpdateReveal from './lib/UpdateReveal.svelte';
@@ -1432,15 +1433,18 @@
       }}
     /></span
   >
-  <!-- The manual's StatusBar ends on the shortcuts sheet (3.17). -->
+  <!-- The manual's StatusBar ends on the shortcuts sheet (3.17). The host
+       chip sits beside it (Thread room, 2026-10-14): the selected session's
+       host's CPU, memory and disk, and every host on a click. -->
   {#snippet end()}
+    <span class="footer-end"><HostHealthChip />
     <button
       type="button"
       class="hub-badge"
       data-testid="footer-shortcuts"
       title="Keyboard shortcuts  ?"
       onclick={() => shortcutSheetOpen.set(true)}>? Shortcuts…</button
-    >
+    ></span>
   {/snippet}
 </StatusBar>
 
@@ -1455,6 +1459,11 @@
     height: calc(100vh - var(--status-h) - var(--header-h));
     width: 100vw;
     background: var(--bg);
+  }
+  .footer-end {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
   }
   /* The footer is the kit's StatusBar (manual: StatusBar, --status-h
      border included). */

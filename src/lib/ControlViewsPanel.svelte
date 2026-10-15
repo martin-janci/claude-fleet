@@ -12,13 +12,29 @@
   · 9 idle"), a search, the Inbox's rows with a paused-limit row's Switch
   account and Wait inline, then Running, Idle and Done today folds. Tasks
   (☑) and Routines (◷) join the strip.
+
+  Thread room (2026-10-14): the right panel of Control, always there (its
+  edge button or a drag to zero hides it). Tabs Needs you · Session · Pull
+  requests by default; "+" lists every view and pins one as a tab. The
+  Session tab shows the session any chat reference opened
+  (control_room.openInControl), with a strip of its siblings in the same
+  thread or mission above it and ↗ to open it in full. Missions shows the
+  mission a thread or a chip opened, with its task graph.
 -->
 <script lang="ts">
   import { tablistKeys } from './tablist_keys';
   import { selectSession, selectSessionExplicitly, selectedSession } from './selection';
   import { sidebarView } from './work_view';
   import { leave } from './destination';
-  import { controlTab } from './control';
+  import ControlMissionView from './ControlMissionView.svelte';
+  import ControlHostsView from './ControlHostsView.svelte';
+  import { requestHostsView } from './app_views';
+  import StatusDot from './kit/StatusDot.svelte';
+  import { sessionState } from './handoffs';
+  import { sessions } from './sessions';
+  import { siblingsLabel, threadSiblings } from './control_threads';
+  import { openInControl } from './control_room';
+  import { handoffs } from './handoffs';
   import { claudeStatusLabel, displayName, promptPreview } from './attention';
   import { timeAgo } from './session_status';
   import type { SessionRow } from './sessions';
@@ -71,8 +87,14 @@
 
   const landed = CONTROL_VIEWS.filter((v) => v.landed);
 
-  /** The views that live somewhere else too; the Library lives only here. */
-  const HAS_PLACE: ReadonlySet<ControlViewId> = new Set(['needs-you', 'session', 'tasks', 'routines', 'prs', 'today']);
+  /** The views that live somewhere else too; the Library and Today live
+   *  only here. */
+  const HAS_PLACE: ReadonlySet<ControlViewId> = new Set(['needs-you', 'session', 'tasks', 'missions', 'hosts', 'routines', 'prs']);
+
+  /** The Session tab's strip: the sessions beside the one in focus. */
+  const siblings = $derived($selectedSession ? threadSiblings($selectedSession, $sessions) : []);
+  const missionNames = $derived(new Map($handoffs.filter((h) => h.mission_id != null).map((h) => [h.mission_id!, h.mission_name ?? null])));
+  const siblingsTitle = $derived($selectedSession ? siblingsLabel($selectedSession, (id) => missionNames.get(id) ?? null) : '');
 
   let query = $state('');
   const folds = $derived(fleetFolds($visibleFleet.rows, $visibleFleet.opts, query));
@@ -98,8 +120,10 @@
       leave('control');
     } else if (id === 'routines') {
       openRoutines();
-    } else if (id === 'today') {
-      controlTab.set('today');
+    } else if (id === 'missions') {
+      openElsewhere('missions');
+    } else if (id === 'hosts') {
+      requestHostsView(null);
     }
   }
 
@@ -151,8 +175,7 @@
             selectView(v.id);
           }}
         >
-          <span aria-hidden="true">{v.glyph}</span>
-          {#if v.id === active}<span class="name">{v.label}</span>{:else}<span class="sr">{v.label}</span>{/if}
+          <span class="name">{v.label}</span>
           {#if v.id === 'needs-you' && $needsYouList.length > 0}<span class="count">{$needsYouList.length}</span>{/if}
         </button>
       {/each}
@@ -161,7 +184,7 @@
     <button
       type="button"
       class="icon"
-      title="Views"
+      title="More views"
       aria-label="Choose views"
       aria-expanded={menuOpen}
       data-testid="control-views-add"
@@ -179,10 +202,10 @@
     <button
       type="button"
       class="icon"
-      title="Close the views"
-      aria-label="Close the views"
+      title="Hide the panel"
+      aria-label="Hide the panel"
       data-testid="control-views-close"
-      onclick={() => setViewsOpen(false)}>✕</button
+      onclick={() => setViewsOpen(false)}>›</button
     >
   </div>
 
@@ -272,13 +295,41 @@
     {:else if active === 'session'}
       {#if $selectedSession}
         <div class="focus" data-testid="control-session-focus">
+          {#if siblings.length > 0}
+            <div class="siblings" data-testid="control-session-siblings">
+              <span class="sib-title">{siblingsTitle}</span>
+              <div class="sib-row">
+                {#each siblings as sib (sib.id)}
+                  <button
+                    type="button"
+                    class="sib"
+                    class:on={sib.id === $selectedSession.id}
+                    aria-current={sib.id === $selectedSession.id ? 'true' : undefined}
+                    data-testid="control-session-sibling"
+                    onclick={() => openInControl(sib.id, displayName(sib, true))}
+                    ><StatusDot state={sessionState(sib)} size={6} />{displayName(sib, true)}</button
+                  >
+                {/each}
+              </div>
+            </div>
+          {/if}
           <div class="focus-head">
             {#if fromDef}
               <button type="button" class="icon back" data-testid="control-session-back" title="Back to {fromDef.label} (Esc)" onclick={back}
                 >‹ {fromDef.label}{#if from === 'needs-you' && $needsYouList.length > 0}{' '}<span class="count">{$needsYouList.length}</span>{/if}</button
               >
             {/if}
-            <p class="row-name">{displayName($selectedSession, true)}</p>
+            <div class="focus-title">
+              <p class="row-name">{displayName($selectedSession, true)}</p>
+              <button
+                type="button"
+                class="icon"
+                data-testid="control-session-full"
+                title="Open {displayName($selectedSession, true)} as a full session"
+                aria-label="Open as a full session"
+                onclick={() => expand('session')}>↗</button
+              >
+            </div>
             <p class="row-why">
               {claudeStatusLabel($selectedSession.claude_status)} · {$selectedSession.host_alias}{#if focusAccount}{' '}· <span data-testid="control-session-account">{focusAccount}</span>{/if}{#if $selectedSession.pr_url}{' '}· {$selectedSession.pr_url.replace(/^.*\/pull\//, 'PR #')}{/if}
             </p>
@@ -293,6 +344,10 @@
       {/if}
     {:else if active === 'tasks'}
       <ControlTasksView />
+    {:else if active === 'missions'}
+      <ControlMissionView />
+    {:else if active === 'hosts'}
+      <ControlHostsView />
     {:else if active === 'routines'}
       <ControlRoutinesView />
     {:else if active === 'prs'}
@@ -320,13 +375,68 @@
     display: flex;
     align-items: center;
     gap: var(--space-1);
-    padding: var(--space-1) var(--space-2);
+    min-height: var(--header-h);
+    padding: 0 var(--space-2);
     border-bottom: 1px solid var(--border);
+  }
+  .siblings {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: 10px var(--space-3);
+    border-bottom: 1px solid var(--border);
+  }
+  .sib-title {
+    color: var(--fg-muted);
+    font-size: var(--text-2xs);
+    font-weight: 500;
+  }
+  .sib-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .sib {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 20px;
+    padding: 0 7px;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: var(--chip-bg);
+    color: var(--fg-2);
+    font: inherit;
+    font-size: var(--text-2xs);
+    font-weight: 500;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .sib.on {
+    background: var(--accent-soft);
+    color: var(--fg);
+    box-shadow: inset 0 0 0 1px var(--accent);
+  }
+  .sib:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+    outline-offset: 1px;
+  }
+  .focus-title {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+  .focus-title .row-name {
+    flex: 1 1 auto;
+    min-width: 0;
   }
   .tabs {
     display: flex;
     gap: 2px;
     min-width: 0;
+    overflow-x: auto;
+    align-self: stretch;
+    align-items: flex-end;
   }
   .tab,
   .icon {
@@ -348,9 +458,19 @@
     background: var(--bg-hover);
     color: var(--fg);
   }
+  .tab {
+    border-radius: 0;
+    border-bottom: 2px solid transparent;
+    padding: 10px 2px 8px;
+    margin: 0 6px;
+    font-size: var(--text-xs);
+  }
+  .tab:hover {
+    background: transparent;
+  }
   .tab[aria-selected='true'] {
-    background: var(--accent-soft);
     color: var(--fg);
+    border-bottom-color: var(--accent);
   }
   .tab:focus-visible,
   .icon:focus-visible,
@@ -520,13 +640,5 @@
   .empty {
     padding: var(--space-3);
     margin: 0;
-  }
-  .sr {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
-    white-space: nowrap;
   }
 </style>

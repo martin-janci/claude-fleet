@@ -57,8 +57,11 @@
   import { placeWork, workTask, workTreeMeta, type DuplicateHint } from './work_view';
   import { proposedByLabel } from './ai_proposal';
   import { sessions } from './sessions';
-  import { focusSession } from './session_focus';
-  import { openMission } from './missions';
+  import { openInControl, openMissionInControl } from './control_room';
+  import TaskGraphCard from './TaskGraphCard.svelte';
+  import { graphFromMission, graphFromTree, type GraphCard } from './task_graph_card';
+  import { getMission } from './missions';
+  import { onWorkChangedDebounced } from './work';
   import { showTaskInWorkView } from './work_view';
   import ReviewDialog from './ReviewDialog.svelte';
   import { hubActionBlocked, hubStatus } from './hub';
@@ -140,12 +143,39 @@
 
   function openSession(h: ControlHandoff) {
     const c = sessionChip(h, $sessions);
-    if (h.session_id != null) focusSession(h.session_id, c.name);
+    // Thread room: the session opens in Control's right panel, in place.
+    if (h.session_id != null) openInControl(h.session_id, c.name);
   }
+
+  // Thread room: the task graph card under a mission receipt (the newest
+  // one per mission), read from the mission's own graph and re-read when
+  // work changes.
+  let graphs = $state<Record<number, GraphCard | null>>({});
+  const graphOwner = $derived.by(() => {
+    const newest = new Map<number, number>();
+    for (const h of $recentHandoffs) if (h.kind === 'mission' && h.mission_id != null) newest.set(h.mission_id, h.id);
+    return newest;
+  });
+  async function loadGraph(id: number) {
+    const r = await getMission(id);
+    graphs = { ...graphs, [id]: r.ok && r.value?.mission ? graphFromMission(r.value) : null };
+  }
+  $effect(() => {
+    for (const id of graphOwner.keys()) if (!(id in untrack(() => graphs))) void loadGraph(id);
+  });
+  onMount(() =>
+    onWorkChangedDebounced(
+      () => {
+        for (const id of graphOwner.keys()) void loadGraph(id);
+      },
+      () => 500,
+      () => 3000,
+    ),
+  );
 
   function openMissionChip(h: ControlHandoff) {
     if (h.mission_id == null) return;
-    openMission(h.mission_id);
+    openMissionInControl(h.mission_id);
   }
 
   // ── G3.11: duplicates on the plan card ──
@@ -314,9 +344,17 @@
           <span class="target">{h.mission_name ?? 'a deleted mission'}</span>
           {#if h.mission_state}<StatusChip state={workState(h.mission_state)} />{/if}
         </button>
+        {#if h.mission_id != null && graphOwner.get(h.mission_id) === h.id && graphs[h.mission_id]}
+          {@const mid = h.mission_id}
+          <TaskGraphCard graph={graphs[mid]!} kind="mission" onopen={() => openMissionInControl(mid)} />
+        {/if}
       {:else if h.kind === 'tree'}
         {@const open = openProposals(h)}
         {@const back = undoable(h, nowSec)}
+        {@const tg = graphFromTree(h)}
+        {#if tg && (h.items?.length ?? 0) > 1}
+          <TaskGraphCard graph={tg} kind="tree" onopen={() => editInWork(h)} />
+        {/if}
         {#if open.length > 0}
           <QuestionCard
             question={h.item ? `Create tasks under ${h.item.title}?` : 'Create these tasks?'}
@@ -431,11 +469,24 @@
                 <span class="what">#TASK</span>
                 <span class="target">{item.title}</span>
               </button>
-              <span class="live" title={liveLong} data-testid="handoff-task-live"
-                ><span class="sr-only">{liveLong}</span><span aria-hidden="true"
-                  >{live.length > 0 ? live.map((x) => `${displayName(x, true)} · ${x.host_alias}`).join(', ') : STATE_WORD[state]}</span
-                ></span
-              >
+              {#if live.length > 0}
+                <!-- Thread room: the task's live session opens in Control's
+                     right panel. -->
+                <button
+                  type="button"
+                  class="live live-open"
+                  title="{liveLong}. Open it beside the chat"
+                  data-testid="handoff-task-live"
+                  onclick={() => openInControl(live[0].id, displayName(live[0], true))}
+                  ><span class="sr-only">{liveLong}</span><span aria-hidden="true"
+                    >{live.map((x) => `${displayName(x, true)} · ${x.host_alias}`).join(', ')}</span
+                  ></button
+                >
+              {:else}
+                <span class="live" title={liveLong} data-testid="handoff-task-live"
+                  ><span class="sr-only">{liveLong}</span><span aria-hidden="true">{STATE_WORD[state]}</span></span
+                >
+              {/if}
               <div class="actions">
                 {#if taskUndoable(item, nowSec)}
                   <Button variant="quiet" size="sm" disabled={busy === h.id} onclick={() => void taskAction(h, () => undoWorkAccept([item.id]))} testid="handoff-task-undo"
@@ -709,6 +760,18 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     color: var(--fg-muted);
+  }
+  .live-open {
+    border: 0;
+    padding: 0;
+    background: none;
+    font: inherit;
+    cursor: pointer;
+    text-align: left;
+  }
+  .live-open:hover {
+    color: var(--fg);
+    text-decoration: underline;
   }
   /* The row's actions show on hover or focus; they stay in the tab order. */
   .task-card .actions {

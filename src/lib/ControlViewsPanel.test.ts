@@ -13,6 +13,8 @@ import { sidebarView } from './work_view';
 import { session, snapshot } from './hosts_fixture';
 import { accountUsage } from './account_usage_store';
 import { expectAccessible } from './a11y_check';
+import { openInControl } from './control_room';
+import { tick } from 'svelte';
 
 // Redesign step 9.4: the Views panel beside Control's chat.
 
@@ -115,6 +117,36 @@ describe('ControlViewsPanel (step 9.4)', () => {
     expect(queryByTestId('control-views')).toBeNull();
     await fireEvent.click(getByTestId('control-views-open'));
     expect(getByTestId('control-views')).toBeTruthy();
+  });
+
+  it('Thread room: tabs Needs you · Session · Pull requests, the rest one "+" away and pinned when chosen', async () => {
+    const { getAllByRole, getByTestId, queryByTestId } = render(ControlViewsPanel);
+    expect(getAllByRole('tab').map((t) => t.textContent?.replace(/\d+/g, '').trim())).toEqual(['Needs you', 'Session', 'Pull requests']);
+    expect(queryByTestId('control-view-tab-missions')).toBeNull();
+    await fireEvent.click(getByTestId('control-views-add'));
+    await fireEvent.click(getByTestId('control-views-toggle-missions'));
+    expect(getByTestId('control-view-tab-missions')).toBeTruthy();
+  });
+
+  it('the Session tab shows the strip of its siblings in the mission, and ↗ opens it in full', async () => {
+    const a = session('mercury', 'step-5', { origin: 'mission', origin_ref: '9', claude_status: 'working' });
+    const b = session('mercury', 'step-6', { origin: 'mission', origin_ref: '9', claude_status: 'blocked' });
+    sessions.set([a, b, busy]);
+    destination.set('control');
+    const { getByTestId, getAllByTestId } = render(ControlViewsPanel);
+    openInControl(a.id);
+    await tick();
+    const strip = getByTestId('control-session-siblings');
+    expect(strip.textContent).toContain('In this mission');
+    const chips = getAllByTestId('control-session-sibling');
+    expect(chips.map((c) => c.textContent)).toEqual(['step-5', 'step-6']);
+    expect(chips[0].getAttribute('aria-current')).toBe('true');
+    await fireEvent.click(chips[1]);
+    expect(get(selectedSession)?.id).toBe(b.id);
+    expect(get(destination)).toBe('control');
+    await fireEvent.click(getByTestId('control-session-full'));
+    expect(get(destination)).toBe('session');
+    expect(get(selectedSession)?.id).toBe(b.id);
   });
 
   it('passes the axe and audit checks', async () => {

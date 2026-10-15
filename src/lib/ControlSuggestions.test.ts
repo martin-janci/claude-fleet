@@ -5,7 +5,7 @@ import { get } from 'svelte/store';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 const { focus } = vi.hoisted(() => ({ focus: vi.fn((..._a: unknown[]) => true) }));
-vi.mock('./session_focus', () => ({ focusSession: (...a: unknown[]) => focus(...a) }));
+vi.mock('./control_room', () => ({ openInControl: (...a: unknown[]) => focus(...a) }));
 
 import { invoke } from '@tauri-apps/api/core';
 import ControlSuggestions from './ControlSuggestions.svelte';
