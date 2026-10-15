@@ -1369,24 +1369,9 @@ pub async fn write_host_file_secret(
         std::fs::create_dir_all(&edir)
             .map_err(|e| IpcError::new(codes::E_PROVISION, format!("mkdir {edir}: {e}")))?;
         let epath = expand_home_local(path)?;
-        let etmp = expand_home_local(&tmp_path)?;
-        let etmp_path = std::path::Path::new(&etmp);
-        if let Err(e) = write_private_file(etmp_path, content) {
-            let _ = std::fs::remove_file(etmp_path);
-            return Err(IpcError::new(
-                codes::E_PROVISION,
-                format!("write {epath}: {e}"),
-            ));
-        }
-        if let Err(e) = place_private_file(etmp_path, std::path::Path::new(&epath), |f, t| {
-            std::fs::rename(f, t)
-        }) {
-            return Err(IpcError::new(
-                codes::E_PROVISION,
-                format!("write {epath}: {e}"),
-            ));
-        }
-        return Ok(());
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        return write_local_secret(std::path::Path::new(&epath), content, home.as_deref())
+            .map_err(|e| IpcError::new(codes::E_PROVISION, format!("write {epath}: {e}")));
     }
     // 1. Create the (empty) tmp file 0600 — paths only, no secret in argv.
     let script = quote(&remote_touch_private_script(dir, &tmp_path));
@@ -1413,11 +1398,86 @@ pub async fn write_host_file_secret(
     // 3. Rename the tmp file onto the real path — atomic, no window where
     //    `path` is truncated but not yet rewritten.
     let mv_script = quote(&remote_rename_script(&tmp_path, path));
-    if let Err(e) = run_remote_write(ssh, host, path, &mv_script).await {
-        remove_remote_tmp(ssh, host, &tmp_path).await;
+    match run_remote_write_output(ssh, host, path, &mv_script).await {
+        Ok(stdout) => {
+            if let Some(line) = stdout
+                .lines()
+                .find(|l| l.starts_with(SYMLINK_FALLBACK_MARKER))
+            {
+                tracing::warn!(
+                    host,
+                    path,
+                    detail = line.trim(),
+                    "[provision] symlinked file not followed (target dangling or outside $HOME); \
+                     the link was replaced by a regular file"
+                );
+            }
+            Ok(())
+        }
+        Err(e) => {
+            remove_remote_tmp(ssh, host, &tmp_path).await;
+            Err(e)
+        }
+    }
+}
+
+/// The local half of [`write_host_file_secret`]: write `content` to
+/// `<target>.fleet-tmp` at 0600, then rename it onto `target`, where
+/// `target` is [`private_write_target`] of `path` — the link's target when
+/// `path` is a symlink into `home`, so the link survives.
+fn write_local_secret(
+    path: &std::path::Path,
+    content: &str,
+    home: Option<&std::path::Path>,
+) -> std::io::Result<()> {
+    let target = private_write_target(path, home);
+    let mut tmp = target.as_os_str().to_owned();
+    tmp.push(".fleet-tmp");
+    let tmp = std::path::PathBuf::from(tmp);
+    if let Err(e) = write_private_file(&tmp, content) {
+        let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
-    Ok(())
+    place_private_file(&tmp, &target, |f, t| std::fs::rename(f, t))
+}
+
+/// Where a secret write to `path` lands. A symlinked `path` whose target is
+/// an existing regular file under `home` is written at that target, so the
+/// link survives: a container that keeps `~/.claude.json` on a persistent
+/// volume links it there, and a rename onto the link replaced it with a
+/// plain file the next pod restart threw away. Anything else — not a link,
+/// a dangling link, a target outside `home` — is written at `path` as
+/// before; the last two are logged, since that replaces the link.
+fn private_write_target(
+    path: &std::path::Path,
+    home: Option<&std::path::Path>,
+) -> std::path::PathBuf {
+    let is_link = std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
+    if !is_link {
+        return path.to_path_buf();
+    }
+    let fallback = |why: &str, target: Option<&std::path::Path>| {
+        tracing::warn!(
+            path = %path.display(),
+            target = ?target,
+            "[provision] symlink not followed ({why}); the link is replaced by a regular file"
+        );
+        path.to_path_buf()
+    };
+    let target = match std::fs::canonicalize(path) {
+        Ok(t) if t.is_file() => t,
+        Ok(t) => return fallback("target is not a regular file", Some(&t)),
+        Err(_) => return fallback("dangling", None),
+    };
+    let Some(home) = home else {
+        return fallback("HOME unknown", Some(&target));
+    };
+    let real_home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+    if target.starts_with(home) || target.starts_with(&real_home) {
+        target
+    } else {
+        fallback("target outside $HOME", Some(&target))
+    }
 }
 
 /// Best-effort cleanup of a `.fleet-tmp` file left behind by a failed
@@ -1550,6 +1610,18 @@ async fn run_remote_write(
     path: &str,
     script: &str,
 ) -> Result<(), IpcError> {
+    run_remote_write_output(ssh, host, path, script)
+        .await
+        .map(|_| ())
+}
+
+/// [`run_remote_write`], handing back the script's stdout.
+async fn run_remote_write_output(
+    ssh: &dyn SshExec,
+    host: &str,
+    path: &str,
+    script: &str,
+) -> Result<String, IpcError> {
     let out = ssh
         .run(host, &["bash", "-lc", script], PROVISION_TIMEOUT)
         .await?;
@@ -1562,7 +1634,7 @@ async fn run_remote_write(
             ),
         ));
     }
-    Ok(())
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Render a path as a token for a remote `bash -lc` script. A leading `~/` is
@@ -1668,12 +1740,36 @@ fn place_private_file(
 /// writes a temp file and renames it over), so the 0600 the touch step gave
 /// it is gone by now, and a rename would carry that umask's 0644 onto the
 /// target.
+///
+/// A symlinked `path` is followed when its target is an existing regular
+/// file under `$HOME`: the tmp file is first moved beside the target (the
+/// link may cross filesystems, so this `mv` can be a copy), then renamed onto
+/// it, and the link survives. A Kubernetes host keeps `~/.claude.json` on a
+/// persistent volume behind such a link; renaming onto the link replaced it
+/// with a plain file and the next pod restart lost the MCP entry. A dangling
+/// link, or one pointing outside `$HOME`, is replaced as before, and the
+/// script prints [`SYMLINK_FALLBACK_MARKER`] so the caller can log it.
 fn remote_rename_script(tmp: &str, path: &str) -> String {
     let (t, p) = (remote_path(tmp), remote_path(path));
     format!(
-        "chmod 600 {t} && {{ mv -f {t} {p} 2>/dev/null || {{ cat {t} > {p} && chmod 600 {p} && rm -f {t}; }}; }}"
+        "chmod 600 {t} && src={t} && dst={p} && {{ \
+         if [ -L \"$dst\" ]; then \
+         r=$(readlink -f -- \"$dst\" 2>/dev/null) || r=; \
+         h=$(cd \"$HOME\" 2>/dev/null && pwd -P) || h=; \
+         case \"$r\" in \"$HOME\"/*|\"${{h:-$HOME}}\"/*) inside=1;; *) inside=;; esac; \
+         if [ -n \"$inside\" ] && [ -f \"$r\" ]; then \
+         mv -f \"$src\" \"$r.fleet-tmp\" && chmod 600 \"$r.fleet-tmp\" \
+         && src=\"$r.fleet-tmp\" && dst=\"$r\" || exit 1; \
+         else echo \"{SYMLINK_FALLBACK_MARKER} $dst -> ${{r:-unresolved}}\"; fi; \
+         fi; \
+         mv -f \"$src\" \"$dst\" 2>/dev/null \
+         || {{ cat \"$src\" > \"$dst\" && chmod 600 \"$dst\" && rm -f \"$src\"; }}; }}"
     )
 }
+
+/// What [`remote_rename_script`] prints when it does NOT follow a symlinked
+/// target (dangling, or outside `$HOME`) and replaces the link instead.
+const SYMLINK_FALLBACK_MARKER: &str = "fleet-symlink-fallback:";
 
 /// Expand a leading `~/` — or a bare `~` — against the LOCAL home dir.
 /// The bare form is the parent directory of a dotfile that lives directly in
@@ -2000,17 +2096,17 @@ mod tests {
         // The rename is still the normal path, of a tmp file made private
         // first (the upload replaced it with one under the remote umask)…
         assert!(s.starts_with(
-            "chmod 600 \"$HOME\"/'.claude.json.fleet-tmp' && { mv -f \"$HOME\"/'.claude.json.fleet-tmp' \"$HOME\"/'.claude.json'"
+            "chmod 600 \"$HOME\"/'.claude.json.fleet-tmp' && src=\"$HOME\"/'.claude.json.fleet-tmp' \
+             && dst=\"$HOME\"/'.claude.json' && {"
         ));
+        assert!(s.contains("mv -f \"$src\" \"$dst\" 2>/dev/null"));
         // …and the fallback writes THROUGH the target, which is the only way
         // onto a bind-mounted file (EBUSY on rename): `claude-fleet-host`
         // containers mount ~/.claude.json in.
-        assert!(
-            s.contains("|| { cat \"$HOME\"/'.claude.json.fleet-tmp' > \"$HOME\"/'.claude.json'")
-        );
+        assert!(s.contains("|| { cat \"$src\" > \"$dst\""));
         // The secret must not inherit the old file's mode, and the tmp file
         // is only removed once the copy succeeded.
-        assert!(s.contains("&& chmod 600 \"$HOME\"/'.claude.json' && rm -f"));
+        assert!(s.contains("&& chmod 600 \"$dst\" && rm -f \"$src\""));
         let quoted = crate::shell::quote(&s);
         assert!(quoted.starts_with('\'') && quoted.ends_with('\''));
         assert!(quoted.contains("\"$HOME\""));
@@ -2107,6 +2203,158 @@ mod tests {
             .mode();
         assert_eq!(mode & 0o777, 0o600);
         assert!(!tmp.exists());
+    }
+
+    /// Run [`remote_rename_script`] for `~/.claude.json` under `home`, with
+    /// `content` already uploaded to its `.fleet-tmp` sibling at the remote
+    /// umask. Returns the script's stdout.
+    #[cfg(unix)]
+    fn rename_claude_json_in(home: &std::path::Path, content: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = home.join(".claude.json.fleet-tmp");
+        std::fs::write(&tmp, content).unwrap();
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(remote_rename_script(
+                "~/.claude.json.fleet-tmp",
+                "~/.claude.json",
+            ))
+            .env("HOME", home)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        assert!(!tmp.exists(), "the staging tmp file must not survive");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    #[cfg(unix)]
+    fn mode_of(p: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    fn is_symlink(p: &std::path::Path) -> bool {
+        std::fs::symlink_metadata(p)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    }
+
+    /// The papayapos-dev pod: `~/.claude.json` links to a file on the
+    /// persistent volume. The write lands on the volume and the link stays.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_claude_json_stays_a_link_and_its_target_gets_the_content() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".claude")).unwrap();
+        let real = home.path().join(".claude/claude.json");
+        std::fs::write(&real, "{\"old\":1}").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let link = home.path().join(".claude.json");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let stdout = rename_claude_json_in(home.path(), "{\"new\":1}");
+
+        assert!(is_symlink(&link), "~/.claude.json must stay a symlink");
+        assert_eq!(std::fs::read_link(&link).unwrap(), real);
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "{\"new\":1}");
+        assert_eq!(mode_of(&real), 0o600);
+        assert!(!home.path().join(".claude/claude.json.fleet-tmp").exists());
+        assert!(!stdout.contains(SYMLINK_FALLBACK_MARKER), "{stdout}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_plain_claude_json_is_replaced_at_0600() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".claude.json");
+        std::fs::write(&path, "{}").unwrap();
+        let stdout = rename_claude_json_in(home.path(), "{\"new\":1}");
+        assert!(!is_symlink(&path));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"new\":1}");
+        assert_eq!(mode_of(&path), 0o600);
+        assert!(!stdout.contains(SYMLINK_FALLBACK_MARKER), "{stdout}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_claude_json_is_created_at_0600() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".claude.json");
+        rename_claude_json_in(home.path(), "{\"new\":1}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"new\":1}");
+        assert_eq!(mode_of(&path), 0o600);
+    }
+
+    /// A dangling link, or one leaving `$HOME`, is not followed: the link is
+    /// replaced as before, and the script says so for the caller to log.
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_or_foreign_link_falls_back_to_replacing_it() {
+        let home = tempfile::tempdir().unwrap();
+        let link = home.path().join(".claude.json");
+        std::os::unix::fs::symlink(home.path().join("gone.json"), &link).unwrap();
+        let stdout = rename_claude_json_in(home.path(), "{\"a\":1}");
+        assert!(stdout.contains(SYMLINK_FALLBACK_MARKER), "{stdout}");
+        assert!(!is_symlink(&link));
+        assert_eq!(std::fs::read_to_string(&link).unwrap(), "{\"a\":1}");
+        assert_eq!(mode_of(&link), 0o600);
+
+        let elsewhere = tempfile::tempdir().unwrap();
+        let foreign = elsewhere.path().join("claude.json");
+        std::fs::write(&foreign, "{}").unwrap();
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&foreign, &link).unwrap();
+        let stdout = rename_claude_json_in(home.path(), "{\"b\":1}");
+        assert!(stdout.contains(SYMLINK_FALLBACK_MARKER), "{stdout}");
+        assert!(!is_symlink(&link));
+        assert_eq!(std::fs::read_to_string(&link).unwrap(), "{\"b\":1}");
+        assert_eq!(std::fs::read_to_string(&foreign).unwrap(), "{}");
+    }
+
+    /// The local twin of the remote script: [`write_local_secret`] follows a
+    /// link into `home`, writes plain and missing files at 0600, and replaces
+    /// a link that leaves `home`.
+    #[cfg(unix)]
+    #[test]
+    fn write_local_secret_follows_a_link_into_home_only() {
+        let home = tempfile::tempdir().unwrap();
+        let h = Some(home.path());
+        std::fs::create_dir(home.path().join(".claude")).unwrap();
+        let real = home.path().join(".claude/claude.json");
+        std::fs::write(&real, "{}").unwrap();
+        let link = home.path().join(".claude.json");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        write_local_secret(&link, "linked", h).unwrap();
+        assert!(is_symlink(&link));
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "linked");
+        assert_eq!(mode_of(&real), 0o600);
+        assert!(!home.path().join(".claude/claude.json.fleet-tmp").exists());
+        assert!(!home.path().join(".claude.json.fleet-tmp").exists());
+
+        let plain = home.path().join("plain.json");
+        std::fs::write(&plain, "old").unwrap();
+        write_local_secret(&plain, "plain", h).unwrap();
+        assert_eq!(std::fs::read_to_string(&plain).unwrap(), "plain");
+        assert_eq!(mode_of(&plain), 0o600);
+
+        let missing = home.path().join("missing.json");
+        write_local_secret(&missing, "fresh", h).unwrap();
+        assert_eq!(std::fs::read_to_string(&missing).unwrap(), "fresh");
+        assert_eq!(mode_of(&missing), 0o600);
+
+        let elsewhere = tempfile::tempdir().unwrap();
+        let foreign = elsewhere.path().join("claude.json");
+        std::fs::write(&foreign, "{}").unwrap();
+        let out_link = home.path().join("foreign.json");
+        std::os::unix::fs::symlink(&foreign, &out_link).unwrap();
+        write_local_secret(&out_link, "replaced", h).unwrap();
+        assert!(!is_symlink(&out_link));
+        assert_eq!(std::fs::read_to_string(&out_link).unwrap(), "replaced");
+        assert_eq!(std::fs::read_to_string(&foreign).unwrap(), "{}");
     }
 
     #[test]
