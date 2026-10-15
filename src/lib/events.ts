@@ -131,6 +131,14 @@ export const HANDOFF_CHANGED_EVENT = 'handoff:changed';
  */
 export const DASHBOARDS_CHANGED_EVENT = 'dashboards:changed';
 
+/**
+ * `run:changed` (run traces, migration 193): a run recorded a step. The
+ * frame carries the run's id (`routine:418`) only; the Runs list and an
+ * open run timeline re-read `runs { list }` / `runs { trace }`, which on a
+ * hub-backed desktop are the hub's.
+ */
+export const RUN_CHANGED_EVENT = 'run:changed';
+
 /** The payload of `update:changed`: what moved, never the row itself. */
 /** `what` is observed | pin | channel today; a newer hub may add others. */
 export type UpdateChanged = { what: string; target?: string };

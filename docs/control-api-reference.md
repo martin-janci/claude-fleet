@@ -673,9 +673,9 @@ Parameters: `confirm_nonce`, `max_chars`, `prompt`, `raw`, `session_id`, `timeou
 
 ### `runs`
 
-Runs, newest first: tasks, mission steps, Jev decisions, planner and summary runs, routine fires. list: {runs, total}; each run has kind, owner, outcome (ok | failed | needs_person | nothing_to_do | running), duration_ms, cost_micros and session_ids.
+Runs, newest first: tasks, mission steps, Jev decisions, planner and summary runs, routine fires. list: {runs, total}; each run has kind, owner, outcome (ok | failed | needs_person | nothing_to_do | running), duration_ms, cost_micros and session_ids. trace {run_id, after_seq?}: a routine or agent run's steps, oldest first ({steps, more}; each has seq, phase, kind, actor, summary, data).
 
-Parameters: `action`, `kind`, `limit`, `mission_id`, `offset`, `org_id`, `outcome`, `routine_id`, `session_id`, `since`, `until`
+Parameters: `action`, `after_seq`, `kind`, `limit`, `mission_id`, `offset`, `org_id`, `outcome`, `routine_id`, `run_id`, `session_id`, `since`, `until`
 
 ### `safe_kill_session`
 
@@ -1258,6 +1258,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::pages::setting_history`
 - `commands::pages::set_fleet_setting`
 - `commands::runs::list_runs`
+- `commands::runs::run_trace`
 - `commands::agents::agents_status`
 - `commands::agents::agents_decide`
 - `commands::agents::agents_debug`

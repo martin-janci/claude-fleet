@@ -254,6 +254,9 @@ pub async fn ask(ctx: &DecideCtx, input: &RunInput, tail: &str) -> Asked {
         },
     )
     .await;
+    if let (Some(a), Ok(s)) = (out.answer.as_ref(), lock(&ctx.store)) {
+        crate::service::routines::trace::write_one(&s, input.run.id, jev_step(&out, a, now));
+    }
     let Some(answer) = out.proposal() else {
         return Asked::Recorded;
     };
@@ -268,7 +271,7 @@ pub async fn ask(ctx: &DecideCtx, input: &RunInput, tail: &str) -> Asked {
         Ok(Some(r)) => r,
         _ => return Asked::Recorded,
     };
-    match outcome::record(&s, &run, o, OutcomeSource::Jev, now) {
+    match outcome::record_with(&s, &run, o, OutcomeSource::Jev, out.run_id, now) {
         Ok(true) => Asked::Applied {
             outcome: o.as_str().to_string(),
             run_id: out.run_id,
@@ -279,6 +282,36 @@ pub async fn ask(ctx: &DecideCtx, input: &RunInput, tail: &str) -> Asked {
             Asked::Recorded
         }
     }
+}
+
+/// The trace step of Jev's read of a run's screen, applied or not.
+fn jev_step(
+    out: &crate::service::decide::DecisionOutcome,
+    a: &crate::service::decide::DecisionAnswer,
+    now: i64,
+) -> crate::service::run_trace::Step {
+    let mode = out.mode.map(|m| m.as_str()).unwrap_or("off");
+    let confidence = a
+        .confidence
+        .map(|c| format!(", {c:.2}"))
+        .unwrap_or_default();
+    crate::service::run_trace::Step::new(
+        now,
+        "outcome",
+        "decision",
+        "jev",
+        format!("Jev read its screen: {} ({mode}{confidence})", a.value),
+    )
+    .data(serde_json::json!({
+        "answer": a.value,
+        "confidence": a.confidence,
+        "probabilities": a.probabilities,
+        "mode": mode,
+        "fallback": out.fallback.map(|f| f.as_str()),
+        "latency_ms": out.latency_ms,
+    }))
+    .cost(out.cost_microusd)
+    .decision(out.run_id)
 }
 
 /// Read each pending run's screen and [`ask`], one after the other.

@@ -2426,3 +2426,170 @@ async fn dry_run_says_what_a_fire_would_start_and_writes_nothing() {
     assert!(d.event.is_none());
     assert_eq!(d.prompt, c.prompt);
 }
+
+/// A run's trace, as `(phase, kind, summary)`.
+fn trace_of(f: &Fx, run_id: i64) -> Vec<(String, String, String)> {
+    lock(&f.store)
+        .unwrap()
+        .run_trace(&crate::service::run_trace::routine_ref(run_id), 0, 100)
+        .unwrap()
+        .into_iter()
+        .map(|t| (t.phase, t.kind, t.summary))
+        .collect()
+}
+
+fn phases(t: &[(String, String, String)]) -> Vec<&str> {
+    t.iter().map(|(p, _, _)| p.as_str()).collect()
+}
+
+#[tokio::test]
+async fn a_run_traces_each_step_from_its_trigger_to_its_settle() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let ana = person(&f.store, None, f.ana);
+    let run = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    typing_done().await;
+    let t = trace_of(&f, run.id);
+    assert_eq!(
+        phases(&t),
+        [
+            "trigger",
+            "checks",
+            "placement",
+            "spawn",
+            "prompt",
+            "prompt"
+        ]
+    );
+    assert_eq!(t[0].2, "Started by Run now");
+    assert!(t[1].2.contains("checks passed"), "{t:?}");
+    assert_eq!(t[2].2, "Placed on mac");
+    assert_eq!(t[3].2, "Session started on mac");
+    assert_eq!(t[5].2, "Prompt typed into the session");
+    event(&f, run.session_id.unwrap(), "turn_done");
+    tick_once(&f.deps, OCT8 + 60).await;
+    let t = trace_of(&f, run.id);
+    assert_eq!(
+        t[6],
+        ("settle".into(), "settle".into(), "Its turn finished".into())
+    );
+}
+
+#[tokio::test]
+async fn a_failed_run_traces_its_error_and_who_judged_it() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let ana = person(&f.store, None, f.ana);
+    let run = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    typing_done().await;
+    event(&f, run.session_id.unwrap(), "stop_failure");
+    tick_once(&f.deps, OCT8 + 60).await;
+    let t = trace_of(&f, run.id);
+    let n = t.len();
+    assert_eq!(&t[n - 2].0, "settle");
+    assert_eq!(&t[n - 2].1, "error");
+    assert!(
+        t[n - 2].2.starts_with("Its turn ended in an error"),
+        "{t:?}"
+    );
+    assert_eq!(
+        t[n - 1],
+        (
+            "outcome".into(),
+            "decision".into(),
+            "It failed, judged by how it ended".into()
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_skipped_fire_traces_why_and_a_failed_start_traces_the_error() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let ana = person(&f.store, None, f.ana);
+    run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    let skipped = run_now(&f.deps, &ana, r.id, OCT8 + 60).await.unwrap();
+    let t = trace_of(&f, skipped.id);
+    assert_eq!(phases(&t), ["trigger", "checks", "settle"]);
+    assert_eq!(t[1].2, "Skipped: its last run is still going");
+    // A start that fails, with no fallback.
+    let mut i = input(&f);
+    i.overlap = Some("parallel".into());
+    save(&f.store, &ana, Some(r.id), &i).unwrap();
+    f.fake.fail.store(true, Ordering::SeqCst);
+    let failed = run_now(&f.deps, &ana, r.id, OCT8 + 120).await.unwrap();
+    let t = trace_of(&f, failed.id);
+    assert_eq!(phases(&t), ["trigger", "checks", "placement", "spawn"]);
+    assert_eq!(t[3].1, "error");
+    assert_eq!(t[3].2, "The start on mac failed: host unreachable");
+}
+
+#[tokio::test]
+async fn a_fallback_start_traces_both_hosts() {
+    let f = fx();
+    let mut i = input(&f);
+    i.fallback_host = Some("nas".into());
+    let r = new_routine(&f, i);
+    let ana = person(&f.store, None, f.ana);
+    reachable(&f, "mac", true);
+    reachable(&f, "nas", true);
+    *f.fake.fail_on.lock().unwrap() = Some("mac".into());
+    let run = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    let t = trace_of(&f, run.id);
+    assert_eq!(
+        &phases(&t)[2..6],
+        ["placement", "spawn", "placement", "spawn"]
+    );
+    assert_eq!(t[3].1, "error");
+    assert!(
+        t[4].2.starts_with("Placed on nas: the start on mac failed"),
+        "{t:?}"
+    );
+    assert_eq!(t[5].2, "Session started on nas");
+}
+
+#[tokio::test]
+async fn only_who_sees_the_routine_reads_its_runs_trace() {
+    use crate::service::run_trace::{read, routine_ref, TraceArgs};
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let ana = person(&f.store, None, f.ana);
+    let run = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    let args = TraceArgs {
+        run_id: routine_ref(run.id),
+        ..Default::default()
+    };
+    let mine = read(&f.store, &ana, &args).unwrap();
+    assert_eq!(mine.steps[0].seq, 1);
+    assert!(!mine.more);
+    let bo = person(&f.store, None, f.bo);
+    assert_eq!(
+        read(&f.store, &bo, &args).unwrap_err().code,
+        codes::E_NOTFOUND
+    );
+    // Reading on from a step, and in pages.
+    let on = read(
+        &f.store,
+        &ana,
+        &TraceArgs {
+            after_seq: Some(1),
+            limit: Some(1),
+            ..args.clone()
+        },
+    )
+    .unwrap();
+    assert_eq!(on.steps.len(), 1);
+    assert_eq!(on.steps[0].seq, 2);
+    assert!(on.more);
+    // A source with no trace, and nonsense, are not found.
+    for id in ["task:1", "routine:x", "nothing"] {
+        let a = TraceArgs {
+            run_id: id.into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            read(&f.store, &ana, &a).unwrap_err().code,
+            codes::E_NOTFOUND
+        );
+    }
+}

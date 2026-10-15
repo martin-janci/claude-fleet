@@ -37,6 +37,7 @@ pub mod review;
 pub mod support;
 #[cfg(test)]
 mod tests;
+pub mod trace;
 pub mod vehicle;
 pub mod workspace;
 
@@ -395,17 +396,22 @@ pub async fn run_with(store: &Mutex<Store>, reg: &Registry, now: i64) -> usize {
                     .filter(|r| r.active_at(now))
             })
             .collect();
+        for job in &jobs {
+            trace::started(&s, job, now);
+        }
         (jobs, rules, get_u32(&s, settings::AGENTS_MAX_RETRIES))
     };
     let runs = jobs.iter().zip(&rules).map(|(job, rule)| async move {
-        match reg.runner(&job.agent) {
+        let started = std::time::Instant::now();
+        let outcome = match reg.runner(&job.agent) {
             Some(r) => r.run(job, rule.as_ref()).await,
             None => RunOutcome::Failed {
                 kind: ErrorKind::Permanent,
                 message: format!("no runner for agent {}", job.agent),
                 cost_micros: 0,
             },
-        }
+        };
+        (outcome, started.elapsed().as_millis() as i64)
     });
     let outcomes = futures_util::future::join_all(runs).await;
     let ended = crate::store::now_unix().max(now);
@@ -413,11 +419,12 @@ pub async fn run_with(store: &Mutex<Store>, reg: &Registry, now: i64) -> usize {
         let Ok(s) = store.lock() else {
             return 0;
         };
-        for (job, outcome) in jobs.iter().zip(&outcomes) {
+        for (job, (outcome, ms)) in jobs.iter().zip(&outcomes) {
             let end = plan_end(outcome, job.attempts, max_retries, ended);
             if let Err(e) = s.finish_agent_job(job.id, &end, cost_of(outcome), ended) {
                 tracing::warn!(job_id = job.id, error = %e, "[agents] recording a run failed");
             }
+            trace::ended(&s, job, outcome, &end, *ms, ended);
         }
     }
     jobs.len() + execute_approved(store, reg).await

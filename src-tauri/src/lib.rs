@@ -666,6 +666,7 @@ pub fn run() {
             commands::pages::setting_history,
             commands::pages::set_fleet_setting,
             commands::runs::list_runs,
+            commands::runs::run_trace,
             commands::agents::agents_status,
             commands::agents::agents_decide,
             commands::agents::agents_debug,

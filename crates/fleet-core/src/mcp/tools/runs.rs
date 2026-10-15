@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::ipc_error::lock;
+use crate::service::run_trace::{self, TraceArgs};
 use crate::service::runs::{self, RunsArgs};
 
 #[tool_router(router = runs_router, vis = "pub(super)")]
@@ -14,7 +15,9 @@ impl FleetTools {
         decisions, planner and summary runs, routine fires. list: {runs, \
         total}; each run \
         has kind, owner, outcome (ok | failed | needs_person | nothing_to_do \
-        | running), duration_ms, cost_micros and session_ids.")]
+        | running), duration_ms, cost_micros and session_ids. trace {run_id, \
+        after_seq?}: a routine or agent run's steps, oldest first ({steps, \
+        more}; each has seq, phase, kind, actor, summary, data).")]
     pub(super) async fn runs(
         &self,
         Extension(caller): Extension<Caller>,
@@ -53,9 +56,23 @@ impl FleetTools {
                 let page = runs::list_in(&s, &scope, &args).map_err(to_mcp_err)?;
                 ok_json_compact(&page)
             }
+            "trace" => {
+                let Some(run_id) = p.run_id else {
+                    return Err(mcp_err(codes::E_INVALID, "trace needs run_id", None));
+                };
+                let args = TraceArgs {
+                    run_id,
+                    after_seq: p.after_seq,
+                    limit: p.limit,
+                };
+                let s = lock(self.reader()).map_err(to_mcp_err)?;
+                let scope = caller.view_scope(&s).map_err(to_mcp_err)?;
+                let trace = run_trace::read_in(&s, &scope, &args).map_err(to_mcp_err)?;
+                ok_json_compact(&trace)
+            }
             other => Err(mcp_err(
                 codes::E_INVALID,
-                format!("runs has no action {other:?}: list"),
+                format!("runs has no action {other:?}: list | trace"),
                 None,
             )),
         }
