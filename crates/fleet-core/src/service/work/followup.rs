@@ -74,7 +74,7 @@ pub fn create(
 /// A report's follow-up as a title: whitespace runs collapsed, cut on a char
 /// boundary at [`LOCAL_WORK_TITLE_MAX_CHARS`]. `.1` is the whole text when it
 /// was cut.
-fn cut_title(text: &str) -> (String, Option<String>) {
+pub(super) fn cut_title(text: &str) -> (String, Option<String>) {
     let clean = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if clean.chars().count() <= LOCAL_WORK_TITLE_MAX_CHARS {
         return (clean, None);

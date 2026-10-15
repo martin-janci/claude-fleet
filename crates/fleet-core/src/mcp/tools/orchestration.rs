@@ -1724,6 +1724,15 @@ impl FleetTools {
                         None,
                     )
                 })?;
+            // The person half, as `work { result }` has it: a follow-up is
+            // made from the task's text, so a reader who may not see the
+            // task (another person's session, a detached task) reads it as
+            // unknown — the same answer as a task that does not exist.
+            {
+                let s = lock(&self.store).map_err(to_mcp_err)?;
+                super::support::task_visible_at(&s, &caller, task_id, Reach::Read)
+                    .map_err(to_mcp_err)?;
+            }
             let made = crate::service::work::followup::create(
                 &self.store,
                 &scope,
@@ -2030,6 +2039,14 @@ impl FleetTools {
                 .is_some_and(|i| i.source != "local");
             if !ticket && !self.own_session_works_on(&caller, item_id)? {
                 self.require_drive_on_item_sessions(&caller, item_id)?;
+            }
+            // Design 2026-10-13 D3 for the agents an `OrgScope::All` hides:
+            // the operator and a peer hub. A per-host token is gated inside
+            // `set_status`.
+            if status == "done" && !ticket && caller.work_decider() == crate::store::Decider::Agent
+            {
+                crate::service::work::status::refuse_agent_done(&self.store, &scope, item_id)
+                    .map_err(to_mcp_err)?;
             }
             return ok_json(
                 &crate::service::work::status::move_status(

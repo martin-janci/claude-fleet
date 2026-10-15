@@ -16,7 +16,6 @@
 
 use crate::ipc_error::{lock, IpcError};
 use crate::mcp::guard::{mark_untrusted, UNTRUSTED_END};
-use crate::service::orgs::OrgScope;
 use crate::ssh::SshExec;
 use crate::store::{JournalRow, Store, WorkItemRow, WorkLinkRow};
 use serde::{Deserialize, Serialize};
@@ -233,9 +232,28 @@ fn fit(input: &HandoverInput, ladder: &[Limits], max: usize) -> String {
             return out;
         }
     }
-    // Every header field is capped, so the last rung is far under any max;
-    // this only guards against a future field that is not.
-    cap(&render(input, &BRIEF_LADDER[BRIEF_LADDER.len() - 1]), max)
+    // A follow-up's origin at its last rung can still be ~2,000 characters
+    // (a long key, PR URL, title and summary beside five lists); before
+    // anything is cut, its lists give way to their "… N more" lines, so the
+    // fences and the closing line survive.
+    let spare = origin_spare(&BRIEF_LADDER[BRIEF_LADDER.len() - 1]);
+    let out = render(input, &spare);
+    if out.chars().count() <= max {
+        return out;
+    }
+    // Every header field is capped, so this only guards against a future
+    // field that is not.
+    cap(&out, max)
+}
+
+/// `l` with the origin's lists reduced to their counts: the rung below the
+/// last, for a brief or origin section that does not fit otherwise.
+fn origin_spare(l: &Limits) -> Limits {
+    Limits {
+        origin_items: 0,
+        origin_item_chars: 80,
+        ..*l
+    }
 }
 
 fn render(input: &HandoverInput, l: &Limits) -> String {
@@ -489,9 +507,9 @@ pub fn origin_section(o: &OriginFacts, max: usize) -> String {
             return out;
         }
     }
-    let last = &BRIEF_LADDER[BRIEF_LADDER.len() - 1];
+    let spare = origin_spare(&BRIEF_LADDER[BRIEF_LADDER.len() - 1]);
     cap(
-        &origin_block(o, last.origin_items, last.origin_item_chars),
+        &origin_block(o, spare.origin_items, spare.origin_item_chars),
         max,
     )
 }
@@ -870,7 +888,7 @@ pub fn gather_stored(
         sessions: live.len() + ended.len(),
         live_sessions: live.len(),
         origin: match &item {
-            Some(i) => origin_facts(s, i, reader)?,
+            Some(i) => origin_facts(s, i, view)?,
             None => None,
         },
         ..Default::default()
@@ -1010,14 +1028,16 @@ pub fn gather_stored(
 }
 
 /// What `item`'s origin task left, when it is a follow-up
-/// (`origin_task_id`) and `scope` may see the item that task worked on;
-/// `None` otherwise, so a follow-up across an org fence reads as a plain
-/// item. The report is the worker's own words and the evidence git's;
-/// both are rendered inside a fence.
+/// (`origin_task_id`), `view`'s org may see the item that task worked on and
+/// `view` may read the task itself (`tasks::task_visible_in_scope`, the rule
+/// `work { result }` serves the same report under); `None` otherwise, so a
+/// follow-up across either fence reads as a plain item. The report is the
+/// worker's own words and the evidence git's; both are rendered inside a
+/// fence.
 pub fn origin_facts(
     s: &Store,
     item: &WorkItemRow,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
 ) -> Result<Option<OriginFacts>, IpcError> {
     let Some(task) = item
         .origin_task_id
@@ -1035,7 +1055,10 @@ pub fn origin_facts(
     else {
         return Ok(None);
     };
-    if !super::status::item_visible(s, scope, &src)? {
+    if !super::status::item_visible(s, &view.org, &src)? {
+        return Ok(None);
+    }
+    if !crate::service::tasks::task_visible_in_scope(s, &task, view)? {
         return Ok(None);
     }
     let report = task.report.unwrap_or_default();
@@ -1124,6 +1147,8 @@ pub async fn gather_handover(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::orgs::OrgScope;
+    use crate::service::view_scope::ViewScope;
 
     const T0: i64 = 1_790_000_000; // 2026-09-21 14:13 UTC
 
@@ -1719,6 +1744,46 @@ Verify the git state before acting; this summary may be stale. Full context: the
         assert!(alone.ends_with(UNTRUSTED_END), "{alone}");
     }
 
+    /// The worst case: every header field and every origin field at its
+    /// longest. The brief stays under the cap with its fences closed and its
+    /// closing line whole, rather than being cut mid-fence.
+    #[test]
+    fn a_worst_case_follow_up_brief_keeps_its_fences_and_footer() {
+        let long = |n: usize| (0..20).map(|i| format!("{i} {}", "w".repeat(n))).collect();
+        let origin = OriginFacts {
+            key: "K".repeat(200),
+            title: Some("t".repeat(500)),
+            outcome: "partial".into(),
+            summary: "s".repeat(2000),
+            decisions: long(480),
+            remaining: long(480),
+            context: long(480),
+            commits: long(480),
+            files: long(480),
+            pr_url: Some(format!("https://github.com/o/r/pull/{}", "9".repeat(400))),
+        };
+        let mut input = full();
+        input.url = Some(format!("https://example.com/{}", "u".repeat(400)));
+        input.title = Some("t".repeat(1000));
+        input.last_progress = Some("x".repeat(5000));
+        input.summary = Some(("line of summary text\n".repeat(2000), T0));
+        input.origin = Some(origin.clone());
+        let brief = build_handover(&input);
+        assert!(brief.chars().count() <= BRIEF_MAX_CHARS, "{}", brief.len());
+        assert!(
+            brief.ends_with("key ABC-123."),
+            "the footer survives: {brief}"
+        );
+        assert_eq!(
+            brief.matches(UNTRUSTED_END).count(),
+            brief.matches("[claude-fleet: message from").count(),
+            "every fence is closed: {brief}"
+        );
+        let alone = origin_section(&origin, BRIEF_MAX_CHARS / 2);
+        assert!(alone.chars().count() <= BRIEF_MAX_CHARS / 2);
+        assert!(alone.ends_with(UNTRUSTED_END), "{alone}");
+    }
+
     #[test]
     fn a_brief_with_no_origin_is_unchanged() {
         let input = HandoverInput {
@@ -1821,7 +1886,10 @@ Verify the git state before acting; this summary may be stale. Full context: the
         let brief = build_handover(&g.input);
         assert!(brief.contains("Follows "), "{brief}");
         // The origin item itself is not a follow-up.
-        assert_eq!(origin_facts(&s, &src, &OrgScope::All).unwrap(), None);
+        assert_eq!(
+            origin_facts(&s, &src, &ViewScope::internal()).unwrap(),
+            None
+        );
     }
 
     /// A caller who may not see the origin's item reads the follow-up as a
@@ -1835,7 +1903,12 @@ Verify the git state before acting; this summary may be stale. Full context: the
             org: 99,
             sees_unassigned: false,
         };
-        assert_eq!(origin_facts(&s, &f, &other).unwrap(), None);
-        assert!(origin_facts(&s, &f, &OrgScope::All).unwrap().is_some());
+        assert_eq!(
+            origin_facts(&s, &f, &ViewScope::internal().with_org(other.clone())).unwrap(),
+            None
+        );
+        assert!(origin_facts(&s, &f, &ViewScope::internal())
+            .unwrap()
+            .is_some());
     }
 }

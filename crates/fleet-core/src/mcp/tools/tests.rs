@@ -12291,6 +12291,10 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     ("work_link", "handover", &["Drive"]),
     // Finish task: the same pane write as `handover` (design 2026-10-13 D2).
     ("work_link", "wrap_up", &["Drive"]),
+    // A follow-up is made from its task's text: the task is read under
+    // `task_visible_at`, as `work { result }` serves it, and the source item
+    // is fenced by the org scope inside `followup::create`.
+    ("work_link", "followup", &["Read"]),
     // Names new work ON a session: a per-session work-graph write, and
     // `share.ts` already says `name_session_work: 'drive'`.
     ("work_link", "name", &["Drive"]),
@@ -12774,14 +12778,6 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
         "a NEW work item: a standalone task has no links and no sessions, and \
          a subtask is checked against its PARENT ITEM; the arm refuses every \
          scoped caller outright (`work::local::create_task`'s two guards)",
-    ),
-    (
-        "work_link",
-        "followup",
-        "a NEW sibling work item made from a task's result (design 2026-10-13 \
-         D4): the source task's ITEM is fenced by the caller's org scope \
-         (`status::item_visible`, outside it an unknown task); no session is \
-         named or answered",
     ),
     (
         "work_link",

@@ -193,7 +193,9 @@ impl Store {
 
     /// Whether `session_id` is a worker of a live mission: a run of one of
     /// its members, while the mission is active or paused (the worker
-    /// guard's scope, orchestration §7.2).
+    /// guard's scope, orchestration §7.2). A `wrapup` row (a person's
+    /// "Finish task", design 2026-10-13 D2) makes no session a worker: it is
+    /// never one of the mission's runs, here or in the counts below.
     pub fn is_mission_worker(&self, session_id: i64) -> Result<bool, IpcError> {
         Ok(self
             .conn
@@ -201,7 +203,8 @@ impl Store {
                 "SELECT 1 FROM tasks t \
                  JOIN work_items i ON i.id = t.work_item_id \
                  JOIN orchestration_projects p ON p.id = i.orchestration_project_id \
-                 WHERE t.worker_session_id = ?1 AND p.state IN ('active', 'paused') LIMIT 1",
+                 WHERE t.worker_session_id = ?1 AND p.state IN ('active', 'paused') \
+                   AND COALESCE(t.role, '') <> 'wrapup' LIMIT 1",
                 [session_id],
                 |_| Ok(()),
             )
@@ -302,7 +305,7 @@ impl Store {
                COALESCE(SUM(t.state IN ('queued','running')), 0), \
                MAX(COALESCE(t.finished_at, t.started_at, t.created_at)) \
              FROM tasks t JOIN work_items i ON i.id = t.work_item_id \
-             WHERE i.orchestration_project_id = ?1",
+             WHERE i.orchestration_project_id = ?1 AND COALESCE(t.role, '') <> 'wrapup'",
             [mission_id],
             |r| {
                 Ok(MissionTaskCounts {
@@ -322,7 +325,8 @@ impl Store {
             "SELECT (SELECT COALESCE(SUM(s.usage_cost_micros), 0) FROM sessions s \
                      WHERE s.id IN (SELECT t.worker_session_id FROM tasks t \
                                     JOIN work_items i ON i.id = t.work_item_id \
-                                    WHERE i.orchestration_project_id = ?1)) \
+                                    WHERE i.orchestration_project_id = ?1 \
+                                      AND COALESCE(t.role, '') <> 'wrapup')) \
                   + (SELECT COALESCE(SUM(cost_micros), 0) FROM aux_usage \
                      WHERE mission_id = ?1)",
             [mission_id],
@@ -345,6 +349,7 @@ impl Store {
                    JOIN work_items i ON i.id = t.work_item_id \
                   WHERE t.finished_at IS NOT NULL AND t.worker_session_id IS NOT NULL \
                     AND i.orchestration_project_id IS NOT NULL \
+                    AND COALESCE(t.role, '') <> 'wrapup' \
                     AND (?1 IS NULL OR i.orchestration_project_id = ?1)) \
              SELECT (SELECT COUNT(*) FROM done), \
                     (SELECT COALESCE(SUM(s.usage_cost_micros), 0) FROM sessions s \

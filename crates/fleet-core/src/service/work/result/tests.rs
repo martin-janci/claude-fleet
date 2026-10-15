@@ -172,6 +172,22 @@ fn a_follow_up_already_made_names_its_item() {
     assert_eq!(v.followups[1].item_id, None);
 }
 
+/// A report's line longer than a title is stored cut (`followup::create`);
+/// the view still names the item it became.
+#[test]
+fn a_follow_up_cut_to_a_title_still_names_its_item() {
+    let w = fixture();
+    let long = format!("Prune {}", "the weekly snapshots ".repeat(10));
+    let task = w.finished("wrapup", Some(report("r", &[long.as_str()])));
+    let made =
+        super::super::followup::create(&w.store, &OrgScope::All, task, Some(0), None).unwrap();
+    assert!(made.title.chars().count() < long.chars().count(), "cut");
+    let v = result_for_item(&w.store, &OrgScope::All, w.item)
+        .unwrap()
+        .unwrap();
+    assert_eq!(v.followups[0].item_id, Some(made.id));
+}
+
 #[test]
 fn the_pr_is_the_probes_row_else_the_sessions_own_reading() {
     let w = fixture();

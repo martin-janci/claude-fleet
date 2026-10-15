@@ -38,16 +38,41 @@ pub fn set_status(
     let item = require_visible(&s, scope, item_id)?;
     // Design 2026-10-13 D3: an agent does not decide a task is done past its
     // own acceptance lines or open subtasks. A person is never refused.
-    if status == "done" && scope.host().is_some() && item.source == "local" {
-        let now = crate::service::catalog::now_secs();
-        let gate = super::gate::completion_gate(&s, &item, now)?;
-        let gate = super::gate::for_scope(gate, &s, scope)?;
-        if let Some(why) = super::gate::refusal(&gate) {
-            return Err(IpcError::new(crate::ipc_error::codes::E_INVALID_STATE, why));
-        }
+    if status == "done" && scope.host().is_some() {
+        refuse_past_gate(&s, scope, &item)?;
     }
     s.set_item_status(item_id, status)?
         .ok_or_else(|| orgs::not_found("work item", item_id))
+}
+
+/// [`set_status`]'s gate for an agent its scope does not name: the operator
+/// and a peer hub reach the store through `OrgScope::All`, as a person
+/// does, yet `Caller::work_decider` counts them as agents. The MCP arm
+/// asks this before it sets a local item to `done` for one of them; an item
+/// outside the scope answers as an unknown id, as [`set_status`] does.
+pub fn refuse_agent_done(
+    store: &Mutex<Store>,
+    scope: &OrgScope,
+    item_id: i64,
+) -> Result<(), IpcError> {
+    let s = lock(store)?;
+    let item = require_visible(&s, scope, item_id)?;
+    refuse_past_gate(&s, scope, &item)
+}
+
+/// `E_INVALID_STATE`, naming what is in the way, when `item` is local and its
+/// completion gate has not passed.
+fn refuse_past_gate(s: &Store, scope: &OrgScope, item: &WorkItemRow) -> Result<(), IpcError> {
+    if item.source != "local" {
+        return Ok(());
+    }
+    let now = crate::service::catalog::now_secs();
+    let gate = super::gate::completion_gate(s, item, now)?;
+    let gate = super::gate::for_scope(gate, s, scope)?;
+    match super::gate::refusal(&gate) {
+        Some(why) => Err(IpcError::new(crate::ipc_error::codes::E_INVALID_STATE, why)),
+        None => Ok(()),
+    }
 }
 
 /// `work_link { action: keep_open, item_id }`: a person's answer to the Work
@@ -535,6 +560,34 @@ mod tests {
         open_subtask(&w, "Child");
         let row = super::set_status(&w.store, &OrgScope::All, w.item, "done").unwrap();
         assert_eq!(row.status_category, "done");
+    }
+
+    /// The operator and a peer hub reach the store as `OrgScope::All`; the
+    /// MCP arm asks [`super::refuse_agent_done`] for them, which refuses
+    /// exactly what `set_status` refuses a per-host token.
+    #[test]
+    fn an_agent_with_the_whole_scope_is_refused_past_the_gate_too() {
+        let w = seeded_local_item_on_host("mercury");
+        let child = open_subtask(&w, "Child");
+        let e = super::refuse_agent_done(&w.store, &OrgScope::All, w.item).unwrap_err();
+        assert_eq!(e.code, crate::ipc_error::codes::E_INVALID_STATE);
+        assert!(
+            e.message.contains("subtask \"Child\" is open"),
+            "{}",
+            e.message
+        );
+        w.store
+            .lock()
+            .unwrap()
+            .set_item_status(child, "done")
+            .unwrap();
+        super::refuse_agent_done(&w.store, &OrgScope::All, w.item).unwrap();
+        let e = super::refuse_agent_done(&w.store, &w.other_org_scope(), w.item).unwrap_err();
+        assert_eq!(
+            e.code,
+            crate::ipc_error::codes::E_NOTFOUND,
+            "outside the scope: unknown"
+        );
     }
 
     #[test]

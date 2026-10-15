@@ -2695,7 +2695,7 @@ fn a_subtask_starts_in_its_project_with_the_ticket_brief_then_its_own() {
             item_id: Some(sub.id),
             ..Default::default()
         },
-        &OrgScope::All,
+        &ViewScope::internal(),
     )
     .unwrap();
     assert_eq!(got.project_id, Some(pid));
@@ -2714,7 +2714,7 @@ fn a_subtask_starts_in_its_project_with_the_ticket_brief_then_its_own() {
             brief: Some("mine".into()),
             ..Default::default()
         },
-        &OrgScope::All,
+        &ViewScope::internal(),
     )
     .unwrap();
     assert_eq!(
@@ -2757,7 +2757,7 @@ fn a_follow_ups_start_brief_opens_with_its_origin() {
         item_id: Some(f.id),
         ..Default::default()
     };
-    let brief = with_native_defaults(&store, &args, &OrgScope::All)
+    let brief = with_native_defaults(&store, &args, &ViewScope::internal())
         .unwrap()
         .brief
         .unwrap();
@@ -2775,7 +2775,7 @@ fn a_follow_ups_start_brief_opens_with_its_origin() {
             brief: Some("mine".into()),
             ..args.clone()
         },
-        &OrgScope::All,
+        &ViewScope::internal(),
     )
     .unwrap();
     assert_eq!(mine.brief.as_deref(), Some("mine"));
@@ -2783,7 +2783,12 @@ fn a_follow_ups_start_brief_opens_with_its_origin() {
         org: 99,
         sees_unassigned: false,
     };
-    let plain = with_native_defaults(&store, &args, &other).unwrap();
+    let plain = with_native_defaults(
+        &store,
+        &args,
+        &ViewScope::internal().with_org(other.clone()),
+    )
+    .unwrap();
     assert!(!plain.brief.unwrap_or_default().contains("Follows"));
 }
 
@@ -2811,7 +2816,7 @@ async fn a_task_started_by_its_key_is_briefed_with_its_notes() {
         with_brief: true,
         ..Default::default()
     };
-    let got = with_native_defaults(&fx.store, &args, &OrgScope::All).unwrap();
+    let got = with_native_defaults(&fx.store, &args, &ViewScope::internal()).unwrap();
     assert_eq!(
         (got.item_id, got.reference.as_deref()),
         (Some(task.id), None)
@@ -2839,7 +2844,7 @@ fn a_tracker_key_is_not_taken_for_a_task() {
         with_brief: true,
         ..Default::default()
     };
-    let got = with_native_defaults(&fx.store, &args, &OrgScope::All).unwrap();
+    let got = with_native_defaults(&fx.store, &args, &ViewScope::internal()).unwrap();
     assert_eq!(
         (got.item_id, got.reference.as_deref()),
         (None, Some("ABC-3"))
@@ -2898,7 +2903,7 @@ fn a_subtask_start_never_carries_a_parent_the_caller_cannot_see() {
             item_id: Some(sub.id),
             ..Default::default()
         },
-        &scope,
+        &ViewScope::internal().with_org(scope.clone()),
     )
     .unwrap();
     let brief = got.brief.unwrap();
@@ -3188,7 +3193,7 @@ async fn a_proposal_previews_as_a_conflict() {
     assert_eq!(p.plan.map(|pl| pl.project_id), Some(fx.pid));
     let e = plan_start(
         &fx.store,
-        &with_native_defaults(&fx.store, &args, &OrgScope::All).unwrap(),
+        &with_native_defaults(&fx.store, &args, &ViewScope::internal()).unwrap(),
         &OrgScope::All,
         &fx.net(),
     )

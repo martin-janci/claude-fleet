@@ -144,15 +144,20 @@ fn view_for_item(
     let gate = gate::for_scope(gate::completion_gate(s, &item, now)?, s, scope)?;
     let prs = result_prs(s, &task);
     let made = s.followups_of(task.id)?;
+    // A follow-up is stored under the title `followup::create` made of the
+    // line (cut to a title's length), so the line is matched the same way.
     let followups = report
         .followups
         .iter()
-        .map(|t| ResultFollowup {
-            text: t.clone(),
-            item_id: made
-                .iter()
-                .find(|(title, _)| followup_norm(title) == followup_norm(t))
-                .map(|(_, id)| *id),
+        .map(|t| {
+            let as_title = followup_norm(&super::followup::cut_title(t).0);
+            ResultFollowup {
+                text: t.clone(),
+                item_id: made
+                    .iter()
+                    .find(|(title, _)| followup_norm(title) == as_title)
+                    .map(|(_, id)| *id),
+            }
         })
         .collect();
     let mut view = TaskResultView {
@@ -206,7 +211,9 @@ fn result_prs(s: &Store, task: &TaskRow) -> Vec<ResultPr> {
 }
 
 /// Fence every piece of worker-written text for an agent reader: the
-/// report's summary and lists, the follow-up lines and the commit subjects.
+/// report's summary and lists, the follow-up lines, the commit subjects and
+/// the file paths (a worker names its files), as the origin brief fences
+/// them.
 fn fence_view(v: &mut TaskResultView) {
     let r = &mut v.report;
     r.summary = fence_untrusted(&r.summary, "a task report", RESULT_SUMMARY_MAX_CHARS);
@@ -234,6 +241,9 @@ fn fence_view(v: &mut TaskResultView) {
     if let Some(ev) = v.evidence.as_mut() {
         for c in &mut ev.commits {
             c.subject = fence_untrusted(&c.subject, "a commit subject", REPORT_ENTRY_MAX_CHARS);
+        }
+        for f in &mut ev.files {
+            f.path = fence_untrusted(&f.path, "a file path", REPORT_ENTRY_MAX_CHARS);
         }
     }
 }
