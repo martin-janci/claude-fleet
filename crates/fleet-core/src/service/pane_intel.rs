@@ -479,8 +479,13 @@ pub(crate) fn detect_stuck(text: &str) -> Option<StuckKind> {
         return Some(StuckKind::AuthMenu);
     }
 
-    // Transport reconnecting.
-    if lower.contains("reconnecting") || lower.contains("connection lost, retrying") {
+    // Transport reconnecting: a status line that OPENS with the notice (after
+    // any spinner glyph), never the word inside prose — a session explaining
+    // that something "dropped and is reconnecting" is not reconnecting.
+    if lines.iter().any(|l| {
+        let l = l.trim_start_matches(|c: char| c.is_whitespace() || !c.is_alphanumeric());
+        l.starts_with("reconnecting") || l.starts_with("connection lost, retrying")
+    }) {
         return Some(StuckKind::Reconnect);
     }
 
@@ -1214,6 +1219,30 @@ mod tests {
         let intel = analyze("Some output\nReconnecting…\n");
         assert_eq!(intel.stuck, Some(StuckKind::Reconnect));
         assert_eq!(intel.derived_status, Some(ClaudeStatus::Blocked));
+    }
+
+    /// 2026-10-15: the UX agent's own answer about a fleet-agent "dropping its
+    /// connection twice … and reconnecting" flagged its idle pane `reconnect`
+    /// for seven hours, and Control's gated composer refused every send.
+    #[test]
+    fn reconnecting_in_prose_is_not_stuck() {
+        let pane = "⏺ The claude-fleet MCP on mefistos is configured.\n\
+                    \x20 - Hub logs: they show the fleet-agent on mefistos dropping its\n\
+                    \x20   connection twice (11:07 and 12:28 UTC) and reconnecting. That matters\n\
+                    \x20   for sessions on mefistos, not for the MCP itself.\n\
+                    ✻ Churned for 45s\n\
+                    ❯ \n\
+                    \x20 ⏵⏵ bypass permissions on (shift+tab to cycle)\n";
+        assert_eq!(analyze(pane).stuck, None);
+        // The status line itself still is, spinner glyph or not.
+        assert_eq!(
+            analyze("out\n✻ Reconnecting… (attempt 2)\n").stuck,
+            Some(StuckKind::Reconnect)
+        );
+        assert_eq!(
+            analyze("out\n  Connection lost, retrying in 4s\n").stuck,
+            Some(StuckKind::Reconnect)
+        );
     }
 
     #[test]
