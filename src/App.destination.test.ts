@@ -25,7 +25,7 @@ import { preloadLazyViews } from './lib/lazy_views';
 // before the first render, so a test sees them on the frame they open.
 beforeAll(() => preloadLazyViews());
 
-const OVERLAYS = ['hosts-overlay', 'assets-overlay', 'board-view', 'accounts-overlay', 'control-overlay', 'automation-overlay'];
+const OVERLAYS = ['hosts-overlay', 'assets-overlay', 'board-view', 'missions-view', 'accounts-overlay', 'control-overlay', 'automation-overlay'];
 
 beforeEach(() => {
   onboardingDismissed.set(true);
@@ -310,6 +310,28 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
     await fireEvent.click(getByTestId('rail-sessions'));
     expect(get(sidebarView)).toBe('sessions');
     expect(getByTestId('rail-sessions').getAttribute('aria-current')).toBe('page');
+  });
+
+  it('Work → Missions opens its room in the right column beside the list; Tasks and the rail\'s Sessions leave it (Thread room for Work)', async () => {
+    const { container, getByTestId, queryByTestId } = render(App);
+    const term = terminalSlot(container);
+    await fireEvent.click(getByTestId('rail-work'));
+    await fireEvent.click(getByTestId('work-tab-missions'));
+    expect(get(destination)).toBe('missions');
+    await waitFor(() => expect(openOverlays(container)).toEqual(['missions-view']));
+    // The list stays in the sidebar; the room starts on its starter.
+    expect(getByTestId('work-missions')).toBeTruthy();
+    expect(getByTestId('mission-room-starter')).toBeTruthy();
+    expect(queryByTestId('inspector')).toBeNull();
+    expect(getByTestId('rail-work').getAttribute('aria-current')).toBe('page');
+    await fireEvent.click(getByTestId('work-tab-tasks'));
+    expect(get(destination)).toBe('session');
+    expect(openOverlays(container)).toEqual([]);
+    await fireEvent.click(getByTestId('work-tab-missions'));
+    expect(get(destination)).toBe('missions');
+    await fireEvent.click(getByTestId('rail-sessions'));
+    expect(get(destination)).toBe('session');
+    expect(terminalSlot(container)).toBe(term);
   });
 
   it('Inbox (step 3.3) shows the Inbox list, with no Today tab since 9.1', async () => {

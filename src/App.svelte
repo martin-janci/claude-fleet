@@ -553,6 +553,7 @@
   const unsubOpened = onSessionOpened(() => {
     closeHosts();
     leave('board');
+    leave('missions');
     leave('accounts');
     leave('control');
     // Automation is a fleet page like Control: an opened session replaces
@@ -869,6 +870,15 @@
   });
   const taskShowing = $derived($sidebarView === 'work' && !!$selectedTaskId && $taskDetailOpen);
   const boardShown = $derived($destination === 'board');
+  // Work → Missions' room (Thread room for Work, 2026-10-15): the right
+  // column is the mission, its log and its own panel; no session tabs, no
+  // inspector, and the sidebar keeps the Missions list beside it.
+  const missionsShown = $derived($destination === 'missions');
+  // The room belongs to the Work view: Sessions or the Inbox in the
+  // sidebar (the rail, ⌘⇧W) leave it.
+  $effect(() => {
+    if ($sidebarView !== 'work') untrack(() => leave('missions'));
+  });
   // The list column and the session header belong to Inbox, Sessions and
   // Work (the Main, Sessions and Work boards). Control and Accounts take the
   // whole width; Automation and Toolkit bring their own navigation. The
@@ -879,15 +889,15 @@
   const listHidden = $derived(fleetPageShown || $settingsOpen);
   // A task in the Work view is not a session: no session tabs over it.
   const sessionChrome = $derived(
-    !!$selectedSession && !fleetPageShown && !$settingsOpen && !(taskShowing && !boardShown),
+    !!$selectedSession && !fleetPageShown && !$settingsOpen && !missionsShown && !(taskShowing && !boardShown),
   );
   const detailsMain = $derived(
-    !wideMode && !boardShown && ($destination === 'details' || taskShowing || !$selectedSession),
+    !wideMode && !boardShown && !missionsShown && ($destination === 'details' || taskShowing || !$selectedSession),
   );
   // Review r08: a board card's task opens in the inspector column beside the
   // board, whatever the inspector pref.
   const boardTask = $derived(boardShown && taskShowing);
-  const inspectorRoom = $derived(boardTask || (!!$selectedSession && !wideMode && !boardShown && !detailsMain));
+  const inspectorRoom = $derived(boardTask || (!!$selectedSession && !wideMode && !boardShown && !missionsShown && !detailsMain));
   const inspectorShown = $derived(!$settingsOpen && (boardTask || (inspectorRoom && inspectorOpen)));
   // Step 5.3: the pane's shells, for the Terminals tab. It is current while
   // the pane shows one of them (alone or split beside the agent).
@@ -1305,6 +1315,12 @@
              sits over the mounted terminal. -->
         <div class="view-slot overlay" data-testid="board-view">
           <Lazy load={lazyViews.board} />
+        </div>
+      {/if}
+      {#if missionsShown}
+        <!-- Work → Missions' room: over the mounted terminal like the board. -->
+        <div class="view-slot overlay" data-testid="missions-view">
+          <Lazy load={lazyViews.missions} />
         </div>
       {/if}
       {#if detailsMain}

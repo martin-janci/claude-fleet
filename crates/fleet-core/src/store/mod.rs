@@ -865,10 +865,18 @@ impl Store {
 
     /// Read the registered controller as `(host, tmux_name)`. `None` unless
     /// both keys are present.
+    ///
+    /// A record naming the UX agent's own session also reads as `None`: the
+    /// operator is never the controller (`refuse_operator_as_controller`),
+    /// but a record written before that refusal existed outlives it, and
+    /// every reader treats the controller as untouchable — auto-restore and
+    /// restore skip it, recreate refuses it — so a lost agent stayed lost.
     pub fn get_controller(&self) -> Result<Option<(String, String)>> {
         let host = self.get_setting("controller.host")?;
         let tmux = self.get_setting("controller.tmux")?;
-        Ok(host.zip(tmux))
+        Ok(host
+            .zip(tmux)
+            .filter(|(h, t)| !crate::service::operator::is_operator_session(self, h, t)))
     }
 
     pub fn conn_ref(&self) -> &rusqlite::Connection {
@@ -1098,6 +1106,30 @@ mod tests {
             Some(("mac".to_string(), "dev-fleet".to_string()))
         );
         // overwrite
+        s.set_controller("mefistos", "ctrl").unwrap();
+        assert_eq!(
+            s.get_controller().unwrap(),
+            Some(("mefistos".to_string(), "ctrl".to_string()))
+        );
+    }
+
+    /// 2026-10-15: a controller record naming `fleet-operator` on mefistos,
+    /// written before `register_self` refused the operator, made auto-restore
+    /// skip the ghosted agent and its Recreate answer `E_SELF_TARGET`.
+    #[test]
+    fn a_controller_record_naming_the_operator_reads_as_none() {
+        let s = Store::open_in_memory().unwrap();
+        crate::service::operator::set_operator_ref(
+            &s,
+            &crate::service::operator::OperatorRef {
+                host_alias: "mefistos".into(),
+                tmux_name: "fleet-operator".into(),
+            },
+        )
+        .unwrap();
+        s.set_controller("mefistos", "fleet-operator").unwrap();
+        assert_eq!(s.get_controller().unwrap(), None);
+        // Any other session is still the controller.
         s.set_controller("mefistos", "ctrl").unwrap();
         assert_eq!(
             s.get_controller().unwrap(),

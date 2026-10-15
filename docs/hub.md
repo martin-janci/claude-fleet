@@ -412,7 +412,9 @@ ready as the right build and stays so, and otherwise go back to the
 previous one — restoring the pre-update backup when the new build migrated
 the database. Setup, what it decides, what a rollback loses, and the
 systemd-timer alternative to mounting the Docker socket in a long-running
-container: `docs/updates.md` → *fleet-updater*.
+container: `docs/updates.md` → *fleet-updater*. A hub run as a Kubernetes
+StatefulSet updates itself the same way (`deploy/kubernetes/fleet-updater.yaml`,
+`docs/updates.md` → *fleet-updater on Kubernetes*).
 
 ## Backups
 

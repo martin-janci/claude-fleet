@@ -1395,7 +1395,7 @@ impl FleetTools {
         a Claude-written summary of past work. archive|unarchive (UI only; with \
         no session_id: the ended links of link_id|key|item_id|task_id), unlink \
         {link_id} with no session_id removes an ended link; snooze {days}|never \
-        (tidy-up); dismiss {item_id} (reopened); archive_item {item_id, on?}: a person \
+        (tidy-up); dismiss {item_id} (reopened); archive_item {item_id|task_id, on?}: a person \
         archives a ticket or task (on: false unarchives); tidy_apply {items}: kills (safe \
         kill when dirty). set_status {item_id, status, status_name?}: a person's status for \
         work with no ticket, or a ticket moved at its tracker; keep_open {item_id} answers close_suggested. edit {item_id, title?, notes?, assignees?, \
@@ -1865,7 +1865,25 @@ impl FleetTools {
                     None,
                 ));
             }
-            self.require_drive_on_item_sessions(&caller, graph_item(&args)?)?;
+            // A bare task (`task_id: "ref:KEY"`, no item) archives its ENDED
+            // links, fenced as every read of them is (`scope_links_for`).
+            let bare = args.item_id.is_none()
+                && args
+                    .task_id
+                    .as_deref()
+                    .is_some_and(|t| !t.trim_start().starts_with("item:"));
+            if !bare {
+                let item = match (args.item_id, args.task_id.as_deref()) {
+                    (None, Some(t)) => t.trim().trim_start_matches("item:").parse().ok(),
+                    (i, _) => i,
+                };
+                self.require_drive_on_item_sessions(
+                    &caller,
+                    item.ok_or_else(|| {
+                        mcp_err("E_INVALID", "archive_item needs item_id or task_id", None)
+                    })?,
+                )?;
+            }
             let view_scope = self.view_scope(&caller)?;
             return ok_json(
                 &crate::service::work::archive::archive_item(&args, &self.store, &view_scope)

@@ -8,6 +8,8 @@ import { tick } from 'svelte';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import WorkMissions from './WorkMissions.svelte';
+import MissionRoom from './MissionRoom.svelte';
+import { openMissionRoom, resetMissionRoomForTests } from './mission_room';
 import { expectAccessible } from './a11y_check';
 import { expectLastButton, expectOnePrimary } from './action_hierarchy_check';
 import { hosts } from './hosts';
@@ -90,8 +92,25 @@ const item = (id: number, title: string) => ({
 });
 
 // An import switches the view to Graph and the choice is kept (a pref), so
-// every test starts on List.
-beforeEach(() => localStorage.removeItem('cf:pref:work.missions.view'));
+// every test starts on List. The room's state is a module's: every test
+// starts with nothing open.
+beforeEach(() => {
+  localStorage.removeItem('cf:pref:work.missions.view');
+  resetMissionRoomForTests();
+});
+
+/** Work → Missions as the app draws it: the sidebar's list and the room. */
+function renderMissions() {
+  const list = render(WorkMissions);
+  const room = render(MissionRoom);
+  return {
+    container: document.body,
+    unmount: () => {
+      list.unmount();
+      room.unmount();
+    },
+  };
+}
 
 describe('WorkMissions', () => {
   let current: Mission;
@@ -122,14 +141,14 @@ describe('WorkMissions', () => {
 
   it('lists missions and says so when there are none', async () => {
     handlers.work_missions = () => [];
-    render(WorkMissions);
+    renderMissions();
     await flush();
     expect(screen.getByTestId('missions-empty')).toBeTruthy();
   });
 
   it('creates a mission from a name and a goal, then opens it', async () => {
     handlers.work_missions = () => [];
-    render(WorkMissions);
+    renderMissions();
     await flush();
     await fireEvent.click(screen.getByTestId('mission-new'));
     await fireEvent.input(screen.getByTestId('mission-new-name'), { target: { value: ' Payments v2 ' } });
@@ -151,7 +170,7 @@ describe('WorkMissions', () => {
     it('the planner drafts the first tasks only when asked', async () => {
       handlers.work_missions = () => [];
       handlers.plan_mission = () => ({ mission_id: 4, cards: [] });
-      render(WorkMissions);
+      renderMissions();
       await flush();
       await fireEvent.click(screen.getByTestId('mission-new'));
       expect((screen.getByTestId('mission-new-planner') as HTMLInputElement).checked).toBe(false);
@@ -168,7 +187,7 @@ describe('WorkMissions', () => {
     it('a new mission without the box asks no planner', async () => {
       handlers.work_missions = () => [];
       handlers.plan_mission = () => ({ mission_id: 4, cards: [] });
-      render(WorkMissions);
+      renderMissions();
       await flush();
       await fireEvent.click(screen.getByTestId('mission-new'));
       await fireEvent.input(screen.getByTestId('mission-new-name'), { target: { value: 'P' } });
@@ -182,7 +201,7 @@ describe('WorkMissions', () => {
       projects.set([tree(3, 'acme', 'api'), tree(5, 'acme', 'web')]);
       handlers.work_missions = () => [];
       handlers.import_mission_plan = () => ({ created: 2, updated: 0, unchanged: 0, deps_added: 1, deps_removed: 0 });
-      render(WorkMissions);
+      renderMissions();
       await flush();
       await fireEvent.click(screen.getByTestId('mission-new'));
       await fireEvent.input(screen.getByTestId('mission-new-name'), { target: { value: 'P' } });
@@ -242,7 +261,7 @@ describe('WorkMissions', () => {
         },
       });
       handlers.decide_mission_card = (a) => ({ ...ask(Number(a.card_id)), state: a.ok ? 'applied' : 'dismissed' });
-      render(WorkMissions);
+      renderMissions();
       await flush();
       await fireEvent.click(screen.getByTestId('mission-row'));
       await flush();
@@ -269,7 +288,7 @@ describe('WorkMissions', () => {
   });
 
   it('offers the moves the state allows and sends the version it saw', async () => {
-    render(WorkMissions);
+    renderMissions();
     await flush();
     await fireEvent.click(screen.getByTestId('mission-row'));
     await flush();
@@ -297,11 +316,12 @@ describe('WorkMissions', () => {
       const h = handlers[cmd];
       return h ? h(args) : null;
     });
-    render(WorkMissions);
+    renderMissions();
     await flush();
-    const rows = screen.getAllByTestId('mission-row');
-    await fireEvent.click(rows[0]);
-    await fireEvent.click(rows[1]);
+    // Payments' detail is still on the wire when Search opens.
+    const row = (name: string) => screen.getAllByTestId('mission-row').find((r) => r.textContent?.includes(name))!;
+    await fireEvent.click(row('Payments v2'));
+    await fireEvent.click(row('Search'));
     await flush();
     expect(screen.getByTestId('mission-detail').textContent).toContain('Faster search');
     releaseA!();
@@ -313,7 +333,7 @@ describe('WorkMissions', () => {
   describe('the ⋯ menu for the moves that end a mission (parity P19)', () => {
     async function openActive() {
       current = mission({ state: 'active' });
-      render(WorkMissions);
+      renderMissions();
       await flush();
       await fireEvent.click(screen.getByTestId('mission-row'));
       await flush();
@@ -340,7 +360,7 @@ describe('WorkMissions', () => {
     });
 
     it('New: Esc closes the menu and a draft offers only Cancel in it', async () => {
-      render(WorkMissions);
+      renderMissions();
       await flush();
       await fireEvent.click(screen.getByTestId('mission-row'));
       await flush();
@@ -354,7 +374,7 @@ describe('WorkMissions', () => {
   });
 
   it('adds a new task under the root and into the mission', async () => {
-    render(WorkMissions);
+    renderMissions();
     await flush();
     await fireEvent.click(screen.getByTestId('mission-row'));
     await flush();
@@ -367,7 +387,7 @@ describe('WorkMissions', () => {
 
   it('shows a refusal as text and keeps the mission open', async () => {
     handlers.set_mission_state = () => new Error('a mission does not go from draft to paused');
-    render(WorkMissions);
+    renderMissions();
     await flush();
     await fireEvent.click(screen.getByTestId('mission-row'));
     await flush();
@@ -393,7 +413,7 @@ describe('WorkMissions', () => {
       may_change: true,
     });
     handlers.set_work_dep = () => ({ item_id: 12, changed: true });
-    render(WorkMissions);
+    renderMissions();
     await flush();
     await fireEvent.click(screen.getByTestId('mission-row'));
     await flush();
@@ -429,7 +449,7 @@ describe('WorkMissions', () => {
         events: [],
         may_change: true,
       });
-      render(WorkMissions);
+      renderMissions();
       await flush();
       await fireEvent.click(screen.getByTestId('mission-row'));
       await flush();
@@ -466,7 +486,7 @@ describe('WorkMissions', () => {
 
     async function open() {
       handlers.work_mission = graphDetail;
-      render(WorkMissions);
+      renderMissions();
       await flush();
       await fireEvent.click(screen.getByTestId('mission-row'));
       await flush();
@@ -520,81 +540,104 @@ describe('WorkMissions', () => {
     async function open() {
       current = mission({ state: 'active' });
       handlers.work_mission = liveDetail;
-      render(WorkMissions);
+      renderMissions();
       await flush();
       await fireEvent.click(screen.getByTestId('mission-row'));
       await flush();
     }
 
-    it('a task title opens the task; its Session link opens its live session', async () => {
+    it('opens on its live session in the panel; a task title opens the task, its Session link the session, in place', async () => {
       await open();
+      // A mission with a live session opens the panel on it (board W1).
+      expect(screen.getByTestId('mission-tab-session').getAttribute('aria-selected')).toBe('true');
+      expect(screen.getByTestId('mission-session-focus').textContent).toContain('pay-api');
+      await fireEvent.click(screen.getByTestId('mission-tab-plan'));
       const titles = screen.getAllByTestId('mission-node-open');
       expect(titles.map((b) => b.textContent)).toEqual(['Payments v2', 'API', 'UI']);
       await fireEvent.click(titles[2]);
       expect(get(selectedTaskId)).toBe('item:13');
       expect(get(taskFocused)).toBe(true);
 
-      // Only the task with a live session has the link.
+      // Only the task with a live session has the link; it opens the
+      // session in the panel, and the app's selection stays where it was.
+      clearSelection();
       const links = screen.getAllByTestId('mission-task-session');
       expect(links).toHaveLength(1);
       expect(links[0].getAttribute('data-session-id')).toBe('7');
       await fireEvent.click(links[0]);
-      expect(get(selectedSession)?.id).toBe(7);
-      expect(get(selectedTaskId)).toBe('item:12');
-      expect(get(taskFocused)).toBe(false);
+      expect(screen.getByTestId('mission-tab-session').getAttribute('aria-selected')).toBe('true');
+      expect(screen.getByTestId('mission-session-focus').textContent).toContain('pay-api');
+      expect(get(selectedSession)).toBeNull();
     });
 
-    it('a run opens its task; the Sessions tab lists the child sessions', async () => {
+    it('a run opens its task; the Session tab shows the child session, its task, and ↗ opens it in full', async () => {
       await open();
-      expect(screen.getByTestId('mission-tab-sessions').textContent).toBe('Sessions1');
+      expect(screen.getByTestId('mission-tab-session').textContent).toBe('Session1');
       await fireEvent.click(screen.getByTestId('mission-tab-runs'));
       await fireEvent.click(screen.getByTestId('mission-run-open'));
       expect(get(selectedTaskId)).toBe('item:12');
       expect(screen.getByTestId('mission-task-session')).toBeTruthy();
 
-      await fireEvent.click(screen.getByTestId('mission-tab-sessions'));
-      const rows = screen.getAllByTestId('mission-session');
-      expect(rows).toHaveLength(1);
-      expect(rows[0].textContent).toContain('pay-api');
-      expect(rows[0].textContent).toContain('mefistos');
-      expect(rows[0].textContent).toContain('API');
-      clearSelection();
-      await fireEvent.click(screen.getByTestId('mission-session-open'));
-      expect(get(selectedSession)?.id).toBe(7);
+      await fireEvent.click(screen.getByTestId('mission-tab-session'));
+      const focus = screen.getByTestId('mission-session-focus');
+      expect(focus.textContent).toContain('pay-api');
+      expect(focus.textContent).toContain('mefistos');
+      expect(screen.getByTestId('mission-session-task').textContent).toBe('API');
       await fireEvent.click(screen.getByTestId('mission-session-task'));
       expect(get(selectedTaskId)).toBe('item:12');
       expect(get(taskFocused)).toBe(true);
+      clearSelection();
+      await fireEvent.click(screen.getByTestId('mission-session-full'));
+      expect(get(selectedSession)?.id).toBe(7);
+      expect(get(selectedTaskId)).toBe('item:12');
     });
 
-    it('the graph\'s chosen task opens the task and its session', async () => {
+    it('the room names its live sessions; a chip opens one in the panel', async () => {
       await open();
+      await fireEvent.click(screen.getByTestId('mission-tab-plan'));
+      const chips = screen.getAllByTestId('mission-room-session');
+      expect(chips).toHaveLength(1);
+      expect(chips[0].textContent).toContain('API');
+      expect(chips[0].textContent).toContain('mefistos');
+      await fireEvent.click(chips[0]);
+      expect(screen.getByTestId('mission-tab-session').getAttribute('aria-selected')).toBe('true');
+    });
+
+    it("the graph's chosen task opens the task and its session", async () => {
+      await open();
+      await fireEvent.click(screen.getByTestId('mission-tab-plan'));
       await fireEvent.click(screen.getByTestId('mission-view-graph'));
       await flush();
       await fireEvent.click(screen.getAllByTestId('mission-graph-node').find((n) => n.textContent?.includes('API'))!);
       await fireEvent.click(screen.getByTestId('mission-graph-chosen-open'));
       expect(get(selectedTaskId)).toBe('item:12');
       await fireEvent.click(screen.getByTestId('mission-graph-chosen-session'));
-      expect(get(selectedSession)?.id).toBe(7);
+      expect(screen.getByTestId('mission-tab-session').getAttribute('aria-selected')).toBe('true');
+      expect(screen.getByTestId('mission-session-focus').textContent).toContain('pay-api');
+      await fireEvent.click(screen.getByTestId('mission-tab-plan'));
       await fireEvent.click(screen.getByTestId('mission-view-list'));
     });
 
     it('a mission from an older hub has no sessions and says so', async () => {
       handlers.work_mission = () => ({ ...liveDetail(), sessions: undefined });
       current = mission({ state: 'active' });
-      render(WorkMissions);
+      renderMissions();
       await flush();
       await fireEvent.click(screen.getByTestId('mission-row'));
       await flush();
       expect(screen.queryAllByTestId('mission-task-session')).toHaveLength(0);
-      expect(screen.getByTestId('mission-tab-sessions').textContent).toBe('Sessions');
-      await fireEvent.click(screen.getByTestId('mission-tab-sessions'));
+      expect(screen.queryByTestId('mission-room-sessions')).toBeNull();
+      expect(screen.getByTestId('mission-tab-session').textContent).toBe('Session');
+      await fireEvent.click(screen.getByTestId('mission-tab-session'));
       expect(screen.getByTestId('mission-sessions-empty')).toBeTruthy();
     });
 
     it('a session that left the fleet is not opened', async () => {
       await open();
+      await fireEvent.click(screen.getByTestId('mission-tab-plan'));
       sessionStore.set([]);
       await fireEvent.click(screen.getByTestId('mission-task-session'));
+      expect(screen.getByTestId('mission-tab-plan').getAttribute('aria-selected')).toBe('true');
       expect(get(selectedSession)).toBeNull();
     });
   });
@@ -609,7 +652,7 @@ describe('WorkMissions', () => {
       deps_removed: 0,
       unknown_needs: ['1.2 needs 9.9'],
     });
-    render(WorkMissions);
+    renderMissions();
     await flush();
     await fireEvent.click(screen.getByTestId('mission-row'));
     await flush();
@@ -643,7 +686,7 @@ describe('WorkMissions', () => {
     });
     handlers.accept_work_proposals = () => [];
     handlers.undo_work_accept = () => [];
-    render(WorkMissions);
+    renderMissions();
     await flush();
     await fireEvent.click(screen.getByTestId('mission-row'));
     await flush();
@@ -691,7 +734,7 @@ describe('WorkMissions', () => {
     });
     handlers.verify_work_item = () => ({ item_id: 11, changed: true });
     handlers.set_work_done_when = () => ({ item_id: 11, changed: true });
-    render(WorkMissions);
+    renderMissions();
     await flush();
     await fireEvent.click(screen.getByTestId('mission-row'));
     await flush();
@@ -731,7 +774,7 @@ describe('WorkMissions', () => {
       current = mission({ state: 'active', level: 3 });
       handlers.work_mission = loopDetail;
       handlers.plan_mission = limit;
-      render(WorkMissions);
+      renderMissions();
       await flush();
       await fireEvent.click(screen.getByTestId('mission-row'));
       await flush();
@@ -762,7 +805,7 @@ describe('WorkMissions', () => {
       current = mission({ state: 'active', level: 3 });
       handlers.work_mission = loopDetail;
       handlers.plan_mission = () => ({ mission_id: 4, cards: [], refused: 'no JSON array of commands: "I think we should"' });
-      render(WorkMissions);
+      renderMissions();
       await flush();
       await fireEvent.click(screen.getByTestId('mission-row'));
       await flush();
@@ -841,7 +884,7 @@ describe('WorkMissions', () => {
         current = mission({ ...current, ...m, version: 2 });
         return current;
       };
-      render(WorkMissions);
+      renderMissions();
       await flush();
       await fireEvent.click(screen.getByTestId('mission-row'));
       await flush();
@@ -876,7 +919,7 @@ describe('WorkMissions', () => {
     it('says the autonomy in words, with how to change it', async () => {
       current = mission({ state: 'active', level: 3 });
       handlers.work_mission = () => detailOf(current);
-      render(WorkMissions);
+      renderMissions();
       await flush();
       await fireEvent.click(screen.getByTestId('mission-row'));
       await flush();
@@ -894,7 +937,7 @@ describe('WorkMissions', () => {
       current = mission({ state: 'active', level: 2 });
       handlers.work_mission = () => detailOf(current);
       handlers.grant_mission = () => ({ id: 1, mission_id: 4, plan_version: 1, level: 2, granted_by: 'fleet', created_at: 1, expires_at: 2 });
-      render(WorkMissions);
+      renderMissions();
       await flush();
       await fireEvent.click(screen.getByTestId('mission-row'));
       await flush();
@@ -925,10 +968,10 @@ describe('WorkMissions', () => {
 
   describe('action hierarchy (redesign 1.5)', () => {
     const view = () => document.body;
-    it('the list: New mission is the one primary; its form: Create', async () => {
-      render(WorkMissions);
+    it("the starter: New mission is the one primary (the list's + New is quiet); its form: Create", async () => {
+      renderMissions();
       await flush();
-      expectOnePrimary(view(), 'mission-new');
+      expectOnePrimary(view(), 'mission-room-new');
       await fireEvent.click(screen.getByTestId('mission-new'));
       await flush();
       expectOnePrimary(view(), 'mission-create');
@@ -950,7 +993,7 @@ describe('WorkMissions', () => {
           counts: { total: 1, open: 0 },
         },
       });
-      const r = render(WorkMissions);
+      const r = renderMissions();
       await flush();
       await fireEvent.click(screen.getByTestId('mission-row'));
       await flush();
@@ -962,7 +1005,7 @@ describe('WorkMissions', () => {
       // A draft can be deleted: the last button of the detail, behind a confirm.
       current = mission({ state: 'draft' });
       handlers.delete_mission = () => null;
-      render(WorkMissions);
+      renderMissions();
       await flush();
       await fireEvent.click(screen.getByTestId('mission-row'));
       await flush();
@@ -1001,7 +1044,7 @@ describe('WorkMissions', () => {
     handlers.decide_mission_card = () => ({ id: 7, mission_id: 4, decision_id: 'p', source: 'planner', kind: 'ask', state: 'applied', created_at: 1 });
     handlers.grant_mission = () => ({ id: 1, mission_id: 4, plan_version: 1, level: 2, granted_by: 'fleet', created_at: 1, expires_at: 2 });
     handlers.pause_all_missions = () => [4];
-    render(WorkMissions);
+    renderMissions();
     await flush();
     await fireEvent.click(screen.getByTestId('missions-pause-all'));
     await flush();
@@ -1033,7 +1076,7 @@ describe('WorkMissions', () => {
 
   it('hides the controls from someone who may only read', async () => {
     handlers.work_mission = () => ({ mission: current, items: [], events: [], may_change: false });
-    render(WorkMissions);
+    renderMissions();
     await flush();
     await fireEvent.click(screen.getByTestId('mission-row'));
     await flush();
@@ -1058,7 +1101,7 @@ describe('WorkMissions', () => {
       events: [{ id: 1, at: 1, kind: 'created', actor: 'person:1' }],
       may_change: true,
     });
-    const { container } = render(WorkMissions);
+    const { container } = renderMissions();
     await flush();
     await expectAccessible(container);
     await fireEvent.click(screen.getByTestId('mission-row'));
@@ -1071,6 +1114,189 @@ describe('WorkMissions', () => {
     await expectAccessible(container);
     // The view choice is remembered: leave it on the list for later tests.
     await fireEvent.click(screen.getByTestId('mission-view-list'));
+  });
+
+  // Thread room for Work (2026-10-15): the room's composer, its panel and
+  // the planner's proposals one by one.
+  describe('the room', () => {
+    const operator = session('local', 'fleet-operator', { id: 99 });
+    afterEach(async () => {
+      const { operatorSession } = await import('./operator');
+      const { destination } = await import('./destination');
+      operatorSession.set(null);
+      sessionStore.set([]);
+      destination.set('session');
+    });
+
+    async function openIt() {
+      renderMissions();
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+    }
+
+    it('Steer sends the text to Control, about this mission, and leaves a receipt that opens Control', async () => {
+      const { operatorSession } = await import('./operator');
+      const { destination } = await import('./destination');
+      sessionStore.set([operator]);
+      operatorSession.set(operator);
+      await openIt();
+      const box = screen.getByTestId('mission-steer-input') as HTMLTextAreaElement;
+      expect(box.placeholder).toBe('Steer Payments v2: ask, change the plan, retry a step…');
+      expect(box.disabled).toBe(false);
+      await fireEvent.input(box, { target: { value: 'Split the refunds step in two' } });
+      await fireEvent.keyDown(box, { key: 'Enter' });
+      await flush();
+      expect(calls('send_prompt')[0]).toEqual({
+        host_alias: 'local',
+        tmux_name: 'fleet-operator',
+        prompt: 'About mission #4 "Payments v2":\n\nSplit the refunds step in two',
+        keys: null,
+      });
+      expect(box.value).toBe('');
+      const receipt = screen.getByTestId('mission-steer-receipt');
+      expect(receipt.textContent).toContain('Split the refunds step in two');
+      expect(receipt.textContent).toContain('Sent to Control');
+      await fireEvent.click(screen.getByTestId('mission-steer-open'));
+      expect(get(destination)).toBe('control');
+    });
+
+    it('Shift+Enter is a new line, not a send; an empty box sends nothing', async () => {
+      const { operatorSession } = await import('./operator');
+      sessionStore.set([operator]);
+      operatorSession.set(operator);
+      await openIt();
+      const box = screen.getByTestId('mission-steer-input');
+      await fireEvent.keyDown(box, { key: 'Enter' });
+      await fireEvent.input(box, { target: { value: 'two lines' } });
+      await fireEvent.keyDown(box, { key: 'Enter', shiftKey: true });
+      await flush();
+      expect(calls('send_prompt')).toHaveLength(0);
+      expect((screen.getByTestId('mission-steer-send') as HTMLButtonElement).disabled).toBe(false);
+    });
+
+    it('with no Control agent the composer is off and says why', async () => {
+      await openIt();
+      expect((screen.getByTestId('mission-steer-input') as HTMLTextAreaElement).disabled).toBe(true);
+      expect((screen.getByTestId('mission-steer-send') as HTMLButtonElement).disabled).toBe(true);
+      expect(screen.getByTestId('mission-steer-blocked').textContent).toContain("Control's agent isn't running");
+    });
+
+    it('the panel: Session, Plan, Runs, Log and Repos; it hides and comes back; Edit opens Plan', async () => {
+      current = mission({ repos: [{ project_id: 1, name: 'o/claude-fleet', created_at: 1 }] });
+      await openIt();
+      const tabs = screen.getAllByRole('tab').filter((t) => t.closest('[data-testid="mission-tabs"]'));
+      expect(tabs.map((t) => t.textContent)).toEqual(['Session', 'Plan', 'Runs', 'Log', 'Repos1']);
+      expect(screen.getByTestId('mission-tab-plan').getAttribute('aria-selected')).toBe('true');
+      expect(screen.getByTestId('mission-panel').textContent).toContain('Cards and refunds');
+      await fireEvent.click(screen.getByTestId('mission-tab-log'));
+      expect(screen.getByTestId('mission-events').textContent).toContain('Created');
+      await fireEvent.click(screen.getByTestId('mission-tab-repos'));
+      expect(screen.getByTestId('mission-repos').textContent).toContain('o/claude-fleet');
+      await fireEvent.click(screen.getByTestId('mission-tab-session'));
+      expect(screen.getByTestId('mission-sessions-empty')).toBeTruthy();
+
+      await fireEvent.click(screen.getByTestId('mission-panel-close'));
+      expect(screen.queryByTestId('mission-panel')).toBeNull();
+      await fireEvent.click(screen.getByTestId('mission-panel-open'));
+      expect(screen.getByTestId('mission-panel')).toBeTruthy();
+
+      await fireEvent.click(screen.getByTestId('mission-tab-runs'));
+      await fireEvent.click(screen.getByTestId('mission-edit'));
+      expect(screen.getByTestId('mission-tab-plan').getAttribute('aria-selected')).toBe('true');
+      expect(screen.getByTestId('mission-edit-form')).toBeTruthy();
+    });
+
+    it('the log reads as a chat, oldest first, under the goal', async () => {
+      handlers.work_mission = () => ({
+        mission: current,
+        items: [item(10, 'Payments v2')],
+        events: [
+          { id: 2, at: 20, kind: 'state', actor: 'person:1', payload: { from: 'draft', to: 'active' } },
+          { id: 1, at: 10, kind: 'created', actor: 'person:1' },
+        ],
+        may_change: true,
+      });
+      await openIt();
+      expect(screen.getByTestId('mission-brief').textContent).toContain('Cards and refunds');
+      expect(screen.getAllByTestId('mission-room-event').map((e) => e.getAttribute('data-kind'))).toEqual(['created', 'state']);
+    });
+
+    it("the planner's proposals: one by one, Accept or Reject each; Ask the planner again", async () => {
+      handlers.work_mission = () => ({
+        mission: current,
+        items: [
+          item(10, 'Payments v2'),
+          { ...item(11, 'Ledger query'), proposal_state: 'proposed' },
+          { ...item(12, 'CSV writer'), proposal_state: 'proposed' },
+        ],
+        graph: {
+          nodes: [
+            { item_id: 10, state: 'ready', wave: 1 },
+            { item_id: 11, state: 'proposed', wave: 1 },
+            { item_id: 12, state: 'proposed', wave: 2 },
+          ],
+          waves: 2,
+        },
+        events: [],
+        may_change: true,
+      });
+      handlers.accept_work_proposal = () => item(11, 'Ledger query');
+      handlers.reject_work_proposal = () => item(12, 'CSV writer');
+      handlers.plan_mission = () => ({ mission_id: 4, cards: [] });
+      await openIt();
+      const card = screen.getByTestId('mission-proposals');
+      expect(card.textContent).toContain('2 tasks · 2 waves');
+      expect(card.textContent).toContain('Ledger query · CSV writer');
+      expect(screen.getByTestId('mission-accept-all').textContent).toBe('Accept all 2');
+      await fireEvent.click(screen.getByTestId('mission-review-one'));
+      expect(screen.getByTestId('mission-review').textContent).toContain('Task 1 of 2');
+      expect(screen.getByTestId('mission-review').textContent).toContain('Ledger query');
+      await fireEvent.click(screen.getByTestId('mission-review-accept'));
+      await flush();
+      expect(calls('accept_work_proposal')[0]).toEqual({ item_id: 11 });
+      await fireEvent.click(screen.getByTestId('mission-review-skip'));
+      expect(screen.getByTestId('mission-review').textContent).toContain('CSV writer');
+      await fireEvent.click(screen.getByTestId('mission-review-reject'));
+      await flush();
+      expect(calls('reject_work_proposal')[0]).toEqual({ item_id: 12 });
+      await fireEvent.click(screen.getByTestId('mission-review-stop'));
+      expect(screen.queryByTestId('mission-review')).toBeNull();
+      await fireEvent.click(screen.getByTestId('mission-proposals-replan'));
+      await flush();
+      expect(calls('plan_mission')[0]).toEqual({ mission_id: 4 });
+    });
+
+    it('Finish… in the Plan tab asks first, in the header', async () => {
+      current = mission({ state: 'active' });
+      await openIt();
+      await fireEvent.click(screen.getByTestId('mission-finish-open'));
+      expect(screen.getByTestId('mission-move-confirm-row').textContent).toContain('Complete Payments v2?');
+      expect(calls('set_mission_state')).toHaveLength(0);
+    });
+
+    it('the starter offers New mission and Plan from a task, which asks Control to /plan', async () => {
+      const { operatorSession } = await import('./operator');
+      const { destination } = await import('./destination');
+      sessionStore.set([operator]);
+      operatorSession.set(operator);
+      renderMissions();
+      await flush();
+      expect(screen.getByTestId('mission-room-starter').textContent).toContain('Pick a mission');
+      await fireEvent.click(screen.getByTestId('mission-room-new'));
+      expect(screen.getByTestId('mission-create-form')).toBeTruthy();
+      await fireEvent.click(screen.getByText('Cancel'));
+      await fireEvent.click(screen.getByTestId('mission-room-plan-task'));
+      await flush();
+      expect(get(destination)).toBe('control');
+    });
+
+    it('with no mission yet the starter says what a mission is', async () => {
+      handlers.work_missions = () => [];
+      renderMissions();
+      await flush();
+      expect(screen.getByTestId('mission-room-starter').textContent).toContain('No missions yet');
+    });
   });
 });
 
@@ -1169,7 +1395,7 @@ describe('WorkMissions comet trails', () => {
       if (cmd === 'work_mission') return detail;
       return null;
     });
-    render(WorkMissions);
+    renderMissions();
     await flush();
     await fireEvent.click(screen.getByTestId('mission-row'));
     await flush();
@@ -1296,21 +1522,43 @@ describe('the Missions board (gap G3.6)', () => {
 
   const rowNames = () => screen.getAllByTestId('mission-row').map((r) => r.querySelector('.title')?.textContent);
 
-  it('groups the list Active, Paused, Drafts, then a folded Completed', async () => {
-    render(WorkMissions);
+  it('groups the list Needs you, Working, Draft and paused, Done this week, then a folded Earlier', async () => {
+    renderMissions();
     await flush();
-    expect(screen.getByTestId('missions-group-active').textContent).toContain('Active');
-    expect(screen.getByTestId('missions-group-active').textContent).toContain('2');
-    expect(screen.getByTestId('missions-group-paused').textContent).toContain('1');
-    expect(screen.getByTestId('missions-group-draft').textContent).toContain('Drafts');
-    expect(rowNames()).toEqual(['Hub federation v2', 'Demo mission', 'Receipt documents', 'Windows installer polish']);
-    const fold = screen.getByTestId('missions-group-finished');
-    expect(fold.textContent).toContain('Completed');
+    // Three wait on a person (open cards), whatever their state.
+    expect(screen.getByTestId('missions-group-needs').textContent).toContain('Needs you');
+    expect(screen.getByTestId('missions-group-needs').textContent).toContain('3');
+    expect(screen.getByTestId('missions-group-running').textContent).toContain('1');
+    expect(screen.queryByTestId('missions-group-paused')).toBeNull();
+    expect(rowNames()).toEqual(['Hub federation v2', 'Receipt documents', 'Windows installer polish', 'Demo mission']);
+    // Ended long ago: Earlier, folded.
+    expect(screen.queryByTestId('missions-group-done')).toBeNull();
+    const fold = screen.getByTestId('missions-group-earlier');
+    expect(fold.textContent).toContain('Earlier');
     expect(fold.textContent).toContain('2');
     expect(fold.getAttribute('aria-expanded')).toBe('false');
     await fireEvent.click(fold);
     expect(rowNames()).toContain('Shipped thing');
     expect(rowNames()).toContain('Dropped thing');
+    // Each row has a meter and N/M when it has tasks.
+    const fed = screen.getAllByTestId('mission-row').find((r) => r.textContent?.includes('Hub federation v2'))!;
+    expect(fed.querySelector('[data-testid="mission-progress"]')?.textContent).toContain('7/12');
+    expect(fed.querySelector('[role="meter"]')?.getAttribute('aria-valuenow')).toBe('58');
+  });
+
+  it('a mission that ended this week is Done this week; a draft with nothing to answer is Draft and paused', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    handlers.work_missions = () => [
+      { ...done, finished_at: now - 3600 },
+      mission({ id: 8, name: 'Fresh draft', state: 'draft', updated_at: 5 }),
+    ];
+    handlers.work_mission = (a) => ({ mission: mission({ id: Number(a.mission_id), state: 'draft' }), items: [], events: [], plan: null });
+    renderMissions();
+    await flush();
+    expect(screen.getByTestId('missions-group-done').textContent).toContain('Done this week');
+    expect(screen.getByTestId('missions-group-paused').textContent).toContain('Draft and paused');
+    const reasons = screen.getAllByTestId('mission-reason').map((r) => r.textContent);
+    expect(reasons).toContain('Draft · not planned yet');
   });
 
   it('Filters narrow the list by needs you, organisation, repository and mode, and say what they hide (G7.7)', async () => {
@@ -1321,7 +1569,7 @@ describe('the Missions board (gap G3.6)', () => {
       { ...receipts, org_id: 1, repos: [repo(4, 'fleet-mobile')] },
       installer,
     ];
-    render(WorkMissions);
+    renderMissions();
     await flush();
     expect(screen.queryByTestId('missions-filters-panel')).toBeNull();
     await fireEvent.click(screen.getByTestId('missions-filters'));
@@ -1333,7 +1581,8 @@ describe('the Missions board (gap G3.6)', () => {
     await fireEvent.click(screen.getByTestId('missions-filter-needs-you'));
     await fireEvent.change(screen.getByTestId('missions-filter-repo'), { target: { value: '4' } });
     await flush();
-    expect(rowNames()).toEqual(['Demo mission', 'Receipt documents']);
+    // Receipt documents has an open card: it needs you, above the running one.
+    expect(rowNames()).toEqual(['Receipt documents', 'Demo mission']);
     await fireEvent.change(screen.getByTestId('missions-filter-org'), { target: { value: '1' } });
     await flush();
     expect(rowNames()).toEqual(['Receipt documents']);
@@ -1350,13 +1599,13 @@ describe('the Missions board (gap G3.6)', () => {
   });
 
   it('reads only the missions still going for their reasons', async () => {
-    render(WorkMissions);
+    renderMissions();
     await flush();
     expect(calls('work_mission').map((a) => a.mission_id).sort()).toEqual([1, 2, 3, 4]);
   });
 
   it('says on each row why the mission is where it is', async () => {
-    render(WorkMissions);
+    renderMissions();
     await flush();
     const reasons = Object.fromEntries(
       screen.getAllByTestId('mission-row').map((r) => [
@@ -1371,7 +1620,7 @@ describe('the Missions board (gap G3.6)', () => {
   });
 
   it('ends the list with the loop and the fleet ceiling beside Pause all', async () => {
-    render(WorkMissions);
+    renderMissions();
     await flush();
     const foot = screen.getByTestId('missions-footer');
     expect(screen.getByTestId('missions-loop').textContent).toBe('Mission loop on · ceiling L1');
@@ -1381,7 +1630,7 @@ describe('the Missions board (gap G3.6)', () => {
   });
 
   it('Group: None lists every mission flat with its state', async () => {
-    render(WorkMissions);
+    renderMissions();
     await flush();
     await fireEvent.change(screen.getByTestId('missions-group'), { target: { value: 'none' } });
     await flush();
@@ -1416,7 +1665,7 @@ describe('the Missions board (gap G3.6)', () => {
       }),
     };
     handlers.work_missions = () => [m];
-    render(WorkMissions);
+    renderMissions();
     await flush();
     await fireEvent.click(screen.getByTestId('mission-row'));
     await flush();
@@ -1448,7 +1697,7 @@ describe('the Missions board (gap G3.6)', () => {
       plan: planOf(),
     };
     handlers.work_missions = () => [m];
-    render(WorkMissions);
+    renderMissions();
     await flush();
     await fireEvent.click(screen.getByTestId('mission-row'));
     await flush();
@@ -1471,8 +1720,8 @@ describe('the Missions board (gap G3.6)', () => {
     expect(screen.getByTestId('mission-events').textContent).toContain('Refused');
     await fireEvent.click(screen.getByTestId('mission-tab-repos'));
     expect(screen.getByTestId('mission-repos').textContent).toContain('o/claude-fleet');
-    // Another mission opens on Plan again.
-    await fireEvent.click(screen.getByTestId('mission-back'));
+    // A mission opened again starts on its default tab.
+    openMissionRoom(null);
     await flush();
     await fireEvent.click(screen.getByTestId('mission-row'));
     await flush();
@@ -1481,7 +1730,7 @@ describe('the Missions board (gap G3.6)', () => {
 
   it('a mission with no run yet says so', async () => {
     handlers.work_missions = () => [installer];
-    render(WorkMissions);
+    renderMissions();
     await flush();
     await fireEvent.click(screen.getByTestId('mission-row'));
     await flush();

@@ -5,7 +5,9 @@
   went quiet, its trail growing with how long it has run); an amber halo
   waits for you, a red spark failed in the last ten minutes; ticks on the
   outer ring are the next routine fires, clockwise from now at the top.
-  A comet or planet click opens the run's timeline. CSS only.
+  A comet or planet click opens the run's timeline. CSS only. `compact`
+  stacks the live feed under the stage and drops the legend, for Control's
+  side panel.
 -->
 <script lang="ts">
   import { orbitModel, type OrbitModel } from '../orbit_map';
@@ -18,6 +20,7 @@
     routines,
     now,
     onpick,
+    compact = false,
   }: {
     runs: RunRow[];
     hostAliases: string[];
@@ -25,6 +28,7 @@
     routines: { name: string; enabled: boolean; trigger: string; host_alias: string; next_run_at?: number; skip_next?: boolean }[];
     now: number;
     onpick?: (run: RunRow) => void;
+    compact?: boolean;
   } = $props();
 
   const model: OrbitModel = $derived(orbitModel({ runs, hostAliases, sessions, routines, now }));
@@ -39,8 +43,8 @@
   }
 </script>
 
-<div class="orbit" data-testid="orbit-map">
-  <div class="stage" role="img" aria-label={`${model.running} running across ${model.hosts.length} hosts`}>
+<div class="orbit" class:compact data-testid="orbit-map">
+  <div class="stage" role="group" aria-label={`${model.running} running across ${model.hosts.length} hosts`}>
     <div class="ring outer"></div>
     {#each model.fires as f (f.routine + f.at)}
       <div class="arm" style:transform={`rotate(${f.deg}deg)`} title={`${f.routine} fires at ${f.label}`} data-testid="orbit-fire">
@@ -84,6 +88,7 @@
   </div>
 
   <div class="side">
+    {#if !compact}
     <div class="card">
       <span class="lbl">How to read it</span>
       <div class="legend xs fg2">
@@ -95,6 +100,7 @@
         <span class="lg tick-sw"></span><span>Ticks on the outer ring are the next fires, clockwise from now at the top.</span>
       </div>
     </div>
+    {/if}
     <div class="card" data-testid="orbit-feed">
       <div class="feed-head"><span class="lbl">Live</span><span class="chip">{model.running} running</span></div>
       {#if model.feed.length === 0}<span class="xs muted">Nothing ran recently.</span>{/if}
@@ -171,5 +177,6 @@
   :global(:root[data-motion='off']) .comet,
   :global(:root[data-motion='off']) .halo,
   :global(:root[data-motion='off']) .spark { animation: none; }
+  .orbit.compact { grid-template-columns: minmax(0, 1fr); gap: 12px; }
   @media (max-width: 900px) { .orbit { grid-template-columns: minmax(0, 1fr); } }
 </style>

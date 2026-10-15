@@ -29,27 +29,26 @@
   import ControlMissionView from './ControlMissionView.svelte';
   import ControlHostsView from './ControlHostsView.svelte';
   import { requestHostsView } from './app_views';
-  import StatusDot from './kit/StatusDot.svelte';
-  import { sessionState } from './handoffs';
   import { sessions } from './sessions';
   import { siblingsLabel, threadSiblings } from './control_threads';
   import { openInControl } from './control_room';
   import { handoffs } from './handoffs';
-  import { claudeStatusLabel, displayName, promptPreview } from './attention';
+  import { claudeStatusLabel, displayName } from './attention';
   import { timeAgo } from './session_status';
   import type { SessionRow } from './sessions';
   import WorkPrs from './WorkPrs.svelte';
   import TodayView from './TodayView.svelte';
   import LibraryView from './LibraryView.svelte';
-  import ConversationPanel from './ConversationPanel.svelte';
+  import SessionFocus from './SessionFocus.svelte';
   import ControlMissions from './ControlMissions.svelte';
   import ControlTasksView from './ControlTasksView.svelte';
   import ControlRoutinesView from './ControlRoutinesView.svelte';
+  import ControlOrbitView from './ControlOrbitView.svelte';
+  import { openRuns } from './automation';
   import LimitActions from './LimitActions.svelte';
   import { classify } from './attention';
   import { attentionFacts } from './attention_facts';
-  import { accountByUuid, accountLabel, sessionAccountUuid } from './accounts';
-  import { hostByAlias } from './hosts';
+  import { accountByUuid, accountLabel } from './accounts';
   import { openRoutines } from './routines';
   import {
     CONTROL_VIEWS,
@@ -71,15 +70,6 @@
   const shown = $derived(shownViews($controlViews));
   const active = $derived($controlViews.active);
   const activeDef = $derived(CONTROL_VIEWS.find((v) => v.id === active)!);
-  /** The focus header's account (G7.8, MCSession board: "host · account ·
-   *  PR"): the one the session in focus bills, by its label. */
-  const focusAccount = $derived.by(() => {
-    const s = $selectedSession;
-    if (!s) return null;
-    const uuid = sessionAccountUuid(s, $hostByAlias.get(s.host_alias)?.account_uuid);
-    const a = uuid ? $accountByUuid.get(uuid) : undefined;
-    return a ? accountLabel(a) : null;
-  });
   let menuOpen = $state(false);
   /** The view a session was opened from (9.5): "‹" and Esc go back to it. */
   let from = $state<ControlViewId | null>(null);
@@ -89,7 +79,7 @@
 
   /** The views that live somewhere else too; the Library and Today live
    *  only here. */
-  const HAS_PLACE: ReadonlySet<ControlViewId> = new Set(['needs-you', 'session', 'tasks', 'missions', 'hosts', 'routines', 'prs']);
+  const HAS_PLACE: ReadonlySet<ControlViewId> = new Set(['needs-you', 'session', 'tasks', 'missions', 'hosts', 'routines', 'orbit', 'prs']);
 
   /** The Session tab's strip: the sessions beside the one in focus. */
   const siblings = $derived($selectedSession ? threadSiblings($selectedSession, $sessions) : []);
@@ -120,6 +110,8 @@
       leave('control');
     } else if (id === 'routines') {
       openRoutines();
+    } else if (id === 'orbit') {
+      openRuns('orbit');
     } else if (id === 'missions') {
       openElsewhere('missions');
     } else if (id === 'hosts') {
@@ -135,7 +127,7 @@
     selectView('session');
   }
 
-  function back() {
+  function goBack() {
     if (!from) return;
     selectView(from);
     from = null;
@@ -146,7 +138,7 @@
   function onKeydown(e: KeyboardEvent) {
     if (e.key !== 'Escape' || e.defaultPrevented || active !== 'session' || !from) return;
     e.preventDefault();
-    back();
+    goBack();
   }
 </script>
 
@@ -294,51 +286,21 @@
       {/each}
     {:else if active === 'session'}
       {#if $selectedSession}
-        <div class="focus" data-testid="control-session-focus">
-          {#if siblings.length > 0}
-            <div class="siblings" data-testid="control-session-siblings">
-              <span class="sib-title">{siblingsTitle}</span>
-              <div class="sib-row">
-                {#each siblings as sib (sib.id)}
-                  <button
-                    type="button"
-                    class="sib"
-                    class:on={sib.id === $selectedSession.id}
-                    aria-current={sib.id === $selectedSession.id ? 'true' : undefined}
-                    data-testid="control-session-sibling"
-                    onclick={() => openInControl(sib.id, displayName(sib, true))}
-                    ><StatusDot state={sessionState(sib)} size={6} />{displayName(sib, true)}</button
-                  >
-                {/each}
-              </div>
-            </div>
-          {/if}
-          <div class="focus-head">
+        <SessionFocus
+          session={$selectedSession}
+          {siblings}
+          {siblingsTitle}
+          onpick={(sib) => openInControl(sib.id, displayName(sib, true))}
+          onfull={() => expand('session')}
+        >
+          {#snippet back()}
             {#if fromDef}
-              <button type="button" class="icon back" data-testid="control-session-back" title="Back to {fromDef.label} (Esc)" onclick={back}
+              <button type="button" class="icon back" data-testid="control-session-back" title="Back to {fromDef.label} (Esc)" onclick={goBack}
                 >‹ {fromDef.label}{#if from === 'needs-you' && $needsYouList.length > 0}{' '}<span class="count">{$needsYouList.length}</span>{/if}</button
               >
             {/if}
-            <div class="focus-title">
-              <p class="row-name">{displayName($selectedSession, true)}</p>
-              <button
-                type="button"
-                class="icon"
-                data-testid="control-session-full"
-                title="Open {displayName($selectedSession, true)} as a full session"
-                aria-label="Open as a full session"
-                onclick={() => expand('session')}>↗</button
-              >
-            </div>
-            <p class="row-why">
-              {claudeStatusLabel($selectedSession.claude_status)} · {$selectedSession.host_alias}{#if focusAccount}{' '}· <span data-testid="control-session-account">{focusAccount}</span>{/if}{#if $selectedSession.pr_url}{' '}· {$selectedSession.pr_url.replace(/^.*\/pull\//, 'PR #')}{/if}
-            </p>
-            {#if $selectedSession.last_prompt}<p class="prompt">{promptPreview($selectedSession.last_prompt, 160)}</p>{/if}
-          </div>
-          <div class="conv">
-            <ConversationPanel session={$selectedSession} visible={true} />
-          </div>
-        </div>
+          {/snippet}
+        </SessionFocus>
       {:else}
         <p class="empty">No session in focus. Pick one in Needs you, Sessions or the Inbox.</p>
       {/if}
@@ -350,6 +312,8 @@
       <ControlHostsView />
     {:else if active === 'routines'}
       <ControlRoutinesView />
+    {:else if active === 'orbit'}
+      <ControlOrbitView onfocus={openRow} />
     {:else if active === 'prs'}
       <WorkPrs />
     {:else if active === 'library'}
@@ -378,57 +342,6 @@
     min-height: var(--header-h);
     padding: 0 var(--space-2);
     border-bottom: 1px solid var(--border);
-  }
-  .siblings {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-    padding: 10px var(--space-3);
-    border-bottom: 1px solid var(--border);
-  }
-  .sib-title {
-    color: var(--fg-muted);
-    font-size: var(--text-2xs);
-    font-weight: 500;
-  }
-  .sib-row {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-  .sib {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    height: 20px;
-    padding: 0 7px;
-    border: 0;
-    border-radius: var(--radius-sm);
-    background: var(--chip-bg);
-    color: var(--fg-2);
-    font: inherit;
-    font-size: var(--text-2xs);
-    font-weight: 500;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  .sib.on {
-    background: var(--accent-soft);
-    color: var(--fg);
-    box-shadow: inset 0 0 0 1px var(--accent);
-  }
-  .sib:focus-visible {
-    outline: var(--ring-w) solid var(--ring);
-    outline-offset: 1px;
-  }
-  .focus-title {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-  }
-  .focus-title .row-name {
-    flex: 1 1 auto;
-    min-width: 0;
   }
   .tabs {
     display: flex;
@@ -560,7 +473,6 @@
   }
   .row-why,
   .row-age,
-  .prompt,
   .empty {
     color: var(--fg-muted);
     font-size: var(--text-xs);
@@ -615,27 +527,8 @@
   .fold-n {
     margin-left: var(--space-1);
   }
-  .focus {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    min-height: 0;
-  }
-  .focus-head {
-    padding: var(--space-2) var(--space-3);
-    border-bottom: 1px solid var(--border);
-  }
-  .focus-head p {
-    margin: 0 0 var(--space-1);
-  }
   .back {
     margin: 0 0 var(--space-1) calc(-1 * var(--space-1));
-  }
-  .conv {
-    flex: 1 1 auto;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
   }
   .empty {
     padding: var(--space-3);

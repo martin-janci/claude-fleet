@@ -467,13 +467,21 @@
   // leaves the ticket lists and hides behind the Work view's Archived switch;
   // Unarchive brings it back. Nothing changes in its tracker.
   const archiveBlocked = $derived(hubActionBlocked('set_work_archived', $hubStatus, $hubConnection));
+  // A task with an item archives the item. A bare one (a key from a prompt,
+  // no item) archives its ended links, so it needs one; and is archived when
+  // every link is, which `archived` already says.
+  const canArchive = (t: WorkTask): boolean => t.item_id != null || (t.counts?.ended ?? 0) > 0;
+  const isArchived = (t: WorkTask): boolean => (t.item_id != null ? t.archived_at != null : !!t.archived);
   let archiveBusy = $state(false);
   async function toggleArchived() {
     const t = task;
-    if (!t || t.item_id == null || archiveBusy) return;
+    if (!t || !canArchive(t) || archiveBusy) return;
     archiveBusy = true;
     statusError = null;
-    const r = await setWorkArchived(t.item_id, t.archived_at == null);
+    const r =
+      t.item_id != null
+        ? await setWorkArchived({ itemId: t.item_id }, t.archived_at == null)
+        : await setWorkArchived({ taskId: t.task_id }, !t.archived);
     archiveBusy = false;
     if (!r.ok) statusError = readErrorText(r.error);
     else void load(taskId);
@@ -603,17 +611,17 @@
             onclick={() => (promoting = true)}>Promote to ticket…</button
           >
         {/if}
-        {#if task?.item_id != null}
+        {#if task && canArchive(task)}
           <button
             class="btn"
             type="button"
             data-testid="work-task-archive"
             disabled={archiveBlocked !== null || archiveBusy}
             title={archiveBlocked ??
-              (task.archived_at != null
+              (isArchived(task)
                 ? 'Bring it back to the ticket lists and the Work view'
                 : 'Hide it from the ticket lists and the Work view (the Archived filter still shows it); nothing changes in its tracker')}
-            onclick={() => void toggleArchived()}>{task.archived_at != null ? 'Unarchive' : 'Archive'}</button
+            onclick={() => void toggleArchived()}>{isArchived(task) ? 'Unarchive' : 'Archive'}</button
           >
         {/if}
       </div>

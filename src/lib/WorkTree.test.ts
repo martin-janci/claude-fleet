@@ -306,7 +306,7 @@ describe('WorkTree', () => {
   // The other Work views hold the same rule; the source says it.
   it('no Work view writes a "Loading …" line of its own', async () => {
     const { readFileSync } = await import('node:fs');
-    for (const f of ['WorkBoard', 'WorkTree', 'WorkPrs', 'WorkMissions']) {
+    for (const f of ['WorkBoard', 'WorkTree', 'WorkPrs', 'WorkMissions', 'MissionRoom', 'MissionTasks']) {
       const s = readFileSync(`src/lib/${f}.svelte`, 'utf8');
       expect(s, f).not.toMatch(/>\s*Loading[^<]*…\s*</);
     }

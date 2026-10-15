@@ -11,10 +11,24 @@ import { listRuns, type RunRow } from './runs';
 import { fleetSettings, setFleetSetting, SETTING_KEYS, settingBool, type FleetSettings } from './fleet_settings';
 import type { Result } from './result';
 import { agentState, type AgentsStatus } from './agents';
+import { goTo } from './destination';
 
 export type AutomationTab = 'routines' | 'rules' | 'runs' | 'agents';
 
 export const automationTab = writable<AutomationTab>('routines');
+
+export type RunsView = 'lanes' | 'orbit' | 'list';
+
+/** A request from elsewhere (Control's Orbit view) to show Runs in a view,
+ *  with one run's timeline open. */
+export const runsRequest = writable<{ view: RunsView; run?: string; at: number } | null>(null);
+
+/** Open Automation's Runs in `view`, on `run`'s timeline when given. */
+export function openRuns(view: RunsView, run?: string): void {
+  runsRequest.set({ view, ...(run ? { run } : {}), at: Date.now() });
+  automationTab.set('runs');
+  goTo('automation');
+}
 
 /** `automation.paused`, as the settings store holds it. */
 export const automationPaused = derived(fleetSettings, ($s) => settingBool($s, SETTING_KEYS.automationPaused));

@@ -1,4 +1,5 @@
-//! The update loop for the Docker hub (design §8.2–§8.4).
+//! The update loop for a hub run as an image (design §8.2–§8.4): a compose
+//! container, or a Kubernetes StatefulSet — the [`Runtime`] says which.
 //!
 //! One [`Updater::tick`]: finish whatever a crash interrupted, replay the
 //! reports the hub did not take, ask the channel what the hub should run, and
@@ -6,17 +7,18 @@
 //! rollback, or anything under `automatic` — carry it through:
 //!
 //! ```text
-//! downloading  pull image@digest; RepoDigests must name it
-//! verifying    (the signatures were checked by verify_target already)
+//! downloading  docker: pull image@digest      kubernetes: (the kubelet pulls)
+//! verifying    docker: RepoDigests names it   kubernetes: a well-formed digest
 //! ready        backup through `fleet-hub backup` in the running hub
-//! installing   stop + remove the hub, create it again on the new image
-//! validating   live, ready, identity, then the soak
+//! installing   docker: recreate the container on image@digest
+//!              kubernetes: patch the StatefulSet's images to image@digest
+//! validating   running the digest, live, ready, identity, then the soak
 //! success      or: failed → rolling_back → recovered | rollback_failed
 //! ```
 //!
 //! Nothing here trusts the hub for content: the target arrives proven
 //! against the release key (`verify_target`, inside the channel's `check`),
-//! and the digest pulled is the one in that signed manifest.
+//! and the digest installed is the one in that signed manifest.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -32,8 +34,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::time::Instant;
 
-use crate::docker::{self, Docker};
-use crate::spec;
+use crate::runtime::{Run, Runtime};
 use crate::state::{Build, Previous, State};
 use fleet_updater::common::{attempt_id, known, prune_backups, safe, stamp};
 pub use fleet_updater::common::{now_unix, restore_db, wants_install};
@@ -47,8 +48,6 @@ pub(crate) use log;
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// The hub container's name (compose's `<project>-fleet-hub-1`).
-    pub container: String,
     /// The hub's data volume as mounted here (backups and restores go
     /// through it).
     pub data_mount: PathBuf,
@@ -57,23 +56,20 @@ pub struct Config {
     pub ready_timeout: Duration,
     pub soak: Duration,
     pub poll: Duration,
-    pub stop_timeout_secs: u64,
     pub keep_backups: usize,
     /// Between checks when the decision names no interval.
     pub interval: Duration,
 }
 
 impl Config {
-    pub fn defaults(container: &str, data_mount: &Path, state_dir: &Path) -> Config {
+    pub fn defaults(data_mount: &Path, state_dir: &Path) -> Config {
         Config {
-            container: container.to_string(),
             data_mount: data_mount.to_path_buf(),
             state_dir: state_dir.to_path_buf(),
             platform: Platform::new("linux", std::env::consts::ARCH, "oci"),
             ready_timeout: Duration::from_secs(90),
             soak: Duration::from_secs(120),
             poll: Duration::from_secs(3),
-            stop_timeout_secs: 30,
             keep_backups: 3,
             interval: Duration::from_secs(21600),
         }
@@ -161,17 +157,17 @@ pub enum Outcome {
     Blocked,
 }
 
-pub struct Updater<D: Docker> {
-    pub docker: D,
+pub struct Updater<R: Runtime> {
+    pub runtime: R,
     pub channel: Box<dyn UpdateChannel>,
     pub cfg: Config,
     pub state: State,
 }
 
-impl<D: Docker> Updater<D> {
-    pub fn new(docker: D, channel: Box<dyn UpdateChannel>, cfg: Config, state: State) -> Self {
+impl<R: Runtime> Updater<R> {
+    pub fn new(runtime: R, channel: Box<dyn UpdateChannel>, cfg: Config, state: State) -> Self {
         Updater {
-            docker,
+            runtime,
             channel,
             cfg,
             state,
@@ -347,27 +343,13 @@ impl<D: Docker> Updater<D> {
     /// What the hub runs now: its readiness when it answers, else the last
     /// build this updater put there.
     async fn observe(&mut self) -> Result<Build, String> {
-        let c = self
-            .docker
-            .inspect_container(&self.cfg.container)
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("no container named {}", self.cfg.container))?;
-        let image_id = docker::container_image_id(&c).map(String::from);
-        let digest = match &image_id {
-            Some(id) => self
-                .docker
-                .inspect_image(id)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|i| docker::first_repo_digest(&i)),
-            None => None,
-        };
-        let id = docker::container_id(&c)
-            .unwrap_or(&self.cfg.container)
-            .to_string();
-        let ready = self.readiness(&id).await;
+        let seen = self
+            .runtime
+            .inspect()
+            .await?
+            .ok_or_else(|| format!("no hub at {}", self.runtime.describe()))?;
+        let (image_id, digest) = (seen.image_id, seen.digest);
+        let ready = self.readiness().await;
         let hub = ready.ok().and_then(|r| r.hub);
         let build = match (hub, &self.state.current) {
             (Some(h), _) => Build {
@@ -398,15 +380,11 @@ impl<D: Docker> Updater<D> {
         Ok(build)
     }
 
-    async fn readiness(&self, container_id: &str) -> Result<ReadyReport, String> {
+    async fn readiness(&self) -> Result<ReadyReport, String> {
         let out = self
-            .docker
-            .exec(
-                container_id,
-                &["fleet-hub", "healthcheck", "--ready", "--json"].map(String::from),
-            )
-            .await
-            .map_err(|e| e.to_string())?;
+            .runtime
+            .exec(&["fleet-hub", "healthcheck", "--ready", "--json"].map(String::from))
+            .await?;
         // Not ready exits 1 and still prints the report.
         serde_json::from_str(out.stdout.trim()).map_err(|e| {
             format!(
@@ -487,29 +465,14 @@ impl<D: Docker> Updater<D> {
         self.install_and_validate(installed).await
     }
 
-    /// Pull, check the digest, back up. Nothing that runs is touched yet.
+    /// Fetch, check the digest, back up. Nothing that runs is touched yet.
     async fn prepare(&mut self, cand: &Build, installed: &Build) -> Result<(), String> {
         let image = cand.image.clone().unwrap_or_default();
         let digest = cand.digest.clone().unwrap_or_default();
-        self.docker
-            .pull(&image, &digest)
-            .await
-            .map_err(|e| e.to_string())?;
+        self.runtime.fetch(&image, &digest).await?;
         self.report(UpdatePhase::Verifying, installed, Value::Null, None)
             .await;
-        let reference = format!("{image}@{digest}");
-        let img = self
-            .docker
-            .inspect_image(&reference)
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("{reference} is not there after the pull"))?;
-        if !docker::has_repo_digest(&img, &image, &digest) {
-            return Err(format!("the pulled image does not carry {reference}"));
-        }
-        let image_id = docker::str_at(&img, &["Id"])
-            .ok_or("the pulled image has no Id")?
-            .to_string();
+        let image_id = self.runtime.verify(&image, &digest).await?;
         if let Some(c) = self.state.candidate.as_mut() {
             c.image_id = Some(image_id);
         }
@@ -518,38 +481,12 @@ impl<D: Docker> Updater<D> {
             .await;
 
         // What runs now, and how to run it again.
-        let c = self
-            .docker
-            .inspect_container(&self.cfg.container)
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("no container named {}", self.cfg.container))?;
-        if !docker::is_running(&c) {
-            return Err("the hub is not running, so it cannot take a backup".into());
-        }
-        let old_image_id = docker::container_image_id(&c)
-            .ok_or("the hub container names no image")?
-            .to_string();
-        let old_image = self
-            .docker
-            .inspect_image(&old_image_id)
-            .await
-            .map_err(|e| e.to_string())?
-            .unwrap_or(Value::Null);
-        let spec = spec::create_body(&c, &old_image, &old_image_id);
-        let id = docker::container_id(&c)
-            .unwrap_or(&self.cfg.container)
-            .to_string();
-        let hub_data = docker::container_env(&c, "FLEET_HUB_DATA_DIR")
-            .unwrap_or(HUB_DATA_DIR)
-            .to_string();
-        let (backup, schema) = self
-            .backup(&id, &cand.version, Path::new(&hub_data))
-            .await?;
+        let snap = self.runtime.snapshot().await?;
+        let (backup, schema) = self.backup(&cand.version, &snap.data_dir).await?;
         self.state.previous = Some(Previous {
             version: installed.version.clone(),
-            image_id: old_image_id,
-            spec,
+            image_id: snap.image_id,
+            spec: snap.spec,
             schema,
             backup: Some(backup),
         });
@@ -561,19 +498,14 @@ impl<D: Docker> Updater<D> {
     /// through the data mount, or a restore could not reach it.
     async fn backup(
         &mut self,
-        container_id: &str,
         to: &Version,
         hub_data: &Path,
     ) -> Result<(PathBuf, Option<i64>), String> {
         let prefix = format!("pre-{}", safe(&to.to_string()));
         let out = self
-            .docker
-            .exec(
-                container_id,
-                &["fleet-hub", "backup", "--prefix", &prefix, "--json"].map(String::from),
-            )
-            .await
-            .map_err(|e| e.to_string())?;
+            .runtime
+            .exec(&["fleet-hub", "backup", "--prefix", &prefix, "--json"].map(String::from))
+            .await?;
         if out.exit_code != 0 {
             return Err(format!(
                 "fleet-hub backup failed (exit {}): {}",
@@ -627,7 +559,7 @@ impl<D: Docker> Updater<D> {
         self.validate(cand).await
     }
 
-    /// Stop and remove the hub, create it again on the candidate's image.
+    /// Replace what runs with the candidate, by the signed digest.
     async fn swap(&mut self, cand: &Build) -> Result<(), String> {
         let prev = self
             .state
@@ -639,32 +571,7 @@ impl<D: Docker> Updater<D> {
             cand.image.as_deref().unwrap_or_default(),
             cand.digest.as_deref().unwrap_or_default()
         );
-        self.replace_container(&prev.spec, &reference).await
-    }
-
-    async fn replace_container(&mut self, spec: &Value, image: &str) -> Result<(), String> {
-        let name = self.cfg.container.clone();
-        if let Some(c) = self
-            .docker
-            .inspect_container(&name)
-            .await
-            .map_err(|e| e.to_string())?
-        {
-            let id = docker::container_id(&c).unwrap_or(&name).to_string();
-            self.docker
-                .stop(&id, self.cfg.stop_timeout_secs)
-                .await
-                .map_err(|e| e.to_string())?;
-            self.docker.remove(&id).await.map_err(|e| e.to_string())?;
-        }
-        let mut body = spec.clone();
-        body["Image"] = Value::String(image.to_string());
-        let id = self
-            .docker
-            .create(&name, &body)
-            .await
-            .map_err(|e| e.to_string())?;
-        self.docker.start(&id).await.map_err(|e| e.to_string())
+        self.runtime.install(&prev.spec, &reference).await
     }
 
     async fn validate(&mut self, cand: Build) -> Outcome {
@@ -735,11 +642,9 @@ impl<D: Docker> Updater<D> {
         }
 
         // Keep the failed candidate's last words, then clear it away.
-        let name = self.cfg.container.clone();
-        if let Ok(Some(c)) = self.docker.inspect_container(&name).await {
-            if docker::container_image_id(&c) != Some(prev.image_id.as_str()) {
-                let id = docker::container_id(&c).unwrap_or(&name).to_string();
-                if let Ok(logs) = self.docker.logs(&id, 500).await {
+        if let Ok(Some(seen)) = self.runtime.inspect().await {
+            if seen.image_id.as_deref() != Some(prev.image_id.as_str()) {
+                if let Ok(logs) = self.runtime.logs(500).await {
                     let v = cand
                         .as_ref()
                         .map(|c| c.version.to_string())
@@ -752,7 +657,9 @@ impl<D: Docker> Updater<D> {
                         log!("the failed hub's log is in {}", p.display());
                     }
                 }
-                let _ = self.docker.stop(&id, self.cfg.stop_timeout_secs).await;
+                if let Err(e) = self.runtime.stop().await {
+                    log!("stopping the candidate: {e}");
+                }
             }
         }
 
@@ -762,10 +669,14 @@ impl<D: Docker> Updater<D> {
             let backup = prev.backup.clone();
             match backup {
                 Some(b) => {
-                    // The candidate must be stopped before its database moves.
-                    if let Ok(Some(c)) = self.docker.inspect_container(&name).await {
-                        let id = docker::container_id(&c).unwrap_or(&name).to_string();
-                        let _ = self.docker.stop(&id, self.cfg.stop_timeout_secs).await;
+                    // The candidate must be stopped before its database moves;
+                    // a hub that may still be writing it is not touched.
+                    if let Err(e) = self.runtime.stop().await {
+                        return self
+                            .rollback_failed(format!(
+                                "the candidate did not stop, so its database stays where it is: {e}"
+                            ))
+                            .await;
                     }
                     let v = cand
                         .as_ref()
@@ -790,7 +701,7 @@ impl<D: Docker> Updater<D> {
             }
         }
 
-        if let Err(e) = self.replace_container(&prev.spec, &prev.image_id).await {
+        if let Err(e) = self.runtime.reinstate(&prev).await {
             return self
                 .rollback_failed(format!("starting {} again: {e}", prev.version))
                 .await;
@@ -851,12 +762,10 @@ impl<D: Docker> Updater<D> {
         }
         self.state.last_error = Some(why.clone());
         // Stop whatever half-runs, so nothing writes to a database in an
-        // unknown state; the containers and files stay for the operator.
-        if let Ok(Some(c)) = self.docker.inspect_container(&self.cfg.container).await {
-            let id = docker::container_id(&c)
-                .unwrap_or(&self.cfg.container)
-                .to_string();
-            let _ = self.docker.stop(&id, self.cfg.stop_timeout_secs).await;
+        // unknown state; the containers (or the StatefulSet, at zero
+        // replicas) and files stay for the operator.
+        if let Err(e) = self.runtime.stop().await {
+            log!("stopping the hub: {e}");
         }
         self.report(
             UpdatePhase::RollbackFailed,
@@ -934,39 +843,34 @@ impl<D: Docker> Updater<D> {
     }
 
     async fn probe(&self, want: &Build) -> Probe {
-        let c = match self.docker.inspect_container(&self.cfg.container).await {
-            Ok(Some(c)) => c,
-            Ok(None) => return Probe::Fatal("the container is gone".into(), None),
-            Err(e) => return Probe::NotYet(e.to_string(), None),
+        let seen = match self.runtime.inspect().await {
+            Ok(Some(s)) => s,
+            Ok(None) => return Probe::Fatal("the hub is gone".into(), None),
+            Err(e) => return Probe::NotYet(e, None),
         };
+        if seen.restarts > 0 {
+            return Probe::Fatal(format!("it restarted {} time(s)", seen.restarts), None);
+        }
+        // Still being created: nothing to compare yet (a pod reports its
+        // image's digest only once its container ran).
+        if let Run::Starting(why) = &seen.run {
+            return Probe::NotYet(why.clone(), None);
+        }
         if let Some(id) = &want.image_id {
-            if docker::container_image_id(&c) != Some(id.as_str()) {
+            if seen.image_id.as_deref() != Some(id.as_str()) {
                 return Probe::Fatal(
                     format!(
-                        "the container runs {}, not {id}",
-                        docker::container_image_id(&c).unwrap_or("nothing")
+                        "the hub runs {}, not {id}",
+                        seen.image_id.as_deref().unwrap_or("nothing")
                     ),
                     None,
                 );
             }
         }
-        if docker::restart_count(&c) > 0 {
-            return Probe::Fatal(
-                format!("it restarted {} time(s)", docker::restart_count(&c)),
-                None,
-            );
+        if let Run::Down(why) = &seen.run {
+            return Probe::Fatal(why.clone(), None);
         }
-        if !docker::is_running(&c) {
-            let code = c
-                .pointer("/State/ExitCode")
-                .and_then(Value::as_i64)
-                .unwrap_or(-1);
-            return Probe::Fatal(format!("it exited (code {code})"), None);
-        }
-        let id = docker::container_id(&c)
-            .unwrap_or(&self.cfg.container)
-            .to_string();
-        let r = match self.readiness(&id).await {
+        let r = match self.readiness().await {
             Ok(r) => r,
             Err(e) => return Probe::NotYet(e, None),
         };
@@ -1004,9 +908,9 @@ impl<D: Docker> Updater<D> {
                 schema,
             );
         }
-        match docker::health(&c) {
+        match seen.health.as_deref() {
             None | Some("healthy") => Probe::Ready(r),
-            Some(h) => Probe::NotYet(format!("container health is {h}"), schema),
+            Some(h) => Probe::NotYet(format!("its health is {h}"), schema),
         }
     }
 
@@ -1042,8 +946,8 @@ impl<D: Docker> Updater<D> {
                 );
                 if self.state.phase == Installing {
                     let running_cand = matches!(
-                        self.docker.inspect_container(&self.cfg.container).await,
-                        Ok(Some(c)) if docker::container_image_id(&c) == cand.image_id.as_deref()
+                        self.runtime.inspect().await,
+                        Ok(Some(s)) if s.image_id.is_some() && s.image_id == cand.image_id
                     );
                     if !running_cand {
                         return Some(
@@ -1095,4 +999,4 @@ pub fn needs_restore(prev: &Previous, cand: Option<&Build>, cand_schema: Option<
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

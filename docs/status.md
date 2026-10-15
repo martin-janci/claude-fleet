@@ -47,7 +47,21 @@ autonomy chip (`AutonomyChip.svelte`, `autonomy.ts`): Ask first · Within
 your brief · Autopilot set `orchestrator.max_level`, `control.auto_continue`
 (and its minutes) and `control.react_to_events` together, through
 `set_fleet_setting`; any other mix, including the shipped defaults, reads
-Custom. New became the default in step 7.6 (#657) and Classic
+Custom. Since 2026-10-15 Work → Missions is a Thread room too (boards
+W1Missions and W2Plan; frontend only; parity row P40): the sidebar's
+Missions tab (`WorkMissions.svelte`) groups the list Needs you / Working /
+Draft and paused / Done this week (a folded Earlier) with a reason, a meter
+and N/M, and a row opens the mission's room in the right column
+(`MissionRoom.svelte`, the `missions` destination, shared state in
+`mission_room.ts`): the header with the state moves, the task graph card,
+the log as a chat with the proposals, the confirm queue, triage, the next
+step and Finish inline, and "Steer <mission>…", which sends to Control's
+agent through the shared outbox prefixed `About mission #N "name":`. Its
+right panel (`layout.missions-right`, resized like Control's through
+`control_room.rightPanelWidth`) has Session (`SessionFocus.svelte`, the
+view Control's Session tab now draws too) · Plan (edit, autonomy and grant,
+the tasks in `MissionTasks.svelte`, Import a plan, Finish, Delete) · Runs ·
+Log · Repos. New became the default in step 7.6 (#657) and Classic
 was removed in step 13.1 (#699). The redesign's backend is not behind
 the switch: M2's session facts (`sessions.agent`, `origin`,
 `last_viewed_at`, `turn_outcome`; migrations 121, 124, 125, 129) and
@@ -1235,6 +1249,23 @@ containers for one service. `scripts/updater-e2e.sh` (CI hub-headless,
 `ci-local.sh --updater-e2e`) runs it against a real Docker daemon. Not
 built: its own self-update (its token does not reach `/events`, so it
 keeps to its interval).
+
+**fleet-updater on Kubernetes is built, opt-in, and has not run against a
+real cluster yet.** `FLEET_UPDATER_BACKEND=kubernetes` (auto-detected in a
+pod with a service account) drives a one-replica StatefulSet with the same
+state machine (`engine.rs` now runs on a `runtime::Runtime`: the compose
+container is `docker::ContainerRuntime`, the StatefulSet
+`kube::KubeRuntime`): the API server over HTTPS with the service account's
+token and CA (`kube::ApiServer`, no kubectl, no `kube`/`k8s-openapi`), the
+backup and readiness through `pods/exec` over a hand-written WebSocket
+(`ws.rs`, `v4.channel.k8s.io`), a strategic-merge patch of every container on
+the hub's repository to the signed `image@digest`, the gate on the pod's
+`imageID`, and a rollback that scales to 0, restores the backup through the
+updater's own mount of the hub's claim, and patches the old images back.
+`deploy/kubernetes/fleet-updater.yaml` is the example (namespace
+`papayapos-fleet`, RBAC limited to the hub's StatefulSet and pod by name).
+Tested against a simulated API server and kubelet (`kube::tests`); no
+kind/k3d run in CI.
 
 **S7 is landed:** the desktop updates itself (`src-tauri/src/self_update.rs`,
 `update_check` / `update_install`, both `SameInBoth`; `src/lib/updates.ts`,
