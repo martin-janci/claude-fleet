@@ -12,6 +12,7 @@ import { operatorError, operatorState, operatorSession } from './operator';
 import { sessions } from './sessions';
 import { hostsViewRequest, settingsOpen, settingsSection } from './app_views';
 import { expectAccessible } from './a11y_check';
+import { fleetSettings, hubSettingKeys, SETTING_DEFAULTS } from './fleet_settings';
 
 const row = (over = {}) =>
   ({
@@ -31,6 +32,8 @@ beforeEach(() => {
   operatorState.set('ready');
   operatorSession.set(row());
   sessions.set([]);
+  fleetSettings.set({ ...SETTING_DEFAULTS });
+  hubSettingKeys.set(null);
 });
 
 /** Mount at `state`: the panel wakes the agent on mount (Control, 9.1), so
@@ -61,6 +64,18 @@ describe('AgentPanel', () => {
     await mount('lost');
     expect(screen.getByRole('button', { name: /restart/i })).toBeTruthy();
     expect(invoke).not.toHaveBeenCalledWith('ensure_operator', expect.anything());
+  });
+
+  // 2026-10-15: a desktop newer than its hub (0.6.2) said "Fleet restarts it
+  // by itself" while the hub had no auto-restore, so Control sat lost.
+  it('promises an automatic restart only when the hub has auto-restore', async () => {
+    const r = await mount('lost');
+    expect(r.container.textContent).toContain('Automatic recovery is off');
+    expect(r.container.textContent).not.toContain('restarts it by itself');
+    r.unmount();
+    hubSettingKeys.set(new Set(['recovery.auto_restore']));
+    const r2 = await mount('lost');
+    expect(r2.container.textContent).toContain('restarts it by itself');
   });
 
   it('shows why a restart of the lost agent failed, under the button', async () => {
