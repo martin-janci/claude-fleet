@@ -263,6 +263,24 @@ pub struct HostHealthRow {
     /// are set or the host could not tell.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub auth_overrides: Vec<String>,
+    /// Host load (migration 192), for a status-bar chip: CPU busy percent,
+    /// used memory percent and memory pressure (0–100), rounded, from the
+    /// last sample; `None` when the host cannot tell. Disk used percent is
+    /// [`Self::disk_home_pct`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_pct: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_used_pct: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_pressure: Option<u8>,
+    /// Available memory at or under `health.mem_low_pct`, on a fresh
+    /// sample: the floor the auto-restore tick defers under.
+    #[serde(default)]
+    pub mem_low: bool,
+    /// CPU at or over `health.cpu_busy_pct` on two samples in a row, the
+    /// latest fresh.
+    #[serde(default)]
+    pub cpu_saturated: bool,
 }
 
 /// The `health.*` thresholds [`hosts_health`] judges against.
@@ -270,6 +288,8 @@ pub struct HostHealthThresholds {
     pub disk_low_pct: u8,
     pub claude_max_behind: i64,
     pub hooks_silent_secs: i64,
+    /// `health.mem_low_pct` (migration 192).
+    pub mem_low_pct: f64,
 }
 
 /// A version stamp young enough to compare: the same 24 h the desktop's
@@ -284,40 +304,112 @@ const VERSION_FRESH_SECS: i64 = 86_400;
 /// keep the two equal.
 pub const HEALTH_SAMPLE_FRESH_SECS: i64 = 3600;
 
-/// The used-memory line [`mem_low`] judges against until the threshold has a
-/// setting of its own: available memory at or under 10 % of physical.
+/// `health.mem_low_pct`'s default: available memory at or under 10 % of
+/// physical reads as short.
 pub const DEFAULT_MEM_LOW_PCT: f64 = 10.0;
+/// `health.cpu_busy_pct`'s default.
+pub const DEFAULT_CPU_BUSY_PCT: f64 = 90.0;
+/// Two CPU readings count as "in a row" for `cpu_saturated` only when the
+/// earlier one is this recent. A reconcile pass samples every ~20 s; a
+/// reading from before the host stopped answering says nothing about a
+/// spike now.
+pub const CPU_SUSTAINED_WINDOW_SECS: i64 = 300;
+
+/// The `health.*` load lines in force (migration 192): what `mem_low` and
+/// `cpu_saturated` are judged against, wherever they are judged.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HostLoadLimits {
+    pub mem_low_pct: f64,
+    pub cpu_busy_pct: f64,
+}
+
+impl Default for HostLoadLimits {
+    fn default() -> Self {
+        Self {
+            mem_low_pct: DEFAULT_MEM_LOW_PCT,
+            cpu_busy_pct: DEFAULT_CPU_BUSY_PCT,
+        }
+    }
+}
+
+/// [`HostLoadLimits`] from the settings (`health.mem_low_pct`,
+/// `health.cpu_busy_pct`); an unreadable value keeps its default.
+pub fn load_limits(s: &Store) -> HostLoadLimits {
+    use crate::service::settings::{get_string, HEALTH_CPU_BUSY_PCT, HEALTH_MEM_LOW_PCT};
+    let d = HostLoadLimits::default();
+    HostLoadLimits {
+        mem_low_pct: get_string(s, HEALTH_MEM_LOW_PCT)
+            .parse()
+            .unwrap_or(d.mem_low_pct),
+        cpu_busy_pct: get_string(s, HEALTH_CPU_BUSY_PCT)
+            .parse()
+            .unwrap_or(d.cpu_busy_pct),
+    }
+}
+
+/// PURE: CPU busy percent between two `/proc/stat` readings, each
+/// `(busy, total)` jiffies. `None` without both, or when the counters went
+/// backwards (the host rebooted between them) or did not move.
+pub fn cpu_from_ticks(prev: Option<(i64, i64)>, now: Option<(i64, i64)>) -> Option<f64> {
+    let ((pb, pt), (nb, nt)) = (prev?, now?);
+    let (db, dt) = (nb - pb, nt - pt);
+    (dt > 0 && db >= 0).then(|| (db as f64 * 100.0 / dt as f64).clamp(0.0, 100.0))
+}
+
+/// PURE: whether available memory is at or under `low_pct` of physical.
+/// Unknown is not low.
+pub fn judge_mem_low(avail_kb: Option<i64>, total_kb: Option<i64>, low_pct: f64) -> bool {
+    match (avail_kb, total_kb) {
+        (Some(a), Some(t)) if t > 0 => a as f64 * 100.0 / t as f64 <= low_pct,
+        _ => false,
+    }
+}
+
+/// PURE: whether the CPU is saturated: this reading AND the one before it
+/// at or over `busy_pct`. Unknown is not saturated.
+pub fn judge_cpu_saturated(cpu: Option<f64>, prev: Option<f64>, busy_pct: f64) -> bool {
+    cpu.is_some_and(|c| c >= busy_pct) && prev.is_some_and(|p| p >= busy_pct)
+}
+
+/// Whether the host's health sample is young enough to judge on
+/// ([`HEALTH_SAMPLE_FRESH_SECS`]).
+pub fn sample_fresh(row: &HostRow, now: i64) -> bool {
+    row.health_at
+        .is_some_and(|at| now - at <= HEALTH_SAMPLE_FRESH_SECS)
+}
 
 /// Available memory as a percent of physical, from the host's last FRESH
-/// health sample ([`HEALTH_SAMPLE_FRESH_SECS`]): `MemAvailable / MemTotal`
-/// on Linux (macOS samples no available memory yet). `None` when either
-/// number is missing or the sample is stale — an old reading says nothing
-/// about whether a restore would fit now.
+/// health sample: `MemAvailable / MemTotal` on Linux, the kernel's
+/// available level on macOS. `None` when either number is missing or the
+/// sample is stale — an old reading says nothing about whether a restore
+/// would fit now.
 pub fn mem_avail_pct(row: &HostRow, now: i64) -> Option<f64> {
-    let fresh = row
-        .health_at
-        .is_some_and(|at| now - at <= HEALTH_SAMPLE_FRESH_SECS);
     let (avail, total) = (row.mem_avail_kb?, row.mem_total_kb?);
-    (fresh && total > 0).then(|| (avail as f64 * 100.0 / total as f64).clamp(0.0, 100.0))
+    (sample_fresh(row, now) && total > 0)
+        .then(|| (avail as f64 * 100.0 / total as f64).clamp(0.0, 100.0))
 }
 
-/// How busy the host's CPUs are, in percent, from its last fresh sample:
-/// the 1-minute load average over the online CPUs, capped at 100. `None`
-/// when either is missing or the sample is stale.
+/// How busy the host's CPUs are, in percent, from its last FRESH sample
+/// (migration 192: the `/proc/stat` delta on Linux, summed `ps` %CPU on
+/// macOS). `None` when unknown or stale; never guessed from the load
+/// average, which counts processes waiting on disk too.
 pub fn cpu_busy_pct(row: &HostRow, now: i64) -> Option<f64> {
-    let fresh = row
-        .health_at
-        .is_some_and(|at| now - at <= HEALTH_SAMPLE_FRESH_SECS);
-    let (load, cpus) = (row.load_1m?, row.cpu_count?);
-    (fresh && cpus > 0).then(|| (load * 100.0 / cpus as f64).clamp(0.0, 100.0))
+    row.cpu_pct.filter(|_| sample_fresh(row, now))
 }
 
-/// Whether the host is short of memory: available memory at or under
-/// `low_pct` of physical ([`mem_avail_pct`]). Unknown is not low. The
+/// Whether the host is short of memory now: available memory at or under
+/// `low_pct` of physical, from a fresh sample ([`judge_mem_low`]). The
 /// auto-restore tick asks this before resuming a session the host killed
 /// (`service::auto_restore`): restoring into the same shortage only loops.
 pub fn mem_low(row: &HostRow, low_pct: f64, now: i64) -> bool {
-    mem_avail_pct(row, now).is_some_and(|p| p <= low_pct)
+    sample_fresh(row, now) && judge_mem_low(row.mem_avail_kb, row.mem_total_kb, low_pct)
+}
+
+/// Whether the host's CPUs are saturated now: the judgment its last sample
+/// was written with ([`judge_cpu_saturated`], two readings in a row),
+/// while that sample is fresh.
+pub fn cpu_saturated(row: &HostRow, now: i64) -> bool {
+    row.cpu_saturated && sample_fresh(row, now)
 }
 
 /// `2.1.282` → `[2, 1, 282]`; `None` when not a dotted number.
@@ -401,9 +493,24 @@ pub fn hosts_health(
                         .is_none_or(|at| now - at > t.hooks_silent_secs),
                 provision_warning: h.provision_warning.clone(),
                 auth_overrides: h.auth_overrides.clone().unwrap_or_default(),
+                cpu_pct: h.cpu_pct.map(round_pct),
+                mem_used_pct: match (h.mem_avail_kb, h.mem_total_kb) {
+                    (Some(a), Some(t)) if t > 0 => {
+                        Some(round_pct(100.0 - a as f64 * 100.0 / t as f64))
+                    }
+                    _ => None,
+                },
+                mem_pressure: h.mem_pressure.map(round_pct),
+                mem_low: mem_low(h, t.mem_low_pct, now),
+                cpu_saturated: cpu_saturated(h, now),
             }
         })
         .collect()
+}
+
+/// A percent rounded to a whole number in 0–100.
+fn round_pct(p: f64) -> u8 {
+    p.round().clamp(0.0, 100.0) as u8
 }
 
 /// An agent host whose agent is OLDER than the hub. An agent ahead of the
@@ -444,6 +551,7 @@ pub fn host_thresholds(s: &Store) -> HostHealthThresholds {
         hooks_silent_secs: get_string(s, HEALTH_HOOKS_SILENT_SECS)
             .parse()
             .unwrap_or(3600),
+        mem_low_pct: load_limits(s).mem_low_pct,
     }
 }
 
@@ -1359,6 +1467,10 @@ mod tests {
             last_reachable_at: None,
             last_probe_error_code: None,
             last_probe_error: None,
+            cpu_pct: None,
+            mem_pressure: None,
+            mem_low: false,
+            cpu_saturated: false,
             harnesses: None,
         }
     }
@@ -1399,6 +1511,7 @@ mod tests {
                 disk_low_pct: 90,
                 claude_max_behind: 30,
                 hooks_silent_secs: 3600,
+                mem_low_pct: 10.0,
             },
             &[("full".to_string(), "0.2.26".to_string())],
             "0.3.1",
@@ -1460,6 +1573,7 @@ mod tests {
             disk_low_pct: 90,
             claude_max_behind: 30,
             hooks_silent_secs: 3600,
+            mem_low_pct: 10.0,
         };
         let mut stale = host("stale", true);
         stale.disk_home_free_kb = Some(3_000_000);

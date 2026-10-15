@@ -1897,7 +1897,7 @@ Per-host failures do not abort provisioning of other hosts.
 
 Every reconcile pass reads one health sample from each reachable host in the
 same batched probe script (`df -Pk` of `$HOME` and `${TMPDIR:-/tmp}`, the
-1-minute load, `MemAvailable` on Linux, the uptime) and, every 6 h, `tmux -V`
+1-minute load, available memory, CPU counters and memory pressure, the uptime) and, every 6 h, `tmux -V`
 and `claude --version`. `list_hosts` carries the sample on each row
 (`disk_home_free_kb`, `disk_home_total_kb`, `disk_tmp_free_kb`, `load_1m`,
 `mem_avail_kb`, `uptime_secs`, `health_at`), the versions stamp
@@ -1912,6 +1912,16 @@ reported. `fleet_health.hosts[]` judges them per host:
 | `claude_behind` | More than `health.claude_max_behind` (default 30) patch releases behind the fleet's newest version among stamps younger than 24 h. |
 | `agent_behind` | An agent host whose agent is not the hub's version (the live registry outranks the stored hello). |
 | `hooks_silent` | Reachable, with a live non-external session, and no hook from its token within `health.hooks_silent_secs` (default 1 h). |
+| `cpu_pct` | CPU busy percent over the last interval, rounded: the `/proc/stat` delta between two samples on Linux, summed `ps` %CPU over the online CPUs on macOS. Absent when unknown. |
+| `mem_used_pct` | Used percent of physical memory (`MemAvailable` on Linux, `kern.memorystatus_level` on macOS). |
+| `mem_pressure` | 0–100: PSI `some avg10` of `/proc/pressure/memory` on Linux; the macOS pressure level (normal 0, warn 50, critical 100). Absent when the kernel cannot tell. |
+| `mem_low` | Available memory at or under `health.mem_low_pct` (default 10) of physical, on a fresh sample. The automatic restore defers on such a host. |
+| `cpu_saturated` | CPU at or over `health.cpu_busy_pct` (default 90) on two samples in a row, the latest fresh. |
+
+The host row and its `host:pinged` ping carry the raw `cpu_pct` and
+`mem_pressure` and the two judgments `mem_low` / `cpu_saturated` as they
+were made when the sample was written (migration 192); trust them only
+while `health_at` is within the hour.
 
 The desktop's "older than the fleet" mark trusts a `claude_version_at`
 younger than `health.version_max_age_secs` (default 24 h). `move_session`

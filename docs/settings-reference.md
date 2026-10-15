@@ -172,6 +172,8 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `health.context_red_pct` | `85` | 1–100% | fleet | Percent of the context window at which a session needs you. The chip turns red here and amber 15 points below. |
 | `health.version_max_age_secs` | `86400` | seconds, shown in hours | fleet | How old a host's recorded Claude version may be before the "older than the fleet" badge stops trusting it and shows nothing. |
 | `health.disk_low_pct` | `90` | 50–100% | fleet | Used share of a host's home filesystem at which the host reads as disk low. |
+| `health.mem_low_pct` | `10` | 1–50% | fleet | Available share of a host's memory at or under which the host reads as memory low. Sessions killed there are brought back only once it recovers. |
+| `health.cpu_busy_pct` | `90` | 50–100% | fleet | Busy share of a host's CPUs at which the host reads as saturated, when two samples in a row reach it. |
 | `health.claude_max_behind` | `30` | 0–1000 | fleet | Patch releases a host's Claude may trail the fleet's newest before the host reads as behind. |
 | `health.hooks_silent_secs` | `3600` | seconds, shown in minutes | fleet | How long a reachable host with a live session may send no hook before it reads as hooks silent. |
 

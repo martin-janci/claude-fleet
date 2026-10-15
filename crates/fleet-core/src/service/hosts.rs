@@ -1031,6 +1031,10 @@ mod tests {
             last_reachable_at: None,
             last_probe_error_code: None,
             last_probe_error: None,
+            cpu_pct: None,
+            mem_pressure: None,
+            mem_low: false,
+            cpu_saturated: false,
             harnesses: None,
         }
     }

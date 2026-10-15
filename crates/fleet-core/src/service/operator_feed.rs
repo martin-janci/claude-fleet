@@ -480,8 +480,7 @@ fn conditions(s: &Store, now: i64) -> Vec<Condition> {
             .first()
             .filter(|r| r.disk_low)
             .and_then(|r| r.disk_home_pct);
-        let mem = health::mem_avail_pct(h, now)
-            .filter(|_| health::mem_low(h, health::DEFAULT_MEM_LOW_PCT, now));
+        let mem = health::mem_avail_pct(h, now).filter(|_| health::mem_low(h, t.mem_low_pct, now));
         out.extend(host_conditions(&h.alias, h.reachable, disk, mem));
     }
     for id in s.handed_off_mission_ids().unwrap_or_default() {

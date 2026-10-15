@@ -232,6 +232,11 @@ pub(crate) fn sample_host() -> HostRow {
         last_reachable_at: Some(1_700_000_000),
         last_probe_error_code: Some("E_SSH_TIMEOUT".into()),
         last_probe_error: Some("ssh timed out".into()),
+        // Host load (migration 192): populated, so the golden pins the names.
+        cpu_pct: Some(37.5),
+        mem_pressure: Some(4.2),
+        mem_low: true,
+        cpu_saturated: true,
     }
 }
 
@@ -421,6 +426,11 @@ fn sample_health() -> Health {
             // so nothing here pins the name.
             provision_warning: Some("ag launcher not installed".into()),
             auth_overrides: vec!["ANTHROPIC_API_KEY".into()],
+            cpu_pct: Some(97),
+            mem_used_pct: Some(93),
+            mem_pressure: Some(41),
+            mem_low: true,
+            cpu_saturated: true,
         }],
         hub: Some(sample_hub_health()),
         tunnels_mode: Some("none".into()),

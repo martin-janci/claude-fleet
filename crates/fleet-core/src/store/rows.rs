@@ -1308,6 +1308,24 @@ pub struct HostRow {
     pub last_probe_error_code: Option<String>,
     #[serde(default)]
     pub last_probe_error: Option<String>,
+    /// Host load (migration 192), from the same sample as the rest: CPU
+    /// busy percent over the last interval and memory pressure 0–100
+    /// (`tmux::HostHealthSample`), `None` when the host cannot tell. Used
+    /// memory and disk percents follow from `mem_avail_kb` / `mem_total_kb`
+    /// and the disk columns. Per-field default: an older hub omits them.
+    #[serde(default)]
+    pub cpu_pct: Option<f64>,
+    #[serde(default)]
+    pub mem_pressure: Option<f64>,
+    /// The two load judgments, made when the sample was written
+    /// (`Store::set_host_health`, against `health.mem_low_pct` /
+    /// `health.cpu_busy_pct`): what a status-bar chip shows. A reader
+    /// judging NOW also checks the sample is fresh
+    /// (`service::health::sample_fresh`). Per-field default.
+    #[serde(default)]
+    pub mem_low: bool,
+    #[serde(default)]
+    pub cpu_saturated: bool,
 }
 
 /// One login profile on a host, as `hosts.claude_profiles` stores it.
@@ -1354,6 +1372,16 @@ pub struct HostHealth {
     /// ping omits it.
     #[serde(default)]
     pub agents_on_path: Option<Vec<String>>,
+    /// Migration 192 (host load). Per-field default: an older hub's ping
+    /// omits them.
+    #[serde(default)]
+    pub cpu_pct: Option<f64>,
+    #[serde(default)]
+    pub mem_pressure: Option<f64>,
+    #[serde(default)]
+    pub mem_low: bool,
+    #[serde(default)]
+    pub cpu_saturated: bool,
 }
 
 impl HostHealth {
@@ -1373,6 +1401,10 @@ impl HostHealth {
             latency_ms: row.latency_ms,
             worktree_kb: row.worktree_kb,
             agents_on_path: row.agents_on_path.clone(),
+            cpu_pct: row.cpu_pct,
+            mem_pressure: row.mem_pressure,
+            mem_low: row.mem_low,
+            cpu_saturated: row.cpu_saturated,
         }
     }
 }
@@ -1402,7 +1434,8 @@ pub(super) const HOST_COLUMNS: &str =
      uptime_secs, health_at, last_hook_at, agent_version, provisioned_at, provision_fingerprint, \
      harnesses, provision_warning, auth_overrides, claude_profiles, cpu_count, mem_total_kb, \
      boot_at, latency_ms, worktree_kb, worktree_at, agents_on_path, \
-     last_reachable_at, last_probe_error_code, last_probe_error";
+     last_reachable_at, last_probe_error_code, last_probe_error, \
+     cpu_pct, mem_pressure, mem_low, cpu_saturated";
 
 /// Map a row selected with [`HOST_COLUMNS`].
 pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow> {
@@ -1470,6 +1503,11 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
         last_reachable_at: row.get(34)?,
         last_probe_error_code: row.get(35)?,
         last_probe_error: row.get(36)?,
+        // Migration 192 (host load).
+        cpu_pct: row.get(37)?,
+        mem_pressure: row.get(38)?,
+        mem_low: row.get::<_, i64>(39)? != 0,
+        cpu_saturated: row.get::<_, i64>(40)? != 0,
     })
 }
 

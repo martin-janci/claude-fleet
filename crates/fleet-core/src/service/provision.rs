@@ -4238,6 +4238,7 @@ mod tests {
                 disk_low_pct: 90,
                 claude_max_behind: 1,
                 hooks_silent_secs: 3600,
+                mem_low_pct: 10.0,
             },
             &[],
             "0.0.0",

@@ -329,6 +329,13 @@ pub const HEALTH_VERSION_MAX_AGE_SECS: &str = "health.version_max_age_secs";
 /// `disk_low` in `fleet_health.hosts[]` and on the desktop (hosts F4: two
 /// hosts sat at 98 % with no signal). Default 90.
 pub const HEALTH_DISK_LOW_PCT: &str = "health.disk_low_pct";
+/// Available memory, as a percent of physical, at or under which a host
+/// reads as `mem_low` (`fleet_health.hosts[]`, the host row): the floor the
+/// auto-restore tick defers under and the operator feed reports. Default 10.
+pub const HEALTH_MEM_LOW_PCT: &str = "health.mem_low_pct";
+/// CPU busy percent at or over which a host reads as `cpu_saturated`, when
+/// two samples in a row say so (one spike is not a busy host). Default 90.
+pub const HEALTH_CPU_BUSY_PCT: &str = "health.cpu_busy_pct";
 /// Patch releases a host's Claude may trail the fleet's newest fresh
 /// version before it reads as `claude_behind` (hosts F3). Default 30.
 pub const HEALTH_CLAUDE_MAX_BEHIND: &str = "health.claude_max_behind";
@@ -1389,6 +1396,23 @@ pub const SPECS: &[Spec] = &[
         "Used share of a host's home filesystem at which the host reads as disk low.",
     )
     .unit(Unit::Percent),
+    Spec::new(
+        HEALTH_MEM_LOW_PCT,
+        "10",
+        Kind::Int { min: 1, max: 50 },
+        "Memory low at",
+        "Available share of a host's memory at or under which the host reads as memory low. Sessions killed there are brought back only once it recovers.",
+    )
+    .unit(Unit::Percent),
+    Spec::new(
+        HEALTH_CPU_BUSY_PCT,
+        "90",
+        Kind::Int { min: 50, max: 100 },
+        "CPU busy at",
+        "Busy share of a host's CPUs at which the host reads as saturated, when two samples in a row reach it.",
+    )
+    .unit(Unit::Percent)
+    .tags(&[Tag::Advanced]),
     Spec::new(
         HEALTH_CLAUDE_MAX_BEHIND,
         "30",

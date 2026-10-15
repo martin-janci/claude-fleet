@@ -3936,6 +3936,34 @@
     },
     {
       "default_widget": "number",
+      "key": "health.mem_low_pct",
+      "kind": {
+        "max": 50,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Memory low at",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "health.cpu_busy_pct",
+      "kind": {
+        "max": 100,
+        "min": 50,
+        "type": "int"
+      },
+      "label": "CPU busy at",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
       "key": "health.claude_max_behind",
       "kind": {
         "max": 1000,

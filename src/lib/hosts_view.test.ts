@@ -11,6 +11,7 @@ import {
   healthSampleFresh,
   HEALTH_SAMPLE_FRESH_SECS,
   hostAttention,
+  memUsedPct,
   NO_ACCOUNT_LABEL,
   newestClaudeVersion,
   removeHostMessage,
@@ -199,6 +200,29 @@ describe('host health helpers', () => {
     expect(healthLine(host('bare', { health_at: null }), NOW)).toBe('not sampled yet');
     expect(versionAge(h, NOW)).toBe('checked 2h ago');
     expect(versionAge(host('bare', { claude_version_at: null }), NOW)).toBe('never checked');
+  });
+
+  it('healthLine shows CPU and memory load, and the judgment only while the sample is fresh', () => {
+    const loaded = host('trn', {
+      load_1m: null,
+      uptime_secs: null,
+      cpu_pct: 96.4,
+      cpu_saturated: true,
+      mem_avail_kb: 800_000,
+      mem_total_kb: 16_000_000,
+      mem_pressure: 23.6,
+      mem_low: true,
+    });
+    expect(healthLine(loaded, NOW)).toBe(
+      'disk 49% · 234 GB free · cpu 96% (saturated) · mem 95% used, pressure 24% (low) · sampled 2m ago',
+    );
+    const stale = { ...loaded, health_at: NOW - 2 * 3600 };
+    expect(healthLine(stale, NOW)).toContain('cpu 96% · mem 95% used, pressure 24% · sampled 2h ago (stale)');
+    // No pressure to speak of, and an older hub's row without the fields.
+    expect(healthLine({ ...loaded, mem_pressure: 0, mem_low: false, cpu_saturated: false }, NOW)).toContain(
+      'cpu 96% · mem 95% used · ',
+    );
+    expect(memUsedPct(host('x'))).toBeNull();
   });
 
   it('a degraded provisioning names its reason, outranking the generic provision_stale', () => {

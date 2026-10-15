@@ -99,7 +99,8 @@ pub struct AutoRestoreConfig {
     pub grace_secs: i64,
     pub max_attempts: u32,
     /// Available memory, percent of physical, at or under which a host is
-    /// too short to restore onto (`health::mem_low`).
+    /// too short to restore onto (`health.mem_low_pct`, `health::mem_low`):
+    /// the same line `fleet_health` judges `mem_low` against.
     pub mem_low_pct: f64,
 }
 
@@ -111,7 +112,7 @@ impl AutoRestoreConfig {
             max_attempts: settings::get_string(s, settings::RECOVERY_MAX_ATTEMPTS)
                 .parse()
                 .unwrap_or(2),
-            mem_low_pct: crate::service::health::DEFAULT_MEM_LOW_PCT,
+            mem_low_pct: crate::service::health::load_limits(s).mem_low_pct,
         }
     }
 }
@@ -407,9 +408,16 @@ impl RestoreAdvisor for NoAdvice {
 
 /// Why `h` reads as loaded, as a `DEFER_*` word: memory first (it is the
 /// floor), then CPU. `None` when calm or unknown.
+///
+/// Both are `fleet_health`'s own judgments (`health::mem_low`,
+/// `health::cpu_saturated`: `health.cpu_busy_pct` on two samples in a
+/// row), so a host the Hosts view shows as loaded is the host this defers
+/// on, and the reverse.
 pub fn host_load(h: &HostRow, cfg: &AutoRestoreConfig, now: i64) -> Option<&'static str> {
     if crate::service::health::mem_low(h, cfg.mem_low_pct, now) {
         Some(DEFER_MEMORY_LOW)
+    } else if crate::service::health::cpu_saturated(h, now) {
+        Some(DEFER_CPU)
     } else {
         None
     }
@@ -1131,6 +1139,63 @@ mod tests {
             )
             .unwrap();
         let r = run_with(&store, &fake, &NoAdvice, &CFG, now).await;
+        assert_eq!(r.restored, 1);
+    }
+
+    /// Part 3's judgment, end to end: two real samples over
+    /// `health.cpu_busy_pct` make the host `cpu_saturated`, which defers
+    /// the restore with the CPU reason; one calm sample lets it through.
+    #[tokio::test]
+    async fn a_saturated_cpu_defers_on_two_samples_and_a_calm_one_lets_it_through() {
+        let now = crate::store::now_unix();
+        let (store, ids) = store_with(&[("a", "process_died")], now - 120);
+        let sample = |busy: i64, total: i64, at: i64| {
+            store
+                .lock()
+                .unwrap()
+                .set_host_health(
+                    "h",
+                    &crate::tmux::HostHealthSample {
+                        cpu_busy_ticks: Some(busy),
+                        cpu_total_ticks: Some(total),
+                        mem_avail_kb: Some(8_000_000),
+                        mem_total_kb: Some(16_000_000),
+                        ..Default::default()
+                    },
+                    at,
+                )
+                .unwrap();
+        };
+        let fake = Fake::default();
+        sample(0, 0, now - 40);
+        sample(95, 100, now - 20); // 95 %, but the first reading
+        assert!(
+            !store
+                .lock()
+                .unwrap()
+                .get_host_row("h")
+                .unwrap()
+                .unwrap()
+                .cpu_saturated
+        );
+        sample(190, 200, now); // 95 % again: saturated
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .get_host_row("h")
+                .unwrap()
+                .unwrap()
+                .cpu_saturated
+        );
+        let r = run_with(&store, &fake, &NoAdvice, &CFG, now).await;
+        assert_eq!((r.deferred, r.restored), (1, 0));
+        assert_eq!(
+            events(&store, ids[0]),
+            vec![(EVENT_DEFERRED.to_string(), Some(DEFER_CPU.to_string()))]
+        );
+        sample(200, 300, now + 1); // 10 %
+        let r = run_with(&store, &fake, &NoAdvice, &CFG, now + 1).await;
         assert_eq!(r.restored, 1);
     }
 

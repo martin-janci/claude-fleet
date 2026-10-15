@@ -1365,6 +1365,50 @@
       "danger": {
         "level": "none"
       },
+      "default": "10",
+      "help": "Available share of a host's memory at or under which the host reads as memory low. Sessions killed there are brought back only once it recovers.",
+      "key": "health.mem_low_pct",
+      "kind": {
+        "max": 50,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Memory low at",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "percent",
+      "value": "10"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "90",
+      "help": "Busy share of a host's CPUs at which the host reads as saturated, when two samples in a row reach it.",
+      "key": "health.cpu_busy_pct",
+      "kind": {
+        "max": 100,
+        "min": 50,
+        "type": "int"
+      },
+      "label": "CPU busy at",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "percent",
+      "value": "90"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "30",
       "help": "Patch releases a host's Claude may trail the fleet's newest before the host reads as behind.",
       "key": "health.claude_max_behind",
@@ -4434,6 +4478,14 @@
           "items": [
             {
               "key": "health.disk_low_pct",
+              "type": "field"
+            },
+            {
+              "key": "health.mem_low_pct",
+              "type": "field"
+            },
+            {
+              "key": "health.cpu_busy_pct",
               "type": "field"
             },
             {

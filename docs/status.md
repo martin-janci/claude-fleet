@@ -236,7 +236,8 @@ systemd-oomd killing one pane in its own scope — is recorded
 `store::reconcile::PROCESS_DIED_CASE`), kept to `sessions.lost_ttl_secs`
 like a reboot, and resumed by the tick after `recovery.grace_secs` (60) with
 the mass-loss reasons, at most `recovery.max_attempts` (2) per session per
-day. A host under load (memory short of the low-memory floor) DEFERS the
+day. A host under load (memory under `health.mem_low_pct`, or CPU
+saturated) DEFERS the
 restore instead: no attempt is spent, one `auto_restore_deferred` event per
 episode names the reason, the lost TTL counts from that deferral (one
 extension per episode) and the tick resumes it once the load drops. With
@@ -264,6 +265,19 @@ cursor and the already-reported host/mission conditions live in the
 (`prompt_origin::FLEET_PROMPT_MARKS`); the operator's `CLAUDE.md` has a
 *Fleet events* section, which an operator born earlier gets at its next
 birth.
+
+**Host load** is landed (migration 192): the health sample adds CPU busy
+percent (Linux `/proc/stat` deltas, macOS summed `ps` %CPU), available
+memory on macOS too (`kern.memorystatus_level`) and memory pressure (Linux
+PSI `some avg10`, the macOS pressure level), all NULL when the host cannot
+tell; the script is shared, so SSH, `local` and agent hosts all get it with
+no proto change. `mem_low` (`health.mem_low_pct`, 10) and `cpu_saturated`
+(`health.cpu_busy_pct`, 90, two samples in a row) are judged when the sample
+is written (`Store::set_host_health`) and carried on the host row, the ping
+and `fleet_health.hosts[]` (with `cpu_pct`, `mem_used_pct`, `mem_pressure`)
+for a future status-bar chip; the automatic restore defers on either, the
+operator feed reports `mem_low`. The desktop shows the numbers only in the
+host's Health line.
 
 The work graph's M0–M3 are landed (work links anchored on participants,
 group-by-work, and M2's work journal, carry rules, handover brief and resume
