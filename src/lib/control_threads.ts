@@ -76,7 +76,8 @@ function sessionLine(s: SessionRow): string {
   return [status, s.host_alias].filter(Boolean).join(' · ');
 }
 
-const WAIT_WORDS: Record<string, string> = {
+/** Why a mission waits on a person, in words (`MissionWait.reason`). */
+export const WAIT_WORDS: Record<string, string> = {
   question: 'Asks a question',
   sign_grant: 'Grant needs signing',
   confirm: 'A step waits for your OK',

@@ -1,5 +1,5 @@
 // A finished mission (gap G3.7, the Finish board), driven through the
-// Missions tab: Reopen, the finish checks card, the PR block, and the
+// Missions tab and its room: Reopen, the finish checks card, the PR block, and the
 // sessions to archive. Archive ends each session through its own Clean up,
 // so a clean, pushed worktree is removed (its disk freed) and a dirty one
 // goes to the agent's Safe remove first.
@@ -11,6 +11,8 @@ import { get } from 'svelte/store';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import WorkMissions from './WorkMissions.svelte';
+import MissionRoom from './MissionRoom.svelte';
+import { resetMissionRoomForTests } from './mission_room';
 import { sessions } from './sessions';
 import { session } from './hosts_fixture';
 import { toasts } from './toasts';
@@ -166,9 +168,12 @@ describe('a finished mission', () => {
   });
 
   async function openIt() {
+    resetMissionRoomForTests();
     render(WorkMissions);
+    render(MissionRoom);
     await flush();
-    await fireEvent.click(screen.getByTestId('missions-group-finished'));
+    // It ended long ago: the list's folded Earlier.
+    await fireEvent.click(screen.getByTestId('missions-group-earlier'));
     await fireEvent.click(screen.getByTestId('mission-row'));
     await flush();
   }

@@ -25,7 +25,7 @@
   // the org → group tree below, unchanged. The header is the same for both.
   // **Board** is not a third layout here: it opens `WorkBoard` over the
   // terminal (it needs the width), and this sidebar keeps its layout.
-  import { onDestroy, onMount, tick } from 'svelte';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { get } from 'svelte/store';
   import { sessions } from './sessions';
   import { selectedSession, selectSessionExplicitly } from './selection';
@@ -39,6 +39,7 @@
   import WorkReview from './WorkReview.svelte';
   import WorkMissions from './WorkMissions.svelte';
   import { missionOpenRequest } from './missions';
+  import { workMissionsOpen } from './mission_room';
   import WorkPrs from './WorkPrs.svelte';
   import WorkRules from './WorkRules.svelte';
   import WorkBuckets from './WorkBuckets.svelte';
@@ -116,6 +117,11 @@
   // where WorkMissions opens the mission.
   $effect(() => {
     if ($missionOpenRequest) tab = 'missions';
+  });
+  // The Missions tab and the mission room (the `missions` destination) go
+  // together: the room showing (a warm start, a request) shows the list.
+  $effect(() => {
+    if ($workMissionsOpen) untrack(() => (tab = 'missions'));
   });
   let page = $state.raw<WorkTreePage | null>(null);
   const archivedHidden = $derived(page?.archived_hidden ?? 0);
@@ -635,10 +641,14 @@
   );
   function pickTab(t: 'tasks' | 'review' | 'missions' | 'board' | 'prs') {
     if (t === 'board') {
+      if (tab === 'missions') tab = 'tasks';
       workBoardOpen.set(true);
       return;
     }
     workBoardOpen.set(false);
+    // Missions opens its room in the right column (Thread room for Work);
+    // any other tab leaves it.
+    workMissionsOpen.set(t === 'missions');
     if (t === 'tasks') showTasks();
     else tab = t;
   }
