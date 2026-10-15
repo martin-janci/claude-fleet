@@ -10,7 +10,7 @@
   import { onMount } from 'svelte';
   import { workChanged, editWorkItem, parseAssignees, setWorkStatus, ownerDueChip } from './work';
   import { startWork } from './trackers';
-  import { readErrorText, showTaskInWorkView, taskLabel, taskStatus, workTree, type WorkTask } from './work_view';
+  import { readErrorText, showTaskInWorkView, taskLabel, taskStatus, withoutPersonArchived, workTree, type WorkTask } from './work_view';
   import {
     TASK_SECTIONS,
     TASK_SECTION_LABELS,
@@ -39,7 +39,8 @@
       return;
     }
     loadError = null;
-    tasks = r.value.tasks;
+    // Done this week needs archived rows; tasks a person archived stay out.
+    tasks = withoutPersonArchived(r.value.tasks, false);
     picked = picked.filter((id) => tasks.some((t) => t.task_id === id));
   }
 

@@ -266,12 +266,59 @@ impl Store {
     /// Write one health sample (migration 077). No event: the reconcile
     /// transaction's `update_host_probe_in_tx` announces the row and puts
     /// this sample on the ping.
+    ///
+    /// Host load (migration 193) needs the sample before this one: Linux
+    /// CPU busy percent is the delta of two `/proc/stat` readings
+    /// (`health::cpu_from_ticks`), and `cpu_saturated` asks that the
+    /// previous sample was over the line too, so one spike does not mark a
+    /// host busy. Both judgments are made here, against the `health.*`
+    /// settings in force (`health::load_limits`), so the row and its ping
+    /// carry them for a chip; `health::hosts_health` and the auto-restore
+    /// tick read the same functions.
     pub fn set_host_health(
         &self,
         alias: &str,
         h: &crate::tmux::HostHealthSample,
         at: i64,
     ) -> Result<(), rusqlite::Error> {
+        use crate::service::health;
+        use rusqlite::OptionalExtension;
+        // (busy ticks, total ticks, cpu %, sampled at) of the previous sample.
+        type Prev = (Option<i64>, Option<i64>, Option<f64>, Option<i64>);
+        let prev: Option<Prev> = self
+            .conn
+            .query_row(
+                "SELECT cpu_busy_ticks, cpu_total_ticks, cpu_pct, health_at \
+                 FROM hosts WHERE alias = ?1",
+                [alias],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        let (prev_busy, prev_total, prev_cpu, prev_at) = prev.unwrap_or_default();
+        let ticks = |b: Option<i64>, t: Option<i64>| b.zip(t);
+        let cpu = health::cpu_from_ticks(
+            ticks(prev_busy, prev_total),
+            ticks(h.cpu_busy_ticks, h.cpu_total_ticks),
+        )
+        .or(h.cpu_pct);
+        let limits = health::load_limits(self);
+        let prev_recent = prev_at.is_some_and(|p| at - p <= health::CPU_SUSTAINED_WINDOW_SECS);
+        let cpu_saturated =
+            health::judge_cpu_saturated(cpu, prev_cpu.filter(|_| prev_recent), limits.cpu_busy_pct);
+        let mem_low = health::judge_mem_low(h.mem_avail_kb, h.mem_total_kb, limits.mem_low_pct);
+        self.conn.execute(
+            "UPDATE hosts SET cpu_busy_ticks = ?2, cpu_total_ticks = ?3, cpu_pct = ?4, \
+             mem_pressure = ?5, mem_low = ?6, cpu_saturated = ?7 WHERE alias = ?1",
+            rusqlite::params![
+                alias,
+                h.cpu_busy_ticks,
+                h.cpu_total_ticks,
+                cpu,
+                h.mem_pressure,
+                mem_low,
+                cpu_saturated,
+            ],
+        )?;
         self.conn.execute(
             "UPDATE hosts SET disk_home_free_kb = ?1, disk_home_total_kb = ?2, \
              disk_tmp_free_kb = ?3, load_1m = ?4, mem_avail_kb = ?5, uptime_secs = ?6, \
@@ -1252,6 +1299,56 @@ mod tests {
         );
     }
 
+    /// Host load (migration 193): Linux CPU is the delta of two counter
+    /// readings, saturation needs two readings in a row over
+    /// `health.cpu_busy_pct` (the previous one recent), and memory is low
+    /// at or under `health.mem_low_pct` — both settings read when the
+    /// sample is written.
+    #[test]
+    fn set_host_health_derives_cpu_from_counters_and_judges_the_load() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("h", Some("h")).unwrap();
+        let write = |busy: i64, total: i64, avail: i64, at: i64| {
+            s.set_host_health(
+                "h",
+                &crate::tmux::HostHealthSample {
+                    cpu_busy_ticks: Some(busy),
+                    cpu_total_ticks: Some(total),
+                    mem_avail_kb: Some(avail),
+                    mem_total_kb: Some(1000),
+                    mem_pressure: Some(3.0),
+                    ..Default::default()
+                },
+                at,
+            )
+            .unwrap();
+            s.get_host_row("h").unwrap().unwrap()
+        };
+        let first = write(1000, 2000, 500, 100);
+        assert_eq!(first.cpu_pct, None, "one reading has no delta");
+        assert!(!first.mem_low && !first.cpu_saturated);
+        let busy = write(1950, 3000, 90, 120);
+        assert_eq!(busy.cpu_pct, Some(95.0));
+        assert!(busy.mem_low, "9 % available is under the 10 % default");
+        assert!(!busy.cpu_saturated, "one busy reading is a spike");
+        let again = write(2900, 4000, 90, 140);
+        assert!(again.cpu_saturated);
+        assert_eq!(again.mem_pressure, Some(3.0));
+        let ping = crate::store::HostHealth::of(&again);
+        assert!(ping.cpu_saturated && ping.mem_low, "the ping carries them");
+        // A busy reading long after the last one starts the count again.
+        assert!(!write(3850, 5000, 500, 2000).cpu_saturated);
+        // The lines are settings.
+        crate::service::settings::set(&s, crate::service::settings::HEALTH_CPU_BUSY_PCT, "99")
+            .unwrap();
+        crate::service::settings::set(&s, crate::service::settings::HEALTH_MEM_LOW_PCT, "50")
+            .unwrap();
+        let tuned = write(4800, 6000, 500, 2020);
+        assert!(!tuned.cpu_saturated && tuned.mem_low);
+        // Counters that went backwards (a reboot) give no percent.
+        assert_eq!(write(10, 20, 500, 2040).cpu_pct, None);
+    }
+
     #[test]
     fn set_host_health_writes_every_column_and_the_stamp() {
         let s = Store::open_in_memory().unwrap();
@@ -1269,6 +1366,7 @@ mod tests {
             latency_ms: Some(18),
             auth_overrides: Some(vec!["CLAUDE_CODE_USE_BEDROCK".into()]),
             agents_on_path: Some(vec!["claude".into(), "codex".into()]),
+            ..Default::default()
         };
         s.set_host_health("h", &sample, 1_700_000_000).unwrap();
         let row = s.get_host_row("h").unwrap().unwrap();

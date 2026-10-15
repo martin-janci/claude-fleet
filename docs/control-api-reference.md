@@ -199,7 +199,7 @@ Ensure the UX agent's operator session exists on a reachable host; returns its r
 
 ### `env_vars`
 
-Session environment variables for the next start; global < host < project < session. list; set {scope, scope_key, name, value|ref, secret?}; unset {scope, scope_key, name}. Secrets and refs are never listed; ref (env:NAME|file:/abs) is master-only. E_INVALID, E_FORBIDDEN.
+Session environment variables for the next start; global < host < project < person < session (person: the session owner's, yours only, scope_key '' = you). list; set {scope, scope_key, name, value|ref, secret?}; unset {scope, scope_key, name}. Secrets and refs are never listed; ref (env:NAME|file:/abs) is master-only. E_INVALID, E_FORBIDDEN.
 
 Parameters: `action`, `name`, `ref`, `scope`, `scope_key`, `secret`, `value`
 
@@ -673,9 +673,9 @@ Parameters: `confirm_nonce`, `max_chars`, `prompt`, `raw`, `session_id`, `timeou
 
 ### `runs`
 
-Runs, newest first: tasks, mission steps, Jev decisions, planner and summary runs, routine fires. list: {runs, total}; each run has kind, owner, outcome (ok | failed | needs_person | nothing_to_do | running), duration_ms, cost_micros and session_ids.
+Runs, newest first: tasks, mission steps, Jev decisions, planner and summary runs, routine fires. list: {runs, total}; each run has kind, owner, outcome (ok | failed | needs_person | nothing_to_do | running), duration_ms, cost_micros and session_ids. trace {run_id, after_seq?}: a routine or agent run's steps, oldest first ({steps, more}; each has seq, phase, kind, actor, summary, data).
 
-Parameters: `action`, `kind`, `limit`, `mission_id`, `offset`, `org_id`, `outcome`, `routine_id`, `session_id`, `since`, `until`
+Parameters: `action`, `after_seq`, `kind`, `limit`, `mission_id`, `offset`, `org_id`, `outcome`, `routine_id`, `run_id`, `session_id`, `since`, `until`
 
 ### `safe_kill_session`
 
@@ -1261,6 +1261,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::pages::setting_history`
 - `commands::pages::set_fleet_setting`
 - `commands::runs::list_runs`
+- `commands::runs::run_trace`
 - `commands::agents::agents_status`
 - `commands::agents::agents_decide`
 - `commands::agents::agents_debug`

@@ -56,7 +56,17 @@ pub(crate) mod routed {
 
     // Paired, every command routes by its own name (the verdict table maps
     // each to the hub's `env_vars` tool); standalone, the desktop is its
-    // own master, so references are allowed.
+    // own master, so references are allowed, every shared scope is its own,
+    // and its `person` scope is this fleet's owner's.
+
+    fn own_master(store: &Mutex<Store>) -> Result<env::EnvCaller, IpcError> {
+        let person = fleet_core::ipc_error::lock(store)?.personal_owner_id()?;
+        Ok(env::EnvCaller {
+            refs_allowed: true,
+            admin: true,
+            person,
+        })
+    }
 
     pub async fn env_vars(
         backend: &FleetBackend,
@@ -65,7 +75,7 @@ pub(crate) mod routed {
     ) -> Result<serde_json::Value, IpcError> {
         match backend.hub() {
             Some(hub) => hub.route("env_vars", &args).await,
-            None => env::run(store, &args, true),
+            None => env::run(store, &args, &own_master(store)?),
         }
     }
 
@@ -76,7 +86,7 @@ pub(crate) mod routed {
     ) -> Result<serde_json::Value, IpcError> {
         match backend.hub() {
             Some(hub) => hub.route("env_var_set", &args.into_args()).await,
-            None => env::run(store, &args.into_args(), true),
+            None => env::run(store, &args.into_args(), &own_master(store)?),
         }
     }
 
@@ -87,7 +97,7 @@ pub(crate) mod routed {
     ) -> Result<serde_json::Value, IpcError> {
         match backend.hub() {
             Some(hub) => hub.route("env_var_unset", &args.into_args()).await,
-            None => env::run(store, &args.into_args(), true),
+            None => env::run(store, &args.into_args(), &own_master(store)?),
         }
     }
 
@@ -101,7 +111,7 @@ pub(crate) mod routed {
         };
         match backend.hub() {
             Some(hub) => hub.route("env_vars_list", &args).await,
-            None => env::run(store, &args, true),
+            None => env::run(store, &args, &own_master(store)?),
         }
     }
 }

@@ -35,6 +35,35 @@ const KILL_MEMORY_SECS: i64 = 2
     * (crate::service::sessions::HOST_PROBE_TIMEOUT.as_secs()
         + crate::service::sessions::PR_PROBE_TIMEOUT.as_secs()) as i64;
 
+/// The `lost_reason` [`Store::ghost_and_clean`]'s Phase 1 records for a
+/// tmux row that dropped out of the live set: `process_died` when the row
+/// carries every sign that its agent was killed rather than ended, else
+/// `missing`.
+///
+/// A pane has no `remain-on-exit`, so when its agent process dies the tmux
+/// session ends with it and the next pass simply does not list the name.
+/// Two very different stories look the same from there: the person typed
+/// `/exit` (or the agent finished and Claude Code quit), or the host killed
+/// the process — the kernel's OOM killer, systemd-oomd (which since the
+/// per-pane scopes kills ONE pane rather than the whole server), a stray
+/// `kill -9`. The difference is the SessionEnd hook: a clean exit fires it
+/// and leaves `claude_status = 'stopped'` before the pane goes; a SIGKILL
+/// fires nothing. So a row whose hooks were demonstrably alive
+/// (`last_hook_at` set), that has a conversation to resume
+/// (`claude_session_id`), runs an agent in a pane (not a `shell` row, and
+/// not a pane-less `bg` / `external` one, which this same Phase 1 prunes for
+/// the agents list and which restore never resumes) and never said
+/// `stopped` died under its feet. Such a row is resumable like a mass loss
+/// and is kept to `sessions.lost_ttl_secs` (Phase 2's exemption) so the
+/// auto-restore tick (`service::auto_restore`) — or a person — can bring it
+/// back. A row without hooks is left `missing`: fleet cannot tell how it
+/// ended, and guessing "killed" would resurrect sessions people closed.
+pub(super) const PROCESS_DIED_CASE: &str = "CASE WHEN claude_session_id IS NOT NULL \
+     AND last_hook_at IS NOT NULL \
+     AND COALESCE(claude_status, '') != 'stopped' \
+     AND kind NOT IN ('shell', 'bg', 'external') AND agent != 'shell' \
+     THEN 'process_died' ELSE 'missing' END";
+
 /// How much of a failed probe's message the host row keeps.
 const PROBE_ERROR_CHARS: usize = 200;
 
@@ -793,7 +822,8 @@ impl Store {
     /// [`Store::ghost_and_clean_bg_sessions`] for pane-less ones).
     ///
     /// Phase 1: rows not in `keep_names` that are currently live (`status !=
-    /// 'ghost'`) are soft-deleted by setting `status='ghost'` and `lost_at=now`.
+    /// 'ghost'`) are soft-deleted by setting `status='ghost'` and `lost_at=now`,
+    /// with `lost_reason` `process_died` or `missing` ([`PROCESS_DIED_CASE`]).
     /// Loss also clears `claude_status`, `stuck_kind`/`stuck_since`,
     /// `current_activity` and `pending_input`: a ghost has no pane to vouch
     /// for them (F4).
@@ -818,13 +848,21 @@ impl Store {
     /// `None` disables the guard (the pane-less pruner has no such race).
     ///
     /// `lost_ttl_cutoff` (unix secs) guards Phase 2 against reaping a
-    /// resumable mass-loss row too early: a row with `claude_session_id IS
-    /// NOT NULL`, `lost_reason IN ('host_reboot','tmux_server_gone')`, and
-    /// `lost_at >= lost_ttl_cutoff` is exempt from the hard-delete — the
+    /// resumable row too early: a row with `claude_session_id IS NOT NULL`,
+    /// `lost_reason IN ('host_reboot','tmux_server_gone','process_died')`,
+    /// and `lost_at >= lost_ttl_cutoff` is exempt from the hard-delete — the
     /// session can still be resumed, so it survives past the usual one-cycle
-    /// grace until it ages out of the TTL. A `missing` row (a single session
-    /// that dropped out while its neighbours stayed live) is never exempt,
-    /// so it keeps today's one-cycle reap regardless of this cutoff. Nor is
+    /// grace until it ages out of the TTL. `process_died` is the one
+    /// single-session reason among them: an agent the host killed (out of
+    /// memory, oomd) is exactly the session someone wants back. A `missing`
+    /// row (a single session that dropped out without those signs, e.g. a
+    /// clean `/exit`) is never exempt, so it keeps today's one-cycle reap
+    /// regardless of this cutoff. A resumable row whose automatic restore
+    /// was deferred for a loaded host (`service::auto_restore`'s
+    /// `auto_restore_deferred` event, written once per loss episode) counts
+    /// from that event instead when it is later: a long overload must not
+    /// reap the session it was waiting to bring back, and one event per
+    /// episode bounds the extension to one more TTL. Nor is
     /// an `external` row: fleet did not start that session and restore never
     /// resumes one, so keeping it to the TTL only piles dead rows into the
     /// "Outside fleet" group. `None`
@@ -867,9 +905,13 @@ impl Store {
                 exempt.push_str(&format!(
                     " AND NOT COALESCE((claude_session_id IS NOT NULL \
                                         AND kind != 'external' \
-                                        AND lost_reason IN ('host_reboot','tmux_server_gone') \
-                                        AND lost_at >= ?{}), 0)",
-                    head.len()
+                                        AND lost_reason IN ('host_reboot','tmux_server_gone','process_died') \
+                                        AND (lost_at >= ?{n} \
+                                             OR EXISTS (SELECT 1 FROM session_events e \
+                                                        WHERE e.session_id = sessions.id \
+                                                          AND e.kind = 'auto_restore_deferred' \
+                                                          AND e.at >= ?{n}))), 0)",
+                    n = head.len()
                 ));
             }
             // An `external` row is never resumable, so the TTL above never
@@ -900,8 +942,12 @@ impl Store {
             } else {
                 ""
             };
+            // `PROCESS_DIED_CASE` reads `claude_status` before `LOSS_CLEARS`
+            // nulls it: SQLite evaluates every SET right-hand side against
+            // the row as it was, so the order inside the list is irrelevant.
             let sql = format!(
-                "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason='missing', {LOSS_CLEARS}
+                "UPDATE sessions SET status='ghost', lost_at=?1, \
+                 lost_reason={PROCESS_DIED_CASE}, {LOSS_CLEARS}
                  WHERE host_alias=?2 AND status!='ghost' AND {kind_filter}{guard}{not_in}
                  RETURNING id"
             );
@@ -1309,6 +1355,10 @@ mod tests {
             last_reachable_at: None,
             last_probe_error_code: None,
             last_probe_error: None,
+            cpu_pct: None,
+            mem_pressure: None,
+            mem_low: false,
+            cpu_saturated: false,
             harnesses: None,
         }
     }
@@ -3350,6 +3400,98 @@ mod tests {
             store.get_session_by_id(id).unwrap().is_none(),
             "a 'missing' row keeps the one-cycle reap even with a TTL cutoff set"
         );
+    }
+
+    /// A pane whose hooks were alive and that never said SessionEnd died
+    /// under its agent (OOM, oomd): Phase 1 records `process_died`, and
+    /// Phase 2 keeps it to the TTL like a mass loss. The same row after a
+    /// SessionEnd (`stopped`), or a `shell` row, ended on purpose: `missing`,
+    /// reaped next pass.
+    #[test]
+    fn a_killed_agent_is_process_died_and_kept_a_clean_exit_is_missing() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let now = 2_000_000;
+        let cutoff = now - TTL_SECS;
+        let mut ids = Vec::new();
+        for (name, status, kind) in [
+            ("killed", Some("working"), "work"),
+            ("exited", Some("stopped"), "work"),
+            ("shell", Some("idle"), "shell"),
+        ] {
+            let id = store
+                .upsert_session(name, "alpha", None, None, 1, 1, "running", None)
+                .unwrap();
+            store
+                .set_claude_session_id(id, &format!("uuid-{name}"))
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "UPDATE sessions SET last_hook_at = 5, claude_status = ?2, kind = ?3 \
+                     WHERE id = ?1",
+                    rusqlite::params![id, status, kind],
+                )
+                .unwrap();
+            ids.push(id);
+        }
+        for ts in [now, now + 10] {
+            store
+                .apply_host_reconcile(HostReconcile {
+                    lost_ttl_cutoff: Some(cutoff),
+                    keep: &[],
+                    ..empty_probe("alpha", ts)
+                })
+                .unwrap();
+        }
+        let killed = store.get_session_by_id(ids[0]).unwrap().unwrap();
+        assert_eq!(killed.lost_reason.as_deref(), Some("process_died"));
+        assert_eq!(killed.claude_status, None, "loss still clears the status");
+        assert!(store.get_session_by_id(ids[1]).unwrap().is_none());
+        assert!(store.get_session_by_id(ids[2]).unwrap().is_none());
+    }
+
+    /// A deferred automatic restore extends the TTL once, from the deferral.
+    #[test]
+    fn a_deferred_restore_outlives_the_ttl_counted_from_the_deferral() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let now = 2_000_000;
+        let cutoff = now - TTL_SECS;
+        let lost_at = cutoff - 100;
+        let kept = seed_ghost_row(
+            &store,
+            "alpha",
+            "kept",
+            lost_at,
+            Some("process_died"),
+            Some("u1"),
+        );
+        let reaped = seed_ghost_row(
+            &store,
+            "alpha",
+            "gone",
+            lost_at,
+            Some("process_died"),
+            Some("u2"),
+        );
+        store
+            .conn
+            .execute(
+                "INSERT INTO session_events (session_id, at, kind, detail) \
+                 VALUES (?1, ?2, 'auto_restore_deferred', 'memory_low')",
+                rusqlite::params![kept, cutoff + 50],
+            )
+            .unwrap();
+        store
+            .apply_host_reconcile(HostReconcile {
+                lost_ttl_cutoff: Some(cutoff),
+                keep: &[],
+                ..empty_probe("alpha", now)
+            })
+            .unwrap();
+        assert!(store.get_session_by_id(kept).unwrap().is_some());
+        assert!(store.get_session_by_id(reaped).unwrap().is_none());
     }
 
     #[test]

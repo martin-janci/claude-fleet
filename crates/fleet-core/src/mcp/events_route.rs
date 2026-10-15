@@ -403,6 +403,7 @@ pub const HOST_BOUND_HIDDEN_KINDS: &[&str] = &[
     "confirm",
     "handoff",
     "dashboards",
+    "run",
 ];
 
 /// Narrow the requested kinds for a host-bound caller; everyone else keeps
@@ -603,6 +604,16 @@ pub(crate) const KIND_FENCES: &[(&str, KindFence)] = &[
             are pinned is read through `dashboards`, which answers each person their own \
             rows only; anyone else learns that SOME person's pins moved and nothing more. \
             Host-bound hidden besides",
+        ),
+    ),
+    (
+        "run",
+        KindFence::NoSessionContent(
+            "a run's id and nothing else (`RowChange::RunChanged(String)`, `routine:418`). \
+            What the run did is read through `runs { list }` and `runs { trace }`, which \
+            answer only the runs the caller may see (`service::runs::reach`); anyone else \
+            learns that SOME run of that id moved and nothing more, which a poll of \
+            `runs { list }` would not tell them either way. Host-bound hidden besides",
         ),
     ),
 ];

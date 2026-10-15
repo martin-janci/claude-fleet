@@ -161,8 +161,10 @@ pub struct SessionRow {
     #[serde(default)]
     pub lost_at: Option<i64>,
     /// Why the row was marked lost (migration 036): `host_reboot` |
-    /// `tmux_server_gone` | `missing` | `killed`. `None` while the row is
-    /// live (or never lost).
+    /// `tmux_server_gone` | `process_died` (its agent was killed under it:
+    /// hooks alive, no SessionEnd — `store::reconcile::PROCESS_DIED_CASE`) |
+    /// `missing` | `killed`. `None` while the row is live (or never lost).
+    /// [`RESUMABLE_LOST_REASONS`] are the ones kept to the lost TTL.
     #[serde(default)]
     pub lost_reason: Option<String>,
     #[serde(default)]
@@ -651,6 +653,13 @@ impl SessionRow {
         } == *other
     }
 }
+
+/// The `lost_reason`s a row is kept for, to `sessions.lost_ttl_secs`, so it
+/// can be resumed: a host reboot, the tmux server exiting, and one agent
+/// killed under its pane (`process_died`). Phase 2 of
+/// `Store::ghost_and_clean` spares them (its SQL spells the same list), and
+/// the auto-restore tick (`service::auto_restore`) brings them back.
+pub const RESUMABLE_LOST_REASONS: [&str; 3] = ["process_died", "tmux_server_gone", "host_reboot"];
 
 /// What losing a session clears, in every path that loses one (a host's
 /// sessions lost, a kill, a reconcile ghosting): the pane-derived state,
@@ -1299,6 +1308,24 @@ pub struct HostRow {
     pub last_probe_error_code: Option<String>,
     #[serde(default)]
     pub last_probe_error: Option<String>,
+    /// Host load (migration 193), from the same sample as the rest: CPU
+    /// busy percent over the last interval and memory pressure 0–100
+    /// (`tmux::HostHealthSample`), `None` when the host cannot tell. Used
+    /// memory and disk percents follow from `mem_avail_kb` / `mem_total_kb`
+    /// and the disk columns. Per-field default: an older hub omits them.
+    #[serde(default)]
+    pub cpu_pct: Option<f64>,
+    #[serde(default)]
+    pub mem_pressure: Option<f64>,
+    /// The two load judgments, made when the sample was written
+    /// (`Store::set_host_health`, against `health.mem_low_pct` /
+    /// `health.cpu_busy_pct`): what a status-bar chip shows. A reader
+    /// judging NOW also checks the sample is fresh
+    /// (`service::health::sample_fresh`). Per-field default.
+    #[serde(default)]
+    pub mem_low: bool,
+    #[serde(default)]
+    pub cpu_saturated: bool,
 }
 
 /// One login profile on a host, as `hosts.claude_profiles` stores it.
@@ -1345,6 +1372,16 @@ pub struct HostHealth {
     /// ping omits it.
     #[serde(default)]
     pub agents_on_path: Option<Vec<String>>,
+    /// Migration 193 (host load). Per-field default: an older hub's ping
+    /// omits them.
+    #[serde(default)]
+    pub cpu_pct: Option<f64>,
+    #[serde(default)]
+    pub mem_pressure: Option<f64>,
+    #[serde(default)]
+    pub mem_low: bool,
+    #[serde(default)]
+    pub cpu_saturated: bool,
 }
 
 impl HostHealth {
@@ -1364,6 +1401,10 @@ impl HostHealth {
             latency_ms: row.latency_ms,
             worktree_kb: row.worktree_kb,
             agents_on_path: row.agents_on_path.clone(),
+            cpu_pct: row.cpu_pct,
+            mem_pressure: row.mem_pressure,
+            mem_low: row.mem_low,
+            cpu_saturated: row.cpu_saturated,
         }
     }
 }
@@ -1393,7 +1434,8 @@ pub(super) const HOST_COLUMNS: &str =
      uptime_secs, health_at, last_hook_at, agent_version, provisioned_at, provision_fingerprint, \
      harnesses, provision_warning, auth_overrides, claude_profiles, cpu_count, mem_total_kb, \
      boot_at, latency_ms, worktree_kb, worktree_at, agents_on_path, \
-     last_reachable_at, last_probe_error_code, last_probe_error";
+     last_reachable_at, last_probe_error_code, last_probe_error, \
+     cpu_pct, mem_pressure, mem_low, cpu_saturated";
 
 /// Map a row selected with [`HOST_COLUMNS`].
 pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow> {
@@ -1461,6 +1503,11 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
         last_reachable_at: row.get(34)?,
         last_probe_error_code: row.get(35)?,
         last_probe_error: row.get(36)?,
+        // Migration 193 (host load).
+        cpu_pct: row.get(37)?,
+        mem_pressure: row.get(38)?,
+        mem_low: row.get::<_, i64>(39)? != 0,
+        cpu_saturated: row.get::<_, i64>(40)? != 0,
     })
 }
 
@@ -1923,8 +1970,8 @@ pub struct HostReconcile<'a> {
     /// (only used when `reachable`).
     pub keep: &'a [String],
     /// Unix-epoch cutoff (see [`Store::ghost_and_clean`]'s `lost_ttl_cutoff`
-    /// doc) at or above which a resumable mass-loss row (`claude_session_id
-    /// IS NOT NULL`, `lost_reason IN ('host_reboot','tmux_server_gone')`,
+    /// doc) at or above which a resumable row (`claude_session_id IS NOT
+    /// NULL`, `lost_reason IN ('host_reboot','tmux_server_gone','process_died')`,
     /// `lost_at >= cutoff`) is spared Phase 2's hard-delete. `None` (the
     /// default) disables the exemption entirely — today's behaviour.
     pub lost_ttl_cutoff: Option<i64>,

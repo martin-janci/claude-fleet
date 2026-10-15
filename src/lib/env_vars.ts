@@ -4,12 +4,13 @@
 // or a reference is write-only: a row carries `value` for a plain entry only.
 import { invokeCmd, type Result } from './result';
 
-export type EnvScope = 'global' | 'host' | 'project' | 'session';
+/** global < host < project < person < session (the narrower wins). */
+export type EnvScope = 'global' | 'host' | 'project' | 'person' | 'session';
 
 export interface EnvVarRow {
   id: number;
   scope: EnvScope;
-  /** '' for global, a host alias, owner/repo, or a session id. */
+  /** '' for global, a host alias, owner/repo, a person id, or a session id. */
   scope_key: string;
   name: string;
   /** Present for a plain, non-reference entry only. */
@@ -22,6 +23,7 @@ export interface EnvVarRow {
 export interface EnvVarsArgs {
   action: 'list' | 'set' | 'unset';
   scope?: EnvScope;
+  /** For scope person: '' or 'me' (the caller's own person; nobody else's). */
   scope_key?: string;
   name?: string;
   value?: string;

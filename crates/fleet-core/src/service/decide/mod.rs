@@ -89,6 +89,9 @@ mod quick_answer_tests;
 pub mod related_session;
 #[cfg(test)]
 mod related_session_tests;
+pub mod restore_timing;
+#[cfg(test)]
+mod restore_timing_tests;
 pub mod resume_or_new;
 #[cfg(test)]
 mod resume_or_new_tests;
@@ -200,6 +203,9 @@ pub enum Feature {
     /// Which login an out-of-credit session resumes under when it is
     /// switched automatically (`service::account_switch`).
     LimitSwitch,
+    /// Whether a session the host killed is resumed now, held back while
+    /// its host is loaded, or moved (`service::auto_restore`).
+    RestoreTiming,
 }
 
 impl Feature {
@@ -225,6 +231,7 @@ impl Feature {
         Feature::TrackerDuplicate,
         Feature::ResumeOrNew,
         Feature::LimitSwitch,
+        Feature::RestoreTiming,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -250,6 +257,7 @@ impl Feature {
             Feature::TrackerDuplicate => "tracker_duplicate",
             Feature::ResumeOrNew => "resume_or_new",
             Feature::LimitSwitch => "limit_switch",
+            Feature::RestoreTiming => "restore_timing",
         }
     }
 
@@ -281,6 +289,7 @@ impl Feature {
             Feature::TrackerDuplicate => settings::DECIDE_JEV_TRACKER_DUPLICATE,
             Feature::ResumeOrNew => settings::DECIDE_JEV_RESUME_OR_NEW,
             Feature::LimitSwitch => settings::DECIDE_JEV_LIMIT_SWITCH,
+            Feature::RestoreTiming => settings::DECIDE_JEV_RESTORE_TIMING,
         }
     }
 

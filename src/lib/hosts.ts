@@ -88,6 +88,16 @@ export interface HostRow {
    *  by the next probe the host answers; absent from an older hub. */
   last_probe_error_code?: string | null;
   last_probe_error?: string | null;
+  /** Host load (migration 193): CPU busy percent over the last interval and
+   *  memory pressure 0–100; null when the host cannot tell. Absent from an
+   *  older hub. */
+  cpu_pct?: number | null;
+  mem_pressure?: number | null;
+  /** Judged when the sample was written (`health.mem_low_pct`,
+   *  `health.cpu_busy_pct` on two samples in a row); trust them only while
+   *  the sample is fresh (`healthSampleFresh`). */
+  mem_low?: boolean;
+  cpu_saturated?: boolean;
 }
 
 /** One login profile on a host. */
@@ -116,6 +126,11 @@ export interface HostHealth {
   worktree_kb?: number | null;
   /** Orbit Fleet 12.4; absent from an older hub's ping. */
   agents_on_path?: string[] | null;
+  /** Host load (migration 193); absent from an older hub's ping. */
+  cpu_pct?: number | null;
+  mem_pressure?: number | null;
+  mem_low?: boolean;
+  cpu_saturated?: boolean;
 }
 
 export interface SshHost {

@@ -13,11 +13,41 @@ layout is built but OFF by default: Settings → Appearance → Layout picks
 Classic or New (`ui.layout`, default `classic`, `src/lib/prefs.ts`). New has
 a rail (`src/lib/rail.ts`: Control, Inbox, Sessions, Work, Automation,
 Accounts, Toolkit, Settings), the session inspector, and Get started with a
-first-run tour (10.5). Control is the operator's place: its Chat and Today
-tabs, the Views panel (9.4, 9.5), confirmations as cards (9.2), "Sent to a
-session" and "Sent to a mission" receipts (9.3, migration 140), tasks in
-Control (9.6) and the Library (9.7, `library_items`, migration 143, the
-`library` tool). New became the default in step 7.6 (#657) and Classic
+first-run tour (10.5). Control is the operator's place: confirmations as
+cards (9.2), "Sent to a session" and "Sent to a mission" receipts (9.3,
+migration 140), tasks in Control (9.6) and the Library (9.7,
+`library_items`, migration 143, the `library` tool). Since 2026-10-14 it is
+a Thread room (direction A; parity map
+`control-chat-first/2026-10-14/control-parity.md`, frontend only): its own
+left column (`ControlThreads.svelte`, `control_threads.ts`) lists Main chat
+and the threads Control handed out (sessions with `origin = 'operator'`,
+the sessions and missions its `control_handoffs` name) grouped Needs you /
+Working / Done today with All · Needs you · Missions chips and today's
+routine spend; it replaces the sessions list only while Control is open and
+folds away. The centre is the same AgentPanel over ConversationPanel in its
+`look="chat"` (720 px column, bubbles, the agent's prose beside the mark,
+tool calls folded, `#`/`@` chips). The right panel (`ControlViewsPanel`,
+the 9.4 views) is resizable 320–640 px (`layout.control-right`), pins Needs
+you · Session · Pull requests (`ui.controlRoomViews`) and opens any session
+the chat names in its Session tab with a strip of its siblings
+(`control_room.openInControl`), a mission in its Missions view with the
+full task graph. ⌘⇧T opens Control with Today on the right. The status bar
+has a host chip beside Shortcuts (`HostHealthChip.svelte`, `host_health.ts`):
+CPU, memory and disk of the selected session's host (in Control, of the
+session on the right, else the operator's host) from the host row's health
+sample (migration 193), the worst other host in trouble (offline, `mem_low`,
+`cpu_saturated`, disk past `health.disk_low_pct`; judged on a fresh sample
+only), and every host in a popover; Control's right panel has the same list
+as its Hosts view. In the chat look, fleet's own prompts (`[fleet events]`
+digests, `[fleet]` notes; `fleet_events.ts`, marks shared with
+`prompt_origin.rs`) fold to one "Fleet · N events" line, and a proposed
+tree of more than one task and the newest receipt of each mission carry a
+compact task graph card (`TaskGraphCard.svelte`, `task_graph_card.ts`). The composer row has an
+autonomy chip (`AutonomyChip.svelte`, `autonomy.ts`): Ask first · Within
+your brief · Autopilot set `orchestrator.max_level`, `control.auto_continue`
+(and its minutes) and `control.react_to_events` together, through
+`set_fleet_setting`; any other mix, including the shipped defaults, reads
+Custom. New became the default in step 7.6 (#657) and Classic
 was removed in step 13.1 (#699). The redesign's backend is not behind
 the switch: M2's session facts (`sessions.agent`, `origin`,
 `last_viewed_at`, `turn_outcome`; migrations 121, 124, 125, 129) and
@@ -229,6 +259,55 @@ restart, migration 036 + `lost_reason`) and **recovery** —
 `recreate_session`, `discover_lost_sessions` scans a host's Claude transcripts
 for conversations fleet has no row for, and `new_session` takes a
 `resume_claude_session_id`; the UI for both is in `HostDetail`.
+**Automatic recovery** is landed and ON by default (`recovery.auto_restore`,
+`service/auto_restore.rs`): a session whose agent the host killed — OOM,
+systemd-oomd killing one pane in its own scope — is recorded
+`lost_reason = 'process_died'` (hooks alive, no SessionEnd,
+`store::reconcile::PROCESS_DIED_CASE`), kept to `sessions.lost_ttl_secs`
+like a reboot, and resumed by the tick after `recovery.grace_secs` (60) with
+the mass-loss reasons, at most `recovery.max_attempts` (2) per session per
+day. A host under load (memory under `health.mem_low_pct`, or CPU
+saturated) DEFERS the
+restore instead: no attempt is spent, one `auto_restore_deferred` event per
+episode names the reason, the lost TTL counts from that deferral (one
+extension per episode) and the tick resumes it once the load drops. With
+`decide.jev.restore_timing` (off by default, docs/decisions.md) Jev is asked
+recover now / defer / move for a due restore on a loaded host or after a
+failed one; assist follows within bounds (never past the memory floor; a
+move is recorded, not carried out). Each attempt leaves one
+`auto_restored` / `auto_restore_failed` / `auto_restore_skipped` event;
+Control's own session is restarted through `restart_session` and gets a
+`[fleet]` note in its conversation. No migration; the controller is still
+never restored without `force`.
+
+**The operator feed** is landed and ON by default (`control.react_to_events`,
+`service/operator_feed.rs`, loop `operator_feed`): Control's own session gets
+one compact `[fleet events]` digest, through the deferred queue so only
+while it is idle, when a session it started (`origin = 'operator'`) or
+briefed (a `control_handoffs` receipt) finishes a turn, waits on an answer,
+fails, is lost, auto-restored or past restoring; when a mission it handed off
+waits on a person; or when a host goes unreachable or low on disk or memory.
+At most one per `control.feed_min_interval_secs` (60) and 6 an hour; none
+while one is still queued, none while paused, never about the operator
+itself, and never a session's own words (names and vocabulary only). The
+cursor and the already-reported host/mission conditions live in the
+`control.feed_state` setting; no migration. The digest is typed as fleet's
+(`prompt_origin::FLEET_PROMPT_MARKS`); the operator's `CLAUDE.md` has a
+*Fleet events* section, which an operator born earlier gets at its next
+birth.
+
+**Host load** is landed (migration 193): the health sample adds CPU busy
+percent (Linux `/proc/stat` deltas, macOS summed `ps` %CPU), available
+memory on macOS too (`kern.memorystatus_level`) and memory pressure (Linux
+PSI `some avg10`, the macOS pressure level), all NULL when the host cannot
+tell; the script is shared, so SSH, `local` and agent hosts all get it with
+no proto change. `mem_low` (`health.mem_low_pct`, 10) and `cpu_saturated`
+(`health.cpu_busy_pct`, 90, two samples in a row) are judged when the sample
+is written (`Store::set_host_health`) and carried on the host row, the ping
+and `fleet_health.hosts[]` (with `cpu_pct`, `mem_used_pct`, `mem_pressure`)
+for a future status-bar chip; the automatic restore defers on either, the
+operator feed reports `mem_low`. The desktop shows the numbers only in the
+host's Health line.
 
 The work graph's M0–M3 are landed (work links anchored on participants,
 group-by-work, and M2's work journal, carry rules, handover brief and resume
@@ -551,7 +630,7 @@ lines), never a person's. `work { result }` (`service/work/result.rs`,
 worker's PR and follow-ups, worker text fenced for a per-host token. A
 follow-up (`work_link { followup }`, `service/work/followup.rs`,
 `Store::create_followup`) is a sibling local item with
-`work_items.origin_task_id` (migration 192); the same title twice answers
+`work_items.origin_task_id` (migration 195); the same title twice answers
 one item (D4). A follow-up's start brief opens with `OriginFacts` (decisions,
 remaining, context, ≤ 10 commits, ≤ 15 files, PR; no conversation text)
 under `BRIEF_MAX_CHARS` (D5). `TaskResultPanel.svelte` replaces
@@ -868,6 +947,8 @@ desktop). Not yet: a filesystem watcher, a three-way merge editor.
 Chat forms, part 1 (spec 2026-10-07-chat-forms-design.md): the ask tool, fleet.form/1, the form card in the Conversation panel, secrets to host files (migration 119; guide `docs/forms.md`). Contract revision 9: the desktop and its hub ship together. The app's own wizards (New session, Add host, Pair a device, Add project, Link to a hub, Get started) are fleet.form/1 specs too (redesign 10.12, `src/lib/forms/wizards/`, `docs/forms.md` → *Wizards are forms too*). As dialogs: Link to a hub (Settings › Hub), Pair a device (Settings › Devices) and Get started's first session (`get_started`). In the chat (`ChatForm` at the end of the Conversation panel and of Control's chat): an agent's `wizard` block (`docs/chat-blocks.md`) opens Add host, Add project, Get started, New session or Pair a device, and Control's *Add project* chip opens Add project; nothing runs until the last button. An agent may stream a long form while it writes it, `ask { draft }` (migration 153, the row's `form_draft`), which the chat draws in as skeleton fields until `ask { form }` opens it. The phone's form sheet (14.7) is fleet-mobile's. Part 2 (forms in guide steps) is not started; the fleet-mobile card is its own plan.
 
 Session environment variables (spec 2026-10-11-session-env-and-secrets-design.md, migration 179, contract 18): `env_vars` (global < host < project < session), `new_session { env }`, a form's `env_target`, Settings › Environment (resource `env_var`, `env_var_set` / `env_var_unset`), the launch file under `~/.claude-fleet/env` sourced by every pane command (create, restart, recreate, repair, review, move) and swept after 10 minutes, and `env_secret_literals` masked in diagnostics. Not built: encryption at rest, `op://` references, a per-worktree scope, a session panel editor.
+
+Person-scoped environment (migration 192, no contract bump): `env_vars` scope `person` (global < host < project < person < session), keyed by `people.id`, sourced from the session OWNER at launch (create: the owner being recorded; restart, recreate, repair, move: the row's `owner_person_id`; review: the source's owner); an unclaimed session or a disabled person gets none. `env_vars` is `Access::PersonOrAdmin`: any person's paired device lists, sets and unsets its OWN person rows only (`scope_key` `''`/`me`), nobody — the master included — reads or writes another person's, and the shared scopes stay a fleet admin's. Settings › Environment's Add defaults to "Me". The recipe it exists for: per-person `GIT_AUTHOR_*` / `GIT_COMMITTER_*` and a secret `GH_TOKEN`, so each person's sessions commit and open PRs as them, over a host/global `GH_TOKEN` or the host's (pod's) own environment as fallback. A pre-192 hub answers scope `person` with `E_INVALID`. Not built: a dedicated "Git identity" form.
 
 PR shepherd, steps 1 to 4 of 5 (step 2 without its Inbox card), are built and do nothing until a person
 grants a rule (spec `docs/superpowers/specs/2026-10-08-pr-shepherd-design.md`):

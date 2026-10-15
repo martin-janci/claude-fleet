@@ -106,16 +106,26 @@ trusted full device. The key and the code are never logged or returned.
 ### Environment
 
 `env_vars` sets the environment variables every session fleet starts gets,
-by scope (`global` < `host` < `project` as `owner/repo` < `session`, the
-narrower winning): `list`, `set { scope, scope_key, name, value | ref,
-secret? }`, `unset`. A secret or a reference is never listed again; a
+by scope (`global` < `host` < `project` as `owner/repo` < `person` <
+`session`, the narrower winning): `list`, `set { scope, scope_key, name,
+value | ref, secret? }`, `unset`. `person` is the session owner's at launch
+(`scope_key` is the person's id; pass `''` or `me` for your own): every
+person's paired device reaches the tool for its OWN person rows only —
+listing shows them nobody else's, and a set or unset naming another
+person's id is `E_FORBIDDEN`, the master's included. The other four scopes
+are listed to and changed by a fleet admin only. Recipe: a person sets
+`GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` / `GIT_COMMITTER_NAME` /
+`GIT_COMMITTER_EMAIL` and a secret `GH_TOKEN` with scope `person`, and their
+sessions commit and open PRs as them, over any host-level fallback. A hub
+older than this answers scope `person` with `E_INVALID`. A secret or a reference is never listed again; a
 reference (`env:NAME` or `file:/abs`, read by the hub at launch) is the
 master's alone, a device gets `E_FORBIDDEN`. A change applies when a session
 next starts or restarts. `new_session { env }` sets session-scope plain
 values for the session it starts, and a form's `secret` field with an
 `env_target` stores its answer as the session's secret variable
-([forms.md](forms.md#secrets)). Served to the master and a fleet admin's
-devices; a write needs the master or a trusted full device.
+([forms.md](forms.md#secrets)). Served to the master and every person's
+paired device, never a host's token; a write outside `person` needs the
+master or a trusted full device.
 
 ### Named tokens
 
@@ -1175,7 +1185,7 @@ Index by area (names only; see the reference for details):
   gone. A row is served to whoever may see the session that opened it; a PR
   whose session is gone only to the hub's own reader or the person of a
   one-person hub. A read: nothing here merges or closes a PR.
-- **Runs** — `runs`, by `action` (`list` today; Orbit Fleet 8.3). One
+- **Runs** — `runs`, by `action` (`list`, `trace`; Orbit Fleet 8.3). One
   newest-first list of everything that ran on the fleet's behalf: dispatched
   tasks, a mission's steps and brakes, Jev's decisions, fleet's own
   `claude -p` runs (the planner, a summary) and routine fires. `list { since?, until?, kind?,
@@ -1194,6 +1204,25 @@ Index by area (names only; see the reference for details):
   mission's rows need the mission, a routine's fires the routine, and runs that belong to no session or
   mission need whole-fleet spend. A person's, never served to a per-host
   token.
+  `trace { run_id, after_seq?, limit? (≤ 2000, 500) }` answers a routine or
+  agent run's steps, oldest first: `{ run_id, steps, more }` (migration
+  194, `service::run_trace`). Each step carries `seq`, `attempt`,
+  `parent_ref?` (the run a retry retries), `at`, `phase` (`trigger` |
+  `checks` | `placement` | `spawn` | `prompt` | `working` | `settle` |
+  `outcome`), `kind` (`trigger`, `check`, `placement`, `spawn`, `prompt`,
+  `tool_call`, `thinking`, `waiting`, `decision`, `settle`, `retry`,
+  `error`, `note`), `actor` (`scheduler` | `hub` | `claude` | `jev` | `rule`
+  | `person`), a one-line `summary`, `data?` (a JSON object of at most 4 KB),
+  `duration_ms?`, `cost_micros?` and `decision_id?` (the Jev decision it
+  records). Read on with `after_seq` set to the last `seq` while `more` is
+  true. The run must be one the caller's `list` would show; any other id,
+  and a run of a source that keeps no trace, answers `E_NOTFOUND`. Every new
+  step emits `run:changed` with the run's id only. A trace is kept 14 days
+  and at most 2000 steps per run (phase boundaries past that still land).
+  While a routine run is open, each tool its session finishes is a `working`
+  step (`tool_call`, or `error` when the tool failed; `actor` `claude`,
+  `data.tool_use_id`, `data.tool`, `duration_ms`); the tool running now is
+  the session row's `current_activity`.
 - **PR shepherd** — `pr_shepherd`, the standing rules that let fleet look
   after a project's PRs (`docs/superpowers/specs/2026-10-08-pr-shepherd-design.md`):
   `status` (rules, recent episodes and merges), `explain` (what the next
@@ -1897,7 +1926,7 @@ Per-host failures do not abort provisioning of other hosts.
 
 Every reconcile pass reads one health sample from each reachable host in the
 same batched probe script (`df -Pk` of `$HOME` and `${TMPDIR:-/tmp}`, the
-1-minute load, `MemAvailable` on Linux, the uptime) and, every 6 h, `tmux -V`
+1-minute load, available memory, CPU counters and memory pressure, the uptime) and, every 6 h, `tmux -V`
 and `claude --version`. `list_hosts` carries the sample on each row
 (`disk_home_free_kb`, `disk_home_total_kb`, `disk_tmp_free_kb`, `load_1m`,
 `mem_avail_kb`, `uptime_secs`, `health_at`), the versions stamp
@@ -1912,6 +1941,16 @@ reported. `fleet_health.hosts[]` judges them per host:
 | `claude_behind` | More than `health.claude_max_behind` (default 30) patch releases behind the fleet's newest version among stamps younger than 24 h. |
 | `agent_behind` | An agent host whose agent is not the hub's version (the live registry outranks the stored hello). |
 | `hooks_silent` | Reachable, with a live non-external session, and no hook from its token within `health.hooks_silent_secs` (default 1 h). |
+| `cpu_pct` | CPU busy percent over the last interval, rounded: the `/proc/stat` delta between two samples on Linux, summed `ps` %CPU over the online CPUs on macOS. Absent when unknown. |
+| `mem_used_pct` | Used percent of physical memory (`MemAvailable` on Linux, `kern.memorystatus_level` on macOS). |
+| `mem_pressure` | 0–100: PSI `some avg10` of `/proc/pressure/memory` on Linux; the macOS pressure level (normal 0, warn 50, critical 100). Absent when the kernel cannot tell. |
+| `mem_low` | Available memory at or under `health.mem_low_pct` (default 10) of physical, on a fresh sample. The automatic restore defers on such a host. |
+| `cpu_saturated` | CPU at or over `health.cpu_busy_pct` (default 90) on two samples in a row, the latest fresh. |
+
+The host row and its `host:pinged` ping carry the raw `cpu_pct` and
+`mem_pressure` and the two judgments `mem_low` / `cpu_saturated` as they
+were made when the sample was written (migration 193); trust them only
+while `health_at` is within the hour.
 
 The desktop's "older than the fleet" mark trusts a `claude_version_at`
 younger than `health.version_max_age_secs` (default 24 h). `move_session`

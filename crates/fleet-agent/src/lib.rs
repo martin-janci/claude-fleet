@@ -17,6 +17,7 @@ pub mod exec;
 pub mod hook_relay;
 pub mod install;
 pub mod report;
+pub mod scope;
 pub mod self_update;
 pub mod update;
 

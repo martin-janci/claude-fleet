@@ -1,5 +1,5 @@
-// Control (redesign step 9.1): the New layout's agent column, its tabs and
-// the Views panel beside the chat, through the axe and audit checks.
+// Control (redesign step 9.1), as a Thread room (2026-10-14): its threads
+// column, the chat and the panel beside it, through the axe and audit checks.
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tick } from 'svelte';
@@ -31,11 +31,12 @@ afterEach(() => {
 });
 
 describe('ControlView', () => {
-  it('Chat and Today, with the Views panel open, is accessible', async () => {
+  it('the Thread room (threads, chat, the panel) and Today on the right are accessible', async () => {
     const { container } = render(ControlView, { isMac: false });
     expect(screen.getByTestId('control-views')).toBeTruthy();
+    expect(screen.getByTestId('control-threads')).toBeTruthy();
     await expectAccessible(container);
-    await fireEvent.click(screen.getByTestId('control-tab-today'));
+    await fireEvent.click(screen.getByTestId('control-overview'));
     for (let i = 0; i < 5; i++) await tick();
     await expectAccessible(container);
   });

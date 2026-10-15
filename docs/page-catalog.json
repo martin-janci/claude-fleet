@@ -2916,6 +2916,10 @@
             "name": "scope",
             "options": [
               [
+                "person",
+                "Me (my sessions)"
+              ],
+              [
                 "global",
                 "Global"
               ],
@@ -2935,7 +2939,7 @@
             "label": "Host or owner/repo",
             "max": 255,
             "name": "scope_key",
-            "placeholder": "mercury · owner/repo · empty for global",
+            "placeholder": "empty for me or global · mercury · owner/repo",
             "required": false,
             "type": "text"
           },
@@ -3008,7 +3012,7 @@
           "badge": {
             "when": "label"
           },
-          "help": "Where it applies: everywhere, one host, one project or one session.",
+          "help": "Where it applies: everywhere, one host, one project, the sessions one person owns, or one session.",
           "id": "scope",
           "label": "Scope",
           "options": [
@@ -3025,6 +3029,10 @@
               "Project"
             ],
             [
+              "person",
+              "Person"
+            ],
+            [
               "session",
               "Session"
             ]
@@ -3032,7 +3040,7 @@
           "type": "choice"
         },
         {
-          "help": "The host alias, owner/repo or session id; empty for global.",
+          "help": "The host alias, owner/repo, person id or session id; empty for global.",
           "id": "scope_key",
           "label": "Applies to",
           "max": 255,
@@ -3076,7 +3084,7 @@
           "type": "time"
         }
       ],
-      "help": "Set in every session fleet starts, by scope: global, then host, then project (owner/repo), then session; the narrower wins. A change applies when a session next starts or restarts. A secret's value is never shown again.",
+      "help": "Set in every session fleet starts, by scope: global, then host, then project (owner/repo), then person (the session owner's own, e.g. GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL and a secret GH_TOKEN), then session; the narrower wins. A person sees and changes only their own person variables. A change applies when a session next starts or restarts. A secret's value is never shown again.",
       "id": "env_var",
       "id_field": "id",
       "label": "Environment variable",
@@ -3284,6 +3292,33 @@
     },
     {
       "default_widget": "switch",
+      "key": "control.react_to_events",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Tell Control what changed",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "control.feed_min_interval_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Time between notes to Control",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
       "key": "playbooks.press_enter",
       "kind": {
         "type": "bool"
@@ -3315,6 +3350,47 @@
         "type": "int"
       },
       "label": "Out-of-memory budget",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "recovery.auto_restore",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Bring killed sessions back",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "recovery.grace_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Wait before bringing back",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "recovery.max_attempts",
+      "kind": {
+        "max": 20,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Automatic restore budget",
       "widgets": [
         "number",
         "readonly"
@@ -3861,6 +3937,34 @@
         "type": "int"
       },
       "label": "Disk low at",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "health.mem_low_pct",
+      "kind": {
+        "max": 50,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Memory low at",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "health.cpu_busy_pct",
+      "kind": {
+        "max": 100,
+        "min": 50,
+        "type": "int"
+      },
+      "label": "CPU busy at",
       "widgets": [
         "number",
         "readonly"
@@ -4841,6 +4945,24 @@
         "type": "choice"
       },
       "label": "Jev: login for an automatic switch",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "decide.jev.restore_timing",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: when to bring a killed session back",
       "widgets": [
         "select",
         "radio",

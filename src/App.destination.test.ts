@@ -378,7 +378,9 @@ describe('App: Control (step 9.1)', () => {
     await fireEvent.click(getByTestId('rail-control'));
     expect(openOverlays(container)).toEqual(['control-overlay']);
     expect(getByTestId('rail-control').getAttribute('aria-current')).toBe('page');
-    expect(getByTestId('control-tab-chat').getAttribute('aria-selected')).toBe('true');
+    // Thread room: the chat is the page, Main chat in Control's column.
+    expect(getByTestId('control-chat-title').textContent).toBe('Main chat');
+    expect(getByTestId('control-thread-main').getAttribute('aria-current')).toBe('true');
     expect(getByTestId('control-agent')).toBeTruthy();
     expect(queryByTestId('agent-panel')).toBeNull();
     await fireEvent.keyDown(document.body, { key: 'Escape' });
@@ -386,14 +388,15 @@ describe('App: Control (step 9.1)', () => {
     expect(terminalSlot(container)).toBe(term);
   });
 
-  it('⌘E opens and closes Control; ⌘⇧T opens its Today tab', async () => {
+  it('⌘E opens and closes Control; ⌘⇧T opens it with Today on the right', async () => {
     const { container, getByTestId } = render(App);
     await fireEvent.keyDown(window, { key: 'e', metaKey: true });
     expect(get(destination)).toBe('control');
     expect(get(controlTab)).toBe('chat');
     await fireEvent.keyDown(window, { key: 'T', ctrlKey: true, shiftKey: true });
     expect(get(controlTab)).toBe('today');
-    await waitFor(() => expect(getByTestId('control-tab-today').getAttribute('aria-selected')).toBe('true'));
+    await waitFor(() => expect(getByTestId('control-view-tab-today').getAttribute('aria-selected')).toBe('true'));
+    expect(getByTestId('control-agent')).toBeTruthy();
     await fireEvent.keyDown(window, { key: 'T', ctrlKey: true, shiftKey: true });
     expect(get(destination)).toBe('session');
     await fireEvent.keyDown(window, { key: 'e', metaKey: true });

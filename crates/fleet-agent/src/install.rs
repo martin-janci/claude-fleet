@@ -139,6 +139,16 @@ impl Systemctl for RealSystemctl {
 ///   (`control-group`) would therefore kill every Claude session on the host
 ///   each time the agent restarted or was upgraded. Only the agent itself is
 ///   stopped; what it started lives on, as it would over SSH.
+///
+///   `KillMode` covers a stop or a restart only: systemd-oomd kills the whole
+///   cgroup whatever it says. That is why, under a user manager, the agent
+///   moves each tmux server and each pane's process tree into a scope of its
+///   own (`crate::scope`), so oomd picks the one pane that is growing instead
+///   of the agent and every session with it. `KillMode=process` still covers
+///   the seconds before a new server is moved, and hosts where nothing moves.
+///   `ManagedOOMPreference=avoid` asks oomd to pick other candidates before
+///   the agent; systemd honours it only for a root-owned cgroup, so it takes
+///   effect for a system unit and is inert, but harmless, for a user one.
 /// - `NotifyAccess=main`, so systemd keeps the `STATUS=` line the agent
 ///   reports (`conn::Notifier`), which is how `status` knows whether it is
 ///   connected without the agent keeping a state file.
@@ -171,6 +181,7 @@ pub fn render_unit(scope: &Scope, binary: &Path, config_path: &Path) -> Result<S
     unit.push_str("Restart=always\n");
     unit.push_str("RestartSec=5\n");
     unit.push_str("KillMode=process\n");
+    unit.push_str("ManagedOOMPreference=avoid\n");
     unit.push_str("NotifyAccess=main\n");
     // `$RUNTIME_DIRECTORY` (`%t/fleet-agent`), the agent's own: the hub's
     // `update_now` drops `update-now` there and `fleet-agent-update.path`
@@ -477,6 +488,7 @@ mod tests {
         for scope in [Scope::User, Scope::System { run_as: "a".into() }] {
             let unit = render_unit(&scope, Path::new("/bin/fa"), Path::new("/c")).unwrap();
             assert!(line_in(&unit, "KillMode=process"), "{unit}");
+            assert!(line_in(&unit, "ManagedOOMPreference=avoid"), "{unit}");
             assert!(line_in(&unit, "Restart=always"), "{unit}");
             // Without it systemd ignores the agent's STATUS= reports, which
             // is what `status` reads.

@@ -56,6 +56,7 @@ describe('Automation (redesign step 8.4)', () => {
   it('lists runs with outcome, cost and a link to the session', async () => {
     render(AutomationView);
     automationTab.set('runs');
+    await fireEvent.click(await screen.findByTestId('automation-runs-list'));
     const rows = await screen.findAllByTestId('automation-run');
     expect(rows[0].textContent).toContain('Morning PR sweep');
     expect(rows[0].textContent).toContain('5m 40s');
@@ -67,6 +68,7 @@ describe('Automation (redesign step 8.4)', () => {
   it('the Runs column filters by outcome', async () => {
     render(AutomationView);
     automationTab.set('runs');
+    await fireEvent.click(await screen.findByTestId('automation-runs-list'));
     await screen.findAllByTestId('automation-run');
     await fireEvent.click(screen.getByTestId('automation-runs-failed'));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('list_runs', { args: { limit: 50, outcome: 'failed' } }));
@@ -131,7 +133,8 @@ describe('Automation when a read fails (review r13)', () => {
     expect(err.textContent).toContain('The hub took too long to answer');
     runsFail = false;
     await fireEvent.click(screen.getByTestId('automation-runs-error-retry'));
-    expect(await screen.findAllByTestId('automation-run')).toHaveLength(2);
+    expect(await screen.findAllByTestId('run-bar')).toHaveLength(1);
+    expect(screen.getAllByTestId('run-jev')).toHaveLength(1);
   });
 
   it('a failed first read of the routines is said, not left blank', async () => {
@@ -145,5 +148,108 @@ describe('Automation when a read fails (review r13)', () => {
     expect(err.textContent).toContain("Couldn't load automation");
     expect(err.textContent).not.toMatch(/^E_/);
     expect(screen.getByTestId('automation-load-error-retry')).toBeInTheDocument();
+  });
+});
+
+describe('Runs lanes and run timeline (automation runs boards A and B)', () => {
+  const ROUTINE_RUN = {
+    id: 'routine:418',
+    source: 'routine',
+    kind: 'routine',
+    owner: 'Nightly dependency bump',
+    started_at: now - 600,
+    outcome: 'running',
+    session_ids: [9],
+    host: 'htz',
+    routine_id: 3,
+    summary: 'Bash: pnpm test',
+  };
+  const SKIPPED = { id: 'routine:417', source: 'routine', kind: 'routine', owner: 'Usage report', started_at: now - 900, outcome: 'nothing_to_do', session_ids: [] };
+  const STEPS = [
+    { seq: 1, attempt: 1, at: now - 600, phase: 'trigger', kind: 'trigger', actor: 'scheduler', summary: 'Fired by its schedule' },
+    {
+      seq: 2,
+      attempt: 1,
+      at: now - 600,
+      phase: 'checks',
+      kind: 'check',
+      actor: 'scheduler',
+      summary: '2 checks passed',
+      data: { checks: [{ name: 'overlap', state: 'ok', detail: 'no run open' }, { name: 'day_budget', state: 'warn', detail: '$1.80 of $2.00' }] },
+    },
+    { seq: 3, attempt: 1, at: now - 596, phase: 'spawn', kind: 'spawn', actor: 'hub', summary: 'Session started on htz', duration_ms: 4200 },
+    { seq: 4, attempt: 1, at: now - 590, phase: 'prompt', kind: 'prompt', actor: 'hub', summary: 'Prompt typed into the session' },
+    { seq: 5, attempt: 1, at: now - 300, phase: 'working', kind: 'tool_call', actor: 'claude', summary: 'Bash: pnpm install', duration_ms: 168_000, data: { tool_use_id: 't1', tool: 'Bash' } },
+  ];
+
+  beforeEach(() => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'health_check') return { version: 'x', db_ready: true, schema_version: 1, loops: LOOPS, automation_paused: false };
+      if (cmd === 'list_runs') return { runs: [ROUTINE_RUN, SKIPPED, ...RUNS], total: 4 };
+      if (cmd === 'run_trace') return { run_id: 'routine:418', steps: STEPS, more: false };
+      return null;
+    });
+  });
+
+  it('lays every run in the window on lanes, with the window counts', async () => {
+    render(AutomationView);
+    automationTab.set('runs');
+    const lanes = await screen.findAllByTestId('run-lane');
+    expect(lanes.map((l) => l.dataset.lane)).toEqual([
+      'Routines:Nightly dependency bump',
+      'Routines:Usage report',
+      'Jev:status_map',
+      'Fleet:Morning PR sweep',
+    ]);
+    expect(screen.getAllByTestId('run-skip')).toHaveLength(1);
+    const live = screen.getAllByTestId('run-bar').find((b) => b.dataset.run === 'routine:418')!;
+    expect(live.className).toContain('running');
+    const stats = screen.getByTestId('automation-runs-stats').textContent ?? '';
+    expect(stats).toMatch(/Running now\s*1/);
+    expect(stats).toMatch(/Skipped fires\s*1/);
+    const call = invoke.mock.calls.find(([c]) => c === 'list_runs')!;
+    expect(call[1].args.limit).toBe(200);
+    expect(now - call[1].args.since).toBeGreaterThanOrEqual(3 * 3600 - 5);
+  });
+
+  it('a lane bar opens the run timeline: phases, steps, detail and checks', async () => {
+    render(AutomationView);
+    automationTab.set('runs');
+    const bars = await screen.findAllByTestId('run-bar');
+    await fireEvent.click(bars.find((b) => b.dataset.run === 'routine:418')!);
+    await screen.findByTestId('run-timeline');
+    await waitFor(() => expect(screen.getAllByTestId('run-step')).toHaveLength(5));
+    expect(invoke).toHaveBeenCalledWith('run_trace', { args: { run_id: 'routine:418' } });
+    expect(screen.getByTestId('run-phase-trigger').dataset.state).toBe('done');
+    expect(screen.getByTestId('run-phase-working').dataset.state).toBe('live');
+    expect(screen.getByTestId('run-phase-settle').dataset.state).toBe('todo');
+    expect(screen.getByTestId('run-step-detail').textContent).toContain('Bash: pnpm install');
+    expect(screen.getByTestId('run-checks').textContent).toContain('$1.80 of $2.00');
+    await fireEvent.click(screen.getAllByTestId('run-step')[2]);
+    expect(screen.getByTestId('run-step-detail').textContent).toContain('Session started on htz');
+    await fireEvent.click(screen.getByTestId('run-timeline-close'));
+    expect(await screen.findByTestId('run-lanes')).toBeInTheDocument();
+  });
+
+  it("the orbit map circles a comet round the live run's host, which opens its timeline", async () => {
+    render(AutomationView);
+    automationTab.set('runs');
+    await fireEvent.click(await screen.findByTestId('automation-runs-orbit'));
+    const comet = await screen.findByTestId('orbit-comet');
+    expect(comet.dataset.run).toBe('routine:418');
+    expect(screen.getAllByTestId('orbit-host').map((h) => h.dataset.host)).toEqual(['htz']);
+    expect(screen.getByTestId('orbit-feed').textContent).toContain('Nightly dependency bump');
+    expect(invoke).toHaveBeenCalledWith('routines', expect.anything());
+    await fireEvent.click(comet);
+    expect(await screen.findByTestId('run-timeline')).toBeInTheDocument();
+  });
+
+  it("the list opens a run's steps too, and an untraced run says so", async () => {
+    render(AutomationView);
+    automationTab.set('runs');
+    await fireEvent.click(await screen.findByTestId('automation-runs-list'));
+    const opens = await screen.findAllByTestId('automation-run-open');
+    await fireEvent.click(opens[3]);
+    expect(await screen.findByTestId('run-timeline-untraced')).toBeInTheDocument();
   });
 });

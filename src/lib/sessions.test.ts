@@ -44,6 +44,7 @@ describe('usage formatting', () => {
   it('labels lost_reason for the reasons with dedicated wording, null otherwise', () => {
     expect(lostReasonLabel('host_reboot')).toBe('host rebooted');
     expect(lostReasonLabel('tmux_server_gone')).toBe('tmux server stopped');
+    expect(lostReasonLabel('process_died')).toBe('its process stopped (out of memory or killed)');
     expect(lostReasonLabel('local_disabled')).toBe('local host is off on this hub');
     expect(lostReasonLabel('missing')).toBeNull();
     expect(lostReasonLabel(null)).toBeNull();

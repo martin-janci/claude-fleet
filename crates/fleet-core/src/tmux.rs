@@ -641,6 +641,23 @@ pub struct HostHealthSample {
     /// `/proc/stat`, else `kern.boottime`). Steady between passes, unlike
     /// now − uptime, so a change means the host rebooted.
     pub boot_at: Option<i64>,
+    /// The aggregate `cpu` line of `/proc/stat` (Linux): jiffies spent busy
+    /// (everything but `idle` and `iowait`) and in total since boot. Only
+    /// the DELTA between two samples means anything, so the store turns a
+    /// pair into [`Self::cpu_pct`] (`Store::set_host_health`). `None`
+    /// elsewhere.
+    pub cpu_busy_ticks: Option<i64>,
+    pub cpu_total_ticks: Option<i64>,
+    /// CPU busy percent read directly, where there are no counters to
+    /// difference (macOS: the summed `ps` %CPU over the online CPUs,
+    /// capped at 100). `None` on Linux, where the counters answer instead.
+    pub cpu_pct: Option<f64>,
+    /// Memory pressure, 0–100: Linux PSI `some avg10` from
+    /// `/proc/pressure/memory` (the share of the last 10 s some task waited
+    /// on memory); macOS `kern.memorystatus_vm_pressure_level` (1 normal → 0,
+    /// 2 warn → 50, 4 critical → 100). `None` when the host cannot tell (a
+    /// kernel without PSI, say).
+    pub mem_pressure: Option<f64>,
     /// Round trip of an empty command to the host, in ms (Orbit Fleet 4.6).
     /// Not read by the script: the probe times [`TmuxExec::round_trip_ms`]
     /// and fills it in. `None` for `local` and whenever it was not timed.
@@ -687,10 +704,25 @@ pub const AUTH_OVERRIDE_VARS: [&str; 7] = [
 /// inside the pipe and `cut` keeps only the name, so no value is printed.
 /// `agents=` lists which agent CLIs `command -v` finds (Orbit Fleet 12.4;
 /// the names are [`crate::service::host_check::AGENT_BINARIES`]).
+///
+/// Host load (migration 193): `memkb=` falls back on macOS to
+/// `kern.memorystatus_level` (the percent of memory the kernel counts as
+/// available) of `hw.memsize`; `cpustat=` is the aggregate `cpu` line of
+/// `/proc/stat` (counters the store differences between samples);
+/// `cpups=` is the summed `ps` %CPU, asked only where `/proc/stat` is not
+/// readable (macOS); `mempsi=` is PSI's `some avg10` and `mempl=` the macOS
+/// pressure level, asked only where `/proc/meminfo` is not readable. The
+/// script is the same text over SSH, on `local` and through an agent
+/// (`remote_sh`), so every transport gets the new lines with no protocol
+/// change; an older hub simply never prints them.
 pub const HOST_HEALTH_SCRIPT: &str = "printf 'dfhome=%s\\n' \"$(df -Pk \"$HOME\" 2>/dev/null | tail -n 1)\"; \
 printf 'dftmp=%s\\n' \"$(df -Pk \"${TMPDIR:-/tmp}\" 2>/dev/null | tail -n 1)\"; \
 printf 'load=%s\\n' \"$(cat /proc/loadavg 2>/dev/null || sysctl -n vm.loadavg 2>/dev/null)\"; \
-printf 'memkb=%s\\n' \"$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null)\"; \
+printf 'memkb=%s\\n' \"$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null || { l=$(sysctl -n kern.memorystatus_level 2>/dev/null); m=$(sysctl -n hw.memsize 2>/dev/null); [ -n \"$l\" ] && [ -n \"$m\" ] && echo $(( m / 1024 * l / 100 )); })\"; \
+printf 'cpustat=%s\\n' \"$(head -n 1 /proc/stat 2>/dev/null)\"; \
+printf 'cpups=%s\\n' \"$([ -r /proc/stat ] || ps -A -o %cpu= 2>/dev/null | awk '{s+=$1} END {if (NR) print s}')\"; \
+printf 'mempsi=%s\\n' \"$(sed -n 's/^some avg10=\\([0-9.]*\\).*/\\1/p' /proc/pressure/memory 2>/dev/null)\"; \
+printf 'mempl=%s\\n' \"$([ -r /proc/meminfo ] || sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null)\"; \
 printf 'uptime=%s\\n' \"$(cut -d. -f1 /proc/uptime 2>/dev/null || { b=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*{ sec = \\([0-9]*\\),.*/\\1/p'); [ -n \"$b\" ] && echo $(( $(date +%s) - b )); })\"; \
 printf 'cpus=%s\\n' \"$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null)\"; \
 printf 'memtotal=%s\\n' \"$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || { m=$(sysctl -n hw.memsize 2>/dev/null); [ -n \"$m\" ] && echo $(( m / 1024 )); })\"; \
@@ -709,6 +741,9 @@ fn df_kb(line: &str) -> (Option<i64>, Option<i64>) {
 /// Parse [`HOST_HEALTH_SCRIPT`] output.
 pub fn parse_host_health(stdout: &str) -> HostHealthSample {
     let mut h = HostHealthSample::default();
+    // macOS's summed `ps` %CPU, turned into a percent of the whole machine
+    // once the CPU count (a later line) is known.
+    let mut ps_cpu: Option<f64> = None;
     for line in stdout.lines() {
         if let Some(v) = line.strip_prefix("dfhome=") {
             let (total, avail) = df_kb(v);
@@ -723,6 +758,31 @@ pub fn parse_host_health(stdout: &str) -> HostHealthSample {
                 .and_then(|s| s.parse().ok());
         } else if let Some(v) = line.strip_prefix("memkb=") {
             h.mem_avail_kb = v.trim().parse().ok();
+        } else if let Some(v) = line.strip_prefix("cpustat=") {
+            if let Some((busy, total)) = parse_proc_stat_cpu(v) {
+                h.cpu_busy_ticks = Some(busy);
+                h.cpu_total_ticks = Some(total);
+            }
+        } else if let Some(v) = line.strip_prefix("cpups=") {
+            ps_cpu = v
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|p| p.is_finite() && *p >= 0.0);
+        } else if let Some(v) = line.strip_prefix("mempsi=") {
+            if let Some(p) = v.trim().parse::<f64>().ok().filter(|p| p.is_finite()) {
+                h.mem_pressure = Some(p.clamp(0.0, 100.0));
+            }
+        } else if let Some(v) = line.strip_prefix("mempl=") {
+            // PSI outranks the macOS level; a host never prints both.
+            if h.mem_pressure.is_none() {
+                h.mem_pressure = match v.trim() {
+                    "1" => Some(0.0),
+                    "2" => Some(50.0),
+                    "4" => Some(100.0),
+                    _ => None,
+                };
+            }
         } else if let Some(v) = line.strip_prefix("uptime=") {
             h.uptime_secs = v.trim().parse().ok();
         } else if let Some(v) = line.strip_prefix("cpus=") {
@@ -753,7 +813,28 @@ pub fn parse_host_health(stdout: &str) -> HostHealthSample {
             );
         }
     }
+    if let (Some(sum), Some(cpus)) = (ps_cpu, h.cpu_count) {
+        h.cpu_pct = Some((sum / cpus as f64).clamp(0.0, 100.0));
+    }
     h
+}
+
+/// The aggregate `cpu` line of `/proc/stat` as `(busy, total)` jiffies:
+/// `cpu user nice system idle iowait irq softirq steal …`, where idle and
+/// iowait are not busy. Guest time is already inside user and nice, so the
+/// first eight fields are the whole. `None` for anything else.
+pub fn parse_proc_stat_cpu(line: &str) -> Option<(i64, i64)> {
+    let mut f = line.split_whitespace();
+    if f.next()? != "cpu" {
+        return None;
+    }
+    let n: Vec<i64> = f.take(8).map(|v| v.parse().ok()).collect::<Option<_>>()?;
+    if n.len() < 4 {
+        return None;
+    }
+    let total: i64 = n.iter().sum();
+    let idle = n[3] + n.get(4).copied().unwrap_or(0);
+    Some((total - idle, total))
 }
 
 /// Parse [`HOST_IDENTITY_SCRIPT`] output. Requires BOTH a `tmuxrc=` line
@@ -3278,6 +3359,12 @@ mod tests {
         let h = parse_host_health(&stdout);
         assert!(h.cpu_count.is_some_and(|n| n >= 1), "{stdout}");
         assert!(h.mem_total_kb.is_some_and(|n| n > 0), "{stdout}");
+        // Host load (migration 193): the CPU counters are always there on
+        // Linux; PSI only on a kernel built with it, so it is not asserted.
+        assert!(
+            h.cpu_total_ticks.is_some_and(|t| t > 0) && h.cpu_busy_ticks.is_some(),
+            "{stdout}"
+        );
         // A boot in the past, and after 2001.
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -3286,6 +3373,56 @@ mod tests {
         assert!(
             h.boot_at.is_some_and(|b| b > 1_000_000_000 && b <= now),
             "{stdout}"
+        );
+    }
+
+    #[test]
+    fn parse_host_health_reads_cpu_counters_and_memory_pressure_on_linux() {
+        let h = parse_host_health(
+            "cpustat=cpu  100 5 50 800 40 3 2 0 0 0\n\
+             cpups=\n\
+             mempsi=12.34\n\
+             mempl=\n\
+             cpus=4\n",
+        );
+        // busy = user+nice+system+irq+softirq+steal; idle and iowait are not.
+        assert_eq!(
+            (h.cpu_busy_ticks, h.cpu_total_ticks),
+            (Some(160), Some(1000))
+        );
+        assert_eq!(
+            h.cpu_pct, None,
+            "Linux answers with counters, not a percent"
+        );
+        assert_eq!(h.mem_pressure, Some(12.34));
+        assert_eq!(
+            parse_proc_stat_cpu("cpu0 1 2 3 4"),
+            None,
+            "one core, not the total"
+        );
+        assert_eq!(parse_proc_stat_cpu("cpu 1 2"), None);
+        assert_eq!(parse_proc_stat_cpu("cpu 1 2 x 4"), None);
+    }
+
+    #[test]
+    fn parse_host_health_reads_cpu_and_memory_pressure_on_macos() {
+        let h =
+            parse_host_health("cpustat=\ncpups=310.5\nmempsi=\nmempl=2\ncpus=8\nmemkb=4194304\n");
+        assert_eq!(h.cpu_pct, Some(310.5 / 8.0));
+        assert_eq!(h.mem_pressure, Some(50.0));
+        assert_eq!(h.mem_avail_kb, Some(4_194_304));
+        assert_eq!((h.cpu_busy_ticks, h.cpu_total_ticks), (None, None));
+        // More %CPU than cores (a sampling race) is capped; no CPU count, no percent.
+        assert_eq!(
+            parse_host_health("cpups=900\ncpus=8\n").cpu_pct,
+            Some(100.0)
+        );
+        assert_eq!(parse_host_health("cpups=50\n").cpu_pct, None);
+        // An older script prints none of it: unknown, never zero.
+        let old = parse_host_health("memkb=5\ncpus=2\n");
+        assert_eq!(
+            (old.cpu_pct, old.mem_pressure, old.cpu_total_ticks),
+            (None, None, None)
         );
     }
 

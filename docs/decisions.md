@@ -1011,6 +1011,54 @@ qualify, Jev is asked which one, right before the restart.
 Code: `service/decide/limit_switch.rs`, called from
 `service/account_switch.rs`.
 
+## `restore_timing` — when a killed session comes back
+
+With `recovery.auto_restore` on (docs/status.md, *Automatic recovery*), a
+session whose process the host killed (`process_died`), whose tmux server
+went away or whose host rebooted is resumed by itself. With
+`decide.jev.restore_timing` on, Jev is asked about the cases the rule has
+a doubt over: a restore is due on a host under load (memory under
+`health.mem_low_pct` available, or CPU saturated), or an automatic restore
+of the session already failed once. A due restore on a calm host asks
+nobody.
+
+- **Rule first.** A loaded host defers the restore: no attempt is spent,
+  the row stays resumable (the lost TTL counts from the deferral), and one
+  `auto_restore_deferred` event per episode names the reason. When the load
+  drops, the session is resumed on the same host. Off or silent, that rule
+  is all there is.
+- **Question.** A choice: `recover_now`, `defer`, and `m:<alias>` for each
+  other active, reachable host whose memory is healthy.
+- **What is sent.** Per host (its own and each move candidate) CPU busy
+  percent, available memory percent and free disk percent, rounded down to
+  a tenth, and its live session count; for the session, why it was lost (a
+  vocabulary word), minutes since its last activity (bucketed), its last
+  turn outcome word, whether a turn was in flight and how many automatic
+  restores failed. No host name, path, prompt or transcript.
+- **Baseline.** `defer` while the host is loaded, else `recover_now`.
+- **Modes.** Shadow records beside the rule. Assist lets the answer pick
+  the timing, within bounds it cannot cross: `recover_now` never resumes
+  onto a host under the low-memory floor, a move names only an offered
+  host. This is a deliberate exception to D35, the owner's call
+  (2026-10-14): every choice is one the rule could make too (resume now,
+  wait), so the model picks timing, never a new kind of act. A `move` is
+  honoured as a deferral that records the target
+  (`auto_restore_deferred` detail `move:<alias>`): a lost session has no
+  live source for a move to carry its worktree from.
+- **Asked once per input.** A run on the same input fingerprint in the same
+  loss episode, or any run in the last 10 minutes, is reused, so the 20 s
+  tick never becomes a call every 20 s.
+- **Default.** Off, like every Jev use case and like `limit_switch`, the
+  closest one (an automatic action with a rule baseline). "On where Jev is
+  configured" would break the invariant that every `decide.jev.*` feature
+  starts off; turning Jev on is a person's choice per use case.
+- **What is recorded.** Subject `session` `<id>`; the reason line (answer
+  and confidence) lands in the `auto_restore_deferred` event's detail when
+  it steered a deferral.
+
+Code: `service/decide/restore_timing.rs`, called from
+`service/auto_restore.rs`.
+
 ## Context order for a drafted brief (J4) — a rule, not a Jev use case
 
 The test map's J4 (ranking context for a brief) is **built as a rule, not
@@ -1127,6 +1175,7 @@ redesign's transition plan.
 | `decide.jev.tracker_duplicate` | `off` | `off` / `shadow` / `assist` | fleet | Flagging in Review a new local task that may be the same work as an open tracker ticket. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.resume_or_new` | `off` | `off` / `shadow` / `assist` | fleet | Proposing, in New session, whether to resume a past session of the same work or start fresh. A single recent past session decides without Jev. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.limit_switch` | `off` | `off` / `shadow` / `assist` | fleet | Asking which login an out-of-credit session should resume under when it is switched automatically. The login with the most headroom is used either way; Jev's pick is recorded beside it so the two can be compared. Experimental. |
+| `decide.jev.restore_timing` | `off` | `off` / `shadow` / `assist` | fleet | Asking whether a killed session due back on a loaded host, or one whose recovery failed, should resume now, wait or move. Off: wait while loaded. Assist follows the answer, never past the low-memory floor; a move is only noted. Experimental. |
 | `decide.jev.unassigned` | `false` | on / off | fleet | Also send sessions and tickets that belong to no organisation. Experimental. Asks to confirm. |
 | `decide.jev.unassigned_reply` | `false` | on / off | fleet | Also send the reply text of sessions that belong to no organisation (turn outcome), on top of sending unassigned sessions at all. Experimental. Asks to confirm. |
 | `decide.jev.timeout_ms` | `1500` | 100–30000 ms | fleet | How long one call may take. A call is never retried. |

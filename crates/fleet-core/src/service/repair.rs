@@ -1469,6 +1469,7 @@ impl RepairExec for HostExec<'_> {
             self.ssh,
             &self.host,
             spec.project_id,
+            None,
             spec.session_id,
             &Default::default(),
             &spec.pane_cmd,

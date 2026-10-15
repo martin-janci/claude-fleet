@@ -1221,6 +1221,24 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "run_trace",
+            "runs",
+            json!({ "action": "trace", "run_id": "routine:4", "after_seq": 2, "limit": 50 }),
+            r#"{"run_id":"routine:4","steps":[{"seq":3,"attempt":1,"at":9,"phase":"settle","kind":"settle","actor":"scheduler","summary":"Its turn finished"}],"more":false}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::runs::routed::run_trace(
+                    b,
+                    s,
+                    fleet_core::service::run_trace::TraceArgs {
+                        run_id: "routine:4".into(),
+                        after_seq: Some(2),
+                        limit: Some(50),
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "agents_status",
             "agents",
             json!({ "action": "status", "agent": "review", "limit": 5 }),

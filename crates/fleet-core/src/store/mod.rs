@@ -62,6 +62,7 @@ mod review_prs;
 mod routine_decisions;
 mod routines;
 mod rows;
+mod run_trace;
 mod runs;
 #[cfg(test)]
 pub(crate) mod scale_fixture;
@@ -128,7 +129,8 @@ pub use clients::{
     LINE_SEPARATORS, MAX_CLIENT_NAME_LEN,
 };
 pub use control_handoffs::{
-    handoff_preview, ControlHandoffRow, HandoffItem, NewHandoff, HANDOFFS_KEEP, HANDOFF_PREVIEW_MAX,
+    handoff_preview, ControlHandoffRow, FeedEventRow, HandoffItem, NewHandoff, HANDOFFS_KEEP,
+    HANDOFF_PREVIEW_MAX,
 };
 pub use control_tokens::{ApiScope, ControlTokenRow, NewControlToken};
 pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};
@@ -227,6 +229,10 @@ pub use routines::{
     ROUTINE_RUN_OUTCOMES, ROUTINE_RUN_OUTCOME_SOURCES, ROUTINE_RUN_STATES, ROUTINE_TRIGGERS,
 };
 pub use rows::*;
+pub use run_trace::{
+    NewRunTrace, RunTraceRow, RUN_PHASES, RUN_TRACE_DATA_MAX, RUN_TRACE_KEEP_SECS,
+    RUN_TRACE_MAX_STEPS,
+};
 pub use runs::{
     RunRow, RunsFilter, RunsReach, MISSION_RUN_EVENTS, RUNS_DEFAULT_LIMIT, RUNS_MAX_LIMIT,
     RUN_KINDS, RUN_OUTCOMES, RUN_SOURCES,

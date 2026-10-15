@@ -379,6 +379,17 @@ describe('operator commands', () => {
     expect(box.value).toContain('`tidy_apply`');
     expect(mockedSend).not.toHaveBeenCalled();
   });
+
+  it('the autonomy chip sits in the same row of chips (Thread room)', async () => {
+    render(AgentPanel);
+    for (let i = 0; i < 4; i++) {
+      await tick();
+      await Promise.resolve();
+    }
+    const chip = screen.getByTestId('autonomy-chip');
+    expect(chip.closest('[data-testid="conv-chips"]')).not.toBeNull();
+    expect(chip.getAttribute('type')).toBe('button');
+  });
 });
 
 // Gap plan G3.9: Control runs /task, /done, /assign and /start itself, over

@@ -60,6 +60,8 @@ pub mod debug;
 pub mod fix;
 pub mod outcome;
 pub mod tick;
+pub mod trace;
+pub mod work_steps;
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs;
@@ -1044,6 +1046,10 @@ pub(crate) fn record_skip(
         error_code: None,
         host_alias: None,
     })?;
+    let checks = debug::fire_checks(s, r, now).unwrap_or_default();
+    let mut steps = trace::opening(r, &run, &checks, Some(reason), now);
+    steps.push(trace::settle_step("skipped", Some(reason), None, 0, now));
+    trace::write(s, &run, steps);
     decide(
         s,
         r,

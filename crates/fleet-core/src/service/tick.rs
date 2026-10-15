@@ -268,6 +268,18 @@ pub fn spawn_reconcile_tick(
                     }
                     service::loops::report("playbooks", Ok::<_, String>(()), Some(period));
                 }
+                // Recovery: a session the host killed (out of memory, a lost
+                // tmux server, a reboot) is resumed once its grace is up,
+                // within its budget, and the operator is restarted and told.
+                // After the pass, so it sees this pass's `lost_reason`s.
+                // Detached and single-flight; stops while paused.
+                service::auto_restore::maybe_run(store, ssh);
+                // Control hears what changed for the sessions it started or
+                // handed work to, its handed-off missions and the hosts: one
+                // `[fleet events]` digest at its next idle moment, rate-capped.
+                // After the restore, so a session brought back this pass is in
+                // it. Detached and single-flight; stops while paused.
+                service::operator_feed::maybe_run(store, ssh);
                 // PR shepherd: projects a person granted a rule for get their
                 // sessions' conflicting or red PRs recorded, and nudged at
                 // `nudge`. No rule, no work: one indexed read and out. Stops

@@ -153,6 +153,10 @@
   import { overflowMark } from './overflow_mark';
   import AutoContinueBar from './AutoContinueBar.svelte';
   import { recommendedPick } from './auto_continue';
+  import OrbitMark from './kit/OrbitMark.svelte';
+  import { hosts as hostRows } from './hosts';
+  import { refIndex, refSegments, type ChatRef } from './chat_refs';
+  import { fleetLine, parseFleetPrompt } from './fleet_events';
 
   let {
     session,
@@ -219,6 +223,15 @@
     // Control's chat: send a `choices` card's recommended option when
     // nobody answers in time (`auto_continue.ts`).
     autoContinue = false,
+    // Thread room (2026-10-14): Control's chat draws the same turns as a
+    // chat (the person's bubbles on the right, the agent's prose beside the
+    // Orbit mark, each run of tool calls folded to "Worked on N things"),
+    // centred in a 720 px column. The data, the sending and every action
+    // are this one panel's, whichever look it wears.
+    look = 'transcript',
+    // A `#TASK` / `@host` / `@session` the person wrote, drawn as a chip in
+    // the chat look; the host opens it (Control: the right panel).
+    onOpenRef,
   }: {
     session: SessionRow;
     visible: boolean;
@@ -238,7 +251,15 @@
     linkTasks?: () => Promise<TaskLink[]>;
     daySeparators?: boolean;
     autoContinue?: boolean;
+    look?: 'transcript' | 'chat';
+    onOpenRef?: (ref: ChatRef) => void;
   } = $props();
+
+  const chatLook = $derived(look === 'chat');
+  /** What a reference in a sent message may name: only read in the chat
+   *  look, and only when a host opens them. */
+  const refs = $derived(chatLook && onOpenRef ? refIndex($sessions, $hostRows.map((h) => h.alias)) : null);
+  const workedOn = (n: number) => `Worked on ${n} ${n === 1 ? 'thing' : 'things'}`;
 
   // Raw: replaced whole on each read and never mutated, so a deep proxy only
   // costs every read of a turn a trap (review r16 D3).
@@ -2236,7 +2257,16 @@
 
 </script>
 
-<div class="conversation-panel" data-testid="conversation-panel" bind:this={root}>
+{#snippet promptBody(text: string)}{#if refs}{#each refSegments(text, refs) as seg, k (k)}{#if seg.ref}<button
+          type="button"
+          class="ref-chip"
+          data-testid="conv-ref"
+          data-kind={seg.ref.kind}
+          title={seg.ref.kind === 'host' ? `Open host ${seg.ref.alias}` : seg.ref.kind === 'task' ? `Open ${seg.ref.key}` : `Open ${seg.ref.label}`}
+          onclick={() => onOpenRef?.(seg.ref!)}>{seg.text}</button
+        >{:else}{seg.text}{/if}{/each}{:else}{text}{/if}{/snippet}
+
+<div class="conversation-panel" class:chat-look={chatLook} data-testid="conversation-panel" bind:this={root}>
   <ConversationHeader
     {session}
     {conversations}
@@ -2360,6 +2390,7 @@
             {@const groups = groupItems(turn.items)}
             {@const replyText = groups.flatMap((x) => (x.kind === 'text' ? [x.text] : [])).join('\n\n')}
             {@const duration = turnRunning ? null : turnDuration(turn.at, turn.ended_at)}
+            {@const fleet = chatLook ? parseFleetPrompt(turn.prompt) : null}
             {#if showDivider && turnAnchor(turn) === dividerAnchor}
               <div class="new-divider" data-testid="conv-new-divider" role="separator" aria-label="New since you last looked"><span>New</span></div>
             {/if}
@@ -2369,7 +2400,35 @@
               data-match={matchKeys.has(key) || undefined}
               data-current-match={currentMatch === key || undefined}
             >
-              {#if turn.prompt !== null}
+              {#if fleet}
+                <!-- Thread room: fleet's own prompt (`[fleet events]` /
+                     `[fleet]`, fleet_events.ts) is not the person talking:
+                     one folded line that opens into the events. -->
+                <details class="fleet-events" data-testid="conv-fleet-events">
+                  <summary
+                    ><span class="fe-rule" aria-hidden="true"></span><span class="fe-line">{fleetLine(fleet)}</span
+                    >{#if turn.at}<time datetime={turn.at}>{relativeTime(turn.at, nowMs)}</time>{/if}<span class="fe-rule" aria-hidden="true"
+                    ></span></summary
+                  >
+                  <ul class="fe-list">
+                    {#each fleet.events as e, k (k)}
+                      {@const sid = e.sessionId}
+                      <li data-testid="conv-fleet-event">
+                        {#if sid != null && onOpenRef && $sessions.some((x) => x.id === sid)}
+                          <button
+                            type="button"
+                            class="fe-open"
+                            data-testid="conv-fleet-event-open"
+                            title="Open this session beside the chat"
+                            onclick={() => onOpenRef?.({ kind: 'session', id: sid, label: e.text })}>{e.text}</button
+                          >
+                        {:else}{e.text}{/if}
+                      </li>
+                    {/each}
+                    {#if fleet.more > 0}<li class="fe-more">… and {fleet.more} more</li>{/if}
+                  </ul>
+                </details>
+              {:else if turn.prompt !== null}
                 {@const long = isLongPrompt(turn.prompt)}
                 <div class="prompt" data-testid="conv-prompt">
                   <div class="prompt-head">
@@ -2387,7 +2446,7 @@
                     class="prompt-text"
                     class:clamped={long && !expanded.has(turnKey(turn, i))}
                     style:--clamp-lines={PROMPT_CLAMP_LINES}
-                  >{turn.prompt}</div>
+                  >{@render promptBody(turn.prompt)}</div>
                   {#if long}
                     <button type="button" class="linkish" data-testid="conv-prompt-toggle" onclick={() => togglePrompt(turnKey(turn, i))}
                       >{expanded.has(turnKey(turn, i)) ? 'Show less' : 'Show more'}</button
@@ -2407,7 +2466,8 @@
                   {/each}
                 </details>
               {/if}
-              <div class="reply">
+              <div class="reply" class:has-mark={chatLook && groups.length > 0}>
+                {#if chatLook && groups.length > 0}<span class="reply-mark" aria-hidden="true"><OrbitMark size={22} label={null} /></span>{/if}
                 {#each groups as g, j (j)}
                   {#if g.kind === 'text'}
                     <div class="text" data-testid="conv-text">
@@ -2425,17 +2485,17 @@
                          line keeps its component (open detail, cache) when a
                          second call joins it. A lone call's group is always
                          open with its summary hidden. -->
-                    {@const single = g.tools.length === 1}
+                    {@const single = !chatLook && g.tools.length === 1}
                     {@const parts = toolGroupParts(g.tools)}
                     <details
                       class="tools"
                       class:single
                       class:has-err={g.tools.some((t) => t.error)}
-                      use:autoOpen={{ on: turnRunning && j === groups.length - 1, single }}
+                      use:autoOpen={{ on: !chatLook && turnRunning && j === groups.length - 1, single }}
                       data-testid={single ? undefined : 'conv-tools'}
                     >
-                      <summary aria-hidden={single || undefined} tabindex={single ? -1 : undefined}
-                        >{parts.main}{#if parts.failed}<span class="failed-count"> · <span class="pill">{parts.failed}</span></span>{/if}</summary
+                      <summary aria-hidden={single || undefined} tabindex={single ? -1 : undefined} title={chatLook ? parts.main : undefined}
+                        >{chatLook ? workedOn(g.tools.length) : parts.main}{#if parts.failed}<span class="failed-count"> · <span class="pill">{parts.failed}</span></span>{/if}</summary
                       >
                       <div class="tools-body">
                         {#each g.tools as line, k (k)}
@@ -2573,7 +2633,7 @@
                   <span class="who">You</span>
                   <time datetime={m.at}>{relativeTime(m.at, nowMs)}</time>
                 </div>
-                <div class="prompt-text">{m.text}</div>
+                <div class="prompt-text">{@render promptBody(m.text)}</div>
                 {#if m.attachments.length}
                   <div class="outgoing-files" data-testid="conv-outgoing-files">
                     {m.attachments.length === 1 ? m.attachments[0].name : `${m.attachments.length} files`}
@@ -3159,6 +3219,158 @@
     flex-direction: column;
     min-height: 0;
     background: var(--bg);
+  }
+  /* Thread room (2026-10-14): the chat look. One 720 px column (the
+     manual's --prose-max) for the turns, the header and the composer. */
+  .conversation-panel.chat-look {
+    --chat-col: var(--prose-max);
+  }
+  .chat-look .turn + .turn {
+    border-top: 0;
+    padding-top: 0.4rem;
+  }
+  .chat-look .prompt {
+    position: relative;
+    width: fit-content;
+    max-width: min(520px, 85%);
+    margin: 0 0 1rem auto;
+    padding: 10px 14px;
+    border: 0;
+    border-radius: var(--radius-phone-card) var(--radius-phone-card) var(--radius-sm) var(--radius-phone-card);
+    background: var(--bg-raise);
+  }
+  .chat-look .who {
+    display: none;
+  }
+  /* The bubble's time and Copy sit beside it, shown on hover or focus. */
+  .chat-look .prompt-head {
+    position: absolute;
+    right: 100%;
+    top: 8px;
+    margin: 0 var(--space-2) 0 0;
+    opacity: 0;
+    transition: opacity var(--dur-fast) ease;
+  }
+  .chat-look .prompt:hover .prompt-head,
+  .chat-look .prompt:focus-within .prompt-head {
+    opacity: 1;
+  }
+  .chat-look .outgoing .prompt.is-early {
+    border: 1px dashed var(--control-border);
+    background: var(--bg-raise);
+  }
+  .chat-look .outgoing .prompt.is-failed {
+    background: var(--failed-soft);
+  }
+  .chat-look .outgoing .receipt {
+    justify-content: flex-end;
+  }
+  .chat-look .reply.has-mark {
+    position: relative;
+    padding-left: 34px;
+  }
+  .reply-mark {
+    position: absolute;
+    left: 0;
+    top: 0.45rem;
+    line-height: 0;
+  }
+  .chat-look .tools.single summary {
+    display: revert;
+  }
+  /* Reply actions on hover over the message, and for the keyboard. */
+  .chat-look .footer-actions {
+    opacity: 0;
+    transition: opacity var(--dur-fast) ease;
+  }
+  .chat-look .turn:hover .footer-actions,
+  .chat-look .footer-actions:focus-within {
+    opacity: 1;
+  }
+  .fleet-events {
+    margin: 0 0 0.8rem;
+    padding-left: 34px;
+  }
+  .fleet-events summary {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    list-style: none;
+    cursor: pointer;
+    color: var(--fg-muted);
+    font-size: var(--text-xs);
+  }
+  .fleet-events summary::-webkit-details-marker {
+    display: none;
+  }
+  .fleet-events summary:hover .fe-line {
+    color: var(--fg);
+  }
+  .fleet-events summary:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+    outline-offset: 2px;
+  }
+  .fe-rule {
+    flex: 1 1 auto;
+    height: 1px;
+    background: var(--border);
+  }
+  .fe-line::after {
+    content: ' ▸';
+  }
+  .fleet-events[open] .fe-line::after {
+    content: ' ▾';
+  }
+  .fe-list {
+    margin: var(--space-2) 0 0;
+    padding: var(--space-2) var(--space-3);
+    list-style: none;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: var(--bg-pane);
+    font-size: var(--text-xs);
+    line-height: var(--text-xs-lh);
+    color: var(--fg-2);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .fe-more {
+    color: var(--fg-muted);
+  }
+  .fe-open {
+    border: 0;
+    padding: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .fe-open:hover {
+    color: var(--fg);
+    text-decoration: underline;
+  }
+  .fe-open:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+    outline-offset: 1px;
+  }
+  .ref-chip {
+    display: inline;
+    padding: 0 4px;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: var(--accent-soft);
+    color: var(--fg);
+    font: inherit;
+    cursor: pointer;
+  }
+  .ref-chip:hover {
+    text-decoration: underline;
+  }
+  .ref-chip:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+    outline-offset: 1px;
   }
   .thread-area {
     position: relative;

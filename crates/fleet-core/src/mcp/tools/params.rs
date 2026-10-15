@@ -1611,8 +1611,14 @@ pub struct DebugDevicesParams {
 /// screen's later actions stay one entry.
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct RunsParams {
-    /// list.
+    /// list | trace.
     pub action: String,
+    /// trace: the run's id from list (`routine:418`, `agent:91`).
+    #[serde(default)]
+    pub run_id: Option<String>,
+    /// trace: only the steps after this seq.
+    #[serde(default)]
+    pub after_seq: Option<i64>,
     /// Started at or after (unix s).
     #[serde(default)]
     pub since: Option<i64>,
@@ -1639,7 +1645,7 @@ pub struct RunsParams {
     /// One routine's fires.
     #[serde(default)]
     pub routine_id: Option<i64>,
-    /// ≤ 200 (50).
+    /// list: ≤ 200 (50); trace: ≤ 2000 (500).
     #[serde(default)]
     pub limit: Option<i64>,
     /// Rows to skip.

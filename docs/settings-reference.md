@@ -19,7 +19,7 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 
 | Setting | Default | Range | Scope | What it does |
 |---|---|---|---|---|
-| `sessions.lost_ttl_secs` | `1209600` | seconds, shown in hours, `0` = removed on the next pass | fleet | How long a resumable session lost to a host reboot or the tmux server exiting is kept before it is deleted, counted from when it was lost. |
+| `sessions.lost_ttl_secs` | `1209600` | seconds, shown in hours, `0` = removed on the next pass | fleet | How long a resumable session lost to a host reboot, the tmux server exiting or its process being killed (out of memory) is kept before it is deleted, counted from when it was lost. |
 
 ## Restoring lost sessions
 
@@ -50,6 +50,8 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 |---|---|---|---|---|
 | `control.auto_continue` | `true` | on / off | fleet | Control's chat sends the option its agent marked recommended once nobody has answered for the minutes below. Typing or Cancel stops it. Never for a push, a delete or another step hard to undo, and only while the app is open. |
 | `control.auto_continue_minutes` | `10` | 1–1440 minutes | fleet | How long Control's chat waits for your answer before it sends the recommended option. |
+| `control.react_to_events` | `true` | on / off | fleet | Control's agent gets a short note when a session it started finishes, gets stuck, fails or is lost, when a mission it handed off waits on you, or when a host goes down or runs low. Only while it is idle, and never while automation is paused. |
+| `control.feed_min_interval_secs` | `60` | seconds, `0` = no wait | fleet | The shortest time between two notes to Control's agent. What happens in between goes out together in the next one. |
 
 ## Playbooks
 
@@ -58,6 +60,14 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `playbooks.press_enter` | `false` | on / off | fleet | Press Enter for sessions stuck on a "Press Enter" prompt. Auth menus, trust prompts and reconnects are always notify-only. |
 | `playbooks.oom_recreate` | `false` | on / off | fleet | Recreate a session that ran out of memory, within the budget below. |
 | `playbooks.oom_max_attempts` | `2` | 0–20, `0` = never | fleet | Recreates one session may get per 24 hours. A session that is working, or finished a turn after the flag, is never recreated. |
+
+## recovery
+
+| Setting | Default | Range | Scope | What it does |
+|---|---|---|---|---|
+| `recovery.auto_restore` | `true` | on / off | fleet | Resume a session on its own when its host killed the process (out of memory), its tmux server stopped or the host rebooted, and note it on the session's timeline. Control's own session is restarted and told what happened. |
+| `recovery.grace_secs` | `60` | seconds, `0` = at once | fleet | How long after a session is lost before it is brought back, so a reboot is recognised as one and the memory that ran out can settle. |
+| `recovery.max_attempts` | `2` | 0–20, `0` = never | fleet | Automatic restores one session may get per 24 hours, failed ones included. Past it the session waits for a person. |
 
 ## agents
 
@@ -162,6 +172,8 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `health.context_red_pct` | `85` | 1–100% | fleet | Percent of the context window at which a session needs you. The chip turns red here and amber 15 points below. |
 | `health.version_max_age_secs` | `86400` | seconds, shown in hours | fleet | How old a host's recorded Claude version may be before the "older than the fleet" badge stops trusting it and shows nothing. |
 | `health.disk_low_pct` | `90` | 50–100% | fleet | Used share of a host's home filesystem at which the host reads as disk low. |
+| `health.mem_low_pct` | `10` | 1–50% | fleet | Available share of a host's memory at or under which the host reads as memory low. Sessions killed there are brought back only once it recovers. |
+| `health.cpu_busy_pct` | `90` | 50–100% | fleet | Busy share of a host's CPUs at which the host reads as saturated, when two samples in a row reach it. |
 | `health.claude_max_behind` | `30` | 0–1000 | fleet | Patch releases a host's Claude may trail the fleet's newest before the host reads as behind. |
 | `health.hooks_silent_secs` | `3600` | seconds, shown in minutes | fleet | How long a reachable host with a live session may send no hook before it reads as hooks silent. |
 
@@ -251,6 +263,7 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `decide.jev.tracker_duplicate` | `off` | `off` / `shadow` / `assist` | fleet | Flagging in Review a new local task that may be the same work as an open tracker ticket. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.resume_or_new` | `off` | `off` / `shadow` / `assist` | fleet | Proposing, in New session, whether to resume a past session of the same work or start fresh. A single recent past session decides without Jev. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.limit_switch` | `off` | `off` / `shadow` / `assist` | fleet | Asking which login an out-of-credit session should resume under when it is switched automatically. The login with the most headroom is used either way; Jev's pick is recorded beside it so the two can be compared. Experimental. |
+| `decide.jev.restore_timing` | `off` | `off` / `shadow` / `assist` | fleet | Asking whether a killed session due back on a loaded host, or one whose recovery failed, should resume now, wait or move. Off: wait while loaded. Assist follows the answer, never past the low-memory floor; a move is only noted. Experimental. |
 | `decide.jev.unassigned` | `false` | on / off | fleet | Also send sessions and tickets that belong to no organisation. Experimental. Asks to confirm. |
 | `decide.jev.unassigned_reply` | `false` | on / off | fleet | Also send the reply text of sessions that belong to no organisation (turn outcome), on top of sending unassigned sessions at all. Experimental. Asks to confirm. |
 | `decide.jev.timeout_ms` | `1500` | 100–30000 ms | fleet | How long one call may take. A call is never retried. |

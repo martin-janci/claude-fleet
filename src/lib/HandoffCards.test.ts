@@ -24,6 +24,9 @@ import { sessions, type SessionRow } from './sessions';
 import { sessionFocus } from './session_focus';
 import { missionOpenRequest } from './missions';
 import { destination } from './destination';
+import { selectedSession } from './selection';
+import { controlViews } from './control_views';
+import { controlMission } from './control_room';
 import { selectedTaskId, sidebarView } from './work_view';
 import { get } from 'svelte/store';
 import { motionPref } from './motion';
@@ -70,8 +73,13 @@ describe('handoff chips', () => {
     expect(chip.textContent).toContain('Working');
     sessions.set([session(3, 'completed', 'fix-ci')]);
     await waitFor(() => expect(screen.getByTestId('handoff-session').textContent).toContain('Done'));
+    destination.set('control');
     await fireEvent.click(screen.getByTestId('handoff-session'));
-    expect(get(sessionFocus)?.id).toBe(3);
+    // Thread room: it opens in Control's Session tab, and Control stays.
+    expect(get(selectedSession)?.id).toBe(3);
+    expect(get(controlViews).active).toBe('session');
+    expect(get(destination)).toBe('control');
+    expect(get(sessionFocus)).toBeNull();
   });
 
   it('a session that is gone says it ended', async () => {
@@ -92,10 +100,12 @@ describe('handoff chips', () => {
     expect(chip.textContent).toContain('Working');
     destination.set('control');
     await fireEvent.click(chip);
-    expect(get(missionOpenRequest)).toEqual({ id: 5 });
-    // Control covers Work: the chip leaves it, or nothing shows.
-    expect(get(destination)).toBe('session');
-    expect(get(sidebarView)).toBe('work');
+    // Thread room: the mission opens in Control's Missions view; Work's
+    // copy is one "Open in Work" away there.
+    expect(get(controlMission)).toBe(5);
+    expect(get(controlViews).active).toBe('missions');
+    expect(get(destination)).toBe('control');
+    expect(get(missionOpenRequest)).toBeNull();
   });
 
   it("a task card's Open in Work leaves Control for the task in Work", async () => {
@@ -421,3 +431,53 @@ describe('the task group', () => {
     expect(screen.getByTestId('handoff-task-owner')).toBeTruthy();
   });
 });
+
+// Thread room (2026-10-14): the task graph card in the chat.
+describe('task graph card', () => {
+  it('a mission receipt shows its graph, and Open full graph opens it in Control', async () => {
+    receipts = [{ id: 2, at: now, kind: 'mission', tool: 'work_link', mission_id: 5, mission_name: 'Ship 9.x', mission_state: 'active' }];
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd === 'control_handoffs') return receipts;
+      if (cmd === 'work_mission')
+        return {
+          mission: { id: 5, name: 'Ship 9.x', state: 'active' },
+          items: [{ id: 1, title: 'Fix flake' }, { id: 2, title: 'Push tag' }],
+          graph: { nodes: [{ item_id: 1, state: 'done', wave: 1 }, { item_id: 2, state: 'proposed', wave: 2 }] },
+        };
+      return null;
+    });
+    render(HandoffCards);
+    const card = await screen.findByTestId('task-graph-card');
+    expect(card.dataset.kind).toBe('mission');
+    expect(screen.getAllByTestId('task-graph-step').map((s) => s.textContent)).toEqual([
+      expect.stringContaining('Fix flake'),
+      expect.stringContaining('Push tag'),
+    ]);
+    expect(screen.getByTestId('task-graph-progress').textContent).toBe('1 of 2 done');
+    await fireEvent.click(screen.getByTestId('task-graph-open'));
+    expect(get(controlMission)).toBe(5);
+    expect(get(controlViews).active).toBe('missions');
+  });
+
+  it('a proposed tree also shows as a graph', async () => {
+    receipts = [
+      {
+        id: 4,
+        at: now,
+        kind: 'tree',
+        tool: 'propose_tree',
+        item: { id: 10, title: 'Release', status: 'todo' },
+        items: [
+          { id: 11, title: 'Build', status: 'todo', proposal_state: 'proposed' },
+          { id: 12, title: 'Tag', status: 'todo', proposal_state: 'proposed', depends_on: [11] },
+        ],
+      },
+    ];
+    render(HandoffCards);
+    const card = await screen.findByTestId('task-graph-card');
+    expect(card.dataset.kind).toBe('tree');
+    expect(card.textContent).toContain('Task graph · Release');
+    expect(screen.getAllByTestId('task-graph-step')).toHaveLength(2);
+  });
+});
+

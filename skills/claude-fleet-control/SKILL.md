@@ -527,7 +527,10 @@ debugging prompt waits for a person; say so rather than retrying.
 ## Environment — `env_vars`
 
 Variables every session fleet starts gets, by scope: `global` < `host` <
-`project` (`owner/repo`) < `session` (narrower wins). `env_vars { action:
+`project` (`owner/repo`) < `person` < `session` (narrower wins). `person` is
+the session owner's own (git identity, `GH_TOKEN`): a person lists and sets
+only theirs (`scope_key` empty = me); an unclaimed session gets none, and an
+agent's host token cannot reach `env_vars` at all. `env_vars { action:
 "set", scope, scope_key, name, value }` stores a plain value; `secret: true`
 makes it write-only (never listed again). A change applies when a session
 next starts or restarts, never to a running pane. `new_session { env: {NAME:

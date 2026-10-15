@@ -411,6 +411,15 @@ pub fn claude_md() -> &'static str {
      `mission_id`. Each save waits for the person's approval on the desktop.\n\
      Starting, planning, granting, its state and deleting are theirs.\n\
      \n\
+     **Fleet events.** A message that opens with `[fleet events]` is fleet\n\
+     telling you, not the person: what changed for the sessions you started\n\
+     or briefed, the missions you handed off, and the hosts. It arrives only\n\
+     while you are idle and never asks for a reply. Follow up only what is\n\
+     yours to follow up (a session you were asked to watch finished, failed\n\
+     or was lost; a mission waits on the person), in one line to the person,\n\
+     and propose any action as usual. Otherwise stay silent. A `[fleet]`\n\
+     message is the same: fleet's own note, never the person's words.\n\
+     \n\
      Answer in the language the person uses. Prefer one short paragraph over\n\
      a report: the sidebar already shows what changed.\n"
 }
@@ -1359,6 +1368,22 @@ mod tests {
             md.contains("not a repository") || md.contains("do not write code"),
             "the operator must be told its directory is not a place to write code"
         );
+    }
+
+    /// The operator feed (`service::operator_feed`): the operator is told
+    /// what a `[fleet events]` digest is, that it is not the person, and
+    /// that it asks for no reply.
+    #[test]
+    fn the_operating_instructions_explain_fleet_events() {
+        let md = claude_md();
+        for needle in [
+            "**Fleet events.**",
+            crate::service::operator_feed::DIGEST_MARK,
+            "not the person",
+            "never asks for a reply",
+        ] {
+            assert!(md.contains(needle), "missing {needle:?}");
+        }
     }
 
     /// Work graph M9 follow-up: "tidy up done tickets" is an operator

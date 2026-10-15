@@ -1060,6 +1060,8 @@ pub(super) async fn new_session_inner(
         &**ssh,
         &args.host_alias,
         Some(args.project_id),
+        // The row does not exist yet: the owner it is about to record.
+        args.owner_person_id,
         None,
         &env_extra,
         &pane_cmd,
@@ -1760,7 +1762,8 @@ pub(super) async fn kill_session_with(
         record_kill(&s, id, claude_sid.as_deref());
         match s.mark_session_killed(id, now_unix()) {
             // Already a ghost before this kill, with no tmux left: a
-            // resumable loss (`host_reboot`, `tmux_server_gone`) is exempt
+            // resumable loss (`host_reboot`, `tmux_server_gone`,
+            // `process_died`) is exempt
             // from the reap for the lost-session TTL, so the person's Kill
             // would leave it listed for days. They asked for it gone.
             Ok(None) if tmux_gone => {
@@ -2270,6 +2273,8 @@ pub async fn restart_session(
         &**ssh,
         &args.host_alias,
         project_id,
+        // The row's owner at launch time (a row-less orphan has none).
+        None,
         session_id,
         &Default::default(),
         &pane_cmd,
@@ -2640,6 +2645,7 @@ pub async fn recreate_session(
         &**ssh,
         &sess.host_alias,
         sess.project_id,
+        None,
         Some(sess.id),
         &Default::default(),
         &pane_cmd,

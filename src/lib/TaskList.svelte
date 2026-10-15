@@ -17,6 +17,8 @@
     selectedTaskId,
     workTree,
     workViewFilters,
+    personArchived,
+    withoutPersonArchived,
     type WorkTask,
     type WorkTaskLink,
     type WorkTreePage,
@@ -49,7 +51,18 @@
     onpage,
   }: { debounceMs?: number; maxWaitMs?: number; onpage?: (p: WorkTreePage) => void } = $props();
 
-  let tasks = $state.raw<WorkTask[]>([]);
+  /** Every task the read answered; [tasks] is what the list shows. */
+  let read = $state.raw<WorkTask[]>([]);
+  // Tasks a person archived stay out until the Archived switch is on.
+  const showArchived = $derived($workViewFilters.archived === true);
+  const tasks = $derived(withoutPersonArchived(read, showArchived));
+  const archivedOut = $derived(showArchived ? 0 : read.filter(personArchived).length);
+  function setShowArchived(on: boolean) {
+    workViewFilters.update((f) => {
+      const { archived: _a, ...rest } = f;
+      return on ? { ...rest, archived: true } : rest;
+    });
+  }
   // A blocked task names what it waits for by key when that task is loaded.
   const byId = $derived(new Map(tasks.map((t) => [t.task_id, t])));
   const taskById = (id: string) => byId.get(id);
@@ -86,11 +99,11 @@
       return;
     }
     error = null;
-    tasks = Array.isArray(r.value?.tasks) ? r.value.tasks : [];
+    read = Array.isArray(r.value?.tasks) ? r.value.tasks : [];
     const orgs = Array.isArray(r.value?.orgs) ? r.value.orgs : [];
     onpage?.({
       ...r.value,
-      tasks,
+      tasks: read,
       orgs,
       groups: Array.isArray(r.value?.groups) ? r.value.groups : [],
       trackers: Array.isArray(r.value?.trackers) ? r.value.trackers : [],
@@ -215,6 +228,17 @@
       <p class="muted" data-testid="task-sections-empty">Nothing in {emptySections.join(' or ')}.</p>
     {/if}
     {#if unplaced}<p class="muted" data-testid="task-list-unplaced">{unplaced}</p>{/if}
+  {/if}
+  {#if loaded && !error && (archivedOut > 0 || (showArchived && read.some(personArchived)))}
+    <p class="muted archived-line" data-testid="task-list-archived">
+      {#if showArchived}
+        Showing archived tasks
+        <button class="btn btn--quiet" type="button" data-testid="task-list-archived-toggle" onclick={() => setShowArchived(false)}>Hide archived</button>
+      {:else}
+        {archivedOut} archived
+        <button class="btn btn--quiet" type="button" data-testid="task-list-archived-toggle" onclick={() => setShowArchived(true)}>Show</button>
+      {/if}
+    </p>
   {/if}
 </div>
 

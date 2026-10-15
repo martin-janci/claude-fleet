@@ -2865,13 +2865,15 @@ async fn move_session_inner(
         &snap.launch,
     );
     // The target sources the session's environment: the target host's
-    // scope, the project's, and the source row's session scope (copied to
-    // the target row below). Before the workspace step; no store guard here.
+    // scope, the project's, the source row's owner's person scope (the
+    // target row keeps that owner) and its session scope (copied to the
+    // target row below). Before the workspace step; no store guard here.
     let pane_cmd = crate::service::env::prepare(
         store,
         ssh,
         &target,
         snap.row.project_id,
+        None,
         Some(snap.row.id),
         &Default::default(),
         &pane_cmd,
@@ -4244,7 +4246,7 @@ mod tests {
             .store
             .lock()
             .unwrap()
-            .env_for_launch("beta", None, Some(rep.target_session_id))
+            .env_for_launch("beta", None, None, Some(rep.target_session_id))
             .unwrap();
         let secret = on_target
             .iter()

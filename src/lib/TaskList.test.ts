@@ -3,6 +3,7 @@
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { tick } from 'svelte';
+import { get } from 'svelte/store';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
@@ -127,6 +128,25 @@ describe('TaskList', () => {
     expect(screen.getByTestId('task-proposals-badge').textContent).toContain('2');
     expect(screen.getByTestId('task-child').textContent).toContain('Neutral review');
     expect(screen.getByTestId('task-child').textContent).toContain('agent');
+  });
+
+  it('hides tasks a person archived until Show is pressed', async () => {
+    const parked = task({ task_id: 'item:8', item_id: 8, key: 'TASK-8', title: 'Parked idea', kind: 'local', status_category: 'todo', archived: true, archived_at: NOW, last_activity_at: NOW });
+    (invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) =>
+      cmd === 'work_tree' ? { ...page, tasks: [...page.tasks, parked], total: 4 } : null,
+    );
+    render(TaskList);
+    await flush();
+    expect(screen.getByTestId('task-section-todo').textContent).not.toContain('Parked idea');
+    expect(screen.getByTestId('task-list-archived').textContent).toContain('1 archived');
+    await fireEvent.click(screen.getByTestId('task-list-archived-toggle'));
+    await flush();
+    expect(get(workViewFilters).archived).toBe(true);
+    expect(screen.getByTestId('task-section-todo').textContent).toContain('Parked idea');
+    await fireEvent.click(screen.getByTestId('task-list-archived-toggle'));
+    await flush();
+    expect(get(workViewFilters).archived).toBeUndefined();
+    expect(screen.getByTestId('task-section-todo').textContent).not.toContain('Parked idea');
   });
 
   it('Done is collapsed by default', async () => {
