@@ -244,6 +244,15 @@ describe('Runs lanes and run timeline (automation runs boards A and B)', () => {
     expect(await screen.findByTestId('run-timeline')).toBeInTheDocument();
   });
 
+  it("Control's Orbit asks for Runs on one run, and Automation opens there", async () => {
+    const { openRuns } = await import('./automation');
+    openRuns('orbit', 'routine:418');
+    render(AutomationView);
+    expect(await screen.findByTestId('run-timeline')).toBeInTheDocument();
+    await fireEvent.click(screen.getByTestId('run-timeline-close'));
+    expect(await screen.findByTestId('orbit-map')).toBeInTheDocument();
+  });
+
   it("the list opens a run's steps too, and an untraced run says so", async () => {
     render(AutomationView);
     automationTab.set('runs');
