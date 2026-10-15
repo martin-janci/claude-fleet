@@ -7,7 +7,7 @@
 // fleet read. `validationLines` keeps the two apart.
 
 import { invokeCmd, type Result } from './result';
-import type { TaskReport } from './rich_blocks';
+import { reportFromValue, type TaskReport } from './rich_blocks';
 import type { TaskEvidence } from './missions';
 import { outcomeLabel } from './mission_triage';
 import type { TaskRow } from './tasks';
@@ -59,9 +59,32 @@ export interface TaskResultView {
 
 /** The result of a work item, or of the item a session works on; `null`
  *  when no finished task carries a report yet. */
-export function workResult(by: { itemId: number } | { sessionId: number }): Promise<Result<TaskResultView | null>> {
+export async function workResult(by: { itemId: number } | { sessionId: number }): Promise<Result<TaskResultView | null>> {
   const args = 'itemId' in by ? { item_id: by.itemId } : { session_id: by.sessionId };
-  return invokeCmd<TaskResultView | null>('work_result', { args });
+  const r = await invokeCmd<TaskResultView | null>('work_result', { args });
+  return r.ok && r.value ? { ok: true, value: normalizeResult(r.value) } : r;
+}
+
+/** The view as the panel reads it. The backend leaves out an empty list and
+ *  an unset option (`skip_serializing_if`), so a report with no blockers
+ *  arrives with no `blockers` at all: every list and nullable is filled in
+ *  here, once, rather than at each read. */
+export function normalizeResult(v: TaskResultView): TaskResultView {
+  return {
+    ...v,
+    session_id: v.session_id ?? null,
+    report: reportFromValue(v.report) ?? (reportFromValue({}) as TaskReport),
+    evidence: v.evidence ?? null,
+    prs: (v.prs ?? []).map((p) => ({
+      url: p.url,
+      number: p.number ?? null,
+      state: p.state ?? null,
+      ci_status: p.ci_status ?? null,
+      review_decision: p.review_decision ?? null,
+    })),
+    gate: { state: v.gate.state, checks: v.gate.checks ?? [], open_children: v.gate.open_children ?? [] },
+    followups: (v.followups ?? []).map((f) => ({ text: f.text, item_id: f.item_id ?? null })),
+  };
 }
 
 /**

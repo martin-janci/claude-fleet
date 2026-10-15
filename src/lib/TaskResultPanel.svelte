@@ -115,7 +115,7 @@
   }
 
   function prLabel(pr: ResultPr): string {
-    const parts = [pr.number !== null ? `#${pr.number}` : 'PR'];
+    const parts = [pr.number != null ? `#${pr.number}` : 'PR'];
     if (pr.state) parts.push(pr.state);
     if (pr.ci_status) parts.push(`CI ${pr.ci_status}`);
     if (pr.review_decision) parts.push(`review ${pr.review_decision.toLowerCase().replaceAll('_', ' ')}`);

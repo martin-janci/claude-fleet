@@ -176,6 +176,7 @@ describe('WorkTaskDetail', () => {
     expect(within(panel).getByTestId('task-result-headline').textContent).toContain('Task completed');
     expect(within(panel).getByTestId('task-result-mark-done')).toBeTruthy();
     expect(screen.queryByTestId('work-task-no-activity')).toBeNull();
+    expect(screen.queryByTestId('work-task-outcome')).toBeNull();
     await fireEvent.click(within(panel).getByTestId('task-result-followup-open-81'));
     expect(get(selectedTaskId)).toBe('item:81');
   });

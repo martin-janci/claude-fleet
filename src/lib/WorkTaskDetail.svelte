@@ -1033,7 +1033,8 @@
           </section>
         {/if}
 
-        {#if detail?.last_outcome}
+        <!-- The result panel replaces "Last outcome" when a result exists (design 2026-10-13 D6). -->
+        {#if !result && detail?.last_outcome}
           {@const o = detail.last_outcome}
           <section aria-label="Last outcome">
             <h3>Last outcome</h3>

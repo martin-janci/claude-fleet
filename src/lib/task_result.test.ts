@@ -71,6 +71,28 @@ describe('task result commands', () => {
     ]);
   });
 
+  it('fills in the lists and options the backend leaves out', async () => {
+    // What the Rust view serialises for a report with nothing but a summary:
+    // empty lists and unset options are skipped, not sent as [] / null.
+    inv.mockResolvedValue({
+      task_id: 1, item_id: 2, role: 'wrapup', at: 0, marker: 'FLEET_TASK_DONE_x',
+      report: { summary: 's', outcome: 'done' },
+      prs: [{ url: 'https://github.com/o/r/pull/1' }],
+      gate: { state: 'passed', checks: [], open_children: [] },
+      followups: [{ text: 'next' }],
+    });
+    const r = await workResult({ itemId: 2 });
+    if (!r.ok || !r.value) throw new Error('expected a result');
+    const v = r.value;
+    expect(v.report.blockers).toEqual([]);
+    expect(v.report.tests_run).toEqual([]);
+    expect(v.session_id).toBeNull();
+    expect(v.evidence).toBeNull();
+    expect(v.prs[0].number).toBeNull();
+    expect(v.followups).toEqual([{ text: 'next', item_id: null }]);
+    expect(validationLines(v)).toEqual([]);
+  });
+
   it('asks a session for its result', async () => {
     await requestWorkResult(9);
     expect(inv).toHaveBeenCalledWith('request_work_result', { args: { session_id: 9 } });
