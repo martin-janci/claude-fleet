@@ -5244,7 +5244,8 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                 block_on(commands::missions::routed::set_work_archived(
                     b,
                     commands::missions::SetWorkArchivedArgs {
-                        item_id: 3,
+                        item_id: Some(3),
+                        task_id: None,
                         on: true,
                     },
                     s,

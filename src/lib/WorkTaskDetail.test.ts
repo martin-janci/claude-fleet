@@ -183,6 +183,35 @@ describe('WorkTaskDetail', () => {
     expect(screen.queryByTestId('work-task-archived-chip')).toBeNull();
   });
 
+  it('a bare task (a key from a prompt, no item, its session gone) archives by task id', async () => {
+    let archived = false;
+    const bare = {
+      ...trackerTask,
+      task: {
+        ...trackerTask.task,
+        task_id: 'ref:martin-janci/claude-fleet#333',
+        key: 'martin-janci/claude-fleet#333',
+        item_id: null,
+        counts: { active: 0, ended: 1, suggested: 0 },
+      },
+    };
+    handlers.work_task = () => ({ ...bare, task: { ...bare.task, archived } });
+    handlers.set_work_archived = (a) => {
+      archived = a.on as boolean;
+      return { item_id: null, task_id: a.task_id, changed: true };
+    };
+    render(WorkTaskDetail, { taskId: 'ref:martin-janci/claude-fleet#333' });
+    await flush();
+    expect(screen.getByTestId('work-task-archive').textContent).toBe('Archive');
+    await fireEvent.click(screen.getByTestId('work-task-archive'));
+    await flush();
+    expect(calls('set_work_archived')).toEqual([{ task_id: 'ref:martin-janci/claude-fleet#333', on: true }]);
+    expect(screen.getByTestId('work-task-archive').textContent).toBe('Unarchive');
+    await fireEvent.click(screen.getByTestId('work-task-archive'));
+    await flush();
+    expect(calls('set_work_archived')[1]).toEqual({ task_id: 'ref:martin-janci/claude-fleet#333', on: false });
+  });
+
   it('a task nobody is asked about, and a ticket, show no close question', async () => {
     render(WorkTaskDetail, { taskId: 'item:77' });
     await flush();
