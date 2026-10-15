@@ -49,6 +49,7 @@
   import ControlRouteReceipts from './ControlRouteReceipts.svelte';
   import ControlCommandReceipts from './ControlCommandReceipts.svelte';
   import ControlSuggestions from './ControlSuggestions.svelte';
+  import AutonomyChip from './AutonomyChip.svelte';
   import { takeControlCommand } from './control_slash';
   import { linkableTasks, type TaskLink } from './control_task_link';
   import { workTree } from './work_view';
@@ -220,6 +221,9 @@
 {#snippet tools()}
   <!-- Control chat UX (2026-10-10): these join the quick-prompt row
        (Clear, Compact, Status), so one row of chips sits above the box. -->
+  <!-- Thread room (board Autonomy): how much Control does on its own, one
+       dial over the mission level, auto-continue and the event feed. -->
+  <AutonomyChip />
   {#if ctx}
     <button
       type="button"

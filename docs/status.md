@@ -42,7 +42,12 @@ as its Hosts view. In the chat look, fleet's own prompts (`[fleet events]`
 digests, `[fleet]` notes; `fleet_events.ts`, marks shared with
 `prompt_origin.rs`) fold to one "Fleet · N events" line, and a proposed
 tree of more than one task and the newest receipt of each mission carry a
-compact task graph card (`TaskGraphCard.svelte`, `task_graph_card.ts`). New became the default in step 7.6 (#657) and Classic
+compact task graph card (`TaskGraphCard.svelte`, `task_graph_card.ts`). The composer row has an
+autonomy chip (`AutonomyChip.svelte`, `autonomy.ts`): Ask first · Within
+your brief · Autopilot set `orchestrator.max_level`, `control.auto_continue`
+(and its minutes) and `control.react_to_events` together, through
+`set_fleet_setting`; any other mix, including the shipped defaults, reads
+Custom. New became the default in step 7.6 (#657) and Classic
 was removed in step 13.1 (#699). The redesign's backend is not behind
 the switch: M2's session facts (`sessions.agent`, `origin`,
 `last_viewed_at`, `turn_outcome`; migrations 121, 124, 125, 129) and
