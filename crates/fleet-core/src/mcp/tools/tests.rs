@@ -12441,6 +12441,14 @@ const VIEW_SCOPE_PROOF: &[(&str, &str, &str, &str)] = &[
         "every_view_scope_page_hides_another_persons_live_session",
         "every_view_scope_page_hides_another_persons_ended_link",
     ),
+    // A result is its task's text, fenced as every task's is
+    // (`task_visible_at`); its own fixture carries the reported task.
+    (
+        "work",
+        "result",
+        "work_result_hides_another_persons_live_result",
+        "work_result_hides_an_ended_workers_result",
+    ),
     (
         "work",
         "review",
@@ -17251,6 +17259,90 @@ async fn a_job_mirrors_own_page_hides_the_dispatch_from_a_stranger() {
         bobs_parent.contains(crate::service::work::view::JOB_TITLE_WITHHELD),
         "the mirror's row survives for Bob under the withheld label: {bobs_parent}"
     );
+}
+
+/// What Ada's session reported when it finished her item's task.
+const ADA_RESULT_SUMMARY: &str = "ada's wrap-up: the retry loop is fixed";
+
+/// [`view_pages_fixture`] plus a finished, reported task at Ada's item,
+/// worked by her live session: what `work { result }` answers.
+fn result_pages_fixture() -> (ViewPages, i64) {
+    let f = view_pages_fixture();
+    let t = crate::service::tasks::create_task(&f.store, None, Some(f.live), "wrap up").unwrap();
+    f.store.set_task_run(t.id, f.item, 1, "wrapup").unwrap();
+    f.store.finish_task(t.id, "done", Some("r"), None).unwrap();
+    f.store
+        .set_task_report(
+            t.id,
+            &crate::store::TaskReport {
+                summary: ADA_RESULT_SUMMARY.into(),
+                outcome: "done".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    (f, t.id)
+}
+
+/// **`work { result }`, the LIVE half** (owner, 2026-10-15: the person
+/// view). A result is its task's text, what Ada's worker wrote, so Bob, who
+/// sees her item but not her session, reads `null`, the answer for an item
+/// with no result: not a refusal, and none of the report. Ada reads it.
+#[tokio::test]
+async fn work_result_hides_another_persons_live_result() {
+    let (f, task) = result_pages_fixture();
+    let (ada, bob, item) = (f.ada, f.bob, f.item);
+    let t = test_tools(f.store);
+    let args = serde_json::json!({ "action": "result", "item_id": item });
+
+    let adas = sweep_text(&t, device_of(ada, ada), "work", &args).await;
+    assert!(
+        adas.contains(ADA_RESULT_SUMMARY) && adas.contains(&format!("\"task_id\":{task}")),
+        "the owner must still read her own result: {adas}"
+    );
+    let bobs = sweep_text(&t, device_of(bob, ada), "work", &args).await;
+    for secret in ADA_SECRETS.iter().chain([&ADA_RESULT_SUMMARY]) {
+        assert!(
+            !bobs.contains(secret),
+            "work {{ result }} handed Bob {secret}: {bobs}"
+        );
+    }
+    assert_eq!(
+        bobs.trim(),
+        "null",
+        "an empty answer, not a refusal: {bobs}"
+    );
+}
+
+/// **`work { result }`, the ENDED half.** Once the worker session is
+/// reaped, migration 101 detaches its task, and a detached task's text is
+/// the hub's alone (`task_visible_in_scope_pure`): no person reads the
+/// result, the owner included, exactly as a job's result. Bob's answer is
+/// still `null`, not a refusal.
+#[tokio::test]
+async fn work_result_hides_an_ended_workers_result() {
+    let (f, task) = result_pages_fixture();
+    let (ada, bob, item, live) = (f.ada, f.bob, f.item, f.live);
+    f.store.delete_session(live).unwrap();
+    assert!(
+        f.store
+            .get_task(task)
+            .unwrap()
+            .unwrap()
+            .detached_at
+            .is_some(),
+        "the reap must detach the task, or this proves nothing"
+    );
+    let t = test_tools(f.store);
+    let args = serde_json::json!({ "action": "result", "item_id": item });
+    for who in [device_of(bob, ada), device_of(ada, ada)] {
+        let out = sweep_text(&t, who, "work", &args).await;
+        assert!(
+            !out.contains(ADA_RESULT_SUMMARY),
+            "a detached result leaked: {out}"
+        );
+        assert_eq!(out.trim(), "null", "an empty answer, not a refusal: {out}");
+    }
 }
 
 /// **The ENDED half of every `ViewScope` row's proof** (see

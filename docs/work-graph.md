@@ -1067,7 +1067,12 @@ The wire is `work { action: result, item_id | session_id }` (the desktop's
 `work_result`), which answers nothing until a finished task carries a
 report. A per-host token reads every piece the session wrote fenced as
 untrusted; an item or session outside the caller's scope answers as an
-unknown id.
+unknown id. The result is its task's text, so it follows the person who
+may read that task, as a dispatched job's result does: someone who sees
+the item but not the session that worked it reads no result. Once that
+session's row is reaped, the task is detached and no paired person reads
+the result any more, its owner included; the desktop on its own still
+does.
 
 ### Follow-ups
 

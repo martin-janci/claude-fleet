@@ -1357,6 +1357,20 @@ impl FleetTools {
                     }
                 }
                 .map_err(to_mcp_err)?;
+                // The person half (owner, 2026-10-15): a result is its task's
+                // text, what the worker wrote, so it is served under the rule
+                // every task's text is (`task_visible_at`, as `list_tasks`
+                // and a job's result are). A reader who does not see the task
+                // reads `null`, the answer for an item with no result: not a
+                // refusal, and none of the report.
+                if let Some(task_id) = view.as_ref().map(|v| v.task_id) {
+                    let s = lock(&self.store).map_err(to_mcp_err)?;
+                    match super::support::task_visible_at(&s, &caller, task_id, Reach::Read) {
+                        Ok(_) => {}
+                        Err(e) if e.code == crate::ipc_error::codes::E_NOTFOUND => view = None,
+                        Err(e) => return Err(to_mcp_err(e)),
+                    }
+                }
                 if let Some(v) = view.as_mut() {
                     hide_unseen_worker(&self.store, &view_scope, v)?;
                 }
