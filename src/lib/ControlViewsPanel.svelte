@@ -43,6 +43,8 @@
   import ControlMissions from './ControlMissions.svelte';
   import ControlTasksView from './ControlTasksView.svelte';
   import ControlRoutinesView from './ControlRoutinesView.svelte';
+  import ControlOrbitView from './ControlOrbitView.svelte';
+  import { openRuns } from './automation';
   import LimitActions from './LimitActions.svelte';
   import { classify } from './attention';
   import { attentionFacts } from './attention_facts';
@@ -77,7 +79,7 @@
 
   /** The views that live somewhere else too; the Library and Today live
    *  only here. */
-  const HAS_PLACE: ReadonlySet<ControlViewId> = new Set(['needs-you', 'session', 'tasks', 'missions', 'hosts', 'routines', 'prs']);
+  const HAS_PLACE: ReadonlySet<ControlViewId> = new Set(['needs-you', 'session', 'tasks', 'missions', 'hosts', 'routines', 'orbit', 'prs']);
 
   /** The Session tab's strip: the sessions beside the one in focus. */
   const siblings = $derived($selectedSession ? threadSiblings($selectedSession, $sessions) : []);
@@ -108,6 +110,8 @@
       leave('control');
     } else if (id === 'routines') {
       openRoutines();
+    } else if (id === 'orbit') {
+      openRuns('orbit');
     } else if (id === 'missions') {
       openElsewhere('missions');
     } else if (id === 'hosts') {
@@ -308,6 +312,8 @@
       <ControlHostsView />
     {:else if active === 'routines'}
       <ControlRoutinesView />
+    {:else if active === 'orbit'}
+      <ControlOrbitView onfocus={openRow} />
     {:else if active === 'prs'}
       <WorkPrs />
     {:else if active === 'library'}

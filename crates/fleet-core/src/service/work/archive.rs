@@ -11,29 +11,59 @@
 //!
 //! Not the sessionless `archive` / `unarchive`, which stamp a task's ENDED
 //! links ([`super::ended`]): those archive the sessions' history, this the
-//! item.
+//! item. A bare task — a key detected in a prompt, with no item behind it —
+//! has nothing else to archive, so `archive_item { task_id: "ref:KEY" }`
+//! stamps its ended links through that same path: the Work tree counts a
+//! task archived once every link is.
 
-use super::graph::{visible_item, GraphChange};
+use super::graph::visible_item;
 use super::WorkLinkArgs;
 use crate::events::WorkChanged;
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::view_scope::ViewScope;
 use crate::store::Store;
+use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
-/// `work_link { action: archive_item, item_id, on? }`; `on` defaults to
-/// archive. An item the caller cannot see answers as an unknown one.
+/// What `archive_item` answers: the item, or `None` for a bare task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchiveChange {
+    pub item_id: Option<i64>,
+    /// Whether anything changed.
+    pub changed: bool,
+}
+
+/// `work_link { action: archive_item, item_id | task_id, on? }`; `on`
+/// defaults to archive. An item the caller cannot see answers as an
+/// unknown one. A `task_id` of an item (`item:N`) is that item; of a bare
+/// key (`ref:KEY`), its ended links.
 pub fn archive_item(
     args: &WorkLinkArgs,
     store: &Mutex<Store>,
     scope: &ViewScope,
-) -> Result<GraphChange, IpcError> {
-    let item = args
-        .item_id
-        .ok_or_else(|| IpcError::new(codes::E_INVALID, "archive_item needs item_id"))?;
+) -> Result<ArchiveChange, IpcError> {
+    let on = args.on.unwrap_or(true);
+    let item = match (args.item_id, args.task_id.as_deref()) {
+        (Some(i), _) => i,
+        (None, Some(task)) => {
+            let task = super::view::parse_task_id(task)?;
+            match task.strip_prefix("item:") {
+                Some(n) => n
+                    .parse()
+                    .map_err(|_| IpcError::new(codes::E_INVALID, format!("bad task_id {task}")))?,
+                None => return archive_bare(&task, on, store, scope),
+            }
+        }
+        (None, None) => {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "archive_item needs item_id or task_id",
+            ))
+        }
+    };
     let s = lock(store)?;
     visible_item(&s, scope, item)?;
-    let changed = s.set_item_archived(item, args.on.unwrap_or(true))?;
+    let changed = s.set_item_archived(item, on)?;
     if changed {
         // Ids only, kind `work`: a client re-reads the lists it shows.
         s.emit_work_changed(WorkChanged {
@@ -43,9 +73,32 @@ pub fn archive_item(
             view_id: None,
         });
     }
-    Ok(GraphChange {
-        item_id: item,
+    Ok(ArchiveChange {
+        item_id: Some(item),
         changed,
+    })
+}
+
+/// A bare task's archive: its ended links, through [`super::ended`] (the
+/// caller's whole scope, the event, and `E_NOTFOUND` for a task with none).
+fn archive_bare(
+    task: &str,
+    on: bool,
+    store: &Mutex<Store>,
+    scope: &ViewScope,
+) -> Result<ArchiveChange, IpcError> {
+    let out = super::ended::work_link_ended(
+        &WorkLinkArgs {
+            action: if on { "archive" } else { "unarchive" }.into(),
+            task_id: Some(task.to_string()),
+            ..Default::default()
+        },
+        store,
+        scope,
+    )?;
+    Ok(ArchiveChange {
+        item_id: None,
+        changed: out.changed > 0,
     })
 }
 
@@ -99,6 +152,50 @@ mod tests {
             .unwrap()
             .archived_at;
         assert_eq!(at, None, "unarchived");
+    }
+
+    /// A bare task: a key detected in a prompt (`owner/repo#333`), no work
+    /// item behind it, its one session gone. The Work view's Archive sends
+    /// its `task_id`, and every ended link of the key is stamped: the tree
+    /// then counts the task archived.
+    #[test]
+    fn a_bare_task_is_archived_and_unarchived_by_task_id() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let key = "martin-janci/claude-fleet#333";
+        let link = {
+            let s = lock(&store).unwrap();
+            s.upsert_host("h").unwrap();
+            let sid = s
+                .upsert_session("gone", "h", None, None, 1, 1, "running", None)
+                .unwrap();
+            s.link_session_work(sid, crate::store::WorkTarget::Key(key), "manual")
+                .unwrap();
+            s.delete_session(sid).unwrap();
+            s.ended_work_links_for_key(key).unwrap()[0].id
+        };
+        let all = ViewScope::internal();
+        let task = |on| WorkLinkArgs {
+            action: "archive_item".into(),
+            task_id: Some(format!("ref:{key}")),
+            on,
+            ..Default::default()
+        };
+        let archived = |store: &Mutex<Store>| {
+            lock(store)
+                .unwrap()
+                .work_link_archived_at(link)
+                .unwrap()
+                .is_some()
+        };
+
+        let r = archive_item(&task(None), &store, &all).unwrap();
+        assert!(r.changed);
+        assert_eq!(r.item_id, None, "a bare task has no item");
+        assert!(archived(&store), "its ended link is archived");
+
+        let r = archive_item(&task(Some(false)), &store, &all).unwrap();
+        assert!(r.changed);
+        assert!(!archived(&store), "unarchived");
     }
 
     #[test]

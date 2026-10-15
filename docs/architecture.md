@@ -444,7 +444,11 @@ bullet for the area you are about to change.
   off the scheduler tick, deduplicated by `tool_use` id). The store caps a run at `RUN_TRACE_MAX_STEPS` (phase
   rows still land), replaces `data` over 4 KB with a note and drops rows
   past `RUN_TRACE_KEEP_SECS` on each run's first step. Reading uses
-  `runs::reach`, so a trace is served exactly where its run is listed.
+  `runs::reach`, so a trace is served exactly where its run is listed. On
+  the desktop, Automation's Runs draws them as lanes, a run timeline and
+  the orbit map (`src/lib/runs.ts`, `orbit_map.ts`, `automation/`); the
+  orbit is also Control's ◌ view (`ControlOrbitView.svelte`), whose ⤢
+  hands Automation a `runsRequest`.
 - **Debug devices** (guide `docs/debug-devices.md`; `service/debug_devices/`,
   `store/debug_devices.rs`, migration 120, `mcp/tools/devices.rs`, contract
   revision 10): a scan runs `scripts::scan_script` on a host (adb,

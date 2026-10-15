@@ -7,6 +7,7 @@
 use crate::backend::FleetBackend;
 use fleet_core::cancel::CancellationRegistry;
 use fleet_core::ipc_error::IpcError;
+use fleet_core::service::work::archive::ArchiveChange;
 use fleet_core::service::work::graph::{self, GraphChange};
 use fleet_core::service::work::missions::{self, MissionDeleted, MissionDetail, MissionInput};
 use fleet_core::service::work::orchestrate::drafts::{Brief, Draft};
@@ -103,10 +104,14 @@ pub struct SetWorkHoldArgs {
     pub on: bool,
 }
 
-/// `set_work_archived`: archive a ticket or task (`on: false` unarchives).
+/// `set_work_archived`: archive a ticket or task (`on: false` unarchives):
+/// its item, or a bare task (no item) by its `task_id`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SetWorkArchivedArgs {
-    pub item_id: i64,
+    #[serde(default)]
+    pub item_id: Option<i64>,
+    #[serde(default)]
+    pub task_id: Option<String>,
     pub on: bool,
 }
 
@@ -301,7 +306,7 @@ pub async fn set_work_archived(
     args: SetWorkArchivedArgs,
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
-) -> Result<GraphChange, IpcError> {
+) -> Result<ArchiveChange, IpcError> {
     routed::set_work_archived(&backend, args, &store).await
 }
 
@@ -629,10 +634,11 @@ pub(crate) mod routed {
         backend: &FleetBackend,
         args: SetWorkArchivedArgs,
         store: &Mutex<Store>,
-    ) -> Result<GraphChange, IpcError> {
+    ) -> Result<ArchiveChange, IpcError> {
         let wire = WorkLinkArgs {
             action: "archive_item".into(),
-            item_id: Some(args.item_id),
+            item_id: args.item_id,
+            task_id: args.task_id,
             on: Some(args.on),
             ..Default::default()
         };
