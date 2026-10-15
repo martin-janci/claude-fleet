@@ -13,6 +13,14 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { listen } from '@tauri-apps/api/event';
+  import RunLanes from './automation/RunLanes.svelte';
+  import RunTimeline from './automation/RunTimeline.svelte';
+  import OrbitMap from './automation/OrbitMap.svelte';
+  import { hosts as hostRows } from './hosts';
+  import { sessions as sessionRows } from './sessions';
+  import { listRoutines, type RoutineRow } from './routines';
+  import { RUN_CHANGED_EVENT } from './events';
   import Button from './kit/Button.svelte';
   import { tablistKeys } from './tablist_keys';
   import Count from './kit/Count.svelte';
@@ -28,7 +36,7 @@
   import FleetAgents from './automation/FleetAgents.svelte';
   import { agents as agentsStatus, jobLine, loadAgents, ruleAgentName, ruleLine } from './agents';
   import { fleetSettings, loadFleetSettings } from './fleet_settings';
-  import { listRuns, outcomeLabel, type RunOutcome, type RunRow } from './runs';
+  import { listRuns, outcomeLabel, runMark, type RunOutcome, type RunRow } from './runs';
   import { goTo } from './destination';
   import { focusSession } from './session_focus';
   import { pushError } from './toasts';
@@ -62,6 +70,19 @@
   let runsOutcome = $state<RunOutcome | null>(null);
   let busy = $state(false);
   let nowSec = $state(Math.floor(Date.now() / 1000));
+  /** The Runs tab's view: every run on one clock, or the plain list. */
+  let runsView = $state<'lanes' | 'orbit' | 'list'>('lanes');
+  /** The routines, for the orbit map's next fires; read when it opens. */
+  let orbitRoutines = $state<RoutineRow[]>([]);
+  /** The lanes' window back from now, in seconds. */
+  let lanesWindow = $state(3 * 3600);
+  /** The run whose timeline is open, in place of the list. */
+  let openRunId = $state<string | null>(null);
+  const LANE_WINDOWS: { secs: number; label: string }[] = [
+    { secs: 3 * 3600, label: 'Last 3 h' },
+    { secs: 24 * 3600, label: 'Last 24 h' },
+    { secs: 7 * 86400, label: '7 days' },
+  ];
 
   /** The routines' spend today against `automation.daily_budget` (G3.8);
    *  null from an older hub, which has no `budget` action. */
@@ -77,7 +98,12 @@
   }
 
   async function loadRuns() {
-    const r = await listRuns({ limit: 50, ...(runsOutcome ? { outcome: runsOutcome } : {}) });
+    const lanes = runsView !== 'list';
+    const r = await listRuns({
+      limit: lanes ? 200 : 50,
+      ...(lanes ? { since: Math.floor(Date.now() / 1000) - lanesWindow } : {}),
+      ...(runsOutcome ? { outcome: runsOutcome } : {}),
+    });
     if (r.ok) {
       runs = r.value.runs;
       runsTotal = r.value.total;
@@ -104,8 +130,56 @@
       void load();
       void loadAgents();
     }, 30_000);
-    return () => clearInterval(t);
+    // The lanes' now line and a live run's clock move every second while
+    // Runs is on screen.
+    const tick = setInterval(() => {
+      if ($automationTab === 'runs' && !windowHidden()) nowSec = Math.floor(Date.now() / 1000);
+    }, 1000);
+    // A run recorded a step: re-read the list, at most once a second and a half.
+    let pending: ReturnType<typeof setTimeout> | null = null;
+    let un: (() => void) | null = null;
+    let gone = false;
+    void listen(RUN_CHANGED_EVENT, () => {
+      if (pending) return;
+      pending = setTimeout(() => {
+        pending = null;
+        if ($automationTab === 'runs') void loadRuns();
+      }, 1500);
+    }).then((u) => (gone ? u() : (un = u)));
+    return () => {
+      gone = true;
+      un?.();
+      if (pending) clearTimeout(pending);
+      clearInterval(t);
+      clearInterval(tick);
+    };
   });
+
+  const openedRun = $derived(openRunId ? (runs?.find((r) => r.id === openRunId) ?? null) : null);
+  /** The window's counts, over the lanes. */
+  const laneStats = $derived.by(() => {
+    const list = runs ?? [];
+    return {
+      running: list.filter((r) => r.outcome === 'running').length,
+      needs: list.filter((r) => r.outcome === 'needs_person').length,
+      failed: list.filter((r) => r.outcome === 'failed').length,
+      skipped: list.filter((r) => runMark(r) === 'skip').length,
+      spent: list.reduce((a, r) => a + (r.cost_micros ?? 0), 0),
+    };
+  });
+
+  function showView(v: 'lanes' | 'orbit' | 'list') {
+    runsView = v;
+    if (v === 'orbit') void listRoutines().then((r) => (orbitRoutines = r.ok && Array.isArray(r.value) ? r.value : []));
+    runs = null;
+    void loadRuns();
+  }
+
+  function showWindow(secs: number) {
+    lanesWindow = secs;
+    runs = null;
+    void loadRuns();
+  }
 
   const paused = $derived(auto?.paused ?? false);
   const spend = $derived(auto ? spendMicros(auto.today) : null);
@@ -263,8 +337,42 @@
         </div>
         {:else if $automationTab === 'runs'}
     <div class="body" role="tabpanel" aria-label="Runs" data-testid="automation-runs">
+          {#if openedRun}
+            <RunTimeline run={openedRun} {nowSec} onclose={() => (openRunId = null)} onopensession={openRun} />
+          {:else}
+          <div class="views">
+            <div class="seg small" role="tablist" aria-label="Runs view" use:tablistKeys>
+              <button type="button" role="tab" aria-selected={runsView === 'lanes'} data-testid="automation-runs-lanes" onclick={() => showView('lanes')}>Lanes</button>
+              <button type="button" role="tab" aria-selected={runsView === 'orbit'} data-testid="automation-runs-orbit" onclick={() => showView('orbit')}>Orbit</button>
+              <button type="button" role="tab" aria-selected={runsView === 'list'} data-testid="automation-runs-list" onclick={() => showView('list')}>List</button>
+            </div>
+            {#if runsView !== 'list'}
+              {#each LANE_WINDOWS as w (w.secs)}
+                <button type="button" class="chip" aria-pressed={lanesWindow === w.secs} data-testid={`automation-runs-window-${w.secs}`} onclick={() => showWindow(w.secs)}>{w.label}</button>
+              {/each}
+            {/if}
+          </div>
           {#if runsError && !runs}
             <LoadError title="Couldn't load the runs" error={runsError} onretry={() => retry(loadRuns)} {retrying} testid="automation-runs-error" />
+          {:else if runsView === 'orbit' && runs}
+            <OrbitMap
+              {runs}
+              hostAliases={$hostRows.map((h) => h.alias)}
+              sessions={$sessionRows}
+              routines={orbitRoutines}
+              now={nowSec}
+              onpick={(r) => (openRunId = r.id)}
+            />
+          {:else if runsView === 'lanes' && runs}
+            <div class="stats" data-testid="automation-runs-stats">
+              <span class="stat"><span class="xs muted">Running now</span><span class="sv"><StatusDot state="working" label={null} />{laneStats.running}</span></span>
+              <span class="stat"><span class="xs muted">Needs you</span><span class="sv"><StatusDot state="waiting" label={null} />{laneStats.needs}</span></span>
+              <span class="stat"><span class="xs muted">Failed</span><span class="sv"><StatusDot state="failed" label={null} />{laneStats.failed}</span></span>
+              <span class="stat"><span class="xs muted">Skipped fires</span><span class="sv">{laneStats.skipped}</span></span>
+              <span class="stat"><span class="xs muted">Spent</span><span class="sv">{money(laneStats.spent)}</span></span>
+            </div>
+            <RunLanes runs={runs} from={nowSec - lanesWindow} to={nowSec + Math.round(lanesWindow / 12)} now={nowSec} selected={openRunId} onpick={(r) => (openRunId = r.id)} />
+            {#if runsTotal > runs.length}<p class="none">Showing the latest {runs.length} of {runsTotal} in this window.</p>{/if}
           {:else if runs && runs.length === 0}
             <p class="none">{runsOutcome ? 'No run ended this way.' : "Nothing has run on the fleet's behalf yet."}</p>
           {:else if runs}
@@ -281,13 +389,17 @@
                   </span>
                   <span class="num">{duration(run)}</span>
                   <span class="num">{run.cost_micros !== undefined ? money(run.cost_micros) : ''}</span>
-                  {#if run.session_ids.length > 0}
-                    <Button variant="quiet" size="sm" testid="automation-run-session" onclick={() => openRun(run)}>Session</Button>
-                  {:else}<span></span>{/if}
+                  <span class="acts">
+                    <Button variant="quiet" size="sm" testid="automation-run-open" onclick={() => (openRunId = run.id)}>Steps</Button>
+                    {#if run.session_ids.length > 0}
+                      <Button variant="quiet" size="sm" testid="automation-run-session" onclick={() => openRun(run)}>Session</Button>
+                    {/if}
+                  </span>
                 </li>
               {/each}
             </ul>
             {#if runsTotal > runs.length}<p class="none">Showing the latest {runs.length} of {runsTotal}.</p>{/if}
+          {/if}
           {/if}
         </div>
         {:else if $automationTab === 'agents'}
@@ -373,7 +485,7 @@
   .body { flex: 1; min-height: 0; overflow: auto; padding: var(--space-4) var(--space-6); display: flex; flex-direction: column; gap: var(--space-3); }
   .hint, .none { margin: 0; font-size: var(--text-sm); color: var(--fg-muted); }
   .table { list-style: none; margin: 0; padding: 0; max-width: 960px; border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; }
-  .table li { display: grid; grid-template-columns: 16px 80px minmax(0, 1fr) 64px 52px 64px; gap: 4px 10px; align-items: center; padding: 9px 12px; font-size: var(--text-sm); }
+  .table li { display: grid; grid-template-columns: 16px 80px minmax(0, 1fr) 64px 52px auto; gap: 4px 10px; align-items: center; padding: 9px 12px; font-size: var(--text-sm); }
   .table li + li { border-top: 1px solid var(--border); }
   .table.agents li { grid-template-columns: 16px minmax(0, 1fr) auto; }
   .sub { margin: 16px 0 6px; font-size: var(--text-sm); font-weight: 600; }
@@ -391,5 +503,16 @@
   .outcomes .of-row[aria-selected='true'] { background: var(--accent-soft); }
   .outcomes .of-row :global(.of-dot) { margin-top: 0; }
   .dot-gap { width: 8px; flex: none; }
+  .acts { display: inline-flex; gap: 2px; justify-content: flex-end; }
+  .views { display: flex; align-items: center; gap: 6px; }
+  .seg.small { flex: none; }
+  .seg.small button { flex: none; padding: 0 10px; }
+  .chip { height: 22px; padding: 0 8px; border: 1px solid var(--border); border-radius: var(--radius-xs); background: transparent; color: var(--fg-2); font: inherit; font-size: var(--text-xs); cursor: pointer; }
+  .chip[aria-pressed='true'] { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+  .stats { display: flex; flex-wrap: wrap; gap: 10px; }
+  .stat { display: flex; flex-direction: column; gap: 2px; min-width: 110px; padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-pane); }
+  .sv { display: inline-flex; align-items: center; gap: 8px; font-size: var(--text-lg); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .xs { font-size: var(--text-xs); }
+  .muted { color: var(--fg-muted); }
   .txt { flex: 1 1 auto; font-size: var(--text-sm); line-height: 18px; }
 </style>
