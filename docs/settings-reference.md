@@ -65,7 +65,7 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 
 | Setting | Default | Range | Scope | What it does |
 |---|---|---|---|---|
-| `recovery.auto_restore` | `true` | on / off | fleet | Resume a session on its own when its host killed the process (out of memory), its tmux server stopped or the host rebooted, and note it on the session's timeline. Control's own session is restarted and told what happened. |
+| `recovery.auto_restore` | `true` | on / off | fleet | Resume a session when its host killed the process (out of memory), its tmux server stopped or the host rebooted, noted on its timeline. Control is restarted, or moved to another host once its own has been silent for five minutes, and told. |
 | `recovery.grace_secs` | `60` | seconds, `0` = at once | fleet | How long after a session is lost before it is brought back, so a reboot is recognised as one and the memory that ran out can settle. |
 | `recovery.max_attempts` | `2` | 0–20, `0` = never | fleet | Automatic restores one session may get per 24 hours, failed ones included. Past it the session waits for a person. |
 
