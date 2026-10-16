@@ -11,7 +11,13 @@
   import UiBlockCard from './rich/UiBlockCard.svelte';
   import HandoverCard from './rich/HandoverCard.svelte';
 
-  let { source, sessionId = null }: { source: string; sessionId?: number | null } = $props();
+  // `answered`: a later message followed this one, so the cards that ask
+  // are receipts now (UiBlockCard).
+  let {
+    source,
+    sessionId = null,
+    answered = false,
+  }: { source: string; sessionId?: number | null; answered?: boolean } = $props();
 
   const segments = $derived(splitRich(source));
 </script>
@@ -24,7 +30,7 @@
   {:else if s.t === 'handover'}
     <HandoverCard handover={s.handover} raw={s.raw} nonce={s.nonce} {sessionId} />
   {:else if s.t === 'ui'}
-    <UiBlockCard block={s.block} raw={s.raw} {sessionId} />
+    <UiBlockCard block={s.block} raw={s.raw} {sessionId} {answered} />
   {:else}
     <Markdown source={fenced(s.lang, s.raw)} />
     <p class="invalid" data-testid="rich-invalid">

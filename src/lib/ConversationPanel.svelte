@@ -21,7 +21,7 @@
   import AnswerPrompt from './AnswerPrompt.svelte';
   import FormCard from './forms/FormCard.svelte';
   import ChatWizards from './forms/ChatWizards.svelte';
-  import { pendingInputFor } from './pending_input';
+  import { answerFingerprint, pendingInputFor } from './pending_input';
   import { hintAnchor } from './hints';
   import { composerPresets, presetSendsNow, type ComposerPreset } from './composer_presets';
   import { chipsThatFit } from './composer_chips';
@@ -734,7 +734,7 @@
   // the 20 s tick, and buttons that outlive their dialog are worse than no
   // buttons. Never while viewing an earlier conversation — that pane is
   // read-only history.
-  const answerView = $derived(
+  const shownAnswer = $derived(
     viewing !== null
       ? null
       : pendingInputFor({
@@ -744,11 +744,30 @@
           probe: liveProbe,
         }),
   );
+  // A dialog the pane no longer shows, dismissed from its card: the row can
+  // keep it for up to a tick, and its buttons would only say "gone" again.
+  // A different dialog (another fingerprint) or another session shows.
+  let goneAnswer = $state<{ sessionId: number; fp: string } | null>(null);
+  const answerView = $derived(
+    shownAnswer !== null && goneAnswer !== null && goneAnswer.sessionId === session.id && goneAnswer.fp === answerFingerprint(shownAnswer)
+      ? null
+      : shownAnswer,
+  );
+  // Once no dialog shows, the same question asked again is a new one.
+  $effect(() => {
+    if (shownAnswer === null && untrack(() => goneAnswer) !== null) goneAnswer = null;
+  });
+  function dismissGoneAnswer() {
+    if (shownAnswer !== null) goneAnswer = { sessionId: session.id, fp: answerFingerprint(shownAnswer) };
+  }
 
   // Chat forms: the form this session's agent waits on. `closedForm` keeps
   // the last one for a line saying how it ended, once the row drops it.
   const pendingForm = $derived(viewing === null ? (session.pending_form ?? null) : null);
   let closedForm = $state<string | null>(null);
+  // A form the row still lists but its card was dismissed (it could not be
+  // read, or it ended and the row has not caught up).
+  let hiddenForm = $state<string | null>(null);
   let lastFormId: string | null = null;
   let lastFormSessionId: number | null = null;
   $effect(() => {
@@ -761,7 +780,7 @@
       lastFormId = id;
       return;
     }
-    if (lastFormId && id === null) closedForm = lastFormId;
+    if (lastFormId && id === null) closedForm = lastFormId === untrack(() => hiddenForm) ? null : lastFormId;
     if (id !== null) closedForm = null;
     lastFormId = id;
   });
@@ -2445,7 +2464,7 @@
                 {#each groups as g, j (j)}
                   {#if g.kind === 'text'}
                     <div class="text" data-testid="conv-text">
-                      <RichText source={g.text} sessionId={cardsAct ? session.id : null} />
+                      <RichText source={g.text} sessionId={cardsAct ? session.id : null} answered={!isLast} />
                     </div>
                   {:else if g.kind === 'tools'}
                     <!-- One structure for a lone call and a folded group, so a
@@ -2645,11 +2664,12 @@
           {/each}
         {/if}
         {#if viewing === null}
-        {#if pendingForm}
+        {#if pendingForm && pendingForm.form_id !== hiddenForm}
           <FormCard
             formId={pendingForm.form_id}
             sessionName={session.friendly_name ?? session.tmux_name}
-            blocked={formBlocked} />
+            blocked={formBlocked}
+            ondismiss={() => (hiddenForm = pendingForm.form_id)} />
         {:else if answerView && (writeBlocked === null || recipientLevel !== null)}
           <!-- Hidden rather than disabled when this client may not write to
                the session (multi-user M1), the same shape `SessionRowItem`
@@ -2667,6 +2687,7 @@
             view={answerView}
             onOpenTerminal={writeBlocked === null ? onOpenTerminal : undefined}
             onAnswered={afterAnswer}
+            onGone={dismissGoneAnswer}
             onOwnWords={showComposer && writeBlocked === null ? () => void tick().then(() => box?.focus()) : undefined}
             readOnlyNote={recipientLevel === 'watch' ? readOnlyAnswerLine(sharerName(session, $myGrantInfo.get(session.id), $orgList)) : undefined}
           />

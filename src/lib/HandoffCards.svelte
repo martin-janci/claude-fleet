@@ -35,6 +35,7 @@
     finishesWhen,
     liveSessionsOf,
     refreshHandoffs,
+    rejectTree,
     taskUndoable,
     treeWaves,
     followHandoffs,
@@ -128,6 +129,14 @@
   async function create(h: ControlHandoff, asMission: boolean) {
     busy = h.id;
     const err = await createFromTree(h, ticked(h), asMission);
+    busy = null;
+    if (err) errors[h.id] = err;
+    else delete errors[h.id];
+  }
+
+  async function reject(h: ControlHandoff) {
+    busy = h.id;
+    const err = await rejectTree(h);
     busy = null;
     if (err) errors[h.id] = err;
     else delete errors[h.id];
@@ -375,6 +384,12 @@
                 disabled: busy === h.id || ticked(h).length === 0 || !h.item,
                 onselect: () => void create(h, true),
                 testid: 'handoff-tree-mission',
+              },
+              {
+                label: 'Reject all',
+                disabled: busy === h.id,
+                onselect: () => void reject(h),
+                testid: 'handoff-tree-reject',
               },
             ]}
           >

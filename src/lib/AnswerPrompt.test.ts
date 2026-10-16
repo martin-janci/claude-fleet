@@ -125,6 +125,16 @@ describe('AnswerPrompt', () => {
     expect(screen.getByTestId('answer-stale')).toBeTruthy();
   });
 
+  it('a gone dialog offers Dismiss, which takes the card away', async () => {
+    mockedAct.mockResolvedValue({ ok: true, value: probe(null) });
+    const onGone = vi.fn();
+    render(AnswerPrompt, { session: session(), view: view(), onGone });
+    await fireEvent.click(screen.getAllByTestId('answer-option')[0]);
+    await settle();
+    await fireEvent.click(screen.getByTestId('answer-stale-dismiss'));
+    expect(onGone).toHaveBeenCalledTimes(1);
+  });
+
   it('sends nothing when the pane cannot be read at all', async () => {
     // No reading is not the same as "unchanged": without proof the dialog is
     // still there, a keystroke is a guess.
