@@ -6,6 +6,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import SessionDevices from './SessionDevices.svelte';
+import { DEVICES_EVERY_MS } from './debug_devices_feed';
 
 const mock = invoke as ReturnType<typeof vi.fn>;
 const session = { id: 42, host_alias: 'mercury' };
@@ -56,7 +57,10 @@ function route(list: unknown[] | (() => unknown)) {
 const listCalls = () => mock.mock.calls.filter((c) => c[0] === 'list_debug_devices').length;
 
 beforeEach(() => route([held, waited, others]));
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  vi.useRealTimers();
+  window.dispatchEvent(new Event('focus'));
+});
 
 describe('SessionDevices', () => {
   it('shows a held device and one it waits for', async () => {
@@ -91,17 +95,52 @@ describe('SessionDevices', () => {
     const { container } = render(SessionDevices, { props: { session } });
     await vi.advanceTimersByTimeAsync(0);
     expect(container.textContent?.trim()).toBe('');
-    await vi.advanceTimersByTimeAsync(31_000);
+    await vi.advanceTimersByTimeAsync(DEVICES_EVERY_MS + 1000);
     expect(listCalls()).toBe(1);
   });
 
-  it('polls every 30 s', async () => {
+  it('polls every 90 s', async () => {
     vi.useFakeTimers();
     render(SessionDevices, { props: { session } });
     await vi.advanceTimersByTimeAsync(0);
     expect(listCalls()).toBe(1);
     await vi.advanceTimersByTimeAsync(30_000);
+    expect(listCalls()).toBe(1);
+    await vi.advanceTimersByTimeAsync(DEVICES_EVERY_MS - 30_000);
     expect(listCalls()).toBe(2);
+  });
+
+  it('reads once for every strip on screen', async () => {
+    vi.useFakeTimers();
+    render(SessionDevices, { props: { session } });
+    render(SessionDevices, { props: { session: { id: 7, host_alias: 'box' } } });
+    render(SessionDevices, { props: { session: { id: 9, host_alias: 'box' } } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(listCalls()).toBe(1);
+    await vi.advanceTimersByTimeAsync(DEVICES_EVERY_MS);
+    expect(listCalls()).toBe(2);
+  });
+
+  it('skips the ticks while the window is blurred, and reads once on focus', async () => {
+    vi.useFakeTimers();
+    render(SessionDevices, { props: { session } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(listCalls()).toBe(1);
+    window.dispatchEvent(new Event('blur'));
+    await vi.advanceTimersByTimeAsync(DEVICES_EVERY_MS * 3);
+    expect(listCalls()).toBe(1);
+    window.dispatchEvent(new Event('focus'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(listCalls()).toBe(2);
+  });
+
+  it('reads again when the folded strip opens', async () => {
+    route([held, dev({ id: 6, title: 'Pixel 8', claimed_by: ME }), waited]);
+    render(SessionDevices, { props: { session } });
+    const toggle = await screen.findByTestId('session-devices-toggle');
+    expect(listCalls()).toBe(1);
+    await fireEvent.click(toggle);
+    await waitFor(() => expect(listCalls()).toBe(2));
   });
 
   it('shows a screenshot inline', async () => {

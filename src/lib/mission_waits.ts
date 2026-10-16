@@ -6,6 +6,7 @@
 import { derived, writable } from 'svelte/store';
 import { listMissions, type Mission, type MissionWait } from './missions';
 import type { Result } from './result';
+import { pollWhileShown } from './window_hidden';
 
 /** How often the list is read while the app shows (as failed routines). */
 export const MISSION_WAITS_EVERY_MS = 60_000;
@@ -40,26 +41,21 @@ export async function loadWaitingMissions(load: () => Promise<Result<Mission[]>>
 /** Keep `waitingMissions` fresh while the app shows; stops on the returned
  *  function. A hub that refuses the read (`E_INVALID`) is not asked again. */
 export function trackWaitingMissions(
-  deps: { load?: () => Promise<Result<Mission[]>>; doc?: Document | null; every?: number } = {},
+  deps: { load?: () => Promise<Result<Mission[]>>; doc?: Document | null; win?: Window | null; every?: number } = {},
 ): () => void {
   const load = deps.load ?? listMissions;
-  const doc = deps.doc === undefined ? (typeof document === 'undefined' ? null : document) : deps.doc;
   let stopped = false;
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  const beat = async () => {
-    timer = null;
-    if (stopped) return;
-    if (doc?.visibilityState !== 'hidden') {
+  const poller = pollWhileShown(
+    async () => {
       const r = await load();
-      if (stopped) return;
+      if (stopped) return false;
       waitingMissions.set(r.ok && Array.isArray(r.value) ? waitingOf(r.value) : []);
-      if (!r.ok && r.error.code === 'E_INVALID') return;
-    }
-    timer = setTimeout(() => void beat(), deps.every ?? MISSION_WAITS_EVERY_MS);
-  };
-  void beat();
+      return r.ok || r.error.code !== 'E_INVALID';
+    },
+    { every: deps.every ?? MISSION_WAITS_EVERY_MS, doc: deps.doc, win: deps.win },
+  );
   return () => {
     stopped = true;
-    if (timer !== null) clearTimeout(timer);
+    poller.stop();
   };
 }

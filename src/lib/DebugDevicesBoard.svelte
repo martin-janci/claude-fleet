@@ -12,6 +12,7 @@
   // refresh runs only while the board is on screen, and not while the
   // window is hidden.
   import { onDestroy, onMount } from 'svelte';
+  import { pollWhileShown, type Poller } from './window_hidden';
   import Button from './kit/Button.svelte';
   import Icon from './kit/Icon.svelte';
   import StatusChip from './kit/StatusChip.svelte';
@@ -116,18 +117,25 @@
     rescanning = false;
   }
 
-  let timer: ReturnType<typeof setInterval> | undefined;
+  // Every 30 s while the window is shown and focused; once on its return
+  // when a tick was skipped (window_hidden.ts).
+  let poller: Poller | undefined;
+  let clock: ReturnType<typeof setInterval> | undefined;
   onMount(() => {
-    void load();
-    timer = setInterval(() => {
-      nowMs = Date.now();
-      if (typeof document !== 'undefined' && document.hidden) return;
-      // A card mid-action keeps its own answer; the next tick catches up.
-      if (loading || rescanning || Object.values(busy).some(Boolean)) return;
-      void load();
-    }, REFRESH_MS);
+    poller = pollWhileShown(
+      async () => {
+        // A card mid-action keeps its own answer; the next tick catches up.
+        if (loading || rescanning || Object.values(busy).some(Boolean)) return;
+        await load();
+      },
+      { every: REFRESH_MS },
+    );
+    clock = setInterval(() => (nowMs = Date.now()), REFRESH_MS);
   });
-  onDestroy(() => clearInterval(timer));
+  onDestroy(() => {
+    poller?.stop();
+    clearInterval(clock);
+  });
 
   /** Run one card action: busy while it runs, its error on the card, and
    *  the device it answers (when it answers one) in place of the old row. */

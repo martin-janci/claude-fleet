@@ -35,7 +35,7 @@ board**: every device as a card, grouped by host, with its state (and what
 a device that is not ready needs), who holds it and for how long, and who
 waits in its line (your own place too). Filter by state or platform and
 search by name, host or model; the board reloads every 30 seconds while it
-is on screen, and **Rescan all** scans every host now. On a card:
+is on screen and the window has focus, and **Rescan all** scans every host now. On a card:
 **Screenshot** (a thumbnail; click it for the full size), **Claim** or
 **Wait in line** (with an optional note), **Leave line**, **Release**,
 **Mirror** / **Stop mirror**, **Logs**, and **Start** / **Stop** for an
@@ -205,8 +205,10 @@ phone:
 - **The device strip**, under the conversation's header, lists the devices
   the session holds (state, time left, its note) and those it waits for
   (its place, who holds them), with **Screenshot**, **Mirror** and
-  **Release…** on a held one. It reloads every 30 seconds and shows nothing
-  when the session holds and waits for nothing.
+  **Release…** on a held one. Every strip on screen shares one read of the
+  list, every 90 seconds while the window has focus and again when a strip
+  opens or releases a device; it shows nothing when the session holds and
+  waits for nothing.
 - **A `device` card** an agent writes in its reply
   (`{"spec": "fleet.ui/1", "kind": "device", "device": "bench pixel"}`,
   `docs/chat-blocks.md`) draws that device live from your own list, with
