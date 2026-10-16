@@ -444,7 +444,7 @@
         "level": "none"
       },
       "default": "true",
-      "help": "Resume a session on its own when its host killed the process (out of memory), its tmux server stopped or the host rebooted, and note it on the session's timeline. Control's own session is restarted and told what happened.",
+      "help": "Resume a session when its host killed the process (out of memory), its tmux server stopped or the host rebooted, noted on its timeline. Control is restarted, or moved to another host once its own has been silent for five minutes, and told.",
       "key": "recovery.auto_restore",
       "kind": {
         "type": "bool"

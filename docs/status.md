@@ -291,8 +291,12 @@ failed one; assist follows within bounds (never past the memory floor; a
 move is recorded, not carried out). Each attempt leaves one
 `auto_restored` / `auto_restore_failed` / `auto_restore_skipped` event;
 Control's own session is restarted through `restart_session` and gets a
-`[fleet]` note in its conversation. No migration; the controller is still
-never restored without `force`.
+`[fleet]` note in its conversation. When Control's own host stops answering
+for 5 minutes (or the grace, if longer), the tick runs `ensure_operator`,
+which starts Control on a host that answers, within the same budget; the
+stranded row gets `operator_moved` / `operator_move_failed` and the new
+Control a `[fleet]` note. No migration; the controller is still never
+restored without `force`.
 
 **The operator feed** is landed and ON by default (`control.react_to_events`,
 `service/operator_feed.rs`, loop `operator_feed`): Control's own session gets
