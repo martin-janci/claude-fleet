@@ -43,6 +43,7 @@
   import { OPERATOR_COMMANDS } from './operator';
   import { insertIntoComposer } from './conversation';
   import ConfirmCards from './ConfirmCards.svelte';
+  import ControlEscalations from './ControlEscalations.svelte';
   import { openChatWizard } from './forms/chat_wizards';
   import HandoffCards from './HandoffCards.svelte';
   import { controlThinking } from './control_loaders';
@@ -210,6 +211,8 @@
        Mounted only while this row renders, so a request is never parked on
        a card nobody can see (confirms.ts). -->
   <ConfirmCards />
+  <!-- Thread room: what in the fleet needs the person, as amber cards. -->
+  <ControlEscalations />
   <!-- Steps 9.3 and 9.6: what the agent handed on, as chips and cards
        that follow their target's state. -->
   <HandoffCards />

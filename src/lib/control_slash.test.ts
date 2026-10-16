@@ -15,6 +15,7 @@ import {
   undoCommand,
 } from './control_slash';
 import { sessions, type SessionRow } from './sessions';
+import { hosts, type HostRow } from './hosts';
 
 // Friday 9 October 2026, mid-morning, local time.
 const NOW = new Date(2026, 9, 9, 10, 30);
@@ -92,7 +93,69 @@ describe('parseControlCommand', () => {
   it('/plan, the built-ins and plain prompts are not Control’s to run', () => {
     expect(parseControlCommand('/plan the Windows installer')).toBeNull();
     expect(parseControlCommand('/clear')).toBeNull();
+    expect(parseControlCommand('/tidy')).toBeNull();
     expect(parseControlCommand('how is the release going?')).toBeNull();
+  });
+  it('reads /health and /graph', () => {
+    expect(parseControlCommand('/health')).toEqual({ ok: true, command: { cmd: 'health' } });
+    expect(parseControlCommand('/health @mefistos')).toEqual({ ok: true, command: { cmd: 'health', host: 'mefistos' } });
+    expect(parseControlCommand('/health mefistos')).toEqual({ ok: false, usage: '/health [@host]' });
+    expect(parseControlCommand('/graph')).toEqual({ ok: true, command: { cmd: 'graph' } });
+    expect(parseControlCommand('/graph Hub federation')).toEqual({ ok: true, command: { cmd: 'graph', target: 'Hub federation' } });
+  });
+});
+
+describe('/health and /graph', () => {
+  const host = (alias: string, over: Partial<HostRow> = {}): HostRow =>
+    ({ alias, reachable: true, hidden: false, health_at: Math.floor(Date.now() / 1000), cpu_pct: 20, mem_avail_kb: 6_000_000, mem_total_kb: 8_000_000, disk_home_free_kb: 50_000_000, disk_home_total_kb: 100_000_000, ...over }) as HostRow;
+
+  it('/health lists every host, the one in trouble first, without asking the backend', async () => {
+    hosts.set([host('alpha'), host('mefistos', { reachable: false })]);
+    expect(takeControlCommand('/health')).toBe(true);
+    const r = await receipt();
+    expect(r.state).toBe('done');
+    expect(r.line).toContain('mefistos');
+    expect(r.rows?.map((x) => x.label)).toEqual(['mefistos', 'alpha']);
+    expect(r.rows?.[0].text).toBe('offline');
+    expect(r.open).toEqual({ kind: 'hosts' });
+    expect(inv).not.toHaveBeenCalled();
+  });
+
+  it('/health @host narrows it, and names a host it does not know', async () => {
+    hosts.set([host('alpha'), host('beta')]);
+    takeControlCommand('/health @beta');
+    const r = await receipt();
+    expect(r.line).toBe('beta is fine.');
+    expect(r.rows).toHaveLength(1);
+    takeControlCommand('/health @gamma');
+    expect((await receipt()).line).toBe('No host named gamma.');
+  });
+
+  it('/graph draws the only active mission as a graph card', async () => {
+    const mission = { id: 4, name: 'Hub federation', state: 'active', root_item_id: 40 };
+    answer({
+      work_missions: [mission, { id: 5, name: 'Old', state: 'completed' }],
+      work_mission: {
+        mission,
+        items: [{ id: 41, title: 'Spec' }, { id: 42, title: 'Build' }],
+        graph: { nodes: [{ item_id: 41, wave: 1, state: 'done' }, { item_id: 42, wave: 2, state: 'todo' }] },
+      },
+    });
+    takeControlCommand('/graph');
+    const r = await receipt();
+    expect(r.state).toBe('done');
+    expect(r.line).toBe('Hub federation · 1 of 2 done');
+    expect(r.graph?.total).toBe(2);
+    expect(r.open).toEqual({ kind: 'mission', id: 4 });
+    expect(calls('work_mission')).toEqual([{ args: { mission_id: 4 } }]);
+  });
+
+  it('/graph asks which mission when several are active', async () => {
+    answer({ work_missions: [{ id: 1, name: 'A', state: 'active' }, { id: 2, name: 'B', state: 'active' }] });
+    takeControlCommand('/graph');
+    const r = await receipt();
+    expect(r.state).toBe('failed');
+    expect(r.line).toBe('2 missions are active: name one (A, B).');
   });
 });
 

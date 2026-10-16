@@ -17,6 +17,12 @@
 //   /done #KEY
 //   /assign #KEY @session
 //   /start #KEY [@host]
+//   /health [@host]          (Thread room: host health from the host rows)
+//   /graph [#KEY | mission]  (Thread room: a mission's task graph card)
+// `/health` and `/graph` only read: the desktop answers from what it holds,
+// so they cost no model turn. `/tidy` goes to the agent, which shows the
+// batch and waits for a go. The phone sends all three to the agent, whose
+// commands (`CONTROL_COMMANDS`) answer the same questions.
 // `#KEY` is a task key (`TASK-219`, `PD-2592`); the `#` is optional.
 import { get, writable } from 'svelte/store';
 import type { Result } from './result';
@@ -26,12 +32,21 @@ import { previewStartWork, previewIsClean, startFromPreview, baseStartArgs } fro
 import { sessions, type SessionRow } from './sessions';
 import { sessionActionBlocked } from './share';
 import { hubActionBlocked } from './hub';
+import { hosts } from './hosts';
+import { selectView } from './control_views';
+import { openMissionInControl } from './control_room';
+import { fleetLoads, loadParts, type LoadLevel } from './host_health';
+import { fleetSettings, settingInt, SETTING_KEYS } from './fleet_settings';
+import { getMission, listMissions, type Mission } from './missions';
+import { graphFromMission, graphProgress, type GraphCard } from './task_graph_card';
 
 export type ControlCommand =
   | { cmd: 'task'; title: string; due?: string; owner?: string }
   | { cmd: 'done'; key: string }
   | { cmd: 'assign'; key: string; session: string }
-  | { cmd: 'start'; key: string; host?: string };
+  | { cmd: 'start'; key: string; host?: string }
+  | { cmd: 'health'; host?: string }
+  | { cmd: 'graph'; target?: string };
 
 /** What a typed line is to Control: one of its commands, a command of its
  *  own typed wrong (`usage` says how), or not one it runs (`null`: `/plan`,
@@ -43,6 +58,8 @@ export const USAGE: Record<ControlCommand['cmd'], string> = {
   done: '/done #KEY',
   assign: '/assign #KEY @session',
   start: '/start #KEY [@host]',
+  health: '/health [@host]',
+  graph: '/graph [#KEY or a mission name]',
 };
 
 const KEY = /^#?([A-Za-z][A-Za-z0-9_]*-\d+)$/;
@@ -116,6 +133,14 @@ export function parseControlCommand(text: string, now: Date = new Date()): Parse
       if (!key || at.length > 1 || toks.length !== 1 + at.length) return bad('start');
       return { ok: true, command: { cmd: 'start', key, ...(at[0] ? { host: at[0].slice(1) } : {}) } };
     }
+    case 'health': {
+      if (toks.length > 1 || (toks[0] !== undefined && !(toks[0].startsWith('@') && toks[0].length > 1))) return bad('health');
+      return { ok: true, command: { cmd: 'health', ...(toks[0] ? { host: toks[0].slice(1) } : {}) } };
+    }
+    case 'graph': {
+      const target = toks.join(' ');
+      return { ok: true, command: { cmd: 'graph', ...(target ? { target } : {}) } };
+    }
     default:
       return null;
   }
@@ -129,8 +154,16 @@ export interface CommandReceipt {
   state: 'running' | 'done' | 'failed';
   /** One sentence: what happened, or why not. */
   line: string;
-  /** Where the result lives: a task in Work, or a session. */
-  open?: { kind: 'task'; taskId: string } | { kind: 'session'; id: number; label: string };
+  /** Where the result lives: a task in Work, a session, Control's Hosts view or a mission. */
+  open?:
+    | { kind: 'task'; taskId: string }
+    | { kind: 'session'; id: number; label: string }
+    | { kind: 'hosts' }
+    | { kind: 'mission'; id: number };
+  /** `/health`: one line per host, worst first. */
+  rows?: { label: string; text: string; level: LoadLevel }[];
+  /** `/graph`: the mission's task graph, drawn as the chat's graph card. */
+  graph?: GraphCard;
   /** Puts back what the command changed, when it can be put back. */
   undo?: () => Promise<Result<unknown>>;
 }
@@ -177,8 +210,74 @@ async function resolveItem(key: string): Promise<{ ok: true; itemId: number; sta
   return { ok: true, itemId: t.item_id, status: t.status_category ?? 'todo', title: t.title ?? key };
 }
 
+function health(host: string | undefined): Omit<CommandReceipt, 'id' | 'typed'> {
+  const settings = get(fleetSettings);
+  const now = Math.floor(Date.now() / 1000);
+  const all = fleetLoads(get(hosts), host ?? null, now, {
+    diskLowPct: settingInt(settings, SETTING_KEYS.healthDiskLowPct),
+    memLowPct: settingInt(settings, SETTING_KEYS.healthMemLowPct),
+    cpuBusyPct: settingInt(settings, SETTING_KEYS.healthCpuBusyPct),
+  });
+  const loads = host ? all.filter((l) => l.alias.toLowerCase() === host.toLowerCase()) : all;
+  if (loads.length === 0) return { state: 'failed', line: host ? `No host named ${host}.` : 'No hosts yet.' };
+  const rank = (l: LoadLevel) => (l === 'crit' ? 0 : l === 'warn' ? 1 : 2);
+  const rows = [...loads]
+    .sort((a, b) => rank(a.level) - rank(b.level) || a.alias.localeCompare(b.alias))
+    .map((l) => ({ label: l.alias, text: loadParts(l).join(' · '), level: l.level }));
+  const trouble = loads.filter((l) => l.trouble);
+  const line =
+    trouble.length === 0
+      ? loads.length === 1
+        ? `${loads[0].alias} is fine.`
+        : `All ${loads.length} hosts are fine.`
+      : trouble.map((l) => `${l.alias}: ${l.trouble}`).join(' · ');
+  return { state: 'done', line, rows, open: { kind: 'hosts' } };
+}
+
+/** The mission `/graph` means: by its root task's key, by name, or the only active one. */
+async function missionFor(target: string | undefined): Promise<{ ok: true; mission: Mission } | { ok: false; line: string }> {
+  const list = await listMissions();
+  if (!list.ok) return { ok: false, line: list.error.message };
+  const missions = list.value;
+  if (target === undefined) {
+    const active = missions.filter((m) => m.state === 'active');
+    if (active.length === 1) return { ok: true, mission: active[0] };
+    if (active.length === 0) return { ok: false, line: 'No active mission. Name one: /graph <mission>.' };
+    return { ok: false, line: `${active.length} missions are active: name one (${active.map((m) => m.name).join(', ')}).` };
+  }
+  const key = keyOf(target);
+  if (key) {
+    const it = await resolveItem(key);
+    if (!it.ok) return { ok: false, line: it.line };
+    const m = missions.find((x) => x.root_item_id === it.itemId);
+    return m ? { ok: true, mission: m } : { ok: false, line: `${key} is not a mission's task.` };
+  }
+  const want = target.toLowerCase();
+  const exact = missions.filter((m) => m.name.toLowerCase() === want);
+  const near = exact.length > 0 ? exact : missions.filter((m) => m.name.toLowerCase().includes(want));
+  if (near.length === 1) return { ok: true, mission: near[0] };
+  if (near.length === 0) return { ok: false, line: `No mission named ${target}.` };
+  return { ok: false, line: `${near.length} missions match ${target}: ${near.map((m) => m.name).join(', ')}.` };
+}
+
+async function graph(target: string | undefined): Promise<Omit<CommandReceipt, 'id' | 'typed'>> {
+  const found = await missionFor(target);
+  if (!found.ok) return { state: 'failed', line: found.line };
+  const m = found.mission;
+  const open = { kind: 'mission' as const, id: m.id };
+  const d = await getMission(m.id);
+  if (!d.ok) return { state: 'failed', line: d.error.message, open };
+  const g = graphFromMission(d.value);
+  if (!g) return { state: 'done', line: `${m.name} has no tasks yet.`, open };
+  return { state: 'done', line: `${m.name} · ${graphProgress(g)}`, open, graph: g };
+}
+
 async function run(c: ControlCommand): Promise<Omit<CommandReceipt, 'id' | 'typed'>> {
   switch (c.cmd) {
+    case 'health':
+      return health(c.host);
+    case 'graph':
+      return graph(c.target);
     case 'task': {
       const r = await createWorkTask({ title: c.title });
       if (!r.ok) return { state: 'failed', line: r.error.message };
@@ -272,6 +371,8 @@ export function takeControlCommand(text: string, now: Date = new Date()): boolea
 export function openCommandResult(r: CommandReceipt, focus: (id: number, label: string) => void): void {
   if (!r.open) return;
   if (r.open.kind === 'task') showTaskInWorkView(r.open.taskId);
+  else if (r.open.kind === 'hosts') selectView('hosts');
+  else if (r.open.kind === 'mission') openMissionInControl(r.open.id);
   else focus(r.open.id, r.open.label);
 }
 
