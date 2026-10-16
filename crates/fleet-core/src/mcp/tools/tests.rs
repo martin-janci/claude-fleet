@@ -13330,8 +13330,10 @@ fn the_reaches_the_desktop_decided_are_the_ones_the_hub_enforces() {
     // `tidy_apply` is `own`, because it can safe-kill — and
     // `safe_kill_session` is `own`, so the batch form cannot be narrower
     // than the single-session one. It lives inside `work_link`, which also
-    // drives, hence both reaches on that row.
-    assert_eq!(reach_of("work_link"), vec!["Drive", "Own"]);
+    // drives, hence both reaches on that row. `Read` is `followup`'s check
+    // on its origin TASK (`task_visible_at`), not on a session, so it widens
+    // no session tier the desktop decided.
+    assert_eq!(reach_of("work_link"), vec!["Drive", "Own", "Read"]);
     assert_eq!(reach_of("safe_kill_session"), vec!["Own"]);
     // `restore_host_sessions` is `recreate_session` in bulk, and it reaches
     // the primitive at the SERVICE layer — so both rows have to say `own`,
