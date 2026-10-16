@@ -156,6 +156,14 @@ describe('the proposed tree', () => {
     expect(calls('save_mission')).toEqual([]);
   });
 
+  it('Reject all turns every proposal down, creating nothing', async () => {
+    receipts = [tree];
+    render(HandoffCards);
+    await fireEvent.click(await screen.findByTestId('handoff-tree-reject'));
+    await waitFor(() => expect(calls('reject_work_proposal')).toHaveLength(3));
+    expect(calls('accept_work_proposals')).toEqual([]);
+  });
+
   it('creates them as a mission rooted at the parent', async () => {
     receipts = [tree];
     render(HandoffCards);

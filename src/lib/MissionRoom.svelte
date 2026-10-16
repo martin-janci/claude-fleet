@@ -149,7 +149,7 @@
   /** The header's autonomy in words: "Runs at L1 · L3 asked · L1 ceiling". */
   const autonomy = $derived(plan ? autonomyWords(plan.autonomy) : null);
   const pressable = $derived((plan?.steps ?? []).filter((s) => s.kind !== 'ask'));
-  const openCards = $derived((plan?.cards ?? []).filter((c) => c.state === 'open'));
+  const openCards = $derived((plan?.cards ?? []).filter((c) => c.state === 'open' && !hiddenCards.includes(c.id)));
   const runs = $derived(detail ? runsOf(detail) : []);
   const proposals = $derived(detail ? proposalSummary(detail) : { ids: [], waves: 0, titles: [] });
   const graph = $derived(detail ? graphFromMission(detail) : null);
@@ -549,7 +549,14 @@
     }
     const out = await act(decideMissionCard(c.id, ok, note));
     if (out?.state === 'refused') notice = out.note ?? 'Refused';
+    // Said under the card that was pressed, too: the room's notice sits at
+    // its top, out of sight from a card further down, and the press looked
+    // like it did nothing.
+    cardNote = notice !== null ? { id: c.id, text: notice } : null;
   }
+  let cardNote = $state<{ id: number; text: string } | null>(null);
+  /** Cards this person cannot act on and hid, by id (per window). */
+  let hiddenCards = $state<number[]>([]);
 
   // The grant: what the loop may do by itself, for how long, on what.
   let granting = $state(false);
@@ -1025,8 +1032,18 @@
                           >Dismiss</button
                         >
                       </div>
+                    {:else}
+                      <!-- Not this person's to answer: say so, and let them
+                           put it away rather than leave it hanging. -->
+                      <div class="row">
+                        <span class="muted small">Only someone who may change this mission can answer.</span>
+                        <button class="btn btn--quiet" type="button" data-testid="mission-card-hide" onclick={() => (hiddenCards = [...hiddenCards, c.id])}
+                          >Hide</button
+                        >
+                      </div>
                     {/if}
                   {/if}
+                  {#if cardNote?.id === c.id}<p class="notice" role="status" data-testid="mission-card-notice">{cardNote.text}</p>{/if}
                 </li>
               {/each}
             </ul>

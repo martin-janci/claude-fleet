@@ -60,9 +60,12 @@
     /** Gap plan G4.2: shown under the choices when this person may read the
      *  session but not answer it ("You can read this session…"). */
     readOnlyNote?: string;
+    /** The pane no longer shows this dialog: "Dismiss" under the stale note
+     *  hides the card until the dialog on the pane changes. */
+    onGone?: () => void;
   }
 
-  const { session, view, compact = false, onOpenTerminal, onAnswered, onOwnWords, readOnlyNote }: Props = $props();
+  const { session, view, compact = false, onOpenTerminal, onAnswered, onOwnWords, readOnlyNote, onGone }: Props = $props();
 
   let busy = $state(false);
   let errorMsg = $state<string | null>(null);
@@ -181,6 +184,9 @@
       else onSent?.();
     } else if ('stale' in out) staleMsg = out.stale;
     else if ('error' in out) errorMsg = out.error;
+    // Refused before any key (the hub is read-only, the session moved): a
+    // press that says nothing looks like a dead button.
+    else if ('blocked' in out) errorMsg = out.blocked;
     busy = false;
     return out.ok;
   }
@@ -326,7 +332,11 @@
       </div>
     {/if}
     {#if readOnlyNote && writeBlocked !== null}<p class="readonly" data-testid="answer-readonly">{readOnlyNote}</p>{/if}
-    {#if staleMsg}<p class="stale" role="status" data-testid="answer-stale">{staleMsg}</p>{/if}
+    {#if staleMsg}<p class="stale" role="status" data-testid="answer-stale"
+        >{staleMsg}{#if onGone}
+          <button type="button" class="btn btn--chip btn--quiet" data-testid="answer-stale-dismiss" onclick={(e) => mine(e, () => onGone?.())}
+            >Dismiss</button
+          >{/if}</p>{/if}
     {#if errorMsg}<p class="err" role="status" data-testid="answer-error">{errorMsg}</p>{/if}
   </QuestionCard>
 </div>
