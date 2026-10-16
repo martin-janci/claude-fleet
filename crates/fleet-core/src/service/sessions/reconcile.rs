@@ -777,7 +777,15 @@ fn open_reconciled_conversation(
 /// often (a laptop off the LAN logged 4,219 identical lines in a day).
 const DOWN_REWARN_SECS: i64 = 600;
 
-/// What one failed probe logs.
+/// How long an agent host with no agent connected is given to redial before
+/// a pass writes it unreachable. Every hub restart (twelve in two days on a
+/// dev channel) found no agent connected on its first pass and flipped every
+/// agent host to unreachable for a tick; an agent whose socket was reset
+/// redials in a second or two and hit the same pass (2026-10-15/16). Above
+/// one 20 s tick, so a real outage is written on the pass after next.
+const AGENT_REDIAL_GRACE_SECS: i64 = 30;
+
+/// What one failed probe does.
 #[derive(Debug, PartialEq, Eq)]
 enum DownLog {
     /// A new outage, a changed error, or [`DOWN_REWARN_SECS`] since the last
@@ -786,12 +794,15 @@ enum DownLog {
         down_for: i64,
     },
     Quiet,
+    /// An agent host inside [`AGENT_REDIAL_GRACE_SECS`]: write nothing yet.
+    Hold,
 }
 
 #[derive(Debug)]
 struct Down {
     since: i64,
-    warned_at: i64,
+    /// `None` while the outage has not been reported (held, so far).
+    warned_at: Option<i64>,
     error: String,
 }
 
@@ -800,35 +811,35 @@ struct Down {
 struct DownHosts(std::sync::Mutex<std::collections::HashMap<String, Down>>);
 
 impl DownHosts {
-    fn note_down(&self, alias: &str, error: &str, now: i64) -> DownLog {
+    /// `agent_offline`: the probe failed because no agent is connected,
+    /// which a redial may fix within [`AGENT_REDIAL_GRACE_SECS`].
+    fn note_down(&self, alias: &str, error: &str, agent_offline: bool, now: i64) -> DownLog {
         let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        match map.get_mut(alias) {
-            Some(d) if d.error == error && now - d.warned_at < DOWN_REWARN_SECS => DownLog::Quiet,
-            Some(d) => {
-                d.warned_at = now;
-                d.error = error.to_string();
-                DownLog::Warn {
-                    down_for: now - d.since,
-                }
-            }
-            None => {
-                map.insert(
-                    alias.to_string(),
-                    Down {
-                        since: now,
-                        warned_at: now,
-                        error: error.to_string(),
-                    },
-                );
-                DownLog::Warn { down_for: 0 }
-            }
+        let d = map.entry(alias.to_string()).or_insert_with(|| Down {
+            since: now,
+            warned_at: None,
+            error: error.to_string(),
+        });
+        if agent_offline && d.warned_at.is_none() && now - d.since < AGENT_REDIAL_GRACE_SECS {
+            return DownLog::Hold;
+        }
+        if d.error == error && d.warned_at.is_some_and(|w| now - w < DOWN_REWARN_SECS) {
+            return DownLog::Quiet;
+        }
+        d.warned_at = Some(now);
+        d.error = error.to_string();
+        DownLog::Warn {
+            down_for: now - d.since,
         }
     }
 
-    /// How long `alias` was down, when it was.
+    /// How long `alias` was down, when that outage was reported; a held one
+    /// that ended inside its grace says nothing.
     fn note_up(&self, alias: &str, now: i64) -> Option<i64> {
         let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        map.remove(alias).map(|d| now - d.since)
+        map.remove(alias)
+            .filter(|d| d.warned_at.is_some())
+            .map(|d| now - d.since)
     }
 }
 
@@ -866,7 +877,12 @@ pub(super) fn reconcile_write_one_host(
             // Mark host unreachable; surface last-known sessions so the UI
             // can render them dimmed/red. We KEEP them (no delete).
             let now = now_unix();
-            match down_hosts().note_down(&host.alias, &e.message, now) {
+            let agent_offline = e.code == codes::E_AGENT_OFFLINE;
+            match down_hosts().note_down(&host.alias, &e.message, agent_offline, now) {
+                DownLog::Hold => {
+                    tracing::debug!(host = %host.alias, "[reconcile] no agent connected yet; waiting for it to redial");
+                    return Ok(());
+                }
                 DownLog::Warn { down_for } => tracing::warn!(
                     host = %host.alias, code = %e.code, error = %e.message, down_for,
                     "[reconcile] host unreachable"
@@ -2722,19 +2738,53 @@ mod down_log_tests {
     fn an_outage_warns_once_then_every_ten_minutes_and_logs_its_end() {
         let d = DownHosts::default();
         let e = "ssh: connect to host 192.168.13.123 port 22: No route to host";
-        assert_eq!(d.note_down("mac", e, 1000), DownLog::Warn { down_for: 0 });
-        assert_eq!(d.note_down("mac", e, 1020), DownLog::Quiet);
-        assert_eq!(d.note_down("mac", e, 1599), DownLog::Quiet);
-        assert_eq!(d.note_down("mac", e, 1600), DownLog::Warn { down_for: 600 });
+        let ssh = |at| d.note_down("mac", e, false, at);
+        assert_eq!(ssh(1000), DownLog::Warn { down_for: 0 });
+        assert_eq!(ssh(1020), DownLog::Quiet);
+        assert_eq!(ssh(1599), DownLog::Quiet);
+        assert_eq!(ssh(1600), DownLog::Warn { down_for: 600 });
         // Another host is its own outage.
-        assert_eq!(d.note_down("htz", e, 1610), DownLog::Warn { down_for: 0 });
+        assert_eq!(
+            d.note_down("htz", e, false, 1610),
+            DownLog::Warn { down_for: 0 }
+        );
         // A different error is news.
         assert_eq!(
-            d.note_down("mac", "Connection timed out", 1620),
+            d.note_down("mac", "Connection timed out", false, 1620),
             DownLog::Warn { down_for: 620 }
         );
         assert_eq!(d.note_up("mac", 1700), Some(700));
         assert_eq!(d.note_up("mac", 1720), None, "said once");
-        assert_eq!(d.note_down("mac", e, 1740), DownLog::Warn { down_for: 0 });
+        assert_eq!(ssh(1740), DownLog::Warn { down_for: 0 });
+    }
+
+    /// A hub restart or a reset socket leaves an agent host without its
+    /// agent for a second or two; the pass that lands then writes nothing.
+    /// One still gone after the grace is reported from when it went.
+    #[test]
+    fn an_agent_host_gets_a_redial_grace_before_it_reads_unreachable() {
+        let d = DownHosts::default();
+        let e = "no fleet-agent is connected for host mefistos";
+        let off = |at| d.note_down("mefistos", e, true, at);
+        assert_eq!(off(1000), DownLog::Hold);
+        assert_eq!(off(1020), DownLog::Hold);
+        // It redialed: nothing was reported, so nothing is said.
+        assert_eq!(d.note_up("mefistos", 1025), None);
+        // A real outage: held, then reported with its whole length.
+        assert_eq!(off(2000), DownLog::Hold);
+        assert_eq!(off(2020), DownLog::Hold);
+        assert_eq!(off(2040), DownLog::Warn { down_for: 40 });
+        assert_eq!(off(2060), DownLog::Quiet);
+        assert_eq!(d.note_up("mefistos", 2070), Some(70));
+        // Any other failure of an agent host is written at once.
+        assert_eq!(
+            d.note_down(
+                "mefistos",
+                "agent on mefistos did not answer within 30s",
+                false,
+                3000
+            ),
+            DownLog::Warn { down_for: 0 }
+        );
     }
 }
