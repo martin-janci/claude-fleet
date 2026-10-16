@@ -72,6 +72,14 @@
             "key": "recovery.auto_restore",
             "truthy": true
           }
+        },
+        {
+          "type": "field",
+          "key": "recovery.max_mem_pressure",
+          "when": {
+            "key": "recovery.auto_restore",
+            "truthy": true
+          }
         }
       ]
     },

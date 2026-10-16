@@ -6247,8 +6247,11 @@ async fn a_changed_boot_id_marks_every_session_lost_as_a_reboot() {
 /// `/proc`, an executor that doesn't implement it, a stubborn ssh hiccup —
 /// `identity: None` on every pass) must behave exactly as before Task 6: a
 /// session that drops out is ghosted on the pass it disappears and hard-
-/// deleted on the NEXT pass (the routine one-cycle grace), never granted the
-/// mass-loss TTL exemption.
+/// deleted by the first pass once it has been a ghost for
+/// `GHOST_MIN_AGE_SECS` (the routine grace), never granted the mass-loss TTL
+/// exemption. The grace used to be one pass; a pass seconds later now keeps
+/// the row (2026-10-16: a restore's single-host pass reaped sixteen rows 4 s
+/// after they were lost).
 #[tokio::test]
 async fn an_unreadable_identity_leaves_today_s_behaviour_intact() {
     let store = Mutex::new(Store::open_in_memory().expect("store"));
@@ -6295,9 +6298,31 @@ async fn an_unreadable_identity_leaves_today_s_behaviour_intact() {
         "pass 2 ghosts the missing row exactly as before Task 6"
     );
 
-    // Pass 3: identical — the routine one-cycle reap must still fire; a
-    // 'missing' row is never exempt regardless of the (now-active) TTL
+    // Pass 3, seconds later: inside the ghost floor the row stays.
+    let deps = identity_deps("mefistos", vec![], None, vec![]);
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    assert!(
+        store
+            .lock()
+            .unwrap()
+            .get_session("z", "mefistos")
+            .unwrap()
+            .is_some(),
+        "a pass inside the ghost floor keeps a 'missing' row"
+    );
+
+    // Pass 4, once the floor has passed: the routine reap must still fire;
+    // a 'missing' row is never exempt regardless of the (now-active) TTL
     // cutoff.
+    store
+        .lock()
+        .unwrap()
+        .conn_ref()
+        .execute(
+            "UPDATE sessions SET lost_at = lost_at - ?1 WHERE tmux_name = 'z'",
+            [crate::service::sessions::reconcile::GHOST_MIN_AGE_SECS + 1],
+        )
+        .unwrap();
     let deps = identity_deps("mefistos", vec![], None, vec![]);
     reconcile_sessions_with(&store, &deps).await.unwrap();
     assert!(
@@ -6307,7 +6332,7 @@ async fn an_unreadable_identity_leaves_today_s_behaviour_intact() {
             .get_session("z", "mefistos")
             .unwrap()
             .is_none(),
-        "pass 3 hard-deletes the 'missing' row exactly as before Task 6 — \
+        "pass 4 hard-deletes the 'missing' row exactly as before Task 6 — \
          the reboot-safety-net TTL exemption must never apply to it"
     );
 }

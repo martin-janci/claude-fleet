@@ -735,6 +735,7 @@ mod tests {
             sessions: &[],
             keep: &[],
             lost_ttl_cutoff: None,
+            min_ghost_age_cutoff: None,
             skip_prune: false,
             reconciled_at: None,
         })
@@ -907,6 +908,7 @@ mod tests {
             sessions: &[],
             keep: &[],
             lost_ttl_cutoff: None,
+            min_ghost_age_cutoff: None,
             skip_prune: false,
             reconciled_at: None,
         })
@@ -1035,6 +1037,7 @@ mod tests {
             sessions: &[],
             keep: &[],
             lost_ttl_cutoff: None,
+            min_ghost_age_cutoff: None,
             skip_prune: false,
             reconciled_at: None,
         })
@@ -1139,6 +1142,7 @@ mod tests {
             sessions: &[],
             keep: &[],
             lost_ttl_cutoff: None,
+            min_ghost_age_cutoff: None,
             skip_prune: false,
             reconciled_at: None,
         })
@@ -1184,6 +1188,7 @@ mod tests {
             sessions: &[],
             keep: &[],
             lost_ttl_cutoff: None,
+            min_ghost_age_cutoff: None,
             skip_prune: false,
             reconciled_at: None,
         })
@@ -1311,6 +1316,7 @@ mod tests {
             sessions: &[],
             keep: &[],
             lost_ttl_cutoff: None,
+            min_ghost_age_cutoff: None,
             skip_prune: true,
             reconciled_at: None,
         })
@@ -1481,6 +1487,7 @@ mod tests {
             sessions: &[],
             keep: &[],
             lost_ttl_cutoff: None,
+            min_ghost_age_cutoff: None,
             skip_prune: false,
             reconciled_at: None,
         })
@@ -1552,6 +1559,7 @@ mod tests {
             sessions: &[],
             keep: &[],
             lost_ttl_cutoff: None,
+            min_ghost_age_cutoff: None,
             skip_prune: false,
             reconciled_at: None,
         })

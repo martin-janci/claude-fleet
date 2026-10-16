@@ -278,6 +278,41 @@ impl Store {
         Ok(n as u32)
     }
 
+    /// When `session_id`'s latest `kind` event at or before `until` was
+    /// written, `None` without one: the auto-restore tick's "was this
+    /// session restored shortly before the loss" (`service::auto_restore`).
+    pub fn last_session_event_at(
+        &self,
+        session_id: i64,
+        kind: &str,
+        until: i64,
+    ) -> Result<Option<i64>, crate::ipc_error::IpcError> {
+        Ok(self.conn.query_row(
+            "SELECT MAX(at) FROM session_events \
+             WHERE session_id = ?1 AND kind = ?2 AND at <= ?3",
+            rusqlite::params![session_id, kind, until],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// How many `kind` events on any session of `host_alias` were written at
+    /// or after `since`: the restores the auto-restore tick launched on a
+    /// host that its health sample may not show yet.
+    pub fn count_host_session_events_since(
+        &self,
+        host_alias: &str,
+        kind: &str,
+        since: i64,
+    ) -> Result<u32, crate::ipc_error::IpcError> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM session_events e JOIN sessions s ON s.id = e.session_id \
+             WHERE s.host_alias = ?1 AND e.kind = ?2 AND e.at >= ?3",
+            rusqlite::params![host_alias, kind, since],
+            |r| r.get(0),
+        )?;
+        Ok(n as u32)
+    }
+
     /// The details of `session_id`'s `kind` events written at or after
     /// `since` (rows with no detail left out): which refusals the
     /// auto-restore tick already wrote for the current loss episode.

@@ -51,6 +51,16 @@ pub fn read_reconcile_interval_secs(raw: Option<String>) -> i64 {
     .unwrap_or(DEFAULT_RECONCILE_INTERVAL_SECS)
 }
 
+/// How long (seconds) a tmux row fleet did not kill stays a ghost before a
+/// pass may hard-delete it (`HostReconcile::min_ghost_age_cutoff`). Measured
+/// on `lost_at`, not in passes: a restore, kill or `new_session` runs a
+/// single-host pass seconds after the tick's, and on 2026-10-16 that reaped
+/// sixteen just-lost rows 4 s after they were ghosted. Five minutes is
+/// several ticks and long enough for a person or the Control session to
+/// see the loss; fleet's own kills (`lost_reason='killed'`) still go on the
+/// next pass.
+pub(crate) const GHOST_MIN_AGE_SECS: i64 = 300;
+
 /// Fallback when `sessions.lost_ttl_secs` is unset or unparseable — 14 days,
 /// matching the registry default in `service::settings::SESSIONS_LOST_TTL_SECS`.
 pub(super) const DEFAULT_LOST_TTL_SECS: i64 = 1_209_600;
@@ -798,6 +808,7 @@ pub(super) fn reconcile_write_one_host(
                     sessions: &[],
                     keep: &[],
                     lost_ttl_cutoff: None,
+                    min_ghost_age_cutoff: None,
                     skip_prune: false,
                     reconciled_at: None,
                 },
@@ -1151,6 +1162,7 @@ fn write_reachable_host(
         sessions: &sessions,
         keep: &keep,
         lost_ttl_cutoff: read_lost_ttl_cutoff(lost_ttl_raw, now),
+        min_ghost_age_cutoff: Some(now - GHOST_MIN_AGE_SECS),
         // A pass that just mass-marked this host's sessions lost
         // must not immediately re-ghost (and restart the reap clock
         // on) those very rows via the routine keep-set prune below —
