@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "version": "0.6.3-dev.462.desktop.gbc1fea2",
+  "mobile_accepts": [
+    0,
+    18
+  ],
+  "components": {
+    "android": {
+      "version": "0.6.3-dev.462.desktop.gbc1fea2",
+      "artifacts": [
+        {
+          "kind": "apk",
+          "url": "https://github.com/martin-janci/fleet-mobile/releases/download/v0.6.3-dev.462.desktop.gbc1fea2/fleet-mobile-0.6.3-dev.462.desktop.gbc1fea2.apk",
+          "sha256": "48ccb9e31d2872ba1442873d88070cba504ed81f7fec75d2c482383c86607edc",
+          "size": 18057422,
+          "version_code": 415634,
+          "signer_sha256": "87081ff376e7ad2cb3082bf8f48dac2f451bffda66693b575c31cd4c354b9a15"
+        }
+      ]
+    }
+  }
+}
