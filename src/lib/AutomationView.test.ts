@@ -207,7 +207,9 @@ describe('Runs lanes and run timeline (automation runs boards A and B)', () => {
     const stats = screen.getByTestId('automation-runs-stats').textContent ?? '';
     expect(stats).toMatch(/Running now\s*1/);
     expect(stats).toMatch(/Skipped fires\s*1/);
-    const call = invoke.mock.calls.find(([c]) => c === 'list_runs')!;
+    // The lanes' own read, not today's (`runsToday` pages with `offset` from
+    // midnight, which before 03:00 is inside the 3 h window too).
+    const call = invoke.mock.calls.find(([c, a]) => c === 'list_runs' && a.args.offset === undefined)!;
     expect(call[1].args.limit).toBe(200);
     expect(now - call[1].args.since).toBeGreaterThanOrEqual(3 * 3600 - 5);
   });

@@ -19,6 +19,15 @@
 //! that died, is told in its own conversation (a `[fleet]` note queued for
 //! its next idle moment) so it can say what happened and carry on.
 //!
+//! **Control off a dead host.** When Control's own host stops answering, its
+//! session cannot be restarted where it is. Once that host has been silent
+//! for [`OPERATOR_MOVE_AFTER_SECS`] (or the grace, if longer), the tick runs
+//! the same `ensure_operator` the desktop's panel runs on open, which starts
+//! Control on a host that answers, within the same attempt budget. The move
+//! is an [`EVENT_OPERATOR_MOVED`] on the stranded row, and the new Control
+//! is told. Before this a fleet whose person had only the phone kept a dead
+//! Control until someone opened the desktop (2026-10-15).
+//!
 //! **What qualifies.** A lost tmux row with a conversation to resume
 //! (`claude_session_id`), a reason in [`RESUMABLE_LOST_REASONS`], lost at
 //! least `recovery.grace_secs` ago (so a reboot or a lost tmux server has a
@@ -82,6 +91,18 @@ pub const EVENT_SKIPPED: &str = "auto_restore_skipped";
 /// `DEFER_*` words, or `move:<alias>`; Jev's one-line reason follows
 /// `: ` when it decided.
 pub const EVENT_DEFERRED: &str = "auto_restore_deferred";
+
+/// Timeline event on the stranded operator row: Control was started again
+/// on another host because its own stopped answering. Detail: `<from>-><to>`.
+pub const EVENT_OPERATOR_MOVED: &str = "operator_moved";
+/// Timeline event on the stranded operator row: that move failed.
+/// Detail: `<from>: <error>`.
+pub const EVENT_OPERATOR_MOVE_FAILED: &str = "operator_move_failed";
+
+/// Control is moved off a host only once that host has been silent this
+/// long (or `recovery.grace_secs`, whichever is longer): a probe that fails
+/// once on a flaky link must not cost Control its conversation.
+pub const OPERATOR_MOVE_AFTER_SECS: i64 = 300;
 
 /// [`EVENT_SKIPPED`] detail: `recovery.max_attempts` is spent.
 pub const SKIP_BUDGET: &str = "budget_spent";
@@ -295,6 +316,9 @@ pub trait AutoRestoreExec: Send + Sync {
     async fn restart_operator(&self, host: &str, tmux_name: &str) -> Result<i64, IpcError>;
     /// Queue `body` for the session's next idle moment.
     async fn queue_note(&self, session_id: i64, body: String) -> Result<(), IpcError>;
+    /// Start Control again where it can run (`ensure_operator`, which moves
+    /// it off a host that does not answer); answers the new row.
+    async fn move_operator(&self) -> Result<SessionRow, IpcError>;
 }
 
 /// Production executor over the real restore, restart and deferred queue.
@@ -352,6 +376,15 @@ impl AutoRestoreExec for RealAutoRestoreExec {
         .await
         .map(|_| ())
     }
+
+    async fn move_operator(&self) -> Result<SessionRow, IpcError> {
+        crate::service::operator::ensure_operator(
+            &self.store,
+            &self.ssh,
+            &crate::cancel::CancellationRegistry::new(),
+        )
+        .await
+    }
 }
 
 /// What a run did.
@@ -362,6 +395,119 @@ pub struct RunReport {
     pub skipped: usize,
     /// Planned deferrals, written or not (one event per episode).
     pub deferred: usize,
+    /// Control was started on another host this run.
+    pub operator_moved: bool,
+}
+
+/// Control stranded on a host that stopped answering, as the tick sees it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Stranded {
+    /// The stranded operator row (it stays where it is).
+    pub session_id: i64,
+    /// The host it is stranded on.
+    pub host: String,
+    /// Where `ensure_operator` would start it instead.
+    pub fallback: String,
+    /// Seconds since that host last answered; `None` when it never did, or
+    /// it was hidden or removed (nothing to wait for).
+    pub silent_for: Option<i64>,
+    /// Moves tried in the last [`ATTEMPT_WINDOW_SECS`], failed ones included.
+    pub attempts: u32,
+}
+
+/// PURE: whether the tick moves Control now. It moves only a live operator
+/// whose host has been silent past the grace, within the restore budget, and
+/// only when a host can take it — the same move the desktop's panel makes on
+/// open, so a fleet whose person is away from the desktop gets its Control
+/// back too (2026-10-15: Control sat on a dead host while the phone had no
+/// way to move it).
+pub fn move_due(st: &Stranded, cfg: &AutoRestoreConfig) -> bool {
+    let wait = cfg.grace_secs.max(OPERATOR_MOVE_AFTER_SECS);
+    st.attempts < cfg.max_attempts && st.silent_for.is_none_or(|s| s >= wait)
+}
+
+/// PURE: the note queued for Control after it was started on another host.
+pub fn operator_moved_note(from: &str, to: &str) -> String {
+    format!(
+        "[fleet] Your host {from} stopped answering, so you were started again on {to}. \
+         Your earlier conversation stays on {from} and comes back with it. Check what \
+         you were following (fleet_status, your missions) and carry on; tell the person \
+         what moved."
+    )
+}
+
+/// Read the stranded operator: `None` unless Control lives on a host that
+/// does not answer and another host can take it.
+fn stranded(store: &Mutex<Store>, now: i64) -> Option<Stranded> {
+    let st = crate::service::operator::operator_status(store).ok()?;
+    if st.blocked.as_deref() != Some("host_down") {
+        return None;
+    }
+    let (row, fallback) = (st.session?, st.fallback?);
+    let s = store.lock().ok()?;
+    let host = s.get_host_row(&row.host_alias).ok().flatten();
+    let silent_for = host
+        .filter(|h| !h.hidden)
+        .and_then(|h| h.last_reachable_at)
+        .map(|at| now - at);
+    let attempts = s
+        .count_session_events_since(
+            row.id,
+            &[EVENT_OPERATOR_MOVED, EVENT_OPERATOR_MOVE_FAILED],
+            now - ATTEMPT_WINDOW_SECS,
+        )
+        .unwrap_or(u32::MAX);
+    Some(Stranded {
+        session_id: row.id,
+        host: row.host_alias,
+        fallback,
+        silent_for,
+        attempts,
+    })
+}
+
+/// Move Control off a host that stopped answering, when [`move_due`].
+async fn move_stranded_operator(
+    store: &Mutex<Store>,
+    exec: &dyn AutoRestoreExec,
+    cfg: &AutoRestoreConfig,
+    now: i64,
+    report: &mut RunReport,
+) {
+    let Some(st) = stranded(store, now) else {
+        return;
+    };
+    if !move_due(&st, cfg) {
+        return;
+    }
+    match exec.move_operator().await {
+        Ok(row) => {
+            tracing::warn!(from = %st.host, to = %row.host_alias, "[auto-restore] operator moved off a host that does not answer");
+            record(
+                store,
+                st.session_id,
+                EVENT_OPERATOR_MOVED,
+                &format!("{}->{}", st.host, row.host_alias),
+            );
+            report.operator_moved = true;
+            if let Err(e) = exec
+                .queue_note(row.id, operator_moved_note(&st.host, &row.host_alias))
+                .await
+            {
+                tracing::warn!(session_id = row.id, error = %e.message, "[auto-restore] operator note not queued");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(from = %st.host, to = %st.fallback, error = %e.message, "[auto-restore] operator move failed");
+            record(
+                store,
+                st.session_id,
+                EVENT_OPERATOR_MOVE_FAILED,
+                &format!("{}: {}", st.host, e.message),
+            );
+            report.failed += 1;
+        }
+    }
 }
 
 /// Whether a lost row is one the tick looks at: a resumable tmux agent row,
@@ -695,6 +841,7 @@ pub async fn run_with(
             }
         }
     }
+    move_stranded_operator(store, exec, cfg, now, &mut report).await;
     report
 }
 
@@ -731,13 +878,14 @@ pub fn maybe_run(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) {
         let advisor = JevAdvisor(crate::service::decide::DecideCtx::jev(Arc::clone(&store)));
         let r = run_with(&store, &exec, &advisor, &cfg, crate::store::now_unix()).await;
         crate::service::loops::report("auto_restore", Ok::<_, String>(()), None);
-        if r.restored + r.failed + r.skipped > 0 {
+        if r.restored + r.failed + r.skipped > 0 || r.operator_moved {
             tracing::info!(
-                "[auto-restore] restored={} failed={} skipped={} deferred={}",
+                "[auto-restore] restored={} failed={} skipped={} deferred={} operator_moved={}",
                 r.restored,
                 r.failed,
                 r.skipped,
-                r.deferred
+                r.deferred,
+                r.operator_moved
             );
         }
     });
@@ -955,6 +1103,8 @@ mod tests {
         restored: Mutex<Vec<(String, Vec<i64>)>>,
         restarted: Mutex<Vec<String>>,
         notes: Mutex<Vec<(i64, String)>>,
+        moved: Mutex<usize>,
+        moved_to: Mutex<Option<SessionRow>>,
         fail_with: Option<&'static str>,
     }
 
@@ -990,6 +1140,17 @@ mod tests {
         async fn queue_note(&self, id: i64, body: String) -> Result<(), IpcError> {
             self.notes.lock().unwrap().push((id, body));
             Ok(())
+        }
+        async fn move_operator(&self) -> Result<SessionRow, IpcError> {
+            *self.moved.lock().unwrap() += 1;
+            if let Some(code) = self.fail_with {
+                return Err(IpcError::new(code, "boom"));
+            }
+            self.moved_to
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "no row to answer"))
         }
     }
 
@@ -1252,6 +1413,164 @@ mod tests {
             .1
             .starts_with("[fleet] Your session was restarted automatically"));
         assert_eq!(events(&store, ids[0]).len(), 1);
+    }
+
+    fn stranded_at(silent_for: Option<i64>, attempts: u32) -> Stranded {
+        Stranded {
+            session_id: 1,
+            host: "mac".into(),
+            fallback: "mefistos".into(),
+            silent_for,
+            attempts,
+        }
+    }
+
+    #[test]
+    fn control_moves_only_once_its_host_has_been_silent_a_while_and_within_budget() {
+        assert!(
+            !move_due(&stranded_at(Some(30), 0), &CFG),
+            "a blip is waited out"
+        );
+        assert!(!move_due(
+            &stranded_at(Some(OPERATOR_MOVE_AFTER_SECS - 1), 0),
+            &CFG
+        ));
+        assert!(move_due(
+            &stranded_at(Some(OPERATOR_MOVE_AFTER_SECS), 0),
+            &CFG
+        ));
+        assert!(
+            move_due(&stranded_at(None, 0), &CFG),
+            "never answered, hidden or removed"
+        );
+        assert!(
+            !move_due(&stranded_at(None, CFG.max_attempts), &CFG),
+            "budget spent"
+        );
+        let slow = AutoRestoreConfig {
+            grace_secs: 900,
+            ..CFG
+        };
+        assert!(
+            !move_due(&stranded_at(Some(600), 0), &slow),
+            "a longer grace wins"
+        );
+    }
+
+    /// Control recorded on `mac`, alive, with MCP on; `mac` stopped answering
+    /// `silent_for` seconds ago and `spare` can take it.
+    fn store_with_control_stranded(silent_for: i64, now: i64) -> (Mutex<Store>, i64, SessionRow) {
+        use crate::service::operator::{set_operator_ref, OperatorRef, OPERATOR_TMUX_NAME};
+        let s = Store::open_in_memory().unwrap();
+        s.set_setting(crate::mcp::SETTING_ENABLED, "true").unwrap();
+        s.set_setting(crate::service::operator::SETTING_OPERATOR_HOST, "mac")
+            .unwrap();
+        for alias in ["mac", "spare"] {
+            s.upsert_host(alias).unwrap();
+        }
+        s.conn_ref()
+            .execute(
+                "UPDATE hosts SET reachable = 0, last_reachable_at = ?1 WHERE alias = 'mac'",
+                [now - silent_for],
+            )
+            .unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE hosts SET reachable = 1, claude_version = '2.1.0', last_reachable_at = ?1 \
+                 WHERE alias = 'spare'",
+                [now],
+            )
+            .unwrap();
+        let old = s
+            .upsert_session(OPERATOR_TMUX_NAME, "mac", None, None, 1, 1, "running", None)
+            .unwrap();
+        set_operator_ref(
+            &s,
+            &OperatorRef {
+                host_alias: "mac".into(),
+                tmux_name: OPERATOR_TMUX_NAME.into(),
+            },
+        )
+        .unwrap();
+        let new = s
+            .upsert_session(
+                "fleet-operator-2",
+                "spare",
+                None,
+                None,
+                1,
+                1,
+                "running",
+                None,
+            )
+            .unwrap();
+        let new = s.get_session_by_id(new).unwrap().unwrap();
+        (Mutex::new(s), old, new)
+    }
+
+    fn kinds(store: &Mutex<Store>, id: i64) -> Vec<(String, Option<String>)> {
+        store
+            .lock()
+            .unwrap()
+            .list_session_events(id, 50)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind.starts_with("operator_move"))
+            .map(|e| (e.kind, e.detail))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn control_on_a_silent_host_is_moved_and_told() {
+        let now = crate::store::now_unix();
+        let (store, old, new) = store_with_control_stranded(OPERATOR_MOVE_AFTER_SECS + 60, now);
+        let fake = Fake::default();
+        *fake.moved_to.lock().unwrap() = Some(new.clone());
+        let r = run_with(&store, &fake, &NoAdvice, &CFG, now).await;
+        assert!(r.operator_moved);
+        assert_eq!(*fake.moved.lock().unwrap(), 1);
+        assert_eq!(
+            kinds(&store, old),
+            vec![(
+                EVENT_OPERATOR_MOVED.to_string(),
+                Some("mac->spare".to_string())
+            )]
+        );
+        let notes = fake.notes.lock().unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].0, new.id);
+        assert!(
+            notes[0].1.contains("mac stopped answering"),
+            "{}",
+            notes[0].1
+        );
+    }
+
+    #[tokio::test]
+    async fn control_waits_out_a_short_silence_and_stops_after_its_budget() {
+        let now = crate::store::now_unix();
+        let (store, _, _) = store_with_control_stranded(60, now);
+        let fake = Fake::default();
+        run_with(&store, &fake, &NoAdvice, &CFG, now).await;
+        assert_eq!(*fake.moved.lock().unwrap(), 0, "a minute is not down");
+
+        let (store, old2, _) = store_with_control_stranded(OPERATOR_MOVE_AFTER_SECS + 60, now);
+        let fake = Fake {
+            fail_with: Some(codes::E_HOST_OFFLINE),
+            ..Default::default()
+        };
+        for _ in 0..4 {
+            run_with(&store, &fake, &NoAdvice, &CFG, now).await;
+        }
+        assert_eq!(
+            *fake.moved.lock().unwrap(),
+            CFG.max_attempts as usize,
+            "failed moves spend the budget"
+        );
+        assert_eq!(kinds(&store, old2).len(), CFG.max_attempts as usize);
+        assert!(kinds(&store, old2)
+            .iter()
+            .all(|(k, _)| k == EVENT_OPERATOR_MOVE_FAILED));
     }
 
     #[tokio::test]
