@@ -514,16 +514,13 @@ fn round_pct(p: f64) -> u8 {
 }
 
 /// An agent host whose agent is OLDER than the hub. An agent ahead of the
-/// hub (after a hub rollback) is not behind, and a version that is not a
-/// dotted number flags nothing — as the desktop's `compareVersions`.
+/// hub (after a hub rollback) is not behind, and a version that is not
+/// semver flags nothing. Semver, so a `-dev.N` build orders by its N.
 fn agent_behind(transport: &str, agent_version: Option<&str>, hub_version: &str) -> bool {
+    let parse = |v: &str| fleet_update::Version::parse(v.split_whitespace().next()?).ok();
     transport == "agent"
-        && agent_version.is_some_and(|v| {
-            matches!(
-                (version_parts(v), version_parts(hub_version)),
-                (Some(a), Some(b)) if a < b
-            )
-        })
+        && agent_version
+            .is_some_and(|v| matches!((parse(v), parse(hub_version)), (Some(a), Some(b)) if a < b))
 }
 
 /// Overlay the agents connected right now onto [`Health::hosts`]: the live
@@ -1562,6 +1559,23 @@ mod tests {
         assert!(!agent_behind("agent", Some("garbage"), "0.3.1"));
         assert!(!agent_behind("agent", None, "0.3.1"));
         assert!(!agent_behind("ssh", Some("0.2.26"), "0.3.1"));
+        // Dev builds: claude-fleet-htz sat on dev.327 under a dev.454 hub and
+        // read "not behind", because `3-dev` is not a number (2026-10-16).
+        assert!(agent_behind(
+            "agent",
+            Some("0.6.3-dev.327.desktop.g3de4ee6"),
+            "0.6.3-dev.454.desktop.g749cdc6"
+        ));
+        assert!(!agent_behind(
+            "agent",
+            Some("0.6.3-dev.454.desktop.g749cdc6"),
+            "0.6.3-dev.454.desktop.g749cdc6"
+        ));
+        assert!(agent_behind(
+            "agent",
+            Some("0.6.3-dev.454.desktop.g1"),
+            "0.6.3"
+        ));
     }
 
     /// A disk sample from a host that stopped answering keeps its percent
