@@ -40,11 +40,10 @@
   import { hosts } from './hosts';
   import { fleetSettings, hubHasSetting, hubSettingKeys, settingBool, SETTING_KEYS } from './fleet_settings';
   import { agentContext, type AgentContextInput } from './agent_context';
-  import { OPERATOR_COMMANDS } from './operator';
+  import ControlPlusMenu from './ControlPlusMenu.svelte';
   import { insertIntoComposer } from './conversation';
   import ConfirmCards from './ConfirmCards.svelte';
   import ControlEscalations from './ControlEscalations.svelte';
-  import { openChatWizard } from './forms/chat_wizards';
   import HandoffCards from './HandoffCards.svelte';
   import { controlThinking } from './control_loaders';
   import ControlRouteReceipts from './ControlRouteReceipts.svelte';
@@ -228,6 +227,9 @@
 {#snippet tools()}
   <!-- Control chat UX (2026-10-10): these join the quick-prompt row
        (Clear, Compact, Status), so one row of chips sits above the box. -->
+  <!-- Thread room: one "+" for Add project, New session and the asks that
+       are commands now (/plan, /tidy, /health, /graph); each fills the box. -->
+  {#if session}<ControlPlusMenu sessionId={session.id} host={firstHost} />{/if}
   <!-- Thread room (board Autonomy): how much Control does on its own, one
        dial over the mission level, auto-continue and the event feed. -->
   <AutonomyChip />
@@ -242,27 +244,6 @@
       {ctx!.chipLabel} ✕
     </button>
   {/if}
-  <!-- Operator commands (work graph M9): they fill the composer, never send. -->
-  <!-- Step 10.12: Add project as a form at the end of this chat; nothing
-       runs until its last button. -->
-  {#if session}
-    <button
-      type="button"
-      class="btn btn--chip command"
-      data-testid="agent-add-project"
-      title="Add a repository to the fleet with a form in this chat"
-      onclick={() => session && openChatWizard(session.id, 'add_project', { from: 'Control' })}>Add project</button
-    >
-  {/if}
-  {#each OPERATOR_COMMANDS as c (c.label)}
-    <button
-      type="button"
-      class="btn btn--chip command"
-      data-testid="agent-command"
-      title="Put this request in the box; nothing is sent until you press Enter"
-      onclick={() => session && insertIntoComposer(session.id, c.text)}>{c.label}</button
-    >
-  {/each}
 {/snippet}
 
 <div class="agent-panel" role="region" aria-label="Agent" data-testid="control-agent">
