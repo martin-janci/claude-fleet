@@ -39,10 +39,13 @@ use crate::state::{Build, Previous, State};
 use fleet_updater::common::{attempt_id, known, prune_backups, safe, stamp};
 pub use fleet_updater::common::{now_unix, restore_db, wants_install};
 
+/// To stderr, ignoring a failed write: `eprintln!` would panic the sidecar
+/// when stderr cannot be written (see `BinaryUpdater::log`).
 macro_rules! log {
-    ($($t:tt)*) => {
-        eprintln!("{} fleet-updater: {}", fleet_update::time::format_rfc3339(crate::engine::now_unix()), format!($($t)*))
-    };
+    ($($t:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), "{} fleet-updater: {}", fleet_update::time::format_rfc3339(crate::engine::now_unix()), format!($($t)*));
+    }};
 }
 pub(crate) use log;
 
