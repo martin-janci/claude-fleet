@@ -763,6 +763,70 @@ fn open_reconciled_conversation(
     Ok(())
 }
 
+/// While a host stays unreachable, the same warning is repeated at most this
+/// often (a laptop off the LAN logged 4,219 identical lines in a day).
+const DOWN_REWARN_SECS: i64 = 600;
+
+/// What one failed probe logs.
+#[derive(Debug, PartialEq, Eq)]
+enum DownLog {
+    /// A new outage, a changed error, or [`DOWN_REWARN_SECS`] since the last
+    /// warning; `down_for` is how long the host has been down.
+    Warn {
+        down_for: i64,
+    },
+    Quiet,
+}
+
+#[derive(Debug)]
+struct Down {
+    since: i64,
+    warned_at: i64,
+    error: String,
+}
+
+/// The hosts this process has seen fail their probe, and when it last said so.
+#[derive(Debug, Default)]
+struct DownHosts(std::sync::Mutex<std::collections::HashMap<String, Down>>);
+
+impl DownHosts {
+    fn note_down(&self, alias: &str, error: &str, now: i64) -> DownLog {
+        let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        match map.get_mut(alias) {
+            Some(d) if d.error == error && now - d.warned_at < DOWN_REWARN_SECS => DownLog::Quiet,
+            Some(d) => {
+                d.warned_at = now;
+                d.error = error.to_string();
+                DownLog::Warn {
+                    down_for: now - d.since,
+                }
+            }
+            None => {
+                map.insert(
+                    alias.to_string(),
+                    Down {
+                        since: now,
+                        warned_at: now,
+                        error: error.to_string(),
+                    },
+                );
+                DownLog::Warn { down_for: 0 }
+            }
+        }
+    }
+
+    /// How long `alias` was down, when it was.
+    fn note_up(&self, alias: &str, now: i64) -> Option<i64> {
+        let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        map.remove(alias).map(|d| now - d.since)
+    }
+}
+
+fn down_hosts() -> &'static DownHosts {
+    static DOWN: std::sync::OnceLock<DownHosts> = std::sync::OnceLock::new();
+    DOWN.get_or_init(DownHosts::default)
+}
+
 /// Apply one host's probe result to the store. Extracted from the reconcile
 /// loop so a per-host write failure can be isolated (logged) without `?`
 /// aborting the whole multi-host reconcile.
@@ -782,11 +846,26 @@ pub(super) fn reconcile_write_one_host(
 ) -> Result<(), IpcError> {
     let host = &probe.host;
     match &probe.result {
-        Ok(live) => s.atomically(|s| write_reachable_host(s, probe, projects, live))?,
+        Ok(live) => {
+            if let Some(down_for) = down_hosts().note_up(&host.alias, now_unix()) {
+                tracing::info!(host = %host.alias, down_for, "[reconcile] host reachable again");
+            }
+            s.atomically(|s| write_reachable_host(s, probe, projects, live))?
+        }
         Err(e) => {
             // Mark host unreachable; surface last-known sessions so the UI
             // can render them dimmed/red. We KEEP them (no delete).
-            tracing::warn!(host = %host.alias, code = %e.code, error = %e.message, "[reconcile] host unreachable");
+            let now = now_unix();
+            match down_hosts().note_down(&host.alias, &e.message, now) {
+                DownLog::Warn { down_for } => tracing::warn!(
+                    host = %host.alias, code = %e.code, error = %e.message, down_for,
+                    "[reconcile] host unreachable"
+                ),
+                DownLog::Quiet => tracing::debug!(
+                    host = %host.alias, code = %e.code, error = %e.message,
+                    "[reconcile] host unreachable"
+                ),
+            }
             s.apply_host_reconcile_failed(
                 HostReconcile {
                     alias: &host.alias,
@@ -2620,5 +2699,30 @@ pub fn expire_stale_working(store: &Mutex<Store>) -> usize {
             tracing::warn!(error = %e, "[reconcile] stale-working expiry failed");
             0
         }
+    }
+}
+
+#[cfg(test)]
+mod down_log_tests {
+    use super::*;
+
+    #[test]
+    fn an_outage_warns_once_then_every_ten_minutes_and_logs_its_end() {
+        let d = DownHosts::default();
+        let e = "ssh: connect to host 192.168.13.123 port 22: No route to host";
+        assert_eq!(d.note_down("mac", e, 1000), DownLog::Warn { down_for: 0 });
+        assert_eq!(d.note_down("mac", e, 1020), DownLog::Quiet);
+        assert_eq!(d.note_down("mac", e, 1599), DownLog::Quiet);
+        assert_eq!(d.note_down("mac", e, 1600), DownLog::Warn { down_for: 600 });
+        // Another host is its own outage.
+        assert_eq!(d.note_down("htz", e, 1610), DownLog::Warn { down_for: 0 });
+        // A different error is news.
+        assert_eq!(
+            d.note_down("mac", "Connection timed out", 1620),
+            DownLog::Warn { down_for: 620 }
+        );
+        assert_eq!(d.note_up("mac", 1700), Some(700));
+        assert_eq!(d.note_up("mac", 1720), None, "said once");
+        assert_eq!(d.note_down("mac", e, 1740), DownLog::Warn { down_for: 0 });
     }
 }

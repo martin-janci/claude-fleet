@@ -1122,11 +1122,16 @@ impl SshClient {
     /// to `bash -lc`; the miss itself is cached for
     /// [`TOOLCHAIN_RETRY_AFTER`].
     pub async fn toolchain(&self, host: &str) -> Option<HostToolchain> {
+        // A retry after a miss: the host is usually still down, and saying
+        // so again every five minutes is noise (264 lines a day for one
+        // laptop off the LAN). The first miss warns; a retry's miss is debug.
+        let mut retry = false;
         if let Some(entry) = self.inner.toolchains.get(host) {
             let (at, tc) = entry.value();
             if tc.is_some() || at.elapsed() < TOOLCHAIN_RETRY_AFTER {
                 return tc.clone();
             }
+            retry = true;
         }
         let mut resolved = None;
         for interactive in [true, false] {
@@ -1144,6 +1149,9 @@ impl SshClient {
         match &resolved {
             Some(tc) => {
                 tracing::info!(host = %host, path = %tc.path, tmux = ?tc.tmux, claude = ?tc.claude, "[ssh] toolchain resolved")
+            }
+            None if retry => {
+                tracing::debug!(host = %host, "[ssh] toolchain still could not be resolved; tmux calls stay on bash -lc")
             }
             None => {
                 tracing::warn!(host = %host, "[ssh] toolchain could not be resolved; tmux calls stay on bash -lc")

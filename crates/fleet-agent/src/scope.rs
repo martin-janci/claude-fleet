@@ -22,6 +22,17 @@
 //! fork mid-move are caught by the next sweep and attached to the pane's
 //! existing scope.
 //!
+//! A pane is born in its server's scope and moves out within [`EVERY`], but
+//! cgroup v2 never moves memory charges: what `claude` allocated before the
+//! sweep stays charged to the server scope. Restoring two dozen sessions left
+//! 1.3 GiB on a scope holding nothing but a 5 MiB tmux server, and oomd killed
+//! it — every session on the host with it (mercury, 2026-10-16, four times in
+//! two days). So a server scope is `ManagedOOMPreference=avoid`: oomd takes it
+//! only when no pane is left to take. oomd honours that on a user manager's
+//! own units (the scope and `user@<uid>.service` have the same owner).
+//! Scopes an older agent made get the property on the first sweep that sees
+//! them.
+//!
 //! Anywhere else — no cgroup v2, a system unit, not under systemd, no
 //! `busctl`, or `FLEET_AGENT_TMUX_SCOPES=0` — nothing moves and tmux stays
 //! where it was started, as before.
@@ -193,7 +204,8 @@ pub fn busctl_args(mv: &Move, slice: Option<&str>) -> Vec<String> {
                 .iter()
                 .map(|s| s.to_string()),
         );
-        let props = 4 + usize::from(slice.is_some());
+        let server = parse_server_unit(&mv.unit).is_some();
+        let props = 4 + usize::from(slice.is_some()) + usize::from(server);
         args.push(props.to_string());
         args.extend(["PIDs", "au"].iter().map(|s| s.to_string()));
         pids(&mut args);
@@ -204,6 +216,13 @@ pub fn busctl_args(mv: &Move, slice: Option<&str>) -> Vec<String> {
         // migration not available on non-delegated units"), and a straggler
         // could never follow its pane.
         args.extend(["Delegate", "b", "true"].iter().map(|s| s.to_string()));
+        if server {
+            args.extend(
+                ["ManagedOOMPreference", "s", SERVER_OOM_PREFERENCE]
+                    .iter()
+                    .map(|s| s.to_string()),
+            );
+        }
         // Gone as soon as its last process is, failed or not.
         args.extend(
             ["CollectMode", "s", "inactive-or-failed"]
@@ -324,9 +343,48 @@ fn snapshot(home: &Home) -> Snapshot {
     snap
 }
 
-fn call(mv: &Move, slice: Option<&str>) -> Result<(), String> {
+/// What oomd is told about a tmux server's scope (see the module docs).
+pub const SERVER_OOM_PREFERENCE: &str = "avoid";
+
+/// The `busctl` argv that sets [`SERVER_OOM_PREFERENCE`] on a server scope
+/// that already exists (`runtime`: it lives as long as the scope does).
+pub fn avoid_oomd_args(unit: &str) -> Vec<String> {
+    [
+        "--user",
+        "--quiet",
+        "call",
+        "org.freedesktop.systemd1",
+        "/org/freedesktop/systemd1",
+        "org.freedesktop.systemd1.Manager",
+        "SetUnitProperties",
+        "sba(sv)",
+        unit,
+        "true",
+        "1",
+        "ManagedOOMPreference",
+        "s",
+        SERVER_OOM_PREFERENCE,
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+/// The server scopes next to the agent's cgroup.
+fn server_units(home: &Home) -> Vec<String> {
+    let Some(Ok(entries)) = home.cgroup.parent().map(std::fs::read_dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| parse_server_unit(n).is_some())
+        .collect()
+}
+
+fn busctl(args: Vec<String>) -> Result<(), String> {
     let out = std::process::Command::new("busctl")
-        .args(busctl_args(mv, slice))
+        .args(args)
         .stdin(std::process::Stdio::null())
         .output()
         .map_err(|e| format!("could not run busctl: {e}"))?;
@@ -364,11 +422,17 @@ pub async fn run() {
         "[agent] moving the tmux servers it starts into scopes of their own"
     );
     let mut failures = 0u32;
+    let marked = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
     loop {
         let h = home.clone();
-        let failed = tokio::task::spawn_blocking(move || sweep(&h))
-            .await
-            .unwrap_or(0);
+        let m = marked.clone();
+        let failed = tokio::task::spawn_blocking(move || {
+            let failed = sweep(&h);
+            mark_servers(&h, &mut m.lock().unwrap_or_else(|e| e.into_inner()));
+            failed
+        })
+        .await
+        .unwrap_or(0);
         failures = if failed == 0 { 0 } else { failures + failed };
         if failures >= MAX_FAILURES {
             tracing::warn!(
@@ -381,13 +445,33 @@ pub async fn run() {
     }
 }
 
+/// Give every server scope not yet in `marked` the oomd preference; a scope
+/// this agent creates has it already, so this is for an older agent's scopes.
+/// A refusal is logged once and not retried: the scope still works.
+fn mark_servers(home: &Home, marked: &mut std::collections::HashSet<String>) {
+    let live = server_units(home);
+    marked.retain(|u| live.contains(u));
+    for unit in live {
+        if marked.contains(&unit) {
+            continue;
+        }
+        match busctl(avoid_oomd_args(&unit)) {
+            Ok(()) => tracing::info!(unit = %unit, "[agent] told oomd to spare the tmux server"),
+            Err(e) => {
+                tracing::warn!(unit = %unit, error = %e, "[agent] could not tell oomd to spare the tmux server")
+            }
+        }
+        marked.insert(unit);
+    }
+}
+
 /// One sweep; returns how many moves failed. A pid that exited between the
 /// read and the call fails its move, so a failure only counts when the unit
 /// was being created and its root is still alive.
 fn sweep(home: &Home) -> u32 {
     let mut failed = 0;
     for mv in plan(&snapshot(home)) {
-        match call(&mv, home.slice.as_deref()) {
+        match busctl(busctl_args(&mv, home.slice.as_deref())) {
             Ok(()) => tracing::info!(
                 unit = %mv.unit,
                 pids = ?mv.pids,
@@ -570,7 +654,7 @@ mod tests {
                 "ssa(sv)a(sa(sv))",
                 "fleet-tmux-200.scope",
                 "fail",
-                "5",
+                "6",
                 "PIDs",
                 "au",
                 "1",
@@ -581,6 +665,9 @@ mod tests {
                 "Delegate",
                 "b",
                 "true",
+                "ManagedOOMPreference",
+                "s",
+                "avoid",
                 "CollectMode",
                 "s",
                 "inactive-or-failed",
@@ -592,8 +679,45 @@ mod tests {
         );
         // No slice: the property count drops with the property.
         let args = busctl_args(&mv, None);
-        assert_eq!(args[10], "4");
+        assert_eq!(args[10], "5");
         assert!(!args.contains(&"Slice".to_string()));
+    }
+
+    /// oomd killed a server scope holding nothing but tmux, because the
+    /// memory its panes allocated before their move stays charged to it
+    /// (mercury, 2026-10-16). A server scope asks to be spared; a pane scope,
+    /// where the memory actually grows, stays a candidate.
+    #[test]
+    fn oomd_spares_the_server_scope_but_not_a_pane() {
+        let pref = |unit: &str| {
+            let args = busctl_args(
+                &Move {
+                    unit: unit.into(),
+                    pids: vec![200],
+                    create: true,
+                },
+                Some("app.slice"),
+            );
+            args.iter()
+                .position(|a| a == "ManagedOOMPreference")
+                .map(|i| args[i + 2].clone())
+        };
+        assert_eq!(pref("fleet-tmux-200.scope").as_deref(), Some("avoid"));
+        assert_eq!(pref("fleet-tmux-200-pane-300.scope"), None);
+        // A scope an older agent made gets it set in place, for its lifetime.
+        assert_eq!(
+            avoid_oomd_args("fleet-tmux-200.scope")[6..],
+            [
+                "SetUnitProperties",
+                "sba(sv)",
+                "fleet-tmux-200.scope",
+                "true",
+                "1",
+                "ManagedOOMPreference",
+                "s",
+                "avoid"
+            ]
+        );
     }
 
     #[test]
