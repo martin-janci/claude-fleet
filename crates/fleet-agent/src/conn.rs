@@ -1354,6 +1354,49 @@ where
     }
 }
 
+/// How long a panicked self-update pass waits before it starts again.
+const SELF_UPDATE_RESTART: Duration = Duration::from_secs(60);
+
+/// Run the self-update pass, and start it again whenever it panics. It used
+/// to be spawned and forgotten: one panic (a failed stderr write on a full
+/// disk) ended it silently, and claude-fleet-htz stayed on dev.327 for three
+/// days while the hub offered dev.462. A pass that returns has decided to
+/// stop (switched off, nothing to update with), which is left alone.
+async fn supervise_self_update(
+    u: crate::self_update::SelfUpdate,
+    config: crate::config::Config,
+    link: Arc<LinkStatus>,
+) {
+    supervise(
+        move || {
+            let (u, config, link) = (u.clone(), config.clone(), Arc::clone(&link));
+            async move { u.run(&config, link).await }
+        },
+        SELF_UPDATE_RESTART,
+    )
+    .await;
+}
+
+/// Run what `make` builds, again after `restart` each time it panics.
+async fn supervise<F, Fut>(mut make: F, restart: Duration)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    loop {
+        match tokio::spawn(make()).await {
+            Err(e) if e.is_panic() => {
+                tracing::warn!(
+                    "[agent] the self-update pass panicked; starting it again in {}s",
+                    restart.as_secs()
+                );
+                tokio::time::sleep(restart).await;
+            }
+            _ => return,
+        }
+    }
+}
+
 /// `fleet-agent run`: serve `config`'s hub until SIGTERM or SIGINT, then kill
 /// whatever is still running and return.
 pub async fn run(
@@ -1363,7 +1406,7 @@ pub async fn run(
     let notifier = Notifier::from_env();
     if let Some(u) = self_update {
         let (config, link) = (config.clone(), notifier.link());
-        tokio::spawn(async move { u.run(&config, link).await });
+        tokio::spawn(supervise_self_update(u, config, link));
     }
     // Under systemd --user, keeps the tmux servers the hub starts out of this
     // unit's cgroup, so an oom-kill of the agent is not one of every session.
@@ -1444,6 +1487,27 @@ fn shutdown_signal() -> Result<impl std::future::Future<Output = ()>, String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A panicked self-update pass starts again; one that returns stays done.
+    #[tokio::test]
+    async fn a_panicked_self_update_pass_starts_again() {
+        let runs = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let r = Arc::clone(&runs);
+        super::supervise(
+            move || {
+                let n = r.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    if n < 2 {
+                        panic!("failed printing to stderr: No space left on device");
+                    }
+                }
+            },
+            Duration::from_millis(1),
+        )
+        .await;
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
     /// A pong queued behind a big result goes out first; big frames keep
     /// their order; a close waits for what was queued before it.
     #[test]
