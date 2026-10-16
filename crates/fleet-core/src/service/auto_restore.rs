@@ -40,12 +40,28 @@
 //! **Bounds.** At most `recovery.max_attempts` attempts per session per
 //! [`ATTEMPT_WINDOW_SECS`], failures included (counted from the timeline, so
 //! the budget survives a restart of the hub), and at most
-//! [`MAX_RESTORES_PER_TICK`] restores per tick. A spent budget is refused
-//! once per loss episode ([`EVENT_SKIPPED`]).
+//! [`MAX_RESTORES_PER_TICK`] restores per tick, [`MAX_RESTORES_PER_HOST_PER_TICK`]
+//! of them on any one host. A spent budget is refused once per loss episode
+//! ([`EVENT_SKIPPED`]). A mass loss within [`MASS_LOSS_REFUND_SECS`] of the
+//! session's last automatic restore gives that restore back: the host lost
+//! everything, so the restore did not fail, and one storm must not spend
+//! the budget a later loss needs (2026-10-16: `budget_spent` across a whole
+//! host after two storms). Only the latest restore is given back, so a
+//! host that keeps dropping its tmux server still runs out.
+//!
+//! **A mass loss waits for evidence.** `tmux_server_gone` and
+//! `host_reboot` rows wait at least [`MASS_LOSS_GRACE_SECS`] and, on a host
+//! that reports health, for a sample taken after the loss: whatever took
+//! the server down has to show in a reading before a dozen sessions start
+//! into it. Control goes first.
 //!
 //! **Load-aware, not a hard skip.** A host under load — memory at or under
-//! the low-memory line (`health::mem_low`, also the hard floor), or its CPU
-//! saturated (`health::cpu_saturated`) — DEFERS the restore: no attempt is
+//! the low-memory line (`health::mem_low`), memory pressure at or over
+//! `recovery.max_mem_pressure` (what systemd-oomd acts on), too little
+//! available memory for the restores this tick has launched there lately
+//! plus one ([`RESTORE_MEM_KB`] each, over [`RESTORE_SETTLE_SECS`]) — those
+//! three are the hard floor — or its CPU saturated
+//! (`health::cpu_saturated`) — DEFERS the restore: no attempt is
 //! spent, the row stays resumable, and the tick retries every pass until
 //! the load drops (restoring into the same shortage only loops). One
 //! [`EVENT_DEFERRED`] per episode says why, and the row's lost TTL is
@@ -81,6 +97,32 @@ pub const ATTEMPT_WINDOW_SECS: i64 = 86_400;
 /// all at once (each tick is ~20 s; the batch restore staggers within).
 pub const MAX_RESTORES_PER_TICK: usize = 4;
 
+/// At most this many of a tick's restores on one host. Four at once into a
+/// host that just lost its tmux server to memory pressure is how
+/// 2026-10-16 relaunched ~25 sessions on one host in three minutes; one per
+/// tick lets each start show in the next health sample first.
+pub const MAX_RESTORES_PER_HOST_PER_TICK: usize = 1;
+
+/// A `tmux_server_gone` / `host_reboot` row waits at least this long
+/// (or `recovery.grace_secs`, if longer) before it is restored.
+pub const MASS_LOSS_GRACE_SECS: i64 = 180;
+
+/// The available memory (KiB) one resumed Claude session is assumed to
+/// take while it starts. A host must hold this much per restore it got in
+/// the last [`RESTORE_SETTLE_SECS`], plus one, before the next.
+pub const RESTORE_MEM_KB: i64 = 600 * 1024;
+
+/// How long a restore counts as still starting: its memory may not show
+/// in the host's health sample yet.
+pub const RESTORE_SETTLE_SECS: i64 = 120;
+
+/// A mass loss this soon after a session's last automatic restore gives
+/// that restore back to the budget (see the module doc's Bounds).
+pub const MASS_LOSS_REFUND_SECS: i64 = 900;
+
+/// The `lost_reason`s of a whole-host loss.
+pub const MASS_LOSS_REASONS: &[&str] = &["tmux_server_gone", "host_reboot"];
+
 /// Timeline event: the session was brought back. Detail: its `lost_reason`.
 pub const EVENT_RESTORED: &str = "auto_restored";
 /// Timeline event: an attempt failed. Detail: `<lost_reason>: <error>`.
@@ -108,6 +150,12 @@ pub const OPERATOR_MOVE_AFTER_SECS: i64 = 300;
 pub const SKIP_BUDGET: &str = "budget_spent";
 /// [`EVENT_DEFERRED`] detail: the host is short of memory.
 pub const DEFER_MEMORY_LOW: &str = "memory_low";
+/// [`EVENT_DEFERRED`] detail: the host's memory pressure is at or over
+/// `recovery.max_mem_pressure`.
+pub const DEFER_MEM_PRESSURE: &str = "memory_pressure";
+/// [`EVENT_DEFERRED`] detail: the host lacks [`RESTORE_MEM_KB`] for each
+/// restore still starting there, plus this one.
+pub const DEFER_MEM_HEADROOM: &str = "memory_headroom";
 /// [`EVENT_DEFERRED`] detail: the host's CPU is saturated.
 pub const DEFER_CPU: &str = "cpu_saturated";
 /// [`EVENT_DEFERRED`] detail: Jev chose to wait.
@@ -123,6 +171,9 @@ pub struct AutoRestoreConfig {
     /// too short to restore onto (`health.mem_low_pct`, `health::mem_low`):
     /// the same line `fleet_health` judges `mem_low` against.
     pub mem_low_pct: f64,
+    /// Memory pressure at or over which a host defers
+    /// (`recovery.max_mem_pressure`).
+    pub max_mem_pressure: f64,
 }
 
 impl AutoRestoreConfig {
@@ -134,6 +185,9 @@ impl AutoRestoreConfig {
                 .parse()
                 .unwrap_or(2),
             mem_low_pct: crate::service::health::load_limits(s).mem_low_pct,
+            max_mem_pressure: settings::get_string(s, settings::RECOVERY_MAX_MEM_PRESSURE)
+                .parse()
+                .unwrap_or(20.0),
         }
     }
 }
@@ -159,6 +213,9 @@ pub struct Candidate {
     pub deferred_noted: bool,
     /// The host is active and reachable.
     pub host_ready: bool,
+    /// The host's health sample was taken after `lost_at`, or the host
+    /// never reports one (nothing to wait for).
+    pub sampled_since_loss: bool,
     /// Why the host reads as loaded (a `DEFER_*` word), `None` when calm.
     pub load: Option<&'static str>,
     /// The host is under the hard low-memory floor: nothing resumes there,
@@ -189,27 +246,41 @@ pub struct Planned {
     pub ask: bool,
 }
 
-/// PURE: the rule. A candidate still inside its grace, on a host that is
+/// PURE: how long after `lost_at` a row with this reason waits.
+pub fn grace_for(reason: &str, cfg: &AutoRestoreConfig) -> i64 {
+    if MASS_LOSS_REASONS.contains(&reason) {
+        cfg.grace_secs.max(MASS_LOSS_GRACE_SECS)
+    } else {
+        cfg.grace_secs
+    }
+}
+
+/// PURE: the rule. A candidate still inside its grace ([`grace_for`]), a
+/// mass loss whose host has not been sampled since, one on a host that is
 /// not ready (it comes back with the host), or refused for a reason
 /// already written this episode produces nothing. A loaded host defers
 /// (planned every tick so Jev may weigh in, written once per episode).
-/// Restores are capped at [`MAX_RESTORES_PER_TICK`] in `lost_at` order
-/// (oldest first); refusals and deferrals are not capped.
+/// Restores are capped at [`MAX_RESTORES_PER_TICK`], and at
+/// [`MAX_RESTORES_PER_HOST_PER_TICK`] per host, Control first and then in
+/// `lost_at` order (oldest first); refusals and deferrals are not capped.
 pub fn plan(cands: &[Candidate], cfg: &AutoRestoreConfig, now: i64) -> Vec<Planned> {
     if !cfg.enabled {
         return Vec::new();
     }
     let mut ordered: Vec<&Candidate> = cands.iter().collect();
-    ordered.sort_by_key(|c| (c.lost_at, c.session_id));
+    ordered.sort_by_key(|c| (!c.operator, c.lost_at, c.session_id));
     let mut out = Vec::new();
     let mut restores = 0usize;
+    let mut per_host: HashMap<&str, usize> = HashMap::new();
     for c in ordered {
         if !RESUMABLE_LOST_REASONS.contains(&c.lost_reason.as_str())
-            || now - c.lost_at < cfg.grace_secs
+            || now - c.lost_at < grace_for(&c.lost_reason, cfg)
+            || (MASS_LOSS_REASONS.contains(&c.lost_reason.as_str()) && !c.sampled_since_loss)
             || !c.host_ready
         {
             continue;
         }
+        let host_restores = per_host.entry(c.host_alias.as_str()).or_default();
         let (action, ask) = if c.attempts >= cfg.max_attempts {
             if c.skipped.iter().any(|d| d == SKIP_BUDGET) {
                 continue;
@@ -217,10 +288,13 @@ pub fn plan(cands: &[Candidate], cfg: &AutoRestoreConfig, now: i64) -> Vec<Plann
             (Action::Skip(SKIP_BUDGET), false)
         } else if let Some(why) = c.load {
             (Action::Defer(why.to_string()), true)
-        } else if restores >= MAX_RESTORES_PER_TICK {
+        } else if restores >= MAX_RESTORES_PER_TICK
+            || *host_restores >= MAX_RESTORES_PER_HOST_PER_TICK
+        {
             continue;
         } else {
             restores += 1;
+            *host_restores += 1;
             let a = if c.operator {
                 Action::RestartOperator
             } else {
@@ -553,20 +627,51 @@ impl RestoreAdvisor for NoAdvice {
 }
 
 /// Why `h` reads as loaded, as a `DEFER_*` word: memory first (it is the
-/// floor), then CPU. `None` when calm or unknown.
+/// floor, [`memory_floor`]), then CPU. `None` when calm or unknown.
+/// `starting` is how many restores the tick launched on `h` in the last
+/// [`RESTORE_SETTLE_SECS`].
 ///
-/// Both are `fleet_health`'s own judgments (`health::mem_low`,
-/// `health::cpu_saturated`: `health.cpu_busy_pct` on two samples in a
-/// row), so a host the Hosts view shows as loaded is the host this defers
-/// on, and the reverse.
-pub fn host_load(h: &HostRow, cfg: &AutoRestoreConfig, now: i64) -> Option<&'static str> {
-    if crate::service::health::mem_low(h, cfg.mem_low_pct, now) {
-        Some(DEFER_MEMORY_LOW)
-    } else if crate::service::health::cpu_saturated(h, now) {
-        Some(DEFER_CPU)
-    } else {
-        None
+/// The low-memory line and CPU are `fleet_health`'s own judgments
+/// (`health::mem_low`, `health::cpu_saturated`: `health.cpu_busy_pct` on
+/// two samples in a row), so a host the Hosts view shows as loaded is the
+/// host this defers on.
+pub fn host_load(
+    h: &HostRow,
+    cfg: &AutoRestoreConfig,
+    starting: u32,
+    now: i64,
+) -> Option<&'static str> {
+    memory_floor(h, cfg, starting, now)
+        .or_else(|| crate::service::health::cpu_saturated(h, now).then_some(DEFER_CPU))
+}
+
+/// Why nothing may resume on `h` whatever Jev says, as a `DEFER_*` word:
+/// available memory at or under the low line, memory pressure at or over
+/// `recovery.max_mem_pressure`, or less available memory than
+/// [`RESTORE_MEM_KB`] for each of the `starting` restores plus this one.
+/// Judged on a fresh sample only; `None` when calm or unknown.
+pub fn memory_floor(
+    h: &HostRow,
+    cfg: &AutoRestoreConfig,
+    starting: u32,
+    now: i64,
+) -> Option<&'static str> {
+    use crate::service::health;
+    if health::mem_low(h, cfg.mem_low_pct, now) {
+        return Some(DEFER_MEMORY_LOW);
     }
+    if !health::sample_fresh(h, now) {
+        return None;
+    }
+    if h.mem_pressure.is_some_and(|p| p >= cfg.max_mem_pressure) {
+        return Some(DEFER_MEM_PRESSURE);
+    }
+    if h.mem_avail_kb
+        .is_some_and(|kb| kb < (i64::from(starting) + 1) * RESTORE_MEM_KB)
+    {
+        return Some(DEFER_MEM_HEADROOM);
+    }
+    None
 }
 
 /// The numbers Jev reads about one host, bucketed.
@@ -603,6 +708,22 @@ fn candidates(s: &Store, cfg: &AutoRestoreConfig, now: i64) -> Option<Vec<Candid
         *live.entry(r.host_alias.as_str()).or_default() += 1;
     }
     let live_on = |alias: &str| live.get(alias).copied().unwrap_or(0);
+    // Restores launched lately, per host: their memory may not be in the
+    // sample yet (`memory_floor`).
+    let starting: HashMap<&str, u32> = hosts
+        .iter()
+        .map(|h| {
+            let n = s
+                .count_host_session_events_since(
+                    &h.alias,
+                    EVENT_RESTORED,
+                    now - RESTORE_SETTLE_SECS,
+                )
+                .unwrap_or(0);
+            (h.alias.as_str(), n)
+        })
+        .collect();
+    let starting_on = |alias: &str| starting.get(alias).copied().unwrap_or(0);
     let operator = crate::service::operator::operator_ref(s);
     Some(
         rows.iter()
@@ -614,10 +735,17 @@ fn candidates(s: &Store, cfg: &AutoRestoreConfig, now: i64) -> Option<Vec<Candid
                 let failed_attempts = s
                     .count_session_events_since(r.id, &[EVENT_FAILED], since)
                     .unwrap_or(0);
+                let reason = r.lost_reason.as_deref().unwrap_or_default();
+                let refund = MASS_LOSS_REASONS.contains(&reason)
+                    && s.last_session_event_at(r.id, EVENT_RESTORED, lost_at)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|at| at >= since && lost_at - at <= MASS_LOSS_REFUND_SECS);
                 let attempts = s
                     .count_session_events_since(r.id, &[EVENT_RESTORED, EVENT_FAILED], since)
-                    .unwrap_or(u32::MAX);
-                let load = host.and_then(|h| host_load(h, cfg, now));
+                    .unwrap_or(u32::MAX)
+                    .saturating_sub(u32::from(refund));
+                let load = host.and_then(|h| host_load(h, cfg, starting_on(&h.alias), now));
                 // A move may name only a healthy, reachable, active host in
                 // the same org as the one the session ran on.
                 let move_to = host
@@ -628,7 +756,7 @@ fn candidates(s: &Store, cfg: &AutoRestoreConfig, now: i64) -> Option<Vec<Candid
                                 h.alias != own.alias
                                     && h.reachable
                                     && h.org_id == own.org_id
-                                    && host_load(h, cfg, now).is_none()
+                                    && host_load(h, cfg, starting_on(&h.alias), now).is_none()
                                     && crate::service::health::mem_avail_pct(h, now).is_some()
                             })
                             .map(|h| host_facts(h, live_on(&h.alias), now))
@@ -672,9 +800,12 @@ fn candidates(s: &Store, cfg: &AutoRestoreConfig, now: i64) -> Option<Vec<Candid
                         .unwrap_or(0)
                         > 0,
                     host_ready: host.is_some_and(|h| h.reachable),
+                    sampled_since_loss: host
+                        .is_some_and(|h| h.health_at.is_none_or(|at| at > lost_at)),
                     load,
-                    floor: host
-                        .is_some_and(|h| crate::service::health::mem_low(h, cfg.mem_low_pct, now)),
+                    floor: host.is_some_and(|h| {
+                        memory_floor(h, cfg, starting_on(&h.alias), now).is_some()
+                    }),
                     question,
                 }
             })
@@ -725,10 +856,12 @@ pub async fn run_with(
         }
     };
     let planned = plan(&cands, cfg, now);
-    let mut restores = planned
-        .iter()
-        .filter(|p| matches!(p.action, Action::Restore | Action::RestartOperator))
-        .count();
+    let resumes = |a: &Action| matches!(a, Action::Restore | Action::RestartOperator);
+    let mut restores = planned.iter().filter(|p| resumes(&p.action)).count();
+    let mut per_host: HashMap<String, usize> = HashMap::new();
+    for p in planned.iter().filter(|p| resumes(&p.action)) {
+        *per_host.entry(p.candidate.host_alias.clone()).or_default() += 1;
+    }
     let mut by_host: BTreeMap<String, Vec<Candidate>> = BTreeMap::new();
     for p in planned {
         let advised = if p.ask {
@@ -736,11 +869,17 @@ pub async fn run_with(
         } else {
             None
         };
-        let action = apply_advice(&p, advised.as_ref(), restores < MAX_RESTORES_PER_TICK);
-        if matches!(p.action, Action::Defer(_))
-            && matches!(action, Action::Restore | Action::RestartOperator)
-        {
+        let host_room = per_host
+            .get(&p.candidate.host_alias)
+            .is_none_or(|n| *n < MAX_RESTORES_PER_HOST_PER_TICK);
+        let action = apply_advice(
+            &p,
+            advised.as_ref(),
+            restores < MAX_RESTORES_PER_TICK && host_room,
+        );
+        if matches!(p.action, Action::Defer(_)) && resumes(&action) {
             restores += 1;
+            *per_host.entry(p.candidate.host_alias.clone()).or_default() += 1;
         }
         let c = p.candidate;
         match action {
@@ -901,6 +1040,7 @@ mod tests {
         grace_secs: 60,
         max_attempts: 2,
         mem_low_pct: 10.0,
+        max_mem_pressure: 20.0,
     };
 
     fn question(id: i64) -> RestoreQuestion {
@@ -938,6 +1078,7 @@ mod tests {
             skipped: vec![],
             deferred_noted: false,
             host_ready: true,
+            sampled_since_loss: true,
             load: None,
             floor: false,
             question: question(id),
@@ -950,24 +1091,38 @@ mod tests {
             .collect()
     }
 
+    /// `cand` on its own host, so the per-host cap stays out of the way.
+    fn cand_on(id: i64, reason: &str, lost_at: i64) -> Candidate {
+        Candidate {
+            host_alias: format!("h{id}"),
+            ..cand(id, reason, lost_at)
+        }
+    }
+
     #[test]
     fn restores_resumable_rows_past_the_grace_only() {
         let c = vec![
-            cand(1, "process_died", 100),
-            cand(2, "tmux_server_gone", 100),
-            cand(3, "host_reboot", 100),
-            cand(4, "missing", 100),
-            cand(5, "killed", 100),
-            cand(6, "process_died", 150),
+            cand_on(1, "process_died", 100),
+            cand_on(2, "tmux_server_gone", 100),
+            cand_on(3, "host_reboot", 100),
+            cand_on(4, "missing", 100),
+            cand_on(5, "killed", 100),
+            cand_on(6, "process_died", 150),
         ];
         assert_eq!(
             actions(&plan(&c, &CFG, 200)),
+            vec![(1, Action::Restore)],
+            "6 is still inside its 60 s grace, a mass loss inside its {MASS_LOSS_GRACE_SECS} s; \
+             missing and killed are never restored"
+        );
+        assert_eq!(
+            actions(&plan(&c, &CFG, 100 + MASS_LOSS_GRACE_SECS)),
             vec![
                 (1, Action::Restore),
                 (2, Action::Restore),
-                (3, Action::Restore)
+                (3, Action::Restore),
+                (6, Action::Restore)
             ],
-            "6 is still inside its 60 s grace; missing and killed are never restored"
         );
         let off = AutoRestoreConfig {
             enabled: false,
@@ -1027,13 +1182,97 @@ mod tests {
 
     #[test]
     fn restores_are_capped_per_tick_oldest_first_and_the_operator_restarts() {
-        let mut c: Vec<Candidate> = (1..=6).map(|i| cand(i, "host_reboot", 10 - i)).collect();
-        c[5].operator = true; // id 6, lost first
+        // Six hosts, one loss each: the global cap, oldest first, except
+        // that Control goes first even though it was lost last.
+        let mut c: Vec<Candidate> = (1..=6).map(|i| cand_on(i, "host_reboot", 10 - i)).collect();
+        c[0].operator = true; // id 1, lost last
         let p = plan(&c, &CFG, 1_000);
         assert_eq!(p.len(), MAX_RESTORES_PER_TICK);
-        assert_eq!(p[0].candidate.session_id, 6);
+        assert_eq!(p[0].candidate.session_id, 1);
         assert_eq!(p[0].action, Action::RestartOperator);
+        assert_eq!(
+            p[1..]
+                .iter()
+                .map(|p| p.candidate.session_id)
+                .collect::<Vec<_>>(),
+            vec![6, 5, 4]
+        );
         assert!(p[1..].iter().all(|p| p.action == Action::Restore));
+
+        // One host that lost six (2026-10-16): one restore per tick, and
+        // Control is that one.
+        let mut c: Vec<Candidate> = (1..=6)
+            .map(|i| cand(i, "tmux_server_gone", 10 - i))
+            .collect();
+        c[0].operator = true;
+        assert_eq!(
+            actions(&plan(&c, &CFG, 1_000)),
+            vec![(1, Action::RestartOperator)]
+        );
+        c[0].operator = false;
+        assert_eq!(actions(&plan(&c, &CFG, 1_000)), vec![(6, Action::Restore)]);
+        // A deferral or a refusal on the same host is not capped.
+        c[1].attempts = 2;
+        assert_eq!(
+            actions(&plan(&c, &CFG, 1_000)),
+            vec![(6, Action::Restore), (2, Action::Skip(SKIP_BUDGET))]
+        );
+    }
+
+    #[test]
+    fn a_mass_loss_waits_for_a_sample_taken_after_it() {
+        let mut gone = cand(1, "tmux_server_gone", 0);
+        gone.sampled_since_loss = false;
+        let mut died = cand_on(2, "process_died", 0);
+        died.sampled_since_loss = false;
+        assert_eq!(
+            actions(&plan(&[gone.clone(), died], &CFG, 1_000)),
+            vec![(2, Action::Restore)],
+            "only a whole-host loss waits for the evidence"
+        );
+        gone.sampled_since_loss = true;
+        assert_eq!(
+            actions(&plan(&[gone], &CFG, 1_000)),
+            vec![(1, Action::Restore)]
+        );
+    }
+
+    fn host_row(avail_kb: i64, pressure: Option<f64>, now: i64) -> HostRow {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let mut h = s.get_host_row("h").unwrap().unwrap();
+        h.reachable = true;
+        h.mem_avail_kb = Some(avail_kb);
+        h.mem_total_kb = Some(16_000_000);
+        h.mem_pressure = pressure;
+        h.health_at = Some(now);
+        h
+    }
+
+    #[test]
+    fn memory_pressure_and_headroom_are_the_floor() {
+        let now = 10_000;
+        let calm = host_row(8_000_000, Some(1.0), now);
+        assert_eq!(memory_floor(&calm, &CFG, 0, now), None);
+        assert_eq!(host_load(&calm, &CFG, 0, now), None);
+        // systemd-oomd's signal, well before it acts.
+        let pressed = host_row(8_000_000, Some(20.0), now);
+        assert_eq!(
+            memory_floor(&pressed, &CFG, 0, now),
+            Some(DEFER_MEM_PRESSURE)
+        );
+        assert_eq!(
+            memory_floor(&host_row(8_000_000, Some(19.9), now), &CFG, 0, now),
+            None
+        );
+        // Room for one more start, counting those still starting.
+        let tight = host_row(3 * RESTORE_MEM_KB - 1, Some(0.0), now);
+        assert_eq!(memory_floor(&tight, &CFG, 1, now), None);
+        assert_eq!(memory_floor(&tight, &CFG, 2, now), Some(DEFER_MEM_HEADROOM));
+        // A stale sample says nothing either way.
+        let mut stale = pressed.clone();
+        stale.health_at = Some(now - crate::service::health::HEALTH_SAMPLE_FRESH_SECS - 1);
+        assert_eq!(host_load(&stale, &CFG, 9, now), None);
     }
 
     fn advised(advice: Advice, follow: bool) -> Advised {
@@ -1205,6 +1444,34 @@ mod tests {
             .unwrap();
     }
 
+    /// A fresh health sample on `h`: `avail_kb` available of 16 GB, and
+    /// memory pressure `pressure`.
+    fn sampled(store: &Mutex<Store>, avail_kb: i64, pressure: f64, now: i64) {
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute(
+                "UPDATE hosts SET mem_avail_kb = ?1, mem_total_kb = 16000000, \
+                 mem_pressure = ?2, health_at = ?3 WHERE alias = 'h'",
+                rusqlite::params![avail_kb, pressure, now],
+            )
+            .unwrap();
+    }
+
+    /// An event written at `at` rather than now.
+    fn event_at(store: &Mutex<Store>, id: i64, kind: &str, detail: &str, at: i64) {
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute(
+                "INSERT INTO session_events (session_id, at, kind, detail) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![id, at, kind, detail],
+            )
+            .unwrap();
+    }
+
     fn events(store: &Mutex<Store>, id: i64) -> Vec<(String, Option<String>)> {
         store
             .lock()
@@ -1261,7 +1528,7 @@ mod tests {
     #[tokio::test]
     async fn a_busy_or_offline_host_is_not_an_attempt() {
         let now = crate::store::now_unix();
-        let (store, ids) = store_with(&[("a", "host_reboot")], now - 120);
+        let (store, ids) = store_with(&[("a", "host_reboot")], now - MASS_LOSS_GRACE_SECS);
         let fake = Fake {
             fail_with: Some(codes::E_INVALID_STATE),
             ..Default::default()
@@ -1301,6 +1568,156 @@ mod tests {
             .unwrap();
         let r = run_with(&store, &fake, &NoAdvice, &CFG, now).await;
         assert_eq!(r.restored, 1);
+    }
+
+    /// 2026-10-16: oomd killed a tmux server at 87.87 % memory pressure
+    /// while plenty of memory still read as available. Pressure defers on
+    /// its own, before the low-memory line, and spends nothing.
+    #[tokio::test]
+    async fn memory_pressure_defers_before_memory_runs_low() {
+        let now = crate::store::now_unix();
+        let (store, ids) = store_with(&[("a", "process_died")], now - 120);
+        sampled(&store, 8_000_000, 35.0, now);
+        let fake = Fake::default();
+        for _ in 0..2 {
+            let r = run_with(&store, &fake, &NoAdvice, &CFG, now).await;
+            assert_eq!((r.deferred, r.restored), (1, 0));
+        }
+        assert_eq!(
+            events(&store, ids[0]),
+            vec![(
+                EVENT_DEFERRED.to_string(),
+                Some(DEFER_MEM_PRESSURE.to_string())
+            )]
+        );
+        // Jev cannot talk it past the floor either.
+        let says = Says(Some(advised(Advice::RecoverNow, true)), Mutex::new(0));
+        run_with(&store, &fake, &says, &CFG, now).await;
+        assert!(fake.restored.lock().unwrap().is_empty());
+        sampled(&store, 8_000_000, 2.0, now + 1);
+        let r = run_with(&store, &fake, &NoAdvice, &CFG, now + 1).await;
+        assert_eq!(r.restored, 1);
+    }
+
+    /// A restore launched on the last tick is not in the host's sample yet:
+    /// it still needs its memory, so the next one waits for room for both.
+    #[tokio::test]
+    async fn a_restore_still_starting_counts_against_the_hosts_memory() {
+        let now = crate::store::now_unix();
+        let (store, ids) = store_with(&[("a", "process_died"), ("b", "process_died")], now - 120);
+        sampled(&store, RESTORE_MEM_KB * 3 / 2, 0.0, now);
+        // A small host, so 900 MB available is well above the low line.
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute(
+                "UPDATE hosts SET mem_total_kb = 2000000 WHERE alias = 'h'",
+                [],
+            )
+            .unwrap();
+        let fake = Fake::default();
+        let r = run_with(&store, &fake, &NoAdvice, &CFG, now).await;
+        assert_eq!(r.restored, 1, "one per host per tick");
+        assert_eq!(
+            *fake.restored.lock().unwrap(),
+            vec![("h".to_string(), vec![ids[0]])]
+        );
+        // The real restore brings the row back; the fake does not.
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute(
+                "UPDATE sessions SET status = 'running', lost_at = NULL, lost_reason = NULL \
+                 WHERE id = ?1",
+                [ids[0]],
+            )
+            .unwrap();
+        let r = run_with(&store, &fake, &NoAdvice, &CFG, now + 20).await;
+        assert_eq!((r.deferred, r.restored), (1, 0));
+        assert_eq!(
+            events(&store, ids[1]),
+            vec![(
+                EVENT_DEFERRED.to_string(),
+                Some(DEFER_MEM_HEADROOM.to_string())
+            )]
+        );
+        // Once a has settled, the same reading has room for b.
+        let later = now + RESTORE_SETTLE_SECS + 1;
+        let r = run_with(&store, &fake, &NoAdvice, &CFG, later).await;
+        assert_eq!(r.restored, 1);
+    }
+
+    /// 2026-10-16: two storms on one host spent every session's budget, so
+    /// the next loss of each was `budget_spent`. A whole-host loss soon after
+    /// an automatic restore gives that restore back; a session's own death
+    /// does not, nor does a restore long before the loss.
+    #[tokio::test]
+    async fn a_mass_loss_soon_after_a_restore_gives_that_restore_back() {
+        let now = crate::store::now_unix();
+        let lost_at = now - MASS_LOSS_GRACE_SECS;
+        let (store, ids) = store_with(
+            &[
+                ("gone", "tmux_server_gone"),
+                ("died", "process_died"),
+                ("old", "tmux_server_gone"),
+            ],
+            lost_at,
+        );
+        for &id in &ids[..2] {
+            event_at(
+                &store,
+                id,
+                EVENT_RESTORED,
+                "tmux_server_gone",
+                lost_at - 3_600,
+            );
+            event_at(&store, id, EVENT_RESTORED, "tmux_server_gone", lost_at - 60);
+        }
+        event_at(
+            &store,
+            ids[2],
+            EVENT_RESTORED,
+            "tmux_server_gone",
+            lost_at - 7_200,
+        );
+        event_at(
+            &store,
+            ids[2],
+            EVENT_RESTORED,
+            "tmux_server_gone",
+            lost_at - MASS_LOSS_REFUND_SECS - 1,
+        );
+        let fake = Fake::default();
+        run_with(&store, &fake, &NoAdvice, &CFG, now).await;
+        assert_eq!(
+            *fake.restored.lock().unwrap(),
+            vec![("h".to_string(), vec![ids[0]])],
+            "only the mass loss right after a restore has budget left"
+        );
+        for &id in &ids[1..] {
+            assert!(
+                events(&store, id)
+                    .contains(&(EVENT_SKIPPED.to_string(), Some(SKIP_BUDGET.to_string()))),
+                "{id}"
+            );
+        }
+        // Only the latest restore is given back: one more storm and the
+        // session waits for a person.
+        let (store, ids) = store_with(&[("gone", "tmux_server_gone")], lost_at);
+        for back in [3_600, 600, 60] {
+            event_at(
+                &store,
+                ids[0],
+                EVENT_RESTORED,
+                "tmux_server_gone",
+                lost_at - back,
+            );
+        }
+        let fake = Fake::default();
+        run_with(&store, &fake, &NoAdvice, &CFG, now).await;
+        assert!(fake.restored.lock().unwrap().is_empty());
     }
 
     /// Part 3's judgment, end to end: two real samples over

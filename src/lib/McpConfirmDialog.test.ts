@@ -114,7 +114,7 @@ describe('McpConfirmDialog', () => {
     const { get } = await import('svelte/store');
     clearToasts();
     inv.mockImplementation(async (cmd: string) => {
-      if (cmd === 'mcp_pending_confirms') return [];
+      if (cmd === 'mcp_pending_confirms') throw new Error('ipc down');
       if (cmd === 'mcp_confirm') throw new Error('ipc down');
       return null;
     });

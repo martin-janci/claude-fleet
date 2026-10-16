@@ -12,7 +12,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import QuestionCard from './kit/QuestionCard.svelte';
-  import { answerConfirm, answering, cardConfirms, hostConfirmCards } from './confirms';
+  import { answerConfirm, answering, cardConfirms, dismissConfirm, failedConfirms, hostConfirmCards } from './confirms';
   import { shortAge } from './session_status';
   import type { ConfirmRequest } from './mcp';
 
@@ -55,6 +55,14 @@
   async function answerPlan(approved: boolean) {
     for (const r of plan ?? []) await answerConfirm(r.nonce, approved);
   }
+
+  const planFailed = $derived(plan ? plan.some((r) => $failedConfirms.has(r.nonce)) : false);
+
+  /** A step whose answer failed can be dismissed here, so a request the hub
+   *  will not take does not stay up with buttons that only fail again. */
+  function dismissPlan() {
+    for (const r of plan ?? []) if ($failedConfirms.has(r.nonce)) dismissConfirm(r.nonce);
+  }
 </script>
 
 {#if plan}
@@ -69,6 +77,7 @@
       answers={[
         { label: `Confirm ${plan.length}`, onselect: () => void answerPlan(true), disabled: planBusy, testid: 'confirm-plan-approve' },
         { label: 'Cancel', onselect: () => void answerPlan(false), disabled: planBusy, testid: 'confirm-plan-cancel' },
+        ...(planFailed ? [{ label: 'Dismiss', onselect: dismissPlan, disabled: planBusy, testid: 'confirm-plan-dismiss' }] : []),
       ]}
     >
       <ol class="steps" data-testid="confirm-plan-steps">
@@ -77,12 +86,14 @@
         {/each}
       </ol>
       <p class="why">They start, move or kill sessions, so each waits for you. Nothing runs until you confirm.</p>
+      {#if planFailed}<p class="failed" role="status" data-testid="confirm-plan-failed">Your answer did not reach the hub. Try again, or dismiss the steps it could not take.</p>{/if}
     </QuestionCard>
   </div>
 {:else if $cardConfirms.length > 0}
   <div class="confirm-cards" data-testid="confirm-cards">
     {#each $cardConfirms as r (r.nonce)}
       {@const busy = $answering.has(r.nonce)}
+      {@const failed = $failedConfirms.get(r.nonce)}
       <QuestionCard
         question={question(r)}
         age={r.asked_at > 0 ? `asked ${shortAge(r.asked_at, nowSec)} ago` : undefined}
@@ -94,9 +105,11 @@
         answers={[
           { label: 'Approve', onselect: () => void answerConfirm(r.nonce, true), disabled: busy, testid: 'confirm-card-approve' },
           { label: 'Deny', onselect: () => void answerConfirm(r.nonce, false), disabled: busy, testid: 'confirm-card-deny' },
+          ...(failed !== undefined ? [{ label: 'Dismiss', onselect: () => dismissConfirm(r.nonce), disabled: busy, testid: 'confirm-card-dismiss' }] : []),
         ]}
       >
         <p class="why">The agent's starts and kills always wait for you. Nothing runs until you approve.</p>
+        {#if failed !== undefined}<p class="failed" role="status" data-testid="confirm-card-failed">Your answer did not reach the hub: {failed}. Try again, or dismiss this card.</p>{/if}
       </QuestionCard>
     {/each}
   </div>
@@ -120,6 +133,11 @@
   .steps .mono {
     color: var(--fg-muted);
     overflow-wrap: anywhere;
+  }
+  .failed {
+    margin: 0;
+    color: var(--usage-crit);
+    font-size: var(--text-xs);
   }
   .why {
     margin: 0;

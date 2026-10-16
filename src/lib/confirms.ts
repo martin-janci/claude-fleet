@@ -28,6 +28,32 @@ export const dialogConfirms = derived([confirmQueue, cardHosts], ([q, hosts]) =>
   hosts > 0 ? q.filter((r) => !r.operator) : q,
 );
 
+/** Requests whose answer failed to reach the backend, with why: their card
+ *  offers Dismiss, so a hub that cannot take the answer does not leave a
+ *  card up whose buttons only ever fail. */
+export const failedConfirms = writable<ReadonlyMap<string, string>>(new Map());
+
+/** Requests a person dismissed on this window; a resync does not bring them
+ *  back. The backend still holds them until they expire or are answered
+ *  elsewhere. */
+const dismissed = new Set<string>();
+
+/** Hide a request on this window without answering it. */
+export function dismissConfirm(nonce: string): void {
+  dismissed.add(nonce);
+  confirmQueue.update((q) => q.filter((x) => x.nonce !== nonce));
+  clearFailed(nonce);
+}
+
+function clearFailed(nonce: string): void {
+  failedConfirms.update((m) => {
+    if (!m.has(nonce)) return m;
+    const next = new Map(m);
+    next.delete(nonce);
+    return next;
+  });
+}
+
 /** Nonces with an answer in flight, so a second click cannot send another. */
 export const answering = writable<ReadonlySet<string>>(new Set());
 
@@ -59,9 +85,13 @@ export async function answerConfirm(nonce: string, approved: boolean): Promise<b
   });
   if (!r.ok) {
     pushError(r.error, `${approved ? 'Approving' : 'Denying'} ${req.tool} failed`);
+    failedConfirms.update((m) => new Map([...m, [nonce, r.error.message]]));
+    // It may have expired or been answered elsewhere: a re-read drops it.
+    void resync();
     return false;
   }
   confirmQueue.update((q) => q.filter((x) => x.nonce !== nonce));
+  clearFailed(nonce);
   if (r.value === false) {
     // The backend refused the answer: the request expired, or another
     // device answered it first (the first answer wins). Saying nothing here
@@ -89,7 +119,10 @@ export const EXPIRY_RESYNC_MS = 30_000;
 async function resync(): Promise<void> {
   const r = await mcpPendingConfirms();
   if (!r.ok || !Array.isArray(r.value)) return;
-  confirmQueue.set(r.value.map(normalise));
+  const queue = r.value.map(normalise).filter((p) => !dismissed.has(p.nonce));
+  confirmQueue.set(queue);
+  const live = new Set(queue.map((p) => p.nonce));
+  failedConfirms.update((m) => ([...m.keys()].every((n) => live.has(n)) ? m : new Map([...m].filter(([n]) => live.has(n)))));
 }
 
 /**
@@ -142,5 +175,7 @@ function normalise(p: Partial<ConfirmRequest> & { nonce: string; tool: string })
 export function resetConfirmsForTests(): void {
   confirmQueue.set([]);
   answering.set(new Set());
+  failedConfirms.set(new Map());
+  dismissed.clear();
   cardHosts.set(0);
 }

@@ -147,8 +147,10 @@ impl Systemctl for RealSystemctl {
 ///   of the agent and every session with it. `KillMode=process` still covers
 ///   the seconds before a new server is moved, and hosts where nothing moves.
 ///   `ManagedOOMPreference=avoid` asks oomd to pick other candidates before
-///   the agent; systemd honours it only for a root-owned cgroup, so it takes
-///   effect for a system unit and is inert, but harmless, for a user one.
+///   the agent. oomd honours it for a root-owned cgroup, and for a user unit
+///   when it acts for that user's own manager (`user@<uid>.service`, the
+///   default pressure target), since both then have the same owner.
+///   A unit installed before this line lacks it until `install` runs again.
 /// - `NotifyAccess=main`, so systemd keeps the `STATUS=` line the agent
 ///   reports (`conn::Notifier`), which is how `status` knows whether it is
 ///   connected without the agent keeping a state file.

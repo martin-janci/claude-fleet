@@ -322,7 +322,7 @@ impl Store {
                 [host_alias],
             )?;
             for kind in [KIND_TMUX, KIND_PANE_LESS] {
-                Self::ghost_and_clean(tx, host_alias, &[], now, kind, None, None, None, &mut out)?;
+                Self::ghost_and_clean(tx, host_alias, &[], now, kind, None, None, None, None, &mut out)?;
             }
             let after: i64 = tx.query_row(
                 "SELECT COUNT(*) FROM sessions WHERE host_alias = ?1",
@@ -868,6 +868,17 @@ impl Store {
     /// "Outside fleet" group. `None`
     /// disables the exemption entirely — today's behaviour, byte-identical
     /// SQL and bindings.
+    ///
+    /// `min_ghost_age_cutoff` (unix secs) is the floor under every reason
+    /// but fleet's own kill: a row with `lost_reason` other than `killed`
+    /// whose `lost_at >= min_ghost_age_cutoff` is exempt from the
+    /// hard-delete, resumable or not. The one-cycle grace assumed passes are
+    /// spaced out, and they are not — a restore, kill or `new_session` runs
+    /// a single-host pass seconds after the tick's, so on 2026-10-16 sixteen
+    /// `missing` rows on one host (the Control session among them) were
+    /// ghosted and deleted 4 s apart, with their timeline, tags, friendly
+    /// name and resume binding. A `killed` row is the person's own decision
+    /// and keeps the prompt reap. `None` disables the floor.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn ghost_and_clean(
         tx: &rusqlite::Connection,
@@ -877,6 +888,7 @@ impl Store {
         kind_filter: &str,
         cutoff: Option<i64>,
         lost_ttl_cutoff: Option<i64>,
+        min_ghost_age_cutoff: Option<i64>,
         external_grace_cutoff: Option<i64>,
         out: &mut Vec<RowChange>,
     ) -> Result<(), rusqlite::Error> {
@@ -912,6 +924,17 @@ impl Store {
                                                           AND e.kind = 'auto_restore_deferred' \
                                                           AND e.at >= ?{n}))), 0)",
                     n = head.len()
+                ));
+            }
+            // A ghost fleet did not kill waits out the floor whatever its
+            // reason (a NULL reason predates migration 036 and is not a
+            // kill either).
+            if let Some(m) = &min_ghost_age_cutoff {
+                head.push(m);
+                exempt.push_str(&format!(
+                    " AND NOT COALESCE((COALESCE(lost_reason, '') != 'killed' \
+                                        AND lost_at >= ?{}), 0)",
+                    head.len()
                 ));
             }
             // An `external` row is never resumable, so the TTL above never
@@ -1132,6 +1155,7 @@ impl Store {
                         KIND_TMUX,
                         Some(ghost_cutoff(spec.probe_started_at)),
                         spec.lost_ttl_cutoff,
+                        spec.min_ghost_age_cutoff,
                         // A tmux row is never `external`.
                         None,
                         &mut out,
@@ -2867,6 +2891,7 @@ mod tests {
                 }],
                 keep: &["a".to_string()],
                 lost_ttl_cutoff: None,
+                min_ghost_age_cutoff: None,
                 skip_prune: false,
                 reconciled_at: None,
             })
@@ -2906,6 +2931,7 @@ mod tests {
             sessions: &[],
             keep: &[],
             lost_ttl_cutoff: None,
+            min_ghost_age_cutoff: None,
             skip_prune: false,
             reconciled_at: None,
         })
@@ -3400,6 +3426,80 @@ mod tests {
             store.get_session_by_id(id).unwrap().is_none(),
             "a 'missing' row keeps the one-cycle reap even with a TTL cutoff set"
         );
+    }
+
+    /// 2026-10-16: a restore ran a single-host pass 4 s after the tick that
+    /// ghosted sixteen `missing` rows, and the one-cycle reap deleted them
+    /// all, Control included. With the ghost floor a pass inside it keeps
+    /// every loss but fleet's own kill; past it the loss is reaped as before.
+    #[test]
+    fn a_pass_inside_the_ghost_floor_keeps_a_loss_and_reaps_a_kill() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        // Phase 1 stamps `lost_at` with the wall clock, so the floor is too.
+        let now = now_unix();
+        let floor = Some(now - 300);
+        let lost = store
+            .upsert_session("lost", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        store.set_claude_session_id(lost, "uuid-lost").unwrap();
+        let tagged = store
+            .upsert_session("legacy", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        let killed = killed_row(&store, "killed", now);
+        // Pass 1 ghosts the two losses (`missing`); the kill is already ghost.
+        store
+            .apply_host_reconcile(HostReconcile {
+                min_ghost_age_cutoff: floor,
+                keep: &[],
+                ..empty_probe("alpha", now)
+            })
+            .unwrap();
+        // A row ghosted before migration 036 has no reason; it is no kill.
+        store
+            .conn_ref()
+            .execute(
+                "UPDATE sessions SET lost_reason = NULL WHERE id = ?1",
+                [tagged],
+            )
+            .unwrap();
+        // Pass 2, seconds later: the kill goes, the losses stay.
+        store
+            .apply_host_reconcile(HostReconcile {
+                min_ghost_age_cutoff: floor,
+                keep: &[],
+                ..empty_probe("alpha", now + 4)
+            })
+            .unwrap();
+        assert!(
+            store.get_session_by_id(killed).unwrap().is_none(),
+            "a kill keeps the prompt reap"
+        );
+        let row = store
+            .get_session_by_id(lost)
+            .unwrap()
+            .expect("a fresh loss survives the pass");
+        assert_eq!(row.status, "ghost");
+        assert_eq!(row.lost_reason.as_deref(), Some("missing"));
+        assert_eq!(row.claude_session_id.as_deref(), Some("uuid-lost"));
+        assert!(store.get_session_by_id(tagged).unwrap().is_some());
+        // Past the floor, the next pass reaps them as before.
+        store
+            .conn_ref()
+            .execute(
+                "UPDATE sessions SET lost_at = ?1 WHERE status = 'ghost'",
+                [now - 301],
+            )
+            .unwrap();
+        store
+            .apply_host_reconcile(HostReconcile {
+                min_ghost_age_cutoff: floor,
+                keep: &[],
+                ..empty_probe("alpha", now + 20)
+            })
+            .unwrap();
+        assert!(store.get_session_by_id(lost).unwrap().is_none());
+        assert!(store.get_session_by_id(tagged).unwrap().is_none());
     }
 
     /// A pane whose hooks were alive and that never said SessionEnd died

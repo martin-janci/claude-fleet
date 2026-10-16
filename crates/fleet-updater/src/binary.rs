@@ -250,8 +250,14 @@ impl<H: Host> BinaryUpdater<H> {
         }
     }
 
+    /// To stderr, ignoring a failed write: `eprintln!` panics when stderr
+    /// cannot be written (a full disk under a `nohup` redirect), and that
+    /// panic killed fleet-agent's in-process self-update for good on
+    /// claude-fleet-htz (2026-10-13; dev.327 for three days after).
     fn log(&self, msg: &str) {
-        eprintln!(
+        use std::io::Write as _;
+        let _ = writeln!(
+            std::io::stderr(),
             "{} {}: {msg}",
             fleet_update::time::format_rfc3339(now_unix()),
             self.cfg.name

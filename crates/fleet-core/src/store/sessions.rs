@@ -307,6 +307,10 @@ impl Store {
                 KIND_PANE_LESS,
                 None,
                 lost_ttl_cutoff,
+                // Pane-less rows keep the two-pass reap: restore never
+                // resumes a `bg` / `external` row, and an external one has
+                // its own grace below.
+                None,
                 external_grace_cutoff,
                 &mut changes,
             )?;

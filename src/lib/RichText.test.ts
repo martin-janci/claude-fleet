@@ -92,6 +92,20 @@ describe('RichText', () => {
     expect((screen.getByTestId('rich-choice') as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it('a card in a reply that was answered later is a receipt that can only be hidden', async () => {
+    const src = ui({ kind: 'choices', question: 'Retry the push?', options: [{ label: 'Retry', prompt: 'retry it' }] });
+    render(RichText, { source: src, sessionId: 5, answered: true });
+    expect(screen.queryByTestId('rich-choice')).toBeNull();
+    expect(screen.getByTestId('rich-answered').textContent).toContain('Retry the push?');
+    await fireEvent.click(screen.getByTestId('rich-answered-hide'));
+    expect(screen.queryByTestId('rich-answered')).toBeNull();
+  });
+
+  it('an answered reply keeps its display cards', () => {
+    render(RichText, { source: TASK_DONE, sessionId: 5, answered: true });
+    expect(screen.getByTestId('rich-report-outcome').textContent).toContain('Done');
+  });
+
   it('a choice fills the composer and sends nothing', async () => {
     render(RichText, { source: ui({ kind: 'choices', question: 'Next?', options: [{ label: 'PR', prompt: 'Open a draft PR' }, { label: 'Stop', prompt: 'Stop here' }] }), sessionId: 5 });
     const [, stop] = screen.getAllByTestId('rich-choice');

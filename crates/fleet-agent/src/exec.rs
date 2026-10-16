@@ -55,6 +55,34 @@ pub struct ExecOutcome {
 /// dropped and `truncated` is set. If the child exits but something it left
 /// behind keeps a stream open, the agent waits for EOF only until the
 /// deadline, then kills the group and reports the child's own exit code.
+/// What systemd hands the agent's own unit, and no child of it may keep.
+/// The hub's scripts start tmux, so a pane inherited the agent's
+/// `NOTIFY_SOCKET` and a process in a Claude session reported to the agent's
+/// unit (mercury, 2026-10-16: "Got notification message from PID …, but
+/// reception only permitted for main PID"). `XDG_RUNTIME_DIR` and
+/// `DBUS_SESSION_BUS_ADDRESS` stay: tmux and `busctl --user` need them.
+pub const SYSTEMD_ENV: &[&str] = &[
+    "NOTIFY_SOCKET",
+    "WATCHDOG_USEC",
+    "WATCHDOG_PID",
+    "LISTEN_FDS",
+    "LISTEN_PID",
+    "LISTEN_FDNAMES",
+    "INVOCATION_ID",
+    "JOURNAL_STREAM",
+    "SYSTEMD_EXEC_PID",
+    "MANAGERPID",
+    "MAINPID",
+    "RUNTIME_DIRECTORY",
+    "STATE_DIRECTORY",
+    "CACHE_DIRECTORY",
+    "LOGS_DIRECTORY",
+    "CONFIGURATION_DIRECTORY",
+    "CREDENTIALS_DIRECTORY",
+    "MEMORY_PRESSURE_WATCH",
+    "MEMORY_PRESSURE_WRITE",
+];
+
 pub async fn execute(req: ExecRequest, cancel: impl Future<Output = ()>) -> ExecOutcome {
     let Some((program, args)) = req.argv.split_first() else {
         return never_started("empty argv: nothing to run".into());
@@ -69,6 +97,9 @@ pub async fn execute(req: ExecRequest, cancel: impl Future<Output = ()>) -> Exec
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    for var in SYSTEMD_ENV {
+        cmd.env_remove(var);
+    }
     #[cfg(unix)]
     cmd.process_group(0);
     if let Some(cwd) = &req.cwd {
@@ -416,6 +447,50 @@ mod tests {
             .write_all(b"the agent's own stdin\n")
             .unwrap();
         let out = inner.wait_with_output().unwrap();
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{said}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            said.contains("1 passed"),
+            "the inner run ran the probe: {said}"
+        );
+    }
+
+    /// The unit's systemd variables stay with the agent (see [`SYSTEMD_ENV`]).
+    /// Re-runs this test with them set, since the test process has none.
+    #[cfg(unix)]
+    #[test]
+    fn a_child_never_inherits_the_unit_s_systemd_environment() {
+        const PROBE: &str = "FLEET_AGENT_ENV_PROBE";
+        const NAME: &str = "exec::tests::a_child_never_inherits_the_unit_s_systemd_environment";
+        if std::env::var_os(PROBE).is_some() {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let out = rt.block_on(execute(req(&["env"]), never()));
+            let env = String::from_utf8_lossy(&out.stdout).into_owned();
+            for var in SYSTEMD_ENV {
+                assert!(
+                    !env.lines().any(|l| l.starts_with(&format!("{var}="))),
+                    "{var} leaked: {env}"
+                );
+            }
+            assert!(env.contains("FLEET_AGENT_ENV_KEPT=1"), "{env}");
+            return;
+        }
+        let mut inner = std::process::Command::new(std::env::current_exe().unwrap());
+        inner
+            .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+            .env(PROBE, "1")
+            .env("FLEET_AGENT_ENV_KEPT", "1");
+        for var in SYSTEMD_ENV {
+            inner.env(var, "/run/user/1000/systemd/notify");
+        }
+        let out = inner.output().unwrap();
         let said = String::from_utf8_lossy(&out.stdout);
         assert!(
             out.status.success(),

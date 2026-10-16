@@ -18,9 +18,12 @@
   import TaskResultPanel from './TaskResultPanel.svelte';
   import type { TaskResultView } from './task_result';
 
+  // `answered`: a later message followed this one, so the cards that ask
+  // are receipts now (UiBlockCard).
   let {
     source,
     sessionId = null,
+    answered = false,
     result = null,
     resultTitle = '',
     onOpenTask,
@@ -28,6 +31,7 @@
   }: {
     source: string;
     sessionId?: number | null;
+    answered?: boolean;
     result?: TaskResultView | null;
     resultTitle?: string;
     onOpenTask?: (id: number) => void;
@@ -47,7 +51,7 @@
   {:else if s.t === 'handover'}
     <HandoverCard handover={s.handover} raw={s.raw} nonce={s.nonce} {sessionId} />
   {:else if s.t === 'ui'}
-    <UiBlockCard block={s.block} raw={s.raw} {sessionId} />
+    <UiBlockCard block={s.block} raw={s.raw} {sessionId} {answered} />
   {:else}
     <Markdown source={fenced(s.lang, s.raw)} />
     <p class="invalid" data-testid="rich-invalid">

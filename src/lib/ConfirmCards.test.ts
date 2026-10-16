@@ -1,4 +1,4 @@
-import { render, screen, fireEvent } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { tick } from 'svelte';
 
@@ -51,7 +51,11 @@ beforeEach(() => {
   clearToasts();
   inv.mockReset();
   inv.mockImplementation(async (cmd: string) => {
-    if (cmd === 'mcp_pending_confirms') return [];
+    if (cmd === 'mcp_pending_confirms') {
+      // The hub that cannot take an answer cannot list either.
+      if (!confirmOk) throw { code: 'E_HUB', message: 'hub unreachable' };
+      return [];
+    }
     if (cmd === 'mcp_confirm') {
       if (!confirmOk) throw { code: 'E_HUB', message: 'hub unreachable' };
       return confirmAnswered;
@@ -118,6 +122,27 @@ describe('confirms as transcript cards', () => {
     expect(inv).toHaveBeenCalledWith('mcp_confirm', { nonce: 'n-op', approved: false });
     expect(get(confirmQueue).map((r) => r.nonce)).toEqual(['n-op']);
     expect(screen.getByTestId('confirm-card')).toBeTruthy();
+    // It says why, and offers a way out that is not another failing press.
+    expect(screen.getByTestId('confirm-card-failed').textContent).toContain('hub unreachable');
+    await fireEvent.click(screen.getByTestId('confirm-card-dismiss'));
+    await tick();
+    expect(screen.queryByTestId('confirm-card')).toBeNull();
+    expect(get(confirmQueue)).toEqual([]);
+  });
+
+  it('a request the hub no longer lists leaves after a failed answer', async () => {
+    let listed = true;
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd === 'mcp_pending_confirms') return listed ? [KILL] : [];
+      if (cmd === 'mcp_confirm') throw { code: 'E_NOTFOUND', message: 'no such request' };
+      return null;
+    });
+    await mountBoth();
+    await emit('mcp:confirm-required', KILL);
+    await tick();
+    listed = false;
+    await fireEvent.click(screen.getByTestId('confirm-card-approve'));
+    await waitFor(() => expect(screen.queryByTestId('confirm-card')).toBeNull());
   });
 
   it('an answer the backend refused (expired, or answered elsewhere first) is said, not shown as done', async () => {

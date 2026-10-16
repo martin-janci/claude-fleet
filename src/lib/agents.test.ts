@@ -179,4 +179,20 @@ describe('agents (design step 5)', () => {
     expect(get(agents)).toBeNull();
     vi.useRealTimers();
   });
+
+  it('skips its reads while the window is blurred, and reads once on focus', async () => {
+    vi.useFakeTimers();
+    const load = vi.fn().mockResolvedValue({ ok: true, value: { rules: [], jobs: [], pending: [] } });
+    const win = new EventTarget() as Window;
+    const stop = trackAgents({ load, doc: null, win, every: 1000 });
+    await vi.advanceTimersByTimeAsync(0);
+    win.dispatchEvent(new Event('blur'));
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(load).toHaveBeenCalledTimes(1);
+    win.dispatchEvent(new Event('focus'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(load).toHaveBeenCalledTimes(2);
+    stop();
+    vi.useRealTimers();
+  });
 });

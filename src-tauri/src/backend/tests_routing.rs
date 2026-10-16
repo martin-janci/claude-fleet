@@ -8855,6 +8855,34 @@ fn update_routes_are_the_only_contract_exemption() {
     }
 }
 
+/// The hub takes an update report with `204 No Content`
+/// (`mcp::update_route::handle_report`). The desktop logged every one of them
+/// as "update report not taken … unreachable: HTTP 204", so a hub never saw a
+/// desktop's update succeed.
+#[test]
+fn an_update_report_the_hub_takes_with_204_is_taken() {
+    struct NoContent;
+    #[async_trait::async_trait]
+    impl remote::HubTransport for NoContent {
+        async fn post_json(
+            &self,
+            _url: &str,
+            _bearer: &str,
+            _body: String,
+        ) -> Result<remote::HubResponse, String> {
+            Ok(remote::HubResponse {
+                status: 204,
+                body: String::new(),
+            })
+        }
+    }
+    let backend = FleetBackend::remote_over(cfg(), Arc::new(NoContent));
+    let hub = backend.hub().expect("a remote backend");
+    let body = block_on(hub.post_update("/update/report", r#"{"update_proto":1}"#.into()))
+        .expect("a 204 is the hub taking the report");
+    assert_eq!(body, "");
+}
+
 /// Persona dashboards step 6: a hub that does not serve `dashboards` yet
 /// answers unknown tool, and the desktop keeps the pin in its own store,
 /// as it did before they moved to the hub.

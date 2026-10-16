@@ -5,6 +5,8 @@
   // of the reply, not a record.
   const ticked = new Map<string, Set<number>>();
   const sent = new Set<string>();
+  // Answered cards a person hid, by block text. Per window, as above.
+  const hidden = new Set<string>();
 </script>
 
 <script lang="ts">
@@ -27,7 +29,38 @@
   import WizardChatCard from '../forms/WizardChatCard.svelte';
   import { WIZARDS } from '../forms/wizards';
 
-  let { block, raw, sessionId = null }: { block: UiBlock; raw: string; sessionId?: number | null } = $props();
+  // `answered`: the reply this card is in was followed by another message,
+  // so its question was answered (or passed over) there. A card that asks
+  // (choices, form, an error's next steps, a wizard) then becomes a receipt
+  // that can only be hidden: its buttons would only fill the composer with
+  // an answer nobody waits for any more (2026-10-16: Control's old cards
+  // stayed up with buttons that seemed to do nothing).
+  let {
+    block,
+    raw,
+    sessionId = null,
+    answered = false,
+  }: { block: UiBlock; raw: string; sessionId?: number | null; answered?: boolean } = $props();
+
+  const asks = $derived(block.kind === 'choices' || block.kind === 'form' || block.kind === 'wizard' || (block.kind === 'error' && block.next.length > 0));
+  const blockId = $derived(blockKey(raw));
+  let isHidden = $state(false);
+  $effect(() => {
+    isHidden = hidden.has(blockId);
+  });
+
+  function hide() {
+    hidden.add(blockId);
+    isHidden = true;
+  }
+
+  function askTitle(b: UiBlock): string {
+    if (b.kind === 'choices') return b.title ?? b.question ?? 'A question';
+    if (b.kind === 'form') return b.form.title;
+    if (b.kind === 'error') return b.title;
+    if (b.kind === 'wizard') return b.wizard === 'fleet_agent' ? `New ${b.definition ?? 'fleet agent'} instance` : WIZARDS[b.wizard].spec.title;
+    return '';
+  }
 
   const key = $derived(`${sessionId ?? '-'}:${blockKey(raw)}`);
   let done = $state<Set<number>>(new Set());
@@ -58,7 +91,15 @@
 
 </script>
 
-{#if block.kind === 'report'}
+{#if answered && asks}
+  {#if !isHidden}
+    <p class="card muted answered" data-testid="rich-answered">
+      <span class="answered-title">{askTitle(block)}</span>
+      <span>Answered in a later message.</span>
+      <button type="button" class="hide" data-testid="rich-answered-hide" title="Hide this card" aria-label="Hide this card" onclick={hide}>✕</button>
+    </p>
+  {/if}
+{:else if block.kind === 'report'}
   <ReportCard report={block} {raw} title={block.title} {sessionId} />
 {:else if block.kind === 'callout'}
   <aside class="card callout {block.tone}" data-testid="rich-callout" role="note">
@@ -206,6 +247,28 @@
     font-size: var(--text-2xs);
   }
   .note { margin: 0; }
+  .answered {
+    flex-direction: row;
+    align-items: baseline;
+    gap: var(--space-2);
+    font-size: var(--text-xs);
+  }
+  .answered-title {
+    font-weight: 600;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .hide {
+    margin-left: auto;
+    border: none;
+    background: none;
+    color: var(--fg-muted);
+    cursor: pointer;
+    padding: 0 var(--space-1);
+  }
+  .hide:hover { color: var(--fg); }
   .intro { margin: 0; font-size: 0.85em; }
   dl {
     display: grid;

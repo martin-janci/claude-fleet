@@ -77,7 +77,19 @@
     }
     const details = (r.error as { details?: { problems?: FieldProblem[] } }).details;
     if (details?.problems) problems = details.problems;
-    else error = r.error.message;
+    else {
+      error = r.error.message;
+      void reread();
+    }
+  }
+
+  /** After a failed answer: the form may have expired or been answered on
+   *  another device, and then its receipt (with Dismiss) replaces the live
+   *  card rather than Send failing again. */
+  async function reread() {
+    const id = formId;
+    const r = await getForm(id);
+    if (id === formId && r.ok) form = r.value;
   }
 
   async function decline() {
@@ -89,7 +101,10 @@
     if (r.ok) {
       wizard?.forgetSaved();
       form = r.value;
-    } else error = r.error.message;
+    } else {
+      error = r.error.message;
+      void reread();
+    }
   }
 </script>
 
@@ -99,7 +114,7 @@
       <span class={`mark ${f.state}`} aria-hidden="true">{endedMark(f.state)}</span>
       <strong>{f.title}</strong>
       <span class="meta" data-testid="form-ended">{ended}</span>
-      {#if closed && ondismiss}<button type="button" class="x" aria-label="Dismiss" onclick={ondismiss}>×</button>{/if}
+      {#if ondismiss}<button type="button" class="x" data-testid="form-dismiss" aria-label="Dismiss" onclick={ondismiss}>×</button>{/if}
     </div>
     {#if summary}<div class="summary" data-testid="form-summary">{summary}</div>{/if}
     {#if f.state === 'declined' && f.note}<div class="summary" data-testid="form-note">“{f.note}”</div>{/if}
@@ -168,6 +183,11 @@
       </div>
     {/if}
     {#if error}<p class="err" data-testid="form-error">{error}</p>{/if}
+    {#if !form && error && ondismiss}
+      <!-- The form could not be read (expired, withdrawn, the hub away): a
+           card with nothing to answer must still be closable. -->
+      <button type="button" class="link" data-testid="form-dismiss" onclick={ondismiss}>Dismiss</button>
+    {/if}
   </section>
 {/if}
 

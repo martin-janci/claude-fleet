@@ -508,6 +508,29 @@
       "danger": {
         "level": "none"
       },
+      "default": "20",
+      "help": "Memory pressure on a host at or over which killed sessions wait to be brought back. The host's out-of-memory killer acts at 50 by default; restoring near it only feeds the next kill.",
+      "key": "recovery.max_mem_pressure",
+      "kind": {
+        "max": 100,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Restore under memory pressure below",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "percent",
+      "value": "20"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "300",
       "help": "Seconds between two looks of one agent rule at what it watches (a repo's pull requests, a Jira project). An agent works only under a rule a person granted.",
       "key": "agents.poll_interval_secs",
@@ -4295,6 +4318,14 @@
             },
             {
               "key": "recovery.max_attempts",
+              "type": "field",
+              "when": {
+                "key": "recovery.auto_restore",
+                "truthy": true
+              }
+            },
+            {
+              "key": "recovery.max_mem_pressure",
               "type": "field",
               "when": {
                 "key": "recovery.auto_restore",

@@ -782,6 +782,7 @@ mod tests {
             }],
             keep: &[name.to_string()],
             lost_ttl_cutoff: None,
+            min_ghost_age_cutoff: None,
             skip_prune: false,
             reconciled_at: None,
         })

@@ -242,6 +242,18 @@ export async function createFromTree(
   return null;
 }
 
+/** Reject every open proposal of the tree: the person wants none of them,
+ *  and the plan card must not stay up waiting. Answers an error message, or
+ *  null. */
+export async function rejectTree(h: ControlHandoff): Promise<string | null> {
+  for (const i of openProposals(h)) {
+    const r = await decideWorkProposal(i.id, false);
+    if (!r.ok) return r.error.message;
+  }
+  await refreshHandoffs();
+  return null;
+}
+
 /** Take the tree's recent accepts back. Answers an error message, or null. */
 export async function undoTree(h: ControlHandoff, nowSec: number): Promise<string | null> {
   const ids = undoable(h, nowSec).map((i) => i.id);

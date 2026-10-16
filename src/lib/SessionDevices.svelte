@@ -2,7 +2,9 @@
   // The debug devices a session holds or waits for (docs/debug-devices.md),
   // as a strip under the Conversation header: one line per device, with a
   // screenshot, a mirror and Release for a held one. Read from the person's
-  // own device list on mount and every 30 s while the window is visible.
+  // own device list, which `debug_devices_feed.ts` reads once for every
+  // strip on screen (every 90 s while the window is shown and focused), and
+  // again when the strip opens or after a release.
   // Nothing at all when the session holds and waits for nothing, and
   // nothing when the list cannot be read (a hub without the command): it is
   // a glance, never a banner of errors.
@@ -21,7 +23,6 @@
     debugDeviceScreenshot,
     devicesOf,
     holderName,
-    listDebugDevices,
     placeName,
     releaseDebugDevice,
     sessionHolder,
@@ -30,19 +31,15 @@
     type DebugDevice,
     type Screenshot,
   } from './debug_devices';
+  import { debugDeviceFeed, refreshDebugDevices, watchDebugDevices } from './debug_devices_feed';
 
   let { session }: { session: { id: number; host_alias: string } } = $props();
 
-  /** How often the list is read again while mounted. */
-  const POLL_MS = 30_000;
   /** Above this many lines the strip folds to its count. */
   const FOLD_OVER = 2;
-  /** Refusals no retry can change: stop asking. */
-  const GIVE_UP = ['E_LOCAL_ONLY', 'E_HUB_CONTRACT', 'E_UNKNOWN_COMMAND'];
 
-  let devices = $state<DebugDevice[]>([]);
-  let nowSecs = $state(Date.now() / 1000);
-  let stopped = false;
+  const devices = $derived($debugDeviceFeed.devices);
+  const nowSecs = $derived($debugDeviceFeed.at);
   let open = $state(false);
   /** The device whose screenshot panel is open, and what it holds. */
   let shotFor = $state<number | null>(null);
@@ -59,36 +56,25 @@
 
   const message = (e: IpcError) => e.message?.trim() || errorText(e);
 
-  async function load() {
-    if (stopped) return;
-    const r = await listDebugDevices();
-    nowSecs = Date.now() / 1000;
-    if (r.ok) devices = Array.isArray(r.value) ? r.value : [];
-    else if (GIVE_UP.includes(r.error.code)) {
-      stopped = true;
-      devices = [];
-    }
-    // Any other failure keeps the last list: the next poll tries again.
-  }
+  // One shared read for every strip on screen, for as long as this one is.
+  $effect(() => watchDebugDevices());
 
-  // Read on mount and when the strip moves to another session, then poll.
+  // A strip moved to another session starts closed and empty-handed; the
+  // list itself is everyone's and needs no read of its own.
   $effect(() => {
     void holder;
     untrack(() => {
-      devices = [];
-      stopped = false;
       shotFor = null;
       shot = null;
       said = null;
       open = false;
-      void load();
     });
-    const timer = setInterval(() => {
-      if (typeof document !== 'undefined' && document.hidden) return;
-      void load();
-    }, POLL_MS);
-    return () => clearInterval(timer);
   });
+
+  function toggle() {
+    open = !open;
+    if (open) refreshDebugDevices();
+  }
 
   async function screenshot(d: DebugDevice) {
     shotFor = d.id;
@@ -122,7 +108,7 @@
     releasing = null;
     if (r.ok) {
       if (shotFor === d.id) shotFor = null;
-      await load();
+      refreshDebugDevices();
     } else said = { id: d.id, text: message(r.error), error: true };
   }
 
@@ -133,7 +119,7 @@
 {#if count > 0}
   <section class="devices" data-testid="session-devices" aria-label="Debug devices of this session">
     {#if count > FOLD_OVER}
-      <button type="button" class="fold" aria-expanded={open} data-testid="session-devices-toggle" onclick={() => (open = !open)}>
+      <button type="button" class="fold" aria-expanded={open} data-testid="session-devices-toggle" onclick={toggle}>
         <Icon name="hosts" size={12} />
         <span>{['Debug devices', `${mine.held.length} held`, mine.waiting.length ? `${mine.waiting.length} waiting` : null].filter(Boolean).join(' · ')}</span>
         <span class="chev" aria-hidden="true">{open ? '▾' : '▸'}</span>

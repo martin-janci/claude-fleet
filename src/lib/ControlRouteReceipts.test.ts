@@ -133,6 +133,16 @@ describe('Control routing receipts', () => {
     expect(screen.getByTestId('control-route-target').textContent).toBe('About Hub federation v2');
   });
 
+  it('a question it asks can be dismissed without answering', async () => {
+    route = { outcome: 'ask', targets: TARGETS };
+    render(ControlRouteReceipts, { sessionId: 1 });
+    await send(msg('a', 'yes, that one'));
+    await fireEvent.click(screen.getByTestId('control-route-dismiss'));
+    await tick();
+    expect(screen.queryByTestId('control-route-receipt')).toBeNull();
+    expect(inv.mock.calls.some((c) => c[0] === 'control_route_follow')).toBe(false);
+  });
+
   it('opening a proposed session confirms it', async () => {
     route = { ...(route as object), target: 's9', proposal: { value: 's9', source: 'jev', confidence_pct: 70 } };
     render(ControlRouteReceipts, { sessionId: 1 });

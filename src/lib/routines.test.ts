@@ -38,6 +38,9 @@ import {
   runSourceHint,
   runWords,
   trackFailingRoutines,
+  FAILING_EVERY_MS,
+  FAILING_GAP_MS,
+  FAILING_SETTLE_MS,
   type FailingRoutine,
   type RoutineRow,
 } from './routines';
@@ -158,17 +161,74 @@ describe('the Inbox', () => {
   it('keeps the list fresh, and stops asking an older hub', async () => {
     vi.useFakeTimers();
     const load = vi.fn().mockResolvedValue({ ok: true, value: [failed()] });
-    const stop = trackFailingRoutines({ load, doc: null, every: 1000 });
+    const listen = vi.fn(async () => () => {});
+    const stop = trackFailingRoutines({ load, doc: null, win: null, every: 1000, listen });
     await vi.advanceTimersByTimeAsync(0);
     expect(get(failing)).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(1000);
     expect(load).toHaveBeenCalledTimes(2);
     stop();
     const old = vi.fn().mockResolvedValue({ ok: false, error: { code: 'E_INVALID', message: 'action must be …' } });
-    trackFailingRoutines({ load: old, doc: null, every: 1000 });
+    trackFailingRoutines({ load: old, doc: null, win: null, every: 1000, listen });
     await vi.advanceTimersByTimeAsync(5000);
     expect(old).toHaveBeenCalledTimes(1);
     expect(get(failing)).toEqual([]);
+    vi.useRealTimers();
+  });
+
+  it('reads on a routine run step, settled and at most once a minute, with a slow safety poll', async () => {
+    vi.useFakeTimers();
+    expect(FAILING_EVERY_MS).toBeGreaterThanOrEqual(10 * 60_000);
+    const load = vi.fn().mockResolvedValue({ ok: true, value: [] });
+    let emit: (e: { payload: unknown }) => void = () => {};
+    const listen = vi.fn(async (_: string, on: typeof emit) => {
+      emit = on;
+      return () => {};
+    });
+    const stop = trackFailingRoutines({ load, doc: null, win: null, listen });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(listen).toHaveBeenCalledWith('run:changed', expect.any(Function));
+    expect(load).toHaveBeenCalledTimes(1);
+    // Quiet for a minute: nothing more without an event.
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(load).toHaveBeenCalledTimes(1);
+    // A burst of steps from one routine run is one read, a moment later.
+    for (let i = 0; i < 5; i++) emit({ payload: { run_ref: 'routine:9' } });
+    await vi.advanceTimersByTimeAsync(FAILING_SETTLE_MS);
+    expect(load).toHaveBeenCalledTimes(2);
+    // Another step right after waits out the minute.
+    emit({ payload: { run_ref: 'routine:9' } });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(load).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(FAILING_GAP_MS);
+    expect(load).toHaveBeenCalledTimes(3);
+    // A run that is not a routine's changes nothing here.
+    emit({ payload: { run_ref: 'mission:4' } });
+    await vi.advanceTimersByTimeAsync(FAILING_GAP_MS * 2);
+    expect(load).toHaveBeenCalledTimes(3);
+    stop();
+    vi.useRealTimers();
+  });
+
+  it('a step while the window is blurred reads once on focus, not before', async () => {
+    vi.useFakeTimers();
+    const load = vi.fn().mockResolvedValue({ ok: true, value: [] });
+    let emit: (e: { payload: unknown }) => void = () => {};
+    const listen = vi.fn(async (_: string, on: typeof emit) => {
+      emit = on;
+      return () => {};
+    });
+    const win = new EventTarget() as Window;
+    const stop = trackFailingRoutines({ load, doc: null, win, listen });
+    await vi.advanceTimersByTimeAsync(0);
+    win.dispatchEvent(new Event('blur'));
+    emit({ payload: { run_ref: 'routine:9' } });
+    await vi.advanceTimersByTimeAsync(FAILING_GAP_MS * 2);
+    expect(load).toHaveBeenCalledTimes(1);
+    win.dispatchEvent(new Event('focus'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(load).toHaveBeenCalledTimes(2);
+    stop();
     vi.useRealTimers();
   });
 });

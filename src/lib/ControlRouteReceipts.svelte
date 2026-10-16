@@ -16,7 +16,7 @@
   import ProposedBy from './ProposedBy.svelte';
   import { outbox, type OutboxMessage } from './outbox';
   import { openInControl, openMissionInControl } from './control_room';
-  import { CONTROL, choose, handOn, optionOf, receipts, routeSent, shownOption, targetOf, type Receipt } from './control_route';
+  import { CONTROL, choose, dismissReceipt, handOn, optionOf, receipts, routeSent, shownOption, targetOf, type Receipt } from './control_route';
 
   let { sessionId }: { sessionId: number } = $props();
 
@@ -129,12 +129,24 @@
             >
           </div>
         {/if}
+        <button type="button" class="dismiss" data-testid="control-route-dismiss" title="Dismiss" aria-label="Dismiss" onclick={() => dismissReceipt(r.key)}
+          >✕</button
+        >
       </div>
     {/each}
   </div>
 {/if}
 
 <style>
+  .dismiss {
+    margin-left: auto;
+    border: none;
+    background: none;
+    color: var(--fg-muted);
+    cursor: pointer;
+    padding: 0 var(--space-1);
+  }
+  .dismiss:hover { color: var(--fg); }
   .receipts {
     flex-basis: 100%;
     display: flex;

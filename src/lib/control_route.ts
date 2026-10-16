@@ -92,6 +92,12 @@ export async function routeSent(key: string, text: string): Promise<void> {
   receipts.update((rs) => [...rs.filter((x) => x.key !== key), { key, route, chosen: null, followed: false, text, handed: null }].slice(-MAX_RECEIPTS));
 }
 
+/** Drop receipt `key` from Control: the person read it, or does not want it
+ *  routed. Nothing is recorded against the run. */
+export function dismissReceipt(key: string): void {
+  receipts.update((rs) => rs.filter((x) => x.key !== key));
+}
+
 /**
  * The person kept or changed receipt `key`. The first decision is
  * recorded against the run; a later change only updates the receipt.
