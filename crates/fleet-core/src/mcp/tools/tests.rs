@@ -11509,7 +11509,8 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     ("wait_for_session", &["Read"]),
     ("wait_for_task", &["Read"]),
     ("work", &["Read"]),
-    ("work_link", &["Drive", "Own"]),
+    // `followup` reads its origin task under `Read` (`task_visible_at`).
+    ("work_link", &["Drive", "Own", "Read"]),
     // repo.rs — every `repo_*` read is `watch` on the session whose
     // worktree it opens.
     //
