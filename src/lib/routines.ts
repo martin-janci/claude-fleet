@@ -6,7 +6,10 @@
 // `routines` command, which routes to the hub's `routines` tool on a paired
 // desktop. Mirrors `fleet_core::store::RoutineRow` / `RoutineRunRow`.
 import { derived, get, writable } from 'svelte/store';
+import { listen as tauriListen } from '@tauri-apps/api/event';
 import { invokeCmd, type Result } from './result';
+import { RUN_CHANGED_EVENT } from './events';
+import { pollWhileShown } from './window_hidden';
 import type { AccountRow } from './accounts';
 import { sessions } from './sessions';
 import { selectSessionExplicitly } from './selection';
@@ -750,38 +753,70 @@ export const TEMPLATES: { id: string; label: string; description: string }[] = [
   { id: 'morning-pr-sweep', label: 'Morning PR sweep', description: 'Weekdays 07:30 · CI, conflicts and review threads' },
 ];
 
-/** How often the failed runs are read for the badge. */
-export const FAILING_EVERY_MS = 60_000;
+/** The safety read of the failed runs for the badge: `run:changed` drives
+ *  it, this only catches a missed event. */
+export const FAILING_EVERY_MS = 15 * 60_000;
+/** A run step arrived: read this long after it, so a burst is one read. */
+export const FAILING_SETTLE_MS = 2_000;
+/** At most one event-driven read this often while runs keep stepping. */
+export const FAILING_GAP_MS = 60_000;
+
+type RunListen = (event: string, on: (e: { payload: unknown }) => void) => Promise<() => void>;
 
 /**
- * Keep `failing` fresh for the Needs you badge, whatever view shows: read it
- * now and every minute while the window is visible. An older hub answers
- * E_INVALID for `failing`, which leaves it empty and stops the reads.
- * Returns the stop.
+ * Keep `failing` fresh for the Needs you badge, whatever view shows. Read it
+ * now, then when a routine run records a step (`run:changed`, settled and at
+ * most once a minute), and every 15 minutes in case an event was missed;
+ * never while the window is hidden or behind another app, and once when it
+ * returns if anything was skipped. An older hub answers E_INVALID for
+ * `failing`, which leaves it empty and stops the reads. Returns the stop.
  */
 export function trackFailingRoutines(
-  deps: { load?: () => Promise<Result<FailingRoutine[]>>; doc?: Document | null; every?: number } = {},
+  deps: {
+    load?: () => Promise<Result<FailingRoutine[]>>;
+    doc?: Document | null;
+    win?: Window | null;
+    every?: number;
+    listen?: RunListen;
+  } = {},
 ): () => void {
   const load = deps.load ?? failingRoutines;
-  const doc = deps.doc === undefined ? (typeof document === 'undefined' ? null : document) : deps.doc;
+  const listen = deps.listen ?? (tauriListen as RunListen);
+  let lastRead = 0;
   let stopped = false;
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  const beat = async () => {
-    timer = null;
-    if (stopped) return;
-    if (doc?.visibilityState !== 'hidden') {
+  const poller = pollWhileShown(
+    async () => {
+      lastRead = Date.now();
       const r = await load();
-      if (stopped) return;
+      if (stopped) return false;
       failing.set(r.ok && Array.isArray(r.value) ? r.value : []);
-      if (!r.ok && r.error.code === 'E_INVALID') return;
-    }
-    timer = setTimeout(() => void beat(), deps.every ?? FAILING_EVERY_MS);
-  };
-  void beat();
-  return () => {
+      if (!r.ok && r.error.code === 'E_INVALID') return stop();
+    },
+    { every: deps.every ?? FAILING_EVERY_MS, doc: deps.doc, win: deps.win },
+  );
+  let pending: ReturnType<typeof setTimeout> | null = null;
+  let unlisten: (() => void) | null = null;
+  void listen(RUN_CHANGED_EVENT, (e) => {
+    const ref = (e.payload as { run_ref?: unknown } | null)?.run_ref;
+    // Only a routine's run can change which routines are failing.
+    if (typeof ref === 'string' && !ref.startsWith('routine:')) return;
+    if (pending !== null || stopped) return;
+    const wait = Math.max(FAILING_SETTLE_MS, lastRead + FAILING_GAP_MS - Date.now());
+    pending = setTimeout(() => {
+      pending = null;
+      poller.poke();
+    }, wait);
+  })
+    .then((u) => (stopped ? u() : (unlisten = u)))
+    .catch(() => {});
+  function stop(): false {
     stopped = true;
-    if (timer !== null) clearTimeout(timer);
-  };
+    poller.stop();
+    unlisten?.();
+    if (pending !== null) clearTimeout(pending);
+    return false;
+  }
+  return () => void stop();
 }
 
 // ---- the Automation list and detail (board Automation) ---------------------

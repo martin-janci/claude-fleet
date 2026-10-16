@@ -8,6 +8,7 @@
 // `fleet_core::service::agents::admin` and `fleet_core::store::Agent*Row`.
 import { derived, writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
+import { pollWhileShown } from './window_hidden';
 import type { FormSpec, Values } from './forms/forms';
 import type { Wizard } from './forms/wizards';
 import type { LoopHealth } from './ipc';
@@ -171,30 +172,26 @@ export async function answerAgentAction(id: number, approve: boolean): Promise<R
 
 export const AGENTS_EVERY_MS = 60_000;
 
-/** Keep `agents` fresh while the window shows, as `trackFailingRoutines`
- *  keeps the failed routines; a hub that refuses this device stops it. */
+/** Keep `agents` fresh while the window shows and has focus, as
+ *  `trackFailingRoutines` keeps the failed routines; a hub that refuses this
+ *  device stops it. */
 export function trackAgents(
-  deps: { load?: () => Promise<Result<AgentsStatus>>; doc?: Document | null; every?: number } = {},
+  deps: { load?: () => Promise<Result<AgentsStatus>>; doc?: Document | null; win?: Window | null; every?: number } = {},
 ): () => void {
   const load = deps.load ?? (() => agentsStatus(undefined, 20));
-  const doc = deps.doc === undefined ? (typeof document === 'undefined' ? null : document) : deps.doc;
   let stopped = false;
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  const beat = async () => {
-    timer = null;
-    if (stopped) return;
-    if (doc?.visibilityState !== 'hidden') {
+  const poller = pollWhileShown(
+    async () => {
       const r = await load();
-      if (stopped) return;
+      if (stopped) return false;
       agents.set(r.ok ? r.value : null);
-      if (!r.ok && (r.error.code === 'E_FORBIDDEN' || r.error.code === 'E_INVALID')) return;
-    }
-    timer = setTimeout(() => void beat(), deps.every ?? AGENTS_EVERY_MS);
-  };
-  void beat();
+      return r.ok || (r.error.code !== 'E_FORBIDDEN' && r.error.code !== 'E_INVALID');
+    },
+    { every: deps.every ?? AGENTS_EVERY_MS, doc: deps.doc, win: deps.win },
+  );
   return () => {
     stopped = true;
-    if (timer !== null) clearTimeout(timer);
+    poller.stop();
   };
 }
 
