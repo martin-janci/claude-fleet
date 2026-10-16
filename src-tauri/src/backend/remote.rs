@@ -1035,7 +1035,8 @@ impl HubBackend {
             )
         })?;
         match resp.status {
-            200 => Ok(resp.body),
+            // `/update/report` answers 204: the hub took it and has nothing to say.
+            200 | 204 => Ok(resp.body),
             401 => Err(IpcError::new(
                 codes::E_UNAUTHORIZED,
                 "the hub revoked this client — pair again in Settings",
