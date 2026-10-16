@@ -3397,6 +3397,20 @@
       ]
     },
     {
+      "default_widget": "number",
+      "key": "recovery.max_mem_pressure",
+      "kind": {
+        "max": 100,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Restore under memory pressure below",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
       "default_widget": "duration",
       "key": "agents.poll_interval_secs",
       "kind": {

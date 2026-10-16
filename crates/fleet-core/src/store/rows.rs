@@ -1975,6 +1975,14 @@ pub struct HostReconcile<'a> {
     /// `lost_at >= cutoff`) is spared Phase 2's hard-delete. `None` (the
     /// default) disables the exemption entirely — today's behaviour.
     pub lost_ttl_cutoff: Option<i64>,
+    /// Unix-epoch cutoff (see [`Store::ghost_and_clean`]'s
+    /// `min_ghost_age_cutoff` doc) at or above which a ghost that fleet did
+    /// NOT kill (`lost_reason != 'killed'`, `lost_at >= cutoff`) is spared
+    /// Phase 2's hard-delete, whatever its reason. A pass is not a clock: a
+    /// restore, kill or `new_session` runs a single-host pass seconds after
+    /// the last one. `None` (the default, store-level tests) keeps the
+    /// one-pass reap.
+    pub min_ghost_age_cutoff: Option<i64>,
     /// Skip the tmux-keyed ghost/reap pass entirely this write (Task 6): set
     /// when this pass already mass-marked the host's sessions lost via
     /// `Store::mark_host_sessions_lost` (a reboot or a vanished tmux

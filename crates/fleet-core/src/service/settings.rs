@@ -405,6 +405,13 @@ pub const RECOVERY_GRACE_SECS: &str = "recovery.grace_secs";
 /// (`service::auto_restore::ATTEMPT_WINDOW_SECS`); failures count. `0`
 /// stops every attempt while the toggle keeps recording why.
 pub const RECOVERY_MAX_ATTEMPTS: &str = "recovery.max_attempts";
+/// Memory pressure (0–100: Linux PSI `some avg10`, macOS's level) at or
+/// over which the auto-restore tick defers on a host. systemd-oomd kills a
+/// whole cgroup past its own limit (50 % by default), so restoring into a
+/// host already at a fifth of that only feeds the next kill (2026-10-16:
+/// twenty-five resumes in three minutes, then oomd took the tmux server).
+/// Default 20.
+pub const RECOVERY_MAX_MEM_PRESSURE: &str = "recovery.max_mem_pressure";
 /// Agents (`service::agents`): seconds between two polls of one rule;
 /// `0` stops every agent's polling.
 pub const AGENTS_POLL_INTERVAL_SECS: &str = "agents.poll_interval_secs";
@@ -1040,6 +1047,15 @@ pub const SPECS: &[Spec] = &[
     )
     .unit(Unit::Count)
     .zero("never"),
+    Spec::new(
+        RECOVERY_MAX_MEM_PRESSURE,
+        "20",
+        Kind::Int { min: 1, max: 100 },
+        "Restore under memory pressure below",
+        "Memory pressure on a host at or over which killed sessions wait to be brought back. The host's out-of-memory killer acts at 50 by default; restoring near it only feeds the next kill.",
+    )
+    .unit(Unit::Percent)
+    .tags(&[Tag::Advanced]),
     Spec::new(
         AGENTS_POLL_INTERVAL_SECS,
         "300",

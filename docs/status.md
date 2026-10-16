@@ -280,7 +280,13 @@ systemd-oomd killing one pane in its own scope — is recorded
 `store::reconcile::PROCESS_DIED_CASE`), kept to `sessions.lost_ttl_secs`
 like a reboot, and resumed by the tick after `recovery.grace_secs` (60) with
 the mass-loss reasons, at most `recovery.max_attempts` (2) per session per
-day. A host under load (memory under `health.mem_low_pct`, or CPU
+day, at most one restore per host per tick (four across the fleet), Control
+first. A `tmux_server_gone` / `host_reboot` row waits at least 180 s and for a
+health sample taken after the loss, and a mass loss within 15 minutes of a
+session's last automatic restore gives that restore back to its budget
+(only the latest one). A host under load (memory under `health.mem_low_pct`,
+memory pressure at or over `recovery.max_mem_pressure` (20), less than
+600 MB available per restore still starting there plus one, or CPU
 saturated) DEFERS the
 restore instead: no attempt is spent, one `auto_restore_deferred` event per
 episode names the reason, the lost TTL counts from that deferral (one
@@ -296,7 +302,12 @@ for 5 minutes (or the grace, if longer), the tick runs `ensure_operator`,
 which starts Control on a host that answers, within the same budget; the
 stranded row gets `operator_moved` / `operator_move_failed` and the new
 Control a `[fleet]` note. No migration; the controller is still never
-restored without `force`.
+restored without `force`. A tmux row fleet did not kill stays a ghost at
+least 5 minutes (`GHOST_MIN_AGE_SECS`, on `lost_at`) before a pass may
+delete it, whatever its reason: a restore, kill or `new_session` runs a
+single-host pass seconds after the tick's, which used to reap a just-lost
+row with its timeline and resume binding; a `killed` row still goes on the
+next pass.
 
 **The operator feed** is landed and ON by default (`control.react_to_events`,
 `service/operator_feed.rs`, loop `operator_feed`): Control's own session gets
