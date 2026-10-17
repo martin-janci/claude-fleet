@@ -47,8 +47,8 @@ wheel (Ask first): tell them in one line and propose, nothing more.\n\
 \n\
 When nobody answers a `choices` card you ended on, fleet may send its\n\
 `recommended` option for the person after a while, as a `[fleet]` note\n\
-that quotes the option (their auto-continue setting; never at Ask first,\n\
-never for a risky step). Carry it out as if they had pressed it.\n";
+that quotes the option (only at Within your brief or Autopilot, never at\n\
+Ask first, never for a risky step). Carry it out as if they had pressed it.\n";
 
 #[cfg(test)]
 mod tests {

@@ -387,7 +387,8 @@ pub const ORCHESTRATOR_HEADLESS_MODEL: &str = "orchestrator.headless_model";
 /// `recommended` once nobody has answered for
 /// [`CONTROL_AUTO_CONTINUE_MINUTES`]. The countdown runs where the fleet
 /// runs (`service::control_continue`), so it works with no window open and
-/// fires once; never at "Ask first".
+/// fires once; only at "Within your brief" or "Autopilot" (never at "Ask
+/// first" or Custom, whatever this setting says).
 pub const CONTROL_AUTO_CONTINUE: &str = "control.auto_continue";
 pub const CONTROL_AUTO_CONTINUE_MINUTES: &str = "control.auto_continue_minutes";
 /// Control's session hears, as one compact `[fleet events]` digest typed at
@@ -1010,7 +1011,7 @@ pub const SPECS: &[Spec] = &[
         "true",
         Kind::Bool,
         "Go on with the recommended option",
-        "Control's chat sends the option its agent marked recommended once nobody has answered for the minutes below, even with the app closed, and only once. Typing, Cancel or any other message stops it. Never for a push, a delete or another step hard to undo, and never at Ask first.",
+        "Only at Within your brief or Autopilot: Control's chat sends the option its agent marked recommended once nobody has answered for the minutes below, once, even with the app closed. Typing or Cancel stops it. Never for a push, a delete or another step hard to undo.",
     ),
     Spec::new(
         CONTROL_AUTO_CONTINUE_MINUTES,

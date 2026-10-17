@@ -91,6 +91,43 @@ describe('escalations', () => {
   });
 });
 
+describe("Control's threads and the hub's follow state (F10)", () => {
+  const blocked = (id: number, extra: Partial<SessionRow> = {}) => row({ id, tmux_name: `s${id}`, claude_status: 'blocked', ...extra } as Partial<SessionRow>);
+  const rows = [
+    blocked(2, { origin: 'operator' } as Partial<SessionRow>),
+    blocked(5),
+    blocked(6, { origin: 'mission', origin_ref: '11' } as Partial<SessionRow>),
+    blocked(7),
+    blocked(8, { origin: 'mission', origin_ref: '12' } as Partial<SessionRow>),
+  ];
+  const receipts = [
+    { kind: 'session', session_id: 5, mission_id: null },
+    { kind: 'session', session_id: 7, mission_id: null },
+    { kind: 'mission', session_id: null, mission_id: 11 },
+    { kind: 'mission', session_id: null, mission_id: 12 },
+  ] as unknown as ControlHandoff[];
+
+  it('leaves out a muted thread, one no longer followed, and the workers of a muted mission', () => {
+    const follows = new Map([
+      ['s:2', { state: 'following', muted: false }],
+      ['s:5', { state: 'muted', muted: true }],
+      ['s:7', { state: 'done', muted: false }],
+      ['m:11', { state: 'following', muted: false }],
+      ['m:12', { state: 'muted', muted: true }],
+    ]);
+    const scope = controlSessionIds(rows, receipts, follows);
+    expect([...scope].sort()).toEqual([2, 6]);
+    expect(escalations(rows, opts, null, new Set(), [], scope).map((e) => e.session?.id).sort()).toEqual([2, 6]);
+    // All fleet still shows every one of them.
+    expect(escalations(rows, opts, null, new Set(), [], null)).toHaveLength(5);
+  });
+
+  it('keeps every thread when the hub has not said (an older hub, no read yet)', () => {
+    expect([...controlSessionIds(rows, receipts, null)].sort()).toEqual([2, 5, 6, 7, 8]);
+    expect([...controlSessionIds(rows, receipts, new Map())].sort()).toEqual([2, 5, 6, 7, 8]);
+  });
+});
+
 describe('pruneLater', () => {
   it('forgets a put-off card after a week and keeps the newest few hundred', () => {
     const now = 10_000_000;

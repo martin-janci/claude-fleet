@@ -55,7 +55,7 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 
 | Setting | Default | Range | Scope | What it does |
 |---|---|---|---|---|
-| `control.auto_continue` | `true` | on / off | fleet | Control's chat sends the option its agent marked recommended once nobody has answered for the minutes below, even with the app closed, and only once. Typing, Cancel or any other message stops it. Never for a push, a delete or another step hard to undo, and never at Ask first. |
+| `control.auto_continue` | `true` | on / off | fleet | Only at Within your brief or Autopilot: Control's chat sends the option its agent marked recommended once nobody has answered for the minutes below, once, even with the app closed. Typing or Cancel stops it. Never for a push, a delete or another step hard to undo. |
 | `control.auto_continue_minutes` | `10` | 1–1440 minutes | fleet | How long Control's chat waits for your answer before it sends the recommended option. |
 | `control.react_to_events` | `true` | on / off | fleet | Control's agent gets a short note when a session it started finishes, gets stuck, fails or is lost, when a mission it handed off waits on you, or when a host goes down or runs low. Only while it is idle, and never while automation is paused. |
 | `control.feed_min_interval_secs` | `900` | seconds, `0` = no wait | fleet | The shortest time between two notes to Control's agent. A note goes only when something needs Control (a question, a failure, failing checks, a lost session, a host down); finished turns wait and go out with the next one. |

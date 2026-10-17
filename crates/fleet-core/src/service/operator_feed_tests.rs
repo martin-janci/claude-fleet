@@ -617,3 +617,32 @@ async fn a_session_control_no_longer_follows_is_not_told() {
         "{body}"
     );
 }
+
+/// F10: a PR's failing checks and its merge are told after Control stopped
+/// following the session; nothing is told for a muted one.
+#[test]
+fn pr_events_are_told_after_following_stopped_unless_muted() {
+    use crate::service::control_follow::{Follow, FollowState};
+    use crate::store::{PR_EVENT_CI_FAILED, PR_EVENT_MERGED};
+    let f = |id: i64, state: FollowState| Follow {
+        kind: "session".into(),
+        id,
+        state,
+        name: String::new(),
+        host_alias: None,
+        muted: state == FollowState::Muted,
+    };
+    let follows = [
+        f(1, FollowState::Following),
+        f(2, FollowState::Done),
+        f(3, FollowState::Muted),
+    ];
+    assert!(told_of(&follows, 1, "turn_done"));
+    assert!(!told_of(&follows, 2, "turn_done"));
+    assert!(told_of(&follows, 2, PR_EVENT_CI_FAILED));
+    assert!(told_of(&follows, 2, PR_EVENT_MERGED));
+    for kind in ["turn_done", PR_EVENT_CI_FAILED, PR_EVENT_MERGED] {
+        assert!(!told_of(&follows, 3, kind), "{kind}");
+    }
+    assert!(!told_of(&follows, 9, PR_EVENT_CI_FAILED));
+}

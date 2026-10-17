@@ -385,7 +385,8 @@ words (names and vocabulary only). Since F10 (`service/control_follow.rs`,
 migration 198) Control follows a session only while it matters: not once it
 is done, killed or removed, its PR merged after the last brief, or quiet for
 `control.follow_quiet_hours` (24), nor a thread muted from the Control
-threads column's bell or `control_journal { action: mute }`. The digest is
+threads column's bell or `control_journal { action: mute }`; a PR's merge
+and failing checks are told after following stopped, unless muted. The digest is
 typed as fleet's (`prompt_origin::FLEET_PROMPT_MARKS`); the operator's
 `CLAUDE.md` has a *Fleet events* section. Since the 2026-10-17 review
 (F13) the operator's `CLAUDE.md`, commands and skill are written at birth (a move is a birth)
@@ -413,9 +414,10 @@ login and account, why a host cannot be reached, each paired client's kind,
 version and Control features; every finding `checked` or `inferred`)
 before naming a cause or a button. `diagnose` reads rows only; the self
 debug agent's `fleet-diagnostics` (#933) is the deeper log search. The
-sweep looks at the threads the feed follows (`control_follow::follows`,
-F10): a session done, killed, merged, quiet or muted, and a muted mission,
-are not swept.
+sweep skips a muted thread and a mission Control no longer follows
+(`control_follow::follows`, F10), but a session's PR is swept after F10
+stopped following the session (done, quiet, merged): a red or conflicting
+PR is still Control's to fix or report.
 
 **Control's journal** is landed and ON by default (`control.journal`,
 `service/control_journal.rs`, migration 198, loop `control_journal`;
@@ -978,8 +980,11 @@ its `test:<command>` lines as `Bash(<command>)`, everything else denied
 `done_when` reads it unchanged; its cost is booked as `headless_check` on
 the mission. A checkout that moved or is dirty, a command with shell syntax,
 or a host outside the grant takes the session path.
-Control's chat goes on by itself (ON by default, `control.auto_continue`;
-moved to the fleet by review F17, 2026-10-17): when the agent's reply ends
+Control's chat goes on by itself only at *Within your brief* or *Autopilot*
+on the autonomy chip (`control.auto_continue`, which those positions turn
+on; the shipped defaults read Custom, which acts as *Ask first*, so it does
+not run until the person picks one; moved to the fleet by review F17,
+2026-10-17): when the agent's reply ends
 on a `choices` card with an option marked `recommended`, the operator's Stop
 hook records it (`service/control_continue.rs`, the `control.auto_continue_state`
 setting, no migration) and loop `control_continue` sends it as a `[fleet]`

@@ -339,7 +339,7 @@
         "level": "none"
       },
       "default": "true",
-      "help": "Control's chat sends the option its agent marked recommended once nobody has answered for the minutes below, even with the app closed, and only once. Typing, Cancel or any other message stops it. Never for a push, a delete or another step hard to undo, and never at Ask first.",
+      "help": "Only at Within your brief or Autopilot: Control's chat sends the option its agent marked recommended once nobody has answered for the minutes below, once, even with the app closed. Typing or Cancel stops it. Never for a push, a delete or another step hard to undo.",
       "key": "control.auto_continue",
       "kind": {
         "type": "bool"

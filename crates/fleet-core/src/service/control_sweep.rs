@@ -12,8 +12,11 @@
 //! * a mission Control handed off that is active, waits on nobody, and has
 //!   finished no task for [`STALL_SECS`].
 //!
-//! Only threads Control still follows are swept, by the operator feed's
-//! own rule (`service::control_follow::follows`, F10).
+//! Missions are swept only while Control still follows them, by the
+//! operator feed's own rule (`service::control_follow::follows`, F10). A
+//! session's PR is swept even after F10 stopped following the session
+//! ([`pr_swept`]), unless the thread is muted: a red or conflicting PR is
+//! still Control's to fix or report.
 //!
 //! They are standing conditions, so the feed's `raised` set reports each
 //! once and again only after it cleared. A PR's key carries its head commit:
@@ -158,6 +161,17 @@ pub fn swept(follows: &[crate::service::control_follow::Follow], kind: &str, id:
         .any(|f| f.kind == kind && f.id == id && f.state.following())
 }
 
+/// PURE: whether a handed-off session's PR is swept: any session of
+/// Control's that is not muted, followed or not. A PR that goes red or
+/// conflicts after F10 stopped following its session (done, quiet, merged
+/// before a new push) is still Control's to fix or report; a mute is the
+/// person's word and holds.
+pub fn pr_swept(follows: &[crate::service::control_follow::Follow], id: i64) -> bool {
+    follows
+        .iter()
+        .any(|f| f.kind == "session" && f.id == id && !f.muted)
+}
+
 /// Every sweep condition now, for the feed's standing conditions. Empty
 /// with `control.sweep` off. `exclude` is the operator's own row.
 pub fn conditions(s: &Store, exclude: Option<i64>, now: i64) -> Vec<Condition> {
@@ -165,13 +179,13 @@ pub fn conditions(s: &Store, exclude: Option<i64>, now: i64) -> Vec<Condition> {
         return Vec::new();
     }
     let ask = crate::service::autonomy::position(s).is_ask_first();
-    // The threads the feed follows (F10): a session done, killed, merged,
-    // quiet or muted, and a muted or finished mission, are not swept.
+    // F10: a muted thread is never swept; a mission only while followed;
+    // a session's PR whether or not the session is still followed.
     let follows = crate::service::control_follow::follows(s, exclude, now);
     let followed = |kind: &str, id: i64| swept(&follows, kind, id);
     let mut out = Vec::new();
     for id in s.handed_off_session_ids(exclude).unwrap_or_default() {
-        if !followed("session", id) {
+        if !pr_swept(&follows, id) {
             continue;
         }
         if let Ok(Some(row)) = s.get_session_by_id(id) {

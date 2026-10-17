@@ -54,7 +54,8 @@
 //! **Only what Control still follows** (Control review F10,
 //! `service::control_follow`): a session done, killed, merged, quiet for
 //! `control.follow_quiet_hours` or muted, and a muted mission, are left
-//! out.
+//! out. A PR's merge and failing checks are told after following stopped,
+//! unless the thread is muted ([`told_of`]).
 //!
 //! **Whose words.** The digest opens with `[fleet events]`
 //! (`prompt_origin::FLEET_PROMPT_MARKS`), so the typing step records it as
@@ -426,6 +427,18 @@ pub fn fold(state: &mut FeedState, events: &[FeedEventRow], now: i64) {
     }
 }
 
+/// PURE: whether an event of `kind` on session `id` is told (F10): while
+/// Control follows the session; a PR event (its merge, which is what stops
+/// the following, and failing checks, which are still Control's to fix)
+/// also after, unless the thread is muted.
+pub fn told_of(follows: &[crate::service::control_follow::Follow], id: i64, kind: &str) -> bool {
+    let pr_event =
+        kind == crate::store::PR_EVENT_MERGED || kind == crate::store::PR_EVENT_CI_FAILED;
+    follows.iter().any(|f| {
+        f.kind == "session" && f.id == id && (f.state.following() || (pr_event && !f.muted))
+    })
+}
+
 /// PURE: whether `state` (with `fresh` conditions raised this pass) has
 /// something that needs Control, so a digest goes out (F11).
 pub fn needs_control(state: &FeedState, fresh_conditions: usize) -> bool {
@@ -786,17 +799,9 @@ pub async fn run_with(
             .operator_feed_events(cursor, Some(op.id), &KINDS, READ_LIMIT)
             .unwrap_or_default();
         state.cursor = Some(events.last().map_or(cursor, |e| e.id));
-        // F10: only the sessions Control still follows. A merge is told
-        // once (it is what stops the following), unless muted.
+        // F10: only the sessions Control still follows ([`told_of`]).
         let follows = crate::service::control_follow::follows(&s, Some(op.id), now);
-        let followed = |id: i64, kind: &str| {
-            follows.iter().any(|f| {
-                f.kind == "session"
-                    && f.id == id
-                    && (f.state.following() || (kind == crate::store::PR_EVENT_MERGED && !f.muted))
-            })
-        };
-        events.retain(|e| followed(e.session_id, &e.kind));
+        events.retain(|e| told_of(&follows, e.session_id, &e.kind));
         fold(&mut state, &events, now);
         let now_raised = conditions(&s, now);
         let mut fresh: Vec<String> = now_raised
