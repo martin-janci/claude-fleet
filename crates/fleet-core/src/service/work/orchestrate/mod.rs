@@ -313,12 +313,11 @@ fn start_for(
         (None, [only]) => Some(*only),
         (None, _) => None,
     };
+    let (host_alias, profile) = grant_placement(s, grant, project_id);
     Ok(StartArgs {
         item_id: Some(item_id),
         project_id,
-        host_alias: grant
-            .and_then(|g| g.hosts.as_ref())
-            .and_then(|h| h.first().cloned()),
+        host_alias,
         with_brief: true,
         decider: match actor {
             Actor::Person(_) => Decider::Person,
@@ -328,10 +327,40 @@ fn start_for(
         // The run's session is the mission's, whoever pressed Go
         // (migration 124): the origin chip names the mission.
         origin: Some(crate::store::SessionOrigin::mission(m.id)),
-        // The login the grant names (redesign 8.7); none, the host's own.
-        profile: grant.and_then(|g| g.profile.clone()),
+        // The login the grant names (redesign 8.7); else placement's pick
+        // on the chosen host; none, the host's own.
+        profile,
         ..Default::default()
     })
+}
+
+/// Where a run inside `grant` goes (control review F5): the best host and
+/// login among the grant's hosts (`placement::best_in_grant`), its own
+/// login when it names one. Nothing in the grant qualifies, or no grant
+/// hosts: its first host (or none, for the tracker's) and its login, so the
+/// limit hold still says why.
+fn grant_placement(
+    s: &Store,
+    grant: Option<&GrantRow>,
+    project_id: Option<i64>,
+) -> (Option<String>, Option<String>) {
+    let named = grant.and_then(|g| g.profile.clone());
+    let Some(hosts) = grant
+        .and_then(|g| g.hosts.as_ref())
+        .filter(|h| !h.is_empty())
+    else {
+        return (None, named);
+    };
+    match crate::service::placement::best_in_grant(
+        s,
+        project_id,
+        hosts,
+        named.as_deref(),
+        crate::store::now_unix(),
+    ) {
+        Some(c) => (Some(c.host_alias), named.or(c.profile)),
+        None => (hosts.first().cloned(), named),
+    }
 }
 
 /// What taking one step did.

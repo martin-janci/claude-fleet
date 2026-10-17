@@ -407,8 +407,27 @@ pub fn refuse_over_limit(
             .unwrap_or_else(|| uuid.to_string())
     };
     let account = email(&over.login.account_uuid);
-    let instead = match &suggestion {
-        Some(l) => format!(
+    // None on this host: the best login on another host (control review F5).
+    let elsewhere = if suggestion.is_none() {
+        let want = crate::service::placement::Want {
+            not_account: Some(over.login.account_uuid.clone()),
+            not_host: Some(host_alias.to_string()),
+            ..Default::default()
+        };
+        crate::service::placement::suggest_with(
+            s,
+            None,
+            &want,
+            crate::service::hub::local_host_enabled(),
+            now,
+        )
+        .ok()
+        .and_then(|p| p.candidates.into_iter().next())
+    } else {
+        None
+    };
+    let instead = match (&suggestion, &elsewhere) {
+        (Some(l), _) => format!(
             "; {} has headroom ({:.0}% used): start with profile {}",
             email(&l.account_uuid),
             l.used_pct.unwrap_or_default(),
@@ -417,7 +436,19 @@ pub fn refuse_over_limit(
                 None => "unset (the host's own login)".to_string(),
             }
         ),
-        None => "; no other login on this host has headroom".to_string(),
+        (None, Some(c)) => format!(
+            "; no other login on this host has headroom, but {} on {} does ({}): start there with host_alias \"{}\" and profile {}",
+            email(&c.account_uuid),
+            c.host_alias,
+            c.used_pct
+                .map_or_else(|| "no reading".to_string(), |u| format!("{u:.0}% used")),
+            c.host_alias,
+            match &c.profile {
+                Some(p) => format!("\"{p}\""),
+                None => "unset (the host's own login)".to_string(),
+            }
+        ),
+        (None, None) => "; no other login on this host or any other has headroom".to_string(),
     };
     Err(IpcError::new(
         codes::E_ACCOUNT_LIMIT,
@@ -430,8 +461,12 @@ pub fn refuse_over_limit(
             "account_uuid": over.login.account_uuid,
             "used_pct": over.login.used_pct,
             "pause_at_pct": pause_at,
-            "suggested_profile": suggestion.as_ref().map(|l| l.profile.clone().unwrap_or_default()),
-            "suggested_account_uuid": suggestion.as_ref().map(|l| l.account_uuid.clone()),
+            "suggested_profile": suggestion.as_ref().map(|l| l.profile.clone().unwrap_or_default())
+                .or_else(|| elsewhere.as_ref().map(|c| c.profile.clone().unwrap_or_default())),
+            "suggested_account_uuid": suggestion.as_ref().map(|l| l.account_uuid.clone())
+                .or_else(|| elsewhere.as_ref().map(|c| c.account_uuid.clone())),
+            "suggested_host": suggestion.as_ref().map(|_| host_alias.to_string())
+                .or_else(|| elsewhere.as_ref().map(|c| c.host_alias.clone())),
     })))
 }
 
@@ -613,6 +648,36 @@ mod tests {
         seed_usage(&s, "mac", Some("work"), "acct-busy", 97.0, NOW);
         let err = refuse_over_limit(&s, "mac", None, NOW).unwrap_err();
         assert!(err.message.contains("no other login"), "{}", err.message);
+    }
+
+    /// Control review F5: with no login on the host under the line, the
+    /// refusal names the best login on another host (`placement`).
+    #[test]
+    fn a_refusal_with_no_login_left_on_the_host_names_another_host() {
+        let s = Store::open_in_memory().unwrap();
+        seed_usage(&s, "mac", None, "acct-full", 95.0, NOW);
+        seed_usage(&s, "htz", Some("spare"), "acct-spare", 15.0, NOW);
+        s.conn_for_test()
+            .execute(
+                "UPDATE hosts SET reachable = 1, claude_version = '2.1' WHERE alias = 'htz'",
+                [],
+            )
+            .unwrap();
+        let err = refuse_over_limit(&s, "mac", None, NOW).unwrap_err();
+        assert!(
+            err.message
+                .contains("acct-spare on htz does (15% used): start there with host_alias \"htz\" and profile \"spare\""),
+            "{}",
+            err.message
+        );
+        let d = err.details.unwrap();
+        assert_eq!(
+            (
+                d["suggested_host"].as_str(),
+                d["suggested_profile"].as_str()
+            ),
+            (Some("htz"), Some("spare"))
+        );
     }
 
     fn snap(uuid: &str, five: f64, week: f64) -> AccountUsageSnapshot {

@@ -224,8 +224,33 @@ click). Automatic switching is landed and OFF by default
 (`accounts.auto_switch`, docs/accounts.md → *Switch automatically*; each
 person can turn it off for their own sessions, migration 187, and ask for
 "continue" after a switch, migration 188; Jev's pick
-is recorded only, `decide.jev.limit_switch`). Not built: a hub vault for
+is recorded only, `decide.jev.limit_switch`); a session parked by a quota
+notification (`quota_auto_resume_*`, read as blocked) is switched too, one
+waiting on a dialog or a form is not. Not built: a hub vault for
 setup-tokens and API keys.
+
+Placement and login health (Control review F5/F6, landed, ON): one rule,
+`service::placement`, picks the host and login for new work: hosts that
+answer, have claude and are under the recovery thresholds (and have run the
+project), logins that are signed in, under `accounts.pause_at` and within
+their daily limit, ranked by account headroom then load. Control calls it
+through `suggest_placement` (its prompt requires it), a mission's run goes
+to the best place inside its grant instead of the grant's first host, a
+start that names no host takes the best host that ran the project, and the
+over-limit refusal names a login on another host when its own host has none.
+Jev's placement stays its own, off-by-default proposal. Signed-out logins
+are kept on the host row (`hosts.signed_out_logins`, migration 197), learnt
+from the usage poll's sources and from headless runs refused for want of a
+login, re-asked hourly; each is one amber card in Control's chat ("Claude
+login expired on <host> (since <day>) · ssh <host> then claude /login") and
+one line in Control's feed. Control's own account (F7, ON:
+`control.switch_at_limit`): `operator_status` reports its login, usage and
+"Paused · limit" / "signed out"; a birth takes the login it had on that host
+or the best one there, not the host's default; at its limit or signed out,
+Control is resumed under another login on its host (same conversation), else
+moved to another host (a new conversation, as the host-down move). The feed
+also reports an account hitting and leaving its limit and account switches
+done or failed.
 
 Single sign-on (docs/hub.md → *Sign in with Keycloak*): a hub with
 `FLEET_HUB_OIDC_ISSUER` set lets a person pair a device by signing in with

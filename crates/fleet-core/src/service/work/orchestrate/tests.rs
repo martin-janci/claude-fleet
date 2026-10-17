@@ -734,3 +734,48 @@ fn a_card_is_claimed_while_it_is_decided() {
     drop(first);
     assert!(CardClaim::take(987_654).is_ok(), "released with the first");
 }
+
+/// Control review F5: a run no longer takes the grant's first host; it goes
+/// where placement finds the most headroom inside the grant, on the login
+/// with it, and keeps the grant's first host when nothing there qualifies.
+#[test]
+fn a_run_goes_to_the_best_host_inside_its_grant() {
+    let fx = fixture();
+    let item = member(&fx, "a");
+    let g = grant(
+        &WorkLinkArgs {
+            level: Some(2),
+            hosts: Some(vec!["mac".into(), "htz".into()]),
+            ..by_id("mission_grant", fx.m.id)
+        },
+        &fx.deps.store,
+        &fx.me,
+    )
+    .unwrap();
+    let s = lock(&fx.deps.store).unwrap();
+    let now = now_unix();
+    let seed = crate::service::account_limits::seed_usage;
+    seed(&s, "mac", None, "acct-mac", 80.0, now);
+    seed(&s, "htz", None, "acct-htz", 70.0, now);
+    seed(&s, "htz", Some("spare"), "acct-spare", 5.0, now);
+    s.conn_for_test()
+        .execute(
+            "UPDATE hosts SET reachable = 1, claude_version = '2.1' WHERE alias IN ('mac', 'htz')",
+            [],
+        )
+        .unwrap();
+    let start = start_for(&s, &fx.m, item, &Actor::Loop, Some(&g)).unwrap();
+    assert_eq!(start.host_alias.as_deref(), Some("htz"));
+    assert_eq!(
+        start.profile.as_deref(),
+        Some("spare"),
+        "the login with headroom"
+    );
+    // Every login in the grant over the line: the first host, as before.
+    seed(&s, "mac", None, "acct-mac", 95.0, now);
+    seed(&s, "htz", None, "acct-htz", 95.0, now);
+    seed(&s, "htz", Some("spare"), "acct-spare", 99.0, now);
+    let start = start_for(&s, &fx.m, item, &Actor::Loop, Some(&g)).unwrap();
+    assert_eq!(start.host_alias.as_deref(), Some("mac"));
+    assert_eq!(start.profile, None);
+}

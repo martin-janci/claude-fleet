@@ -356,6 +356,9 @@ pub fn spawn_reconcile_tick(
                 // account ran out under the login with the most headroom.
                 // Detached and rate-limited.
                 service::account_switch::maybe_run(store, ssh);
+                // On by default (`control.switch_at_limit`): resume Control
+                // under another login when its own account ran out.
+                service::operator_account::maybe_run(store, ssh);
             }
         })
         .await;

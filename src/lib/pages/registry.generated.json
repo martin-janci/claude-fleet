@@ -383,6 +383,25 @@
       "danger": {
         "level": "none"
       },
+      "default": "true",
+      "help": "When Control's account hits its limit or its login is signed out, resume Control's conversation under another signed-in login with headroom: on its host first, then on another host.",
+      "key": "control.switch_at_limit",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Move Control off a spent login",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "true"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "false",
       "help": "Press Enter for sessions stuck on a \"Press Enter\" prompt. Auth menus, trust prompts and reconnects are always notify-only.",
       "key": "playbooks.press_enter",
@@ -5355,6 +5374,10 @@
                 "key": "control.react_to_events",
                 "truthy": true
               }
+            },
+            {
+              "key": "control.switch_at_limit",
+              "type": "field"
             }
           ],
           "title": "Fleet events"

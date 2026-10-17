@@ -3319,6 +3319,18 @@
     },
     {
       "default_widget": "switch",
+      "key": "control.switch_at_limit",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Move Control off a spent login",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
       "key": "playbooks.press_enter",
       "kind": {
         "type": "bool"

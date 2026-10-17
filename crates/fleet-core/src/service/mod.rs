@@ -8,6 +8,7 @@
 //! `&Arc<CancellationRegistry>`) rather than `tauri::State`, so they carry no
 //! dependency on the Tauri runtime and are directly unit-testable.
 
+pub mod account_feed;
 pub mod account_limits;
 pub mod account_spend;
 pub mod account_switch;
@@ -57,6 +58,7 @@ pub mod hosts;
 pub mod hub;
 pub mod library;
 pub mod local_sync;
+pub mod login_health;
 pub mod loops;
 pub mod messages;
 pub mod move_session;
@@ -65,6 +67,7 @@ pub mod names;
 pub mod nl;
 pub mod onboarding;
 pub mod operator;
+pub mod operator_account;
 pub mod operator_feed;
 pub mod org_admin;
 pub mod org_needs;
@@ -73,6 +76,7 @@ pub mod orgs;
 pub mod outcome;
 pub mod pane_intel;
 pub mod peer;
+pub mod placement;
 pub mod playbooks;
 pub mod pr_shepherd;
 pub mod presence;

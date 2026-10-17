@@ -442,6 +442,30 @@ impl Store {
             .filter(|p| *p != 0))
     }
 
+    /// Write the host's signed-out logins (migration 197,
+    /// `service::login_health`) and announce the row, only when they changed.
+    /// Returns whether they did. An unknown host changes nothing.
+    pub fn set_host_signed_out_logins(
+        &self,
+        alias: &str,
+        logins: &[super::SignedOutLogin],
+    ) -> Result<bool, rusqlite::Error> {
+        let Some(row) = fetch_host(&self.conn, alias)? else {
+            return Ok(false);
+        };
+        if row.signed_out_logins == logins {
+            return Ok(false);
+        }
+        let json = (!logins.is_empty())
+            .then(|| serde_json::to_string(logins).unwrap_or_else(|_| "[]".into()));
+        self.conn.execute(
+            "UPDATE hosts SET signed_out_logins = ?2 WHERE alias = ?1",
+            rusqlite::params![alias, json],
+        )?;
+        self.emit_host(alias, |bus, row| bus.host_probed(row))?;
+        Ok(true)
+    }
+
     pub fn set_host_hidden(&self, alias: &str, hidden: bool) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "UPDATE hosts SET hidden=?1 WHERE alias=?2",

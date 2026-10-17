@@ -11,8 +11,9 @@
   import { operatorSession } from './operator';
   import { openInControl } from './control_room';
   import { displayName } from './attention';
+  import { hosts } from './hosts';
 
-  const all = $derived(escalations($visibleFleet.rows, $visibleFleet.opts, $operatorSession?.id ?? null, $laterEscalations));
+  const all = $derived(escalations($visibleFleet.rows, $visibleFleet.opts, $operatorSession?.id ?? null, $laterEscalations, $hosts));
   const shown = $derived(all.slice(0, ESCALATIONS_SHOWN));
   const more = $derived(all.length - shown.length);
 </script>
@@ -26,12 +27,15 @@
           <span class="line">{e.line}</span>
           {#if e.detail}<span class="detail" data-testid="control-escalation-detail">{e.detail}</span>{/if}
         </div>
-        <button
-          type="button"
-          class="btn btn--chip"
-          data-testid="control-escalation-open"
-          onclick={() => openInControl(e.session.id, displayName(e.session, true))}>Open</button
-        >
+        {#if e.session}
+          {@const s = e.session}
+          <button
+            type="button"
+            class="btn btn--chip"
+            data-testid="control-escalation-open"
+            onclick={() => openInControl(s.id, displayName(s, true))}>Open</button
+          >
+        {/if}
         <button type="button" class="btn btn--quiet" data-testid="control-escalation-later" onclick={() => putOff(e.key)}>Later</button>
       </li>
     {/each}

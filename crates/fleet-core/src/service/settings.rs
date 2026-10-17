@@ -388,6 +388,10 @@ pub const CONTROL_REACT_TO_EVENTS: &str = "control.react_to_events";
 /// The fewest seconds between two digests: events in between wait and go
 /// out together in the next one.
 pub const CONTROL_FEED_MIN_INTERVAL_SECS: &str = "control.feed_min_interval_secs";
+/// When Control's own account reaches its limit or its login is signed out,
+/// resume Control under another signed-in login with headroom: on its host
+/// first, else on another host (`service::operator_account`).
+pub const CONTROL_SWITCH_AT_LIMIT: &str = "control.switch_at_limit";
 pub const PLAYBOOK_OOM_RECREATE: &str = "playbooks.oom_recreate";
 /// Recreates the `oom` playbook may run on one session per 24 h
 /// (`service::playbooks::OOM_ATTEMPT_WINDOW_SECS`). `0` refuses every
@@ -998,6 +1002,13 @@ pub const SPECS: &[Spec] = &[
     .unit(Unit::Seconds)
     .zero("no wait")
     .tags(&[Tag::Advanced]),
+    Spec::new(
+        CONTROL_SWITCH_AT_LIMIT,
+        "true",
+        Kind::Bool,
+        "Move Control off a spent login",
+        "When Control's account hits its limit or its login is signed out, resume Control's conversation under another signed-in login with headroom: on its host first, then on another host.",
+    ),
     Spec::new(
         PLAYBOOK_PRESS_ENTER,
         "false",

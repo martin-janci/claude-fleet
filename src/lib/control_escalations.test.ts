@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { escalations, escalationKey } from './control_escalations';
+import { escalations, escalationKey, loginCardText } from './control_escalations';
+import type { HostRow } from './hosts';
 import type { SessionRow } from './sessions';
 import type { AttentionOptions } from './attention';
 
@@ -45,5 +46,30 @@ describe('escalations', () => {
   it('a failed session is a card, after the ones waiting on you', () => {
     const out = escalations([row({ id: 4, tmux_name: 'b', claude_status: 'failed' }), row({ id: 2, tmux_name: 'a', claude_status: 'blocked' })], opts, null, new Set());
     expect(out.map((e) => e.bucket)).toEqual(['waiting', 'stop_failed']);
+  });
+
+  it("Control's own limit is a card in its own chat (review F7); its other states are not", () => {
+    const limited: AttentionOptions = { ...opts, facts: { limited_accounts: { acct: { window: 'five_hour', resets_at: null } } } };
+    const control = row({ id: 9, tmux_name: 'fleet-operator', account_uuid: 'acct' } as Partial<SessionRow>);
+    const out = escalations([control], limited, 9, new Set());
+    expect(out).toHaveLength(1);
+    expect(out[0].bucket).toBe('account_limit');
+    expect(out[0].line).toMatch(/^Control's account hit its limit/);
+    expect(escalations([control], limited, 9, new Set([out[0].key]))).toEqual([]);
+  });
+
+  it('a signed-out login is one card per host and login, with the command (review F6)', () => {
+    // 2026-08-09 12:00 UTC.
+    const since = 1_786_276_800;
+    const host = { alias: 'htz', hidden: false, signed_out_logins: [{ profile: null, since }, { profile: 'work', since }] } as unknown as HostRow;
+    const hidden = { alias: 'gone', hidden: true, signed_out_logins: [{ profile: null, since }] } as unknown as HostRow;
+    const out = escalations([], opts, null, new Set(), [host, hidden]);
+    expect(out.map((e) => e.line)).toEqual([
+      'Claude login expired on htz (since Aug 9) · ssh htz then claude /login',
+      'Claude login expired on htz (profile work) (since Aug 9) · ssh htz then CLAUDE_CONFIG_DIR=~/.claude-profiles/work claude /login',
+    ]);
+    expect(out.every((e) => e.session === null)).toBe(true);
+    expect(escalations([], opts, null, new Set([out[0].key]), [host])).toHaveLength(1);
+    expect(loginCardText('htz', { profile: null, since })).toContain('(since Aug 9)');
   });
 });

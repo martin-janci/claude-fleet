@@ -1024,6 +1024,30 @@ pub(crate) fn seen_host(
     }
 }
 
+/// The host a start that names none lands on (control review F5): the best
+/// placement among the hosts that have run the project, the one it last ran
+/// on (`seen`) winning a near tie; `seen` itself when placement has no
+/// candidate (no readings, every login spent: the start's own refusals say
+/// why); `None` only when no host has run it.
+fn placed_host(s: &Store, project_id: i64, seen: Option<String>) -> Option<String> {
+    let seen = seen?;
+    let want = crate::service::placement::Want {
+        prefer_host: Some(seen.clone()),
+        ..Default::default()
+    };
+    crate::service::placement::suggest_with(
+        s,
+        Some(project_id),
+        &want,
+        crate::service::hub::local_host_enabled(),
+        crate::store::now_unix(),
+    )
+    .ok()
+    .and_then(|p| p.candidates.into_iter().next())
+    .map(|c| c.host_alias)
+    .or(Some(seen))
+}
+
 /// Plan where a resolved ticket's start lands. `E_EXISTS` (with the
 /// session) when the key already has a live session — in THIS project for a
 /// multi-repo start, where a live session on the start's branch counts too,
@@ -1122,7 +1146,12 @@ pub fn plan_resolved(
                 .and_then(|w| w.host_alias.clone())
                 .expect("checked above")
         }
-        (None, None) => match seen_host(&s, seen, project_id)? {
+        (None, None) => match match seen_host(&s, seen, project_id)? {
+            // An org-bound client keeps the host it saw: placement does not
+            // judge orgs.
+            seen if scope.bound_org().is_some() => seen,
+            seen => placed_host(&s, project_id, seen),
+        } {
             Some(h) => h,
             None => {
                 let hosts: Vec<String> = s
