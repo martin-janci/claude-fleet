@@ -21,6 +21,7 @@ pub mod agents;
 pub mod attachments;
 pub mod attention;
 pub mod auto_restore;
+pub mod autofix;
 pub mod bg_sessions;
 pub mod catalog;
 pub mod claude_print;
