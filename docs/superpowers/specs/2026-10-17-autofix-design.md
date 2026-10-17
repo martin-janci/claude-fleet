@@ -2,6 +2,39 @@
 
 Date: 2026-10-17 · Status: design approved in chat, spec under review
 
+## Changes after planning (2026-10-17)
+
+The core plan (PR 1) departs from the text below in these ways:
+
+- States are `open | verifying | cleared | apply_failed | dismissed` (no
+  `applying`). A `verifying` row still reported after `AUTOFIX_VERIFY_SECS`
+  (600 s) becomes `apply_failed`: "the fix ran, but the problem is still
+  there". Automatic retries are spaced by `AUTOFIX_RETRY_SECS` (600 s), up to
+  `autofix.max_attempts` (default 3, range 0..10).
+- No `autofix_audit` table: every apply goes through
+  `Store::record_admin_event_or_log` with `action: "autofix.apply"`.
+- Settings in PR 1: `autofix.auto_safe` (true), `autofix.max_attempts` (3),
+  `autofix.detector.operator_unbound` (true), `autofix.detector.host` (true).
+  A switched-off detector's findings clear on the next pass.
+  `autofix.interval_secs` and `autofix.mcp_entry_probe_secs` do not exist:
+  the loop period is a fixed 60 s, and the probe (detector 2) belongs to PR 2.
+- Detector 4: `host.provision_stale` is Safe with `auto: false` (the
+  reprovision loop owns it); `host.hooks_silent` is Safe with `auto: true`;
+  `host.agent_behind` is NeedsApproval and runs `update::update_now` with
+  target `agent:<alias>`, then pokes the agent's updater (a poke counts only
+  when it prints `poked` and exits 0); `host.claude_behind` is
+  explanation-only (fleet has no Claude Code update path). Unreachable hosts
+  are skipped; hidden hosts never appear (`health::hosts_health` skips them).
+- MCP tool `autofix` is `Access::PersonDevice`, so it is not served to
+  per-host tokens or the master. `list` returns live rows only; `scan` syncs
+  and never auto-applies; `apply` / `dismiss` need a trusted full device and
+  the operator (`ux-agent`) gets `E_FORBIDDEN`.
+- Detector 1 vs PR #932: #932 binds at birth and backfills; detector 1
+  catches later regressions. Autofix adds no backfill.
+- Migration 195 collides with PR #932's 195; whichever merges second
+  renumbers with `scripts/renumber-migrations.sh`.
+- Detectors 2 and 3 and the surfaces (chat card, panel, feed) are PR 2.
+
 ## Problem
 
 On 2026-10-17 the fleet operator (Control, tmux `fleet-operator` on mefistos)
@@ -117,7 +150,7 @@ CREATE TABLE autofix_findings (
   host_alias    TEXT,                   -- for scoping a per-host caller
   severity      TEXT NOT NULL,
   body          TEXT NOT NULL,          -- JSON: title, explanation, evidence, fix
-  state         TEXT NOT NULL,          -- open | applying | cleared | apply_failed | dismissed
+  state         TEXT NOT NULL,          -- open | verifying | cleared | apply_failed | dismissed
   first_seen_at INTEGER NOT NULL,
   last_seen_at  INTEGER NOT NULL,
   dismissed_until INTEGER,
@@ -126,17 +159,10 @@ CREATE TABLE autofix_findings (
   last_error    TEXT
 );
 CREATE UNIQUE INDEX autofix_live ON autofix_findings(kind, subject)
-  WHERE state IN ('open','applying','apply_failed','dismissed');
-
-CREATE TABLE autofix_audit (
-  id          INTEGER PRIMARY KEY,
-  finding_id  INTEGER NOT NULL,
-  at          INTEGER NOT NULL,
-  actor       TEXT NOT NULL,            -- "auto" | Caller::label()
-  outcome     TEXT NOT NULL,            -- applied | cleared | failed | dismissed
-  detail      TEXT
-);
+  WHERE state IN ('open','verifying','apply_failed','dismissed');
 ```
+
+Applies are audited through `record_admin_event` (`action: "autofix.apply"`); there is no audit table.
 
 A finding is an **episode**: the same `(kind, subject)` seen again updates
 `last_seen_at`; when a scan stops reporting it, the row moves to `cleared`.
@@ -144,8 +170,7 @@ A later recurrence opens a new row.
 
 ### Runner
 
-- In the reconcile tick, behind `loops::gate("autofix")`, every 60 s (setting
-  `autofix.interval_secs`), stops when automation is paused.
+- In the reconcile tick, behind `loops::gate("autofix")`, every 60 s (fixed), stops when automation is paused.
 - Upserts findings, clears the ones no detector reported.
 - Auto-applies a finding only when **all** hold: `fix.safety == Safe`,
   `autofix.auto_safe` is on (default **on**), the detector's own switch
@@ -154,13 +179,12 @@ A later recurrence opens a new row.
   episode. After that it stays `apply_failed` and waits for the person.
 - After every apply, re-scans that detector only. Reported → `apply_failed`
   with the detector's evidence. Not reported → `cleared`.
-- Every apply writes an `autofix_audit` row and an `autofix_applied` event
-  (timeline, operator feed).
+- Every apply is recorded with `record_admin_event` (`action: "autofix.apply"`).
 
 ### Access
 
-- `list` / `explain`: what the caller may see. A per-host token sees findings
-  whose `host_alias` is its own host. A person sees findings on hosts and
+- Not served to per-host tokens in v1 (`Access::PersonDevice`).
+- `list` / `explain`: what the caller may see. A person sees findings on hosts and
   sessions their `ViewScope` reaches, plus `hub` findings when fleet-admin.
 - `apply` / `dismiss`: **fleet-admin or the personal owner only**, the gate
   `decide_setting_proposals` uses. The operator's token and host tokens get
@@ -178,8 +202,8 @@ A later recurrence opens a new row.
 | 3b | `stuck.trust_prompt` | `stuck_kind = trust_prompt` | accept the trust prompt | NeedsApproval (security) |
 | 3c | `stuck.auth_menu` | `stuck_kind = auth_menu` | none: `ClientAction::login` | n/a |
 | 3d | `stuck.press_enter`, `stuck.oom` | existing playbook states | delegates to the playbook executor | Safe only when that playbook's toggle is on, else NeedsApproval |
-| 4a | `host.provision_stale`, `host.hooks_silent` | `HostRow.provision_stale`, `HostHealthRow.hooks_silent` | `provision_content_only` (fleet's own files only) | Safe |
-| 4b | `host.agent_behind`, `host.claude_behind` | `HostHealthRow` flags | the existing update path | NeedsApproval (restarts the agent) |
+| 4a | `host.provision_stale`, `host.hooks_silent` | `HostRow.provision_stale`, `HostHealthRow.hooks_silent` | `provision_content_only` (fleet's own files only) | Safe (`provision_stale` is `auto: false`, owned by the reprovision loop; `hooks_silent` is `auto: true`) |
+| 4b | `host.agent_behind`, `host.claude_behind` | `HostHealthRow` flags | `agent_behind`: `update_now` on `agent:<alias>` then poke; `claude_behind`: explanation only | NeedsApproval (restarts the agent) / n/a |
 
 ### Detector 2: the probe
 
@@ -208,11 +232,10 @@ identity.
 
 ### Detector 1 and the direct fix
 
-A separate change (branch `operator-token-person`) binds the token at birth
-and backfills the live one. Detector 1 stays useful after it lands: it
-catches a token unbound later (a manual `set_device_person`, a restore from a
-backup, a hub whose owner was set after the birth). If that branch's backfill
-is merged first, autofix does not add a second backfill.
+PR #932 binds the token at birth and backfills the live one; detector 1
+catches later regressions (a manual `set_device_person`, a restore from a
+backup, a hub whose owner was set after the birth). Autofix adds no backfill
+of its own.
 
 ## Surfaces
 

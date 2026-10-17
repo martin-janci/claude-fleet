@@ -449,6 +449,21 @@ bullet for the area you are about to change.
   the orbit map (`src/lib/runs.ts`, `orbit_map.ts`, `automation/`); the
   orbit is also Control's ◌ view (`ControlOrbitView.svelte`), whose ⤢
   hands Automation a `runsRequest`.
+- **Autofix** (`service/autofix/`, `store/autofix.rs`, migration 195, MCP
+  `autofix`, loop `autofix`, settings `autofix.*`): known broken states, each
+  found by a pure detector over a `ScanCx` the runner gathers under one lock,
+  stored as an episode in `autofix_findings` (`(kind, subject)` unique while
+  live: open → verifying → cleared / apply_failed, or dismissed; a verifying
+  row still reported after `AUTOFIX_VERIFY_SECS` becomes apply_failed). A fix
+  is a `FixPlan` the hub wrote itself, run by `FixExec` (`SshFixExec` in
+  production), followed at once by a re-scan of its detector. Safe fixes with
+  `auto: true` run on the reconcile tick (fixed 60 s, retries spaced by
+  `AUTOFIX_RETRY_SECS`, up to `autofix.max_attempts`) when `autofix.auto_safe`
+  is on; the rest wait for a trusted full device's `autofix { apply }` (tool
+  is `Access::PersonDevice`, never served to host tokens or the operator).
+  Every apply is in the admin audit log (`autofix.apply`). Detectors:
+  `operator_unbound`, `host.*`. Spec:
+  `docs/superpowers/specs/2026-10-17-autofix-design.md`.
 - **Debug devices** (guide `docs/debug-devices.md`; `service/debug_devices/`,
   `store/debug_devices.rs`, migration 120, `mcp/tools/devices.rs`, contract
   revision 10): a scan runs `scripts::scan_script` on a host (adb,
