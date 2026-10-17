@@ -413,7 +413,12 @@ Index by area (names only; see the reference for details):
   session's shell terminals, tmux sessions `<name>--sh<N>` beside the agent
   that no session list shows; own reach), `register_self`, `whoami`, `ensure_operator` (the UX
   agent's own session, idempotent), `operator_status` (why it cannot work,
-  if it cannot).
+  if it cannot), `diagnose` (read-only: where Control runs, its host, login
+  and account, why a host cannot be reached, and each paired client's kind,
+  version and Control features, every finding `checked` or `inferred`),
+  `control_auto_continue` (Control's auto-continue, run by the fleet:
+  `status` for the countdown, `cancel`, `take` for Send now; Control itself
+  may only read it).
 - **Sharing & ownership** (multi-user M1) — `session_share` (give one
   person `watch`, `answer` or `drive` on a session you own — or, with `org` instead of
   `person`, an org you are a member of: its members and admins as of now,

@@ -146,6 +146,7 @@
     "claim_debug_device",
     "comment_on_work",
     "confirm_session_work",
+    "control_auto_continue",
     "control_handoffs",
     "control_route_follow",
     "control_route_propose",

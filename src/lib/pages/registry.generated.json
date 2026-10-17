@@ -301,7 +301,7 @@
         "level": "none"
       },
       "default": "true",
-      "help": "Control's chat sends the option its agent marked recommended once nobody has answered for the minutes below. Typing or Cancel stops it. Never for a push, a delete or another step hard to undo, and only while the app is open.",
+      "help": "Control's chat sends the option its agent marked recommended once nobody has answered for the minutes below, even with the app closed, and only once. Typing, Cancel or any other message stops it. Never for a push, a delete or another step hard to undo, and never at Ask first.",
       "key": "control.auto_continue",
       "kind": {
         "type": "bool"
@@ -377,6 +377,25 @@
       "unit": "seconds",
       "value": "60",
       "zero": "no wait"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "true",
+      "help": "The note to Control's agent also names a pull request it handed out that has merge conflicts or failing checks, and a mission it handed off that made no progress for a while, once per change. Within your brief it fixes or reassigns them, asking as usual; at Ask first it only tells you.",
+      "key": "control.sweep",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Control sweeps what it handed out",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "true"
     },
     {
       "ai": "suggest",
@@ -5350,6 +5369,14 @@
             },
             {
               "key": "control.feed_min_interval_secs",
+              "type": "field",
+              "when": {
+                "key": "control.react_to_events",
+                "truthy": true
+              }
+            },
+            {
+              "key": "control.sweep",
               "type": "field",
               "when": {
                 "key": "control.react_to_events",

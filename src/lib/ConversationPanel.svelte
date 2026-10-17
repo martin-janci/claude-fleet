@@ -150,7 +150,6 @@
   import { completeTaskLink, matchTaskLinks, taskLinkQuery, type TaskLink } from './control_task_link';
   import { overflowMark } from './overflow_mark';
   import AutoContinueBar from './AutoContinueBar.svelte';
-  import { recommendedPick } from './auto_continue';
   import OrbitMark from './kit/OrbitMark.svelte';
   import { hosts as hostRows } from './hosts';
   import { refIndex, refSegments, type ChatRef } from './chat_refs';
@@ -1270,7 +1269,6 @@
   // read yet is the mangled line the gate exists to prevent.
   const outboxBusy = $derived(outgoing.some((m) => m.state === 'waiting' || m.state === 'sending' || m.state === 'sent'));
   const busyBlocked = $derived(blockWhileBusy && (busyNote !== null || outboxBusy));
-  const autoPick = $derived(autoContinue ? recommendedPick(conv) : null);
 
   // ── May this client write into this session at all? (multi-user M1) ─────
   //
@@ -2797,8 +2795,7 @@
   {#if autoContinue && showComposer && canPrompt && bgEntry === null}
     <AutoContinueBar
       sessionId={session.id}
-      pick={autoPick}
-      ready={busyNote === null && !outboxBusy && viewing === null && writeBlocked === null}
+      turnSeq={session.turn_seq}
       typing={draft.trim() !== ''}
       onSend={(text) => void sendText(text)}
     />

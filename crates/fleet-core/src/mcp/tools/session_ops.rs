@@ -1107,6 +1107,53 @@ impl FleetTools {
         ok_json(&status)
     }
 
+    #[tool(
+        description = "Check before you tell the person: where Control runs and whether its host, login and account are healthy, why a host cannot be reached (host), and which clients the person uses with what each can show. Each finding says checked or inferred. Read-only."
+    )]
+    pub(super) async fn diagnose(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<crate::service::control_diagnose::DiagnoseArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("diagnose", args.host.as_deref().unwrap_or(""));
+        // Control and the master see every paired client; any other client
+        // only itself.
+        let only = match &caller.client {
+            Some(c) if !caller.is_operator() => Some(c.id),
+            _ => None,
+        };
+        let d = crate::service::control_diagnose::diagnose(
+            &self.store,
+            &args,
+            only,
+            crate::store::now_unix(),
+        )
+        .map_err(to_mcp_err)?;
+        ok_json(&d)
+    }
+
+    #[tool(
+        description = "Control's auto-continue, which fleet runs: action status (the recommended option it will send and when, due_at), cancel (stop it) or take (Send now: settles it and returns the prompt for the client to send). turn_seq names the card. Not for Control itself."
+    )]
+    pub(super) async fn control_auto_continue(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<crate::service::control_continue::AutoContinueArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("control_auto_continue", &args.action);
+        // The countdown answers for the person: Control may read it, never
+        // stop or take its own.
+        if caller.is_operator() && args.action != "status" {
+            return Err(to_mcp_err(crate::ipc_error::IpcError::new(
+                crate::ipc_error::codes::E_FORBIDDEN,
+                "auto-continue is the person's: Control may only read its status",
+            )));
+        }
+        let v = crate::service::control_continue::act(&self.store, &args, crate::store::now_unix())
+            .map_err(to_mcp_err)?;
+        ok_json(&v)
+    }
+
     // ── Orchestration (Wave 3 Track E) ───────────────────────────────────
 
     /// The person gate on a batch restore (multi-user M1, T7): plan it, put
