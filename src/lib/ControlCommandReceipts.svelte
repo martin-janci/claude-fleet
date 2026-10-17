@@ -7,6 +7,9 @@
 <script lang="ts">
   import { commandReceipts, dismissCommandReceipt, openCommandResult, undoCommand } from './control_slash';
   import { openInControl } from './control_room';
+  import TaskGraphCard from './TaskGraphCard.svelte';
+
+  const OPEN_LABEL = { task: 'Open in Work ↗', session: 'Open session ↗', hosts: 'Open hosts ↗', mission: 'Open mission ↗' } as const;
 </script>
 
 {#if $commandReceipts.length > 0}
@@ -22,7 +25,7 @@
             class="link"
             data-testid="control-command-open"
             onclick={() => openCommandResult(r, (id, label) => void openInControl(id, label))}
-            >{r.open.kind === 'task' ? 'Open in Work ↗' : 'Open session ↗'}</button
+            >{OPEN_LABEL[r.open.kind]}</button
           >
         {/if}
         {#if r.undo}
@@ -35,6 +38,19 @@
           data-testid="control-command-dismiss"
           onclick={() => dismissCommandReceipt(r.id)}>✕</button
         >
+        {#if r.rows?.length}
+          <dl class="rows" data-testid="control-command-rows">
+            {#each r.rows as row (row.label)}
+              <dt data-level={row.level}>{row.label}</dt>
+              <dd data-level={row.level}>{row.text}</dd>
+            {/each}
+          </dl>
+        {/if}
+        {#if r.graph}
+          <div class="graph" data-testid="control-command-graph">
+            <TaskGraphCard graph={r.graph} kind="mission" onopen={() => openCommandResult(r, (id, label) => void openInControl(id, label))} />
+          </div>
+        {/if}
       </li>
     {/each}
   </ul>
@@ -70,6 +86,29 @@
   }
   .line {
     color: var(--fg);
+  }
+  .rows {
+    flex-basis: 100%;
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 2px var(--space-3);
+    margin: 0;
+  }
+  .rows dt {
+    font-weight: 600;
+    color: var(--fg);
+  }
+  .rows dd {
+    margin: 0;
+  }
+  .rows [data-level='warn'] {
+    color: var(--usage-warn);
+  }
+  .rows [data-level='crit'] {
+    color: var(--usage-crit);
+  }
+  .graph {
+    flex-basis: 100%;
   }
   .link {
     background: none;

@@ -358,25 +358,31 @@ describe('the sheet feeds the one composer its live state', () => {
 
 // Work graph M9: operator commands fill the operator's composer, never send.
 describe('operator commands', () => {
-  it('"Tidy up done tickets" puts its request in the box and sends nothing', async () => {
+  it('the "+" menu puts /tidy in the box and sends nothing (Thread room)', async () => {
     render(AgentPanel);
     for (let i = 0; i < 4; i++) {
       await tick();
       await Promise.resolve();
     }
-    const cmd = screen
-      .getAllByTestId('agent-command')
-      .find((b) => b.textContent === 'Tidy up done tickets')!;
-    // One row of chips above the box: the operator commands share it with
-    // the quick prompts, inside the composer form, so they must not submit.
-    expect(cmd.closest('[data-testid="conv-chips"]')).not.toBeNull();
-    expect(cmd.getAttribute('type')).toBe('button');
-    await fireEvent.click(cmd);
-    await tick();
-    await tick();
+    const plus = screen.getByTestId('control-plus');
+    // One row of chips above the box, inside the composer form: it must not submit.
+    expect(plus.closest('[data-testid="conv-chips"]')).not.toBeNull();
+    expect(plus.getAttribute('type')).toBe('button');
     const box = screen.getByPlaceholderText(/ask the fleet/i) as HTMLTextAreaElement;
-    expect(box.value).toContain('`work` tool, action `tidy`');
-    expect(box.value).toContain('`tidy_apply`');
+    // With text in the box a command cannot run from it, so it waits.
+    await fireEvent.input(box, { target: { value: 'ahoj' } });
+    await fireEvent.click(plus);
+    expect(screen.getByTestId('control-plus-project')).toBeTruthy();
+    expect((screen.getByTestId('control-plus-tidy') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId('control-plus-typed')).toBeTruthy();
+    await fireEvent.click(plus);
+    await fireEvent.input(box, { target: { value: '' } });
+    await fireEvent.click(plus);
+    await fireEvent.click(screen.getByTestId('control-plus-tidy'));
+    await tick();
+    await tick();
+    expect(box.value).toBe('/tidy');
+    expect(screen.queryByTestId('control-plus-menu')).toBeNull();
     expect(mockedSend).not.toHaveBeenCalled();
   });
 

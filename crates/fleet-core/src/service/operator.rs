@@ -278,7 +278,7 @@ pub const BRAINSTORM_SKILL_PATH: &str = ".claude/skills/fleet-brainstorm/SKILL.m
 /// (`control_commands_are_mirrored_in_the_menu`). The desktop runs `/task`,
 /// `/done`, `/assign` and `/start` itself with the same grammar
 /// (`src/lib/control_slash.ts`, gap plan G3.9); the phone sends them here.
-pub const CONTROL_COMMANDS: [(&str, &str); 5] = [
+pub const CONTROL_COMMANDS: [(&str, &str); 8] = [
     (
         "task",
         "---\n\
@@ -336,6 +336,44 @@ pub const CONTROL_COMMANDS: [(&str, &str); 5] = [
          link it to the task and brief it with `send_prompt` (the person approves \
          the brief on the card too). Say which host and project you picked and \
          why, in one line.\n",
+    ),
+    (
+        "health",
+        "---\n\
+         description: Show host and session health\n\
+         argument-hint: @host\n\
+         ---\n\
+         Report the fleet's health for \"$ARGUMENTS\" (an `@host` word narrows it \
+         to that host; none means every host). Read `fleet_health` and \
+         `list_hosts` (CPU, memory, disk and load per host). Lead with what is \
+         wrong: a host down or unreachable, disk 90 % full or more, memory low, \
+         CPU saturated, a session lost, recovering or failed. Then one line per \
+         host in a `facts` card. Change nothing.\n",
+    ),
+    (
+        "graph",
+        "---\n\
+         description: Show a mission task graph\n\
+         argument-hint: #KEY or a mission\n\
+         ---\n\
+         Show the task graph of \"$ARGUMENTS\": a mission's name, or a task key \
+         whose mission or subtasks you draw; none means the mission in focus, or \
+         the only active one. Read it with `work` action `missions` and `mission`. \
+         Draw it as a `steps` card, one step per task in dependency order, each \
+         with its state, and say in one line what is next. Change nothing.\n",
+    ),
+    (
+        "tidy",
+        "---\n\
+         description: Tidy up done tickets\n\
+         argument-hint: optional filter\n\
+         ---\n\
+         Tidy up done tickets (narrowed by \"$ARGUMENTS\" when it names a host, \
+         project or key): read the candidates with `work` action `tidy` and take \
+         the ones whose ticket is done, not planned, or whose PR merged. Show the \
+         batch (key, session, host, reason and action) and wait for the person's \
+         go. Then apply it in ONE `work_link` action `tidy_apply` call, keeping \
+         each candidate's action. If there is nothing to tidy, say so in one line.\n",
     ),
 ];
 
