@@ -31,6 +31,23 @@ ignore = [
   # YAML crate (serde-saphyr); that changes how the files are rendered, so it
   # is its own change, not a CI fix.
   "RUSTSEC-2024-0449",
+  # zbus_names / zvariant / zvariant_derive: no longer maintained as standalone
+  # crates (folded into zbus, z-galaxy/zbus#2043); via zbus <- tauri-plugin-opener.
+  # Issued 2026-10-17, no safe upgrade. Drop when tauri-plugin-opener moves to a
+  # zbus that no longer pulls them.
+  "RUSTSEC-2026-0371",
+  "RUSTSEC-2026-0370",
+  "RUSTSEC-2026-0372",
+  # zip 4.6.1 extraction flaws (SUID/SGID bits kept, symlink targets outside the
+  # destination, permissions applied through symlinks); fixed in zip >= 9, which
+  # only tauri-plugin-updater 3.x (alpha, needs tauri 3) uses. The desktop updater
+  # extracts only archives whose minisign signature it has verified against the
+  # pubkey in src-tauri/tauri.conf.json, and runs as the user, not root, so an
+  # attacker-controlled archive needs our signing key first. Issued 2026-10-17.
+  # Drop all three when tauri-plugin-updater is bumped to a release on zip >= 9.
+  "RUSTSEC-2026-0367",
+  "RUSTSEC-2026-0368",
+  "RUSTSEC-2026-0369",
 ]
 
 [licenses]
