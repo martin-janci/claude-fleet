@@ -344,10 +344,13 @@
 </section>
 
 <style>
+  /* The view fills a bare scroll body (ControlViewsPanel's .body has no
+     padding), so it brings its own gutter. */
   .today {
     display: flex;
     flex-direction: column;
     gap: 0.4rem;
+    padding: var(--space-3) var(--space-4) var(--space-4);
     font-size: var(--text-sm);
   }
   header {
