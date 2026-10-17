@@ -63,6 +63,19 @@ beforeEach(() => {
 const calls = (cmd: string) => inv.mock.calls.filter((c) => c[0] === cmd).map((c) => c[1]);
 
 describe('handoff chips', () => {
+  // Review 2026-10-17, F1/F2: a receipt says how the call got through.
+  it('a session chip says when the call was pre-approved or approved by a person', async () => {
+    sessions.set([session(3, 'working', 'fix-ci'), session(4, 'working', 'docs')]);
+    receipts = [
+      { id: 2, at: now, kind: 'session', tool: 'send_prompt', session_id: 3, approval: 'pre_approved' },
+      { id: 1, at: now, kind: 'session', tool: 'run_prompt', session_id: 4, approval: 'person' },
+    ];
+    render(HandoffCards);
+    await screen.findAllByTestId('handoff-session');
+    const words = screen.getAllByTestId('handoff-approval').map((e) => e.textContent);
+    expect(words.sort()).toEqual(['approved', 'pre-approved']);
+  });
+
   it("a session chip follows the session's live state and opens it", async () => {
     sessions.set([session(3, 'working', 'fix-ci')]);
     receipts = [{ id: 1, at: now, kind: 'session', tool: 'send_prompt', session_id: 3, preview: 'Fix CI' }];

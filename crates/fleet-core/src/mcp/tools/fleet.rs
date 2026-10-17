@@ -1044,7 +1044,9 @@ impl FleetTools {
     ) -> Result<CallToolResult, McpError> {
         audit("answer_mcp_confirm", &format!("approved={}", p.approved));
         refuse_operator_answer(&caller)?;
-        let answered = self.guards.confirms.resolve(&p.nonce, p.approved);
+        // `answer`, not `resolve`: an operator call waiting here runs on
+        // approval and Control is told either way (review 2026-10-17, F1).
+        let answered = self.guards.confirms.answer(&p.nonce, p.approved);
         if answered {
             if let Ok(s) = lock(&self.store) {
                 s.bus_confirm_changed();
