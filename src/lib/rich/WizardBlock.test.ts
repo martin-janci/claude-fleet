@@ -75,7 +75,7 @@ describe('a wizard block', () => {
     const card = await screen.findByTestId('wizard-chat-card');
     expect(card.dataset.wizard).toBe('fleet_agent');
     await waitFor(() => expect(screen.getByTestId('chat-form')).toHaveTextContent('New l2-support instance'));
-    expect(inv).toHaveBeenCalledWith('agents_fleet', { action: 'form', definition: 'l2-support', id: null, answers: null });
+    expect(inv).toHaveBeenCalledWith('agents_fleet', { action: 'form', definition: 'l2-support', id: null, answers: null, request: null, runScope: null });
     expect((screen.getByTestId('form-field-f_instance') as HTMLInputElement).value).toBe('l2-prod');
     await fireEvent.click(screen.getByTestId('form-submit'));
     await screen.findByTestId('chat-form-outcome');
@@ -84,6 +84,8 @@ describe('a wizard block', () => {
       definition: 'l2-support',
       id: null,
       answers: { f_instance: 'l2-prod', project: 'L2S' },
+      request: null,
+      runScope: null,
     });
     expect(composerDrafts.get(4)).toBe('Done in the "New l2-support instance" form: l2-support instance l2-prod started');
   });

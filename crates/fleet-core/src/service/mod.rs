@@ -25,6 +25,7 @@ pub mod autofix;
 pub mod bg_sessions;
 pub mod catalog;
 pub mod claude_print;
+pub mod client_logs;
 pub mod clipboard;
 pub mod context;
 pub mod context_help;

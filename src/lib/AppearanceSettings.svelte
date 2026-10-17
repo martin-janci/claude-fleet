@@ -17,7 +17,8 @@
     type UiDensity,
   } from './prefs';
   import { TEXT_SIZES, textSize, textSizeLabel, type TextSize } from './text_size';
-  import { applyTheme, theme, type Theme } from './theme';
+  import { accentPref, applyTheme, contrastPref, moodLine, theme, type ContrastPref, type Theme } from './theme';
+  import { ACCENTS, type AccentId } from './palette';
   import { motionPref, type MotionPref } from './motion';
 
   const densities = [
@@ -26,10 +27,25 @@
   ] as const satisfies readonly { id: UiDensity; label: string }[];
 
   const themes = [
+    { id: 'sun', label: 'Sun' },
     { id: 'auto', label: 'System' },
     { id: 'light', label: 'Light' },
     { id: 'dark', label: 'Dark' },
   ] as const satisfies readonly { id: Theme; label: string }[];
+
+  const contrasts = [
+    { id: 'system', label: 'System' },
+    { id: 'soft', label: 'Soft' },
+    { id: 'std', label: 'Standard' },
+    { id: 'high', label: 'High' },
+  ] as const satisfies readonly { id: ContrastPref; label: string }[];
+
+  const accents = ACCENTS.map((a) => ({ id: a.id, label: a.label })) satisfies { id: AccentId; label: string }[];
+
+  const moodLines = [
+    { id: 'off', label: 'Off' },
+    { id: 'on', label: 'On' },
+  ] as const;
 
   const tabNames = [
     { id: 'agent', label: 'Per agent' },
@@ -53,7 +69,10 @@
   <div class="pref">
     <div class="pref-text">
       <span class="lbl">Theme</span>
-      <p class="hook-desc">Follows the system unless you pick one.</p>
+      <p class="hook-desc">
+        Sun is light while the sun is up where you are and dark after sunset, easing through golden hour, blue
+        hour and night. System follows your light/dark setting.
+      </p>
     </div>
     <SegmentedControl
       options={themes}
@@ -61,6 +80,48 @@
       label="Theme"
       testidPrefix="appearance-theme-"
       onchange={(id) => applyTheme(id)} />
+  </div>
+  <div class="pref">
+    <div class="pref-text">
+      <span class="lbl">Contrast</span>
+      <p class="hook-desc">
+        Text is held at the same contrast all day. High is for glare or tired eyes. System picks High when your
+        system asks for more contrast.
+      </p>
+    </div>
+    <SegmentedControl
+      options={contrasts}
+      value={$contrastPref}
+      label="Contrast"
+      testidPrefix="appearance-contrast-"
+      onchange={(id) => contrastPref.set(id)} />
+  </div>
+  <div class="pref">
+    <div class="pref-text">
+      <span class="lbl">Accent</span>
+      <p class="hook-desc">Selection, focus and the primary action. Status colours keep their own.</p>
+    </div>
+    <SegmentedControl
+      options={accents}
+      value={$accentPref}
+      label="Accent"
+      testidPrefix="appearance-accent-"
+      onchange={(id) => accentPref.set(id)} />
+  </div>
+  <div class="pref">
+    <div class="pref-text">
+      <span class="lbl">Glow line</span>
+      <p class="hook-desc">
+        A thin line along the top of the window in the fleet's mood: your accent when calm, blue while sessions
+        work, amber when one needs you.
+      </p>
+    </div>
+    <SegmentedControl
+      options={moodLines}
+      value={$moodLine ? 'on' : 'off'}
+      label="Glow line"
+      testidPrefix="appearance-mood-line-"
+      onchange={(id) => moodLine.set(id === 'on')} />
   </div>
   <div class="pref">
     <div class="pref-text">

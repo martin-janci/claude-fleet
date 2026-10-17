@@ -23,6 +23,14 @@
 // so they cost no model turn. `/tidy` goes to the agent, which shows the
 // batch and waits for a go. The phone sends all three to the agent, whose
 // commands (`CONTROL_COMMANDS`) answer the same questions.
+//   /debug [@host] [30m|6h|3d] [part:<component>] [session:<name>] <focus>
+// `/debug` queues the self debug agent (the active `self-debug` fleet agent)
+// with the focus as its request and the rest as its scope, then follows the
+// run and shows its findings, worst first, when it is done.
+//   /propose <focus>
+// `/propose` runs the proposer (the active `proposer` fleet agent) now, with
+// the focus as its request, and shows what it proposed; each proposal waits
+// in the Inbox for Approve.
 // `#KEY` is a task key (`TASK-219`, `PD-2592`); the `#` is optional.
 import { get, writable } from 'svelte/store';
 import type { Result } from './result';
@@ -39,6 +47,8 @@ import { fleetLoads, loadParts, type LoadLevel } from './host_health';
 import { fleetSettings, settingInt, SETTING_KEYS } from './fleet_settings';
 import { getMission, listMissions, type Mission } from './missions';
 import { graphFromMission, graphProgress, type GraphCard } from './task_graph_card';
+import { agentsStatus, runFleetAgent, SCOPE_COMPONENTS, type AgentJob, type RunScope } from './agents';
+import { openRuns } from './automation';
 
 export type ControlCommand =
   | { cmd: 'task'; title: string; due?: string; owner?: string }
@@ -46,7 +56,9 @@ export type ControlCommand =
   | { cmd: 'assign'; key: string; session: string }
   | { cmd: 'start'; key: string; host?: string }
   | { cmd: 'health'; host?: string }
-  | { cmd: 'graph'; target?: string };
+  | { cmd: 'graph'; target?: string }
+  | { cmd: 'debug'; request?: string; scope?: RunScope }
+  | { cmd: 'propose'; request?: string };
 
 /** What a typed line is to Control: one of its commands, a command of its
  *  own typed wrong (`usage` says how), or not one it runs (`null`: `/plan`,
@@ -60,6 +72,8 @@ export const USAGE: Record<ControlCommand['cmd'], string> = {
   start: '/start #KEY [@host]',
   health: '/health [@host]',
   graph: '/graph [#KEY or a mission name]',
+  debug: '/debug [@host] [30m|6h|3d] [part:<component>] [session:<name>] <focus>',
+  propose: '/propose <focus>',
 };
 
 const KEY = /^#?([A-Za-z][A-Za-z0-9_]*-\d+)$/;
@@ -141,10 +155,40 @@ export function parseControlCommand(text: string, now: Date = new Date()): Parse
       const target = toks.join(' ');
       return { ok: true, command: { cmd: 'graph', ...(target ? { target } : {}) } };
     }
+    case 'debug': {
+      const scope: RunScope = {};
+      const words: string[] = [];
+      for (const t of toks) {
+        const span = /^(\d+)([mhd])$/i.exec(t);
+        if (t.startsWith('@') && t.length > 1 && scope.host === undefined) scope.host = t.slice(1);
+        else if (span && scope.minutes === undefined) {
+          const n = Number(span[1]) * ({ m: 1, h: 60, d: 1440 } as Record<string, number>)[span[2].toLowerCase()];
+          if (n < 1 || n > DEBUG_MAX_MINUTES) return bad('debug');
+          scope.minutes = n;
+        } else if (/^part:/i.test(t)) {
+          const c = t.slice(5).toLowerCase();
+          if (!(SCOPE_COMPONENTS as readonly string[]).includes(c) || scope.component !== undefined) return bad('debug');
+          scope.component = c;
+        } else if (/^session:./i.test(t) && scope.session === undefined) scope.session = t.slice(8);
+        else words.push(t);
+      }
+      const request = words.join(' ');
+      return {
+        ok: true,
+        command: { cmd: 'debug', ...(request ? { request } : {}), ...(Object.keys(scope).length > 0 ? { scope } : {}) },
+      };
+    }
+    case 'propose': {
+      const request = toks.join(' ');
+      return { ok: true, command: { cmd: 'propose', ...(request ? { request } : {}) } };
+    }
     default:
       return null;
   }
 }
+
+/** The longest window `/debug` takes: a week, as the hub allows. */
+export const DEBUG_MAX_MINUTES = 7 * 24 * 60;
 
 /** What a run left to show under the composer. */
 export interface CommandReceipt {
@@ -159,8 +203,10 @@ export interface CommandReceipt {
     | { kind: 'task'; taskId: string }
     | { kind: 'session'; id: number; label: string }
     | { kind: 'hosts' }
-    | { kind: 'mission'; id: number };
-  /** `/health`: one line per host, worst first. */
+    | { kind: 'mission'; id: number }
+    | { kind: 'runs' };
+  /** `/health`: one line per host, worst first; `/debug`: one per finding;
+   *  `/propose`: one per proposal. */
   rows?: { label: string; text: string; level: LoadLevel }[];
   /** `/graph`: the mission's task graph, drawn as the chat's graph card. */
   graph?: GraphCard;
@@ -272,8 +318,121 @@ async function graph(target: string | undefined): Promise<Omit<CommandReceipt, '
   return { state: 'done', line: `${m.name} · ${graphProgress(g)}`, open, graph: g };
 }
 
-async function run(c: ControlCommand): Promise<Omit<CommandReceipt, 'id' | 'typed'>> {
+type Outcome = Omit<CommandReceipt, 'id' | 'typed'>;
+
+/** How often `/debug` and `/propose` look at their run, and for how long (the agent's own
+ *  timeout plus a pass to pick it up). Test seam. */
+export const debugPoll = { everyMs: 10_000, forMs: 20 * 60_000 };
+
+interface Finding {
+  title?: unknown;
+  severity?: unknown;
+  component?: unknown;
+  cause?: unknown;
+}
+
+function findingLevel(sev: unknown): LoadLevel {
+  // The self debug agent says critical | major | minor; other agents may say high | medium.
+  return sev === 'critical' || sev === 'high' ? 'crit' : sev === 'major' || sev === 'medium' ? 'warn' : 'ok';
+}
+
+/** A finished self-debug job as a receipt: its summary, then a row per finding. */
+export function debugOutcome(job: Pick<AgentJob, 'state' | 'error' | 'result'>): Outcome {
+  const open = { kind: 'runs' as const };
+  if (job.state !== 'done') {
+    return { state: 'failed', line: `The self debug run ${job.state.replace('_', ' ')}${job.error ? `: ${job.error}` : '.'}`, open };
+  }
+  let answer: { summary?: unknown; findings?: unknown } = {};
+  try {
+    answer = (JSON.parse(job.result ?? '{}') as { answer?: typeof answer }).answer ?? {};
+  } catch {
+    // An unreadable result still finished: say so below.
+  }
+  const findings = Array.isArray(answer.findings) ? (answer.findings as Finding[]) : [];
+  const rank = (l: LoadLevel) => (l === 'crit' ? 0 : l === 'warn' ? 1 : 2);
+  const rows = findings
+    .map((f) => ({
+      label: typeof f.component === 'string' ? f.component : 'fleet',
+      text: [f.title, f.cause].filter((x) => typeof x === 'string' && x).join(' · '),
+      level: findingLevel(f.severity),
+    }))
+    .sort((a, b) => rank(a.level) - rank(b.level));
+  const summary = typeof answer.summary === 'string' && answer.summary ? answer.summary : null;
+  const line = summary ?? (rows.length === 0 ? 'No problems found.' : `${rows.length} findings.`);
+  return { state: 'done', line, open, ...(rows.length > 0 ? { rows } : {}) };
+}
+
+interface Proposal {
+  title?: unknown;
+  kind?: unknown;
+  severity?: unknown;
+  why?: unknown;
+}
+
+/** A finished proposer job as a receipt: its summary, then a row per proposal. */
+export function proposeOutcome(job: Pick<AgentJob, 'state' | 'error' | 'result'>): Outcome {
+  const open = { kind: 'runs' as const };
+  if (job.state !== 'done') {
+    return { state: 'failed', line: `The proposer run ${job.state.replace('_', ' ')}${job.error ? `: ${job.error}` : '.'}`, open };
+  }
+  let answer: { summary?: unknown; proposals?: unknown } = {};
+  try {
+    answer = (JSON.parse(job.result ?? '{}') as { answer?: typeof answer }).answer ?? {};
+  } catch {
+    // An unreadable result still finished: say so below.
+  }
+  const proposals = Array.isArray(answer.proposals) ? (answer.proposals as Proposal[]) : [];
+  const rows = proposals.map((p) => ({
+    label: typeof p.kind === 'string' ? p.kind : 'proposal',
+    text: [p.title, p.why].filter((x) => typeof x === 'string' && x).join(' · '),
+    level: findingLevel(p.severity),
+  }));
+  const summary = typeof answer.summary === 'string' && answer.summary ? answer.summary : null;
+  const waits = rows.length === 0 ? 'Nothing to propose.' : rows.length === 1 ? '1 proposal waits in the Inbox.' : `${rows.length} proposals wait in the Inbox.`;
+  return { state: 'done', line: summary ? `${summary} ${rows.length > 0 ? waits : ''}`.trim() : waits, open, ...(rows.length > 0 ? { rows } : {}) };
+}
+
+/** Run one fleet agent now and follow it until it answers. */
+async function follow(
+  c: { definition: string; name: string; doing: string; request?: string; scope?: RunScope },
+  outcome: (job: AgentJob) => Outcome,
+  update: (o: Outcome) => void,
+): Promise<Outcome> {
+  const st = await agentsStatus('fleet');
+  if (!st.ok) return { state: 'failed', line: st.error.message };
+  const rule = st.value.rules.find((r) => r.active && r.definition === c.definition);
+  if (!rule) return { state: 'failed', line: `No ${c.name} yet: add one under Automation, Agents.` };
+  const q = await runFleetAgent(rule.id, c.request, c.scope);
+  if (!q.ok) return { state: 'failed', line: q.error.message };
+  const key = q.value.job;
+  const open = { kind: 'runs' as const };
+  update({ state: 'running', line: `Queued: the ${c.name} is ${c.doing}.`, open });
+  const until = Date.now() + debugPoll.forMs;
+  while (Date.now() < until) {
+    await new Promise((r) => setTimeout(r, debugPoll.everyMs));
+    const s = await agentsStatus('fleet');
+    if (!s.ok) continue;
+    const job = s.value.jobs.find((j) => j.dedup_key === key);
+    if (!job || job.state === 'pending') continue;
+    if (job.state === 'running') {
+      update({ state: 'running', line: `The ${c.name} is ${c.doing}…`, open });
+      continue;
+    }
+    return outcome(job);
+  }
+  return { state: 'done', line: 'Still running: its answer will be in Automation, Runs.', open };
+}
+
+async function run(c: ControlCommand, update: (o: Outcome) => void): Promise<Outcome> {
   switch (c.cmd) {
+    case 'debug':
+      return follow(
+        { definition: 'self-debug', name: 'self debug agent', doing: 'reading the fleet', request: c.request, scope: c.scope },
+        debugOutcome,
+        update,
+      );
+    case 'propose':
+      return follow({ definition: 'proposer', name: 'proposer', doing: 'reading what the agents found', request: c.request }, proposeOutcome, update);
     case 'health':
       return health(c.host);
     case 'graph':
@@ -360,7 +519,7 @@ export function takeControlCommand(text: string, now: Date = new Date()): boolea
     return true;
   }
   put({ id, typed, state: 'running', line: 'Running…' });
-  void run(parsed.command).then(
+  void run(parsed.command, (o) => put({ id, typed, ...o })).then(
     (out) => put({ id, typed, ...out }),
     (e: unknown) => put({ id, typed, state: 'failed', line: e instanceof Error ? e.message : String(e) }),
   );
@@ -373,6 +532,7 @@ export function openCommandResult(r: CommandReceipt, focus: (id: number, label: 
   if (r.open.kind === 'task') showTaskInWorkView(r.open.taskId);
   else if (r.open.kind === 'hosts') selectView('hosts');
   else if (r.open.kind === 'mission') openMissionInControl(r.open.id);
+  else if (r.open.kind === 'runs') openRuns('list');
   else focus(r.open.id, r.open.label);
 }
 

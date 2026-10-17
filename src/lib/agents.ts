@@ -238,6 +238,14 @@ export function actionTitle(a: Pick<AgentAction, 'kind' | 'payload'>): string {
   if (a.kind === 'record' && p) return `Remember ${p.key} in ${p.store}`;
   if (a.kind === 'mcp_call' && p) return `Call ${p.binding}.${p.tool}`;
   if (a.kind === 'pr_comment' && p) return `Comment on ${p.repo}#${p.number}`;
+  // Fleet's own: what an analysis proposes (self debug, proposer, simplify, refactor).
+  if (a.kind === 'work_task' && p) {
+    const n = Array.isArray(p.steps) ? p.steps.length : 0;
+    return `Create a task: ${p.title}${n > 0 ? ` (${n} step${n === 1 ? '' : 's'})` : ''}`;
+  }
+  if (a.kind === 'fix_session' && p) return `Start a session on ${p.project}${p.host ? ` (${p.host})` : ''}: ${p.title}`;
+  if (a.kind === 'setting' && p) return `Change ${p.key}${p.was ? ` from ${p.was}` : ''} to ${p.value}`;
+  if (a.kind === 'session_recover' && p) return `Recover ${p.session}${p.host ? ` on ${p.host}` : ''}`;
   return a.kind.replace(/_/g, ' ');
 }
 
@@ -294,12 +302,17 @@ export interface FleetDefinition {
   writes: string;
 }
 
-function fleetCmd<T>(action: string, a: { definition?: string; id?: number; answers?: Values } = {}): Promise<Result<T>> {
+function fleetCmd<T>(
+  action: string,
+  a: { definition?: string; id?: number; answers?: Values; request?: string; runScope?: RunScope } = {},
+): Promise<Result<T>> {
   return invokeCmd<T>('agents_fleet', {
     action,
     definition: a.definition ?? null,
     id: a.id ?? null,
     answers: a.answers ?? null,
+    request: a.request ?? null,
+    runScope: a.runScope ?? null,
   });
 }
 
@@ -321,9 +334,53 @@ export function revokeAgentRule(id: number): Promise<Result<{ changed: number }>
   return fleetCmd('revoke', { id });
 }
 
-/** Run a manual (or scheduled) fleet agent now. */
-export function runFleetAgent(id: number): Promise<Result<{ job: string }>> {
-  return fleetCmd('run', { id });
+/** Where a manual run should look (`agents { run, run_scope }`): the
+ *  window back from now, a host, a session, a part of the fleet. */
+export interface RunScope {
+  minutes?: number;
+  host?: string;
+  session?: string;
+  component?: string;
+}
+
+/** The parts of the fleet a run's scope may name (`runner::SCOPE_COMPONENTS`). */
+export const SCOPE_COMPONENTS = [
+  'hub',
+  'updater',
+  'agent',
+  'host',
+  'desktop',
+  'phone',
+  'session',
+  'routine',
+  'mission',
+  'jev',
+  'update',
+] as const;
+
+/** The windows the Run dialog offers, in minutes. */
+export const SCOPE_WINDOWS: { label: string; minutes: number }[] = [
+  { label: 'Last hour', minutes: 60 },
+  { label: 'Last 6 hours', minutes: 360 },
+  { label: 'Last 24 hours', minutes: 1440 },
+  { label: 'Last 3 days', minutes: 4320 },
+  { label: 'Last 7 days', minutes: 10080 },
+];
+
+/** A scope with its empty fields left out; `undefined` when nothing is set. */
+export function cleanScope(s: RunScope): RunScope | undefined {
+  const out: RunScope = {};
+  if (s.minutes) out.minutes = s.minutes;
+  if (s.host?.trim()) out.host = s.host.trim();
+  if (s.session?.trim()) out.session = s.session.trim();
+  if (s.component) out.component = s.component;
+  return Object.keys(out).length ? out : undefined;
+}
+
+/** Run a manual (or scheduled) fleet agent now, with a request and a scope. */
+export function runFleetAgent(id: number, request?: string, scope?: RunScope): Promise<Result<{ job: string }>> {
+  const r = request?.trim();
+  return fleetCmd('run', { id, request: r ? r : undefined, runScope: scope ? cleanScope(scope) : undefined });
 }
 
 /** A grant form as the dialog's wizard. */
