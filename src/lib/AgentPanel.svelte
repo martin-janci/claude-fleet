@@ -105,8 +105,10 @@
   // owns no composer any more, so what hangs off this row is what the sheet
   // hands DOWN to ConversationPanel's: the row it renders, and through it the
   // `claude_status` / `stuck_kind` that drive both the note under the box and
-  // — because this sheet passes `blockWhileBusy` — the gate that refuses a
-  // send while the agent is mid-turn. A frozen row would leave both stale.
+  // — because this sheet passes `blockWhileBusy` — the gate that holds a
+  // send while the agent is mid-turn (queued, sent when the turn ends, with
+  // a Stop button beside Send: review 2026-10-17, F4). A frozen row would
+  // leave both stale.
   // See `operatorRow` in operator.ts.
   const session = $derived($operatorRow);
   const rawCtx = $derived(contextInput ? agentContext(contextInput) : null);
@@ -274,7 +276,8 @@
          was deleted (`busy = statusNote !== null` at v0.2.35) and lost in
          the refactor. It is passed explicitly, and only here: the
          Conversation tab never had it, and queueing a prompt behind a
-         running turn is a workflow there, not a mistake. -->
+         running turn is a workflow there, not a mistake. Here it holds
+         the line as a "queued · cancel" chip until the turn ends (F4). -->
     <ConversationPanel
       {session}
       visible={true}
