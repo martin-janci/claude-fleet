@@ -444,6 +444,85 @@
         "level": "none"
       },
       "default": "true",
+      "help": "Fix problems whose fix only touches fleet's own files and can be undone, then tell you. Fixes that touch tokens, sign-in or running sessions always wait for you.",
+      "key": "autofix.auto_safe",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Apply safe fixes automatically",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "true"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "3",
+      "help": "How many times one problem is fixed automatically before it waits for you.",
+      "key": "autofix.max_attempts",
+      "kind": {
+        "max": 10,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Automatic fix attempts",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "count",
+      "value": "3",
+      "zero": "never"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "true",
+      "help": "Notice when Control's token belongs to nobody, which leaves it unable to see any session.",
+      "key": "autofix.detector.operator_unbound",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Check Control's access",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "true"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "true",
+      "help": "Notice hosts with out-of-date fleet files, silent hooks, or an old agent or Claude Code.",
+      "key": "autofix.detector.host",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Check hosts",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "true"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "true",
       "help": "Resume a session when its host killed the process (out of memory), its tmux server stopped or the host rebooted, noted on its timeline. Control is restarted, or moved to another host once its own has been silent for five minutes, and told.",
       "key": "recovery.auto_restore",
       "kind": {
@@ -4301,6 +4380,31 @@
             }
           ],
           "title": "Playbooks"
+        },
+        {
+          "items": [
+            {
+              "key": "autofix.auto_safe",
+              "type": "field"
+            },
+            {
+              "key": "autofix.max_attempts",
+              "type": "field",
+              "when": {
+                "key": "autofix.auto_safe",
+                "truthy": true
+              }
+            },
+            {
+              "key": "autofix.detector.operator_unbound",
+              "type": "field"
+            },
+            {
+              "key": "autofix.detector.host",
+              "type": "field"
+            }
+          ],
+          "title": "Autofix"
         },
         {
           "items": [

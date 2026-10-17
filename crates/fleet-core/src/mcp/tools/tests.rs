@@ -2845,6 +2845,7 @@ fn router_sum_serves_every_tool() {
         include_str!("devices.rs"),
         include_str!("prs.rs"),
         include_str!("pr_shepherd.rs"),
+        include_str!("autofix.rs"),
         include_str!("agents.rs"),
         include_str!("api_tokens.rs"),
         include_str!("add_account.rs"),
@@ -9865,6 +9866,7 @@ fn the_settings_tools_reach_the_master_and_the_hub_owners_own_device_only() {
         "decide_setting_proposals",
         "list_pages",
         "pr_shepherd",
+        "autofix",
         "agents",
     ] {
         assert!(
@@ -10221,6 +10223,7 @@ fn settings_reach_a_persons_device_and_never_a_host_or_an_org_bound_client() {
         "set_setting",
         "decide_setting_proposals",
         "pr_shepherd",
+        "autofix",
         "agents",
     ] {
         assert!(can(&laptop, t), "{t}: reached, then trust decides");
@@ -10241,6 +10244,7 @@ fn settings_reach_a_persons_device_and_never_a_host_or_an_org_bound_client() {
         "decide_setting_proposals",
         "list_pages",
         "pr_shepherd",
+        "autofix",
         "agents",
     ] {
         assert!(!can(&colleague, t), "{t}: never a second person's device");
@@ -10287,6 +10291,7 @@ fn settings_reach_a_persons_device_and_never_a_host_or_an_org_bound_client() {
         "decide_setting_proposals",
         "list_pages",
         "pr_shepherd",
+        "autofix",
         "agents",
     ] {
         assert!(!can(&master, t), "{t}: not served to the master");
@@ -21044,4 +21049,155 @@ async fn ended_work_links_are_archived_and_removed_without_a_session() {
         "{}",
         e.message
     );
+}
+
+// ---- autofix ----
+
+fn autofix_params(action: &str, id: Option<i64>) -> AutofixParams {
+    AutofixParams {
+        action: action.into(),
+        id,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn autofix_lists_the_operator_finding_and_a_trusted_device_fixes_it() {
+    let s = Store::open_in_memory().unwrap();
+    s.insert_client_token(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        "aa11",
+        "full",
+    )
+    .unwrap();
+    let t = test_tools(s);
+    let mut dev = client_caller("laptop", TokenMode::Full);
+    dev.client.as_mut().unwrap().trusted = true;
+
+    let scan = result_json(
+        &t.autofix(
+            Extension(dev.clone()),
+            Parameters(autofix_params("scan", None)),
+        )
+        .await
+        .unwrap(),
+    );
+    let rows = scan["findings"].as_array().unwrap();
+    let op = rows
+        .iter()
+        .find(|r| r["kind"] == "operator_unbound")
+        .expect("the 2026-10-17 case is found");
+    assert_eq!(op["fix"]["safety"], "needs_approval");
+    let id = op["id"].as_i64().unwrap();
+
+    let applied = result_json(
+        &t.autofix(
+            Extension(dev),
+            Parameters(autofix_params("apply", Some(id))),
+        )
+        .await
+        .unwrap(),
+    );
+    assert_eq!(applied["state"], "cleared");
+}
+
+#[tokio::test]
+async fn the_operator_may_list_but_not_apply_or_dismiss() {
+    let s = Store::open_in_memory().unwrap();
+    s.insert_client_token(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        "aa11",
+        "full",
+    )
+    .unwrap();
+    let t = test_tools(s);
+    let mut op = client_caller(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        TokenMode::Full,
+    );
+    op.client.as_mut().unwrap().trusted = true;
+    let scan = result_json(
+        &t.autofix(
+            Extension(op.clone()),
+            Parameters(autofix_params("scan", None)),
+        )
+        .await
+        .unwrap(),
+    );
+    let id = scan["findings"][0]["id"].as_i64().unwrap();
+    for action in ["apply", "dismiss"] {
+        let err = t
+            .autofix(
+                Extension(op.clone()),
+                Parameters(autofix_params(action, Some(id))),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.message.starts_with("E_FORBIDDEN"), "{action}: {err:?}");
+    }
+}
+
+#[tokio::test]
+async fn an_untrusted_device_may_not_apply() {
+    let s = Store::open_in_memory().unwrap();
+    s.insert_client_token(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        "aa11",
+        "full",
+    )
+    .unwrap();
+    let t = test_tools(s);
+    let dev = client_caller("phone", TokenMode::Full); // trusted: false
+    let scan = result_json(
+        &t.autofix(
+            Extension(dev.clone()),
+            Parameters(autofix_params("scan", None)),
+        )
+        .await
+        .unwrap(),
+    );
+    let id = scan["findings"][0]["id"].as_i64().unwrap();
+    let err = t
+        .autofix(
+            Extension(dev),
+            Parameters(autofix_params("apply", Some(id))),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.message.starts_with("E_FORBIDDEN"), "{err:?}");
+}
+
+#[tokio::test]
+async fn dismiss_refuses_an_until_in_the_past() {
+    let s = Store::open_in_memory().unwrap();
+    s.insert_client_token(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        "aa11",
+        "full",
+    )
+    .unwrap();
+    let t = test_tools(s);
+    let mut dev = client_caller("laptop", TokenMode::Full);
+    dev.client.as_mut().unwrap().trusted = true;
+    let scan = result_json(
+        &t.autofix(
+            Extension(dev.clone()),
+            Parameters(autofix_params("scan", None)),
+        )
+        .await
+        .unwrap(),
+    );
+    let id = scan["findings"][0]["id"].as_i64().unwrap();
+    let err = t
+        .autofix(
+            Extension(dev),
+            Parameters(AutofixParams {
+                until: Some(1),
+                ..autofix_params("dismiss", Some(id))
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.message.starts_with("E_INVALID"), "{err:?}");
+    assert!(err.message.contains("in the future"), "{err:?}");
 }
