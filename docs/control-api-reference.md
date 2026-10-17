@@ -89,7 +89,7 @@ Parameters: `continue_after`, `enabled`
 
 ### `autofix`
 
-Known broken fleet states, each with a plain-language explanation and, where one exists, a fix: list {state?} (the open ones), explain {id}, scan (check now), apply {id}, dismiss {id, until?} (later; default 24 h). Safe fixes run by themselves (setting autofix.auto_safe); the rest wait for a person. apply and dismiss need a trusted full device; Control may list and explain only.
+Known broken fleet states, each with a plain-language explanation and, where one exists, a fix: list {state?} (the live ones: open, verifying, apply_failed, dismissed), explain {id}, scan (check now), apply {id}, dismiss {id, until?} (later; default 24 h). Safe fixes run by themselves (setting autofix.auto_safe); the rest wait for a person. apply and dismiss need a trusted full device; Control may list and explain only.
 
 Parameters: `action`, `id`, `state`, `until`
 

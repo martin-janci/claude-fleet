@@ -1618,7 +1618,7 @@ pub struct AutofixParams {
     /// dismiss: until when (unix seconds); default 24 hours from now.
     #[serde(default)]
     pub until: Option<i64>,
-    /// list: only findings in this state (open | verifying | apply_failed | dismissed | cleared).
+    /// list: only findings in this state (open | verifying | apply_failed | dismissed).
     #[serde(default)]
     pub state: Option<String>,
 }
