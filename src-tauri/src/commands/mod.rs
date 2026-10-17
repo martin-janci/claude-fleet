@@ -4,6 +4,7 @@ pub mod add_account;
 pub mod agents;
 pub mod api_tokens;
 pub mod assets;
+pub mod autofix;
 pub mod cancel;
 pub mod context_help;
 pub mod dashboards;

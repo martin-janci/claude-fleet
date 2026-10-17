@@ -449,6 +449,38 @@ bullet for the area you are about to change.
   the orbit map (`src/lib/runs.ts`, `orbit_map.ts`, `automation/`); the
   orbit is also Control's ◌ view (`ControlOrbitView.svelte`), whose ⤢
   hands Automation a `runsRequest`.
+- **Autofix** (`service/autofix/`, `store/autofix.rs`, migration 195, MCP
+  `autofix`, loop `autofix`, settings `autofix.*`): known broken states, each
+  found by a pure detector over a `ScanCx` the runner gathers under one lock,
+  stored as an episode in `autofix_findings` (`(kind, subject)` unique while
+  live: open → verifying → cleared / apply_failed, or dismissed; a verifying
+  row still reported after `AUTOFIX_VERIFY_SECS` becomes apply_failed). A fix
+  is a `FixPlan` the hub wrote itself, run by `FixExec` (`SshFixExec` in
+  production), followed at once by a re-scan of its detector. Safe fixes with
+  `auto: true` run on the reconcile tick (fixed 60 s, retries spaced by
+  `AUTOFIX_RETRY_SECS`, up to `autofix.max_attempts` counted over every
+  episode of the `(kind, subject)` in `AUTOFIX_BUDGET_WINDOW_SECS`, so a
+  flapping state shares one budget) when `autofix.auto_safe` is on; the rest
+  wait for a trusted full device's `autofix { apply }`. Cleared rows are
+  pruned after `AUTOFIX_RETENTION_SECS`. The
+  tool is `Access::PersonDevice`: served to a fleet admin's paired person
+  devices (the bound operator among them), never to per-host tokens or the
+  master; the operator may list, explain and scan but never apply or dismiss.
+  Every apply is in the admin audit log (`autofix.apply`, with the actor's
+  person and device). Detectors: `operator_unbound`, `host.*`,
+  `host_mcp_entry.*` (the tick probes each reachable host's global
+  `~/.claude.json` entry every `mcp_entry::PROBE_EVERY_SECS`, hashing the
+  bearer on the host, into an in-memory cache the scan reads; the fix is
+  `provision::rewrite_mcp_entry` with the stored host token) and `stuck.*`
+  (keystrokes through `playbooks::press_enter_on`, re-checked under the
+  guard; never the controller). `service/autofix/api.rs` is the one shape
+  the tool and the desktop commands (`autofix_findings`, `autofix_apply`,
+  `autofix_dismiss`, routed to `autofix`) return. Surfaces: `FixCard.svelte`
+  (Needs you's "Problems & fixes", the `fix` chat block via
+  `rich/FixBlockCard.svelte`, Control's own finding in `AgentPanel`), the
+  host chip's count (`src/lib/autofix.ts`), and operator feed lines
+  (`operator_feed::autofix_conditions`). Spec:
+  `docs/superpowers/specs/2026-10-17-autofix-design.md`.
 - **Debug devices** (guide `docs/debug-devices.md`; `service/debug_devices/`,
   `store/debug_devices.rs`, migration 120, `mcp/tools/devices.rs`, contract
   revision 10): a scan runs `scripts::scan_script` on a host (adb,

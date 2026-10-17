@@ -970,6 +970,11 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "setting_history",
         },
     ),
+    // Autofix findings: the hub's, decided on the hub (`autofix` tool;
+    // apply and dismiss need a trusted full device there).
+    ("autofix_findings", Verdict::Routed { tool: "autofix" }),
+    ("autofix_apply", Verdict::Routed { tool: "autofix" }),
+    ("autofix_dismiss", Verdict::Routed { tool: "autofix" }),
     ("list_guides", Verdict::Routed { tool: "guide" }),
     ("decide_guide", Verdict::Routed { tool: "guide" }),
     ("remove_guide", Verdict::Routed { tool: "guide" }),

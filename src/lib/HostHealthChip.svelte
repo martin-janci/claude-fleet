@@ -4,7 +4,8 @@
   Control, of the session its right panel shows, else of the operator's
   host — and the other host in the worst trouble, if any ("· mercury mem
   94%"). A click opens every host's numbers above it; a host's name there
-  opens it in the Hosts view. Sits beside Shortcuts.
+  opens it in the Hosts view. Sits beside Shortcuts. Open autofix findings
+  on the focus host show as a count ("2 problems", src/lib/autofix.ts).
 -->
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
@@ -17,13 +18,19 @@
   import { fleetSettings, settingInt, SETTING_KEYS } from './fleet_settings';
   import { requestHostsView } from './app_views';
   import { chipHost, fleetLoads, loadParts, otherTrouble, type LoadLimits } from './host_health';
+  import { findingsByHost, watchFindings } from './autofix';
 
   let nowSec = $state(Math.floor(Date.now() / 1000));
   let clock: ReturnType<typeof setInterval> | undefined;
+  let release: (() => void) | undefined;
   onMount(() => {
     clock = setInterval(() => (nowSec = Math.floor(Date.now() / 1000)), 20_000);
+    release = watchFindings();
   });
-  onDestroy(() => clearInterval(clock));
+  onDestroy(() => {
+    clearInterval(clock);
+    release?.();
+  });
 
   const limits: LoadLimits = $derived({
     diskLowPct: settingInt($fleetSettings, SETTING_KEYS.healthDiskLowPct),
@@ -38,6 +45,7 @@
   const loads = $derived(fleetLoads($hosts, focus, nowSec, limits));
   const mine = $derived(loads.find((l) => l.alias === focus) ?? null);
   const other = $derived(otherTrouble(loads, focus));
+  const problems = $derived($findingsByHost.get(focus) ?? 0);
   const why = $derived(
     inControl && !(sessionShown && $selectedSession) ? "Control's host" : $selectedSession ? 'follows the selected session' : "Control's host",
   );
@@ -72,7 +80,7 @@
       class:alert={!!mine?.trouble}
       data-testid="host-health-chip"
       aria-expanded={open}
-      aria-label="Host health for {focus}{other ? `; ${other.alias} ${other.trouble}` : ''}"
+      aria-label="Host health for {focus}{problems ? `; ${problems} open problem${problems === 1 ? '' : 's'}` : ''}{other ? `; ${other.alias} ${other.trouble}` : ''}"
       title="CPU, memory and disk of {focus} ({why}). Click for every host."
       onclick={() => (open = !open)}
     >
@@ -82,6 +90,7 @@
       {:else}
         <span class="part">unknown host</span>
       {/if}
+      {#if problems > 0}<span class="problems" data-testid="host-health-problems">{problems} problem{problems === 1 ? '' : 's'}</span>{/if}
       {#if other}<span class="other" data-testid="host-health-other">· {other.alias} {other.trouble}</span>{/if}
     </button>
     {#if open}
@@ -125,6 +134,10 @@
   }
   .part {
     font-variant-numeric: tabular-nums;
+  }
+  .problems {
+    color: var(--status-waiting);
+    font-weight: 500;
   }
   .other {
     color: var(--status-waiting);

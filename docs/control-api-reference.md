@@ -87,6 +87,12 @@ Your own answer to automatic account switching: when one of your sessions' Claud
 
 Parameters: `continue_after`, `enabled`
 
+### `autofix`
+
+Known broken fleet states, each with a plain-language explanation and, where one exists, a fix: list {state?} (the live ones: open, verifying, apply_failed, dismissed; also `fixed`, cleared in the last day after a fix ran), explain {id}, scan (check now), apply {id}, dismiss {id, until?} (later; default 24 h). Safe fixes run by themselves (setting autofix.auto_safe); the rest wait for a person. apply and dismiss need a trusted full device; Control may list and explain only, and shows the person a finding with a `fix` chat card (`{"spec":"fleet.ui/1","kind":"fix","finding_id":<id>}`).
+
+Parameters: `action`, `id`, `state`, `until`
+
 ### `broadcast_prompt`
 
 Send one prompt to every matching work session (not the controller), skipping blocked or stuck ones unless status="blocked". Returns per-session results. Rate-limited per caller (default one call per 30 s; E_RATE_LIMITED with retry_after_secs). Marked untrusted unless raw=true (master token only). May return E_CONFIRM_REQUIRED when desktop confirmation is on.
@@ -1216,6 +1222,9 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::pages::flow_cancel`
 - `commands::pages::setting_proposals`
 - `commands::pages::decide_setting_proposals`
+- `commands::autofix::autofix_findings`
+- `commands::autofix::autofix_apply`
+- `commands::autofix::autofix_dismiss`
 - `commands::pages::list_guides`
 - `commands::pages::decide_guide`
 - `commands::pages::remove_guide`

@@ -61,6 +61,17 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `playbooks.oom_recreate` | `false` | on / off | fleet | Recreate a session that ran out of memory, within the budget below. |
 | `playbooks.oom_max_attempts` | `2` | 0–20, `0` = never | fleet | Recreates one session may get per 24 hours. A session that is working, or finished a turn after the flag, is never recreated. |
 
+## autofix
+
+| Setting | Default | Range | Scope | What it does |
+|---|---|---|---|---|
+| `autofix.auto_safe` | `true` | on / off | fleet | Fix problems whose fix only touches fleet's own files and can be undone, then tell you. Fixes that touch tokens, sign-in or running sessions always wait for you. |
+| `autofix.max_attempts` | `3` | 0–10, `0` = never | fleet | How many times one problem is fixed automatically before it waits for you. |
+| `autofix.detector.operator_unbound` | `true` | on / off | fleet | Notice when Control's token belongs to nobody, which leaves it unable to see any session. |
+| `autofix.detector.host` | `true` | on / off | fleet | Notice hosts with out-of-date fleet files, silent hooks, or an old agent or Claude Code. |
+| `autofix.detector.host_mcp_entry` | `true` | on / off | fleet | Every 10 minutes, read the fleet entry in each host's ~/.claude.json (its token is hashed on the host and never sent) and notice one that is missing, points elsewhere or carries the wrong token. |
+| `autofix.detector.stuck` | `true` | on / off | fleet | Notice sessions stuck on a reconnect, a trust or sign-in prompt, a Press Enter wait or out of memory, and offer the fix. |
+
 ## recovery
 
 | Setting | Default | Range | Scope | What it does |

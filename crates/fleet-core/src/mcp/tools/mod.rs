@@ -42,6 +42,7 @@ mod add_account;
 mod agents;
 mod api_tokens;
 mod assets;
+mod autofix;
 mod dashboards;
 mod devices;
 mod downloads;
@@ -393,6 +394,7 @@ impl FleetTools {
             + Self::devices_router()
             + Self::prs_router()
             + Self::pr_shepherd_router()
+            + Self::autofix_router()
             + Self::agents_router()
             + Self::add_account_router()
             + Self::api_tokens_router()

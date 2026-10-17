@@ -417,3 +417,119 @@ async fn pause_all_stops_the_operator_feed() {
         None
     ));
 }
+
+fn finding_view(
+    id: i64,
+    state: &str,
+    fix: Option<crate::service::autofix::Fix>,
+    last_seen_at: i64,
+) -> crate::service::autofix::api::FindingView {
+    crate::service::autofix::api::FindingView {
+        id,
+        kind: "host_mcp_entry.token".into(),
+        subject: "host:mercury".into(),
+        host_alias: Some("mercury".into()),
+        severity: "degraded".into(),
+        state: state.into(),
+        first_seen_at: 0,
+        last_seen_at,
+        attempts: 0,
+        last_attempt_at: None,
+        last_error: None,
+        dismissed_until: None,
+        title: Some("The title".into()),
+        explanation: None,
+        evidence: vec![],
+        fix,
+        action: None,
+    }
+}
+
+fn a_fix(safety: crate::service::autofix::Safety, auto: bool) -> crate::service::autofix::Fix {
+    crate::service::autofix::Fix {
+        summary: "s".into(),
+        changes: vec![],
+        safety,
+        reversible: true,
+        auto,
+        plan: crate::service::autofix::FixPlan::RewriteMcpEntry {
+            host: "mercury".into(),
+        },
+    }
+}
+
+#[test]
+fn autofix_lines_say_what_waits_on_a_person_and_what_fleet_fixed() {
+    use crate::service::autofix::Safety;
+    let live = vec![
+        finding_view(1, "open", Some(a_fix(Safety::NeedsApproval, false)), 0),
+        finding_view(2, "open", Some(a_fix(Safety::Safe, true)), 0),
+        finding_view(3, "apply_failed", Some(a_fix(Safety::Safe, true)), 0),
+        finding_view(4, "open", None, 0),
+        finding_view(5, "dismissed", Some(a_fix(Safety::NeedsApproval, false)), 0),
+        finding_view(6, "open", Some(a_fix(Safety::Safe, false)), 0),
+    ];
+    let fixed = vec![
+        finding_view(7, "cleared", Some(a_fix(Safety::Safe, true)), 1000),
+        finding_view(
+            8,
+            "cleared",
+            Some(a_fix(Safety::NeedsApproval, false)),
+            1000,
+        ),
+        finding_view(
+            9,
+            "cleared",
+            Some(a_fix(Safety::Safe, true)),
+            1000 - EVENT_MAX_AGE_SECS - 1,
+        ),
+    ];
+    let c = autofix_conditions(&live, &fixed, 1000);
+    let keys: Vec<_> = c.iter().map(|c| c.key.as_str()).collect();
+    assert_eq!(keys, vec!["af1", "af3", "af4", "af7:fixed"]);
+    assert_eq!(
+        c[0].text,
+        "problem: The title (host mercury) — fix needs your approval (autofix finding #1)"
+    );
+    assert!(c[1].text.contains("automatic fix did not work"));
+    assert!(c[2].text.contains("no fix"));
+    assert_eq!(c[3].text, "fixed automatically: The title");
+}
+
+#[tokio::test]
+async fn an_autofix_problem_reaches_the_operator_once() {
+    let w = world();
+    let fake = Fake::default();
+    let now = crate::store::now_unix();
+    run_with(&w.store, &fake, &CFG, now).await;
+    {
+        let s = w.store.lock().unwrap();
+        s.insert_client_token(
+            crate::service::operator::OPERATOR_CLIENT_NAME,
+            "aa11",
+            "full",
+        )
+        .unwrap();
+        let cx = crate::service::autofix::apply::gather(&s, &[], now).unwrap();
+        let found = crate::service::autofix::operator_unbound::scan(&cx);
+        crate::service::autofix::sync::sync(
+            &s,
+            &found,
+            crate::service::autofix::sync::Scope::Detector("operator_unbound"),
+            now,
+        )
+        .unwrap();
+    }
+    assert!(run_with(&w.store, &fake, &CFG, now + 120).await.sent);
+    let body = fake.sent.lock().unwrap()[0].1.clone();
+    assert!(
+        body.contains(
+            "problem: Control can't see any sessions (token ux-agent) — fix needs your approval"
+        ),
+        "{body}"
+    );
+    assert!(
+        !run_with(&w.store, &fake, &CFG, now + 240).await.sent,
+        "said once"
+    );
+}
