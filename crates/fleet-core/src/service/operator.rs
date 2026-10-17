@@ -387,7 +387,7 @@ pub fn control_command_path(name: &str) -> String {
 /// carries the token and takes the secret path.
 pub fn operator_files() -> Vec<(String, &'static str)> {
     let mut files = vec![
-        ("CLAUDE.md".to_string(), claude_md()),
+        ("CLAUDE.md".to_string(), claude_md_full()),
         (BRAINSTORM_SKILL_PATH.to_string(), BRAINSTORM_SKILL),
     ];
     files.extend(
@@ -396,6 +396,25 @@ pub fn operator_files() -> Vec<(String, &'static str)> {
             .map(|(name, body)| (control_command_path(name), *body)),
     );
     files
+}
+
+/// The sections other modules add to the operator's CLAUDE.md, each its
+/// own module's `SECTION` (Control review: one const per module, so the
+/// prompt's owners never edit one another's text).
+pub const CLAUDE_MD_SECTIONS: &[&str] = &[crate::service::control_journal::SECTION];
+
+/// PURE: the operator's CLAUDE.md as written: [`claude_md`], then each of
+/// [`CLAUDE_MD_SECTIONS`], a blank line apart.
+pub fn claude_md_full() -> &'static str {
+    static FULL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    FULL.get_or_init(|| {
+        let mut md = claude_md().to_string();
+        for s in CLAUDE_MD_SECTIONS {
+            md.push('\n');
+            md.push_str(s);
+        }
+        md
+    })
 }
 
 /// PURE: the operator's standing instructions.

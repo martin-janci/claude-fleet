@@ -1066,6 +1066,55 @@ impl FleetTools {
         )
     }
 
+    #[tool(description = "Control's journal, which fleet keeps for a new \
+        conversation: threads followed (state, muted), open asks to the \
+        person, their last words, notes, pending approvals. note|ask \
+        {text} adds one (an ask clears when the person answers); \
+        mute|unmute {thread: session|mission, id}.")]
+    pub(super) async fn control_journal(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<ControlJournalParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let action = p.action.as_deref().unwrap_or("read");
+        audit("control_journal", action);
+        // Control's own state and the owner's words to it: Control, the
+        // master and the fleet admin's own device only.
+        if !(caller.is_operator() || caller.is_master() || caller.is_fleet_admin_device()) {
+            return Err(mcp_err(
+                "E_FORBIDDEN",
+                "control_journal is Control's and its owner's",
+                None,
+            ));
+        }
+        let args = crate::service::control_journal::JournalArgs {
+            action: p.action.clone(),
+            text: p.text,
+            thread: p.thread,
+            id: p.id,
+        };
+        let mut v =
+            crate::service::control_journal::call(&self.store, &args, crate::store::now_unix())
+                .map_err(to_mcp_err)?;
+        // The approvals Control is waiting on live in this server's memory.
+        if action == "read" {
+            let approvals: Vec<_> = self
+                .guards
+                .confirms
+                .pending()
+                .into_iter()
+                .filter(|c| c.operator)
+                .map(|c| {
+                    serde_json::json!({ "tool": c.tool, "summary": c.summary, "asked_at": c.asked_at })
+                })
+                .collect();
+            if let Some(o) = v.as_object_mut() {
+                o.insert("approvals".into(), serde_json::Value::Array(approvals));
+            }
+        }
+        ok_json_compact(&v)
+    }
+
     // ---- Control routing (redesign step 9.9, Jev K2) ----
 
     #[tool(description = "Where a message just sent in Control goes \

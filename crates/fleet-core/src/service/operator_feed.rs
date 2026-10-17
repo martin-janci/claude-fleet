@@ -36,11 +36,25 @@
 //! session; `session_conversation` is one call away.
 //!
 //! **How often.** At most one digest per `control.feed_min_interval_secs`
-//! and [`MAX_DIGESTS_PER_HOUR`] an hour; while one is still queued (the
-//! operator busy), nothing new is queued, so changes pile up into the next
-//! one instead of a stack of notes. Events older than
-//! [`EVENT_MAX_AGE_SECS`] when finally sent are dropped: an operator that
-//! was down for a day does not need yesterday read to it.
+//! (15 minutes by default) and [`MAX_DIGESTS_PER_HOUR`] an hour; while one
+//! is still queued (the operator busy), nothing new is queued, so changes
+//! pile up into the next one instead of a stack of notes.
+//!
+//! **Only for real events** (Control review F11). A digest goes out only
+//! when something in it needs Control ([`What::needs_control`]: a session
+//! waiting or stuck, a failure, failing checks, a lost session, a host
+//! down, a mission waiting on a person); a finished turn, a merge or an
+//! automatic restore is kept in [`FeedState::backlog`] and rides along
+//! with the next digest that goes. Events older than
+//! [`EVENT_MAX_AGE_SECS`] when finally sent are not read out one by one:
+//! they become ONE "while you were away" line of counts
+//! ([`away_line`]), so an operator that was down for a day hears that
+//! something happened without yesterday read to it.
+//!
+//! **Only what Control still follows** (Control review F10,
+//! `service::control_follow`): a session done, killed, merged, quiet for
+//! `control.follow_quiet_hours` or muted, and a muted mission, are left
+//! out.
 //!
 //! **Whose words.** The digest opens with `[fleet events]`
 //! (`prompt_origin::FLEET_PROMPT_MARKS`), so the typing step records it as
@@ -79,7 +93,9 @@ pub const READ_LIMIT: i64 = 500;
 /// The timeline kinds the feed reads. Each maps to one [`What`] in
 /// [`classify`]; anything else on the timeline is not the operator's
 /// business.
-pub const KINDS: [&str; 11] = [
+pub const KINDS: [&str; 13] = [
+    crate::store::PR_EVENT_CI_FAILED,
+    crate::store::PR_EVENT_MERGED,
     "turn_done",
     "task_done",
     "notification",
@@ -119,6 +135,10 @@ pub enum What {
     /// An automatic restore failed or the budget is spent: a person's
     /// Restore is what is left.
     NotRestorable,
+    /// Its pull request's checks turned failing.
+    CiFailing,
+    /// Its pull request merged (Control stops following it, F10).
+    Merged,
 }
 
 impl What {
@@ -132,6 +152,22 @@ impl What {
             What::Lost(_) => "lost",
             What::AutoRestored => "restored",
             What::NotRestorable => "not_restorable",
+            What::CiFailing => "ci_failing",
+            What::Merged => "merged",
+        }
+    }
+
+    /// PURE: whether this needs Control (F11): a digest goes out for it.
+    /// A finished turn, a merge and an automatic restore are routine: they
+    /// wait for the next digest something else sends.
+    pub fn needs_control(&self) -> bool {
+        match self {
+            What::Finished | What::AutoRestored | What::Merged => false,
+            What::Blocked
+            | What::Failed(_)
+            | What::Lost(_)
+            | What::NotRestorable
+            | What::CiFailing => true,
         }
     }
 
@@ -149,6 +185,8 @@ impl What {
             What::NotRestorable => {
                 "could not be brought back automatically; it needs a Restore".into()
             }
+            What::CiFailing => "has failing checks on its pull request".into(),
+            What::Merged => "had its pull request merged".into(),
         }
     }
 }
@@ -181,6 +219,8 @@ pub fn classify(kind: &str, detail: Option<&str>) -> Option<What> {
         "lost" => What::Lost(detail.unwrap_or("missing").to_string()),
         k if k == EVENT_RESTORED => What::AutoRestored,
         k if k == EVENT_FAILED || k == EVENT_SKIPPED => What::NotRestorable,
+        crate::store::PR_EVENT_CI_FAILED => What::CiFailing,
+        crate::store::PR_EVENT_MERGED => What::Merged,
         _ => return None,
     })
 }
@@ -192,6 +232,26 @@ pub struct FeedLine {
     pub text: String,
 }
 
+/// PURE: one event as a digest line (its key and words) and what it was,
+/// `None` for one the digest does not report.
+fn line_of(e: &FeedEventRow) -> Option<(FeedLine, What)> {
+    let what = classify(&e.kind, e.detail.as_deref())?;
+    let key = format!("s{}:{}", e.session_id, what.slot());
+    let who = if e.started_by_control {
+        ", you started it"
+    } else {
+        ""
+    };
+    let text = format!(
+        "session {} on {} (#{}{who}) {}",
+        e.tmux_name,
+        e.host_alias,
+        e.session_id,
+        what.words()
+    );
+    Some((FeedLine { key, text }, what))
+}
+
 /// PURE: the session lines of a batch of events, one per session and kind
 /// of change, in the order each first happened, worded by its latest event.
 /// Events older than `now - EVENT_MAX_AGE_SECS` are left out.
@@ -199,22 +259,9 @@ pub fn session_lines(events: &[FeedEventRow], now: i64) -> Vec<FeedLine> {
     let mut order: Vec<String> = Vec::new();
     let mut latest: BTreeMap<String, String> = BTreeMap::new();
     for e in events.iter().filter(|e| e.at >= now - EVENT_MAX_AGE_SECS) {
-        let Some(what) = classify(&e.kind, e.detail.as_deref()) else {
+        let Some((FeedLine { key, text }, _)) = line_of(e) else {
             continue;
         };
-        let key = format!("s{}:{}", e.session_id, what.slot());
-        let who = if e.started_by_control {
-            ", you started it"
-        } else {
-            ""
-        };
-        let text = format!(
-            "session {} on {} (#{}{who}) {}",
-            e.tmux_name,
-            e.host_alias,
-            e.session_id,
-            what.words()
-        );
         if !latest.contains_key(&key) {
             order.push(key.clone());
         }
@@ -226,6 +273,156 @@ pub fn session_lines(events: &[FeedEventRow], now: i64) -> Vec<FeedLine> {
             let text = latest.remove(&key).unwrap_or_default();
             FeedLine { key, text }
         })
+        .collect()
+}
+
+/// A session line waiting for the next digest (F11).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Held {
+    pub key: String,
+    pub text: String,
+    /// Its latest event, unix seconds.
+    pub at: i64,
+    /// [`What::needs_control`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub urgent: bool,
+}
+
+/// Lines a backlog keeps; the oldest past it are counted in [`Away`].
+pub const BACKLOG_MAX: usize = 100;
+
+/// What happened more than [`EVENT_MAX_AGE_SECS`] before it could be told
+/// (F11): counted, not read out.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Away {
+    /// Events per kind of change ([`What::slot`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub counts: BTreeMap<String, u32>,
+    /// The sessions they were on, by name.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub sessions: BTreeSet<String>,
+    /// One of them needs Control.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub urgent: bool,
+}
+
+impl Away {
+    fn add(&mut self, slot: &str, session: &str, urgent: bool) {
+        *self.counts.entry(slot.to_string()).or_default() += 1;
+        self.sessions.insert(session.to_string());
+        self.urgent |= urgent;
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.counts.is_empty()
+    }
+}
+
+/// PURE: the slot a held line's key names (`s4:failed` → `failed`).
+fn slot_of(key: &str) -> &str {
+    key.rsplit(':').next().unwrap_or(key)
+}
+
+/// PURE: the "while you were away" line for `a`, `None` when empty.
+pub fn away_line(a: &Away) -> Option<String> {
+    if a.is_empty() {
+        return None;
+    }
+    let words = |slot: &str| match slot {
+        "finished" => "finished turns",
+        "blocked" => "waits on an answer",
+        "failed" => "failures",
+        "lost" => "lost sessions",
+        "restored" => "automatic restores",
+        "not_restorable" => "sessions left needing a Restore",
+        "ci_failing" => "pull requests with failing checks",
+        "merged" => "merged pull requests",
+        _ => "other changes",
+    };
+    let what = a
+        .counts
+        .iter()
+        .map(|(slot, n)| format!("{n} {}", words(slot)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    const NAMES: usize = 4;
+    let mut names = a
+        .sessions
+        .iter()
+        .take(NAMES)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if a.sessions.len() > NAMES {
+        names.push_str(&format!(" and {} more", a.sessions.len() - NAMES));
+    }
+    Some(format!(
+        "while you were away (over an hour ago): {what}, on {names}; `list_sessions` has where they are now"
+    ))
+}
+
+/// PURE: fold a batch of events into `state`'s backlog (F11): a recent
+/// event replaces its session-and-kind line (worded by the latest), an
+/// event older than `now - EVENT_MAX_AGE_SECS` (and a held line that grew
+/// that old) is counted in `state.away`; past [`BACKLOG_MAX`] lines the
+/// oldest are counted too.
+pub fn fold(state: &mut FeedState, events: &[FeedEventRow], now: i64) {
+    let cutoff = now - EVENT_MAX_AGE_SECS;
+    for e in events {
+        let Some((line, what)) = line_of(e) else {
+            continue;
+        };
+        let urgent = what.needs_control();
+        if e.at < cutoff {
+            state.away.add(what.slot(), &e.tmux_name, urgent);
+            continue;
+        }
+        match state.backlog.iter_mut().find(|h| h.key == line.key) {
+            Some(h) => {
+                h.text = line.text;
+                h.at = h.at.max(e.at);
+            }
+            None => state.backlog.push(Held {
+                key: line.key,
+                text: line.text,
+                at: e.at,
+                urgent,
+            }),
+        }
+    }
+    let (old, keep): (Vec<Held>, Vec<Held>) = std::mem::take(&mut state.backlog)
+        .into_iter()
+        .partition(|h| h.at < cutoff);
+    state.backlog = keep;
+    let over = state.backlog.len().saturating_sub(BACKLOG_MAX);
+    let dropped: Vec<Held> = state.backlog.drain(..over).collect();
+    for h in old.iter().chain(&dropped) {
+        // The line names its session first: "session NAME on …".
+        let name = h
+            .text
+            .strip_prefix("session ")
+            .and_then(|t| t.split(' ').next())
+            .unwrap_or("?");
+        state.away.add(slot_of(&h.key), name, h.urgent);
+    }
+}
+
+/// PURE: whether `state` (with `fresh` conditions raised this pass) has
+/// something that needs Control, so a digest goes out (F11).
+pub fn needs_control(state: &FeedState, fresh_conditions: usize) -> bool {
+    fresh_conditions > 0 || state.away.urgent || state.backlog.iter().any(|h| h.urgent)
+}
+
+/// PURE: the digest lines of `state` and this pass's fresh conditions:
+/// what needs Control first, then the routine lines, then the away line.
+pub fn digest_lines(state: &FeedState, fresh: &[String]) -> Vec<String> {
+    let urgent = state.backlog.iter().filter(|h| h.urgent);
+    let routine = state.backlog.iter().filter(|h| !h.urgent);
+    urgent
+        .map(|h| h.text.clone())
+        .chain(fresh.iter().cloned())
+        .chain(routine.map(|h| h.text.clone()))
+        .chain(away_line(&state.away))
         .collect()
 }
 
@@ -315,6 +512,12 @@ pub struct FeedState {
     /// The standing conditions already reported and still true.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub raised: BTreeSet<String>,
+    /// Session lines read but not told yet: nothing needed Control (F11).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backlog: Vec<Held>,
+    /// What grew too old to read out, counted (F11).
+    #[serde(default, skip_serializing_if = "Away::is_empty")]
+    pub away: Away,
 }
 
 impl FeedState {
@@ -484,6 +687,10 @@ fn conditions(s: &Store, now: i64) -> Vec<Condition> {
         out.extend(host_conditions(&h.alias, h.reachable, disk, mem));
     }
     for id in s.handed_off_mission_ids().unwrap_or_default() {
+        // F10: a mission the person muted is not told.
+        if crate::service::control_follow::mission_muted(s, id) {
+            continue;
+        }
         let Ok(Some(mut m)) = s.get_mission(id) else {
             continue;
         };
@@ -548,31 +755,46 @@ pub async fn run_with(
             state.save(&s);
             return FeedReport::default();
         };
-        let events = s
+        let mut events = s
             .operator_feed_events(cursor, Some(op.id), &KINDS, READ_LIMIT)
             .unwrap_or_default();
-        let mut lines: Vec<String> = session_lines(&events, now)
-            .into_iter()
-            .map(|l| l.text)
-            .collect();
-        let now_raised = conditions(&s, now);
-        lines.extend(
-            now_raised
-                .iter()
-                .filter(|c| !state.raised.contains(&c.key))
-                .map(|c| c.text.clone()),
-        );
         state.cursor = Some(events.last().map_or(cursor, |e| e.id));
+        // F10: only the sessions Control still follows. A merge is told
+        // once (it is what stops the following), unless muted.
+        let follows = crate::service::control_follow::follows(&s, Some(op.id), now);
+        let followed = |id: i64, kind: &str| {
+            follows.iter().any(|f| {
+                f.kind == "session"
+                    && f.id == id
+                    && (f.state.following() || (kind == crate::store::PR_EVENT_MERGED && !f.muted))
+            })
+        };
+        events.retain(|e| followed(e.session_id, &e.kind));
+        fold(&mut state, &events, now);
+        let now_raised = conditions(&s, now);
+        let fresh: Vec<String> = now_raised
+            .iter()
+            .filter(|c| !state.raised.contains(&c.key))
+            .map(|c| c.text.clone())
+            .collect();
         state.raised = now_raised.into_iter().map(|c| c.key).collect();
         state.sent.retain(|&t| now - t < 3600);
-        let body = build_digest(&lines);
-        if body.is_none() {
-            // Nothing to say: move past what was read, keep what is raised.
+        if !needs_control(&state, fresh.len()) {
+            // Nothing needs Control: move past what was read, keep the
+            // routine lines for the next digest and what is raised.
             if state != FeedState::load(&s) {
                 state.save(&s);
             }
-            return FeedReport::default();
+            let held =
+                (!state.backlog.is_empty() || !state.away.is_empty()).then_some("nothing_urgent");
+            return FeedReport {
+                held,
+                ..Default::default()
+            };
         }
+        let body = build_digest(&digest_lines(&state, &fresh));
+        state.backlog.clear();
+        state.away = Away::default();
         (op.id, body, state)
     };
     let body = body.expect("checked above");

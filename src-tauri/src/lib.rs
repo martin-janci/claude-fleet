@@ -736,6 +736,7 @@ pub fn run() {
             commands::mcp::mcp_confirm,
             commands::mcp::mcp_pending_confirms,
             commands::mcp::control_handoffs,
+            commands::mcp::control_journal,
             commands::operator::ensure_operator,
             commands::operator::operator_status,
             commands::operator::control_route_propose,

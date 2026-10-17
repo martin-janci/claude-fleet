@@ -35,6 +35,13 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `automation.paused` | `false` | on / off | fleet | Stop every background job that acts on its own: missions, garbage collection, playbooks, repairs, tracker, catalog and folder syncs, and host refreshes. Reconcile, usage and update checks keep running, and health shows each job as paused. |
 | `automation.daily_budget` | `0` | 0–1000000 USD, `0` = none | fleet | What every routine's runs together may spend in one UTC day. Once they have spent it no routine starts a run, Run now included, until the next day. A run already going finishes. |
 
+## routines
+
+| Setting | Default | Range | Scope | What it does |
+|---|---|---|---|---|
+| `routines.backoff_on_no_change` | `false` | on / off | fleet | A scheduled routine whose last runs found nothing to do waits twice as long before each next run, up to 6 hours. A run that does work brings the schedule back. |
+| `routines.pause_at_limit` | `true` | on / off | fleet | A scheduled routine whose account is at its usage limit waits until the limit resets instead of skipping at every scheduled time. |
+
 ## orchestrator
 
 | Setting | Default | Range | Scope | What it does |
@@ -51,7 +58,9 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `control.auto_continue` | `true` | on / off | fleet | Control's chat sends the option its agent marked recommended once nobody has answered for the minutes below. Typing or Cancel stops it. Never for a push, a delete or another step hard to undo, and only while the app is open. |
 | `control.auto_continue_minutes` | `10` | 1–1440 minutes | fleet | How long Control's chat waits for your answer before it sends the recommended option. |
 | `control.react_to_events` | `true` | on / off | fleet | Control's agent gets a short note when a session it started finishes, gets stuck, fails or is lost, when a mission it handed off waits on you, or when a host goes down or runs low. Only while it is idle, and never while automation is paused. |
-| `control.feed_min_interval_secs` | `60` | seconds, `0` = no wait | fleet | The shortest time between two notes to Control's agent. What happens in between goes out together in the next one. |
+| `control.feed_min_interval_secs` | `900` | seconds, `0` = no wait | fleet | The shortest time between two notes to Control's agent. A note goes only when something needs Control (a question, a failure, failing checks, a lost session, a host down); finished turns wait and go out with the next one. |
+| `control.follow_quiet_hours` | `24` | 1–720 hours | fleet | Control stops following a session it started or briefed once it is done, killed or its pull request merged, or after this long without a turn. Briefing it again follows it again. |
+| `control.journal` | `true` | on / off | fleet | When Control starts a new conversation (a restart, a move to another host, a compaction or a new chat), fleet first tells it what it was following, what it asked you and what you last said. |
 
 ## Playbooks
 

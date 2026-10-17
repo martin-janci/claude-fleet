@@ -504,9 +504,9 @@ pub fn move_due(st: &Stranded, cfg: &AutoRestoreConfig) -> bool {
 pub fn operator_moved_note(from: &str, to: &str) -> String {
     format!(
         "[fleet] Your host {from} stopped answering, so you were started again on {to}. \
-         Your earlier conversation stays on {from} and comes back with it. Check what \
-         you were following (fleet_status, your missions) and carry on; tell the person \
-         what moved."
+         Your earlier conversation stays on {from} and comes back with it. What you \
+         were following comes next as your journal (`control_journal`); check it against \
+         fleet_status and carry on, and tell the person what moved."
     )
 }
 

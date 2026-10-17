@@ -280,6 +280,10 @@ pub fn spawn_reconcile_tick(
                 // After the restore, so a session brought back this pass is in
                 // it. Detached and single-flight; stops while paused.
                 service::operator_feed::maybe_run(store, ssh);
+                // A new Control conversation (a start, a restart, a move, a
+                // compaction, /clear) gets its journal as a `[fleet]` note.
+                // Detached and single-flight; stops while paused.
+                service::control_journal::maybe_run(store, ssh);
                 // PR shepherd: projects a person granted a rule for get their
                 // sessions' conflicting or red PRs recorded, and nudged at
                 // `nudge`. No rule, no work: one indexed read and out. Stops

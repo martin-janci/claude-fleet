@@ -55,6 +55,7 @@
 //! `explain` / `dry_run` answer "why did it (not) fire?" and "what would a
 //! fire do now?" without starting anything.
 
+pub mod backoff;
 pub mod cron;
 pub mod debug;
 pub mod fix;

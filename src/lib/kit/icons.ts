@@ -73,6 +73,9 @@ export const OF_ICONS = {
   pin: [p('M8 11v3.5'), p('M6 3h4M6.5 3v3.5L4.5 9v2h7V9l-2-2.5V3')],
   folder: [p('M2 4.5A1.5 1.5 0 0 1 3.5 3h2.8l1.4 1.5h4.8A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z')],
   hide: [p('M6.6 3.7A6.5 6.5 0 0 1 8 3.5c4.5 0 6.5 4.5 6.5 4.5a9 9 0 0 1-1.2 1.8'), p('M4.3 4.3A9 9 0 0 0 1.5 8s2 4.5 6.5 4.5a6 6 0 0 0 3.5-1.1'), p('m2 2 12 12'), p('M9.4 9.5a2 2 0 0 1-2.9-2.9')],
+  // Control's threads column: mute a thread (Control review F10).
+  bell: [p('M4 11V7a4 4 0 0 1 8 0v4l1.5 1.5h-11z'), p('M6.5 14h3')],
+  'bell-off': [p('M4 11V7a4 4 0 0 1 6.5-3.1M12 7v4l1.5 1.5h-11L4 11'), p('M6.5 14h3'), p('m2 2 12 12')],
 } satisfies Record<string, OfIconShape[]>;
 
 export type OfIconName = keyof typeof OF_ICONS;

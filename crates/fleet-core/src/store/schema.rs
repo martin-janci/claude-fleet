@@ -2192,6 +2192,13 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/194_run_trace.sql"),
         already_applied: None,
     },
+    // Control's journal and thread mutes (Control review F10, F12):
+    // `control_journal`, `control_mutes`. New tables.
+    Migration {
+        version: 195,
+        sql: include_str!("../../migrations/195_control_journal.sql"),
+        already_applied: None,
+    },
 ];
 
 /// The settings row [`Store::finish_realm_upgrade`] writes once migration

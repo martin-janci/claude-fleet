@@ -147,6 +147,7 @@
     "comment_on_work",
     "confirm_session_work",
     "control_handoffs",
+    "control_journal",
     "control_route_follow",
     "control_route_propose",
     "create_work_task",

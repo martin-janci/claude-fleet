@@ -1299,6 +1299,9 @@ fn apply_prompt_submit_hook(
                 .get_conversation(row.id, session_id)?
                 .is_none_or(|c| c.first_prompt.is_none());
             s.conversation_set_first_prompt(row.id, session_id, &p)?;
+            // Control's journal (review F12): the last thing the person
+            // said to Control. Best-effort, and nobody else's row.
+            crate::service::control_journal::on_prompt(s, &row, &p, crate::store::now_unix());
             // Work detection (M4.2): references in the full prompt become
             // suggestions with evidence; the prompt itself is never stored.
             // Best-effort: a detection failure never fails the hook.

@@ -3210,6 +3210,30 @@
     },
     {
       "default_widget": "switch",
+      "key": "routines.backoff_on_no_change",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Back off when nothing changes",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "routines.pause_at_limit",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Wait for the limit to reset",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
       "key": "orchestrator.enabled",
       "kind": {
         "type": "bool"
@@ -3314,6 +3338,32 @@
       "widgets": [
         "number",
         "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "control.follow_quiet_hours",
+      "kind": {
+        "max": 720,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Stop following after",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "control.journal",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Brief Control from its journal",
+      "widgets": [
+        "switch",
         "readonly"
       ]
     },

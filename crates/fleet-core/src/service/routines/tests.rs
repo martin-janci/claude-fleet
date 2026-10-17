@@ -2696,3 +2696,88 @@ async fn an_open_runs_tools_land_in_its_trace_once_each() {
     work_steps::read_open(&f.store, &reader, OCT8 + 80).await;
     assert!(!trace_of(&f, run.id).iter().any(|(_, _, s)| s == "Bash(c)"));
 }
+
+// ---- Control review F16: back off on no change, wait out a limit ----
+
+#[tokio::test]
+async fn a_fire_at_a_limit_holds_the_next_until_the_reset() {
+    let f = fx();
+    let mut i = input(&f);
+    i.cron = Some("0 * * * *".into());
+    let r = new_routine(&f, i);
+    // 9:30, the account at 93%; its window resets at 10:30.
+    let t = OCT8 + 9 * H + 1800;
+    crate::service::account_limits::seed_usage(
+        &lock(&f.store).unwrap(),
+        "mac",
+        Some("work"),
+        "work",
+        93.0,
+        t,
+    );
+    due_at(&f, r.id, t);
+    tick_once(&f.deps, t).await;
+    assert_eq!(runs_of(&f, r.id)[0].state, "skipped");
+    // Not 10:00, when it would only skip again: the first hour past 10:30.
+    assert_eq!(routine(&f, r.id).next_run_at, Some(OCT8 + 11 * H));
+    let v = verdicts(&f, r.id);
+    assert!(
+        v.iter()
+            .any(|(_, why)| why.contains("held until") && why.contains("usage limit")),
+        "{v:?}"
+    );
+    // Off: the schedule as written.
+    crate::service::settings::set(
+        &lock(&f.store).unwrap(),
+        crate::service::settings::ROUTINES_PAUSE_AT_LIMIT,
+        "false",
+    )
+    .unwrap();
+    due_at(&f, r.id, t + 20);
+    tick_once(&f.deps, t + 20).await;
+    assert_eq!(routine(&f, r.id).next_run_at, Some(OCT8 + 10 * H));
+}
+
+#[tokio::test]
+async fn a_run_that_found_nothing_doubles_the_gap_when_backoff_is_on() {
+    let f = fx();
+    let mut i = input(&f);
+    i.cron = Some("0 * * * *".into());
+    let r = new_routine(&f, i);
+    crate::service::settings::set(
+        &lock(&f.store).unwrap(),
+        crate::service::settings::ROUTINES_BACKOFF_ON_NO_CHANGE,
+        "true",
+    )
+    .unwrap();
+    let nine = OCT8 + 9 * H;
+    due_at(&f, r.id, nine);
+    tick_once(&f.deps, nine).await;
+    // No streak yet: the next hour.
+    assert_eq!(routine(&f, r.id).next_run_at, Some(nine + H));
+    let run = runs_of(&f, r.id).remove(0);
+    event(&f, run.session_id.unwrap(), "turn_done");
+    tick_once(&f.deps, nine + 60).await;
+    {
+        let s = lock(&f.store).unwrap();
+        let done = s.get_routine_run(run.id).unwrap().unwrap();
+        assert_eq!(done.state, "done");
+        outcome::record(
+            &s,
+            &done,
+            outcome::RunOutcome::Nothing,
+            outcome::OutcomeSource::Jev,
+            nine + 90,
+        )
+        .unwrap();
+    }
+    tick_once(&f.deps, nine + H).await;
+    assert_eq!(runs_of(&f, r.id).len(), 2);
+    // One run with nothing new: two hours, on the schedule.
+    assert_eq!(routine(&f, r.id).next_run_at, Some(nine + 3 * H));
+    let v = verdicts(&f, r.id);
+    assert!(
+        v.iter().any(|(_, why)| why.contains("found nothing new")),
+        "{v:?}"
+    );
+}

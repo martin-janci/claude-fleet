@@ -364,6 +364,14 @@ pub const AUTOMATION_PAUSED: &str = "automation.paused";
 /// M15 G3.8: whole USD every routine's runs may spend in one UTC day
 /// before no new run starts; `0` is none.
 pub const AUTOMATION_DAILY_BUDGET: &str = "automation.daily_budget";
+/// Control review F16: a cron routine whose last runs came to `nothing`
+/// (`routines::outcome`) doubles the gap to its next fire for each one, up
+/// to 6 h (`routines::backoff`). Off: every fire on schedule.
+pub const ROUTINES_BACKOFF_ON_NO_CHANGE: &str = "routines.backoff_on_no_change";
+/// Control review F16: a cron routine skipped because its account is at
+/// its limit holds its next fire until the account's limit resets, rather
+/// than skipping again at every scheduled time.
+pub const ROUTINES_PAUSE_AT_LIMIT: &str = "routines.pause_at_limit";
 /// Orchestration O4–O6: the missions' loop runs at all (the kill switch).
 pub const ORCHESTRATOR_ENABLED: &str = "orchestrator.enabled";
 /// Orchestration O6: the highest autonomy any mission's loop may take,
@@ -388,6 +396,13 @@ pub const CONTROL_REACT_TO_EVENTS: &str = "control.react_to_events";
 /// The fewest seconds between two digests: events in between wait and go
 /// out together in the next one.
 pub const CONTROL_FEED_MIN_INTERVAL_SECS: &str = "control.feed_min_interval_secs";
+/// Control review F10: hours without a turn after which Control stops
+/// following a session it started or briefed (`service::control_follow`).
+pub const CONTROL_FOLLOW_QUIET_HOURS: &str = "control.follow_quiet_hours";
+/// Control review F12: every new Control conversation (a start, a restart,
+/// a move, a compaction, `/clear`) gets its journal as a `[fleet]` note
+/// (`service::control_journal`).
+pub const CONTROL_JOURNAL: &str = "control.journal";
 pub const PLAYBOOK_OOM_RECREATE: &str = "playbooks.oom_recreate";
 /// Recreates the `oom` playbook may run on one session per 24 h
 /// (`service::playbooks::OOM_ATTEMPT_WINDOW_SECS`). `0` refuses every
@@ -936,6 +951,20 @@ pub const SPECS: &[Spec] = &[
     .unit(Unit::Usd)
     .zero("none"),
     Spec::new(
+        ROUTINES_BACKOFF_ON_NO_CHANGE,
+        "false",
+        Kind::Bool,
+        "Back off when nothing changes",
+        "A scheduled routine whose last runs found nothing to do waits twice as long before each next run, up to 6 hours. A run that does work brings the schedule back.",
+    ),
+    Spec::new(
+        ROUTINES_PAUSE_AT_LIMIT,
+        "true",
+        Kind::Bool,
+        "Wait for the limit to reset",
+        "A scheduled routine whose account is at its usage limit waits until the limit resets instead of skipping at every scheduled time.",
+    ),
+    Spec::new(
         ORCHESTRATOR_ENABLED,
         "true",
         Kind::Bool,
@@ -990,14 +1019,30 @@ pub const SPECS: &[Spec] = &[
     ),
     Spec::new(
         CONTROL_FEED_MIN_INTERVAL_SECS,
-        "60",
+        "900",
         Kind::Secs,
         "Time between notes to Control",
-        "The shortest time between two notes to Control's agent. What happens in between goes out together in the next one.",
+        "The shortest time between two notes to Control's agent. A note goes only when something needs Control (a question, a failure, failing checks, a lost session, a host down); finished turns wait and go out with the next one.",
     )
     .unit(Unit::Seconds)
     .zero("no wait")
     .tags(&[Tag::Advanced]),
+    Spec::new(
+        CONTROL_FOLLOW_QUIET_HOURS,
+        "24",
+        Kind::Int { min: 1, max: 720 },
+        "Stop following after",
+        "Control stops following a session it started or briefed once it is done, killed or its pull request merged, or after this long without a turn. Briefing it again follows it again.",
+    )
+    .unit(Unit::Hours)
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        CONTROL_JOURNAL,
+        "true",
+        Kind::Bool,
+        "Brief Control from its journal",
+        "When Control starts a new conversation (a restart, a move to another host, a compaction or a new chat), fleet first tells it what it was following, what it asked you and what you last said.",
+    ),
     Spec::new(
         PLAYBOOK_PRESS_ENTER,
         "false",

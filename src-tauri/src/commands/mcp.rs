@@ -366,9 +366,45 @@ pub async fn control_handoffs(
     routed::control_handoffs(&backend, &store, limit).await
 }
 
+/// Control's journal and thread mutes (Control review F10, F12): read it,
+/// or mute / unmute a thread from the Control threads column. The hub's on
+/// a hub-backed desktop (`control_journal`), where the agent runs.
+#[tauri::command]
+pub async fn control_journal(
+    args: fleet_core::service::control_journal::JournalArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<serde_json::Value, IpcError> {
+    routed::control_journal(&backend, &store, args).await
+}
+
 pub(crate) mod routed {
     use super::*;
     use serde_json::json;
+
+    /// A hub from before the journal refuses the tool as a protocol error,
+    /// and it keeps none: nothing to show, nothing muted.
+    pub async fn control_journal(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: fleet_core::service::control_journal::JournalArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        match backend.hub() {
+            Some(hub) => older_hub(
+                hub.route(
+                    "control_journal",
+                    &serde_json::to_value(&args).unwrap_or_default(),
+                )
+                .await,
+                serde_json::Value::Null,
+            ),
+            None => fleet_core::service::control_journal::call(
+                store,
+                &args,
+                fleet_core::store::now_unix(),
+            ),
+        }
+    }
 
     /// Paired with a hub, "Re-provision this host" asks the hub to refresh
     /// that one host's content (skills, CLAUDE.md block, hooks), which the
