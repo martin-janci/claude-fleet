@@ -2192,6 +2192,13 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/194_run_trace.sql"),
         already_applied: None,
     },
+    // Autofix: `autofix_findings`, one row per episode of a detected broken
+    // state (service/autofix). A new table.
+    Migration {
+        version: 195,
+        sql: include_str!("../../migrations/195_autofix.sql"),
+        already_applied: None,
+    },
 ];
 
 /// The settings row [`Store::finish_realm_upgrade`] writes once migration
