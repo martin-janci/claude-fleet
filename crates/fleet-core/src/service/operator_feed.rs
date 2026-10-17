@@ -22,6 +22,8 @@
 //!   confirm).
 //! * Hosts that went unreachable or run low on disk or memory, as
 //!   `fleet_health` judges them.
+//! * Autofix findings (`service::autofix`) that wait on a person, and the
+//!   safe fixes fleet applied by itself ([`autofix_conditions`]).
 //!
 //! The last two are states, not events: they are reported when they are
 //! first seen (`FeedState::raised`) and again only after they cleared and
@@ -280,6 +282,59 @@ pub fn mission_condition(id: i64, name: &str, reason: &str) -> Condition {
     }
 }
 
+/// PURE: the autofix lines. A live finding whose fix needs a person (or
+/// that has no fix fleet can run, or whose automatic fix stopped working)
+/// is a problem; a safe fix fleet applied by itself and that cleared within
+/// [`EVENT_MAX_AGE_SECS`] is news. A safe fix still to run, or one a loop
+/// owns (`auto: false`), says nothing yet. Titles are fleet's own words
+/// (the detectors'), never a session's.
+pub fn autofix_conditions(
+    live: &[crate::service::autofix::api::FindingView],
+    fixed: &[crate::service::autofix::api::FindingView],
+    now: i64,
+) -> Vec<Condition> {
+    use crate::service::autofix::Safety;
+    let mut out = Vec::new();
+    for f in live {
+        if !matches!(f.state.as_str(), "open" | "apply_failed") {
+            continue;
+        }
+        let title = f.title.as_deref().unwrap_or(&f.kind);
+        let subject = crate::service::autofix::api::subject_words(&f.subject);
+        let tail = match &f.fix {
+            Some(x) if x.safety == Safety::NeedsApproval => "fix needs your approval",
+            Some(x) if x.auto && f.state == "apply_failed" => {
+                "the automatic fix did not work; it needs you"
+            }
+            Some(_) => continue,
+            None => "fleet has no fix for it; it needs you",
+        };
+        out.push(Condition {
+            key: format!("af{}", f.id),
+            text: format!(
+                "problem: {title} ({subject}) — {tail} (autofix finding #{})",
+                f.id
+            ),
+        });
+    }
+    for f in fixed {
+        let automatic = f
+            .fix
+            .as_ref()
+            .is_some_and(|x| x.safety == Safety::Safe && x.auto);
+        if automatic && f.last_seen_at >= now - EVENT_MAX_AGE_SECS {
+            out.push(Condition {
+                key: format!("af{}:fixed", f.id),
+                text: format!(
+                    "fixed automatically: {}",
+                    f.title.as_deref().unwrap_or(&f.kind)
+                ),
+            });
+        }
+    }
+    out
+}
+
 /// PURE: the digest for `lines`, `None` when there is nothing to say. At
 /// most [`MAX_LINES`] lines; the rest are counted.
 pub fn build_digest(lines: &[String]) -> Option<String> {
@@ -482,6 +537,9 @@ fn conditions(s: &Store, now: i64) -> Vec<Condition> {
             .and_then(|r| r.disk_home_pct);
         let mem = health::mem_avail_pct(h, now).filter(|_| health::mem_low(h, t.mem_low_pct, now));
         out.extend(host_conditions(&h.alias, h.reachable, disk, mem));
+    }
+    if let Ok(found) = crate::service::autofix::api::list(s, None, false, now) {
+        out.extend(autofix_conditions(&found.findings, &found.fixed, now));
     }
     for id in s.handed_off_mission_ids().unwrap_or_default() {
         let Ok(Some(mut m)) = s.get_mission(id) else {

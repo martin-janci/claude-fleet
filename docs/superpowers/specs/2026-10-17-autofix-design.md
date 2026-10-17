@@ -39,6 +39,36 @@ The core plan (PR 1) departs from the text below in these ways:
   renumbers with `scripts/renumber-migrations.sh`.
 - Detectors 2 and 3 and the surfaces (chat card, panel, feed) are PR 2.
 
+## Changes in PR 2 (2026-10-17)
+
+- Detector 2 (`host_mcp_entry.*`): the probe runs on the tick, every
+  `PROBE_EVERY_SECS` (600 s, a constant; no `autofix.mcp_entry_probe_secs`
+  setting), only on reachable hosts that have a stored host token, and uses
+  `jq` with a `python3` fallback (`no_tool` when the host has neither: the
+  host is not judged). Results live in memory; a hub restart probes again.
+  One finding per host: a wrong token (`token`) outranks a stale URL or a
+  missing pane header (`header`). The rewrite re-probes the host so the
+  re-scan reads the new entry.
+- Detector 3 (`stuck.*`): `reconnect` and `trust_prompt` press Enter (the
+  trust prompt's preselected "Yes, proceed"); both go through
+  `playbooks::press_enter_on`, which skips a pane a person is attached to.
+  `press_enter` / `oom` are Safe with `auto: false` when their playbook
+  toggle is on (the playbook loop runs them, as `host.provision_stale`'s
+  loop does), NeedsApproval otherwise. The controller's findings carry no
+  fix, and every keystroke fix re-checks under the guard that the session is
+  not the controller and still shows the same `stuck_kind`.
+- New detector switches: `autofix.detector.host_mcp_entry`,
+  `autofix.detector.stuck` (default on).
+- `FindingBody.action`: a client step for a finding with no fix
+  (`{ "action": "login", "host" }`).
+- The attempt budget counts every episode of a `(kind, subject)` within
+  24 h; cleared rows are deleted after 30 days.
+- The `fix` block is `{ "spec": "fleet.ui/1", "kind": "fix", "finding_id": N }`
+  (`kind`, like every other block).
+- The panel reads three desktop commands routed to the tool:
+  `autofix_findings`, `autofix_apply`, `autofix_dismiss`; `list` also
+  returns `fixed` (cleared in the last day after a fix ran) and `can_apply`.
+
 ## Problem
 
 On 2026-10-17 the fleet operator (Control, tmux `fleet-operator` on mefistos)

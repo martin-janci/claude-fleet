@@ -72,6 +72,14 @@
         {
           "type": "field",
           "key": "autofix.detector.host"
+        },
+        {
+          "type": "field",
+          "key": "autofix.detector.host_mcp_entry"
+        },
+        {
+          "type": "field",
+          "key": "autofix.detector.stuck"
         }
       ]
     },

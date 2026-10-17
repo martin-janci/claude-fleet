@@ -1,6 +1,7 @@
 //! The autofix loop: one pass per minute on the reconcile tick, detached.
 
 use super::apply::{live_agents, run_pass, SshFixExec};
+use super::mcp_entry;
 use crate::ipc_error::lock;
 use crate::ssh::SshClient;
 use crate::store::{now_unix, Store};
@@ -16,6 +17,43 @@ struct InFlight(&'static AtomicBool);
 impl Drop for InFlight {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Detector 2's input: read the MCP entry of every reachable host that has
+/// a stored token and is due ([`mcp_entry::PROBE_EVERY_SECS`]), one at a
+/// time, before the pass scans. Skipped while the detector is off.
+async fn probe_mcp_entries(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>, now: i64) {
+    let due: Vec<String> = {
+        let Ok(s) = lock(store) else { return };
+        if !crate::service::settings::get_bool(
+            &s,
+            crate::service::settings::AUTOFIX_DETECTOR_MCP_ENTRY,
+        ) {
+            return;
+        }
+        let with_token: std::collections::BTreeSet<String> = s
+            .list_host_tokens()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| t.host_alias)
+            .collect();
+        let local = crate::service::hub::local_host_enabled();
+        crate::service::hosts::active_hosts(s.list_hosts().unwrap_or_default(), local)
+            .into_iter()
+            .filter(|h| h.reachable && with_token.contains(&h.alias))
+            .map(|h| h.alias)
+            .filter(|a| mcp_entry::due(a, now))
+            .collect()
+    };
+    for alias in due {
+        match mcp_entry::probe(ssh.as_ref(), &alias).await {
+            Ok(p) => mcp_entry::remember(&alias, now, p),
+            Err(e) => {
+                tracing::debug!(host = %alias, error = %e, "[autofix] mcp entry probe failed");
+                mcp_entry::remember(&alias, now, None);
+            }
+        }
     }
 }
 
@@ -44,10 +82,11 @@ pub fn maybe_run(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) {
     let ssh = Arc::clone(ssh);
     tokio::spawn(async move {
         let _guard = guard;
+        probe_mcp_entries(&store, &ssh, now_unix()).await;
         let live = live_agents(&ssh);
         let exec = SshFixExec {
             store: &store,
-            ssh: &*ssh,
+            ssh: &ssh,
         };
         let res = run_pass(&store, &exec, &live, now_unix()).await;
         if let Ok(o) = &res {

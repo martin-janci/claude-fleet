@@ -244,6 +244,33 @@ pub fn pane_is_attached(stdout: &str) -> bool {
     !matches!(stdout.trim().parse::<u32>(), Ok(0))
 }
 
+/// `press_enter` on any executor: skip the pane when a person is attached
+/// to it (or the probe cannot tell), else send Enter. Autofix's stuck
+/// fixes (`service::autofix::stuck`) press through this too.
+pub async fn press_enter_on(
+    ssh: &dyn crate::ssh::SshExec,
+    host_alias: &str,
+    tmux_name: &str,
+) -> Result<PressEnterOutcome, IpcError> {
+    crate::validate::host_alias(host_alias)?;
+    crate::validate::tmux_name_addressable(tmux_name)?;
+    let timeout = std::time::Duration::from_secs(10);
+    let attached =
+        crate::ssh::run_shell(ssh, host_alias, &attached_probe_script(tmux_name), timeout).await?;
+    if !attached.status.success() || pane_is_attached(&String::from_utf8_lossy(&attached.stdout)) {
+        return Ok(PressEnterOutcome::SkippedAttached);
+    }
+    let out =
+        crate::ssh::run_shell(ssh, host_alias, &press_enter_script(tmux_name), timeout).await?;
+    if !out.status.success() {
+        return Err(IpcError::new(
+            codes::E_TMUX,
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ));
+    }
+    Ok(PressEnterOutcome::Sent)
+}
+
 #[async_trait::async_trait]
 impl PlaybookExec for RealPlaybookExec {
     async fn press_enter(
@@ -251,33 +278,7 @@ impl PlaybookExec for RealPlaybookExec {
         host_alias: &str,
         tmux_name: &str,
     ) -> Result<PressEnterOutcome, IpcError> {
-        crate::validate::tmux_name_addressable(tmux_name)?;
-        let attached = crate::service::sessions::run_host_script(
-            &self.ssh,
-            host_alias,
-            &attached_probe_script(tmux_name),
-            std::time::Duration::from_secs(10),
-        )
-        .await?;
-        if !attached.status.success()
-            || pane_is_attached(&String::from_utf8_lossy(&attached.stdout))
-        {
-            return Ok(PressEnterOutcome::SkippedAttached);
-        }
-        let out = crate::service::sessions::run_host_script(
-            &self.ssh,
-            host_alias,
-            &press_enter_script(tmux_name),
-            std::time::Duration::from_secs(10),
-        )
-        .await?;
-        if !out.status.success() {
-            return Err(IpcError::new(
-                codes::E_TMUX,
-                String::from_utf8_lossy(&out.stderr).trim().to_string(),
-            ));
-        }
-        Ok(PressEnterOutcome::Sent)
+        press_enter_on(self.ssh.as_ref(), host_alias, tmux_name).await
     }
 
     async fn recreate(&self, session_id: i64) -> Result<(), IpcError> {

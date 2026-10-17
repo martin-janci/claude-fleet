@@ -22,6 +22,7 @@ fn finding(
             explanation: explanation.into(),
             evidence,
             fix,
+            action: None,
         },
     }
 }
