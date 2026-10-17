@@ -5,8 +5,9 @@
 
 use super::*;
 use crate::ipc_error::lock;
-use crate::service::autofix::apply::{apply_one, body_of, gather, live_agents, SshFixExec};
-use crate::service::autofix::scan_all;
+use crate::service::autofix::apply::{
+    apply_one, body_of, gather, live_agents, scan_enabled, Config, SshFixExec,
+};
 use crate::service::autofix::sync::{sync, Scope};
 use crate::store::{now_unix, AutofixRow};
 
@@ -75,7 +76,7 @@ impl FleetTools {
                     let live = live_agents(&self.ssh);
                     let s = lock(&self.store).map_err(to_mcp_err)?;
                     let cx = gather(&s, &live, now).map_err(to_mcp_err)?;
-                    let found = scan_all(&cx);
+                    let found = scan_enabled(&cx, &Config::read(&s));
                     sync(&s, &found, Scope::All, now).map_err(to_mcp_err)?;
                 }
                 let s = lock(&self.store).map_err(to_mcp_err)?;
@@ -113,10 +114,12 @@ impl FleetTools {
             "dismiss" => {
                 autofix_writer(&caller)?;
                 let id = need_id()?;
+                let until = p.until.unwrap_or(now + 86_400);
+                if until <= now {
+                    return Err(mcp_err("E_INVALID", "until must be in the future", None));
+                }
                 let s = lock(&self.store).map_err(to_mcp_err)?;
-                let ok = s
-                    .dismiss_autofix_finding(id, p.until.unwrap_or(now + 86_400))
-                    .map_err(db_err)?;
+                let ok = s.dismiss_autofix_finding(id, until).map_err(db_err)?;
                 if !ok {
                     return Err(mcp_err("E_NOTFOUND", "no live finding with that id", None));
                 }

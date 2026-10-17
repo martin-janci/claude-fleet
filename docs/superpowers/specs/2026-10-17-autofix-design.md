@@ -29,6 +29,10 @@ The core plan (PR 1) departs from the text below in these ways:
   per-host tokens or the master. `list` returns live rows only; `scan` syncs
   and never auto-applies; `apply` / `dismiss` need a trusted full device and
   the operator (`ux-agent`) gets `E_FORBIDDEN`.
+- `scan` returns all live rows after syncing, not only the new ones.
+- Each automatic apply re-checks eligibility (pause, dismissal, budget) under
+  the same guard that marks the attempt; a manual apply on a `verifying` row
+  is refused for `AUTOFIX_INFLIGHT_SECS` (60 s) after the attempt.
 - Detector 1 vs PR #932: #932 binds at birth and backfills; detector 1
   catches later regressions. Autofix adds no backfill.
 - Migration 195 collides with PR #932's 195; whichever merges second

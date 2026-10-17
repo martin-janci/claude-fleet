@@ -22,12 +22,12 @@ pub fn scan(cx: &ScanCx) -> Vec<Finding> {
         plan: FixPlan::BindOperator,
     });
     let explanation = if fix.is_some() {
-        "The fleet only shows a token the sessions of the person it belongs to. The agent's \
+        "Fleet shows each token only the sessions of the person it belongs to. The agent's \
          token belongs to nobody, so the agent sees no sessions, not even its own, and cannot \
          find itself (`whoami` fails). Linking the token to the hub's owner lets the agent \
          see what the owner sees."
     } else {
-        "The fleet only shows a token the sessions of the person it belongs to. The agent's \
+        "Fleet shows each token only the sessions of the person it belongs to. The agent's \
          token belongs to nobody, and this hub has no owner to link it to. Set the hub's owner \
          in Settings › People first; the fix appears here once there is one."
     };

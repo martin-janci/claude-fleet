@@ -459,8 +459,10 @@ bullet for the area you are about to change.
   production), followed at once by a re-scan of its detector. Safe fixes with
   `auto: true` run on the reconcile tick (fixed 60 s, retries spaced by
   `AUTOFIX_RETRY_SECS`, up to `autofix.max_attempts`) when `autofix.auto_safe`
-  is on; the rest wait for a trusted full device's `autofix { apply }` (tool
-  is `Access::PersonDevice`, never served to host tokens or the operator).
+  is on; the rest wait for a trusted full device's `autofix { apply }`. The
+  tool is `Access::PersonDevice`: served to a fleet admin's paired person
+  devices (the bound operator among them), never to per-host tokens or the
+  master; the operator may list, explain and scan but never apply or dismiss.
   Every apply is in the admin audit log (`autofix.apply`). Detectors:
   `operator_unbound`, `host.*`. Spec:
   `docs/superpowers/specs/2026-10-17-autofix-design.md`.

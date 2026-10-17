@@ -11,6 +11,10 @@ use std::sync::Mutex;
 /// Minimum gap between two automatic attempts on one episode.
 pub const AUTOFIX_RETRY_SECS: i64 = 600;
 
+/// How long after an attempt a manual apply on a `verifying` row is refused,
+/// because that fix may still be running.
+pub const AUTOFIX_INFLIGHT_SECS: i64 = 60;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub auto_safe: bool,
@@ -39,6 +43,18 @@ impl Config {
     pub fn detector_on(&self, kind: &str) -> bool {
         detector_of(kind).is_some_and(|d| !self.detectors_off.contains(&d.id))
     }
+}
+
+/// Every finding of the detectors the settings leave on.
+pub fn scan_enabled(cx: &ScanCx, cfg: &Config) -> Vec<Finding> {
+    only_enabled(scan_all(cx), cfg)
+}
+
+fn only_enabled(found: Vec<Finding>, cfg: &Config) -> Vec<Finding> {
+    found
+        .into_iter()
+        .filter(|f| cfg.detector_on(&f.kind))
+        .collect()
 }
 
 pub fn auto_eligible(row: &AutofixRow, fix: &Fix, cfg: &Config, now: i64) -> bool {
@@ -192,9 +208,10 @@ async fn execute(store: &Mutex<Store>, exec: &dyn FixExec, plan: &FixPlan) -> Re
     }
 }
 
-/// Run one finding's fix, re-scan its detector, and return the row as it now
-/// stands: `cleared` when the state is gone, `verifying` when it still shows
-/// (the next passes decide), `apply_failed` when the fix itself errored.
+/// Run one finding's fix on a person's say-so, re-scan its detector, and
+/// return the row as it now stands: `cleared` when the state is gone,
+/// `verifying` when it still shows (the next passes decide), `apply_failed`
+/// when the fix itself errored.
 pub async fn apply_one(
     store: &Mutex<Store>,
     exec: &dyn FixExec,
@@ -203,19 +220,41 @@ pub async fn apply_one(
     live_agents: &[(String, String)],
     now: i64,
 ) -> Result<AutofixRow, IpcError> {
-    apply_with(store, exec, id, actor, now, &|s| {
-        Ok(scan_all(&gather(s, live_agents, now)?))
+    apply_scanned(store, exec, id, actor, live_agents, now, false).await
+}
+
+async fn apply_scanned(
+    store: &Mutex<Store>,
+    exec: &dyn FixExec,
+    id: i64,
+    actor: &str,
+    live_agents: &[(String, String)],
+    now: i64,
+    auto: bool,
+) -> Result<AutofixRow, IpcError> {
+    apply_with(store, exec, id, actor, now, auto, &|s| {
+        Ok(scan_enabled(
+            &gather(s, live_agents, now)?,
+            &Config::read(s),
+        ))
     })
     .await
 }
 
 /// `apply_one` with the re-scan supplied, so tests can say what it finds.
+///
+/// `auto` is the runner's own apply: under the same guard as the attempt is
+/// marked, it re-reads the settings and refuses unless the row is still
+/// eligible (not dismissed or already tried since, automation not paused).
+/// A manual apply refuses a fix that started less than
+/// [`AUTOFIX_INFLIGHT_SECS`] ago and may still be running.
 async fn apply_with(
     store: &Mutex<Store>,
     exec: &dyn FixExec,
     id: i64,
     actor: &str,
     now: i64,
+    auto: bool,
     scan: &(dyn Fn(&Store) -> Result<Vec<Finding>, IpcError> + Sync),
 ) -> Result<AutofixRow, IpcError> {
     let (row, fix) = {
@@ -238,7 +277,31 @@ async fn apply_with(
                 format!("finding {id} has no automatic fix; its explanation says what to do"),
             )
         })?;
-        s.mark_autofix_attempt(id, now)?;
+        if auto {
+            let cfg = Config::read(&s);
+            if crate::service::loops::paused(&s) || !auto_eligible(&row, &fix, &cfg, now) {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    format!("finding {id} is no longer eligible to fix by itself"),
+                ));
+            }
+        } else if row.state == "verifying"
+            && row
+                .last_attempt_at
+                .is_some_and(|t| now - t < AUTOFIX_INFLIGHT_SECS)
+        {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "a fix for this finding is already running; try again in a minute",
+            ));
+        }
+        // The check above and this mark share one guard, so nothing can
+        // change the row between them.
+        if !s.mark_autofix_attempt(id, now)? {
+            return s
+                .autofix_finding(id)?
+                .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("no finding {id}")));
+        }
         (row, fix)
     };
     let result = execute(store, exec, &fix.plan).await;
@@ -260,6 +323,8 @@ async fn apply_with(
     });
     match result {
         Err(e) => {
+            // False when a sync resolved the row while the fix ran: the row
+            // stays as that sync left it.
             s.set_autofix_state(id, "apply_failed", Some(&e.message), now)?;
         }
         Ok(()) => {
@@ -300,15 +365,14 @@ pub(crate) async fn run_pass_with(
     now: i64,
     scan: impl Fn(&ScanCx) -> Vec<Finding>,
 ) -> Result<PassOutcome, IpcError> {
-    // The guard lives only in this block: never held across an await.
+    // The guard lives only in this block: never held across an await. Each
+    // apply below re-checks eligibility under its own guard, so a dismissal
+    // or a pause made while an earlier fix runs is honoured.
     let (synced, due) = {
         let s = lock(store)?;
         let cfg = Config::read(&s);
         let cx = gather(&s, live_agents, now)?;
-        let found: Vec<_> = scan(&cx)
-            .into_iter()
-            .filter(|f| cfg.detector_on(&f.kind))
-            .collect();
+        let found = only_enabled(scan(&cx), &cfg);
         let synced = sync(&s, &found, Scope::All, now)?;
         let due: Vec<i64> = if crate::service::loops::paused(&s) {
             Vec::new()
@@ -328,7 +392,7 @@ pub(crate) async fn run_pass_with(
     };
     let mut applied = Vec::new();
     for id in due {
-        match apply_one(store, exec, id, "auto", live_agents, now).await {
+        match apply_scanned(store, exec, id, "auto", live_agents, now, true).await {
             Ok(_) => applied.push(id),
             Err(e) => {
                 tracing::warn!(id, code = %e.code, "[autofix] automatic fix refused: {}", e.message)
@@ -595,7 +659,7 @@ mod tests {
     async fn a_provision_fix_that_ran_but_still_shows_ends_verifying() {
         let (store, id) = seed(safe_fix(true), "host.hooks_silent");
         let exec = FakeExec::default();
-        let row = apply_with(&store, &exec, id, "test", 20, &|_| {
+        let row = apply_with(&store, &exec, id, "test", 20, false, &|_| {
             Ok(vec![finding_with(safe_fix(true), "host.hooks_silent")])
         })
         .await
@@ -672,5 +736,162 @@ mod tests {
             .unwrap();
         assert!(out.applied.is_empty());
         assert_eq!(exec.provisions.load(Ordering::SeqCst), 0);
+    }
+
+    fn still_there(_: &Store) -> Result<Vec<Finding>, IpcError> {
+        Ok(vec![hooks_silent_finding()])
+    }
+
+    #[tokio::test]
+    async fn an_auto_apply_honours_a_dismissal_made_after_the_pass_decided() {
+        let (store, id) = seed(safe_fix(true), "host.hooks_silent");
+        {
+            let s = store.lock().unwrap();
+            assert!(s.dismiss_autofix_finding(id, 10_000).unwrap());
+        }
+        let exec = FakeExec::default();
+        let err = apply_with(&store, &exec, id, "auto", 20, true, &still_there)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID);
+        assert_eq!(exec.provisions.load(Ordering::SeqCst), 0);
+        let row = store.lock().unwrap().autofix_finding(id).unwrap().unwrap();
+        assert_eq!(row.state, "dismissed");
+        assert_eq!(row.attempts, 0);
+    }
+
+    #[tokio::test]
+    async fn an_auto_apply_stops_when_automation_was_paused_mid_pass() {
+        let (store, id) = seed(safe_fix(true), "host.hooks_silent");
+        {
+            let s = store.lock().unwrap();
+            crate::service::settings::set(&s, crate::service::settings::AUTOMATION_PAUSED, "true")
+                .unwrap();
+        }
+        let exec = FakeExec::default();
+        let err = apply_with(&store, &exec, id, "auto", 20, true, &still_there)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID);
+        assert_eq!(exec.provisions.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .autofix_finding(id)
+                .unwrap()
+                .unwrap()
+                .state,
+            "open"
+        );
+    }
+
+    /// Clears the row (and opens a new episode for the same state) while the
+    /// fix runs, then fails, as a tick's sync might during a long SSH apply.
+    struct ClearingExec<'a> {
+        store: &'a Mutex<Store>,
+        id: i64,
+    }
+    #[async_trait::async_trait]
+    impl FixExec for ClearingExec<'_> {
+        async fn provision_content(&self, _host: &str) -> Result<(), IpcError> {
+            {
+                let s = self.store.lock().unwrap();
+                s.set_autofix_state(self.id, "cleared", None, 15).unwrap();
+                sync(&s, &[hooks_silent_finding()], Scope::All, 16).unwrap();
+            }
+            Err(IpcError::new(codes::E_SSH, "boom"))
+        }
+        async fn update_agent(&self, _host: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_row_cleared_while_its_fix_ran_stays_cleared() {
+        let (store, id) = seed(safe_fix(true), "host.hooks_silent");
+        let exec = ClearingExec { store: &store, id };
+        let row = apply_with(&store, &exec, id, "test", 20, false, &still_there)
+            .await
+            .unwrap();
+        assert_eq!(row.id, id);
+        assert_eq!(row.state, "cleared");
+        let s = store.lock().unwrap();
+        let live = s.live_autofix_findings().unwrap();
+        assert_eq!(live.len(), 1, "the new episode is untouched");
+        assert_ne!(live[0].id, id);
+        assert_eq!(live[0].state, "open");
+    }
+
+    #[test]
+    fn a_disabled_detector_finds_nothing_in_a_scan() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_client_token(OPERATOR_CLIENT_NAME, "aa11", "full")
+            .unwrap();
+        s.insert_host("h1", Some("h1")).unwrap();
+        s.set_host_provisioned("h1", true).unwrap();
+        let mut h = s
+            .list_hosts()
+            .unwrap()
+            .into_iter()
+            .find(|h| h.alias == "h1")
+            .unwrap();
+        h.reachable = true;
+        let mut cx = gather(&s, &[], 10).unwrap();
+        cx.hosts = vec![h];
+        cx.health = vec![crate::service::health::HostHealthRow {
+            alias: "h1".into(),
+            reachable: true,
+            hooks_silent: true,
+            ..Default::default()
+        }];
+        let on = scan_enabled(&cx, &cfg());
+        assert!(on.iter().any(|f| f.kind.starts_with("host.")), "{on:?}");
+        let off = scan_enabled(
+            &cx,
+            &Config {
+                detectors_off: vec!["host"],
+                ..cfg()
+            },
+        );
+        assert!(!off.is_empty(), "the operator detector still runs");
+        assert!(off.iter().all(|f| !f.kind.starts_with("host.")), "{off:?}");
+    }
+
+    #[tokio::test]
+    async fn a_manual_apply_waits_while_a_fix_is_still_running() {
+        let (store, id) = seed(safe_fix(true), "host.hooks_silent");
+        {
+            let s = store.lock().unwrap();
+            assert!(s.mark_autofix_attempt(id, 100).unwrap());
+        }
+        let exec = FakeExec::default();
+        let err = apply_with(
+            &store,
+            &exec,
+            id,
+            "test",
+            100 + AUTOFIX_INFLIGHT_SECS - 1,
+            false,
+            &still_there,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID);
+        assert!(err.message.contains("already running"), "{}", err.message);
+        assert_eq!(exec.provisions.load(Ordering::SeqCst), 0);
+        let row = apply_with(
+            &store,
+            &exec,
+            id,
+            "test",
+            100 + AUTOFIX_INFLIGHT_SECS,
+            false,
+            &still_there,
+        )
+        .await
+        .unwrap();
+        assert_eq!(exec.provisions.load(Ordering::SeqCst), 1);
+        assert_eq!(row.attempts, 2);
     }
 }

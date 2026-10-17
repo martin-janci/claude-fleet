@@ -119,6 +119,8 @@ impl Store {
             .optional()
     }
 
+    /// Move a live row to `state`. Returns false, and writes nothing, when the
+    /// row is no longer live (already cleared): a cleared episode is history.
     pub fn set_autofix_state(
         &self,
         id: i64,
@@ -127,19 +129,25 @@ impl Store {
         now: i64,
     ) -> Result<bool> {
         let n = self.conn.execute(
-            "UPDATE autofix_findings
-             SET state = ?2, last_error = ?3, last_seen_at = MAX(last_seen_at, ?4)
-             WHERE id = ?1",
+            &format!(
+                "UPDATE autofix_findings
+                 SET state = ?2, last_error = ?3, last_seen_at = MAX(last_seen_at, ?4)
+                 WHERE id = ?1 AND {LIVE_SQL}"
+            ),
             rusqlite::params![id, state, error, now],
         )?;
         Ok(n == 1)
     }
 
+    /// Count an attempt on a live row and move it to `verifying`. Returns
+    /// false, and writes nothing, when the row is no longer live.
     pub fn mark_autofix_attempt(&self, id: i64, now: i64) -> Result<bool> {
         let n = self.conn.execute(
-            "UPDATE autofix_findings
-             SET attempts = attempts + 1, last_attempt_at = ?2, state = 'verifying', last_error = NULL
-             WHERE id = ?1",
+            &format!(
+                "UPDATE autofix_findings
+                 SET attempts = attempts + 1, last_attempt_at = ?2, state = 'verifying', last_error = NULL
+                 WHERE id = ?1 AND {LIVE_SQL}"
+            ),
             rusqlite::params![id, now],
         )?;
         Ok(n == 1)
@@ -223,6 +231,22 @@ mod tests {
         assert_eq!(
             (row.state.as_str(), row.dismissed_until),
             ("dismissed", Some(999))
+        );
+    }
+
+    #[test]
+    fn state_writes_leave_a_cleared_row_alone() {
+        let s = Store::open_in_memory().unwrap();
+        let (a, _) = s.upsert_autofix_finding(&new("k", "hub"), 10).unwrap();
+        assert!(s.set_autofix_state(a, "cleared", None, 11).unwrap());
+        assert!(!s
+            .set_autofix_state(a, "apply_failed", Some("x"), 12)
+            .unwrap());
+        assert!(!s.mark_autofix_attempt(a, 13).unwrap());
+        let row = s.autofix_finding(a).unwrap().unwrap();
+        assert_eq!(
+            (row.state.as_str(), row.attempts, row.last_error),
+            ("cleared", 0, None)
         );
     }
 }

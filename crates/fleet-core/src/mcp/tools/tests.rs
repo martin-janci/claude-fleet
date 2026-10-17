@@ -21157,11 +21157,47 @@ async fn an_untrusted_device_may_not_apply() {
         .unwrap(),
     );
     let id = scan["findings"][0]["id"].as_i64().unwrap();
-    assert!(t
+    let err = t
         .autofix(
             Extension(dev),
-            Parameters(autofix_params("apply", Some(id)))
+            Parameters(autofix_params("apply", Some(id))),
         )
         .await
-        .is_err());
+        .unwrap_err();
+    assert!(err.message.starts_with("E_FORBIDDEN"), "{err:?}");
+}
+
+#[tokio::test]
+async fn dismiss_refuses_an_until_in_the_past() {
+    let s = Store::open_in_memory().unwrap();
+    s.insert_client_token(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        "aa11",
+        "full",
+    )
+    .unwrap();
+    let t = test_tools(s);
+    let mut dev = client_caller("laptop", TokenMode::Full);
+    dev.client.as_mut().unwrap().trusted = true;
+    let scan = result_json(
+        &t.autofix(
+            Extension(dev.clone()),
+            Parameters(autofix_params("scan", None)),
+        )
+        .await
+        .unwrap(),
+    );
+    let id = scan["findings"][0]["id"].as_i64().unwrap();
+    let err = t
+        .autofix(
+            Extension(dev),
+            Parameters(AutofixParams {
+                until: Some(1),
+                ..autofix_params("dismiss", Some(id))
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.message.starts_with("E_INVALID"), "{err:?}");
+    assert!(err.message.contains("in the future"), "{err:?}");
 }
