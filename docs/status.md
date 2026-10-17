@@ -1037,6 +1037,42 @@ person sends; the phone lists the instances with Revoke. Step 6 in part: the
 and comments and new items on trackers other than Jira; not `pr_review`,
 polling other trackers, or restating the built-in agents.
 
+The self debug agent (thread "Self debug agent", 2026-10-17), the hub and
+desktop parts: a fleet agent definition that sets `run.diagnostics` gets
+`fleet-diagnostics` (`service/fleet_agents/diagnostics.rs`,
+`/agent-diagnostics`, a run token like `fleet-records`), a read-only view
+of the fleet: `hub_log` (the hub's log files by window, level, target and
+text), `errors` (`error_reports`, grouped), `timeline` (runs, notable
+session events and error reports on one clock), `fleet` (hub version, host
+health and last probe error, update phases), `host_log` (a host's journal,
+OOM kills, fleet-agent log, a docker container's or the updater's log,
+through fixed quoted scripts), `session` (row, events, pane, transcript)
+and `client_log` (the apps' own log, sent to `POST /log` only while a
+request is open: `service/client_logs.rs`; the desktop polls every 30 s
+under `CLAUDE_FLEET_HUB_REPORTS`). Every answer is redacted with every
+secret the store knows and capped at 48 KiB. A manual run takes a scope
+(`agents {action: run, request, run_scope}`: minutes, host, session,
+component), from Run now's panel or `/debug` in Control. The
+`self-debug` definition ships in `catalog-seed/fleet-agents/self-debug/`
+(findings kept in a `findings` store, a tracker issue only proposed).
+The phone's log ring, Run with focus and findings card are fleet-mobile#233.
+
+Proposals from analysis (same thread, Martin's "Both"): four fleet-own
+action kinds, `work_task`, `fix_session`, `setting` and `session_recover`
+(`fleet_agents/fleet_ops.rs`), run only after a person's Approve through
+the same services as the matching buttons (`settings_review` as
+`Actor::Agent`, which refuses `AiPolicy::Never` and owned keys;
+`restore_host_sessions` / `restart_session`; `start_work`). Only
+`work_task` may be `auto`. An action's `each: <answer array>` fans it out
+per item (`{{item.…}}`, `when` per item, at most 10), so self-debug
+proposes one step per finding. `fleet-diagnostics` adds `analyses` (recent
+fleet-agent answers with their findings) and `proposals` (the last 30
+days of agent actions and what a person did). Three more seeds:
+`proposer` (daily 07:00 and `/propose <focus>`; merges by fingerprint,
+skips pending, done, or rejected in the last 14 days; at most five),
+`simplify` and `refactor` (manual, read a project's checkout, propose a
+task or fix session per finding). No migration.
+
 Session state machine hardening (plan A, #343) is landed: a `working` row
 with no activity for `reconcile.stale_working_secs` turns `idle` with
 `stale_working_at` (migration 065); a StopFailure reads as failed; one

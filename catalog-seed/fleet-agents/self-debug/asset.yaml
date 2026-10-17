@@ -1,0 +1,104 @@
+kind: fleet_agent
+name: self-debug
+description: Reads the fleet's own logs (hub, error reports, runs, hosts, updater, sessions) and reports what is wrong, with evidence. Run it with what to look into and where.
+inputs:
+  - { name: issue_tracker, type: tracker, label: "Issue tracker (optional, for a proposed issue)" }
+  - { name: issue_project, type: text, label: Issue project (optional), help: "e.g. martin-janci/claude-fleet" }
+stores:
+  - { role: findings, kind: fleet, label: Findings seen before }
+trigger:
+  source: manual
+run:
+  workspace: home
+  max_turns: 40
+  timeout_secs: 900
+  diagnostics: true
+  output_schema:
+    type: object
+    required: [summary, healthy, findings]
+    properties:
+      summary: { type: string, maxLength: 600 }
+      healthy: { type: boolean }
+      findings:
+        type: array
+        items:
+          type: object
+          required: [title, severity, component, cause, evidence, fingerprint]
+          properties:
+            title: { type: string, maxLength: 160 }
+            severity: { enum: [critical, major, minor] }
+            component: { enum: [hub, updater, agent, host, desktop, phone, session, routine, mission, jev, update] }
+            cause: { type: string, maxLength: 1200 }
+            fix: { type: string, maxLength: 1200 }
+            confidence: { enum: [high, medium, low] }
+            fingerprint: { type: string, maxLength: 120 }
+            evidence:
+              type: array
+              items:
+                type: object
+                required: [source, quote]
+                properties:
+                  source: { type: string, maxLength: 80 }
+                  at: { type: integer }
+                  quote: { type: string, maxLength: 600 }
+            next: { enum: [none, task, fix, setting, recover] }
+            steps: { type: array, items: { type: string, maxLength: 200 } }
+            project: { type: string, maxLength: 200 }
+            host: { type: string, maxLength: 64 }
+            prompt: { type: string, maxLength: 3000 }
+            settingKey: { type: string, maxLength: 120 }
+            settingValue: { type: string, maxLength: 200 }
+            session: { type: string, maxLength: 120 }
+      topFingerprint: { type: string, maxLength: 120 }
+      topTitle: { type: string, maxLength: 160 }
+      topSeverity: { enum: [critical, major, minor] }
+      fileIssue: { type: boolean }
+      issueBody: { type: string, maxLength: 4000 }
+actions:
+  - id: remember
+    each: findings
+    when: { field: fingerprint, truthy: true }
+    do: record
+    store: findings
+    key: "{{item.fingerprint}}"
+    value: { title: "{{item.title}}", severity: "{{item.severity}}", component: "{{item.component}}", seen: "{{now}}" }
+    auto: true
+  - id: task
+    each: findings
+    when: { field: next, eq: task }
+    do: work_task
+    summary: "{{item.title}}"
+    body: "{{item.cause}}\n\nFix: {{item.fix}}\n\nFingerprint: {{item.fingerprint}}"
+    steps: "{{item.steps}}"
+  - id: fix
+    each: findings
+    when: { field: next, eq: fix }
+    do: fix_session
+    project: "{{item.project}}"
+    host: "{{item.host}}"
+    summary: "{{item.title}}"
+    body: "{{item.prompt}}"
+  - id: tune
+    each: findings
+    when: { field: next, eq: setting }
+    do: setting
+    key: "{{item.settingKey}}"
+    value: "{{item.settingValue}}"
+    body: "{{item.title}}: {{item.cause}}"
+  - id: recover
+    each: findings
+    when: { field: next, eq: recover }
+    do: session_recover
+    target: "{{item.session}}"
+    host: "{{item.host}}"
+    body: "{{item.title}}: {{item.cause}}"
+  - id: issue
+    when: { all: [ { field: fileIssue, truthy: true }, { field: topTitle, truthy: true } ] }
+    do: tracker_issue
+    tracker: "{{issue_tracker}}"
+    project: "{{issue_project}}"
+    summary: "{{answer.topTitle}}"
+    body: "{{answer.issueBody}}"
+limits:
+  max_body_chars: 4000
+  write_projects: ["{{issue_project}}"]

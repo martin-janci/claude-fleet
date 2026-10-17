@@ -54,35 +54,55 @@ pub async fn agents_decide(
 /// `definitions` (the list), `form` (a definition's grant form,
 /// `definition`, prefilled from rule `id` for Edit), `grant` (the form's
 /// `answers`; each MCP binding is asked for its tools on the host first),
-/// `revoke` (rule `id`) and `run` (a manual fleet agent's rule `id` now).
+/// `revoke` (rule `id`) and `run` (a manual fleet agent's rule `id` now,
+/// with the person's `request` and the `run_scope` they narrowed it to).
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn agents_fleet(
     action: String,
     definition: Option<String>,
     id: Option<i64>,
     answers: Option<serde_json::Value>,
+    request: Option<String>,
+    run_scope: Option<serde_json::Value>,
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<serde_json::Value, IpcError> {
-    routed::agents_fleet(&backend, &store, &ssh, action, definition, id, answers).await
+    let args = routed::FleetCall {
+        action,
+        definition,
+        id,
+        answers,
+        request,
+        run_scope,
+    };
+    routed::agents_fleet(&backend, &store, &ssh, args).await
 }
 
 pub(crate) mod routed {
     use super::*;
 
-    pub fn fleet_args(
-        action: String,
-        definition: Option<String>,
-        id: Option<i64>,
-        answers: Option<serde_json::Value>,
-    ) -> AgentsArgs {
+    /// What `agents_fleet` was asked, as the frontend sends it.
+    #[derive(Debug, Clone, Default)]
+    pub struct FleetCall {
+        pub action: String,
+        pub definition: Option<String>,
+        pub id: Option<i64>,
+        pub answers: Option<serde_json::Value>,
+        pub request: Option<String>,
+        pub run_scope: Option<serde_json::Value>,
+    }
+
+    pub fn fleet_args(c: FleetCall) -> AgentsArgs {
         AgentsArgs {
-            agent: (action == "grant").then(|| "fleet".to_string()),
-            action,
-            definition,
-            id,
-            answers,
+            agent: (c.action == "grant").then(|| "fleet".to_string()),
+            action: c.action,
+            definition: c.definition,
+            id: c.id,
+            answers: c.answers,
+            request: c.request,
+            run_scope: c.run_scope,
             ..Default::default()
         }
     }
@@ -91,11 +111,9 @@ pub(crate) mod routed {
         backend: &FleetBackend,
         store: &Mutex<Store>,
         ssh: &SshClient,
-        action: String,
-        definition: Option<String>,
-        id: Option<i64>,
-        answers: Option<serde_json::Value>,
+        call: FleetCall,
     ) -> Result<serde_json::Value, IpcError> {
+        let action = &call.action;
         if !matches!(
             action.as_str(),
             "definitions" | "form" | "grant" | "revoke" | "run"
@@ -105,7 +123,7 @@ pub(crate) mod routed {
                 format!("agents_fleet action must be definitions | form | grant | revoke | run, got {action:?}"),
             ));
         }
-        let args = fleet_args(action, definition, id, answers);
+        let args = fleet_args(call);
         if let Some(hub) = backend.hub() {
             return hub.route("agents_fleet", &args).await;
         }

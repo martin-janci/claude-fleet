@@ -1278,10 +1278,11 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                     b,
                     s,
                     ssh,
-                    "form".into(),
-                    Some("l2-support".into()),
-                    None,
-                    None,
+                    commands::agents::routed::FleetCall {
+                        action: "form".into(),
+                        definition: Some("l2-support".into()),
+                        ..Default::default()
+                    },
                 ))
                 .map(|_| ())
             }),

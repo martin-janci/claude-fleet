@@ -9,7 +9,7 @@
   import { openInControl } from './control_room';
   import TaskGraphCard from './TaskGraphCard.svelte';
 
-  const OPEN_LABEL = { task: 'Open in Work ↗', session: 'Open session ↗', hosts: 'Open hosts ↗', mission: 'Open mission ↗' } as const;
+  const OPEN_LABEL = { task: 'Open in Work ↗', session: 'Open session ↗', hosts: 'Open hosts ↗', mission: 'Open mission ↗', runs: 'Open runs ↗' } as const;
 </script>
 
 {#if $commandReceipts.length > 0}

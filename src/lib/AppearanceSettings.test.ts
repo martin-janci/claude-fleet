@@ -4,12 +4,15 @@ import { get } from 'svelte/store';
 import AppearanceSettings from './AppearanceSettings.svelte';
 import { agentTabLabel, agentTabName, badgeCounts, badgeNumber, uiDensity } from './prefs';
 import { applyTextSize, textSize } from './text_size';
-import { applyTheme, theme } from './theme';
+import { accentPref, applyTheme, contrastPref, moodLine, theme } from './theme';
 import { motionPref } from './motion';
 
 afterEach(() => {
   uiDensity.set('compact');
-  applyTheme('auto');
+  applyTheme('sun');
+  contrastPref.set('system');
+  accentPref.set('cyan');
+  moodLine.set(false);
   motionPref.set('system');
   textSize.set(100);
   agentTabName.set('agent');
@@ -43,13 +46,38 @@ describe('AppearanceSettings', () => {
 
   it('picks the theme (the one picker since the sidebar line went in 1.4)', async () => {
     render(AppearanceSettings);
+    expect(screen.getByTestId('appearance-theme-sun').textContent).toBe('Sun');
     expect(screen.getByTestId('appearance-theme-auto').textContent).toBe('System');
     await fireEvent.click(screen.getByTestId('appearance-theme-dark'));
     expect(get(theme)).toBe('dark');
     expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
+    await fireEvent.click(screen.getByTestId('appearance-theme-light'));
+    expect(document.documentElement.getAttribute('data-theme')).toBe('light');
     await fireEvent.click(screen.getByTestId('appearance-theme-auto'));
     expect(get(theme)).toBe('auto');
-    expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
+  });
+
+  it('picks contrast and accent, and the engine repaints <html> at once', async () => {
+    render(AppearanceSettings);
+    await fireEvent.click(screen.getByTestId('appearance-theme-light'));
+    const root = document.documentElement.style;
+    const stdFg = root.getPropertyValue('--fg');
+    await fireEvent.click(screen.getByTestId('appearance-contrast-high'));
+    expect(get(contrastPref)).toBe('high');
+    expect(localStorage.getItem('cf:pref:ui.contrast')).toBe('"high"');
+    expect(root.getPropertyValue('--fg')).not.toBe(stdFg);
+    const cyan = root.getPropertyValue('--accent');
+    await fireEvent.click(screen.getByTestId('appearance-accent-copper'));
+    expect(get(accentPref)).toBe('copper');
+    expect(root.getPropertyValue('--accent')).not.toBe(cyan);
+  });
+
+  it('turns the glow line on (off by default)', async () => {
+    render(AppearanceSettings);
+    expect(screen.getByTestId('appearance-mood-line-off').getAttribute('aria-pressed')).toBe('true');
+    await fireEvent.click(screen.getByTestId('appearance-mood-line-on'));
+    expect(get(moodLine)).toBe(true);
+    expect(localStorage.getItem('cf:pref:ui.moodLine')).toBe('true');
   });
 
   it('starts on Compact (the design row, UX audit L1) and persists Comfortable', async () => {

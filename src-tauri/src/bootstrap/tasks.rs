@@ -234,14 +234,24 @@ impl FleetTasks for RealFleetTasks {
     }
 
     /// Flush `fleet_core::logging::report_ring()` to the hub's `POST
-    /// /report`. The only other background task a hub client runs;
-    /// `start_background_tasks` gates it behind `CLAUDE_FLEET_HUB_REPORTS`.
+    /// /report`, and send this app's log to `POST /log` when the self debug
+    /// agent asks for it (`fleet_core::service::client_logs`). The only
+    /// other background tasks a hub client runs; `start_background_tasks`
+    /// gates both behind `CLAUDE_FLEET_HUB_REPORTS`.
     fn start_report_flusher(&self) {
         let Some(cfg) = self.remote.clone() else {
             tracing::error!("[report] asked to flush reports with no hub configured");
             return;
         };
         let transport = HubBackend::new(cfg.clone()).transport();
+        let poller = fleet_core::service::client_logs::LogPoller {
+            url: format!("{}/log", cfg.base_url),
+            token: cfg.token.clone(),
+            app: format!("desktop {}", fleet_core::app_version::get()),
+            transport: Arc::clone(&transport),
+            dir: fleet_core::logging::active_log_dir().map(std::path::Path::to_path_buf),
+        };
+        fleet_core::rt::spawn(poller.run(self.shutdown.clone()));
         spawn_report_flusher(
             ReportFlusher::new(cfg, transport, fleet_core::logging::report_ring()),
             self.shutdown.clone(),

@@ -1,6 +1,7 @@
 <script lang="ts">
   import Icon from './lib/kit/Icon.svelte';
   import StatusBar from './lib/kit/StatusBar.svelte';
+  import MoodLine from './lib/MoodLine.svelte';
   import { applyWorkEvents, loadTrackers, sessionsMentioning } from './lib/trackers';
   import { loadOrgs, cycleScope } from './lib/orgs';
   import type { WorkEvent } from './lib/trackers';
@@ -1158,6 +1159,8 @@
 
 <!-- Redesign 3.17: the Main board's header, above everything else. -->
 <ShellHeader mac={isMac} />
+<!-- The dynamic theme's opt-in glow line: the fleet's mood along the top edge. -->
+<MoodLine />
 <!-- Redesign 10.5: the first-run tour and Get started float above the
      layout. Both used to be mounted by the Sidebar,
      which a fleet page hides and a collapsed rail unmounts. -->

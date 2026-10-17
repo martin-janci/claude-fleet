@@ -86,13 +86,14 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
-    margin-bottom: 12px;
   }
   h3 {
     display: flex;
     align-items: baseline;
     gap: 8px;
     margin: 0;
+    font-size: var(--text-sm);
+    font-weight: 600;
   }
   .when {
     font-size: var(--text-2xs);

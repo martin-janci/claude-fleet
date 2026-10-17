@@ -72,7 +72,7 @@ describe('project skills in the slash menu (redesign 5.9)', () => {
     operatorSession.set({ id: 42 } as SessionRow);
     try {
       const list = await projectSkills(42);
-      expect(list.map((c) => c.name)).toEqual(['task', 'plan', 'done', 'assign', 'start', 'health', 'graph', 'tidy']);
+      expect(list.map((c) => c.name)).toEqual(['task', 'plan', 'done', 'assign', 'start', 'health', 'graph', 'tidy', 'debug', 'propose']);
       expect(tree).not.toHaveBeenCalled();
       expect(matchSlashCommands('/pl', list).map((c) => c.name)).toEqual(['plan']);
       tree.mockResolvedValue({ ok: true, value: { entries: [], truncated: false } });

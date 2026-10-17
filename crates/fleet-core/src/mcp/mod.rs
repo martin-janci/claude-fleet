@@ -8,7 +8,9 @@
 // `pub(crate)` for `agent::ws`'s tests, which mint a client token the way the
 // pairing flow does; the public surface stays the `pub use`s below.
 pub(crate) mod auth;
+pub mod client_log_route;
 mod conn;
+pub mod diagnostics_route;
 #[cfg(test)]
 mod doc_gen;
 pub mod downloads_route;
@@ -688,6 +690,16 @@ fn build_app(
                 ))
                 .with_state(report_state.clone()),
         )
+        // `/log`: an app's own log, sent when the self debug agent asks.
+        // Behind `authorize` like `/report`, with a larger body cap.
+        .merge(
+            axum::Router::new()
+                .route("/log", axum::routing::post(client_log_route::handle_log))
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    client_log_route::BODY_MAX,
+                ))
+                .with_state(report_state.clone()),
+        )
         // `/downloads/<id>`: a ready file download's bytes, streamed. Behind
         // `authorize`; the handler applies the caller's scope.
         .merge(
@@ -766,6 +778,17 @@ fn build_app(
             axum::routing::post(records_route::handle_records)
                 .layer(axum::extract::DefaultBodyLimit::max(
                     records_route::BODY_MAX,
+                ))
+                .with_state(report_state.clone()),
+        )
+        // `/agent-diagnostics`: a self debug run's `fleet-diagnostics`
+        // server. Outside `authorize` for the same reason: a RUN token
+        // (`service::fleet_agents::diagnostics`), read-only, one run.
+        .route(
+            crate::service::fleet_agents::diagnostics::ROUTE,
+            axum::routing::post(diagnostics_route::handle_diagnostics)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    diagnostics_route::BODY_MAX,
                 ))
                 .with_state(report_state),
         )
@@ -1062,6 +1085,8 @@ pub async fn start_with_listener<A: TlsAcceptor>(
         // Likewise taken before `store` is moved into `FleetTools`: `/report`
         // and `/reports` keep their own handle to the store.
         let reports_store = Arc::clone(&store);
+        // And `/agent-diagnostics` reads hosts through the same client.
+        let reports_ssh = Arc::clone(&ssh);
         let hook_state = hooks::HookState {
             store: Arc::clone(&store),
             ssh: Arc::clone(&ssh),
@@ -1136,7 +1161,7 @@ pub async fn start_with_listener<A: TlsAcceptor>(
             // to. `None` on an SSH-only client (the desktop): `/agent` then
             // answers 503 rather than upgrading a socket nothing would read.
             crate::agent::ws::AgentWsState::new(agent_registry.map(|r| (r, agents_store))),
-            report_route::ReportState::new(reports_store),
+            report_route::ReportState::new(reports_store).with_ssh(reports_ssh),
         );
 
         let scheme = if tls.is_some() { "https" } else { "http" };
