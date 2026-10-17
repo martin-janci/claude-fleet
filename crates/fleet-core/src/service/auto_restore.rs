@@ -1643,8 +1643,16 @@ mod tests {
                 Some(DEFER_MEM_HEADROOM.to_string())
             )]
         );
-        // Once a has settled, the same reading has room for b.
-        let later = now + RESTORE_SETTLE_SECS + 1;
+        // Once a has settled, the same reading has room for b. The tick
+        // stamps its event with the wall clock, not `now`, and on a loaded
+        // box that is a second or more past `now`: settle from the stamp.
+        let restored_at = store
+            .lock()
+            .unwrap()
+            .last_session_event_at(ids[0], EVENT_RESTORED, i64::MAX)
+            .unwrap()
+            .expect("a's restore was recorded");
+        let later = restored_at + RESTORE_SETTLE_SECS + 1;
         let r = run_with(&store, &fake, &NoAdvice, &CFG, later).await;
         assert_eq!(r.restored, 1);
     }
