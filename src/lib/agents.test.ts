@@ -90,6 +90,16 @@ beforeEach(() => {
 describe('agents (design step 5)', () => {
   it('names the support agent\'s Jira writes', () => {
     expect(actionTitle({ kind: 'jira_comment', payload: '{"key":"L2S-7","body":"h3. x"}' })).toBe('Comment on L2S-7');
+    expect(actionTitle({ kind: 'work_task', payload: '{"title":"Flaky reconnect","steps":["a","b"]}' })).toBe(
+      'Create a task: Flaky reconnect (2 steps)',
+    );
+    expect(actionTitle({ kind: 'fix_session', payload: '{"project":"o/r","host":"htz","title":"Fix backoff"}' })).toBe(
+      'Start a session on o/r (htz): Fix backoff',
+    );
+    expect(actionTitle({ kind: 'setting', payload: '{"key":"hub.probe_secs","value":"60","was":"30"}' })).toBe(
+      'Change hub.probe_secs from 30 to 60',
+    );
+    expect(actionTitle({ kind: 'session_recover', payload: '{"session":"fed-v2","host":"htz"}' })).toBe('Recover fed-v2 on htz');
     expect(
       actionTitle({ kind: 'jira_create_bug', payload: '{"project":"PD","source_key":"L2S-7","summary":"[pay] NPE"}' }),
     ).toBe('File a bug in PD for L2S-7: [pay] NPE');

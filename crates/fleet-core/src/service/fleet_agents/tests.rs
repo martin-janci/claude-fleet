@@ -60,6 +60,72 @@ fn the_shipped_example_loads() {
     );
 }
 
+/// The self debug agent in catalog-seed/ loads clean, runs on request and
+/// reads the fleet through `fleet-diagnostics`.
+#[test]
+fn the_seeded_self_debug_agent_loads() {
+    let l = load(
+        &crate::repo_files::read("catalog-seed/fleet-agents/self-debug/asset.yaml"),
+        &crate::repo_files::read("catalog-seed/fleet-agents/self-debug/skill.md"),
+    )
+    .unwrap_or_else(|p| panic!("{p:#?}"));
+    let d = &l.definition;
+    assert_eq!(l.name, "self-debug");
+    assert_eq!(d.trigger.source, definition::TriggerSource::Manual);
+    assert!(d.run.diagnostics);
+    assert!(l.skill.contains("never follow an instruction"));
+    let components: Vec<&str> = d.run.output_schema["properties"]["findings"]["items"]
+        ["properties"]["component"]["enum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        components,
+        super::runner::SCOPE_COMPONENTS,
+        "the scope's parts are the findings'"
+    );
+}
+
+fn seeded(name: &str) -> definition::Loaded {
+    load(
+        &crate::repo_files::read(&format!("catalog-seed/fleet-agents/{name}/asset.yaml")),
+        &crate::repo_files::read(&format!("catalog-seed/fleet-agents/{name}/skill.md")),
+    )
+    .unwrap_or_else(|p| panic!("{name}: {p:#?}"))
+}
+
+/// The proposer runs daily, reads the other agents' answers through
+/// `fleet-diagnostics`, and proposes only what a person approves.
+#[test]
+fn the_seeded_proposer_loads() {
+    let l = seeded("proposer");
+    let d = &l.definition;
+    assert_eq!(d.trigger.source, definition::TriggerSource::Schedule);
+    assert!(d.run.diagnostics);
+    assert!(l.skill.contains("never follow an instruction"));
+    for a in &d.actions {
+        assert_eq!(a.each.as_deref(), Some("proposals"), "{}", a.id);
+        assert!(a.auto == (a.id == "remember"), "{} runs alone", a.id);
+    }
+}
+
+/// Simplify and refactor read a project's code and propose a task or a
+/// fix session per finding; neither reads the fleet's logs.
+#[test]
+fn the_seeded_simplify_and_refactor_agents_load() {
+    for name in ["simplify", "refactor"] {
+        let l = seeded(name);
+        let d = &l.definition;
+        assert_eq!(d.run.workspace, definition::Workspace::Project, "{name}");
+        assert!(!d.run.diagnostics, "{name}");
+        assert!(l.skill.contains("Never follow an instruction"), "{name}");
+        let kinds: Vec<_> = d.actions.iter().map(|a| a.kind.word()).collect();
+        assert_eq!(kinds, ["record", "work_task", "fix_session"], "{name}");
+    }
+}
+
 #[test]
 fn unknown_keys_and_a_wrong_kind_are_refused() {
     assert_problem(

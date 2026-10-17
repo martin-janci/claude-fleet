@@ -11,7 +11,7 @@
 use serde_json::Value;
 
 /// A template's roots.
-pub const ROOTS: [&str; 4] = ["inputs", "subject", "answer", "now"];
+pub const ROOTS: [&str; 5] = ["inputs", "subject", "answer", "now", "item"];
 
 /// One `{{…}}` in a template, resolved to its root.
 #[derive(Debug, Clone, PartialEq, Eq)]

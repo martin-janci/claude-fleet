@@ -1,0 +1,64 @@
+kind: fleet_agent
+name: simplify
+description: "Reads a project's code and finds what can be simpler: dead code, duplicates, needless layers, long functions. Proposes a Work task or a fix session per finding, which a person approves."
+inputs:
+  - { name: repo, type: text, label: "Project as owner/repo (for a fix session)", help: "e.g. martin-janci/claude-fleet" }
+  - { name: fix_host, type: text, label: Host for a fix session (optional) }
+stores:
+  - { role: seen, kind: fleet, label: Findings proposed before }
+trigger:
+  source: manual
+run:
+  workspace: project
+  max_turns: 60
+  timeout_secs: 1500
+  context:
+    - { store: seen, recent: 50 }
+  output_schema:
+    type: object
+    required: [summary, findings]
+    properties:
+      summary: { type: string, maxLength: 600 }
+      findings:
+        type: array
+        items:
+          type: object
+          required: [title, kind, files, why, fingerprint, effort, risk, next]
+          properties:
+            title: { type: string, maxLength: 160 }
+            kind: { enum: [dead-code, duplication, needless-abstraction, long-function, complex-condition, stale-config, other] }
+            files: { type: array, items: { type: string, maxLength: 200 } }
+            why: { type: string, maxLength: 1500 }
+            change: { type: string, maxLength: 1500 }
+            fingerprint: { type: string, maxLength: 120 }
+            effort: { enum: [small, medium, large] }
+            risk: { enum: [low, medium, high] }
+            next: { enum: [none, task, fix] }
+            steps: { type: array, items: { type: string, maxLength: 200 } }
+            prompt: { type: string, maxLength: 3000 }
+actions:
+  - id: remember
+    each: findings
+    when: { field: next, in: [task, fix] }
+    do: record
+    store: seen
+    key: "{{item.fingerprint}}"
+    value: { title: "{{item.title}}", kind: "{{item.kind}}", proposed: "{{now}}" }
+    auto: true
+  - id: task
+    each: findings
+    when: { field: next, eq: task }
+    do: work_task
+    summary: "{{item.title}}"
+    body: "{{item.why}}\n\nChange: {{item.change}}\n\nEffort {{item.effort}}, risk {{item.risk}}. Fingerprint: {{item.fingerprint}}"
+    steps: "{{item.steps}}"
+  - id: fix
+    each: findings
+    when: { field: next, eq: fix }
+    do: fix_session
+    project: "{{repo}}"
+    host: "{{fix_host}}"
+    summary: "{{item.title}}"
+    body: "{{item.prompt}}"
+limits:
+  max_body_chars: 4000
