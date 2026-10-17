@@ -167,6 +167,14 @@
     return classify(row, opts) === 'account_limit' ? row : null;
   }
 
+  /** The row's dot: a failed turn reads red, a wait amber, live work blue,
+   *  stale grey (the status colours the session list draws). */
+  function sessionTone(s: TodaySession, bucket: TodayBucket): string {
+    if (bucket === 'waiting') return s.attention === 'failed' ? 'failed' : 'waiting';
+    if (bucket === 'stale') return 'idle';
+    return 'working';
+  }
+
   function jump(s: TodaySession) {
     const row: SessionRow | undefined = $sessions.find((r) => r.id === s.id);
     if (!row) return;
@@ -180,6 +188,7 @@
     {#each list as g (`${g.key ?? ''}|${bucket}`)}
       <li class="group" data-testid="today-group">
         <div class="head">
+          <div class="what">
           <span class="label" class:nowork={!g.key}>{groupLabel(g)}</span>
           <!-- The status the group is in: a tracker's own name, or the
                effective status of work fleet tracks itself (native item
@@ -192,6 +201,7 @@
               >{groupStatusLabel(g)}</span
             >
           {/if}
+          </div>
           {#if g.url}
             <button class="btn btn--quiet link" type="button" onclick={() => void openExternal(g.url ?? '')}
               >Open ticket</button
@@ -200,17 +210,26 @@
         </div>
         <ul class="sessions">
           {#each g.sessions as s (s.id)}
-            <li>
+            <li class="srow">
+              <span class="sdot tone-{sessionTone(s, bucket)}" aria-hidden="true"></span>
+              <div class="smain">
+                <button
+                  class="btn btn--quiet session"
+                  type="button"
+                  data-testid="today-session"
+                  title={`${s.host_alias} · active ${timeAgo(s.last_activity_at, now())}`}
+                  onclick={() => jump(s)}>{sessionPhrase(s, bucket)}</button
+                >
+                <span class="meta"
+                  >{s.host_alias}{#if s.ci_status}{` · CI ${s.ci_status}`}{/if}{` · ${timeAgo(s.last_activity_at, now())}`}</span
+                >
+              </div>
               <button
-                class="btn btn--quiet session"
+                class="btn btn--quiet is-bounded open"
                 type="button"
-                data-testid="today-session"
-                title={`${s.host_alias} · active ${timeAgo(s.last_activity_at, now())}`}
-                onclick={() => jump(s)}>{sessionPhrase(s, bucket)}</button
-              >
-              <span class="meta">{s.host_alias}{#if s.ci_status} · CI {s.ci_status}{/if}</span>
-              <button class="btn btn--quiet open" type="button" data-testid="today-session-open" aria-label="Open {s.name}" onclick={() => jump(s)}
-                >Open</button
+                data-testid="today-session-open"
+                aria-label="Open {s.name}"
+                onclick={() => jump(s)}>Open</button
               >
               {#if bucket === 'waiting'}
                 {@const row = limited(s)}
@@ -234,13 +253,17 @@
 
 <section class="today" data-testid="today-view" aria-label="Today">
   <header>
-    <div>
+    <div class="title">
       <h2>Today</h2>
       <p class="dateline" data-testid="today-dateline">{dateLine}</p>
     </div>
     <div class="actions">
-      <button class="btn" type="button" data-testid="today-copy" disabled={!view} onclick={() => void copyStandup()}
-        >{copied ? 'Copied' : 'Copy standup'}</button
+      <button
+        class="btn btn--quiet is-bounded"
+        type="button"
+        data-testid="today-copy"
+        disabled={!view}
+        onclick={() => void copyStandup()}>{copied ? 'Copied' : 'Copy standup'}</button
       >
       <button class="btn btn--quiet" type="button" data-testid="today-refresh" disabled={loading} onclick={() => void refresh()}
         >Refresh</button
@@ -257,83 +280,103 @@
     <p class="error" role="alert" data-testid="today-error">Couldn't load Today: {error}. Refresh tries again.</p>
   {/if}
 
-  <!-- Redesign 9.11: the brief drafted last; a new one only on Refresh. -->
-  <MorningBrief />
-  <!-- Redesign 9.10: stuck missions, with the next step Jev proposes. -->
-  <MissionNudge />
-
   {#if view && kpis}
+    <!-- The tiles read label over number (the Today board); the DOM keeps
+         number first so the text a screen reader and the copy see is
+         "4 Needs you". -->
     <ul class="kpis" aria-label="Today in numbers" data-testid="today-kpis">
-      <li class="kpi" class:hot={kpis.needsYou > 0}><span class="n">{kpis.needsYou}</span>{' '}<span class="k">Needs you</span></li>
-      <li class="kpi"><span class="n">{kpis.inProgress}</span>{' '}<span class="k">In progress</span></li>
-      <li class="kpi"><span class="n">{kpis.shipped}</span>{' '}<span class="k">Shipped today</span></li>
+      <li class="kpi waiting" class:hot={kpis.needsYou > 0}><span class="n">{kpis.needsYou}</span>{' '}<span class="k">Needs you</span></li>
+      <li class="kpi working" class:hot={kpis.inProgress > 0}><span class="n">{kpis.inProgress}</span>{' '}<span class="k">In progress</span></li>
+      <li class="kpi done" class:hot={kpis.shipped > 0}><span class="n">{kpis.shipped}</span>{' '}<span class="k">Shipped today</span></li>
       <li class="kpi"><span class="n">{kpis.stale}</span>{' '}<span class="k">Stale</span></li>
     </ul>
   {/if}
+
+  <!-- Redesign 9.10: stuck missions, with the next step Jev proposes. -->
+  <MissionNudge />
 
   {#if view}
     {#if isEmptyView(view)}
       <p class="empty" data-testid="details-empty">Nothing running today. Pick a session, or start work from ⌘K.</p>
     {/if}
     {#if view.waiting.length > 0 || (view.missions?.length ?? 0) > 0}
-      <h3 data-testid="today-waiting">Waiting on you</h3>
-      {#if view.waiting.length > 0}{@render groups(view.waiting, 'waiting')}{/if}
-      {#if view.missions?.length}
-        <!-- G1.6: missions waiting on a person, beside the sessions. -->
-        <ul class="groups" data-testid="today-missions">
-          {#each view.missions as m (m.id)}
-            <li class="group">
-              <button class="btn btn--quiet link" type="button" data-testid="today-mission-open" onclick={() => openMission(m.id)}
-                >Mission {m.name}</button
-              >
-              <span class="status">{waitWords(m.waiting_on)}</span>
+      <section class="block">
+        <h3 class="waiting" data-testid="today-waiting">
+          Waiting on you <span class="count">{kpis?.needsYou}</span>
+        </h3>
+        {#if view.waiting.length > 0}{@render groups(view.waiting, 'waiting')}{/if}
+        {#if view.missions?.length}
+          <!-- G1.6: missions waiting on a person, beside the sessions. -->
+          <ul class="groups" data-testid="today-missions">
+            {#each view.missions as m (m.id)}
+              <li class="group mission">
+                <span class="sdot tone-waiting" aria-hidden="true"></span>
+                <div class="smain">
+                  <button class="btn btn--quiet session" type="button" data-testid="today-mission-open" onclick={() => openMission(m.id)}
+                    >{m.name}</button
+                  >
+                  <span class="meta waits">{waitWords(m.waiting_on)}</span>
+                </div>
+                <span class="tag">Mission</span>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </section>
+    {/if}
+    {#if view.inProgress.length > 0}
+      <section class="block">
+        <h3 data-testid="today-in-progress">In progress <span class="count">{kpis?.inProgress}</span></h3>
+        {@render groups(inProgressShown, 'in_progress')}
+        {#if view.inProgress.length > inProgressShown.length}
+          <button class="btn btn--quiet more" type="button" data-testid="today-more" onclick={() => (allInProgress = true)}
+            >{view.inProgress.length - inProgressShown.length} more ›</button
+          >
+        {/if}
+      </section>
+    {/if}
+    {#if view.shipped.length > 0}
+      <section class="block">
+        <h3 class="shipped-h" data-testid="today-shipped">Shipped today <span class="count">{view.shipped.length}</span></h3>
+        <ul class="groups">
+          {#each view.shipped as x (`${x.how}|${x.key ?? x.pr_url ?? x.at}`)}
+            <li class="group shipped">
+              <span class="glyph" aria-hidden="true">{x.how === 'pr' ? '⑂' : '✓'}</span>
+              <div class="smain">
+                <span class="label">{x.key ? groupLabel({ key: x.key, title: x.title ?? '' }) : x.title || 'Untitled work'}</span>
+                <span class="meta"
+                  ><span data-testid="today-shipped-when">{shippedWhen(x)}</span
+                  >{#if x.from}{' · '}<span data-testid="today-shipped-from">from {x.from}</span>{/if}</span
+                >
+              </div>
+              {#if x.pr_url}
+                <button class="btn btn--quiet link" type="button" onclick={() => void openExternal(x.pr_url ?? '')}>PR</button>
+              {:else if x.url}
+                <button class="btn btn--quiet link" type="button" onclick={() => void openExternal(x.url ?? '')}
+                  >Open ticket</button
+                >
+              {/if}
             </li>
           {/each}
         </ul>
-      {/if}
-    {/if}
-    {#if view.inProgress.length > 0}
-      <h3 data-testid="today-in-progress">In progress</h3>
-      {@render groups(inProgressShown, 'in_progress')}
-      {#if view.inProgress.length > inProgressShown.length}
-        <button class="btn btn--quiet more" type="button" data-testid="today-more" onclick={() => (allInProgress = true)}
-          >{view.inProgress.length - inProgressShown.length} more ›</button
-        >
-      {/if}
-    {/if}
-    {#if view.shipped.length > 0}
-      <h3 data-testid="today-shipped">Shipped today</h3>
-      <ul class="groups">
-        {#each view.shipped as x (`${x.how}|${x.key ?? x.pr_url ?? x.at}`)}
-          <li class="group shipped">
-            <span class="label">{x.key ? groupLabel({ key: x.key, title: x.title ?? '' }) : x.title || 'Untitled work'}</span>
-            <span class="status" data-testid="today-shipped-when">{shippedWhen(x)}</span>
-            {#if x.from}<span class="status" data-testid="today-shipped-from">from {x.from}</span>{/if}
-            {#if x.pr_url}
-              <button class="btn btn--quiet link" type="button" onclick={() => void openExternal(x.pr_url ?? '')}>PR</button>
-            {:else if x.url}
-              <button class="btn btn--quiet link" type="button" onclick={() => void openExternal(x.url ?? '')}
-                >Open ticket</button
-              >
-            {/if}
-          </li>
-        {/each}
-      </ul>
+      </section>
     {/if}
     {#if view.stale.length > 0}
-      <h3 data-testid="today-stale">
-        Stale
-        {#if staleTidy.length > 0}
-          <button
-            class="btn btn--quiet tidy"
-            type="button"
-            data-testid="today-tidy"
-            title="Open Tidy up with these sessions picked; nothing happens until you confirm there"
-            onclick={tidyStale}>Tidy up · {staleTidy.length}</button
-          >
-        {/if}
-      </h3>
-      {@render groups(view.stale, 'stale')}
+      <section class="block">
+        <h3 data-testid="today-stale">
+          Stale <span class="count">{kpis?.stale}</span>
+          {#if staleTidy.length > 0}
+            <button
+              class="btn btn--quiet tidy"
+              type="button"
+              data-testid="today-tidy"
+              title="Open Tidy up with these sessions picked; nothing happens until you confirm there"
+              onclick={tidyStale}>Tidy up · {staleTidy.length}</button
+            >
+          {/if}
+        </h3>
+        {@render groups(view.stale, 'stale')}
+      </section>
     {/if}
   {:else if !error && !unsupported && today === null}
     <!-- Review r13 (step 10.6): the first read is loading, not empty. -->
@@ -341,78 +384,141 @@
   {:else if !error}
     <p class="empty" data-testid="details-empty">Pick a session to see details.</p>
   {/if}
+
+  <!-- Redesign 9.11: the brief drafted last; a new one only on Refresh.
+       Last, as on the Today board: what needs a hand comes first. -->
+  <div class="brief-card"><MorningBrief /></div>
 </section>
 
 <style>
+  /* The view fills a bare scroll body (ControlViewsPanel's .body has no
+     padding), so it brings its own gutter. Spacing follows the Orbit Fleet
+     Today board: sections 24 px apart, rows on an 8 px rhythm. */
   .today {
+    container-type: inline-size;
     display: flex;
     flex-direction: column;
-    gap: 0.4rem;
+    gap: var(--space-4);
+    padding: var(--space-3) var(--space-4) var(--space-6);
     font-size: var(--text-sm);
+    line-height: var(--text-sm-lh);
   }
   header {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: space-between;
-    gap: 0.5rem;
+    gap: var(--space-2);
+  }
+  .title {
+    min-width: 0;
   }
   h2 {
     margin: 0;
-    font-size: var(--text-md);
+    font-size: var(--text-lg);
+    line-height: var(--text-lg-lh);
+    font-weight: var(--text-lg-weight);
   }
   .dateline {
-    margin: 0;
+    margin: 2px 0 0;
     color: var(--fg-muted);
-    font-size: var(--text-2xs);
-  }
-  .kpis {
-    list-style: none;
-    margin: 0.2rem 0;
-    padding: 0;
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
-    gap: 0.4rem;
-  }
-  .kpi {
-    display: flex;
-    flex-direction: column;
-    padding: 0.4rem 0.5rem;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-md);
-  }
-  .kpi .n {
-    font-size: var(--text-md);
-    font-weight: 600;
-    font-variant-numeric: tabular-nums;
-  }
-  .kpi.hot .n {
-    color: var(--status-waiting);
-  }
-  .kpi .k {
-    color: var(--fg-muted);
-    font-size: var(--text-2xs);
-  }
-  .limit {
-    padding: 0.2rem 0 0.2rem 0.6rem;
-  }
-  .more {
-    align-self: flex-start;
-  }
-  h3 {
-    margin: 0.6rem 0 0.2rem;
-    font-size: var(--text-2xs);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--fg-muted);
-  }
-  h3 .tidy {
-    margin-left: 0.4rem;
-    text-transform: none;
-    letter-spacing: normal;
+    font-size: var(--text-xs);
+    line-height: var(--text-xs-lh);
   }
   .actions {
     display: flex;
-    gap: 0.3rem;
+    flex-shrink: 0;
+    gap: var(--space-1);
+  }
+
+  /* ── KPI tiles: label over number, the number in its status colour ── */
+  .kpis {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-2);
+  }
+  @container (min-width: 460px) {
+    .kpis {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+  }
+  .kpi {
+    display: flex;
+    flex-direction: column-reverse;
+    justify-content: flex-end;
+    gap: 2px;
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--bg-raise);
+  }
+  .kpi .n {
+    font-size: var(--text-xl);
+    line-height: var(--text-xl-lh);
+    font-weight: var(--text-xl-weight);
+    font-variant-numeric: tabular-nums;
+  }
+  .kpi .k {
+    color: var(--fg-muted);
+    font-size: var(--text-xs);
+    line-height: var(--text-xs-lh);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .kpi.waiting.hot {
+    border-color: var(--waiting-line);
+    background: var(--waiting-faint);
+  }
+  .kpi.waiting.hot .n {
+    color: var(--status-waiting);
+  }
+  .kpi.working.hot .n {
+    color: var(--status-working);
+  }
+  .kpi.done.hot .n {
+    color: var(--status-done);
+  }
+
+  /* ── sections ── */
+  .block {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+  h3 {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin: 0 0 var(--space-1);
+    font-size: var(--text-xs);
+    line-height: var(--text-xs-lh);
+    font-weight: 600;
+    color: var(--fg-muted);
+  }
+  h3.waiting {
+    color: var(--status-waiting);
+  }
+  h3.shipped-h {
+    color: var(--status-done);
+  }
+  .count {
+    min-width: 18px;
+    padding: 0 5px;
+    border-radius: var(--radius-sm);
+    background: var(--count-bg);
+    color: var(--fg-2);
+    font-size: var(--text-2xs);
+    line-height: 16px;
+    font-weight: 500;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+  }
+  h3 .tidy {
+    margin-left: auto;
+    font-weight: 400;
   }
   .groups,
   .sessions {
@@ -420,39 +526,61 @@
     margin: 0;
     padding: 0;
   }
+  .groups {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--bg-raise);
+  }
+  .groups + .groups {
+    margin-top: var(--space-2);
+  }
   .group {
-    padding: 0.25rem 0;
+    padding: var(--space-2) var(--space-3);
     border-bottom: 1px solid var(--border);
   }
-  .head,
-  .shipped {
+  .group:last-child {
+    border-bottom: 0;
+  }
+  .head {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+  }
+  .what {
+    flex: 1 1 auto;
+    min-width: 0;
     display: flex;
     align-items: baseline;
-    gap: 0.4rem;
     flex-wrap: wrap;
+    column-gap: var(--space-2);
+    padding: 3px 0;
+  }
+  .head .link {
+    flex-shrink: 0;
   }
   .label {
     font-weight: 600;
     overflow-wrap: anywhere;
   }
   .label.nowork {
-    font-weight: normal;
+    font-weight: 500;
     color: var(--fg-muted);
   }
   .status,
   .meta {
     color: var(--fg-muted);
-    font-size: var(--text-2xs);
+    font-size: var(--text-xs);
+    line-height: var(--text-xs-lh);
   }
   .status {
     display: inline-flex;
     align-items: center;
-    gap: 0.25rem;
+    gap: var(--space-1);
   }
   .dot {
-    width: 0.45rem;
-    height: 0.45rem;
-    border-radius: 50%;
+    width: 6px;
+    height: 6px;
+    border-radius: var(--radius-pill);
     display: inline-block;
     background: var(--fg-muted);
   }
@@ -466,16 +594,87 @@
   .dot-done {
     background: var(--status-done);
   }
-  .sessions {
-    padding-left: 0.6rem;
+
+  /* ── one session: dot · name over host and age · Open ── */
+  .srow,
+  .mission,
+  .shipped {
+    display: grid;
+    grid-template-columns: 12px minmax(0, 1fr) auto;
+    column-gap: var(--space-2);
+    align-items: center;
   }
-  .session {
+  .srow {
+    padding: var(--space-1) 0;
+  }
+  .sdot {
+    width: 8px;
+    height: 8px;
+    border-radius: var(--radius-pill);
+    background: var(--status-idle);
+    justify-self: center;
+  }
+  .tone-waiting {
+    background: var(--status-waiting);
+  }
+  .tone-failed {
+    background: var(--status-failed);
+  }
+  .tone-working {
+    background: var(--status-working);
+  }
+  .smain {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  /* The name is the row's main target: text, not a chip. */
+  .btn.session {
+    justify-content: flex-start;
+    height: auto;
+    min-height: var(--control-h);
+    padding: 0 var(--space-1);
+    margin-left: calc(-1 * var(--space-1));
+    color: var(--fg);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    line-height: var(--text-sm-lh);
+    white-space: normal;
     text-align: left;
+    overflow-wrap: anywhere;
+  }
+  .smain .meta {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .meta.waits {
+    color: var(--status-waiting);
+  }
+  .limit {
+    grid-column: 2 / -1;
+    padding-top: var(--space-1);
+  }
+  .glyph {
+    justify-self: center;
+    color: var(--status-done);
+    font-size: var(--text-xs);
+  }
+  .more {
+    align-self: flex-start;
+  }
+  .brief-card {
+    padding: var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--bg-raise);
   }
   .empty {
+    margin: 0;
     color: var(--fg-muted);
   }
   .error {
+    margin: 0;
     color: var(--danger);
   }
 </style>
