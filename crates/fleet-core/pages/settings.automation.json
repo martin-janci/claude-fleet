@@ -51,6 +51,31 @@
       ]
     },
     {
+      "title": "Autofix",
+      "items": [
+        {
+          "type": "field",
+          "key": "autofix.auto_safe"
+        },
+        {
+          "type": "field",
+          "key": "autofix.max_attempts",
+          "when": {
+            "key": "autofix.auto_safe",
+            "truthy": true
+          }
+        },
+        {
+          "type": "field",
+          "key": "autofix.detector.operator_unbound"
+        },
+        {
+          "type": "field",
+          "key": "autofix.detector.host"
+        }
+      ]
+    },
+    {
       "title": "Recovery",
       "items": [
         {
