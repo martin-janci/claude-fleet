@@ -1153,6 +1153,20 @@ hubs trade keys (11.12). The link protocol has no step that waits on the
 other side's approval — its operator mints the code first, and redeeming it
 completes the link — so the wizard never says "waiting for … to sign".
 
+Desktop multi-hub, Phase 1 (design
+`docs/superpowers/specs/2026-10-17-desktop-multi-hub-design.md`): one window
+can show extra hubs beside its launch-time fleet. Settings → Hub & sync →
+Fleets adds (pairing code) and removes them at runtime; each has its own
+token item, event bridge and contract gate (`backend/fleets.rs`), and its
+sessions show in the sidebar under a coloured fleet badge with a fleet
+switcher, with prompt / rename / pin / close / start / copy-attach routed to
+its hub (`FLEET_SCOPED`). No flag: nothing runs until a second hub is added,
+and an existing pairing is hub #1 with no migration. Not yet (Phase 2): the
+session view (conversation, terminal) for an extra fleet's session, a fleet
+picker in New session with org-based defaults, Hosts / Projects / Inbox /
+PRs per fleet, and federation addresses rendered by fleet (needs `fleet_id`
+in the `/events` ready frame).
+
 Application updates: design
 `docs/superpowers/specs/2026-09-28-update-channel-design.md` (with
 fleet-mobile's `docs/superpowers/specs/2026-09-28-mobile-update-adapter.md`).

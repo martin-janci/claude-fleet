@@ -584,3 +584,18 @@ bullet for the area you are about to change.
   pasted sentence), then `REGEN_HUB_VERDICTS=1`, then — for a `LocalOnly`
   command the UI can reach — a `REASONS` entry in `src/lib/hub.ts` or an
   allowlist line in `src/lib/hub_verdicts.test.ts`.
+- **Extra fleets** (`src-tauri/src/backend/fleets.rs`, `commands/fleets.rs`,
+  `src/lib/fleets.ts`; spec
+  `docs/superpowers/specs/2026-10-17-desktop-multi-hub-design.md`): further
+  hubs one window shows beside the launch-time one (the "primary", slot
+  `primary`, unchanged). Rows in the `hub.fleets` setting, tokens per slot
+  (`OsTokenStore::for_fleet`). Each gets its own `HubBackend` +
+  `HubConnectionStatus` + event bridge (`bootstrap/tasks.rs`
+  `ExtraFleetLinks`, `spawn_extra_fleet_bridge`), its events tagged as
+  `fleet:event` so no primary store ever sees a foreign id. A command in
+  `FLEET_SCOPED` takes `fleet` and picks its backend with `Fleets::select`,
+  then calls the same `routed::` function; an extra fleet's `FleetBackend`
+  is always a hub, so it has no local arm. Adding a command to the scope:
+  `fleet: Option<String>` + `fleets.select(backend.inner(), fleet.as_deref())?`,
+  a `FLEET_SCOPED` entry in both `fleets.rs` and `fleets.ts`
+  (`tests_fleets`, `fleets.test.ts` hold them together).

@@ -7601,6 +7601,7 @@ const SOURCES: &[(&str, &str)] = &[
     ),
     ("commands/editor.rs", include_str!("../commands/editor.rs")),
     ("commands/files.rs", include_str!("../commands/files.rs")),
+    ("commands/fleets.rs", include_str!("../commands/fleets.rs")),
     ("commands/health.rs", include_str!("../commands/health.rs")),
     (
         "commands/history.rs",
