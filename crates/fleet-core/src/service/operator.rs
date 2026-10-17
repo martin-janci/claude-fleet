@@ -385,9 +385,22 @@ pub fn control_command_path(name: &str) -> String {
 /// PURE: every plain (non-secret) file of the operator's directory, as
 /// `(path relative to the directory, body)`. The `.mcp.json` is not here: it
 /// carries the token and takes the secret path.
+///
+/// The last entry is [`OPERATOR_FILES_STAMP_PATH`], holding
+/// [`operator_files_stamp`] of the others: [`refresh_operator_files`] reads
+/// it to tell whether the host already has this version (F13).
 pub fn operator_files() -> Vec<(String, &'static str)> {
+    let mut files = operator_files_unstamped();
+    files.push((
+        OPERATOR_FILES_STAMP_PATH.to_string(),
+        operator_files_stamp(),
+    ));
+    files
+}
+
+fn operator_files_unstamped() -> Vec<(String, &'static str)> {
     let mut files = vec![
-        ("CLAUDE.md".to_string(), claude_md()),
+        ("CLAUDE.md".to_string(), claude_md_full()),
         (BRAINSTORM_SKILL_PATH.to_string(), BRAINSTORM_SKILL),
     ];
     files.extend(
@@ -396,6 +409,102 @@ pub fn operator_files() -> Vec<(String, &'static str)> {
             .map(|(name, body)| (control_command_path(name), *body)),
     );
     files
+}
+
+/// Where the operator's directory keeps the version of its files (F13).
+pub const OPERATOR_FILES_STAMP_PATH: &str = ".claude/fleet-operator-files.version";
+
+/// PURE: the version of the operator's files: a digest over every path and
+/// body of [`operator_files`] but the stamp itself. A change to the prompt,
+/// a command or the skill changes it; nothing else does.
+pub fn operator_files_stamp() -> &'static str {
+    static STAMP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    STAMP.get_or_init(|| {
+        let mut all = String::new();
+        for (path, body) in operator_files_unstamped() {
+            all.push_str(&path);
+            all.push('\0');
+            all.push_str(body);
+            all.push('\0');
+        }
+        format!("{}\n", crate::mcp::guard::content_digest(&all))
+    })
+}
+
+/// Write the operator's plain files on `host` again when the host's stamp
+/// is not this build's (review 2026-10-17, F13): a prompt, command or skill
+/// fix then reaches a running Control on its next start, restart or
+/// automatic restore, not only at its birth. The `.mcp.json` is not
+/// rewritten — its token is the birth's. Answers whether it wrote.
+pub async fn refresh_operator_files(
+    ssh: &dyn crate::ssh::SshExec,
+    host: &str,
+) -> Result<bool, IpcError> {
+    use crate::service::provision::{read_host_file, write_host_file};
+    let dir = operator_dir_on(host, ssh).await?;
+    let stamp_path = format!("{dir}/{OPERATOR_FILES_STAMP_PATH}");
+    let on_host = read_host_file(ssh, host, &stamp_path).await?;
+    if !files_need_refresh(&on_host) {
+        return Ok(false);
+    }
+    // The stamp last, so a write cut off half way is tried again next time.
+    for (rel, body) in operator_files() {
+        let path = format!("{dir}/{rel}");
+        let parent = path.rsplit_once('/').map_or(dir.as_str(), |(p, _)| p);
+        write_host_file(ssh, host, parent, &path, body).await?;
+    }
+    Ok(true)
+}
+
+/// PURE: whether a host whose stamp file reads `on_host` (empty when
+/// missing) needs this build's files.
+pub fn files_need_refresh(on_host: &str) -> bool {
+    on_host.trim() != operator_files_stamp().trim()
+}
+
+/// [`refresh_operator_files`] when `host`/`tmux` is the operator's session;
+/// best-effort, so a failed refresh never stops a restart. Called before a
+/// restart relaunches the pane (`sessions::restart_session`), which every
+/// Control restart goes through: the panel's, auto-restore's and Jev's.
+pub async fn refresh_if_operator(
+    store: &Mutex<Store>,
+    ssh: &dyn crate::ssh::SshExec,
+    host: &str,
+    tmux: &str,
+) {
+    let is_operator = store
+        .lock()
+        .ok()
+        .and_then(|s| operator_ref(&s))
+        .is_some_and(|o| o.host_alias == host && o.tmux_name == tmux);
+    if !is_operator {
+        return;
+    }
+    match refresh_operator_files(ssh, host).await {
+        Ok(true) => tracing::info!(
+            host,
+            "[operator] refreshed its CLAUDE.md, commands and skill"
+        ),
+        Ok(false) => {}
+        Err(e) => tracing::warn!(host, "[operator] files not refreshed: {e}"),
+    }
+}
+
+/// The sections other parts of fleet add to Control's CLAUDE.md, each a
+/// `## …` block of its own, after [`claude_md`]. One line per section, so a
+/// new one is a one-line change here and its text stays in its module.
+pub const CLAUDE_MD_SECTIONS: &[&str] = &[crate::service::autonomy::SECTION];
+
+/// The operator's CLAUDE.md as written: [`claude_md`] and every
+/// [`CLAUDE_MD_SECTIONS`] entry, `\n`-separated.
+pub fn claude_md_full() -> &'static str {
+    static FULL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    FULL.get_or_init(|| {
+        std::iter::once(claude_md())
+            .chain(CLAUDE_MD_SECTIONS.iter().copied())
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
 }
 
 /// PURE: the operator's standing instructions.
@@ -412,7 +521,8 @@ pub fn claude_md() -> &'static str {
      1. **Destructive work is proposed, never assumed.** Starting or killing\n\
      a session, deleting, moving, broadcasting, committing and every prompt\n\
      you type into another session stop for a confirmation you do not\n\
-     control. Say plainly what you are about to do and let the dialog do its\n\
+     control, unless your autonomy position lets it through (see Autonomy\n\
+     below). Say plainly what you are about to do and let the dialog do its\n\
      job; do not try to route around a refusal.\n\
      \n\
      2. **This directory is not a repository and you do not write code in\n\

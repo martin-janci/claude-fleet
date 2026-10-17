@@ -2254,6 +2254,15 @@ pub async fn restart_session(
             ),
         }
     };
+    // Control reads its CLAUDE.md, commands and skill as it starts: a
+    // restart is when a prompt fix reaches it (review 2026-10-17, F13).
+    crate::service::operator::refresh_if_operator(
+        store,
+        ssh.as_ref(),
+        &args.host_alias,
+        &args.name,
+    )
+    .await;
     refuse_unvalidated_agent(&agent)?;
     if launch.profile.is_some() && agent == crate::store::AGENT_CLAUDE && kind != "shell" {
         // As `new_session`: no relaunch under a login past its daily limit.
