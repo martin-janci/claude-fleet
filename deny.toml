@@ -31,6 +31,16 @@ ignore = [
   # YAML crate (serde-saphyr); that changes how the files are rendered, so it
   # is its own change, not a CI fix.
   "RUSTSEC-2024-0449",
+  # zip 4.6.1: SUID/SGID bits kept, symlink targets outside the destination,
+  # permissions applied through symlinks (all issued 2026-10-17, fixed only in
+  # zip >= 9). Via tauri-plugin-updater 2.12, whose 2.x line pins zip 4 (the
+  # 3.0 line is alpha). The updater extracts a zip only on Windows, and only
+  # an update whose minisign signature it verified first (our own release
+  # artifact); fleet-update does not use the crate. Drop these entries when
+  # tauri-plugin-updater moves to zip >= 9.
+  "RUSTSEC-2026-0367",
+  "RUSTSEC-2026-0368",
+  "RUSTSEC-2026-0369",
 ]
 
 [licenses]
