@@ -2100,7 +2100,11 @@ automatically on app start.
   its `safe_kill_session`, everything it writes into a session
   (`send_prompt`, `run_prompt`, `queue_prompt`, and `dispatch_task` to a
   worker that already exists: review round 15, F21 — nothing an LLM composes
-  reaches a session without a person), and every tool above return
+  reaches a session without a person; since the 2026-10-17 review's F2 the
+  autonomy position lets those four through into a live session the operator
+  started or briefed at "Within your brief", and a Claude start inside a
+  running mission's grant at "Autopilot" — `guard::operator_must_confirm`),
+  and every tool above return
   `E_CONFIRM_REQUIRED` until a person approves them: on the desktop in its
   dialog or Control's cards, and on a hub from a fleet admin's paired device,
   which lists the waiting calls with `mcp_confirms` (each with `nonce`,

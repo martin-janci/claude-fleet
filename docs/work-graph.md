@@ -1317,7 +1317,11 @@ tidy-up kills: each returns `E_CONFIRM_REQUIRED` until you approve it in the
 desktop's dialog. Since review round 15 (F21) **what it writes waits too**:
 `send_prompt`, `run_prompt`, `queue_prompt` and a `dispatch_task` to a
 worker that already exists, because nothing an agent composes should reach a
-session without you reading it first. The toggle does not lift any of this —
+session without you reading it first — unless you set the autonomy chip to
+Within your brief (prompts and tasks into sessions it started or briefed go
+without a card) or Autopilot (also new sessions inside a mission's grant),
+the 2026-10-17 review's F2. When you approve a card, fleet runs the call and
+tells the agent (F1). The toggle does not lift any of this —
 only a different token does: these tools are `confirm: false`, so the master
 token and your other paired clients send prompts ungated. On a hub there is nobody to approve, so the operator's
 starts and kills are refused (`E_FORBIDDEN`); there it offers archive or
