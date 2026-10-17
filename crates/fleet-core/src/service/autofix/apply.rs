@@ -263,6 +263,72 @@ async fn apply_with(
         .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("no finding {id}")))
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct PassOutcome {
+    pub sync: super::sync::SyncOutcome,
+    pub applied: Vec<i64>,
+}
+
+/// One autofix pass: scan, sync findings, then apply every safe fix that is
+/// eligible to run by itself. Approval fixes are never touched here.
+pub async fn run_pass(
+    store: &Mutex<Store>,
+    exec: &dyn FixExec,
+    live_agents: &[(String, String)],
+    now: i64,
+) -> Result<PassOutcome, IpcError> {
+    run_pass_with(store, exec, live_agents, now, scan_all).await
+}
+
+/// [`run_pass`] with the scan injectable, for tests.
+pub(crate) async fn run_pass_with(
+    store: &Mutex<Store>,
+    exec: &dyn FixExec,
+    live_agents: &[(String, String)],
+    now: i64,
+    scan: impl Fn(&ScanCx) -> Vec<Finding>,
+) -> Result<PassOutcome, IpcError> {
+    // The guard lives only in this block: never held across an await.
+    let (synced, due) = {
+        let s = lock(store)?;
+        let cfg = Config::read(&s);
+        let cx = gather(&s, live_agents, now)?;
+        let found: Vec<_> = scan(&cx)
+            .into_iter()
+            .filter(|f| cfg.detector_on(&f.kind))
+            .collect();
+        let synced = sync(&s, &found, Scope::All, now)?;
+        let due: Vec<i64> = if crate::service::loops::paused(&s) {
+            Vec::new()
+        } else {
+            s.live_autofix_findings()?
+                .into_iter()
+                .filter(|r| {
+                    body_of(r)
+                        .ok()
+                        .and_then(|b| b.fix)
+                        .is_some_and(|f| auto_eligible(r, &f, &cfg, now))
+                })
+                .map(|r| r.id)
+                .collect()
+        };
+        (synced, due)
+    };
+    let mut applied = Vec::new();
+    for id in due {
+        match apply_one(store, exec, id, "auto", live_agents, now).await {
+            Ok(_) => applied.push(id),
+            Err(e) => {
+                tracing::warn!(id, code = %e.code, "[autofix] automatic fix refused: {}", e.message)
+            }
+        }
+    }
+    Ok(PassOutcome {
+        sync: synced,
+        applied,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -534,6 +600,65 @@ mod tests {
         let exec = FakeExec::default();
         apply_one(&store, &exec, id, "test", &[], 20).await.unwrap();
         assert_eq!(exec.updates.load(Ordering::SeqCst), 1);
+        assert_eq!(exec.provisions.load(Ordering::SeqCst), 0);
+    }
+
+    fn hooks_silent_finding() -> Finding {
+        Finding {
+            kind: "host.hooks_silent".into(),
+            subject: "host:h1".into(),
+            host_alias: Some("h1".into()),
+            severity: Severity::Degraded,
+            body: FindingBody {
+                title: "t".into(),
+                explanation: "e".into(),
+                evidence: vec![],
+                fix: Some(safe_fix(true)),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pass_applies_safe_fixes_and_leaves_approval_ones() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.insert_client_token(OPERATOR_CLIENT_NAME, "aa11", "full")
+                .unwrap();
+        }
+        let exec = FakeExec::default();
+        let out = run_pass_with(&store, &exec, &[], 10, |cx| {
+            let mut f = scan_all(cx);
+            f.push(hooks_silent_finding());
+            f
+        })
+        .await
+        .unwrap();
+        assert_eq!(out.applied.len(), 1, "only the safe one");
+        assert_eq!(exec.provisions.load(Ordering::SeqCst), 1);
+        let s = store.lock().unwrap();
+        let op = s
+            .live_autofix_findings()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.kind == "operator_unbound")
+            .unwrap();
+        assert_eq!(op.state, "open", "approval fixes never run by themselves");
+    }
+
+    #[tokio::test]
+    async fn pause_all_stops_autofix() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            crate::service::settings::set(&s, crate::service::settings::AUTOMATION_PAUSED, "true")
+                .unwrap();
+        }
+        let exec = FakeExec::default();
+        let out = run_pass_with(&store, &exec, &[], 10, |_| vec![hooks_silent_finding()])
+            .await
+            .unwrap();
+        assert!(out.applied.is_empty());
         assert_eq!(exec.provisions.load(Ordering::SeqCst), 0);
     }
 }
