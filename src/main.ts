@@ -1,4 +1,6 @@
 import App from './App.svelte';
+import '@fontsource-variable/geist';
+import '@fontsource-variable/geist-mono';
 import './app.css';
 import './lib/controls.css';
 import './lib/loader-kit.css';

@@ -1,0 +1,92 @@
+kind: fleet_agent
+name: proposer
+description: Reads what the fleet's agents concluded and proposed lately, merges repeats, drops what was already decided, and proposes the few next steps worth a person's Approve.
+inputs:
+  - { name: issue_tracker, type: tracker, label: "Issue tracker (optional, for a proposed issue)" }
+  - { name: issue_project, type: text, label: Issue project (optional), help: "e.g. martin-janci/claude-fleet" }
+stores:
+  - { role: proposals, kind: fleet, label: Proposals made before }
+trigger:
+  source: schedule
+  cron: "0 7 * * *"
+run:
+  workspace: home
+  max_turns: 30
+  timeout_secs: 900
+  diagnostics: true
+  context:
+    - { store: proposals, recent: 50 }
+  output_schema:
+    type: object
+    required: [summary, proposals]
+    properties:
+      summary: { type: string, maxLength: 600 }
+      proposals:
+        type: array
+        items:
+          type: object
+          required: [title, kind, why, fingerprint, severity]
+          properties:
+            title: { type: string, maxLength: 160 }
+            kind: { enum: [task, fix, setting, recover, issue] }
+            why: { type: string, maxLength: 1500 }
+            fingerprint: { type: string, maxLength: 120 }
+            severity: { enum: [critical, major, minor] }
+            seen: { type: integer }
+            steps: { type: array, items: { type: string, maxLength: 200 } }
+            project: { type: string, maxLength: 200 }
+            host: { type: string, maxLength: 64 }
+            prompt: { type: string, maxLength: 3000 }
+            settingKey: { type: string, maxLength: 120 }
+            settingValue: { type: string, maxLength: 200 }
+            session: { type: string, maxLength: 120 }
+            issueBody: { type: string, maxLength: 4000 }
+actions:
+  - id: remember
+    each: proposals
+    when: { field: fingerprint, truthy: true }
+    do: record
+    store: proposals
+    key: "{{item.fingerprint}}"
+    value: { title: "{{item.title}}", kind: "{{item.kind}}", proposed: "{{now}}" }
+    auto: true
+  - id: task
+    each: proposals
+    when: { field: kind, eq: task }
+    do: work_task
+    summary: "{{item.title}}"
+    body: "{{item.why}}\n\nFingerprint: {{item.fingerprint}}"
+    steps: "{{item.steps}}"
+  - id: fix
+    each: proposals
+    when: { field: kind, eq: fix }
+    do: fix_session
+    project: "{{item.project}}"
+    host: "{{item.host}}"
+    summary: "{{item.title}}"
+    body: "{{item.prompt}}"
+  - id: tune
+    each: proposals
+    when: { field: kind, eq: setting }
+    do: setting
+    key: "{{item.settingKey}}"
+    value: "{{item.settingValue}}"
+    body: "{{item.title}}: {{item.why}}"
+  - id: recover
+    each: proposals
+    when: { field: kind, eq: recover }
+    do: session_recover
+    target: "{{item.session}}"
+    host: "{{item.host}}"
+    body: "{{item.title}}: {{item.why}}"
+  - id: issue
+    each: proposals
+    when: { field: kind, eq: issue }
+    do: tracker_issue
+    tracker: "{{issue_tracker}}"
+    project: "{{issue_project}}"
+    summary: "{{item.title}}"
+    body: "{{item.issueBody}}"
+limits:
+  max_body_chars: 4000
+  write_projects: ["{{issue_project}}"]

@@ -21,9 +21,9 @@ impl FleetTools {
         host first; or answers: the grant form's)}, definitions (the \
         catalog's fleet agents), form {definition, id?} (a fleet agent's \
         grant form, prefilled from rule id), revoke {id}, pause_all, approve \
-        {id}, reject {id}, run {id, request?} (a manual or scheduled fleet \
-        agent, now). The owner's own device; writes need a trusted full \
-        device.")]
+        {id}, reject {id}, run {id, request?, run_scope? {minutes?, host?, \
+        session?, component?}} (a manual or scheduled fleet agent, now). \
+        The owner's own device; writes need a trusted full device.")]
     pub(super) async fn agents(
         &self,
         Extension(caller): Extension<Caller>,
