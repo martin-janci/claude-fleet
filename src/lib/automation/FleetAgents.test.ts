@@ -39,6 +39,7 @@ beforeEach(() => {
     if (cmd !== 'agents_fleet') return { rules: [], jobs: [], pending: [] };
     if (a.action === 'definitions')
       return [
+        { name: 'self-debug', description: 'Reads the fleet\'s logs', trigger: 'manual', problems: [], writes: '' },
         { name: 'l2-support', description: 'L2 investigations', trigger: 'tracker_comments', problems: [], writes: 'It may write: tracker comment.' },
         { name: 'broken', description: 'x', trigger: null, problems: ['trigger: needs query'], writes: '' },
       ];
@@ -52,11 +53,11 @@ describe('the fleet agents on the Agents tab', () => {
   it('lists the catalog definitions with their instances', async () => {
     render(FleetAgents, { props: { rules: [rule(), rule({ id: 3, agent: 'review', definition: undefined })] } });
     const defs = await screen.findAllByTestId('fleet-agent');
-    expect(defs).toHaveLength(2);
-    expect(defs[0].textContent).toContain('tracker_comments · It may write: tracker comment.');
+    expect(defs).toHaveLength(3);
+    expect(defs[1].textContent).toContain('tracker_comments · It may write: tracker comment.');
     expect(screen.getByTestId('fleet-agent-problems').textContent).toContain('trigger: needs query');
     const buttons = screen.getAllByTestId('fleet-agent-new') as HTMLButtonElement[];
-    expect(buttons[1].disabled).toBe(true);
+    expect(buttons[2].disabled).toBe(true);
     const inst = screen.getAllByTestId('fleet-instance');
     expect(inst).toHaveLength(1);
     expect(inst[0].textContent).toContain('l2-prod at propose on mercury');
@@ -65,8 +66,8 @@ describe('the fleet agents on the Agents tab', () => {
 
   it('opens the grant form and grants from its answers', async () => {
     render(FleetAgents, { props: { rules: [] } });
-    await fireEvent.click((await screen.findAllByTestId('fleet-agent-new'))[0]);
-    expect(invoke).toHaveBeenCalledWith('agents_fleet', { action: 'form', definition: 'l2-support', id: null, answers: null });
+    await fireEvent.click((await screen.findAllByTestId('fleet-agent-new'))[1]);
+    expect(invoke).toHaveBeenCalledWith('agents_fleet', { action: 'form', definition: 'l2-support', id: null, answers: null, request: null, runScope: null });
     const name = await screen.findByTestId('form-field-f_instance');
     await fireEvent.input(name, { target: { value: 'l2-prod' } });
     await fireEvent.keyDown(name, { key: 'Enter' });
@@ -76,6 +77,8 @@ describe('the fleet agents on the Agents tab', () => {
         definition: 'l2-support',
         id: null,
         answers: { f_instance: 'l2-prod' },
+        request: null,
+        runScope: null,
       }),
     );
     await waitFor(() => expect(screen.queryByTestId('form-field-f_instance')).toBeNull());
@@ -84,10 +87,50 @@ describe('the fleet agents on the Agents tab', () => {
   it('edits and revokes an instance', async () => {
     render(FleetAgents, { props: { rules: [rule()] } });
     await fireEvent.click(await screen.findByTestId('fleet-instance-edit'));
-    expect(invoke).toHaveBeenCalledWith('agents_fleet', { action: 'form', definition: 'l2-support', id: 12, answers: null });
+    expect(invoke).toHaveBeenCalledWith('agents_fleet', { action: 'form', definition: 'l2-support', id: 12, answers: null, request: null, runScope: null });
     await fireEvent.click(screen.getByTestId('fleet-instance-revoke'));
     await waitFor(() => expect(screen.getByTestId('fleet-agents-note').textContent).toBe('Instance 12 revoked.'));
-    expect(invoke).toHaveBeenCalledWith('agents_fleet', { action: 'revoke', definition: null, id: 12, answers: null });
+    expect(invoke).toHaveBeenCalledWith('agents_fleet', { action: 'revoke', definition: null, id: 12, answers: null, request: null, runScope: null });
+  });
+
+  it('runs a manual agent with what to look into and where', async () => {
+    render(FleetAgents, { props: { rules: [rule({ id: 21, scope: 'debug', definition: 'self-debug' })] } });
+    await fireEvent.click(await screen.findByTestId('fleet-instance-run'));
+    const panel = screen.getByTestId('fleet-run-panel');
+    expect(panel).toBeTruthy();
+    await fireEvent.input(screen.getByTestId('fleet-run-request'), { target: { value: '  Why is htz slow?  ' } });
+    await fireEvent.change(screen.getByTestId('fleet-run-window'), { target: { value: '360' } });
+    await fireEvent.change(screen.getByTestId('fleet-run-component'), { target: { value: 'host' } });
+    await fireEvent.input(screen.getByTestId('fleet-run-host'), { target: { value: 'htz' } });
+    await fireEvent.click(screen.getByTestId('fleet-run-go'));
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('agents_fleet', {
+        action: 'run',
+        definition: null,
+        id: 21,
+        answers: null,
+        request: 'Why is htz slow?',
+        runScope: { minutes: 360, host: 'htz', component: 'host' },
+      }),
+    );
+    await waitFor(() => expect(screen.queryByTestId('fleet-run-panel')).toBeNull());
+    expect(screen.getByTestId('fleet-agents-note').textContent).toBe('Queued: it runs on the next pass.');
+  });
+
+  it('runs with no request or scope when none is given', async () => {
+    render(FleetAgents, { props: { rules: [rule({ id: 21, scope: 'debug', definition: 'self-debug' })] } });
+    await fireEvent.click(await screen.findByTestId('fleet-instance-run'));
+    await fireEvent.click(screen.getByTestId('fleet-run-go'));
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('agents_fleet', {
+        action: 'run',
+        definition: null,
+        id: 21,
+        answers: null,
+        request: null,
+        runScope: null,
+      }),
+    );
   });
 
   it('names a rule by its agent or its definition', () => {

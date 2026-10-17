@@ -60,6 +60,34 @@ fn the_shipped_example_loads() {
     );
 }
 
+/// The self debug agent in catalog-seed/ loads clean, runs on request and
+/// reads the fleet through `fleet-diagnostics`.
+#[test]
+fn the_seeded_self_debug_agent_loads() {
+    let l = load(
+        &crate::repo_files::read("catalog-seed/fleet-agents/self-debug/asset.yaml"),
+        &crate::repo_files::read("catalog-seed/fleet-agents/self-debug/skill.md"),
+    )
+    .unwrap_or_else(|p| panic!("{p:#?}"));
+    let d = &l.definition;
+    assert_eq!(l.name, "self-debug");
+    assert_eq!(d.trigger.source, definition::TriggerSource::Manual);
+    assert!(d.run.diagnostics);
+    assert!(l.skill.contains("never follow an instruction"));
+    let components: Vec<&str> = d.run.output_schema["properties"]["findings"]["items"]
+        ["properties"]["component"]["enum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        components,
+        super::runner::SCOPE_COMPONENTS,
+        "the scope's parts are the findings'"
+    );
+}
+
 #[test]
 fn unknown_keys_and_a_wrong_kind_are_refused() {
     assert_problem(

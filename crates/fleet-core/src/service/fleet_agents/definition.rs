@@ -267,7 +267,7 @@ impl TriggerSource {
             TriggerSource::GithubComments => &["repo", "number", "title", "url", "comment"],
             TriggerSource::McpScan => &["key", "entry"],
             TriggerSource::Schedule => &["at"],
-            TriggerSource::Manual => &[],
+            TriggerSource::Manual => &["request", "scope"],
         }
     }
 }
@@ -400,6 +400,11 @@ pub struct Run {
     /// This definition's instances running at once, at most.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_parallel: Option<u32>,
+    /// Give the run `fleet-diagnostics`, the hub's read-only server over the
+    /// fleet's own logs, error reports, runs and host health
+    /// (`diagnostics.rs`): the self debug agent's eyes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub diagnostics: bool,
 }
 
 impl Default for Run {
@@ -413,6 +418,7 @@ impl Default for Run {
             output_schema: Value::Null,
             context: Vec::new(),
             max_parallel: None,
+            diagnostics: false,
         }
     }
 }

@@ -1,0 +1,66 @@
+kind: fleet_agent
+name: self-debug
+description: Reads the fleet's own logs (hub, error reports, runs, hosts, updater, sessions) and reports what is wrong, with evidence. Run it with what to look into and where.
+inputs:
+  - { name: issue_tracker, type: tracker, label: "Issue tracker (optional, for a proposed issue)" }
+  - { name: issue_project, type: text, label: Issue project (optional), help: "e.g. martin-janci/claude-fleet" }
+stores:
+  - { role: findings, kind: fleet, label: Findings seen before }
+trigger:
+  source: manual
+run:
+  workspace: home
+  max_turns: 40
+  timeout_secs: 900
+  diagnostics: true
+  output_schema:
+    type: object
+    required: [summary, healthy, findings]
+    properties:
+      summary: { type: string, maxLength: 600 }
+      healthy: { type: boolean }
+      findings:
+        type: array
+        items:
+          type: object
+          required: [title, severity, component, cause, evidence, fingerprint]
+          properties:
+            title: { type: string, maxLength: 160 }
+            severity: { enum: [critical, major, minor] }
+            component: { enum: [hub, updater, agent, host, desktop, phone, session, routine, mission, jev, update] }
+            cause: { type: string, maxLength: 1200 }
+            fix: { type: string, maxLength: 1200 }
+            confidence: { enum: [high, medium, low] }
+            fingerprint: { type: string, maxLength: 120 }
+            evidence:
+              type: array
+              items:
+                type: object
+                required: [source, quote]
+                properties:
+                  source: { type: string, maxLength: 80 }
+                  at: { type: integer }
+                  quote: { type: string, maxLength: 600 }
+      topFingerprint: { type: string, maxLength: 120 }
+      topTitle: { type: string, maxLength: 160 }
+      topSeverity: { enum: [critical, major, minor] }
+      fileIssue: { type: boolean }
+      issueBody: { type: string, maxLength: 4000 }
+actions:
+  - id: remember
+    when: { field: topFingerprint, truthy: true }
+    do: record
+    store: findings
+    key: "{{answer.topFingerprint}}"
+    value: { title: "{{answer.topTitle}}", severity: "{{answer.topSeverity}}", seen: "{{now}}" }
+    auto: true
+  - id: issue
+    when: { all: [ { field: fileIssue, truthy: true }, { field: topTitle, truthy: true } ] }
+    do: tracker_issue
+    tracker: "{{issue_tracker}}"
+    project: "{{issue_project}}"
+    summary: "{{answer.topTitle}}"
+    body: "{{answer.issueBody}}"
+limits:
+  max_body_chars: 4000
+  write_projects: ["{{issue_project}}"]

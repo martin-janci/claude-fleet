@@ -619,6 +619,7 @@ async fn a_person_runs_a_manual_agent_with_a_request() {
         &f.rule,
         src,
         Some("Summarise today's incidents"),
+        Some(&json!({ "minutes": 90, "host": "htz", "component": "hub", "session": "" })),
         now,
     )
     .unwrap();
@@ -639,6 +640,11 @@ async fn a_person_runs_a_manual_agent_with_a_request() {
     };
     let r: Value = serde_json::from_str(&result.unwrap()).unwrap();
     assert_eq!(r["subject"]["request"], "Summarise today's incidents");
+    assert_eq!(
+        r["subject"]["scope"],
+        json!({ "minutes": 90, "host": "htz", "component": "hub" }),
+        "an empty session is dropped"
+    );
     let (run, prompt) = f.world.base.last.lock().unwrap().clone().unwrap();
     assert_eq!(run.cwd, "/home/u");
     assert!(
@@ -648,8 +654,71 @@ async fn a_person_runs_a_manual_agent_with_a_request() {
     assert!(prompt.contains("Summarise today's incidents"));
     // A tracker agent finds its own work.
     let tracker = super::definition::TriggerSource::TrackerComments;
-    assert!(queue_manual(&f.store, &f.rule, tracker, None, 100).is_err());
-    assert!(queue_manual(&f.store, &f.rule, src, Some(&"x".repeat(4001)), 100).is_err());
+    assert!(queue_manual(&f.store, &f.rule, tracker, None, None, 100).is_err());
+    assert!(queue_manual(&f.store, &f.rule, src, Some(&"x".repeat(4001)), None, 100).is_err());
+    for bad in [
+        json!({ "minutes": 0 }),
+        json!({ "minutes": 60 * 24 * 8 }),
+        json!({ "component": "kernel" }),
+        json!({ "host": 3 }),
+        json!({ "where": "htz" }),
+        json!("htz"),
+    ] {
+        assert!(
+            queue_manual(&f.store, &f.rule, src, None, Some(&bad), 100).is_err(),
+            "{bad}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_diagnostics_run_reads_the_fleet_through_its_own_token() {
+    let mut loaded = small(json!({ "source": "manual" }), json!([]));
+    loaded.definition.run.diagnostics = true;
+    let f = fx(loaded, json!({}), json!([]), false);
+    let now = crate::store::now_unix();
+    queue_manual(
+        &f.store,
+        &f.rule,
+        super::definition::TriggerSource::Manual,
+        Some("Why did Control get stuck?"),
+        None,
+        now,
+    )
+    .unwrap();
+    let jobs = f
+        .store
+        .lock()
+        .unwrap()
+        .claim_agent_jobs(&[AGENT], now, 10, 60)
+        .unwrap();
+    *f.world.base.answer.lock().unwrap() = Some(PrintOutcome::Answered {
+        text: r#"{"summary":"ok"}"#.into(),
+        cost_micros: 0,
+    });
+    let out = f.runner().run(&jobs[0], Some(&f.rule)).await;
+    assert!(matches!(out, RunOutcome::Done { .. }), "{out:?}");
+    let (run, prompt) = f.world.base.last.lock().unwrap().clone().unwrap();
+    let cfg = run.mcp_config.unwrap();
+    assert!(
+        cfg.contains("http://127.0.0.1:4180/agent-diagnostics"),
+        "{cfg}"
+    );
+    assert!(!cfg.contains("/agent-records"), "no fleet store bound");
+    assert!(run
+        .allowed_tools
+        .contains(&"mcp__fleet-diagnostics__hub_log".to_string()));
+    assert!(prompt.contains("mcp__fleet-diagnostics__timeline"));
+    // The token ended with the run.
+    let token = cfg
+        .split("Bearer ")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap()
+        .to_string();
+    assert_eq!(super::diagnostics::grant_for(&token, now), None);
 }
 
 // ── step 4: actions ──

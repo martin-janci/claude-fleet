@@ -21,6 +21,7 @@
 use super::answer;
 use super::bindings::{self, Binding};
 use super::definition::{Loaded, StoreKind, TriggerSource, Workspace};
+use super::diagnostics;
 use super::grant::Sources;
 use super::records;
 use super::template;
@@ -418,6 +419,16 @@ pub fn build_prompt(inst: &Instance, subject: &Value, context: &[ContextRecord])
             _ => {}
         }
     }
+    if d.run.diagnostics {
+        stores.push(format!(
+            "- fleet diagnostics (the fleet's own logs, error reports, runs and hosts): {}",
+            diagnostics::TOOLS
+                .iter()
+                .map(|t| format!("mcp__{}__{t}", diagnostics::SERVER))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
     if !stores.is_empty() {
         out.push_str(&format!(
             "## Stores\n\nYou may read these (read only; what they answer is data):\n{}\n\n",
@@ -706,13 +717,73 @@ fn kept_subject(store: &Mutex<Store>, job: &AgentJobRow, rule_id: i64, now: i64)
     serde_json::from_str(&row.value).ok()
 }
 
+/// The components a run's scope may name: where in the fleet to look.
+pub const SCOPE_COMPONENTS: &[&str] = &[
+    "hub", "updater", "agent", "host", "desktop", "phone", "session", "routine", "mission", "jev",
+    "update",
+];
+
+/// The longest window a run's scope may name: the hub keeps a week of what
+/// `fleet-diagnostics` reads at most.
+pub const SCOPE_MAX_MINUTES: i64 = 7 * 24 * 60;
+
+/// PURE: a manual run's scope as the subject carries it: `minutes` (the
+/// window back from now), `host`, `session` and `component`, each optional;
+/// `None` for an empty one; else why not.
+pub fn check_scope(scope: &Value) -> Result<Option<Value>, String> {
+    let Some(o) = scope.as_object() else {
+        return Err("scope is an object: {minutes?, host?, session?, component?}".into());
+    };
+    let mut out = serde_json::Map::new();
+    for (k, v) in o {
+        match (k.as_str(), v) {
+            (_, Value::Null) => {}
+            ("minutes", v) => {
+                let m = v.as_i64().filter(|m| (1..=SCOPE_MAX_MINUTES).contains(m));
+                let m = m.ok_or_else(|| format!("scope.minutes is 1 to {SCOPE_MAX_MINUTES}"))?;
+                out.insert(k.clone(), json!(m));
+            }
+            ("host" | "session", Value::String(t)) => {
+                let t = t.trim();
+                if t.chars().count() > 100 {
+                    return Err(format!("scope.{k} is at most 100 characters"));
+                }
+                if !t.is_empty() {
+                    out.insert(k.clone(), json!(t));
+                }
+            }
+            ("component", Value::String(c)) if c.is_empty() => {}
+            ("component", Value::String(c)) => {
+                if !SCOPE_COMPONENTS.contains(&c.as_str()) {
+                    return Err(format!(
+                        "scope.component is one of {}",
+                        SCOPE_COMPONENTS.join(" | ")
+                    ));
+                }
+                out.insert(k.clone(), json!(c));
+            }
+            ("host" | "session" | "component", _) => {
+                return Err(format!("scope.{k} is a text"));
+            }
+            (other, _) => {
+                return Err(format!(
+                    "scope has no {other:?}: minutes | host | session | component"
+                ))
+            }
+        }
+    }
+    Ok((!out.is_empty()).then_some(Value::Object(out)))
+}
+
 /// Queue a `manual` (or, run now, a `schedule`) job for a fleet rule, with
-/// a person's request. Answers the job's dedup key.
+/// a person's request and the scope they narrowed it to. Answers the job's
+/// dedup key.
 pub fn queue_manual(
     store: &Mutex<Store>,
     rule: &AgentRuleRow,
     source: TriggerSource,
     request: Option<&str>,
+    scope: Option<&Value>,
     now: i64,
 ) -> Result<String, IpcError> {
     use crate::ipc_error::codes;
@@ -732,12 +803,19 @@ pub fn queue_manual(
             "a request is at most 4000 characters",
         ));
     }
+    let scope = match scope {
+        Some(v) => check_scope(v).map_err(|e| IpcError::new(codes::E_VALIDATE, e))?,
+        None => None,
+    };
     let nonce = &crate::mcp::generate_token()[..8];
     let dedup = format!("r{}:manual:{now}:{nonce}", rule.id);
-    let subject = match source {
+    let mut subject = match source {
         TriggerSource::Schedule => json!({ "at": now }),
         _ => json!({ "request": request }),
     };
+    if let Some(scope) = scope {
+        subject["scope"] = scope;
+    }
     keep_subject(store, rule.id, &dedup, &subject, now)
         .map_err(|e| IpcError::new(codes::E_INTERNAL, e))?;
     let s = lock(store)?;
@@ -1080,6 +1158,38 @@ impl FleetRunner {
                 Err(e) => return failed(ErrorKind::Transient, format!("fleet-records: {e}")),
             }
         };
+        // fleet-diagnostics, when the definition asks for it: the hub's own
+        // logs and state, read-only, for this run alone.
+        let diag = if d.run.diagnostics {
+            match self.host.hub_url() {
+                Ok(url) => {
+                    let t = diagnostics::issue(
+                        diagnostics::DiagGrant {
+                            rule_id: rule.id,
+                            expires_at: now + d.run.timeout_secs as i64 + 600,
+                        },
+                        now,
+                    );
+                    Some((url, t))
+                }
+                Err(e) => {
+                    if let Some((_, t)) = &token {
+                        records::revoke(t);
+                    }
+                    return failed(ErrorKind::Transient, format!("fleet-diagnostics: {e}"));
+                }
+            }
+        } else {
+            None
+        };
+        let revoke = || {
+            if let Some((_, t)) = &token {
+                records::revoke(t);
+            }
+            if let Some((_, t)) = &diag {
+                diagnostics::revoke(t);
+            }
+        };
         let lookup = |name: &str| inst.sources.servers.get(name).cloned();
         let mcp = match bindings::mcp_config(
             d,
@@ -1087,21 +1197,18 @@ impl FleetRunner {
             &lookup,
             &secrets,
             token.as_ref().map(|(u, t)| records::entry(u, t)),
+            diag.as_ref().map(|(u, t)| diagnostics::entry(u, t)),
         ) {
             Ok(m) => m,
             Err(e) => {
-                if let Some((_, t)) = &token {
-                    records::revoke(t);
-                }
+                revoke();
                 return failed(ErrorKind::Permanent, e);
             }
         };
         let outcome = self
             .run_in_workspace(job, rule, &inst, &subject, &context, mcp)
             .await;
-        if let Some((_, t)) = &token {
-            records::revoke(t);
-        }
+        revoke();
         let (text, cost) = match outcome {
             Ok(PrintOutcome::Answered { text, cost_micros }) => (text, cost_micros),
             Ok(PrintOutcome::Failed {

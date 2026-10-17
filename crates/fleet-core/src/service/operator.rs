@@ -278,7 +278,7 @@ pub const BRAINSTORM_SKILL_PATH: &str = ".claude/skills/fleet-brainstorm/SKILL.m
 /// (`control_commands_are_mirrored_in_the_menu`). The desktop runs `/task`,
 /// `/done`, `/assign` and `/start` itself with the same grammar
 /// (`src/lib/control_slash.ts`, gap plan G3.9); the phone sends them here.
-pub const CONTROL_COMMANDS: [(&str, &str); 8] = [
+pub const CONTROL_COMMANDS: [(&str, &str); 9] = [
     (
         "task",
         "---\n\
@@ -374,6 +374,22 @@ pub const CONTROL_COMMANDS: [(&str, &str); 8] = [
          batch (key, session, host, reason and action) and wait for the person's \
          go. Then apply it in ONE `work_link` action `tidy_apply` call, keeping \
          each candidate's action. If there is nothing to tidy, say so in one line.\n",
+    ),
+    (
+        "debug",
+        "---\n\
+         description: Look for problems in the fleet logs\n\
+         argument-hint: [@host] [30m|6h|3d] [part:<component>] [session:<name>] <focus>\n\
+         ---\n\
+         Run the self debug agent on \"$ARGUMENTS\". An `@host` word is the \
+         scope's `host`, a `30m`, `6h` or `3d` word its `minutes`, `part:<x>` its \
+         `component` and `session:<name>` its `session`; the rest is the request. \
+         Find the active rule whose definition is `self-debug` with `agents` \
+         action `status` agent `fleet`; when there is none, say it is added under \
+         Automation, Agents, and stop. Otherwise call `agents` action `run` with \
+         its `id`, the `request` and the `run_scope`, and say in one line that it \
+         is queued and where its findings appear (Automation, Runs). Change \
+         nothing else.\n",
     ),
 ];
 

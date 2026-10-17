@@ -164,8 +164,8 @@ fn check_mcp<'a>(
         out.push(format!(
             "{at}: binding name {name:?} is [a-z][a-z0-9_-]*, at most 40"
         ));
-    } else if name == RECORDS_SERVER {
-        out.push(format!("{at}: {RECORDS_SERVER} is fleet's own server"));
+    } else if name == RECORDS_SERVER || name == super::diagnostics::SERVER {
+        out.push(format!("{at}: {name} is fleet's own server"));
     }
     if names.contains(&name) {
         out.push(format!("{at}: binding name {name} is used twice"));
@@ -334,13 +334,15 @@ impl std::fmt::Debug for RunMcp {
 
 /// PURE: a run's MCP servers: each mcp binding rendered, plus
 /// `records` (the [`RECORDS_SERVER`] entry) when the rule binds a fleet
-/// namespace. `server` looks an asset up as in [`check`].
+/// namespace, and `diagnostics` (`fleet-diagnostics`) when the definition
+/// sets `run.diagnostics`. `server` looks an asset up as in [`check`].
 pub fn mcp_config(
     def: &Definition,
     bindings: &[Binding],
     server: &dyn Fn(&str) -> Option<AssetSpec>,
     secrets: &BTreeMap<String, String>,
     records: Option<Value>,
+    diagnostics: Option<Value>,
 ) -> Result<RunMcp, String> {
     let mut servers = Map::new();
     let mut allowed = Vec::new();
@@ -365,6 +367,11 @@ pub fn mcp_config(
                 .iter()
                 .map(|t| format!("mcp__{RECORDS_SERVER}__{t}")),
         );
+    }
+    if let Some(d) = diagnostics {
+        use super::diagnostics::{SERVER, TOOLS};
+        servers.insert(SERVER.into(), d);
+        allowed.extend(TOOLS.iter().map(|t| format!("mcp__{SERVER}__{t}")));
     }
     Ok(RunMcp {
         config: (!servers.is_empty()).then(|| json!({ "mcpServers": servers }).to_string()),
@@ -555,6 +562,7 @@ mod tests {
             &lookup,
             &secrets,
             Some(json!({ "type": "http", "url": "u" })),
+            Some(json!({ "type": "http", "url": "d" })),
         )
         .unwrap();
         assert_eq!(
@@ -563,17 +571,27 @@ mod tests {
                 "mcp__logs-prod__search_logs",
                 "mcp__kb__search_docs",
                 "mcp__fleet-records__get",
-                "mcp__fleet-records__find"
+                "mcp__fleet-records__find",
+                "mcp__fleet-diagnostics__hub_log",
+                "mcp__fleet-diagnostics__errors",
+                "mcp__fleet-diagnostics__timeline",
+                "mcp__fleet-diagnostics__fleet",
+                "mcp__fleet-diagnostics__host_log",
+                "mcp__fleet-diagnostics__session",
+                "mcp__fleet-diagnostics__client_log"
             ]
         );
         let cfg: Value = serde_json::from_str(run.config.as_deref().unwrap()).unwrap();
         let names: Vec<&String> = cfg["mcpServers"].as_object().unwrap().keys().collect();
-        assert_eq!(names, ["fleet-records", "kb", "logs-prod"]);
+        assert_eq!(
+            names,
+            ["fleet-diagnostics", "fleet-records", "kb", "logs-prod"]
+        );
         assert!(
             !format!("{run:?}").contains("/d/dist"),
             "Debug prints no config"
         );
-        let none = mcp_config(&def(), &[], &lookup, &secrets, None).unwrap();
+        let none = mcp_config(&def(), &[], &lookup, &secrets, None, None).unwrap();
         assert_eq!((none.config, none.allowed_tools.len()), (None, 0));
     }
 }
