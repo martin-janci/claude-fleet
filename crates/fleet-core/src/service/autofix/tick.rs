@@ -1,6 +1,6 @@
 //! The autofix loop: one pass per minute on the reconcile tick, detached.
 
-use super::apply::{run_pass, SshFixExec};
+use super::apply::{live_agents, run_pass, SshFixExec};
 use crate::ipc_error::lock;
 use crate::ssh::SshClient;
 use crate::store::{now_unix, Store};
@@ -44,15 +44,7 @@ pub fn maybe_run(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) {
     let ssh = Arc::clone(ssh);
     tokio::spawn(async move {
         let _guard = guard;
-        let live: Vec<(String, String)> = ssh
-            .agent_registry()
-            .map(|r| {
-                r.snapshot()
-                    .into_iter()
-                    .map(|a| (a.alias, a.agent_version))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let live = live_agents(&ssh);
         let exec = SshFixExec {
             store: &store,
             ssh: &*ssh,

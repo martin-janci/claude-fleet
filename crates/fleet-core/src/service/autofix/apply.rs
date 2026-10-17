@@ -4,7 +4,7 @@ use super::sync::{sync, Scope};
 use super::{detector_of, scan_all, Finding, FindingBody, Fix, FixPlan, Safety, ScanCx};
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::settings;
-use crate::ssh::SshExec;
+use crate::ssh::{SshClient, SshExec};
 use crate::store::{AdminEvent, AutofixRow, Store};
 use std::sync::Mutex;
 
@@ -57,6 +57,18 @@ pub fn auto_eligible(row: &AutofixRow, fix: &Fix, cfg: &Config, now: i64) -> boo
 pub trait FixExec: Send + Sync {
     async fn provision_content(&self, host: &str) -> Result<(), IpcError>;
     async fn update_agent(&self, host: &str) -> Result<(), IpcError>;
+}
+
+/// The connected agents as `(alias, agent version)`, for the re-scan.
+pub fn live_agents(ssh: &SshClient) -> Vec<(String, String)> {
+    ssh.agent_registry()
+        .map(|r| {
+            r.snapshot()
+                .into_iter()
+                .map(|a| (a.alias, a.agent_version))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub struct SshFixExec<'a> {
