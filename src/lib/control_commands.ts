@@ -21,4 +21,5 @@ export const CONTROL_COMMANDS: readonly SlashCommand[] = [
   { name: 'graph', description: 'Show a mission task graph', args: true, usage: '#KEY or a mission', source: 'command' },
   { name: 'tidy', description: 'Tidy up done tickets', args: true, usage: 'optional filter', source: 'command' },
   { name: 'debug', description: 'Look for problems in the fleet logs', args: true, usage: '[@host] [6h] [part:<component>] [session:<name>] <focus>', source: 'command' },
+  { name: 'propose', description: 'Propose next steps from what the agents found', args: true, usage: '<focus>', source: 'command' },
 ];

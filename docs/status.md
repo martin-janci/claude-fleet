@@ -1055,7 +1055,23 @@ secret the store knows and capped at 48 KiB. A manual run takes a scope
 component), from Run now's panel or `/debug` in Control. The
 `self-debug` definition ships in `catalog-seed/fleet-agents/self-debug/`
 (findings kept in a `findings` store, a tracker issue only proposed).
-Not built yet: the phone's log ring and its Run with focus (fleet-mobile).
+The phone's log ring, Run with focus and findings card are fleet-mobile#233.
+
+Proposals from analysis (same thread, Martin's "Both"): four fleet-own
+action kinds, `work_task`, `fix_session`, `setting` and `session_recover`
+(`fleet_agents/fleet_ops.rs`), run only after a person's Approve through
+the same services as the matching buttons (`settings_review` as
+`Actor::Agent`, which refuses `AiPolicy::Never` and owned keys;
+`restore_host_sessions` / `restart_session`; `start_work`). Only
+`work_task` may be `auto`. An action's `each: <answer array>` fans it out
+per item (`{{item.…}}`, `when` per item, at most 10), so self-debug
+proposes one step per finding. `fleet-diagnostics` adds `analyses` (recent
+fleet-agent answers with their findings) and `proposals` (the last 30
+days of agent actions and what a person did). Three more seeds:
+`proposer` (daily 07:00 and `/propose <focus>`; merges by fingerprint,
+skips pending, done, or rejected in the last 14 days; at most five),
+`simplify` and `refactor` (manual, read a project's checkout, propose a
+task or fix session per finding). No migration.
 
 Session state machine hardening (plan A, #343) is landed: a `working` row
 with no activity for `reconcile.stale_working_secs` turns `idle` with

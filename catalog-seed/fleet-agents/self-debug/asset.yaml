@@ -41,6 +41,14 @@ run:
                   source: { type: string, maxLength: 80 }
                   at: { type: integer }
                   quote: { type: string, maxLength: 600 }
+            next: { enum: [none, task, fix, setting, recover] }
+            steps: { type: array, items: { type: string, maxLength: 200 } }
+            project: { type: string, maxLength: 200 }
+            host: { type: string, maxLength: 64 }
+            prompt: { type: string, maxLength: 3000 }
+            settingKey: { type: string, maxLength: 120 }
+            settingValue: { type: string, maxLength: 200 }
+            session: { type: string, maxLength: 120 }
       topFingerprint: { type: string, maxLength: 120 }
       topTitle: { type: string, maxLength: 160 }
       topSeverity: { enum: [critical, major, minor] }
@@ -48,12 +56,42 @@ run:
       issueBody: { type: string, maxLength: 4000 }
 actions:
   - id: remember
-    when: { field: topFingerprint, truthy: true }
+    each: findings
+    when: { field: fingerprint, truthy: true }
     do: record
     store: findings
-    key: "{{answer.topFingerprint}}"
-    value: { title: "{{answer.topTitle}}", severity: "{{answer.topSeverity}}", seen: "{{now}}" }
+    key: "{{item.fingerprint}}"
+    value: { title: "{{item.title}}", severity: "{{item.severity}}", component: "{{item.component}}", seen: "{{now}}" }
     auto: true
+  - id: task
+    each: findings
+    when: { field: next, eq: task }
+    do: work_task
+    summary: "{{item.title}}"
+    body: "{{item.cause}}\n\nFix: {{item.fix}}\n\nFingerprint: {{item.fingerprint}}"
+    steps: "{{item.steps}}"
+  - id: fix
+    each: findings
+    when: { field: next, eq: fix }
+    do: fix_session
+    project: "{{item.project}}"
+    host: "{{item.host}}"
+    summary: "{{item.title}}"
+    body: "{{item.prompt}}"
+  - id: tune
+    each: findings
+    when: { field: next, eq: setting }
+    do: setting
+    key: "{{item.settingKey}}"
+    value: "{{item.settingValue}}"
+    body: "{{item.title}}: {{item.cause}}"
+  - id: recover
+    each: findings
+    when: { field: next, eq: recover }
+    do: session_recover
+    target: "{{item.session}}"
+    host: "{{item.host}}"
+    body: "{{item.title}}: {{item.cause}}"
   - id: issue
     when: { all: [ { field: fileIssue, truthy: true }, { field: topTitle, truthy: true } ] }
     do: tracker_issue

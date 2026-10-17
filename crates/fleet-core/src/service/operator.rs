@@ -278,7 +278,7 @@ pub const BRAINSTORM_SKILL_PATH: &str = ".claude/skills/fleet-brainstorm/SKILL.m
 /// (`control_commands_are_mirrored_in_the_menu`). The desktop runs `/task`,
 /// `/done`, `/assign` and `/start` itself with the same grammar
 /// (`src/lib/control_slash.ts`, gap plan G3.9); the phone sends them here.
-pub const CONTROL_COMMANDS: [(&str, &str); 9] = [
+pub const CONTROL_COMMANDS: [(&str, &str); 10] = [
     (
         "task",
         "---\n\
@@ -390,6 +390,19 @@ pub const CONTROL_COMMANDS: [(&str, &str); 9] = [
          its `id`, the `request` and the `run_scope`, and say in one line that it \
          is queued and where its findings appear (Automation, Runs). Change \
          nothing else.\n",
+    ),
+    (
+        "propose",
+        "---\n\
+         description: Propose next steps from what the agents found\n\
+         argument-hint: <focus>\n\
+         ---\n\
+         Run the proposer now, focused on \"$ARGUMENTS\" when it is not empty. \
+         Find the active rule whose definition is `proposer` with `agents` \
+         action `status` agent `fleet`; when there is none, say it is added under \
+         Automation, Agents, and stop. Otherwise call `agents` action `run` with \
+         its `id` and the `request`, and say in one line that it is queued and \
+         that its proposals wait in the Inbox for Approve. Change nothing else.\n",
     ),
 ];
 

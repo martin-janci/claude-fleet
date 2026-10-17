@@ -33,6 +33,7 @@ pub mod answer;
 pub mod bindings;
 pub mod definition;
 pub mod diagnostics;
+pub mod fleet_ops;
 pub mod form;
 pub mod github;
 pub mod grant;

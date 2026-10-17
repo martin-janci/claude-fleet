@@ -107,6 +107,8 @@ struct World {
     comments: Mutex<Vec<crate::service::agents::review::PrComment>>,
     /// GitHub writes, in order.
     gh_writes: Mutex<Vec<String>>,
+    /// Fleet-own actions carried out, in order.
+    fleet_ops: Mutex<Vec<super::actions::FleetOp>>,
 }
 
 #[async_trait::async_trait]
@@ -191,6 +193,10 @@ impl FleetHost for World {
     fn base(&self) -> &dyn SupportHost {
         &self.base
     }
+    async fn fleet_op(&self, op: super::actions::FleetOp) -> Result<String, String> {
+        self.fleet_ops.lock().unwrap().push(op);
+        Ok("done".into())
+    }
 }
 
 fn server(placeholder: &str) -> AssetSpec {
@@ -272,6 +278,7 @@ fn fx(loaded: Loaded, config: Value, bindings: Value, project: bool) -> Fx {
         prs: Mutex::default(),
         comments: Mutex::default(),
         gh_writes: Mutex::default(),
+        fleet_ops: Mutex::default(),
     });
     Fx {
         store: Arc::new(Mutex::new(s)),
@@ -719,6 +726,38 @@ async fn a_diagnostics_run_reads_the_fleet_through_its_own_token() {
         .unwrap()
         .to_string();
     assert_eq!(super::diagnostics::grant_for(&token, now), None);
+}
+
+/// Run now on a scheduled agent (`/propose <focus>`) carries the focus; its
+/// own ticks carry none.
+#[test]
+fn run_now_on_a_scheduled_agent_keeps_its_focus() {
+    let src = super::definition::TriggerSource::Schedule;
+    let now = crate::store::now_unix();
+    for request in [Some("the hub"), None] {
+        let f = fx(
+            small(
+                json!({ "source": "schedule", "cron": "0 7 * * *" }),
+                json!([]),
+            ),
+            json!({}),
+            json!([]),
+            false,
+        );
+        queue_manual(&f.store, &f.rule, src, request, None, now).unwrap();
+        let jobs = f
+            .store
+            .lock()
+            .unwrap()
+            .claim_agent_jobs(&[AGENT], now, 10, 60)
+            .unwrap();
+        let job = jobs
+            .first()
+            .unwrap_or_else(|| panic!("{request:?}: no job"));
+        let subject = super::runner::kept_subject(&f.store, job, f.rule.id, now).unwrap();
+        assert_eq!(subject["at"], now);
+        assert_eq!(subject.get("request").and_then(Value::as_str), request);
+    }
 }
 
 // ── step 4: actions ──
@@ -1247,5 +1286,146 @@ async fn another_tracker_gets_a_plain_comment_and_no_link() {
         f.world.base.writes.lock().unwrap().len(),
         1,
         "nothing created"
+    );
+}
+
+/// A definition whose answer lists findings, each maybe with a proposal.
+fn proposing() -> Loaded {
+    let d = definition::parse_value(&json!({
+        "trigger": { "source": "manual" },
+        "run": { "workspace": "home", "output_schema": { "type": "object",
+            "required": ["summary", "findings"], "properties": {
+                "summary": { "type": "string" },
+                "findings": { "type": "array", "items": { "type": "object",
+                    "required": ["title", "kind"], "properties": {
+                        "title": { "type": "string" },
+                        "kind": { "enum": ["none", "task", "setting", "recover", "fix"] },
+                        "steps": { "type": "array", "items": { "type": "string" } },
+                        "key": { "type": "string" }, "value": { "type": "string" },
+                        "session": { "type": "string" }, "project": { "type": "string" } } } } } } },
+        "actions": [
+            { "id": "task", "do": "work_task", "each": "findings", "auto": true,
+              "when": { "field": "kind", "eq": "task" },
+              "summary": "{{item.title}}", "body": "Found by the run: {{answer.summary}}",
+              "steps": "{{item.steps}}" },
+            { "id": "tune", "do": "setting", "each": "findings",
+              "when": { "field": "kind", "eq": "setting" },
+              "key": "{{item.key}}", "value": "{{item.value}}", "body": "{{item.title}}" },
+            { "id": "recover", "do": "session_recover", "each": "findings",
+              "when": { "field": "kind", "eq": "recover" },
+              "target": "{{item.session}}", "body": "{{item.title}}" },
+            { "id": "fix", "do": "fix_session", "each": "findings",
+              "when": { "field": "kind", "eq": "fix" },
+              "project": "{{item.project}}", "summary": "{{item.title}}", "body": "Fix: {{item.title}}" }
+        ]
+    }))
+    .unwrap();
+    let problems = definition::problems(&d, &BTreeMap::new());
+    assert!(problems.is_empty(), "{problems:#?}");
+    Loaded {
+        name: "proposing".into(),
+        definition: d,
+        skill: "Propose.".into(),
+        templates: BTreeMap::new(),
+    }
+}
+
+#[tokio::test]
+async fn each_finding_becomes_its_own_fleet_proposal() {
+    let f = fx(proposing(), json!({}), json!([]), false).at("act");
+    let now = crate::store::now_unix();
+    queue_manual(
+        &f.store,
+        &f.rule,
+        super::definition::TriggerSource::Manual,
+        None,
+        None,
+        now,
+    )
+    .unwrap();
+    let jobs = f
+        .store
+        .lock()
+        .unwrap()
+        .claim_agent_jobs(&[AGENT], now, 10, 60)
+        .unwrap();
+    let key = crate::service::settings::SPECS
+        .iter()
+        .find(|sp| sp.ai != crate::service::settings::AiPolicy::Never && sp.owned_by.is_none())
+        .unwrap()
+        .key;
+    let answer = json!({ "summary": "two problems", "findings": [
+        { "title": "Flaky reconnect", "kind": "task", "steps": ["Reproduce", "- Fix the backoff", ""] },
+        { "title": "Disk alarm too late", "kind": "setting", "key": key, "value": "1" },
+        { "title": "Not a proposal", "kind": "none" },
+        { "title": "fed-v2 stuck", "kind": "recover", "session": "fed-v2" },
+        { "title": "Second task", "kind": "task" },
+        { "title": "Unknown key", "kind": "setting", "key": "no.such.key", "value": "1" }
+    ]});
+    *f.world.base.answer.lock().unwrap() = Some(PrintOutcome::Answered {
+        text: answer.to_string(),
+        cost_micros: 0,
+    });
+    let out = f.runner().run(&jobs[0], Some(&f.rule)).await;
+    let RunOutcome::Done { result, .. } = out else {
+        panic!("{out:?}")
+    };
+    let r: Value = serde_json::from_str(&result.unwrap()).unwrap();
+    let st = states(&r);
+    assert_eq!(
+        st,
+        [
+            ("task", "approved"),
+            ("task", "approved"),
+            ("tune", "pending"),
+            ("recover", "pending"),
+            ("tune", "skipped"),
+        ]
+        .map(|(a, b)| (a.to_string(), b.to_string())),
+        "a work_task may run alone at act; the others wait; a key no agent may set is skipped"
+    );
+    let first = r["actions"][0]["body"].as_str().unwrap();
+    assert!(
+        first.starts_with("Flaky reconnect") && first.contains("- Fix the backoff"),
+        "{first}"
+    );
+    // Approved: the executor hands each to fleet.
+    let ex = f.executor();
+    for a in f.actions() {
+        assert_eq!(ex.execute(&a).await, ActionResult::Executed, "{}", a.kind);
+    }
+    let ops = f.world.fleet_ops.lock().unwrap().clone();
+    assert_eq!(ops.len(), 4);
+    assert!(ops
+        .iter()
+        .any(|o| matches!(o, super::actions::FleetOp::WorkTask(p)
+        if p.title == "Flaky reconnect" && p.steps == ["Reproduce", "Fix the backoff"])));
+    assert!(ops
+        .iter()
+        .any(|o| matches!(o, super::actions::FleetOp::Recover(p) if p.session == "fed-v2")));
+}
+
+#[test]
+fn a_fleet_proposal_that_acts_alone_is_refused() {
+    let mut d = proposing().definition;
+    d.actions[2].auto = true;
+    let p = definition::problems(&d, &BTreeMap::new());
+    assert!(
+        p.iter().any(|x| x.contains("never runs without a person")),
+        "{p:?}"
+    );
+    let mut d = proposing().definition;
+    d.actions[0].each = Some("summary".into());
+    let p = definition::problems(&d, &BTreeMap::new());
+    assert!(
+        p.iter().any(|x| x.contains("not an array of objects")),
+        "{p:?}"
+    );
+    let mut d = proposing().definition;
+    d.actions[0].each = None;
+    let p = definition::problems(&d, &BTreeMap::new());
+    assert!(
+        p.iter().any(|x| x.contains("there is no item here")),
+        "{p:?}"
     );
 }

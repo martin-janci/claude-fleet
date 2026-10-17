@@ -266,7 +266,7 @@ impl TriggerSource {
             ],
             TriggerSource::GithubComments => &["repo", "number", "title", "url", "comment"],
             TriggerSource::McpScan => &["key", "entry"],
-            TriggerSource::Schedule => &["at"],
+            TriggerSource::Schedule => &["at", "request", "scope"],
             TriggerSource::Manual => &["request", "scope"],
         }
     }
@@ -434,6 +434,14 @@ pub enum ActionKind {
     PrLabels,
     McpCall,
     Record,
+    /// A task in fleet's Work view, optionally with proposed subtasks.
+    WorkTask,
+    /// A Claude session started on a project to fix something.
+    FixSession,
+    /// One fleet setting changed (only keys an agent may propose).
+    Setting,
+    /// One session restored (lost) or restarted (stuck).
+    SessionRecover,
 }
 
 impl ActionKind {
@@ -447,7 +455,22 @@ impl ActionKind {
             ActionKind::PrLabels => "pr_labels",
             ActionKind::McpCall => "mcp_call",
             ActionKind::Record => "record",
+            ActionKind::WorkTask => "work_task",
+            ActionKind::FixSession => "fix_session",
+            ActionKind::Setting => "setting",
+            ActionKind::SessionRecover => "session_recover",
         }
+    }
+
+    /// Acts on fleet itself rather than a tracker, GitHub or a store.
+    pub fn is_fleet_own(self) -> bool {
+        matches!(
+            self,
+            ActionKind::WorkTask
+                | ActionKind::FixSession
+                | ActionKind::Setting
+                | ActionKind::SessionRecover
+        )
     }
 
     /// The action keys this kind takes (besides id, when, do, auto, stop),
@@ -485,6 +508,19 @@ impl ActionKind {
             ActionKind::Record => (
                 &["store", "key", "value", "expires_secs"],
                 &["store", "key", "value"],
+            ),
+            ActionKind::WorkTask => (&["summary", "body", "body_template", "steps"], &["summary"]),
+            ActionKind::FixSession => (
+                &["project", "host", "summary", "body", "body_template"],
+                &["project", "summary", "body"],
+            ),
+            ActionKind::Setting => (
+                &["key", "value", "body", "body_template"],
+                &["key", "value", "body"],
+            ),
+            ActionKind::SessionRecover => (
+                &["target", "host", "body", "body_template"],
+                &["target", "body"],
             ),
         }
     }
@@ -551,7 +587,21 @@ pub struct Action {
     pub value: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_secs: Option<i64>,
+    /// An array field of the answer: the action is planned once per item
+    /// (at most [`MAX_EACH`]), `{{item.…}}` naming that item and `when`
+    /// tested on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub each: Option<String>,
+    /// `work_task`: proposed subtasks, one per line (a template).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps: Option<String>,
+    /// `fix_session`, `session_recover`: the host (a template).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
 }
+
+/// Most items one `each` action is planned for.
+pub const MAX_EACH: usize = 10;
 
 impl Action {
     fn set_keys(&self) -> Vec<&'static str> {
@@ -579,6 +629,8 @@ impl Action {
         put("key", self.key.is_some());
         put("value", self.value.is_some());
         put("expires_secs", self.expires_secs.is_some());
+        put("steps", self.steps.is_some());
+        put("host", self.host.is_some());
         out
     }
 }
@@ -736,6 +788,8 @@ struct Scope<'a> {
     /// `None`: answer paths are refused here.
     answer: Option<&'a Value>,
     now: bool,
+    /// `Some(schema)`: `{{item.…}}` names an item of an `each` array.
+    item: Option<&'a Value>,
 }
 
 fn check_template(text: &str, at: &str, scope: Scope, out: &mut Vec<String>) {
@@ -786,6 +840,15 @@ fn check_path(p: &Path, at: &str, scope: Scope, out: &mut Vec<String>) {
             None => out.push(format!("{at}: {{{{{text}}}}}: there is no answer yet here")),
             Some(schema) if !answer::has_path(schema, &p.rest) => out.push(format!(
                 "{at}: {{{{{text}}}}}: output_schema has no such field"
+            )),
+            _ => {}
+        },
+        "item" => match scope.item {
+            None => out.push(format!(
+                "{at}: {{{{{text}}}}}: there is no item here (an action with each has one)"
+            )),
+            Some(schema) if !answer::has_path(schema, &p.rest) => out.push(format!(
+                "{at}: {{{{{text}}}}}: the each items have no such field"
             )),
             _ => {}
         },
@@ -940,6 +1003,7 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
         subject: None,
         answer: None,
         now: false,
+        item: None,
     };
 
     // ── trigger ──
@@ -1085,6 +1149,7 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
         subject: Some(subject_fields),
         answer: None,
         now: true,
+        item: None,
     };
     for (i, c) in r.context.iter().enumerate() {
         let at = format!("run › context › {}", i + 1);
@@ -1116,6 +1181,7 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
             None
         },
         now: true,
+        item: None,
     };
     let answer_fields = answer::fields(&r.output_schema);
     let mut ids: Vec<&str> = Vec::new();
@@ -1128,16 +1194,38 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
             out.push(format!("{at}: the id appears twice"));
         }
         ids.push(&a.id);
+        // `each`: the array the action is planned over, and its items' schema
+        // for `{{item.…}}` and `when`.
+        let item_schema = a.each.as_ref().and_then(|f| {
+            let items = r
+                .output_schema
+                .get("properties")
+                .and_then(|p| p.get(f))
+                .filter(|v| v.get("type").and_then(Value::as_str) == Some("array"))
+                .and_then(|v| v.get("items"))
+                .filter(|i| i.get("type").and_then(Value::as_str) == Some("object"));
+            if schema_ok && items.is_none() {
+                out.push(format!(
+                    "{at}: each {f} is not an array of objects in output_schema"
+                ));
+            }
+            items
+        });
         if let Some(c) = &a.when {
             out.extend(answer::check_condition(c, &format!("{at} › when")));
+            let fields = item_schema.map_or_else(|| answer_fields.clone(), answer::fields);
             if schema_ok {
                 for f in answer::condition_fields(c) {
-                    if !answer_fields.contains(&f) {
+                    if !fields.contains(&f) {
                         out.push(format!("{at} › when: {f} is not a field of output_schema"));
                     }
                 }
             }
         }
+        let after_run = Scope {
+            item: item_schema,
+            ..after_run
+        };
         let (allowed, needed) = a.kind.keys();
         let set = a.set_keys();
         for k in &set {
@@ -1180,6 +1268,8 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
             ("to", &a.to),
             ("link_type", &a.link_type),
             ("key", &a.key),
+            ("steps", &a.steps),
+            ("host", &a.host),
         ] {
             if let Some(v) = v {
                 check_template(v, &format!("{at} › {k}"), after_run, &mut out);
@@ -1252,6 +1342,15 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
                 }
                 if a.arguments.as_ref().is_some_and(|v| !v.is_object()) {
                     out.push(format!("{at}: arguments is an object"));
+                }
+            }
+            ActionKind::WorkTask => {}
+            ActionKind::FixSession | ActionKind::Setting | ActionKind::SessionRecover => {
+                if a.auto {
+                    out.push(format!(
+                        "{at}: {} never runs without a person: drop auto",
+                        a.kind.word()
+                    ));
                 }
             }
             ActionKind::Record => {

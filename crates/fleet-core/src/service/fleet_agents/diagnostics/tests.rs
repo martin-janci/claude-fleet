@@ -474,3 +474,89 @@ fn client_log_asks_first_and_reads_what_came_in() {
     );
     assert!(client_log(&logs, &json!({ "minutes": 0 }), NOW).is_err());
 }
+
+#[test]
+fn analyses_and_proposals_show_what_agents_concluded_and_proposed() {
+    let st = Mutex::new(Store::open_in_memory().unwrap());
+    let now = crate::store::now_unix();
+    {
+        let s = st.lock().unwrap();
+        s.upsert_host("box").unwrap();
+        let rule = s
+            .grant_agent_rule(&crate::store::NewAgentRule {
+                agent: "fleet".into(),
+                scope: "debug".into(),
+                level: "propose".into(),
+                host_alias: "box".into(),
+                project_id: None,
+                config: "{}".into(),
+                granted_by: "t".into(),
+                granted_at: 0,
+                expires_at: None,
+                definition: Some("self-debug".into()),
+                bindings: "[]".into(),
+            })
+            .unwrap();
+        s.record_agent_poll(
+            rule,
+            now,
+            None,
+            &[crate::store::NewAgentJob {
+                rule_id: rule,
+                agent: "fleet".into(),
+                subject: "manual:1".into(),
+                trigger: "manual".into(),
+                dedup_key: "k1".into(),
+                not_before: 0,
+            }],
+        )
+        .unwrap();
+        let job = s
+            .claim_agent_jobs(&["fleet"], now, 10, 60)
+            .unwrap()
+            .remove(0);
+        let result = json!({ "subject": { "request": "why slow?" }, "answer": {
+            "summary": "htz swaps", "findings": [
+                { "title": "Swap storm", "severity": "major", "component": "host",
+                  "fingerprint": "host:htz-swap", "cause": "too many sessions", "next": "task" } ] } });
+        s.finish_agent_job(
+            job.id,
+            &crate::store::AgentJobEnd::Final {
+                state: "done",
+                result: Some(result.to_string()),
+                error_kind: None,
+                error: None,
+            },
+            0,
+            now,
+        )
+        .unwrap();
+        s.insert_agent_action(
+            job.id,
+            "work_task",
+            &json!({ "body": "Swap storm\n\nmore" }).to_string(),
+            now,
+        )
+        .unwrap();
+    }
+    let s = st.lock().unwrap();
+    let got = analyses(&s, &json!({}), now).unwrap();
+    let run = &got["items"][0];
+    assert_eq!(
+        (run["definition"].as_str(), run["request"].as_str()),
+        (Some("self-debug"), Some("why slow?"))
+    );
+    assert_eq!(run["findings"][0]["fingerprint"], "host:htz-swap");
+    assert_eq!(
+        analyses(&s, &json!({ "definition": "l2-support" }), now).unwrap()["runs"],
+        0
+    );
+    let p = proposals(&s, &json!({}), now).unwrap();
+    assert_eq!(p["items"][0]["kind"], "work_task");
+    assert_eq!(p["items"][0]["state"], "pending");
+    assert!(p["items"][0]["says"]
+        .as_str()
+        .unwrap()
+        .starts_with("Swap storm"));
+    assert!(proposals(&s, &json!({ "days": 0 }), now).is_err());
+}

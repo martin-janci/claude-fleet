@@ -33,6 +33,14 @@ Answer:
 - `healthy`: true only when you found nothing that needs a person.
 - `findings`: the problems, most severe first, at most ten.
 - `topFingerprint`, `topTitle`, `topSeverity`: the first finding's, when there is one.
+- `next` on each finding: the one step you propose, which a person approves before it happens.
+  `none` when nothing should change. `task` for work a person or session should pick up: a Work
+  task titled by the finding, with `steps` when it splits. `fix` for a bug in a project's code a
+  Claude session can fix now: `project` (owner/repo), optional `host`, and the session's `prompt`
+  with the evidence and where to look. `setting` when a fleet setting is wrong for this fleet:
+  `settingKey` and `settingValue` (only keys `fleet` or the settings pages show). `recover` for a
+  lost or stuck session: `session` (its tmux name) and `host`. Propose one step per finding at
+  most, and none for a finding you are not sure of.
 - `fileIssue` and `issueBody`: only for a bug in fleet's own code that a developer should fix
   (not a host that is down or full), with the evidence and a suggested fix in the body. A person
   approves the issue before it is filed.

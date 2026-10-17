@@ -516,6 +516,11 @@ pub trait FleetHost: Send + Sync {
     async fn set_pr_labels(&self, req: &LabelsRequest) -> Result<(), String>;
     /// The support agent's host: issues, workspaces, writes and the run.
     fn base(&self) -> &dyn SupportHost;
+    /// Carry out an approved fleet-own action (`fleet_ops`).
+    async fn fleet_op(&self, op: super::actions::FleetOp) -> Result<String, String> {
+        let _ = op;
+        Err("this host does not act on fleet".into())
+    }
 }
 
 /// The production host.
@@ -627,6 +632,10 @@ impl FleetHost for LiveFleetHost {
         self.gh.set_labels(req).await
     }
 
+    async fn fleet_op(&self, op: super::actions::FleetOp) -> Result<String, String> {
+        super::fleet_ops::run(&self.store, &self.ssh, op).await
+    }
+
     fn base(&self) -> &dyn SupportHost {
         &self.base
     }
@@ -708,7 +717,12 @@ pub(super) fn keep_subject(
     .map_err(|e| e.to_string())
 }
 
-fn kept_subject(store: &Mutex<Store>, job: &AgentJobRow, rule_id: i64, now: i64) -> Option<Value> {
+pub(super) fn kept_subject(
+    store: &Mutex<Store>,
+    job: &AgentJobRow,
+    rule_id: i64,
+    now: i64,
+) -> Option<Value> {
     let s = lock(store).ok()?;
     let key: String = job.dedup_key.chars().take(300).collect();
     let row = s
@@ -810,7 +824,12 @@ pub fn queue_manual(
     let nonce = &crate::mcp::generate_token()[..8];
     let dedup = format!("r{}:manual:{now}:{nonce}", rule.id);
     let mut subject = match source {
-        TriggerSource::Schedule => json!({ "at": now }),
+        // Run now on a scheduled agent may carry a focus too (`/propose
+        // <focus>`); its own ticks carry none.
+        TriggerSource::Schedule => match request {
+            Some(r) => json!({ "at": now, "request": r }),
+            None => json!({ "at": now }),
+        },
         _ => json!({ "request": request }),
     };
     if let Some(scope) = scope {

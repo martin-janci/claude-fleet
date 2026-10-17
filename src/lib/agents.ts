@@ -238,6 +238,14 @@ export function actionTitle(a: Pick<AgentAction, 'kind' | 'payload'>): string {
   if (a.kind === 'record' && p) return `Remember ${p.key} in ${p.store}`;
   if (a.kind === 'mcp_call' && p) return `Call ${p.binding}.${p.tool}`;
   if (a.kind === 'pr_comment' && p) return `Comment on ${p.repo}#${p.number}`;
+  // Fleet's own: what an analysis proposes (self debug, proposer, simplify, refactor).
+  if (a.kind === 'work_task' && p) {
+    const n = Array.isArray(p.steps) ? p.steps.length : 0;
+    return `Create a task: ${p.title}${n > 0 ? ` (${n} step${n === 1 ? '' : 's'})` : ''}`;
+  }
+  if (a.kind === 'fix_session' && p) return `Start a session on ${p.project}${p.host ? ` (${p.host})` : ''}: ${p.title}`;
+  if (a.kind === 'setting' && p) return `Change ${p.key}${p.was ? ` from ${p.was}` : ''} to ${p.value}`;
+  if (a.kind === 'session_recover' && p) return `Recover ${p.session}${p.host ? ` on ${p.host}` : ''}`;
   return a.kind.replace(/_/g, ' ');
 }
 

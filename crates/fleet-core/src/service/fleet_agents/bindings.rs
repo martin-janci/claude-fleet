@@ -578,7 +578,9 @@ mod tests {
                 "mcp__fleet-diagnostics__fleet",
                 "mcp__fleet-diagnostics__host_log",
                 "mcp__fleet-diagnostics__session",
-                "mcp__fleet-diagnostics__client_log"
+                "mcp__fleet-diagnostics__client_log",
+                "mcp__fleet-diagnostics__analyses",
+                "mcp__fleet-diagnostics__proposals"
             ]
         );
         let cfg: Value = serde_json::from_str(run.config.as_deref().unwrap()).unwrap();
