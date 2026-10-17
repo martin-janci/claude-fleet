@@ -102,6 +102,7 @@ pub const LOOPS: &[LoopSpec] = &[
     acts("repair", "Worktree repair"),
     acts("worktree_prune", "Worktree prune"),
     acts("account_switch", "Account switch"),
+    acts("operator_account", "Control's account"),
     keeps("account_usage", "Account usage", "Only reads account limits."),
     acts("trackers", "Tracker sync"),
     acts("missions", "Missions"),

@@ -1266,6 +1266,16 @@ impl Store {
             .optional()?)
     }
 
+    /// Every host a session of `project_id` ever ran on, by alias: where
+    /// its checkout is known to be (placement's repo filter).
+    pub fn hosts_with_project(&self, project_id: i64) -> Result<Vec<String>, IpcError> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT DISTINCT host_alias FROM sessions WHERE project_id = ?1 ORDER BY host_alias",
+        )?;
+        let rows = st.query_map(rusqlite::params![project_id], |r| r.get(0))?;
+        Ok(rows.collect::<Result<Vec<String>, _>>()?)
+    }
+
     /// An item's `meta`, for the reads that use its description or view
     /// membership.
     pub fn work_item_meta(&self, id: i64) -> Result<ItemMeta, IpcError> {

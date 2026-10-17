@@ -380,6 +380,11 @@ Index by area (names only; see the reference for details):
   or past the line fails `E_ACCOUNT_LIMIT`, naming the account and the
   login with headroom, unless `over_limit_ok: true` says the person chose
   it; `agent: "agy"` fails `E_UNSUPPORTED` until its adapter is validated),
+  `suggest_placement` (`project_id?`, `hosts?`, `profile?`: where new work should
+  run — every host and login ranked by headroom and load, each one left out
+  with its reason: down or loaded host, login signed out, account at
+  `accounts.pause_at` or spent, repo missing; read-only; see
+  [accounts.md](accounts.md#where-new-work-runs)),
   `auto_switch_account` (`enabled?`: your own answer to automatic account
   switching, on unless you turned it off; with the fleet's
   `accounts.auto_switch` on too, a session of yours paused at its

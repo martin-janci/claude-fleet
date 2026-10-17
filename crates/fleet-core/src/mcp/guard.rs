@@ -328,6 +328,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Control review F5: where new work should run (host and login), from
+    // the store's hosts, usage and login health. Same reach as
+    // `check_account_headroom`.
+    ToolPolicy {
+        name: "suggest_placement",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // Gap plan G7.3: Jev's host for a new session, for the phone's New
     // session. Reads the store and asks the decision model; writes only the
     // decision record. A per-host token does not place sessions.

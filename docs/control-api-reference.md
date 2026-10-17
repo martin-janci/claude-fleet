@@ -891,6 +891,12 @@ Start rules: a task key pattern (PD-*) that names the project, and optionally th
 
 Parameters: `action`, `rule`, `rule_id`
 
+### `suggest_placement`
+
+Where new work should run: every host and Claude login that can take it, best first, and what was left out and why. Filters hosts that answer, have claude and are under the recovery thresholds (memory, pressure, CPU), and, with project_id, have run that project; logins that are signed in, under accounts.pause_at and within their daily limit. Ranks by account headroom, then idle CPU and free memory. hosts limits it to those (a mission's grant), profile to one login ("" = each host's own). Returns {pause_at_pct, candidates:[{host_alias, profile?, account_uuid, email?, used_pct?, cpu_pct?, mem_avail_pct?, score, reasons}], excluded:[{host_alias, profile?, host, why}], note?}. Read-only; never fetches. Errors: E_INVALID.
+
+Parameters: `hosts`, `profile`, `project_id`
+
 ### `touch_session_viewed`
 
 Mark a session viewed now: the turns it has finished read as seen. Returns the row.

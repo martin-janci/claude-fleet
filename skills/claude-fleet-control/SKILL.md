@@ -65,6 +65,7 @@ orient     fleet_health list_hosts list_projects list_worktrees list_sessions
            session_activity search
 spawn      new_session new_shell_session new_bg_session spawn_review
            shell_terminals adopt_session propose_host_placement
+           suggest_placement
 steer      send_prompt run_prompt queue_prompt queued_prompts wait_for_session
            capture_session session_transcript session_conversation
            session_conversations session_tool_detail session_summary_since
@@ -185,6 +186,10 @@ the `host_alias` + `tmux_name` pair. `session_id` (from `list_sessions` /
 
 ## Spawning — `new_session` / `new_shell_session` / `new_bg_session`
 
+- Where: ask `suggest_placement { project_id }` first and start on its first
+  candidate's `host_alias` with its `profile` (none = the host's own login).
+  It leaves out hosts that are down or loaded, signed-out logins and accounts
+  over `accounts.pause_at`, and says why for each.
 - `new_session { host_alias, project_id, name }` runs Claude Code in a tmux
   pane. Add `worktree_id` to land in an existing worktree, or
   `new_worktree: "<branch>"` (+ optional `base_branch`) to create one. Remote

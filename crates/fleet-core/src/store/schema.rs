@@ -750,6 +750,16 @@ fn hosts_has_cpu_pct(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 195.
+fn hosts_has_signed_out_logins(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'signed_out_logins'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 125.
 fn sessions_has_last_viewed_at(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -2191,6 +2201,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 194,
         sql: include_str!("../../migrations/194_run_trace.sql"),
         already_applied: None,
+    },
+    // Login health: the host's signed-out Claude logins (`hosts`
+    // `signed_out_logins`, control review F6). An ADD COLUMN, so guarded.
+    Migration {
+        version: 195,
+        sql: include_str!("../../migrations/195_host_signed_out_logins.sql"),
+        already_applied: Some(hosts_has_signed_out_logins),
     },
 ];
 
