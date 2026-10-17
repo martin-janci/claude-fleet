@@ -1,7 +1,7 @@
 //! Eligibility, execution and the apply → re-scan step.
 
 use super::sync::{sync, Scope};
-use super::{detector_of, scan_all, FindingBody, Fix, FixPlan, Safety, ScanCx};
+use super::{detector_of, scan_all, Finding, FindingBody, Fix, FixPlan, Safety, ScanCx};
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::settings;
 use crate::ssh::SshExec;
@@ -79,24 +79,54 @@ impl FixExec for SshFixExec<'_> {
     async fn update_agent(&self, host: &str) -> Result<(), IpcError> {
         use crate::service::update;
         let now = crate::store::now_unix();
-        update::update_now(
+        let r = update::update_now(
             self.store,
             "agent",
-            host,
+            &agent_target(host),
             None,
             &update::trusted_keys(),
             now,
         )?;
+        if r.agents.is_empty() {
+            return Err(IpcError::new(
+                codes::E_NOTFOUND,
+                format!("{host} has no agent updater to wake"),
+            ));
+        }
         let script = crate::shell::quote(update::AGENT_POKE_SCRIPT);
-        self.ssh
-            .run(
-                host,
-                &["bash", "-c", &script],
-                std::time::Duration::from_secs(10),
-            )
-            .await?;
+        for alias in &r.agents {
+            let out = self
+                .ssh
+                .run(
+                    alias,
+                    &["bash", "-c", &script],
+                    std::time::Duration::from_secs(10),
+                )
+                .await?;
+            poke_result(&out)?;
+        }
         Ok(())
     }
+}
+
+/// The `update_now` target for one agent host.
+fn agent_target(host: &str) -> String {
+    format!("agent:{host}")
+}
+
+/// A poke worked only when the script exited 0 and printed `poked`
+/// (`update::AGENT_POKE_SCRIPT` prints a reason and still exits 0 otherwise).
+fn poke_result(out: &std::process::Output) -> Result<(), IpcError> {
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if out.status.success() && stdout.contains("poked") {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let said = format!("{} {}", stdout.trim(), stderr.trim());
+    Err(IpcError::new(
+        codes::E_INTERNAL,
+        format!("the agent updater was not woken: {}", said.trim()),
+    ))
 }
 
 /// Everything detectors read, under the caller's guard.
@@ -161,6 +191,21 @@ pub async fn apply_one(
     live_agents: &[(String, String)],
     now: i64,
 ) -> Result<AutofixRow, IpcError> {
+    apply_with(store, exec, id, actor, now, &|s| {
+        Ok(scan_all(&gather(s, live_agents, now)?))
+    })
+    .await
+}
+
+/// `apply_one` with the re-scan supplied, so tests can say what it finds.
+async fn apply_with(
+    store: &Mutex<Store>,
+    exec: &dyn FixExec,
+    id: i64,
+    actor: &str,
+    now: i64,
+    scan: &(dyn Fn(&Store) -> Result<Vec<Finding>, IpcError> + Sync),
+) -> Result<AutofixRow, IpcError> {
     let (row, fix) = {
         let s = lock(store)?;
         let row = s
@@ -207,8 +252,7 @@ pub async fn apply_one(
         }
         Ok(()) => {
             let detector = detector_of(&row.kind).map(|d| d.id).unwrap_or("");
-            let cx = gather(&s, live_agents, now)?;
-            let found: Vec<_> = scan_all(&cx)
+            let found: Vec<_> = scan(&s)?
                 .into_iter()
                 .filter(|f| detector_of(&f.kind).is_some_and(|d| d.id == detector))
                 .collect();
@@ -223,7 +267,7 @@ pub async fn apply_one(
 mod tests {
     use super::*;
     use crate::service::autofix::sync::{sync, Scope};
-    use crate::service::autofix::{Finding, FindingBody, FixPlan, Safety, Severity};
+    use crate::service::autofix::Severity;
     use crate::service::operator::OPERATOR_CLIENT_NAME;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -413,5 +457,83 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, codes::E_INVALID);
+    }
+
+    #[test]
+    fn agent_target_names_the_component() {
+        assert_eq!(agent_target("h1"), "agent:h1");
+    }
+
+    fn output(code: i32, stdout: &str, stderr: &str) -> std::process::Output {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn a_poke_counts_only_when_it_printed_poked_and_exited_zero() {
+        assert!(poke_result(&output(0, "poked\n", "")).is_ok());
+        let e = poke_result(&output(
+            0,
+            "no update trigger: re-run fleet-agent install --auto-update\n",
+            "",
+        ))
+        .unwrap_err();
+        assert!(e.message.contains("no update trigger"), "{}", e.message);
+        let e = poke_result(&output(1, "poked", "denied")).unwrap_err();
+        assert!(e.message.contains("denied"), "{}", e.message);
+    }
+
+    fn finding_with(fix: Fix, kind: &str) -> Finding {
+        Finding {
+            kind: kind.into(),
+            subject: "host:h1".into(),
+            host_alias: Some("h1".into()),
+            severity: Severity::Degraded,
+            body: FindingBody {
+                title: "t".into(),
+                explanation: "e".into(),
+                evidence: vec![],
+                fix: Some(fix),
+            },
+        }
+    }
+
+    fn seed(fix: Fix, kind: &str) -> (Mutex<Store>, i64) {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let id = {
+            let s = store.lock().unwrap();
+            sync(&s, &[finding_with(fix, kind)], Scope::All, 10)
+                .unwrap()
+                .opened[0]
+        };
+        (store, id)
+    }
+
+    #[tokio::test]
+    async fn a_provision_fix_that_ran_but_still_shows_ends_verifying() {
+        let (store, id) = seed(safe_fix(true), "host.hooks_silent");
+        let exec = FakeExec::default();
+        let row = apply_with(&store, &exec, id, "test", 20, &|_| {
+            Ok(vec![finding_with(safe_fix(true), "host.hooks_silent")])
+        })
+        .await
+        .unwrap();
+        assert_eq!(exec.provisions.load(Ordering::SeqCst), 1);
+        assert_eq!(row.state, "verifying");
+    }
+
+    #[tokio::test]
+    async fn an_agent_update_fix_runs_the_executor() {
+        let mut fix = safe_fix(true);
+        fix.plan = FixPlan::UpdateAgent { host: "h1".into() };
+        let (store, id) = seed(fix, "host.agent_behind");
+        let exec = FakeExec::default();
+        apply_one(&store, &exec, id, "test", &[], 20).await.unwrap();
+        assert_eq!(exec.updates.load(Ordering::SeqCst), 1);
+        assert_eq!(exec.provisions.load(Ordering::SeqCst), 0);
     }
 }
