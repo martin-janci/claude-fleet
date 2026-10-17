@@ -204,6 +204,6 @@
     flex: 1;
   }
   .versions.behind {
-    color: var(--warn, #b45309);
+    color: var(--usage-warn);
   }
 </style>

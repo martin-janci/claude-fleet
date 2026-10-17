@@ -4220,8 +4220,8 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 12px;
-    color: var(--text-muted, inherit);
+    font-size: var(--text-xs);
+    color: var(--fg-muted);
     min-width: 0;
   }
   .held-text {
@@ -4235,7 +4235,7 @@
   }
   .held-cancel {
     flex: none;
-    font-size: 12px;
+    font-size: var(--text-xs);
     padding: 0 4px;
   }
   .interrupt {
