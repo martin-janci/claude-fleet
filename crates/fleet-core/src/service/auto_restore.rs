@@ -1643,8 +1643,27 @@ mod tests {
                 Some(DEFER_MEM_HEADROOM.to_string())
             )]
         );
-        // Once a has settled, the same reading has room for b.
-        let later = now + RESTORE_SETTLE_SECS + 1;
+        // Once a has settled, the same reading has room for b. The settle
+        // window runs from a's `restored` event, which the store stamps
+        // with the wall clock, not with `now`: counted from `now`, a second
+        // that ticked over between the two (the template migration of a
+        // test process's first store alone can take that long) left a still
+        // "starting" at `later`, and b deferred again.
+        let restored_at: i64 = store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .query_row(
+                "SELECT MAX(at) FROM session_events WHERE session_id = ?1 AND kind = ?2",
+                rusqlite::params![ids[0], EVENT_RESTORED],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            restored_at >= now,
+            "stamped by the clock, at or after `now`"
+        );
+        let later = restored_at + RESTORE_SETTLE_SECS + 1;
         let r = run_with(&store, &fake, &NoAdvice, &CFG, later).await;
         assert_eq!(r.restored, 1);
     }
