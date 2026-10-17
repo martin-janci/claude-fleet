@@ -594,6 +594,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Control review F10/F12: Control's journal and thread mutes, for
+    // Control itself and its owner's device (the tool checks which).
+    ToolPolicy {
+        name: "control_journal",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // The page specs, for a phone that renders them (P6). Compiled into the
     // hub like the desktop: the same answer for everyone who may see pages.
     ToolPolicy {
@@ -1984,6 +1993,8 @@ pub const NOT_FOR_HOST_TOKENS: &[&str] = &[
     // `list_tasks` for the tasks it dispatched, and proves no person, so
     // its scope would show it next to nothing here anyway.
     "runs",
+    // Control's journal and its owner's words to Control (review F12).
+    "control_journal",
 ];
 
 // --- legacy name lists -------------------------------------------------------

@@ -10,10 +10,14 @@
   It takes the sessions list's place only while Control is open. "All
   sessions" at its foot (and the rail's Sessions) goes back to that list,
   which never went anywhere; « folds this column to an edge button.
+
+  Each thread's bell mutes it (Control review F10): fleet stops telling
+  Control about it until it is unmuted (`control_journal`).
 -->
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
   import StatusDot from './kit/StatusDot.svelte';
+  import Icon from './kit/Icon.svelte';
   import Meter from './kit/Meter.svelte';
   import OrbitMark from './kit/OrbitMark.svelte';
   import { sessions } from './sessions';
@@ -30,10 +34,15 @@
   import { money } from './automation';
   import { leave } from './destination';
   import { sidebarView } from './work_view';
+  import { mutedThreads, refreshMutes, setThreadMuted } from './control_journal';
 
   let { oncollapse }: { oncollapse: () => void } = $props();
 
   onMount(() => followHandoffs());
+  // A mute is a `handoff:changed`, which re-reads the receipts: re-read the
+  // mutes with them.
+  const stopMutes = handoffs.subscribe(() => void refreshMutes());
+  onDestroy(stopMutes);
 
   let missions = $state<Mission[]>([]);
   let budget = $state<FleetBudget | null>(null);
@@ -74,6 +83,7 @@
       missions,
       operatorId: $operatorRow?.id ?? null,
       opts: $visibleFleet.opts,
+      muted: $mutedThreads,
     }),
   );
   const counts = $derived(threadCounts(threads));
@@ -89,6 +99,12 @@
   function open(t: ControlThread) {
     if (t.kind === 'session') openInControl(t.id, t.title);
     else openMissionInControl(t.id);
+  }
+
+  let muteError = $state<string | null>(null);
+  async function toggleMute(t: ControlThread) {
+    const r = await setThreadMuted(t.kind, t.id, !t.muted);
+    muteError = r.ok ? null : r.error.message;
   }
 
   function isActive(t: ControlThread): boolean {
@@ -150,26 +166,39 @@
     {:else if groups.length === 0}
       <p class="empty">Nothing here for this filter.</p>
     {/if}
+    {#if muteError}<p class="empty" role="alert" data-testid="control-thread-mute-error">{muteError}</p>{/if}
     {#each groups as g (g.id)}
       {#snippet rows()}
         {#each g.threads as t (t.key)}
-          <button
-            type="button"
-            class="row"
-            class:on={isActive(t)}
-            aria-current={isActive(t) ? 'true' : undefined}
-            data-testid="control-thread"
-            data-kind={t.kind}
-            data-group={t.group}
-            onclick={() => open(t)}
-          >
-            <span class="dot"><StatusDot state={t.state} /></span>
-            <span class="text">
-              <span class="ttl">{t.title}</span>
-              <span class="ln" class:waiting={t.group === 'needs'}>{t.line}</span>
-            </span>
-            {#if t.at > 0}<span class="age">{shortAge(t.at, nowSec)}</span>{/if}
-          </button>
+          <div class="trow" class:muted={t.muted}>
+            <button
+              type="button"
+              class="row"
+              class:on={isActive(t)}
+              aria-current={isActive(t) ? 'true' : undefined}
+              data-testid="control-thread"
+              data-kind={t.kind}
+              data-group={t.group}
+              data-muted={t.muted ? 'true' : undefined}
+              onclick={() => open(t)}
+            >
+              <span class="dot"><StatusDot state={t.state} /></span>
+              <span class="text">
+                <span class="ttl">{t.title}</span>
+                <span class="ln" class:waiting={t.group === 'needs'}>{t.muted ? `Muted · ${t.line}` : t.line}</span>
+              </span>
+              {#if t.at > 0}<span class="age">{shortAge(t.at, nowSec)}</span>{/if}
+            </button>
+            <button
+              type="button"
+              class="mute"
+              data-testid="control-thread-mute"
+              aria-pressed={t.muted}
+              title={t.muted ? 'Unmute: Control hears about it again' : 'Mute: Control stops hearing about it'}
+              aria-label={t.muted ? `Unmute ${t.title}` : `Mute ${t.title}`}
+              onclick={() => void toggleMute(t)}><Icon name={t.muted ? 'bell-off' : 'bell'} size={12} /></button
+            >
+          </div>
         {/each}
       {/snippet}
       {#if g.id === 'earlier'}
@@ -249,6 +278,34 @@
   .row:focus-visible {
     outline: var(--ring-w) solid var(--ring);
     outline-offset: -2px;
+  }
+  .trow {
+    position: relative;
+  }
+  .trow.muted .row {
+    opacity: 0.6;
+  }
+  .mute {
+    position: absolute;
+    top: 50%;
+    right: var(--space-2);
+    transform: translateY(-50%);
+    display: inline-flex;
+    padding: 2px;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: var(--bg-pane);
+    color: var(--fg-2);
+    cursor: pointer;
+    opacity: 0;
+  }
+  .trow:hover .mute,
+  .mute:focus-visible,
+  .mute[aria-pressed='true'] {
+    opacity: 1;
+  }
+  .mute:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
   }
   .list {
     flex: 1 1 auto;

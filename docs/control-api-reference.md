@@ -141,6 +141,12 @@ What the agent handed on, newest first: prompts and tasks sent to sessions, new 
 
 Parameters: `limit`
 
+### `control_journal`
+
+Control's journal, which fleet keeps for a new conversation: threads followed (state, muted), open asks to the person, their last words, notes, pending approvals. note|ask {text} adds one (an ask clears when the person answers); mute|unmute {thread: session|mission, id}.
+
+Parameters: `action`, `id`, `text`, `thread`
+
 ### `control_route`
 
 Where a message just sent in Control goes (propose {text}), or record the person's pick (follow {run_id, chosen}).
@@ -1346,6 +1352,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::mcp::mcp_confirm`
 - `commands::mcp::mcp_pending_confirms`
 - `commands::mcp::control_handoffs`
+- `commands::mcp::control_journal`
 - `commands::operator::ensure_operator`
 - `commands::operator::operator_status`
 - `commands::operator::control_auto_continue`

@@ -298,4 +298,8 @@
 //!   `run_trace`) and the `run:changed` event (kind `run`). A hub without
 //!   the action answers `E_INVALID`, which the desktop shows as a run with
 //!   no steps, and a client drops an event name it does not know.
+//!   Control's journal (migration 198) is new without a bump: the
+//!   `control_journal` tool (the desktop's command of the same name). A hub
+//!   without it refuses it as a protocol error, which the desktop reads as
+//!   nothing muted.
 pub const CONTRACT_REVISION: u32 = 18;

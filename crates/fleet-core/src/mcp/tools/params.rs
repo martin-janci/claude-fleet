@@ -1125,6 +1125,22 @@ pub struct ControlHandoffsParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ControlJournalParams {
+    /// read (default) | note | ask | mute | unmute
+    #[serde(default)]
+    pub action: Option<String>,
+    /// note, ask: the text.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// mute, unmute: session | mission.
+    #[serde(default)]
+    pub thread: Option<String>,
+    /// mute, unmute: its id.
+    #[serde(default)]
+    pub id: Option<i64>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct ControlRouteParams {
     /// propose | follow
     pub action: String,

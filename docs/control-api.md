@@ -2146,6 +2146,17 @@ automatically on app start.
   proposal state); like `mcp_confirms` it answers a fleet admin's device
   only, since a receipt quotes the operator's prompt. Each new receipt sends
   an empty `handoff:changed` event. No other caller's calls leave one.
+- **Control's journal** (Control review F10, F12). `control_journal`
+  answers the operator, the master and a fleet admin's device, never a
+  per-host token. `read` (the default) lists `follows` (every session and
+  mission Control started or was handed, with `state` following | muted |
+  killed | merged | done | quiet and `muted`), the open `asks`, the person's
+  last words to Control (`said`), Control's `notes` and the `approvals` it
+  waits on; `note` / `ask {text}` add one (an ask clears when the person
+  next speaks); `mute` / `unmute {thread: session | mission, id}` stop or
+  restart fleet telling Control about a thread, and send `handoff:changed`.
+  A new Control conversation gets the journal as a `[fleet] Control
+  journal` note (`control.journal`).
 - **File modes.** `~/.claude.json`, its backup and `~/.claude/settings.json`
   are written `0600` on every host; `state.db` is `0600` on the central
   machine.

@@ -12,6 +12,9 @@
 //! * a mission Control handed off that is active, waits on nobody, and has
 //!   finished no task for [`STALL_SECS`].
 //!
+//! Only threads Control still follows are swept, by the operator feed's
+//! own rule (`service::control_follow::follows`, F10).
+//!
 //! They are standing conditions, so the feed's `raised` set reports each
 //! once and again only after it cleared. A PR's key carries its head commit:
 //! a push that is still red is a new change and is reported again; a
@@ -147,6 +150,14 @@ pub fn mission_condition(
     })
 }
 
+/// PURE: whether the thread `kind`/`id` is swept: Control still follows it
+/// (`control_follow::follows`, the operator feed's rule).
+pub fn swept(follows: &[crate::service::control_follow::Follow], kind: &str, id: i64) -> bool {
+    follows
+        .iter()
+        .any(|f| f.kind == kind && f.id == id && f.state.following())
+}
+
 /// Every sweep condition now, for the feed's standing conditions. Empty
 /// with `control.sweep` off. `exclude` is the operator's own row.
 pub fn conditions(s: &Store, exclude: Option<i64>, now: i64) -> Vec<Condition> {
@@ -154,8 +165,15 @@ pub fn conditions(s: &Store, exclude: Option<i64>, now: i64) -> Vec<Condition> {
         return Vec::new();
     }
     let ask = crate::service::autonomy::position(s).is_ask_first();
+    // The threads the feed follows (F10): a session done, killed, merged,
+    // quiet or muted, and a muted or finished mission, are not swept.
+    let follows = crate::service::control_follow::follows(s, exclude, now);
+    let followed = |kind: &str, id: i64| swept(&follows, kind, id);
     let mut out = Vec::new();
     for id in s.handed_off_session_ids(exclude).unwrap_or_default() {
+        if !followed("session", id) {
+            continue;
+        }
         if let Ok(Some(row)) = s.get_session_by_id(id) {
             out.extend(pr_condition(&row, ask));
         }
@@ -164,6 +182,9 @@ pub fn conditions(s: &Store, exclude: Option<i64>, now: i64) -> Vec<Condition> {
     let before = state.clone();
     let mut seen = Vec::new();
     for id in s.handed_off_mission_ids().unwrap_or_default() {
+        if !followed("mission", id) {
+            continue;
+        }
         let Ok(Some(mut m)) = s.get_mission(id) else {
             continue;
         };

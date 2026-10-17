@@ -212,6 +212,44 @@
       "danger": {
         "level": "none"
       },
+      "default": "false",
+      "help": "A scheduled routine whose last runs found nothing to do waits twice as long before each next run, up to 6 hours. A run that does work brings the schedule back.",
+      "key": "routines.backoff_on_no_change",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Back off when nothing changes",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "true",
+      "help": "A scheduled routine whose account is at its usage limit waits until the limit resets instead of skipping at every scheduled time.",
+      "key": "routines.pause_at_limit",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Wait for the limit to reset",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "true"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "true",
       "help": "Let active missions take their next steps: keep their cards and brakes current and, under a person's grant, run what is ready. Off stops every mission's loop at once.",
       "key": "orchestrator.enabled",
@@ -359,8 +397,8 @@
       "danger": {
         "level": "none"
       },
-      "default": "60",
-      "help": "The shortest time between two notes to Control's agent. What happens in between goes out together in the next one.",
+      "default": "900",
+      "help": "The shortest time between two notes to Control's agent. A note goes only when something needs Control (a question, a failure, failing checks, a lost session, a host down); finished turns wait and go out with the next one.",
       "key": "control.feed_min_interval_secs",
       "kind": {
         "max": 315360000,
@@ -375,7 +413,7 @@
         "advanced"
       ],
       "unit": "seconds",
-      "value": "60",
+      "value": "900",
       "zero": "no wait"
     },
     {
@@ -409,6 +447,48 @@
         "type": "bool"
       },
       "label": "Control sweeps what it handed out",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "true"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "24",
+      "help": "Control stops following a session it started or briefed once it is done, killed or its pull request merged, or after this long without a turn. Briefing it again follows it again.",
+      "key": "control.follow_quiet_hours",
+      "kind": {
+        "max": 720,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Stop following after",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "hours",
+      "value": "24"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "true",
+      "help": "When Control starts a new conversation (a restart, a move to another host, a compaction or a new chat), fleet first tells it what it was following, what it asked you and what you last said.",
+      "key": "control.journal",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Brief Control from its journal",
       "modified": false,
       "restart": "none",
       "scope": "fleet",
@@ -4310,6 +4390,14 @@
             {
               "key": "automation.daily_budget",
               "type": "field"
+            },
+            {
+              "key": "routines.pause_at_limit",
+              "type": "field"
+            },
+            {
+              "key": "routines.backoff_on_no_change",
+              "type": "field"
             }
           ],
           "title": "Routines"
@@ -5405,6 +5493,18 @@
                 "key": "control.react_to_events",
                 "truthy": true
               }
+            },
+            {
+              "key": "control.follow_quiet_hours",
+              "type": "field",
+              "when": {
+                "key": "control.react_to_events",
+                "truthy": true
+              }
+            },
+            {
+              "key": "control.journal",
+              "type": "field"
             }
           ],
           "title": "Fleet events"

@@ -527,6 +527,7 @@ pub const CLAUDE_MD_SECTIONS: &[&str] = &[
     crate::service::placement::SECTION,
     crate::service::operator_account::SECTION,
     crate::service::control_rules::SECTION,
+    crate::service::control_journal::SECTION,
 ];
 
 /// PURE: the operator's whole CLAUDE.md: [`claude_md`], then every

@@ -2233,6 +2233,13 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/197_host_signed_out_logins.sql"),
         already_applied: Some(hosts_has_signed_out_logins),
     },
+    // Control's journal and thread mutes (Control review F10, F12):
+    // `control_journal`, `control_mutes`. New tables.
+    Migration {
+        version: 198,
+        sql: include_str!("../../migrations/198_control_journal.sql"),
+        already_applied: None,
+    },
 ];
 
 /// The settings row [`Store::finish_realm_upgrade`] writes once migration
