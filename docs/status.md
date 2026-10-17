@@ -639,6 +639,38 @@ task page's rail and header ([work-graph.md](work-graph.md#priority-labels-and-e
 Not yet: writing them back to a tracker, filtering or sorting by them, the
 Board card and the phone.
 
+Task result, completion gate and follow-ups (spec
+`docs/superpowers/specs/2026-10-13-task-result-handover-design.md`, plans
+`docs/superpowers/plans/2026-10-13-task-result-handover*.md`, mission CF-7
+to CF-20; [work-graph.md](work-graph.md#task-result-gate-and-follow-ups)).
+A result is the newest finished `tasks` row of an item that carries
+`result_json` (D1); `TaskReport` gained `done`, `decisions`, `remaining`
+and `context`, all `#[serde(default)]`, and the run instruction
+(`report::run_instruction`) asks for them. **Finish task** (TicketCard,
+`work_link { wrap_up }`, `service/work/wrapup.rs`) writes a `wrapup`-role
+task with the session as worker and types the run instruction into an idle
+REPL; the Stop hook resolves it as a run (D2). `wrapup` is outside
+`RUN_ROLES` and attempts count per role, so it is never an attempt. The
+gate (`service/work/gate.rs`, D3) is `passed` / `unverified` / `blocked`
+over `done_when` and open native children; `status::set_status` refuses
+an agent's `done` on a local item past it (`E_INVALID_STATE`, naming the
+lines), never a person's. `work { result }` (`service/work/result.rs`,
+`TaskResultView`) joins report, evidence, gate (fenced per scope), the
+worker's PR and follow-ups, worker text fenced for a per-host token. A
+follow-up (`work_link { followup }`, `service/work/followup.rs`,
+`Store::create_followup`) is a sibling local item with
+`work_items.origin_task_id` (migration 195); the same title twice answers
+one item (D4). A follow-up's start brief opens with `OriginFacts` (decisions,
+remaining, context, ≤ 10 commits, ≤ 15 files, PR; no conversation text)
+under `BRIEF_MAX_CHARS` (D5). `TaskResultPanel.svelte` replaces
+`ReportCard` in the conversation for the turn that carries the result and
+shows as *Result* on the task page, above *Last outcome* (D6). Not built
+(the spec's §4, ordered in its §7): results from every dispatch and child
+results to the parent, asking about a result, Create PR / Merge PR buttons,
+one automation policy, lifecycle hooks and skills per task, Jev context
+selection, project memory, sub-agent results, action detection, and the
+phone.
+
 The Jev evaluation (TypeSafe's decision model as an optional reader for
 closed-set decisions) has started with a local language census: `fleet-hub
 census languages` over `service::nl` (cargo feature `nl-detect`, lingua, ON

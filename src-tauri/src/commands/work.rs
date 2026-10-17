@@ -27,6 +27,10 @@
 //! Epics (sprints design 2026-09-28 §3): `set_work_parent` →
 //! `work_link { set_parent }`, a local item filed under an epic or a task,
 //! or taken out to the top.
+//!
+//! Task result (design 2026-10-13): `request_work_result` →
+//! `work_link { wrap_up }` ("Finish task"), `work_result` →
+//! `work { result }`, and `create_followup_task` → `work_link { followup }`.
 
 use crate::backend::FleetBackend;
 use fleet_core::cancel::CancellationRegistry;
@@ -34,13 +38,14 @@ use fleet_core::ipc_error::IpcError;
 use fleet_core::service::decide::resume_or_new::{self, ResumeOrNew};
 use fleet_core::service::decide::DecideCtx;
 use fleet_core::service::work::card::TicketCard;
+use fleet_core::service::work::result::TaskResultView;
 use fleet_core::service::work::resume::ResumePlan;
 use fleet_core::service::work::summary::SummaryOutcome;
 use fleet_core::service::work::tidy::{TidyApplyItem, TidyApplyReport, TidyReport};
 use fleet_core::service::work::today::Today;
 use fleet_core::service::work::{self, Dismissed, PurgeImpact, WorkArgs, WorkLinkArgs};
 use fleet_core::ssh::SshClient;
-use fleet_core::store::{ReopenedWork, SessionRow, Store, WorkItemRow, WorkLinkRow};
+use fleet_core::store::{ReopenedWork, SessionRow, Store, TaskRow, WorkItemRow, WorkLinkRow};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -442,6 +447,62 @@ pub async fn request_work_handover(
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<SessionRow, IpcError> {
     routed::request_work_handover(&backend, args, &store, &ssh).await
+}
+
+/// "Finish task": ask a live session for its task result (design
+/// 2026-10-13 D2). Answers the `wrapup` task that waits for it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RequestWorkResultArgs {
+    pub session_id: i64,
+}
+
+#[tauri::command]
+pub async fn request_work_result(
+    args: RequestWorkResultArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<TaskRow, IpcError> {
+    routed::request_work_result(&backend, args, &store, &ssh).await
+}
+
+/// The result of a work item, or of the item a session works on: exactly
+/// one of the two.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorkResultArgs {
+    #[serde(default)]
+    pub item_id: Option<i64>,
+    #[serde(default)]
+    pub session_id: Option<i64>,
+}
+
+#[tauri::command]
+pub async fn work_result(
+    args: WorkResultArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Option<TaskResultView>, IpcError> {
+    routed::work_result(&backend, args, &store).await
+}
+
+/// A follow-up of task `task_id`'s result as a new task (design 2026-10-13
+/// D4): the report's `followups[index]`, or a `title` of the person's own.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CreateFollowupTaskArgs {
+    pub task_id: i64,
+    #[serde(default)]
+    pub index: Option<usize>,
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+#[tauri::command]
+pub async fn create_followup_task(
+    args: CreateFollowupTaskArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<WorkItemRow, IpcError> {
+    routed::create_followup_task(&backend, args, &store).await
 }
 
 /// A Claude-written summary of past work (work graph M13.4c, on demand):
@@ -1103,6 +1164,82 @@ pub(crate) mod routed {
                 )
                 .await
             }
+        }
+    }
+
+    pub async fn request_work_result(
+        backend: &FleetBackend,
+        args: RequestWorkResultArgs,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<TaskRow, IpcError> {
+        let wire = WorkLinkArgs {
+            action: "wrap_up".into(),
+            session_id: Some(args.session_id),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("request_work_result", &wire).await,
+            None => {
+                work::wrapup::request(
+                    store,
+                    ssh,
+                    args.session_id,
+                    &fleet_core::service::orgs::OrgScope::All,
+                )
+                .await
+            }
+        }
+    }
+
+    pub async fn work_result(
+        backend: &FleetBackend,
+        args: WorkResultArgs,
+        store: &Mutex<Store>,
+    ) -> Result<Option<TaskResultView>, IpcError> {
+        let wire = WorkArgs {
+            action: Some("result".into()),
+            item_id: args.item_id,
+            session_id: args.session_id,
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("work_result", &wire).await,
+            None => {
+                let all = fleet_core::service::orgs::OrgScope::All;
+                match (args.item_id, args.session_id) {
+                    (Some(item_id), None) => work::result::result_for_item(store, &all, item_id),
+                    (None, Some(id)) => work::result::result_for_session(store, &all, id),
+                    _ => Err(IpcError::new(
+                        fleet_core::ipc_error::codes::E_INVALID,
+                        "work_result needs exactly one of item_id or session_id",
+                    )),
+                }
+            }
+        }
+    }
+
+    pub async fn create_followup_task(
+        backend: &FleetBackend,
+        args: CreateFollowupTaskArgs,
+        store: &Mutex<Store>,
+    ) -> Result<WorkItemRow, IpcError> {
+        let wire = WorkLinkArgs {
+            action: "followup".into(),
+            task_id: Some(args.task_id.to_string()),
+            index: args.index,
+            title: args.title.clone(),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("create_followup_task", &wire).await,
+            None => work::followup::create(
+                store,
+                &fleet_core::service::orgs::OrgScope::All,
+                args.task_id,
+                args.index,
+                args.title.as_deref(),
+            ),
         }
     }
 

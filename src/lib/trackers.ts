@@ -115,6 +115,9 @@ export interface WorkItemRow {
   /** How big the work is, in `estimate_unit`. */
   estimate?: number | null;
   estimate_unit?: EstimateUnit | null;
+  /** The task whose result this follow-up was made from (absent otherwise,
+   *  and from a hub older than migration 195). */
+  origin_task_id?: number | null;
   iteration?: string | null;
   updated_ext?: number | null;
   status_changed_at?: number | null;

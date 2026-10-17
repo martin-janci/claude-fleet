@@ -973,6 +973,140 @@ There are two kinds:
   runs nothing. Only one summary runs per host at a time. It is never
   automatic (decisions D10, D30).
 
+## Task result, gate and follow-ups
+
+A task can end with a structured **result**, behind a **completion gate**,
+and a follow-up from that result can become a new task whose session starts
+from what the first one left. Design
+`docs/superpowers/specs/2026-10-13-task-result-handover-design.md`.
+
+### What a result is
+
+A task's result is not a table of its own: it is the newest finished
+`tasks` row of the work item that carries a report (`tasks.result_json`),
+of any role: a `work_link { run }` attempt, a headless check, or a
+**Finish task** wrap-up. Beside it fleet keeps the git evidence it read
+itself when the task finished (`tasks.evidence_json`: commits, changed
+files). The report has the summary, outcome (done, partial, blocked or
+failed), tests run, warnings, blockers, follow-ups and confidence, and four
+lists that matter to the next task: **done** (what was done), **decisions**
+(choices the next task must keep), **remaining** (work left) and
+**context** (facts a fresh session needs). Reports stored before those four
+lists existed still read; the lists are just empty.
+
+The report is what the session *said*. The panel labels it **reported**;
+the gate, the changes and the PR are what fleet read itself.
+
+### Asking a session for its result
+
+In a ticket card (Details), **Finish task** asks a live, idle session that
+is linked to a work item for its result (`work_link { action: wrap_up,
+session_id }`). Fleet writes a request (a `tasks` row of role `wrapup`,
+with the session as its worker) and types one prompt into the REPL:
+
+> Wrap up your work on *KEY*. Do not start new work. Commit what is
+> finished, then report what you did and what is left.
+
+followed by the same instruction every run gets:
+
+> When finished, print exactly FLEET_TASK_DONE_<nonce> on its own line,
+> followed by one fenced ```json block with these keys: "summary" (one
+> paragraph), "outcome" (done | partial | blocked | failed), "done" (what
+> you did), "decisions" (choices the next task must keep), "remaining"
+> (work left), "context" (facts a fresh session needs to continue),
+> "tests_run" (the commands you ran), "warnings", "blockers", "followups"
+> (each a task title) — all lists of short strings — and "confidence"
+> (low | medium | high). Fleet reads your commits and changed files from
+> git itself; do not list them.
+
+The next Stop hook reads the reply exactly as it reads a run's: the marker
+closes the request, the JSON becomes the report, and fleet collects the
+evidence. It costs the session one turn. It is refused when the session has
+no work item (link it first), is busy, stuck or waiting on a dialog, is the
+operator's own session, or already has a request open ("a result is already
+requested from this session"). A wrap-up is never counted as an attempt:
+attempts count per role, and `wrapup` is not a role `work_link { run }`
+takes.
+
+### The completion gate
+
+The gate is what stands between a work item and *done*, computed on every
+read from the item's acceptance lines (`work_link { done_when }`: `ci`,
+`review`, `test:<cmd>`, `person` or free text) and its
+open subtasks (a subtask counts unless it is done or a rejected proposal):
+
+| State | When |
+|---|---|
+| **passed** | every acceptance line passed (an item with none has none to fail) and no subtask is open |
+| **unverified** | no line failed and no subtask is open, but not every line has passed yet |
+| **blocked** | a line failed, or a subtask is open |
+
+An **agent** (a per-host token, the operator, or a peer hub) setting a
+local task to `done` while the gate has not passed is refused with `E_INVALID_STATE`, and the refusal
+names what is in the way ("this task is not done yet: `test:cargo test` is
+fail; subtask "…" is open. Report it instead; a person marks it done."). A
+subtask the agent's organisation may not see is named only as "a subtask
+is open". A **person** is never refused: the panel shows the gate and a
+**Mark done** button. Fleet never moves a task to done because a report
+says *done*. A tracker ticket's status is not gated here; a mission keeps
+its own close step.
+
+### The result panel
+
+One panel shows a result: a headline (**Task completed** only when the
+report says done *and* the gate passed; otherwise *Reported done, not
+verified*, *Completion blocked*, or the report's own outcome), what was
+done, the validation (the gate's lines, then the tests the session says it
+ran, marked *reported*), decisions, what is left, the changes, the PR of
+the session that did it (state, CI, review), and the follow-ups. It
+appears in the conversation in place of the plain report card for the turn
+that carries the result, and as **Result** on the task page in place of
+*Last outcome*. A report with no task behind it keeps the plain report card.
+
+The wire is `work { action: result, item_id | session_id }` (the desktop's
+`work_result`), which answers nothing until a finished task carries a
+report. A per-host token reads every piece the session wrote fenced as
+untrusted; an item or session outside the caller's scope answers as an
+unknown id. The result is its task's text, so it follows the person who
+may read that task, as a dispatched job's result does: someone who sees
+the item but not the session that worked it reads no result. Once that
+session's row is reaped, the task is detached and no paired person reads
+the result any more, its owner included; the desktop on its own still
+does.
+
+### Follow-ups
+
+Each follow-up the report proposed has **Create task**, and the panel takes
+a title of your own too (`work_link { action: followup, task_id, index?,
+title? }`; the desktop's `create_followup_task`). The new task is a
+**sibling** of the finished one (same parent, same project, a local task
+even when the original is a tracker ticket) and remembers the task it came
+from (`work_items.origin_task_id`, migration 195). Creating the same
+follow-up twice (whitespace and case aside) answers the task made the
+first time. A report line longer than a title is cut, and kept whole in
+the new task's notes. A follow-up is made from its task's text, so it
+follows the same person rule as the result: someone who may not read the
+task gets the answer for an unknown task.
+
+When the follow-up is started, its brief **opens with what its origin
+left**, under *Follows KEY*: the origin's title, its outcome and summary,
+its decisions, what it left undone, its context lines, its commits (at most
+10) and changed files (at most 15), and its PR. Every list is capped so the
+brief stays under its 4,000 characters, and all of it is fenced as
+untrusted. **No conversation text travels**: not the origin's prompts, not
+its transcript, only the result and what git said. An origin outside the
+starter's scope, or whose task the starter may not read (the result's
+person rule), is left out of the brief.
+
+| You do | Desktop command | MCP action |
+|---|---|---|
+| Finish task | `request_work_result` | `work_link { action: wrap_up, session_id }` |
+| Read a result | `work_result` | `work { action: result, item_id \| session_id }` |
+| Create task (follow-up) | `create_followup_task` | `work_link { action: followup, task_id, index? \| title? }` |
+
+`wrap_up` types into a pane, so it takes the same drive reach and
+organisation fence as **Ask for a handover**.
+
 ## Today and standup
 
 **Today** is the Details panel's empty state, and ⌘⇧T (Ctrl+Shift+T)

@@ -73,6 +73,15 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ReportLayer {
     }
 }
 
+/// Held for the whole of any test that drains [`ring`]: it is process-global
+/// and this crate's tests run in parallel, so a drain in one test swallows
+/// the reports another test queued for its hub (`conn`'s report tests).
+/// Async-aware because those tests hold it across their awaits; `tokio::sync`
+/// primitives are not tied to one runtime, so a `#[tokio::test]` waiting here
+/// is woken by whichever other test releases it.
+#[cfg(test)]
+pub(crate) static TEST_RING_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,9 +89,9 @@ mod tests {
     #[test]
     fn an_error_event_lands_in_the_ring_with_its_code() {
         use tracing_subscriber::layer::SubscriberExt as _;
-        // The ring is process-global and this crate's tests run in parallel,
-        // so a length assertion would be racy; instead push a unique message
-        // and find *this* report after draining everything (see
+        // The ring is process-global: the drain below holds TEST_RING_LOCK
+        // so it cannot take another test's reports, and the unique message
+        // finds *this* report among anything an earlier test left (see
         // `fleet_core::logging`'s version of this test).
         let unique = format!(
             "refused-{}",
@@ -91,6 +100,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         );
+        let _lock = super::TEST_RING_LOCK.blocking_lock();
         let before = ring().len();
         let sub = tracing_subscriber::registry().with(ReportLayer);
         tracing::subscriber::with_default(sub, || {

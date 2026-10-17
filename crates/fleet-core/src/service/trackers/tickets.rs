@@ -1732,8 +1732,9 @@ fn link_started(
 fn with_native_defaults(
     store: &Mutex<Store>,
     args: &StartArgs,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
 ) -> Result<StartArgs, IpcError> {
+    let scope = &view.org;
     let s = lock(store)?;
     let local = match (args.item_id, args.reference.as_deref()) {
         (None, Some(r)) => local_item_for_key(&s, r, scope)?,
@@ -1814,6 +1815,14 @@ fn with_native_defaults(
             }
             None => own,
         });
+        // A follow-up's brief opens with what its origin task left (design
+        // 2026-10-13 D5), in at most half the budget; the rest is cut first.
+        let max = crate::service::work::handover::BRIEF_MAX_CHARS;
+        if let Some(o) = crate::service::work::handover::origin_facts(&s, &item, view)? {
+            let head = crate::service::work::handover::origin_section(&o, max / 2);
+            let rest = out.brief.take().unwrap_or_default();
+            out.brief = Some(format!("{head}\n\n{rest}").chars().take(max).collect());
+        }
     }
     Ok(out)
 }
@@ -1878,9 +1887,9 @@ pub async fn start_work_unprompted(
     view: &crate::service::view_scope::ViewScope,
     net: &TrackerNet,
 ) -> Result<(SessionRow, StartPlan, bool), IpcError> {
-    // Main's native-subtask defaults, under M1's `ViewScope`: the step needs
-    // only the org half, which is what `with_native_defaults` takes.
-    let args = &with_native_defaults(store, args, &view.org)?;
+    // Main's native-subtask defaults, under M1's `ViewScope`: the org half
+    // for the subtask's parent, the whole scope for a follow-up's origin task.
+    let args = &with_native_defaults(store, args, view)?;
     let plan = plan_start(store, args, view, net).await?;
     let brief = match (&args.brief, args.with_brief) {
         (Some(b), _) => Some(b.clone()),
@@ -2255,7 +2264,7 @@ pub async fn preview_start(
     view: &crate::service::view_scope::ViewScope,
     net: &TrackerNet,
 ) -> Result<StartPreview, IpcError> {
-    let args = with_native_defaults(store, args, &view.org)?;
+    let args = with_native_defaults(store, args, view)?;
     let mut conflicts = Vec::new();
     let ticket = resolve_ticket(store, &args, view, net, true).await?;
     let (projects, hosts, live, done, rule_offer) = {

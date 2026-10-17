@@ -14,6 +14,8 @@ pub mod confidence;
 pub mod describe;
 pub mod detect;
 pub mod ended;
+pub mod followup;
+pub mod gate;
 pub mod graph;
 pub mod handover;
 pub mod harvest;
@@ -26,6 +28,7 @@ pub mod promote;
 pub mod recognize;
 pub mod report;
 pub mod resolve;
+pub mod result;
 pub mod resume;
 pub mod retention;
 pub mod run;
@@ -43,6 +46,7 @@ pub mod tracker_comments;
 pub mod usage;
 pub mod verify;
 pub mod view;
+pub mod wrapup;
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs::{self, OrgScope};
@@ -151,6 +155,9 @@ pub struct WorkArgs {
     /// attachment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment_id: Option<i64>,
+    /// result: the work item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
@@ -288,9 +295,18 @@ pub struct WorkLinkArgs {
     /// set_status on a ticket: the tracker's column name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_name: Option<String>,
-    /// item:<id> or ref:<KEY>; reject: item:<id> merges into it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// item:<id> or ref:<KEY>; reject: item:<id> merges into it; followup:
+    /// a result's task id.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "id_text"
+    )]
+    #[schemars(with = "Option<String>")]
     pub task_id: Option<String>,
+    /// followup: the report's follow-up, from 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<usize>,
     /// Version seen (0 none); place needs it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_version: Option<i64>,
@@ -521,6 +537,9 @@ pub enum WorkAction {
     Attachment,
     /// A ticket's comments as its tracker holds them, on demand.
     TrackerComments,
+    /// One item's task result: report, evidence, gate, PR and follow-ups
+    /// (design 2026-10-13 D1).
+    Result,
 }
 
 /// Every `work` action, by name — the ONLY place an action is parsed from,
@@ -558,6 +577,7 @@ pub const WORK_ACTIONS: &[(&str, WorkAction)] = &[
     ("mission", WorkAction::Mission),
     ("attachment", WorkAction::Attachment),
     ("tracker_comments", WorkAction::TrackerComments),
+    ("result", WorkAction::Result),
 ];
 
 /// Every `work_link` action. The tool refuses any other name before
@@ -576,6 +596,7 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "abandon_start",
     "run",
     "handover",
+    "wrap_up",
     "archive",
     "unarchive",
     "archive_item",
@@ -584,6 +605,7 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "dismiss",
     "tidy_apply",
     "create",
+    "followup",
     "propose",
     "accept",
     "name",
@@ -662,6 +684,11 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("preview_start_work", "work_link", "preview_start"),
     ("abandon_start", "work_link", "abandon_start"),
     ("request_work_handover", "work_link", "handover"),
+    // Task result (design 2026-10-13): Finish task, the result view and a
+    // follow-up made from it.
+    ("request_work_result", "work_link", "wrap_up"),
+    ("work_result", "work", "result"),
+    ("create_followup_task", "work_link", "followup"),
     ("start_work_multi", "work_link", "start"),
     ("work_tidy", "work", "tidy"),
     ("work_reopened", "work", "reopened"),
@@ -743,6 +770,22 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("today_brief", "work_link", "today_brief"),
     ("mission_triage", "work_link", "mission_triage"),
 ];
+
+/// `work_link`'s `task_id` as text, from a string or a bare integer:
+/// `followup` names a result's task, whose id `work { result }` answers as
+/// a number.
+fn id_text<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum IdText {
+        Text(String),
+        Number(i64),
+    }
+    Ok(Option::<IdText>::deserialize(d)?.map(|v| match v {
+        IdText::Text(t) => t,
+        IdText::Number(n) => n.to_string(),
+    }))
+}
 
 /// The `action` schemas are generated from the tables above (work graph
 /// M8.0), so a client that reads the `enum` — the phone, which draws a

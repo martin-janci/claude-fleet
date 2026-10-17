@@ -174,6 +174,35 @@ fn counts_and_cost_cover_the_members_attempts() {
     assert_eq!(s.mission_cost_micros(m).unwrap(), 1_500_000);
 }
 
+/// A person's "Finish task" on a member (a `wrapup` row, design 2026-10-13
+/// D2) is not one of the mission's runs: it spends no attempt, takes no
+/// slot, adds no cost and makes its session no mission worker.
+#[test]
+fn a_wrapup_on_a_member_is_not_a_mission_run() {
+    let s = Store::open_in_memory().unwrap();
+    let m = mission(&s);
+    s.set_mission_state(m, None, "active", "fleet").unwrap();
+    s.upsert_host("h").unwrap();
+    let p = s
+        .upsert_session("p", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    let item = s.create_local_work_item(None, "a").unwrap().id;
+    s.set_mission_item(m, item, true, "fleet").unwrap();
+    let t = s.insert_task(None, Some(p), "finish", "n").unwrap();
+    s.set_task_run(t.id, item, 1, "wrapup").unwrap();
+    s.conn_ref()
+        .execute(
+            "UPDATE sessions SET usage_cost_micros = 1500000 WHERE id = ?1",
+            [p],
+        )
+        .unwrap();
+    let c = s.mission_task_counts(m).unwrap();
+    assert_eq!((c.total, c.open), (0, 0));
+    assert_eq!(s.mission_cost_micros(m).unwrap(), 0);
+    assert!(!s.is_mission_worker(p).unwrap());
+    assert_eq!(s.run_cost_estimate(Some(m)).unwrap(), None);
+}
+
 /// An active mission, its next wake an hour away.
 fn sleeping(s: &Store) -> i64 {
     let m = mission(s);

@@ -984,7 +984,8 @@ impl FleetTools {
         session_tasks; review; rules; rule_preview {rule}; views; org_impact. \
         buckets {kind?}: sprints, releases; bucket {bucket_id}. missions; \
         mission {mission_id, before_event?}. attachment {attachment_id}: a \
-        file's bytes.")]
+        file's bytes. result {item_id|session_id}: a task's report, \
+        evidence, gate, PR and follow-ups.")]
     pub(super) async fn work(
         &self,
         Extension(caller): Extension<Caller>,
@@ -1334,6 +1335,47 @@ impl FleetTools {
                         .map_err(to_mcp_err)?,
                 )
             }
+            // Task result (design 2026-10-13 D1): one item's newest result.
+            // The item's org fence is inside: outside it, an unknown id.
+            WorkAction::Result => {
+                let mut view = match (args.item_id, args.session_id) {
+                    (Some(item_id), None) => {
+                        w::result::result_for_item(&self.store, &scope, item_id)
+                    }
+                    (None, Some(id)) => {
+                        // `watch`: a result only reports what the session's
+                        // item left. The person half; the org half is inside.
+                        self.resolve_row_person_gated(&caller, id, Reach::Read, "the session")?;
+                        w::result::result_for_session(&self.store, &scope, id)
+                    }
+                    _ => {
+                        return Err(mcp_err(
+                            "E_INVALID",
+                            "result needs exactly one of item_id or session_id",
+                            None,
+                        ))
+                    }
+                }
+                .map_err(to_mcp_err)?;
+                // The person half (owner, 2026-10-15): a result is its task's
+                // text, what the worker wrote, so it is served under the rule
+                // every task's text is (`task_visible_at`, as `list_tasks`
+                // and a job's result are). A reader who does not see the task
+                // reads `null`, the answer for an item with no result: not a
+                // refusal, and none of the report.
+                if let Some(task_id) = view.as_ref().map(|v| v.task_id) {
+                    let s = lock(&self.store).map_err(to_mcp_err)?;
+                    match super::support::task_visible_at(&s, &caller, task_id, Reach::Read) {
+                        Ok(_) => {}
+                        Err(e) if e.code == crate::ipc_error::codes::E_NOTFOUND => view = None,
+                        Err(e) => return Err(to_mcp_err(e)),
+                    }
+                }
+                if let Some(v) = view.as_mut() {
+                    hide_unseen_worker(&self.store, &view_scope, v)?;
+                }
+                ok_json_compact(&view)
+            }
         }
     }
 
@@ -1348,7 +1390,8 @@ impl FleetTools {
         {session_id}: undo an unused start. run {item_id, role?}: an \
         attempt at the item in its own session and worktree, tracked as a task. \
         handover {session_id}: ask it to \
-        write its hand-off. summarize {key, link_id}: \
+        write its hand-off. wrap_up {session_id}: ask it for its task result. \
+        summarize {key, link_id}: \
         a Claude-written summary of past work. archive|unarchive (UI only; with \
         no session_id: the ended links of link_id|key|item_id|task_id), unlink \
         {link_id} with no session_id removes an ended link; snooze {days}|never \
@@ -1359,7 +1402,8 @@ impl FleetTools {
         due_at?, priority?, labels?, estimate?, estimate_unit?}: a person edits work with no ticket. attach {item_id, name, \
         mime, data_base64, comment_id?}: a file on a task; attachment_delete \
         {attachment_id}. create {title, parent?, \
-        notes?, assignees?, due_at?}: a task or subtask. promote {item_id, tracker_id?, \
+        notes?, assignees?, due_at?}: a task or subtask. followup {task_id, \
+        index|title}: a result's follow-up as a task. promote {item_id, tracker_id?, \
         container?}: make it a ticket. propose {parent, title, why?}: a subtask a person accepts \
         or rejects {item_id, no session_id}. bucket_add|bucket_remove \
         {bucket_id, item_id}: sprint/release. mission_save {mission, \
@@ -1550,6 +1594,26 @@ impl FleetTools {
                     .map_err(to_mcp_err)?;
             return ok_json(&row);
         }
+        if args.action == "wrap_up" {
+            // Task result (design 2026-10-13 D2): "Finish task" asks a live
+            // session for its result. The host and org fences are inside.
+            let sid = args
+                .session_id
+                .ok_or_else(|| mcp_err("E_INVALID", "wrap_up needs session_id", None))?;
+            // `drive`: like `handover`, it TYPES A PROMPT into the session's
+            // pane. Person-gated without the host fence in front, so a
+            // session this caller may not reach answers as an unknown id.
+            self.resolve_row_person_gated(
+                &caller,
+                sid,
+                Reach::Drive,
+                "the session to ask for its result",
+            )?;
+            let task = crate::service::work::wrapup::request(&self.store, &self.ssh, sid, &scope)
+                .await
+                .map_err(to_mcp_err)?;
+            return ok_json(&task);
+        }
         if args.action == "resume" {
             // The host fence (a per-host token resumes only onto its own
             // host) and the org fence are inside `resume_work`'s scope.
@@ -1643,6 +1707,40 @@ impl FleetTools {
                 // J7: whether it repeats an open tracker ticket (off by default).
                 crate::service::decide::tracker_duplicate::spawn_ask(&self.store, made.id);
             }
+            return ok_json(&made);
+        }
+        if args.action == "followup" {
+            // Task result (design 2026-10-13 D4): a follow-up of a task's
+            // result becomes a NEW sibling item. The source item's org fence
+            // is inside: a task outside the caller's scope reads as unknown.
+            let task_id = args
+                .task_id
+                .as_deref()
+                .and_then(|t| t.trim().parse::<i64>().ok())
+                .ok_or_else(|| {
+                    mcp_err(
+                        "E_INVALID",
+                        "followup needs task_id, a result's task id",
+                        None,
+                    )
+                })?;
+            // The person half, as `work { result }` has it: a follow-up is
+            // made from the task's text, so a reader who may not see the
+            // task (another person's session, a detached task) reads it as
+            // unknown — the same answer as a task that does not exist.
+            {
+                let s = lock(&self.store).map_err(to_mcp_err)?;
+                super::support::task_visible_at(&s, &caller, task_id, Reach::Read)
+                    .map_err(to_mcp_err)?;
+            }
+            let made = crate::service::work::followup::create(
+                &self.store,
+                &scope,
+                task_id,
+                args.index,
+                args.title.as_deref(),
+            )
+            .map_err(to_mcp_err)?;
             return ok_json(&made);
         }
         if args.action == "propose" {
@@ -1959,6 +2057,14 @@ impl FleetTools {
                 .is_some_and(|i| i.source != "local");
             if !ticket && !self.own_session_works_on(&caller, item_id)? {
                 self.require_drive_on_item_sessions(&caller, item_id)?;
+            }
+            // Design 2026-10-13 D3 for the agents an `OrgScope::All` hides:
+            // the operator and a peer hub. A per-host token is gated inside
+            // `set_status`.
+            if status == "done" && !ticket && caller.work_decider() == crate::store::Decider::Agent
+            {
+                crate::service::work::status::refuse_agent_done(&self.store, &scope, item_id)
+                    .map_err(to_mcp_err)?;
             }
             return ok_json(
                 &crate::service::work::status::move_status(
@@ -3202,6 +3308,30 @@ fn refuse_operator_decision(caller: &Caller) -> Result<(), McpError> {
              the phone; the operator may only propose",
             None,
         ));
+    }
+    Ok(())
+}
+
+/// `work { result }`'s person half for the worker: the session that left the
+/// result, and its PR, are that session's facts, so a caller whose view does
+/// not see the session reads the result without them (the result itself is
+/// the item's, behind the item's org fence).
+fn hide_unseen_worker(
+    store: &std::sync::Mutex<crate::store::Store>,
+    view_scope: &crate::service::view_scope::ViewScope,
+    v: &mut crate::service::work::result::TaskResultView,
+) -> Result<(), McpError> {
+    let Some(sid) = v.session_id else {
+        return Ok(());
+    };
+    let s = lock(store).map_err(to_mcp_err)?;
+    let seen = s
+        .get_session_by_id(sid)
+        .map_err(|e| to_mcp_err(IpcError::from(e)))?
+        .is_some_and(|row| view_scope.sees_session_row(&row).is_visible());
+    if !seen {
+        v.session_id = None;
+        v.prs.clear();
     }
     Ok(())
 }
