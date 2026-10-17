@@ -31,13 +31,12 @@ ignore = [
   # YAML crate (serde-saphyr); that changes how the files are rendered, so it
   # is its own change, not a CI fix.
   "RUSTSEC-2024-0449",
-  # zip 4.6.1: SUID/SGID bits kept, symlink targets outside the destination,
-  # permissions applied through symlinks (all issued 2026-10-17, fixed only in
-  # zip >= 9). Via tauri-plugin-updater 2.12, whose 2.x line pins zip 4 (the
-  # 3.0 line is alpha). The updater extracts a zip only on Windows, and only
-  # an update whose minisign signature it verified first (our own release
-  # artifact); fleet-update does not use the crate. Drop these entries when
-  # tauri-plugin-updater moves to zip >= 9.
+  # zip 4.x extraction (SUID bits kept, symlink targets and permissions not
+  # confined); issued 2026-10, fixed only in zip >= 9. Our sole path is
+  # tauri-plugin-updater, which builds zip on Windows only and extracts the
+  # update archive after its minisign signature checks out, so the archive is
+  # one we released. No updater release (2.14.0 included) takes zip 9 yet:
+  # drop these when one does and `cargo update -p tauri-plugin-updater` lands.
   "RUSTSEC-2026-0367",
   "RUSTSEC-2026-0368",
   "RUSTSEC-2026-0369",
