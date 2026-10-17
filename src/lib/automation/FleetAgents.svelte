@@ -7,7 +7,9 @@
   // wizard uses; sending it grants (`grant` with the answers), which starts
   // each MCP binding on the host and asks it for its tools first, so a store
   // that is not there is the dialog's error, not the first job's. Revoke
-  // ends an instance; Run now queues a manual agent's job.
+  // ends an instance; Run now opens a small panel under the instance: what
+  // to look into (the request) and where (the scope: a window, a host, a
+  // session, a part of the fleet), and Run queues the manual agent's job.
   import { onMount } from 'svelte';
   import WizardDialog from '../forms/WizardDialog.svelte';
   import StatusDot from '../kit/StatusDot.svelte';
@@ -22,8 +24,11 @@
     revokeAgentRule,
     ruleLine,
     runFleetAgent,
+    SCOPE_COMPONENTS,
+    SCOPE_WINDOWS,
     type AgentRule,
     type FleetDefinition,
+    type RunScope,
   } from '../agents';
 
   let { rules }: { rules: AgentRule[] } = $props();
@@ -34,6 +39,9 @@
   let busy = $state(false);
   let error = $state<string | null>(null);
   let note = $state<string | null>(null);
+  /** The instance whose Run panel is open, and what it holds. */
+  let running = $state<{ id: number; request: string; scope: RunScope } | null>(null);
+  let queuing = $state(false);
 
   async function load() {
     const r = await fleetDefinitions();
@@ -77,9 +85,17 @@
     void loadAgents();
   }
 
-  async function runNow(id: number) {
-    const r = await runFleetAgent(id);
+  function openRun(id: number) {
+    running = running?.id === id ? null : { id, request: '', scope: {} };
+  }
+
+  async function runNow() {
+    if (!running) return;
+    queuing = true;
+    const r = await runFleetAgent(running.id, running.request, running.scope);
+    queuing = false;
     note = r.ok ? 'Queued: it runs on the next pass.' : (r.error?.message ?? 'Run failed');
+    if (r.ok) running = null;
     void loadAgents();
   }
 </script>
@@ -119,12 +135,58 @@
           <span class="main"><span class="summary">{ruleLine(r)}</span></span>
           <span class="buttons">
             {#if d.trigger === 'manual' || d.trigger === 'schedule'}
-              <button class="act" type="button" data-testid="fleet-instance-run" onclick={() => void runNow(r.id)}>Run now</button>
+              <button
+                class="act"
+                type="button"
+                aria-expanded={running?.id === r.id}
+                data-testid="fleet-instance-run"
+                onclick={() => openRun(r.id)}>Run now</button
+              >
             {/if}
             <button class="act" type="button" data-testid="fleet-instance-edit" onclick={() => void openForm(d.name, r.id)}>Edit</button>
             <button class="act" type="button" data-testid="fleet-instance-revoke" onclick={() => void revoke(r.id)}>Revoke</button>
           </span>
         </li>
+        {#if running?.id === r.id}
+          <li class="instance run" data-testid="fleet-run-panel">
+            <label class="wide">
+              <span>What to look into</span>
+              <textarea
+                rows="2"
+                maxlength="4000"
+                placeholder="Why did Control get stuck at 14:00?"
+                data-testid="fleet-run-request"
+                bind:value={running.request}
+              ></textarea>
+            </label>
+            <label>
+              <span>Window</span>
+              <select data-testid="fleet-run-window" bind:value={running.scope.minutes}>
+                <option value={undefined}>Any</option>
+                {#each SCOPE_WINDOWS as w (w.minutes)}<option value={w.minutes}>{w.label}</option>{/each}
+              </select>
+            </label>
+            <label>
+              <span>Part</span>
+              <select data-testid="fleet-run-component" bind:value={running.scope.component}>
+                <option value={undefined}>Whole fleet</option>
+                {#each SCOPE_COMPONENTS as c (c)}<option value={c}>{c}</option>{/each}
+              </select>
+            </label>
+            <label>
+              <span>Host</span>
+              <input type="text" maxlength="100" placeholder="any" data-testid="fleet-run-host" bind:value={running.scope.host} />
+            </label>
+            <label>
+              <span>Session</span>
+              <input type="text" maxlength="100" placeholder="any" data-testid="fleet-run-session" bind:value={running.scope.session} />
+            </label>
+            <span class="buttons">
+              <button class="act primary" type="button" disabled={queuing} data-testid="fleet-run-go" onclick={() => void runNow()}>Run</button>
+              <button class="act" type="button" data-testid="fleet-run-cancel" onclick={() => (running = null)}>Cancel</button>
+            </span>
+          </li>
+        {/if}
       {/each}
     {/each}
   </ul>
@@ -155,4 +217,17 @@
     cursor: pointer;
   }
   .act:disabled { opacity: 0.5; cursor: default; }
+  .act.primary { border-color: var(--accent); color: var(--accent); }
+  .run { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: flex-end; }
+  .run label { display: flex; flex-direction: column; gap: 2px; font-size: var(--text-sm); }
+  .run label.wide { flex-basis: 100%; }
+  .run textarea, .run input, .run select {
+    font: inherit;
+    padding: 4px 6px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border);
+    background: transparent;
+    color: inherit;
+  }
+  .run textarea { width: 100%; resize: vertical; }
 </style>

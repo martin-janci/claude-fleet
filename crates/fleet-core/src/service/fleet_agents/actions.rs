@@ -144,6 +144,67 @@ pub struct PrLabelsPayload {
     pub body: String,
 }
 
+/// `work_task`: a Work task, with proposed subtasks.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkTaskPayload {
+    pub action: String,
+    pub title: String,
+    pub notes: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<String>,
+    pub body: String,
+}
+
+/// `fix_session`: a task, and a Claude session started on it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FixSessionPayload {
+    pub action: String,
+    /// A fleet project, by name or id.
+    pub project: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    pub title: String,
+    /// The session's first prompt.
+    pub prompt: String,
+    pub body: String,
+}
+
+/// `setting`: one setting, from the value it had when planned.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SettingPayload {
+    pub action: String,
+    pub key: String,
+    pub value: String,
+    /// The value when it was proposed (shown; not checked).
+    pub was: String,
+    pub why: String,
+    pub body: String,
+}
+
+/// `session_recover`: one session, by tmux name and host.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecoverPayload {
+    pub action: String,
+    pub session: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    pub why: String,
+    pub body: String,
+}
+
+/// What a fleet-own action asks of fleet when it is approved
+/// ([`super::runner::FleetHost::fleet_op`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum FleetOp {
+    WorkTask(WorkTaskPayload),
+    FixSession(FixSessionPayload),
+    Setting(SettingPayload),
+    Recover(RecoverPayload),
+}
+
+/// Most proposed subtasks of one `work_task`.
+pub const MAX_STEPS: usize = 12;
+
 /// Whether a tracker provider is Jira (rich comments, issue links).
 pub fn is_jira(provider: Option<&str>) -> bool {
     provider.is_none_or(|p| p.starts_with("jira"))
@@ -294,245 +355,396 @@ pub fn plan(
     let namespaces = bindings::namespaces(rule_id, &inst.bindings);
     let mut planned = Vec::new();
     let mut skipped = Vec::new();
-    for a in &d.actions {
-        if !answer::holds(a.when.as_ref(), answer) {
-            continue;
-        }
-        let r = |t: &Option<String>| {
-            t.as_deref()
-                .map(|t| template::render(t, &ctx).trim().to_string())
-                .unwrap_or_default()
+    'actions: for a in &d.actions {
+        // An `each` action is planned once per item of that answer array,
+        // with `{{item.…}}` and its `when` on the item.
+        let rounds: Vec<Value> = match &a.each {
+            Some(f) => answer
+                .get(f)
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter(|i| answer::holds(a.when.as_ref(), i))
+                        .take(super::definition::MAX_EACH)
+                        .map(|i| {
+                            let mut c = ctx.clone();
+                            c["item"] = i.clone();
+                            c
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            None if answer::holds(a.when.as_ref(), answer) => vec![ctx.clone()],
+            None => Vec::new(),
         };
-        let body_text = || -> String {
-            match (&a.body, &a.body_template) {
-                (Some(b), _) => template::render(b, &ctx),
-                (None, Some(name)) => loaded
-                    .templates
-                    .get(name)
-                    .map(|t| template::render(t, &ctx))
-                    .unwrap_or_default(),
-                _ => String::new(),
-            }
-            .trim()
-            .to_string()
-        };
-        let skip = |why: &str| Unplanned {
-            id: a.id.clone(),
-            why: why.to_string(),
-        };
-        let tracker = || tracker_of(d, a, &inst.values, &ctx);
-        let made: Result<(String, String), Unplanned> = (|| match a.kind {
-            ActionKind::TrackerComment => {
-                let key = r(&a.target);
-                let text = body_text();
-                let tracker = tracker().ok_or_else(|| skip("no tracker"))?;
-                if key.is_empty() || text.is_empty() {
-                    return Err(skip("the target or the body is empty"));
-                }
-                let mark = format!("\n\n{}", marker(instance));
-                let body = format!(
-                    "{}{mark}",
-                    fit(&text, max.saturating_sub(mark.chars().count()))
-                );
-                let p = CommentPayload {
-                    action: a.id.clone(),
-                    tracker,
-                    key,
-                    adf: text_adf(&body),
-                    body: body.clone(),
-                };
-                Ok((serde_json::to_string(&p).unwrap_or_default(), body))
-            }
-            ActionKind::TrackerIssue => {
-                let project = r(&a.project);
-                let summary = fit(&r(&a.summary), 250);
-                let body = fit(&body_text(), max);
-                let tracker = tracker().ok_or_else(|| skip("no tracker"))?;
-                if project.is_empty() || summary.is_empty() {
-                    return Err(skip("the project or the summary is empty"));
-                }
-                let link = a.link.as_ref().and_then(|l| {
-                    let to = template::render(&l.to, &ctx).trim().to_string();
-                    (!to.is_empty()).then(|| LinkTo {
-                        to,
-                        link_type: template::render(&l.link_type, &ctx).trim().to_string(),
-                    })
-                });
-                let shown = format!("{summary}\n\n{body}");
-                let p = IssuePayload {
-                    action: a.id.clone(),
-                    tracker,
-                    project,
-                    issue_type: Some(r(&a.issue_type))
-                        .filter(|t| !t.is_empty())
-                        .unwrap_or_else(|| "Task".into()),
-                    summary,
-                    adf: text_adf(&body),
-                    body,
-                    labels: labels_of(a.labels.as_ref(), &ctx),
-                    link,
-                };
-                Ok((serde_json::to_string(&p).unwrap_or_default(), shown))
-            }
-            ActionKind::TrackerLink => {
-                let (from, to, link_type) = (r(&a.from), r(&a.to), r(&a.link_type));
-                let tracker = tracker().ok_or_else(|| skip("no tracker"))?;
-                if from.is_empty() || to.is_empty() || link_type.is_empty() {
-                    return Err(skip("from, to or link_type is empty"));
-                }
-                let body = format!("{from} {link_type} {to}");
-                let p = LinkPayload {
-                    action: a.id.clone(),
-                    tracker,
-                    from,
-                    to,
-                    link_type,
-                    body: body.clone(),
-                };
-                Ok((serde_json::to_string(&p).unwrap_or_default(), body))
-            }
-            ActionKind::Record => {
-                let store = a.store.clone().unwrap_or_default();
-                let namespace = namespaces
-                    .get(&store)
-                    .cloned()
-                    .ok_or_else(|| skip("its store is not bound"))?;
-                let key = r(&a.key);
-                if key.is_empty() {
-                    return Err(skip("the key is empty"));
-                }
-                let value = template::render_value(a.value.as_ref().unwrap_or(&Value::Null), &ctx);
-                let body = format!("{store} · {key} = {value}");
-                let p = RecordPayload {
-                    action: a.id.clone(),
-                    store,
-                    namespace,
-                    key,
-                    value,
-                    expires_secs: a.expires_secs,
-                    body: body.clone(),
-                };
-                Ok((serde_json::to_string(&p).unwrap_or_default(), body))
-            }
-            ActionKind::McpCall => {
-                let store = a.store.clone().unwrap_or_default();
-                let b = inst
-                    .bindings
-                    .iter()
-                    .find(|b| b.role == store)
-                    .ok_or_else(|| skip("its store is not bound"))?;
-                let tool = a.tool.clone().unwrap_or_default();
-                let arguments =
-                    template::render_value(a.arguments.as_ref().unwrap_or(&json!({})), &ctx);
-                let body = format!(
-                    "{}.{tool}({})",
-                    b.server_name(),
-                    serde_json::to_string_pretty(&arguments).unwrap_or_default()
-                );
-                let p = McpCallPayload {
-                    action: a.id.clone(),
-                    store,
-                    binding: b.server_name().to_string(),
-                    tool,
-                    arguments,
-                    body: body.clone(),
-                };
-                Ok((serde_json::to_string(&p).unwrap_or_default(), body))
-            }
-            ActionKind::PrComment | ActionKind::PrLabels => {
-                let repo = d
-                    .trigger
-                    .repo
-                    .as_deref()
+        for ctx in &rounds {
+            let ctx = ctx.clone();
+            let r = |t: &Option<String>| {
+                t.as_deref()
                     .map(|t| template::render(t, &ctx).trim().to_string())
-                    .unwrap_or_default();
-                let number: i64 = r(&a.target)
-                    .trim_start_matches('#')
-                    .parse()
-                    .map_err(|_| skip("the target is not a pull request number"))?;
-                if !super::github::repo_ok(&repo) {
-                    return Err(skip("the trigger's repo is not owner/repo"));
+                    .unwrap_or_default()
+            };
+            let body_text = || -> String {
+                match (&a.body, &a.body_template) {
+                    (Some(b), _) => template::render(b, &ctx),
+                    (None, Some(name)) => loaded
+                        .templates
+                        .get(name)
+                        .map(|t| template::render(t, &ctx))
+                        .unwrap_or_default(),
+                    _ => String::new(),
                 }
-                if a.kind == ActionKind::PrComment {
+                .trim()
+                .to_string()
+            };
+            let skip = |why: &str| Unplanned {
+                id: a.id.clone(),
+                why: why.to_string(),
+            };
+            let tracker = || tracker_of(d, a, &inst.values, &ctx);
+            let made: Result<(String, String), Unplanned> = (|| match a.kind {
+                ActionKind::TrackerComment => {
+                    let key = r(&a.target);
                     let text = body_text();
-                    if text.is_empty() {
-                        return Err(skip("the body is empty"));
+                    let tracker = tracker().ok_or_else(|| skip("no tracker"))?;
+                    if key.is_empty() || text.is_empty() {
+                        return Err(skip("the target or the body is empty"));
                     }
                     let mark = format!("\n\n{}", marker(instance));
                     let body = format!(
                         "{}{mark}",
                         fit(&text, max.saturating_sub(mark.chars().count()))
                     );
-                    let p = PrCommentPayload {
+                    let p = CommentPayload {
                         action: a.id.clone(),
-                        repo,
-                        number,
+                        tracker,
+                        key,
+                        adf: text_adf(&body),
                         body: body.clone(),
                     };
                     Ok((serde_json::to_string(&p).unwrap_or_default(), body))
-                } else {
-                    let all = labels_of(a.labels.as_ref(), &ctx);
-                    let remove: Vec<String> = all
-                        .iter()
-                        .filter_map(|l| l.strip_prefix('-').map(str::to_string))
-                        .collect();
-                    let add: Vec<String> =
-                        all.into_iter().filter(|l| !l.starts_with('-')).collect();
-                    if add.is_empty() && remove.is_empty() {
-                        return Err(skip("no label to change"));
+                }
+                ActionKind::TrackerIssue => {
+                    let project = r(&a.project);
+                    let summary = fit(&r(&a.summary), 250);
+                    let body = fit(&body_text(), max);
+                    let tracker = tracker().ok_or_else(|| skip("no tracker"))?;
+                    if project.is_empty() || summary.is_empty() {
+                        return Err(skip("the project or the summary is empty"));
                     }
-                    let body = add
-                        .iter()
-                        .map(|l| format!("+{l}"))
-                        .chain(remove.iter().map(|l| format!("−{l}")))
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    let p = PrLabelsPayload {
+                    let link = a.link.as_ref().and_then(|l| {
+                        let to = template::render(&l.to, &ctx).trim().to_string();
+                        (!to.is_empty()).then(|| LinkTo {
+                            to,
+                            link_type: template::render(&l.link_type, &ctx).trim().to_string(),
+                        })
+                    });
+                    let shown = format!("{summary}\n\n{body}");
+                    let p = IssuePayload {
                         action: a.id.clone(),
-                        repo,
-                        number,
-                        add,
-                        remove,
+                        tracker,
+                        project,
+                        issue_type: Some(r(&a.issue_type))
+                            .filter(|t| !t.is_empty())
+                            .unwrap_or_else(|| "Task".into()),
+                        summary,
+                        adf: text_adf(&body),
+                        body,
+                        labels: labels_of(a.labels.as_ref(), &ctx),
+                        link,
+                    };
+                    Ok((serde_json::to_string(&p).unwrap_or_default(), shown))
+                }
+                ActionKind::TrackerLink => {
+                    let (from, to, link_type) = (r(&a.from), r(&a.to), r(&a.link_type));
+                    let tracker = tracker().ok_or_else(|| skip("no tracker"))?;
+                    if from.is_empty() || to.is_empty() || link_type.is_empty() {
+                        return Err(skip("from, to or link_type is empty"));
+                    }
+                    let body = format!("{from} {link_type} {to}");
+                    let p = LinkPayload {
+                        action: a.id.clone(),
+                        tracker,
+                        from,
+                        to,
+                        link_type,
                         body: body.clone(),
                     };
                     Ok((serde_json::to_string(&p).unwrap_or_default(), body))
                 }
-            }
-            ActionKind::PrReview => Err(skip(
-                "pr_review is the PR reviewer's: not built for a fleet agent",
-            )),
-        })();
-        match made {
-            Ok((payload, body)) => {
-                let auto = a.auto
-                    && match a.kind {
-                        ActionKind::McpCall => d
-                            .stores
-                            .iter()
-                            .find(|s| Some(&s.role) == a.store.as_ref())
-                            .and_then(|s| {
-                                s.write_tools
-                                    .iter()
-                                    .find(|w| Some(w.name()) == a.tool.as_deref())
-                            })
-                            .is_some_and(|w| w.auto_ok()),
-                        _ => true,
+                ActionKind::Record => {
+                    let store = a.store.clone().unwrap_or_default();
+                    let namespace = namespaces
+                        .get(&store)
+                        .cloned()
+                        .ok_or_else(|| skip("its store is not bound"))?;
+                    let key = r(&a.key);
+                    if key.is_empty() {
+                        return Err(skip("the key is empty"));
+                    }
+                    let value =
+                        template::render_value(a.value.as_ref().unwrap_or(&Value::Null), &ctx);
+                    let body = format!("{store} · {key} = {value}");
+                    let p = RecordPayload {
+                        action: a.id.clone(),
+                        store,
+                        namespace,
+                        key,
+                        value,
+                        expires_secs: a.expires_secs,
+                        body: body.clone(),
                     };
-                planned.push(Planned {
-                    id: a.id.clone(),
-                    kind: a.kind.word(),
-                    payload,
-                    body,
-                    auto,
-                });
-                if a.stop {
-                    break;
+                    Ok((serde_json::to_string(&p).unwrap_or_default(), body))
                 }
+                ActionKind::McpCall => {
+                    let store = a.store.clone().unwrap_or_default();
+                    let b = inst
+                        .bindings
+                        .iter()
+                        .find(|b| b.role == store)
+                        .ok_or_else(|| skip("its store is not bound"))?;
+                    let tool = a.tool.clone().unwrap_or_default();
+                    let arguments =
+                        template::render_value(a.arguments.as_ref().unwrap_or(&json!({})), &ctx);
+                    let body = format!(
+                        "{}.{tool}({})",
+                        b.server_name(),
+                        serde_json::to_string_pretty(&arguments).unwrap_or_default()
+                    );
+                    let p = McpCallPayload {
+                        action: a.id.clone(),
+                        store,
+                        binding: b.server_name().to_string(),
+                        tool,
+                        arguments,
+                        body: body.clone(),
+                    };
+                    Ok((serde_json::to_string(&p).unwrap_or_default(), body))
+                }
+                ActionKind::PrComment | ActionKind::PrLabels => {
+                    let repo = d
+                        .trigger
+                        .repo
+                        .as_deref()
+                        .map(|t| template::render(t, &ctx).trim().to_string())
+                        .unwrap_or_default();
+                    let number: i64 = r(&a.target)
+                        .trim_start_matches('#')
+                        .parse()
+                        .map_err(|_| skip("the target is not a pull request number"))?;
+                    if !super::github::repo_ok(&repo) {
+                        return Err(skip("the trigger's repo is not owner/repo"));
+                    }
+                    if a.kind == ActionKind::PrComment {
+                        let text = body_text();
+                        if text.is_empty() {
+                            return Err(skip("the body is empty"));
+                        }
+                        let mark = format!("\n\n{}", marker(instance));
+                        let body = format!(
+                            "{}{mark}",
+                            fit(&text, max.saturating_sub(mark.chars().count()))
+                        );
+                        let p = PrCommentPayload {
+                            action: a.id.clone(),
+                            repo,
+                            number,
+                            body: body.clone(),
+                        };
+                        Ok((serde_json::to_string(&p).unwrap_or_default(), body))
+                    } else {
+                        let all = labels_of(a.labels.as_ref(), &ctx);
+                        let remove: Vec<String> = all
+                            .iter()
+                            .filter_map(|l| l.strip_prefix('-').map(str::to_string))
+                            .collect();
+                        let add: Vec<String> =
+                            all.into_iter().filter(|l| !l.starts_with('-')).collect();
+                        if add.is_empty() && remove.is_empty() {
+                            return Err(skip("no label to change"));
+                        }
+                        let body = add
+                            .iter()
+                            .map(|l| format!("+{l}"))
+                            .chain(remove.iter().map(|l| format!("−{l}")))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        let p = PrLabelsPayload {
+                            action: a.id.clone(),
+                            repo,
+                            number,
+                            add,
+                            remove,
+                            body: body.clone(),
+                        };
+                        Ok((serde_json::to_string(&p).unwrap_or_default(), body))
+                    }
+                }
+                ActionKind::PrReview => Err(skip(
+                    "pr_review is the PR reviewer's: not built for a fleet agent",
+                )),
+                ActionKind::WorkTask => {
+                    let title = fit(&r(&a.summary), 200);
+                    if title.is_empty() {
+                        return Err(skip("the title is empty"));
+                    }
+                    let notes = fit(&body_text(), max);
+                    let steps = steps_of(a.steps.as_deref(), &ctx);
+                    let mut body = title.clone();
+                    if !notes.is_empty() {
+                        body.push_str(&format!("\n\n{notes}"));
+                    }
+                    for st in &steps {
+                        body.push_str(&format!("\n- {st}"));
+                    }
+                    let p = WorkTaskPayload {
+                        action: a.id.clone(),
+                        title,
+                        notes,
+                        steps,
+                        body: body.clone(),
+                    };
+                    Ok((serde_json::to_string(&p).unwrap_or_default(), body))
+                }
+                ActionKind::FixSession => {
+                    let project = r(&a.project);
+                    let title = fit(&r(&a.summary), 200);
+                    let prompt = fit(&body_text(), max);
+                    if project.is_empty() || title.is_empty() || prompt.is_empty() {
+                        return Err(skip("the project, the title or the prompt is empty"));
+                    }
+                    let host = Some(r(&a.host)).filter(|h| !h.is_empty());
+                    let body = format!(
+                        "Start a session on {project}{} for: {title}\n\n{prompt}",
+                        host.as_deref()
+                            .map(|h| format!(" ({h})"))
+                            .unwrap_or_default()
+                    );
+                    let p = FixSessionPayload {
+                        action: a.id.clone(),
+                        project,
+                        host,
+                        title,
+                        prompt,
+                        body: body.clone(),
+                    };
+                    Ok((serde_json::to_string(&p).unwrap_or_default(), body))
+                }
+                ActionKind::Setting => {
+                    let key = r(&a.key);
+                    let value = match template::render_value(
+                        a.value.as_ref().unwrap_or(&Value::Null),
+                        &ctx,
+                    ) {
+                        Value::String(v) => v.trim().to_string(),
+                        Value::Null => String::new(),
+                        other => other.to_string(),
+                    };
+                    let why = fit(&body_text(), 500);
+                    if key.is_empty() || value.is_empty() {
+                        return Err(skip("the key or the value is empty"));
+                    }
+                    let Some(spec) = crate::service::settings::spec(&key) else {
+                        return Err(skip("the key is not a fleet setting"));
+                    };
+                    if spec.ai == crate::service::settings::AiPolicy::Never
+                        || spec.owned_by.is_some()
+                    {
+                        return Err(skip("the setting is not one an agent may propose"));
+                    }
+                    let body = format!("{} ({key}) → {value}\n\n{why}", spec.label);
+                    let p = SettingPayload {
+                        action: a.id.clone(),
+                        key,
+                        value,
+                        was: String::new(),
+                        why,
+                        body: body.clone(),
+                    };
+                    Ok((serde_json::to_string(&p).unwrap_or_default(), body))
+                }
+                ActionKind::SessionRecover => {
+                    let session = r(&a.target);
+                    let why = fit(&body_text(), 500);
+                    if session.is_empty() {
+                        return Err(skip("the session is empty"));
+                    }
+                    let host = Some(r(&a.host)).filter(|h| !h.is_empty());
+                    let body = format!(
+                        "Recover {session}{}\n\n{why}",
+                        host.as_deref()
+                            .map(|h| format!(" on {h}"))
+                            .unwrap_or_default()
+                    );
+                    let p = RecoverPayload {
+                        action: a.id.clone(),
+                        session,
+                        host,
+                        why,
+                        body: body.clone(),
+                    };
+                    Ok((serde_json::to_string(&p).unwrap_or_default(), body))
+                }
+            })();
+            match made {
+                Ok((payload, body)) => {
+                    let auto = a.auto
+                        && match a.kind {
+                            ActionKind::McpCall => d
+                                .stores
+                                .iter()
+                                .find(|s| Some(&s.role) == a.store.as_ref())
+                                .and_then(|s| {
+                                    s.write_tools
+                                        .iter()
+                                        .find(|w| Some(w.name()) == a.tool.as_deref())
+                                })
+                                .is_some_and(|w| w.auto_ok()),
+                            _ => true,
+                        };
+                    planned.push(Planned {
+                        id: a.id.clone(),
+                        kind: a.kind.word(),
+                        payload,
+                        body,
+                        auto,
+                    });
+                    if a.stop {
+                        break 'actions;
+                    }
+                }
+                Err(u) => skipped.push(u),
             }
-            Err(u) => skipped.push(u),
         }
     }
     (planned, skipped)
+}
+
+/// PURE: `steps` rendered: a template that is one array path gives its
+/// items, anything else its lines. Empty lines dropped, at most
+/// [`MAX_STEPS`], each cut to 200 characters.
+fn steps_of(steps: Option<&str>, ctx: &Value) -> Vec<String> {
+    let Some(t) = steps else {
+        return Vec::new();
+    };
+    let lines: Vec<String> = match template::render_value(&Value::String(t.to_string()), ctx) {
+        Value::Array(items) => items
+            .iter()
+            .map(|v| match v {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            })
+            .collect(),
+        Value::String(s) => s.lines().map(str::to_string).collect(),
+        _ => Vec::new(),
+    };
+    lines
+        .into_iter()
+        .map(|l| fit(l.trim().trim_start_matches(['-', '*']).trim(), 200))
+        .filter(|l| !l.is_empty())
+        .take(MAX_STEPS)
+        .collect()
 }
 
 /// PURE: what is wrong with `args` for a tool whose `inputSchema` is
@@ -954,6 +1166,35 @@ impl FleetExecutor {
             ActionKind::PrReview => {
                 ActionResult::Failed("pr_review is not built for a fleet agent".into())
             }
+            ActionKind::WorkTask => {
+                let p = payload!(WorkTaskPayload);
+                if p.title.is_empty() || p.steps.len() > MAX_STEPS || !fits(&p.notes) {
+                    return refuse("the task is empty or over its limits");
+                }
+                self.fleet(FleetOp::WorkTask(p)).await
+            }
+            ActionKind::FixSession => {
+                let p = payload!(FixSessionPayload);
+                if !fits(&p.prompt) {
+                    return refuse(format!("the prompt is over {max} characters"));
+                }
+                self.fleet(FleetOp::FixSession(p)).await
+            }
+            ActionKind::Setting => {
+                let p = payload!(SettingPayload);
+                self.fleet(FleetOp::Setting(p)).await
+            }
+            ActionKind::SessionRecover => {
+                let p = payload!(RecoverPayload);
+                self.fleet(FleetOp::Recover(p)).await
+            }
+        }
+    }
+
+    async fn fleet(&self, op: FleetOp) -> ActionResult {
+        match self.host.fleet_op(op).await {
+            Ok(_) => ActionResult::Executed,
+            Err(e) => ActionResult::Failed(e),
         }
     }
 }

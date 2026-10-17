@@ -16,6 +16,9 @@ use std::sync::{Arc, Mutex};
 pub struct ReportState {
     store: Arc<Mutex<Store>>,
     windows: Arc<RateWindows>,
+    /// How `/agent-diagnostics` reaches a host (`host_log`, `session`);
+    /// `None` where the embedder gave none, and those tools then refuse.
+    ssh: Option<Arc<crate::ssh::SshClient>>,
 }
 
 impl ReportState {
@@ -23,7 +26,18 @@ impl ReportState {
         ReportState {
             store,
             windows: Arc::new(RateWindows::new()),
+            ssh: None,
         }
+    }
+
+    /// The client `/agent-diagnostics` reads hosts through.
+    pub fn with_ssh(mut self, ssh: Arc<crate::ssh::SshClient>) -> Self {
+        self.ssh = Some(ssh);
+        self
+    }
+
+    pub(crate) fn ssh(&self) -> Option<&Arc<crate::ssh::SshClient>> {
+        self.ssh.as_ref()
     }
 
     /// The store, for the `/update` routes that share this state.
@@ -387,6 +401,87 @@ mod tests {
         assert_eq!(
             http(addr, "POST", "/agent-records", &token, list).await.0,
             401
+        );
+    }
+
+    /// `/agent-diagnostics` likewise: a live diagnostics run token only;
+    /// neither the master nor a records token opens it.
+    #[tokio::test]
+    async fn the_diagnostics_route_takes_only_a_diagnostics_run_token() {
+        use crate::service::fleet_agents::diagnostics::{self, DiagGrant};
+        use crate::service::fleet_agents::records::{self, RunGrant};
+        let (addr, _store) = app().await;
+        let now = crate::store::now_unix();
+        let token = diagnostics::issue(
+            DiagGrant {
+                rule_id: 1,
+                expires_at: now + 600,
+            },
+            now,
+        );
+        let records_token = records::issue(
+            RunGrant {
+                rule_id: 1,
+                stores: Default::default(),
+                expires_at: now + 600,
+            },
+            now,
+        );
+        let list = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        for other in ["s3cret", "host-tok", records_token.as_str()] {
+            assert_eq!(
+                http(addr, "POST", "/agent-diagnostics", other, list)
+                    .await
+                    .0,
+                401
+            );
+        }
+        let (st, body) = http(addr, "POST", "/agent-diagnostics", &token, list).await;
+        assert_eq!(st, 200);
+        assert!(body.contains(r#""name":"timeline""#), "{body}");
+        let call = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fleet","arguments":{}}}"#;
+        let (st, body) = http(addr, "POST", "/agent-diagnostics", &token, call).await;
+        assert_eq!(st, 200);
+        assert!(body.contains(r#"\"hosts\""#), "{body}");
+        diagnostics::revoke(&token);
+        records::revoke(&records_token);
+        assert_eq!(
+            http(addr, "POST", "/agent-diagnostics", &token, list)
+                .await
+                .0,
+            401
+        );
+    }
+
+    /// `/log`: a client polls, is asked only while a request is open, and
+    /// its upload is what `client_log` then reads.
+    #[tokio::test]
+    async fn a_client_sends_its_log_to_slash_log_when_asked() {
+        use crate::service::client_logs::hub_logs;
+        let (addr, _store) = app().await;
+        assert_eq!(http(addr, "POST", "/log", "ro-tok", "{}").await.0, 204);
+        assert_eq!(http(addr, "POST", "/log", "nonsense", "{}").await.0, 401);
+        assert_eq!(http(addr, "POST", "/log", "ro-tok", "[1]").await.0, 400);
+        let now = crate::store::now_unix();
+        let id = hub_logs()
+            .lock()
+            .unwrap()
+            .ask(Some("client:phone"), 15, now);
+        let (st, body) = http(addr, "POST", "/log", "ro-tok", "").await;
+        assert_eq!(st, 200);
+        assert!(body.contains(&id), "{body}");
+        let up = serde_json::json!({ "id": id, "lines": ["boot", "crash"], "app": "fleet-mobile" });
+        let (st, _) = http(addr, "POST", "/log", "ro-tok", &up.to_string()).await;
+        assert_eq!(st, 204);
+        let got = hub_logs()
+            .lock()
+            .unwrap()
+            .fresh(Some("client:phone"), 15, now);
+        assert_eq!(got[0].1.lines, ["boot", "crash"]);
+        assert_eq!(
+            http(addr, "POST", "/log", "ro-tok", "{}").await.0,
+            204,
+            "answered"
         );
     }
 

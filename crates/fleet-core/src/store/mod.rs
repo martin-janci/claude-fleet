@@ -25,6 +25,7 @@ mod conversations;
 mod debug_devices;
 mod decisions;
 mod deferred_prompts;
+mod diagnostics;
 mod downloads;
 mod env_vars;
 mod forms;
@@ -153,6 +154,7 @@ pub use host_setup::{AgentInstallRow, HostSetupRow, SetupCheck};
 // inside its own transactions.
 #[allow(unused_imports)]
 pub(crate) use admin_events::record_admin_event_in_tx;
+pub use diagnostics::WindowEventRow;
 pub use identities::{normalize_issuer, IdentityRow, MAX_IDENTITY_FIELD_LEN};
 pub use item_deps::{ItemDepRow, DEP_SOURCES};
 pub use item_verify::{

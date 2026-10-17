@@ -91,11 +91,13 @@
   --control-fg-quiet: #5a5a5a;
 
   /* ── type ──
+     Geist and Geist Mono (the HUD look; bundled, @fontsource-variable),
+     with the system faces behind them.
      Six steps for everything that is not a control, plus code. New code
      picks one of these; old sizes move onto them as their components are
      touched. Each step has its size, -lh line height and -weight. */
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-sans: "Geist Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   /* The older name, read at 16 sites. */
   --mono: var(--font-mono);
   --text-2xs: 11px;
@@ -445,6 +447,26 @@
 /* Motion (src/lib/motion.ts sets data-motion from the Motion pref and the
    OS). Reduced keeps only short fades; Off stops UI motion. Every
    transition reads these tokens, so this is the one switch. */
+/* The palette engine (src/lib/palette.ts, theme.ts) paints the colour tokens
+   onto <html> at run time; the blocks above are the first paint. A flip
+   between light and dark crossfades instead of snapping, under the same
+   Motion rules as everything else (Off makes it instant). */
+:root[data-theme-fade],
+:root[data-theme-fade] * {
+  transition:
+    background-color calc(var(--dur-slow) * 2) ease,
+    color calc(var(--dur-slow) * 2) ease,
+    border-color calc(var(--dur-slow) * 2) ease,
+    fill calc(var(--dur-slow) * 2) ease;
+}
+
+/* In the dark the primary action wears the HUD halo (--glow, painted by the
+   engine; unset, it is no shadow). Zero specificity: a component's own
+   shadow wins. */
+:where(.btn--primary, .of-btn.primary) {
+  box-shadow: var(--glow);
+}
+
 :root[data-motion='reduced'] {
   --dur-base: var(--dur-fast);
   --dur-slow: var(--dur-fast);
