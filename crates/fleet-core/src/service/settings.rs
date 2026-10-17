@@ -377,7 +377,9 @@ pub const ORCHESTRATOR_HEADLESS_CHECKS: &str = "orchestrator.headless_checks";
 pub const ORCHESTRATOR_HEADLESS_MODEL: &str = "orchestrator.headless_model";
 /// Control's chat sends the option an agent's `choices` card marks
 /// `recommended` once nobody has answered for
-/// [`CONTROL_AUTO_CONTINUE_MINUTES`] (`src/lib/auto_continue.ts`).
+/// [`CONTROL_AUTO_CONTINUE_MINUTES`]. The countdown runs where the fleet
+/// runs (`service::control_continue`), so it works with no window open and
+/// fires once; never at "Ask first".
 pub const CONTROL_AUTO_CONTINUE: &str = "control.auto_continue";
 pub const CONTROL_AUTO_CONTINUE_MINUTES: &str = "control.auto_continue_minutes";
 /// Control's session hears, as one compact `[fleet events]` digest typed at
@@ -392,6 +394,10 @@ pub const CONTROL_FEED_MIN_INTERVAL_SECS: &str = "control.feed_min_interval_secs
 /// resume Control under another signed-in login with headroom: on its host
 /// first, else on another host (`service::operator_account`).
 pub const CONTROL_SWITCH_AT_LIMIT: &str = "control.switch_at_limit";
+/// The fleet events digest also names a PR Control handed out that
+/// conflicts or went red and a handed-off mission that stalled
+/// (`service::control_sweep`), so Control fixes or reports it.
+pub const CONTROL_SWEEP: &str = "control.sweep";
 pub const PLAYBOOK_OOM_RECREATE: &str = "playbooks.oom_recreate";
 /// Recreates the `oom` playbook may run on one session per 24 h
 /// (`service::playbooks::OOM_ATTEMPT_WINDOW_SECS`). `0` refuses every
@@ -975,7 +981,7 @@ pub const SPECS: &[Spec] = &[
         "true",
         Kind::Bool,
         "Go on with the recommended option",
-        "Control's chat sends the option its agent marked recommended once nobody has answered for the minutes below. Typing or Cancel stops it. Never for a push, a delete or another step hard to undo, and only while the app is open.",
+        "Control's chat sends the option its agent marked recommended once nobody has answered for the minutes below, even with the app closed, and only once. Typing, Cancel or any other message stops it. Never for a push, a delete or another step hard to undo, and never at Ask first.",
     ),
     Spec::new(
         CONTROL_AUTO_CONTINUE_MINUTES,
@@ -1008,6 +1014,13 @@ pub const SPECS: &[Spec] = &[
         Kind::Bool,
         "Move Control off a spent login",
         "When Control's account hits its limit or its login is signed out, resume Control's conversation under another signed-in login with headroom: on its host first, then on another host.",
+    ),
+    Spec::new(
+        CONTROL_SWEEP,
+        "true",
+        Kind::Bool,
+        "Control sweeps what it handed out",
+        "The note to Control's agent also names a pull request it handed out that has merge conflicts or failing checks, and a mission it handed off that made no progress for a while, once per change. Within your brief it fixes or reassigns them, asking as usual; at Ask first it only tells you.",
     ),
     Spec::new(
         PLAYBOOK_PRESS_ENTER,

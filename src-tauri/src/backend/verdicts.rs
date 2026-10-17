@@ -1569,6 +1569,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "operator_status",
         },
     ),
+    // F17: the countdown runs on the hub, so a hub-backed desktop reads and
+    // settles the hub's, never a copy of its own.
+    (
+        "control_auto_continue",
+        Verdict::Routed {
+            tool: "control_auto_continue",
+        },
+    ),
     // Redesign step 9.9 (Jev K2): the hub decides where a Control message
     // goes, since it owns the fleet and the decision envelope.
     (

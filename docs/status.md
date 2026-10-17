@@ -389,6 +389,25 @@ digest (`operator_files_stamp`); the `.mcp.json` keeps the birth's token.
 Other parts of fleet add their own `## …` section to the prompt with one
 line in `operator::CLAUDE_MD_SECTIONS` (`claude_md_full`).
 
+**The sweep** (review F15, 2026-10-17, ON by default: `control.sweep`,
+`service/control_sweep.rs`) adds `sweep:` lines to that digest, as standing
+conditions reported once per change: a PR of a session Control answers for
+that conflicts with its base or has failing checks (the PR shepherd's
+`condition_of` over `sessions.pr_evidence`, keyed by head commit), and a
+handed-off mission, active and waiting on nobody, that finished no task for
+2 h (its done count is tracked in `control.sweep_state`). Each line says
+`sweep: act` (within the brief: Control fixes or reassigns, every step
+behind the usual confirmation) or `sweep: report` at *Ask first* (and
+Custom, which acts as it). The sweep's and auto-continue's `CLAUDE.md`
+rules live in `service/control_rules.rs`, one of the
+`operator::CLAUDE_MD_SECTIONS`, together with *Check before you tell the
+person* (F14): Control checks `diagnose` (where it runs, its host,
+login and account, why a host cannot be reached, each paired client's kind,
+version and Control features; every finding `checked` or `inferred`)
+before naming a cause or a button. `diagnose` reads rows only; the self
+debug agent's `fleet-diagnostics` (#933) is the deeper log search. The
+sweep's session set is the feed's (no expiry yet, F10).
+
 **Host load** is landed (migration 193): the health sample adds CPU busy
 percent (Linux `/proc/stat` deltas, macOS summed `ps` %CPU), available
 memory on macOS too (`kern.memorystatus_level`) and memory pressure (Linux
@@ -934,13 +953,20 @@ its `test:<command>` lines as `Bash(<command>)`, everything else denied
 `done_when` reads it unchanged; its cost is booked as `headless_check` on
 the mission. A checkout that moved or is dirty, a command with shell syntax,
 or a host outside the grant takes the session path.
-Control's chat goes on by itself (ON by default, `control.auto_continue`):
-when the agent's reply ends on a `choices` card with an option marked
-`recommended`, the desktop sends it after `control.auto_continue_minutes`
-(10) of nobody answering, with a countdown, *Send now* and *Cancel* above
-the box (`src/lib/auto_continue.ts`). Never a risky option, never a card
-more than a day old, only while the app is open; fleet-mobile does not do
-it.
+Control's chat goes on by itself (ON by default, `control.auto_continue`;
+moved to the fleet by review F17, 2026-10-17): when the agent's reply ends
+on a `choices` card with an option marked `recommended`, the operator's Stop
+hook records it (`service/control_continue.rs`, the `control.auto_continue_state`
+setting, no migration) and loop `control_continue` sends it as a `[fleet]`
+note after `control.auto_continue_minutes` (10) of nobody answering, once
+(the state moves to `sent` before the prompt is queued), with no window
+open. Never at *Ask first*, nor at Custom, which acts as it
+(`autonomy::position`, the chip's own reading), never a risky
+option, never a card more than a day old, never over a newer turn or a busy
+agent. Clients read and settle it with `control_auto_continue` (`status`,
+`cancel`, `take`); the desktop draws the countdown with *Send now* and
+*Cancel* (`AutoContinueBar.svelte`), and typing cancels it. fleet-mobile
+does not draw it yet (F19).
 
 Routines are landed (`service/routines/`, migrations 131 and 139, redesign
 8.5 to 8.10): a saved prompt that starts a session on a cron schedule, on a

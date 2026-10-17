@@ -958,6 +958,20 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    ToolPolicy {
+        name: "diagnose",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "control_auto_continue",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // lifecycle.rs
     // Opens or closes a shell beside a session (step 5.3): never the agent.
     ToolPolicy {

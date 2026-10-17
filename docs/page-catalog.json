@@ -3331,6 +3331,18 @@
     },
     {
       "default_widget": "switch",
+      "key": "control.sweep",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Control sweeps what it handed out",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
       "key": "playbooks.press_enter",
       "kind": {
         "type": "bool"

@@ -1,80 +1,92 @@
 <script lang="ts">
   // Control's chat goes on with the recommended option (auto_continue.ts):
-  // the countdown above the box, its Send now and Cancel, and the send when
-  // the clock runs out. The panel says when the clock may run (`ready`: the
-  // agent quiet, the box writable) and whether the person is typing.
+  // the countdown above the box, its Send now and Cancel. The clock and the
+  // send are the fleet's (`service::control_continue`), so this bar only
+  // shows them: it reads the state when the chat's turn changes and every
+  // few seconds, and settles the card when the person acts. Typing answers
+  // the card in the person's own words, so it cancels it.
   import { onDestroy } from 'svelte';
-  import { fleetSettings, settingBool, settingInt, SETTING_KEYS } from './fleet_settings';
-  import { clockStart, countdown, isSettled, pauseClock, settle, type RecommendedPick } from './auto_continue';
+  import { autoContinue, countdown, liveCountdown, type AutoContinueView } from './auto_continue';
 
   let {
     sessionId,
-    pick,
-    ready,
+    turnSeq,
     typing,
     onSend,
   }: {
     sessionId: number;
-    pick: RecommendedPick | null;
-    ready: boolean;
+    /** The chat's turn counter: a new turn may bring a new card. */
+    turnSeq: number;
     typing: boolean;
     onSend: (text: string) => void;
   } = $props();
 
-  const enabled = $derived(settingBool($fleetSettings, SETTING_KEYS.controlAutoContinue));
-  const waitMs = $derived(Math.max(1, settingInt($fleetSettings, SETTING_KEYS.controlAutoContinueMinutes) || 10) * 60_000);
+  /** How often the state is read again while the chat is open. */
+  const POLL_MS = 10_000;
 
+  let view = $state<AutoContinueView | null>(null);
   let now = $state(Date.now());
-  // Bumped by settle(), which lives outside Svelte's reach.
-  let settledTick = $state(0);
-  const live = $derived(enabled && pick !== null && settledTick >= 0 && !isSettled(sessionId, pick.key));
 
-  // Typing answers the card in the person's own words: its clock stops for
-  // good. A busy agent or a blocked box only pauses it.
+  async function refresh() {
+    const r = await autoContinue('status');
+    if (r.ok) view = r.value;
+  }
+
   $effect(() => {
-    if (!live || !pick) return;
-    if (typing) {
-      settle(sessionId, pick.key);
-      settledTick++;
-    } else if (!ready) {
-      pauseClock(sessionId, pick.key);
+    void turnSeq;
+    void refresh();
+  });
+
+  const timer = setInterval(() => (now = Date.now()), 1000);
+  const poll = setInterval(() => void refresh(), POLL_MS);
+  onDestroy(() => {
+    clearInterval(timer);
+    clearInterval(poll);
+  });
+
+  const live = $derived(liveCountdown(view, sessionId));
+  const left = $derived(live ? live.dueAt * 1000 - now : null);
+
+  // Once due the fleet sends it; read again shortly after to clear the bar.
+  $effect(() => {
+    if (left !== null && left <= 0) {
+      const t = setTimeout(() => void refresh(), 3000);
+      return () => clearTimeout(t);
     }
   });
 
-  const start = $derived(live && ready && !typing && pick ? clockStart(sessionId, pick.key, now) : null);
-  const left = $derived(start === null ? null : start + waitMs - now);
-
-  const timer = setInterval(() => (now = Date.now()), 1000);
-  onDestroy(() => clearInterval(timer));
-
   $effect(() => {
-    if (left === null || left > 0 || !pick) return;
-    go();
+    if (typing && live) void cancel();
   });
 
-  function go() {
-    if (!pick) return;
-    settle(sessionId, pick.key);
-    settledTick++;
-    onSend(pick.option.prompt);
+  async function go() {
+    if (!live) return;
+    const r = await autoContinue('take', live.pick.turn_seq);
+    if (r.ok) {
+      view = r.value;
+      // `pending` is the card only when this window settled it: a send by the
+      // fleet or another window already happened.
+      if (r.value.pending) onSend(r.value.pending.prompt);
+      void refresh();
+    }
   }
 
-  function cancel() {
-    if (!pick) return;
-    settle(sessionId, pick.key);
-    settledTick++;
+  async function cancel() {
+    if (!live) return;
+    const r = await autoContinue('cancel', live.pick.turn_seq);
+    if (r.ok) view = r.value;
   }
 </script>
 
-{#if left !== null && pick}
+{#if left !== null && live}
   <div class="auto-continue" role="status" data-testid="auto-continue">
     <span class="line"
-      >Going on with <strong>{pick.option.label}</strong> in <span class="clock" data-testid="auto-continue-clock"
+      >Going on with <strong>{live.pick.label}</strong> in <span class="clock" data-testid="auto-continue-clock"
         >{countdown(left)}</span
       ></span
     >
-    <button type="button" class="btn btn--chip" data-testid="auto-continue-now" onclick={go}>Send now</button>
-    <button type="button" class="btn btn--quiet" data-testid="auto-continue-cancel" onclick={cancel}>Cancel</button>
+    <button type="button" class="btn btn--chip" data-testid="auto-continue-now" onclick={() => void go()}>Send now</button>
+    <button type="button" class="btn btn--quiet" data-testid="auto-continue-cancel" onclick={() => void cancel()}>Cancel</button>
   </div>
 {/if}
 

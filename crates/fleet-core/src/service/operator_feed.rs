@@ -513,6 +513,12 @@ fn conditions(s: &Store, now: i64) -> Vec<Condition> {
             out.push(mission_condition(m.id, &m.name, w.reason.as_str()));
         }
     }
+    // F15: what Control handed out that went wrong on its own.
+    out.extend(crate::service::control_sweep::conditions(
+        s,
+        operator_row(s).map(|r| r.id),
+        now,
+    ));
     out
 }
 

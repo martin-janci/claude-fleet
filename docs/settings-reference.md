@@ -48,11 +48,12 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 
 | Setting | Default | Range | Scope | What it does |
 |---|---|---|---|---|
-| `control.auto_continue` | `true` | on / off | fleet | Control's chat sends the option its agent marked recommended once nobody has answered for the minutes below. Typing or Cancel stops it. Never for a push, a delete or another step hard to undo, and only while the app is open. |
+| `control.auto_continue` | `true` | on / off | fleet | Control's chat sends the option its agent marked recommended once nobody has answered for the minutes below, even with the app closed, and only once. Typing, Cancel or any other message stops it. Never for a push, a delete or another step hard to undo, and never at Ask first. |
 | `control.auto_continue_minutes` | `10` | 1–1440 minutes | fleet | How long Control's chat waits for your answer before it sends the recommended option. |
 | `control.react_to_events` | `true` | on / off | fleet | Control's agent gets a short note when a session it started finishes, gets stuck, fails or is lost, when a mission it handed off waits on you, or when a host goes down or runs low. Only while it is idle, and never while automation is paused. |
 | `control.feed_min_interval_secs` | `60` | seconds, `0` = no wait | fleet | The shortest time between two notes to Control's agent. What happens in between goes out together in the next one. |
 | `control.switch_at_limit` | `true` | on / off | fleet | When Control's account hits its limit or its login is signed out, resume Control's conversation under another signed-in login with headroom: on its host first, then on another host. |
+| `control.sweep` | `true` | on / off | fleet | The note to Control's agent also names a pull request it handed out that has merge conflicts or failing checks, and a mission it handed off that made no progress for a while, once per change. Within your brief it fixes or reassigns them, asking as usual; at Ask first it only tells you. |
 
 ## Playbooks
 

@@ -98,7 +98,8 @@ admin      add_host remove_host probe_host check_host hide_host merge_host
            revoke_client set_client_trust api_tokens set_secret rename_session
            set_friendly_name list_accounts add_account get_settings set_setting guide
            env_vars
-           quick_replies work_admin ensure_operator operator_status
+           quick_replies work_admin ensure_operator operator_status diagnose
+           control_auto_continue
            update_status update_admin link_peer unlink_peer list_peer_links
 device     pr_shepherd agents mcp_confirms answer_mcp_confirm setting_proposals
            decide_setting_proposals setting_history control_route
