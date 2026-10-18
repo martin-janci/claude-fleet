@@ -609,6 +609,85 @@ fn adding_a_hub_pairs_stores_its_token_under_its_own_slot_and_follows_it() {
     assert_eq!(w.links.followed.lock().unwrap().len(), 1);
 }
 
+/// A hub's `POST /pair` that runs `during` before it answers: what another
+/// add or a remove did while the pairing was in flight.
+struct PairWhile<F: Fn() + Send + Sync> {
+    inner: Pair,
+    during: F,
+}
+
+#[async_trait::async_trait]
+impl<F: Fn() + Send + Sync> PairTransport for PairWhile<F> {
+    async fn post_pair(&self, url: &str, body: String) -> Result<HubResponse, String> {
+        (self.during)();
+        self.inner.post_pair(url, body).await
+    }
+}
+
+#[test]
+fn an_add_keeps_the_rows_written_while_its_pairing_was_in_flight() {
+    let w = world(
+        &[record("company", "https://fleet.papayapos.dev")],
+        Tokens::with(&[("company", "cl_company")]),
+    );
+    // While the pairing is in flight: `company` is removed and another add
+    // takes the slot `lab` would have had.
+    let store = Arc::clone(&w.store);
+    let transport = PairWhile {
+        inner: pair("cl_lab"),
+        during: move || {
+            write_records(&store, &[record("lab", "https://other.example.com")]).unwrap();
+        },
+    };
+    let info = block_on(w.fleets.add(
+        &transport,
+        &standalone(),
+        FleetAddArgs {
+            label: Some("lab".into()),
+            ..add_args("https://lab.example.com")
+        },
+    ))
+    .unwrap();
+    assert_ne!(
+        info.id, "lab",
+        "the slot is chosen from the rows as they stand"
+    );
+    let stored: Vec<(String, String)> = read_records(&w.store)
+        .unwrap()
+        .into_iter()
+        .map(|r| (r.id, r.url))
+        .collect();
+    assert_eq!(
+        stored,
+        vec![
+            ("lab".to_string(), "https://other.example.com".to_string()),
+            (info.id.clone(), "https://lab.example.com".to_string()),
+        ],
+        "the removed row must stay gone and the concurrent add must survive"
+    );
+    assert_eq!(w.tokens.token_of(&info.id).as_deref(), Some("cl_lab"));
+}
+
+#[test]
+fn a_hub_added_while_its_pairing_was_in_flight_is_not_added_twice() {
+    let w = world(&[], Tokens::with(&[]));
+    let store = Arc::clone(&w.store);
+    let transport = PairWhile {
+        inner: pair("cl_lab"),
+        during: move || {
+            write_records(&store, &[record("lab", "https://lab.example.com")]).unwrap();
+        },
+    };
+    let err = block_on(w.fleets.add(
+        &transport,
+        &standalone(),
+        add_args("https://lab.example.com"),
+    ))
+    .unwrap_err();
+    assert_eq!(err.code, codes::E_EXISTS, "{}", err.message);
+    assert_eq!(read_records(&w.store).unwrap().len(), 1);
+}
+
 #[test]
 fn a_hub_already_shown_is_refused_before_the_code_is_spent() {
     let w = world(
@@ -779,6 +858,25 @@ fn every_fleet_scoped_command_selects_and_no_other_takes_a_fleet() {
                 );
             }
         }
+    }
+}
+
+/// Retry and remove reach the OS keychain, which can wait on an unlock
+/// prompt: a sync command would run them on the macOS main thread.
+#[test]
+fn fleet_commands_that_touch_the_keychain_are_off_the_main_thread() {
+    let src = include_str!("../commands/fleets.rs");
+    for name in ["fleet_retry_now", "fleet_remove"] {
+        let at = src
+            .find(&format!("pub fn {name}("))
+            .or_else(|| src.find(&format!("pub async fn {name}(")))
+            .unwrap_or_else(|| panic!("{name} not found"));
+        let head = &src[..at];
+        let attr = &head[head.rfind("#[tauri::command").expect("an attribute")..];
+        assert!(
+            attr.starts_with("#[tauri::command(async)]") || src[at..].starts_with("pub async fn"),
+            "{name} must be an async command"
+        );
     }
 }
 
