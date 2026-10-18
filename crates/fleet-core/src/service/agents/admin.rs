@@ -23,7 +23,7 @@ const STATUS_DEFAULT_LIMIT: u32 = 20;
 pub const MAX_RULE_HOURS: i64 = 24 * 90;
 
 /// `agents { action, agent?, scope?, level?, host?, project_id?, config?,
-/// hours?, definition?, bindings?, answers?, id?, request?, limit? }`.
+/// hours?, definition?, bindings?, answers?, id?, request?, run_scope?, limit? }`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "AgentsParams")]
 pub struct AgentsArgs {
@@ -68,6 +68,12 @@ pub struct AgentsArgs {
     /// run: a person's request to a manual fleet agent (≤ 4000 chars).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request: Option<String>,
+    /// run: where the run should look, an object {minutes?, host?, session?,
+    /// component?}: the window back from now (≤ 7 days), a host alias, a
+    /// session name, one of hub | updater | agent | host | desktop | phone |
+    /// session | routine | mission | jev | update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_scope: Option<serde_json::Value>,
     /// revoke, run: a rule's id; approve, reject: an action's id; job: a job's id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<i64>,
@@ -395,6 +401,7 @@ pub fn run_now(
         &rule,
         sources.definition.definition.trigger.source,
         args.request.as_deref(),
+        args.run_scope.as_ref(),
         now,
     )?;
     Ok(serde_json::json!({ "changed": 1, "id": id, "job": job }))

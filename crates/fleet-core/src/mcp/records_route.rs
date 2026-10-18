@@ -17,7 +17,7 @@ use axum::Json;
 /// Largest request body: a tools/call with a key and a text.
 pub const BODY_MAX: usize = 64 * 1024;
 
-fn bearer(headers: &HeaderMap) -> Option<&str> {
+pub(super) fn bearer(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(header::AUTHORIZATION)?
         .to_str()

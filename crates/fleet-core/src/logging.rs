@@ -548,7 +548,16 @@ pub fn init_in_with(log_dir: &Path, force_stderr: bool) -> Result<PathBuf, Strin
     if !from_env && std::env::var_os("RUST_LOG").is_some() {
         tracing::warn!("RUST_LOG is set but invalid; using the default filter {DEFAULT_FILTER:?}");
     }
+    let _ = ACTIVE_LOG_DIR.set(dir.clone());
     Ok(dir)
+}
+
+static ACTIVE_LOG_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The directory this process's file log writes to, once [`init_in_with`]
+/// installed it: what `fleet-diagnostics`' `hub_log` reads.
+pub fn active_log_dir() -> Option<&'static Path> {
+    ACTIVE_LOG_DIR.get().map(PathBuf::as_path)
 }
 
 /// Route panics through `tracing` as well: the default hook writes only to

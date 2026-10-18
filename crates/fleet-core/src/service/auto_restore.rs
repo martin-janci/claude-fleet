@@ -1643,16 +1643,20 @@ mod tests {
                 Some(DEFER_MEM_HEADROOM.to_string())
             )]
         );
-        // Once a has settled, the same reading has room for b. The tick
-        // stamps its event with the wall clock, not `now`, and on a loaded
-        // box that is a second or more past `now`: settle from the stamp.
-        let restored_at = store
+        // Once a has settled, the same reading has room for b. The restore
+        // event is stamped with the wall clock, which on a loaded runner is
+        // already past `now`: settle from the stamp, not from `now`.
+        let restored_at: i64 = store
             .lock()
             .unwrap()
-            .last_session_event_at(ids[0], EVENT_RESTORED, i64::MAX)
-            .unwrap()
-            .expect("a's restore was recorded");
-        let later = restored_at + RESTORE_SETTLE_SECS + 1;
+            .conn_ref()
+            .query_row(
+                "SELECT MAX(at) FROM session_events WHERE session_id = ?1 AND kind = ?2",
+                rusqlite::params![ids[0], EVENT_RESTORED],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let later = restored_at.max(now) + RESTORE_SETTLE_SECS + 1;
         let r = run_with(&store, &fake, &NoAdvice, &CFG, later).await;
         assert_eq!(r.restored, 1);
     }
