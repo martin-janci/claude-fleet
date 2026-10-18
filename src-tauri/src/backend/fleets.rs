@@ -75,6 +75,14 @@ pub const FLEET_SCOPED: &[&str] = &[
     "touch_session_viewed",
     // Phase 2: the PRs page per fleet.
     "list_pull_requests",
+    // Settings › Environment per fleet: a person's own variables on each hub,
+    // and the two reads that say what this device may change there.
+    "env_vars",
+    "env_vars_list",
+    "env_var_set",
+    "env_var_unset",
+    "my_grants",
+    "setting_proposals",
 ];
 
 /// Colours offered to a new fleet, in order; the first one no fleet uses is

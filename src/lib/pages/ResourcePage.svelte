@@ -51,6 +51,8 @@
     readonly = false,
     reason = null,
     actions = [],
+    fleet = null,
+    canChange,
   }: {
     page: Page;
     resource: ResourceType;
@@ -60,7 +62,19 @@
     reason?: string | null;
     /** The page actions an `action` list item names (`pages/actions.rs`). */
     actions?: PageAction[];
+    /** An extra fleet's slot id (multi-hub): the list and every action go to
+     *  that fleet's hub. Only a resource whose commands are fleet-scoped is
+     *  shown this way; any other command is refused, never sent to the
+     *  primary by mistake (`resources.ts::fleetArgs`). */
+    fleet?: string | null;
+    /** Whether one record may be changed here, when that differs by record
+     *  (Settings › Environment: a person's own variables, not the shared
+     *  ones). Absent: every record follows `readonly`. */
+    canChange?: (record: ResourceRecord) => boolean;
   } = $props();
+
+  /** The primary's stores follow a change; an extra fleet's are not those. */
+  const followUp = (r: ResourceType) => (fleet && fleet !== 'primary' ? Promise.resolve() : afterChange(r));
 
   let records = $state<ResourceRecord[]>([]);
   let loaded = $state(false);
@@ -128,7 +142,7 @@
   }
 
   async function reload() {
-    const r = await listRecords(resource);
+    const r = await listRecords(resource, fleet);
     loaded = true;
     if (!r.ok) {
       error = r.error.message;
@@ -146,13 +160,13 @@
     void reload();
     // The stores the option selects read (hosts, trackers, orgs) and other views
     // keep of this resource, fresh when the page opens.
-    void afterChange(resource);
+    void followUp(resource);
   });
 
   /** Run an action; a failure is a toast, and the list is re-read either way. */
   async function run(action: ActionSpec, args: Record<string, unknown>): Promise<boolean> {
     busy = true;
-    const r = await runAction(action, args);
+    const r = await runAction(action, args, fleet);
     busy = false;
     if (!r.ok) pushError(r.error, `${action.label} failed`);
     else if (action.result === 'pairing') pairing = r.value as Pairing;
@@ -164,7 +178,7 @@
       else push({ kind: 'error', message: `${action.label}: ${rep?.error ?? 'failed'}` });
     }
     await reload();
-    await afterChange(resource);
+    await followUp(resource);
     return r.ok;
   }
 
@@ -339,7 +353,7 @@
             tabs={page.tabs ?? []}
             bind:tab={recordTab}
             record={current}
-            {readonly}
+            readonly={readonly || (canChange ? !canChange(current) : false)}
             {options}
             {actionOptions}
             {run}

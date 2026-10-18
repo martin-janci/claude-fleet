@@ -759,12 +759,17 @@ pub async fn session_access(
 /// T9's `grant:changed` to keep the set current, this is what
 /// `src/lib/access.ts` derives a row's access from. No arguments on purpose —
 /// "whose grants" is the connection's own identity, never an argument a
-/// caller could point at someone else.
+/// caller could point at someone else. `fleet` picks only WHICH hub answers
+/// (Settings › Environment asks an extra fleet whether this device speaks
+/// for a person there); that hub still answers for its own connection.
 #[tauri::command]
 pub async fn my_grants(
+    fleet: Option<String>,
     backend: State<'_, Arc<FleetBackend>>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<sessions::MyGrants, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::my_grants(&backend, &store).await
 }
 

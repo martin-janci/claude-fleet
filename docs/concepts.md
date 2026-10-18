@@ -98,7 +98,11 @@ override. An unclaimed session gets no person scope, and a disabled
 person's is no longer applied. Each person lists, sets and unsets only their
 own person variables (scope key empty or `me`), from any of their paired
 devices; nobody else — the hub owner included — reads or writes them, and
-the shared scopes stay a fleet admin's.
+the shared scopes stay a fleet admin's. Settings › Environment follows the
+same line: a person's untrusted device adds and removes only "Me" rows, a
+trusted fleet admin's device every scope, and with more than one fleet in
+the window its Fleet picker chooses whose hub the page reads and writes.
+Its *Git & tokens…* form sets the recipe below in one go.
 
 **Recipe: per-person git identity and `GH_TOKEN`.** Each person sets, with
 scope `person`, `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`,

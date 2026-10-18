@@ -1,6 +1,7 @@
 <script lang="ts">
   import HubProjectsPick from './HubProjectsPick.svelte';
   import FleetsSettings from './FleetsSettings.svelte';
+  import EnvironmentSettings from './EnvironmentSettings.svelte';
   import Icon from './kit/Icon.svelte';
   import Loader from './Loader.svelte';
   import WorkSettings from './WorkSettings.svelte';
@@ -1052,7 +1053,24 @@
     </div>
 
     {#if currentPage}
-      {#if !ownsFleet && currentPage.layout === 'master_detail'}
+      {#if currentPage.id === 'settings.env'}
+        <!-- Environment decides per fleet what this device may change: a
+             person's own variables from any of their devices, the shared ones
+             from a trusted one (`env_access.ts`), on any fleet shown here. -->
+        {#key view}
+          <EnvironmentSettings
+            page={currentPage}
+            pages={$allPages}
+            descs={$descriptors}
+            values={$settingValues}
+            sources={$pagesBundle.sources}
+            resources={$pagesBundle.resources}
+            actions={$pagesBundle.actions}
+            section={leaf?.section}
+            {ownsFleet}
+            onnavigate={(id) => select(id)} />
+        {/key}
+      {:else if !ownsFleet && currentPage.layout === 'master_detail'}
         <!-- A resource's list routes to the hub: shown, read-only, with
              where to change it instead. -->
         {@const res = $pagesBundle.resources.find((r) => r.id === currentPage.resource)}

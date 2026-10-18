@@ -3159,6 +3159,17 @@ read the page specs with `list_pages`. A page's data items (usage,
 retention) and page actions stay on a standalone desktop: a paired desktop
 shows the settings only.
 
+Settings › Environment (`env_vars`) does not follow that trust line: any
+paired device that speaks for a person (`my_grants.person_id`) adds and
+removes that person's OWN variables there, trusted or not, and its Add
+offers only "Me (my sessions)". The global, host and project scopes still
+need a fleet admin's trusted `full` device, and the page says so, naming
+the `fleet-hub client trust <name>` it takes. A device bound to no person
+reads the shared scopes only. With a second fleet added (Settings › Hub &
+sync › Fleets) a Fleet picker routes the page to that hub, with the same
+rule judged by that hub (`env_vars`, `env_vars_list`, `env_var_set`,
+`env_var_unset`, `my_grants` and `setting_proposals` are fleet-scoped).
+
 These read and write `state.db` directly, as the person at the console:
 an applied proposal is recorded with actor `person` and its id. Every write
 of a registered setting is kept in that history, whoever made it (5,000

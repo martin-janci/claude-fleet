@@ -737,6 +737,11 @@ fn every_fleet_scoped_command_selects_and_no_other_takes_a_fleet() {
             include_str!("../commands/projects.rs"),
         ),
         ("commands/prs.rs", include_str!("../commands/prs.rs")),
+        (
+            "commands/env_vars.rs",
+            include_str!("../commands/env_vars.rs"),
+        ),
+        ("commands/pages.rs", include_str!("../commands/pages.rs")),
     ];
     for name in FLEET_SCOPED {
         let body = files
