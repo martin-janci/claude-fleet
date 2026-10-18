@@ -418,25 +418,27 @@ let stopFollowing: (() => void) | null = null;
 /**
  * Keep `pinnedDashboards` current while a page or a card shows it: read
  * now, and again on `dashboards:changed`, which the hub sends when the
- * person pins or unpins on any device (step 7). Returns the release; the
+ * person pins or unpins on any device (step 7), and on `hub:resynced`.
+ * Returns the release; the
  * last release stops listening.
  */
 export function followPinned(): () => void {
   followers += 1;
   if (followers === 1) {
     let disposed = false;
-    let unlisten: UnlistenFn | null = null;
+    const unlisteners: UnlistenFn[] = [];
+    const keep = (u: UnlistenFn) => {
+      if (disposed) u();
+      else unlisteners.push(u);
+    };
     void loadPinned();
-    void listen(DASHBOARDS_CHANGED_EVENT, () => void loadPinned()).then(
-      (u) => {
-        if (disposed) u();
-        else unlisten = u;
-      },
-      () => {},
-    );
+    void listen(DASHBOARDS_CHANGED_EVENT, () => void loadPinned()).then(keep, () => {});
+    // A gap the hub could not replay can have swallowed a
+    // `dashboards:changed`: re-read rather than trust what we hold.
+    void listen('hub:resynced', () => void loadPinned()).then(keep, () => {});
     stopFollowing = () => {
       disposed = true;
-      unlisten?.();
+      for (const u of unlisteners.splice(0)) u();
     };
   }
   let released = false;

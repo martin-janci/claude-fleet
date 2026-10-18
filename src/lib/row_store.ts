@@ -118,6 +118,9 @@ export interface RowStore<T, K> {
    *  after the row was removed does not resurrect it. */
   accept(row: T | null | undefined): void;
   isTombstoned(key: K): boolean;
+  /** Forget `key`'s tombstone, for a row the backend reports as deliberately
+   *  added again (a host re-added under the same alias). */
+  clearTombstone(key: K): void;
   /** Call before asking for the full list; hand the token to `applyList`. */
   beginList(): ListToken;
   /** Replace the store with a full list answer. The list owns the order and
@@ -231,6 +234,9 @@ export function createRowStore<T, K>(
       store.update((arr) => mergeInto(arr, row));
     },
     isTombstoned,
+    clearTombstone(key) {
+      tombstones.delete(key);
+    },
     beginList: race.begin,
     applyList(listed, token) {
       // A mocked or older backend may answer with nothing: keep what we have.

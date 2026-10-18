@@ -118,6 +118,51 @@ describe('fleet rows', () => {
     expect(listed).toEqual([{ fleet: 'company' }, { fleet: 'company' }]);
   });
 
+  // Each list_sessions call parks until the test answers it, in any order.
+  function deferSessionLists(): ((rows: SessionRow[]) => void)[] {
+    const answers: ((rows: SessionRow[]) => void)[] = [];
+    inv.mockImplementation((cmd: string) =>
+      cmd === 'list_sessions' ? new Promise((res) => answers.push(res)) : Promise.resolve([]),
+    );
+    return answers;
+  }
+
+  it('a kill applied while the list was in flight is not undone by its answer', async () => {
+    onFleetEvent({ fleet: 'company', name: 'session:updated', payload: session(1) });
+    onFleetEvent({ fleet: 'company', name: 'session:updated', payload: session(2) });
+    const answers = deferSessionLists();
+    const load = loadFleetRows('company');
+    onFleetEvent({ fleet: 'company', name: 'session:killed', payload: { id: 1 } });
+    answers[0]([session(1), session(2)]);
+    await load;
+    expect([...get(fleetRows).get('company')!.sessions.keys()]).toEqual([2]);
+  });
+
+  it('an older list answering last does not land over a newer one', async () => {
+    const answers = deferSessionLists();
+    const older = loadFleetRows('company');
+    const newer = loadFleetRows('company');
+    answers[1]([session(2)]);
+    await newer;
+    answers[0]([session(1), session(2)]);
+    await older;
+    expect([...get(fleetRows).get('company')!.sessions.keys()]).toEqual([2]);
+  });
+
+  it("flattens a ping's health sample onto the host row, as the primary does", () => {
+    const rows = emptyRows();
+    applyFleetEvent(rows, { name: 'host:added', payload: { alias: 'mac', reachable: true, load_1m: 0.1 } });
+    applyFleetEvent(rows, {
+      name: 'host:pinged',
+      payload: { alias: 'mac', last_pinged_at: 9, reachable: true, health: { load_1m: 3.5, mem_avail_kb: 42 } },
+    });
+    const h = rows.hosts.get('mac')!;
+    expect(h.load_1m).toBe(3.5);
+    expect(h.mem_avail_kb).toBe(42);
+    expect(h.last_pinged_at).toBe(9);
+    expect('health' in h).toBe(false);
+  });
+
   it('a failed list shows on the fleet rather than wiping its rows', async () => {
     onFleetEvent({ fleet: 'company', name: 'session:updated', payload: session(3) });
     inv.mockImplementation(async (cmd: string) => {
