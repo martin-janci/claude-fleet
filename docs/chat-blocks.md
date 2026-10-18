@@ -9,8 +9,9 @@ it are drawn as cards instead:
   The card shows the outcome, the confidence, the summary, then blockers,
   warnings, tests run and follow-ups. A follow-up's *Ask* button puts it in
   the composer. The JSON is still there under *Reported after FLEET_TASK_DONE_…*.
-- **A `fleet.ui/1` block.** A fenced ```` ```fleet-ui ```` block (or a
-  ```` ```json ```` block whose object has `"spec": "fleet.ui/1"`) holding one
+- **A `fleet.ui/1` block.** A fenced ```` ```fleet-ui ```` block (`fleet.ui`
+  is read the same way), or a ```` ```json ```` or untagged block whose object
+  has `"spec": "fleet.ui/1"`, holding one
   block: a tutorial, a guide, a callout, facts, choices, a form, a report,
   a job's progress, results, an error, a settings change, a wizard, a
   dashboard or a debug device.

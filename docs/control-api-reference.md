@@ -89,7 +89,7 @@ Parameters: `continue_after`, `enabled`
 
 ### `autofix`
 
-Known broken fleet states, each with a plain-language explanation and, where one exists, a fix: list {state?} (the live ones: open, verifying, apply_failed, dismissed; also `fixed`, cleared in the last day after a fix ran), explain {id}, scan (check now), apply {id}, dismiss {id, until?} (later; default 24 h). Safe fixes run by themselves (setting autofix.auto_safe); the rest wait for a person. apply and dismiss need a trusted full device; Control may list and explain only, and shows the person a finding with a `fix` chat card (`{"spec":"fleet.ui/1","kind":"fix","finding_id":<id>}`).
+Known broken fleet states, each with a plain-language explanation and, where one exists, a fix: list {state?} (the live ones: open, verifying, apply_failed, dismissed; also `fixed`, cleared in the last day after a fix ran), explain {id}, scan (check now), apply {id}, dismiss {id, until?} (later; default 24 h). Safe fixes run by themselves (setting autofix.auto_safe); the rest wait for a person. apply and dismiss need a trusted full device; Control may list and explain only, and shows the person a finding with a `fix` chat card: a ```fleet-ui fenced block holding `{"spec":"fleet.ui/1","kind":"fix","finding_id":<id>}`.
 
 Parameters: `action`, `id`, `state`, `until`
 
