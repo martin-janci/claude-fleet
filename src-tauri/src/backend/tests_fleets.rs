@@ -176,6 +176,7 @@ fn standalone() -> PrimaryView {
         connection: None,
         unavailable: None,
         configured_url: None,
+        fleet_id: None,
     }
 }
 
@@ -187,6 +188,7 @@ fn paired_to(url: &str) -> PrimaryView {
         connection: Some(HubConnection::Connected),
         unavailable: None,
         configured_url: Some(url.into()),
+        fleet_id: None,
     }
 }
 
@@ -464,6 +466,79 @@ fn one_hubs_contract_skew_refuses_only_that_hubs_calls() {
     );
 }
 
+#[test]
+fn one_hub_added_twice_under_two_urls_is_spotted_by_its_fleet_id() {
+    let w = world(
+        &[
+            record("company", "https://fleet.papayapos.dev"),
+            record("company-2", "https://10.0.0.7"),
+            record("lab", "https://lab.example.com"),
+        ],
+        Tokens::with(&[("company", "cl_a"), ("company-2", "cl_b"), ("lab", "cl_c")]),
+    );
+    // Nothing is a duplicate before the hubs have said who they are.
+    let primary = Arc::new(FleetBackend::local());
+    assert!(w.fleets.select(&primary, Some("company-2")).is_ok());
+    for (slot, id) in [("company", "f-1"), ("company-2", "f-1"), ("lab", "f-2")] {
+        w.fleets
+            .status_of(slot)
+            .unwrap()
+            .hub_fleet_id(Some(id.to_string()));
+    }
+    let list = w.fleets.list(&standalone());
+    let dup = |slot: &str| {
+        list.iter()
+            .find(|f| f.id == slot)
+            .unwrap()
+            .duplicate_of
+            .clone()
+    };
+    // The first in slot order keeps working; the later one is the duplicate.
+    assert_eq!(dup("company"), None);
+    assert_eq!(dup("company-2").as_deref(), Some("\"company\""));
+    assert_eq!(dup("lab"), None);
+    assert_eq!(
+        list.iter()
+            .find(|f| f.id == "lab")
+            .unwrap()
+            .fleet_id
+            .as_deref(),
+        Some("f-2")
+    );
+    let err = w.fleets.select(&primary, Some("company-2")).unwrap_err();
+    assert_eq!(err.code, codes::E_EXISTS);
+    assert!(w.fleets.select(&primary, Some("company")).is_ok());
+}
+
+#[test]
+fn an_extra_fleet_that_is_the_primarys_own_hub_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_with_bus(&dir.path().join("state.db"), Arc::new(NoopEventBus)).unwrap();
+    let w = Fleets::new(
+        Arc::new(Mutex::new(store)),
+        Tokens::with(&[("home", "cl_home")]) as Arc<dyn FleetTokens>,
+        Arc::new(Sink::default()) as Arc<dyn RemoteEventSink>,
+        Arc::new(Links::default()) as Arc<dyn FleetLinks>,
+        CancellationToken::new(),
+    )
+    .with_primary_identity(Arc::new(|| Some("f-home".to_string())));
+    w.store_records_for_test(&[record("home", "https://10.0.0.5")]);
+    w.load();
+    w.status_of("home")
+        .unwrap()
+        .hub_fleet_id(Some("f-home".to_string()));
+    let err = w
+        .select(&Arc::new(FleetBackend::local()), Some("home"))
+        .unwrap_err();
+    assert_eq!(err.code, codes::E_EXISTS);
+    assert!(err.message.contains("primary"), "{}", err.message);
+    let mut primary = standalone();
+    primary.fleet_id = Some("f-home".into());
+    let list = w.list(&primary);
+    assert_eq!(list[0].fleet_id.as_deref(), Some("f-home"));
+    assert_eq!(list[1].duplicate_of.as_deref(), Some("the primary fleet"));
+}
+
 // --- events ------------------------------------------------------------------
 
 #[test]
@@ -661,6 +736,7 @@ fn every_fleet_scoped_command_selects_and_no_other_takes_a_fleet() {
             "commands/projects.rs",
             include_str!("../commands/projects.rs"),
         ),
+        ("commands/prs.rs", include_str!("../commands/prs.rs")),
     ];
     for name in FLEET_SCOPED {
         let body = files

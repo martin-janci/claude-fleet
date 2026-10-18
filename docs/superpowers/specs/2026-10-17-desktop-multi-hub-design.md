@@ -215,7 +215,19 @@ Migration: none needed (D1).
 **Visible in app:** yes — Settings → Hub & sync → *Fleets*, and the sidebar's
 switcher once a second hub is added.
 
-### Phase 2 — a second fleet as a first-class window
+### Phase 2 — a second fleet as a first-class window (landed)
+
+As built: the session view is `FleetSessionView` (conversation, composer,
+keys, a terminal under its own pty id, a pane snapshot) rather than
+ConversationPanel with a `fleet` prop — that panel's ~80 modules key drafts,
+viewed-at, the terminal map, rewind and fork by the primary's ids, which is
+Phase 3's re-key. `FLEET_SCOPED` grew by `session_conversation`,
+`session_tool_detail`, `capture_session`, `touch_session_viewed` and
+`list_pull_requests`. The New session default is: the fleet last used for
+the repository, else the extra fleet whose label or host name is the
+repository's owner, else the primary (the org rule, read from what the
+window knows; the hubs' org rows are not compared). Repo reads stay on the
+primary.
 
 - The full session view (conversation, transcript, terminal attach, repo
   reads) for an extra fleet's session: add `fleet` to those commands

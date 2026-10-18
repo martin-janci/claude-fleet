@@ -25,6 +25,24 @@ import {
   visibleExtraFleets,
   _resetFleetsForTest,
   _setFleetsForTest,
+  closeFleetSession,
+  defaultFleetFor,
+  fleetAddress,
+  fleetCaptureSession,
+  fleetChoicesFor,
+  fleetInbox,
+  fleetInboxCount,
+  fleetListPullRequests,
+  fleetNeedsCount,
+  fleetOwnsOwner,
+  fleetPtyId,
+  fleetSelection,
+  fleetSendKey,
+  fleetSessionAt,
+  openFleetSession,
+  rememberFleetFor,
+  rememberedFleetFor,
+  selectedFleetSession,
   type FleetInfo,
 } from './fleets';
 import type { SessionRow } from './sessions';
@@ -169,5 +187,119 @@ describe('connection words', () => {
       connectionWord({ connection: { state: 'hub_too_old', hub_contract: 1, min_contract: 13 }, unavailable: null, local: false })
         .word,
     ).toBe('hub too old');
+  });
+});
+
+describe('Phase 2: an extra fleet as a window', () => {
+  it('opens an extra fleet session by its own id, and drops it when it is gone', () => {
+    _setFleetsForTest([fleet(PRIMARY), fleet('company')]);
+    onFleetEvent({ fleet: 'company', name: 'session:updated', payload: session(1, { tmux_name: 'pos' }) });
+    openFleetSession('company', 1);
+    expect(get(selectedFleetSession)?.row.tmux_name).toBe('pos');
+    expect(get(selectedFleetSession)?.fleet.id).toBe('company');
+    onFleetEvent({ fleet: 'company', name: 'session:killed', payload: { id: 1 } });
+    expect(get(selectedFleetSession)).toBeNull();
+    openFleetSession(PRIMARY, 1);
+    expect(get(fleetSelection)).toEqual({ fleet: 'company', id: 1 });
+    closeFleetSession();
+    expect(get(fleetSelection)).toBeNull();
+  });
+
+  it('reads, keys and snapshots through the fleet, under a pty id of its own', async () => {
+    inv.mockResolvedValue('pane');
+    await fleetCaptureSession('company', session(4));
+    await fleetSendKey('company', session(4), 'Escape');
+    await fleetListPullRequests('company', { state: 'open' });
+    expect(inv.mock.calls).toEqual([
+      ['capture_session', { args: { session_id: 4, scrollback_lines: 200 }, fleet: 'company' }],
+      ['send_prompt', { args: { host_alias: 'mac', tmux_name: 's4', prompt: '', submit: false, keys: 'Escape' }, fleet: 'company' }],
+      ['list_pull_requests', { args: { state: 'open' }, fleet: 'company' }],
+    ]);
+    expect(fleetPtyId('company', { id: 4 })).toBe('fleet-company-4');
+    expect(fleetPtyId('company', { id: 4 })).toMatch(/^[A-Za-z0-9_.:-]{1,64}$/);
+  });
+
+  it('re-reads the fleet list when a link comes up, for its fleet id', async () => {
+    _setFleetsForTest([fleet(PRIMARY), fleet('company', { connection: { state: 'connecting' } })]);
+    inv.mockImplementation(async (cmd: string) =>
+      cmd === 'fleets_list' ? [fleet(PRIMARY), fleet('company', { fleet_id: 'f-1' })] : [],
+    );
+    onFleetEvent({ fleet: 'company', name: 'hub:connection', payload: { state: 'connected' } });
+    await vi.waitFor(() => expect(get(visibleExtraFleets)[0].fleet.fleet_id).toBe('f-1'));
+  });
+
+  it("never shows a duplicate fleet's rows", () => {
+    _setFleetsForTest([fleet(PRIMARY), fleet('company'), fleet('again', { duplicate_of: '"company"' })]);
+    onFleetEvent({ fleet: 'again', name: 'session:updated', payload: session(1) });
+    const again = get(visibleExtraFleets).find((v) => v.fleet.id === 'again')!;
+    expect(again.rows.sessions.size).toBe(0);
+  });
+});
+
+describe('Phase 2: which fleet New session starts on', () => {
+  const project = (id: number, owner: string, repo: string) => ({
+    project: { id, owner, repo, base_path: '', last_session_at: null, adopted: false, system: false },
+    worktrees: [],
+  });
+
+  it('offers only usable extra fleets that have the repository, by their own project id', () => {
+    const known = [
+      fleet(PRIMARY),
+      fleet('company'),
+      fleet('lab'),
+      fleet('down', { unavailable: 'no token' }),
+      fleet('twice', { duplicate_of: '"company"' }),
+    ];
+    const rows = new Map([
+      ['company', { ...emptyRows(), projects: [project(9, 'PapayaPOS', 'pos')] }],
+      ['lab', { ...emptyRows(), projects: [project(3, 'me', 'other')] }],
+      ['down', { ...emptyRows(), projects: [project(1, 'papayapos', 'pos')] }],
+      ['twice', { ...emptyRows(), projects: [project(1, 'papayapos', 'pos')] }],
+    ]);
+    const got = fleetChoicesFor('papayapos', 'POS', known, rows);
+    expect(got.map((c) => [c.fleet.id, c.projectId])).toEqual([['company', 9]]);
+  });
+
+  it('defaults to the remembered fleet, else the one that owns the owner, else the primary', () => {
+    const company = { fleet: fleet('company', { label: 'company', url: 'https://fleet.papayapos.dev' }), projectId: 9 };
+    const lab = { fleet: fleet('lab'), projectId: 2 };
+    expect(defaultFleetFor('PapayaPOS', [lab, company], null)).toBe('company');
+    expect(defaultFleetFor('PapayaPOS', [lab, company], 'lab')).toBe('lab');
+    expect(defaultFleetFor('PapayaPOS', [lab, company], PRIMARY)).toBe(PRIMARY);
+    expect(defaultFleetFor('PapayaPOS', [lab, company], 'gone')).toBe('company');
+    expect(defaultFleetFor('martin-janci', [lab, company], null)).toBe(PRIMARY);
+    expect(fleetOwnsOwner({ label: 'Papaya POS', url: null }, 'papayapos')).toBe(true);
+  });
+
+  it('remembers per repository, and forgets for the primary', () => {
+    rememberFleetFor('PapayaPOS', 'pos', 'company');
+    expect(rememberedFleetFor('papayapos', 'POS')).toBe('company');
+    rememberFleetFor('PapayaPOS', 'pos', PRIMARY);
+    expect(rememberedFleetFor('papayapos', 'pos')).toBeNull();
+  });
+});
+
+describe('Phase 2: attention and addresses per fleet', () => {
+  it('counts what needs you per fleet with that fleet’s own table', () => {
+    _setFleetsForTest([fleet(PRIMARY), fleet('company'), fleet('lab')]);
+    onFleetEvent({ fleet: 'company', name: 'session:updated', payload: session(1, { claude_status: 'blocked', kind: 'work' }) });
+    onFleetEvent({ fleet: 'company', name: 'session:updated', payload: session(2, { claude_status: 'working', kind: 'work' }) });
+    onFleetEvent({ fleet: 'lab', name: 'session:updated', payload: session(1, { claude_status: 'working', kind: 'work' }) });
+    expect(get(fleetNeedsCount).get('company')).toBe(1);
+    expect(get(fleetNeedsCount).get('lab')).toBe(0);
+    expect(get(fleetInbox).map((g) => [g.fleet.id, g.rows.map((r) => r.id)])).toEqual([['company', [1]]]);
+    expect(get(fleetInboxCount)).toBe(1);
+    fleetFilter.set('lab');
+    expect(get(fleetInboxCount)).toBe(0);
+  });
+
+  it('names a federation address by the fleet this window knows, and finds its session', () => {
+    const known = [fleet(PRIMARY, { fleet_id: 'aaaaaaaa-1111' }), fleet('company', { label: 'company', fleet_id: 'bbbbbbbb-2222' })];
+    const rows = new Map([['company', { ...emptyRows(), sessions: new Map([[5, session(5, { host_alias: 'mac', tmux_name: 'dev-x' })]]) }]]);
+    expect(fleetAddress('bbbbbbbb-2222/session/mac/dev-x', known).text).toBe('company › mac/dev-x');
+    expect(fleetSessionAt('BBBBBBBB-2222/session/mac/dev-x', known, rows)).toEqual({ fleet: 'company', id: 5 });
+    expect(fleetSessionAt('aaaaaaaa-1111/session/mac/dev-x', known, rows)).toBeNull();
+    expect(fleetAddress('cccccccc-3333/session/mac/x', known)).toEqual({ text: 'cccccccc-3333/session/mac/x', fleet: null, host: 'mac', name: 'x' });
+    expect(fleetAddress('session 12 on mefistos', known).fleet).toBeNull();
   });
 });

@@ -468,6 +468,10 @@ impl EventBridge {
                         contract::MAX_HUB_CONTRACT,
                     ) {
                         contract::ContractFit::InRange => {
+                            // Before `Connected`: whoever reacts to that
+                            // state (the fleets list) must already see it.
+                            self.status
+                                .hub_fleet_id(contract::hub_fleet_id(&frame.data));
                             // Reported BEFORE the resync, and the order is
                             // load-bearing: the resync's own client consults
                             // this status (`bootstrap/tasks.rs`), so a

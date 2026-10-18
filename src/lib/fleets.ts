@@ -21,6 +21,10 @@ import type { SessionRow } from './sessions';
 import type { HostRow } from './hosts';
 import type { ProjectRow, ProjectTreeRow } from './projects';
 import { readPref, writePref } from './prefs';
+import { attentionState, byTriage, countsTowardBadge } from './attention';
+import { attentionFactsFrom } from './attention_facts';
+import { attentionIdleMinutes } from './notify';
+import type { PrFilter, PrList } from './prs';
 
 /** The slot id of the launch-time fleet (`backend::fleets::PRIMARY`). */
 export const PRIMARY = 'primary';
@@ -35,6 +39,13 @@ export const FLEET_SCOPED = [
   'pin_session',
   'list_hosts',
   'list_projects',
+  // Phase 2: an extra fleet's session opens in its own view.
+  'session_conversation',
+  'session_tool_detail',
+  'capture_session',
+  'touch_session_viewed',
+  // Phase 2: the PRs page per fleet.
+  'list_pull_requests',
 ] as const;
 export type FleetScopedCommand = (typeof FLEET_SCOPED)[number];
 
@@ -52,6 +63,12 @@ export interface FleetInfo {
   connection: HubConnection | null;
   /** Why a configured fleet is not in use. */
   unavailable: string | null;
+  /** The fleet id the hub's `ready` frame named (Phase 2); null until it
+   *  has, or from a hub older than the field. */
+  fleet_id?: string | null;
+  /** The fleet this one is the same hub as (Phase 2, by `fleet_id`): its
+   *  rows are not shown and its calls are refused. */
+  duplicate_of?: string | null;
 }
 
 /** One extra fleet's rows, keyed within that fleet only. */
@@ -118,7 +135,8 @@ export const visibleExtraFleets = derived(
   ([$filter, $fleets, $rows]) =>
     $fleets
       .filter((f) => !f.primary && filterShows($filter, f.id, $fleets))
-      .map((f) => ({ fleet: f, rows: $rows.get(f.id) ?? emptyRows() })),
+      // A duplicate's rows are the other fleet's twice over: never shown.
+      .map((f) => ({ fleet: f, rows: f.duplicate_of ? emptyRows() : ($rows.get(f.id) ?? emptyRows()) })),
 );
 
 // ── applying events ─────────────────────────────────────────────────────
@@ -208,7 +226,12 @@ export function onFleetEvent(e: FleetEvent): void {
   });
   if (todo === 'connection' && isObj(e.payload)) {
     setConnection(e.fleet, e.payload as unknown as HubConnection);
-    if ((e.payload as { state?: string }).state === 'connected') void loadFleetRows(e.fleet);
+    if ((e.payload as { state?: string }).state === 'connected') {
+      // The ready frame that connected it also named its fleet id, which
+      // only the list carries (and with it whether it is a duplicate).
+      void loadFleets();
+      void loadFleetRows(e.fleet);
+    }
   } else if (todo === 'relist') {
     void loadFleetRows(e.fleet);
   }
@@ -311,6 +334,14 @@ export function fleetSendPrompt(fleet: string, s: SessionRow, prompt: string): P
   });
 }
 
+/** Press one key in an extra fleet's session instead of typing: answer or
+ *  dismiss a dialog, interrupt a turn. */
+export function fleetSendKey(fleet: string, s: SessionRow, key: 'Enter' | 'Escape' | 'C-c'): Promise<Result<null>> {
+  return fleetCmd('send_prompt', fleet, {
+    args: { host_alias: s.host_alias, tmux_name: s.tmux_name, prompt: '', submit: false, keys: key },
+  });
+}
+
 export async function fleetKillSession(fleet: string, s: SessionRow): Promise<Result<number>> {
   const r = await fleetCmd<number>('kill_session', fleet, { args: { host_alias: s.host_alias, name: s.tmux_name } });
   if (r.ok) patchRows(fleet, (rows) => rows.sessions.delete(s.id));
@@ -334,6 +365,8 @@ export async function fleetPinSession(fleet: string, s: SessionRow, pinned: bool
 export interface FleetNewSession {
   host_alias: string;
   project_id: number;
+  /** Phase 2: `work` (the default) or `shell`. */
+  kind?: 'work' | 'shell';
   /** The tmux name. */
   name: string;
   friendly_name?: string | null;
@@ -350,13 +383,217 @@ export async function fleetNewSession(fleet: string, a: FleetNewSession): Promis
       name: a.name,
       new_worktree: a.new_worktree ?? null,
       base_branch: null,
-      kind: 'work',
+      kind: a.kind ?? 'work',
       start_command: null,
       friendly_name: a.friendly_name ?? null,
     },
   });
   if (r.ok) patchRows(fleet, (rows) => rows.sessions.set(r.value.id, r.value));
   return r;
+}
+
+// ── an extra fleet's session, opened (Phase 2) ──────────────────────────
+
+/** The extra fleet's session on screen, by its fleet and its id there. Null
+ *  while the primary's own selection (`selectedSession`) is what is shown.
+ *  Kept apart from that selection on purpose: every primary module reads it
+ *  as an id in the primary's space, where this id means another session. */
+export const fleetSelection = writable<{ fleet: string; id: number } | null>(null);
+
+/** The opened session's fleet and live row, or null when none is open or it
+ *  has gone (killed, its fleet removed). */
+export const selectedFleetSession = derived([fleetSelection, fleetsStore, rowsStore], ([$sel, $fleets, $rows]) => {
+  if (!$sel) return null;
+  const fleet = $fleets.find((f) => f.id === $sel.fleet && !f.primary);
+  const row = $rows.get($sel.fleet)?.sessions.get($sel.id);
+  return fleet && row ? { fleet, row } : null;
+});
+
+/** Open an extra fleet's session in the main view. */
+export function openFleetSession(fleet: string, id: number): void {
+  if (fleet === PRIMARY) return;
+  fleetSelection.set({ fleet, id });
+}
+
+/** Go back to the primary's own selection. */
+export function closeFleetSession(): void {
+  fleetSelection.set(null);
+}
+
+/** Its finished turns read as seen, on its own hub. */
+export async function fleetTouchViewed(fleet: string, s: SessionRow): Promise<void> {
+  const r = await fleetCmd<SessionRow>('touch_session_viewed', fleet, { args: { session_id: s.id } });
+  if (r.ok && isObj(r.value) && typeof r.value.id === 'number') patchRows(fleet, (rows) => rows.sessions.set(r.value.id, r.value));
+}
+
+/** A read-only snapshot of its pane, from its own hub. */
+export function fleetCaptureSession(fleet: string, s: SessionRow, scrollback = 200): Promise<Result<string>> {
+  return fleetCmd<string>('capture_session', fleet, { args: { session_id: s.id, scrollback_lines: scrollback } });
+}
+
+/** The pty id an extra fleet's terminal attaches under: never one the
+ *  primary's panes use (`agent`, `shell-N`, a pop-out's label). */
+export function fleetPtyId(fleet: string, s: Pick<SessionRow, 'id'>): string {
+  return `fleet-${fleet}-${s.id}`;
+}
+
+// ── New session: which fleet (Phase 2) ──────────────────────────────────
+
+/** An extra fleet that can start a session in a repository: its project row
+ *  for it, by the id that fleet's hub knows it under. */
+export interface FleetChoice {
+  fleet: FleetInfo;
+  projectId: number;
+}
+
+const sameText = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+/** Lower-case letters and digits only: `PapayaPOS` and `papayapos` agree. */
+const squash = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+/** The extra fleets that have `owner/repo` among their projects and can be
+ *  used now (connected or connecting, not a duplicate, not unavailable). */
+export function fleetChoicesFor(
+  owner: string,
+  repo: string,
+  known: readonly FleetInfo[],
+  rows: ReadonlyMap<string, FleetRows>,
+): FleetChoice[] {
+  const out: FleetChoice[] = [];
+  for (const f of known) {
+    if (f.primary || f.unavailable || f.duplicate_of) continue;
+    const p = rows.get(f.id)?.projects.find((t) => !t.project.system && sameText(t.project.owner, owner) && sameText(t.project.repo, repo));
+    if (p) out.push({ fleet: f, projectId: p.project.id });
+  }
+  return out;
+}
+
+/** Whether a fleet reads as the one that owns `owner`'s work: its label, or
+ *  a label of its hub's host name, is the owner's name (`PapayaPOS` →
+ *  the fleet at `fleet.papayapos.dev`, or one labelled "papayapos"). */
+export function fleetOwnsOwner(f: Pick<FleetInfo, 'label' | 'url'>, owner: string): boolean {
+  const o = squash(owner);
+  if (!o) return false;
+  if (squash(f.label) === o) return true;
+  let host = '';
+  try {
+    host = f.url ? new URL(f.url).hostname : '';
+  } catch {
+    host = '';
+  }
+  return host.split('.').some((part) => squash(part) === o);
+}
+
+const FLEET_BY_REPO_PREF = 'newSession.fleetByRepo';
+const isRepoMap = (v: unknown): v is Record<string, string> =>
+  isObj(v) && Object.values(v).every((x) => typeof x === 'string');
+
+/** The fleet a person last started `owner/repo` on, if any. */
+export function rememberedFleetFor(owner: string, repo: string): string | null {
+  return readPref<Record<string, string>>(FLEET_BY_REPO_PREF, {}, isRepoMap)[`${owner}/${repo}`.toLowerCase()] ?? null;
+}
+
+/** Remember where `owner/repo` was last started (the primary forgets it). */
+export function rememberFleetFor(owner: string, repo: string, fleet: string): void {
+  const map = { ...readPref<Record<string, string>>(FLEET_BY_REPO_PREF, {}, isRepoMap) };
+  const key = `${owner}/${repo}`.toLowerCase();
+  if (fleet === PRIMARY) delete map[key];
+  else map[key] = fleet;
+  writePref(FLEET_BY_REPO_PREF, map);
+}
+
+/** Where New session starts `owner/repo` unless the person picks: the fleet
+ *  they last started it on, else the extra fleet that owns the owner's work
+ *  (design: "PapayaPOS → company"), else the primary. Only ever one of
+ *  `choices` or the primary. */
+export function defaultFleetFor(owner: string, choices: readonly FleetChoice[], remembered: string | null): string {
+  if (remembered && (remembered === PRIMARY || choices.some((c) => c.fleet.id === remembered))) return remembered;
+  return choices.find((c) => fleetOwnsOwner(c.fleet, owner))?.fleet.id ?? PRIMARY;
+}
+
+// ── attention per fleet (Phase 2) ───────────────────────────────────────
+
+/** An extra fleet's sessions that need you, worst first, by the same table
+ *  the primary's Inbox asks (`inbox.ts::inboxRows`, spelled out here so the
+ *  Inbox's badge can count these without an import cycle), with that
+ *  fleet's own host facts. Usage facts are the primary's alone, so none. */
+export function fleetNeedsYou(rows: FleetRows, idleSecs: number, now: number): SessionRow[] {
+  const opts = { idleSecs, now, facts: attentionFactsFrom([...rows.hosts.values()], {}, now) };
+  return byTriage(
+    [...rows.sessions.values()].filter((s) => countsTowardBadge(attentionState(s, opts))),
+    opts,
+  );
+}
+
+/** Per extra fleet the filter shows: its sessions that need you. Duplicates
+ *  and fleets with nothing waiting are left out. */
+export const fleetInbox = derived(
+  [visibleExtraFleets, attentionIdleMinutes],
+  ([$visible, $idle]) => {
+    const now = Math.floor(Date.now() / 1000);
+    return $visible
+      .map(({ fleet, rows }) => ({ fleet, rows: fleetNeedsYou(rows, $idle * 60, now) }))
+      .filter((g) => g.rows.length > 0);
+  },
+);
+
+/** Per extra fleet, filter or not: how many of its sessions need you — the
+ *  fleet switcher's chip count. */
+export const fleetNeedsCount = derived(
+  [fleetsStore, rowsStore, attentionIdleMinutes],
+  ([$fleets, $rows, $idle]) => {
+    const now = Math.floor(Date.now() / 1000);
+    const out = new Map<string, number>();
+    for (const f of $fleets) {
+      if (f.primary || f.duplicate_of) continue;
+      const rows = $rows.get(f.id);
+      if (rows) out.set(f.id, fleetNeedsYou(rows, $idle * 60, now).length);
+    }
+    return out;
+  },
+);
+
+/** How many sessions need you across the extra fleets the filter shows. */
+export const fleetInboxCount = derived(fleetInbox, ($g) => $g.reduce((n, g) => n + g.rows.length, 0));
+
+// ── the PRs page per fleet (Phase 2) ────────────────────────────────────
+
+/** An extra fleet's pull requests, from its own hub. */
+export function fleetListPullRequests(
+  fleet: string,
+  q: { state?: PrFilter; limit?: number } = {},
+): Promise<Result<PrList>> {
+  const args: { state?: PrFilter; limit?: number } = {};
+  if (q.state) args.state = q.state;
+  if (q.limit) args.limit = q.limit;
+  return fleetCmd<PrList>('list_pull_requests', fleet, { args });
+}
+
+// ── federation addresses (Phase 2) ──────────────────────────────────────
+
+/** A federation address (`<fleet-uuid>/session/<host>/<name>`) as this
+ *  window names it: `company › mac/dev-x` when the uuid is one of the fleets
+ *  it shows, with that fleet. Anything else comes back as it was, fleet null. */
+export function fleetAddress(addr: string, known: readonly FleetInfo[]): { text: string; fleet: FleetInfo | null; host: string | null; name: string | null } {
+  const m = /^([0-9a-fA-F-]{8,64})\/session\/([^/]+)\/(.+)$/.exec(addr.trim());
+  if (!m) return { text: addr, fleet: null, host: null, name: null };
+  const fleet = known.find((f) => f.fleet_id && f.fleet_id.toLowerCase() === m[1].toLowerCase()) ?? null;
+  if (!fleet) return { text: addr, fleet: null, host: m[2], name: m[3] };
+  return { text: `${fleet.label} › ${m[2]}/${m[3]}`, fleet, host: m[2], name: m[3] };
+}
+
+/** The extra fleet's session an address names, when that fleet is shown and
+ *  has it: what a click on a federation address opens. */
+export function fleetSessionAt(
+  addr: string,
+  known: readonly FleetInfo[],
+  rows: ReadonlyMap<string, FleetRows>,
+): { fleet: string; id: number } | null {
+  const a = fleetAddress(addr, known);
+  if (!a.fleet || a.fleet.primary) return null;
+  const hit = [...(rows.get(a.fleet.id)?.sessions.values() ?? [])].find(
+    (s) => s.host_alias === a.host && s.tmux_name === a.name,
+  );
+  return hit ? { fleet: a.fleet.id, id: hit.id } : null;
 }
 
 /** POSIX single-quoting for a command a person pastes into a shell. */
@@ -400,7 +637,13 @@ export function _resetFleetsForTest(): void {
   fleetsStore.set([]);
   rowsStore.set(new Map());
   fleetFilter.set('all');
+  fleetSelection.set(null);
   started = false;
+}
+
+/** Test seam: seed one extra fleet's rows. */
+export function _setFleetRowsForTest(fleet: string, rows: FleetRows): void {
+  rowsStore.update((m) => new Map(m).set(fleet, rows));
 }
 
 /** Test seam: seed the fleet list. */

@@ -3,8 +3,9 @@
   // Shown only once this window shows more than one fleet, so a one-hub
   // install looks exactly as before. Each chip carries the fleet's colour and
   // a dot for its live link; the word beside the dot says the state, so the
-  // colour never carries it alone.
-  import { fleets, fleetFilter, multiFleet, connectionWord } from './fleets';
+  // colour never carries it alone. An extra fleet's chip counts its sessions
+  // that need you (Phase 2), whatever the filter shows.
+  import { fleets, fleetFilter, multiFleet, connectionWord, fleetNeedsCount } from './fleets';
 </script>
 
 {#if $multiFleet}
@@ -32,6 +33,11 @@
         <span class="swatch" aria-hidden="true"></span>
         {f.label}
         <span class="dot {cw.tone}" aria-label={cw.word}></span>
+        {#if ($fleetNeedsCount.get(f.id) ?? 0) > 0}
+          <span class="needs" data-testid="fleet-needs-count-{f.id}" aria-label="{$fleetNeedsCount.get(f.id)} need you"
+            >{$fleetNeedsCount.get(f.id)}</span
+          >
+        {/if}
       </button>
     {/each}
   </div>
@@ -81,5 +87,14 @@
   }
   .dot.bad {
     background: var(--status-failed);
+  }
+  .needs {
+    min-width: 14px;
+    padding: 0 4px;
+    border-radius: var(--radius-pill);
+    background: var(--status-waiting);
+    color: var(--bg);
+    font-weight: 600;
+    text-align: center;
   }
 </style>

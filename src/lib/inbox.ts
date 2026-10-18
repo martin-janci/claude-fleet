@@ -36,6 +36,7 @@ import { waitingMissionCount } from './mission_waits';
 import { groupRows } from './row_groups';
 import { localMidnight } from './today';
 import { badgeCounts, badgeNumber, readPref, writePref } from './prefs';
+import { fleetInboxCount, showPrimary } from './fleets';
 
 /** The rows that need you, worst first (`byTriage`). */
 export function inboxRows(rows: readonly SessionRow[], opts: AttentionOptions): SessionRow[] {
@@ -219,11 +220,16 @@ export const inboxCount = derived(
     failingCount,
     waitingMissionCount,
     pendingAgentCount,
+    showPrimary,
+    fleetInboxCount,
   ],
-  ([$sessions, $host, $bg, $scope, $of, $idle, $failing, $missions, $agentActions]) => {
+  ([$sessions, $host, $bg, $scope, $of, $idle, $failing, $missions, $agentActions, $showPrimary, $fleets]) => {
     const scope = $scope === 'all' ? null : { id: $scope, of: $of };
-    const visible = $sessions.filter((s) => sessionVisible(s, $host, $bg, null, scope));
+    // Multi-hub Phase 2: the extra fleets the fleet filter shows count too,
+    // and this window's own rows only while the filter shows them.
+    const visible = $showPrimary ? $sessions.filter((s) => sessionVisible(s, $host, $bg, null, scope)) : [];
     return (
+      $fleets +
       countNeedsYou(visible, { idleSecs: $idle * 60, now: Math.floor(Date.now() / 1000) }) +
       $failing +
       $missions +
