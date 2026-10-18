@@ -1233,7 +1233,7 @@ Index by area (names only; see the reference for details):
   step (`tool_call`, or `error` when the tool failed; `actor` `claude`,
   `data.tool_use_id`, `data.tool`, `duration_ms`); the tool running now is
   the session row's `current_activity`.
-- **Autofix** — `autofix`, known broken fleet states with a plain-language explanation and a fix. Safe fixes run by themselves (`autofix.auto_safe`); the rest wait for a person's trusted device. Control may list and explain, never apply.
+- **Autofix** — `autofix`, known broken fleet states with a plain-language explanation and a fix. Safe fixes run by themselves (`autofix.auto_safe`); the rest wait for a person's trusted device. Control may list and explain, never apply: it shows the person a finding with a `fix` chat card (`docs/chat-blocks.md`).
 - **PR shepherd** — `pr_shepherd`, the standing rules that let fleet look
   after a project's PRs (`docs/superpowers/specs/2026-10-08-pr-shepherd-design.md`):
   `status` (rules, recent episodes and merges), `explain` (what the next

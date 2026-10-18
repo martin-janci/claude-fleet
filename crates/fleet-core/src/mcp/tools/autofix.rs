@@ -5,11 +5,12 @@
 
 use super::*;
 use crate::ipc_error::lock;
+use crate::service::autofix::api;
 use crate::service::autofix::apply::{
-    apply_one, body_of, gather, live_agents, scan_enabled, Config, SshFixExec,
+    apply_one, gather, live_agents, scan_enabled, Actor, Config, SshFixExec,
 };
 use crate::service::autofix::sync::{sync, Scope};
-use crate::store::{now_unix, AutofixRow};
+use crate::store::now_unix;
 
 /// Only a person's trusted full device decides a fix. Control may list and
 /// explain, and post a `fix` card for the person to press.
@@ -31,31 +32,22 @@ fn autofix_writer(caller: &Caller) -> Result<(), McpError> {
     ))
 }
 
-fn row_json(r: &AutofixRow) -> serde_json::Value {
-    let body = body_of(r).ok();
-    serde_json::json!({
-        "id": r.id, "kind": r.kind, "subject": r.subject, "host_alias": r.host_alias,
-        "severity": r.severity, "state": r.state,
-        "first_seen_at": r.first_seen_at, "last_seen_at": r.last_seen_at,
-        "attempts": r.attempts, "last_error": r.last_error, "dismissed_until": r.dismissed_until,
-        "title": body.as_ref().map(|b| b.title.clone()),
-        "explanation": body.as_ref().map(|b| b.explanation.clone()),
-        "evidence": body.as_ref().map(|b| b.evidence.clone()),
-        "fix": body.and_then(|b| b.fix),
-    })
-}
-
-fn db_err(e: rusqlite::Error) -> McpError {
-    to_mcp_err(e.into())
+/// Who applied, for the `autofix.apply` admin event.
+fn actor_of(caller: &Caller) -> Actor {
+    Actor {
+        label: caller.label(),
+        person: caller.person(),
+        device: caller.client.as_ref().map(|c| c.id),
+    }
 }
 
 #[tool_router(router = autofix_router, vis = "pub(super)")]
 impl FleetTools {
     #[tool(
         description = "Known broken fleet states, each with a plain-language explanation and, where one exists, a fix: \
-        list {state?} (the live ones: open, verifying, apply_failed, dismissed), explain {id}, scan (check now), apply {id}, dismiss {id, until?} (later; default 24 h). \
+        list {state?} (the live ones: open, verifying, apply_failed, dismissed; also `fixed`, cleared in the last day after a fix ran), explain {id}, scan (check now), apply {id}, dismiss {id, until?} (later; default 24 h). \
         Safe fixes run by themselves (setting autofix.auto_safe); the rest wait for a person. \
-        apply and dismiss need a trusted full device; Control may list and explain only."
+        apply and dismiss need a trusted full device; Control may list and explain only, and shows the person a finding with a `fix` chat card (`{\"spec\":\"fleet.ui/1\",\"kind\":\"fix\",\"finding_id\":<id>}`)."
     )]
     pub(super) async fn autofix(
         &self,
@@ -80,23 +72,14 @@ impl FleetTools {
                     sync(&s, &found, Scope::All, now).map_err(to_mcp_err)?;
                 }
                 let s = lock(&self.store).map_err(to_mcp_err)?;
-                let rows: Vec<_> = s
-                    .live_autofix_findings()
-                    .map_err(db_err)?
-                    .iter()
-                    .filter(|r| p.state.as_deref().is_none_or(|st| r.state == st))
-                    .map(row_json)
-                    .collect();
-                ok_json_compact(&serde_json::json!({ "findings": rows }))
+                let can_apply = autofix_writer(&caller).is_ok();
+                let out = api::list(&s, p.state.as_deref(), can_apply, now).map_err(to_mcp_err)?;
+                ok_json_compact(&out)
             }
             "explain" => {
                 let id = need_id()?;
                 let s = lock(&self.store).map_err(to_mcp_err)?;
-                let r = s
-                    .autofix_finding(id)
-                    .map_err(db_err)?
-                    .ok_or_else(|| mcp_err("E_NOTFOUND", "no such finding", None))?;
-                ok_json(&row_json(&r))
+                ok_json(&api::get(&s, id).map_err(to_mcp_err)?)
             }
             "apply" => {
                 autofix_writer(&caller)?;
@@ -104,30 +87,18 @@ impl FleetTools {
                 let live = live_agents(&self.ssh);
                 let exec = SshFixExec {
                     store: &self.store,
-                    ssh: &*self.ssh,
+                    ssh: &self.ssh,
                 };
-                let r = apply_one(&self.store, &exec, id, &caller.label(), &live, now)
+                let r = apply_one(&self.store, &exec, id, &actor_of(&caller), &live, now)
                     .await
                     .map_err(to_mcp_err)?;
-                ok_json(&row_json(&r))
+                ok_json(&api::FindingView::from(&r))
             }
             "dismiss" => {
                 autofix_writer(&caller)?;
                 let id = need_id()?;
-                let until = p.until.unwrap_or(now + 86_400);
-                if until <= now {
-                    return Err(mcp_err("E_INVALID", "until must be in the future", None));
-                }
                 let s = lock(&self.store).map_err(to_mcp_err)?;
-                let ok = s.dismiss_autofix_finding(id, until).map_err(db_err)?;
-                if !ok {
-                    return Err(mcp_err("E_NOTFOUND", "no live finding with that id", None));
-                }
-                let r = s
-                    .autofix_finding(id)
-                    .map_err(db_err)?
-                    .ok_or_else(|| mcp_err("E_NOTFOUND", "no such finding", None))?;
-                ok_json(&row_json(&r))
+                ok_json(&api::dismiss(&s, id, p.until, now).map_err(to_mcp_err)?)
             }
             other => Err(mcp_err(
                 "E_INVALID",

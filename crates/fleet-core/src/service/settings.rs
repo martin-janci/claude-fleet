@@ -409,6 +409,8 @@ pub const AUTOFIX_AUTO_SAFE: &str = "autofix.auto_safe";
 pub const AUTOFIX_MAX_ATTEMPTS: &str = "autofix.max_attempts";
 pub const AUTOFIX_DETECTOR_OPERATOR: &str = "autofix.detector.operator_unbound";
 pub const AUTOFIX_DETECTOR_HOST: &str = "autofix.detector.host";
+pub const AUTOFIX_DETECTOR_MCP_ENTRY: &str = "autofix.detector.host_mcp_entry";
+pub const AUTOFIX_DETECTOR_STUCK: &str = "autofix.detector.stuck";
 /// Bring a session back on its own when the host killed its process (out of
 /// memory, oomd), its tmux server went or the host rebooted
 /// (`service::auto_restore`). Off: such sessions wait for a person's Restore.
@@ -1080,6 +1082,20 @@ pub const SPECS: &[Spec] = &[
         Kind::Bool,
         "Check hosts",
         "Notice hosts with out-of-date fleet files, silent hooks, or an old agent or Claude Code.",
+    ),
+    Spec::new(
+        AUTOFIX_DETECTOR_MCP_ENTRY,
+        "true",
+        Kind::Bool,
+        "Check each host's fleet connection",
+        "Every 10 minutes, read the fleet entry in each host's ~/.claude.json (its token is hashed on the host and never sent) and notice one that is missing, points elsewhere or carries the wrong token.",
+    ),
+    Spec::new(
+        AUTOFIX_DETECTOR_STUCK,
+        "true",
+        Kind::Bool,
+        "Check stuck sessions",
+        "Notice sessions stuck on a reconnect, a trust or sign-in prompt, a Press Enter wait or out of memory, and offer the fix.",
     ),
     Spec::new(
         RECOVERY_AUTO_RESTORE,

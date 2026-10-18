@@ -26,6 +26,7 @@
   import ReportCard from './ReportCard.svelte';
   import ResultsCard from './ResultsCard.svelte';
   import SettingCard from './SettingCard.svelte';
+  import FixBlockCard from './FixBlockCard.svelte';
   import WizardChatCard from '../forms/WizardChatCard.svelte';
   import { WIZARDS } from '../forms/wizards';
 
@@ -201,6 +202,8 @@
   <ErrorCard {block} onfill={fill} canFill={sessionId !== null} />
 {:else if block.kind === 'setting'}
   <SettingCard {block} />
+{:else if block.kind === 'fix'}
+  <FixBlockCard {block} />
 {:else if block.kind === 'dashboard'}
   <DashboardCard {block} />
 {:else if block.kind === 'device'}

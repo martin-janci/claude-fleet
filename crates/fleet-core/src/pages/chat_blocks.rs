@@ -36,6 +36,7 @@ pub const KINDS: &[&str] = &[
     "wizard",
     "dashboard",
     "device",
+    "fix",
 ];
 /// The app's wizards a `wizard` block may open in the chat (redesign 10.12):
 /// the ones in `src/lib/forms/wizards/` whose last button runs in the chat
@@ -298,6 +299,11 @@ pub enum BlockKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
     },
+    /// An autofix finding for a person to decide: the id `autofix { action:
+    /// list }` answered. The card draws the finding from the hub's own row,
+    /// never from the block, so an agent cannot invent a fix or reword what
+    /// it changes; Fix asks first and needs the desktop or a trusted device.
+    Fix { finding_id: u64 },
 }
 
 /// One widget of a `dashboard` block.
@@ -704,6 +710,13 @@ pub fn check(v: &Value) -> Result<(), Vec<String>> {
             p.str(o, "why", "", false, 500);
             let widgets = p.arr(o, "widgets", "", 1, 12);
             p.each(&widgets, "widget", dash_widget);
+        }
+        "fix" => {
+            if matches!(o.get("finding_id"), None | Some(Value::Null)) {
+                p.add("", "`finding_id` is required");
+            } else {
+                p.num(o, "finding_id", "", 1);
+            }
         }
         "device" => {
             p.str(o, "device", "", true, 200);

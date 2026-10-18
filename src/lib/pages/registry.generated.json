@@ -561,6 +561,44 @@
         "level": "none"
       },
       "default": "true",
+      "help": "Every 10 minutes, read the fleet entry in each host's ~/.claude.json (its token is hashed on the host and never sent) and notice one that is missing, points elsewhere or carries the wrong token.",
+      "key": "autofix.detector.host_mcp_entry",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Check each host's fleet connection",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "true"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "true",
+      "help": "Notice sessions stuck on a reconnect, a trust or sign-in prompt, a Press Enter wait or out of memory, and offer the fix.",
+      "key": "autofix.detector.stuck",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Check stuck sessions",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "true"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "true",
       "help": "Resume a session when its host killed the process (out of memory), its tmux server stopped or the host rebooted, noted on its timeline. Control is restarted, or moved to another host once its own has been silent for five minutes, and told.",
       "key": "recovery.auto_restore",
       "kind": {
@@ -4439,6 +4477,14 @@
             },
             {
               "key": "autofix.detector.host",
+              "type": "field"
+            },
+            {
+              "key": "autofix.detector.host_mcp_entry",
+              "type": "field"
+            },
+            {
+              "key": "autofix.detector.stuck",
               "type": "field"
             }
           ],

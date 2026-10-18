@@ -7,7 +7,7 @@
 // - A `fleet.ui/1` block: a fenced ```fleet-ui block (or a ```json block
 //   whose object says `"spec": "fleet.ui/1"`) holding one display block —
 //   report, steps, guide, callout, facts, choices, form, progress, results,
-//   error, setting, wizard, dashboard or device. docs/chat-blocks.md is the
+//   error, setting, wizard, dashboard, device or fix. docs/chat-blocks.md is the
 //   format; the Rust twin of the check is
 //   crates/fleet-core/src/pages/chat_blocks.rs, and both run
 //   docs/chat-block-examples/blocks.json.
@@ -168,10 +168,14 @@ export type UiBlock =
   /** A debug device (`docs/debug-devices.md`) drawn live from the person's
    *  own list by its reference (`rich/DeviceCard.svelte`): the block names
    *  the device, never its state. */
-  | { kind: 'device'; device: string; title?: string; note?: string };
+  | { kind: 'device'; device: string; title?: string; note?: string }
+  /** An autofix finding by id (`autofix` tool): drawn from the hub's own
+   *  row, never from the block, so an agent cannot invent a fix or reword
+   *  what it changes (`rich/FixBlockCard.svelte`). */
+  | { kind: 'fix'; finding_id: number };
 
 export type UiKind = UiBlock['kind'];
-export const UI_KINDS: UiKind[] = ['report', 'steps', 'guide', 'callout', 'facts', 'choices', 'form', 'progress', 'results', 'error', 'setting', 'wizard', 'dashboard', 'device'];
+export const UI_KINDS: UiKind[] = ['report', 'steps', 'guide', 'callout', 'facts', 'choices', 'form', 'progress', 'results', 'error', 'setting', 'wizard', 'dashboard', 'device', 'fix'];
 /** A progress `id`, an error `code` and a guide's `page`: a key, never prose. */
 const KEY_RE = /^[A-Za-z0-9_.:-]+$/;
 const KEY_MAX = 64;
@@ -919,6 +923,13 @@ export function checkUiBlock(raw: string): Check {
       if (v.proposal === undefined || v.proposal === null) p.add('', '`proposal` is required');
       else proposal = num(v, 'proposal', p, '', { min: 1 });
       block = { kind: 'setting', proposal: proposal ?? 0, note: str(v, 'note', p, '', { max: 500 }) };
+      break;
+    }
+    case 'fix': {
+      let id: number | undefined;
+      if (v.finding_id === undefined || v.finding_id === null) p.add('', '`finding_id` is required');
+      else id = num(v, 'finding_id', p, '', { min: 1 });
+      block = { kind: 'fix', finding_id: id ?? 0 };
       break;
     }
     case 'wizard': {

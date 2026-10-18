@@ -44,6 +44,7 @@ pub fn scan(cx: &ScanCx) -> Vec<Finding> {
                 token_label(&t.name, &t.token_sha256)
             )],
             fix,
+            action: None,
         },
     }]
 }
@@ -62,6 +63,7 @@ mod tests {
             client_tokens: s.active_client_tokens().unwrap(),
             hosts: vec![],
             health: vec![],
+            ..Default::default()
         }
     }
 

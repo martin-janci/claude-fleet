@@ -109,6 +109,7 @@ mod tests {
                 explanation: "e".into(),
                 evidence: vec![],
                 fix: None,
+                action: None,
             },
         }
     }

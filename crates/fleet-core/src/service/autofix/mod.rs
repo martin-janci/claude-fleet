@@ -5,14 +5,18 @@
 //! Detectors are PURE over a [`ScanCx`] the runner gathers under one brief
 //! lock. A fix is a [`FixPlan`] the hub wrote itself; `apply::FixExec` runs it.
 
+pub mod api;
 pub mod apply;
 pub mod host_stale;
+pub mod mcp_entry;
 pub mod operator_unbound;
+pub mod stuck;
 pub mod sync;
 pub mod tick;
 
 use crate::service::health::HostHealthRow;
-use crate::store::{ClientTokenRow, HostRow};
+use crate::service::playbooks::PlaybookConfig;
+use crate::store::{ClientTokenRow, HostRow, SessionRow};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -44,8 +48,39 @@ pub enum Safety {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum FixPlan {
     BindOperator,
-    ProvisionContent { host: String },
-    UpdateAgent { host: String },
+    ProvisionContent {
+        host: String,
+    },
+    UpdateAgent {
+        host: String,
+    },
+    /// Rewrite the host's `claude-fleet` entry in `~/.claude.json` with the
+    /// hub's URL and the host's own stored token (`merge_mcp_entry`).
+    RewriteMcpEntry {
+        host: String,
+    },
+    /// Press Enter in a stuck session's pane, through the playbook
+    /// executor (which skips a pane a person is attached to). Refused for
+    /// the controller, and when the session no longer shows `stuck_kind`.
+    PressEnter {
+        session_id: i64,
+        host: String,
+        tmux_name: String,
+        stuck_kind: String,
+    },
+    /// Recreate a session that ran out of memory (the `oom` playbook's
+    /// action). Refused for the controller and while a turn is running.
+    Recreate {
+        session_id: i64,
+    },
+}
+
+/// A step the app takes for a finding that has no fix fleet can run: a
+/// login on a host (the `error` card's `login` next step).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum ClientAction {
+    Login { host: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -66,6 +101,8 @@ pub struct FindingBody {
     pub evidence: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fix: Option<Fix>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<ClientAction>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +124,21 @@ pub struct ScanCx {
     pub client_tokens: Vec<ClientTokenRow>,
     pub hosts: Vec<HostRow>,
     pub health: Vec<HostHealthRow>,
+    /// Every session row (detector 3 reads `stuck_kind`).
+    pub sessions: Vec<SessionRow>,
+    /// The registered controller `(host, tmux_name)`: never sent keys.
+    pub controller: Option<(String, String)>,
+    pub playbooks: PlaybookConfig,
+    /// Detector 2: the hub's MCP URL, `None` when it cannot be read.
+    pub mcp_url: Option<String>,
+    /// Detector 2: the last probe of each host's global MCP entry.
+    pub mcp_probes: Vec<mcp_entry::HostProbe>,
+    /// Detector 2: `(host, sha256 of its stored token)`.
+    pub host_token_shas: Vec<(String, String)>,
+    /// Detector 2: revoked client tokens, to name a stale bearer.
+    pub revoked_client_tokens: Vec<ClientTokenRow>,
+    /// Detector 2: the operator's token hash (`operator.token_sha`).
+    pub operator_sha: Option<String>,
 }
 
 pub struct Detector {
@@ -102,6 +154,14 @@ pub const DETECTORS: &[Detector] = &[
     Detector {
         id: "host",
         scan: host_stale::scan,
+    },
+    Detector {
+        id: "host_mcp_entry",
+        scan: mcp_entry::scan,
+    },
+    Detector {
+        id: "stuck",
+        scan: stuck::scan,
     },
 ];
 
