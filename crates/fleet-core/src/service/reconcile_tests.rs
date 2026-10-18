@@ -1566,6 +1566,37 @@ async fn two_concurrent_creates_of_one_name_do_not_cross_stamp() {
 /// completes without it, the next pass leaves it alone while its probe is
 /// still running, and its result (and a fresh probe) land once it answers.
 #[tokio::test]
+async fn a_single_host_reconcile_outdates_a_parked_late_probe() {
+    // A full pass parks a slow host's probe as late; `new_session`'s own
+    // single-host reconcile then writes a newer view of that host. The late
+    // probe, written at the next pass's start, must not put the older view
+    // back: the single-host write is recorded as the newest for the host.
+    let mut f = Fleet::new(&["slow"]);
+    f.deps = f.deps.with_pass_budget(Duration::from_millis(100));
+    f.list("slow", "job|1|2|0|/tmp/j|%4\n");
+    f.pane("slow", "job", IDLE);
+    f.fake.on_host_once(
+        "slow",
+        Match::script_contains("---FLEET:end"),
+        Reply::Hang {
+            for_: Duration::from_millis(400),
+        },
+    );
+    f.pass().await;
+    assert!(f.deps.probe_in_flight("slow"));
+    let parked = f.deps.newest_written("slow");
+
+    next_unix_second().await;
+    let before = now_unix();
+    reconcile_one_host_with_for_test(&f.store, &f.deps, "slow")
+        .await
+        .unwrap();
+    let newest = f.deps.newest_written("slow").expect("stamped");
+    assert!(newest >= before, "the single-host write is the newest");
+    assert_ne!(parked, Some(newest));
+}
+
+#[tokio::test]
 async fn a_slow_host_does_not_hold_the_pass_or_the_next_one() {
     let mut f = Fleet::new(&["alpha", "slow"]);
     f.deps = f.deps.with_pass_budget(Duration::from_millis(100));

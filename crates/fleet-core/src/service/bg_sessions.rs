@@ -620,6 +620,33 @@ where
             }
         }
     }
+    // The rows go with the project, but their panes would not: a running
+    // session would keep working (and billing) under a row reconcile then
+    // re-inserts unowned and unpinned, and a pinned one is one the person
+    // asked fleet to keep. Both are stopped (or unpinned) first, by a person.
+    {
+        let s = lock(store)?;
+        let (live, pinned): (i64, i64) = s.conn_ref().query_row(
+            "SELECT COUNT(*) FILTER (WHERE status = 'running' AND lost_at IS NULL), \
+                    COUNT(*) FILTER (WHERE pinned_at IS NOT NULL) \
+               FROM sessions WHERE project_id = ?1",
+            [args.project_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if live > 0 || pinned > 0 {
+            return Err(IpcError::new(
+                codes::E_INVALID_STATE,
+                match (live, pinned) {
+                    (0, p) => {
+                        format!("unpin the project's {p} pinned session(s) before removing it")
+                    }
+                    (l, _) => {
+                        format!("stop the project's {l} running session(s) before removing it")
+                    }
+                },
+            ));
+        }
+    }
     let mut reports = Vec::with_capacity(args.host_aliases.len());
     for host in &args.host_aliases {
         reports.push(purge(host.clone(), args.project_path.clone()).await?);
@@ -1193,7 +1220,9 @@ mod tests {
         }
     }
 
-    /// A project with one session on each of `hosts`; returns its id.
+    /// A project with one session on each of `hosts`, every one of them
+    /// already gone (a project is purged once its work has ended); returns
+    /// its id.
     fn seed_project(store: &Mutex<Store>, hosts: &[&str]) -> i64 {
         let s = store.lock().unwrap();
         let pid = s.upsert_project("o", "r", "/home/u/p/r").unwrap();
@@ -1206,7 +1235,7 @@ mod tests {
                 None,
                 1,
                 1,
-                "running",
+                "ghost",
                 None,
             )
             .unwrap();
@@ -1262,6 +1291,46 @@ mod tests {
         assert_eq!(err.code, "E_CLAUDE_CLI");
         assert_eq!(*calls.lock().unwrap(), vec!["alpha", "beta"]);
         assert_eq!(project_state(&store, pid, &["alpha", "beta"]), (true, 2));
+    }
+
+    #[tokio::test]
+    async fn purge_project_refuses_while_a_session_runs_or_is_pinned() {
+        let store = make_store();
+        let pid = seed_project(&store, &["alpha"]);
+        let id = store
+            .lock()
+            .unwrap()
+            .upsert_session("dev-live", "alpha", Some(pid), None, 1, 1, "running", None)
+            .unwrap();
+        let purged = Mutex::new(0);
+        let attempt = || {
+            purge_project_with(
+                purge_args(&["alpha"], "/home/u/p/r", pid),
+                &store,
+                |host, path| {
+                    *purged.lock().unwrap() += 1;
+                    async move { Ok(report_for(&host, &path)) }
+                },
+            )
+        };
+        let err = attempt().await.unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID_STATE);
+        assert!(err.message.contains("1 running"), "{}", err.message);
+        // Ended, but pinned: still the person's to unpin first.
+        {
+            let s = store.lock().unwrap();
+            s.set_session_pinned(id, Some(1)).unwrap();
+            s.conn_ref()
+                .execute("UPDATE sessions SET status = 'ghost' WHERE id = ?1", [id])
+                .unwrap();
+        }
+        let err = attempt().await.unwrap_err();
+        assert!(err.message.contains("pinned"), "{}", err.message);
+        assert_eq!(*purged.lock().unwrap(), 0, "nothing purged on a host");
+        assert_eq!(project_state(&store, pid, &["alpha"]), (true, 2));
+        store.lock().unwrap().set_session_pinned(id, None).unwrap();
+        attempt().await.unwrap();
+        assert_eq!(project_state(&store, pid, &["alpha"]), (false, 0));
     }
 
     #[tokio::test]

@@ -447,6 +447,33 @@ async fn apply_step_inner(
                             ));
                         }
                     }
+                    // `plan_steps` counts slots and attempts for its own
+                    // steps; a planner card the loop applies did not, so
+                    // the same limits hold here.
+                    if step.kind != "integrate" {
+                        let counts = s.mission_task_counts(m.id)?;
+                        let cap = max_parallel(m, &a);
+                        if counts.open >= i64::from(cap) {
+                            return Err(IpcError::new(
+                                codes::E_LIMIT,
+                                format!("the mission already runs {cap} at once"),
+                            ));
+                        }
+                        if counts.total >= i64::from(m.policy.max_tasks) {
+                            return Err(IpcError::new(
+                                codes::E_LIMIT,
+                                format!("the mission used its {} attempts", m.policy.max_tasks),
+                            ));
+                        }
+                    }
+                    if s.get_work_item(item_id)?
+                        .is_some_and(|i| i.held_at.is_some())
+                    {
+                        return Err(IpcError::new(
+                            codes::E_INVALID_STATE,
+                            "a person holds this item",
+                        ));
+                    }
                 }
                 (start_for(&s, m, item_id, actor, a.grant.as_ref())?, a.grant)
             };
@@ -742,12 +769,48 @@ async fn apply_card(
         }
         "cancel" => {
             let it = need_item()?;
-            let s = lock(&deps.store)?;
-            let mut n = 0;
-            for t in s.tasks_for_item(it)? {
-                if matches!(t.state.as_str(), "queued" | "running") {
-                    crate::service::tasks::cancel_task(&s, t.id, "the mission cancelled it")?;
-                    n += 1;
+            let (n, workers) = {
+                let s = lock(&deps.store)?;
+                let mut n = 0;
+                let mut workers = Vec::new();
+                for t in s.tasks_for_item(it)? {
+                    if matches!(t.state.as_str(), "queued" | "running") {
+                        crate::service::tasks::cancel_task(&s, t.id, "the mission cancelled it")?;
+                        n += 1;
+                        // Only the mission's own worker: a cancelled row
+                        // whose session kept editing would race the retry.
+                        let own = crate::store::SessionOrigin::mission(m.id);
+                        if let Some(w) = t
+                            .worker_session_id
+                            .map(|id| s.get_session_by_id(id))
+                            .transpose()?
+                            .flatten()
+                            .filter(|w| {
+                                w.status == "running"
+                                    && w.origin.as_deref() == Some(own.origin)
+                                    && w.origin_ref == own.origin_ref
+                            })
+                        {
+                            workers.push((w.host_alias, w.tmux_name));
+                        }
+                    }
+                }
+                (n, workers)
+            };
+            for (host_alias, name) in workers {
+                if let Err(e) = crate::service::sessions::kill_session(
+                    crate::service::sessions::KillSessionArgs {
+                        host_alias: host_alias.clone(),
+                        name: name.clone(),
+                        force: false,
+                    },
+                    &deps.store,
+                    &deps.ssh,
+                )
+                .await
+                {
+                    tracing::warn!(host = %host_alias, session = %name, error = %e,
+                        "[mission] a cancelled run's worker was not stopped");
                 }
             }
             Ok(format!("cancelled {n} runs"))

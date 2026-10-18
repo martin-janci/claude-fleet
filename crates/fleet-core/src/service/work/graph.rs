@@ -214,12 +214,14 @@ pub fn build(
             "rejected"
         } else if open {
             "running"
+        } else if i.held_at.is_some() {
+            // Before failed / verifying: a hold stops retries, reviews and
+            // the close, whatever the latest attempt did.
+            "held"
         } else if failed {
             "failed"
         } else if implemented {
             "verifying"
-        } else if i.held_at.is_some() {
-            "held"
         } else if i.status_category == "in_progress" {
             "doing"
         } else {

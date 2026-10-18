@@ -400,6 +400,12 @@ impl ReconcileDeps {
     pub(crate) fn probe_in_flight(&self, alias: &str) -> bool {
         self.late.lock().is_ok_and(|l| l.in_flight.contains(alias))
     }
+
+    /// `started_at` of the newest probe of `alias` written so far (tests).
+    #[cfg(test)]
+    pub(crate) fn newest_written(&self, alias: &str) -> Option<i64> {
+        self.late.lock().ok()?.written.get(alias).copied()
+    }
 }
 
 /// How long a production pass waits for its host probes (see
@@ -2451,7 +2457,17 @@ pub(super) async fn reconcile_one_host_with(
     //    as the multi-host reconcile (single transaction + emit-after-commit).
     let mut s = lock(store)?;
     let projects = s.list_projects()?;
-    reconcile_write_one_host(&mut s, &probe, &projects)
+    let written = reconcile_write_one_host(&mut s, &probe, &projects);
+    // Newer than any probe of this host a full pass parked as late: that
+    // one, written at the next pass's start, would put an older view (an
+    // unreachable host, an older tmux identity) over this one.
+    if written.is_ok() {
+        if let Ok(mut late) = deps.late.lock() {
+            let newest = late.written.entry(probe.host.alias.clone()).or_insert(0);
+            *newest = (*newest).max(probe.started_at);
+        }
+    }
+    written
 }
 
 /// Test access to the private single-host reconcile entry point, so
