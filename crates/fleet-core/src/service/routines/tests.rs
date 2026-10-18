@@ -1860,6 +1860,32 @@ async fn a_failed_run_is_retried_once_and_never_again() {
     assert_eq!(runs_of(&f, late.id).len(), 1);
 }
 
+/// A run that ended at a rate limit waits for the limit to lift (F16); a
+/// limit that lasts past the plain one-hour window must not age the retry
+/// out, so it is still retried once the window allows.
+#[tokio::test]
+async fn a_rate_limited_run_is_still_retried_after_the_hour() {
+    let f = fx();
+    let mut i = input(&f);
+    i.retry_once = Some(true);
+    let r = new_routine(&f, i);
+    let ana = person(&f.store, None, f.ana);
+    f.fake.fail.store(true, Ordering::SeqCst);
+    let first = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    lock(&f.store)
+        .unwrap()
+        .set_routine_run_error_code(first.id, super::fix::E_TURN_RATE_LIMIT)
+        .unwrap();
+    f.fake.fail.store(false, Ordering::SeqCst);
+    tick_once(&f.deps, OCT8 + 3 * 3600).await;
+    let runs = runs_of(&f, r.id);
+    assert_eq!(runs.len(), 2, "{runs:?}");
+    assert_eq!(
+        runs[1].trigger_ref.as_deref(),
+        Some(&*format!("retry:{}", first.id))
+    );
+}
+
 #[tokio::test]
 async fn a_run_past_its_time_cap_is_stopped_and_failed() {
     let f = fx();

@@ -314,6 +314,13 @@ impl SwitchExec for RealSwitchExec {
             crate::service::sessions::QueuePromptArgs {
                 session_id,
                 prompt: body,
+                // Not before the resumed pane is up: the restart returns as
+                // soon as tmux has the new process, and the row still reads
+                // the old turn's idle, so an untimed note is pasted into a
+                // REPL that is still starting and lost.
+                not_before: Some(
+                    crate::store::now_unix() + crate::service::account_switch::CONTINUE_AFTER_SECS,
+                ),
                 ..Default::default()
             },
             &self.store,

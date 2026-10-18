@@ -2041,3 +2041,29 @@ fn touching_a_session_marks_it_viewed() {
         Some(crate::ipc_error::codes::E_NOTFOUND.to_string())
     );
 }
+
+/// A session killed while an account switch was on its way: the switch's
+/// restart onto the other login is refused before any tmux call, so it does
+/// not come back to life on that login.
+#[tokio::test]
+async fn a_login_switch_restart_does_not_revive_a_killed_session() {
+    use super::lifecycle::restart_session;
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("h").unwrap();
+    let id = s
+        .upsert_session("dev-a", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.mark_session_killed(id, 2).unwrap();
+    let store = Mutex::new(s);
+    let ssh = Arc::new(crate::ssh::SshClient::new());
+    let restart = serde_json::from_value(serde_json::json!({
+        "host_alias": "h", "name": "dev-a", "profile": "work"
+    }))
+    .unwrap();
+    let err = restart_session(restart, &store, &ssh).await.unwrap_err();
+    assert_eq!(
+        err.code,
+        crate::ipc_error::codes::E_INVALID_STATE,
+        "{err:?}"
+    );
+}
