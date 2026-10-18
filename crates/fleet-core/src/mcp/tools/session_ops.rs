@@ -400,7 +400,18 @@ impl FleetTools {
         // Multi-user M1 (T8d): and only into a checkout it may drive. The two
         // fences above are both no-ops for a person's own device — see
         // `require_may_land_in_worktree`, which is where the reasoning lives.
-        require_may_land_in_worktree(&self.store, &caller, p.worktree_id, Reach::Drive)?;
+        require_may_land_in_worktree(
+            &self.store,
+            &caller,
+            landing_worktree(
+                &self.store,
+                &p.host_alias,
+                p.project_id,
+                p.worktree_id,
+                p.new_worktree.as_deref(),
+            )?,
+            Reach::Drive,
+        )?;
         // Multi-user M1 (T8d): and `resume_claude_session_id` goes through the
         // SAME predicate `work_link { resume }` uses.
         //
@@ -535,7 +546,18 @@ impl FleetTools {
         // Multi-user M1 (T8d): and only into a checkout it may drive. The two
         // fences above are both no-ops for a person's own device — see
         // `require_may_land_in_worktree`, which is where the reasoning lives.
-        require_may_land_in_worktree(&self.store, &caller, p.worktree_id, Reach::Drive)?;
+        require_may_land_in_worktree(
+            &self.store,
+            &caller,
+            landing_worktree(
+                &self.store,
+                &p.host_alias,
+                p.project_id,
+                p.worktree_id,
+                p.new_worktree.as_deref(),
+            )?,
+            Reach::Drive,
+        )?;
         self.confirm_gate(
             "new_shell_session",
             p.confirm_nonce.as_deref(),

@@ -414,7 +414,13 @@ pub async fn discard_kill_session(
             Some(pid) => s.project_base_path(pid)?,
             None => None,
         };
-        let removable = removable_worktree(&s, row.worktree_id, base.as_deref())?;
+        // A tree another session still works in stays; only this session
+        // goes.
+        let removable = if tree_shared_with_another_session(&s, row.id, row.worktree_id)? {
+            None
+        } else {
+            removable_worktree(&s, row.worktree_id, base.as_deref())?
+        };
         (row.id, removable, base)
     };
     let worktree_id = removable.as_ref().map(|(wid, _)| *wid);
@@ -470,6 +476,34 @@ pub async fn discard_kill_session(
         ssh,
     )
     .await
+}
+
+/// Whether another session on the same host works in `session_id`'s tree:
+/// one linked to the same worktree row, or one whose pane sits in the same
+/// checkout (a review runs in its source's tree and is linked to none). A
+/// row its host lost counts too: a reboot leaves its uncommitted work there
+/// for the restore.
+pub(crate) fn tree_shared_with_another_session(
+    s: &Store,
+    session_id: i64,
+    worktree_id: Option<i64>,
+) -> Result<bool, IpcError> {
+    let Some(me) = s.get_session_by_id(session_id)? else {
+        return Ok(false);
+    };
+    if let Some(wid) = worktree_id.or(me.worktree_id) {
+        if s.occupant_session_ids_for_worktree(wid)?
+            .into_iter()
+            .any(|id| id != session_id)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(s.list_related_sessions(session_id)?.iter().any(|r| {
+        r.host_alias == me.host_alias
+            && (r.status == "running"
+                || (r.lost_at.is_some() && r.lost_reason.as_deref() != Some("killed")))
+    }))
 }
 
 /// The tree safe kill and discard may `git worktree remove` for a session:
@@ -709,7 +743,13 @@ async fn finalize_safe_kill(
             Some(pid) => s.project_base_path(pid)?,
             None => None,
         };
-        let removable = removable_worktree(&s, worktree_id, proj_base.as_deref())?;
+        // A tree another session (its review, a second pane) still works in
+        // is left to it: this session is killed, the checkout stays.
+        let removable = if tree_shared_with_another_session(&s, session_id, worktree_id)? {
+            None
+        } else {
+            removable_worktree(&s, worktree_id, proj_base.as_deref())?
+        };
         (removable, proj_base)
     };
     let worktree_id = removable.as_ref().map(|(wid, _)| *wid);
@@ -1012,6 +1052,36 @@ SAFE_REMOVE_READY_n1";
             scan_pane_for_marker(pane, "0badf00d"),
             MarkerOutcome::Failed("(no reason given)".into())
         );
+    }
+
+    #[test]
+    fn a_tree_its_review_still_works_in_is_shared() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        s.upsert_host("other").unwrap();
+        let pid = s.upsert_project("o", "r", "/tmp/o/r").unwrap();
+        let mk = |name: &str, host: &str| {
+            let id = s
+                .upsert_session(name, host, Some(pid), None, 1, 1, "running", None)
+                .unwrap();
+            s.conn_for_test()
+                .execute(
+                    "UPDATE sessions SET worktree_key = 'feat' WHERE id = ?1",
+                    [id],
+                )
+                .unwrap();
+            id
+        };
+        let source = mk("src", "h");
+        assert!(!tree_shared_with_another_session(&s, source, None).unwrap());
+        // The same branch on another host is another checkout.
+        mk("elsewhere", "other");
+        assert!(!tree_shared_with_another_session(&s, source, None).unwrap());
+        let review = mk("src-review", "h");
+        assert!(tree_shared_with_another_session(&s, source, None).unwrap());
+        // Once the review is killed, the tree is the source's alone again.
+        s.mark_session_killed(review, 5).unwrap();
+        assert!(!tree_shared_with_another_session(&s, source, None).unwrap());
     }
 
     #[test]

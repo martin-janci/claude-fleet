@@ -8656,3 +8656,30 @@ fn a_session_being_safe_killed_cannot_be_pinned() {
     .unwrap_err();
     assert_eq!(e.code, codes::E_SAFE_KILL_IN_PROGRESS);
 }
+
+#[test]
+fn a_pinned_ghost_is_not_dismissed() {
+    let s = Store::open_in_memory().expect("store");
+    s.upsert_host("h").unwrap();
+    let id = s
+        .upsert_session("x", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.set_session_pinned(id, Some(1)).unwrap();
+    s.conn_for_test()
+        .execute(
+            "UPDATE sessions SET status='ghost', lost_reason='host_reboot' WHERE id=?1",
+            [id],
+        )
+        .unwrap();
+    let store = Mutex::new(s);
+    let e = dismiss_ghost_session(DismissGhostSessionArgs { session_id: id }, &store).unwrap_err();
+    assert_eq!(e.code, codes::E_PINNED, "{}", e.message);
+    store.lock().unwrap().set_session_pinned(id, None).unwrap();
+    dismiss_ghost_session(DismissGhostSessionArgs { session_id: id }, &store).unwrap();
+    assert!(store
+        .lock()
+        .unwrap()
+        .get_session_by_id(id)
+        .unwrap()
+        .is_none());
+}

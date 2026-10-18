@@ -55,6 +55,10 @@ pub struct RestoreOutcome {
     pub tmux_name: String,
     pub ok: bool,
     pub error: Option<String>,
+    /// The failure's `E_*` code, so a caller can tell a host that dropped
+    /// mid-restore from an attempt that failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -552,6 +556,7 @@ where
                                     tmux_name,
                                     ok: false,
                                     error: Some(RESTORED_ELSEWHERE.to_string()),
+                                    code: None,
                                 }
                             }
                             Some(res) => {
@@ -569,12 +574,14 @@ where
                                         tmux_name,
                                         ok: true,
                                         error: None,
+                                        code: None,
                                     },
                                     Err(e) => RestoreOutcome {
                                         session_id: sid,
                                         tmux_name,
                                         ok: false,
                                         error: Some(e.message.clone()),
+                                        code: Some(e.code.clone()),
                                     },
                                 }
                             }
@@ -1633,6 +1640,7 @@ mod tests {
                     tmux_name: format!("t{id}"),
                     ok,
                     error: (!ok).then(|| "no".into()),
+                    code: None,
                 })
                 .collect();
             async move {

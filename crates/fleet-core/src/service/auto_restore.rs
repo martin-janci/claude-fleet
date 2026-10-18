@@ -833,6 +833,15 @@ fn not_now(e: &IpcError) -> bool {
     e.code == codes::E_INVALID_STATE || e.code == codes::E_HOST_OFFLINE
 }
 
+/// [`not_now`] for one row of a batch, by its code: the same two, and a
+/// transport that failed under that row's recreate (an SSH flap is the
+/// host's, not the session's, and must not spend its budget).
+fn row_not_now(code: &str) -> bool {
+    code == codes::E_INVALID_STATE
+        || code == codes::E_HOST_OFFLINE
+        || codes::is_transport_failure(code)
+}
+
 /// Plan, consult the advisor where the rule has a doubt, and execute one
 /// run. Returns what it did.
 pub async fn run_with(
@@ -955,6 +964,10 @@ pub async fn run_with(
                     {
                         // A person (or another restore) got there first:
                         // not an attempt of ours.
+                    } else if o.code.as_deref().is_some_and(row_not_now) {
+                        // The host dropped (or the row moved on) mid-restore:
+                        // the next tick tries again, budget untouched.
+                        tracing::debug!(host = %host, session_id = o.session_id, "[auto-restore] host dropped mid-restore; next tick");
                     } else {
                         let err = o.error.unwrap_or_else(|| "unknown error".into());
                         record(
@@ -1345,6 +1358,9 @@ mod tests {
         moved: Mutex<usize>,
         moved_to: Mutex<Option<SessionRow>>,
         fail_with: Option<&'static str>,
+        /// Every row of the batch fails with this code (the batch itself
+        /// answers).
+        row_fails_with: Option<&'static str>,
     }
 
     #[async_trait]
@@ -1366,8 +1382,9 @@ mod tests {
                     .map(|&id| RestoreOutcome {
                         session_id: id,
                         tmux_name: String::new(),
-                        ok: true,
-                        error: None,
+                        ok: self.row_fails_with.is_none(),
+                        error: self.row_fails_with.map(|_| "boom".to_string()),
+                        code: self.row_fails_with.map(str::to_string),
                     })
                     .collect(),
             })
@@ -1535,6 +1552,36 @@ mod tests {
         };
         run_with(&store, &fake, &NoAdvice, &CFG, now).await;
         assert!(events(&store, ids[0]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_host_that_drops_mid_restore_spends_no_budget() {
+        let now = crate::store::now_unix();
+        for code in [codes::E_HOST_OFFLINE, codes::E_SSH_TIMEOUT, codes::E_SSH] {
+            let (store, ids) = store_with(&[("a", "process_died")], now - 120);
+            let fake = Fake {
+                row_fails_with: Some(code),
+                ..Default::default()
+            };
+            for _ in 0..3 {
+                let r = run_with(&store, &fake, &NoAdvice, &CFG, now).await;
+                assert_eq!(r.failed, 0, "{code}");
+            }
+            assert!(events(&store, ids[0]).is_empty(), "{code}");
+            assert_eq!(
+                fake.restored.lock().unwrap().len(),
+                3,
+                "still tried: {code}"
+            );
+        }
+        // A failure of the session's own still counts.
+        let (store, ids) = store_with(&[("a", "process_died")], now - 120);
+        let fake = Fake {
+            row_fails_with: Some(codes::E_TMUX),
+            ..Default::default()
+        };
+        run_with(&store, &fake, &NoAdvice, &CFG, now).await;
+        assert_eq!(events(&store, ids[0])[0].0, EVENT_FAILED);
     }
 
     #[tokio::test]

@@ -20,13 +20,17 @@
 //! same session moves once its account passes `accounts.pause_at`, so its
 //! next turn does not stall at the limit. Never touched: shells, pane-less
 //! (`bg` / `external`) sessions, other agents, ghosts and lost rows, the
-//! registered controller, sessions on a hidden or unreachable host, and a
+//! registered controller, Control itself (`operator_account` fails it over
+//! and tells it), sessions on a hidden or unreachable host, and a
 //! session switched (or tried) in the last [`RETRY_AFTER_SECS`].
 //!
 //! **Which login.** [`pick`] over [`candidates`]: another login on the same
 //! host, on another account (a second login on the same account shares its
-//! limit), with a reading under `accounts.pause_at`, not at a limit and not
-//! past its daily spend limit, the least used first. No candidate, no
+//! limit), not signed out, with a reading under `accounts.pause_at` no older
+//! than [`STALE_TARGET_SECS`], not at a limit and not past its daily spend
+//! limit, the least used first. An account takes one session per wave
+//! ([`plan`]), so a dozen sessions on a spent account do not all land on
+//! the same spare login off one reading. No candidate, no
 //! switch: the row stays "Paused · limit" for a person. With two or more,
 //! Jev's pick is recorded beside it when `decide.jev.limit_switch` is on
 //! (`decide::limit_switch`); the rule's pick is the one used.
@@ -71,6 +75,10 @@ pub const RUN_EVERY_SECS: u64 = 60;
 /// the row's account until the next pass reads the new one, and a login
 /// that refused once is not hammered.
 pub const RETRY_AFTER_SECS: i64 = 30 * 60;
+/// A login whose newest reading is older than this is no target: its poll
+/// has been failing (signed out, rate-limited, host gone) and the number
+/// it still shows may be hours behind.
+pub const STALE_TARGET_SECS: i64 = 60 * 60;
 /// What a person who asked to carry on gets typed after a switch.
 pub const CONTINUE_PROMPT: &str = "Continue where you left off.";
 /// How long after the switch the prompt may go in at the earliest.
@@ -205,11 +213,16 @@ pub fn pick(candidates: &[HostLogin]) -> Option<&HostLogin> {
 
 /// The switches due at `now`, from the store alone (the usage poll writes
 /// its readings wherever it runs). Empty while the fleet has it off.
-/// `recent` maps a session id to when it was last tried.
+/// `recent` says what earlier runs tried ([`Recent`]).
+///
+/// Many sessions run out together when one account does, and every one of
+/// them would pick the same least-used login from the same reading. So an
+/// account takes one session per wave: one per run, and the next only once
+/// a reading fetched after the last move onto it is in (`recent.targets`).
 pub fn plan(
     s: &Store,
     local_host_enabled: bool,
-    recent: &HashMap<i64, i64>,
+    recent: &Recent,
     now: i64,
 ) -> Result<Vec<Planned>, IpcError> {
     if !fleet_enabled(s) || !crate::service::decide::owns_the_fleet(s) {
@@ -223,6 +236,18 @@ pub fn plan(
             .and_then(|r| account_limits::used_pct_of(&r.usage, Some(r.fetched_at), now))
     };
     let is_limited = |uuid: &str| used(uuid).is_some_and(|u| u >= 100.0);
+    // A target's reading must be recent, and newer than the last session
+    // sent there. (An old "at the limit" reading is still a reason to
+    // leave, so `due` reads every snapshot.)
+    let fresh_target = |uuid: &str| {
+        snaps
+            .iter()
+            .find(|r| r.account_uuid == uuid)
+            .is_some_and(|r| {
+                now - r.fetched_at <= STALE_TARGET_SECS
+                    && recent.targets.get(uuid).is_none_or(|at| r.fetched_at > *at)
+            })
+    };
     let pause_at = account_limits::pause_at_pct(s);
     // Early (`accounts.auto_switch_early`): an idle session moves once its
     // account passes `accounts.pause_at`, before its next turn stalls.
@@ -243,6 +268,7 @@ pub fn plan(
     let opted_out = s.people_without_auto_switch()?;
     let personal_owner = s.personal_owner_id()?;
     let controller = s.get_controller()?;
+    let mut taken: BTreeSet<String> = BTreeSet::new();
     let mut out = Vec::new();
     for row in s.list_all_sessions()? {
         let parked = row.claude_status.as_deref() == Some("blocked")
@@ -256,7 +282,11 @@ pub fn plan(
             || controller
                 .as_ref()
                 .is_some_and(|(h, t)| *h == row.host_alias && *t == row.tmux_name)
+            // Control's own failover is `operator_account`'s, which tells
+            // it what happened; two restarts of one pane must not race.
+            || crate::service::operator::is_operator_session(s, &row.host_alias, &row.tmux_name)
             || recent
+                .sessions
                 .get(&row.id)
                 .is_some_and(|at| now - at < RETRY_AFTER_SECS)
         {
@@ -268,6 +298,10 @@ pub fn plan(
         let from = row.account_uuid.clone().unwrap_or_default();
         let logins = account_limits::host_logins(host, &[], now)
             .into_iter()
+            // A signed-out login keeps its last good reading, but a session
+            // resumed there lands on `/login`.
+            .filter(|l| !crate::service::login_health::is_signed_out(host, l.profile.as_deref()))
+            .filter(|l| fresh_target(&l.account_uuid) && !taken.contains(&l.account_uuid))
             .map(|mut l| {
                 l.used_pct = used(&l.account_uuid);
                 l
@@ -280,6 +314,7 @@ pub fn plan(
         let Some(target) = pick(&cands).cloned() else {
             continue;
         };
+        taken.insert(target.account_uuid.clone());
         let continue_after = match answering_person(&row, personal_owner) {
             Some(p) => s.person_auto_switch_continue(p)? && last_turn_cut_off(s, row.id)?,
             None => false,
@@ -364,9 +399,19 @@ pub struct RunReport {
     pub failed: usize,
 }
 
-/// When each session was last tried, for [`RETRY_AFTER_SECS`].
-static RECENT: std::sync::LazyLock<Mutex<HashMap<i64, i64>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+/// What earlier runs did, which the next plan must know.
+#[derive(Debug, Default, Clone)]
+pub struct Recent {
+    /// When each session was last tried, for [`RETRY_AFTER_SECS`].
+    pub sessions: HashMap<i64, i64>,
+    /// When a session was last moved onto each account: until a reading
+    /// fetched after that moment arrives, the account's number does not
+    /// count the sessions just sent there, so it takes no more.
+    pub targets: HashMap<String, i64>,
+}
+
+static RECENT: std::sync::LazyLock<Mutex<Recent>> =
+    std::sync::LazyLock::new(|| Mutex::new(Recent::default()));
 
 /// One run: plan, then switch each, recording every attempt. `jev` is asked
 /// for its pick (recorded only) when there are two or more candidates.
@@ -374,7 +419,7 @@ pub async fn run_with(
     store: &Arc<Mutex<Store>>,
     switcher: &dyn Switcher,
     jev: Option<&crate::service::decide::DecideCtx>,
-    recent: &Mutex<HashMap<i64, i64>>,
+    recent: &Mutex<Recent>,
     local_host_enabled: bool,
     now: i64,
 ) -> Result<RunReport, IpcError> {
@@ -385,10 +430,13 @@ pub async fn run_with(
     };
     let mut report = RunReport::default();
     for p in planned {
-        recent
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(p.session_id, now);
+        {
+            let mut r = recent.lock().unwrap_or_else(|e| e.into_inner());
+            r.sessions.insert(p.session_id, now);
+            // A failed try counts too: whether the restart got as far as
+            // the new login is not known.
+            r.targets.insert(p.target.account_uuid.clone(), now);
+        }
         let jev_pick = match jev {
             Some(ctx) => {
                 let org = lock(store)?.session_org(p.session_id).ok().flatten();
@@ -434,10 +482,11 @@ pub async fn run_with(
         }
     }
     // Forget tries the retry window no longer covers.
-    recent
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .retain(|_, at| now - *at < RETRY_AFTER_SECS);
+    {
+        let mut r = recent.lock().unwrap_or_else(|e| e.into_inner());
+        r.sessions.retain(|_, at| now - *at < RETRY_AFTER_SECS);
+        r.targets.retain(|_, at| now - *at < STALE_TARGET_SECS);
+    }
     Ok(report)
 }
 

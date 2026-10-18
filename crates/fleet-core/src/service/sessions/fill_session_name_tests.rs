@@ -196,3 +196,35 @@ fn generated_pair_avoids_slugs_already_used_on_the_project() {
     }
     assert!(seen.len() > 1, "names are random, not fixed");
 }
+
+#[test]
+fn a_name_another_start_is_still_creating_is_passed_over() {
+    let (s, main_id, _) = seeded();
+    // No row yet: the store alone would hand "dev-o-r" to both starts.
+    let name =
+        fill_session_name_avoiding(&s, &args(Some(main_id), None, None), &|n| n == "dev-o-r")
+            .unwrap();
+    assert_ne!(name, "dev-o-r");
+    assert!(name.starts_with("dev-o-r--"), "{name}");
+}
+
+#[test]
+fn a_start_name_and_a_resume_are_held_until_the_start_ends() {
+    let owner = 0xfeed;
+    let first = claim_start_name(owner, "h", "dev-o-r").expect("free");
+    assert!(claim_start_name(owner, "h", "dev-o-r").is_none(), "held");
+    assert!(
+        claim_start_name(owner, "other", "dev-o-r").is_some(),
+        "per host"
+    );
+    assert!(crate::rt::is_claimed(
+        &STARTING_NAMES,
+        owner,
+        &start_key("h", "dev-o-r")
+    ));
+    drop(first);
+    assert!(
+        claim_start_name(owner, "h", "dev-o-r").is_some(),
+        "released"
+    );
+}

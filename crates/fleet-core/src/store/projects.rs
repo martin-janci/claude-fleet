@@ -975,6 +975,23 @@ impl Store {
             .optional()
     }
 
+    /// The id of `host_alias`'s worktree row `name` in `project_id`, if one
+    /// is recorded: what a `new_worktree` start under that name lands in.
+    pub fn worktree_id_named(
+        &self,
+        host_alias: &str,
+        project_id: i64,
+        name: &str,
+    ) -> Result<Option<i64>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT id FROM worktrees WHERE project_id = ?1 AND host_alias = ?2 AND name = ?3",
+                rusqlite::params![project_id, host_alias, name],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
     /// Worktree's logical name (the leaf used in remote
     /// `~/projects/.../.claude/worktrees/<name>` paths). The on-host `path`
     /// column is local-machine-only and unusable for remote rebuilds.

@@ -815,6 +815,12 @@ pub fn spawn_enforce_stop_limits(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>
                         Err(e) if e.code == codes::E_NOTFOUND => {
                             (host_alias, claude_session_id, "gone")
                         }
+                        // The person pinned it after setting the limit: the
+                        // pin wins, and the limit is closed rather than
+                        // refused again on every tick.
+                        Err(e) if e.code == codes::E_PINNED => {
+                            (host_alias, claude_session_id, "pinned")
+                        }
                         Err(e) => {
                             // Retried on the next tick.
                             tracing::warn!(

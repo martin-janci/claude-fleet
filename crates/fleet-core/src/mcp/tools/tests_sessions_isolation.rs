@@ -1370,6 +1370,22 @@ async fn run_matrix() {
         cannot_land,
     )
     .await;
+    // A `new_worktree` named like a recorded tree lands in that tree
+    // (`worktree add` reuses the directory), so it is the same landing.
+    m.at(
+        "new_session",
+        Reach::Drive,
+        |fx, _| {
+            json!({
+                "host_alias": HOST,
+                "project_id": fx.project,
+                "new_worktree": "wt",
+                "name": "fresh-wt"
+            })
+        },
+        cannot_land,
+    )
+    .await;
     // `inbox` is the one surface that DEGRADES rather than refusing, and the
     // cells say so. `mark_read` defaults to TRUE, so `inbox { session_id }` —
     // the documented shape every pre-M1 client sends — asks for the write

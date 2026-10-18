@@ -1,4 +1,4 @@
-import { writable } from 'svelte/store';
+import { get, writable } from 'svelte/store';
 import { createRowStore } from './row_store';
 import { invokeCmd, invokeCmdAbortable, type Result } from './result';
 import { readPref, writePref } from './prefs';
@@ -374,12 +374,22 @@ export function formatCostMicros(micros: number | null | undefined): string {
 // never rejected for it — only a KNOWN older version is. Shared by the
 // `rows` store's `isStale` option and by `loadSessions`'s own list/event
 // reconciliation below, so both use exactly the same rule.
+//
+// Only for the SAME session: `sessions.id` has no AUTOINCREMENT, so a killed
+// newest row's id goes to the next insert, whose `row_version` starts again
+// at 0. Compared across that reuse, the dead row's higher version would win
+// and the new session would stay hidden behind it.
 function sessionIsStale(incoming: SessionRow, current: SessionRow): boolean {
   return (
+    sessionIdentity(incoming) === sessionIdentity(current) &&
     incoming.row_version !== undefined &&
     current.row_version !== undefined &&
     incoming.row_version < current.row_version
   );
+}
+
+function sessionIdentity(s: SessionRow): string {
+  return `${s.host_alias}\u0000${s.tmux_name}\u0000${s.created_at}`;
 }
 
 /** Human label for a ghost row's `lost_reason`, or null when the reason has
@@ -409,7 +419,7 @@ const rows = createRowStore<SessionRow, number>({
   // `sessions.id` is an INTEGER PRIMARY KEY without AUTOINCREMENT, so a killed
   // highest id is handed to the next insert. A `session:created` whose row is
   // not the killed one gets past that id's tombstone (`mergeCreatedInto`).
-  identity: (s) => `${s.host_alias}\u0000${s.tmux_name}\u0000${s.created_at}`,
+  identity: sessionIdentity,
 });
 export const sessions = rows.store;
 export const resetTombstonesForTests = rows.resetTombstonesForTests;
@@ -482,7 +492,20 @@ export async function killSession(hostAlias: string, name: string): Promise<Resu
   const r = await invokeCmd<number>('kill_session', {
     args: { host_alias: hostAlias, name },
   });
-  if (r.ok) removeSession(r.value);
+  if (r.ok) {
+    removeSession(r.value);
+    return r;
+  }
+  // The kill went through and only the reconcile after it failed
+  // (`kill_landed`): the session is gone, so it is no failed kill (a bulk
+  // kill must not report it as one); the next reconcile pass tidies its row.
+  if ((r.error.details as { kill_landed?: unknown } | null | undefined)?.kill_landed === true) {
+    const row = get(rows.store).find((s) => s.host_alias === hostAlias && s.tmux_name === name);
+    if (row) {
+      removeSession(row.id);
+      return { ok: true, value: row.id };
+    }
+  }
   return r;
 }
 
@@ -1244,6 +1267,8 @@ export interface RestoreOutcome {
   tmux_name: string;
   ok: boolean;
   error: string | null;
+  /** The failure's `E_*` code (absent on success and from older hubs). */
+  code?: string;
 }
 
 /** Mirrors `service::sessions::restore::RestoreReport`. */

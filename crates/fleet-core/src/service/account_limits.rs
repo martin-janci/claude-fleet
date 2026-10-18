@@ -138,6 +138,9 @@ pub fn headroom(
         logins
             .iter()
             .filter(|l| Some(l.account_uuid.as_str()) != current)
+            // A signed-out login answers a start with `/login`, whatever
+            // its last reading said.
+            .filter(|l| !crate::service::login_health::is_signed_out(host, l.profile.as_deref()))
             .filter_map(|l| l.used_pct.filter(|u| *u < pause_at_pct).map(|u| (u, l)))
             .min_by(|(a, _), (b, _)| a.total_cmp(b))
             .map(|(_, l)| l.clone())
@@ -396,6 +399,7 @@ pub fn refuse_over_limit(
     })
     .into_iter()
     .filter(|l| l.account_uuid != over.login.account_uuid)
+    .filter(|l| !crate::service::login_health::is_signed_out(&host, l.profile.as_deref()))
     .filter_map(|l| l.used_pct.filter(|u| *u < pause_at).map(|u| (u, l)))
     .min_by(|(a, _), (b, _)| a.total_cmp(b))
     .map(|(_, l)| l);

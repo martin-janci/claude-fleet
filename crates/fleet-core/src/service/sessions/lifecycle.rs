@@ -442,17 +442,56 @@ pub async fn new_session(
 ) -> Result<SessionRow, IpcError> {
     // Reject hostile input before it reaches ssh / tmux / git.
     crate::validate::host_alias(&args.host_alias)?;
+    let owner_key = store as *const Mutex<Store> as usize;
     // An empty name means "pick one for me" (the dialog's dice, an MCP
     // caller that doesn't care): mint it here so every caller shares the
-    // same convention and the same collision policy.
-    if args.name.trim().is_empty() {
-        let s = lock(store)?;
-        args.name = fill_session_name(&s, &args)?;
-    }
-    crate::validate::tmux_name(&args.name)?;
+    // same convention and the same collision policy. A name another start
+    // is still creating has no row yet, so it is skipped here by its claim.
+    let _name_claim = if args.name.trim().is_empty() {
+        let mut claimed = None;
+        for _ in 0..3 {
+            let name = {
+                let s = lock(store)?;
+                fill_session_name_avoiding(&s, &args, &|n| {
+                    crate::rt::is_claimed(
+                        &STARTING_NAMES,
+                        owner_key,
+                        &start_key(&args.host_alias, n),
+                    )
+                })?
+            };
+            crate::validate::tmux_name(&name)?;
+            if let Some(c) = claim_start_name(owner_key, &args.host_alias, &name) {
+                args.name = name;
+                claimed = Some(c);
+                break;
+            }
+        }
+        claimed.ok_or_else(|| {
+            IpcError::new(
+                codes::E_EXISTS,
+                format!(
+                    "could not pick a free session name on {}; try again",
+                    args.host_alias
+                ),
+            )
+        })?
+    } else {
+        crate::validate::tmux_name(&args.name)?;
+        claim_start_name(owner_key, &args.host_alias, &args.name).ok_or_else(|| {
+            IpcError::new(
+                codes::E_EXISTS,
+                format!(
+                    "a session named {} is being started on {} already",
+                    args.name, args.host_alias
+                ),
+            )
+        })?
+    };
     if let Some(fname) = args.friendly_name.as_deref() {
         crate::validate::friendly_name(fname)?;
     }
+    let mut resume_claim = None;
     if let Some(id) = args.resume_claude_session_id.as_deref() {
         crate::validate::claude_session_id(id)?;
         if args.kind.as_deref() == Some("shell") {
@@ -464,7 +503,23 @@ pub async fn new_session(
         let s = lock(store)?;
         reject_held_conversation(&s, &args.host_alias, id)?;
         reject_foreign_conversation(&s, id, args.owner_person_id)?;
+        // The row that holds the conversation is written only once the pane
+        // is up, seconds of SSH later: until then this claim is the hold.
+        resume_claim = Some(
+            crate::rt::claim(&RESUMING, owner_key, start_key(&args.host_alias, id)).ok_or_else(
+                || {
+                    IpcError::new(
+                        codes::E_EXISTS,
+                        format!(
+                            "conversation {id} is being resumed on {} already",
+                            args.host_alias
+                        ),
+                    )
+                },
+            )?,
+        );
     }
+    let _resume_claim = resume_claim;
     normalize_launch(&mut args)?;
     {
         let s = lock(store)?;
@@ -486,6 +541,32 @@ pub async fn new_session(
     if let Some(name) = args.new_worktree.as_deref() {
         validate_new_worktree_name(name)?;
     }
+    // Two starts creating the same worktree at once would both run `git
+    // worktree add` into one directory and share whatever it became.
+    let _worktree_claim = match args.new_worktree.as_deref() {
+        Some(name) => Some(
+            crate::rt::claim(
+                &CREATING_WORKTREES,
+                owner_key,
+                format!(
+                    "{}\0{}\0{}",
+                    args.host_alias,
+                    args.project_id,
+                    crate::projects::worktree_dir_name(name)
+                ),
+            )
+            .ok_or_else(|| {
+                IpcError::new(
+                    codes::E_EXISTS,
+                    format!(
+                        "worktree {name} is being created on {} already",
+                        args.host_alias
+                    ),
+                )
+            })?,
+        ),
+        None => None,
+    };
     if let Some(t) = args.start_token.as_deref() {
         validate_start_token(t)?;
     }
@@ -872,7 +953,18 @@ pub(crate) fn claude_id_and_pane_cmd(args: &NewSessionArgs) -> (Option<String>, 
 /// `project_taken_slugs`), so the result is unique and reads like
 /// `dev-owner-repo--blue-sirius` rather than `…--main-2`. `.` and `:` are
 /// mapped to `-` so the result always passes `validate::tmux_name`.
+#[cfg(test)]
 pub(crate) fn fill_session_name(s: &Store, args: &NewSessionArgs) -> Result<String, IpcError> {
+    fill_session_name_avoiding(s, args, &|_| false)
+}
+
+/// The name `fill_session_name` mints, also passing over one `in_flight`
+/// says another start is creating (it has no row yet).
+pub(crate) fn fill_session_name_avoiding(
+    s: &Store,
+    args: &NewSessionArgs,
+    in_flight: &dyn Fn(&str) -> bool,
+) -> Result<String, IpcError> {
     use crate::service::names::{generate_name_default, tmux_safe};
     let (owner, repo) = fetch_owner_repo(s, args.project_id)?;
     let base = format!("dev-{owner}-{repo}");
@@ -905,15 +997,41 @@ pub(crate) fn fill_session_name(s: &Store, args: &NewSessionArgs) -> Result<Stri
         derive_tmux_name(&owner, &repo, worktree_key)
     ));
     let on_host = s.list_sessions_for_host(&args.host_alias)?;
-    if !on_host.iter().any(|r| r.tmux_name == deterministic) {
+    let free = |n: &str| !in_flight(n) && !on_host.iter().any(|r| r.tmux_name == n);
+    if free(&deterministic) {
         return Ok(deterministic);
     }
-    let taken = project_taken_slugs(s, args.project_id, &owner, &repo)?;
-    let pair = generate_name_default(&taken);
-    Ok(tmux_safe(&match &wt {
-        Some(w) => format!("{base}--{w}--{pair}{term}"),
-        None => format!("{base}--{pair}{term}"),
-    }))
+    let mut taken = project_taken_slugs(s, args.project_id, &owner, &repo)?;
+    loop {
+        let pair = generate_name_default(&taken);
+        let name = tmux_safe(&match &wt {
+            Some(w) => format!("{base}--{w}--{pair}{term}"),
+            None => format!("{base}--{pair}{term}"),
+        });
+        if free(&name) || !taken.insert(pair.to_lowercase()) {
+            return Ok(name);
+        }
+    }
+}
+
+/// Starts in flight, per store, keyed by [`start_key`]: the row that
+/// would answer "is this name taken?" or "is this conversation open?" is
+/// written only after the pane is up, so these claims stand in for it
+/// meanwhile.
+pub(super) static STARTING_NAMES: crate::rt::KeySet = std::sync::Mutex::new(None);
+static RESUMING: crate::rt::KeySet = std::sync::Mutex::new(None);
+static CREATING_WORKTREES: crate::rt::KeySet = std::sync::Mutex::new(None);
+
+pub(super) fn start_key(host_alias: &str, what: &str) -> String {
+    format!("{host_alias}\0{what}")
+}
+
+pub(super) fn claim_start_name(
+    owner: usize,
+    host_alias: &str,
+    name: &str,
+) -> Option<crate::rt::KeyedClaim> {
+    crate::rt::claim(&STARTING_NAMES, owner, start_key(host_alias, name))
 }
 
 /// Every slug already in use on a project — worktree names, the suffix of
@@ -1234,87 +1352,137 @@ pub(super) async fn new_session_inner(
     // (T5's review — see `store::reconcile`'s ownership note).
     record_tmux_created(store, &args.host_alias, &args.name);
 
-    reconcile_one_host(store, ssh, &args.host_alias).await?;
-    progress.advance(StartStep::Agent);
-    if let Some(rep) = &repaired {
-        // Same detail as every other workspace_repaired event (branch_source
-        // included), attached now that reconcile created the row.
-        record_session_event(
-            store,
+    // From here the pane runs. A failure before the row is finished would
+    // leave it running unowned, with no launch or conversation recorded,
+    // and a retry would start a second agent beside it: undo the pane.
+    let finished: Result<SessionRow, IpcError> = async {
+        reconcile_one_host(store, ssh, &args.host_alias).await?;
+        // A probe that timed out right after the create marks the host
+        // unreachable and inserts nothing: look once more before giving up.
+        let has_row = |store: &Mutex<Store>| -> Result<bool, IpcError> {
+            Ok(lock(store)?
+                .list_sessions_for_host(&args.host_alias)?
+                .iter()
+                .any(|r| r.tmux_name == args.name))
+        };
+        if !has_row(store)? {
+            reconcile_one_host(store, ssh, &args.host_alias).await?;
+        }
+        progress.advance(StartStep::Agent);
+        if let Some(rep) = &repaired {
+            // Same detail as every other workspace_repaired event (branch_source
+            // included), attached now that reconcile created the row.
+            record_session_event(
+                store,
+                &args.host_alias,
+                &args.name,
+                crate::service::repair::EVENT_REPAIRED,
+                Some(crate::service::repair::event_detail(rep)),
+            );
+        }
+        let s = lock(store)?;
+        let row = s
+            .list_sessions_for_host(&args.host_alias)?
+            .into_iter()
+            .find(|r| r.tmux_name == args.name)
+            .ok_or_else(|| {
+                IpcError::new(
+                    codes::E_INTERNAL,
+                    format!(
+                        "session {} on {} vanished after creation",
+                        args.name, args.host_alias
+                    ),
+                )
+            })?;
+
+        // The row's project comes from reconcile's cwd match, which finds none
+        // for a cwd outside the host's project layout (a system project on a
+        // remote host, a custom root). The session was created against
+        // `args.project_id`; pin it, so a relaunch resolves the same project-scope
+        // environment as this launch did. Reconcile keeps a started row's project
+        // when its own match is empty.
+        if row.project_id.is_none() {
+            s.set_session_project(row.id, args.project_id)?;
+        }
+        // `new_session { env }` was used in memory for this launch; from now on
+        // it is the session's own scope, read by every relaunch.
+        for (name, value) in &env_extra {
+            s.set_env_var(
+                "session",
+                &row.id.to_string(),
+                name,
+                &crate::store::EnvValue::Plain(value.clone()),
+            )?;
+        }
+        let worktree_id =
+            link_new_session_worktree(&s, row.id, &args, &path.to_string_lossy(), fixed.is_some())?;
+        let derived_friendly = derive_friendly_name(&s, &args, worktree_id.or(row.worktree_id))?;
+        if !is_shell {
+            let launch = crate::tmux::ClaudeLaunch {
+                model: args.model.clone(),
+                effort: args.effort.clone(),
+                profile: args.profile.clone(),
+            };
+            store_start_launch(&s, row.id, &args.name, &launch)?;
+        }
+        // Not soft: a Codex or agy pane on a row that says Claude would be resumed,
+        // read and answered as Claude's.
+        if let Some(agent) = args
+            .agent
+            .as_deref()
+            .filter(|a| *a != crate::store::AGENT_CLAUDE && !is_shell)
+        {
+            s.set_session_agent(row.id, agent)?;
+        }
+        finalize_new_session(
+            &s,
+            row.id,
             &args.host_alias,
             &args.name,
-            crate::service::repair::EVENT_REPAIRED,
-            Some(crate::service::repair::event_detail(rep)),
-        );
+            derived_friendly.as_deref(),
+            claude_id.as_deref(),
+            is_shell,
+            args.owner_person_id,
+            &args
+                .origin
+                .clone()
+                .unwrap_or_else(|| crate::store::SessionOrigin::person(args.owner_person_id)),
+        )
     }
-    let s = lock(store)?;
-    let row = s
-        .list_sessions_for_host(&args.host_alias)?
-        .into_iter()
-        .find(|r| r.tmux_name == args.name)
-        .ok_or_else(|| {
-            IpcError::new(
-                codes::E_INTERNAL,
-                format!(
-                    "session {} on {} vanished after creation",
-                    args.name, args.host_alias
-                ),
-            )
-        })?;
+    .await;
+    if let Err(e) = &finished {
+        // `E_FORBIDDEN`: somebody proved and claimed the row first; the
+        // pane is theirs now, not ours to kill.
+        if e.code != codes::E_FORBIDDEN {
+            roll_back_start(store, &*tmux, &args.host_alias, &args.name).await;
+        }
+    }
+    finished
+}
 
-    // The row's project comes from reconcile's cwd match, which finds none
-    // for a cwd outside the host's project layout (a system project on a
-    // remote host, a custom root). The session was created against
-    // `args.project_id`; pin it, so a relaunch resolves the same project-scope
-    // environment as this launch did. Reconcile keeps a started row's project
-    // when its own match is empty.
-    if row.project_id.is_none() {
-        s.set_session_project(row.id, args.project_id)?;
+/// Undo a start whose pane is up but whose row could not be finished: kill
+/// the pane (best-effort) and record it as fleet's own kill, so the next
+/// pass neither re-inserts it nor reads it as a loss.
+pub(super) async fn roll_back_start(
+    store: &Mutex<Store>,
+    tmux: &dyn TmuxExec,
+    host_alias: &str,
+    name: &str,
+) {
+    if let Err(e) = tmux.kill_session(name).await {
+        tracing::warn!(session = %name, host = %host_alias, error = %e, "[new_session] removing the half-started pane failed");
     }
-    // `new_session { env }` was used in memory for this launch; from now on
-    // it is the session's own scope, read by every relaunch.
-    for (name, value) in &env_extra {
-        s.set_env_var(
-            "session",
-            &row.id.to_string(),
-            name,
-            &crate::store::EnvValue::Plain(value.clone()),
-        )?;
+    let Ok(s) = store.lock() else { return };
+    let now = now_unix();
+    match s.get_session(name, host_alias) {
+        Ok(Some(row)) => {
+            record_kill(&s, row.id, row.claude_session_id.as_deref());
+            if let Err(e) = s.mark_session_killed(row.id, now) {
+                tracing::warn!(session = %name, error = %e, "[new_session] marking the half-started row failed");
+            }
+        }
+        _ => s.note_kill(host_alias, name, now),
     }
-    let worktree_id =
-        link_new_session_worktree(&s, row.id, &args, &path.to_string_lossy(), fixed.is_some())?;
-    let derived_friendly = derive_friendly_name(&s, &args, worktree_id.or(row.worktree_id))?;
-    if !is_shell {
-        let launch = crate::tmux::ClaudeLaunch {
-            model: args.model.clone(),
-            effort: args.effort.clone(),
-            profile: args.profile.clone(),
-        };
-        store_start_launch(&s, row.id, &args.name, &launch)?;
-    }
-    // Not soft: a Codex or agy pane on a row that says Claude would be resumed,
-    // read and answered as Claude's.
-    if let Some(agent) = args
-        .agent
-        .as_deref()
-        .filter(|a| *a != crate::store::AGENT_CLAUDE && !is_shell)
-    {
-        s.set_session_agent(row.id, agent)?;
-    }
-    finalize_new_session(
-        &s,
-        row.id,
-        &args.host_alias,
-        &args.name,
-        derived_friendly.as_deref(),
-        claude_id.as_deref(),
-        is_shell,
-        args.owner_person_id,
-        &args
-            .origin
-            .clone()
-            .unwrap_or_else(|| crate::store::SessionOrigin::person(args.owner_person_id)),
-    )
 }
 
 /// Point a new session's row at the worktree it was started in: the one
@@ -2540,7 +2708,8 @@ pub(crate) fn store_launch(
 /// the pane already runs with them, and a failed write only means a later
 /// recreate / restart uses the host's defaults. Not soft for a profile
 /// (review r05 F8): that later restart would run under the host's own login
-/// and silently bill another account, so the start reports the failure.
+/// and silently bill another account, so the start reports the failure (and
+/// `new_session` stops the pane it had started).
 pub(crate) fn store_start_launch(
     s: &Store,
     session_id: i64,
@@ -2554,8 +2723,8 @@ pub(crate) fn store_start_launch(
             Err(IpcError::new(
                 codes::E_INTERNAL,
                 format!(
-                    "session {name} started, but its credential profile was not saved; \
-                     restart it with the profile chosen again so it keeps that login"
+                    "session {name} could not record its credential profile, so it was \
+                     stopped rather than left to bill another login later; start it again"
                 ),
             ))
         }
@@ -2689,7 +2858,33 @@ pub async fn recreate_session(
     // alive, and saying so uniformly is what keeps the invariant checkable.
     record_tmux_created(store, &sess.host_alias, &sess.tmux_name);
 
-    // Mark the row live again and return it.
+    // Mark the row live again and return it — unless a person killed or
+    // dismissed it while the workspace was being rebuilt (seconds of SSH,
+    // a re-clone at worst). Their word is the newer one: the pane just
+    // started goes again, and the kill stays remembered.
+    let killed_meanwhile = {
+        let s = lock(store)?;
+        match s.get_session_by_id(sess.id)? {
+            None => true,
+            Some(now) => {
+                now.lost_reason.as_deref() == Some("killed")
+                    && sess.lost_reason.as_deref() != Some("killed")
+            }
+        }
+    };
+    if killed_meanwhile {
+        let _ = tmux.kill_session(&sess.tmux_name).await;
+        if let Ok(s) = store.lock() {
+            s.note_kill(&sess.host_alias, &sess.tmux_name, now_unix());
+        }
+        return Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            format!(
+                "{} on {} was killed while it was being recreated; left it killed",
+                sess.tmux_name, sess.host_alias
+            ),
+        ));
+    }
     let row = {
         let s = lock(store)?;
         // The rebuilt `claude` reads the host's login afresh.
@@ -2802,6 +2997,15 @@ pub fn dismiss_ghost_session(
             ),
         ));
     }
+    // A pinned session a reboot turned into a ghost is still the one the
+    // person asked fleet to keep: dismissing it would drop its pin and the
+    // resumable conversation with it.
+    refuse_if_pinned(
+        &s,
+        &sess.host_alias,
+        &sess.tmux_name,
+        "dismiss_ghost_session",
+    )?;
     s.delete_session(sess.id)?;
     Ok(())
 }
