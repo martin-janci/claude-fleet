@@ -172,7 +172,10 @@ fn the_timeline_puts_sessions_and_errors_on_one_clock() {
             .unwrap();
     }
     let s = st.lock().unwrap();
-    let got = timeline(&s, &json!({ "minutes": 5 }), now).unwrap();
+    // The session events are stamped with the wall clock when they are
+    // written, which on a loaded box is already past `now`: read up to the
+    // clock as it is after the writes, or `until` cuts them off.
+    let got = timeline(&s, &json!({ "minutes": 5 }), crate::store::now_unix()).unwrap();
     let items = got["items"].as_array().unwrap();
     let kinds: Vec<(&str, &str)> = items
         .iter()
