@@ -33,6 +33,13 @@ pub trait TokenStore: Send + Sync {
 const SERVICE: &str = "claude-fleet";
 const ACCOUNT: &str = "hub-client-token";
 
+/// The account of an extra fleet's token (multi-hub design D2): one item per
+/// hub, so two hubs' tokens can never be confused, and the primary's item —
+/// [`ACCOUNT`] — stays exactly where every earlier build put it (D1).
+pub fn fleet_account(fleet: &str) -> String {
+    format!("{ACCOUNT}.{fleet}")
+}
+
 /// The real store: the macOS keychain through the Security framework
 /// directly (see the `TokenStore` impl below — no more shelling out to
 /// `/usr/bin/security`), Windows Credential Manager through the Win32 API,
@@ -44,6 +51,10 @@ pub struct OsTokenStore {
     /// so the struct has one shape — and one constructor — on every platform.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     data_dir: std::path::PathBuf,
+    /// The keychain account, the Credential Manager user name and the file
+    /// name: [`ACCOUNT`] for the primary hub, [`fleet_account`] for an extra
+    /// fleet's.
+    account: String,
     /// The Credential Manager target. `SERVICE/ACCOUNT` in the app; a test
     /// names its own so it never touches a real pairing on the machine.
     #[cfg(windows)]
@@ -56,19 +67,31 @@ pub struct OsTokenStore {
 
 impl OsTokenStore {
     pub fn new(data_dir: std::path::PathBuf) -> Self {
+        Self::for_account(data_dir, ACCOUNT.to_string())
+    }
+
+    /// The token of the extra fleet `fleet` (multi-hub design D2). The caller
+    /// has validated `fleet` as a slot id (`backend::fleets::valid_slot`), so
+    /// it is safe as a file name and a keychain account.
+    pub fn for_fleet(data_dir: std::path::PathBuf, fleet: &str) -> Self {
+        Self::for_account(data_dir, fleet_account(fleet))
+    }
+
+    fn for_account(data_dir: std::path::PathBuf, account: String) -> Self {
         Self {
             data_dir,
             #[cfg(windows)]
-            target: format!("{SERVICE}/{ACCOUNT}"),
+            target: format!("{SERVICE}/{account}"),
             #[cfg(target_os = "macos")]
             service: SERVICE.to_string(),
+            account,
         }
     }
 
     /// The fallback file. Sibling of `state.db`, and like it owner-only.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     fn fallback_path(&self) -> std::path::PathBuf {
-        self.data_dir.join(ACCOUNT)
+        self.data_dir.join(&self.account)
     }
 }
 
@@ -99,7 +122,7 @@ impl TokenStore for OsTokenStore {
         // function's whole body is this call.
         let options = security_framework::passwords::PasswordOptions::new_generic_password(
             &self.service,
-            ACCOUNT,
+            &self.account,
         );
         match security_framework::passwords::generic_password(options) {
             Ok(bytes) => {
@@ -116,14 +139,14 @@ impl TokenStore for OsTokenStore {
     fn set(&self, token: &str) -> Result<(), String> {
         security_framework::passwords::set_generic_password(
             &self.service,
-            ACCOUNT,
+            &self.account,
             token.trim().as_bytes(),
         )
         .map_err(|e| format!("keychain write failed: {e}"))
     }
 
     fn clear(&self) -> Result<(), String> {
-        match security_framework::passwords::delete_generic_password(&self.service, ACCOUNT) {
+        match security_framework::passwords::delete_generic_password(&self.service, &self.account) {
             // Already gone is success: Disconnect may be pressed twice.
             Ok(()) => Ok(()),
             Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(()),
@@ -277,7 +300,7 @@ impl OsTokenStore {
     }
 
     fn write_and_drop_file(&self, token: &str) -> Result<(), String> {
-        wincred::write(&self.target, ACCOUNT, token.trim().as_bytes())?;
+        wincred::write(&self.target, &self.account, token.trim().as_bytes())?;
         // Only once the credential holds it: a failed write keeps the old
         // file as the one copy there is. A file that will not go (locked by
         // a backup or an indexer) is logged, not an error: the credential is

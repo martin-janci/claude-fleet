@@ -103,6 +103,14 @@ impl FleetBackend {
         }
     }
 
+    /// A window onto an extra fleet's hub (`backend::fleets`). Always a hub:
+    /// there is no standalone arm for a fleet this process does not own, so
+    /// every command addressed to it routes or refuses, and none of them can
+    /// reach this machine's store or SSH.
+    pub fn over(hub: HubBackend) -> Self {
+        Self { hub: Some(hub) }
+    }
+
     /// A hub client over a caller-supplied transport — the seam the routing
     /// tests use to answer with a recorded response instead of a network.
     pub fn remote_over(cfg: RemoteConfig, transport: Arc<dyn HubTransport>) -> Self {

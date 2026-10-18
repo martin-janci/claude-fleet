@@ -1359,6 +1359,10 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::hub::offline_local_sessions`
 - `commands::hub::hub_stranded_token`
 - `commands::hub::report_client_error`
+- `commands::fleets::fleets_list`
+- `commands::fleets::fleet_add`
+- `commands::fleets::fleet_remove`
+- `commands::fleets::fleet_retry_now`
 - `commands::onboarding::check_local_prereqs`
 - `commands::onboarding::tunnel_status`
 - `commands::assets::catalog_config`
