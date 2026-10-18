@@ -432,6 +432,8 @@ describe('the routine editor (G2.3: schedule picker, next run, account, dry run,
       await fireEvent.click(screen.getByTestId('routine-tune-accept'));
       expect((screen.getByTestId('routine-prompt') as HTMLTextAreaElement).value).toBe('Tidy up the repo. Done when CI is green.');
       expect(argsOf('save')).toBeUndefined();
+      // Focus goes back to the prompt it tuned, not to the page.
+      await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId('routine-prompt')));
     } finally {
       fleetSettings.set({ ...SETTING_DEFAULTS });
     }
@@ -621,5 +623,37 @@ describe('the routine form (FormsAutomation board)', () => {
     await fireEvent.click(screen.getByTestId('routine-use-template'));
     await fireEvent.click(screen.getByTestId('routine-template-morning-pr-sweep'));
     expect((screen.getByTestId('routine-name') as HTMLInputElement).value).toBe('Morning PR sweep');
+  });
+
+  it('Esc on the Use a template… menu closes the menu, not the editor', async () => {
+    await openBlank();
+    await fireEvent.click(screen.getByTestId('routine-use-template'));
+    expect(screen.getByTestId('routine-new-menu')).toBeInTheDocument();
+    await fireEvent.keyDown(screen.getByTestId('routine-template-blank'), { key: 'Escape' });
+    expect(screen.queryByTestId('routine-new-menu')).toBeNull();
+    expect(screen.getByTestId('routine-editor')).toBeInTheDocument();
+    expect(screen.queryByTestId('form-discard-ask')).toBeNull();
+  });
+
+  it('Esc in the tuner closes only the tuner, and a template picked while it is open closes it', async () => {
+    fleetSettings.set({ ...SETTING_DEFAULTS, 'work.prompt_tune': 'true' });
+    try {
+      await openBlank();
+      await fireEvent.input(screen.getByTestId('routine-prompt'), { target: { value: 'Tidy up.' } });
+      await fireEvent.click(screen.getByTestId('routine-tune-open'));
+      await fireEvent.keyDown(screen.getByTestId('routine-tune-close'), { key: 'Escape' });
+      expect(screen.queryByTestId('routine-tune')).toBeNull();
+      expect(screen.getByTestId('routine-editor')).toBeInTheDocument();
+      expect(screen.queryByTestId('form-discard-ask')).toBeNull();
+
+      await fireEvent.click(screen.getByTestId('routine-tune-open'));
+      expect(screen.getByTestId('routine-tune')).toBeInTheDocument();
+      await fireEvent.click(screen.getByTestId('routine-use-template'));
+      await fireEvent.click(screen.getByTestId('routine-template-morning-pr-sweep'));
+      expect((screen.getByTestId('routine-name') as HTMLInputElement).value).toBe('Morning PR sweep');
+      expect(screen.queryByTestId('routine-tune')).toBeNull();
+    } finally {
+      fleetSettings.set({ ...SETTING_DEFAULTS });
+    }
   });
 });

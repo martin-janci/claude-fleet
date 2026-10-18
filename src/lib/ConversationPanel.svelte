@@ -543,6 +543,11 @@
       // catch that; it has to be dropped here.
       attachments = [];
       attachErrors = [];
+      // The tuner and the help panel answer about the session they were
+      // opened on: left open, "Use this" would put the old session's
+      // rewrite into this session's draft.
+      tuneOpen = false;
+      helpOpen = false;
       // Restore where the returning session was left, once its fetch lands —
       // a snapshot only exists when it was scrolled away from the bottom
       // (`rememberScroll` drops an at-bottom one), so recalling one always
