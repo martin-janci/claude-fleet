@@ -1192,8 +1192,10 @@ Automation › Agents lists the catalog's fleet agents with their instances;
 agent drafts one in a chat with a `wizard: fleet_agent` block, which the
 person sends; the phone lists the instances with Revoke. Step 6 in part: the
 `github_prs` and `github_comments` sources, `pr_comment` and `pr_labels`,
-and comments and new items on trackers other than Jira; not `pr_review`,
-polling other trackers, or restating the built-in agents.
+and comments and new items on trackers other than Jira, whose
+`tracker_comments` and `tracker_assigned` polls read the hub's synced items
+(updated since the poll, less a sync's lag) and each one's comments through
+its provider; not `pr_review` or restating the built-in agents.
 
 The self debug agent (thread "Self debug agent", 2026-10-17), the hub and
 desktop parts: a fleet agent definition that sets `run.diagnostics` gets
