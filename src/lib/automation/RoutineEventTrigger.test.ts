@@ -10,7 +10,7 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import RoutinesPanel from './RoutinesPanel.svelte';
 import { hosts } from '../hosts';
 import { projects } from '../projects';
-import { eventFilterInput, eventFilterOf, eventFilterWords, failing, triggerWords, type RoutineRow } from '../routines';
+import { EVENT_CHOICES, eventFilterInput, eventFilterOf, eventFilterWords, eventLabel, failing, triggerWords, type RoutineRow } from '../routines';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
 
@@ -104,12 +104,12 @@ describe('pull request triggers in the routine editor', () => {
 
 describe('event filter helpers', () => {
   it('sends repo and author for a PR event only, the rate for any event, nothing for a schedule', () => {
-    const f = { repo: 'acme/web', author: 'anyone' as const, rate: '600' };
+    const f = { repo: 'acme/web', author: 'anyone' as const, rate: '600', host: '' };
     expect(eventFilterInput('event', 'pr_merged', f)).toEqual({ event_repo: 'acme/web', event_author: 'anyone', event_rate_secs: 600 });
     expect(eventFilterInput('event', 'stuck', f)).toEqual({ event_rate_secs: 600 });
     expect(eventFilterInput('cron', 'pr_merged', f)).toEqual({});
-    expect(eventFilterInput('event', 'pr_merged', { repo: ' ', author: 'me', rate: '' })).toEqual({});
-    expect(eventFilterOf({})).toEqual({ repo: '', author: 'me', rate: '' });
+    expect(eventFilterInput('event', 'pr_merged', { repo: ' ', author: 'me', rate: '', host: '' })).toEqual({});
+    expect(eventFilterOf({})).toEqual({ repo: '', author: 'me', rate: '', host: '' });
   });
 
   it('words a trigger and its filters', () => {
@@ -118,5 +118,42 @@ describe('event filter helpers', () => {
     expect(eventFilterWords({ event: 'pr_merged' })).toBe('mine');
     expect(eventFilterWords({ event: 'stuck', event_rate_secs: 86400 })).toBe('once per session per day');
     expect(eventFilterWords({ event: 'stuck' })).toBe('');
+  });
+});
+
+describe('fleet events and the host filter', () => {
+  it('offers every event the hub fires on, each with its own words', () => {
+    for (const e of ['needs_you', 'auto_restored', 'account_switched', 'session_moved', 'pr_opened', 'host_offline', 'account_limited', 'mission_done'])
+      expect(EVENT_CHOICES).toContain(e);
+    expect(new Set(EVENT_CHOICES.map(eventLabel)).size).toBe(EVENT_CHOICES.length);
+    expect(triggerWords({ trigger: 'event', event: 'host_offline' })).toBe('When a host goes offline');
+    expect(triggerWords({ trigger: 'event', event: 'account_limited' })).toBe('When an account hits its limit');
+    expect(triggerWords({ trigger: 'event', event: 'needs_you' })).toBe('When a session is waiting for you');
+  });
+
+  it('sends a host only for an event about a host', () => {
+    const f = { repo: '', author: 'me' as const, rate: '3600', host: 'nas' };
+    expect(eventFilterInput('event', 'host_offline', f)).toEqual({ event_host: 'nas', event_rate_secs: 3600 });
+    expect(eventFilterInput('event', 'stuck', f)).toEqual({ event_host: 'nas', event_rate_secs: 3600 });
+    expect(eventFilterInput('event', 'account_limited', f)).toEqual({ event_rate_secs: 3600 });
+    expect(eventFilterOf({ event_host: 'nas' }).host).toBe('nas');
+    expect(eventFilterWords({ event: 'host_offline', event_host: 'nas', event_rate_secs: 3600 })).toBe('on nas · once per host per hour');
+    expect(eventFilterWords({ event: 'account_limited', event_rate_secs: 86400 })).toBe('once per account per day');
+  });
+
+  it('saves a routine that starts when a host goes offline, on one host', async () => {
+    route([]);
+    render(RoutinesPanel);
+    await screen.findByTestId('routines-empty');
+    await fireEvent.click(screen.getByTestId('routine-new'));
+    await fireEvent.click(screen.getByTestId('routine-template-morning-pr-sweep'));
+    await fireEvent.click(screen.getByTestId('routine-trigger-event'));
+    await fireEvent.change(screen.getByTestId('routine-event'), { target: { value: 'host_offline' } });
+    const host = (await screen.findByTestId('routine-event-host')) as HTMLSelectElement;
+    expect(Array.from(host.options).map((o) => o.value)).toEqual(['', 'mac']);
+    await fireEvent.change(host, { target: { value: 'mac' } });
+    await fireEvent.click(screen.getByTestId('routine-save'));
+    await waitFor(() => expect(argsOf('save')).toBeDefined());
+    expect(argsOf('save').routine).toMatchObject({ trigger: 'event', event: 'host_offline', event_host: 'mac' });
   });
 });

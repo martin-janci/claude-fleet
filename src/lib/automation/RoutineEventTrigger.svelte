@@ -2,10 +2,14 @@
   // The routine editor's "On an event" fields (Orbit Fleet M15 step G2.4,
   // the FormsAutomation board's "Starts on an event"): the event, session
   // ones and the pull request ones (review, checks, merge), then for a pull
-  // request "Only when repo / author", and for any event "Not more often
-  // than once per PR (session) per …". The hub checks every field again
-  // (`service::routines::event_filters`); this only offers what it accepts.
-  import { EVENT_CHOICES, RATE_CHOICES, eventLabel, isPrEvent, type EventFilter } from '../routines';
+  // request "Only when repo / author", for an event about a host "Only on
+  // host", and for any event "Not more often than once per PR (session,
+  // host, …) per …". The events come in three groups: sessions, pull
+  // requests, and the fleet's hosts, accounts and missions (migration 201).
+  // The hub checks every field again (`service::routines::event_filters`);
+  // this only offers what it accepts.
+  import { EVENT_GROUPS, RATE_CHOICES, eventLabel, isFleetEvent, isPrEvent, rateSubject, takesHostFilter, type EventFilter } from '../routines';
+  import { hosts } from '../hosts';
 
   interface Props {
     event: string;
@@ -16,12 +20,18 @@
   let { event = $bindable(), filter = $bindable(), repos = [] }: Props = $props();
 
   const pr = $derived(isPrEvent(event));
+  const per = $derived(rateSubject(event));
+  const hostAliases = $derived($hosts.filter((h) => !h.hidden).map((h) => h.alias));
 </script>
 
 <label class="field"
   >Event
   <select data-testid="routine-event" bind:value={event}>
-    {#each EVENT_CHOICES as e (e)}<option value={e}>{eventLabel(e)}</option>{/each}
+    {#each EVENT_GROUPS as g (g.label)}
+      <optgroup label={g.label}>
+        {#each g.events as e (e)}<option value={e}>{eventLabel(e)}</option>{/each}
+      </optgroup>
+    {/each}
   </select>
 </label>
 {#if pr}
@@ -49,16 +59,27 @@
     </label>
   </div>
 {/if}
+{#if takesHostFilter(event)}
+  <label class="field"
+    >Only on host
+    <select data-testid="routine-event-host" bind:value={filter.host}>
+      <option value="">any host</option>
+      {#each hostAliases as h (h)}<option value={h}>{h}</option>{/each}
+      {#if filter.host && !hostAliases.includes(filter.host)}<option value={filter.host}>{filter.host}</option>{/if}
+    </select>
+  </label>
+{/if}
 <label class="field"
   >Not more often than
   <select data-testid="routine-event-rate" bind:value={filter.rate}>
     {#each RATE_CHOICES as c (c.label)}
       <option value={c.secs ? String(c.secs) : ''}
-        >{c.secs ? c.label.replace('once per', `once per ${pr ? 'PR' : 'session'} per`) : c.label}</option
+        >{c.secs ? c.label.replace('once per', `once per ${per} per`) : c.label}</option
       >
     {/each}
   </select>
   {#if pr}<span class="hint">The run's prompt names the pull request that started it.</span>{/if}
+  {#if isFleetEvent(event)}<span class="hint">Fires once when it happens, not again while it lasts. The run's prompt says what happened.</span>{/if}
 </label>
 
 <style>

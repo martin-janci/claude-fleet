@@ -117,7 +117,7 @@ pub const KINDS: [&str; 15] = [
 /// The `notification` types that mean a session waits on someone
 /// (`hooks::notification_effect`'s blocked ones). `quota_auto_resume_fired`
 /// is the session going again, not a wait.
-const BLOCKING_NOTIFICATIONS: [&str; 5] = [
+pub const BLOCKING_NOTIFICATIONS: [&str; 5] = [
     "permission_prompt",
     "elicitation_dialog",
     "elicitation_url_dialog",

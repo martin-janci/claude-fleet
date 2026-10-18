@@ -12,11 +12,11 @@
 //! on one answers `dry_run` exactly as an id that does not exist.
 
 use super::tick::{self, EventFire, Plan};
-use super::{fleet_budget, usd, visible, EVENTS, PR_EVENTS};
+use super::{fleet_budget, is_fleet_event, stored_kind, usd, visible, EVENTS, PR_EVENTS};
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::loops::{self, LoopHealth};
 use crate::service::view_scope::ViewScope;
-use crate::store::{RoutineDecisionRow, RoutineRow, Store, ROUTINE_DECISIONS_KEPT};
+use crate::store::{FleetEventRow, RoutineDecisionRow, RoutineRow, Store, ROUTINE_DECISIONS_KEPT};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
@@ -54,7 +54,12 @@ impl RoutineCheck {
 pub struct EventVerdict {
     pub event_id: i64,
     pub kind: String,
-    pub session_id: i64,
+    /// The session it is on; none for a fleet event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<i64>,
+    /// What a fleet event is about (`host:mac`, `account:…`, `mission:4`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
     pub at: i64,
     /// Whether the routine's cursor is past it: it was read already.
     pub read: bool,
@@ -155,6 +160,15 @@ fn sees_session(s: &Store, scope: &ViewScope, sid: Option<i64>) -> Result<bool, 
     };
     Ok(s.get_session_by_id(sid)?
         .is_some_and(|row| scope.sees_session_row(&row).is_visible()))
+}
+
+/// May `scope` read fleet event `e`: its org, and a person's (a mission's)
+/// only as that row's owner may.
+fn sees_fleet_event(scope: &ViewScope, e: &FleetEventRow) -> bool {
+    scope.org.sees_org(e.org_id)
+        && (e.person_id.is_none()
+            || scope.is_unrestricted()
+            || scope.may_own_person_row(e.org_id, e.person_id))
 }
 
 /// `r`'s newest decisions, the ones about a session `scope` may not read
@@ -278,6 +292,9 @@ fn scheduled_checks(
                 if let Some(repo) = r.event_repo.as_deref() {
                     words.push_str(&format!(" in {repo}"));
                 }
+                if let Some(host) = r.event_host.as_deref() {
+                    words.push_str(&format!(" on {host}"));
+                }
                 if PR_EVENTS.contains(&k) && r.event_author.as_deref() == Some("anyone") {
                     words.push_str(", anyone's in its organisation");
                 }
@@ -384,7 +401,8 @@ fn judge_event(
     let mut v = EventVerdict {
         event_id: eid,
         kind: kind.to_string(),
-        session_id: sid,
+        session_id: Some(sid),
+        subject: None,
         at,
         read: eid <= r.event_cursor,
         fires: false,
@@ -398,7 +416,54 @@ fn judge_event(
         ));
         return Ok((v, None));
     }
-    match tick::event_fire(s, r, kind, eid, sid, detail.as_deref())? {
+    if !tick::needs_you(kind, detail.as_deref()) {
+        v.reason = Some("it waits on nobody".into());
+        return Ok((v, None));
+    }
+    let verdict = tick::event_fire(s, r, kind, eid, sid, detail.as_deref())?;
+    rate(s, r, v, verdict, now)
+}
+
+/// What fleet event `e` does to event routine `r`: its filters
+/// ([`tick::fleet_event_fire`]), then its rate.
+fn judge_fleet_event(
+    s: &Store,
+    r: &RoutineRow,
+    e: &FleetEventRow,
+    now: i64,
+) -> Result<(EventVerdict, Option<EventFire>), IpcError> {
+    let mut v = EventVerdict {
+        event_id: e.id,
+        kind: e.kind.clone(),
+        session_id: None,
+        subject: Some(e.subject.clone()),
+        at: e.at,
+        read: e.id <= r.event_cursor,
+        fires: false,
+        reason: None,
+        reference: None,
+    };
+    if r.event.as_deref() != Some(e.kind.as_str()) {
+        v.reason = Some(format!(
+            "it is {}; the routine fires on {}",
+            e.kind,
+            r.event.as_deref().unwrap_or("no event")
+        ));
+        return Ok((v, None));
+    }
+    let verdict = tick::fleet_event_fire(s, r, e)?;
+    rate(s, r, v, verdict, now)
+}
+
+/// A verdict of the filters, then the routine's rate.
+fn rate(
+    s: &Store,
+    r: &RoutineRow,
+    mut v: EventVerdict,
+    verdict: Result<EventFire, String>,
+    now: i64,
+) -> Result<(EventVerdict, Option<EventFire>), IpcError> {
+    match verdict {
         Err(why) => {
             v.reason = Some(why);
             Ok((v, None))
@@ -447,18 +512,43 @@ pub fn explain(
     let mut checks = scheduled_checks(&s, &r, loop_row.as_ref(), now)?;
     checks.extend(fire_checks(&s, &r, now)?);
     let event = match r.event.as_deref().filter(|_| r.trigger == "event") {
-        Some(kind) if EVENTS.contains(&kind) => {
+        Some(kind) if is_fleet_event(kind) => {
             let mut recent = Vec::new();
-            for ev in s.recent_events_of_kind(kind, EVENTS_SCANNED)? {
+            for e in s.recent_fleet_events_of_kind(kind, EVENTS_SCANNED)? {
                 if recent.len() as i64 >= EVENTS_SHOWN {
                     break;
+                }
+                if sees_fleet_event(scope, &e) {
+                    recent.push(judge_fleet_event(&s, &r, &e, now)?.0);
+                }
+            }
+            let unread = if scope.is_unrestricted() {
+                Some(s.count_fleet_events_of_kind_after(r.event_cursor, kind)?)
+            } else {
+                None
+            };
+            Some(EventExplain {
+                kind: kind.to_string(),
+                cursor: r.event_cursor,
+                unread,
+                recent,
+            })
+        }
+        Some(kind) if EVENTS.contains(&kind) => {
+            let mut recent = Vec::new();
+            for ev in s.recent_events_of_kind(stored_kind(kind), EVENTS_SCANNED)? {
+                if recent.len() as i64 >= EVENTS_SHOWN {
+                    break;
+                }
+                if !tick::needs_you(kind, ev.3.as_deref()) {
+                    continue;
                 }
                 if sees_session(&s, scope, Some(ev.1))? {
                     recent.push(judge_event(&s, &r, ev, kind, now)?.0);
                 }
             }
             let unread = if scope.is_unrestricted() {
-                Some(s.count_events_of_kind_after(r.event_cursor, kind)?)
+                Some(s.count_events_of_kind_after(r.event_cursor, stored_kind(kind))?)
             } else {
                 None
             };
@@ -538,35 +628,75 @@ pub fn dry_run(
             ),
         ));
     }
-    let ev = match event_id {
-        Some(eid) => {
-            let not_found = || IpcError::new(codes::E_NOTFOUND, format!("event {eid} not found"));
-            let (sid, kind, at, detail) = s.session_event_by_id(eid)?.ok_or_else(not_found)?;
-            if !sees_session(&s, scope, Some(sid))? {
-                return Err(not_found());
-            }
-            Some((kind, (eid, sid, at, detail)))
-        }
-        None => match r.event.as_deref().filter(|_| r.trigger == "event") {
-            Some(kind) => {
-                let mut newest = None;
-                for e in s.recent_events_of_kind(kind, EVENTS_SCANNED)? {
-                    if sees_session(&s, scope, Some(e.1))? {
-                        newest = Some((kind.to_string(), e));
-                        break;
-                    }
+    // A fleet event routine is tried on a fleet event, every other on a
+    // timeline event: an `event_id` names one of its own kind's table.
+    let fleet = r.event.as_deref().is_some_and(is_fleet_event) && r.trigger == "event";
+    let (event, fire) = if fleet {
+        let e = match event_id {
+            Some(eid) => {
+                let not_found =
+                    || IpcError::new(codes::E_NOTFOUND, format!("event {eid} not found"));
+                let e = s.fleet_event_by_id(eid)?.ok_or_else(not_found)?;
+                if !sees_fleet_event(scope, &e) {
+                    return Err(not_found());
                 }
-                newest
+                Some(e)
             }
-            None => None,
-        },
-    };
-    let (event, fire) = match ev {
-        Some((kind, e)) => {
-            let (v, f) = judge_event(&s, &r, e, &kind, now)?;
-            (Some(v), f)
+            None => {
+                let kind = r.event.as_deref().unwrap_or_default();
+                s.recent_fleet_events_of_kind(kind, EVENTS_SCANNED)?
+                    .into_iter()
+                    .find(|e| sees_fleet_event(scope, e))
+            }
+        };
+        match e {
+            Some(e) => {
+                let (v, f) = judge_fleet_event(&s, &r, &e, now)?;
+                (Some(v), f)
+            }
+            None => (None, None),
         }
-        None => (None, None),
+    } else {
+        let ev = match event_id {
+            Some(eid) => {
+                let not_found =
+                    || IpcError::new(codes::E_NOTFOUND, format!("event {eid} not found"));
+                let (sid, kind, at, detail) = s.session_event_by_id(eid)?.ok_or_else(not_found)?;
+                if !sees_session(&s, scope, Some(sid))? {
+                    return Err(not_found());
+                }
+                // A `needs_you` routine reads `notification`s: judged as its
+                // own event, so the filter says whether it waits on a person.
+                let kind = match r.event.as_deref() {
+                    Some(e) if stored_kind(e) == kind => e.to_string(),
+                    _ => kind,
+                };
+                Some((kind, (eid, sid, at, detail)))
+            }
+            None => match r.event.as_deref().filter(|_| r.trigger == "event") {
+                Some(kind) => {
+                    let mut newest = None;
+                    for e in s.recent_events_of_kind(stored_kind(kind), EVENTS_SCANNED)? {
+                        if !tick::needs_you(kind, e.3.as_deref()) {
+                            continue;
+                        }
+                        if sees_session(&s, scope, Some(e.1))? {
+                            newest = Some((kind.to_string(), e));
+                            break;
+                        }
+                    }
+                    newest
+                }
+                None => None,
+            },
+        };
+        match ev {
+            Some((kind, e)) => {
+                let (v, f) = judge_event(&s, &r, e, &kind, now)?;
+                (Some(v), f)
+            }
+            None => (None, None),
+        }
     };
     let (starts, reason, host, note) = match tick::plan(&s, &r, now)? {
         Plan::Skip(why) => (false, Some(why), r.host_alias.clone(), None),

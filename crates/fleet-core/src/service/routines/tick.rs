@@ -9,14 +9,19 @@ use super::fix::{
     turn_code, E_NO_SESSION, E_PROMPT_NOT_DELIVERED, E_PROMPT_NOT_QUEUED, E_RUN_BUDGET,
     E_RUN_STALE, E_RUN_TIME_CAP, E_SESSION_LOST, E_SESSION_REMOVED,
 };
-use super::{decide, record_skip, repo_matches, trace, usd, Decision, EVENTS, PR_EVENTS};
+use super::{
+    decide, is_fleet_event, record_skip, repo_matches, stored_kind, trace, usd, Decision, EVENTS,
+    NEEDS_YOU, PR_EVENTS,
+};
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::{lock, IpcError};
 use crate::service::decide::routine_run_outcome::{self, PaneReader, TmuxPanes};
 use crate::service::run_trace::Step;
 use crate::service::sessions::NewSessionArgs;
 use crate::ssh::SshClient;
-use crate::store::{NewRoutineRun, RoutineRow, RoutineRunRow, SessionOrigin, SessionRow, Store};
+use crate::store::{
+    FleetEventRow, NewRoutineRun, RoutineRow, RoutineRunRow, SessionOrigin, SessionRow, Store,
+};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -728,7 +733,15 @@ pub(super) fn event_fire(
     detail: Option<&str>,
 ) -> Result<Result<EventFire, String>, IpcError> {
     if !PR_EVENTS.contains(&kind) {
-        return Ok(event_fires(s, r, sid)?.map(|()| EventFire {
+        let passes = event_fires(s, r, sid)?.and_then(|()| {
+            let host = s
+                .get_session_by_id(sid)
+                .ok()
+                .flatten()
+                .map(|row| row.host_alias);
+            host_passes(r, host.as_deref())
+        });
+        return Ok(passes.map(|()| EventFire {
             reference: format!("session:{sid}:{eid}"),
             subject: format!("session:{sid}:"),
             context: None,
@@ -751,6 +764,9 @@ pub(super) fn event_fire(
                 pr.repo.as_deref().unwrap_or("(unknown)")
             )));
         }
+    }
+    if let Err(why) = host_passes(r, pr.host_alias.as_deref()) {
+        return Ok(Err(why));
     }
     let anyone = r.event_author.as_deref() == Some("anyone") && r.org_id.is_some();
     let passes = if anyone {
@@ -781,6 +797,62 @@ pub(super) fn event_fire(
             "Started because pull request {} {}.",
             pr.url,
             pr_event_words(kind, &pr)
+        )),
+    }))
+}
+
+/// Whether an event on `host` passes `r`'s host filter. `Err` says why not.
+fn host_passes(r: &RoutineRow, host: Option<&str>) -> Result<(), String> {
+    match r.event_host.as_deref() {
+        Some(want) if host != Some(want) => Err(format!(
+            "it is on {}, not {want}",
+            host.unwrap_or("no host")
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Whether a `needs_you` routine reads this `notification`: only the types
+/// that wait on a person; the rest are not its event at all.
+pub(super) fn needs_you(kind: &str, detail: Option<&str>) -> bool {
+    kind != NEEDS_YOU
+        || detail
+            .is_some_and(|d| crate::service::operator_feed::BLOCKING_NOTIFICATIONS.contains(&d))
+}
+
+/// Whether fleet event `e` may fire `r`, and how: the routine's org (a
+/// mission's, its owner), and its host filter. `Err` says why not.
+pub(super) fn fleet_event_fire(
+    s: &Store,
+    r: &RoutineRow,
+    e: &FleetEventRow,
+) -> Result<Result<EventFire, String>, IpcError> {
+    // A hub with no people: everything is the hub's own.
+    let peopleless = s.personal_owner_id()?.is_none() && r.owner_person_id.is_none();
+    let passes = if let Some(p) = e.person_id.filter(|_| !peopleless) {
+        if r.owner_person_id == Some(p) {
+            Ok(())
+        } else {
+            Err(format!(
+                "{} is someone else's, not the routine owner's",
+                e.subject
+            ))
+        }
+    } else if !peopleless && e.org_id != r.org_id {
+        Err(format!(
+            "{} is not of the routine's organisation",
+            e.subject
+        ))
+    } else {
+        Ok(())
+    };
+    let passes = passes.and_then(|()| host_passes(r, e.host_alias.as_deref()));
+    Ok(passes.map(|()| EventFire {
+        reference: format!("fleet:{}:{}", e.subject, e.id),
+        subject: format!("fleet:{}:", e.subject),
+        context: Some(format!(
+            "Started because {}.",
+            e.detail.as_deref().unwrap_or(&e.kind.replace('_', " "))
         )),
     }))
 }
@@ -841,6 +913,45 @@ async fn tick_cron(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError> {
     res.map(|_| ())
 }
 
+/// The events a pass read for one routine: each one's id, its session
+/// (none for a fleet event) and whether it fires; and the newest id read,
+/// `None` when there was none.
+pub(super) struct Judged {
+    pub events: Vec<(i64, Option<i64>, Result<EventFire, String>)>,
+    pub last: Option<i64>,
+}
+
+/// Read the events of `kind` after `cursor`, at most [`EVENTS_PER_PASS`],
+/// and judge each for `r`. A `needs_you` notification that waits on nobody
+/// is read past and not judged: it is not the routine's event.
+pub(super) fn read_events(
+    s: &Store,
+    r: &RoutineRow,
+    kind: &str,
+    cursor: i64,
+) -> Result<Judged, IpcError> {
+    let mut out = Judged {
+        events: Vec::new(),
+        last: None,
+    };
+    if is_fleet_event(kind) {
+        for e in s.fleet_events_of_kind_after(cursor, kind, EVENTS_PER_PASS)? {
+            out.last = Some(e.id);
+            out.events.push((e.id, None, fleet_event_fire(s, r, &e)?));
+        }
+        return Ok(out);
+    }
+    for (eid, sid, detail) in s.events_of_kind_after(cursor, stored_kind(kind), EVENTS_PER_PASS)? {
+        out.last = Some(eid);
+        if !needs_you(kind, detail.as_deref()) {
+            continue;
+        }
+        let verdict = event_fire(s, r, kind, eid, sid, detail.as_deref())?;
+        out.events.push((eid, Some(sid), verdict));
+    }
+    Ok(out)
+}
+
 /// One event routine, under its lease: fire once per new event of its
 /// kind that it may see, then move its cursor past what it read.
 pub(super) async fn tick_event(deps: &Deps, r: &RoutineRow, now: i64) -> Result<(), IpcError> {
@@ -862,13 +973,13 @@ pub(super) async fn tick_event(deps: &Deps, r: &RoutineRow, now: i64) -> Result<
             s.release_routine_lease(r.id)?;
             return Ok(());
         };
-        let events = s.events_of_kind_after(r.event_cursor, &kind, EVENTS_PER_PASS)?;
-        let Some(&(last, _, _)) = events.last() else {
+        let judged = read_events(&s, &r, &kind, r.event_cursor)?;
+        let Some(last) = judged.last else {
             // Nothing of this kind since the cursor: move it to the newest
             // event anyway (same lock, so nothing slipped in between), or a
             // rare kind rescans every event since the routine was made, on
             // every 20 s pass (review r16).
-            let newest = s.latest_session_event_id()?;
+            let newest = super::start_cursor(&s, Some(&kind))?;
             if newest > r.event_cursor {
                 s.set_routine_event_cursor(r.id, newest)?;
             }
@@ -877,8 +988,8 @@ pub(super) async fn tick_event(deps: &Deps, r: &RoutineRow, now: i64) -> Result<
         };
         s.set_routine_event_cursor(r.id, last)?;
         let mut fires = Vec::new();
-        for (eid, sid, detail) in events {
-            match event_fire(&s, &r, &kind, eid, sid, detail.as_deref())? {
+        for (eid, sid, verdict) in judged.events {
+            match verdict {
                 Ok(f) => fires.push((eid, sid, f)),
                 Err(why) => decide(
                     &s,
@@ -888,7 +999,7 @@ pub(super) async fn tick_event(deps: &Deps, r: &RoutineRow, now: i64) -> Result<
                         verdict: "filtered",
                         reason: Some(&format!("{kind} #{eid}: {why}")),
                         event_id: Some(eid),
-                        session_id: Some(sid),
+                        session_id: sid,
                         ..Decision::default()
                     },
                     now,
@@ -926,7 +1037,7 @@ pub(super) async fn tick_event(deps: &Deps, r: &RoutineRow, now: i64) -> Result<
                         reason: Some(&format!("{kind} #{eid}: {why}")),
                         trigger_ref: Some(&f.reference),
                         event_id: Some(eid),
-                        session_id: Some(sid),
+                        session_id: sid,
                         ..Decision::default()
                     },
                     now,

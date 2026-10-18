@@ -280,6 +280,10 @@ pub fn spawn_reconcile_tick(
                 // After the restore, so a session brought back this pass is in
                 // it. Detached and single-flight; stops while paused.
                 service::operator_feed::maybe_run(store, ssh);
+                // Fleet events for event routines: a host gone or back, an
+                // account at its limit or under it again, written once per
+                // change. Reads rows only; cheap.
+                service::fleet_events::maybe_run(store);
                 // Control's recommended option goes out once nobody answered
                 // for `control.auto_continue_minutes` (F17): here, not in a
                 // window, so it runs with none open and only once.

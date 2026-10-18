@@ -1362,9 +1362,10 @@ fn a_pull_request_change_writes_review_ci_and_merge_events() {
         Some("REVIEW_REQUIRED"),
         Some("pending"),
     );
-    assert!(
-        kinds(&f).is_empty(),
-        "an open PR with nothing new is no event"
+    assert_eq!(
+        kinds(&f),
+        ["pr_opened"],
+        "an open PR seen for the first time is opened, and nothing else"
     );
     see_pr(
         &f,
@@ -1400,7 +1401,13 @@ fn a_pull_request_change_writes_review_ci_and_merge_events() {
     );
     assert_eq!(
         kinds(&f),
-        ["pr_ci_failed", "pr_review", "pr_ci_passed", "pr_merged"],
+        [
+            "pr_opened",
+            "pr_ci_failed",
+            "pr_review",
+            "pr_ci_passed",
+            "pr_merged"
+        ],
         "one event per change, none for the same reading twice"
     );
     // A PR first seen merged is history.
@@ -1412,7 +1419,7 @@ fn a_pull_request_change_writes_review_ci_and_merge_events() {
         None,
         Some("failing"),
     );
-    assert_eq!(kinds(&f).len(), 4);
+    assert_eq!(kinds(&f).len(), 5);
 }
 
 #[tokio::test]
@@ -2323,7 +2330,10 @@ async fn explain_judges_the_events_its_owner_may_read_only() {
         "bo's session is left out: {:?}",
         ev.recent
     );
-    assert!(ev.recent.iter().all(|v| v.session_id == mine && !v.read));
+    assert!(ev
+        .recent
+        .iter()
+        .all(|v| v.session_id == Some(mine) && !v.read));
     let (fires, filtered): (Vec<_>, Vec<_>) = ev.recent.iter().partition(|v| v.fires);
     assert_eq!(fires.len(), 1);
     assert!(
@@ -2379,7 +2389,7 @@ async fn dry_run_says_what_a_fire_would_start_and_writes_nothing() {
         .event
         .clone()
         .expect("its kind's newest event ana may read");
-    assert_eq!(ev.session_id, mine);
+    assert_eq!(ev.session_id, Some(mine));
     assert!(ev.fires);
     assert!(d.prompt.starts_with("Review my open PRs"), "{}", d.prompt);
     assert!(
@@ -2780,4 +2790,233 @@ async fn a_run_that_found_nothing_doubles_the_gap_when_backoff_is_on() {
         v.iter().any(|(_, why)| why.contains("found nothing new")),
         "{v:?}"
     );
+}
+
+fn event_routine(f: &Fx, event: &str, change: impl FnOnce(&mut RoutineInput)) -> RoutineRow {
+    pr_routine(f, event, change)
+}
+
+fn fleet_event(f: &Fx, e: crate::store::NewFleetEvent<'_>) -> i64 {
+    lock(&f.store).unwrap().insert_fleet_event(&e).unwrap()
+}
+
+fn host_down(host: &str) -> (String, String) {
+    (
+        format!("host:{host}"),
+        format!("host {host} is unreachable"),
+    )
+}
+
+#[tokio::test]
+async fn a_routine_fires_on_a_host_going_offline_once_per_host_in_its_rate() {
+    let f = fx();
+    let (old_subject, old_words) = host_down("mac");
+    // History before the routine never fires it.
+    fleet_event(
+        &f,
+        crate::store::NewFleetEvent {
+            kind: "host_offline",
+            subject: &old_subject,
+            detail: Some(&old_words),
+            host_alias: Some("mac"),
+            ..Default::default()
+        },
+    );
+    let r = event_routine(&f, "host_offline", |i| i.event_rate_secs = Some(H));
+    tick_once(&f.deps, OCT8).await;
+    assert!(runs_of(&f, r.id).is_empty(), "history does not fire");
+    for host in ["mac", "mac", "nas"] {
+        let (subject, words) = host_down(host);
+        fleet_event(
+            &f,
+            crate::store::NewFleetEvent {
+                kind: "host_offline",
+                subject: &subject,
+                detail: Some(&words),
+                host_alias: Some(host),
+                ..Default::default()
+            },
+        );
+    }
+    tick_once(&f.deps, OCT8 + 20).await;
+    let runs = runs_of(&f, r.id);
+    assert_eq!(runs.len(), 2, "one per host in the rate: {runs:?}");
+    assert!(runs[0]
+        .trigger_ref
+        .as_deref()
+        .unwrap()
+        .starts_with("fleet:host:mac:"));
+    let sid = runs[0].session_id.unwrap();
+    assert!(
+        queued_prompt(&f, sid).contains("Started because host mac is unreachable."),
+        "{}",
+        queued_prompt(&f, sid)
+    );
+    assert_eq!(
+        trace::trigger_words("event", runs[0].trigger_ref.as_deref()),
+        "Fired by a fleet event on host mac"
+    );
+}
+
+#[tokio::test]
+async fn a_host_filter_narrows_fleet_and_session_events() {
+    let f = fx();
+    let r = event_routine(&f, "host_online", |i| i.event_host = Some("nas".into()));
+    assert_eq!(r.event_host.as_deref(), Some("nas"));
+    for host in ["mac", "nas"] {
+        let subject = format!("host:{host}");
+        fleet_event(
+            &f,
+            crate::store::NewFleetEvent {
+                kind: "host_online",
+                subject: &subject,
+                host_alias: Some(host),
+                ..Default::default()
+            },
+        );
+    }
+    tick_once(&f.deps, OCT8).await;
+    let runs = runs_of(&f, r.id);
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert!(runs[0]
+        .trigger_ref
+        .as_deref()
+        .unwrap()
+        .starts_with("fleet:host:nas:"));
+    let filtered = lock(&f.store).unwrap().routine_decisions(r.id, 10).unwrap();
+    assert!(
+        filtered
+            .iter()
+            .any(|d| d.verdict == "filtered"
+                && d.reason.as_deref().unwrap_or("").contains("not nas")),
+        "{filtered:?}"
+    );
+    // A session event on another host does not fire a host-filtered routine.
+    let stuck = event_routine(&f, "stuck", |i| i.event_host = Some("nas".into()));
+    let on_mac = pr_session(&f, "on-mac", f.ana);
+    event(&f, on_mac, "stuck");
+    tick_once(&f.deps, OCT8 + 20).await;
+    assert!(runs_of(&f, stuck.id).is_empty());
+    // An account event takes no host filter.
+    let mut i = input(&f);
+    i.trigger = "event".into();
+    i.cron = None;
+    i.event = Some("account_limited".into());
+    i.event_host = Some("mac".into());
+    let err = save(&f.store, &person(&f.store, None, f.ana), None, &i).unwrap_err();
+    assert_eq!(err.code, codes::E_INVALID);
+    i.event_host = Some("nope".into());
+    i.event = Some("host_low".into());
+    let err = save(&f.store, &person(&f.store, None, f.ana), None, &i).unwrap_err();
+    assert_eq!(err.code, codes::E_NOTFOUND);
+}
+
+#[tokio::test]
+async fn a_mission_event_fires_its_owners_routine_only() {
+    let f = fx();
+    let r = event_routine(&f, "mission_done", |_| {});
+    for owner in [f.bo, f.ana] {
+        let subject = format!("mission:{owner}");
+        fleet_event(
+            &f,
+            crate::store::NewFleetEvent {
+                kind: "mission_done",
+                subject: &subject,
+                detail: Some("mission #1 \"Ship it\" completed"),
+                person_id: Some(owner),
+                ..Default::default()
+            },
+        );
+    }
+    tick_once(&f.deps, OCT8).await;
+    let runs = runs_of(&f, r.id);
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert!(runs[0]
+        .trigger_ref
+        .as_deref()
+        .unwrap()
+        .starts_with(&format!("fleet:mission:{}:", f.ana)));
+}
+
+#[tokio::test]
+async fn needs_you_fires_on_a_blocking_notification_only() {
+    let f = fx();
+    let r = event_routine(&f, NEEDS_YOU, |_| {});
+    let sid = pr_session(&f, "asks", f.ana);
+    {
+        let s = lock(&f.store).unwrap();
+        s.insert_session_event(sid, "notification", Some("idle_prompt"))
+            .unwrap();
+    }
+    tick_once(&f.deps, OCT8).await;
+    assert!(
+        runs_of(&f, r.id).is_empty(),
+        "an idle notice waits on nobody"
+    );
+    assert!(
+        lock(&f.store)
+            .unwrap()
+            .routine_decisions(r.id, 10)
+            .unwrap()
+            .is_empty(),
+        "and it is not the routine's event: no trace row"
+    );
+    {
+        let s = lock(&f.store).unwrap();
+        s.insert_session_event(sid, "notification", Some("permission_prompt"))
+            .unwrap();
+    }
+    tick_once(&f.deps, OCT8 + 20).await;
+    assert_eq!(runs_of(&f, r.id).len(), 1);
+}
+
+#[tokio::test]
+async fn a_routine_switched_to_a_fleet_event_starts_after_the_newest_one() {
+    let f = fx();
+    let r = event_routine(&f, "stuck", |_| {});
+    let id = fleet_event(
+        &f,
+        crate::store::NewFleetEvent {
+            kind: "account_limited",
+            subject: "account:u-1",
+            ..Default::default()
+        },
+    );
+    let mut i = input(&f);
+    i.trigger = "event".into();
+    i.cron = None;
+    i.event = Some("account_limited".into());
+    let saved = save(&f.store, &person(&f.store, None, f.ana), Some(r.id), &i).unwrap();
+    assert_eq!(routine(&f, saved.id).event_cursor, id);
+    tick_once(&f.deps, OCT8).await;
+    assert!(runs_of(&f, r.id).is_empty());
+}
+
+#[test]
+fn a_mission_that_completes_writes_a_fleet_event() {
+    let f = fx();
+    let s = lock(&f.store).unwrap();
+    let m = s
+        .create_mission(
+            &crate::store::NewMission {
+                org_id: None,
+                owner_person_id: Some(f.ana),
+                root_item_id: None,
+                name: "Ship it",
+                goal: "Ship the release.",
+                non_goals: None,
+                done_when: &[],
+                mode: None,
+                level: None,
+            },
+            "test",
+        )
+        .unwrap();
+    s.set_mission_state(m.id, None, "active", "test").unwrap();
+    s.set_mission_state(m.id, None, "completed", "test")
+        .unwrap();
+    let rows = s.fleet_events_of_kind_after(0, "mission_done", 10).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].subject, format!("mission:{}", m.id));
+    assert_eq!(rows[0].person_id, Some(f.ana));
 }

@@ -39,6 +39,15 @@
 //! event routine may hold a rate (`event_rate_secs`): at most one run per
 //! PR, or per session, in that window; a fire inside it is dropped.
 //!
+//! **Fleet events** (migration 201) are [`FLEET_EVENTS`]: what happened to
+//! the fleet rather than to a session (a host gone or back, an account at
+//! its limit, a mission finished), read off `fleet_events` past the same
+//! cursor. One fires a routine of the org it belongs to (a mission's, only
+//! its owner's), its rate counted per subject (a host, an account, a
+//! mission). `needs_you` is a session event read off `notification`: only
+//! the ones that wait on a person. Any event may narrow to one host
+//! (`event_host`).
+//!
 //! **Guards** (M15 step G3.8, migration 159): the fleet's daily budget
 //! (`automation.daily_budget`, every routine's runs in one UTC day) stops
 //! new runs like a routine's own day budget; a time cap (`run_max_secs`)
@@ -69,8 +78,8 @@ use crate::service::orgs;
 use crate::service::view_scope::ViewScope;
 use crate::store::{
     NewRoutineDecision, NewRoutineRun, RoutineFields, RoutineRow, RoutineRunRow, Store,
-    PR_EVENT_CI_FAILED, PR_EVENT_CI_PASSED, PR_EVENT_MERGED, PR_EVENT_REVIEW, ROUTINE_OVERLAPS,
-    ROUTINE_TRIGGERS,
+    PR_EVENT_CI_FAILED, PR_EVENT_CI_PASSED, PR_EVENT_MERGED, PR_EVENT_OPENED, PR_EVENT_REVIEW,
+    ROUTINE_OVERLAPS, ROUTINE_TRIGGERS,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
@@ -78,8 +87,12 @@ use std::sync::Mutex;
 pub use debug::{decisions, dry_run, explain, RoutineDryRun, RoutineExplain};
 pub use tick::{spawn_routine_tick, tick_once, Deps, LiveSpawn, Spawn};
 
-/// The session timeline kinds an event routine may fire on.
-pub const EVENTS: [&str; 12] = [
+/// A session waiting on a person: a `notification` of a blocking type.
+pub const NEEDS_YOU: &str = "needs_you";
+
+/// The events an event routine may fire on: session timeline kinds (and
+/// [`NEEDS_YOU`]), then the [`FLEET_EVENTS`].
+pub const EVENTS: [&str; 27] = [
     "turn_done",
     "stop_failure",
     "stuck",
@@ -92,16 +105,70 @@ pub const EVENTS: [&str; 12] = [
     PR_EVENT_CI_FAILED,
     PR_EVENT_CI_PASSED,
     PR_EVENT_MERGED,
+    NEEDS_YOU,
+    crate::service::auto_restore::EVENT_RESTORED,
+    crate::service::auto_restore::EVENT_FAILED,
+    crate::service::account_switch::EVENT_SWITCHED,
+    crate::service::account_switch::EVENT_SWITCH_FAILED,
+    crate::service::move_session::EVENT_MOVED,
+    PR_EVENT_OPENED,
+    crate::store::fleet_events::HOST_OFFLINE,
+    crate::store::fleet_events::HOST_ONLINE,
+    crate::store::fleet_events::HOST_LOW,
+    crate::store::fleet_events::ACCOUNT_LIMITED,
+    crate::store::fleet_events::ACCOUNT_AVAILABLE,
+    crate::store::fleet_events::LOGIN_SIGNED_OUT,
+    crate::store::fleet_events::MISSION_DONE,
+    crate::store::fleet_events::MISSION_FAILED,
 ];
 
 /// The [`EVENTS`] about a pull request: their detail is its URL, and only
 /// they take a repo filter or `event_author: anyone`.
-pub const PR_EVENTS: [&str; 4] = [
+pub const PR_EVENTS: [&str; 5] = [
     PR_EVENT_REVIEW,
     PR_EVENT_CI_FAILED,
     PR_EVENT_CI_PASSED,
     PR_EVENT_MERGED,
+    PR_EVENT_OPENED,
 ];
+
+pub use crate::store::FLEET_EVENTS;
+
+/// Whether `event` is read off `fleet_events` rather than the session
+/// timeline.
+pub fn is_fleet_event(event: &str) -> bool {
+    FLEET_EVENTS.contains(&event)
+}
+
+/// The fleet events about no host: they take no host filter.
+const HOSTLESS_EVENTS: [&str; 4] = [
+    crate::store::fleet_events::ACCOUNT_LIMITED,
+    crate::store::fleet_events::ACCOUNT_AVAILABLE,
+    crate::store::fleet_events::MISSION_DONE,
+    crate::store::fleet_events::MISSION_FAILED,
+];
+
+/// The timeline kind a session event is read off: [`NEEDS_YOU`] is a
+/// `notification`, every other its own kind.
+pub fn stored_kind(event: &str) -> &str {
+    if event == NEEDS_YOU {
+        "notification"
+    } else {
+        event
+    }
+}
+
+/// The newest event id a routine on `event` starts after: the fleet
+/// events' or the timeline's.
+pub fn start_cursor(s: &Store, event: Option<&str>) -> Result<i64, IpcError> {
+    match event {
+        Some(e) if is_fleet_event(e) => s.latest_fleet_event_id(),
+        _ => s.latest_session_event_id(),
+    }
+}
+
+/// A host filter, in characters.
+pub const EVENT_HOST_MAX_CHARS: usize = 64;
 
 /// `event_author` values: `me` (the same as absent) | `anyone`.
 pub const EVENT_AUTHORS: [&str; 2] = ["me", "anyone"];
@@ -163,6 +230,9 @@ pub struct RoutineInput {
     /// At most one run per PR (or session) in this many seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_rate_secs: Option<i64>,
+    /// Only events on this host (a host alias).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_host: Option<String>,
     // The guards (G3.8): plain comments, not doc comments, so they stay
     // out of the served schema's budget; docs/control-api.md says them.
     // The IANA zone shown with the schedule.
@@ -455,6 +525,10 @@ fn check(
         Some(e) => event_filters(input, e)?,
         None => (None, None, None),
     };
+    let event_host = match event.as_deref() {
+        Some(e) => event_host_filter(s, scope, input, e)?,
+        None => None,
+    };
     crate::validate::host_alias(&input.host_alias)?;
     if s.get_host_row(&input.host_alias)?.is_none() {
         return Err(host_not_found(&input.host_alias));
@@ -506,6 +580,7 @@ fn check(
             event_repo,
             event_author,
             event_rate_secs,
+            event_host,
             time_zone: guards.time_zone,
             run_max_secs: guards.run_max_secs,
             fallback_host: guards.fallback_host,
@@ -695,6 +770,41 @@ fn event_filters(
     Ok((repo.map(str::to_string), author, input.event_rate_secs))
 }
 
+/// The host filter `input` writes: a host this caller sees, on an event
+/// that is about a host.
+fn event_host_filter(
+    s: &Store,
+    scope: &ViewScope,
+    input: &RoutineInput,
+    event: &str,
+) -> Result<Option<String>, IpcError> {
+    let Some(h) = input
+        .event_host
+        .as_deref()
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+    else {
+        return Ok(None);
+    };
+    if HOSTLESS_EVENTS.contains(&event) {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!("{event} is about no host; it takes no host filter"),
+        ));
+    }
+    if h.chars().count() > EVENT_HOST_MAX_CHARS {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!("event_host is a host alias of at most {EVENT_HOST_MAX_CHARS} characters"),
+        ));
+    }
+    crate::validate::host_alias(h)?;
+    if s.get_host_row(h)?.is_none() || !scope.org.sees_org(s.host_org(h)?) {
+        return Err(host_not_found(h));
+    }
+    Ok(Some(h.to_string()))
+}
+
 /// Whether a PR's `owner/name` passes a routine's repo filter: the same
 /// `owner/name`, or the same `name` when the filter names no owner,
 /// without case. A PR whose repo is unknown passes no filter.
@@ -854,7 +964,7 @@ pub fn save(
                 }
             };
             let (f, org) = check(&s, scope, input)?;
-            let cursor = s.latest_session_event_id()?;
+            let cursor = start_cursor(&s, f.event.as_deref())?;
             s.insert_routine(org, owner, &f, next_fire(&f, now), cursor)
         }
         Some(id) => {
@@ -868,7 +978,7 @@ pub fn save(
             let cursor = if f.trigger == "event"
                 && (before.event != f.event || before.trigger != "event" || !before.enabled)
             {
-                s.latest_session_event_id()?
+                start_cursor(&s, f.event.as_deref())?
             } else {
                 before.event_cursor
             };
@@ -911,7 +1021,7 @@ pub fn set_enabled(
     let r = changeable(&s, scope, id)?;
     let now = crate::store::now_unix();
     if enabled && !r.enabled && r.trigger == "event" {
-        s.set_routine_event_cursor(id, s.latest_session_event_id()?)?;
+        s.set_routine_event_cursor(id, start_cursor(&s, r.event.as_deref())?)?;
     }
     // Already on: keep the schedule as it is, a due fire included.
     let next = match (enabled, r.enabled) {
