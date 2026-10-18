@@ -164,11 +164,18 @@ pub fn next_fire(
     }
 }
 
+/// Whether a `retry_once` retry of `run` is one that waits out a limit
+/// ([`retry_waits`]): it ended at a rate limit and waiting is on. Such a
+/// retry is looked for past the usual retry window, until the limit lifts.
+pub fn retry_may_wait(s: &Store, run: &RoutineRunRow) -> bool {
+    settings::get_bool(s, settings::ROUTINES_PAUSE_AT_LIMIT)
+        && run.error_code.as_deref() == Some(super::fix::E_TURN_RATE_LIMIT)
+}
+
 /// Whether a `retry_once` retry of `run` waits: it ended at a rate limit
 /// and its routine's account is still over the line.
 pub fn retry_waits(s: &Store, r: &RoutineRow, run: &RoutineRunRow, now: i64) -> bool {
-    settings::get_bool(s, settings::ROUTINES_PAUSE_AT_LIMIT)
-        && run.error_code.as_deref() == Some(super::fix::E_TURN_RATE_LIMIT)
+    retry_may_wait(s, run)
         && crate::service::account_limits::over_limit(
             s,
             run.host_alias.as_deref().unwrap_or(&r.host_alias),

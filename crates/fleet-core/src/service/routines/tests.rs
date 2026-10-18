@@ -2749,6 +2749,54 @@ async fn a_fire_at_a_limit_holds_the_next_until_the_reset() {
 }
 
 #[tokio::test]
+async fn a_retry_held_at_a_limit_outlasts_the_retry_window() {
+    let f = fx();
+    let mut i = input(&f);
+    i.retry_once = Some(true);
+    let r = new_routine(&f, i);
+    let ana = person(&f.store, None, f.ana);
+    let run = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    let seed = |pct: f64, at: i64| {
+        crate::service::account_limits::seed_usage(
+            &lock(&f.store).unwrap(),
+            "mac",
+            Some("work"),
+            "work",
+            pct,
+            at,
+        )
+    };
+    seed(93.0, OCT8);
+    lock(&f.store)
+        .unwrap()
+        .insert_session_event(
+            run.session_id.unwrap(),
+            "stop_failure",
+            Some("rate_limit (429)"),
+        )
+        .unwrap();
+    tick_once(&f.deps, OCT8 + 20).await;
+    assert_eq!(
+        run_row(&f, run.id).error_code.as_deref(),
+        Some(fix::E_TURN_RATE_LIMIT)
+    );
+    assert_eq!(runs_of(&f, r.id).len(), 1, "held at the limit");
+    // Still over the line two hours on: still held, not dropped.
+    seed(93.0, OCT8 + 2 * H);
+    tick_once(&f.deps, OCT8 + 2 * H).await;
+    assert_eq!(runs_of(&f, r.id).len(), 1);
+    // The limit lifts past the usual retry window: the retry runs.
+    seed(10.0, OCT8 + 3 * H);
+    tick_once(&f.deps, OCT8 + 3 * H).await;
+    let runs = runs_of(&f, r.id);
+    assert_eq!(runs.len(), 2, "{runs:?}");
+    assert_eq!(
+        runs[1].trigger_ref.as_deref(),
+        Some(&*format!("retry:{}", run.id))
+    );
+}
+
+#[tokio::test]
 async fn a_run_that_found_nothing_doubles_the_gap_when_backoff_is_on() {
     let f = fx();
     let mut i = input(&f);
@@ -2909,6 +2957,50 @@ async fn a_host_filter_narrows_fleet_and_session_events() {
     i.event = Some("host_low".into());
     let err = save(&f.store, &person(&f.store, None, f.ana), None, &i).unwrap_err();
     assert_eq!(err.code, codes::E_NOTFOUND);
+}
+
+#[tokio::test]
+async fn a_fleet_event_host_filter_stays_in_the_routines_org() {
+    let f = fx();
+    let other = {
+        let s = lock(&f.store).unwrap();
+        let o = s.add_org("other", None, false).unwrap();
+        s.set_host_org("nas", Some(o.id)).unwrap();
+        o.id
+    };
+    let mut i = input(&f);
+    i.trigger = "event".into();
+    i.cron = None;
+    i.event = Some("host_offline".into());
+    i.event_host = Some("nas".into());
+    // The routine runs on mac (no org); nas's events are of `other` and
+    // would be filtered on every fire.
+    let ana = person(&f.store, None, f.ana);
+    let err = save(&f.store, &ana, None, &i).unwrap_err();
+    assert_eq!(err.code, codes::E_INVALID, "{err:?}");
+    assert!(err.message.contains("another organisation"), "{err:?}");
+    // In the same org it saves.
+    lock(&f.store)
+        .unwrap()
+        .set_host_org("mac", Some(other))
+        .unwrap();
+    assert!(save(&f.store, &ana, None, &i).is_ok());
+    // A session event fires on its owner, not its org: any host passes.
+    lock(&f.store).unwrap().set_host_org("mac", None).unwrap();
+    i.event = Some("stuck".into());
+    assert!(save(&f.store, &ana, None, &i).is_ok());
+}
+
+#[tokio::test]
+async fn a_host_filter_takes_any_valid_alias() {
+    let f = fx();
+    let long = format!("{}.example.com", "a".repeat(70));
+    lock(&f.store)
+        .unwrap()
+        .insert_host(&long, Some(&long))
+        .unwrap();
+    let r = event_routine(&f, "host_online", |i| i.event_host = Some(long.clone()));
+    assert_eq!(r.event_host.as_deref(), Some(&*long));
 }
 
 #[tokio::test]

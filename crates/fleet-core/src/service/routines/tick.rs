@@ -34,6 +34,11 @@ pub const EVENTS_PER_PASS: i64 = 50;
 /// A failed run older than this is not retried (`retry_once`): a pass
 /// missed for longer, a restart, does not start yesterday's work.
 pub const RETRY_WITHIN_SECS: i64 = 3600;
+/// A failed run that waits out a rate limit (`backoff::retry_may_wait`) is
+/// retried within this long instead: past a weekly window's reset, so the
+/// retry is not dropped while the limit holds it.
+pub const HELD_RETRY_WITHIN_SECS: i64 =
+    crate::service::account_usage::WEEK_SECS + RETRY_WITHIN_SECS;
 
 /// Starts a run's session: the real start path in production, a fake in
 /// tests.
@@ -625,8 +630,13 @@ pub fn settle(s: &Store, now: i64) -> Result<Vec<StopTurn>, IpcError> {
 /// run's own trigger, `trigger_ref` `retry:<run id>`. Only while automation
 /// runs (the caller is past Pause all's gate).
 async fn retry_failed(deps: &Deps, now: i64) -> Result<(), IpcError> {
-    let runs = lock(&deps.store)?.routine_runs_to_retry(now - RETRY_WITHIN_SECS)?;
+    let runs = lock(&deps.store)?.routine_runs_to_retry(now - HELD_RETRY_WITHIN_SECS)?;
     for run in runs {
+        if run.started_at < now - RETRY_WITHIN_SECS
+            && !super::backoff::retry_may_wait(&*lock(&deps.store)?, &run)
+        {
+            continue;
+        }
         let Some(r) = lock(&deps.store)?.get_routine(run.routine_id)? else {
             continue;
         };
