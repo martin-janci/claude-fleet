@@ -2199,6 +2199,7 @@ const MIGRATIONS: &[Migration] = &[
         version: 195,
         sql: include_str!("../../migrations/195_operator_token_person.sql"),
         already_applied: None,
+    },
     // Autofix: `autofix_findings`, one row per episode of a detected broken
     // state (service/autofix). A new table.
     Migration {
