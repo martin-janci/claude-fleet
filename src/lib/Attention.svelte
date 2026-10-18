@@ -17,6 +17,10 @@
   // reach the OS notification (when this desktop has them on) and the chime
   // as the Desktop and Sound columns and quiet hours say. Only while the
   // window is in the background: on screen, the app already shows it.
+  //
+  // Multi-hub Phase 2: an extra fleet's sessions notify the same way, by
+  // the same table, named with their fleet. A fleet's first non-empty list
+  // is its baseline, as the primary's bootstrap fill is.
   import { onMount } from 'svelte';
   import { get } from 'svelte/store';
   import {
@@ -39,7 +43,8 @@
     type NotifyState,
   } from './notify';
   import { fleetSettings } from './fleet_settings';
-  import { attentionFacts } from './attention_facts';
+  import { attentionFacts, attentionFactsFrom } from './attention_facts';
+  import { fleetRows, fleets } from './fleets';
   import { failing } from './routines';
   import type { AttentionState } from './attention';
   import { push } from './toasts';
@@ -121,10 +126,48 @@
         chimed = notifyMatrix('routine_failed', title, f.run.reason ?? '', `routine-${f.run.id}`, !chimed) || chimed;
       }
     });
+    const fleetPrev = new Map<string, Map<number, AttentionState>>();
+    const fleetStuckPrev = new Map<string, Map<number, StuckKind>>();
+    const unsubFleets = fleetRows.subscribe((all) => {
+      const now = Math.floor(Date.now() / 1000);
+      const idleSecs = get(attentionIdleMinutes) * 60;
+      const friendly = get(showFriendlyNames);
+      let chimed = false;
+      for (const [fid, rows] of all) {
+        const list = [...rows.sessions.values()];
+        const opts = { idleSecs, now, facts: attentionFactsFrom([...rows.hosts.values()], {}, now) };
+        const before = fleetPrev.get(fid);
+        const beforeStuck = fleetStuckPrev.get(fid);
+        fleetPrev.set(fid, notifySnapshot(list, opts));
+        fleetStuckPrev.set(fid, stuckSnapshot(list));
+        if (!before || before.size === 0) continue;
+        const label = get(fleets).find((f) => f.id === fid)?.label ?? fid;
+        for (const { row, state } of newlyNotifiable(before, list, opts)) {
+          const name = friendly && row.friendly_name ? row.friendly_name : row.tmux_name;
+          chimed = notifyMatrix(state, `${name} ${TITLES[state]}`, `${label} · ${row.host_alias}`, `${state}-${fid}-${row.id}`, !chimed) || chimed;
+        }
+        if (beforeStuck) {
+          for (const row of newlyStuck(beforeStuck, list)) {
+            const name = friendly && row.friendly_name ? row.friendly_name : row.tmux_name;
+            chimed =
+              notifyMatrix('blocked', `${name} ${TITLES.blocked}`, `${label} · ${stuckMessage(row, friendly)}`, `stuck-${fid}-${row.id}`, !chimed) ||
+              chimed;
+          }
+        }
+      }
+      // A fleet that is gone forgets its baseline.
+      for (const fid of [...fleetPrev.keys()]) {
+        if (!all.has(fid)) {
+          fleetPrev.delete(fid);
+          fleetStuckPrev.delete(fid);
+        }
+      }
+    });
     return () => {
       unsub();
       unsubStates();
       unsubRuns();
+      unsubFleets();
     };
   });
 </script>

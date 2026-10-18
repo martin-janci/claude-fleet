@@ -31,9 +31,12 @@
     claudeSessionId,
     nowMs,
     live,
+    fleet = undefined,
   }: {
     line: ToolLine;
     sessionId: number;
+    /** An extra fleet's slot (multi-hub): the detail is read from its hub. */
+    fleet?: string;
     claudeSessionId: string | null;
     nowMs: number;
     /** The call belongs to the running turn of the current conversation. An
@@ -114,7 +117,9 @@
     const mine = key;
     fetching = true;
     loadError = null;
-    const r = await toolDetail(sessionId, line.id, claudeSessionId ?? undefined);
+    const r = await (fleet === undefined
+      ? toolDetail(sessionId, line.id, claudeSessionId ?? undefined)
+      : toolDetail(sessionId, line.id, claudeSessionId ?? undefined, fleet));
     if (mine !== key) return;
     fetching = false;
     if (r.ok) detail = r.value;

@@ -62,6 +62,17 @@
   import { draftBrief, draftSource, previewStartWork, siblingProposal, type BriefDraft } from './start_preview';
   import { openNewSessionPicker } from './switcher_request';
   import { agentChoices, keepAgent, type PickerAgent } from './agent_picker';
+  import {
+    PRIMARY,
+    fleets,
+    fleetRows,
+    fleetChoicesFor,
+    defaultFleetFor,
+    rememberedFleetFor,
+    rememberFleetFor,
+    fleetNewSession,
+    openFleetSession,
+  } from './fleets';
 
   let {
     project,
@@ -844,6 +855,63 @@
   let error: string | null = $state(null);
   let createController: AbortController | null = null;
 
+  // ── Which fleet (multi-hub Phase 2) ──────────────────────────────────
+  // The extra fleets that also have this repository. Picking one starts the
+  // session on THAT hub (`fleetNewSession`), with its hosts and its project
+  // id; the rest of this dialog (accounts, worktree scan, tickets, multi
+  // start) is about this window's own fleet and steps aside.
+  const fleetOptions = $derived(fleetChoicesFor(owner, repo, $fleets, $fleetRows));
+  let chosenFleet = $state<string>(PRIMARY);
+  let fleetPicked = false;
+  $effect(() => {
+    const options = fleetOptions;
+    untrack(() => {
+      if (!fleetPicked) chosenFleet = defaultFleetFor(owner, options, rememberedFleetFor(owner, repo));
+    });
+  });
+  const fleetChoice = $derived(
+    ticket || asBackground ? null : (fleetOptions.find((c) => c.fleet.id === chosenFleet) ?? null),
+  );
+  const fleetHosts = $derived(
+    fleetChoice ? [...($fleetRows.get(fleetChoice.fleet.id)?.hosts.values() ?? [])].filter((h) => !h.hidden) : [],
+  );
+  let fleetHost = $state('');
+  $effect(() => {
+    const list = fleetHosts;
+    untrack(() => {
+      if (!list.some((h) => h.alias === fleetHost)) fleetHost = list.find((h) => h.reachable)?.alias ?? list[0]?.alias ?? '';
+    });
+  });
+  let fleetBranch = $state('');
+
+  function pickFleet(id: string) {
+    fleetPicked = true;
+    chosenFleet = id;
+  }
+
+  async function submitFleet(choice: NonNullable<typeof fleetChoice>) {
+    if (!fleetHost) return;
+    busy = true;
+    error = null;
+    const r = await fleetNewSession(choice.fleet.id, {
+      host_alias: fleetHost,
+      project_id: choice.projectId,
+      name: nameOverride ?? '',
+      friendly_name: friendlyName.trim() || null,
+      new_worktree: fleetBranch.trim() ? finalizeBranchSlug(slugifyBranch(fleetBranch.trim())) : null,
+      kind: chosenKind,
+    });
+    busy = false;
+    if (!r.ok) {
+      if (destroyed) pushError(r.error, `New session on ${choice.fleet.label} failed`);
+      else error = r.error.message;
+      return;
+    }
+    rememberFleetFor(owner, repo, choice.fleet.id);
+    openFleetSession(choice.fleet.id, r.value.id);
+    onCancel();
+  }
+
   // Escape / backdrop close this dialog during a creation in both modes
   // (`Modal.svelte` never gates that on `busy`) without aborting the
   // request — a late SUCCESS still merges into the session store on its own
@@ -1196,6 +1264,10 @@
 
   async function submit() {
     if (busy) return;
+    if (fleetChoice) {
+      await submitFleet(fleetChoice);
+      return;
+    }
     if (ticket && chosenKind === 'work') {
       await submitTicket(ticket);
       return;
@@ -1284,6 +1356,7 @@
     }
     remember(submittedHost, submittedWorktreeId);
     answerHostProposal(submittedHost);
+    if (fleetOptions.length > 0) rememberFleetFor(owner, repo, PRIMARY);
     onCreate(r.value);
   }
 
@@ -1353,6 +1426,24 @@
         openNewSessionPicker(initialHost, ticket);
       }}
     />
+
+  {#if fleetOptions.length > 0 && !ticket && !asBackground}
+    <div class="fleet-pick" role="radiogroup" aria-label="Fleet" data-testid="new-session-fleet">
+      <span class="field-label">Fleet</span>
+      {#each [{ id: PRIMARY, label: $fleets.find((f) => f.primary)?.label ?? 'This window', color: $fleets.find((f) => f.primary)?.color ?? 'var(--accent)' }, ...fleetOptions.map((c) => ({ id: c.fleet.id, label: c.fleet.label, color: c.fleet.color }))] as f (f.id)}
+        <button
+          type="button"
+          role="radio"
+          aria-checked={chosenFleet === f.id}
+          class="fleet-chip"
+          class:on={chosenFleet === f.id}
+          style="--fleet: {f.color}"
+          data-testid="new-session-fleet-{f.id}"
+          onclick={() => pickFleet(f.id)}>{f.label}</button
+        >
+      {/each}
+    </div>
+  {/if}
 
   <div class="fields">
     <label for="friendly-name">Name</label>
@@ -1675,6 +1766,24 @@
       />
     {/if}
 
+    {#if fleetChoice}
+      <label for="fleet-host">Host on {fleetChoice.fleet.label}</label>
+      <select id="fleet-host" data-testid="new-session-fleet-host" bind:value={fleetHost}>
+        {#each fleetHosts as h (h.alias)}
+          <option value={h.alias}>{h.alias}{h.reachable ? '' : ' (unreachable)'}</option>
+        {/each}
+      </select>
+      {#if fleetHosts.length === 0}
+        <p class="wt-status">{fleetChoice.fleet.label} lists no hosts yet.</p>
+      {/if}
+      <label for="fleet-branch">new branch (optional)</label>
+      <input
+        id="fleet-branch"
+        data-testid="new-session-fleet-branch"
+        bind:value={fleetBranch}
+        placeholder="empty = the project's checkout"
+      />
+    {:else}
     <HostChips
       active={chosenHost}
       labelId="new-session-host-label"
@@ -1750,6 +1859,7 @@
         placeholder="default branch"
       />
     {/if}
+    {/if}
 
     <label for="session-name">tmux name</label>
     <input
@@ -1759,9 +1869,11 @@
       oninput={(e) => onNameInput((e.target as HTMLInputElement).value)}
       placeholder="empty = let fleet pick one"
     />
+    {#if !fleetChoice}
     <p class="preview" data-testid="path-preview" title={pathPreview}>
       <span class="k">cwd</span> <code>{pathPreview}</code>
     </p>
+    {/if}
 
     {#if error}
       <p class="err">{error}</p>
@@ -1794,16 +1906,16 @@
       </div>
     {/if}
     <button onclick={onCancel} disabled={busy}>Cancel</button>
-    {#if hubCreateNote}
+    {#if hubCreateNote && !fleetChoice}
       <span class="hub-create-note" data-testid="hub-create-note" title={hubCreateNote}>{hubCreateNote}</span>
-    {:else if busy}
+    {:else if busy && !fleetChoice}
       <button type="button" data-testid="cancel-create" onclick={cancelCreate}>Cancel creation</button>
     {:else}
       <button
         class="primary"
         onclick={submit}
         data-testid="create-btn"
-        disabled={(inNewMode && !newWorktreeName.trim()) ||
+        disabled={fleetChoice ? !fleetHost : (inNewMode && !newWorktreeName.trim()) ||
           (chosenKind === 'work' && profileInvalid) ||
           (asBackground
             ? bgSessionBlocked !== null || !bgPrompt.trim()
@@ -1811,7 +1923,7 @@
               ? startBlocked !== null
               : newSessionBlocked !== null)}
         title={(asBackground ? bgSessionBlocked : ticket && chosenKind === 'work' ? startBlocked : newSessionBlocked) ?? ''}
-      >{asBackground ? 'Start in background' : ticket && chosenKind === 'work' ? 'Start work' : 'Create'}</button>
+      >{fleetChoice ? `Create on ${fleetChoice.fleet.label}` : asBackground ? 'Start in background' : ticket && chosenKind === 'work' ? 'Start work' : 'Create'}</button>
     {/if}
   </div>
 </div>
@@ -1846,6 +1958,28 @@
     min-height: 0;
   }
   .dialog h3 { margin: 0 0 0.3rem 0; font-size: var(--text-sm); flex: 0 0 auto; }
+  .fleet-pick {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    flex-wrap: wrap;
+    margin-bottom: var(--space-2);
+  }
+  .fleet-chip {
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--fleet);
+    border-radius: var(--radius-sm);
+    background: none;
+    color: var(--fg);
+    font: inherit;
+    font-size: var(--text-sm);
+    padding: 2px var(--space-2);
+    cursor: pointer;
+  }
+  .fleet-chip.on {
+    background: color-mix(in srgb, var(--fleet) 16%, transparent);
+    border-color: var(--fleet);
+  }
   .fields {
     display: flex;
     flex-direction: column;

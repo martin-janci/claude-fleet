@@ -1355,11 +1355,15 @@ token item, event bridge and contract gate (`backend/fleets.rs`), and its
 sessions show in the sidebar under a coloured fleet badge with a fleet
 switcher, with prompt / rename / pin / close / start / copy-attach routed to
 its hub (`FLEET_SCOPED`). No flag: nothing runs until a second hub is added,
-and an existing pairing is hub #1 with no migration. Not yet (Phase 2): the
-session view (conversation, terminal) for an extra fleet's session, a fleet
-picker in New session with org-based defaults, Hosts / Projects / Inbox /
-PRs per fleet, and federation addresses rendered by fleet (needs `fleet_id`
-in the `/events` ready frame).
+and an existing pairing is hub #1 with no migration. Phase 2 landed too: an
+extra fleet's session opens in its own view (`FleetSessionView`:
+conversation, composer, terminal over this machine's ssh, snapshot), New
+session has a fleet picker (remembered, else owner → fleet by name, else the
+primary), the Hosts page, Inbox (and the rail count), PRs and notifications
+follow the fleet filter, and the hub's `ready` frame names its `fleet_id`
+(minted at `serve` start) so one hub added twice is refused. The fleet id
+needs a hub with this change; an older one just never reads as a duplicate.
+Phase 3 (one id space, the full panes per fleet) is not started.
 
 Application updates: design
 `docs/superpowers/specs/2026-09-28-update-channel-design.md` (with

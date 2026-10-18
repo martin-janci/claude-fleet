@@ -104,7 +104,8 @@
   import { hubStatus, loadHubStatus } from './lib/hub';
   import HubUnavailableBanner from './lib/HubUnavailableBanner.svelte';
   import { startHubConnection, setGapHandler, hubConnection } from './lib/hub_connection';
-  import { startFleets } from './lib/fleets';
+  import { startFleets, selectedFleetSession, closeFleetSession } from './lib/fleets';
+  import FleetSessionView from './lib/FleetSessionView.svelte';
   import StatusBarMark from './lib/StatusBarMark.svelte';
   import HostHealthChip from './lib/HostHealthChip.svelte';
   import ShellHeader from './lib/ShellHeader.svelte';
@@ -697,6 +698,9 @@
     resolveSessionView($sessionView, selNoPane, selHasClaudeId, selOwned),
   );
   const conversationMode = $derived(sessionTabActive && effectiveView === 'conversation');
+  // Opening one of this window's own sessions (even the one already
+  // selected) goes back to it from an extra fleet's (multi-hub Phase 2).
+  onDestroy(onSessionOpened(() => closeFleetSession()));
   // Bumped to remount the view when a request names a host while it is open.
   let hostsViewKey = $state(0);
   /** Last host shown in the Hosts view, for this app session only. */
@@ -1204,7 +1208,7 @@
   {/if}
 
   <div class="right-col" data-testid="pane-terminal">
-    {#if sessionChrome}
+    {#if sessionChrome && !$selectedFleetSession}
       <SessionTabs
         session={$selectedSession}
         name={selName}
@@ -1278,6 +1282,15 @@
             <ConversationPanel session={$selectedSession} visible={!fleetPageShown} onOpenTerminal={() => setSessionView('terminal')} />
           </div>
         {/if}
+      {/if}
+      {#if $selectedFleetSession && !fleetPageShown}
+        <!-- An extra fleet's session (multi-hub Phase 2), over this
+             window's own: the fleet pages and the overlays below still
+             cover it. Its ids are that hub's, so it never becomes
+             `selectedSession`. -->
+        <div class="view-slot overlay" data-testid="fleet-session-overlay">
+          <FleetSessionView fleet={$selectedFleetSession.fleet} session={$selectedFleetSession.row} />
+        </div>
       {/if}
       {#if $destination === 'hosts'}
         <div class="view-slot overlay" data-testid="hosts-overlay">

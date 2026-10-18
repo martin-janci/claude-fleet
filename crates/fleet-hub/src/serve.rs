@@ -844,6 +844,13 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         tracing::warn!("{warning}");
     }
     persist(&store, &r)?;
+    // This fleet's identity, minted now rather than on its first federation
+    // message: the `/events` ready frame reports it (read-only, never minting)
+    // so a desktop showing several hubs can tell one hub behind two URLs
+    // apart from two hubs (multi-hub design D8).
+    if let Err(e) = fleet_core::service::address::ensure_local_fleet_id(&store) {
+        tracing::warn!(error = %e.message, "fleet id: could not mint one");
+    }
     // File downloads live under the data dir; a copy the last run left
     // half-done fails now, before a client can ask for it.
     if let Ok(s) = store.lock() {

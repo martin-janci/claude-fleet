@@ -80,6 +80,7 @@ pub(crate) mod logic {
             other => Some(other),
         };
         PrimaryView {
+            fleet_id: primary_fleet_id(backend, hub_link, store),
             url: backend
                 .remote()
                 .map(|c| c.base_url.clone())
@@ -89,6 +90,23 @@ pub(crate) mod logic {
             connection,
             unavailable: backend.unavailable().map(|u| u.reason.clone()),
             configured_url,
+        }
+    }
+
+    /// The primary's fleet id (multi-hub design D8): this machine's own when
+    /// standalone, read without minting one; otherwise what the primary hub's
+    /// last `ready` frame named.
+    pub fn primary_fleet_id(
+        backend: &Backend,
+        hub_link: &HubConnectionStatus,
+        store: &Mutex<Store>,
+    ) -> Option<String> {
+        if backend.owns_the_fleet() {
+            fleet_core::service::address::stored_local_fleet_id(store)
+                .ok()
+                .flatten()
+        } else {
+            hub_link.fleet_id()
         }
     }
 }

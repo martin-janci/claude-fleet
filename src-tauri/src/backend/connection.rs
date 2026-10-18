@@ -89,6 +89,13 @@ pub enum HubConnection {
 /// sequence without a frontend.
 pub trait ConnectionReporter: Send + Sync {
     fn report(&self, state: HubConnection);
+
+    /// The fleet id a `ready` frame named (`null` from a hub that has not
+    /// minted one, absent from one older than the field). Reported before
+    /// [`HubConnection::Connected`], so whoever reacts to that state already
+    /// sees it. Only the multi-hub registry reads it (design D8: one hub
+    /// added twice under two URLs); a reporter that does not care ignores it.
+    fn hub_fleet_id(&self, _fleet_id: Option<String>) {}
 }
 
 /// The reading half: where the connection stands, for the code that must
@@ -182,6 +189,9 @@ pub struct HubConnectionStatus {
     /// The banner's "Retry now": wakes the bridge out of its backoff wait
     /// (`hub_retry_now`). See [`super::events::EventBridge::waking_on`].
     retry: Arc<tokio::sync::Notify>,
+    /// The fleet id the hub's last `ready` frame named, if any. See
+    /// [`ConnectionReporter::hub_fleet_id`].
+    fleet_id: Mutex<Option<String>>,
 }
 
 /// Hand-written: the token is here only to be redacted, and a `{:?}` must not
@@ -205,6 +215,7 @@ impl HubConnectionStatus {
             sink: None,
             token: String::new(),
             retry: Arc::new(tokio::sync::Notify::new()),
+            fleet_id: Mutex::new(None),
         }
     }
 
@@ -217,6 +228,7 @@ impl HubConnectionStatus {
             sink: Some(sink),
             token: token.to_string(),
             retry: Arc::new(tokio::sync::Notify::new()),
+            fleet_id: Mutex::new(None),
         }
     }
 
@@ -239,6 +251,15 @@ impl HubConnectionStatus {
     /// it leaves no permit behind to cut a later wait short.
     pub fn retry_now(&self) {
         self.retry.notify_waiters();
+    }
+
+    /// The fleet id this hub's last `ready` frame named. `None` before the
+    /// first one, and for a hub that has none or predates the field.
+    pub fn fleet_id(&self) -> Option<String> {
+        self.fleet_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// The skew a `ready` frame last judged this hub to be in, if it still
@@ -288,6 +309,17 @@ impl HubConnectionStatus {
 }
 
 impl ConnectionReporter for HubConnectionStatus {
+    fn hub_fleet_id(&self, fleet_id: Option<String>) {
+        // Standalone runs no bridge; nothing reports into it.
+        if self.sink.is_none() {
+            return;
+        }
+        *self
+            .fleet_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = fleet_id;
+    }
+
     fn report(&self, state: HubConnection) {
         // Standalone runs no bridge; nothing may move it off `Standalone`.
         let Some(sink) = &self.sink else { return };

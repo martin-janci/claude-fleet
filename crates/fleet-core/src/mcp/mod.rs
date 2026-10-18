@@ -2968,6 +2968,43 @@ mod tests {
         );
     }
 
+    /// The ready frame names this fleet once it has an id, and says `null`
+    /// before — never minting one itself, since opening a stream must not
+    /// write (multi-hub design D8: a desktop spots one hub added twice).
+    #[tokio::test]
+    async fn the_ready_frame_carries_the_fleet_id_without_minting_one() {
+        use crate::events::BroadcastEventBus;
+        let bus = Arc::new(BroadcastEventBus::default());
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let (addr, _) = serve_events_app(
+            &bus,
+            events_route::KEEPALIVE_INTERVAL,
+            CancellationToken::new(),
+            Arc::clone(&store),
+        )
+        .await;
+
+        let mut before = SseConn::open(addr, Some("s3cret"), "").await;
+        let head = before.wait_for("event: ready").await.to_string();
+        assert!(
+            head.contains("\"fleet_id\":null"),
+            "no id yet reads null:\n{head}"
+        );
+        assert_eq!(
+            crate::service::address::stored_local_fleet_id(&store).unwrap(),
+            None,
+            "opening a stream must not mint the fleet id"
+        );
+
+        let id = crate::service::address::ensure_local_fleet_id(&store).unwrap();
+        let mut after = SseConn::open(addr, Some("s3cret"), "").await;
+        let head = after.wait_for("event: ready").await.to_string();
+        assert!(
+            head.contains(&format!("\"fleet_id\":\"{id}\"")),
+            "a minted id is reported:\n{head}"
+        );
+    }
+
     /// The stream itself: authenticated, `text/event-stream`, a `ready` frame
     /// first, then one frame per change emitted AFTER the subscription — the
     /// whole reason a phone can stop polling.

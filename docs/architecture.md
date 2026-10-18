@@ -630,4 +630,9 @@ bullet for the area you are about to change.
   is always a hub, so it has no local arm. Adding a command to the scope:
   `fleet: Option<String>` + `fleets.select(backend.inner(), fleet.as_deref())?`,
   a `FLEET_SCOPED` entry in both `fleets.rs` and `fleets.ts`
-  (`tests_fleets`, `fleets.test.ts` hold them together).
+  (`tests_fleets`, `fleets.test.ts` hold them together). Phase 2: an extra
+  fleet's session opens in `FleetSessionView` (+ `FleetTerminal`, its own
+  pty id `fleet-<slot>-<id>`), never as `selectedSession`; `fleetSelection`
+  holds `{fleet, id}`. The hub's `ready` frame carries `fleet_id`; the
+  bridge reports it through `ConnectionReporter::hub_fleet_id`, and
+  `Fleets::select` refuses an extra fleet whose id another fleet already has.

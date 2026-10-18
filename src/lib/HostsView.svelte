@@ -37,6 +37,8 @@
     type HostRowInfo,
   } from './hosts_view';
   import AddHostWizard from './AddHostWizard.svelte';
+  import FleetHostsSection from './FleetHostsSection.svelte';
+  import { multiFleet, showPrimary } from './fleets';
   import HubAddHostDialog from './HubAddHostDialog.svelte';
   import HostsList from './HostsList.svelte';
   import HostDetail from './HostDetail.svelte';
@@ -503,7 +505,17 @@
     </p>
   {/if}
 
-  {#if showTable}
+  {#if $multiFleet}
+    <!-- Multi-hub Phase 2: the extra fleets the sidebar's fleet filter
+         shows, each under its badge; this window's own hosts follow unless
+         the filter names another fleet. -->
+    <FleetHostsSection />
+  {/if}
+  {#if !$showPrimary}
+    <p class="empty" data-testid="hosts-primary-filtered">
+      This window's own hosts are hidden by the fleet filter in the sidebar.
+    </p>
+  {:else if showTable}
     <HostsTable
       hosts={tableHosts}
       {rowInfo}

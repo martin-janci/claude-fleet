@@ -123,11 +123,13 @@ export function sessionConversation(
   sessionId: number,
   turns?: number,
   claudeSessionId?: string,
+  fleet?: string,
 ): Promise<Result<Conversation>> {
   const args: { session_id: number; turns?: number; claude_session_id?: string } = { session_id: sessionId };
   if (turns !== undefined) args.turns = turns;
   if (claudeSessionId !== undefined) args.claude_session_id = claudeSessionId;
-  return invokeCmd<Conversation>('session_conversation', { args });
+  // `fleet` (multi-hub): an extra fleet's session is read from its own hub.
+  return invokeCmd<Conversation>('session_conversation', fleet === undefined ? { args } : { args, fleet });
 }
 
 /** The session's conversations, newest first (backend caps `limit` at 500). */
@@ -171,13 +173,14 @@ export function toolDetail(
   sessionId: number,
   toolUseId: string,
   claudeSessionId?: string,
+  fleet?: string,
 ): Promise<Result<ToolDetail>> {
   const args: { session_id: number; tool_use_id: string; claude_session_id?: string } = {
     session_id: sessionId,
     tool_use_id: toolUseId,
   };
   if (claudeSessionId !== undefined) args.claude_session_id = claudeSessionId;
-  return invokeCmd<ToolDetail>('session_tool_detail', { args });
+  return invokeCmd<ToolDetail>('session_tool_detail', fleet === undefined ? { args } : { args, fleet });
 }
 
 /** Deep (JSON) equality — used to decide whether a poll result actually changed. */

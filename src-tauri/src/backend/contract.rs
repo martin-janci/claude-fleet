@@ -229,6 +229,19 @@ pub enum ContractFit {
     TooNew,
 }
 
+/// The fleet id a `ready` frame names (`fleet_id`, multi-hub design D8),
+/// or `None` when it names none, names it `null`, or names something that is
+/// not a plausible id. Never fatal: an older hub simply has no such field.
+pub fn hub_fleet_id(ready_frame_data: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(ready_frame_data)
+        .ok()?
+        .get("fleet_id")?
+        .as_str()
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && id.len() <= 64)
+        .map(str::to_string)
+}
+
 /// A hub's wire-contract revision, read out of a `ready` frame's raw JSON.
 ///
 /// `0` for a hub that sends no `contract` field (every hub released before

@@ -183,9 +183,12 @@ pub async fn decide_related_session(
 #[tauri::command]
 pub async fn touch_session_viewed(
     args: TouchSessionViewedArgs,
+    fleet: Option<String>,
     backend: State<'_, Arc<FleetBackend>>,
+    fleets: State<'_, Arc<Fleets>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<SessionRow, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::touch_session_viewed(&backend, args, &store).await
 }
 
@@ -520,10 +523,13 @@ pub struct SessionConversationArgs {
 #[tauri::command]
 pub async fn session_conversation(
     args: SessionConversationArgs,
+    fleet: Option<String>,
     backend: State<'_, Arc<FleetBackend>>,
+    fleets: State<'_, Arc<Fleets>>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<fleet_core::service::transcript::Conversation, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::session_conversation(&backend, args, &store, &ssh).await
 }
 
@@ -546,10 +552,13 @@ pub struct SessionToolDetailArgs {
 #[tauri::command]
 pub async fn session_tool_detail(
     args: SessionToolDetailArgs,
+    fleet: Option<String>,
     backend: State<'_, Arc<FleetBackend>>,
+    fleets: State<'_, Arc<Fleets>>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<fleet_core::service::transcript::ToolDetail, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::session_tool_detail(&backend, args, &store, &ssh).await
 }
 
@@ -620,10 +629,13 @@ pub struct CaptureSessionArgs {
 #[tauri::command]
 pub async fn capture_session(
     args: CaptureSessionArgs,
+    fleet: Option<String>,
     backend: State<'_, Arc<FleetBackend>>,
+    fleets: State<'_, Arc<Fleets>>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<String, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::capture_session(&backend, args, &store, &ssh).await
 }
 

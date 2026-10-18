@@ -68,6 +68,13 @@ pub const FLEET_SCOPED: &[&str] = &[
     "pin_session",
     "list_hosts",
     "list_projects",
+    // Phase 2: an extra fleet's session opens in its own view.
+    "session_conversation",
+    "session_tool_detail",
+    "capture_session",
+    "touch_session_viewed",
+    // Phase 2: the PRs page per fleet.
+    "list_pull_requests",
 ];
 
 /// Colours offered to a new fleet, in order; the first one no fleet uses is
@@ -266,6 +273,14 @@ pub struct FleetInfo {
     pub connection: Option<HubConnection>,
     /// Why a configured fleet is not in use.
     pub unavailable: Option<String>,
+    /// The fleet id the hub's `ready` frame named (design D8), once it has
+    /// said one; for a standalone primary, this machine's own.
+    pub fleet_id: Option<String>,
+    /// The label of the fleet this one is the same hub as, when its `ready`
+    /// frame named an id another fleet in this window already has. Its rows
+    /// are not shown and its calls are refused: they would be the other's
+    /// twice over.
+    pub duplicate_of: Option<String>,
 }
 
 /// Adding a fleet: what the dialog sends.
@@ -295,7 +310,14 @@ pub struct PrimaryView {
     /// `hub.remote_url` as stored and normalised, which a re-pairing awaiting
     /// a restart can make differ from `url`. Both count for duplicates.
     pub configured_url: Option<String>,
+    /// The primary's fleet id: what its hub's `ready` frame named, or this
+    /// machine's own when standalone. `None` while unknown.
+    pub fleet_id: Option<String>,
 }
+
+/// The primary's fleet id, read when it is needed rather than copied once:
+/// a hub client learns it from the first `ready` frame, after launch.
+pub type PrimaryIdentity = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 
 /// Every extra fleet this window shows.
 pub struct Fleets {
@@ -305,6 +327,8 @@ pub struct Fleets {
     links: Arc<dyn FleetLinks>,
     shutdown: CancellationToken,
     handles: RwLock<BTreeMap<String, FleetHandle>>,
+    /// See [`PrimaryIdentity`]; `None` in tests that are not about it.
+    primary_identity: Option<PrimaryIdentity>,
 }
 
 impl Fleets {
@@ -322,7 +346,39 @@ impl Fleets {
             links,
             shutdown,
             handles: RwLock::new(BTreeMap::new()),
+            primary_identity: None,
         }
+    }
+
+    /// How [`Self::select`] learns the primary's fleet id, to refuse an extra
+    /// fleet that turned out to be the same hub (design D8).
+    pub fn with_primary_identity(mut self, identity: PrimaryIdentity) -> Self {
+        self.primary_identity = Some(identity);
+        self
+    }
+
+    /// Which fleet `id` is the same hub as, by the fleet ids the hubs named:
+    /// the primary, or an extra fleet earlier in slot order. `None` while
+    /// either side has not named one.
+    fn duplicate_label(
+        handles: &BTreeMap<String, FleetHandle>,
+        id: &str,
+        primary_fleet_id: Option<&str>,
+    ) -> Option<String> {
+        let mine = handles.get(id)?.status.as_ref()?.fleet_id()?;
+        if primary_fleet_id == Some(mine.as_str()) {
+            return Some("the primary fleet".to_string());
+        }
+        handles
+            .iter()
+            .take_while(|(slot, _)| slot.as_str() != id)
+            .find(|(_, h)| {
+                h.status
+                    .as_ref()
+                    .and_then(|s| s.fleet_id())
+                    .is_some_and(|other| other == mine)
+            })
+            .map(|(_, h)| format!("{:?}", h.record.label))
     }
 
     /// Connect every stored extra fleet. With none stored this reads one
@@ -442,6 +498,17 @@ impl Fleets {
                 ),
             )
         })?;
+        let primary_id = self.primary_identity.as_ref().and_then(|f| f());
+        if let Some(dup) = Self::duplicate_label(&handles, id, primary_id.as_deref()) {
+            return Err(IpcError::new(
+                codes::E_EXISTS,
+                format!(
+                    "{} ({}) is the same hub as {dup}, so this window already shows it; \
+                     remove one of the two in Settings → Hub & sync",
+                    handle.record.label, handle.record.url
+                ),
+            ));
+        }
         match (&handle.backend, &handle.unavailable) {
             (Some(b), _) => Ok(Arc::clone(b)),
             (None, why) => Err(IpcError::new(
@@ -461,6 +528,9 @@ impl Fleets {
         let handles = self.read();
         let mut out = vec![primary_info(primary)];
         out.extend(handles.values().map(|h| {
+            let fleet_id = h.status.as_ref().and_then(|s| s.fleet_id());
+            let duplicate_of =
+                Self::duplicate_label(&handles, &h.record.id, primary.fleet_id.as_deref());
             FleetInfo {
                 id: h.record.id.clone(),
                 label: h.record.label.clone(),
@@ -475,6 +545,8 @@ impl Fleets {
                 client_name: Some(h.record.client_name.clone()).filter(|n| !n.is_empty()),
                 connection: h.status.as_ref().map(|s| s.current()),
                 unavailable: h.unavailable.clone(),
+                fleet_id,
+                duplicate_of,
             }
         }));
         out
@@ -668,6 +740,12 @@ impl Fleets {
         Ok(())
     }
 
+    /// Seed the stored rows, for a test that builds its own `Fleets`.
+    #[cfg(test)]
+    pub(crate) fn store_records_for_test(&self, rows: &[ExtraFleet]) {
+        write_records(&self.store, rows).unwrap();
+    }
+
     /// Every extra fleet's connection reporter, for a test that drives one.
     #[cfg(test)]
     pub(crate) fn status_of(&self, id: &str) -> Option<Arc<HubConnectionStatus>> {
@@ -701,6 +779,8 @@ fn primary_info(p: &PrimaryView) -> FleetInfo {
         client_name: p.client_name.clone(),
         connection: p.connection.clone(),
         unavailable: p.unavailable.clone(),
+        fleet_id: p.fleet_id.clone(),
+        duplicate_of: None,
     }
 }
 

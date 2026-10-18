@@ -5,6 +5,10 @@
   // opens on GitHub, the session opens in fleet; nothing here merges.
   //
   // Titles and branch names are text a person wrote: rendered as text.
+  //
+  // Multi-hub Phase 2: with extra fleets, the list is every fleet the
+  // sidebar's fleet filter shows, each PR read from its own hub and marked
+  // with its fleet's badge; a PR's session opens on its own fleet.
   import Skeleton from './states/Skeleton.svelte';
   import { onDestroy, onMount } from 'svelte';
   import { get } from 'svelte/store';
@@ -16,6 +20,19 @@
   import { readErrorText } from './work_view';
   import type { IpcError } from './result';
   import { listPullRequests, prChecksLabel, prDiffstat, prRef, prStateLabel, type PrFilter, type PullRequestRow } from './prs';
+  import {
+    PRIMARY,
+    fleetListPullRequests,
+    fleetRows,
+    multiFleet,
+    openFleetSession,
+    showPrimary,
+    visibleExtraFleets,
+    type FleetInfo,
+  } from './fleets';
+
+  /** A PR and the fleet whose hub listed it. */
+  type Item = PullRequestRow & { fleet: FleetInfo | null };
 
   const FILTERS: { id: PrFilter; label: string }[] = [
     { id: 'open', label: 'Open' },
@@ -25,7 +42,7 @@
   ];
 
   let filter = $state<PrFilter>('open');
-  let items = $state<PullRequestRow[]>([]);
+  let items = $state<Item[]>([]);
   let total = $state(0);
   let loaded = $state(false);
   let loadError = $state<IpcError | null>(null);
@@ -33,17 +50,42 @@
 
   async function load() {
     const mine = ++seq;
-    const r = await listPullRequests({ state: filter });
+    const extras = get(multiFleet) ? get(visibleExtraFleets).map((g) => g.fleet).filter((f) => !f.unavailable && !f.duplicate_of) : [];
+    const own = get(showPrimary);
+    const [r, ...others] = await Promise.all([
+      own ? listPullRequests({ state: filter }) : Promise.resolve(null),
+      ...extras.map((f) => fleetListPullRequests(f.id, { state: filter })),
+    ]);
     if (mine !== seq) return;
     loaded = true;
-    if (r.ok) {
-      items = r.value?.items ?? [];
-      total = r.value?.total ?? items.length;
-      loadError = null;
-    } else {
+    if (r && !r.ok) {
       loadError = r.error;
+      return;
     }
+    const list: Item[] = (r?.value?.items ?? []).map((pr) => ({ ...pr, fleet: null }));
+    let count = r?.value?.total ?? list.length;
+    extras.forEach((f, i) => {
+      const o = others[i];
+      // One extra hub that cannot answer leaves the rest on screen.
+      if (!o.ok) return;
+      list.push(...(o.value?.items ?? []).map((pr) => ({ ...pr, fleet: f })));
+      count += o.value?.total ?? 0;
+    });
+    if (extras.length > 0) list.sort((a, b) => b.updated_at - a.updated_at);
+    items = list;
+    total = count;
+    loadError = null;
   }
+
+  // The fleet filter moved: re-read for the fleets it now shows.
+  let lastFleets = '';
+  const unsubFleets = visibleExtraFleets.subscribe((v) => {
+    const sig = `${get(showPrimary)}|${v.map((g) => g.fleet.id).join(',')}`;
+    if (sig === lastFleets) return;
+    const first = lastFleets === '';
+    lastFleets = sig;
+    if (!first) void load();
+  });
 
   function pick(f: PrFilter) {
     if (f === filter) return;
@@ -70,16 +112,21 @@
   onMount(() => void load());
   onDestroy(() => {
     unsub();
+    unsubFleets();
     if (timer) clearTimeout(timer);
   });
 
-  function sessionRow(pr: PullRequestRow) {
-    return pr.session_id == null ? undefined : get(sessions).find((r) => r.id === pr.session_id);
+  function sessionRow(pr: Item) {
+    if (pr.session_id == null) return undefined;
+    if (pr.fleet) return $fleetRows.get(pr.fleet.id)?.sessions.get(pr.session_id);
+    return get(sessions).find((r) => r.id === pr.session_id);
   }
 
-  function openSession(pr: PullRequestRow) {
+  function openSession(pr: Item) {
     const row = sessionRow(pr);
-    if (row) selectSessionExplicitly(row);
+    if (!row) return;
+    if (pr.fleet && pr.fleet.id !== PRIMARY) openFleetSession(pr.fleet.id, row.id);
+    else selectSessionExplicitly(row);
   }
 </script>
 
@@ -110,12 +157,13 @@
     </p>
   {:else}
     <ul class="items">
-      {#each items as pr (pr.id)}
+      {#each items as pr (`${pr.fleet?.id ?? PRIMARY}:${pr.id}`)}
         {@const checks = prChecksLabel(pr)}
         {@const live = sessionRow(pr)}
         {@const stat = prDiffstat(pr)}
         <li class="item" data-testid="work-pr" data-state={pr.state}>
           <div class="head">
+            {#if pr.fleet}<span class="fleet-badge" style="--fleet: {pr.fleet.color}" data-testid="work-pr-fleet">{pr.fleet.label}</span>{/if}
             <span class="state state--{pr.draft && pr.state === 'OPEN' ? 'draft' : pr.state.toLowerCase()}" data-testid="work-pr-state"
               >{prStateLabel(pr)}</span
             >
@@ -163,6 +211,14 @@
 </section>
 
 <style>
+  .fleet-badge {
+    padding: 0 var(--space-1);
+    border-radius: var(--radius-xs);
+    border: 1px solid var(--fleet);
+    background: color-mix(in srgb, var(--fleet) 16%, transparent);
+    font-size: var(--text-xs);
+    font-weight: 600;
+  }
   .diffstat .add {
     color: var(--status-done);
   }

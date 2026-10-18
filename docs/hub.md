@@ -2714,6 +2714,12 @@ move it — and a
 hub built before this field existed sends nothing, which a client reads as
 revision `0`. See *Version skew* below for what a client does with it.
 
+It also carries `fleet_id`: this fleet's id (the one federation addresses
+start with), minted when `serve` starts, or `null` before one exists. Opening
+a stream never mints it. A desktop showing several hubs uses it to spot one
+hub added twice under two URLs (*More than one hub in one window*).
+Additive: no contract move.
+
 Each row frame carries an `id:` of the form `<generation>-<seq>`, where `seq`
 counts the frames **this connection** was served. A client that reconnects
 sends the last one back as `Last-Event-ID` (or as `?since=<id>`, for the
@@ -3869,9 +3875,39 @@ Settings → **Hub & sync** → *Fleets* → *Add a hub*: run
 - **Remove does not revoke**, exactly like Disconnect: it forgets the URL and
   the token on this machine; revoke the client on that hub.
 
-Phase 1 limits: an extra fleet's session opens no conversation or terminal
-tab yet (use *Copy attach*), and Hosts, Projects, Inbox and PRs show the
-primary only.
+- **An extra fleet's session opens in its own view.** Click its name in the
+  sidebar: *Conversation* is read from its hub, the composer prompts it there
+  (with Enter / Esc / Ctrl-C keys for a dialog or an interrupt), *Terminal*
+  attaches with this machine's own `ssh` (so the fleet's host alias has to
+  resolve here too, as for any terminal), and *Snapshot* is a read-only
+  `capture_session` of its pane.
+- **New session can start on another fleet.** When an extra fleet has the
+  same repository, the dialog shows a *Fleet* row. It defaults to the fleet
+  you last started that repository on, else the fleet whose label or host
+  name is the repository's owner (`PapayaPOS` → `fleet.papayapos.dev`), else
+  this window's own.
+- **Hosts, the Inbox, PRs and notifications follow the fleet filter.** The
+  Hosts page lists each extra fleet's hosts under its badge (read-only:
+  managing a hub's hosts is its operator's job), the Inbox and the rail's
+  count include the extra fleets' sessions that need you, the PRs list reads
+  every shown fleet, and an extra fleet's session notifies like one of this
+  window's, named with its fleet. A fleet chip counts its sessions that need
+  you.
+- **One hub added twice is spotted.** Each hub names its fleet id in the
+  `/events` `ready` frame (`fleet_id`, minted at `serve` start; `null` until
+  then). An extra fleet whose id is the primary's, or an earlier extra
+  fleet's, is marked as the same hub, its rows are not shown and its calls
+  are refused; remove one of the two. A hub older than the field is never
+  called a duplicate.
+- **Federation senders read by fleet.** In an extra fleet's conversation, a
+  prompt's untrusted-sender line that is a federation address
+  (`<fleet-uuid>/session/<host>/<name>`) reads `company › mac/dev-x` when
+  this window shows that fleet, and opens that session.
+
+Limits (Phase 3): this window's own panes — the full Conversation panel,
+Files, Repo, Rewind and Fork, forms, the session's terminals — are still
+about its own fleet only; an extra fleet's session has the lighter view
+above. Usage, accounts, tasks and missions show the primary only.
 
 ### Going back
 

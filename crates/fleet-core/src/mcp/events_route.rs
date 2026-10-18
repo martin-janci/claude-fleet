@@ -1613,6 +1613,14 @@ pub(super) async fn handle_events(
                             // point — a client that assumed continuity would show
                             // a stale fleet.
                             "resumed": st.resumed,
+                            // This fleet's id (`service::address`), or null
+                            // before one is minted. Read, never minted here:
+                            // opening a stream must not write. Additive like
+                            // `contract`; a desktop showing several hubs uses
+                            // it to spot one hub added twice under two URLs.
+                            "fleet_id": crate::service::address::stored_local_fleet_id(&st.store)
+                                .ok()
+                                .flatten(),
                         });
                         return Some((Ok::<Event, Infallible>(sse_event("ready", &ready)), st));
                     }

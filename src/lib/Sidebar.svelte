@@ -51,7 +51,8 @@
   import ProposedBy from './ProposedBy.svelte';
   import FleetSwitcher from './FleetSwitcher.svelte';
   import FleetSessionGroups from './FleetSessionGroups.svelte';
-  import { showPrimary } from './fleets';
+  import { showPrimary, fleetInboxCount } from './fleets';
+  import FleetInbox from './FleetInbox.svelte';
   import { failingCount, loadFailing, loadNextRoutine, nextRoutine, nextRoutineLine } from './routines';
   import { loadWaitingMissions, waitingMissionCount } from './mission_waits';
   import { matchesAllWords, sessionMatchesSearch } from './search';
@@ -1052,13 +1053,17 @@
   // ── Inbox (redesign step 3.3) ──
   // The rows the list would show under the same filters, narrowed to what
   // raises the badge (`inbox.ts`); the rest is counted in one line.
+  // Multi-hub Phase 2: this window's own rows only while the fleet filter
+  // shows them; the extra fleets' follow under their badges (FleetInbox).
   const inboxPool = $derived(
-    $sidebarView === 'inbox'
+    $sidebarView === 'inbox' && $showPrimary
       ? [...pinnedRows, ...filtered.flatMap((r) => sessionsForProject(r.project.id)), ...orphanSessions, ...sharedWithMe]
       : [],
   );
   const inboxList = $derived(inboxRows(inboxPool, attentionOpts));
-  const inboxNeeding = $derived(inboxList.length + $failingCount + $waitingMissionCount + $pendingAgentCount);
+  const inboxNeeding = $derived(
+    inboxList.length + $failingCount + $waitingMissionCount + $pendingAgentCount + $fleetInboxCount,
+  );
   // G1.6: Jev's "probably waiting" rows, listed apart and never counted.
   const inboxProposed = $derived(proposedRows(inboxPool, attentionOpts, $notWaitingSaid));
   // G3.1: the model's sections ("Group: state"), each carrying the model's
@@ -1702,6 +1707,7 @@
         {/if}
       </div>
     {/each}
+    <FleetInbox />
     <div class="inbox-rest" data-testid="inbox-rest">
       {#if inboxRestText && !(inboxNeeding === 0 && !listUnavailable)}<span class="muted">Not waiting · {inboxRestText}</span>{/if}
       <button

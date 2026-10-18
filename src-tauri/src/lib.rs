@@ -358,7 +358,17 @@ pub fn run() {
                     as std::sync::Arc<dyn backend::events::RemoteEventSink>,
                 std::sync::Arc::new(bootstrap::tasks::ExtraFleetLinks),
                 shutdown_token.clone(),
-            ));
+            )
+            // Read at each call, not copied: a hub client learns its
+            // primary's fleet id from the first `ready` frame (design D8).
+            .with_primary_identity({
+                let backend = backend.clone();
+                let hub_link = std::sync::Arc::clone(&hub_link);
+                let store = std::sync::Arc::clone(&store);
+                std::sync::Arc::new(move || {
+                    commands::fleets::logic::primary_fleet_id(&backend, &hub_link, &store)
+                })
+            }));
             app.manage(std::sync::Arc::clone(&fleets));
             std::thread::spawn(move || fleets.load());
             // Which background tasks this process may run is decided in

@@ -1,9 +1,10 @@
 <script lang="ts">
-  // An extra fleet's sessions in the sidebar (multi-hub design, Phase 1):
-  // one group per fleet the filter shows, under that fleet's badge, with its
-  // live link and the actions that route to its hub — send a prompt, rename,
-  // pin, close, start a session, copy the attach command. The full session
-  // view (conversation, terminal) for an extra fleet is Phase 2.
+  // An extra fleet's sessions in the sidebar (multi-hub design): one group
+  // per fleet the filter shows, under that fleet's badge, with its live link
+  // and the actions that route to its hub — send a prompt, rename, pin,
+  // close, start a session, copy the attach command. A row's name opens the
+  // session in the main view (`FleetSessionView`, Phase 2), and a row that
+  // needs you says so with the same table the Inbox uses.
   import {
     visibleExtraFleets,
     connectionWord,
@@ -16,6 +17,9 @@
     fleetNewSession,
     fleetAttachCommand,
     fleetKey,
+    fleetNeedsYou,
+    fleetSelection,
+    openFleetSession,
     type FleetInfo,
     type FleetRows,
   } from './fleets';
@@ -23,6 +27,12 @@
   import { copyText } from './clipboard';
   import { push } from './toasts';
   import Button from './kit/Button.svelte';
+  import { attentionIdleMinutes } from './notify';
+
+  /** The rows of one fleet that need you, by id. */
+  function needing(rows: FleetRows): Set<number> {
+    return new Set(fleetNeedsYou(rows, $attentionIdleMinutes * 60, Math.floor(Date.now() / 1000)).map((s) => s.id));
+  }
 
   // Which row has which inline form open, by fleet-qualified key.
   let open = $state<{ key: string; kind: 'prompt' | 'rename' | 'close' } | null>(null);
@@ -33,10 +43,24 @@
   let newProject = $state<number | null>(null);
   let newName = $state('');
 
+  /** The project a row belongs to on its own fleet, as `owner/repo`
+   *  (Phase 2: an extra fleet's sessions group by project, like the
+   *  primary's tree); `Other` for one with none. */
+  function projectOf(rows: FleetRows, s: SessionRow): string {
+    const p = s.project_id == null ? undefined : rows.projects.find((t) => t.project.id === s.project_id);
+    return p ? `${p.project.owner}/${p.project.repo}` : 'Other';
+  }
+
   function sorted(rows: FleetRows): SessionRow[] {
     return [...rows.sessions.values()]
       .filter((s) => s.status !== 'lost')
-      .sort((a, b) => (b.pinned_at ?? 0) - (a.pinned_at ?? 0) || b.last_activity_at - a.last_activity_at);
+      .sort(
+        (a, b) =>
+          (projectOf(rows, a) === 'Other' ? 1 : 0) - (projectOf(rows, b) === 'Other' ? 1 : 0) ||
+          projectOf(rows, a).localeCompare(projectOf(rows, b)) ||
+          (b.pinned_at ?? 0) - (a.pinned_at ?? 0) ||
+          b.last_activity_at - a.last_activity_at,
+      );
   }
 
   function label(s: SessionRow): string {
@@ -89,6 +113,7 @@
 {#each $visibleExtraFleets as { fleet: f, rows } (f.id)}
   {@const cw = connectionWord(f)}
   {@const list = sorted(rows)}
+  {@const needs = needing(rows)}
   <section class="fleet-group" style="--fleet: {f.color}" data-testid="fleet-group-{f.id}">
     <header class="head">
       <span class="badge" data-testid="fleet-badge-{f.id}">{f.label}</span>
@@ -103,7 +128,11 @@
         <Button size="sm" variant="quiet" testid="fleet-new-{f.id}" onclick={() => startForm(f, rows)}>New…</Button>
       {/if}
     </header>
-    {#if f.unavailable}
+    {#if f.duplicate_of}
+      <p class="note err" data-testid="fleet-duplicate-{f.id}">
+        This is the same hub as {f.duplicate_of}, so its sessions are shown there. Remove one of the two in Settings → Hub &amp; sync.
+      </p>
+    {:else if f.unavailable}
       <p class="note err" data-testid="fleet-unavailable-{f.id}">{f.unavailable}</p>
     {:else if rows.error}
       <p class="note err">{rows.error}</p>
@@ -132,11 +161,26 @@
       </form>
     {/if}
     <ul class="rows">
-      {#each list as s (s.id)}
+      {#each list as s, i (s.id)}
         {@const key = fleetKey(f.id, s.id)}
-        <li class="row" data-testid="fleet-session-{f.id}-{s.id}">
+        {@const proj = projectOf(rows, s)}
+        {#if i === 0 || projectOf(rows, list[i - 1]) !== proj}
+          <li class="proj" data-testid="fleet-project-{f.id}-{proj}">{proj}</li>
+        {/if}
+        <li
+          class="row"
+          class:selected={$fleetSelection?.fleet === f.id && $fleetSelection?.id === s.id}
+          data-testid="fleet-session-{f.id}-{s.id}"
+        >
           <div class="line">
-            <span class="name" title={s.tmux_name}>{#if s.pinned_at}<span class="pin" aria-label="pinned">◆</span>{/if}{label(s)}</span>
+            <button
+              type="button"
+              class="name"
+              title="Open {s.tmux_name}"
+              data-testid="fleet-open-{f.id}-{s.id}"
+              onclick={() => openFleetSession(f.id, s.id)}
+            >{#if s.pinned_at}<span class="pin" aria-label="pinned">◆</span>{/if}{label(s)}</button>
+            {#if needs.has(s.id)}<span class="needs" data-testid="fleet-needs-{f.id}-{s.id}">needs you</span>{/if}
             <span class="host">{s.host_alias}</span>
             {#if s.claude_status}<span class="status">{s.claude_status}</span>{/if}
           </div>
@@ -238,6 +282,30 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     color: var(--fg);
+    background: none;
+    border: 0;
+    padding: 0;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .name:hover {
+    text-decoration: underline;
+  }
+  .proj {
+    margin-top: var(--space-1);
+    font-size: var(--text-xs);
+    color: var(--fg-muted);
+    font-weight: 600;
+  }
+  .row.selected {
+    background: color-mix(in srgb, var(--fleet) 12%, transparent);
+    border-radius: var(--radius-xs);
+  }
+  .needs {
+    font-size: var(--text-xs);
+    color: var(--status-waiting);
+    font-weight: 600;
   }
   .pin {
     margin-right: var(--space-1);
