@@ -103,7 +103,7 @@ admin      add_host remove_host probe_host check_host hide_host merge_host
            update_status update_admin link_peer unlink_peer list_peer_links
 device     pr_shepherd autofix agents mcp_confirms answer_mcp_confirm setting_proposals
            decide_setting_proposals setting_history control_route
-           resume_or_new control_handoffs list_pages project_picks
+           resume_or_new control_handoffs control_journal list_pages project_picks
            set_project_pick
            org_admin realm_admin update_policy session_claim wizard_state
            dashboards
@@ -288,9 +288,9 @@ broken one shows as code with the reason. Format: `docs/chat-blocks.md`.
 Use `ask` instead when you need the answers before you continue.
 
 In `choices`, mark the option you would pick `"recommended": true` (one
-per card). In Control's chat, when the person does not answer for the
-minutes `control.auto_continue_minutes` sets, the app sends that option for
-them, so recommend only what you would do anyway; it is never sent for an
+per card). In Control's chat, at the Within your brief or Autopilot
+autonomy positions only, when the person does not answer for the minutes
+`control.auto_continue_minutes` sets, fleet sends that option for them, so recommend only what you would do anyway; it is never sent for an
 option or question naming a push, a delete or another step hard to undo.
 
 When the person asks for a dashboard, or for a view they will come back

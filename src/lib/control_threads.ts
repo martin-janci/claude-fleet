@@ -35,6 +35,8 @@ interface ThreadBase {
   line: string;
   /** Its last change, unix seconds: the row's age and the sort. */
   at: number;
+  /** Muted: fleet stops telling Control about it (Control review F10). */
+  muted: boolean;
 }
 
 export interface SessionThread extends ThreadBase {
@@ -61,6 +63,8 @@ export interface ThreadInput {
   opts: AttentionOptions;
   /** Local midnight, unix seconds: what "Done today" means. */
   since?: number;
+  /** The muted threads' keys (`s:<id>`, `m:<id>`, `control_journal`). */
+  muted?: ReadonlySet<string>;
 }
 
 function sessionGroup(s: SessionRow, opts: AttentionOptions, since: number): ThreadGroup {
@@ -113,6 +117,7 @@ export function buildThreads(input: ThreadInput): ControlThread[] {
     }
   }
   const out: ControlThread[] = [];
+  const muted = input.muted ?? new Set<string>();
   const missionById = new Map(input.missions.map((m) => [m.id, m]));
   for (const id of sessionIds) {
     const row = byId.get(id)!;
@@ -128,6 +133,7 @@ export function buildThreads(input: ThreadInput): ControlThread[] {
       title: displayName(row, true),
       line: sessionLine(row),
       at: Math.max(row.last_activity_at ?? 0, handedAt.get(id) ?? 0, row.created_at ?? 0),
+      muted: muted.has(`s:${id}`),
     });
   }
   for (const [id, h] of missionReceipts) {
@@ -150,6 +156,7 @@ export function buildThreads(input: ThreadInput): ControlThread[] {
       title: m?.name ?? h.mission_name ?? `Mission ${id}`,
       line,
       at: Math.max(m?.updated_at ?? 0, h.at),
+      muted: muted.has(`m:${id}`),
     });
   }
   out.sort((a, b) => b.at - a.at);

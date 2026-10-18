@@ -3,8 +3,8 @@
   the person, as amber cards above Control's composer. Open shows the
   session beside the chat, where its question can be answered; Later puts
   the card off until that session needs you again, across restarts. By
-  default only Control's own threads raise a card; "All fleet" shows the
-  rest. More than a few: the rest are counted, and the count opens the
+  default only Control's own threads raise a card, and not one the hub
+  stopped following or someone muted (F10); "All fleet" shows the rest. More than a few: the rest are counted, and the count opens the
   Needs you tab.
 -->
 <script lang="ts">
@@ -15,12 +15,17 @@
   import { openInControl } from './control_room';
   import { displayName } from './attention';
   import { followHandoffs, handoffs } from './handoffs';
+  import { refreshMutes, threadFollows } from './control_journal';
   import { hosts } from './hosts';
 
   const release = followHandoffs();
   onDestroy(release);
+  // A mute or a new brief is a `handoff:changed`: re-read the hub's follow
+  // state with the receipts (F10).
+  const stopFollows = handoffs.subscribe(() => void refreshMutes());
+  onDestroy(stopFollows);
 
-  const mine = $derived(controlSessionIds($visibleFleet.rows, $handoffs));
+  const mine = $derived(controlSessionIds($visibleFleet.rows, $handoffs, $threadFollows));
   const opId = $derived($operatorSession?.id ?? null);
   const fleetAll = $derived(escalations($visibleFleet.rows, $visibleFleet.opts, opId, $laterEscalations, $hosts));
   const ours = $derived(escalations($visibleFleet.rows, $visibleFleet.opts, opId, $laterEscalations, $hosts, mine));

@@ -21,6 +21,7 @@ mod catalog;
 mod changesets;
 mod clients;
 mod control_handoffs;
+mod control_journal;
 mod control_tokens;
 mod conversations;
 mod debug_devices;
@@ -134,6 +135,10 @@ pub use clients::{
 pub use control_handoffs::{
     handoff_preview, ControlHandoffRow, FeedEventRow, HandoffItem, NewHandoff, APPROVAL_PERSON,
     APPROVAL_PRE_APPROVED, HANDOFFS_KEEP, HANDOFF_PREVIEW_MAX,
+};
+pub use control_journal::{
+    journal_text, JournalEntry, CONTROL_JOURNAL_KINDS, JOURNAL_KEEP, JOURNAL_SAID_MAX,
+    JOURNAL_TEXT_MAX, MUTE_KINDS,
 };
 pub use control_tokens::{ApiScope, ControlTokenRow, NewControlToken};
 pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};

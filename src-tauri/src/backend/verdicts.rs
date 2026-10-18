@@ -1557,6 +1557,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "control_handoffs",
         },
     ),
+    // Control review F10/F12: Control's journal and its thread mutes live
+    // where the agent runs.
+    (
+        "control_journal",
+        Verdict::Routed {
+            tool: "control_journal",
+        },
+    ),
     // ── the UX agent's operator session ─────────────────────────────────────
     //
     // Both route unconditionally. The operator panel is the same panel on a

@@ -143,3 +143,56 @@ fn the_sweep_looks_at_what_control_started_and_nothing_with_the_setting_off() {
     s.set_setting(settings::CONTROL_SWEEP, "false").unwrap();
     assert!(conditions(&s, None, 0).is_empty());
 }
+
+#[test]
+fn only_a_thread_control_still_follows_is_swept() {
+    use crate::service::control_follow::{Follow, FollowState};
+    let f = |kind: &str, id: i64, state: FollowState| Follow {
+        kind: kind.into(),
+        id,
+        state,
+        name: String::new(),
+        host_alias: None,
+        muted: state == FollowState::Muted,
+    };
+    let follows = [
+        f("session", 1, FollowState::Following),
+        f("session", 2, FollowState::Muted),
+        f("session", 3, FollowState::Quiet),
+        f("session", 4, FollowState::Merged),
+        f("mission", 1, FollowState::Following),
+        f("mission", 5, FollowState::Muted),
+    ];
+    assert!(swept(&follows, "session", 1));
+    assert!(!swept(&follows, "session", 2));
+    assert!(!swept(&follows, "session", 3));
+    assert!(!swept(&follows, "session", 4));
+    assert!(!swept(&follows, "session", 9), "not a thread of Control's");
+    assert!(swept(&follows, "mission", 1));
+    assert!(!swept(&follows, "mission", 5));
+}
+
+#[test]
+fn a_pr_is_swept_after_following_stopped_but_not_when_muted() {
+    use crate::service::control_follow::{Follow, FollowState};
+    let f = |id: i64, state: FollowState| Follow {
+        kind: "session".into(),
+        id,
+        state,
+        name: String::new(),
+        host_alias: None,
+        muted: state == FollowState::Muted,
+    };
+    let follows = [
+        f(1, FollowState::Following),
+        f(2, FollowState::Done),
+        f(3, FollowState::Quiet),
+        f(4, FollowState::Merged),
+        f(5, FollowState::Muted),
+    ];
+    for id in [1, 2, 3, 4] {
+        assert!(pr_swept(&follows, id), "#{id}");
+    }
+    assert!(!pr_swept(&follows, 5), "a mute holds");
+    assert!(!pr_swept(&follows, 9), "not a thread of Control's");
+}

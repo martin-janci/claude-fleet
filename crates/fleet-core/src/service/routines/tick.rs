@@ -625,6 +625,12 @@ async fn retry_failed(deps: &Deps, now: i64) -> Result<(), IpcError> {
         let Some(r) = lock(&deps.store)?.get_routine(run.routine_id)? else {
             continue;
         };
+        // A run that ended at a rate limit is retried once the limit lifts,
+        // not into it (Control review F16).
+        let waits = super::backoff::retry_waits(&*lock(&deps.store)?, &r, &run, now);
+        if waits {
+            continue;
+        }
         let reference = format!("retry:{}", run.id);
         let retry = fire(
             deps,
@@ -798,21 +804,41 @@ async fn tick_cron(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError> {
     let scheduled = r.next_run_at;
     let res = if r.skip_next {
         let s = lock(&deps.store)?;
-        record_skip(&s, &r, "cron", None, scheduled, "a person skipped it", now).map(|_| ())
+        record_skip(&s, &r, "cron", None, scheduled, "a person skipped it", now)
     } else {
-        fire(deps, &r, "cron", None, scheduled, now)
-            .await
-            .map(|_| ())
+        fire(deps, &r, "cron", None, scheduled, now).await
     };
     let s = lock(&deps.store)?;
     // The routine as it is now: a person may have changed its schedule or
     // set Skip next while it fired, and the next fire follows what they
-    // saved, not what this pass read (review r06 F3).
+    // saved, not what this pass read (review r06 F3). It backs off when
+    // nothing changes and waits out a limit (Control review F16).
     if let Some(cur) = s.get_routine(id)? {
-        s.advance_routine(id, super::next_fire_of(&cur, now), r.skip_next)?;
+        let ran = res.as_ref().ok().filter(|_| !r.skip_next);
+        let (next, held) = super::backoff::next_fire(&s, &cur, ran, now);
+        if let Some(h) = held {
+            let reason = format!(
+                "next run held until {}: {}",
+                crate::service::agents::review::rfc3339(h.at),
+                h.why
+            );
+            decide(
+                &s,
+                &cur,
+                Decision {
+                    trigger: "cron",
+                    verdict: "skipped",
+                    reason: Some(&reason),
+                    run_id: ran.map(|run| run.id),
+                    ..Decision::default()
+                },
+                now,
+            );
+        }
+        s.advance_routine(id, next, r.skip_next)?;
     }
     s.release_routine_lease(id)?;
-    res
+    res.map(|_| ())
 }
 
 /// One event routine, under its lease: fire once per new event of its

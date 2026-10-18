@@ -21,6 +21,14 @@
         {
           "type": "field",
           "key": "automation.daily_budget"
+        },
+        {
+          "type": "field",
+          "key": "routines.pause_at_limit"
+        },
+        {
+          "type": "field",
+          "key": "routines.backoff_on_no_change"
         }
       ]
     },

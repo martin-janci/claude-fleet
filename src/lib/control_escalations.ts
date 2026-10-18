@@ -7,7 +7,7 @@
 // Pure apart from the `later` and `escalationScope` stores, which persist in
 // prefs (F18, review 2026-10-17): Later survives a restart, and by default
 // only Control's own threads (`controlSessionIds`: what it started or handed
-// work to) raise a card, with an "All fleet" switch for the rest. The rows
+// work to, while the hub still follows it and nobody muted it) raise a card, with an "All fleet" switch for the rest. The rows
 // and the triage are the Needs you tab's own (`visibleFleet`, `classify`), so
 // a card and the tab never disagree. Control's own session is a card in its
 // own chat only when its account is at its limit or without a login (control
@@ -16,6 +16,7 @@
 // it in, whatever the scope.
 import { writable } from 'svelte/store';
 import { classify, displayName, type AttentionOptions, type TriageBucket } from './attention';
+import { stillFollowed, type FollowMark } from './control_journal';
 import type { ControlHandoff } from './handoffs';
 import type { HostRow, SignedOutLogin } from './hosts';
 import { readPref, writePref } from './prefs';
@@ -94,18 +95,28 @@ export function loginEscalations(hosts: readonly HostRow[], later: ReadonlySet<s
  * The sessions that are Control's threads, as `control_threads.ts` lists
  * them: those its agent started (`origin = 'operator'`), those a session or
  * task receipt names, and the workers of a mission a receipt names.
+ * `follows` is the hub's follow state (`control_journal` read, F10): a
+ * thread muted or no longer followed (done, killed, merged, quiet) is left
+ * out, and so are the workers of such a mission; a thread it does not name,
+ * or no `follows` at all (an older hub), stays in.
  */
-export function controlSessionIds(rows: readonly SessionRow[], handoffs: readonly ControlHandoff[]): Set<number> {
+export function controlSessionIds(
+  rows: readonly SessionRow[],
+  handoffs: readonly ControlHandoff[],
+  follows: ReadonlyMap<string, FollowMark> | null = null,
+): Set<number> {
+  const followed = (key: string) => stillFollowed(follows?.get(key));
   const ids = new Set<number>();
   const missions = new Set<number>();
   for (const h of handoffs) {
     if (h.session_id != null && (h.kind === 'session' || h.kind === 'task')) ids.add(h.session_id);
-    if (h.mission_id != null) missions.add(h.mission_id);
+    if (h.mission_id != null && followed(`m:${h.mission_id}`)) missions.add(h.mission_id);
   }
   for (const s of rows) {
     if (s.origin === 'operator') ids.add(s.id);
     else if (s.origin === 'mission' && s.origin_ref && missions.has(Number(s.origin_ref))) ids.add(s.id);
   }
+  for (const id of [...ids]) if (!followed(`s:${id}`)) ids.delete(id);
   return ids;
 }
 

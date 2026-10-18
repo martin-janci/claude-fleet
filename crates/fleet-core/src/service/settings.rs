@@ -364,6 +364,14 @@ pub const AUTOMATION_PAUSED: &str = "automation.paused";
 /// M15 G3.8: whole USD every routine's runs may spend in one UTC day
 /// before no new run starts; `0` is none.
 pub const AUTOMATION_DAILY_BUDGET: &str = "automation.daily_budget";
+/// Control review F16: a cron routine whose last runs came to `nothing`
+/// (`routines::outcome`) doubles the gap to its next fire for each one, up
+/// to 6 h (`routines::backoff`). Off: every fire on schedule.
+pub const ROUTINES_BACKOFF_ON_NO_CHANGE: &str = "routines.backoff_on_no_change";
+/// Control review F16: a cron routine skipped because its account is at
+/// its limit holds its next fire until the account's limit resets, rather
+/// than skipping again at every scheduled time.
+pub const ROUTINES_PAUSE_AT_LIMIT: &str = "routines.pause_at_limit";
 /// Orchestration O4–O6: the missions' loop runs at all (the kill switch).
 pub const ORCHESTRATOR_ENABLED: &str = "orchestrator.enabled";
 /// Orchestration O6: the highest autonomy any mission's loop may take,
@@ -379,7 +387,8 @@ pub const ORCHESTRATOR_HEADLESS_MODEL: &str = "orchestrator.headless_model";
 /// `recommended` once nobody has answered for
 /// [`CONTROL_AUTO_CONTINUE_MINUTES`]. The countdown runs where the fleet
 /// runs (`service::control_continue`), so it works with no window open and
-/// fires once; never at "Ask first".
+/// fires once; only at "Within your brief" or "Autopilot" (never at "Ask
+/// first" or Custom, whatever this setting says).
 pub const CONTROL_AUTO_CONTINUE: &str = "control.auto_continue";
 pub const CONTROL_AUTO_CONTINUE_MINUTES: &str = "control.auto_continue_minutes";
 /// Control's session hears, as one compact `[fleet events]` digest typed at
@@ -398,6 +407,13 @@ pub const CONTROL_SWITCH_AT_LIMIT: &str = "control.switch_at_limit";
 /// conflicts or went red and a handed-off mission that stalled
 /// (`service::control_sweep`), so Control fixes or reports it.
 pub const CONTROL_SWEEP: &str = "control.sweep";
+/// Control review F10: hours without a turn after which Control stops
+/// following a session it started or briefed (`service::control_follow`).
+pub const CONTROL_FOLLOW_QUIET_HOURS: &str = "control.follow_quiet_hours";
+/// Control review F12: every new Control conversation (a start, a restart,
+/// a move, a compaction, `/clear`) gets its journal as a `[fleet]` note
+/// (`service::control_journal`).
+pub const CONTROL_JOURNAL: &str = "control.journal";
 pub const PLAYBOOK_OOM_RECREATE: &str = "playbooks.oom_recreate";
 /// Recreates the `oom` playbook may run on one session per 24 h
 /// (`service::playbooks::OOM_ATTEMPT_WINDOW_SECS`). `0` refuses every
@@ -954,6 +970,20 @@ pub const SPECS: &[Spec] = &[
     .unit(Unit::Usd)
     .zero("none"),
     Spec::new(
+        ROUTINES_BACKOFF_ON_NO_CHANGE,
+        "false",
+        Kind::Bool,
+        "Back off when nothing changes",
+        "A scheduled routine whose last runs found nothing to do waits twice as long before each next run, up to 6 hours. A run that does work brings the schedule back.",
+    ),
+    Spec::new(
+        ROUTINES_PAUSE_AT_LIMIT,
+        "true",
+        Kind::Bool,
+        "Wait for the limit to reset",
+        "A scheduled routine whose account is at its usage limit waits until the limit resets instead of skipping at every scheduled time.",
+    ),
+    Spec::new(
         ORCHESTRATOR_ENABLED,
         "true",
         Kind::Bool,
@@ -989,7 +1019,7 @@ pub const SPECS: &[Spec] = &[
         "true",
         Kind::Bool,
         "Go on with the recommended option",
-        "Control's chat sends the option its agent marked recommended once nobody has answered for the minutes below, even with the app closed, and only once. Typing, Cancel or any other message stops it. Never for a push, a delete or another step hard to undo, and never at Ask first.",
+        "Only at Within your brief or Autopilot: Control's chat sends the option its agent marked recommended once nobody has answered for the minutes below, once, even with the app closed. Typing or Cancel stops it. Never for a push, a delete or another step hard to undo.",
     ),
     Spec::new(
         CONTROL_AUTO_CONTINUE_MINUTES,
@@ -1008,10 +1038,10 @@ pub const SPECS: &[Spec] = &[
     ),
     Spec::new(
         CONTROL_FEED_MIN_INTERVAL_SECS,
-        "60",
+        "900",
         Kind::Secs,
         "Time between notes to Control",
-        "The shortest time between two notes to Control's agent. What happens in between goes out together in the next one.",
+        "The shortest time between two notes to Control's agent. A note goes only when something needs Control (a question, a failure, failing checks, a lost session, a host down); finished turns wait and go out with the next one.",
     )
     .unit(Unit::Seconds)
     .zero("no wait")
@@ -1029,6 +1059,22 @@ pub const SPECS: &[Spec] = &[
         Kind::Bool,
         "Control sweeps what it handed out",
         "The note to Control's agent also names a pull request it handed out that has merge conflicts or failing checks, and a mission it handed off that made no progress for a while, once per change. Within your brief it fixes or reassigns them, asking as usual; at Ask first it only tells you.",
+    ),
+    Spec::new(
+        CONTROL_FOLLOW_QUIET_HOURS,
+        "24",
+        Kind::Int { min: 1, max: 720 },
+        "Stop following after",
+        "Control stops following a session it started or briefed once it is done, killed or its pull request merged, or after this long without a turn. Briefing it again follows it again.",
+    )
+    .unit(Unit::Hours)
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        CONTROL_JOURNAL,
+        "true",
+        Kind::Bool,
+        "Brief Control from its journal",
+        "When Control starts a new conversation (a restart, a move to another host, a compaction or a new chat), fleet first tells it what it was following, what it asked you and what you last said.",
     ),
     Spec::new(
         PLAYBOOK_PRESS_ENTER,

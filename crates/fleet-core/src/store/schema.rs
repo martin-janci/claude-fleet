@@ -2256,6 +2256,13 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/199_followup_origin.sql"),
         already_applied: Some(work_items_has_origin_task_id),
     },
+    // Control's journal and thread mutes (Control review F10, F12):
+    // `control_journal`, `control_mutes`. New tables.
+    Migration {
+        version: 200,
+        sql: include_str!("../../migrations/200_control_journal.sql"),
+        already_applied: None,
+    },
 ];
 
 /// The settings row [`Store::finish_realm_upgrade`] writes once migration

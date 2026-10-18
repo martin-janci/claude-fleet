@@ -370,18 +370,26 @@ next pass.
 **The operator feed** is landed and ON by default (`control.react_to_events`,
 `service/operator_feed.rs`, loop `operator_feed`): Control's own session gets
 one compact `[fleet events]` digest, through the deferred queue so only
-while it is idle, when a session it started (`origin = 'operator'`) or
-briefed (a `control_handoffs` receipt) finishes a turn, waits on an answer,
-fails, is lost, auto-restored or past restoring; when a mission it handed off
-waits on a person; or when a host goes unreachable or low on disk or memory.
-At most one per `control.feed_min_interval_secs` (60) and 6 an hour; none
-while one is still queued, none while paused, never about the operator
-itself, and never a session's own words (names and vocabulary only). The
-cursor and the already-reported host/mission conditions live in the
-`control.feed_state` setting; no migration. The digest is typed as fleet's
-(`prompt_origin::FLEET_PROMPT_MARKS`); the operator's `CLAUDE.md` has a
-*Fleet events* section. Since the 2026-10-17 review (F13) the operator's
-`CLAUDE.md`, commands and skill are written at birth (a move is a birth)
+while it is idle, about a session it started (`origin = 'operator'`) or
+briefed (a `control_handoffs` receipt) that waits on an answer, fails, gets
+failing checks on its PR, is lost or is past restoring; a mission it handed
+off that waits on a person; or a host that goes unreachable or low on disk
+or memory. Since the Control review (F11) only those interrupt: a finished
+turn, a merge or an automatic restore waits in the `control.feed_state`
+backlog and rides along with the next digest, and what grew older than an
+hour before it could be told is one "while you were away" line of counts
+instead of being dropped. At most one per `control.feed_min_interval_secs`
+(900 since F11, was 60) and 6 an hour; none while one is still queued, none
+while paused, never about the operator itself, and never a session's own
+words (names and vocabulary only). Since F10 (`service/control_follow.rs`,
+migration 200) Control follows a session only while it matters: not once it
+is done, killed or removed, its PR merged after the last brief, or quiet for
+`control.follow_quiet_hours` (24), nor a thread muted from the Control
+threads column's bell or `control_journal { action: mute }`; a PR's merge
+and failing checks are told after following stopped, unless muted. The digest is
+typed as fleet's (`prompt_origin::FLEET_PROMPT_MARKS`); the operator's
+`CLAUDE.md` has a *Fleet events* section. Since the 2026-10-17 review
+(F13) the operator's `CLAUDE.md`, commands and skill are written at birth (a move is a birth)
 and again before every restart, the panel's and auto-restore's alike
 (`operator::refresh_if_operator` in `sessions::restart_session`), unless the
 host's `.claude/fleet-operator-files.version` already holds this build's
@@ -406,7 +414,26 @@ login and account, why a host cannot be reached, each paired client's kind,
 version and Control features; every finding `checked` or `inferred`)
 before naming a cause or a button. `diagnose` reads rows only; the self
 debug agent's `fleet-diagnostics` (#933) is the deeper log search. The
-sweep's session set is the feed's (no expiry yet, F10).
+sweep skips a muted thread and a mission Control no longer follows
+(`control_follow::follows`, F10), but a session's PR is swept after F10
+stopped following the session (done, quiet, merged): a red or conflicting
+PR is still Control's to fix or report.
+
+**Control's journal** is landed and ON by default (`control.journal`,
+`service/control_journal.rs`, migration 200, loop `control_journal`;
+Control review F12): the hub keeps what Control follows (read live from
+the receipts), the questions it asked the person and is waiting on (`ask`,
+cleared when the person next speaks), the last thing the person said to it
+(the UserPromptSubmit hook, the person's own words only, 200 characters)
+and Control's own notes. When the operator's timeline shows a new
+conversation (`conversation_started`: a start, a restart, a move's new
+birth, `/clear`, `/resume`; or `compact_done`) its journal is queued as a
+`[fleet] Control journal` note; an empty journal is not sent. The MCP tool
+`control_journal` (Control, the master and the owner's device; desktop
+command of the same name, routed to the hub) reads it with the pending
+approvals and adds a `note` or an `ask`. The *Your journal* section of the
+operator's `CLAUDE.md` (`control_journal::SECTION`) reaches a running
+operator at its next start or restart (F13).
 
 **Host load** is landed (migration 193): the health sample adds CPU busy
 percent (Linux `/proc/stat` deltas, macOS summed `ps` %CPU), available
@@ -985,8 +1012,11 @@ its `test:<command>` lines as `Bash(<command>)`, everything else denied
 `done_when` reads it unchanged; its cost is booked as `headless_check` on
 the mission. A checkout that moved or is dirty, a command with shell syntax,
 or a host outside the grant takes the session path.
-Control's chat goes on by itself (ON by default, `control.auto_continue`;
-moved to the fleet by review F17, 2026-10-17): when the agent's reply ends
+Control's chat goes on by itself only at *Within your brief* or *Autopilot*
+on the autonomy chip (`control.auto_continue`, which those positions turn
+on; the shipped defaults read Custom, which acts as *Ask first*, so it does
+not run until the person picks one; moved to the fleet by review F17,
+2026-10-17): when the agent's reply ends
 on a `choices` card with an option marked `recommended`, the operator's Stop
 hook records it (`service/control_continue.rs`, the `control.auto_continue_state`
 setting, no migration) and loop `control_continue` sends it as a `[fleet]`
@@ -1012,7 +1042,13 @@ is at or past `accounts.pause_at` is skipped (8.7). M15 G3.8 (migration
 159) adds the guards: a fleet daily budget for every routine's runs
 (`automation.daily_budget`), a per-run time cap, a fallback host, retry
 once, an autonomy line under the prompt, and a named fix on a failed run
-from its error code. Each finished run
+from its error code. The Control review's F16 (`routines/backoff.rs`, no
+migration): a cron fire skipped at a usage limit holds the next fire until
+the account's window resets (`routines.pause_at_limit`, on), a `retry_once`
+retry of a rate-limited run waits for the same, and with
+`routines.backoff_on_no_change` (off) each run in a row that came to
+`nothing` doubles the gap to the next scheduled fire, up to 6 h (a run's
+`nothing` comes from Jev N6, itself off). Each finished run
 records what it came to (8.10; Jev N6 is off), and a failed run shows in
 the Inbox. `runs` (8.3, migration 141) lists tasks, missions, Jev,
 `claude -p` and routine runs in one list. Start rules (8.11,

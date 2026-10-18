@@ -1178,6 +1178,25 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "control_journal",
+            "control_journal",
+            json!({ "action": "mute", "thread": "session", "id": 3 }),
+            r#"{"changed":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::mcp::routed::control_journal(
+                    b,
+                    s,
+                    fleet_core::service::control_journal::JournalArgs {
+                        action: Some("mute".into()),
+                        thread: Some("session".into()),
+                        id: Some(3),
+                        ..Default::default()
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "mcp_pending_confirms",
             "mcp_confirms",
             json!({}),

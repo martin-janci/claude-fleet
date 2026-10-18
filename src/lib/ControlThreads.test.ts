@@ -16,6 +16,7 @@ import { destination } from './destination';
 import { sidebarView } from './work_view';
 import { session } from './hosts_fixture';
 import { expectAccessible } from './a11y_check';
+import { mutedThreads } from './control_journal';
 
 // Thread room (2026-10-14, board Main): Control's own left column.
 
@@ -32,6 +33,7 @@ let budget: unknown = null;
 
 beforeEach(() => {
   resetHandoffsForTests();
+  mutedThreads.set(new Set());
   controlViews.set(defaultLayout());
   activeThread.set(null);
   controlMission.set(null);
@@ -116,6 +118,32 @@ describe('ControlThreads', () => {
     await fireEvent.click(screen.getByTestId('control-threads-all-sessions'));
     expect(get(sidebarView)).toBe('sessions');
     expect(get(destination)).toBe('session');
+  });
+
+  it("a thread's bell mutes it for Control, and the journal says which are muted", async () => {
+    let muted = false;
+    inv.mockImplementation(async (cmd: string, args?: { args?: { action?: string; thread?: string; id?: number } }) => {
+      if (cmd === 'control_handoffs') return receipts;
+      if (cmd === 'work_missions') return missions;
+      if (cmd === 'control_journal') {
+        const a = args?.args ?? {};
+        if (a.action === 'mute') muted = true;
+        if (a.action === 'unmute') muted = false;
+        return a.action === 'read' ? { follows: [{ kind: 'session', id: flake.id, state: muted ? 'muted' : 'following', name: 'fix-flake', muted }] } : { changed: true };
+      }
+      return null;
+    });
+    render(ControlThreads, { oncollapse: () => {} });
+    await waitFor(() => expect(screen.getAllByTestId('control-thread')).toHaveLength(3));
+    const row = () => screen.getAllByTestId('control-thread').find((r) => (r.textContent ?? '').includes('fix-flake'))!;
+    const bell = () => row().parentElement!.querySelector('[data-testid="control-thread-mute"]') as HTMLElement;
+    expect(bell().getAttribute('aria-pressed')).toBe('false');
+    await fireEvent.click(bell());
+    await waitFor(() => expect(row().dataset.muted).toBe('true'));
+    expect(row().textContent).toContain('Muted ·');
+    expect(inv).toHaveBeenCalledWith('control_journal', { args: { action: 'mute', thread: 'session', id: flake.id } });
+    await fireEvent.click(bell());
+    await waitFor(() => expect(row().dataset.muted).toBeUndefined());
   });
 
   it('passes the axe and audit checks', async () => {

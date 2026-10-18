@@ -55,6 +55,11 @@ fn each_reported_kind_is_classified_and_the_rest_are_not() {
         classify("auto_restore_skipped", Some("budget_spent")),
         Some(What::NotRestorable)
     );
+    assert_eq!(
+        classify("pr_ci_failed", Some("https://x/pr/1")),
+        Some(What::CiFailing)
+    );
+    assert_eq!(classify("pr_merged", None), Some(What::Merged));
     assert_eq!(classify("prompt_sent", None), None);
     assert_eq!(classify("mcp_call", None), None);
     for k in KINDS {
@@ -220,8 +225,11 @@ fn world() -> World {
     s.conn_ref()
         .execute("UPDATE hosts SET reachable = 1 WHERE alias = 'h'", [])
         .unwrap();
+    // Created now: a session nothing happened on for a day is no longer
+    // followed (F10).
+    let t0 = crate::store::now_unix();
     let mk = |name: &str| {
-        s.upsert_session(name, "h", None, None, 1, 1, "running", None)
+        s.upsert_session(name, "h", None, None, t0, t0, "running", None)
             .unwrap()
     };
     let op = mk("fleet-operator");
@@ -317,7 +325,7 @@ async fn changes_inside_the_interval_wait_and_go_out_together() {
     let fake = Fake::default();
     let now = crate::store::now_unix();
     run_with(&w.store, &fake, &CFG, now).await;
-    event(&w, w.child, "turn_done", None);
+    event(&w, w.child, "stuck", Some("press_enter"));
     assert!(run_with(&w.store, &fake, &CFG, now).await.sent);
     event(&w, w.child, "lost", Some("process_died"));
     let r = run_with(&w.store, &fake, &CFG, now + 10).await;
@@ -339,7 +347,7 @@ async fn a_digest_still_queued_holds_the_next_one() {
     };
     let now = crate::store::now_unix();
     run_with(&w.store, &fake, &CFG, now).await;
-    event(&w, w.child, "turn_done", None);
+    event(&w, w.child, "stop_failure", None);
     assert!(run_with(&w.store, &fake, &CFG, now).await.sent);
     event(&w, w.child, "stuck", Some("press_enter"));
     let r = run_with(&w.store, &fake, &CFG, now + 600).await;
@@ -577,4 +585,180 @@ async fn a_signed_out_login_is_told_once_and_its_return_too() {
     assert!(fake.sent.lock().unwrap()[1]
         .1
         .contains("the Claude login on h is signed in again"));
+}
+
+// ------------------------------------------------- F10 / F11 (Control review)
+
+#[test]
+fn only_what_needs_control_sends_a_digest() {
+    for w in [
+        What::Finished,
+        What::AutoRestored,
+        What::Merged,
+        What::AccountSwitch(true),
+    ] {
+        assert!(!w.needs_control(), "{w:?}");
+    }
+    for w in [
+        What::Blocked,
+        What::Failed(None),
+        What::Lost("process_died".into()),
+        What::NotRestorable,
+        What::CiFailing,
+        What::AccountSwitch(false),
+    ] {
+        assert!(w.needs_control(), "{w:?}");
+    }
+}
+
+#[test]
+fn fold_keeps_routine_lines_and_counts_what_grew_old() {
+    let now = 100_000;
+    let mut st = FeedState::default();
+    fold(
+        &mut st,
+        &[
+            ev(1, 1, now - 50, "turn_done", None),
+            ev(2, 1, now - 40, "turn_done", None),
+            ev(3, 2, now - EVENT_MAX_AGE_SECS - 5, "stop_failure", None),
+            ev(4, 3, now - EVENT_MAX_AGE_SECS - 9, "turn_done", None),
+        ],
+        now,
+    );
+    assert_eq!(st.backlog.len(), 1, "two turns of one session are one line");
+    assert!(!st.backlog[0].urgent);
+    assert_eq!(st.backlog[0].at, now - 40);
+    assert!(st.away.urgent, "an old failure still needs Control");
+    assert_eq!(st.away.counts.get("failed"), Some(&1));
+    assert_eq!(st.away.counts.get("finished"), Some(&1));
+    assert!(needs_control(&st, 0));
+    let line = away_line(&st.away).unwrap();
+    assert!(line.starts_with("while you were away"), "{line}");
+    assert!(
+        line.contains("1 failures") && line.contains("1 finished turns"),
+        "{line}"
+    );
+    assert!(line.contains("s2, s3"), "{line}");
+    // A held line that grows old moves to the count.
+    let mut st2 = FeedState::default();
+    fold(&mut st2, &[ev(5, 1, now - 10, "turn_done", None)], now);
+    assert!(!needs_control(&st2, 0));
+    fold(&mut st2, &[], now + EVENT_MAX_AGE_SECS);
+    assert!(st2.backlog.is_empty());
+    assert_eq!(st2.away.sessions, ["s1".to_string()].into_iter().collect());
+    assert!(!needs_control(&st2, 0));
+    assert!(needs_control(&st2, 1), "a fresh condition does");
+}
+
+#[test]
+fn the_digest_puts_what_needs_control_first() {
+    let now = 100_000;
+    let mut st = FeedState::default();
+    fold(
+        &mut st,
+        &[
+            ev(1, 1, now - 50, "turn_done", None),
+            ev(2, 2, now - 40, "lost", Some("host_reboot")),
+        ],
+        now,
+    );
+    let lines = digest_lines(&st, &["host h is unreachable".into()]);
+    assert!(lines[0].contains("was lost"), "{lines:?}");
+    assert_eq!(lines[1], "host h is unreachable");
+    assert!(lines[2].contains("finished its turn"), "{lines:?}");
+}
+
+#[tokio::test]
+async fn a_finished_turn_waits_for_something_that_needs_control() {
+    let w = world();
+    let fake = Fake::default();
+    let now = crate::store::now_unix();
+    run_with(&w.store, &fake, &CFG, now).await;
+    event(&w, w.child, "turn_done", None);
+    let r = run_with(&w.store, &fake, &CFG, now).await;
+    assert_eq!(r.held, Some("nothing_urgent"));
+    assert!(fake.sent.lock().unwrap().is_empty());
+    // Past the interval, still nothing: a finished turn alone never sends.
+    assert!(!run_with(&w.store, &fake, &CFG, now + 600).await.sent);
+    event(&w, w.handed, "stop_failure", Some("rate_limit: later"));
+    let r = run_with(&w.store, &fake, &CFG, now + 601).await;
+    assert!(r.sent, "{r:?}");
+    let body = fake.sent.lock().unwrap()[0].1.clone();
+    let fail = body.find("failed (rate_limit)").unwrap();
+    let done = body.find("finished its turn").unwrap();
+    assert!(fail < done, "what needs Control comes first: {body}");
+    // Told once: the backlog went with it.
+    event(&w, w.handed, "stop_failure", None);
+    run_with(&w.store, &fake, &CFG, now + 700).await;
+    let second = fake.sent.lock().unwrap()[1].1.clone();
+    assert!(!second.contains("finished its turn"), "{second}");
+}
+
+#[tokio::test]
+async fn a_session_control_no_longer_follows_is_not_told() {
+    let w = world();
+    let fake = Fake::default();
+    let now = crate::store::now_unix();
+    run_with(&w.store, &fake, &CFG, now).await;
+    // Muted by the person: its failure is not told.
+    w.store
+        .lock()
+        .unwrap()
+        .set_control_mute("session", w.child, true, now)
+        .unwrap();
+    event(&w, w.child, "stop_failure", None);
+    let r = run_with(&w.store, &fake, &CFG, now).await;
+    assert!(!r.sent, "{r:?}");
+    // Merged: told once, then nothing more about it.
+    event(&w, w.handed, "pr_merged", Some("https://x/pr/1"));
+    event(&w, w.handed, "stop_failure", None);
+    let r = run_with(&w.store, &fake, &CFG, now).await;
+    assert!(
+        !r.sent,
+        "a merge alone is routine and the failure after it is not followed"
+    );
+    event(&w, w.child, "stuck", None);
+    w.store
+        .lock()
+        .unwrap()
+        .set_control_mute("session", w.child, false, now)
+        .unwrap();
+    event(&w, w.child, "stuck", None);
+    let r = run_with(&w.store, &fake, &CFG, now).await;
+    assert!(r.sent, "{r:?}");
+    let body = fake.sent.lock().unwrap()[0].1.clone();
+    assert!(body.contains("had its pull request merged"), "{body}");
+    assert!(
+        !body.contains(&format!("session handed on h (#{}) failed", w.handed)),
+        "{body}"
+    );
+}
+
+/// F10: a PR's failing checks and its merge are told after Control stopped
+/// following the session; nothing is told for a muted one.
+#[test]
+fn pr_events_are_told_after_following_stopped_unless_muted() {
+    use crate::service::control_follow::{Follow, FollowState};
+    use crate::store::{PR_EVENT_CI_FAILED, PR_EVENT_MERGED};
+    let f = |id: i64, state: FollowState| Follow {
+        kind: "session".into(),
+        id,
+        state,
+        name: String::new(),
+        host_alias: None,
+        muted: state == FollowState::Muted,
+    };
+    let follows = [
+        f(1, FollowState::Following),
+        f(2, FollowState::Done),
+        f(3, FollowState::Muted),
+    ];
+    assert!(told_of(&follows, 1, "turn_done"));
+    assert!(!told_of(&follows, 2, "turn_done"));
+    assert!(told_of(&follows, 2, PR_EVENT_CI_FAILED));
+    assert!(told_of(&follows, 2, PR_EVENT_MERGED));
+    for kind in ["turn_done", PR_EVENT_CI_FAILED, PR_EVENT_MERGED] {
+        assert!(!told_of(&follows, 3, kind), "{kind}");
+    }
+    assert!(!told_of(&follows, 9, PR_EVENT_CI_FAILED));
 }
