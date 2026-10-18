@@ -2533,7 +2533,23 @@ impl FleetTools {
                 "acked": serde_json::Value::Null,
             }));
         }
-        let queued = delivery_gate(row, force, submit)?;
+        let mut queued = delivery_gate(row, force, submit)?;
+        // An idle session gets one prompt per idle moment, whoever types it:
+        // this send takes the moment, or the queue already did and the REPL
+        // will hold this one behind that turn.
+        if submit
+            && !queued
+            && !crate::service::sessions::deferred::claim_moment_for_direct_send(
+                &self.store,
+                row,
+                &prompt,
+                crate::store::now_unix(),
+            )
+            .map_err(to_mcp_err)?
+            && crate::service::sessions::deferred::idle_for_prompt(row)
+        {
+            queued = true;
+        }
         let before = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             s.prompt_ack_state(row.id)
