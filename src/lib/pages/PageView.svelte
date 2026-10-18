@@ -23,7 +23,7 @@
   import { setFleetSetting, type SettingKey } from '../fleet_settings';
   import AccountsUsage from './usage/AccountsUsage.svelte';
   import type { SettingProposal } from './review';
-  import type { ResourceType } from './resources';
+  import type { ResourceRecord, ResourceType } from './resources';
   import { hosts } from '../hosts';
   import {
     boundRef,
@@ -54,6 +54,8 @@
     remote = false,
     reason = null,
     proposals = [],
+    fleet = null,
+    canChange,
     onnavigate,
     onopen,
   }: {
@@ -81,6 +83,10 @@
     /** Pending settings proposals (P5): a field shows its own inline, a
      *  review_apply page lists them all. */
     proposals?: SettingProposal[];
+    /** A resource page's extra fleet (multi-hub): see `ResourcePage`. */
+    fleet?: string | null;
+    /** A resource page's per-record write gate: see `ResourcePage`. */
+    canChange?: (record: ResourceRecord) => boolean;
     onnavigate: (pageId: string) => void;
     /** Open a setting on its page (a review row's name). */
     onopen?: (pageId: string, key: string) => void;
@@ -232,7 +238,7 @@
   {#if page.layout === 'master_detail'}
     {@const res = resources.find((r) => r.id === page.resource)}
     {#if res}
-      <ResourcePage {page} resource={res} {readonly} {reason} {actions} />
+      <ResourcePage {page} resource={res} {readonly} {reason} {actions} {fleet} {canChange} />
     {/if}
   {:else if tabs.length > 0}
     <Tabs tabs={tabs.map((t) => t.title)} bind:selected={tab} label={page.title} testidPrefix={`page-${page.id}-tab`} />

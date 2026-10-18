@@ -4,6 +4,7 @@
 // an action's arguments, say a sub-item, list the badges. Actions run the
 // existing desktop commands they name, so every hub verdict applies as is.
 import { invokeCmd, type Result } from '../result';
+import { FLEET_SCOPED, PRIMARY } from '../fleets';
 import { loadOrgs, ruleChip, type OrgRuleRow } from '../orgs';
 import { loadTrackers } from '../trackers';
 import { loadCatalogStatuses } from '../assets_workspace';
@@ -625,8 +626,26 @@ export function formValues(action: ActionSpec, params: Record<string, string>): 
   return Object.fromEntries(action.params.map((p) => [p.name, paramValue(p, params)]));
 }
 
-export function runAction(action: ActionSpec, args: Record<string, unknown>): Promise<Result<unknown>> {
-  return invokeCmd<unknown>(action.command, { args });
+/**
+ * The envelope that sends `command` to `fleet`: nothing extra for the
+ * primary, `{ fleet }` for an extra fleet — and a refusal when the command
+ * is not fleet-scoped, since the backend would ignore an argument it does
+ * not take and act on the PRIMARY fleet instead (multi-hub design D6).
+ */
+function fleetArgs(command: string, fleet: string | null | undefined): Result<Record<string, unknown>> {
+  if (!fleet || fleet === PRIMARY) return { ok: true, value: {} };
+  if (!(FLEET_SCOPED as readonly string[]).includes(command))
+    return {
+      ok: false,
+      error: { code: 'E_INVALID', message: `${command} cannot be sent to another fleet from this window` },
+    };
+  return { ok: true, value: { fleet } };
+}
+
+export async function runAction(action: ActionSpec, args: Record<string, unknown>, fleet?: string | null): Promise<Result<unknown>> {
+  const f = fleetArgs(action.command, fleet);
+  if (!f.ok) return f;
+  return invokeCmd<unknown>(action.command, { args, ...f.value });
 }
 
 /** An action's preview (`ActionSpec.preview`): its one-line answer, or
@@ -638,8 +657,11 @@ export async function previewAction(action: ActionSpec, args: Record<string, unk
   return r.ok && typeof r.value?.sentence === 'string' ? r.value.sentence : null;
 }
 
-export function listRecords(r: ResourceType): Promise<Result<ResourceRecord[]>> {
-  return invokeCmd<ResourceRecord[]>(r.list);
+/** A resource's records; from an extra fleet when `fleet` names one. */
+export async function listRecords(r: ResourceType, fleet?: string | null): Promise<Result<ResourceRecord[]>> {
+  const f = fleetArgs(r.list, fleet);
+  if (!f.ok) return f;
+  return Object.keys(f.value).length ? invokeCmd<ResourceRecord[]>(r.list, f.value) : invokeCmd<ResourceRecord[]>(r.list);
 }
 
 /**

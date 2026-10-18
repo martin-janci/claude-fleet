@@ -2,7 +2,8 @@
 //! Settings › Environment and the hub's `env_vars` tool. Standalone it runs
 //! `service::env::run` as this app's own master (references allowed);
 //! paired, the hub's tool decides, so a reference from a device is refused
-//! there.
+//! there. Every command is fleet-scoped (`backend::fleets::FLEET_SCOPED`):
+//! `fleet` names an extra fleet, whose hub then decides the same way.
 
 use crate::backend::FleetBackend;
 use fleet_core::ipc_error::IpcError;
@@ -14,9 +15,12 @@ use tauri::State;
 #[tauri::command]
 pub async fn env_vars(
     args: EnvVarsArgs,
+    fleet: Option<String>,
     backend: State<'_, Arc<FleetBackend>>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<serde_json::Value, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::env_vars(&backend, &store, args).await
 }
 
@@ -24,9 +28,12 @@ pub async fn env_vars(
 /// arguments of its own.
 #[tauri::command]
 pub async fn env_vars_list(
+    fleet: Option<String>,
     backend: State<'_, Arc<FleetBackend>>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<serde_json::Value, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::env_vars_list(&backend, &store).await
 }
 
@@ -35,9 +42,12 @@ pub async fn env_vars_list(
 #[tauri::command]
 pub async fn env_var_set(
     args: EnvVarSetArgs,
+    fleet: Option<String>,
     backend: State<'_, Arc<FleetBackend>>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<serde_json::Value, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::env_var_set(&backend, &store, args).await
 }
 
@@ -45,9 +55,12 @@ pub async fn env_var_set(
 #[tauri::command]
 pub async fn env_var_unset(
     args: EnvVarUnsetArgs,
+    fleet: Option<String>,
     backend: State<'_, Arc<FleetBackend>>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<serde_json::Value, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::env_var_unset(&backend, &store, args).await
 }
 

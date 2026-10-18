@@ -650,3 +650,8 @@ bullet for the area you are about to change.
   holds `{fleet, id}`. The hub's `ready` frame carries `fleet_id`; the
   bridge reports it through `ConnectionReporter::hub_fleet_id`, and
   `Fleets::select` refuses an extra fleet whose id another fleet already has.
+  A declarative resource page can be pointed at an extra fleet
+  (`ResourcePage`'s `fleet` prop, used by Settings › Environment through
+  `EnvironmentSettings.svelte`): `resources.ts::fleetArgs` sends `fleet` with
+  a `FLEET_SCOPED` command and refuses any other, which the backend would
+  otherwise run against the primary.

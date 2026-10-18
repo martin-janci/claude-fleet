@@ -223,7 +223,10 @@ ConversationPanel with a `fleet` prop — that panel's ~80 modules key drafts,
 viewed-at, the terminal map, rewind and fork by the primary's ids, which is
 Phase 3's re-key. `FLEET_SCOPED` grew by `session_conversation`,
 `session_tool_detail`, `capture_session`, `touch_session_viewed` and
-`list_pull_requests`. The New session default is: the fleet last used for
+`list_pull_requests`, and later by Settings › Environment's `env_vars`,
+`env_vars_list`, `env_var_set`, `env_var_unset` plus the two reads that say
+what the device may change there, `my_grants` and `setting_proposals`
+(a Fleet picker on that page). The New session default is: the fleet last used for
 the repository, else the extra fleet whose label or host name is the
 repository's owner, else the primary (the org rule, read from what the
 window knows; the hubs' org rows are not compared). Repo reads stay on the

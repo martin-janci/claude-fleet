@@ -583,3 +583,25 @@ describe('Settings → Catalogs on a paired desktop', () => {
     expect(screen.queryByTestId('item-remove-admitted')).toBeNull();
   });
 });
+
+// Person-scope env: Settings → Environment on a paired desktop is not the
+// fleet-wide read-only page. A person's own variables are theirs to change
+// from an untrusted device; the shared scopes still need the trust.
+describe('Settings → Environment on a paired desktop', () => {
+  it('an untrusted device that speaks for a person adds its own variables', async () => {
+    hubStatus.set(remote);
+    settingsWritable.set(false);
+    route({
+      env_vars_list: [],
+      my_grants: { person_id: 7, grants: [] },
+      setting_proposals: { can_write: false, proposals: [] },
+    });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await fireEvent.click(await screen.findByTestId('settings-nav-env'));
+    const reason = await screen.findByTestId('resource-readonly');
+    expect(reason.textContent).toContain('Your own variables');
+    await fireEvent.click(await screen.findByTestId('resource-add'));
+    const scope = (await screen.findByTestId('param-env_var.set-scope')) as HTMLSelectElement;
+    expect(Array.from(scope.options).map((o) => o.value)).toEqual(['person']);
+  });
+});
