@@ -18,13 +18,14 @@ import { listen } from '@tauri-apps/api/event';
 import { invokeCmd, type IpcError, type Result } from './result';
 import type { HubConnection } from './hub_connection';
 import type { SessionRow } from './sessions';
-import type { HostRow } from './hosts';
+import { applyPing, type HostPing, type HostRow } from './hosts';
 import type { ProjectRow, ProjectTreeRow } from './projects';
 import { readPref, writePref } from './prefs';
 import { attentionState, byTriage, countsTowardBadge } from './attention';
 import { attentionFactsFrom } from './attention_facts';
 import { attentionIdleMinutes } from './notify';
 import type { PrFilter, PrList } from './prs';
+import { createListRace, type ListRace } from './row_store';
 
 /** The slot id of the launch-time fleet (`backend::fleets::PRIMARY`). */
 export const PRIMARY = 'primary';
@@ -157,6 +158,31 @@ function isObj(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null;
 }
 
+/** One extra fleet's re-list rule (review r07, as `projects.ts` keeps it):
+ *  every frame touches the key it changed, so a list answer in flight loses
+ *  to it, and an older list never lands over a newer one — a reconnect asks
+ *  twice (`connected`, then `hub:resynced`) and the two can answer out of
+ *  order. */
+export interface FleetRaces {
+  sessions: ListRace<number>;
+  hosts: ListRace<string>;
+  projects: ListRace<number>;
+}
+
+const races = new Map<string, FleetRaces>();
+
+function racesFor(fleet: string): FleetRaces {
+  let r = races.get(fleet);
+  if (!r) {
+    r = { sessions: createListRace(), hosts: createListRace(), projects: createListRace() };
+    races.set(fleet, r);
+  }
+  return r;
+}
+
+/** The collections of one fleet's rows. */
+type RowPart = keyof FleetRaces;
+
 // ── the guards the primary's session store has (`sessions.ts`) ──────────
 //
 // An extra fleet's rows race the same way the primary's do: a command's
@@ -164,8 +190,8 @@ function isObj(v: unknown): v is Record<string, unknown> {
 // `session:updated` already queued can land after the kill ("ghost
 // session"), and a list answer can land after events that are newer than
 // it. So, per fleet: a known older `row_version` of the same session is
-// dropped, a killed id keeps a short tombstone, and a list merges with what
-// changed while it was out instead of replacing it.
+// dropped, a killed id keeps a short tombstone, and a list merges through the
+// fleet's race (`FleetRaces`) with what changed while it was out.
 
 /** How long a killed session's id refuses a late `session:updated`. */
 export const FLEET_TOMBSTONE_MS = 5000;
@@ -187,19 +213,6 @@ function fleetSessionIsStale(incoming: SessionRow, current: SessionRow): boolean
 /** Per fleet, per killed id: until when, and which session it was (null when
  *  the kill named only the id of a row this window never held). */
 const tombstones = new Map<string, Map<number, { until: number; identity: string | null }>>();
-
-/** What changed while one list call was out, so its answer does not undo it. */
-interface Touched {
-  sessions: Set<number>;
-  hosts: Set<string>;
-  projects: Set<number>;
-}
-const listsOut = new Map<string, Set<Touched>>();
-
-function touch(fleet: string | undefined, part: keyof Touched, id: number | string): void {
-  if (fleet === undefined) return;
-  for (const t of listsOut.get(fleet) ?? []) (t[part] as Set<number | string>).add(id);
-}
 
 function liveTombstone(fleet: string | undefined, id: number): { identity: string | null } | null {
   if (fleet === undefined) return null;
@@ -233,14 +246,14 @@ function admitSession(
 function putSession(fleet: string | undefined, rows: FleetRows, row: SessionRow, how: 'updated' | 'created' | 'command'): void {
   if (!admitSession(fleet, rows, row, how)) return;
   rows.sessions.set(row.id, row);
-  touch(fleet, 'sessions', row.id);
+  if (fleet !== undefined) racesFor(fleet).sessions.touch(row.id);
 }
 
 function dropSession(fleet: string | undefined, rows: FleetRows, id: number): void {
   const current = rows.sessions.get(id);
   rows.sessions.delete(id);
-  touch(fleet, 'sessions', id);
   if (fleet === undefined) return;
+  racesFor(fleet).sessions.touch(id);
   let m = tombstones.get(fleet);
   if (!m) tombstones.set(fleet, (m = new Map()));
   m.set(id, { until: Date.now() + FLEET_TOMBSTONE_MS, identity: current ? fleetSessionIdentity(current) : null });
@@ -248,7 +261,7 @@ function dropSession(fleet: string | undefined, rows: FleetRows, id: number): vo
 
 /** The event names that change an extra fleet's rows, and which of its
  *  collections each one writes. */
-const ROW_EVENTS = new Map<string, keyof Touched>([
+const ROW_EVENTS = new Map<string, RowPart>([
   ['session:created', 'sessions'],
   ['session:updated', 'sessions'],
   ['session:killed', 'sessions'],
@@ -263,12 +276,14 @@ const ROW_EVENTS = new Map<string, keyof Touched>([
  *  caller has to do beyond that: `relist` after a gap the bridge could not
  *  replay, `connection` when the link moved. Unknown names are ignored —
  *  this fleet's view keeps sessions, hosts and projects only (Phase 1).
- *  With `fleet`, that fleet's stale-row and tombstone guards apply. */
+ *  With `fleet`, that fleet's stale-row and tombstone guards apply and each
+ *  frame touches the key it changed in the fleet's race. */
 export function applyFleetEvent(
   rows: FleetRows,
   e: Pick<FleetEvent, 'name' | 'payload'>,
   fleet?: string,
 ): 'relist' | 'connection' | null {
+  const race = fleet === undefined ? undefined : racesFor(fleet);
   const p = e.payload;
   switch (e.name) {
     case 'session:created':
@@ -283,31 +298,33 @@ export function applyFleetEvent(
     case 'host:probed':
       if (isObj(p) && typeof p.alias === 'string') {
         rows.hosts.set(p.alias, p as unknown as HostRow);
-        touch(fleet, 'hosts', p.alias);
+        race?.hosts.touch(p.alias);
       }
       return null;
     case 'host:pinged':
       if (isObj(p) && typeof p.alias === 'string') {
         const old = rows.hosts.get(p.alias);
+        // Flattened as the primary's hosts store does: the row keeps the
+        // health sample at top level, never under `health`.
         if (old) {
-          rows.hosts.set(p.alias, { ...old, ...(p as Partial<HostRow>) });
-          touch(fleet, 'hosts', p.alias);
+          rows.hosts.set(p.alias, applyPing(old, p as unknown as HostPing));
+          race?.hosts.touch(p.alias);
         }
       }
       return null;
     case 'host:removed':
       if (isObj(p) && typeof p.alias === 'string') {
         rows.hosts.delete(p.alias);
-        touch(fleet, 'hosts', p.alias);
+        race?.hosts.touch(p.alias);
       }
       return null;
     case 'project:updated':
       if (isObj(p) && typeof p.id === 'number') {
         const row = p as unknown as ProjectRow;
+        race?.projects.touch(row.id);
         const at = rows.projects.findIndex((t) => t.project.id === row.id);
         if (at >= 0) rows.projects[at] = { ...rows.projects[at], project: row };
         else rows.projects.push({ project: row, worktrees: [] });
-        touch(fleet, 'projects', row.id);
       }
       return null;
     case 'hub:resynced':
@@ -323,7 +340,7 @@ export function applyFleetEvent(
  *  see a change; only the collections named in `parts` are copied (and only
  *  those may be mutated by `fn`), so a resync's burst of session events does
  *  not copy the hosts and projects once per event. */
-function patchRows(fleet: string, fn: (rows: FleetRows) => void, parts: readonly (keyof Touched)[] = ['sessions', 'hosts', 'projects']): void {
+function patchRows(fleet: string, fn: (rows: FleetRows) => void, parts: readonly RowPart[] = ['sessions', 'hosts', 'projects']): void {
   rowsStore.update((m) => {
     const next = new Map(m);
     const rows = next.get(fleet) ?? emptyRows();
@@ -352,12 +369,13 @@ export function onFleetEvent(e: FleetEvent): void {
     patchRows(fleet, (rows) => void applyFleetEvent(rows, e, fleet), [part]);
   } else if (e.name === 'hub:connection' && isObj(e.payload)) {
     setConnection(fleet, e.payload as unknown as HubConnection);
-    // The ready frame that connected it also named its fleet id, which
-    // only the list carries (and with it whether it is a duplicate). The
-    // rows are not re-listed here: a connection the hub could not resume
-    // resyncs and ends with `hub:resynced`, which re-lists; one it resumed
-    // replays what was missed.
-    if ((e.payload as { state?: string }).state === 'connected') void loadFleets();
+    if ((e.payload as { state?: string }).state === 'connected') {
+      // The ready frame that connected it also named its fleet id, which
+      // only the list carries (and with it whether it is a duplicate). The
+      // race keeps the re-list here and the `hub:resynced` one in order.
+      void loadFleets();
+      void loadFleetRows(fleet);
+    }
   } else if (e.name === 'hub:resynced') {
     void loadFleetRows(fleet);
   }
@@ -390,60 +408,35 @@ export async function loadFleets(): Promise<Result<FleetInfo[]>> {
   return r;
 }
 
-/** List one extra fleet's sessions, hosts and projects from its hub. */
+/** List one extra fleet's sessions, hosts and projects from its hub. Each
+ *  list merges through the fleet's race (`FleetRaces`) rather than replacing
+ *  what a frame applied while it was in flight. */
 export async function loadFleetRows(fleet: string): Promise<void> {
   if (fleet === PRIMARY) return;
-  // What changes while the lists are out wins over their answer: an event
-  // or a command result applied meanwhile is newer than the list.
-  const touched: Touched = { sessions: new Set(), hosts: new Set(), projects: new Set() };
-  let out = listsOut.get(fleet);
-  if (!out) listsOut.set(fleet, (out = new Set()));
-  out.add(touched);
-  let s: Result<SessionRow[]>, h: Result<HostRow[]>, p: Result<ProjectTreeRow[]>;
-  try {
-    [s, h, p] = await Promise.all([
-      invokeCmd<SessionRow[]>('list_sessions', { fleet }),
-      invokeCmd<HostRow[]>('list_hosts', { fleet }),
-      invokeCmd<ProjectTreeRow[]>('list_projects', { fleet }),
-    ]);
-  } finally {
-    out.delete(touched);
-    if (out.size === 0) listsOut.delete(fleet);
-  }
+  const race = racesFor(fleet);
+  const ts = race.sessions.begin();
+  const th = race.hosts.begin();
+  const tp = race.projects.begin();
+  const [s, h, p] = await Promise.all([
+    invokeCmd<SessionRow[]>('list_sessions', { fleet }),
+    invokeCmd<HostRow[]>('list_hosts', { fleet }),
+    invokeCmd<ProjectTreeRow[]>('list_projects', { fleet }),
+  ]);
   patchRows(fleet, (rows) => {
     if (s.ok && Array.isArray(s.value)) {
-      const next = new Map<number, SessionRow>();
-      for (const r of s.value) {
-        if (touched.sessions.has(r.id)) continue;
-        if (!admitSession(fleet, rows, r, 'command')) {
-          // Killed (tombstoned), or older than the row held: keep what is held.
-          const held = rows.sessions.get(r.id);
-          if (held) next.set(r.id, held);
-          continue;
-        }
-        next.set(r.id, r);
-      }
-      for (const id of touched.sessions) {
-        const held = rows.sessions.get(id);
-        if (held) next.set(id, held);
-      }
-      rows.sessions = next;
+      // Killed (tombstoned) or older than the row held: the list never
+      // brings it back or rolls it back.
+      // (An older one stays listed so `keepCurrent` keeps the held row.)
+      const listed = s.value.filter((r) => admitSession(fleet, rows, r, 'command') || rows.sessions.has(r.id));
+      const out = race.sessions.mergeList([...rows.sessions.values()], listed, ts, (r) => r.id, (r, cur) => fleetSessionIsStale(r, cur));
+      if (out) rows.sessions = new Map(out.map((r) => [r.id, r]));
     }
     if (h.ok && Array.isArray(h.value)) {
-      const next = new Map(h.value.filter((r) => !touched.hosts.has(r.alias)).map((r) => [r.alias, r]));
-      for (const alias of touched.hosts) {
-        const held = rows.hosts.get(alias);
-        if (held) next.set(alias, held);
-      }
-      rows.hosts = next;
+      const out = race.hosts.mergeList([...rows.hosts.values()], h.value, th, (r) => r.alias);
+      if (out) rows.hosts = new Map(out.map((r) => [r.alias, r]));
     }
     if (p.ok && Array.isArray(p.value)) {
-      const next = p.value.filter((t) => !touched.projects.has(t.project.id));
-      for (const id of touched.projects) {
-        const held = rows.projects.find((t) => t.project.id === id);
-        if (held) next.push(held);
-      }
-      rows.projects = next;
+      rows.projects = race.projects.mergeList(rows.projects, p.value, tp, (t) => t.project.id) ?? rows.projects;
     }
     const failed = [s, h, p].find((r) => !r.ok) as { ok: false; error: IpcError } | undefined;
     rows.error = failed ? failed.error.message : null;
@@ -852,9 +845,9 @@ export function _resetFleetsForTest(): void {
   fleetsStore.set([]);
   rowsStore.set(new Map());
   tombstones.clear();
-  listsOut.clear();
   fleetFilter.set('all');
   fleetSelection.set(null);
+  races.clear();
   started = false;
 }
 

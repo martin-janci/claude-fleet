@@ -70,6 +70,15 @@ export const findingsError = writable<IpcError | null>(null);
 /** The findings a person is asked about: everything live but the dismissed. */
 export const openFindings = derived(findings, ($f) => $f.filter((x) => x.state !== 'dismissed'));
 
+/** Hidden with Later, until the hub shows them again: the panel's own fold. */
+export const hiddenFindings = derived(findings, ($f) => $f.filter((x) => x.state === 'dismissed'));
+
+/** What a fixed row says ran: the fix's summary, and how many tries it took. */
+export function fixedWords(f: Finding): string {
+  const what = f.fix?.summary || 'Fixed';
+  return f.attempts > 1 ? `${what} · ${f.attempts} tries` : what;
+}
+
 /** Open findings per host alias, for the host chip. */
 export const findingsByHost = derived(openFindings, ($f) => {
   const m = new Map<string, number>();

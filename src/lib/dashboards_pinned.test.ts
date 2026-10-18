@@ -159,4 +159,14 @@ describe('pinned dashboards', () => {
     await emit('dashboards:changed', {});
     expect(mock.mock.calls.filter((c) => c[1].args.action === 'list').length).toBe(3);
   });
+
+  it('re-reads the pins after a gap the hub could not replay', async () => {
+    const stop = followPinned();
+    await vi.waitFor(() => expect(mock).toHaveBeenCalledTimes(1));
+    // The `dashboards:changed` for this pin fell into the gap.
+    rows.set('dash.release-42', { id: 'dash.release-42', title: 'R', spec: dashboardBlock(release), pinned_at: 7 });
+    await emit('hub:resynced', null);
+    await vi.waitFor(() => expect(get(pinnedDashboards).map((p) => p.id)).toEqual(['dash.release-42']));
+    stop();
+  });
 });

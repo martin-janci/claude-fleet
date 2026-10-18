@@ -381,7 +381,15 @@ pub async fn send_message_scoped(
                 )
                 .await
                 {
-                    Ok(()) => woke = true,
+                    Ok(()) => {
+                        woke = true;
+                        // The paste carried the whole body: the turn it starts
+                        // must not get it again as the hook's context.
+                        if let Err(e) = lock(store).and_then(|s| s.mark_messages_delivered(&[id])) {
+                            tracing::warn!(message = id, error = %e.message,
+                                "[messages] a woken message stays undelivered; the hook repeats it");
+                        }
+                    }
                     Err(e) => deliver_error = Some(merge_error(deliver_error, e.message)),
                 }
             }

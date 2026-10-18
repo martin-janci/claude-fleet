@@ -114,6 +114,23 @@ describe('hosts store', () => {
     expect(get(hosts)[0].last_reachable_at).toBe(60);
   });
 
+  // Another client re-adding a host it just removed lands inside the
+  // tombstone window: `added` is deliberate and lifts it, a late `probed`
+  // for the removed host does not.
+  it('a host re-added right after its removal comes back; a late probe does not', () => {
+    const b = { ...sampleLocal, alias: 'b' };
+    hosts.set([sampleLocal, b]);
+
+    applyHostEvents([{ type: 'removed', alias: 'b' }, { type: 'probed', row: b }]);
+    expect(get(hosts).map((h) => h.alias)).toEqual(['local']);
+
+    applyHostEvents([{ type: 'added', row: b }]);
+    expect(get(hosts).map((h) => h.alias)).toEqual(['local', 'b']);
+
+    applyHostEvents([{ type: 'removed', alias: 'b' }, { type: 'added', row: b }]);
+    expect(get(hosts).map((h) => h.alias)).toEqual(['local', 'b']);
+  });
+
   it('a pinged event for a host we do not hold invents nothing', () => {
     hosts.set([sampleLocal]);
 

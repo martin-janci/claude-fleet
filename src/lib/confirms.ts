@@ -128,7 +128,8 @@ async function resync(): Promise<void> {
 /**
  * Seed the queue with requests raised before the window mounted (a reload)
  * and follow new ones: `mcp:confirm-required` from this desktop's own
- * server, `confirm:changed` from a hub. Call once, from the always-mounted
+ * server, `confirm:changed` from a hub, and a re-read after the hub's
+ * `hub:resynced`. Call once, from the always-mounted
  * dialog.
  */
 export function startConfirmQueue(): () => void {
@@ -145,6 +146,9 @@ export function startConfirmQueue(): () => void {
   });
   void listen<ConfirmRequest>(MCP_CONFIRM_EVENT, (e) => enqueueConfirm(normalise(e.payload))).then(keep);
   void listen(CONFIRM_CHANGED_EVENT, () => void resync()).then(keep);
+  // A gap the hub could not replay can have swallowed a `confirm:changed`,
+  // and a request raised in it would stay invisible until the next change.
+  void listen('hub:resynced', () => void resync()).then(keep);
   // A request that expires announces nothing, so re-read the queue now and
   // then while something is on it: otherwise its card or dialog stays up
   // until an unrelated change, and answering it only reports "expired".

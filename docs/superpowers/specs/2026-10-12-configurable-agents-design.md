@@ -2,7 +2,8 @@
 
 Status: steps 1 to 5 built, and step 6's GitHub sources, PR comments and
 labels, and writes to other trackers, 2026-10-14 (the phone's part in
-martin-janci/fleet-mobile). The rest of step 6 not built.
+martin-janci/fleet-mobile); polling other trackers, 2026-10-18. The rest of
+step 6 not built.
 Asked for by the owner after the built-in reviewer and support agent landed
 (`2026-10-11-review-and-support-agents-design.md`, PRs
 martin-janci/claude-fleet#871, martin-janci/fleet-mobile#217,
@@ -190,9 +191,10 @@ configures it; it never supplies code.
 | `schedule` | a cron expression (routines' parser) | `{at}` | `cron:<rule>:<slot>` |
 | `manual` | nothing: a person or a chat agent starts it with inputs | the inputs | `manual:<uuid>` |
 
-`issue_threads` is Jira-only today. `tracker_*` on GitHub, Linear or Asana
-needs that method on their providers first. Each provider is a small step, and
-a definition naming a provider without it is refused at grant time.
+`issue_threads` is Jira's. On GitHub, Linear or Asana `tracker_comments` and
+`tracker_assigned` read the hub's synced copy of the tracker instead (built
+2026-10-18, see *Steps*), so `query`, which is JQL, is optional on these two
+sources and refused on a tracker that is not Jira.
 
 The **loop guard** is generic: a comment the instance's own writes made
 (fleet records the remote id of every write it sends) or a comment carrying
@@ -596,9 +598,22 @@ run real instances.
    `tracker_issue` creates an item in the project (`WriteOp::CreateItem`);
    an issue link is Jira's, so a link, or an issue with one, is refused
    there. Not built: `pr_review` (the reviewer's placed, verified review
-   stays the PR reviewer's), polling a tracker that is not Jira (its
-   provider has no `issue_threads`), restating the built-in agents, and a
-   gallery.
+   stays the PR reviewer's), restating the built-in agents, and a gallery.
+
+   Polling a tracker that is not Jira, built 2026-10-18: no provider grows
+   `issue_threads`. The poll reads the items the hub's tracker sync saw
+   updated since the last poll, less `SYNC_LAG_SECS` (30 minutes: the sync
+   lags the tracker), at most 25 (`ITEM_POLL_MAX`,
+   `Store::tracker_items_updated_since`), and each one's newest 20 comments
+   through its provider's `comments`. The job keys are the Jira poll's
+   (`<tracker>:<key>#c<id>`, `#assigned:<who>`), so the longer window finds
+   nothing twice. The subject is kept when the job is found, the item's own
+   URL with it, and the run reads it back rather than asking the tracker
+   again. `match.assignee` is the account id as the sync stores it (a GitHub
+   login, a Linear or Asana user id). A comment there has no author id, so
+   the loop guard is the marker alone. `query` is JQL: it is optional on
+   `tracker_comments` and `tracker_assigned`, and a poll of a tracker that is
+   not Jira refuses one that is set.
 
 ## Not in scope
 

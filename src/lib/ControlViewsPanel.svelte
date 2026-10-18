@@ -23,6 +23,7 @@
 -->
 <script lang="ts">
   import { tablistKeys } from './tablist_keys';
+  import { tabStrip } from './tab_strip';
   import { selectSession, selectSessionExplicitly, selectedSession } from './selection';
   import { sidebarView } from './work_view';
   import { leave } from './destination';
@@ -47,7 +48,7 @@
   import { openRuns } from './automation';
   import LimitActions from './LimitActions.svelte';
   import FixCard from './FixCard.svelte';
-  import { fixedRecently, openFindings, watchFindings } from './autofix';
+  import { fixedRecently, fixedWords, hiddenFindings, openFindings, subjectWords, watchFindings } from './autofix';
   import { onMount } from 'svelte';
   import { classify } from './attention';
   import { attentionFacts } from './attention_facts';
@@ -159,7 +160,7 @@
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <aside class="views" aria-label="Views" data-testid="control-views" onkeydown={onKeydown}>
   <div class="strip">
-    <div class="tabs" role="tablist" aria-label="Views" use:tablistKeys>
+    <div class="tabs" role="tablist" aria-label="Views" use:tablistKeys use:tabStrip={[active, shown.length]}>
       {#each shown as v (v.id)}
         <button
           type="button"
@@ -258,17 +259,30 @@
           <input type="search" placeholder="Search sessions" aria-label="Search sessions" bind:value={query} data-testid="control-views-search" />
         </label>
       </div>
-      {#if $openFindings.length > 0 || $fixedRecently.length > 0}
+      {#if $openFindings.length > 0 || $hiddenFindings.length > 0 || $fixedRecently.length > 0}
         <section class="problems" aria-label="Problems & fixes" data-testid="control-problems">
           <h3 class="problems-title">Problems &amp; fixes{#if $openFindings.length > 0}{' '}<span class="count">{$openFindings.length}</span>{/if}</h3>
           {#each $openFindings as f (f.id)}
             <FixCard finding={f} compact={true} />
           {/each}
+          {#if $hiddenFindings.length > 0}
+            <details class="fold" data-testid="control-problems-hidden">
+              <summary>Hidden until later <span class="fold-n">{$hiddenFindings.length}</span></summary>
+              {#each $hiddenFindings as f (f.id)}
+                <FixCard finding={f} compact={true} />
+              {/each}
+            </details>
+          {/if}
           {#if $fixedRecently.length > 0}
             <details class="fold" data-testid="control-problems-fixed">
-              <summary>Fixed automatically <span class="fold-n">{$fixedRecently.length}</span></summary>
+              <summary>Fixed in the last day <span class="fold-n">{$fixedRecently.length}</span></summary>
               <ul class="fixed">
-                {#each $fixedRecently as f (f.id)}<li>{f.title ?? f.kind}</li>{/each}
+                {#each $fixedRecently as f (f.id)}
+                  <li data-testid="control-problems-fixed-row">
+                    <span class="fixed-title">{f.title ?? f.kind}</span>
+                    <span class="fixed-what">{fixedWords(f)} · {subjectWords(f.subject)}</span>
+                  </li>
+                {/each}
               </ul>
             </details>
           {/if}
@@ -365,13 +379,33 @@
     padding: 0 var(--space-2);
     border-bottom: 1px solid var(--border);
   }
+  /* More tabs than width scroll sideways (tab_strip.ts), the scrollbar
+     hidden and the edge with more past it faded; "+" lists them all too. */
   .tabs {
     display: flex;
     gap: 2px;
     min-width: 0;
     overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
     align-self: stretch;
     align-items: flex-end;
+    --fade: 24px;
+  }
+  .tabs::-webkit-scrollbar {
+    display: none;
+  }
+  .strip :global(.tabs[data-more-right]) {
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - var(--fade)), transparent);
+    mask-image: linear-gradient(to right, #000 calc(100% - var(--fade)), transparent);
+  }
+  .strip :global(.tabs[data-more-left]) {
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 var(--fade));
+    mask-image: linear-gradient(to right, transparent, #000 var(--fade));
+  }
+  .strip :global(.tabs[data-more-left][data-more-right]) {
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 var(--fade), #000 calc(100% - var(--fade)), transparent);
+    mask-image: linear-gradient(to right, transparent, #000 var(--fade), #000 calc(100% - var(--fade)), transparent);
   }
   .tab,
   .icon {
@@ -394,6 +428,7 @@
     color: var(--fg);
   }
   .tab {
+    flex: none;
     border-radius: 0;
     border-bottom: 2px solid transparent;
     padding: 10px 2px 8px;
@@ -423,7 +458,10 @@
     color: var(--status-waiting);
   }
   .grow {
-    flex: 1 1 auto;
+    flex: 1 1 0;
+  }
+  .strip > .icon {
+    flex: none;
   }
   .menu {
     position: absolute;
@@ -524,6 +562,13 @@
     padding-left: 1.1rem;
     font-size: var(--text-xs);
     color: var(--fg-muted);
+  }
+  .fixed li {
+    display: flex;
+    flex-direction: column;
+  }
+  .fixed-title {
+    color: var(--fg-2);
   }
   .fleet {
     padding: var(--space-2) var(--space-3);

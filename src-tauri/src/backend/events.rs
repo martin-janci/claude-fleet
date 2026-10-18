@@ -838,8 +838,11 @@ impl FleetResync for HubResync {
         };
         match name {
             "session:created" | "session:updated" => {
-                if let (Some(set), Some(id)) = (seen.sessions.as_mut(), id()) {
-                    set.insert(id);
+                // Tracked even before a re-list succeeded: a first resync
+                // whose list failed must not leave the live rows untracked,
+                // or the next one cannot tell which of them went away.
+                if let Some(id) = id() {
+                    seen.sessions.get_or_insert_with(HashSet::new).insert(id);
                 }
             }
             "session:killed" => {
@@ -848,8 +851,8 @@ impl FleetResync for HubResync {
                 }
             }
             "host:added" | "host:probed" => {
-                if let (Some(set), Some(alias)) = (seen.hosts.as_mut(), alias()) {
-                    set.insert(alias);
+                if let Some(alias) = alias() {
+                    seen.hosts.get_or_insert_with(HashSet::new).insert(alias);
                 }
             }
             "host:removed" => {

@@ -109,6 +109,9 @@ struct World {
     gh_writes: Mutex<Vec<String>>,
     /// Fleet-own actions carried out, in order.
     fleet_ops: Mutex<Vec<super::actions::FleetOp>>,
+    /// A tracker that is not Jira: its synced items, and the windows asked.
+    items: Mutex<Vec<ItemThread>>,
+    item_since: Mutex<Vec<i64>>,
 }
 
 #[async_trait::async_trait]
@@ -152,6 +155,23 @@ impl FleetHost for World {
                 .clone()
                 .unwrap_or_else(|| "jira_cloud".into()),
         )
+    }
+    async fn item_threads(
+        &self,
+        _: i64,
+        since: i64,
+        max: usize,
+    ) -> Result<Vec<ItemThread>, String> {
+        self.item_since.lock().unwrap().push(since);
+        Ok(self
+            .items
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|i| i.thread.updated.is_some_and(|u| u >= since))
+            .take(max)
+            .cloned()
+            .collect())
     }
     async fn open_prs(
         &self,
@@ -279,6 +299,8 @@ fn fx(loaded: Loaded, config: Value, bindings: Value, project: bool) -> Fx {
         comments: Mutex::default(),
         gh_writes: Mutex::default(),
         fleet_ops: Mutex::default(),
+        items: Mutex::default(),
+        item_since: Mutex::default(),
     });
     Fx {
         store: Arc::new(Mutex::new(s)),
@@ -1428,4 +1450,118 @@ fn a_fleet_proposal_that_acts_alone_is_refused() {
         p.iter().any(|x| x.contains("there is no item here")),
         "{p:?}"
     );
+}
+
+/// A GitHub item, updated at `updated`, with `comments`.
+fn gh_item(updated: i64, comments: &[(&str, &str, i64)]) -> ItemThread {
+    let mut t = thread(comments);
+    t.key = "o/r#12".into();
+    t.updated = Some(updated);
+    t.assignee_id = Some("octocat".into());
+    ItemThread {
+        thread: t,
+        url: Some("https://github.com/o/r/issues/12".into()),
+    }
+}
+
+#[tokio::test]
+async fn another_trackers_synced_items_are_polled_and_their_subject_kept() {
+    let f = fx(
+        small(
+            json!({ "source": "tracker_comments", "tracker": "3",
+                "match": { "any_phrase": "/ask" } }),
+            json!([]),
+        ),
+        json!({}),
+        json!([]),
+        false,
+    );
+    *f.world.provider.lock().unwrap() = Some("github".into());
+    let now = crate::store::now_unix();
+    let since = now - 300;
+    *f.world.items.lock().unwrap() = vec![
+        gh_item(
+            now - 10,
+            &[
+                ("c1", "/ask why is CI red", now - 20),
+                ("c2", "unrelated", now - 15),
+                ("c3", "/ask again [fleet-agent:x]", now - 12),
+            ],
+        ),
+        // A comment from before the window is not asked again.
+        gh_item(now - 60, &[("c0", "/ask old", now - 4000)]),
+    ];
+    let p = f.poller();
+    let polled = p
+        .poll(&f.rule, Some(&f.cursor(since, None)), now)
+        .await
+        .unwrap();
+    let keys: Vec<&str> = polled.jobs.iter().map(|j| j.dedup_key.as_str()).collect();
+    assert_eq!(keys, [format!("r{}:tracker:3:o/r#12#cc1", f.rule.id)]);
+    assert_eq!(
+        f.world.item_since.lock().unwrap()[0],
+        since - SYNC_LAG_SECS - POLL_SLACK_SECS,
+        "read back further by a sync's lag"
+    );
+    assert!(f.world.base.jql.lock().unwrap().is_empty(), "no JQL");
+    // The same comment, seen again within the lag, is not a second job.
+    let again = p
+        .poll(&f.rule, Some(&f.cursor(now, None)), now + 60)
+        .await
+        .unwrap();
+    assert!(again.jobs.is_empty(), "{:?}", again.jobs);
+
+    // The run reads the kept subject: the item and the comment that asked.
+    *f.world.base.answer.lock().unwrap() = Some(PrintOutcome::Answered {
+        text: r#"{"summary":"flaky test"}"#.into(),
+        cost_micros: 1,
+    });
+    let jobs = f.claim(&polled.jobs);
+    let out = f.runner().run(&jobs[0], Some(&f.rule)).await;
+    let RunOutcome::Done { result, .. } = out else {
+        panic!("{out:?}")
+    };
+    let r: Value = serde_json::from_str(&result.unwrap()).unwrap();
+    assert_eq!(r["subject"]["key"], "o/r#12");
+    assert_eq!(r["subject"]["url"], "https://github.com/o/r/issues/12");
+    assert_eq!(r["subject"]["comment"]["body"], "/ask why is CI red");
+    assert!(
+        f.world.base.jql.lock().unwrap().is_empty(),
+        "not read from Jira"
+    );
+}
+
+#[tokio::test]
+async fn another_tracker_takes_an_assignment_and_refuses_a_jql_query() {
+    let assigned = fx(
+        small(
+            json!({ "source": "tracker_assigned", "tracker": "3",
+                "match": { "assignee": "octocat" } }),
+            json!([]),
+        ),
+        json!({}),
+        json!([]),
+        false,
+    );
+    *assigned.world.provider.lock().unwrap() = Some("linear".into());
+    let now = crate::store::now_unix();
+    *assigned.world.items.lock().unwrap() = vec![gh_item(now - 5, &[])];
+    let polled = assigned
+        .poller()
+        .poll(&assigned.rule, Some(&assigned.cursor(now - 60, None)), now)
+        .await
+        .unwrap();
+    assert_eq!(
+        polled.jobs[0].dedup_key,
+        format!("r{}:tracker:3:o/r#12#assigned:octocat", assigned.rule.id)
+    );
+
+    let f = l2_fx();
+    *f.world.provider.lock().unwrap() = Some("asana".into());
+    let err = f
+        .poller()
+        .poll(&f.rule, Some(&f.cursor(now - 60, None)), now)
+        .await
+        .unwrap_err();
+    assert!(err.contains("query is JQL"), "{err}");
 }

@@ -15,6 +15,7 @@ import { accountUsage } from './account_usage_store';
 import { expectAccessible } from './a11y_check';
 import { openInControl } from './control_room';
 import { tick } from 'svelte';
+import { findings, fixedRecently, type Finding } from './autofix';
 
 // Redesign step 9.4: the Views panel beside Control's chat.
 
@@ -203,5 +204,42 @@ describe('Needs you folds and search (G3.10)', () => {
     sessions.set([limited]);
     const { getByTestId } = render(ControlViewsPanel);
     expect(getByTestId('control-needs-you-limit').textContent).toMatch(/Switch account|Wait/);
+  });
+});
+
+describe('Problems & fixes (autofix)', () => {
+  const base: Finding = {
+    id: 1,
+    kind: 'host.agent_behind',
+    subject: 'host:mercury',
+    host_alias: 'mercury',
+    severity: 'degraded',
+    state: 'open',
+    first_seen_at: 1,
+    last_seen_at: 2,
+    attempts: 0,
+    title: 'The agent on mercury is behind',
+    explanation: 'mercury runs an older agent.',
+    evidence: [],
+    fix: { summary: 'Update the agent on mercury', changes: ['fleet-agent on mercury'], safety: 'needs_approval', reversible: true, auto: false },
+  };
+  afterEach(() => {
+    findings.set([]);
+    fixedRecently.set([]);
+  });
+
+  it('keeps the findings hidden with Later in their own fold', () => {
+    findings.set([{ ...base, id: 2, state: 'dismissed', title: 'Hidden one' }]);
+    const { getByTestId } = render(ControlViewsPanel);
+    expect(getByTestId('control-problems')).toBeTruthy();
+    expect(getByTestId('control-problems-hidden').textContent).toContain('Hidden one');
+  });
+
+  it('says what ran for each fixed finding, and where', () => {
+    fixedRecently.set([{ ...base, id: 3, state: 'cleared', attempts: 2 }]);
+    const { getByTestId } = render(ControlViewsPanel);
+    const row = getByTestId('control-problems-fixed-row');
+    expect(row.textContent).toContain('Update the agent on mercury · 2 tries');
+    expect(row.textContent).toContain('host mercury');
   });
 });

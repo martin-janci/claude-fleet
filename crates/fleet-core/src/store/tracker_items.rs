@@ -1142,6 +1142,28 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// The items of `tracker_id` the tracker updated at or after `since`
+    /// (unix seconds), still answering, newest first, at most `limit`, with
+    /// their meta: what a fleet agent's poll reads on a tracker that is not
+    /// Jira (`service::fleet_agents::runner`).
+    pub fn tracker_items_updated_since(
+        &self,
+        tracker_id: i64,
+        since: i64,
+        limit: usize,
+    ) -> Result<Vec<(WorkItemRow, ItemMeta)>, IpcError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ITEM_COLUMNS}, meta FROM work_items \
+             WHERE tracker_id = ?1 AND updated_ext >= ?2 AND unavailable_at IS NULL \
+             ORDER BY updated_ext DESC, id DESC LIMIT ?3"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![tracker_id, since, limit as i64], |r| {
+            let meta: Option<String> = r.get(ITEM_COLUMN_COUNT)?;
+            Ok((map_item(r)?, ItemMeta::parse(meta.as_deref())))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Items the sessions on `host` work on: a live link whose session runs
     /// there, an ended link that ran there, or an open run
     /// (`work_link { run }`, a `tasks` row naming the item) whose worker is
@@ -1371,6 +1393,34 @@ mod tests {
         .unwrap();
         bus.take();
         (s, t.id, bus)
+    }
+
+    #[test]
+    fn items_updated_since_are_newest_first_capped_and_answering() {
+        let (s, t, _) = with_tracker(&["ABC"]);
+        for (ext, at) in [("1", 50), ("2", 200), ("3", 300), ("4", 400)] {
+            let w = TrackerItemWrite {
+                updated_ext: Some(at),
+                description: Some(format!("about {ext}")),
+                ..write(ext, &format!("ABC-{ext}"), ("To Do", "todo"))
+            };
+            s.upsert_tracker_item(t, &w).unwrap();
+        }
+        let keys = |since, limit| -> Vec<String> {
+            s.tracker_items_updated_since(t, since, limit)
+                .unwrap()
+                .into_iter()
+                .map(|(r, _)| r.key.unwrap())
+                .collect()
+        };
+        assert_eq!(keys(200, 10), ["ABC-4", "ABC-3", "ABC-2"]);
+        assert_eq!(keys(0, 2), ["ABC-4", "ABC-3"]);
+        let (_, meta) = &s.tracker_items_updated_since(t, 400, 1).unwrap()[0];
+        assert_eq!(meta.description.as_deref(), Some("about 4"));
+        assert!(s
+            .tracker_items_updated_since(t + 1, 0, 10)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

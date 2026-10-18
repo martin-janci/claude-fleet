@@ -461,6 +461,10 @@ fn bookkeep_stop_streak(
         Some(crate::service::delivery::StopAction::Block) => {
             let _ = s.bump_stop_block_streak(row_id);
             let _ = s.insert_session_event(row_id, "stop_blocked_for_message", None);
+            if let Err(e) = s.resume_turn_after_blocked_stop(row_id) {
+                tracing::warn!(session_id = row_id, error = %e.message,
+                    "[hook] a blocked Stop left the row idle");
+            }
         }
         Some(crate::service::delivery::StopAction::Context) => {
             if streak >= crate::service::delivery::STOP_BLOCK_STREAK_MAX {

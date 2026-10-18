@@ -191,11 +191,11 @@ fn a_trigger_takes_its_sources_keys_only() {
             v["trigger"]
                 .as_object_mut()
                 .unwrap()
-                .remove("query")
+                .remove("tracker")
                 .map(|_| ())
                 .unwrap()
         },
-        "needs query",
+        "needs tracker",
     );
     assert_problem(
         |v| v["trigger"]["query"] = json!("project = {{nope}}"),
