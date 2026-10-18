@@ -3381,6 +3381,56 @@
     },
     {
       "default_widget": "switch",
+      "key": "autofix.auto_safe",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Apply safe fixes automatically",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "autofix.max_attempts",
+      "kind": {
+        "max": 10,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Automatic fix attempts",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "autofix.detector.operator_unbound",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Check Control's access",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "autofix.detector.host",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Check hosts",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
       "key": "recovery.auto_restore",
       "kind": {
         "type": "bool"

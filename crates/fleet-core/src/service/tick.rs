@@ -352,6 +352,8 @@ pub fn spawn_reconcile_tick(
                 // Opt-in (`repair.auto_on_tick`): re-add vanished worktrees with
                 // the create-only automatic policy. Detached and rate-limited.
                 service::repair_tick::maybe_run(store, ssh);
+                // Detect broken fleet states; apply the safe fixes by itself.
+                service::autofix::tick::maybe_run(store, ssh);
                 // Drop remote worktree rows whose checkout is gone and no longer
                 // registered with git (removed without ExitWorktree). One
                 // read-only probe per reachable host; detached and rate-limited.

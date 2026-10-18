@@ -791,6 +791,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Autofix: known broken fleet states. The owner's own device; apply and
+    // dismiss also need a trusted full device, and never Control.
+    ToolPolicy {
+        name: "autofix",
+        access: Access::PersonDevice,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
     // Agents (reviewer, support): a person's standing rule per repo or
     // Jira project, which lets an agent read and write outside fleet, and
     // a person's answer to a write an agent proposes. The owner's own

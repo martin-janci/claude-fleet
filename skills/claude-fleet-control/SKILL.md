@@ -101,7 +101,7 @@ admin      add_host remove_host probe_host check_host hide_host merge_host
            quick_replies work_admin ensure_operator operator_status diagnose
            control_auto_continue
            update_status update_admin link_peer unlink_peer list_peer_links
-device     pr_shepherd agents mcp_confirms answer_mcp_confirm setting_proposals
+device     pr_shepherd autofix agents mcp_confirms answer_mcp_confirm setting_proposals
            decide_setting_proposals setting_history control_route
            resume_or_new control_handoffs list_pages project_picks
            set_project_pick

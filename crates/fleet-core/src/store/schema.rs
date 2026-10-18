@@ -2233,6 +2233,13 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/197_host_signed_out_logins.sql"),
         already_applied: Some(hosts_has_signed_out_logins),
     },
+    // Autofix: `autofix_findings`, one row per episode of a detected broken
+    // state (service/autofix). A new table.
+    Migration {
+        version: 198,
+        sql: include_str!("../../migrations/198_autofix.sql"),
+        already_applied: None,
+    },
 ];
 
 /// The settings row [`Store::finish_realm_upgrade`] writes once migration

@@ -22,6 +22,7 @@ pub mod agents;
 pub mod attachments;
 pub mod attention;
 pub mod auto_restore;
+pub mod autofix;
 pub mod autonomy;
 pub mod bg_sessions;
 pub mod catalog;
