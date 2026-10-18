@@ -2182,3 +2182,30 @@ async fn one_failed_connect_after_a_stream_ended_does_not_arm_the_breaker() {
         .collect();
     assert_eq!(offline, [(2, 1), (3, 2)], "{states:?}");
 }
+
+/// A first resync whose session list failed leaves nothing listed; rows that
+/// then arrive live are still tracked, so the next resync removes the ones
+/// that went away during a gap.
+#[tokio::test]
+async fn rows_seen_live_after_a_failed_first_list_are_still_removed_later() {
+    let (resync, seen, table) = resync_over(&[
+        ("list_hosts", &hosts_payload(&["trn"])),
+        ("list_tasks", "[]"),
+        ("list_accounts", "[]"),
+    ]);
+    resync.resync().await;
+    resync.observe("session:created", &json!({ "id": 5 }));
+    let before = seen.events().len();
+    table.set(&[
+        ("list_sessions", &sessions_payload(&[])),
+        ("list_hosts", &hosts_payload(&["trn"])),
+        ("list_tasks", "[]"),
+        ("list_accounts", "[]"),
+    ]);
+    resync.resync().await;
+    let after: Vec<(&'static str, Value)> = seen.events().into_iter().skip(before).collect();
+    assert!(
+        after.contains(&("session:killed", json!({ "id": 5 }))),
+        "{after:?}"
+    );
+}

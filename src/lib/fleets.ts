@@ -18,13 +18,14 @@ import { listen } from '@tauri-apps/api/event';
 import { invokeCmd, type IpcError, type Result } from './result';
 import type { HubConnection } from './hub_connection';
 import type { SessionRow } from './sessions';
-import type { HostRow } from './hosts';
+import { applyPing, type HostPing, type HostRow } from './hosts';
 import type { ProjectRow, ProjectTreeRow } from './projects';
 import { readPref, writePref } from './prefs';
 import { attentionState, byTriage, countsTowardBadge } from './attention';
 import { attentionFactsFrom } from './attention_facts';
 import { attentionIdleMinutes } from './notify';
 import type { PrFilter, PrList } from './prs';
+import { createListRace, type ListRace } from './row_store';
 
 /** The slot id of the launch-time fleet (`backend::fleets::PRIMARY`). */
 export const PRIMARY = 'primary';
@@ -157,39 +158,81 @@ function isObj(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null;
 }
 
-/** Apply one `fleet:event` to that fleet's rows, in place. Returns what the
- *  caller has to do beyond that: `relist` after a gap the bridge could not
- *  replay, `connection` when the link moved. Unknown names are ignored —
- *  this fleet's view keeps sessions, hosts and projects only (Phase 1). */
+/** One extra fleet's re-list rule (review r07, as `projects.ts` keeps it):
+ *  every frame touches the key it changed, so a list answer in flight loses
+ *  to it, and an older list never lands over a newer one — a reconnect asks
+ *  twice (`connected`, then `hub:resynced`) and the two can answer out of
+ *  order. */
+export interface FleetRaces {
+  sessions: ListRace<number>;
+  hosts: ListRace<string>;
+  projects: ListRace<number>;
+}
+
+const races = new Map<string, FleetRaces>();
+
+function racesFor(fleet: string): FleetRaces {
+  let r = races.get(fleet);
+  if (!r) {
+    r = { sessions: createListRace(), hosts: createListRace(), projects: createListRace() };
+    races.set(fleet, r);
+  }
+  return r;
+}
+
+/** Apply one `fleet:event` to that fleet's rows, in place, touching the key
+ *  it changed in `race` when given. Returns what the caller has to do beyond
+ *  that: `relist` after a gap the bridge could not replay, `connection` when
+ *  the link moved. Unknown names are ignored — this fleet's view keeps
+ *  sessions, hosts and projects only (Phase 1). */
 export function applyFleetEvent(
   rows: FleetRows,
   e: Pick<FleetEvent, 'name' | 'payload'>,
+  race?: FleetRaces,
 ): 'relist' | 'connection' | null {
   const p = e.payload;
   switch (e.name) {
     case 'session:created':
     case 'session:updated':
-      if (isObj(p) && typeof p.id === 'number') rows.sessions.set(p.id, p as unknown as SessionRow);
+      if (isObj(p) && typeof p.id === 'number') {
+        rows.sessions.set(p.id, p as unknown as SessionRow);
+        race?.sessions.touch(p.id);
+      }
       return null;
     case 'session:killed':
-      if (isObj(p) && typeof p.id === 'number') rows.sessions.delete(p.id);
+      if (isObj(p) && typeof p.id === 'number') {
+        rows.sessions.delete(p.id);
+        race?.sessions.touch(p.id);
+      }
       return null;
     case 'host:added':
     case 'host:probed':
-      if (isObj(p) && typeof p.alias === 'string') rows.hosts.set(p.alias, p as unknown as HostRow);
+      if (isObj(p) && typeof p.alias === 'string') {
+        rows.hosts.set(p.alias, p as unknown as HostRow);
+        race?.hosts.touch(p.alias);
+      }
       return null;
     case 'host:pinged':
       if (isObj(p) && typeof p.alias === 'string') {
         const old = rows.hosts.get(p.alias);
-        if (old) rows.hosts.set(p.alias, { ...old, ...(p as Partial<HostRow>) });
+        // Flattened as the primary's hosts store does: the row keeps the
+        // health sample at top level, never under `health`.
+        if (old) {
+          rows.hosts.set(p.alias, applyPing(old, p as unknown as HostPing));
+          race?.hosts.touch(p.alias);
+        }
       }
       return null;
     case 'host:removed':
-      if (isObj(p) && typeof p.alias === 'string') rows.hosts.delete(p.alias);
+      if (isObj(p) && typeof p.alias === 'string') {
+        rows.hosts.delete(p.alias);
+        race?.hosts.touch(p.alias);
+      }
       return null;
     case 'project:updated':
       if (isObj(p) && typeof p.id === 'number') {
         const row = p as unknown as ProjectRow;
+        race?.projects.touch(row.id);
         const at = rows.projects.findIndex((t) => t.project.id === row.id);
         if (at >= 0) rows.projects[at] = { ...rows.projects[at], project: row };
         else rows.projects.push({ project: row, worktrees: [] });
@@ -229,8 +272,9 @@ function setConnection(fleet: string, c: HubConnection): void {
 export function onFleetEvent(e: FleetEvent): void {
   if (!e || typeof e.fleet !== 'string' || e.fleet === PRIMARY) return;
   let todo: ReturnType<typeof applyFleetEvent> = null;
+  const race = racesFor(e.fleet);
   patchRows(e.fleet, (rows) => {
-    todo = applyFleetEvent(rows, e);
+    todo = applyFleetEvent(rows, e, race);
   });
   if (todo === 'connection' && isObj(e.payload)) {
     setConnection(e.fleet, e.payload as unknown as HubConnection);
@@ -262,18 +306,32 @@ export async function loadFleets(): Promise<Result<FleetInfo[]>> {
   return r;
 }
 
-/** List one extra fleet's sessions, hosts and projects from its hub. */
+/** List one extra fleet's sessions, hosts and projects from its hub. Each
+ *  list merges through the fleet's race (`FleetRaces`) rather than replacing
+ *  what a frame applied while it was in flight. */
 export async function loadFleetRows(fleet: string): Promise<void> {
   if (fleet === PRIMARY) return;
+  const race = racesFor(fleet);
+  const ts = race.sessions.begin();
+  const th = race.hosts.begin();
+  const tp = race.projects.begin();
   const [s, h, p] = await Promise.all([
     invokeCmd<SessionRow[]>('list_sessions', { fleet }),
     invokeCmd<HostRow[]>('list_hosts', { fleet }),
     invokeCmd<ProjectTreeRow[]>('list_projects', { fleet }),
   ]);
   patchRows(fleet, (rows) => {
-    if (s.ok && Array.isArray(s.value)) rows.sessions = new Map(s.value.map((r) => [r.id, r]));
-    if (h.ok && Array.isArray(h.value)) rows.hosts = new Map(h.value.map((r) => [r.alias, r]));
-    if (p.ok && Array.isArray(p.value)) rows.projects = p.value;
+    if (s.ok && Array.isArray(s.value)) {
+      const out = race.sessions.mergeList([...rows.sessions.values()], s.value, ts, (r) => r.id);
+      if (out) rows.sessions = new Map(out.map((r) => [r.id, r]));
+    }
+    if (h.ok && Array.isArray(h.value)) {
+      const out = race.hosts.mergeList([...rows.hosts.values()], h.value, th, (r) => r.alias);
+      if (out) rows.hosts = new Map(out.map((r) => [r.alias, r]));
+    }
+    if (p.ok && Array.isArray(p.value)) {
+      rows.projects = race.projects.mergeList(rows.projects, p.value, tp, (t) => t.project.id) ?? rows.projects;
+    }
     const failed = [s, h, p].find((r) => !r.ok) as { ok: false; error: IpcError } | undefined;
     rows.error = failed ? failed.error.message : null;
   });
@@ -646,6 +704,7 @@ export function _resetFleetsForTest(): void {
   rowsStore.set(new Map());
   fleetFilter.set('all');
   fleetSelection.set(null);
+  races.clear();
   started = false;
 }
 

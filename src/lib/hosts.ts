@@ -283,19 +283,39 @@ function removeHost(alias: string): void {
   rows.remove(alias);
 }
 
+/** What `host:pinged` carries: the stamp, reachability and the nested
+ *  health sample. */
+export interface HostPing {
+  alias: string;
+  last_pinged_at: number;
+  reachable: boolean;
+  claude_version_at?: number | null;
+  health?: HostHealth | null;
+}
+
 /** One backend host event, as delivered by `events.ts`. */
 export type HostEvent =
   | { type: 'added' | 'probed'; row: HostRow }
   /** A probe that changed nothing but the stamp — patched onto the row we hold. */
-  | {
-      type: 'pinged';
-      alias: string;
-      last_pinged_at: number;
-      reachable: boolean;
-      claude_version_at?: number | null;
-      health?: HostHealth | null;
-    }
+  | ({ type: 'pinged' } & HostPing)
   | { type: 'removed'; alias: string };
+
+/** `have` with a ping patched on: the nested health sample flattened onto
+ *  the row, where `HostRow` keeps it. Shared with an extra fleet's rows
+ *  (`fleets.ts`). */
+export function applyPing(have: HostRow, ev: HostPing): HostRow {
+  return {
+    ...have,
+    last_pinged_at: ev.last_pinged_at,
+    // A ping is a probe that changed nothing else: answered, it moved
+    // `last_reachable_at` with the stamp (store/reconcile.rs).
+    last_reachable_at: ev.reachable ? ev.last_pinged_at : have.last_reachable_at,
+    claude_version_at: ev.claude_version_at ?? have.claude_version_at,
+    reachable: ev.reachable,
+    // The health sample rides the ping (it moves every pass).
+    ...(ev.health ?? {}),
+  };
+}
 
 /** Apply a burst of host events in ONE store update, in order (see
  *  `applySessionEvents` for the rationale). */
@@ -312,19 +332,13 @@ export function applyHostEvents(events: readonly HostEvent[]): void {
         // host, and inventing one from three fields would show a host with
         // no versions and no transport.
         const have = next.find((h) => h.alias === ev.alias);
-        if (have) {
-          next = rows.mergeInto(next, {
-            ...have,
-            last_pinged_at: ev.last_pinged_at,
-            // A ping is a probe that changed nothing else: answered, it moved
-            // `last_reachable_at` with the stamp (store/reconcile.rs).
-            last_reachable_at: ev.reachable ? ev.last_pinged_at : have.last_reachable_at,
-            claude_version_at: ev.claude_version_at ?? have.claude_version_at,
-            reachable: ev.reachable,
-            // The health sample rides the ping (it moves every pass).
-            ...(ev.health ?? {}),
-          });
-        }
+        if (have) next = rows.mergeInto(next, applyPing(have, ev));
+      } else if (ev.type === 'added') {
+        // `added` is a host (re-)added on purpose — from this client or
+        // another within the tombstone window — not a late frame for the
+        // removed one: it lifts the tombstone. A late `probed` stays dropped.
+        rows.clearTombstone(ev.row.alias);
+        next = rows.mergeInto(next, ev.row);
       } else {
         next = rows.mergeInto(next, ev.row);
       }
