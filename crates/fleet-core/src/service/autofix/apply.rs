@@ -1185,9 +1185,8 @@ mod tests {
     }
 
     fn output(code: i32, stdout: &str, stderr: &str) -> std::process::Output {
-        use std::os::unix::process::ExitStatusExt;
         std::process::Output {
-            status: std::process::ExitStatus::from_raw(code << 8),
+            status: crate::agent::transport::exit_status(code),
             stdout: stdout.as_bytes().to_vec(),
             stderr: stderr.as_bytes().to_vec(),
         }
