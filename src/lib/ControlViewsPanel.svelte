@@ -47,7 +47,7 @@
   import { openRuns } from './automation';
   import LimitActions from './LimitActions.svelte';
   import FixCard from './FixCard.svelte';
-  import { fixedRecently, openFindings, watchFindings } from './autofix';
+  import { fixedRecently, fixedWords, hiddenFindings, openFindings, subjectWords, watchFindings } from './autofix';
   import { onMount } from 'svelte';
   import { classify } from './attention';
   import { attentionFacts } from './attention_facts';
@@ -258,17 +258,30 @@
           <input type="search" placeholder="Search sessions" aria-label="Search sessions" bind:value={query} data-testid="control-views-search" />
         </label>
       </div>
-      {#if $openFindings.length > 0 || $fixedRecently.length > 0}
+      {#if $openFindings.length > 0 || $hiddenFindings.length > 0 || $fixedRecently.length > 0}
         <section class="problems" aria-label="Problems & fixes" data-testid="control-problems">
           <h3 class="problems-title">Problems &amp; fixes{#if $openFindings.length > 0}{' '}<span class="count">{$openFindings.length}</span>{/if}</h3>
           {#each $openFindings as f (f.id)}
             <FixCard finding={f} compact={true} />
           {/each}
+          {#if $hiddenFindings.length > 0}
+            <details class="fold" data-testid="control-problems-hidden">
+              <summary>Hidden until later <span class="fold-n">{$hiddenFindings.length}</span></summary>
+              {#each $hiddenFindings as f (f.id)}
+                <FixCard finding={f} compact={true} />
+              {/each}
+            </details>
+          {/if}
           {#if $fixedRecently.length > 0}
             <details class="fold" data-testid="control-problems-fixed">
-              <summary>Fixed automatically <span class="fold-n">{$fixedRecently.length}</span></summary>
+              <summary>Fixed in the last day <span class="fold-n">{$fixedRecently.length}</span></summary>
               <ul class="fixed">
-                {#each $fixedRecently as f (f.id)}<li>{f.title ?? f.kind}</li>{/each}
+                {#each $fixedRecently as f (f.id)}
+                  <li data-testid="control-problems-fixed-row">
+                    <span class="fixed-title">{f.title ?? f.kind}</span>
+                    <span class="fixed-what">{fixedWords(f)} · {subjectWords(f.subject)}</span>
+                  </li>
+                {/each}
               </ul>
             </details>
           {/if}
@@ -524,6 +537,13 @@
     padding-left: 1.1rem;
     font-size: var(--text-xs);
     color: var(--fg-muted);
+  }
+  .fixed li {
+    display: flex;
+    flex-direction: column;
+  }
+  .fixed-title {
+    color: var(--fg-2);
   }
   .fleet {
     padding: var(--space-2) var(--space-3);
