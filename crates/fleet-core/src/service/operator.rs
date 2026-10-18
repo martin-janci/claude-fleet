@@ -1170,6 +1170,23 @@ pub(crate) async fn ensure_operator_on(
         // `E_NOTFOUND` here just means there was none.
         let _ = s.revoke_client_token(OPERATOR_CLIENT_NAME);
         s.insert_client_token(OPERATOR_CLIENT_NAME, &sha, "full")?;
+        // The token is the hub owner's, as the session started in step 6 is
+        // (`hub_personal_owner`). A client with no person gets a REFUSING
+        // `view_scope` — the agent would see no session, its own included.
+        // A hub that cannot say whose it is leaves the token unbound, the
+        // same fail-closed rule that leaves the session `unclaimed`; the
+        // agent then sees nothing until the hub has an owner, which is what
+        // the master token sees on such a hub too. Migration 195 heals a
+        // token minted before this.
+        match s.personal_owner_id()? {
+            Some(owner) => {
+                s.set_client_person(OPERATOR_CLIENT_NAME, Some(owner))?;
+            }
+            None => tracing::warn!(
+                "the hub has no personal owner; the operator's token is left \
+                 unbound and will see no sessions"
+            ),
+        }
         s.set_setting(SETTING_OPERATOR_TOKEN_SHA, &sha)
             .map_err(|e| {
                 IpcError::new(codes::E_SQLITE, format!("record the operator token: {e}"))
@@ -2004,6 +2021,74 @@ mod tests {
             .into_iter()
             .filter(|t| t.name == "ux-agent")
             .collect()
+    }
+
+    /// The token the operator is handed must SEE the fleet it operates:
+    /// its own session and the sessions of the person it acts for. Minted
+    /// person-less, it resolved to a client whose `view_scope` refuses every
+    /// row (`Caller::view_scope`: "client with no `person_id` → a REFUSING
+    /// scope"), so the agent listed no sessions, `whoami` from its own pane
+    /// was `E_NOTFOUND`, and `operator_status` answered `session: null`.
+    #[tokio::test]
+    async fn the_operator_token_sees_its_own_session_and_its_owners() {
+        let (store, _ssh, _reg) = fixture();
+        let owner = store
+            .lock()
+            .unwrap()
+            .personal_owner_id()
+            .unwrap()
+            .expect("a fresh hub has a personal owner");
+        let host = FakeHost::new(&store);
+        let row = ensure_operator_on(&store, &host).await.expect("born");
+
+        let token = {
+            let j = written_mcp_json(&host);
+            j["mcpServers"]["claude-fleet"]["headers"]["Authorization"]
+                .as_str()
+                .and_then(|h| h.strip_prefix("Bearer "))
+                .expect("a bearer header")
+                .to_string()
+        };
+        let s = store.lock().unwrap();
+        // The real host starts the session with `hub_personal_owner` as its
+        // owner (`LiveHost::start_session`); the fake writes a bare
+        // row, so give it the owner the real one would.
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET owner_person_id = ?1, visibility = 'private' \
+                 WHERE id = ?2",
+                rusqlite::params![owner, row.id],
+            )
+            .unwrap();
+        let other = s
+            .upsert_session("cf-25", OPERATOR_HOST, None, None, 1, 1, "running", None)
+            .unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET owner_person_id = ?1, visibility = 'private' \
+                 WHERE id = ?2",
+                rusqlite::params![owner, other],
+            )
+            .unwrap();
+
+        let caller = crate::mcp::auth::resolve_token(
+            &token,
+            "master-token",
+            &[],
+            &s.active_client_tokens().unwrap(),
+            Some(owner),
+        )
+        .expect("the operator's token resolves");
+        assert_eq!(caller.person(), Some(owner), "the token is the owner's");
+        let scope = caller.view_scope(&s).unwrap();
+        for (what, tmux) in [("its own", OPERATOR_TMUX_NAME), ("the owner's", "cf-25")] {
+            let r = s.get_session(tmux, OPERATOR_HOST).unwrap().unwrap();
+            assert_eq!(
+                scope.sees_session_row(&r),
+                crate::service::view_scope::Visibility::RowAndContent,
+                "the operator must see {what} session"
+            );
+        }
     }
 
     /// `ensure_operator` runs on every press of the button. Twice over it

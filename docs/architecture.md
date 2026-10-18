@@ -449,7 +449,7 @@ bullet for the area you are about to change.
   the orbit map (`src/lib/runs.ts`, `orbit_map.ts`, `automation/`); the
   orbit is also Control's ◌ view (`ControlOrbitView.svelte`), whose ⤢
   hands Automation a `runsRequest`.
-- **Autofix** (`service/autofix/`, `store/autofix.rs`, migration 195, MCP
+- **Autofix** (`service/autofix/`, `store/autofix.rs`, migration 196, MCP
   `autofix`, loop `autofix`, settings `autofix.*`): known broken states, each
   found by a pure detector over a `ScanCx` the runner gathers under one lock,
   stored as an episode in `autofix_findings` (`(kind, subject)` unique while
