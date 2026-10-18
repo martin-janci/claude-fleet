@@ -267,6 +267,31 @@ where
     })
 }
 
+/// A prompt typed straight in (an agent's `send_prompt`, a dispatch) takes
+/// the session's current idle moment in the ledger, so a queued prompt the
+/// Stop hook or the reconcile backstop is about to deliver waits for the
+/// next one instead of going in on top. Answers whether this send got the
+/// moment: `false` when the session is not idle, or a queued prompt already
+/// took it (the REPL then queues this one behind that turn). The ledger row
+/// is history only: it is recorded as delivered and never typed by fleet.
+pub fn claim_moment_for_direct_send(
+    store: &Mutex<Store>,
+    row: &SessionRow,
+    body: &str,
+    now: i64,
+) -> Result<bool, IpcError> {
+    if !idle_for_prompt(row) {
+        return Ok(false);
+    }
+    let s = lock(store)?;
+    let id = s.insert_deferred_prompt(row.id, body, now)?;
+    if s.claim_deferred_prompt_in(id, now, idle_moment(row))? {
+        return Ok(true);
+    }
+    s.cancel_deferred_prompt(id, now)?;
+    Ok(false)
+}
+
 /// Type the session's oldest waiting prompt when it is idle. Answers the row
 /// that went out, `None` when nothing did (not idle, nothing waiting, or a
 /// racing call took it).
@@ -804,6 +829,45 @@ mod tests {
         let row = s.get_session_by_id(id).unwrap().unwrap();
         assert!(!idle_for_prompt(&row));
         assert_eq!(row.idle_since, None);
+    }
+
+    /// An agent's direct send into an idle session takes the moment: the
+    /// queued prompt waits for the next Stop instead of going in on top.
+    #[tokio::test]
+    async fn a_direct_send_takes_the_idle_moment_from_the_queue() {
+        let (store, id) = store_with("working");
+        let now = now_unix();
+        queue_prompt_with(args(id, "later"), &store, now - 20, |_, _| async {
+            panic!()
+        })
+        .await
+        .unwrap();
+        set_idle_since(&store, id, now - 10);
+        let row = store
+            .lock()
+            .unwrap()
+            .get_session_by_id(id)
+            .unwrap()
+            .unwrap();
+        assert!(claim_moment_for_direct_send(&store, &row, "now", now - 5).unwrap());
+        let out = deliver_due_with(&store, id, now, |_, _| async {
+            panic!("typed into the moment the direct send took")
+        })
+        .await
+        .unwrap();
+        assert!(out.is_none());
+        // Nothing direct is left waiting to be typed by fleet.
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .next_deferred_prompt(id)
+                .unwrap()
+                .map(|r| r.body),
+            Some("later".to_string())
+        );
+        // A second direct send in the same moment does not get it.
+        assert!(!claim_moment_for_direct_send(&store, &row, "again", now - 4).unwrap());
     }
 
     /// A move carries the source's waiting prompts to its new row.
