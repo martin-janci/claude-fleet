@@ -102,7 +102,18 @@ pub struct ControlHandoffRow {
     pub items: Vec<HandoffItem>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
+    /// How the call was let through (migration 196): `person` — a person
+    /// approved its card and fleet ran it (review 2026-10-17, F1);
+    /// `pre_approved` — the autonomy position let it through without a card
+    /// (F2). Absent when no card was needed, or on an older receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<String>,
 }
+
+/// [`ControlHandoffRow::approval`]: a person approved the card (F1).
+pub const APPROVAL_PERSON: &str = "person";
+/// [`ControlHandoffRow::approval`]: the autonomy position let it through (F2).
+pub const APPROVAL_PRE_APPROVED: &str = "pre_approved";
 
 /// One timeline event of a session Control answers for, with the names the
 /// operator feed's digest shows ([`Store::operator_feed_events`]).
@@ -135,6 +146,17 @@ impl Store {
     /// Write one receipt and drop the ones past [`HANDOFFS_KEEP`]; answers
     /// the row id.
     pub fn insert_control_handoff(&self, h: &NewHandoff, now: i64) -> Result<i64> {
+        self.insert_control_handoff_as(h, now, None)
+    }
+
+    /// [`Self::insert_control_handoff`], saying how the call was let through
+    /// ([`APPROVAL_PERSON`] / [`APPROVAL_PRE_APPROVED`]).
+    pub fn insert_control_handoff_as(
+        &self,
+        h: &NewHandoff,
+        now: i64,
+        approval: Option<&str>,
+    ) -> Result<i64> {
         let ids = if h.item_ids.is_empty() {
             None
         } else {
@@ -143,8 +165,9 @@ impl Store {
         self.conn
             .prepare_cached(
                 "INSERT INTO control_handoffs \
-                 (at, kind, tool, session_id, task_id, mission_id, item_id, item_ids, preview) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 (at, kind, tool, session_id, task_id, mission_id, item_id, item_ids, preview, \
+                  approval) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             )?
             .execute(rusqlite::params![
                 now,
@@ -156,6 +179,7 @@ impl Store {
                 h.item_id,
                 ids,
                 h.preview,
+                approval,
             ])?;
         let id = self.conn.last_insert_rowid();
         self.conn
@@ -169,7 +193,7 @@ impl Store {
     pub fn list_control_handoffs(&self, limit: i64) -> Result<Vec<ControlHandoffRow>> {
         let mut st = self.conn.prepare_cached(
             "SELECT h.id, h.at, h.kind, h.tool, h.session_id, h.task_id, h.mission_id, \
-                    m.name, m.state, h.item_id, h.item_ids, h.preview \
+                    m.name, m.state, h.item_id, h.item_ids, h.preview, h.approval \
              FROM control_handoffs h \
              LEFT JOIN orchestration_projects m ON m.id = h.mission_id \
              ORDER BY h.id DESC LIMIT ?1",
@@ -190,6 +214,7 @@ impl Store {
                         item: None,
                         items: Vec::new(),
                         preview: r.get(11)?,
+                        approval: r.get(12)?,
                     },
                     r.get::<_, Option<i64>>(9)?,
                     r.get::<_, Option<String>>(10)?,
@@ -282,6 +307,22 @@ impl Store {
             .query_row([], |r| r.get(0))
     }
 
+    /// Whether `session_id` is one of Control's OPEN handoffs (review
+    /// 2026-10-17, F2): a live session (`running`, not lost) that Control
+    /// started (`origin = 'operator'`) or briefed (a receipt names it). The
+    /// operator guard pre-approves a prompt or task to such a session at
+    /// "Within your brief" and "Autopilot" (`mcp::guard::operator_must_confirm`).
+    pub fn is_open_control_handoff(&self, session_id: i64) -> Result<bool> {
+        self.conn
+            .prepare_cached(
+                "SELECT EXISTS (SELECT 1 FROM sessions s \
+                  WHERE s.id = ?1 AND s.status = 'running' AND s.lost_at IS NULL \
+                    AND (s.origin = 'operator' OR EXISTS \
+                         (SELECT 1 FROM control_handoffs h WHERE h.session_id = s.id)))",
+            )?
+            .query_row([session_id], |r| r.get(0))
+    }
+
     /// The missions Control handed off (a receipt names them), newest
     /// receipt first, without repeats.
     pub fn handed_off_mission_ids(&self) -> Result<Vec<i64>> {
@@ -342,6 +383,67 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         s.insert_control_handoff(&NewHandoff::default(), 100)
             .unwrap();
+    }
+
+    /// F1/F2: how a call was let through reads back, and a receipt from
+    /// before says nothing.
+    #[test]
+    fn a_receipt_keeps_how_it_was_approved() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_control_handoff(&NewHandoff::default(), 1).unwrap();
+        s.insert_control_handoff_as(&NewHandoff::default(), 2, Some(APPROVAL_PRE_APPROVED))
+            .unwrap();
+        s.insert_control_handoff_as(&NewHandoff::default(), 3, Some(APPROVAL_PERSON))
+            .unwrap();
+        let rows = s.list_control_handoffs(10).unwrap();
+        let got: Vec<Option<&str>> = rows.iter().map(|r| r.approval.as_deref()).collect();
+        assert_eq!(got, vec![Some("person"), Some("pre_approved"), None]);
+        assert!(s
+            .insert_control_handoff_as(&NewHandoff::default(), 4, Some("whatever"))
+            .is_err());
+    }
+
+    /// F2: an open handoff is a live session Control started or briefed.
+    #[test]
+    fn an_open_handoff_is_a_live_session_control_started_or_briefed() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let mk = |name: &str| {
+            s.upsert_session(name, "h", None, None, 1, 1, "running", None)
+                .unwrap()
+        };
+        let started = mk("started");
+        let briefed = mk("briefed");
+        let stranger = mk("stranger");
+        let gone = mk("gone");
+        s.conn
+            .execute(
+                "UPDATE sessions SET origin = 'operator' WHERE id IN (?1, ?2)",
+                [started, gone],
+            )
+            .unwrap();
+        s.insert_control_handoff(
+            &NewHandoff {
+                session_id: Some(briefed),
+                ..Default::default()
+            },
+            1,
+        )
+        .unwrap();
+        s.conn
+            .execute(
+                "UPDATE sessions SET status = 'killed' WHERE id = ?1",
+                [gone],
+            )
+            .unwrap();
+        assert!(s.is_open_control_handoff(started).unwrap());
+        assert!(s.is_open_control_handoff(briefed).unwrap());
+        assert!(!s.is_open_control_handoff(stranger).unwrap());
+        assert!(
+            !s.is_open_control_handoff(gone).unwrap(),
+            "a dead session is closed"
+        );
+        assert!(!s.is_open_control_handoff(9_999).unwrap());
     }
 
     #[test]

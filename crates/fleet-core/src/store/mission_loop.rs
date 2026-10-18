@@ -547,6 +547,44 @@ impl Store {
             .optional()?)
     }
 
+    /// Whether a new session on `host` falls inside a running mission's
+    /// grant at `now` (review 2026-10-17, F2, "Autopilot"): an ACTIVE
+    /// mission holds a live grant ([`Self::live_mission_grant`]: not
+    /// revoked, not expired — its hours — and signed for the plan it has
+    /// now) whose hosts include `host` (or name none), whose budget is not
+    /// spent and whose parallel cap has room. The operator guard lets such
+    /// a start through without a card at Autopilot only.
+    pub fn start_inside_mission_grant(&self, host: &str, now: i64) -> Result<bool, IpcError> {
+        let ids: Vec<i64> = self
+            .conn
+            .prepare_cached("SELECT id FROM orchestration_projects WHERE state = 'active'")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for id in ids {
+            let Some(g) = self.live_mission_grant(id, now)? else {
+                continue;
+            };
+            if g.hosts
+                .as_ref()
+                .is_some_and(|hs| !hs.iter().any(|h| h == host))
+            {
+                continue;
+            }
+            if let Some(budget) = g.budget_micros {
+                if self.mission_cost_micros(id)? >= budget {
+                    continue;
+                }
+            }
+            if let Some(cap) = g.max_parallel {
+                if self.mission_task_counts(id)?.open >= cap {
+                    continue;
+                }
+            }
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     /// Revoke every live grant of the mission. Answers how many.
     pub fn revoke_grants(&self, mission_id: i64) -> Result<usize, IpcError> {
         Ok(self.conn.execute(

@@ -1643,9 +1643,12 @@ mod tests {
                 Some(DEFER_MEM_HEADROOM.to_string())
             )]
         );
-        // Once a has settled, the same reading has room for b. The restore
-        // event is stamped with the wall clock, which on a loaded runner is
-        // already past `now`: settle from the stamp, not from `now`.
+        // Once a has settled, the same reading has room for b. The settle
+        // window runs from a's `restored` event, which the store stamps
+        // with the wall clock, not with `now`: counted from `now`, a second
+        // that ticked over between the two (the template migration of a
+        // test process's first store alone can take that long) left a still
+        // "starting" at `later`, and b deferred again.
         let restored_at: i64 = store
             .lock()
             .unwrap()
@@ -1656,7 +1659,11 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        let later = restored_at.max(now) + RESTORE_SETTLE_SECS + 1;
+        assert!(
+            restored_at >= now,
+            "stamped by the clock, at or after `now`"
+        );
+        let later = restored_at + RESTORE_SETTLE_SECS + 1;
         let r = run_with(&store, &fake, &NoAdvice, &CFG, later).await;
         assert_eq!(r.restored, 1);
     }

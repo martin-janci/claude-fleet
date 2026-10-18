@@ -19,6 +19,7 @@ import {
 } from './control_slash';
 import { sessions, type SessionRow } from './sessions';
 import { hosts, type HostRow } from './hosts';
+import { controlVersions } from './control_versions';
 
 // Friday 9 October 2026, mid-morning, local time.
 const NOW = new Date(2026, 9, 9, 10, 30);
@@ -122,6 +123,18 @@ describe('/health and /graph', () => {
     expect(r.rows?.[0].text).toBe('offline');
     expect(r.open).toEqual({ kind: 'hosts' });
     expect(inv).not.toHaveBeenCalled();
+  });
+
+  it('/health ends with the versions Control runs against, amber when the hub is behind', async () => {
+    hosts.set([host('alpha')]);
+    controlVersions.set({ hub: '0.6.2', desktop: '0.6.3', phone: null, remote: true });
+    takeControlCommand('/health');
+    const r = await receipt();
+    const last = r.rows?.at(-1);
+    expect(last?.label).toBe('versions');
+    expect(last?.text).toBe('hub 0.6.2 · desktop 0.6.3 · hub behind');
+    expect(last?.level).toBe('warn');
+    controlVersions.set({ hub: null, desktop: null, phone: null, remote: false });
   });
 
   it('/health @host narrows it, and names a host it does not know', async () => {

@@ -1001,6 +1001,7 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
             item: Some(item.clone()),
             items: vec![item],
             preview: Some("p".into()),
+            approval: Some("pre_approved".into()),
         }),
     );
     // Revision 13.

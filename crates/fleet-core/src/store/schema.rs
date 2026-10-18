@@ -718,6 +718,15 @@ fn sessions_has_pinned_at(conn: &Connection) -> rusqlite::Result<bool> {
 }
 
 /// `already_applied` guard of migration 191.
+fn control_handoffs_has_approval(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('control_handoffs') WHERE name = 'approval'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn hosts_has_agent_hook_port(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'agent_hook_port'",
@@ -2199,6 +2208,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 195,
         sql: include_str!("../../migrations/195_operator_token_person.sql"),
         already_applied: None,
+    },
+    // How Control's handoff was let through: a person's card or the
+    // autonomy position (review 2026-10-17, F1/F2). An ADD COLUMN, so guarded.
+    Migration {
+        version: 196,
+        sql: include_str!("../../migrations/196_control_handoff_approval.sql"),
+        already_applied: Some(control_handoffs_has_approval),
     },
 ];
 

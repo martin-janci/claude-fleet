@@ -6,7 +6,10 @@
 // Control hears what changed (`control.react_to_events`), together, through
 // the same `set_fleet_setting` path Settings uses. Settings → Control API
 // keeps each one for whoever wants them apart; a mix the dial does not name
-// reads as Custom.
+// reads as Custom. The hub reads the same position (`service::autonomy`,
+// `autonomy_positions_mirror_the_dial` keeps the rows in step) and
+// pre-approves the operator's calls by it (`guard::operator_must_confirm`):
+// Custom grants what Ask first does.
 import { setFleetSetting, settingBool, settingInt, SETTING_KEYS, type FleetSettings, type SettingKey } from './fleet_settings';
 
 export type AutonomyId = 'ask' | 'brief' | 'autopilot';
@@ -36,7 +39,7 @@ export const AUTONOMY: readonly AutonomyPosition[] = [
   {
     id: 'brief',
     label: 'Within your brief',
-    blurb: 'Does what you handed it: answers its sessions, nudges, retries, and goes on with a recommended choice after 10 minutes. Asks for anything new.',
+    blurb: 'Prompts and briefs the sessions it started or briefed without asking you, and goes on with a recommended choice after 10 minutes. Asks before starting, stopping or restarting anything.',
     maxLevel: 2,
     autoContinue: true,
     minutes: 10,
@@ -45,7 +48,7 @@ export const AUTONOMY: readonly AutonomyPosition[] = [
   {
     id: 'autopilot',
     label: 'Autopilot',
-    blurb: "Also creates a mission's tasks and goes on with a recommended choice after 2 minutes. Never tags, deploys or deletes.",
+    blurb: "Also starts sessions inside a mission's grant (its hosts, hours and budget) and creates its tasks, and goes on with a recommended choice after 2 minutes. Kills, restarts and deletes still ask.",
     maxLevel: 3,
     autoContinue: true,
     minutes: 2,

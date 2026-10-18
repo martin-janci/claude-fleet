@@ -129,8 +129,8 @@ pub use clients::{
     LINE_SEPARATORS, MAX_CLIENT_NAME_LEN,
 };
 pub use control_handoffs::{
-    handoff_preview, ControlHandoffRow, FeedEventRow, HandoffItem, NewHandoff, HANDOFFS_KEEP,
-    HANDOFF_PREVIEW_MAX,
+    handoff_preview, ControlHandoffRow, FeedEventRow, HandoffItem, NewHandoff, APPROVAL_PERSON,
+    APPROVAL_PRE_APPROVED, HANDOFFS_KEEP, HANDOFF_PREVIEW_MAX,
 };
 pub use control_tokens::{ApiScope, ControlTokenRow, NewControlToken};
 pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};

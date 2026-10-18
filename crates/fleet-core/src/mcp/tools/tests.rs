@@ -8449,11 +8449,22 @@ fn the_operator_must_confirm_starts_kills_and_every_confirm_tool() {
         "run_prompt",
         "queue_prompt",
     ] {
-        assert!(guard::operator_must_confirm(true, tool), "{tool}");
-        assert!(!guard::operator_must_confirm(false, tool), "{tool}");
+        let ask = crate::service::autonomy::Position::Ask;
+        assert!(
+            guard::caller_must_confirm(true, tool, ask, false, false),
+            "{tool}"
+        );
+        assert!(
+            !guard::caller_must_confirm(false, tool, ask, false, false),
+            "{tool}"
+        );
     }
     for tool in ["list_sessions", "work", "discover_lost_sessions"] {
-        assert!(!guard::operator_must_confirm(true, tool), "{tool}");
+        let ask = crate::service::autonomy::Position::Ask;
+        assert!(
+            !guard::caller_must_confirm(true, tool, ask, false, false),
+            "{tool}"
+        );
     }
     let op = client_caller(
         crate::service::operator::OPERATOR_CLIENT_NAME,
@@ -8467,6 +8478,115 @@ fn the_operator_must_confirm_starts_kills_and_every_confirm_tool() {
         TokenMode::Full
     )
     .is_operator());
+}
+
+/// Review 2026-10-17, F2: at "Within your brief" the operator's prompt into
+/// a session it started goes without a card, is audited on that session and
+/// its receipt says pre-approved; into a session that is not its handoff it
+/// still asks, and at Ask first everything asks.
+#[tokio::test]
+async fn within_the_brief_the_operators_prompt_to_its_own_session_is_pre_approved() {
+    let (s, _, on_b) = two_host_store();
+    let stranger = s
+        .upsert_session("dev-c", "hostb", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.conn_ref()
+        .execute(
+            "UPDATE sessions SET origin = 'operator' WHERE id = ?1",
+            [on_b],
+        )
+        .unwrap();
+    let t = guarded_tools(s, true);
+    let queue = |id: i64| {
+        serde_json::from_value::<QueuePromptParams>(serde_json::json!({
+            "session_id": id, "prompt": "Work on PD-1",
+        }))
+        .unwrap()
+    };
+    // Ask first (a fresh store): a card.
+    let asked = t
+        .queue_prompt(Extension(operator()), Parameters(queue(on_b)))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
+    {
+        let st = t.store.lock().unwrap();
+        st.set_setting(crate::service::settings::ORCHESTRATOR_MAX_LEVEL, "2")
+            .unwrap();
+        st.set_setting(crate::service::settings::CONTROL_AUTO_CONTINUE, "true")
+            .unwrap();
+        assert_eq!(
+            crate::service::autonomy::position(&st),
+            crate::service::autonomy::Position::Brief
+        );
+    }
+    let (out, approval) =
+        guard::tracking_approval(t.queue_prompt(Extension(operator()), Parameters(queue(on_b))))
+            .await;
+    if let Err(e) = &out {
+        assert!(
+            !e.message.starts_with("E_CONFIRM_REQUIRED"),
+            "{}",
+            e.message
+        );
+    }
+    assert_eq!(approval, Some(crate::store::APPROVAL_PRE_APPROVED));
+    let events = t
+        .store
+        .lock()
+        .unwrap()
+        .list_session_events(on_b, 20)
+        .unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind == super::support::EVENT_PRE_APPROVED),
+        "a pre-approved call is audited on its target"
+    );
+    let other = t
+        .queue_prompt(Extension(operator()), Parameters(queue(stranger)))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&other);
+}
+
+/// Review 2026-10-17, F1: the operator is told to wait, not to retry, and
+/// its own retry after fleet took the approval neither runs it nor gets a
+/// fresh card.
+#[tokio::test]
+async fn an_approval_fleet_runs_is_not_run_again_by_the_operators_retry() {
+    let (s, _, on_b) = two_host_store();
+    let t = guarded_tools(s, true);
+    let queue = |nonce: Option<&str>| {
+        serde_json::from_value::<QueuePromptParams>(serde_json::json!({
+            "session_id": on_b, "prompt": "Work on PD-1", "confirm_nonce": nonce,
+        }))
+        .unwrap()
+    };
+    let asked = t
+        .queue_prompt(Extension(operator()), Parameters(queue(None)))
+        .await
+        .unwrap_err();
+    assert!(asked.message.contains("Do not retry"), "{}", asked.message);
+    let nonce = confirm_nonce_of(&asked);
+    let ran = Arc::new(Mutex::new(Vec::new()));
+    let log = ran.clone();
+    assert!(t.guards.confirms.attach_replay(
+        &nonce,
+        Box::new(move |approved| Box::pin(async move { log.lock().unwrap().push(approved) })),
+    ));
+    assert!(t.guards.confirms.answer(&nonce, true));
+    let retry = t
+        .queue_prompt(Extension(operator()), Parameters(queue(Some(&nonce))))
+        .await
+        .unwrap_err();
+    assert!(
+        retry.message.starts_with("E_INVALID_STATE"),
+        "{}",
+        retry.message
+    );
+    assert!(retry.message.contains("fleet runs it"), "{}", retry.message);
+    assert!(t.guards.confirms.pending().is_empty(), "no fresh card");
 }
 
 fn guarded_tools(s: Store, approver: bool) -> FleetTools {

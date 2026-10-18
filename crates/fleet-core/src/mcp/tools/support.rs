@@ -1792,6 +1792,21 @@ pub(super) fn usage_scope(
         .or_else(|| requested.map(str::to_string)))
 }
 
+/// What a gated call acts on, for the operator's pre-approval (review
+/// 2026-10-17, F2, `guard::operator_must_confirm`).
+#[derive(Clone, Copy, Debug)]
+pub(super) enum GateTarget<'a> {
+    /// Nothing the autonomy position can pre-approve.
+    Other,
+    /// A prompt or task into this existing session.
+    Session(i64),
+    /// A new Claude session on this host.
+    Start { host: &'a str },
+}
+
+/// The timeline event a pre-approved operator call leaves on its target.
+pub const EVENT_PRE_APPROVED: &str = "control_pre_approved";
+
 impl FleetTools {
     /// True when the operator turned on desktop confirmation for
     /// destructive calls (`mcp.confirm_destructive`).
@@ -1830,14 +1845,77 @@ impl FleetTools {
         caller: &Caller,
         person: bool,
     ) -> Result<(), McpError> {
+        self.confirm_gate_inner(tool, nonce, summary, caller, person, GateTarget::Other)
+    }
+
+    /// [`Self::confirm_gate`] for a call whose target the autonomy position
+    /// may pre-approve (review 2026-10-17, F2): a prompt or task into an
+    /// existing session, or a new Claude session on a host.
+    pub(super) fn confirm_gate_target(
+        &self,
+        tool: &str,
+        nonce: Option<&str>,
+        summary: &str,
+        caller: &Caller,
+        target: GateTarget<'_>,
+    ) -> Result<(), McpError> {
+        self.confirm_gate_inner(tool, nonce, summary, caller, false, target)
+    }
+
+    /// The operator's facts [`guard::operator_must_confirm`] decides on:
+    /// the autonomy position, whether `target` is one of Control's open
+    /// handoffs, and whether it is a start inside a running mission's grant.
+    fn operator_gate_facts(
+        &self,
+        target: GateTarget<'_>,
+    ) -> Result<(crate::service::autonomy::Position, bool, bool), McpError> {
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        let position = crate::service::autonomy::position(&s);
+        if position.is_ask_first() {
+            return Ok((position, false, false));
+        }
+        let own = match target {
+            GateTarget::Session(id) => s
+                .is_open_control_handoff(id)
+                .map_err(|e| to_mcp_err(IpcError::from(e)))?,
+            _ => false,
+        };
+        let grant = match target {
+            GateTarget::Start { host } => s
+                .start_inside_mission_grant(host, crate::store::now_unix())
+                .map_err(to_mcp_err)?,
+            _ => false,
+        };
+        Ok((position, own, grant))
+    }
+
+    fn confirm_gate_inner(
+        &self,
+        tool: &str,
+        nonce: Option<&str>,
+        summary: &str,
+        caller: &Caller,
+        person: bool,
+        target: GateTarget<'_>,
+    ) -> Result<(), McpError> {
         debug_assert!(
             guard::needs_confirmation(tool) || guard::OPERATOR_CONFIRMS.contains(&tool),
             "{tool} is not in guard::CONFIRM_TOOLS"
         );
-        // The operator's starts and kills are always confirmed (D12); for
-        // everyone else only the `confirm: true` tools, and only with the
-        // toggle on.
-        let forced = person || guard::operator_must_confirm(caller.is_operator(), tool);
+        // The operator's starts and kills are always confirmed (D12), and
+        // its prompts unless the autonomy position pre-approves them (F2);
+        // for everyone else only the `confirm: true` tools, and only with
+        // the toggle on.
+        let operator_gated = caller.is_operator() && guard::operator_gated(tool);
+        let forced = person
+            || (operator_gated && {
+                let (position, own, grant) = self.operator_gate_facts(target)?;
+                let must = guard::caller_must_confirm(true, tool, position, own, grant);
+                if !must {
+                    self.note_pre_approved(tool, summary, position, target);
+                }
+                must
+            });
         if !forced && (!guard::needs_confirmation(tool) || !self.confirm_enabled()?) {
             return Ok(());
         }
@@ -1859,7 +1937,12 @@ impl FleetTools {
         let confirms = &self.guards.confirms;
         if let Some(n) = nonce {
             match confirms.consume(n, tool, summary) {
-                ConfirmState::Approved => return Ok(()),
+                ConfirmState::Approved => {
+                    if caller.is_operator() {
+                        guard::note_approval(crate::store::APPROVAL_PERSON);
+                    }
+                    return Ok(());
+                }
                 ConfirmState::Denied => {
                     return Err(mcp_err(
                         "E_FORBIDDEN",
@@ -1876,11 +1959,37 @@ impl FleetTools {
                         Some(serde_json::json!({ "confirm_nonce": n })),
                     ))
                 }
+                ConfirmState::RunByFleet => {
+                    return Err(mcp_err(
+                        codes::E_INVALID_STATE,
+                        format!(
+                            "{tool} was approved and fleet runs it itself; its result reaches \
+                             you as a [fleet] approved note. Do not retry it."
+                        ),
+                        None,
+                    ))
+                }
                 ConfirmState::Unknown => {} // expired / replayed — issue a fresh one
             }
         }
         let req = confirms.request_from(tool, summary, &caller.label(), caller.is_operator());
         (self.guards.notify)(&req);
+        if caller.is_operator() {
+            // F1: `call_tool` hands this nonce a replay, so the approval
+            // runs the call and Control hears of it: no retry, no "go".
+            return Err(mcp_err(
+                codes::E_CONFIRM_REQUIRED,
+                format!(
+                    "{tool} needs a person's approval ({}). Tell the person in one line \
+                     what waits for them and end your turn: once they approve, fleet runs \
+                     it and tells you in a [fleet] approved note (or denied). Do not retry \
+                     it (confirm_nonce={})",
+                    guard::operator_confirm_reason(tool),
+                    req.nonce
+                ),
+                Some(serde_json::json!({ "confirm_nonce": req.nonce })),
+            ));
+        }
         Err(mcp_err(
             codes::E_CONFIRM_REQUIRED,
             format!(
@@ -1897,6 +2006,32 @@ impl FleetTools {
             ),
             Some(serde_json::json!({ "confirm_nonce": req.nonce })),
         ))
+    }
+
+    /// F2: a call the autonomy position let through without a card is
+    /// audited — a log line, a `control_pre_approved` event on the target
+    /// session — and marked for its receipt (`approval = pre_approved`), so
+    /// the conversation and the receipts show it as pre-approved.
+    fn note_pre_approved(
+        &self,
+        tool: &str,
+        summary: &str,
+        position: crate::service::autonomy::Position,
+        target: GateTarget<'_>,
+    ) {
+        audit(
+            "operator_pre_approved",
+            &format!("tool={tool} position={} {summary}", position.id()),
+        );
+        guard::note_approval(crate::store::APPROVAL_PRE_APPROVED);
+        if let GateTarget::Session(id) = target {
+            if let Ok(s) = lock(&self.store) {
+                let detail = format!("{tool} · {}", position.label());
+                if let Err(e) = s.insert_session_event(id, EVENT_PRE_APPROVED, Some(&detail)) {
+                    tracing::warn!(session_id = id, "pre-approval not recorded: {e}");
+                }
+            }
+        }
     }
 
     /// Resolve a session-addressed tool's target (MCP-6) to the stored

@@ -28,6 +28,8 @@
   import { shortcutLabel } from './shortcuts';
   import { openSettingsAt } from './app_views';
   import { operatorHost } from './operator';
+  import { controlVersions, loadControlVersions, versionsSummary } from './control_versions';
+  import { onMount } from 'svelte';
   import type { AgentContextInput } from './agent_context';
 
   let { isMac, contextInput = null }: { isMac: boolean; contextInput?: AgentContextInput | null } = $props();
@@ -41,6 +43,12 @@
   function endRight() {
     rawRight = null;
   }
+
+  // F0.2: which hub, desktop and phone Control is running against.
+  onMount(() => {
+    void loadControlVersions();
+  });
+  const versions = $derived(versionsSummary($controlVersions));
 
   const leftCol = $derived($controlLeftCollapsed ? '0px' : `${$controlLeftPx}px`);
   const rightCol = $derived($controlViews.open ? `${$controlRightPx}px` : '0px');
@@ -71,6 +79,11 @@
       {/if}
       <h2 class="title" data-testid="control-chat-title">Main chat</h2>
       <span class="sub" title="The agent runs as a session on {$operatorHost}">Control on {$operatorHost}</span>
+      {#if versions}
+        <span class="sub versions" class:behind={versions.hubBehind} data-testid="control-versions" title={versions.title}
+          >{versions.text}</span
+        >
+      {/if}
       <span class="grow"></span>
       <!-- UX audit C3 (board MissionControl): Overview opens the fleet's
            summary, the Today briefing view on the right. -->
@@ -189,5 +202,8 @@
   }
   .right-handle > :global(.resizer) {
     flex: 1;
+  }
+  .versions.behind {
+    color: var(--usage-warn);
   }
 </style>

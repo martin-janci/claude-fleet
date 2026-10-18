@@ -438,11 +438,20 @@ impl FleetTools {
             )
             .map_err(to_mcp_err)?;
         }
-        self.confirm_gate(
+        // A Claude start inside a running mission's grant goes without a
+        // card at Autopilot (F2); a shell or another agent never does.
+        self.confirm_gate_target(
             "new_session",
             p.confirm_nonce.as_deref(),
             &new_session_summary(&p),
             &caller,
+            if runs_claude {
+                GateTarget::Start {
+                    host: &p.host_alias,
+                }
+            } else {
+                GateTarget::Other
+            },
         )?;
         let args = sessions::NewSessionArgs {
             host_alias: p.host_alias,

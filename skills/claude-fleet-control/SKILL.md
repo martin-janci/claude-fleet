@@ -459,7 +459,9 @@ in a deleted dir, git lists a stale entry): `repair_session { session_id }`
   in any case, adopt the branch's checkout elsewhere, recreate the branch from
   base once origin confirms it is gone, and respawn the pane.
 - **Confirm gate:** behind `mcp.confirm_destructive`; on `E_CONFIRM_REQUIRED`,
-  retry with the returned `confirm_nonce` once the user approves it.
+  retry with the returned `confirm_nonce` once the user approves it. The
+  fleet operator (Control) does not retry: fleet runs its approved call and
+  tells it in a `[fleet] approved: …` note.
 - **Refusals need a human; do not loop:** `E_BRANCH_CHECKED_OUT` (the branch
   is checked out in the main checkout, or another fleet workspace uses the
   checkout adoption would take), `E_REPO_MISSING` (the main checkout is gone;

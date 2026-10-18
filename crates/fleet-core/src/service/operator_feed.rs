@@ -565,7 +565,9 @@ pub async fn run_with(
         state.cursor = Some(events.last().map_or(cursor, |e| e.id));
         state.raised = now_raised.into_iter().map(|c| c.key).collect();
         state.sent.retain(|&t| now - t < 3600);
-        let body = build_digest(&lines);
+        let body = build_digest(&lines).map(|d| {
+            crate::service::autonomy::with_header(&d, crate::service::autonomy::position(&s))
+        });
         if body.is_none() {
             // Nothing to say: move past what was read, keep what is raised.
             if state != FeedState::load(&s) {
@@ -576,7 +578,8 @@ pub async fn run_with(
         (op.id, body, state)
     };
     let body = body.expect("checked above");
-    let lines = body.lines().count() - 1;
+    // The digest's `- ` lines: not its mark nor the autonomy line (F3).
+    let lines = body.lines().filter(|l| l.starts_with("- ")).count();
     match exec.queue(op_id, body).await {
         Ok(()) => {
             next.sent.push(now);

@@ -39,6 +39,7 @@
     taskUndoable,
     treeWaves,
     followHandoffs,
+    approvalWords,
     openProposals,
     recentHandoffs,
     sessionChip,
@@ -337,6 +338,7 @@
         >
           <span class="what">Sent to a session</span>
           <span class="target">{c.name}</span>
+          {#if approvalWords(h)}<span class="what approval" data-testid="handoff-approval">{approvalWords(h)}</span>{/if}
           {#if c.state}<StatusChip state={c.state} />{:else}<span class="what">ended</span>{/if}
         </button>
         </div>

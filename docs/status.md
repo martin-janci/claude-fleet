@@ -8,10 +8,9 @@ delete it rather than adding a correction after it.
 
 The Orbit Fleet redesign (plan
 `docs/ux/2026-10-08-orbit-fleet-redesign/transition-plan.md`, parity
-contract `docs/redesign/parity.md`) is landing step by step, and its New
-layout is built but OFF by default: Settings → Appearance → Layout picks
-Classic or New (`ui.layout`, default `classic`, `src/lib/prefs.ts`). New has
-a rail (`src/lib/rail.ts`: Control, Inbox, Sessions, Work, Automation,
+contract `docs/redesign/parity.md`) is the only layout: step 13.1 removed
+the Classic layout and its Classic/New switch (`ui.layout` is forgotten at
+load, `src/lib/prefs.ts`). It has a rail (`src/lib/rail.ts`: Control, Inbox, Sessions, Work, Automation,
 Accounts, Toolkit, Settings), the session inspector, and Get started with a
 first-run tour (10.5). Control is the operator's place: confirmations as
 cards (9.2), "Sent to a session" and "Sent to a mission" receipts (9.3,
@@ -47,7 +46,41 @@ autonomy chip (`AutonomyChip.svelte`, `autonomy.ts`): Ask first · Within
 your brief · Autopilot set `orchestrator.max_level`, `control.auto_continue`
 (and its minutes) and `control.react_to_events` together, through
 `set_fleet_setting`; any other mix, including the shipped defaults, reads
-Custom. Since 2026-10-15 Work → Missions is a Thread room too (boards
+Custom. The hub reads the same position (`service/autonomy.rs`, mirrored
+from `autonomy.ts`; Custom grants what Ask first does), and since the
+2026-10-17 Control review it means something to Control itself:
+
+- **Pre-approval (F2, owner-approved; reverses review round 15 F21 for these
+  cases only).** At Within your brief the operator's `send_prompt`,
+  `queue_prompt`, `run_prompt` and `dispatch_task` into a live session it
+  started or briefed (`Store::is_open_control_handoff`) go without a card;
+  at Autopilot so does a Claude `new_session` (or `dispatch_task`
+  `new_worker`) on a host inside an active mission's live grant — its
+  hosts, expiry and budget, and parallel cap (`start_inside_mission_grant`).
+  Kills, restarts, rewinds, restores, add_project and every `confirm: true`
+  tool always ask. The rule is one pure function,
+  `guard::operator_must_confirm(tool, position, own_handoff, inside_grant)`,
+  with a truth-table test. A pre-approved call writes a
+  `control_pre_approved` event on its target and its receipt carries
+  `approval = pre_approved` (migration 196), drawn "pre-approved" on the
+  chip.
+- **Approvals run the call (F1).** An operator call stopped at
+  `E_CONFIRM_REQUIRED` keeps its request (`confirm_replay.rs`); answering
+  the card — the hub's `answer_mcp_confirm` or the desktop's `mcp_confirm`,
+  both through `PendingConfirms::answer` — runs it once on the hub
+  (Control's own retry reads `RunByFleet`, no second run, no fresh card) and
+  queues `[fleet] approved: <call> → <result>` (or `[fleet] denied: …`) for
+  Control's next idle moment. The nonce keeps its 10-minute TTL. The
+  receipt says `approval = person`.
+- **Control is told (F3).** Its CLAUDE.md has an Autonomy section, and every
+  `[fleet events]` digest's second line names the position and its rule.
+- **The composer queues (F4).** Typed while Control is mid-turn, a line is
+  held as a "queued · cancel" chip and sent when the turn ends
+  (`composer_hold.ts`; Control's chat only, `blockWhileBusy`), and a Stop
+  button beside Send interrupts the turn (Escape into the pane).
+- **Versions (F0.2).** Control's header and `/health` show the hub, desktop
+  and (when one reported) phone versions, flagged when the hub is older
+  than the desktop (`control_versions.ts`). Since 2026-10-15 Work → Missions is a Thread room too (boards
 W1Missions and W2Plan; frontend only; parity row P40): the sidebar's
 Missions tab (`WorkMissions.svelte`) groups the list Needs you / Working /
 Draft and paused / Done this week (a folded Earlier) with a reason, a meter
@@ -322,8 +355,14 @@ itself, and never a session's own words (names and vocabulary only). The
 cursor and the already-reported host/mission conditions live in the
 `control.feed_state` setting; no migration. The digest is typed as fleet's
 (`prompt_origin::FLEET_PROMPT_MARKS`); the operator's `CLAUDE.md` has a
-*Fleet events* section, which an operator born earlier gets at its next
-birth.
+*Fleet events* section. Since the 2026-10-17 review (F13) the operator's
+`CLAUDE.md`, commands and skill are written at birth (a move is a birth)
+and again before every restart, the panel's and auto-restore's alike
+(`operator::refresh_if_operator` in `sessions::restart_session`), unless the
+host's `.claude/fleet-operator-files.version` already holds this build's
+digest (`operator_files_stamp`); the `.mcp.json` keeps the birth's token.
+Other parts of fleet add their own `## …` section to the prompt with one
+line in `operator::CLAUDE_MD_SECTIONS` (`claude_md_full`).
 
 **Host load** is landed (migration 193): the health sample adds CPU busy
 percent (Linux `/proc/stat` deltas, macOS summed `ps` %CPU), available
@@ -763,7 +802,7 @@ C0: the operator is born with the `fleet-brainstorm` skill
 needed): Diverge → Converge → Decide → Plan, each stage closed by the
 person; the plan becomes a task (`work_link create`, the plan in `notes`)
 with proposed subtasks a person accepts. An operator born before C0 gets
-it at its next birth. Not yet: plan rows, decision rows, the worker
+it at its next start or restart (F13). Not yet: plan rows, decision rows, the worker
 catalog copy (C1).
 A3 (part): a start writes its steps to the new session's timeline
 (P-5): `start_spawned` (detail: `tickets::StartSpawned` JSON),
