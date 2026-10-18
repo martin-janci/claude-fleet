@@ -147,7 +147,7 @@ describe('fleet events and the host filter', () => {
     await screen.findByTestId('routines-empty');
     await fireEvent.click(screen.getByTestId('routine-new'));
     await fireEvent.click(screen.getByTestId('routine-template-morning-pr-sweep'));
-    await fireEvent.change(screen.getByTestId('routine-trigger'), { target: { value: 'event' } });
+    await fireEvent.click(screen.getByTestId('routine-trigger-event'));
     await fireEvent.change(screen.getByTestId('routine-event'), { target: { value: 'host_offline' } });
     const host = (await screen.findByTestId('routine-event-host')) as HTMLSelectElement;
     expect(Array.from(host.options).map((o) => o.value)).toEqual(['', 'mac']);
