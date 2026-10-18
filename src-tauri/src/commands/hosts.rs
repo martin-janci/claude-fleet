@@ -18,6 +18,7 @@ use fleet_core::service::hosts::{
     self, AddHostArgs, HideHostArgs, HostAliasArgs, MergeHostArgs, ProbePreview, ProbeSshAliasArgs,
     SetAccountNicknameArgs,
 };
+use fleet_core::service::tunnel::TunnelSupervisor;
 use fleet_core::service::view_scope::ViewScope;
 use fleet_core::ssh::SshClient;
 use fleet_core::ssh_config::SshHost;
@@ -187,9 +188,10 @@ pub fn remove_host(
     args: HostAliasArgs,
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
+    tunnels: State<'_, Arc<TunnelSupervisor>>,
 ) -> Result<HostRow, IpcError> {
     backend.refuse_local_only("remove_host")?;
-    hosts::remove_host(args, &store)
+    hosts::remove_host(args, &store, &tunnels)
 }
 
 /// Host identity & health, task 5. LocalOnly like `remove_host`: the hub
@@ -200,9 +202,10 @@ pub fn merge_host(
     args: MergeHostArgs,
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
+    tunnels: State<'_, Arc<TunnelSupervisor>>,
 ) -> Result<fleet_core::store::MergeReport, IpcError> {
     backend.refuse_local_only("merge_host")?;
-    hosts::merge_host(args, &store)
+    hosts::merge_host(args, &store, &tunnels)
 }
 
 #[tauri::command(async)]

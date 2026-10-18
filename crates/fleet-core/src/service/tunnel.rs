@@ -613,8 +613,8 @@ impl TunnelSupervisor {
         tasks.insert(host.to_string(), handle);
     }
 
-    /// Stop a single host's tunnel.
-    #[allow(dead_code)]
+    /// Stop a single host's tunnel (the host was removed or merged
+    /// away). A no-op for a host with none.
     pub fn stop(&self, host: &str) {
         if let Some(h) = self
             .tasks
