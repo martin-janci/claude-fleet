@@ -5529,6 +5529,32 @@ mod tests {
         }
     }
 
+    /// A pinned session whose move stops at a failed source kill keeps its
+    /// pin: both sessions live on, and `resolve_move`'s undo kills the
+    /// target trusting the source still holds its own.
+    #[tokio::test]
+    async fn a_failed_source_kill_puts_the_sources_pin_back() {
+        let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        f.store
+            .lock()
+            .unwrap()
+            .set_session_pinned(f.source_id, Some(77))
+            .unwrap();
+        let mut hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        hooks.kill_fails = true;
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_PARTIAL);
+        let src = f
+            .store
+            .lock()
+            .unwrap()
+            .get_session_by_id(f.source_id)
+            .unwrap()
+            .expect("source row");
+        assert_eq!(src.pinned_at, Some(77));
+    }
+
     /// Task 4: a partial move's `session_move_partial` detail carries
     /// everything a later `resolve_move` needs — the target identity, the
     /// source transcript as the copy was taken (size, mtime and path, so a

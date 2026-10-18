@@ -425,8 +425,16 @@ impl Store {
                 .prepare(&reclassify_sql)?
                 .query_map(params.as_slice(), |r| r.get(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
+            // A row whose agent said `stopped` (the SessionEnd hook) was
+            // closed by its person before the server went: it is no part of
+            // the mass loss, and resuming it would bring back a conversation
+            // they ended (the distinction `PROCESS_DIED_CASE` makes for one
+            // row). Every SET reads the row as it was, so `claude_status` is
+            // read before `LOSS_CLEARS` empties it.
             let sql = format!(
-                "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason=?2, {LOSS_CLEARS}
+                "UPDATE sessions SET status='ghost', lost_at=?1, \
+                 lost_reason=CASE WHEN COALESCE(claude_status, '')='stopped' \
+                 THEN 'missing' ELSE ?2 END, {LOSS_CLEARS}
                  WHERE host_alias=?3 AND status!='ghost' AND {kind_filter}
                    AND COALESCE(last_reconciled_at, 0) < ?4{not_in}
                  RETURNING id"
@@ -1432,10 +1440,16 @@ impl Store {
     /// Transition a session back to running (clears `lost_at`). Called by the
     /// `recreate_session` flow after `new_session` rebuilds the tmux session on
     /// the host — for both ghost and live (RAM/wedged) recreates.
+    ///
+    /// Stamps `last_reconciled_at` like a reconcile that saw the pane: a
+    /// probe that listed the host BEFORE the rebuild and writes after it
+    /// would otherwise ghost the row again (the stale-probe guard spares
+    /// only rows stamped at or after the probe's start).
     pub fn restore_session(&self, id: i64) -> Result<Option<SessionRow>, rusqlite::Error> {
         self.conn.execute(
-            "UPDATE sessions SET status='running', lost_at=NULL, lost_reason=NULL WHERE id=?1",
-            rusqlite::params![id],
+            "UPDATE sessions SET status='running', lost_at=NULL, lost_reason=NULL, \
+             last_reconciled_at=?2 WHERE id=?1",
+            rusqlite::params![id, super::now_unix()],
         )?;
         self.emit_session(id)
     }
@@ -2959,6 +2973,50 @@ mod tests {
         s.ghost_and_clean_bg_sessions("h", &[], 4200, None, Some(700))
             .unwrap();
         assert!(s.get_session("bg:e1", "h").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_session_its_person_closed_is_no_part_of_a_mass_loss() {
+        let s = store();
+        s.upsert_host("h").unwrap();
+        let closed = s
+            .upsert_session("closed", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        let live = s
+            .upsert_session("live", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        for id in [closed, live] {
+            s.set_claude_session_id(id, &format!("c{id}")).unwrap();
+        }
+        s.conn
+            .execute(
+                "UPDATE sessions SET claude_status='stopped' WHERE id=?1",
+                [closed],
+            )
+            .unwrap();
+        s.mark_host_sessions_lost("h", "tmux_server_gone", &[], 500, 0)
+            .unwrap();
+        let reason = |id| s.get_session_by_id(id).unwrap().unwrap().lost_reason;
+        assert_eq!(reason(closed).as_deref(), Some("missing"), "not resumed");
+        assert_eq!(reason(live).as_deref(), Some("tmux_server_gone"));
+    }
+
+    #[test]
+    fn a_restored_row_survives_a_probe_that_listed_the_host_before_it() {
+        let s = store();
+        s.upsert_host("h").unwrap();
+        let id = s
+            .upsert_session("a", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.mark_host_sessions_lost("h", "host_reboot", &[], 500, 0)
+            .unwrap();
+        // The probe started before the rebuild; the restore lands; then the
+        // probe's verdict (which never saw the new pane) is written.
+        let probe_started_at = super::super::now_unix() - 10;
+        s.restore_session(id).unwrap();
+        s.mark_host_sessions_lost("h", "host_reboot", &[], 600, probe_started_at)
+            .unwrap();
+        assert_eq!(s.get_session_by_id(id).unwrap().unwrap().status, "running");
     }
 
     #[test]

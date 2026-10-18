@@ -569,8 +569,9 @@ pub(super) fn require_bound_client_may_create(
 /// wrong in the other direction — nothing of the existing session is
 /// destroyed, relocated or re-shared.
 ///
-/// `new_worktree` passes through untouched: a tree that does not exist yet has
-/// no occupants, and `worktree_id` is `None` on that path.
+/// A `new_worktree` that does not exist yet has no occupants and passes; one
+/// already recorded under that name is gated as the tree it is
+/// ([`landing_worktree`]).
 ///
 /// The occupants are the ones `delete_worktree` gates
 /// ([`crate::store::Store::occupant_session_ids_for_worktree`]) — the running
@@ -592,6 +593,32 @@ pub(super) fn require_bound_client_may_create(
 /// `new_session` and `new_shell_session` can carry a row in `SESSION_REACH`
 /// instead of an exemption whose sentence would have to argue they gate
 /// nothing.
+/// The worktree a start lands in: `worktree_id`, or the recorded tree a
+/// `new_worktree` name resolves to. `worktree add` reuses a directory that
+/// is already there, so a "new" name that is somebody's live checkout lands
+/// in it like a `worktree_id` would, and is gated the same.
+pub(super) fn landing_worktree(
+    store: &Mutex<Store>,
+    host_alias: &str,
+    project_id: i64,
+    worktree_id: Option<i64>,
+    new_worktree: Option<&str>,
+) -> Result<Option<i64>, McpError> {
+    if worktree_id.is_some() {
+        return Ok(worktree_id);
+    }
+    let Some(name) = new_worktree.map(str::trim).filter(|n| !n.is_empty()) else {
+        return Ok(None);
+    };
+    let s = lock(store).map_err(to_mcp_err)?;
+    s.worktree_id_named(
+        host_alias,
+        project_id,
+        &crate::projects::worktree_dir_name(name),
+    )
+    .map_err(|e| to_mcp_err(crate::ipc_error::IpcError::from(e)))
+}
+
 pub(super) fn require_may_land_in_worktree(
     store: &Mutex<Store>,
     caller: &Caller,

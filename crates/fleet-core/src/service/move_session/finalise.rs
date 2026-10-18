@@ -142,6 +142,11 @@ pub(super) async fn finalise_source(
         };
         // A pin follows the session: the target took it at the carry step,
         // so the source's is lifted, or its kill would refuse (E_PINNED).
+        // Kept, to put back if the kill fails: the source then lives on, and
+        // `resolve_move` assumes it still holds its own pin.
+        let source_pinned_at: Option<i64> = lock(store)?
+            .get_session_by_id(a.source_row_id)?
+            .and_then(|r| r.pinned_at);
         if let Ok(s) = store.lock() {
             if let Err(e) = s.set_session_pinned(a.source_row_id, None) {
                 tracing::warn!(session_id = a.source_row_id, error = %e, "[move_session] unpinning the source failed");
@@ -164,6 +169,13 @@ pub(super) async fn finalise_source(
             other => other,
         };
         if let Err(e) = killed {
+            if let Some(at) = source_pinned_at {
+                if let Err(re) =
+                    lock(store).and_then(|s| Ok(s.set_session_pinned(a.source_row_id, Some(at))?))
+                {
+                    tracing::warn!(session_id = a.source_row_id, error = %re.message, "move_session: the kill failed AND the source's pin could not be put back");
+                }
+            }
             // The kill failed, so BOTH sessions are alive and the caller is
             // about to report `E_MOVE_PARTIAL` — a state that can last hours,
             // until `resolve_move` runs. The re-point above must not stand

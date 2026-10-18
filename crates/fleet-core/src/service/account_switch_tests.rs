@@ -48,7 +48,7 @@ fn session(s: &Store, name: &str, account: &str, owner: Option<i64>) -> i64 {
 }
 
 fn plan_now(s: &Store) -> Vec<Planned> {
-    plan(s, true, &HashMap::new(), NOW).unwrap()
+    plan(s, true, &Recent::default(), NOW).unwrap()
 }
 
 #[test]
@@ -145,10 +145,101 @@ fn a_second_login_on_the_same_account_is_no_way_out() {
 #[test]
 fn a_session_tried_recently_is_left_alone() {
     let (s, id, _) = fleet();
-    let recent = HashMap::from([(id, NOW - 60)]);
+    let tried = |at| Recent {
+        sessions: HashMap::from([(id, at)]),
+        ..Default::default()
+    };
+    let recent = tried(NOW - 60);
     assert!(plan(&s, true, &recent, NOW).unwrap().is_empty());
-    let old = HashMap::from([(id, NOW - RETRY_AFTER_SECS)]);
+    let old = tried(NOW - RETRY_AFTER_SECS);
     assert_eq!(plan(&s, true, &old, NOW).unwrap().len(), 1);
+}
+
+fn sign_out(s: &Store, profiles: &[&str]) {
+    let logins: Vec<crate::store::SignedOutLogin> = profiles
+        .iter()
+        .map(|p| crate::store::SignedOutLogin {
+            profile: Some(p.to_string()),
+            since: NOW,
+            checked_at: NOW,
+        })
+        .collect();
+    s.set_host_signed_out_logins("mac", &logins).unwrap();
+}
+
+#[test]
+fn a_signed_out_login_is_no_way_out_whatever_its_last_reading() {
+    let (s, _, _) = fleet();
+    // `spare` read 10% before its login expired; the poll writes no reading
+    // for a failed fetch, so that number stays the newest.
+    sign_out(&s, &["spare"]);
+    let p = plan_now(&s);
+    assert_eq!(p.len(), 1);
+    assert_eq!(p[0].target.profile.as_deref(), Some("work"));
+    assert_eq!(p[0].candidates.len(), 1);
+    sign_out(&s, &["spare", "work"]);
+    assert!(plan_now(&s).is_empty());
+}
+
+#[test]
+fn control_is_left_to_its_own_failover() {
+    let (s, _, _) = fleet();
+    crate::service::operator::set_operator_ref(
+        &s,
+        &crate::service::operator::OperatorRef {
+            host_alias: "mac".into(),
+            tmux_name: "s1".into(),
+        },
+    )
+    .unwrap();
+    assert!(plan_now(&s).is_empty());
+}
+
+#[test]
+fn a_dozen_sessions_on_a_spent_account_do_not_all_pile_onto_one_login() {
+    let (s, _, owner) = fleet();
+    for n in 2..=6 {
+        session(&s, &format!("s{n}"), "acct-out", Some(owner));
+    }
+    let p = plan_now(&s);
+    let mut targets: Vec<&str> = p.iter().map(|p| p.target.account_uuid.as_str()).collect();
+    targets.sort();
+    assert_eq!(
+        targets,
+        ["acct-spare", "acct-work"],
+        "one per account per run"
+    );
+    // The next run, before either account has a reading newer than the
+    // move: nobody else goes.
+    let recent = Recent {
+        sessions: p.iter().map(|p| (p.session_id, NOW)).collect(),
+        targets: p
+            .iter()
+            .map(|p| (p.target.account_uuid.clone(), NOW))
+            .collect(),
+    };
+    assert!(plan(&s, true, &recent, NOW + 60).unwrap().is_empty());
+    // A fresh reading of spare (now counting the session it took) opens
+    // it to the next one.
+    seed_usage(&s, "mac", Some("spare"), "acct-spare", 30.0, NOW + 300);
+    let next = plan(&s, true, &recent, NOW + 360).unwrap();
+    assert_eq!(next.len(), 1);
+    assert_eq!(next[0].target.account_uuid, "acct-spare");
+}
+
+#[test]
+fn a_login_whose_reading_went_stale_is_no_target() {
+    let (s, _, _) = fleet();
+    // spare's poll has been failing for a day; its 10% is a day old.
+    s.conn_for_test()
+        .execute(
+            "UPDATE account_usage_snapshots SET fetched_at = ?1 WHERE account_uuid = 'acct-spare'",
+            [NOW - 86_400],
+        )
+        .unwrap();
+    let p = plan_now(&s);
+    assert_eq!(p.len(), 1);
+    assert_eq!(p[0].target.profile.as_deref(), Some("work"));
 }
 
 #[test]
@@ -214,7 +305,7 @@ async fn a_run_switches_records_and_does_not_try_again_at_once() {
     let (s, id, _) = fleet();
     let store = Arc::new(Mutex::new(s));
     let fake = Fake::default();
-    let recent = Mutex::new(HashMap::new());
+    let recent = Mutex::new(Recent::default());
     let r = run_with(&store, &fake, None, &recent, true, NOW)
         .await
         .unwrap();
@@ -253,7 +344,7 @@ async fn a_failed_switch_is_recorded_with_its_code() {
         fail: true,
         ..Default::default()
     };
-    let recent = Mutex::new(HashMap::new());
+    let recent = Mutex::new(Recent::default());
     let r = run_with(&store, &fake, None, &recent, true, NOW)
         .await
         .unwrap();
@@ -348,7 +439,7 @@ async fn a_switch_queues_continue_for_a_turn_the_limit_cut_off() {
     s.set_person_auto_switch_continue(owner, true).unwrap();
     turn_end(&s, id, "stop_failure", "rate_limit: 429");
     let store = Arc::new(Mutex::new(s));
-    let recent = Mutex::new(HashMap::new());
+    let recent = Mutex::new(Recent::default());
     run_with(&store, &Fake::default(), None, &recent, true, NOW)
         .await
         .unwrap();
@@ -372,9 +463,16 @@ async fn a_failed_switch_queues_nothing() {
         fail: true,
         ..Default::default()
     };
-    run_with(&store, &fake, None, &Mutex::new(HashMap::new()), true, NOW)
-        .await
-        .unwrap();
+    run_with(
+        &store,
+        &fake,
+        None,
+        &Mutex::new(Recent::default()),
+        true,
+        NOW,
+    )
+    .await
+    .unwrap();
     assert!(queued(&store.lock().unwrap(), id).is_empty());
 }
 

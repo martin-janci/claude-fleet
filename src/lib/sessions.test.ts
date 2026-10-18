@@ -78,6 +78,27 @@ describe('sessions store', () => {
     expect(get(sessions)).toHaveLength(0);
   });
 
+  it('killSession whose kill landed but whose reconcile failed is a kill', async () => {
+    sessions.set(sample);
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockRejectedValueOnce({
+      code: 'E_SSH',
+      message: 'reconcile failed',
+      details: { kill_landed: true },
+    });
+    const r = await killSession('local', 'dev-foo');
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value).toBe(1);
+    expect(get(sessions)).toHaveLength(0);
+  });
+
+  it('killSession that did not land stays a failure and keeps the row', async () => {
+    sessions.set(sample);
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockRejectedValueOnce({ code: 'E_SSH', message: 'no route' });
+    const r = await killSession('local', 'dev-foo');
+    expect(r.ok).toBe(false);
+    expect(get(sessions)).toHaveLength(1);
+  });
+
   it('renameSession passes old/new and merges into store', async () => {
     const renamed = { ...sample[0], tmux_name: 'dev-bar' };
     sessions.set(sample);
@@ -484,6 +505,20 @@ describe('a reused session id', () => {
   it('...and loadSessions then lists it', async () => {
     sessions.set([killed]);
     applySessionEvents([{ type: 'killed', id: 9 }, { type: 'created', row: reborn }]);
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) =>
+      cmd === 'list_sessions' ? [reborn] : null,
+    );
+    await loadSessions();
+    expect(get(sessions).map((s) => s.tmux_name)).toEqual(['fresh']);
+  });
+
+  it('a missed kill (resync after a long sleep) does not hide the new row behind the dead one', async () => {
+    // The kill and the reuse both happened while this client was away: it
+    // still holds the dead row at version 4; the new one starts at 1.
+    sessions.set([killed]);
+    applySessionEvents([{ type: 'updated', row: reborn }]);
+    expect(get(sessions).map((s) => s.tmux_name)).toEqual(['fresh']);
+    sessions.set([killed]);
     (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) =>
       cmd === 'list_sessions' ? [reborn] : null,
     );

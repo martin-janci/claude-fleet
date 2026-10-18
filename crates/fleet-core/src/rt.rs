@@ -171,6 +171,15 @@ pub fn claim(set: &'static KeySet, owner: usize, key: String) -> Option<KeyedCla
     fresh.then(|| KeyedClaim { set, key })
 }
 
+/// Whether `key` is claimed for `owner` right now (a hint for picking
+/// another key; only [`claim`] itself decides).
+pub fn is_claimed(set: &'static KeySet, owner: usize, key: &str) -> bool {
+    set.lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .is_some_and(|keys| keys.contains(&(owner, key.to_string())))
+}
+
 impl Drop for KeyedClaim {
     fn drop(&mut self) {
         let mut guard = self.set.lock().unwrap_or_else(|p| p.into_inner());

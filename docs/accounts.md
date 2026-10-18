@@ -167,17 +167,20 @@ With it on, a paused row says where the session will go ("Moves to work
 host has room, offering only Wait.
 
 Which login: another account on the same host (a second login on the same
-account shares its limit), with a usage reading under `accounts.pause_at`,
-not at a limit and not past its daily spend limit, the least used first.
-With none, nothing moves and the row waits for a person. With
+account shares its limit), not signed out, with a usage reading under
+`accounts.pause_at` taken in the last hour, not at a limit and not past its
+daily spend limit, the least used first. An account takes one session per
+wave: one per run, and the next only after a usage reading newer than that
+move, so a dozen sessions on a spent account spread out instead of all
+landing on the same spare login and spending it too. With none, nothing moves and the row waits for a person. With
 `decide.jev.limit_switch` on, Jev is asked the same question and its
 answer is recorded beside the rule's (docs/decisions.md); the rule's pick
 is the one used.
 
 Bounds: the pass runs on the reconcile tick at most once a minute, switches
 at most five sessions a run, leaves a session it switched or tried alone
-for 30 minutes, skips the fleet controller and sessions on a hidden or
-unreachable host, stands still while Pause all is on, and runs only on the
+for 30 minutes, skips the fleet controller, Control (whose own failover
+moves it and tells it) and sessions on a hidden or unreachable host, stands still while Pause all is on, and runs only on the
 hub or a standalone desktop, never on a desktop paired to a hub. Every
 attempt leaves `account_switched` or `account_switch_failed` on the
 session's timeline (logins by profile, accounts by uuid); the desktop shows

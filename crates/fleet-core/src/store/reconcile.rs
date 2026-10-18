@@ -271,7 +271,7 @@ impl Store {
     /// Remember that fleet killed `tmux_name` on `host_alias` at `at` (unix
     /// seconds, the same clock as `lost_at` and `probe.started_at`). Called
     /// by [`Store::mark_session_killed`]; see [`KillMemory`].
-    pub(super) fn note_kill(&self, host_alias: &str, tmux_name: &str, at: i64) {
+    pub(crate) fn note_kill(&self, host_alias: &str, tmux_name: &str, at: i64) {
         self.kills
             .pruned()
             .insert((host_alias.to_string(), tmux_name.to_string()), at);
