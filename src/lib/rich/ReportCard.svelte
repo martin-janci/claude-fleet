@@ -29,6 +29,24 @@
   {#if report.summary}
     <div class="summary"><Markdown source={report.summary} /></div>
   {/if}
+  {#if report.done.length}
+    <div class="group" data-testid="rich-report-done">
+      <h6>Done</h6>
+      <ul>{#each report.done as d, k (k)}<li>{d}</li>{/each}</ul>
+    </div>
+  {/if}
+  {#if report.decisions.length}
+    <div class="group" data-testid="rich-report-decisions">
+      <h6>Decisions</h6>
+      <ul>{#each report.decisions as d, k (k)}<li>{d}</li>{/each}</ul>
+    </div>
+  {/if}
+  {#if report.remaining.length}
+    <div class="group" data-testid="rich-report-remaining">
+      <h6>Left</h6>
+      <ul>{#each report.remaining as r, k (k)}<li>{r}</li>{/each}</ul>
+    </div>
+  {/if}
   {#if report.blockers.length}
     <div class="group crit" data-testid="rich-report-blockers">
       <h6>Blockers</h6>

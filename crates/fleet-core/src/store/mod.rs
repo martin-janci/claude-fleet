@@ -29,6 +29,7 @@ mod deferred_prompts;
 mod diagnostics;
 mod downloads;
 mod env_vars;
+mod followups;
 mod forms;
 mod guides;
 mod host_setup;
@@ -157,6 +158,8 @@ pub use host_setup::{AgentInstallRow, HostSetupRow, SetupCheck};
 #[allow(unused_imports)]
 pub(crate) use admin_events::record_admin_event_in_tx;
 pub use diagnostics::WindowEventRow;
+/// How follow-up titles compare: the same line twice, whitespace and case aside.
+pub(crate) use followups::norm as followup_norm;
 pub use identities::{normalize_issuer, IdentityRow, MAX_IDENTITY_FIELD_LEN};
 pub use item_deps::{ItemDepRow, DEP_SOURCES};
 pub use item_verify::{

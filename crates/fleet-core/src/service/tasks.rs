@@ -1164,17 +1164,25 @@ async fn capture_worker_pane(
         .await
 }
 
+/// Fixtures shared with the tests of `service::work::wrapup`.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::store::StartSource;
-    use crate::store::TaskEnd;
+pub(crate) mod tests_support {
+    use crate::store::Store;
 
-    fn seed(s: &Store, host: &str, name: &str) -> i64 {
+    /// A running session `name` on `host`; its id.
+    pub(crate) fn seed(s: &Store, host: &str, name: &str) -> i64 {
         s.upsert_host(host).unwrap();
         s.upsert_session(name, host, None, None, 0, 0, "running", None)
             .unwrap()
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tests_support::seed;
+    use super::*;
+    use crate::store::StartSource;
+    use crate::store::TaskEnd;
 
     /// **A hub reader narrowed by `with_org` is fenced here too** (multi-user
     /// M1, the T6 review). `task_visible_in_scope_pure` opened with

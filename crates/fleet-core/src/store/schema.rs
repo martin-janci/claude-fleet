@@ -956,6 +956,15 @@ fn hosts_has_worktree_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+fn work_items_has_origin_task_id(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'origin_task_id'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn work_items_has_done_when(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'done_when'",
@@ -2239,6 +2248,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 198,
         sql: include_str!("../../migrations/198_autofix.sql"),
         already_applied: None,
+    },
+    // Task result D4: a follow-up item names the task whose result it came
+    // from (`work_items.origin_task_id`). An ADD COLUMN, guarded on it.
+    Migration {
+        version: 199,
+        sql: include_str!("../../migrations/199_followup_origin.sql"),
+        already_applied: Some(work_items_has_origin_task_id),
     },
 ];
 

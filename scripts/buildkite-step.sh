@@ -11,6 +11,12 @@
 #     incremental caches go first, then the whole target dir, because a full
 #     disk fails the build halfway (Appendix I.4) and costs more than a cold
 #     rebuild.
+#
+# Tests' temp files go to tmpfs (BUILDER_TMPDIR, default /dev/shm/claude-fleet-ci)
+# when it has BUILDER_MIN_TMPFS_GB free (default 4): thousands of tempdir SQLite
+# stores on ext4 serialise behind its journal and the fleet-hub / src-tauri
+# targets crawl (CLAUDE.md, "TMPDIR fixes it"). The directory is emptied first;
+# concurrency 1 means no other build is using it.
 set -euo pipefail
 
 ROOT="$(git rev-parse --show-toplevel)"
@@ -36,6 +42,18 @@ if (( $(free_gb) < min_gb )); then
   fi
 fi
 echo "buildkite-step: $(free_gb) GB free; target $CARGO_TARGET_DIR"
+
+tmp=${BUILDER_TMPDIR:-/dev/shm/claude-fleet-ci}
+tmp_min_gb=${BUILDER_MIN_TMPFS_GB:-4}
+tmp_parent=$(dirname "$tmp")
+if [[ -d "$tmp_parent" && -w "$tmp_parent" ]] \
+  && (( $(df -Pk "$tmp_parent" | awk 'NR==2 { print int($4 / 1048576) }') >= tmp_min_gb )); then
+  rm -rf "$tmp" && mkdir -p "$tmp"
+  export TMPDIR="$tmp"
+  echo "buildkite-step: TMPDIR $TMPDIR"
+else
+  echo "buildkite-step: $tmp_parent missing or under $tmp_min_gb GB free; TMPDIR stays ${TMPDIR:-/tmp}"
+fi
 
 # verify.sh narrows ci-local.sh by what changed since the merge base with
 # origin/main, so that ref has to be current.
