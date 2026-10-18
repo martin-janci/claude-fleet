@@ -519,7 +519,7 @@ impl FleetTools {
         Parameters(args): Parameters<hosts::HostAliasArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit("remove_host", &format!("alias={}", args.alias));
-        ok_json(&hosts::remove_host(args, &self.store).map_err(to_mcp_err)?)
+        ok_json(&hosts::remove_host(args, &self.store, &self.tunnels).map_err(to_mcp_err)?)
     }
 
     #[tool(description = "Fold host `from` into `into` in one transaction: \
@@ -543,7 +543,7 @@ impl FleetTools {
             &format!("from={} into={}", args.from, args.into),
             &caller,
         )?;
-        ok_json(&hosts::merge_host(args, &self.store).map_err(to_mcp_err)?)
+        ok_json(&hosts::merge_host(args, &self.store, &self.tunnels).map_err(to_mcp_err)?)
     }
 
     #[tool(description = "Hide or show a host (hidden: skipped by \
