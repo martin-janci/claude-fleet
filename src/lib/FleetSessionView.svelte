@@ -65,8 +65,16 @@
   const name = $derived(session.friendly_name || session.tmux_name);
   const key = $derived(`${fleet.id}:${session.id}`);
 
+  // Each read is numbered and only the newest one lands: a read for the
+  // session this view showed before (or an older poll that came back late)
+  // must not paint over the current one.
+  let convSeq = 0;
+  let snapshotSeq = 0;
+
   async function loadConversation() {
+    const seq = ++convSeq;
     const r = await sessionConversation(session.id, turns, undefined, fleet.id);
+    if (seq !== convSeq) return;
     if (r.ok) {
       convError = null;
       if (!sameConversation(conv, r.value)) conv = reuseTurns(conv, r.value);
@@ -76,7 +84,9 @@
   }
 
   async function loadSnapshot() {
+    const seq = ++snapshotSeq;
     const r = await fleetCaptureSession(fleet.id, session);
+    if (seq !== snapshotSeq) return;
     if (r.ok) {
       snapshot = r.value;
       snapshotError = null;
@@ -93,6 +103,8 @@
       convError = null;
       turns = CONV_TURNS_STEP;
       snapshot = null;
+      snapshotError = null;
+      snapshotSeq++;
       tab = 'conversation';
       void loadConversation();
       void fleetTouchViewed(fleet.id, session);
