@@ -16,7 +16,7 @@
   import { keyToBytes, detectMac } from './terminal_keys';
   import { createDrainLoop } from './terminal_drain';
   import { fitCells } from './terminal_size';
-  import { fleetPtyId } from './fleets';
+  import { fleetAttachRefusal, fleetPtyId } from './fleets';
   import { toIpcError } from './result';
   import type { SessionRow } from './sessions';
   import Button from './kit/Button.svelte';
@@ -46,12 +46,40 @@
   let rows = 24;
   let cellW = $state(7.8);
   let ro: ResizeObserver | null = null;
+  // Set once the component is gone: an attach still awaiting `pty_open` then
+  // closes what it opened instead of starting a drain loop nobody stops.
+  let destroyed = false;
+  // `local` on another hub is that hub's own machine; here it would be this
+  // desktop's tmux, a different session that may share the name.
+  const refusal = $derived(fleetAttachRefusal(session));
 
+  // Each row's runs, re-derived only when `Screen.rowVersion` says the row
+  // changed (as TerminalView's `visibleRows` does): a drain that touched two
+  // rows re-encodes two rows, not the whole grid.
+  let rowCache: { ver: number; runs: Run[] }[] = [];
+  let cacheScreen: Screen | null = null;
   const view = $derived.by(() => {
     void version;
     const scr = screen;
     if (!scr) return [] as Run[][];
-    return scr.cells.map((r) => rowToRuns(r));
+    if (cacheScreen !== scr) {
+      rowCache = [];
+      cacheScreen = scr;
+    }
+    const out: Run[][] = new Array(scr.rows);
+    for (let r = 0; r < scr.rows; r++) {
+      const ver = scr.rowVersion[r];
+      const cached = rowCache[r];
+      if (cached !== undefined && cached.ver === ver) {
+        out[r] = cached.runs;
+        continue;
+      }
+      const runs = rowToRuns(scr.cells[r]);
+      rowCache[r] = { ver, runs };
+      out[r] = runs;
+    }
+    if (rowCache.length > scr.rows) rowCache.length = scr.rows;
+    return out;
   });
 
   function measure() {
@@ -111,7 +139,9 @@
   }
 
   async function attach() {
+    if (refusal) return;
     await close();
+    if (destroyed) return;
     measure();
     const dim = size();
     cols = dim.cols;
@@ -120,17 +150,23 @@
     version++;
     error = null;
     ended = false;
-    ptyId = fleetPtyId(fleet, session);
+    const id = fleetPtyId(fleet, session);
+    ptyId = id;
     try {
       const opened = await invoke<unknown>('pty_open', {
-        args: { id: ptyId, session_name: session.tmux_name, host_alias: session.host_alias, cols, rows },
+        args: { id, session_name: session.tmux_name, host_alias: session.host_alias, cols, rows },
       });
+      if (destroyed) {
+        // Unmounted while it opened: `onDestroy`'s close found nothing yet.
+        void invoke('pty_close', { args: { id } }).catch(() => {});
+        return;
+      }
       generation = typeof opened === 'number' ? opened : null;
       open = true;
       drain.start();
       grid?.focus();
     } catch (e) {
-      error = toIpcError(e).message;
+      if (!destroyed) error = toIpcError(e).message;
     }
   }
 
@@ -167,6 +203,7 @@
   });
 
   onDestroy(() => {
+    destroyed = true;
     ro?.disconnect();
     drain.stop();
     void close();
@@ -174,7 +211,9 @@
 </script>
 
 <div class="fleet-term" data-testid="fleet-terminal">
-  {#if error}
+  {#if refusal}
+    <p class="note err" data-testid="fleet-terminal-refused">{refusal}</p>
+  {:else if error}
     <p class="note err" data-testid="fleet-terminal-error">
       Couldn't attach from this machine: {error}. The attach uses this machine's ssh with the
       host alias <code>{session.host_alias}</code>, which has to resolve here too.

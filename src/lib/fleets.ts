@@ -157,35 +157,149 @@ function isObj(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null;
 }
 
+// ── the guards the primary's session store has (`sessions.ts`) ──────────
+//
+// An extra fleet's rows race the same way the primary's do: a command's
+// returned snapshot can land after a newer `session:updated`, a
+// `session:updated` already queued can land after the kill ("ghost
+// session"), and a list answer can land after events that are newer than
+// it. So, per fleet: a known older `row_version` of the same session is
+// dropped, a killed id keeps a short tombstone, and a list merges with what
+// changed while it was out instead of replacing it.
+
+/** How long a killed session's id refuses a late `session:updated`. */
+export const FLEET_TOMBSTONE_MS = 5000;
+
+/** The same rule as `sessions.ts::sessionIsStale`: only a KNOWN older
+ *  version of the SAME session (ids are reused after a kill) is stale. */
+function fleetSessionIdentity(s: SessionRow): string {
+  return `${s.host_alias}\u0000${s.tmux_name}\u0000${s.created_at}`;
+}
+function fleetSessionIsStale(incoming: SessionRow, current: SessionRow): boolean {
+  return (
+    fleetSessionIdentity(incoming) === fleetSessionIdentity(current) &&
+    incoming.row_version !== undefined &&
+    current.row_version !== undefined &&
+    incoming.row_version < current.row_version
+  );
+}
+
+/** Per fleet, per killed id: until when, and which session it was (null when
+ *  the kill named only the id of a row this window never held). */
+const tombstones = new Map<string, Map<number, { until: number; identity: string | null }>>();
+
+/** What changed while one list call was out, so its answer does not undo it. */
+interface Touched {
+  sessions: Set<number>;
+  hosts: Set<string>;
+  projects: Set<number>;
+}
+const listsOut = new Map<string, Set<Touched>>();
+
+function touch(fleet: string | undefined, part: keyof Touched, id: number | string): void {
+  if (fleet === undefined) return;
+  for (const t of listsOut.get(fleet) ?? []) (t[part] as Set<number | string>).add(id);
+}
+
+function liveTombstone(fleet: string | undefined, id: number): { identity: string | null } | null {
+  if (fleet === undefined) return null;
+  const t = tombstones.get(fleet)?.get(id);
+  if (!t) return null;
+  if (t.until > Date.now()) return t;
+  tombstones.get(fleet)?.delete(id);
+  return null;
+}
+
+/** Whether `row` may be written over what `rows` holds for its id. `how`:
+ *  `updated` (an event about a row we may have killed), `created` or
+ *  `command` (a row that is new, or the answer to the person's own request:
+ *  passes a tombstone unless it is the very session that was killed). */
+function admitSession(
+  fleet: string | undefined,
+  rows: FleetRows,
+  row: SessionRow,
+  how: 'updated' | 'created' | 'command',
+): boolean {
+  const tomb = liveTombstone(fleet, row.id);
+  if (tomb) {
+    if (how === 'updated') return false;
+    if (tomb.identity === null || tomb.identity === fleetSessionIdentity(row)) return false;
+    tombstones.get(fleet!)?.delete(row.id);
+  }
+  const current = rows.sessions.get(row.id);
+  return !(current && fleetSessionIsStale(row, current));
+}
+
+function putSession(fleet: string | undefined, rows: FleetRows, row: SessionRow, how: 'updated' | 'created' | 'command'): void {
+  if (!admitSession(fleet, rows, row, how)) return;
+  rows.sessions.set(row.id, row);
+  touch(fleet, 'sessions', row.id);
+}
+
+function dropSession(fleet: string | undefined, rows: FleetRows, id: number): void {
+  const current = rows.sessions.get(id);
+  rows.sessions.delete(id);
+  touch(fleet, 'sessions', id);
+  if (fleet === undefined) return;
+  let m = tombstones.get(fleet);
+  if (!m) tombstones.set(fleet, (m = new Map()));
+  m.set(id, { until: Date.now() + FLEET_TOMBSTONE_MS, identity: current ? fleetSessionIdentity(current) : null });
+}
+
+/** The event names that change an extra fleet's rows, and which of its
+ *  collections each one writes. */
+const ROW_EVENTS = new Map<string, keyof Touched>([
+  ['session:created', 'sessions'],
+  ['session:updated', 'sessions'],
+  ['session:killed', 'sessions'],
+  ['host:added', 'hosts'],
+  ['host:probed', 'hosts'],
+  ['host:pinged', 'hosts'],
+  ['host:removed', 'hosts'],
+  ['project:updated', 'projects'],
+]);
+
 /** Apply one `fleet:event` to that fleet's rows, in place. Returns what the
  *  caller has to do beyond that: `relist` after a gap the bridge could not
  *  replay, `connection` when the link moved. Unknown names are ignored —
- *  this fleet's view keeps sessions, hosts and projects only (Phase 1). */
+ *  this fleet's view keeps sessions, hosts and projects only (Phase 1).
+ *  With `fleet`, that fleet's stale-row and tombstone guards apply. */
 export function applyFleetEvent(
   rows: FleetRows,
   e: Pick<FleetEvent, 'name' | 'payload'>,
+  fleet?: string,
 ): 'relist' | 'connection' | null {
   const p = e.payload;
   switch (e.name) {
     case 'session:created':
     case 'session:updated':
-      if (isObj(p) && typeof p.id === 'number') rows.sessions.set(p.id, p as unknown as SessionRow);
+      if (isObj(p) && typeof p.id === 'number')
+        putSession(fleet, rows, p as unknown as SessionRow, e.name === 'session:created' ? 'created' : 'updated');
       return null;
     case 'session:killed':
-      if (isObj(p) && typeof p.id === 'number') rows.sessions.delete(p.id);
+      if (isObj(p) && typeof p.id === 'number') dropSession(fleet, rows, p.id);
       return null;
     case 'host:added':
     case 'host:probed':
-      if (isObj(p) && typeof p.alias === 'string') rows.hosts.set(p.alias, p as unknown as HostRow);
+      if (isObj(p) && typeof p.alias === 'string') {
+        rows.hosts.set(p.alias, p as unknown as HostRow);
+        touch(fleet, 'hosts', p.alias);
+      }
       return null;
     case 'host:pinged':
       if (isObj(p) && typeof p.alias === 'string') {
         const old = rows.hosts.get(p.alias);
-        if (old) rows.hosts.set(p.alias, { ...old, ...(p as Partial<HostRow>) });
+        if (old) {
+          rows.hosts.set(p.alias, { ...old, ...(p as Partial<HostRow>) });
+          touch(fleet, 'hosts', p.alias);
+        }
       }
       return null;
     case 'host:removed':
-      if (isObj(p) && typeof p.alias === 'string') rows.hosts.delete(p.alias);
+      if (isObj(p) && typeof p.alias === 'string') {
+        rows.hosts.delete(p.alias);
+        touch(fleet, 'hosts', p.alias);
+      }
       return null;
     case 'project:updated':
       if (isObj(p) && typeof p.id === 'number') {
@@ -193,6 +307,7 @@ export function applyFleetEvent(
         const at = rows.projects.findIndex((t) => t.project.id === row.id);
         if (at >= 0) rows.projects[at] = { ...rows.projects[at], project: row };
         else rows.projects.push({ project: row, worktrees: [] });
+        touch(fleet, 'projects', row.id);
       }
       return null;
     case 'hub:resynced':
@@ -204,15 +319,18 @@ export function applyFleetEvent(
   }
 }
 
-function patchRows(fleet: string, fn: (rows: FleetRows) => void): void {
+/** Change one fleet's rows. A fresh `FleetRows` so `$fleetRows` subscribers
+ *  see a change; only the collections named in `parts` are copied (and only
+ *  those may be mutated by `fn`), so a resync's burst of session events does
+ *  not copy the hosts and projects once per event. */
+function patchRows(fleet: string, fn: (rows: FleetRows) => void, parts: readonly (keyof Touched)[] = ['sessions', 'hosts', 'projects']): void {
   rowsStore.update((m) => {
     const next = new Map(m);
     const rows = next.get(fleet) ?? emptyRows();
-    // A fresh object so `$fleetRows` subscribers see a change.
     const copy: FleetRows = {
-      sessions: new Map(rows.sessions),
-      hosts: new Map(rows.hosts),
-      projects: [...rows.projects],
+      sessions: parts.includes('sessions') ? new Map(rows.sessions) : rows.sessions,
+      hosts: parts.includes('hosts') ? new Map(rows.hosts) : rows.hosts,
+      projects: parts.includes('projects') ? [...rows.projects] : rows.projects,
       error: rows.error,
     };
     fn(copy);
@@ -228,21 +346,31 @@ function setConnection(fleet: string, c: HubConnection): void {
 /** Handle one `fleet:event` (exported for the tests). */
 export function onFleetEvent(e: FleetEvent): void {
   if (!e || typeof e.fleet !== 'string' || e.fleet === PRIMARY) return;
-  let todo: ReturnType<typeof applyFleetEvent> = null;
-  patchRows(e.fleet, (rows) => {
-    todo = applyFleetEvent(rows, e);
-  });
-  if (todo === 'connection' && isObj(e.payload)) {
-    setConnection(e.fleet, e.payload as unknown as HubConnection);
-    if ((e.payload as { state?: string }).state === 'connected') {
-      // The ready frame that connected it also named its fleet id, which
-      // only the list carries (and with it whether it is a duplicate).
-      void loadFleets();
-      void loadFleetRows(e.fleet);
-    }
-  } else if (todo === 'relist') {
-    void loadFleetRows(e.fleet);
+  const fleet = e.fleet;
+  const part = ROW_EVENTS.get(e.name);
+  if (part) {
+    patchRows(fleet, (rows) => void applyFleetEvent(rows, e, fleet), [part]);
+  } else if (e.name === 'hub:connection' && isObj(e.payload)) {
+    setConnection(fleet, e.payload as unknown as HubConnection);
+    // The ready frame that connected it also named its fleet id, which
+    // only the list carries (and with it whether it is a duplicate). The
+    // rows are not re-listed here: a connection the hub could not resume
+    // resyncs and ends with `hub:resynced`, which re-lists; one it resumed
+    // replays what was missed.
+    if ((e.payload as { state?: string }).state === 'connected') void loadFleets();
+  } else if (e.name === 'hub:resynced') {
+    void loadFleetRows(fleet);
   }
+  // Anything else (tasks, accounts, `work:changed`) is not kept here.
+}
+
+/** The primary's own link moved. When it comes up its `ready` frame names
+ *  the primary's fleet id, which decides whether an extra fleet is the same
+ *  hub twice (`duplicate_of`): an extra fleet that connected first was
+ *  listed before that was known, so the list is read again (exported for
+ *  the tests). */
+export function onPrimaryConnection(c: unknown): void {
+  if (isObj(c) && c.state === 'connected') void loadFleets();
 }
 
 // ── loading ─────────────────────────────────────────────────────────────
@@ -265,15 +393,58 @@ export async function loadFleets(): Promise<Result<FleetInfo[]>> {
 /** List one extra fleet's sessions, hosts and projects from its hub. */
 export async function loadFleetRows(fleet: string): Promise<void> {
   if (fleet === PRIMARY) return;
-  const [s, h, p] = await Promise.all([
-    invokeCmd<SessionRow[]>('list_sessions', { fleet }),
-    invokeCmd<HostRow[]>('list_hosts', { fleet }),
-    invokeCmd<ProjectTreeRow[]>('list_projects', { fleet }),
-  ]);
+  // What changes while the lists are out wins over their answer: an event
+  // or a command result applied meanwhile is newer than the list.
+  const touched: Touched = { sessions: new Set(), hosts: new Set(), projects: new Set() };
+  let out = listsOut.get(fleet);
+  if (!out) listsOut.set(fleet, (out = new Set()));
+  out.add(touched);
+  let s: Result<SessionRow[]>, h: Result<HostRow[]>, p: Result<ProjectTreeRow[]>;
+  try {
+    [s, h, p] = await Promise.all([
+      invokeCmd<SessionRow[]>('list_sessions', { fleet }),
+      invokeCmd<HostRow[]>('list_hosts', { fleet }),
+      invokeCmd<ProjectTreeRow[]>('list_projects', { fleet }),
+    ]);
+  } finally {
+    out.delete(touched);
+    if (out.size === 0) listsOut.delete(fleet);
+  }
   patchRows(fleet, (rows) => {
-    if (s.ok && Array.isArray(s.value)) rows.sessions = new Map(s.value.map((r) => [r.id, r]));
-    if (h.ok && Array.isArray(h.value)) rows.hosts = new Map(h.value.map((r) => [r.alias, r]));
-    if (p.ok && Array.isArray(p.value)) rows.projects = p.value;
+    if (s.ok && Array.isArray(s.value)) {
+      const next = new Map<number, SessionRow>();
+      for (const r of s.value) {
+        if (touched.sessions.has(r.id)) continue;
+        if (!admitSession(fleet, rows, r, 'command')) {
+          // Killed (tombstoned), or older than the row held: keep what is held.
+          const held = rows.sessions.get(r.id);
+          if (held) next.set(r.id, held);
+          continue;
+        }
+        next.set(r.id, r);
+      }
+      for (const id of touched.sessions) {
+        const held = rows.sessions.get(id);
+        if (held) next.set(id, held);
+      }
+      rows.sessions = next;
+    }
+    if (h.ok && Array.isArray(h.value)) {
+      const next = new Map(h.value.filter((r) => !touched.hosts.has(r.alias)).map((r) => [r.alias, r]));
+      for (const alias of touched.hosts) {
+        const held = rows.hosts.get(alias);
+        if (held) next.set(alias, held);
+      }
+      rows.hosts = next;
+    }
+    if (p.ok && Array.isArray(p.value)) {
+      const next = p.value.filter((t) => !touched.projects.has(t.project.id));
+      for (const id of touched.projects) {
+        const held = rows.projects.find((t) => t.project.id === id);
+        if (held) next.push(held);
+      }
+      rows.projects = next;
+    }
     const failed = [s, h, p].find((r) => !r.ok) as { ok: false; error: IpcError } | undefined;
     rows.error = failed ? failed.error.message : null;
   });
@@ -287,6 +458,7 @@ export async function startFleets(): Promise<void> {
   if (started) return;
   started = true;
   await listen<FleetEvent>('fleet:event', (e) => onFleetEvent(e.payload));
+  await listen<unknown>('hub:connection', (e) => onPrimaryConnection(e.payload));
   const r = await loadFleets();
   if (!r.ok) return;
   for (const f of r.value) if (!f.primary && !f.unavailable) void loadFleetRows(f.id);
@@ -331,6 +503,14 @@ export async function retryFleet(id: string): Promise<Result<null>> {
 
 // ── acting on an extra fleet's rows ─────────────────────────────────────
 
+/** Apply a row a command returned, under the same guards as an event: it
+ *  never overwrites a newer version of that session, and never brings back
+ *  the session a kill just removed (`sessions.ts::acceptCommandRow`). */
+function acceptFleetRow(fleet: string, row: unknown): void {
+  if (!isObj(row) || typeof row.id !== 'number') return;
+  patchRows(fleet, (rows) => putSession(fleet, rows, row as unknown as SessionRow, 'command'), ['sessions']);
+}
+
 /** Call a fleet-scoped command on `fleet`'s hub. */
 export function fleetCmd<T>(cmd: FleetScopedCommand, fleet: string, args: Record<string, unknown> = {}): Promise<Result<T>> {
   return invokeCmd<T>(cmd, { ...args, fleet });
@@ -352,7 +532,7 @@ export function fleetSendKey(fleet: string, s: SessionRow, key: 'Enter' | 'Escap
 
 export async function fleetKillSession(fleet: string, s: SessionRow): Promise<Result<number>> {
   const r = await fleetCmd<number>('kill_session', fleet, { args: { host_alias: s.host_alias, name: s.tmux_name } });
-  if (r.ok) patchRows(fleet, (rows) => rows.sessions.delete(s.id));
+  if (r.ok) patchRows(fleet, (rows) => dropSession(fleet, rows, s.id), ['sessions']);
   return r;
 }
 
@@ -360,13 +540,13 @@ export async function fleetRenameSession(fleet: string, s: SessionRow, name: str
   const r = await fleetCmd<SessionRow>('set_session_friendly_name', fleet, {
     args: { host_alias: s.host_alias, tmux_name: s.tmux_name, friendly_name: name },
   });
-  if (r.ok) patchRows(fleet, (rows) => rows.sessions.set(r.value.id, r.value));
+  if (r.ok) acceptFleetRow(fleet, r.value);
   return r;
 }
 
 export async function fleetPinSession(fleet: string, s: SessionRow, pinned: boolean): Promise<Result<SessionRow>> {
   const r = await fleetCmd<SessionRow>('pin_session', fleet, { args: { session_id: s.id, pinned } });
-  if (r.ok) patchRows(fleet, (rows) => rows.sessions.set(r.value.id, r.value));
+  if (r.ok) acceptFleetRow(fleet, r.value);
   return r;
 }
 
@@ -396,7 +576,7 @@ export async function fleetNewSession(fleet: string, a: FleetNewSession): Promis
       friendly_name: a.friendly_name ?? null,
     },
   });
-  if (r.ok) patchRows(fleet, (rows) => rows.sessions.set(r.value.id, r.value));
+  if (r.ok) acceptFleetRow(fleet, r.value);
   return r;
 }
 
@@ -431,7 +611,7 @@ export function closeFleetSession(): void {
 /** Its finished turns read as seen, on its own hub. */
 export async function fleetTouchViewed(fleet: string, s: SessionRow): Promise<void> {
   const r = await fleetCmd<SessionRow>('touch_session_viewed', fleet, { args: { session_id: s.id } });
-  if (r.ok && isObj(r.value) && typeof r.value.id === 'number') patchRows(fleet, (rows) => rows.sessions.set(r.value.id, r.value));
+  if (r.ok) acceptFleetRow(fleet, r.value);
 }
 
 /** A read-only snapshot of its pane, from its own hub. */
@@ -615,6 +795,33 @@ export function fleetAttachCommand(s: Pick<SessionRow, 'host_alias' | 'tmux_name
   return `ssh -t ${shq(s.host_alias)} tmux attach -t ${shq(`=${s.tmux_name}`)}`;
 }
 
+/** Why this machine must not attach to an extra fleet's session, or null
+ *  when it may try. `local` is the name a hub gives its OWN machine: from
+ *  here it would mean this desktop, so `pty_open` would attach to this
+ *  machine's tmux (a different session that may share the name, typed into
+ *  blind) and the copied `ssh -t local …` reaches nothing. */
+export function fleetAttachRefusal(s: Pick<SessionRow, 'host_alias'>): string | null {
+  if (s.host_alias !== 'local') return null;
+  return "This session runs on that hub's own machine, which it calls \"local\". From here \"local\" would mean this machine, so it cannot be attached from here: use the Conversation and Snapshot tabs, or attach on that machine.";
+}
+
+/** The hosts an extra fleet's New… form offers: the visible ones. */
+export function fleetHostChoices(rows: Pick<FleetRows, 'hosts'>): HostRow[] {
+  return [...rows.hosts.values()].filter((h) => !h.hidden);
+}
+
+/** The host that form starts on: the first offered one that is reachable,
+ *  else the first offered one — never a hidden host the picker cannot show
+ *  (NewSessionDialog's `fleetHost` rule). */
+export function defaultFleetHost(rows: Pick<FleetRows, 'hosts'>): string {
+  const list = fleetHostChoices(rows);
+  return list.find((h) => h.reachable)?.alias ?? list[0]?.alias ?? '';
+}
+
+/** Per extra fleet the filter shows, the ids of its sessions that need you
+ *  (`fleetInbox`, as a lookup for the sidebar's rows). */
+export const fleetNeedsIds = derived(fleetInbox, ($g) => new Map($g.map((g) => [g.fleet.id, new Set(g.rows.map((s) => s.id))])));
+
 /** A fleet's connection, as one short word for its header and chip. */
 export function connectionWord(f: Pick<FleetInfo, 'connection' | 'unavailable' | 'local'>): {
   word: string;
@@ -644,6 +851,8 @@ export function connectionWord(f: Pick<FleetInfo, 'connection' | 'unavailable' |
 export function _resetFleetsForTest(): void {
   fleetsStore.set([]);
   rowsStore.set(new Map());
+  tombstones.clear();
+  listsOut.clear();
   fleetFilter.set('all');
   fleetSelection.set(null);
   started = false;

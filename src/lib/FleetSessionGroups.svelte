@@ -16,8 +16,11 @@
     fleetPinSession,
     fleetNewSession,
     fleetAttachCommand,
+    fleetAttachRefusal,
+    fleetHostChoices,
+    defaultFleetHost,
     fleetKey,
-    fleetNeedsYou,
+    fleetNeedsIds,
     fleetSelection,
     openFleetSession,
     type FleetInfo,
@@ -27,12 +30,8 @@
   import { copyText } from './clipboard';
   import { push } from './toasts';
   import Button from './kit/Button.svelte';
-  import { attentionIdleMinutes } from './notify';
 
-  /** The rows of one fleet that need you, by id. */
-  function needing(rows: FleetRows): Set<number> {
-    return new Set(fleetNeedsYou(rows, $attentionIdleMinutes * 60, Math.floor(Date.now() / 1000)).map((s) => s.id));
-  }
+  const NONE: ReadonlySet<number> = new Set();
 
   // Which row has which inline form open, by fleet-qualified key.
   let open = $state<{ key: string; kind: 'prompt' | 'rename' | 'close' } | null>(null);
@@ -43,23 +42,22 @@
   let newProject = $state<number | null>(null);
   let newName = $state('');
 
-  /** The project a row belongs to on its own fleet, as `owner/repo`
-   *  (Phase 2: an extra fleet's sessions group by project, like the
-   *  primary's tree); `Other` for one with none. */
-  function projectOf(rows: FleetRows, s: SessionRow): string {
-    const p = s.project_id == null ? undefined : rows.projects.find((t) => t.project.id === s.project_id);
-    return p ? `${p.project.owner}/${p.project.repo}` : 'Other';
-  }
-
-  function sorted(rows: FleetRows): SessionRow[] {
+  /** A fleet's sessions in sidebar order, each with the project it belongs
+   *  to there as `owner/repo` (Phase 2: an extra fleet's sessions group by
+   *  project, like the primary's tree); `Other` for one with none. Each
+   *  project is named once and each row's key computed once, not per
+   *  comparison. */
+  function sorted(rows: FleetRows): { s: SessionRow; proj: string }[] {
+    const names = new Map(rows.projects.map((t) => [t.project.id, `${t.project.owner}/${t.project.repo}`]));
     return [...rows.sessions.values()]
       .filter((s) => s.status !== 'lost')
+      .map((s) => ({ s, proj: (s.project_id == null ? undefined : names.get(s.project_id)) ?? 'Other' }))
       .sort(
         (a, b) =>
-          (projectOf(rows, a) === 'Other' ? 1 : 0) - (projectOf(rows, b) === 'Other' ? 1 : 0) ||
-          projectOf(rows, a).localeCompare(projectOf(rows, b)) ||
-          (b.pinned_at ?? 0) - (a.pinned_at ?? 0) ||
-          b.last_activity_at - a.last_activity_at,
+          (a.proj === 'Other' ? 1 : 0) - (b.proj === 'Other' ? 1 : 0) ||
+          a.proj.localeCompare(b.proj) ||
+          (b.s.pinned_at ?? 0) - (a.s.pinned_at ?? 0) ||
+          b.s.last_activity_at - a.s.last_activity_at,
       );
   }
 
@@ -90,12 +88,13 @@
   }
 
   async function copyAttach(s: SessionRow) {
+    if (fleetAttachRefusal(s)) return;
     if (await copyText(fleetAttachCommand(s))) push({ kind: 'success', message: 'Attach command copied' });
   }
 
   function startForm(f: FleetInfo, rows: FleetRows) {
     starting = starting === f.id ? null : f.id;
-    newHost = [...rows.hosts.keys()][0] ?? '';
+    newHost = defaultFleetHost(rows);
     newProject = rows.projects.find((p) => !p.project.system)?.project.id ?? null;
     newName = '';
   }
@@ -113,7 +112,7 @@
 {#each $visibleExtraFleets as { fleet: f, rows } (f.id)}
   {@const cw = connectionWord(f)}
   {@const list = sorted(rows)}
-  {@const needs = needing(rows)}
+  {@const needs = $fleetNeedsIds.get(f.id) ?? NONE}
   <section class="fleet-group" style="--fleet: {f.color}" data-testid="fleet-group-{f.id}">
     <header class="head">
       <span class="badge" data-testid="fleet-badge-{f.id}">{f.label}</span>
@@ -147,7 +146,7 @@
         }}
       >
         <select bind:value={newHost} aria-label="Host">
-          {#each [...rows.hosts.values()].filter((h) => !h.hidden) as h (h.alias)}
+          {#each fleetHostChoices(rows) as h (h.alias)}
             <option value={h.alias}>{h.alias}</option>
           {/each}
         </select>
@@ -161,10 +160,9 @@
       </form>
     {/if}
     <ul class="rows">
-      {#each list as s, i (s.id)}
+      {#each list as { s, proj }, i (s.id)}
         {@const key = fleetKey(f.id, s.id)}
-        {@const proj = projectOf(rows, s)}
-        {#if i === 0 || projectOf(rows, list[i - 1]) !== proj}
+        {#if i === 0 || list[i - 1].proj !== proj}
           <li class="proj" data-testid="fleet-project-{f.id}-{proj}">{proj}</li>
         {/if}
         <li
@@ -188,7 +186,13 @@
             <Button size="sm" variant="quiet" testid="fleet-prompt-{f.id}-{s.id}" onclick={() => toggle(f.id, s, 'prompt')}>Prompt…</Button>
             <Button size="sm" variant="quiet" onclick={() => toggle(f.id, s, 'rename')}>Rename…</Button>
             <Button size="sm" variant="quiet" onclick={() => void run('Pinning', fleetPinSession(f.id, s, !s.pinned_at))}>{s.pinned_at ? 'Unpin' : 'Pin'}</Button>
-            <Button size="sm" variant="quiet" onclick={() => void copyAttach(s)}>Copy attach</Button>
+            <Button
+              size="sm"
+              variant="quiet"
+              disabled={!!fleetAttachRefusal(s)}
+              title={fleetAttachRefusal(s) ?? undefined}
+              onclick={() => void copyAttach(s)}>Copy attach</Button
+            >
             <Button size="sm" variant="quiet" testid="fleet-close-{f.id}-{s.id}" onclick={() => toggle(f.id, s, 'close')}>Close…</Button>
           </div>
           {#if open?.key === key && open.kind === 'prompt'}
