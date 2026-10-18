@@ -659,7 +659,7 @@ lines), never a person's. `work { result }` (`service/work/result.rs`,
 worker's PR and follow-ups, worker text fenced for a per-host token. A
 follow-up (`work_link { followup }`, `service/work/followup.rs`,
 `Store::create_followup`) is a sibling local item with
-`work_items.origin_task_id` (migration 195); the same title twice answers
+`work_items.origin_task_id` (migration 196); the same title twice answers
 one item (D4). A follow-up's start brief opens with `OriginFacts` (decisions,
 remaining, context, ≤ 10 commits, ≤ 15 files, PR; no conversation text)
 under `BRIEF_MAX_CHARS` (D5). `TaskResultPanel.svelte` replaces

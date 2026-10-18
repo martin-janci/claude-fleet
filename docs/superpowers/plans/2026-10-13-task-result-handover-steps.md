@@ -6,7 +6,7 @@ Import with "Import plan" on the mission. Detail of each step:
 
 | # | Step | Needs | Lane | Status | Repo |
 |---|---|---|---|---|---|
-| 0.1 | Scaffold modules, migration 195 and WorkItemRow.origin_task_id | | Orchestrator | todo | claude-fleet |
+| 0.1 | Scaffold modules, migration 196 and WorkItemRow.origin_task_id | | Orchestrator | todo | claude-fleet |
 | 1.1 | Report carries done, decisions, remaining, context and latest_item_result | 0.1 | Backend | todo | claude-fleet |
 | 1.2 | Wrap-up request service with role wrapup | 0.1 | Backend | todo | claude-fleet |
 | 1.3 | Completion gate and agent refusal of done past it | 0.1 | Backend | todo | claude-fleet |

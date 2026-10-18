@@ -252,7 +252,7 @@ pub struct WorkItemRow {
     /// and archived in the Work tree until unarchived. `None` = not archived.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<i64>,
-    /// The task whose result this follow-up was made from (migration 195);
+    /// The task whose result this follow-up was made from (migration 196);
     /// `None` for every item not made from a result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_task_id: Option<i64>,

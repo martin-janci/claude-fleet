@@ -2201,11 +2201,19 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/194_run_trace.sql"),
         already_applied: None,
     },
+    // The operator's live `ux-agent` token, minted person-less before
+    // `ensure_operator` bound it, becomes the personal owner's. An UPDATE
+    // over a NULL `person_id`, so a re-run changes nothing.
+    Migration {
+        version: 195,
+        sql: include_str!("../../migrations/195_operator_token_person.sql"),
+        already_applied: None,
+    },
     // Task result D4: a follow-up item names the task whose result it came
     // from (`work_items.origin_task_id`). An ADD COLUMN, guarded on it.
     Migration {
-        version: 195,
-        sql: include_str!("../../migrations/195_followup_origin.sql"),
+        version: 196,
+        sql: include_str!("../../migrations/196_followup_origin.sql"),
         already_applied: Some(work_items_has_origin_task_id),
     },
 ];
@@ -3885,6 +3893,60 @@ mod tests {
         assert!(old.touch_session_viewed(id, stamped + 5).unwrap());
         assert_eq!(row().last_viewed_at, Some(stamped + 5));
         assert_eq!(row().row_version, before + 1, "the trigger watches it");
+    }
+
+    /// 195 on a database stopped at 194: the live, person-less `ux-agent`
+    /// token becomes the personal owner's, and nothing else moves — a
+    /// revoked operator token, another unbound client, a peer link and a
+    /// token already bound to someone else all keep their `person_id`.
+    #[test]
+    fn migration_195_binds_the_live_operator_token_to_the_owner() {
+        let old = Store::open_in_memory().expect("open");
+        let owner = old.personal_owner_id().unwrap().expect("an owner");
+        let ada = old.create_person("ada", None).unwrap().id;
+        old.insert_client_token("ux-agent", &"a".repeat(64), "full")
+            .unwrap();
+        old.revoke_client_token("ux-agent").unwrap();
+        old.insert_client_token("ux-agent", &"b".repeat(64), "full")
+            .unwrap();
+        old.insert_client_token("phone", &"c".repeat(64), "full")
+            .unwrap();
+        old.insert_client_token("peer-hub", &"d".repeat(64), "peer")
+            .unwrap();
+        old.insert_client_token("ada-laptop", &"e".repeat(64), "full")
+            .unwrap();
+        old.set_client_person("ada-laptop", Some(ada)).unwrap();
+        old.conn
+            .execute_batch(
+                "UPDATE client_tokens SET person_id = NULL \
+                   WHERE name IN ('ux-agent', 'phone', 'peer-hub');\
+                 DELETE FROM schema_version WHERE version >= 195;",
+            )
+            .unwrap();
+        old.migrate().expect("195 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let person = |sha: &str| -> Option<i64> {
+            old.conn
+                .query_row(
+                    "SELECT person_id FROM client_tokens WHERE token_sha256 = ?1",
+                    [sha],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            person(&"b".repeat(64)),
+            Some(owner),
+            "the live operator token"
+        );
+        assert_eq!(person(&"a".repeat(64)), None, "a revoked one is history");
+        assert_eq!(person(&"c".repeat(64)), None, "only the operator's token");
+        assert_eq!(person(&"d".repeat(64)), None, "a peer link is no device");
+        assert_eq!(
+            person(&"e".repeat(64)),
+            Some(ada),
+            "a bound token keeps its person"
+        );
     }
 
     /// 193 on a database stopped at 192: every host arrives with its load
