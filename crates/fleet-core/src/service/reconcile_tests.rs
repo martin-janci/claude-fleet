@@ -1571,6 +1571,38 @@ async fn a_single_host_reconcile_outdates_a_parked_late_probe() {
     // single-host reconcile then writes a newer view of that host. The late
     // probe, written at the next pass's start, must not put the older view
     // back: the single-host write is recorded as the newest for the host.
+    let (f, written) = parked_late_probe_then(true).await;
+    assert!(written, "the single-host reconcile stamps the host");
+    let row = f.row("job", "slow");
+    assert_eq!(row.status, "running", "the late probe was skipped: {row:?}");
+    assert!(f.reachable("slow"));
+}
+
+/// The control for the test above: with no newer write, the same late probe
+/// IS written at the next pass's start — so that test's assertions would see
+/// it if the skip broke.
+#[tokio::test]
+async fn a_parked_late_probe_is_written_when_nothing_newer_was() {
+    let (f, written) = parked_late_probe_then(false).await;
+    assert!(!written);
+    let probe_view = (
+        f.try_row("job", "slow").map(|r| r.status),
+        f.reachable("slow"),
+    );
+    assert_ne!(
+        probe_view,
+        (Some("running".to_string()), true),
+        "the late probe's (empty) view lands"
+    );
+}
+
+/// Park `slow`'s probe as late (it hangs past the pass budget, then answers
+/// with nothing), optionally run a single-host reconcile of `slow` in a
+/// later second while it is parked, wait for the late probe to answer, and
+/// run the pass that drains it — with that pass's own fresh probe of `slow`
+/// hanging too, so whatever it finds is not written in that pass. Returns
+/// whether the single-host write recorded itself as `slow`'s newest.
+async fn parked_late_probe_then(single_host: bool) -> (Fleet, bool) {
     let mut f = Fleet::new(&["slow"]);
     f.deps = f.deps.with_pass_budget(Duration::from_millis(100));
     f.list("slow", "job|1|2|0|/tmp/j|%4\n");
@@ -1584,16 +1616,38 @@ async fn a_single_host_reconcile_outdates_a_parked_late_probe() {
     );
     f.pass().await;
     assert!(f.deps.probe_in_flight("slow"));
-    let parked = f.deps.newest_written("slow");
+    assert_eq!(f.deps.newest_written("slow"), None, "nothing written yet");
 
-    next_unix_second().await;
-    let before = now_unix();
-    reconcile_one_host_with_for_test(&f.store, &f.deps, "slow")
-        .await
-        .unwrap();
-    let newest = f.deps.newest_written("slow").expect("stamped");
-    assert!(newest >= before, "the single-host write is the newest");
-    assert_ne!(parked, Some(newest));
+    let mut written = false;
+    if single_host {
+        next_unix_second().await;
+        let before = now_unix();
+        reconcile_one_host_with_for_test(&f.store, &f.deps, "slow")
+            .await
+            .unwrap();
+        let newest = f.deps.newest_written("slow").expect("stamped");
+        assert!(newest >= before, "the single-host write is the newest");
+        written = true;
+        let row = f.row("job", "slow");
+        assert_eq!(row.status, "running", "{row:?}");
+        assert!(f.reachable("slow"));
+    }
+
+    // Wait out the late probe, then hang the drain pass's own fresh probe.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while f.deps.probe_in_flight("slow") {
+        assert!(std::time::Instant::now() < deadline, "late probe answered");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    f.fake.on_host_once(
+        "slow",
+        Match::script_contains("---FLEET:end"),
+        Reply::Hang {
+            for_: Duration::from_secs(3),
+        },
+    );
+    f.pass().await;
+    (f, written)
 }
 
 #[tokio::test]
