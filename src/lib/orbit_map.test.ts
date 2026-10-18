@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { orbitModel, LAP_BUSY, LAP_QUIET, RING_SECS } from './orbit_map';
+import { orbitModel, hostLabels, LAP_BUSY, LAP_QUIET, RECENT_SECS, RING_SECS } from './orbit_map';
 import type { RunRow } from './runs';
 
 const NOW = 1_800_000_000;
@@ -73,7 +73,58 @@ describe('orbitModel', () => {
       ],
       now: NOW,
     });
-    expect(m.fires.map((f) => [f.routine, f.deg])).toEqual([['Usage report', 90]]);
-    expect(m.hosts[0].caption).toMatch(/^quiet · next fire \d\d:\d\d$/);
+    // The right half of the ring is the next 12 hours: a quarter of them is 45°.
+    expect(m.fires.map((f) => [f.routine, f.deg])).toEqual([['Usage report', 45]]);
+    expect(m.hosts[0].caption).toMatch(/^quiet · next in 3h$/);
+  });
+
+  it('draws what ran lately: moons on the host, dots down the left of the ring, a ripple and a hub ripple', () => {
+    const m = orbitModel({
+      runs: [
+        run({ id: 'routine:1', outcome: 'done', started_at: NOW - 400, ended_at: NOW - 300 }),
+        run({ id: 'routine:2', outcome: 'failed', started_at: NOW - 7200, ended_at: NOW - 7000 }),
+        run({ id: 'hook:3', owner: 'turn_outcome', summary: 'turn_outcome (assist): working', outcome: 'done', host: undefined, ended_at: NOW - 30 }),
+      ],
+      hostAliases: ['htz'],
+      sessions: [],
+      routines: [],
+      now: NOW,
+    });
+    const htz = m.hosts[0];
+    expect(htz.moons.map((x) => [x.run_id, x.tone])).toEqual([['routine:1', 'done']]);
+    expect(htz.heat).toBeCloseTo(1 - 300 / RECENT_SECS, 2);
+    expect(htz.caption).toBe('quiet · last ran 5m ago');
+    expect(m.past.map((p) => p.run_id)).toEqual(['hook:3', 'routine:1', 'routine:2']);
+    expect(m.past.every((p) => p.deg <= 0 && p.deg >= -180)).toBe(true);
+    expect(m.hubHeat).toBeGreaterThan(0.9);
+    // A summary that repeats its owner says it once.
+    expect(m.feed[0]).toMatchObject({ who: 'turn_outcome', what: '(assist): working' });
+  });
+
+  it('circles a satellite per session at work that no live run draws', () => {
+    const m = orbitModel({
+      runs: [run({ id: 'routine:1', session_ids: [1] })],
+      hostAliases: ['htz'],
+      sessions: [
+        { id: 1, host_alias: 'htz', claude_status: 'working' },
+        { id: 2, host_alias: 'htz', claude_status: 'working' },
+        { id: 3, host_alias: 'htz', claude_status: 'idle' },
+      ],
+      routines: [],
+      now: NOW,
+    });
+    expect(m.hosts[0].working).toBe(1);
+    expect(m.working).toBe(2);
+  });
+});
+
+describe('hostLabels', () => {
+  it('keeps short names, and drops the leading segments long ones share', () => {
+    const l = hostLabels(['claude-fleet-ci', 'claude-fleet-trn', 'claude-fleet', 'mac', 'mefistos', 'buildbox-primary']);
+    expect(l.get('claude-fleet-ci')).toBe('ci');
+    expect(l.get('claude-fleet-trn')).toBe('trn');
+    expect(l.get('claude-fleet')).toBe('fleet');
+    expect(l.get('mac')).toBe('mac');
+    expect(l.get('buildbox-primary')).toBe('buildbox-primary');
   });
 });
