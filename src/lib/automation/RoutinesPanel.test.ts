@@ -517,3 +517,79 @@ describe('the routine editor (G7.4: time zone select, Undo on save)', () => {
     await waitFor(() => expect(argsOf('delete')).toMatchObject({ routine_id: 8 }));
   });
 });
+
+describe('the routine form (FormsAutomation board)', () => {
+  async function openBlank() {
+    route([]);
+    render(RoutinesPanel);
+    await screen.findByTestId('routines-empty');
+    await fireEvent.click(screen.getByTestId('routines-empty-new'));
+  }
+
+  it('says under the disabled verb what is still missing, and checks a field on blur', async () => {
+    await openBlank();
+    const save = screen.getByTestId('routine-save') as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+    expect(screen.getByTestId('routine-save-why').textContent).toBe('Name the routine.');
+    await fireEvent.blur(screen.getByTestId('routine-name'));
+    expect(screen.getByText('A routine needs a name.')).toBeInTheDocument();
+    await fireEvent.input(screen.getByTestId('routine-name'), { target: { value: 'Nightly' } });
+    expect(screen.getByTestId('routine-save-why').textContent).toBe('Write the prompt.');
+    await fireEvent.input(screen.getByTestId('routine-prompt'), { target: { value: 'Tidy up.' } });
+    expect(screen.queryByTestId('routine-save-why')).toBeNull();
+    expect(save.disabled).toBe(false);
+  });
+
+  it('Starts picks the trigger: a schedule, an event or Run now only', async () => {
+    await openBlank();
+    expect(screen.getByTestId('routine-days')).toBeInTheDocument();
+    await fireEvent.click(screen.getByTestId('routine-trigger-event'));
+    expect(screen.getByTestId('routine-event')).toBeInTheDocument();
+    expect(screen.queryByTestId('routine-days')).toBeNull();
+    await fireEvent.click(screen.getByTestId('routine-trigger-manual'));
+    expect(screen.getByTestId('routine-manual-note')).toBeInTheDocument();
+    await fireEvent.input(screen.getByTestId('routine-name'), { target: { value: 'By hand' } });
+    await fireEvent.input(screen.getByTestId('routine-prompt'), { target: { value: 'Tidy up.' } });
+    await fireEvent.click(screen.getByTestId('routine-save'));
+    await waitFor(() => expect(argsOf('save')?.routine).toMatchObject({ trigger: 'manual', cron: undefined, event: undefined }));
+  });
+
+  it('⌘↵ saves; a refused save stays open with the failure as its banner', async () => {
+    await openBlank();
+    inv.mockImplementation(async (cmd: string, a: { args: { action: string } }) => {
+      if (cmd !== 'routines') return null;
+      if (a.args.action === 'save') throw { code: 'E_FORBIDDEN', message: 'you are a Viewer in 32bit' };
+      if (a.args.action === 'list') return [];
+      if (a.args.action === 'preview') return previewAnswer;
+      return [];
+    });
+    await fireEvent.input(screen.getByTestId('routine-name'), { target: { value: 'Nightly' } });
+    await fireEvent.input(screen.getByTestId('routine-prompt'), { target: { value: 'Tidy up.' } });
+    await fireEvent.keyDown(screen.getByTestId('routine-prompt'), { key: 'Enter', metaKey: true });
+    expect(await screen.findByTestId('routine-save-error')).toBeInTheDocument();
+    expect((screen.getByTestId('routine-name') as HTMLInputElement).value).toBe('Nightly');
+  });
+
+  it('Cancel on a changed form asks "Discard changes?" once; an untouched one just closes', async () => {
+    await openBlank();
+    await fireEvent.click(screen.getByTestId('routine-cancel'));
+    expect(screen.queryByTestId('routine-editor')).toBeNull();
+
+    await fireEvent.click(screen.getByTestId('routines-empty-new'));
+    await fireEvent.input(screen.getByTestId('routine-name'), { target: { value: 'Nightly' } });
+    await fireEvent.keyDown(screen.getByTestId('routine-name'), { key: 'Escape' });
+    expect(screen.getByTestId('form-discard-ask')).toBeInTheDocument();
+    await fireEvent.click(screen.getByTestId('form-keep-editing'));
+    expect((screen.getByTestId('routine-name') as HTMLInputElement).value).toBe('Nightly');
+    await fireEvent.click(screen.getByTestId('routine-cancel'));
+    await fireEvent.click(screen.getByTestId('form-discard'));
+    expect(screen.queryByTestId('routine-editor')).toBeNull();
+  });
+
+  it('Use a template… fills a new routine from the template; an edit does not offer it', async () => {
+    await openBlank();
+    await fireEvent.click(screen.getByTestId('routine-use-template'));
+    await fireEvent.click(screen.getByTestId('routine-template-morning-pr-sweep'));
+    expect((screen.getByTestId('routine-name') as HTMLInputElement).value).toBe('Morning PR sweep');
+  });
+});
