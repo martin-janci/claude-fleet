@@ -10,6 +10,7 @@ fn login(profile: Option<&str>, account: &str, used: Option<f64>) -> LoginFacts 
         used_pct: used,
         daily_limit_hit: false,
         signed_out_since: None,
+        live_sessions: 0,
     }
 }
 
@@ -235,4 +236,44 @@ fn the_store_wrapper_reads_logins_usage_health_and_the_project() {
     let p = suggest_with(&s, Some(other), &Want::default(), false, now).unwrap();
     assert_eq!(places(&p), vec![("mac".into(), None)]);
     assert!(p.note.is_some());
+}
+
+/// Live sessions on an account cost it: the usage reading lags the runs a
+/// mission just started, so a pass's picks spread instead of piling up.
+#[test]
+fn live_sessions_spread_picks_across_logins() {
+    let busy = LoginFacts {
+        live_sessions: 3,
+        ..login(Some("b"), "acct-b", Some(60.0))
+    };
+    let hosts = vec![host(
+        "h",
+        Some(10.0),
+        Some(80.0),
+        vec![login(Some("a"), "acct-a", Some(70.0)), busy],
+    )];
+    let p = rank(&hosts, &Want::default(), 90.0);
+    assert_eq!(p.candidates[0].account_uuid, "acct-a");
+    assert!(
+        p.candidates[1]
+            .reasons
+            .iter()
+            .any(|r| r == "3 sessions already on the account"),
+        "{:?}",
+        p.candidates[1].reasons
+    );
+    // Without them the emptier account wins.
+    let idle = vec![host(
+        "h",
+        Some(10.0),
+        Some(80.0),
+        vec![
+            login(Some("a"), "acct-a", Some(70.0)),
+            login(Some("b"), "acct-b", Some(60.0)),
+        ],
+    )];
+    assert_eq!(
+        rank(&idle, &Want::default(), 90.0).candidates[0].account_uuid,
+        "acct-b"
+    );
 }

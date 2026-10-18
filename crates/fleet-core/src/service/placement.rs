@@ -53,6 +53,10 @@ pub const PREFERRED_BONUS: f64 = 10.0;
 /// Headroom assumed for a login with no usage reading: neither the best nor
 /// the worst.
 pub const UNKNOWN_HEADROOM: f64 = 50.0;
+/// Score points a login loses per live session already on its account: the
+/// usage reading lags the sessions placement just started, so without it
+/// every run a mission starts in one pass lands on the same top login.
+pub const SESSION_PENALTY: f64 = 5.0;
 
 /// One login on a host, as placement sees it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -67,6 +71,9 @@ pub struct LoginFacts {
     pub daily_limit_hit: bool,
     /// When fleet first saw it signed out; `None` = signed in.
     pub signed_out_since: Option<i64>,
+    /// Live sessions running on its account, on any host.
+    #[serde(default)]
+    pub live_sessions: u32,
 }
 
 /// One host, as placement sees it.
@@ -260,6 +267,13 @@ pub fn rank(hosts: &[HostFacts], want: &Want, pause_at: f64) -> Placement {
                 (None, None) => reasons.push("no load reading for the host".into()),
             }
             let mut score = headroom - 0.25 * cpu - 0.15 * mem_used;
+            if l.live_sessions > 0 {
+                score -= SESSION_PENALTY * f64::from(l.live_sessions);
+                reasons.push(match l.live_sessions {
+                    1 => "1 session already on the account".into(),
+                    n => format!("{n} sessions already on the account"),
+                });
+            }
             if want.prefer_host.as_deref() == Some(h.alias.as_str()) {
                 score += PREFERRED_BONUS;
                 reasons.push("where this work ran before".into());
@@ -317,6 +331,7 @@ pub fn facts(
     let hosts = crate::service::hosts::active_hosts(s.list_hosts()?, local_enabled);
     let snaps = s.latest_usage_snapshots()?;
     let accounts = s.list_accounts()?;
+    let live = s.live_sessions_per_account()?;
     let cfg = auto_restore::AutoRestoreConfig::from_store(s);
     let with_repo: Option<Vec<String>> = match project_id {
         Some(p) => Some(s.hosts_with_project(p)?),
@@ -345,6 +360,7 @@ pub fn facts(
                     .and_then(|a| a.email.clone()),
                 used_pct: used,
                 daily_limit_hit: daily,
+                live_sessions: live.get(&l.account_uuid).copied().unwrap_or(0),
                 profile: l.profile,
                 account_uuid: l.account_uuid,
             });

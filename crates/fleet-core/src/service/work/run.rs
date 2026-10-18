@@ -285,11 +285,12 @@ pub async fn run_item_with(
         let task = record_run(&s, row.id, &prompt, item_id, attempt, role)?;
         (prompt, task)
     };
-    crate::service::work::resume::spawn_start_prompt(
+    crate::service::work::resume::spawn_run_prompt(
         Arc::clone(store),
         Arc::clone(ssh),
         &row,
         crate::service::work::report::with_run_instruction(&prompt, &task.nonce),
+        task.id,
     );
     Ok(RunOutcome {
         task,
@@ -319,6 +320,22 @@ mod tests {
             })
             .unwrap();
         (s, worker, item.id)
+    }
+
+    /// A worker whose first prompt never went in fails its run, so the
+    /// attempt frees its parallel slot and the next one is attempt 2.
+    #[test]
+    fn a_run_whose_prompt_was_not_typed_fails() {
+        let (s, worker, item) = store_with_item();
+        let t = record_run(&s, worker, "do it", item, 1, "implement").unwrap();
+        let store = Mutex::new(s);
+        crate::service::work::resume::run_prompt_undelivered(&store, t.id);
+        let s = store.lock().unwrap();
+        assert_eq!(s.get_task(t.id).unwrap().unwrap().state, "failed");
+        assert_eq!(
+            precheck(&s, &ViewScope::internal(), item, "implement").unwrap(),
+            Precheck::Fresh { attempt: 2 }
+        );
     }
 
     #[test]

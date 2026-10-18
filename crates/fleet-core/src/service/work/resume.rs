@@ -1248,6 +1248,41 @@ pub fn spawn_start_prompt(
     sessions::seed::spawn_seed(store, ssh, row, prompt, sessions::seed::HANDOVER);
 }
 
+/// [`spawn_start_prompt`] for a run's worker: a prompt that could not be
+/// typed fails `task_id` (when it is still open), so the attempt shows and
+/// the mission can retry it rather than hold a parallel slot until the
+/// task's age limit.
+pub fn spawn_run_prompt(
+    store: Arc<Mutex<Store>>,
+    ssh: Arc<SshClient>,
+    row: &SessionRow,
+    prompt: String,
+    task_id: i64,
+) {
+    let row = row.clone();
+    crate::rt::spawn(async move {
+        let typed =
+            sessions::seed::seed_background(&store, &ssh, &row, &prompt, sessions::seed::HANDOVER)
+                .await;
+        if !typed {
+            run_prompt_undelivered(&store, task_id);
+        }
+    });
+}
+
+/// The failure branch of [`spawn_run_prompt`].
+pub(crate) fn run_prompt_undelivered(store: &Mutex<Store>, task_id: i64) {
+    if let Ok(s) = store.lock() {
+        if let Err(e) = crate::service::tasks::fail_task(
+            &s,
+            task_id,
+            "its prompt was not typed into the session (the REPL did not come up or a dialog stayed open)",
+        ) {
+            tracing::warn!(task = task_id, error = %e, "[work] could not fail an undelivered run");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -427,6 +427,98 @@ async fn a_loop_step_planned_before_pause_all_does_not_start() {
     assert_eq!(s.mission_task_counts(fx.m.id).unwrap().open, 0);
 }
 
+/// [`fixture`] with the loop allowed to act: a level-2 grant under a
+/// level-3 ceiling.
+fn granted() -> Fx {
+    let fx = fixture();
+    lock(&fx.deps.store)
+        .unwrap()
+        .set_setting(settings::ORCHESTRATOR_MAX_LEVEL, "3")
+        .unwrap();
+    grant(
+        &WorkLinkArgs {
+            level: Some(2),
+            hours: Some(2),
+            ..by_id("mission_grant", fx.m.id)
+        },
+        &fx.deps.store,
+        &fx.me,
+    )
+    .unwrap();
+    fx
+}
+
+fn loop_run(item: i64) -> Step {
+    Step {
+        kind: "run".into(),
+        item_id: Some(item),
+        role: Some("implement".into()),
+        reason: "the planner said so".into(),
+        context: None,
+        auto: true,
+    }
+}
+
+/// A planner card the loop applies holds to the parallel limit, as the
+/// steps `plan_steps` counts slots for do.
+#[tokio::test]
+async fn a_loop_run_past_the_parallel_limit_is_refused() {
+    let fx = granted();
+    let (a, b, c) = (member(&fx, "a"), member(&fx, "b"), member(&fx, "c"));
+    {
+        let s = lock(&fx.deps.store).unwrap();
+        for item in [a, b] {
+            crate::service::work::run::record_headless_run(&s, "x", item, 1, "implement").unwrap();
+        }
+        assert_eq!(s.mission_task_counts(fx.m.id).unwrap().open, 2);
+    }
+    let r = apply_step(
+        &fx.deps,
+        &fx.m,
+        &loop_run(c),
+        &Actor::Loop,
+        &ViewScope::internal(),
+    )
+    .await;
+    assert!(!r.ok);
+    assert!(r.detail.contains("2 at once"), "{}", r.detail);
+    let s = lock(&fx.deps.store).unwrap();
+    assert_eq!(s.mission_task_counts(fx.m.id).unwrap().open, 2);
+}
+
+/// A hold stops the loop: a held item whose attempt failed is neither
+/// retried nor run by a planner card.
+#[tokio::test]
+async fn a_held_item_is_not_retried_or_run_by_the_loop() {
+    let fx = granted();
+    let item = member(&fx, "one");
+    {
+        let s = lock(&fx.deps.store).unwrap();
+        let t =
+            crate::service::work::run::record_headless_run(&s, "x", item, 1, "implement").unwrap();
+        crate::service::tasks::fail_task(&s, t.id, "boom").unwrap();
+        s.set_item_hold(item, true, "ana").unwrap();
+        let m = s.get_mission(fx.m.id).unwrap().unwrap();
+        let a = autonomy(&s, &m, now_unix()).unwrap();
+        let steps = steps_for(&s, &m, &a).unwrap();
+        assert!(
+            !steps.iter().any(|st| st.item_id == Some(item)
+                && matches!(st.kind.as_str(), "run" | "retry" | "review" | "close")),
+            "{steps:?}"
+        );
+    }
+    let r = apply_step(
+        &fx.deps,
+        &fx.m,
+        &loop_run(item),
+        &Actor::Loop,
+        &ViewScope::internal(),
+    )
+    .await;
+    assert!(!r.ok);
+    assert!(r.detail.contains("holds"), "{}", r.detail);
+}
+
 #[test]
 fn a_continuous_mission_wakes_on_its_timer() {
     let mut m = fixture().m;

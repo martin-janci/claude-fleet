@@ -668,6 +668,19 @@ impl Store {
         fp_keys: &FingerprintKeys,
     ) -> Result<(), crate::ipc_error::IpcError> {
         let tx = self.conn.unchecked_transaction()?;
+        // The rows that go, with their facts read first, so every client
+        // drops them (`killed_payloads`; `delete_host` does the same) instead
+        // of listing them until its next full re-list.
+        let gone_killed = {
+            let ids: Vec<i64> = {
+                let mut stmt = tx.prepare("SELECT id FROM sessions WHERE project_id = ?1")?;
+                let ids = stmt
+                    .query_map(rusqlite::params![project_id], |r| r.get(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                ids
+            };
+            super::sessions::killed_payloads(&tx, &ids)?
+        };
         // What dies with the sessions (as `delete_session` does): their
         // timeline. And the recorded parent fingerprints (repair) of the
         // project's worktree rows, each under the ROW's host (rows are
@@ -736,6 +749,9 @@ impl Store {
             rusqlite::params![project_id],
         )?;
         tx.commit()?;
+        for killed in gone_killed {
+            self.bus.session_killed(killed);
+        }
         self.emit_sessions_updated(&cross);
         Ok(())
     }

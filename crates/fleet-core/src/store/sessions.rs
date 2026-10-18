@@ -2528,6 +2528,19 @@ impl Store {
     pub fn bus_dashboards_changed(&self) {
         self.bus.dashboards_changed();
     }
+
+    /// Live (running, not lost) Claude sessions per account, on any host:
+    /// what placement charges a login for the work already on it.
+    pub fn live_sessions_per_account(&self) -> Result<std::collections::HashMap<String, u32>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT account_uuid, COUNT(*) FROM sessions \
+             WHERE status = 'running' AND lost_at IS NULL \
+               AND account_uuid IS NOT NULL AND kind != 'shell' \
+             GROUP BY account_uuid",
+        )?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?)))?;
+        rows.collect()
+    }
 }
 
 #[cfg(test)]

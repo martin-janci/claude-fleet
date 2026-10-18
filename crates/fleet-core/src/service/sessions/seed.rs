@@ -280,6 +280,20 @@ pub fn spawn_seed(
     });
 }
 
+/// [`spawn_seed`] that also hands back whether the prompt was typed:
+/// `false` when the REPL never came up, a dialog stayed up or the send
+/// failed.
+pub async fn seed_background(
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    row: &SessionRow,
+    prompt: &str,
+    events: SeedEvents,
+) -> bool {
+    let pane = LivePane::new(store, ssh, row, Origin::Person, Some(events));
+    seed(&pane, prompt, &BACKGROUND).await
+}
+
 /// Seed `row` with `prompt` before returning ([`FOREGROUND`]), as a
 /// person's prompt. `false` when the prompt was not typed (the REPL did not
 /// come up, a dialog is up, the send failed); the session is live either way
