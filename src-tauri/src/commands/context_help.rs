@@ -9,11 +9,14 @@
 //! cost: a paired one's state.db is not the fleet's.
 //!
 //! `session_context_help` (the composer) is routed: a paired desktop asks
-//! the hub, so a session shared at `answer` or `drive` has it too.
+//! the hub, so a session shared at `answer` or `drive` has it too. So is
+//! `session_prompt_tune`, the composer's prompt tuner
+//! (`fleet_core::service::prompt_tune`).
 
 use crate::backend::FleetBackend;
 use fleet_core::ipc_error::IpcError;
 use fleet_core::service::context_help::{self, ClaudeOnHost, HelpAnswer, HelpRequest, Surface};
+use fleet_core::service::prompt_tune::{self, TuneAnswer, TuneRequest};
 use fleet_core::service::settings;
 use fleet_core::ssh::SshClient;
 use fleet_core::store::Store;
@@ -117,6 +120,32 @@ pub async fn session_context_help(
     routed::session_context_help(&backend, args, &store, &ssh).await
 }
 
+/// `session_prompt_tune`'s arguments: `SessionPromptTuneParams` field for
+/// field.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct SessionPromptTuneArgs {
+    pub session_id: i64,
+    #[serde(flatten)]
+    pub request: TuneRequest,
+}
+
+/// The prompt tuner at a session's composer, owned or shared at `answer` /
+/// `drive`: a rewrite of the draft for the box, never sent. Routed like
+/// [`session_context_help`].
+///
+/// Errors: `E_INVALID_STATE` (Prompt tuner off), `E_FORBIDDEN` (a watch
+/// grant), `E_NOTFOUND`, `E_INVALID` (an empty draft), `E_CLAUDE_CLI`,
+/// `E_TIMEOUT`, transport codes.
+#[tauri::command]
+pub async fn session_prompt_tune(
+    args: SessionPromptTuneArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<TuneAnswer, IpcError> {
+    routed::session_prompt_tune(&backend, args, &store, &ssh).await
+}
+
 pub mod routed {
     use super::*;
     use fleet_core::ipc_error::codes;
@@ -148,5 +177,33 @@ pub mod routed {
             })?
         };
         context_help::ask_for_session(store, ssh.as_ref(), &row, &args.request).await
+    }
+
+    pub async fn session_prompt_tune(
+        backend: &FleetBackend,
+        args: SessionPromptTuneArgs,
+        store: &Arc<Mutex<Store>>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<TuneAnswer, IpcError> {
+        if let Some(hub) = backend.hub() {
+            // A hub older than the tuner has no such tool; say what it needs.
+            return match hub.route("session_prompt_tune", &args).await {
+                Err(e) if e.code == codes::E_HUB_PROTOCOL => Err(IpcError::new(
+                    codes::E_HUB_PROTOCOL,
+                    "The prompt tuner needs the hub updated first",
+                )),
+                other => other,
+            };
+        }
+        let row = {
+            let s = fleet_core::ipc_error::lock(store)?;
+            s.get_session_by_id(args.session_id)?.ok_or_else(|| {
+                IpcError::new(
+                    codes::E_NOTFOUND,
+                    format!("session {} not found", args.session_id),
+                )
+            })?
+        };
+        prompt_tune::tune_for_session(store, ssh.as_ref(), &row, &args.request).await
     }
 }

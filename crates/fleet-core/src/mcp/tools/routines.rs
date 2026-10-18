@@ -20,8 +20,11 @@ impl FleetTools {
         check by check, its recent events judged and its decision trace; \
         decisions {routine_id, limit?}: the trace alone; dry_run \
         {routine_id, event_id?}: what a fire now would start and the exact \
-        prompt. Pause all stops the schedule, not run_now. E_NOTFOUND, \
-        E_INVALID.")]
+        prompt. tune_prompt {routine, ask?}: the prompt tuner on a draft \
+        routine's prompt, on its host and profile: { prompt, notes, \
+        unchanged, model, host_alias, at }, a proposal never saved \
+        (E_INVALID_STATE while work.prompt_tune is off). Pause all stops the \
+        schedule, not run_now. E_NOTFOUND, E_INVALID.")]
     pub(super) async fn routines(
         &self,
         Extension(caller): Extension<Caller>,
@@ -80,6 +83,23 @@ impl FleetTools {
                     .ok_or_else(|| mcp_err(codes::E_INVALID, "save needs routine", None))?;
                 ok_json_compact(
                     &routines::save(store, &scope, p.routine_id, input).map_err(to_mcp_err)?,
+                )
+            }
+            "tune_prompt" => {
+                let input = p
+                    .routine
+                    .as_ref()
+                    .ok_or_else(|| mcp_err(codes::E_INVALID, "tune_prompt needs routine", None))?;
+                ok_json_compact(
+                    &crate::service::prompt_tune::tune_for_routine(
+                        store,
+                        self.ssh.as_ref(),
+                        &scope,
+                        input,
+                        p.ask.as_deref().unwrap_or(""),
+                    )
+                    .await
+                    .map_err(to_mcp_err)?,
                 )
             }
             "preview" => {

@@ -2123,7 +2123,7 @@
         "level": "none"
       },
       "default": "haiku",
-      "help": "The model that answers a question asked at a terminal or composer prompt line, on the session's own host and account.",
+      "help": "The model that answers a question asked at a terminal or composer prompt line, and that tunes a prompt, on the session's own host and account.",
       "key": "work.help_model",
       "kind": {
         "options": [
@@ -2142,6 +2142,27 @@
       ],
       "unit": "none",
       "value": "haiku"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "Composer and routine prompt: Tune has a model rewrite your draft into a clearer prompt for the agent, on the session's or routine's host. You see the rewrite beside your draft and accept, edit or discard it; nothing is sent.",
+      "key": "work.prompt_tune",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Prompt tuner",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "ai"
+      ],
+      "unit": "none",
+      "value": "false"
     },
     {
       "ai": "suggest",
@@ -5115,6 +5136,10 @@
                 },
                 {
                   "key": "work.context_help",
+                  "type": "field"
+                },
+                {
+                  "key": "work.prompt_tune",
                   "type": "field"
                 },
                 {

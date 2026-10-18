@@ -572,6 +572,20 @@ bullet for the area you are about to change.
   session's launch profile (`ask_for_session`). The run is booked as
   `context_help` in `aux_usage` where it ran (the hub, or a standalone
   desktop), the composer's to the session's org.
+- **Prompt tuner** (`service/prompt_tune.rs`, `PromptTune.svelte`,
+  `prompt_tune.ts`): the composer's ✦ asks a model to rewrite the draft
+  into a clearer prompt for the session's agent (`TUNE_INSTRUCTION`, fixed;
+  where it goes — agent, host, project — is read from the row, never from
+  the caller). It reuses context help's `HelpModel` / `ClaudeOnHost`, on
+  `work.help_model`, booked as `context_help`, and is gated by its own
+  Writing help toggle `work.prompt_tune` (off by default). The answer is a
+  proposal: the panel shows the rewrite (editable) and its changes
+  (`lineDiff`) beside the draft, and only "Use this" puts it in the box.
+  The composer's `session_prompt_tune` is routed to the hub tool of that
+  name at `answer`, like `session_context_help`; an older hub's
+  `E_HUB_PROTOCOL` reads as "needs the hub updated". A routine's prompt
+  field asks `routines { action: tune_prompt, routine }`, which tunes an
+  unsaved draft on its host and profile for a caller who sees that host.
 - **Terminal** is a hand-rolled ANSI screen buffer (`src/lib/ansi.ts` +
   `TerminalView.svelte`), *not* xterm.js — xterm's renderer failed to repaint in
   the WKWebView setup. PTYs live in an id-keyed map (`PtyState` in `pty.rs`,

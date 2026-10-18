@@ -4436,6 +4436,18 @@
     },
     {
       "default_widget": "switch",
+      "key": "work.prompt_tune",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Prompt tuner",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
       "key": "work.draft_commit_messages",
       "kind": {
         "type": "bool"

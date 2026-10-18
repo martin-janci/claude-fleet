@@ -65,6 +65,10 @@
             },
             {
               "type": "field",
+              "key": "work.prompt_tune"
+            },
+            {
+              "type": "field",
               "key": "work.help_model"
             },
             {

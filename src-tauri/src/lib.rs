@@ -852,6 +852,7 @@ pub fn run() {
             commands::windows::open_terminal_window,
             commands::context_help::context_help,
             commands::context_help::session_context_help,
+            commands::context_help::session_prompt_tune,
             commands::voice::voice_claim,
             commands::voice::voice_release,
             cancel_command,

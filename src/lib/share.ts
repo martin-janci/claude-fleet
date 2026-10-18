@@ -200,6 +200,8 @@ const SESSION_TIER = {
   // Context help at the composer: its answer is text for the box, which a
   // watcher cannot send, and the run spends the owner's account.
   session_context_help: 'answer',
+  // The prompt tuner: the same, a rewrite for the box.
+  session_prompt_tune: 'answer',
 
   // ── reads: nothing to disable, listed so the gap is visibly deliberate ──
   capture_session: 'watch',

@@ -2112,6 +2112,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "session_prompt_tune",
+        Verdict::Routed {
+            tool: "session_prompt_tune",
+        },
+    ),
+    (
         "pty_resize",
         Verdict::SameInBoth {
             why: "the same as pty_write",

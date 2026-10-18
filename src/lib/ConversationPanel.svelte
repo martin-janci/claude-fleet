@@ -39,6 +39,8 @@
   import ForkSheet from './ForkSheet.svelte';
   import SendLaterSheet from './SendLaterSheet.svelte';
   import ContextHelp from './ContextHelp.svelte';
+  import PromptTune from './PromptTune.svelte';
+  import { tuneComposerPrompt } from './prompt_tune';
   import { askComposerHelp, commandLine, helpModel } from './context_help';
   import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
   import Icon from './kit/Icon.svelte';
@@ -2022,10 +2024,34 @@
   );
   function openHelp() {
     helpOpen = true;
+    tuneOpen = false;
     const id = session.id;
     void projectSkills(id).then((list) => {
       if (session.id === id) helpCommands = matchSlashCommands('/', list).map(commandLine);
     });
+  }
+  // The prompt tuner (`prompt_tune.ts`): a model rewrites the draft for the
+  // agent, with the same context as help; the rewrite goes in the box only
+  // on the person's "Use this", never sent. `session_prompt_tune`, routed.
+  let tuneOpen = $state(false);
+  /** Writing help's "Prompt tuner" toggle, off by default. */
+  const tuneOn = $derived(settingBool($fleetSettings, SETTING_KEYS.workPromptTune));
+  const tuneBlocked = $derived(
+    hubActionBlocked('session_prompt_tune', $hubStatus, $hubConnection) ??
+      $sessionBlocked(session, 'session_prompt_tune'),
+  );
+  function openTune() {
+    tuneOpen = true;
+    helpOpen = false;
+    const id = session.id;
+    void projectSkills(id).then((list) => {
+      if (session.id === id) helpCommands = matchSlashCommands('/', list).map(commandLine);
+    });
+  }
+  function runTune(ask: string) {
+    const blocked = $sessionBlocked(session, 'session_prompt_tune');
+    if (blocked) return Promise.resolve({ ok: false as const, error: { code: 'E_FORBIDDEN', message: blocked } });
+    return tuneComposerPrompt(session.id, { draft, history, commands: helpCommands }, ask);
   }
   function askHelp(question: string) {
     // The grant can narrow while the panel is open: ask again at the call.
@@ -2939,6 +2965,22 @@
           {/each}
         </ul>
       {/if}
+      {#if tuneOn && tuneOpen}
+        <PromptTune
+          model={helpModel($fleetSettings)}
+          {draft}
+          tune={runTune}
+          testid="conv-tune"
+          onaccept={(p) => {
+            draft = p;
+            histIndex = null;
+          }}
+          onclose={() => {
+            tuneOpen = false;
+            box?.focus();
+          }}
+        />
+      {/if}
       {#if helpOn && helpOpen}
         <ContextHelp
           model={helpModel($fleetSettings)}
@@ -3137,6 +3179,17 @@
             {/each}
           </select>
           <span class="composer-hint" id={COMPOSER_HINT_ID} data-testid="conv-composer-hint">{composerHint}</span>
+          {#if tuneOn}
+            <button
+              type="button"
+              class="btn btn--icon btn--quiet"
+              data-testid="conv-tune-button"
+              aria-label="Tune this prompt with {helpModel($fleetSettings)}"
+              aria-expanded={tuneOpen}
+              title={tuneBlocked ?? `Tune: ${helpModel($fleetSettings)} rewrites your draft into a clearer prompt. You choose whether to use it.`}
+              disabled={tuneBlocked !== null}
+              onclick={() => (tuneOpen ? (tuneOpen = false) : openTune())}>✦</button>
+          {/if}
           {#if helpOn}
             <button
               type="button"

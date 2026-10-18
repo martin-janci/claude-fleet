@@ -2498,6 +2498,29 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // The prompt tuner at the composer: the request crosses flat too.
+        (
+            "session_prompt_tune",
+            "session_prompt_tune",
+            json!({ "session_id": 42, "draft": "fix it", "ask": "shorter", "history": [], "commands": [] }),
+            r#"{"prompt":"Fix it.","notes":"","unchanged":false,"model":"haiku","host_alias":"h","at":1791466000}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::context_help::routed::session_prompt_tune(
+                    b,
+                    commands::context_help::SessionPromptTuneArgs {
+                        session_id: 42,
+                        request: fleet_core::service::prompt_tune::TuneRequest {
+                            draft: "fix it".into(),
+                            ask: "shorter".into(),
+                            ..Default::default()
+                        },
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
         (
             "session_access",
             "session_access",

@@ -774,6 +774,24 @@ pub struct SessionContextHelpParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionPromptTuneParams {
+    /// Fleet session id.
+    pub session_id: i64,
+    /// The draft prompt in the composer.
+    pub draft: String,
+    /// What the person wants from the rewrite; empty asks for a general
+    /// tune.
+    #[serde(default)]
+    pub ask: String,
+    /// The composer's earlier prompts, oldest first.
+    #[serde(default)]
+    pub history: Vec<String>,
+    /// The commands the composer accepts, one per entry.
+    #[serde(default)]
+    pub commands: Vec<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct SessionToolDetailParams {
     /// Fleet session id.
     pub session_id: i64,
@@ -1427,14 +1445,18 @@ pub struct UpdateAdminParams {
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct RoutinesParams {
-    /// list | get | runs | failing | budget | save | preview | delete | set_enabled | skip_next | run_now | set_run_outcome | explain | decisions | dry_run.
+    /// list | get | runs | failing | budget | save | preview | delete | set_enabled | skip_next | run_now | set_run_outcome | explain | decisions | dry_run | tune_prompt.
     pub action: String,
     /// Every action but list, and save or preview of a change.
     #[serde(default)]
     pub routine_id: Option<i64>,
-    /// save, preview: the whole routine.
+    /// save, preview, tune_prompt: the whole routine (tune_prompt reads its
+    /// host, profile, project and prompt; it need not be saved).
     #[serde(default)]
     pub routine: Option<crate::service::routines::RoutineInput>,
+    /// tune_prompt: what the person wants from the rewrite.
+    #[serde(default)]
+    pub ask: Option<String>,
     /// set_enabled.
     #[serde(default)]
     pub enabled: Option<bool>,
