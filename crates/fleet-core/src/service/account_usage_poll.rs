@@ -158,6 +158,7 @@ async fn fetch_and_emit(
         account_usage::fetch_account_usage_with(account_uuid, hosts, ssh, cache, false).await;
     if let Some(store) = store {
         persist_if_new(store, &before, &after);
+        recheck_logins(account_uuid, hosts, ssh, store, &after).await;
     }
     if after.is_newsworthy_change(&before) {
         let was = account_blocked(bus, account_uuid);
@@ -182,6 +183,62 @@ async fn fetch_and_emit(
         }
     }
     after
+}
+
+/// Login health (control review F6, `service::login_health`): record what
+/// this fetch saw of its sources' logins, then, when a login of this account
+/// is known to be signed out and due a look, ask that login alone through a
+/// throwaway cache (the account's own schedule and snapshot stay as they
+/// are) and record that too. Also records the signed-out headless runs
+/// noted since the last pass.
+async fn recheck_logins(
+    account_uuid: &str,
+    hosts: &[HostRow],
+    ssh: &dyn SshExec,
+    store: &Mutex<Store>,
+    after: &AccountUsageSnapshot,
+) {
+    use crate::service::login_health;
+    let now = crate::store::now_unix();
+    let due = match store.lock() {
+        Ok(s) => {
+            login_health::drain_noted(&s, now);
+            let obs = login_health::observations_from_usage(after);
+            if let Err(e) = login_health::record(&s, &obs, now) {
+                tracing::debug!(error = %e.message, "[login-health] not recorded");
+            }
+            // The stored rows carry the signed-out lists the poll's own
+            // `hosts` may predate.
+            let rows = s.list_hosts().unwrap_or_default();
+            let fresh: Vec<HostRow> = hosts
+                .iter()
+                .map(|h| {
+                    rows.iter()
+                        .find(|r| r.alias == h.alias)
+                        .unwrap_or(h)
+                        .clone()
+                })
+                .collect();
+            login_health::recheck_due(&fresh, account_uuid, now)
+        }
+        Err(_) => None,
+    };
+    let Some(only) = due else { return };
+    let scratch = Mutex::new(UsageCache::new());
+    let snap = account_usage::fetch_account_usage_with(
+        account_uuid,
+        std::slice::from_ref(&only),
+        ssh,
+        &scratch,
+        false,
+    )
+    .await;
+    let obs = login_health::observations_from_usage(&snap);
+    if let Ok(s) = store.lock() {
+        if let Err(e) = login_health::record(&s, &obs, now) {
+            tracing::debug!(error = %e.message, "[login-health] recheck not recorded");
+        }
+    }
 }
 
 /// Whether `bus`'s facts hold `account` at a limit or without a login: the
@@ -500,6 +557,7 @@ mod tests {
             mem_pressure: None,
             mem_low: false,
             cpu_saturated: false,
+            signed_out_logins: Vec::new(),
             harnesses: None,
         }
     }
@@ -1042,6 +1100,76 @@ mod tests {
         assert!(fresh.lock().unwrap().due("acct-1"));
     }
 
+    /// Login health (control review F6), end to end through a real fetch:
+    /// a source whose login expired is recorded on its host row while
+    /// another source answers, and once it is due a look it is asked alone
+    /// and leaves the list when it answers.
+    #[tokio::test]
+    async fn a_poll_records_a_signed_out_source_and_a_recheck_clears_it() {
+        let store = store_with_account("acct-1");
+        for h in ["a-htz", "b-mac"] {
+            let s = store.lock().unwrap();
+            s.insert_host(h, None).unwrap();
+            s.set_host_account(h, Some("acct-1")).unwrap();
+            s.update_host_probe(h, true, None, None, 1).unwrap();
+        }
+        let store = Arc::new(store);
+        let hosts = Arc::new(store.lock().unwrap().list_hosts().unwrap());
+        let clock = TestClock::new();
+        let cache = Arc::new(Mutex::new(UsageCache::with_clock(clock.clone())));
+        let fake = FakeSsh::new();
+        // The newest rule answers first: the standing answer, then the
+        // expired login it covers once.
+        fake.on(
+            crate::ssh_fake::Match::Any,
+            crate::ssh_fake::Reply::ok(OK_OUTPUT),
+        );
+        fake.on_host_once(
+            "a-htz",
+            crate::ssh_fake::Match::Any,
+            crate::ssh_fake::Reply::ok("__usage_start__\n__login_expired__\n"),
+        );
+        let ssh: Arc<dyn SshExec> = Arc::new(fake.clone());
+        let bus: Arc<dyn EventBus> = Arc::new(RecordingEventBus::new());
+        let poller = Arc::new(AccountUsagePoller::new());
+        let poll = || {
+            poll_due_accounts(
+                &poller,
+                Arc::clone(&hosts),
+                Arc::clone(&ssh),
+                Arc::clone(&cache),
+                Arc::clone(&bus),
+                Some(Arc::clone(&store)),
+            )
+        };
+        for h in poll() {
+            h.await.unwrap();
+        }
+        let row = |a: &str| store.lock().unwrap().get_host_row(a).unwrap().unwrap();
+        assert_eq!(row("a-htz").signed_out_logins.len(), 1, "seen signed out");
+        assert!(row("b-mac").signed_out_logins.is_empty(), "it answered");
+        assert_eq!(fake.calls_for("a-htz").len(), 1, "not looked at again yet");
+
+        // An hour later (the stored look is old): the sticky source answers,
+        // and the signed-out one is asked alone, signs in, and leaves.
+        store
+            .lock()
+            .unwrap()
+            .conn_for_test()
+            .execute(
+                "UPDATE hosts SET signed_out_logins = '[{\"profile\":null,\"since\":5,\"checked_at\":5}]' \
+                 WHERE alias = 'a-htz'",
+                [],
+            )
+            .unwrap();
+        clock.advance(USAGE_POLL_FLOOR_SECS as u64);
+        for h in poll() {
+            h.await.unwrap();
+        }
+        assert_eq!(fake.calls_for("a-htz").len(), 2, "the recheck asked it");
+        assert!(row("a-htz").signed_out_logins.is_empty());
+    }
+
     #[tokio::test]
     async fn a_failed_answer_writes_no_row() {
         let store = store_with_logged_in_host();
@@ -1180,6 +1308,8 @@ mod tests {
         assert_eq!(
             frames(),
             vec![
+                // h1's login is now on record as signed out (login_health).
+                ("host:probed", None, None),
                 ("account_usage:updated", None, None),
                 (
                     "session:updated",
@@ -1195,6 +1325,8 @@ mod tests {
         assert_eq!(
             frames(),
             vec![
+                // ... and off the record again.
+                ("host:probed", None, None),
                 ("account_usage:updated", None, None),
                 ("session:updated", Some(ids[0]), None),
             ],

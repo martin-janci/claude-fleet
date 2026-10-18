@@ -201,6 +201,7 @@ fn lib_rs_cannot_start_a_background_task_behind_this_modules_back() {
         "spawn_account_usage_tick(",
         "maybe_start_mcp(",
         "spawn_event_bridge(",
+        "spawn_extra_fleet_bridge(",
         "spawn_report_flusher(",
         "spawn_tracker_sync(",
         "spawn_catalog_scan_tick(",
@@ -237,6 +238,10 @@ fn the_real_tasks_module_spawns_each_of_the_three_exactly_once() {
         ("spawn_account_usage_tick(", "the account-usage poll"),
         ("maybe_start_mcp(", "the embedded control API"),
         ("spawn_event_bridge(", "the hub event bridge"),
+        (
+            "spawn_extra_fleet_bridge(",
+            "the extra fleets' event bridges",
+        ),
         ("spawn_report_flusher(", "the error-report flusher"),
         ("spawn_tracker_sync(", "the tracker sync"),
         ("spawn_catalog_scan_tick(", "the catalog scan tick"),

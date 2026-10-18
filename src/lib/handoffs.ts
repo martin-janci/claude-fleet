@@ -49,6 +49,23 @@ export interface ControlHandoff {
   /** kind tree: the proposed items as they are now. */
   items?: HandoffItem[];
   preview?: string | null;
+  /** How the call was let through (migration 196, review 2026-10-17):
+   *  `person` — approved on its card and run by fleet (F1); `pre_approved`
+   *  — the autonomy position let it through without a card (F2). Absent
+   *  when no card was needed, or from an older hub. */
+  approval?: 'person' | 'pre_approved' | string | null;
+}
+
+/** The chip's words for how a handoff was let through, or null. */
+export function approvalWords(h: Pick<ControlHandoff, 'approval'>): string | null {
+  switch (h.approval) {
+    case 'pre_approved':
+      return 'pre-approved';
+    case 'person':
+      return 'approved';
+    default:
+      return null;
+  }
 }
 
 /** How long after an accept Undo is offered, seconds (`ACCEPT_UNDO_SECS`). */

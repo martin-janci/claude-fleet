@@ -342,6 +342,25 @@ pub fn run() {
                         as std::sync::Arc<dyn backend::connection::ConnectionView>),
             ));
             app.manage(backend.clone());
+            // Extra fleets: further hubs this window also shows, beside the
+            // launch-time one above (multi-hub design). Never this process's
+            // to own, so they are hot and do not go through
+            // `start_background_tasks`. Loaded off the main thread: each one
+            // is a keychain read, bounded like the primary's but still up to
+            // KEYCHAIN_WAIT on a locked keychain. With none configured this
+            // reads one setting and nothing else.
+            let fleets = std::sync::Arc::new(backend::fleets::Fleets::new(
+                std::sync::Arc::clone(&store),
+                std::sync::Arc::new(bootstrap::tasks::OsFleetTokens {
+                    data_dir: data_dir.clone(),
+                }),
+                std::sync::Arc::clone(&frontend_bus)
+                    as std::sync::Arc<dyn backend::events::RemoteEventSink>,
+                std::sync::Arc::new(bootstrap::tasks::ExtraFleetLinks),
+                shutdown_token.clone(),
+            ));
+            app.manage(std::sync::Arc::clone(&fleets));
+            std::thread::spawn(move || fleets.load());
             // Which background tasks this process may run is decided in
             // `backend::startup`, not here, and the real spawns live in
             // `bootstrap::tasks`. Both moved out of this closure because
@@ -738,6 +757,7 @@ pub fn run() {
             commands::mcp::control_handoffs,
             commands::operator::ensure_operator,
             commands::operator::operator_status,
+            commands::operator::control_auto_continue,
             commands::operator::control_route_propose,
             commands::operator::control_route_follow,
             commands::hub::hub_status,
@@ -748,6 +768,10 @@ pub fn run() {
             commands::hub::offline_local_sessions,
             commands::hub::hub_stranded_token,
             commands::hub::report_client_error,
+            commands::fleets::fleets_list,
+            commands::fleets::fleet_add,
+            commands::fleets::fleet_remove,
+            commands::fleets::fleet_retry_now,
             commands::onboarding::check_local_prereqs,
             commands::onboarding::tunnel_status,
             commands::assets::catalog_config,

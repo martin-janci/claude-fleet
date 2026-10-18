@@ -9,6 +9,7 @@
 use crate::backend::FleetBackend;
 use fleet_core::cancel::CancellationRegistry;
 use fleet_core::ipc_error::IpcError;
+use fleet_core::service::control_continue::{self, AutoContinueView};
 use fleet_core::service::decide::control_route::ControlRoute;
 use fleet_core::service::operator::{self, OperatorStatus};
 use fleet_core::ssh::SshClient;
@@ -54,6 +55,19 @@ pub async fn control_route_follow(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<bool, IpcError> {
     routed::control_route_follow(&backend, &store, run_id, chosen).await
+}
+
+/// Control's auto-continue, which the fleet runs (F17): the countdown's
+/// state, Cancel, and Send now (`take`, whose answer carries the prompt the
+/// window then sends as the person's).
+#[tauri::command]
+pub async fn control_auto_continue(
+    action: String,
+    turn_seq: Option<i64>,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<AutoContinueView, IpcError> {
+    routed::control_auto_continue(&backend, &store, action, turn_seq).await
 }
 
 pub(crate) mod routed {
@@ -123,6 +137,25 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.operator_status().await,
             None => operator::operator_status(store),
+        }
+    }
+
+    pub async fn control_auto_continue(
+        backend: &FleetBackend,
+        store: &Arc<Mutex<Store>>,
+        action: String,
+        turn_seq: Option<i64>,
+    ) -> Result<AutoContinueView, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                let args = json!({ "action": action, "turn_seq": turn_seq });
+                hub.route("control_auto_continue", &args).await
+            }
+            None => control_continue::act(
+                store,
+                &control_continue::AutoContinueArgs { action, turn_seq },
+                fleet_core::store::now_unix(),
+            ),
         }
     }
 }

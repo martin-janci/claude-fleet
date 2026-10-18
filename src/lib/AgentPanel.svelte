@@ -34,6 +34,8 @@
     ensureAgent,
     restartOperator,
     replaceOperator,
+    operatorAccount,
+    operatorAccountLine,
     type OperatorBlocked,
   } from './operator';
   import { openSettingsAt, requestHostsView, requestNewSessionOnHost } from './app_views';
@@ -105,8 +107,10 @@
   // owns no composer any more, so what hangs off this row is what the sheet
   // hands DOWN to ConversationPanel's: the row it renders, and through it the
   // `claude_status` / `stuck_kind` that drive both the note under the box and
-  // — because this sheet passes `blockWhileBusy` — the gate that refuses a
-  // send while the agent is mid-turn. A frozen row would leave both stale.
+  // — because this sheet passes `blockWhileBusy` — the gate that holds a
+  // send while the agent is mid-turn (queued, sent when the turn ends, with
+  // a Stop button beside Send: review 2026-10-17, F4). A frozen row would
+  // leave both stale.
   // See `operatorRow` in operator.ts.
   const session = $derived($operatorRow);
   const rawCtx = $derived(contextInput ? agentContext(contextInput) : null);
@@ -182,9 +186,16 @@
   let firstRunClosed = $state(false);
   const firstRun = $derived(!!session && !session.last_prompt && !firstRunClosed);
   const firstHost = $derived($hosts.find((h) => !h.hidden)?.alias ?? $operatorHost);
+  // Control review F7: Control's own login, said only when it is in trouble.
+  const accountLine = $derived(
+    $operatorAccount && $operatorAccount.state !== 'ok' && $operatorAccount.state !== 'unknown' ? operatorAccountLine($operatorAccount) : null,
+  );
 </script>
 
 {#snippet chip()}
+  {#if accountLine}
+    <p class="account-line" data-testid="control-account" data-state={$operatorAccount?.state}>{accountLine}</p>
+  {/if}
   {#if firstRun && session}
     <!-- Thread room (board A2Empty): the empty chat's starters, centred
          under the greeting. -->
@@ -274,7 +285,8 @@
          was deleted (`busy = statusNote !== null` at v0.2.35) and lost in
          the refactor. It is passed explicitly, and only here: the
          Conversation tab never had it, and queueing a prompt behind a
-         running turn is a workflow there, not a mistake. -->
+         running turn is a workflow there, not a mistake. Here it holds
+         the line as a "queued · cancel" chip until the turn ends (F4). -->
     <ConversationPanel
       {session}
       visible={true}
@@ -306,6 +318,12 @@
     box-sizing: border-box;
     background: var(--bg);
     color: var(--fg);
+  }
+  .account-line {
+    flex-basis: 100%;
+    margin: 0;
+    font-size: var(--text-xs);
+    color: var(--usage-warn);
   }
   .blocked-state {
     margin: auto;

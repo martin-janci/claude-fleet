@@ -1,5 +1,5 @@
 //! Autofix findings (service/autofix): one row per episode of a detected
-//! broken state. See `migrations/196_autofix.sql`.
+//! broken state. See `migrations/198_autofix.sql`.
 
 use super::Store;
 use rusqlite::{OptionalExtension, Result};

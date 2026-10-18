@@ -437,7 +437,9 @@ pub(crate) mod routed {
                 .await,
                 false,
             ),
-            None => Ok(guards.confirms.resolve(&nonce, approved)),
+            // `answer`: the operator's approved call runs and Control is
+            // told (review 2026-10-17, F1), as on a hub.
+            None => Ok(guards.confirms.answer(&nonce, approved)),
         }
     }
 

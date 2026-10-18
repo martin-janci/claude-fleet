@@ -3438,6 +3438,21 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             }),
         ),
         (
+            "control_auto_continue",
+            "control_auto_continue",
+            json!({ "action": "cancel", "turn_seq": 4 }),
+            r#"{"enabled":true,"minutes":10}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::operator::routed::control_auto_continue(
+                    b,
+                    s,
+                    "cancel".into(),
+                    Some(4),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "control_route_follow",
             "control_route",
             json!({ "action": "follow", "run_id": 7, "chosen": "m3" }),
@@ -7602,6 +7617,7 @@ const SOURCES: &[(&str, &str)] = &[
     ),
     ("commands/editor.rs", include_str!("../commands/editor.rs")),
     ("commands/files.rs", include_str!("../commands/files.rs")),
+    ("commands/fleets.rs", include_str!("../commands/fleets.rs")),
     ("commands/health.rs", include_str!("../commands/health.rs")),
     (
         "commands/history.rs",

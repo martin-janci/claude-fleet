@@ -381,3 +381,23 @@ describe('operatorRow', () => {
     expect(get(operatorRow)).toBeNull();
   });
 });
+
+describe('operatorAccountLine (control review F7)', () => {
+  it('names the state, the account, the login and the usage', async () => {
+    const { operatorAccountLine } = await import('./operator');
+    const a = {
+      host_alias: 'mac',
+      profile: null,
+      account_uuid: 'u',
+      email: 'me@x',
+      used_pct: 100,
+      state: 'limit' as const,
+      label: 'Paused · limit',
+    };
+    expect(operatorAccountLine(a)).toBe("Paused · limit · me@x (mac's own login) · 100% used");
+    expect(operatorAccountLine({ ...a, state: 'signed_out', label: 'signed out', profile: 'work', used_pct: null })).toBe(
+      'signed out · me@x (profile work)',
+    );
+    expect(operatorAccountLine(null)).toBeNull();
+  });
+});

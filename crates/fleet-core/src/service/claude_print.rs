@@ -310,7 +310,10 @@ pub fn run_signed_out(env: Option<&Envelope>, text: &str, stderr: &[u8]) -> bool
 /// The refusal for a run whose login is gone: which login (the host's own,
 /// or the login profile `profile`) on which host, and the command that
 /// signs it in again there. Fleet holds no token, so only a person can.
+/// Every refusal built here is also noted for `service::login_health`.
 pub fn signed_out_error(host: &str, profile: Option<&str>) -> crate::ipc_error::IpcError {
+    // Login health (control review F6): the next usage pass records it.
+    crate::service::login_health::note_signed_out(host, profile);
     let (whose, login) = match profile {
         Some(p) => (
             format!("{host} (login profile {p})"),

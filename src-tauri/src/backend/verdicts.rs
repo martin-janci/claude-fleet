@@ -1569,6 +1569,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "operator_status",
         },
     ),
+    // F17: the countdown runs on the hub, so a hub-backed desktop reads and
+    // settles the hub's, never a copy of its own.
+    (
+        "control_auto_continue",
+        Verdict::Routed {
+            tool: "control_auto_continue",
+        },
+    ),
     // Redesign step 9.9 (Jev K2): the hub decides where a Control message
     // goes, since it owns the fleet and the decision envelope.
     (
@@ -1647,6 +1655,36 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             why: "asks THIS machine's own token store whether a pairing that crashed before \
                   writing its URL left a credential behind. There is no hub to ask — the \
                   whole state is that no hub is configured",
+        },
+    ),
+    // ── extra fleets (multi-hub design) — about THIS process's windows ─────
+    (
+        "fleets_list",
+        Verdict::SameInBoth {
+            why: "lists which hubs THIS window shows and how each link is doing. Each extra \
+                  fleet is its own hub client; asking any one hub would be circular",
+        },
+    ),
+    (
+        "fleet_add",
+        Verdict::SameInBoth {
+            why: "pairs THIS process with another hub through that hub's POST /pair and keeps \
+                  the token in this machine's secure storage. It changes nothing on the \
+                  launch-time fleet and owns nothing on the new one",
+        },
+    ),
+    (
+        "fleet_remove",
+        Verdict::SameInBoth {
+            why: "stops showing an extra fleet and forgets its token on THIS machine. It \
+                  revokes nothing on that hub, as hub_disconnect revokes nothing on the primary",
+        },
+    ),
+    (
+        "fleet_retry_now",
+        Verdict::SameInBoth {
+            why: "cuts THIS process's wait before it reconnects to an extra fleet's hub, or \
+                  re-reads that fleet's token after a locked keychain",
         },
     ),
     (

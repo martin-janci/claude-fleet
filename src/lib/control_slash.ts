@@ -47,6 +47,7 @@ import { fleetLoads, loadParts, type LoadLevel } from './host_health';
 import { fleetSettings, settingInt, SETTING_KEYS } from './fleet_settings';
 import { getMission, listMissions, type Mission } from './missions';
 import { graphFromMission, graphProgress, type GraphCard } from './task_graph_card';
+import { controlVersions, versionsSummary } from './control_versions';
 import { agentsStatus, runFleetAgent, SCOPE_COMPONENTS, type AgentJob, type RunScope } from './agents';
 import { openRuns } from './automation';
 
@@ -277,6 +278,10 @@ function health(host: string | undefined): Omit<CommandReceipt, 'id' | 'typed'> 
         ? `${loads[0].alias} is fine.`
         : `All ${loads.length} hosts are fine.`
       : trouble.map((l) => `${l.alias}: ${l.trouble}`).join(' · ');
+  // F0.2: the versions Control runs against, last, amber when the hub is
+  // older than this desktop.
+  const v = versionsSummary(get(controlVersions));
+  if (v) rows.push({ label: 'versions', text: v.text, level: v.hubBehind ? 'warn' : 'ok' });
   return { state: 'done', line, rows, open: { kind: 'hosts' } };
 }
 

@@ -162,6 +162,7 @@ pub fn record(
     tool: &str,
     args: &Value,
     result: &rmcp::model::CallToolResult,
+    approval: Option<&str>,
 ) {
     let Some(result) = result_json(result) else {
         return;
@@ -178,7 +179,7 @@ pub fn record(
     let Some(h) = handoff_of(tool, args, &result, named) else {
         return;
     };
-    match s.insert_control_handoff(&h, crate::store::now_unix()) {
+    match s.insert_control_handoff_as(&h, crate::store::now_unix(), approval) {
         Ok(_) => s.bus_handoff_changed(),
         Err(e) => tracing::warn!(tool, "control handoff not recorded: {e}"),
     }
@@ -333,6 +334,7 @@ mod tests {
             "dispatch_task",
             &json!({ "worker_session_id": 3, "prompt": "Review" }),
             &result,
+            None,
         );
         let rows = list(&store, None).unwrap();
         assert_eq!(rows.len(), 1);

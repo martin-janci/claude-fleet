@@ -1914,7 +1914,7 @@ scripts/verify.sh
 - [ ] **Step 1: Architecture bullet**
 
 ```markdown
-- **Autofix** (`service/autofix/`, `store/autofix.rs`, migration 196, MCP `autofix`, loop `autofix`, settings `autofix.*`): known broken states, each found by a pure detector over a `ScanCx` the runner gathers under one lock, stored as an episode in `autofix_findings` (`(kind, subject)` unique while live: open → verifying → cleared / apply_failed, or dismissed). A fix is a `FixPlan` the hub wrote itself, run by `FixExec` (`SshFixExec` in production), followed at once by a re-scan of its detector. Safe fixes with `auto: true` run on the reconcile tick when `autofix.auto_safe` is on; the rest wait for a trusted device's `autofix { apply }`. Every apply is in the admin audit log (`autofix.apply`). Detectors: `operator_unbound`, `host.*`. Spec: `docs/superpowers/specs/2026-10-17-autofix-design.md`.
+- **Autofix** (`service/autofix/`, `store/autofix.rs`, migration 198, MCP `autofix`, loop `autofix`, settings `autofix.*`): known broken states, each found by a pure detector over a `ScanCx` the runner gathers under one lock, stored as an episode in `autofix_findings` (`(kind, subject)` unique while live: open → verifying → cleared / apply_failed, or dismissed). A fix is a `FixPlan` the hub wrote itself, run by `FixExec` (`SshFixExec` in production), followed at once by a re-scan of its detector. Safe fixes with `auto: true` run on the reconcile tick when `autofix.auto_safe` is on; the rest wait for a trusted device's `autofix { apply }`. Every apply is in the admin audit log (`autofix.apply`). Detectors: `operator_unbound`, `host.*`. Spec: `docs/superpowers/specs/2026-10-17-autofix-design.md`.
 ```
 
 - [ ] **Step 2: Update the spec**

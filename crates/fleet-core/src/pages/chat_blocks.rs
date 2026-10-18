@@ -447,9 +447,9 @@ pub struct Choice {
     pub prompt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
-    /// The option you would pick. At most one per block; Control's chat
-    /// sends it after `control.auto_continue_minutes` when nobody answers
-    /// (`src/lib/auto_continue.ts`).
+    /// The option you would pick. At most one per block; in Control's chat
+    /// fleet sends it after `control.auto_continue_minutes` when nobody
+    /// answers (`service::control_continue`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub recommended: bool,
 }

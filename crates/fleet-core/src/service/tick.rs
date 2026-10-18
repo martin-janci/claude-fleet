@@ -280,6 +280,10 @@ pub fn spawn_reconcile_tick(
                 // After the restore, so a session brought back this pass is in
                 // it. Detached and single-flight; stops while paused.
                 service::operator_feed::maybe_run(store, ssh);
+                // Control's recommended option goes out once nobody answered
+                // for `control.auto_continue_minutes` (F17): here, not in a
+                // window, so it runs with none open and only once.
+                service::control_continue::maybe_run(store, ssh);
                 // PR shepherd: projects a person granted a rule for get their
                 // sessions' conflicting or red PRs recorded, and nudged at
                 // `nudge`. No rule, no work: one indexed read and out. Stops
@@ -358,6 +362,9 @@ pub fn spawn_reconcile_tick(
                 // account ran out under the login with the most headroom.
                 // Detached and rate-limited.
                 service::account_switch::maybe_run(store, ssh);
+                // On by default (`control.switch_at_limit`): resume Control
+                // under another login when its own account ran out.
+                service::operator_account::maybe_run(store, ssh);
             }
         })
         .await;

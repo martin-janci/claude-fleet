@@ -718,6 +718,15 @@ fn sessions_has_pinned_at(conn: &Connection) -> rusqlite::Result<bool> {
 }
 
 /// `already_applied` guard of migration 191.
+fn control_handoffs_has_approval(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('control_handoffs') WHERE name = 'approval'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn hosts_has_agent_hook_port(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'agent_hook_port'",
@@ -744,6 +753,16 @@ fn env_vars_has_person_scope(conn: &Connection) -> rusqlite::Result<bool> {
 fn hosts_has_cpu_pct(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'cpu_busy_ticks'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 197.
+fn hosts_has_signed_out_logins(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'signed_out_logins'",
         [],
         |r| r.get(0),
     )?;
@@ -2200,11 +2219,25 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/195_operator_token_person.sql"),
         already_applied: None,
     },
+    // How Control's handoff was let through: a person's card or the
+    // autonomy position (review 2026-10-17, F1/F2). An ADD COLUMN, so guarded.
+    Migration {
+        version: 196,
+        sql: include_str!("../../migrations/196_control_handoff_approval.sql"),
+        already_applied: Some(control_handoffs_has_approval),
+    },
+    // Login health: the host's signed-out Claude logins (`hosts`
+    // `signed_out_logins`, control review F6). An ADD COLUMN, so guarded.
+    Migration {
+        version: 197,
+        sql: include_str!("../../migrations/197_host_signed_out_logins.sql"),
+        already_applied: Some(hosts_has_signed_out_logins),
+    },
     // Autofix: `autofix_findings`, one row per episode of a detected broken
     // state (service/autofix). A new table.
     Migration {
-        version: 196,
-        sql: include_str!("../../migrations/196_autofix.sql"),
+        version: 198,
+        sql: include_str!("../../migrations/198_autofix.sql"),
         already_applied: None,
     },
 ];

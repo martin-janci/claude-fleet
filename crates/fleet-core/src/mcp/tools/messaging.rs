@@ -53,11 +53,12 @@ impl FleetTools {
         )?;
         // The operator's text (or key) reaches the session only once a
         // person approves it (F21); for any other caller this is a no-op.
-        self.confirm_gate(
+        self.confirm_gate_target(
             "send_prompt",
             p.confirm_nonce.as_deref(),
             &prompt_summary(&row, &p.prompt, p.keys.as_deref(), p.submit, p.force, p.raw),
             &caller,
+            GateTarget::Session(row.id),
         )?;
         if let Some(k) = p.keys.as_deref() {
             let key = crate::tmux::NamedKey::parse(k).ok_or_else(|| {
@@ -200,11 +201,12 @@ impl FleetTools {
             "the session to prompt",
         )?;
         // As `send_prompt`: the operator's text waits for a person (F21).
-        self.confirm_gate(
+        self.confirm_gate_target(
             "queue_prompt",
             p.confirm_nonce.as_deref(),
             &prompt_summary(&row, &p.prompt, None, true, false, p.raw),
             &caller,
+            GateTarget::Session(row.id),
         )?;
         let prompt = apply_marker(p.prompt, &marker_origin(&caller), &caller, p.raw)?;
         let out = sessions::queue_prompt(

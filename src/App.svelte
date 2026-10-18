@@ -104,6 +104,7 @@
   import { hubStatus, loadHubStatus } from './lib/hub';
   import HubUnavailableBanner from './lib/HubUnavailableBanner.svelte';
   import { startHubConnection, setGapHandler, hubConnection } from './lib/hub_connection';
+  import { startFleets } from './lib/fleets';
   import StatusBarMark from './lib/StatusBarMark.svelte';
   import HostHealthChip from './lib/HostHealthChip.svelte';
   import ShellHeader from './lib/ShellHeader.svelte';
@@ -261,6 +262,11 @@
     // be an error toast on every launch for a panel that does not apply), and
     // the footer names the hub it is a window onto.
     await loadHubStatus();
+    // Extra fleets (multi-hub design): further hubs this window shows beside
+    // the one above. Independent of whether that one is usable, so before
+    // the `unavailable` return below; with none configured it is one list
+    // call that answers only the primary.
+    void startFleets();
     // Not awaited and never fatal: the version is for the footer and for a
     // bug report, and `versionLine` says less rather than guessing when it
     // is missing. Before the `unavailable` return below, so a window that

@@ -237,6 +237,7 @@ pub(crate) fn sample_host() -> HostRow {
         mem_pressure: Some(4.2),
         mem_low: true,
         cpu_saturated: true,
+        signed_out_logins: Vec::new(),
     }
 }
 
@@ -1001,6 +1002,7 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
             item: Some(item.clone()),
             items: vec![item],
             preview: Some("p".into()),
+            approval: Some("pre_approved".into()),
         }),
     );
     // Revision 13.
