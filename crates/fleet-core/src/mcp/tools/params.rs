@@ -832,6 +832,9 @@ pub struct NewWorkerSpec {
     /// tmux name; omit to let new_session pick one.
     #[serde(default)]
     pub name: Option<String>,
+    /// The person chose to start on a login past `accounts.pause_at`.
+    #[serde(default)]
+    pub over_limit_ok: Option<bool>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

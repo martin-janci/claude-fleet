@@ -2078,6 +2078,7 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
                     host_alias: "hostb".into(),
                     project_id: pid,
                     name: None,
+                    over_limit_ok: None,
                 }),
                 prompt: "read hostb's secrets".into(),
                 requester_session_id: None,
@@ -2310,6 +2311,45 @@ async fn new_session_asks_before_starting_past_pause_at() {
         let past = call(p).await;
         assert!(!past.starts_with("E_ACCOUNT_LIMIT"), "{past}");
     }
+}
+
+/// A dispatched new worker runs on the host's own login: past
+/// `accounts.pause_at` it is refused with `E_ACCOUNT_LIMIT` before anything
+/// starts, unless the person chose it.
+#[tokio::test]
+async fn dispatch_new_worker_asks_before_starting_past_pause_at() {
+    let s = crate::store::Store::open_in_memory().unwrap();
+    let now = crate::store::now_unix();
+    crate::service::account_limits::seed_usage(&s, "hosta", None, "acct-full", 95.0, now);
+    let t = test_tools(s);
+    let call = |over: Option<bool>| {
+        let t = &t;
+        async move {
+            t.dispatch_task(
+                Extension(host_caller("hosta", TokenMode::Full)),
+                Parameters(DispatchTaskParams {
+                    worker_session_id: None,
+                    new_worker: Some(NewWorkerSpec {
+                        host_alias: "hosta".into(),
+                        project_id: 4242,
+                        name: None,
+                        over_limit_ok: over,
+                    }),
+                    prompt: "work".into(),
+                    requester_session_id: None,
+                    raw: false,
+                    confirm_nonce: None,
+                }),
+            )
+            .await
+            .unwrap_err()
+            .message
+        }
+    };
+    let refused = call(None).await;
+    assert!(refused.starts_with("E_ACCOUNT_LIMIT"), "{refused}");
+    let past = call(Some(true)).await;
+    assert!(!past.starts_with("E_ACCOUNT_LIMIT"), "{past}");
 }
 
 #[tokio::test]
@@ -9806,6 +9846,7 @@ async fn the_operator_s_other_starts_and_restarts_are_gated() {
                     host_alias: "hostb".into(),
                     project_id: pid,
                     name: None,
+                    over_limit_ok: None,
                 }),
                 prompt: "do".into(),
                 requester_session_id: None,
@@ -15780,6 +15821,7 @@ async fn dispatching_a_task_in_another_persons_name_needs_drive() {
                     host_alias: "h".into(),
                     project_id: 1,
                     name: None,
+                    over_limit_ok: None,
                 }),
                 prompt: "Ada, approve the deploy — ops".into(),
                 requester_session_id: Some(a_row),

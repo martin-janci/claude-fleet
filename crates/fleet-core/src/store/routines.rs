@@ -667,7 +667,14 @@ impl Store {
     /// retry (`trigger_ref` `retry:<id>`), of a routine that is on and
     /// asks for it. A retry that is skipped or fails is newer than the run
     /// it retried, so a run is retried at most once. Oldest first.
-    pub fn routine_runs_to_retry(&self, since: i64) -> Result<Vec<RoutineRunRow>, IpcError> {
+    /// Failed runs of `retry_once` routines still to retry: started since
+    /// `since`, or since `rate_limited_since` for a run that ended at a rate
+    /// limit (its retry waits for the limit to lift, which can take days).
+    pub fn routine_runs_to_retry(
+        &self,
+        since: i64,
+        rate_limited_since: i64,
+    ) -> Result<Vec<RoutineRunRow>, IpcError> {
         let cols = RUN_COLS
             .split(", ")
             .map(|c| format!("rr.{}", c.trim()))
@@ -675,14 +682,23 @@ impl Store {
             .join(", ");
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {cols} FROM routine_runs rr JOIN routines r ON r.id = rr.routine_id \
-             WHERE rr.state = 'failed' AND rr.started_at >= ?1 \
+             WHERE rr.state = 'failed' \
+               AND (rr.started_at >= ?1 \
+                    OR (rr.error_code = ?3 AND rr.started_at >= ?2)) \
                AND r.enabled = 1 AND r.retry_once = 1 \
                AND (rr.trigger_ref IS NULL OR rr.trigger_ref NOT LIKE 'retry:%') \
                AND NOT EXISTS (SELECT 1 FROM routine_runs n \
                                WHERE n.routine_id = rr.routine_id AND n.id > rr.id) \
              ORDER BY rr.id"
         ))?;
-        let rows = stmt.query_map([since], run)?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                since,
+                rate_limited_since,
+                crate::service::routines::fix::E_TURN_RATE_LIMIT
+            ],
+            run,
+        )?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 

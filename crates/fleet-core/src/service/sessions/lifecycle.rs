@@ -2353,6 +2353,23 @@ pub async fn restart_session(
         let row = s.get_session(&args.name, &args.host_alias)?;
         let gone_cwd = gone_pane_cwd(&s, row.as_ref(), &args.host_alias, &args.name)?;
         match row {
+            // Killed while an account switch was on its way: the switch
+            // planned before the kill must not bring it back on the other
+            // login. A plain restart (a person's button, Control's `lost`
+            // recovery) still revives a killed row.
+            Some(r)
+                if switch.is_some()
+                    && r.status == "ghost"
+                    && r.lost_reason.as_deref() == Some("killed") =>
+            {
+                return Err(IpcError::new(
+                    codes::E_INVALID_STATE,
+                    format!(
+                        "session {} was killed; not restarting it on another login",
+                        r.tmux_name
+                    ),
+                ));
+            }
             Some(r) => {
                 if switch.is_some()
                     && (r.kind == "shell"
