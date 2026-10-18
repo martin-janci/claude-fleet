@@ -3,8 +3,13 @@
 // is a live run circling its host, dimmed and slowed when its session has
 // gone quiet, its trail growing with how long it has run; an amber halo is
 // a run that waits for a person, a red spark one that failed in the last
-// ten minutes; ticks on the outer ring are the next routine fires, the
-// clock running clockwise from now at the top. PURE: `orbitModel` turns the
+// ten minutes. Sessions at work circle their planet as satellites; the
+// last hour's finished runs sit on the host's ring as moons, coloured by
+// how they ended; a host that ran something lately ripples, and its spoke
+// to the hub carries the pulse. The outer ring is a 24-hour clock with now
+// at the top: the next 12 hours of routine fires tick clockwise down the
+// right half, the last 12 hours of runs dot anticlockwise down the left.
+// PURE: `orbitModel` turns the
 // runs, hosts, sessions and routines a client already holds into that
 // picture; `OrbitMap.svelte` draws it.
 import type { RunRow } from './runs';
@@ -13,8 +18,19 @@ import type { RunRow } from './runs';
 export const SPARK_SECS = 600;
 /** A run waiting this long or less still haloes its host. */
 export const HALO_SECS = 3600;
-/** The outer ring's span: the next 12 hours of fires. */
+/** Each half of the outer ring: the next 12 hours of fires on the right,
+ *  the last 12 hours of runs on the left. */
 export const RING_SECS = 12 * 3600;
+/** A run started or ended this recently still ripples its host. */
+export const RECENT_SECS = 15 * 60;
+/** A run that ended this recently is a moon on its host's ring. */
+export const MOON_SECS = 3600;
+/** At most this many moons, satellites and past dots per host / ring. */
+export const MOONS_MAX = 6;
+export const SATELLITES_MAX = 6;
+export const PAST_MAX = 48;
+/** A host name longer than this drops the segments it shares with another. */
+export const LABEL_MAX = 10;
 /** A comet's trail is full after this long. */
 export const TRAIL_FULL_SECS = 1800;
 /** One lap, in seconds, of a busy comet and of one gone quiet. */
@@ -31,9 +47,38 @@ export interface OrbitComet {
   quiet: boolean;
 }
 
+export type OrbitTone = 'working' | 'waiting' | 'failed' | 'done' | 'idle' | 'jev';
+
+/** A finished run on its host's ring. */
+export interface OrbitMoon {
+  run_id: string;
+  owner: string;
+  tone: OrbitTone;
+  /** Position in percent of the host box. */
+  x: number;
+  y: number;
+  title: string;
+}
+
+/** A finished run on the outer ring's left half. */
+export interface OrbitPast {
+  run_id: string;
+  tone: OrbitTone;
+  /** Anticlockwise from the top: 0 to -180. */
+  deg: number;
+  title: string;
+}
+
 export interface OrbitHost {
   alias: string;
+  /** What the map prints: the alias, or its tail when it shares a long prefix. */
+  label: string;
   sessions: number;
+  /** Sessions at work here that no live run already draws: satellites. */
+  working: number;
+  /** 0 to 1: how lately something ran here (1 is just now). */
+  heat: number;
+  moons: OrbitMoon[];
   /** Planet size, 0.6 to 1.2. */
   scale: number;
   comets: OrbitComet[];
@@ -54,17 +99,23 @@ export interface OrbitFire {
 }
 
 export interface OrbitFeed {
+  run_id: string;
   at: number;
   who: string;
   what: string;
-  tone: 'working' | 'waiting' | 'failed' | 'done' | 'idle' | 'jev';
+  tone: OrbitTone;
 }
 
 export interface OrbitModel {
   hosts: OrbitHost[];
   fires: OrbitFire[];
+  past: OrbitPast[];
   feed: OrbitFeed[];
   running: number;
+  /** Sessions at work across the fleet. */
+  working: number;
+  /** 0 to 1: how lately a run with no host ran (it ripples the hub). */
+  hubHeat: number;
   /** Jev decisions in the last ten minutes: diamonds on the hub ring. */
   jev: number;
 }
@@ -88,21 +139,88 @@ const hm = (sec: number) => {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 };
 
+/** "in 52m", "in 3h 10m". */
+export function inLabel(secs: number): string {
+  const m = Math.max(1, Math.round(secs / 60));
+  if (m < 60) return `in ${m}m`;
+  const h = Math.floor(m / 60);
+  return m % 60 ? `in ${h}h ${m % 60}m` : `in ${h}h`;
+}
+
+/** "just now", "12m ago", "3h ago". */
+export function agoLabel(secs: number): string {
+  if (secs < 60) return 'just now';
+  const m = Math.round(secs / 60);
+  return m < 60 ? `${m}m ago` : `${Math.round(m / 60)}h ago`;
+}
+
+/** A summary that repeats its owner ("turn_outcome turn_outcome (assist)…")
+ *  says it once. */
+function tidy(what: string, who: string): string {
+  return what.startsWith(`${who} `) ? what.slice(who.length + 1) : what;
+}
+
+function toneOf(r: RunRow): OrbitTone {
+  switch (r.outcome) {
+    case 'running':
+      return 'working';
+    case 'needs_person':
+      return 'waiting';
+    case 'failed':
+      return 'failed';
+    case 'nothing_to_do':
+      return 'idle';
+    default:
+      return r.source === 'jev' ? 'jev' : 'done';
+  }
+}
+
 function feedLine(r: RunRow): OrbitFeed {
   const at = r.ended_at ?? r.started_at;
   const who = r.owner;
+  const tone = toneOf(r);
+  const line = (what: string, when = at) => ({ run_id: r.id, at: when, who, what: tidy(what, who), tone });
   switch (r.outcome) {
     case 'running':
-      return { at: r.started_at, who, what: r.summary ? `running: ${r.summary}` : `started${r.host ? ` on ${r.host}` : ''}`, tone: 'working' };
+      return line(r.summary ? `running: ${r.summary}` : `started${r.host ? ` on ${r.host}` : ''}`, r.started_at);
     case 'needs_person':
-      return { at, who, what: r.summary ? `asks: ${r.summary}` : 'waits for you', tone: 'waiting' };
+      return line(r.summary ? `asks: ${r.summary}` : 'waits for you');
     case 'failed':
-      return { at, who, what: r.error ? `failed: ${r.error}` : 'failed', tone: 'failed' };
+      return line(r.error ? `failed: ${r.error}` : 'failed');
     case 'nothing_to_do':
-      return { at, who, what: r.summary ?? 'had nothing to do', tone: 'idle' };
+      return line(r.summary ?? 'had nothing to do');
     default:
-      return { at, who, what: r.summary ?? 'done', tone: r.source === 'jev' ? 'jev' : 'done' };
+      return line(r.summary ?? 'done');
   }
+}
+
+/**
+ * PURE: what the map prints for each host. A short alias prints whole; a
+ * long one that shares its leading segments (split on `-`, `_`, `.`) with
+ * another host drops them, so `claude-fleet-ci` and `claude-fleet-trn`
+ * read `ci` and `trn` instead of two clipped `claude-fl…`. The full alias
+ * stays in the tooltip and the accessible name.
+ */
+export function hostLabels(aliases: string[]): Map<string, string> {
+  const seg = (a: string) => a.split(/(?<=[-_.])/);
+  const out = new Map<string, string>();
+  for (const a of aliases) {
+    if (a.length <= LABEL_MAX) {
+      out.set(a, a);
+      continue;
+    }
+    const mine = seg(a);
+    let shared = 0;
+    for (const b of aliases) {
+      if (b === a) continue;
+      const theirs = seg(b);
+      let n = 0;
+      while (n < mine.length - 1 && n < theirs.length && mine[n] === theirs[n]) n++;
+      shared = Math.max(shared, n);
+    }
+    out.set(a, shared > 0 ? mine.slice(shared).join('') : a);
+  }
+  return out;
 }
 
 /**
@@ -126,6 +244,12 @@ export function orbitModel(args: {
   const most = Math.max(1, ...count.values());
 
   const list = [...aliases].sort((a, b) => a.localeCompare(b));
+  const labels = hostLabels(list);
+  const heatOf = (rs: RunRow[]) => {
+    const last = Math.max(-Infinity, ...rs.map((r) => (r.outcome === 'running' ? now : (r.ended_at ?? r.started_at))));
+    const age = now - last;
+    return age >= 0 && age < RECENT_SECS ? Math.round((1 - age / RECENT_SECS) * 100) / 100 : 0;
+  };
   const hosts: OrbitHost[] = list.map((alias, i) => {
     const mine = runs.filter((r) => r.host === alias);
     const comets = mine
@@ -148,18 +272,50 @@ export function orbitModel(args: {
     const next = routines
       .filter((r) => r.host_alias === alias && r.enabled && r.trigger === 'cron' && !r.skip_next && (r.next_run_at ?? 0) > now)
       .sort((a, b) => (a.next_run_at ?? 0) - (b.next_run_at ?? 0))[0];
+    const drawn = new Set(mine.filter((r) => r.outcome === 'running').flatMap((r) => r.session_ids.slice(0, 1)));
+    const working = sessions.filter((s) => s.host_alias === alias && s.claude_status === 'working' && !drawn.has(s.id)).length;
+    const lastEnded = mine
+      .filter((r) => r.outcome !== 'running')
+      .reduce((t, r) => Math.max(t, r.ended_at ?? r.started_at), -Infinity);
+    const moonRuns = mine
+      .filter((r) => r.outcome !== 'running' && now - (r.ended_at ?? r.started_at) <= MOON_SECS)
+      .sort((a, b) => (b.ended_at ?? b.started_at) - (a.ended_at ?? a.started_at))
+      .slice(0, MOONS_MAX);
+    // Moons sit on the ring from the top, the newest first, a sixth apart.
+    const moons = moonRuns.map((r, k) => {
+      const a = -Math.PI / 2 + (k * Math.PI) / 3 + Math.PI / 6;
+      const at = r.ended_at ?? r.started_at;
+      const tone = toneOf(r);
+      return {
+        run_id: r.id,
+        owner: r.owner,
+        tone,
+        x: 50 + 50 * Math.cos(a),
+        y: 50 + 50 * Math.sin(a),
+        title: `${r.owner} · ${feedLine(r).what} · ${agoLabel(now - at)}`,
+      };
+    });
+    const tail = next
+      ? `next ${inLabel(next.next_run_at! - now)}`
+      : Number.isFinite(lastEnded)
+        ? `last ran ${agoLabel(now - lastEnded)}`
+        : '';
     const caption =
       comets.length > 0
         ? comets.map((c) => c.owner + (c.quiet ? ' · going quiet' : '')).join(' · ')
-        : next
-          ? `quiet · next fire ${hm(next.next_run_at!)}`
-          : 'quiet';
+        : working > 0
+          ? `${working} working${tail ? ` · ${tail}` : ''}`
+          : `quiet${tail ? ` · ${tail}` : ''}`;
     // One host sits top-left; more go round the hub, from the top.
     const angle = list.length === 1 ? -Math.PI * 0.75 : -Math.PI / 2 + (i / list.length) * Math.PI * 2;
     const n = count.get(alias) ?? 0;
     return {
       alias,
+      label: labels.get(alias) ?? alias,
       sessions: n,
+      working: Math.min(working, SATELLITES_MAX),
+      heat: heatOf(mine),
+      moons,
       scale: 0.6 + 0.6 * (n / most),
       comets,
       needs,
@@ -172,8 +328,17 @@ export function orbitModel(args: {
 
   const fires = routines
     .filter((r) => r.enabled && r.trigger === 'cron' && !r.skip_next && r.next_run_at !== undefined && r.next_run_at > now && r.next_run_at - now <= RING_SECS)
-    .map((r) => ({ routine: r.name, at: r.next_run_at!, deg: ((r.next_run_at! - now) / RING_SECS) * 360, label: hm(r.next_run_at!) }))
+    .map((r) => ({ routine: r.name, at: r.next_run_at!, deg: ((r.next_run_at! - now) / RING_SECS) * 180, label: hm(r.next_run_at!) }))
     .sort((a, b) => a.at - b.at);
+
+  const past = runs
+    .filter((r) => r.outcome !== 'running' && now - (r.ended_at ?? r.started_at) <= RING_SECS && (r.ended_at ?? r.started_at) <= now)
+    .sort((a, b) => (b.ended_at ?? b.started_at) - (a.ended_at ?? a.started_at))
+    .slice(0, PAST_MAX)
+    .map((r) => {
+      const at = r.ended_at ?? r.started_at;
+      return { run_id: r.id, tone: toneOf(r), deg: -((now - at) / RING_SECS) * 180, title: `${hm(at)} · ${r.owner} · ${feedLine(r).what}` };
+    });
 
   const feed = runs
     .map(feedLine)
@@ -183,8 +348,11 @@ export function orbitModel(args: {
   return {
     hosts,
     fires,
+    past,
     feed,
     running: runs.filter((r) => r.outcome === 'running').length,
+    working: sessions.filter((s) => s.claude_status === 'working').length,
+    hubHeat: heatOf(runs.filter((r) => !r.host || !aliases.has(r.host))),
     jev: runs.filter((r) => r.source === 'jev' && now - r.started_at <= SPARK_SECS).length,
   };
 }

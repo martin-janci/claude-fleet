@@ -23,6 +23,7 @@
 -->
 <script lang="ts">
   import { tablistKeys } from './tablist_keys';
+  import { tabStrip } from './tab_strip';
   import { selectSession, selectSessionExplicitly, selectedSession } from './selection';
   import { sidebarView } from './work_view';
   import { leave } from './destination';
@@ -159,7 +160,7 @@
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <aside class="views" aria-label="Views" data-testid="control-views" onkeydown={onKeydown}>
   <div class="strip">
-    <div class="tabs" role="tablist" aria-label="Views" use:tablistKeys>
+    <div class="tabs" role="tablist" aria-label="Views" use:tablistKeys use:tabStrip={[active, shown.length]}>
       {#each shown as v (v.id)}
         <button
           type="button"
@@ -365,13 +366,33 @@
     padding: 0 var(--space-2);
     border-bottom: 1px solid var(--border);
   }
+  /* More tabs than width scroll sideways (tab_strip.ts), the scrollbar
+     hidden and the edge with more past it faded; "+" lists them all too. */
   .tabs {
     display: flex;
     gap: 2px;
     min-width: 0;
     overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
     align-self: stretch;
     align-items: flex-end;
+    --fade: 24px;
+  }
+  .tabs::-webkit-scrollbar {
+    display: none;
+  }
+  .strip :global(.tabs[data-more-right]) {
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - var(--fade)), transparent);
+    mask-image: linear-gradient(to right, #000 calc(100% - var(--fade)), transparent);
+  }
+  .strip :global(.tabs[data-more-left]) {
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 var(--fade));
+    mask-image: linear-gradient(to right, transparent, #000 var(--fade));
+  }
+  .strip :global(.tabs[data-more-left][data-more-right]) {
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 var(--fade), #000 calc(100% - var(--fade)), transparent);
+    mask-image: linear-gradient(to right, transparent, #000 var(--fade), #000 calc(100% - var(--fade)), transparent);
   }
   .tab,
   .icon {
@@ -394,6 +415,7 @@
     color: var(--fg);
   }
   .tab {
+    flex: none;
     border-radius: 0;
     border-bottom: 2px solid transparent;
     padding: 10px 2px 8px;
@@ -423,7 +445,10 @@
     color: var(--status-waiting);
   }
   .grow {
-    flex: 1 1 auto;
+    flex: 1 1 0;
+  }
+  .strip > .icon {
+    flex: none;
   }
   .menu {
     position: absolute;

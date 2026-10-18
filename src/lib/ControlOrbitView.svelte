@@ -22,6 +22,8 @@
 
   /** The orbit's window: what ran in the last day. */
   const WINDOW_SECS = 24 * 3600;
+  /** A missed run event, or a routine's next fire moving on, shows within this. */
+  const REFRESH_MS = 60_000;
 
   let runs = $state<RunRow[] | null>(null);
   let routines = $state<RoutineRow[]>([]);
@@ -37,12 +39,19 @@
     } else loadError = r.error;
   }
 
+  const loadRoutines = () => listRoutines().then((r) => (routines = r.ok && Array.isArray(r.value) ? r.value : routines));
+
   onMount(() => {
     void load();
-    void listRoutines().then((r) => (routines = r.ok && Array.isArray(r.value) ? r.value : []));
+    void loadRoutines();
     const tick = setInterval(() => {
       if (!windowHidden()) nowSec = Math.floor(Date.now() / 1000);
     }, 1000);
+    const refresh = setInterval(() => {
+      if (windowHidden()) return;
+      void load();
+      void loadRoutines();
+    }, REFRESH_MS);
     // A run recorded a step: re-read, at most once a second and a half.
     let pending: ReturnType<typeof setTimeout> | null = null;
     let un: (() => void) | null = null;
@@ -61,6 +70,7 @@
       un?.();
       if (pending) clearTimeout(pending);
       clearInterval(tick);
+      clearInterval(refresh);
     };
   });
 
