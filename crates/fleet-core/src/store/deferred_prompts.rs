@@ -215,6 +215,29 @@ impl Store {
         Ok(failed.is_some())
     }
 
+    /// A claimed prompt whose typing may have landed (the SSH call timed out
+    /// after the paste could have run): failed for good rather than handed
+    /// back, so it is never typed twice.
+    pub fn fail_deferred_prompt(&self, id: i64, error: &str, now: i64) -> Result<()> {
+        self.conn
+            .prepare_cached(
+                "UPDATE deferred_prompts SET attempts = attempts + 1, error = ?2, \
+                 delivered_at = NULL, failed_at = ?3 WHERE id = ?1",
+            )?
+            .execute(rusqlite::params![id, error, now])?;
+        Ok(())
+    }
+
+    /// Move `from`'s waiting prompts to `to` (a moved session's new row).
+    /// Answers how many moved.
+    pub fn repoint_deferred_prompts(&self, from: i64, to: i64) -> Result<usize> {
+        self.conn
+            .prepare_cached(&format!(
+                "UPDATE deferred_prompts SET session_id = ?2 WHERE session_id = ?1 AND {PENDING}"
+            ))?
+            .execute(rusqlite::params![from, to])
+    }
+
     /// Take back a prompt that has not gone out. `false` when there is none
     /// waiting under that id.
     pub fn cancel_deferred_prompt(&self, id: i64, now: i64) -> Result<bool> {

@@ -106,6 +106,20 @@ pub fn idle_for_prompt(row: &SessionRow) -> bool {
         ) == WakeAction::Paste
 }
 
+/// When the session's current idle moment began, for the one-prompt-per-
+/// moment claim: the later of `idle_since` and the last Stop. A Stop always
+/// starts a new moment, even when the UserPromptSubmit before it was missed
+/// and `idle_since` still holds an older one.
+fn idle_moment(row: &SessionRow) -> Option<i64> {
+    row.idle_since.max(row.last_stop_at)
+}
+
+/// A typing error after which the paste may still have landed: the SSH
+/// call outlived its wall clock, not a tmux refusal.
+fn maybe_typed(e: &IpcError) -> bool {
+    e.code == codes::E_SSH_TIMEOUT
+}
+
 /// Whether the row's work link is archived (collapsed into Done).
 fn archived(row: &SessionRow) -> bool {
     row.work.as_ref().is_some_and(|w| w.archived_at.is_some())
@@ -213,24 +227,39 @@ where
             format!("session {} is already archived", row.id),
         ));
     }
-    let send_now = {
+    // Decided and recorded under one lock: a prompt sent now goes through
+    // the ledger too and claims this idle moment, so two sends (or a send
+    // racing the Stop delivery) type one prompt and queue the other.
+    let (id, send_now) = {
         let s = lock(store)?;
         // Only a prompt that could go out now holds this one back.
         let due = s.due_deferred_prompts(row.id, now)?;
         let ahead = first_ready(&s, &row, due, now)?.is_some();
         let held = timing.not_before.is_some_and(|t| t > now)
             || (timing.until_limit_reset && account_over(&s, &row, now)?);
-        idle_for_prompt(&row) && !ahead && !held
+        let id = s.insert_deferred_prompt_timed(row.id, &body, timing, now)?;
+        let send_now = idle_for_prompt(&row)
+            && !ahead
+            && !held
+            && s.claim_deferred_prompt_in(id, now, idle_moment(&row))?;
+        (id, send_now)
     };
     if send_now {
-        type_it(row.clone(), body).await?;
+        if let Err(e) = type_it(row.clone(), body).await {
+            // The caller sees the error and decides; the row is taken back,
+            // not left to be typed again behind its back.
+            if let Ok(s) = lock(store) {
+                let _ = s.release_deferred_prompt(id, &e.message, now);
+                let _ = s.cancel_deferred_prompt(id, now);
+            }
+            return Err(e);
+        }
         return Ok(QueuePromptResult {
             session_id: row.id,
             delivered: true,
             queued_id: None,
         });
     }
-    let id = lock(store)?.insert_deferred_prompt_timed(row.id, &body, timing, now)?;
     Ok(QueuePromptResult {
         session_id: row.id,
         delivered: false,
@@ -295,13 +324,27 @@ where
         };
         // One prompt per idle moment, whichever path (Stop hook or the
         // reconcile backstop) gets there first.
-        if !s.claim_deferred_prompt_in(next.id, now, row.idle_since)? {
+        if !s.claim_deferred_prompt_in(next.id, now, idle_moment(&row))? {
             return Ok(None);
         }
         (row, next)
     };
     match type_it(row, next.body.clone()).await {
         Ok(()) => Ok(Some(next)),
+        Err(e) if maybe_typed(&e) => {
+            lock(store)?.fail_deferred_prompt(
+                next.id,
+                &format!("may have been typed, not sent again: {}", e.message),
+                now,
+            )?;
+            tracing::warn!(
+                session_id,
+                prompt = next.id,
+                error = %e.message,
+                "[deferred] typing timed out; not retried"
+            );
+            Err(e)
+        }
         Err(e) => {
             let gave_up = lock(store)?.release_deferred_prompt(next.id, &e.message, now)?;
             tracing::warn!(
@@ -634,6 +677,152 @@ mod tests {
                 .map(|r| r.id),
             Some(qid)
         );
+    }
+
+    fn set_idle_since(store: &Mutex<Store>, id: i64, at: i64) {
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute(
+                "UPDATE sessions SET claude_status = 'idle', idle_since = ?2 WHERE id = ?1",
+                rusqlite::params![id, at],
+            )
+            .unwrap();
+    }
+
+    /// Two sends to one idle session: the first claims the idle moment and
+    /// types, the second, while the first is still typing, queues.
+    #[tokio::test]
+    async fn two_sends_to_an_idle_session_type_one_and_queue_the_other() {
+        let (store, id) = store_with("idle");
+        let now = now_unix();
+        set_idle_since(&store, id, now - 10);
+        let typing = tokio::sync::Notify::new();
+        let release = tokio::sync::Notify::new();
+        let first = queue_prompt_with(args(id, "a"), &store, now, |_, _| async {
+            typing.notify_one();
+            release.notified().await;
+            Ok(())
+        });
+        let second = async {
+            typing.notified().await;
+            let r = queue_prompt_with(args(id, "b"), &store, now, |_, _| async {
+                panic!("typed into the same idle moment")
+            })
+            .await
+            .unwrap();
+            release.notify_one();
+            r
+        };
+        let (a, b) = tokio::join!(first, second);
+        assert!(a.unwrap().delivered);
+        assert!(!b.delivered && b.queued_id.is_some());
+    }
+
+    /// A send that failed to type is the caller's error and is not typed
+    /// again later behind its back.
+    #[tokio::test]
+    async fn a_send_that_failed_is_not_left_queued() {
+        let (store, id) = store_with("idle");
+        set_idle_since(&store, id, now_unix() - 10);
+        let err = queue_prompt_with(args(id, "a"), &store, now_unix(), |_, _| async {
+            Err(IpcError::new(codes::E_TMUX, "no pane"))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_TMUX);
+        assert!(store
+            .lock()
+            .unwrap()
+            .next_deferred_prompt(id)
+            .unwrap()
+            .is_none());
+    }
+
+    /// The UserPromptSubmit of the turn a delivery started was missed, so
+    /// `idle_since` still holds the old moment: the next Stop starts a new
+    /// one all the same, and the queue drains.
+    #[tokio::test]
+    async fn a_missed_prompt_submit_does_not_pin_the_queue() {
+        let (store, id) = store_with("working");
+        let now = now_unix();
+        for p in ["one", "two"] {
+            queue_prompt_with(args(id, p), &store, now - 20, |_, _| async { panic!() })
+                .await
+                .unwrap();
+        }
+        set_idle_since(&store, id, now - 10);
+        let out = deliver_due_with(&store, id, now - 5, |_, _| async { Ok(()) })
+            .await
+            .unwrap();
+        assert_eq!(out.map(|r| r.body), Some("one".to_string()));
+        // The turn ends without a prompt-submit having been seen.
+        store.lock().unwrap().record_stop_hook_for_row(id).unwrap();
+        let out = deliver_due_with(&store, id, now, |_, _| async { Ok(()) })
+            .await
+            .unwrap();
+        assert_eq!(out.map(|r| r.body), Some("two".to_string()));
+    }
+
+    /// A typing call that timed out may have pasted already: the prompt
+    /// fails rather than going back in the queue to be typed twice.
+    #[tokio::test]
+    async fn a_timed_out_typing_is_not_retried() {
+        let (store, id) = store_with("working");
+        let qid = queue_prompt_with(args(id, "p"), &store, now_unix(), |_, _| async { panic!() })
+            .await
+            .unwrap()
+            .queued_id
+            .unwrap();
+        set_status(&store, id, "idle");
+        let err = deliver_due_with(&store, id, now_unix(), |_, _| async {
+            Err(IpcError::new(codes::E_SSH_TIMEOUT, "wall clock"))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_SSH_TIMEOUT);
+        let s = store.lock().unwrap();
+        assert!(s.next_deferred_prompt(id).unwrap().is_none());
+        assert!(s
+            .get_deferred_prompt(qid)
+            .unwrap()
+            .unwrap()
+            .failed_at
+            .is_some());
+    }
+
+    /// A Stop the hook blocked keeps the turn going: the row reads working
+    /// again, so nothing is typed into it.
+    #[test]
+    fn a_blocked_stop_puts_the_row_back_to_working() {
+        let (store, id) = store_with("working");
+        let s = store.lock().unwrap();
+        s.record_stop_hook_for_row(id).unwrap();
+        assert!(idle_for_prompt(&s.get_session_by_id(id).unwrap().unwrap()));
+        s.resume_turn_after_blocked_stop(id).unwrap();
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert!(!idle_for_prompt(&row));
+        assert_eq!(row.idle_since, None);
+    }
+
+    /// A move carries the source's waiting prompts to its new row.
+    #[test]
+    fn queued_prompts_follow_a_repoint() {
+        let (store, id) = store_with("working");
+        let s = store.lock().unwrap();
+        let to = s
+            .upsert_session("t", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        let waiting = s.insert_deferred_prompt(id, "later", 1).unwrap();
+        let done = s.insert_deferred_prompt(id, "sent", 1).unwrap();
+        assert!(s.claim_deferred_prompt(done, 2).unwrap());
+        assert_eq!(s.repoint_deferred_prompts(id, to).unwrap(), 1);
+        assert_eq!(
+            s.get_deferred_prompt(waiting).unwrap().unwrap().session_id,
+            to
+        );
+        assert_eq!(s.get_deferred_prompt(done).unwrap().unwrap().session_id, id);
     }
 
     #[tokio::test]
