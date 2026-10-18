@@ -191,6 +191,7 @@ fn row(id: i64, title: &str) -> WorkItemRow {
         estimate_unit: None,
         archived_at: None,
         display_key: None,
+        origin_task_id: None,
     }
 }
 

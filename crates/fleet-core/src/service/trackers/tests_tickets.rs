@@ -2695,7 +2695,7 @@ fn a_subtask_starts_in_its_project_with_the_ticket_brief_then_its_own() {
             item_id: Some(sub.id),
             ..Default::default()
         },
-        &OrgScope::All,
+        &ViewScope::internal(),
     )
     .unwrap();
     assert_eq!(got.project_id, Some(pid));
@@ -2714,13 +2714,82 @@ fn a_subtask_starts_in_its_project_with_the_ticket_brief_then_its_own() {
             brief: Some("mine".into()),
             ..Default::default()
         },
-        &OrgScope::All,
+        &ViewScope::internal(),
     )
     .unwrap();
     assert_eq!(
         (mine.project_id, mine.brief.as_deref()),
         (Some(7), Some("mine"))
     );
+}
+
+/// Design 2026-10-13 D5: a follow-up's start brief opens with what its
+/// origin task left, then its own title; a person's own brief is kept as
+/// written, and a caller who may not see the origin gets none of it.
+#[test]
+fn a_follow_ups_start_brief_opens_with_its_origin() {
+    let s = Store::open_in_memory().unwrap();
+    let src = s
+        .create_native_item(&crate::store::NativeItem {
+            title: "Add the gate",
+            parent_id: None,
+            project_id: None,
+            notes: None,
+        })
+        .unwrap();
+    let t = crate::service::tasks::create_task(&s, None, None, "wrap up").unwrap();
+    s.set_task_run(t.id, src.id, 1, "wrapup").unwrap();
+    s.finish_task(t.id, "done", Some("gate added"), None)
+        .unwrap();
+    s.set_task_report(
+        t.id,
+        &crate::store::TaskReport {
+            summary: "Gate added, Windows left.".into(),
+            outcome: "partial".into(),
+            remaining: vec!["Windows probe path".into()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let (f, _) = s.create_followup(t.id, "Windows probe path").unwrap();
+    let store = Mutex::new(s);
+    let args = StartArgs {
+        item_id: Some(f.id),
+        ..Default::default()
+    };
+    let brief = with_native_defaults(&store, &args, &ViewScope::internal())
+        .unwrap()
+        .brief
+        .unwrap();
+    let follows = format!("## Follows {}", src.key.as_deref().unwrap());
+    assert!(brief.starts_with(&follows), "{brief}");
+    assert!(brief.contains("Its result (partial): Gate added, Windows left."));
+    assert!(brief.ends_with("Windows probe path"), "{brief}");
+    assert!(
+        brief.chars().count() <= crate::service::work::handover::BRIEF_MAX_CHARS,
+        "{brief}"
+    );
+    let mine = with_native_defaults(
+        &store,
+        &StartArgs {
+            brief: Some("mine".into()),
+            ..args.clone()
+        },
+        &ViewScope::internal(),
+    )
+    .unwrap();
+    assert_eq!(mine.brief.as_deref(), Some("mine"));
+    let other = OrgScope::Org {
+        org: 99,
+        sees_unassigned: false,
+    };
+    let plain = with_native_defaults(
+        &store,
+        &args,
+        &ViewScope::internal().with_org(other.clone()),
+    )
+    .unwrap();
+    assert!(!plain.brief.unwrap_or_default().contains("Follows"));
 }
 
 /// A fleet task started by its key (the new-session dialog sends the key
@@ -2747,7 +2816,7 @@ async fn a_task_started_by_its_key_is_briefed_with_its_notes() {
         with_brief: true,
         ..Default::default()
     };
-    let got = with_native_defaults(&fx.store, &args, &OrgScope::All).unwrap();
+    let got = with_native_defaults(&fx.store, &args, &ViewScope::internal()).unwrap();
     assert_eq!(
         (got.item_id, got.reference.as_deref()),
         (Some(task.id), None)
@@ -2775,7 +2844,7 @@ fn a_tracker_key_is_not_taken_for_a_task() {
         with_brief: true,
         ..Default::default()
     };
-    let got = with_native_defaults(&fx.store, &args, &OrgScope::All).unwrap();
+    let got = with_native_defaults(&fx.store, &args, &ViewScope::internal()).unwrap();
     assert_eq!(
         (got.item_id, got.reference.as_deref()),
         (None, Some("ABC-3"))
@@ -2834,7 +2903,7 @@ fn a_subtask_start_never_carries_a_parent_the_caller_cannot_see() {
             item_id: Some(sub.id),
             ..Default::default()
         },
-        &scope,
+        &ViewScope::internal().with_org(scope.clone()),
     )
     .unwrap();
     let brief = got.brief.unwrap();
@@ -3124,7 +3193,7 @@ async fn a_proposal_previews_as_a_conflict() {
     assert_eq!(p.plan.map(|pl| pl.project_id), Some(fx.pid));
     let e = plan_start(
         &fx.store,
-        &with_native_defaults(&fx.store, &args, &OrgScope::All).unwrap(),
+        &with_native_defaults(&fx.store, &args, &ViewScope::internal()).unwrap(),
         &OrgScope::All,
         &fx.net(),
     )

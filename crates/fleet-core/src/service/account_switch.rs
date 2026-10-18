@@ -13,7 +13,9 @@
 //! **Which sessions.** Exactly the rows the attention model shows as
 //! "Paused · limit" (`attention::Reason::AccountLimit`): a live Claude
 //! session with a pane, not working, not waiting on a dialog or a form and
-//! not stuck, whose account has a 5-hour or weekly window fully used that
+//! not stuck (a session Claude Code parked at its quota with a
+//! `quota_auto_resume_*` notification reads as blocked but is no dialog, so
+//! it is switched too), whose account has a 5-hour or weekly window fully used that
 //! has not reset. With `accounts.auto_switch_early` on (off by default), the
 //! same session moves once its account passes `accounts.pause_at`, so its
 //! next turn does not stall at the limit. Never touched: shells, pane-less
@@ -101,9 +103,28 @@ pub fn fleet_enabled(s: &Store) -> bool {
     settings::get_bool(s, settings::ACCOUNTS_AUTO_SWITCH)
 }
 
+/// The `Notification` types with which Claude Code parks a session at its
+/// usage limit (`hooks::notification_effect` reads them as blocked).
+pub const QUOTA_NOTIFICATIONS: [&str; 2] =
+    ["quota_auto_resume_disabled", "quota_auto_resume_stale"];
+
+/// PURE: whether a session's newest `notification` (its type) says it is
+/// parked at its quota rather than waiting on a dialog (control review F8).
+pub fn quota_parked(newest_notification: Option<&str>) -> bool {
+    newest_notification.is_some_and(|k| QUOTA_NOTIFICATIONS.contains(&k))
+}
+
 /// PURE: whether `row` is "Paused · limit" on `limited` accounts and a
-/// session this pass may switch at all.
-pub fn switchable(row: &SessionRow, is_limited: impl Fn(&str) -> bool) -> bool {
+/// session this pass may switch at all. `quota_parked` ([`quota_parked`]):
+/// its blocked status (and the Enter a stale auto-resume waits for) is
+/// Claude Code parking it at the limit, which a switch is for; a dialog's or
+/// a form's still keeps it where it is.
+pub fn switchable(row: &SessionRow, is_limited: impl Fn(&str) -> bool, quota_parked: bool) -> bool {
+    let blocked = row.claude_status.as_deref() == Some("blocked");
+    let stuck_ok = match row.stuck_kind.as_deref() {
+        None => true,
+        Some(k) => quota_parked && k == crate::service::pane_intel::StuckKind::PressEnter.as_str(),
+    };
     row.kind != "shell"
         && !crate::store::has_no_pane(&row.kind)
         && row.agent == crate::store::AGENT_CLAUDE
@@ -112,9 +133,10 @@ pub fn switchable(row: &SessionRow, is_limited: impl Fn(&str) -> bool) -> bool {
         && row.claude_status.as_deref() != Some("working")
         // Waiting on a dialog or a form, or stuck: the attention model puts
         // these before "Paused · limit", and a restart would lose the dialog.
-        && row.claude_status.as_deref() != Some("blocked")
+        // A quota note is no dialog (review F8).
+        && (!blocked || (quota_parked && row.pending_input.is_none()))
         && row.pending_form.is_none()
-        && row.stuck_kind.is_none()
+        && stuck_ok
         && row.account_uuid.as_deref().is_some_and(is_limited)
 }
 
@@ -223,7 +245,13 @@ pub fn plan(
     let controller = s.get_controller()?;
     let mut out = Vec::new();
     for row in s.list_all_sessions()? {
-        if !switchable(&row, due)
+        let parked = row.claude_status.as_deref() == Some("blocked")
+            && quota_parked(
+                s.newest_session_event_of(row.id, &["notification"])?
+                    .and_then(|e| e.detail)
+                    .as_deref(),
+            );
+        if !switchable(&row, due, parked)
             || !owner_allows(&row, personal_owner, &opted_out)
             || controller
                 .as_ref()

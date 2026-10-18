@@ -1294,10 +1294,11 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                     b,
                     s,
                     ssh,
-                    "form".into(),
-                    Some("l2-support".into()),
-                    None,
-                    None,
+                    commands::agents::routed::FleetCall {
+                        action: "form".into(),
+                        definition: Some("l2-support".into()),
+                        ..Default::default()
+                    },
                 ))
                 .map(|_| ())
             }),
@@ -2202,6 +2203,23 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                     s,
                 ))
                 .map(|_| ())
+            }),
+        ),
+        (
+            "work_result",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "result", "item_id": 3 }),
+            r#"{"task_id":21,"item_id":3,"role":"wrapup","at":1,"marker":"m","report":{"summary":"s","outcome":"done"},"prs":[],"gate":{"state":"passed","checks":[],"open_children":[]},"followups":[{"text":"Add tests"}]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::work_result(
+                    b,
+                    commands::work::WorkResultArgs {
+                        item_id: Some(3),
+                        session_id: None,
+                    },
+                    s,
+                ))
+                .map(|view| assert_eq!(view.map(|v| v.task_id), Some(21), "the hub's result"))
             }),
         ),
         (
@@ -3453,6 +3471,21 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             }),
         ),
         (
+            "control_auto_continue",
+            "control_auto_continue",
+            json!({ "action": "cancel", "turn_seq": 4 }),
+            r#"{"enabled":true,"minutes":10}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::operator::routed::control_auto_continue(
+                    b,
+                    s,
+                    "cancel".into(),
+                    Some(4),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "control_route_follow",
             "control_route",
             json!({ "action": "follow", "run_id": 7, "chosen": "m3" }),
@@ -3867,6 +3900,41 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     commands::work::RequestWorkHandoverArgs { session_id: 5 },
                     s,
                     &ssh(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "request_work_result",
+            "work_link",
+            json!({ "session_id": 5, "action": "wrap_up", "key": null, "item_id": null,
+                    "link_id": null, "source": null }),
+            TASK_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::request_work_result(
+                    b,
+                    commands::work::RequestWorkResultArgs { session_id: 5 },
+                    s,
+                    &ssh(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "create_followup_task",
+            "work_link",
+            json!({ "session_id": null, "action": "followup", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "task_id": "21", "index": 0 }),
+            NATIVE_ITEM_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::create_followup_task(
+                    b,
+                    commands::work::CreateFollowupTaskArgs {
+                        task_id: 21,
+                        index: Some(0),
+                        title: None,
+                    },
+                    s,
                 ))
                 .map(|_| ())
             }),
@@ -7643,6 +7711,7 @@ const SOURCES: &[(&str, &str)] = &[
     ),
     ("commands/editor.rs", include_str!("../commands/editor.rs")),
     ("commands/files.rs", include_str!("../commands/files.rs")),
+    ("commands/fleets.rs", include_str!("../commands/fleets.rs")),
     ("commands/health.rs", include_str!("../commands/health.rs")),
     (
         "commands/history.rs",

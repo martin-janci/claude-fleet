@@ -120,6 +120,40 @@ describe('TicketCard', () => {
       other.unmount();
     }
   });
+  it('Finish task asks this session for its result, and only an idle one', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) =>
+      cmd === 'work_ticket_card' ? card() : cmd === 'request_work_result' ? { id: 9 } : null,
+    );
+    render(TicketCard, { session: row({ claude_status: 'idle' }) });
+    await flush();
+    await fireEvent.click(screen.getByTestId('ticket-card-finish'));
+    await flush();
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('request_work_result', { args: { session_id: 31 } });
+    expect(screen.getByTestId('ticket-card-finish').textContent).toContain('Result asked for');
+
+    for (const claude_status of ['working', 'blocked', 'stopped', null, undefined]) {
+      const other = render(TicketCard, { session: row({ claude_status }) });
+      await flush();
+      const btn = other.container.querySelector('[data-testid="ticket-card-finish"]') as HTMLButtonElement;
+      expect(btn.disabled, String(claude_status)).toBe(true);
+      other.unmount();
+    }
+  });
+
+  it('Finish task shows a request already waiting inline', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_ticket_card') return card();
+      if (cmd === 'request_work_result') throw { code: 'E_EXISTS', message: 'A result request is already waiting' };
+      return null;
+    });
+    render(TicketCard, { session: row({ claude_status: 'idle' }) });
+    await flush();
+    await fireEvent.click(screen.getByTestId('ticket-card-finish'));
+    await flush();
+    expect(screen.getByTestId('ticket-card-finish-error').textContent).toContain('already waiting');
+    expect(screen.getByTestId('ticket-card-finish').textContent).toContain('Finish task');
+  });
+
   it('reloads when the selected session’s key changes, and a late answer for the old key is dropped', async () => {
     const pending = new Map<string, (c: Card) => void>();
     vi.mocked(invoke).mockImplementation((cmd: string, a?: unknown) => {

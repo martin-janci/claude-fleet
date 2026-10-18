@@ -53,9 +53,9 @@ Which agent hosts (transport "agent") have a fleet-agent connected: since (unix 
 
 ### `agents`
 
-The agents (PR reviewer, support, fleet agents from the catalog): status {agent?, limit?} (rules, newest jobs, actions waiting for a person), explain (per rule: polls or why not, next poll, last poll error, jobs by state, the next and the last failed job), job {id} (one job whole, its proposed actions included), grant {agent: review | support | fleet, scope: gh:<owner>/<repo> | jira:<tracker id>:<PROJECT> | <instance name>, host, level: watch | propose | act, project_id?, config?, hours?, definition? (fleet), bindings? (fleet: one per store role; each MCP binding is asked for its tools on the host first; or answers: the grant form's)}, definitions (the catalog's fleet agents), form {definition, id?} (a fleet agent's grant form, prefilled from rule id), revoke {id}, pause_all, approve {id}, reject {id}, run {id, request?} (a manual or scheduled fleet agent, now). The owner's own device; writes need a trusted full device.
+The agents (PR reviewer, support, fleet agents from the catalog): status {agent?, limit?} (rules, newest jobs, actions waiting for a person), explain (per rule: polls or why not, next poll, last poll error, jobs by state, the next and the last failed job), job {id} (one job whole, its proposed actions included), grant {agent: review | support | fleet, scope: gh:<owner>/<repo> | jira:<tracker id>:<PROJECT> | <instance name>, host, level: watch | propose | act, project_id?, config?, hours?, definition? (fleet), bindings? (fleet: one per store role; each MCP binding is asked for its tools on the host first; or answers: the grant form's)}, definitions (the catalog's fleet agents), form {definition, id?} (a fleet agent's grant form, prefilled from rule id), revoke {id}, pause_all, approve {id}, reject {id}, run {id, request?, run_scope? {minutes?, host?, session?, component?}} (a manual or scheduled fleet agent, now). The owner's own device; writes need a trusted full device.
 
-Parameters: `action`, `agent`, `answers`, `bindings`, `config`, `definition`, `host`, `hours`, `id`, `level`, `limit`, `project_id`, `request`, `scope`
+Parameters: `action`, `agent`, `answers`, `bindings`, `config`, `definition`, `host`, `hours`, `id`, `level`, `limit`, `project_id`, `request`, `run_scope`, `scope`
 
 ### `answer_mcp_confirm`
 
@@ -135,6 +135,12 @@ A host's health checklist over SSH: tmux, the agents on PATH, fleet's hooks and 
 
 Parameters: `alias`, `base_path`
 
+### `control_auto_continue`
+
+Control's auto-continue, which fleet runs: action status (the recommended option it will send and when, due_at), cancel (stop it) or take (Send now: settles it and returns the prompt for the client to send). turn_seq names the card. Not for Control itself.
+
+Parameters: `action`, `turn_seq`
+
 ### `control_handoffs`
 
 What the agent handed on, newest first: prompts and tasks sent to sessions, new sessions, missions, tasks and proposed trees, each with its target's state now.
@@ -176,6 +182,12 @@ Parameters: `accept`, `reject`
 Delete a git worktree on its host (no --force) and drop fleet's row. Refuses if an alive session points at it, unless force. Errors: E_WORKTREE_BUSY, E_NOTFOUND, E_GIT, E_CONFIRM_REQUIRED (desktop confirmation on).
 
 Parameters: `confirm_nonce`, `force`, `worktree_id`
+
+### `diagnose`
+
+Check before you tell the person: where Control runs and whether its host, login and account are healthy, why a host cannot be reached (host), and which clients the person uses with what each can show. Each finding says checked or inferred. Read-only.
+
+Parameters: `host`
 
 ### `discover_hosts`
 
@@ -897,6 +909,12 @@ Start rules: a task key pattern (PD-*) that names the project, and optionally th
 
 Parameters: `action`, `rule`, `rule_id`
 
+### `suggest_placement`
+
+Where new work should run: every host and Claude login that can take it, best first, and what was left out and why. Filters hosts that answer, have claude and are under the recovery thresholds (memory, pressure, CPU), and, with project_id, have run that project; logins that are signed in, under accounts.pause_at and within their daily limit. Ranks by account headroom, then idle CPU and free memory. hosts limits it to those (a mission's grant), profile to one login ("" = each host's own). Returns {pause_at_pct, candidates:[{host_alias, profile?, account_uuid, email?, used_pct?, cpu_pct?, mem_avail_pct?, score, reasons}], excluded:[{host_alias, profile?, host, why}], note?}. Read-only; never fetches. Errors: E_INVALID.
+
+Parameters: `hosts`, `profile`, `project_id`
+
 ### `touch_session_viewed`
 
 Mark a session viewed now: the turns it has finished read as seen. Returns the row.
@@ -965,9 +983,9 @@ Parameters: `action`, `answers`, `key`, `kind`, `label`, `step`
 
 ### `work`
 
-Work links: {session_id} → its live links; {key} → ended (past) links; neither → recently ended. action context|resume_plan {key}; purge_impact; tickets (cached; view: mine|sprint|recent|archived); lookup {key|url}; trackers; scopes; orgs; org_suggestions; today {since}; card {key}; describe {key} (the tracker's whole description, cached); tracker_comments {key} (the ticket's own comments, live); tidy; reopened. Work view: tree {filters, cursor} (archived: false hides archived tasks); task {task_id}; session_tasks; review; rules; rule_preview {rule}; views; org_impact. buckets {kind?}: sprints, releases; bucket {bucket_id}. missions; mission {mission_id, before_event?}. attachment {attachment_id}: a file's bytes.
+Work links: {session_id} → its live links; {key} → ended (past) links; neither → recently ended. action context|resume_plan {key}; purge_impact; tickets (cached; view: mine|sprint|recent|archived); lookup {key|url}; trackers; scopes; orgs; org_suggestions; today {since}; card {key}; describe {key} (the tracker's whole description, cached); tracker_comments {key} (the ticket's own comments, live); tidy; reopened. Work view: tree {filters, cursor} (archived: false hides archived tasks); task {task_id}; session_tasks; review; rules; rule_preview {rule}; views; org_impact. buckets {kind?}: sprints, releases; bucket {bucket_id}. missions; mission {mission_id, before_event?}. attachment {attachment_id}: a file's bytes. result {item_id|session_id}: a task's report, evidence, gate, PR and follow-ups.
 
-Parameters: `action`, `attachment_id`, `before_event`, `bucket_id`, `cursor`, `filters`, `host_alias`, `host_aliases`, `include_local`, `key`, `kind`, `limit`, `link_id`, `mission_id`, `org_id`, `per_task`, `project_id`, `query`, `rule`, `session_id`, `since`, `task_id`, `tracker_id`, `url`, `view`, `with_brief`
+Parameters: `action`, `attachment_id`, `before_event`, `bucket_id`, `cursor`, `filters`, `host_alias`, `host_aliases`, `include_local`, `item_id`, `key`, `kind`, `limit`, `link_id`, `mission_id`, `org_id`, `per_task`, `project_id`, `query`, `rule`, `session_id`, `since`, `task_id`, `tracker_id`, `url`, `view`, `with_brief`
 
 ### `work_admin`
 
@@ -977,9 +995,9 @@ Parameters: `action`, `auth_kind`, `auto_tidy`, `bound_sees_unassigned`, `bucket
 
 ### `work_link`
 
-Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. switch {link_id, key|item_id}: end that link, take the primary. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket (project_ids: one per repo; parallel: beside a live one); preview_start: where it would land, nothing made. abandon_start {session_id}: undo an unused start. run {item_id, role?}: an attempt at the item in its own session and worktree, tracked as a task. handover {session_id}: ask it to write its hand-off. summarize {key, link_id}: a Claude-written summary of past work. archive|unarchive (UI only; with no session_id: the ended links of link_id|key|item_id|task_id), unlink {link_id} with no session_id removes an ended link; snooze {days}|never (tidy-up); dismiss {item_id} (reopened); archive_item {item_id|task_id, on?}: a person archives a ticket or task (on: false unarchives); tidy_apply {items}: kills (safe kill when dirty). set_status {item_id, status, status_name?}: a person's status for work with no ticket, or a ticket moved at its tracker; keep_open {item_id} answers close_suggested. edit {item_id, title?, notes?, assignees?, due_at?, priority?, labels?, estimate?, estimate_unit?}: a person edits work with no ticket. attach {item_id, name, mime, data_base64, comment_id?}: a file on a task; attachment_delete {attachment_id}. create {title, parent?, notes?, assignees?, due_at?}: a task or subtask. promote {item_id, tracker_id?, container?}: make it a ticket. propose {parent, title, why?}: a subtask a person accepts or rejects {item_id, no session_id}. bucket_add|bucket_remove {bucket_id, item_id}: sprint/release. mission_save {mission, mission_id?, item_id?: root}; mission_state {mission_id, status} (paused reopens a finished one); mission_repo {project_id, role?, on?}; mission_item {item_id, on?}; mission_delete; mission_import {plan}. dep {item_id, depends_on, on?}; hold {item_id, on?}; propose_tree {parent, tree}; accept_many | undo_accept {item_ids}. done_when {item_id, done_when: [ci[:check] | review | test[:cmd] | person | text]}; verify {item_id, line, ok, note?}: a person's check. mission_start {mission_id, step?}: take the next steps; retry {item_id, note?}; mission_plan: ask the planner; card_decide {card_id, ok, note?}; mission_grant {mission_id, level, hours?, budget_cents?, hosts?, max_parallel?, profile?}; mission_revoke; missions_pause_all. mission_release_note {mission_id}: a drafted release note of a completed mission; today_brief {refresh?, org_id?, since?}: Today's morning brief, drafted only on refresh; mission_triage {mission_id, refresh?}: a stuck mission's card, Jev's proposed outcome and next step (never applied), and with refresh its drafted words. Work view: primary:false links a secondary; expected_* guard (E_CONFLICT). place {task_id|item_id, group, note?, expected_version}: group a task; unplace clears it.
+Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. switch {link_id, key|item_id}: end that link, take the primary. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket (project_ids: one per repo; parallel: beside a live one); preview_start: where it would land, nothing made. abandon_start {session_id}: undo an unused start. run {item_id, role?}: an attempt at the item in its own session and worktree, tracked as a task. handover {session_id}: ask it to write its hand-off. wrap_up {session_id}: ask it for its task result. summarize {key, link_id}: a Claude-written summary of past work. archive|unarchive (UI only; with no session_id: the ended links of link_id|key|item_id|task_id), unlink {link_id} with no session_id removes an ended link; snooze {days}|never (tidy-up); dismiss {item_id} (reopened); archive_item {item_id|task_id, on?}: a person archives a ticket or task (on: false unarchives); tidy_apply {items}: kills (safe kill when dirty). set_status {item_id, status, status_name?}: a person's status for work with no ticket, or a ticket moved at its tracker; keep_open {item_id} answers close_suggested. edit {item_id, title?, notes?, assignees?, due_at?, priority?, labels?, estimate?, estimate_unit?}: a person edits work with no ticket. attach {item_id, name, mime, data_base64, comment_id?}: a file on a task; attachment_delete {attachment_id}. create {title, parent?, notes?, assignees?, due_at?}: a task or subtask. followup {task_id, index|title}: a result's follow-up as a task. promote {item_id, tracker_id?, container?}: make it a ticket. propose {parent, title, why?}: a subtask a person accepts or rejects {item_id, no session_id}. bucket_add|bucket_remove {bucket_id, item_id}: sprint/release. mission_save {mission, mission_id?, item_id?: root}; mission_state {mission_id, status} (paused reopens a finished one); mission_repo {project_id, role?, on?}; mission_item {item_id, on?}; mission_delete; mission_import {plan}. dep {item_id, depends_on, on?}; hold {item_id, on?}; propose_tree {parent, tree}; accept_many | undo_accept {item_ids}. done_when {item_id, done_when: [ci[:check] | review | test[:cmd] | person | text]}; verify {item_id, line, ok, note?}: a person's check. mission_start {mission_id, step?}: take the next steps; retry {item_id, note?}; mission_plan: ask the planner; card_decide {card_id, ok, note?}; mission_grant {mission_id, level, hours?, budget_cents?, hosts?, max_parallel?, profile?}; mission_revoke; missions_pause_all. mission_release_note {mission_id}: a drafted release note of a completed mission; today_brief {refresh?, org_id?, since?}: Today's morning brief, drafted only on refresh; mission_triage {mission_id, refresh?}: a stuck mission's card, Jev's proposed outcome and next step (never applied), and with refresh its drafted words. Work view: primary:false links a secondary; expected_* guard (E_CONFLICT). place {task_id|item_id, group, note?, expected_version}: group a task; unplace clears it.
 
-Parameters: `ack_live`, `action`, `assignees`, `attachment_id`, `brief`, `bucket_id`, `bucket_op`, `budget_cents`, `card_id`, `comment_id`, `confirm_nonce`, `container`, `data_base64`, `days`, `decisions`, `depends_on`, `done_when`, `draft_brief`, `due_at`, `epic`, `estimate`, `estimate_unit`, `expected_primary`, `expected_version`, `force_cross_org`, `group`, `host_alias`, `hosts`, `hours`, `impact_token`, `item_id`, `item_ids`, `items`, `key`, `labels`, `level`, `line`, `link_id`, `max_parallel`, `mime`, `mission`, `mission_id`, `mode`, `name`, `note`, `notes`, `ok`, `on`, `org_id`, `parallel`, `parent`, `plan`, `post_to_tracker`, `primary`, `priority`, `profile`, `project_id`, `project_ids`, `refresh`, `role`, `rule`, `rule_id`, `session_id`, `since`, `source`, `status`, `status_name`, `step`, `task_id`, `title`, `tracker_id`, `tree`, `url`, `view`, `view_id`, `why`, `with_brief`, `worktree`
+Parameters: `ack_live`, `action`, `assignees`, `attachment_id`, `brief`, `bucket_id`, `bucket_op`, `budget_cents`, `card_id`, `comment_id`, `confirm_nonce`, `container`, `data_base64`, `days`, `decisions`, `depends_on`, `done_when`, `draft_brief`, `due_at`, `epic`, `estimate`, `estimate_unit`, `expected_primary`, `expected_version`, `force_cross_org`, `group`, `host_alias`, `hosts`, `hours`, `impact_token`, `index`, `item_id`, `item_ids`, `items`, `key`, `labels`, `level`, `line`, `link_id`, `max_parallel`, `mime`, `mission`, `mission_id`, `mode`, `name`, `note`, `notes`, `ok`, `on`, `org_id`, `parallel`, `parent`, `plan`, `post_to_tracker`, `primary`, `priority`, `profile`, `project_id`, `project_ids`, `refresh`, `role`, `rule`, `rule_id`, `session_id`, `since`, `source`, `status`, `status_name`, `step`, `task_id`, `title`, `tracker_id`, `tree`, `url`, `view`, `view_id`, `why`, `with_brief`, `worktree`
 
 ## Tauri IPC commands
 
@@ -1047,6 +1065,9 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::work::work_today`
 - `commands::work::work_ticket_card`
 - `commands::work::request_work_handover`
+- `commands::work::request_work_result`
+- `commands::work::work_result`
+- `commands::work::create_followup_task`
 - `commands::work::summarize_past_work`
 - `commands::work::name_session_work`
 - `commands::work::rename_work_item`
@@ -1339,6 +1360,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::mcp::control_handoffs`
 - `commands::operator::ensure_operator`
 - `commands::operator::operator_status`
+- `commands::operator::control_auto_continue`
 - `commands::operator::control_route_propose`
 - `commands::operator::control_route_follow`
 - `commands::hub::hub_status`
@@ -1349,6 +1371,10 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::hub::offline_local_sessions`
 - `commands::hub::hub_stranded_token`
 - `commands::hub::report_client_error`
+- `commands::fleets::fleets_list`
+- `commands::fleets::fleet_add`
+- `commands::fleets::fleet_remove`
+- `commands::fleets::fleet_retry_now`
 - `commands::onboarding::check_local_prereqs`
 - `commands::onboarding::tunnel_status`
 - `commands::assets::catalog_config`

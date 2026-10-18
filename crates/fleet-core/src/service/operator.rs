@@ -278,7 +278,7 @@ pub const BRAINSTORM_SKILL_PATH: &str = ".claude/skills/fleet-brainstorm/SKILL.m
 /// (`control_commands_are_mirrored_in_the_menu`). The desktop runs `/task`,
 /// `/done`, `/assign` and `/start` itself with the same grammar
 /// (`src/lib/control_slash.ts`, gap plan G3.9); the phone sends them here.
-pub const CONTROL_COMMANDS: [(&str, &str); 8] = [
+pub const CONTROL_COMMANDS: [(&str, &str); 10] = [
     (
         "task",
         "---\n\
@@ -375,6 +375,35 @@ pub const CONTROL_COMMANDS: [(&str, &str); 8] = [
          go. Then apply it in ONE `work_link` action `tidy_apply` call, keeping \
          each candidate's action. If there is nothing to tidy, say so in one line.\n",
     ),
+    (
+        "debug",
+        "---\n\
+         description: Look for problems in the fleet logs\n\
+         argument-hint: [@host] [30m|6h|3d] [part:<component>] [session:<name>] <focus>\n\
+         ---\n\
+         Run the self debug agent on \"$ARGUMENTS\". An `@host` word is the \
+         scope's `host`, a `30m`, `6h` or `3d` word its `minutes`, `part:<x>` its \
+         `component` and `session:<name>` its `session`; the rest is the request. \
+         Find the active rule whose definition is `self-debug` with `agents` \
+         action `status` agent `fleet`; when there is none, say it is added under \
+         Automation, Agents, and stop. Otherwise call `agents` action `run` with \
+         its `id`, the `request` and the `run_scope`, and say in one line that it \
+         is queued and where its findings appear (Automation, Runs). Change \
+         nothing else.\n",
+    ),
+    (
+        "propose",
+        "---\n\
+         description: Propose next steps from what the agents found\n\
+         argument-hint: <focus>\n\
+         ---\n\
+         Run the proposer now, focused on \"$ARGUMENTS\" when it is not empty. \
+         Find the active rule whose definition is `proposer` with `agents` \
+         action `status` agent `fleet`; when there is none, say it is added under \
+         Automation, Agents, and stop. Otherwise call `agents` action `run` with \
+         its `id` and the `request`, and say in one line that it is queued and \
+         that its proposals wait in the Inbox for Approve. Change nothing else.\n",
+    ),
 ];
 
 /// Where a [`CONTROL_COMMANDS`] entry lives in the operator's directory.
@@ -385,9 +414,22 @@ pub fn control_command_path(name: &str) -> String {
 /// PURE: every plain (non-secret) file of the operator's directory, as
 /// `(path relative to the directory, body)`. The `.mcp.json` is not here: it
 /// carries the token and takes the secret path.
+///
+/// The last entry is [`OPERATOR_FILES_STAMP_PATH`], holding
+/// [`operator_files_stamp`] of the others: [`refresh_operator_files`] reads
+/// it to tell whether the host already has this version (F13).
 pub fn operator_files() -> Vec<(String, &'static str)> {
+    let mut files = operator_files_unstamped();
+    files.push((
+        OPERATOR_FILES_STAMP_PATH.to_string(),
+        operator_files_stamp(),
+    ));
+    files
+}
+
+fn operator_files_unstamped() -> Vec<(String, &'static str)> {
     let mut files = vec![
-        ("CLAUDE.md".to_string(), claude_md()),
+        ("CLAUDE.md".to_string(), claude_md_full()),
         (BRAINSTORM_SKILL_PATH.to_string(), BRAINSTORM_SKILL),
     ];
     files.extend(
@@ -396,6 +438,110 @@ pub fn operator_files() -> Vec<(String, &'static str)> {
             .map(|(name, body)| (control_command_path(name), *body)),
     );
     files
+}
+
+/// Where the operator's directory keeps the version of its files (F13).
+pub const OPERATOR_FILES_STAMP_PATH: &str = ".claude/fleet-operator-files.version";
+
+/// PURE: the version of the operator's files: a digest over every path and
+/// body of [`operator_files`] but the stamp itself. A change to the prompt,
+/// a command or the skill changes it; nothing else does.
+pub fn operator_files_stamp() -> &'static str {
+    static STAMP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    STAMP.get_or_init(|| {
+        let mut all = String::new();
+        for (path, body) in operator_files_unstamped() {
+            all.push_str(&path);
+            all.push('\0');
+            all.push_str(body);
+            all.push('\0');
+        }
+        format!("{}\n", crate::mcp::guard::content_digest(&all))
+    })
+}
+
+/// Write the operator's plain files on `host` again when the host's stamp
+/// is not this build's (review 2026-10-17, F13): a prompt, command or skill
+/// fix then reaches a running Control on its next start, restart or
+/// automatic restore, not only at its birth. The `.mcp.json` is not
+/// rewritten — its token is the birth's. Answers whether it wrote.
+pub async fn refresh_operator_files(
+    ssh: &dyn crate::ssh::SshExec,
+    host: &str,
+) -> Result<bool, IpcError> {
+    use crate::service::provision::{read_host_file, write_host_file};
+    let dir = operator_dir_on(host, ssh).await?;
+    let stamp_path = format!("{dir}/{OPERATOR_FILES_STAMP_PATH}");
+    let on_host = read_host_file(ssh, host, &stamp_path).await?;
+    if !files_need_refresh(&on_host) {
+        return Ok(false);
+    }
+    // The stamp last, so a write cut off half way is tried again next time.
+    for (rel, body) in operator_files() {
+        let path = format!("{dir}/{rel}");
+        let parent = path.rsplit_once('/').map_or(dir.as_str(), |(p, _)| p);
+        write_host_file(ssh, host, parent, &path, body).await?;
+    }
+    Ok(true)
+}
+
+/// PURE: whether a host whose stamp file reads `on_host` (empty when
+/// missing) needs this build's files.
+pub fn files_need_refresh(on_host: &str) -> bool {
+    on_host.trim() != operator_files_stamp().trim()
+}
+
+/// [`refresh_operator_files`] when `host`/`tmux` is the operator's session;
+/// best-effort, so a failed refresh never stops a restart. Called before a
+/// restart relaunches the pane (`sessions::restart_session`), which every
+/// Control restart goes through: the panel's, auto-restore's and Jev's.
+pub async fn refresh_if_operator(
+    store: &Mutex<Store>,
+    ssh: &dyn crate::ssh::SshExec,
+    host: &str,
+    tmux: &str,
+) {
+    let is_operator = store
+        .lock()
+        .ok()
+        .and_then(|s| operator_ref(&s))
+        .is_some_and(|o| o.host_alias == host && o.tmux_name == tmux);
+    if !is_operator {
+        return;
+    }
+    match refresh_operator_files(ssh, host).await {
+        Ok(true) => tracing::info!(
+            host,
+            "[operator] refreshed its CLAUDE.md, commands and skill"
+        ),
+        Ok(false) => {}
+        Err(e) => tracing::warn!(host, "[operator] files not refreshed: {e}"),
+    }
+}
+
+/// The operator's CLAUDE.md sections beyond [`claude_md`], each a module's
+/// own `SECTION` (one line per section, so the workers that add them merge
+/// trivially). Appended in this order by [`claude_md_full`].
+pub const CLAUDE_MD_SECTIONS: &[&str] = &[
+    crate::service::autonomy::SECTION,
+    crate::service::placement::SECTION,
+    crate::service::operator_account::SECTION,
+    crate::service::control_rules::SECTION,
+];
+
+/// PURE: the operator's whole CLAUDE.md: [`claude_md`], then every
+/// [`CLAUDE_MD_SECTIONS`] entry, a blank line between.
+pub fn claude_md_full() -> &'static str {
+    static FULL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    FULL.get_or_init(|| {
+        let mut out = claude_md().trim_end().to_string();
+        for section in CLAUDE_MD_SECTIONS {
+            out.push_str("\n\n");
+            out.push_str(section.trim());
+        }
+        out.push('\n');
+        out
+    })
 }
 
 /// PURE: the operator's standing instructions.
@@ -412,7 +558,8 @@ pub fn claude_md() -> &'static str {
      1. **Destructive work is proposed, never assumed.** Starting or killing\n\
      a session, deleting, moving, broadcasting, committing and every prompt\n\
      you type into another session stop for a confirmation you do not\n\
-     control. Say plainly what you are about to do and let the dialog do its\n\
+     control, unless your autonomy position lets it through (see Autonomy\n\
+     below). Say plainly what you are about to do and let the dialog do its\n\
      job; do not try to route around a refusal.\n\
      \n\
      2. **This directory is not a repository and you do not write code in\n\
@@ -613,6 +760,10 @@ struct LiveHost {
     store: Arc<Mutex<Store>>,
     ssh: Arc<SshClient>,
     reg: Arc<CancellationRegistry>,
+    /// The login the session starts under: `Some(None)` = the host's own,
+    /// `Some(Some(p))` = profile `p`, `None` = fleet's choice on the home
+    /// it lands on (`operator_account::birth_profile`, control review F7).
+    profile: Option<Option<String>>,
 }
 
 #[async_trait::async_trait]
@@ -679,6 +830,17 @@ impl OperatorHost for LiveHost {
     }
 
     async fn start_session(&self, host: &str, project_id: i64) -> Result<SessionRow, IpcError> {
+        // Not the host's default login unless it is the best one there: the
+        // login it had on this host, else the signed-in one with the most
+        // headroom (control review F7).
+        let profile = match &self.profile {
+            Some(p) => p.clone(),
+            None => crate::service::operator_account::birth_profile(
+                &*lock(&self.store)?,
+                host,
+                crate::store::now_unix(),
+            ),
+        };
         // An ordinary work session, which is the whole point: transcript,
         // conversation view, restart and reboot survival all come for free.
         crate::service::sessions::new_session(
@@ -696,7 +858,7 @@ impl OperatorHost for LiveHost {
                 friendly_name: Some("fleet operator".to_string()),
                 model: None,
                 effort: None,
-                profile: None,
+                profile,
                 agent: None,
                 origin: None,
                 // Whose the operator's session is (multi-user M1, T5): the
@@ -764,6 +926,12 @@ pub struct OperatorStatus {
     /// never moved the operator.
     #[serde(default)]
     pub fallback: Option<String>,
+    /// The login Control runs under, its account and usage, and whether it
+    /// is at its limit or signed out (control review F7,
+    /// `operator_account`). `null` without a session. Defaulted on read: a
+    /// hub from before the field does not report it.
+    #[serde(default)]
+    pub account: Option<crate::service::operator_account::OperatorAccount>,
 }
 
 fn default_operator_host() -> String {
@@ -819,9 +987,12 @@ pub(crate) fn operator_status_with(
             local_enabled,
         )
     };
+    let now = crate::store::now_unix();
+    let account_of = |row: &SessionRow| crate::service::operator_account::account_of(&s, row, now);
     let blocked =
         |why: &str, session: Option<SessionRow>, fallback: Option<String>| OperatorStatus {
             ready: false,
+            account: session.as_ref().and_then(account_of),
             session,
             blocked: Some(why.to_string()),
             host: host.clone(),
@@ -887,6 +1058,7 @@ pub(crate) fn operator_status_with(
     }
     Ok(OperatorStatus {
         ready: true,
+        account: account_of(&row),
         session: Some(row),
         blocked: None,
         host,
@@ -925,8 +1097,64 @@ pub async fn ensure_operator(
         store: Arc::clone(store),
         ssh: Arc::clone(ssh),
         reg: Arc::clone(reg),
+        profile: None,
     };
     ensure_operator_on(store, &host).await
+}
+
+/// Where a birth should land, beyond [`ensure_operator_on`]'s own rule.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct BirthPlan {
+    /// Born here when it is usable, before the configured home.
+    pub prefer: Option<String>,
+    /// A live operator on this host is left (treated as stranded): a move
+    /// off a host that still answers (control review F7, its login spent).
+    pub leave: Option<String>,
+}
+
+/// Start Control on `host` under `profile` (`None` = the host's own),
+/// leaving its live session on `from`: the operator move, for a Control
+/// whose account ran out with no other login on its host
+/// (`operator_account`). The session left behind is ended once the new one
+/// runs; its token was revoked by the birth.
+pub async fn move_operator_to(
+    store: &Arc<Mutex<Store>>,
+    ssh: &Arc<SshClient>,
+    host: &str,
+    profile: Option<&str>,
+    from: &str,
+) -> Result<SessionRow, IpcError> {
+    let old = {
+        let s = lock(store)?;
+        operator_ref(&s).filter(|r| r.host_alias == from)
+    };
+    let live = LiveHost {
+        store: Arc::clone(store),
+        ssh: Arc::clone(ssh),
+        reg: CancellationRegistry::new(),
+        profile: Some(profile.map(str::to_string)),
+    };
+    let plan = BirthPlan {
+        prefer: Some(host.to_string()),
+        leave: Some(from.to_string()),
+    };
+    let row = ensure_operator_with(store, &live, &plan).await?;
+    if let Some(old) = old.filter(|o| o.host_alias != row.host_alias) {
+        let ended = crate::service::sessions::kill_session(
+            crate::service::sessions::KillSessionArgs {
+                host_alias: old.host_alias.clone(),
+                name: old.tmux_name.clone(),
+                force: false,
+            },
+            store,
+            ssh,
+        )
+        .await;
+        if let Err(e) = ended {
+            tracing::warn!(host = %old.host_alias, error = %e.message, "[operator] the session left behind was not ended");
+        }
+    }
+    Ok(row)
 }
 
 type BirthLocks = Mutex<std::collections::HashMap<usize, Arc<tokio::sync::Mutex<()>>>>;
@@ -979,6 +1207,15 @@ pub(crate) async fn ensure_operator_on(
     store: &Arc<Mutex<Store>>,
     host: &dyn OperatorHost,
 ) -> Result<SessionRow, IpcError> {
+    ensure_operator_with(store, host, &BirthPlan::default()).await
+}
+
+/// [`ensure_operator_on`] with a [`BirthPlan`].
+pub(crate) async fn ensure_operator_with(
+    store: &Arc<Mutex<Store>>,
+    host: &dyn OperatorHost,
+    plan: &BirthPlan,
+) -> Result<SessionRow, IpcError> {
     // 0. One birth at a time. Everything below — guard #1 included — runs
     //    inside this, so a second press that arrives mid-birth waits and
     //    then finds the session the first one created. See
@@ -1005,7 +1242,9 @@ pub(crate) async fn ensure_operator_on(
                 let host_row = s
                     .get_host_row(&r.host_alias)
                     .map_err(|e| IpcError::new(codes::E_SQLITE, format!("operator's host: {e}")))?;
-                if !home_usable(host_row.as_ref(), &r.host_alias, local_enabled) {
+                if !home_usable(host_row.as_ref(), &r.host_alias, local_enabled)
+                    || plan.leave.as_deref() == Some(r.host_alias.as_str())
+                {
                     stranded = Some(r.host_alias);
                 } else if row.lost_at.is_none() {
                     return Ok(row);
@@ -1038,10 +1277,17 @@ pub(crate) async fn ensure_operator_on(
     //    host qualifies is the birth refused, naming the obstacle.
     let (home, endpoint) = {
         let s = lock(store)?;
-        let preferred = read_operator_host(&s);
         let hosts = s
             .list_hosts()
             .map_err(|e| IpcError::new(codes::E_SQLITE, format!("list hosts: {e}")))?;
+        let preferred = plan
+            .prefer
+            .clone()
+            .filter(|p| {
+                Some(p.as_str()) != stranded.as_deref()
+                    && home_usable(hosts.iter().find(|h| h.alias == *p), p, local_enabled)
+            })
+            .unwrap_or_else(|| read_operator_host(&s));
         let Some(home) = pick_operator_home(&hosts, &preferred, local_enabled, stranded.as_deref())
         else {
             return Err(if let Some(down) = &stranded {
@@ -1141,6 +1387,23 @@ pub(crate) async fn ensure_operator_on(
         // `E_NOTFOUND` here just means there was none.
         let _ = s.revoke_client_token(OPERATOR_CLIENT_NAME);
         s.insert_client_token(OPERATOR_CLIENT_NAME, &sha, "full")?;
+        // The token is the hub owner's, as the session started in step 6 is
+        // (`hub_personal_owner`). A client with no person gets a REFUSING
+        // `view_scope` — the agent would see no session, its own included.
+        // A hub that cannot say whose it is leaves the token unbound, the
+        // same fail-closed rule that leaves the session `unclaimed`; the
+        // agent then sees nothing until the hub has an owner, which is what
+        // the master token sees on such a hub too. Migration 195 heals a
+        // token minted before this.
+        match s.personal_owner_id()? {
+            Some(owner) => {
+                s.set_client_person(OPERATOR_CLIENT_NAME, Some(owner))?;
+            }
+            None => tracing::warn!(
+                "the hub has no personal owner; the operator's token is left \
+                 unbound and will see no sessions"
+            ),
+        }
         s.set_setting(SETTING_OPERATOR_TOKEN_SHA, &sha)
             .map_err(|e| {
                 IpcError::new(codes::E_SQLITE, format!("record the operator token: {e}"))
@@ -1975,6 +2238,74 @@ mod tests {
             .into_iter()
             .filter(|t| t.name == "ux-agent")
             .collect()
+    }
+
+    /// The token the operator is handed must SEE the fleet it operates:
+    /// its own session and the sessions of the person it acts for. Minted
+    /// person-less, it resolved to a client whose `view_scope` refuses every
+    /// row (`Caller::view_scope`: "client with no `person_id` → a REFUSING
+    /// scope"), so the agent listed no sessions, `whoami` from its own pane
+    /// was `E_NOTFOUND`, and `operator_status` answered `session: null`.
+    #[tokio::test]
+    async fn the_operator_token_sees_its_own_session_and_its_owners() {
+        let (store, _ssh, _reg) = fixture();
+        let owner = store
+            .lock()
+            .unwrap()
+            .personal_owner_id()
+            .unwrap()
+            .expect("a fresh hub has a personal owner");
+        let host = FakeHost::new(&store);
+        let row = ensure_operator_on(&store, &host).await.expect("born");
+
+        let token = {
+            let j = written_mcp_json(&host);
+            j["mcpServers"]["claude-fleet"]["headers"]["Authorization"]
+                .as_str()
+                .and_then(|h| h.strip_prefix("Bearer "))
+                .expect("a bearer header")
+                .to_string()
+        };
+        let s = store.lock().unwrap();
+        // The real host starts the session with `hub_personal_owner` as its
+        // owner (`LiveHost::start_session`); the fake writes a bare
+        // row, so give it the owner the real one would.
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET owner_person_id = ?1, visibility = 'private' \
+                 WHERE id = ?2",
+                rusqlite::params![owner, row.id],
+            )
+            .unwrap();
+        let other = s
+            .upsert_session("cf-25", OPERATOR_HOST, None, None, 1, 1, "running", None)
+            .unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET owner_person_id = ?1, visibility = 'private' \
+                 WHERE id = ?2",
+                rusqlite::params![owner, other],
+            )
+            .unwrap();
+
+        let caller = crate::mcp::auth::resolve_token(
+            &token,
+            "master-token",
+            &[],
+            &s.active_client_tokens().unwrap(),
+            Some(owner),
+        )
+        .expect("the operator's token resolves");
+        assert_eq!(caller.person(), Some(owner), "the token is the owner's");
+        let scope = caller.view_scope(&s).unwrap();
+        for (what, tmux) in [("its own", OPERATOR_TMUX_NAME), ("the owner's", "cf-25")] {
+            let r = s.get_session(tmux, OPERATOR_HOST).unwrap().unwrap();
+            assert_eq!(
+                scope.sees_session_row(&r),
+                crate::service::view_scope::Visibility::RowAndContent,
+                "the operator must see {what} session"
+            );
+        }
     }
 
     /// `ensure_operator` runs on every press of the button. Twice over it

@@ -1,6 +1,7 @@
 <script lang="ts">
   import Icon from './lib/kit/Icon.svelte';
   import StatusBar from './lib/kit/StatusBar.svelte';
+  import MoodLine from './lib/MoodLine.svelte';
   import { applyWorkEvents, loadTrackers, sessionsMentioning } from './lib/trackers';
   import { loadOrgs, cycleScope } from './lib/orgs';
   import type { WorkEvent } from './lib/trackers';
@@ -103,6 +104,7 @@
   import { hubStatus, loadHubStatus } from './lib/hub';
   import HubUnavailableBanner from './lib/HubUnavailableBanner.svelte';
   import { startHubConnection, setGapHandler, hubConnection } from './lib/hub_connection';
+  import { startFleets } from './lib/fleets';
   import StatusBarMark from './lib/StatusBarMark.svelte';
   import HostHealthChip from './lib/HostHealthChip.svelte';
   import ShellHeader from './lib/ShellHeader.svelte';
@@ -260,6 +262,11 @@
     // be an error toast on every launch for a panel that does not apply), and
     // the footer names the hub it is a window onto.
     await loadHubStatus();
+    // Extra fleets (multi-hub design): further hubs this window shows beside
+    // the one above. Independent of whether that one is usable, so before
+    // the `unavailable` return below; with none configured it is one list
+    // call that answers only the primary.
+    void startFleets();
     // Not awaited and never fatal: the version is for the footer and for a
     // bug report, and `versionLine` says less rather than guessing when it
     // is missing. Before the `unavailable` return below, so a window that
@@ -1152,6 +1159,8 @@
 
 <!-- Redesign 3.17: the Main board's header, above everything else. -->
 <ShellHeader mac={isMac} />
+<!-- The dynamic theme's opt-in glow line: the fleet's mood along the top edge. -->
+<MoodLine />
 <!-- Redesign 10.5: the first-run tour and Get started float above the
      layout. Both used to be mounted by the Sidebar,
      which a fleet page hides and a collapsed rail unmounts. -->

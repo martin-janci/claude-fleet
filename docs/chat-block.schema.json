@@ -585,7 +585,7 @@
           "type": "string"
         },
         "recommended": {
-          "description": "The option you would pick. At most one per block; Control's chat\nsends it after `control.auto_continue_minutes` when nobody answers\n(`src/lib/auto_continue.ts`).",
+          "description": "The option you would pick. At most one per block; in Control's chat\nfleet sends it after `control.auto_continue_minutes` when nobody\nanswers (`service::control_continue`).",
           "type": "boolean"
         }
       },

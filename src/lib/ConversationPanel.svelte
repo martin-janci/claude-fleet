@@ -19,6 +19,7 @@
   import { requestOpenPath, OPEN_PATH_CONTEXT, type OpenPathFn } from './app_views';
   import { sendPrompt, hasNoPane, sessions, sessionAgent, restartSession, type SessionRow } from './sessions';
   import AnswerPrompt from './AnswerPrompt.svelte';
+  import { canStop, cancelInto, drop, due, heldPreview, hold, STOP_KEY, type HeldLine } from './composer_hold';
   import FormCard from './forms/FormCard.svelte';
   import ChatWizards from './forms/ChatWizards.svelte';
   import { answerFingerprint, pendingInputFor } from './pending_input';
@@ -126,6 +127,8 @@
   import { pointInRect, dropPoint } from './geometry';
   import Markdown from './MarkdownView.svelte';
   import RichText from './RichText.svelte';
+  import { workResult, type TaskResultView } from './task_result';
+  import { showTaskInWorkView } from './work_view';
   import BackgroundDetail from './BackgroundDetail.svelte';
   import Loader from './Loader.svelte';
   import Skeleton from './states/Skeleton.svelte';
@@ -150,7 +153,6 @@
   import { completeTaskLink, matchTaskLinks, taskLinkQuery, type TaskLink } from './control_task_link';
   import { overflowMark } from './overflow_mark';
   import AutoContinueBar from './AutoContinueBar.svelte';
-  import { recommendedPick } from './auto_continue';
   import OrbitMark from './kit/OrbitMark.svelte';
   import { hosts as hostRows } from './hosts';
   import { refIndex, refSegments, type ChatRef } from './chat_refs';
@@ -1219,6 +1221,30 @@
   // A reply's cards (rich_blocks.ts) act by filling this composer, so they
   // act only where it is drawn and holds the conversation on screen.
   const cardsAct = $derived(showComposer && canPrompt && bgEntry === null && viewing === null);
+
+  // The result of the task this session works on (design 2026-10-13, D6):
+  // the reply whose done marker it was read from draws as the result panel.
+  // Re-read when the session's row says a turn ended (the Stop hook settles
+  // a wrap-up) or its work link moved; nothing is read for unlinked work.
+  let taskResult = $state<TaskResultView | null>(null);
+  let resultSeq = 0;
+  async function loadTaskResult(id: number, linked: boolean) {
+    const mine = ++resultSeq;
+    if (!linked) {
+      taskResult = null;
+      return;
+    }
+    const r = await workResult({ sessionId: id });
+    if (mine !== resultSeq) return;
+    taskResult = r.ok ? r.value : null;
+  }
+  const workLinkId = $derived(session.work?.link_id ?? null);
+  $effect(() => {
+    const id = session.id;
+    const linked = workLinkId !== null;
+    void session.turn_seq;
+    untrack(() => void loadTaskResult(id, linked));
+  });
   const emptyHint = $derived(
     gone
       ? 'The host no longer keeps this conversation’s transcript file.'
@@ -1270,7 +1296,35 @@
   // read yet is the mangled line the gate exists to prevent.
   const outboxBusy = $derived(outgoing.some((m) => m.state === 'waiting' || m.state === 'sending' || m.state === 'sent'));
   const busyBlocked = $derived(blockWhileBusy && (busyNote !== null || outboxBusy));
-  const autoPick = $derived(autoContinue ? recommendedPick(conv) : null);
+  // F4 (review 2026-10-17): what the gate holds instead of refusing. A line
+  // typed while busy waits here as a "queued · cancel" chip and goes out,
+  // one per turn, when the gate opens (`composer_hold.ts`).
+  let held = $state<HeldLine[]>([]);
+  $effect(() => {
+    void sessionId;
+    held = [];
+  });
+  $effect(() => {
+    const next = due(held, busyBlocked, writeBlocked !== null || viewing !== null);
+    if (!next) return;
+    held = drop(held, next.id);
+    void sendText(next.text);
+  });
+  function cancelHeld(line: HeldLine) {
+    held = drop(held, line.id);
+    draft = cancelInto(draft, line);
+    box?.focus();
+  }
+  const showStop = $derived(canStop(blockWhileBusy, busyNote));
+  let stopping = $state(false);
+  /** Interrupt the running turn: the REPL's own Escape. */
+  async function stopTurn() {
+    if (stopping || writeBlocked !== null) return;
+    stopping = true;
+    const r = await sendPrompt(session.host_alias, session.tmux_name, '', { keys: STOP_KEY });
+    stopping = false;
+    if (!r.ok) sendError = r.error.message;
+  }
 
   // ── May this client write into this session at all? (multi-user M1) ─────
   //
@@ -1331,7 +1385,8 @@
     hubActionBlocked('rewind_conversation', $hubStatus, $hubConnection) ?? rewindShareBlocked,
   );
   const canSend = $derived(
-    draft.trim().length > 0 && viewing === null && !busyBlocked && writeBlocked === null,
+    // A gated composer that is busy still takes the line: it is held (F4).
+    draft.trim().length > 0 && viewing === null && writeBlocked === null,
   );
   // A one-gesture chip send is held while the session is waiting on an
   // answer: a permission or choice prompt (`blocked`) or any stuck screen.
@@ -1684,7 +1739,14 @@
       box?.focus();
       return;
     }
-    if (busyBlocked) return;
+    if (busyBlocked) {
+      // F4: held, not refused; it goes when the turn ends.
+      held = hold(held, text);
+      if (opts.fromDraft) draft = '';
+      histIndex = null;
+      box?.focus();
+      return;
+    }
     chipHeld = false;
     // A pasted tile has an empty `path` (see attachments.ts): nothing ever
     // authorised it for the Rust allow-list, so it is never uploaded. It
@@ -2464,7 +2526,15 @@
                 {#each groups as g, j (j)}
                   {#if g.kind === 'text'}
                     <div class="text" data-testid="conv-text">
-                      <RichText source={g.text} sessionId={cardsAct ? session.id : null} answered={!isLast} />
+                      <RichText
+                        source={g.text}
+                        sessionId={cardsAct ? session.id : null}
+                        answered={!isLast}
+                        result={taskResult}
+                        resultTitle={session.work?.title ?? ''}
+                        onOpenTask={(id) => showTaskInWorkView(`item:${id}`)}
+                        onResultChanged={() => void loadTaskResult(session.id, workLinkId !== null)}
+                      />
                     </div>
                   {:else if g.kind === 'tools'}
                     <!-- One structure for a lone call and a folded group, so a
@@ -2797,11 +2867,21 @@
   {#if autoContinue && showComposer && canPrompt && bgEntry === null}
     <AutoContinueBar
       sessionId={session.id}
-      pick={autoPick}
-      ready={busyNote === null && !outboxBusy && viewing === null && writeBlocked === null}
+      turnSeq={session.turn_seq}
       typing={draft.trim() !== ''}
       onSend={(text) => void sendText(text)}
     />
+  {/if}
+  {#if held.length > 0 && showComposer && canPrompt && bgEntry === null}
+    <div class="held-lines" data-testid="conv-held-lines">
+      {#each held as line (line.id)}
+        <div class="held-chip" data-testid="conv-held">
+          <span class="held-text" title={line.text}>{heldPreview(line.text)}</span>
+          <span class="held-state">queued ·</span>
+          <button type="button" class="btn btn--quiet held-cancel" data-testid="conv-held-cancel" onclick={() => cancelHeld(line)}>cancel</button>
+        </div>
+      {/each}
+    </div>
   {/if}
   {#if showComposer && canPrompt && bgEntry === null}
     <form
@@ -3076,12 +3156,22 @@
             title={sendLaterWhy ?? 'Send later…'}
             disabled={sendLaterWhy !== null}
             onclick={() => (sendLaterOpen = true)}><Icon name="clock" size={14} /></button>
+          {#if showStop}
+            <button
+              type="button"
+              class="btn btn--quiet composer-stop"
+              data-testid="conv-composer-stop"
+              aria-label="Stop the turn"
+              title="Stop the turn (Escape in the session)"
+              disabled={stopping || writeBlocked !== null}
+              onclick={() => void stopTurn()}>Stop</button>
+          {/if}
           <button
             type="submit"
             class="btn btn--icon btn--primary composer-send"
             data-testid="conv-composer-send"
-            aria-label="Send prompt"
-            title={writeBlocked ?? 'Send (Enter)'}
+            aria-label={busyBlocked ? 'Queue prompt' : 'Send prompt'}
+            title={writeBlocked ?? (busyBlocked ? 'Queue it: it goes when the turn ends (Enter)' : 'Send (Enter)')}
             aria-keyshortcuts="Enter"
             disabled={!canSend}>↑</button>
         </div>
@@ -4150,6 +4240,34 @@
     line-height: 1.45;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+  }
+  .held-lines {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 4px 12px 0;
+  }
+  .held-chip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--text-xs);
+    color: var(--fg-muted);
+    min-width: 0;
+  }
+  .held-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  .held-state {
+    flex: none;
+  }
+  .held-cancel {
+    flex: none;
+    font-size: var(--text-xs);
+    padding: 0 4px;
   }
   .interrupt {
     margin: 0.3rem 0 0.5rem;

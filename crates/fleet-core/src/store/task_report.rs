@@ -35,6 +35,18 @@ pub struct TaskReport {
     /// One of [`REPORT_OUTCOMES`].
     #[serde(default)]
     pub outcome: String,
+    /// What the worker says it did, one short line each.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub done: Vec<String>,
+    /// Choices the worker made that the next task must keep.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<String>,
+    /// Work the task did not finish.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remaining: Vec<String>,
+    /// Facts a fresh session needs to continue (where things live, traps).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tests_run: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -96,7 +108,7 @@ pub struct TaskEvidence {
 }
 
 /// Decode a stored JSON column; text fleet did not write reads as absent.
-pub(super) fn decode<T: serde::de::DeserializeOwned>(raw: Option<String>) -> Option<T> {
+pub(crate) fn decode<T: serde::de::DeserializeOwned>(raw: Option<String>) -> Option<T> {
     raw.and_then(|t| serde_json::from_str(&t).ok())
 }
 
@@ -141,6 +153,25 @@ impl Store {
                     super::rows::TASK_COLUMNS
                 ),
                 rusqlite::params![item_id, role],
+                super::rows::map_task_row,
+            )
+            .optional()?)
+    }
+
+    /// The newest `done` task of `item_id` with a stored report, any role:
+    /// the item's result.
+    pub fn latest_item_result(&self, item_id: i64) -> Result<Option<super::TaskRow>, IpcError> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {} FROM tasks WHERE work_item_id = ?1 AND state = 'done' \
+                       AND result_json IS NOT NULL \
+                     ORDER BY finished_at DESC, id DESC LIMIT 1",
+                    super::rows::TASK_COLUMNS
+                ),
+                [item_id],
                 super::rows::map_task_row,
             )
             .optional()?)

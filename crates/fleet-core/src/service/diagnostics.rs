@@ -220,6 +220,22 @@ fn tunnel_detail(alias: &str, tunnels: &HashMap<String, TunnelHealth>) -> Option
     ))
 }
 
+/// Every secret the store knows, to mask literally in text that leaves the
+/// hub with [`logging::redact_secrets`]: host tokens, the master token,
+/// tracker credentials (the token and its Basic-auth encoding, whichever an
+/// error string or log line might carry), the decision model's API key and
+/// session environment secrets.
+pub fn known_secrets(s: &Store) -> Result<Vec<String>, IpcError> {
+    let mut secrets: Vec<String> = s.list_host_tokens()?.into_iter().map(|t| t.token).collect();
+    if let Some(m) = crate::mcp::settings::McpSettings::read(s)?.token {
+        secrets.push(m);
+    }
+    secrets.extend(s.tracker_secret_literals()?);
+    secrets.extend(s.decision_secret_literals()?);
+    secrets.extend(s.env_secret_literals()?);
+    Ok(secrets)
+}
+
 /// Build the diagnostics bundle. The store mutex is held only while reading
 /// rows (no `.await` in here); log files are read after it is released.
 pub fn collect(
@@ -239,9 +255,7 @@ pub fn collect(
         hosts,
         tokens,
         sessions,
-        tracker_secrets,
-        decision_secrets,
-        env_secrets,
+        secrets,
     ) = {
         let s = lock(store)?;
         let cfg = crate::mcp::settings::McpSettings::read(&s)?;
@@ -255,24 +269,9 @@ pub fn collect(
             s.list_hosts()?,
             s.list_host_tokens()?,
             s.list_all_sessions()?,
-            s.tracker_secret_literals()?,
-            s.decision_secret_literals()?,
-            s.env_secret_literals()?,
+            known_secrets(&s)?,
         )
     };
-
-    // Every token the store knows — masked literally in the final text.
-    let mut secrets: Vec<String> = tokens.iter().map(|t| t.token.clone()).collect();
-    if let Some(m) = &master_set {
-        secrets.push(m.clone());
-    }
-    // Tracker credentials (work graph M3): the token and its Basic-auth
-    // encoding, whichever an error string or log line might carry.
-    secrets.extend(tracker_secrets);
-    // The decision model's API key (Jev evaluation), masked the same way.
-    secrets.extend(decision_secrets);
-    // Session environment secrets (spec 2026-10-11), masked the same way.
-    secrets.extend(env_secrets);
     let token_modes: BTreeMap<&str, &str> = tokens
         .iter()
         .map(|t| (t.host_alias.as_str(), t.mode.as_str()))

@@ -35,6 +35,36 @@ export interface OperatorStatus {
    * field, which never moved the agent.
    */
   fallback?: string | null;
+  /**
+   * The login Control runs under and how its account stands (control review
+   * F7, `operator_account::OperatorAccount`). Absent from a hub older than
+   * the field.
+   */
+  account?: OperatorAccount | null;
+}
+
+/** Control's own account, as `operator_status` reports it. */
+export interface OperatorAccount {
+  host_alias: string;
+  /** The login profile; null = the host's own login. */
+  profile: string | null;
+  account_uuid: string | null;
+  email: string | null;
+  used_pct: number | null;
+  state: 'ok' | 'near_limit' | 'limit' | 'signed_out' | 'unknown';
+  /** "Paused · limit" / "signed out" / "near its limit"; null when fine. */
+  label: string | null;
+}
+
+/** PURE: the one line the panel shows about Control's account, or null when
+ *  there is nothing to say. */
+export function operatorAccountLine(a: OperatorAccount | null | undefined): string | null {
+  if (!a) return null;
+  const who = a.email ?? a.account_uuid ?? 'its account';
+  const login = a.profile ? `profile ${a.profile}` : `${a.host_alias}'s own login`;
+  const used = a.used_pct == null ? '' : ` · ${Math.round(a.used_pct)}% used`;
+  if (a.state === 'ok' || a.state === 'unknown') return `Control runs as ${who} (${login})${used}`;
+  return `${a.label ?? a.state} · ${who} (${login})${used}`;
 }
 
 export const operatorState: Writable<'unknown' | 'waking' | 'ready' | OperatorBlocked> =
@@ -57,6 +87,8 @@ export const operatorHost: Writable<string> = writable('local');
  * stranded agent without asking.
  */
 export const operatorFallback: Writable<string | null> = writable(null);
+/** Control's own account as the last status call said (control review F7). */
+export const operatorAccount: Writable<OperatorAccount | null> = writable(null);
 /**
  * Why the last press of the panel's `lost` button did nothing, shown under
  * the button; null when it worked or was never pressed. The button used to
@@ -196,6 +228,7 @@ export async function refreshOperator(): Promise<void> {
   operatorSession.set(r.value.session);
   operatorHost.set(r.value.host ?? 'local');
   operatorFallback.set(r.value.fallback ?? null);
+  operatorAccount.set(r.value.account ?? null);
   operatorState.set(r.value.ready ? 'ready' : (r.value.blocked ?? 'absent'));
 }
 

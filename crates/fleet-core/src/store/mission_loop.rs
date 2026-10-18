@@ -193,7 +193,9 @@ impl Store {
 
     /// Whether `session_id` is a worker of a live mission: a run of one of
     /// its members, while the mission is active or paused (the worker
-    /// guard's scope, orchestration §7.2).
+    /// guard's scope, orchestration §7.2). A `wrapup` row (a person's
+    /// "Finish task", design 2026-10-13 D2) makes no session a worker: it is
+    /// never one of the mission's runs, here or in the counts below.
     pub fn is_mission_worker(&self, session_id: i64) -> Result<bool, IpcError> {
         Ok(self
             .conn
@@ -201,7 +203,8 @@ impl Store {
                 "SELECT 1 FROM tasks t \
                  JOIN work_items i ON i.id = t.work_item_id \
                  JOIN orchestration_projects p ON p.id = i.orchestration_project_id \
-                 WHERE t.worker_session_id = ?1 AND p.state IN ('active', 'paused') LIMIT 1",
+                 WHERE t.worker_session_id = ?1 AND p.state IN ('active', 'paused') \
+                   AND COALESCE(t.role, '') <> 'wrapup' LIMIT 1",
                 [session_id],
                 |_| Ok(()),
             )
@@ -302,7 +305,7 @@ impl Store {
                COALESCE(SUM(t.state IN ('queued','running')), 0), \
                MAX(COALESCE(t.finished_at, t.started_at, t.created_at)) \
              FROM tasks t JOIN work_items i ON i.id = t.work_item_id \
-             WHERE i.orchestration_project_id = ?1",
+             WHERE i.orchestration_project_id = ?1 AND COALESCE(t.role, '') <> 'wrapup'",
             [mission_id],
             |r| {
                 Ok(MissionTaskCounts {
@@ -322,7 +325,8 @@ impl Store {
             "SELECT (SELECT COALESCE(SUM(s.usage_cost_micros), 0) FROM sessions s \
                      WHERE s.id IN (SELECT t.worker_session_id FROM tasks t \
                                     JOIN work_items i ON i.id = t.work_item_id \
-                                    WHERE i.orchestration_project_id = ?1)) \
+                                    WHERE i.orchestration_project_id = ?1 \
+                                      AND COALESCE(t.role, '') <> 'wrapup')) \
                   + (SELECT COALESCE(SUM(cost_micros), 0) FROM aux_usage \
                      WHERE mission_id = ?1)",
             [mission_id],
@@ -345,6 +349,7 @@ impl Store {
                    JOIN work_items i ON i.id = t.work_item_id \
                   WHERE t.finished_at IS NOT NULL AND t.worker_session_id IS NOT NULL \
                     AND i.orchestration_project_id IS NOT NULL \
+                    AND COALESCE(t.role, '') <> 'wrapup' \
                     AND (?1 IS NULL OR i.orchestration_project_id = ?1)) \
              SELECT (SELECT COUNT(*) FROM done), \
                     (SELECT COALESCE(SUM(s.usage_cost_micros), 0) FROM sessions s \
@@ -545,6 +550,44 @@ impl Store {
                 map_grant,
             )
             .optional()?)
+    }
+
+    /// Whether a new session on `host` falls inside a running mission's
+    /// grant at `now` (review 2026-10-17, F2, "Autopilot"): an ACTIVE
+    /// mission holds a live grant ([`Self::live_mission_grant`]: not
+    /// revoked, not expired — its hours — and signed for the plan it has
+    /// now) whose hosts include `host` (or name none), whose budget is not
+    /// spent and whose parallel cap has room. The operator guard lets such
+    /// a start through without a card at Autopilot only.
+    pub fn start_inside_mission_grant(&self, host: &str, now: i64) -> Result<bool, IpcError> {
+        let ids: Vec<i64> = self
+            .conn
+            .prepare_cached("SELECT id FROM orchestration_projects WHERE state = 'active'")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for id in ids {
+            let Some(g) = self.live_mission_grant(id, now)? else {
+                continue;
+            };
+            if g.hosts
+                .as_ref()
+                .is_some_and(|hs| !hs.iter().any(|h| h == host))
+            {
+                continue;
+            }
+            if let Some(budget) = g.budget_micros {
+                if self.mission_cost_micros(id)? >= budget {
+                    continue;
+                }
+            }
+            if let Some(cap) = g.max_parallel {
+                if self.mission_task_counts(id)?.open >= cap {
+                    continue;
+                }
+            }
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     /// Revoke every live grant of the mission. Answers how many.

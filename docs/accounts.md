@@ -184,6 +184,52 @@ session's timeline (logins by profile, accounts by uuid); the desktop shows
 it in the conversation and as a toast, one toast for all when several
 sessions moved at once.
 
+A session Claude Code parked at its limit with a quota notification
+(`quota_auto_resume_disabled`, or `quota_auto_resume_stale` waiting for
+Enter) reads as blocked, but it is no dialog: it is switched like an idle
+one. A permission prompt or a question raised after it is the newer word,
+and that session waits for its person.
+
+### Where new work runs
+
+`service::placement` answers where new work should run: every host and
+login that can take it, best first, and why the others cannot
+(`suggest_placement` over MCP). A host must answer, have claude, be under
+the recovery thresholds (low memory, memory pressure, CPU saturated) and,
+when a project is named and some host has run it, have run it too; a login
+must be on a known account, signed in, under `accounts.pause_at` and within
+its daily limit. The rest rank by the account's unused share, then the
+host's idle CPU and free memory; the host the work ran on before wins a
+near tie. Control is told to call it before it starts anything, a mission's
+run takes the best place inside its grant (its hosts, its login when it
+names one), a start that names no host takes the best host that has run the
+project, and the over-limit refusal names a login on another host when none
+on its own has room.
+
+### Signed-out logins
+
+A login whose sign-in is gone (the usage check found it expired or its
+token rejected, or a headless `claude -p` run was refused with "Login
+expired · Run /login") is kept on its host row
+(`hosts.signed_out_logins`) with the day fleet first saw it, until fleet
+sees it signed in again; one signed-out login is asked again at most once
+an hour. Placement leaves it out, Control's chat shows one card per login
+("Claude login expired on htz (since Aug 9) · ssh htz then claude /login";
+for a profile, `CLAUDE_CONFIG_DIR=~/.claude-profiles/<name> claude
+/login`), and Control's feed says it once. Only a person can sign it in.
+
+### Control's own login
+
+`operator_status` reports the login Control runs under, its account and
+usage, and "Paused · limit" or "signed out". A Control born on a host takes
+the login it had there, else the best signed-in login with headroom on it.
+With `control.switch_at_limit` on (the default), a Control at its limit or
+signed out, and not mid-turn, is resumed under another login with headroom
+on its own host (the same conversation: profiles share `projects/`), else
+started on another host under the best login there (the host-down move: its
+conversation stays behind). It gets a `[fleet]` note either way, and the
+switch is on its timeline. Tried at most every 30 minutes.
+
 ### Accounts and usage
 
 A session under a profile is attributed to its profile's account, never the

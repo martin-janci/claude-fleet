@@ -9,6 +9,7 @@
   import { openExternal } from './open_external';
   import { loadTicketCard, canInsertInto, type TicketCard } from './ticket_card';
   import { requestWorkHandover, handoverOutcome, handoverOutcomeLine, type HandoverOutcome } from './work';
+  import { requestWorkResult } from './task_result';
   import { sessionHistory } from './timeline';
   import { push, pushError } from './toasts';
   import { hubStatus, hubActionBlocked } from './hub';
@@ -70,6 +71,32 @@
     else pushError(r.error, 'Asking for a handover failed');
     void loadOutcome(session.id);
   }
+
+  // "Finish task" (design 2026-10-13, D2): ask the session for its task
+  // result. Gated as the handover is: it too types one prompt into an idle
+  // REPL and waits for the reply. A request already waiting (`E_EXISTS`)
+  // reads inline, under the button, not as a toast.
+  let finishing = $state(false);
+  let finishError = $state<string | null>(null);
+  let finishAsked = $state(false);
+  async function finishTask() {
+    if (!key || finishing || askBlocked !== null) return;
+    finishing = true;
+    finishError = null;
+    const r = await requestWorkResult(session.id);
+    finishing = false;
+    if (r.ok) {
+      finishAsked = true;
+      push({ kind: 'success', message: `Asked for the ${key} result; it shows when the reply ends` });
+    } else if (r.error.code === 'E_EXISTS') finishError = r.error.message;
+    else pushError(r.error, 'Asking for the result failed');
+  }
+  // Another session, another request.
+  $effect(() => {
+    void session.id;
+    finishError = null;
+    finishAsked = false;
+  });
 
   // The latest outcome (M10.1): the newest `handover_*` event on the
   // session's timeline — re-read after an ask and whenever a turn ends
@@ -154,6 +181,20 @@
           : 'Only an idle Claude session can be asked for a handover')}
       onclick={() => void askHandover()}>Ask for a handover</button
     >
+    <button
+      class="btn btn--quiet"
+      type="button"
+      data-testid="ticket-card-finish"
+      disabled={!canAsk || finishing}
+      title={askBlocked ??
+        (canAsk
+          ? 'Ask this session to wrap up and report its result: what changed, how it was checked, what is left (it uses one turn)'
+          : 'Only an idle Claude session can be asked for its result')}
+      onclick={() => void finishTask()}>{finishAsked ? 'Result asked for' : 'Finish task'}</button
+    >
+    {#if finishError}
+      <p class="muted handover failed" data-testid="ticket-card-finish-error" role="alert">{finishError}</p>
+    {/if}
     {#if outcome}
       <p class="muted handover {outcome.state}" data-testid="ticket-card-handover-outcome" data-state={outcome.state}>
         {handoverOutcomeLine(outcome)}

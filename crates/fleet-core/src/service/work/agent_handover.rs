@@ -164,7 +164,7 @@ fn make_nonce() -> String {
 }
 
 /// Why this row cannot be asked now, if it cannot.
-fn refusal(row: &SessionRow) -> Option<String> {
+pub(super) fn refusal(row: &SessionRow) -> Option<String> {
     if row.status != "running" {
         return Some(format!("{} is not running", row.tmux_name));
     }
@@ -211,7 +211,10 @@ fn refusal(row: &SessionRow) -> Option<String> {
 /// Why the row's current conversation rules a handover out: it has ended
 /// (a SessionEnd closed it) or the row awaits a rebind after `/clear` /
 /// `/resume`, so the conversation that would write it is not the one linked.
-fn conversation_refusal(s: &Store, row: &SessionRow) -> Result<Option<String>, IpcError> {
+pub(super) fn conversation_refusal(
+    s: &Store,
+    row: &SessionRow,
+) -> Result<Option<String>, IpcError> {
     let Some(current) = row.claude_session_id.as_deref() else {
         return Ok(None);
     };

@@ -135,13 +135,15 @@ you, for example `"Open a draft PR"`.
 
 `recommended: true` marks the option you would pick (at most one). The
 button says *Recommended*. In Control's chat, when the card ends your reply
-and nobody answers, the app sends that option's `prompt` once
-`control.auto_continue` is on and `control.auto_continue_minutes` have
-passed with you quiet and the box empty; a countdown above the box offers
-*Send now* and *Cancel*, and typing stops it. An option or a question that
-names a push, a delete or another step that is hard to undo
-(`src/lib/quick_answer.ts`'s `risky`) is never sent this way, nor a card
-from a reply more than a day old.
+and nobody answers, fleet sends that option's `prompt` once
+`control.auto_continue` is on, the autonomy dial is not at *Ask first* and
+`control.auto_continue_minutes` have passed with you quiet; it runs where
+the fleet runs (`service::control_continue`), so with no window open and
+only once, as a `[fleet]` note quoting the option. A countdown above the
+box offers *Send now* and *Cancel*, and typing or any newer turn stops it.
+An option or a question that names a push, a delete or another step that
+is hard to undo (`decide::quick_answer::risky`) is never sent this way, nor
+a card from a reply more than a day old.
 
 ### `form`
 

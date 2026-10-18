@@ -1,5 +1,6 @@
 <script lang="ts">
   import HubProjectsPick from './HubProjectsPick.svelte';
+  import FleetsSettings from './FleetsSettings.svelte';
   import Icon from './kit/Icon.svelte';
   import Loader from './Loader.svelte';
   import WorkSettings from './WorkSettings.svelte';
@@ -744,6 +745,7 @@
         </p>
       {/if}
     </section>
+    <FleetsSettings />
     </div>
 
     <div class="panel" hidden={panel !== 'projects'} data-testid="settings-panel-projects">

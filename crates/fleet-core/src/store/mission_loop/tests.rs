@@ -174,6 +174,35 @@ fn counts_and_cost_cover_the_members_attempts() {
     assert_eq!(s.mission_cost_micros(m).unwrap(), 1_500_000);
 }
 
+/// A person's "Finish task" on a member (a `wrapup` row, design 2026-10-13
+/// D2) is not one of the mission's runs: it spends no attempt, takes no
+/// slot, adds no cost and makes its session no mission worker.
+#[test]
+fn a_wrapup_on_a_member_is_not_a_mission_run() {
+    let s = Store::open_in_memory().unwrap();
+    let m = mission(&s);
+    s.set_mission_state(m, None, "active", "fleet").unwrap();
+    s.upsert_host("h").unwrap();
+    let p = s
+        .upsert_session("p", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    let item = s.create_local_work_item(None, "a").unwrap().id;
+    s.set_mission_item(m, item, true, "fleet").unwrap();
+    let t = s.insert_task(None, Some(p), "finish", "n").unwrap();
+    s.set_task_run(t.id, item, 1, "wrapup").unwrap();
+    s.conn_ref()
+        .execute(
+            "UPDATE sessions SET usage_cost_micros = 1500000 WHERE id = ?1",
+            [p],
+        )
+        .unwrap();
+    let c = s.mission_task_counts(m).unwrap();
+    assert_eq!((c.total, c.open), (0, 0));
+    assert_eq!(s.mission_cost_micros(m).unwrap(), 0);
+    assert!(!s.is_mission_worker(p).unwrap());
+    assert_eq!(s.run_cost_estimate(Some(m)).unwrap(), None);
+}
+
 /// An active mission, its next wake an hour away.
 fn sleeping(s: &Store) -> i64 {
     let m = mission(s);
@@ -269,4 +298,50 @@ fn a_wake_during_a_tick_survives_the_release() {
     s.release_mission_lease(m, Some(now + 3600), Some(now))
         .unwrap();
     assert!(s.missions_due(now_unix()).unwrap().is_empty());
+}
+
+/// Review 2026-10-17, F2: Autopilot starts a session without a card only
+/// inside an active mission's live grant — its hosts, hours and budget.
+#[test]
+fn a_start_is_inside_a_grant_only_on_its_hosts_while_it_holds() {
+    let s = Store::open_in_memory().unwrap();
+    let m = mission(&s);
+    let now = now_unix();
+    s.add_grant(
+        m,
+        &NewGrant {
+            level: 2,
+            granted_by: "person:1",
+            hosts: Some(vec!["h".into()]),
+            budget_micros: Some(5_000_000),
+            expires_at: now + 3600,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        !s.start_inside_mission_grant("h", now).unwrap(),
+        "a mission that is not running grants nothing"
+    );
+    s.set_mission_state(m, None, "active", "fleet").unwrap();
+    assert!(s.start_inside_mission_grant("h", now).unwrap());
+    assert!(
+        !s.start_inside_mission_grant("other", now).unwrap(),
+        "not its host"
+    );
+    assert!(
+        !s.start_inside_mission_grant("h", now + 3601).unwrap(),
+        "expired"
+    );
+    s.conn
+        .execute(
+            "INSERT INTO aux_usage (origin, host_alias, model, mission_id, cost_micros, at) \
+             VALUES ('planner', 'h', 'm', ?1, 5000000, 1)",
+            [m],
+        )
+        .unwrap();
+    assert!(
+        !s.start_inside_mission_grant("h", now).unwrap(),
+        "budget spent"
+    );
 }

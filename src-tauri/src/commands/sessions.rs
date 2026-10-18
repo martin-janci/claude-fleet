@@ -28,6 +28,7 @@
 //! params (optional — absent means today's MCP behaviour), so the desktop's
 //! arguments now map one-to-one and it routes unconditionally.
 
+use crate::backend::fleets::Fleets;
 use crate::backend::FleetBackend;
 use fleet_core::cancel::CancellationRegistry;
 use fleet_core::ipc_error::lock;
@@ -59,31 +60,40 @@ use tauri::State;
 #[tauri::command]
 pub async fn list_sessions(
     force: Option<bool>,
+    fleet: Option<String>,
     backend: State<'_, Arc<FleetBackend>>,
+    fleets: State<'_, Arc<Fleets>>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<Vec<SessionRow>, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::list_sessions(&backend, force, &store, &ssh).await
 }
 
 #[tauri::command]
 pub async fn new_session(
     args: NewSessionArgs,
+    fleet: Option<String>,
     backend: State<'_, Arc<FleetBackend>>,
+    fleets: State<'_, Arc<Fleets>>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
     reg: State<'_, Arc<CancellationRegistry>>,
 ) -> Result<SessionRow, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::new_session(&backend, args, &store, &ssh, &reg).await
 }
 
 #[tauri::command]
 pub async fn kill_session(
     args: KillSessionArgs,
+    fleet: Option<String>,
     backend: State<'_, Arc<FleetBackend>>,
+    fleets: State<'_, Arc<Fleets>>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<i64, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::kill_session(&backend, args, &store, &ssh).await
 }
 
@@ -140,9 +150,12 @@ pub async fn rename_session(
 #[tauri::command]
 pub async fn set_session_friendly_name(
     args: SetFriendlyNameArgs,
+    fleet: Option<String>,
     backend: State<'_, Arc<FleetBackend>>,
+    fleets: State<'_, Arc<Fleets>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<SessionRow, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::set_session_friendly_name(&backend, args, &store).await
 }
 
@@ -181,9 +194,12 @@ pub async fn touch_session_viewed(
 #[tauri::command]
 pub async fn pin_session(
     args: PinSessionArgs,
+    fleet: Option<String>,
     backend: State<'_, Arc<FleetBackend>>,
+    fleets: State<'_, Arc<Fleets>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<SessionRow, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::pin_session(&backend, args, &store).await
 }
 
@@ -219,10 +235,13 @@ pub async fn rewind_conversation(
 #[tauri::command]
 pub async fn send_prompt(
     args: SendPromptArgs,
+    fleet: Option<String>,
     backend: State<'_, Arc<FleetBackend>>,
+    fleets: State<'_, Arc<Fleets>>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     // A key into a standalone session (a dialog answer): re-read just that
     // pane afterwards, as the hub's own `send_prompt` does, so the answered
     // dialog leaves the row now rather than on the next tick.

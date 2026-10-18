@@ -81,7 +81,7 @@ pub const READ_LIMIT: i64 = 500;
 /// The timeline kinds the feed reads. Each maps to one [`What`] in
 /// [`classify`]; anything else on the timeline is not the operator's
 /// business.
-pub const KINDS: [&str; 11] = [
+pub const KINDS: [&str; 13] = [
     "turn_done",
     "task_done",
     "notification",
@@ -93,6 +93,8 @@ pub const KINDS: [&str; 11] = [
     crate::service::auto_restore::EVENT_RESTORED,
     crate::service::auto_restore::EVENT_FAILED,
     crate::service::auto_restore::EVENT_SKIPPED,
+    crate::service::account_switch::EVENT_SWITCHED,
+    crate::service::account_switch::EVENT_SWITCH_FAILED,
 ];
 
 /// The `notification` types that mean a session waits on someone
@@ -121,6 +123,9 @@ pub enum What {
     /// An automatic restore failed or the budget is spent: a person's
     /// Restore is what is left.
     NotRestorable,
+    /// Its login was switched (`true`) or the switch failed (control
+    /// review F9, `account_switch`).
+    AccountSwitch(bool),
 }
 
 impl What {
@@ -134,6 +139,7 @@ impl What {
             What::Lost(_) => "lost",
             What::AutoRestored => "restored",
             What::NotRestorable => "not_restorable",
+            What::AccountSwitch(_) => "account_switch",
         }
     }
 
@@ -150,6 +156,12 @@ impl What {
             What::AutoRestored => "was brought back automatically".into(),
             What::NotRestorable => {
                 "could not be brought back automatically; it needs a Restore".into()
+            }
+            What::AccountSwitch(true) => {
+                "was switched to a login with headroom after its account ran out".into()
+            }
+            What::AccountSwitch(false) => {
+                "could not be switched to another login; it waits at its limit".into()
             }
         }
     }
@@ -183,6 +195,8 @@ pub fn classify(kind: &str, detail: Option<&str>) -> Option<What> {
         "lost" => What::Lost(detail.unwrap_or("missing").to_string()),
         k if k == EVENT_RESTORED => What::AutoRestored,
         k if k == EVENT_FAILED || k == EVENT_SKIPPED => What::NotRestorable,
+        k if k == crate::service::account_switch::EVENT_SWITCHED => What::AccountSwitch(true),
+        k if k == crate::service::account_switch::EVENT_SWITCH_FAILED => What::AccountSwitch(false),
         _ => return None,
     })
 }
@@ -541,6 +555,8 @@ fn conditions(s: &Store, now: i64) -> Vec<Condition> {
     if let Ok(found) = crate::service::autofix::api::list(s, None, false, now) {
         out.extend(autofix_conditions(&found.findings, &found.fixed, now));
     }
+    // Accounts at their limit and signed-out logins (control review F9).
+    out.extend(crate::service::account_feed::conditions(s, &hosts, now));
     for id in s.handed_off_mission_ids().unwrap_or_default() {
         let Ok(Some(mut m)) = s.get_mission(id) else {
             continue;
@@ -555,6 +571,12 @@ fn conditions(s: &Store, now: i64) -> Vec<Condition> {
             out.push(mission_condition(m.id, &m.name, w.reason.as_str()));
         }
     }
+    // F15: what Control handed out that went wrong on its own.
+    out.extend(crate::service::control_sweep::conditions(
+        s,
+        operator_row(s).map(|r| r.id),
+        now,
+    ));
     out
 }
 
@@ -620,10 +642,18 @@ pub async fn run_with(
                 .filter(|c| !state.raised.contains(&c.key))
                 .map(|c| c.text.clone()),
         );
+        // A limit that reset, a login signed in again (control review F9).
+        lines.extend(crate::service::account_feed::cleared_lines(
+            &s,
+            &state.raised,
+            &now_raised,
+        ));
         state.cursor = Some(events.last().map_or(cursor, |e| e.id));
         state.raised = now_raised.into_iter().map(|c| c.key).collect();
         state.sent.retain(|&t| now - t < 3600);
-        let body = build_digest(&lines);
+        let body = build_digest(&lines).map(|d| {
+            crate::service::autonomy::with_header(&d, crate::service::autonomy::position(&s))
+        });
         if body.is_none() {
             // Nothing to say: move past what was read, keep what is raised.
             if state != FeedState::load(&s) {
@@ -634,7 +664,8 @@ pub async fn run_with(
         (op.id, body, state)
     };
     let body = body.expect("checked above");
-    let lines = body.lines().count() - 1;
+    // The digest's `- ` lines: not its mark nor the autonomy line (F3).
+    let lines = body.lines().filter(|l| l.starts_with("- ")).count();
     match exec.queue(op_id, body).await {
         Ok(()) => {
             next.sent.push(now);

@@ -65,6 +65,7 @@ orient     fleet_health list_hosts list_projects list_worktrees list_sessions
            session_activity search
 spawn      new_session new_shell_session new_bg_session spawn_review
            shell_terminals adopt_session propose_host_placement
+           suggest_placement
 steer      send_prompt run_prompt queue_prompt queued_prompts wait_for_session
            capture_session session_transcript session_conversation
            session_conversations session_tool_detail session_summary_since
@@ -97,7 +98,8 @@ admin      add_host remove_host probe_host check_host hide_host merge_host
            revoke_client set_client_trust api_tokens set_secret rename_session
            set_friendly_name list_accounts add_account get_settings set_setting guide
            env_vars
-           quick_replies work_admin ensure_operator operator_status
+           quick_replies work_admin ensure_operator operator_status diagnose
+           control_auto_continue
            update_status update_admin link_peer unlink_peer list_peer_links
 device     pr_shepherd autofix agents mcp_confirms answer_mcp_confirm setting_proposals
            decide_setting_proposals setting_history control_route
@@ -185,6 +187,10 @@ the `host_alias` + `tmux_name` pair. `session_id` (from `list_sessions` /
 
 ## Spawning — `new_session` / `new_shell_session` / `new_bg_session`
 
+- Where: ask `suggest_placement { project_id }` first and start on its first
+  candidate's `host_alias` with its `profile` (none = the host's own login).
+  It leaves out hosts that are down or loaded, signed-out logins and accounts
+  over `accounts.pause_at`, and says why for each.
 - `new_session { host_alias, project_id, name }` runs Claude Code in a tmux
   pane. Add `worktree_id` to land in an existing worktree, or
   `new_worktree: "<branch>"` (+ optional `base_branch`) to create one. Remote
@@ -342,6 +348,8 @@ owner's plan, and `hold` / `done_when` are a person's.
 - `work_link { action: "create", title, parent?: "item:<id>", project_id?, notes? }` — a native task `TASK-<id>`, or a subtask under `parent`. A standalone task needs the desktop or the master token; a per-host token may add subtasks under a task its own sessions work on.
 - `work_link { action: "propose", parent, title, notes?, why? }` — propose a subtask. A person accepts or rejects it; you cannot. At most 10 open proposals per task; a rejected title is not accepted again.
 - `work_link { action: "start", item_id }` on a subtask starts it in its project with the parent ticket's brief followed by the subtask's title and notes.
+- `work_link { action: "wrap_up", session_id }` — "Finish task": ask an idle session linked to work for its structured result; it gets one prompt and answers with the done marker and report. `work { action: "result", item_id | session_id }` reads the result (report, git evidence, completion gate, PR, follow-ups). `work_link { action: "followup", task_id, index? | title? }` turns one of its follow-ups into a sibling task whose start brief opens with what the origin left; asking twice answers the same task.
+- You cannot set a local task to `done` while its completion gate has not passed (a `done_when` line failed or pending, or a subtask open): the refusal names what is in the way. Report instead; a person marks it done.
 - Every `dispatch_task` job shows as an agent subtask under the requester's task and follows the job's state.
 - Your `TaskCreate` / `TaskUpdate` steps are captured on the task page as "per the agent". They never mark anything done — the task's status and evidence do.
 
@@ -459,7 +467,9 @@ in a deleted dir, git lists a stale entry): `repair_session { session_id }`
   in any case, adopt the branch's checkout elsewhere, recreate the branch from
   base once origin confirms it is gone, and respawn the pane.
 - **Confirm gate:** behind `mcp.confirm_destructive`; on `E_CONFIRM_REQUIRED`,
-  retry with the returned `confirm_nonce` once the user approves it.
+  retry with the returned `confirm_nonce` once the user approves it. The
+  fleet operator (Control) does not retry: fleet runs its approved call and
+  tells it in a `[fleet] approved: …` note.
 - **Refusals need a human; do not loop:** `E_BRANCH_CHECKED_OUT` (the branch
   is checked out in the main checkout, or another fleet workspace uses the
   checkout adoption would take), `E_REPO_MISSING` (the main checkout is gone;

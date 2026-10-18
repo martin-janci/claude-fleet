@@ -252,6 +252,10 @@ pub struct WorkItemRow {
     /// and archived in the Work tree until unarchived. `None` = not archived.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<i64>,
+    /// The task whose result this follow-up was made from (migration 199);
+    /// `None` for every item not made from a result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_task_id: Option<i64>,
 }
 
 /// A task's estimate (migration 171): a finite, positive number, rounded to
@@ -620,12 +624,12 @@ pub(super) const ITEM_COLUMNS: &str =
      assignees, iteration, updated_ext, status_changed_at, fetched_at, unavailable_at, \
      unavailable_reason, status_set_by, status_set_at, origin, project_id, notes, task_id, \
      proposal_state, proposed_by, proposal_why, held_at, done_when, due_at, display_key, priority, \
-     labels, estimate, estimate_unit, archived_at";
+     labels, estimate, estimate_unit, archived_at, origin_task_id";
 
 /// How many columns [`ITEM_COLUMNS`] names. A query that appends its own
 /// columns after the list indexes them as `ITEM_COLUMN_COUNT + n` — never a
 /// literal, because a literal silently shifts when a column is added here.
-pub(super) const ITEM_COLUMN_COUNT: usize = 41;
+pub(super) const ITEM_COLUMN_COUNT: usize = 42;
 
 /// A JSON array column as a list; anything unreadable is empty.
 fn json_list(raw: Option<String>) -> Vec<String> {
@@ -676,6 +680,7 @@ pub(super) fn map_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkItemRow> {
         estimate: r.get::<_, Option<f64>>(38)?.and_then(Estimate::new),
         estimate_unit: r.get(39)?,
         archived_at: r.get(40)?,
+        origin_task_id: r.get(41)?,
     })
 }
 

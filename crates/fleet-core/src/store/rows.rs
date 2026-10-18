@@ -1326,6 +1326,26 @@ pub struct HostRow {
     pub mem_low: bool,
     #[serde(default)]
     pub cpu_saturated: bool,
+    /// The host's Claude logins known to be signed out (migration 197,
+    /// `service::login_health`): the host's own (`profile: None`) and its
+    /// login profiles, each with when fleet first saw it signed out. Empty:
+    /// every login is signed in as far as fleet knows. Per-field default:
+    /// an older hub omits it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signed_out_logins: Vec<SignedOutLogin>,
+}
+
+/// One signed-out login on a host ([`HostRow::signed_out_logins`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SignedOutLogin {
+    /// `None` = the host's own login; else the login profile's name.
+    #[serde(default)]
+    pub profile: Option<String>,
+    /// When fleet first saw it signed out (unix seconds).
+    pub since: i64,
+    /// When fleet last looked at it and found it still signed out.
+    #[serde(default)]
+    pub checked_at: i64,
 }
 
 /// One login profile on a host, as `hosts.claude_profiles` stores it.
@@ -1435,7 +1455,7 @@ pub(super) const HOST_COLUMNS: &str =
      harnesses, provision_warning, auth_overrides, claude_profiles, cpu_count, mem_total_kb, \
      boot_at, latency_ms, worktree_kb, worktree_at, agents_on_path, \
      last_reachable_at, last_probe_error_code, last_probe_error, \
-     cpu_pct, mem_pressure, mem_low, cpu_saturated";
+     cpu_pct, mem_pressure, mem_low, cpu_saturated, signed_out_logins";
 
 /// Map a row selected with [`HOST_COLUMNS`].
 pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow> {
@@ -1508,6 +1528,11 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
         mem_pressure: row.get(38)?,
         mem_low: row.get::<_, i64>(39)? != 0,
         cpu_saturated: row.get::<_, i64>(40)? != 0,
+        // Migration 197 (login health). Same lenient read as `harnesses`.
+        signed_out_logins: row
+            .get::<_, Option<String>>(41)?
+            .and_then(|t| serde_json::from_str::<Vec<SignedOutLogin>>(&t).ok())
+            .unwrap_or_default(),
     })
 }
 

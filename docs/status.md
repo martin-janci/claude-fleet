@@ -8,10 +8,9 @@ delete it rather than adding a correction after it.
 
 The Orbit Fleet redesign (plan
 `docs/ux/2026-10-08-orbit-fleet-redesign/transition-plan.md`, parity
-contract `docs/redesign/parity.md`) is landing step by step, and its New
-layout is built but OFF by default: Settings → Appearance → Layout picks
-Classic or New (`ui.layout`, default `classic`, `src/lib/prefs.ts`). New has
-a rail (`src/lib/rail.ts`: Control, Inbox, Sessions, Work, Automation,
+contract `docs/redesign/parity.md`) is the only layout: step 13.1 removed
+the Classic layout and its Classic/New switch (`ui.layout` is forgotten at
+load, `src/lib/prefs.ts`). It has a rail (`src/lib/rail.ts`: Control, Inbox, Sessions, Work, Automation,
 Accounts, Toolkit, Settings), the session inspector, and Get started with a
 first-run tour (10.5). Control is the operator's place: confirmations as
 cards (9.2), "Sent to a session" and "Sent to a mission" receipts (9.3,
@@ -47,7 +46,41 @@ autonomy chip (`AutonomyChip.svelte`, `autonomy.ts`): Ask first · Within
 your brief · Autopilot set `orchestrator.max_level`, `control.auto_continue`
 (and its minutes) and `control.react_to_events` together, through
 `set_fleet_setting`; any other mix, including the shipped defaults, reads
-Custom. Since 2026-10-15 Work → Missions is a Thread room too (boards
+Custom. The hub reads the same position (`service/autonomy.rs`, mirrored
+from `autonomy.ts`; Custom grants what Ask first does), and since the
+2026-10-17 Control review it means something to Control itself:
+
+- **Pre-approval (F2, owner-approved; reverses review round 15 F21 for these
+  cases only).** At Within your brief the operator's `send_prompt`,
+  `queue_prompt`, `run_prompt` and `dispatch_task` into a live session it
+  started or briefed (`Store::is_open_control_handoff`) go without a card;
+  at Autopilot so does a Claude `new_session` (or `dispatch_task`
+  `new_worker`) on a host inside an active mission's live grant — its
+  hosts, expiry and budget, and parallel cap (`start_inside_mission_grant`).
+  Kills, restarts, rewinds, restores, add_project and every `confirm: true`
+  tool always ask. The rule is one pure function,
+  `guard::operator_must_confirm(tool, position, own_handoff, inside_grant)`,
+  with a truth-table test. A pre-approved call writes a
+  `control_pre_approved` event on its target and its receipt carries
+  `approval = pre_approved` (migration 196), drawn "pre-approved" on the
+  chip.
+- **Approvals run the call (F1).** An operator call stopped at
+  `E_CONFIRM_REQUIRED` keeps its request (`confirm_replay.rs`); answering
+  the card — the hub's `answer_mcp_confirm` or the desktop's `mcp_confirm`,
+  both through `PendingConfirms::answer` — runs it once on the hub
+  (Control's own retry reads `RunByFleet`, no second run, no fresh card) and
+  queues `[fleet] approved: <call> → <result>` (or `[fleet] denied: …`) for
+  Control's next idle moment. The nonce keeps its 10-minute TTL. The
+  receipt says `approval = person`.
+- **Control is told (F3).** Its CLAUDE.md has an Autonomy section, and every
+  `[fleet events]` digest's second line names the position and its rule.
+- **The composer queues (F4).** Typed while Control is mid-turn, a line is
+  held as a "queued · cancel" chip and sent when the turn ends
+  (`composer_hold.ts`; Control's chat only, `blockWhileBusy`), and a Stop
+  button beside Send interrupts the turn (Escape into the pane).
+- **Versions (F0.2).** Control's header and `/health` show the hub, desktop
+  and (when one reported) phone versions, flagged when the hub is older
+  than the desktop (`control_versions.ts`). Since 2026-10-15 Work → Missions is a Thread room too (boards
 W1Missions and W2Plan; frontend only; parity row P40): the sidebar's
 Missions tab (`WorkMissions.svelte`) groups the list Needs you / Working /
 Draft and paused / Done this week (a folded Earlier) with a reason, a meter
@@ -191,8 +224,33 @@ click). Automatic switching is landed and OFF by default
 (`accounts.auto_switch`, docs/accounts.md → *Switch automatically*; each
 person can turn it off for their own sessions, migration 187, and ask for
 "continue" after a switch, migration 188; Jev's pick
-is recorded only, `decide.jev.limit_switch`). Not built: a hub vault for
+is recorded only, `decide.jev.limit_switch`); a session parked by a quota
+notification (`quota_auto_resume_*`, read as blocked) is switched too, one
+waiting on a dialog or a form is not. Not built: a hub vault for
 setup-tokens and API keys.
+
+Placement and login health (Control review F5/F6, landed, ON): one rule,
+`service::placement`, picks the host and login for new work: hosts that
+answer, have claude and are under the recovery thresholds (and have run the
+project), logins that are signed in, under `accounts.pause_at` and within
+their daily limit, ranked by account headroom then load. Control calls it
+through `suggest_placement` (its prompt requires it), a mission's run goes
+to the best place inside its grant instead of the grant's first host, a
+start that names no host takes the best host that ran the project, and the
+over-limit refusal names a login on another host when its own host has none.
+Jev's placement stays its own, off-by-default proposal. Signed-out logins
+are kept on the host row (`hosts.signed_out_logins`, migration 197), learnt
+from the usage poll's sources and from headless runs refused for want of a
+login, re-asked hourly; each is one amber card in Control's chat ("Claude
+login expired on <host> (since <day>) · ssh <host> then claude /login") and
+one line in Control's feed. Control's own account (F7, ON:
+`control.switch_at_limit`): `operator_status` reports its login, usage and
+"Paused · limit" / "signed out"; a birth takes the login it had on that host
+or the best one there, not the host's default; at its limit or signed out,
+Control is resumed under another login on its host (same conversation), else
+moved to another host (a new conversation, as the host-down move). The feed
+also reports an account hitting and leaving its limit and account switches
+done or failed.
 
 Single sign-on (docs/hub.md → *Sign in with Keycloak*): a hub with
 `FLEET_HUB_OIDC_ISSUER` set lets a person pair a device by signing in with
@@ -322,8 +380,33 @@ itself, and never a session's own words (names and vocabulary only). The
 cursor and the already-reported host/mission conditions live in the
 `control.feed_state` setting; no migration. The digest is typed as fleet's
 (`prompt_origin::FLEET_PROMPT_MARKS`); the operator's `CLAUDE.md` has a
-*Fleet events* section, which an operator born earlier gets at its next
-birth.
+*Fleet events* section. Since the 2026-10-17 review (F13) the operator's
+`CLAUDE.md`, commands and skill are written at birth (a move is a birth)
+and again before every restart, the panel's and auto-restore's alike
+(`operator::refresh_if_operator` in `sessions::restart_session`), unless the
+host's `.claude/fleet-operator-files.version` already holds this build's
+digest (`operator_files_stamp`); the `.mcp.json` keeps the birth's token.
+Other parts of fleet add their own `## …` section to the prompt with one
+line in `operator::CLAUDE_MD_SECTIONS` (`claude_md_full`).
+
+**The sweep** (review F15, 2026-10-17, ON by default: `control.sweep`,
+`service/control_sweep.rs`) adds `sweep:` lines to that digest, as standing
+conditions reported once per change: a PR of a session Control answers for
+that conflicts with its base or has failing checks (the PR shepherd's
+`condition_of` over `sessions.pr_evidence`, keyed by head commit), and a
+handed-off mission, active and waiting on nobody, that finished no task for
+2 h (its done count is tracked in `control.sweep_state`). Each line says
+`sweep: act` (within the brief: Control fixes or reassigns, every step
+behind the usual confirmation) or `sweep: report` at *Ask first* (and
+Custom, which acts as it). The sweep's and auto-continue's `CLAUDE.md`
+rules live in `service/control_rules.rs`, one of the
+`operator::CLAUDE_MD_SECTIONS`, together with *Check before you tell the
+person* (F14): Control checks `diagnose` (where it runs, its host,
+login and account, why a host cannot be reached, each paired client's kind,
+version and Control features; every finding `checked` or `inferred`)
+before naming a cause or a button. `diagnose` reads rows only; the self
+debug agent's `fleet-diagnostics` (#933) is the deeper log search. The
+sweep's session set is the feed's (no expiry yet, F10).
 
 **Host load** is landed (migration 193): the health sample adds CPU busy
 percent (Linux `/proc/stat` deltas, macOS summed `ps` %CPU), available
@@ -639,6 +722,38 @@ task page's rail and header ([work-graph.md](work-graph.md#priority-labels-and-e
 Not yet: writing them back to a tracker, filtering or sorting by them, the
 Board card and the phone.
 
+Task result, completion gate and follow-ups (spec
+`docs/superpowers/specs/2026-10-13-task-result-handover-design.md`, plans
+`docs/superpowers/plans/2026-10-13-task-result-handover*.md`, mission CF-7
+to CF-20; [work-graph.md](work-graph.md#task-result-gate-and-follow-ups)).
+A result is the newest finished `tasks` row of an item that carries
+`result_json` (D1); `TaskReport` gained `done`, `decisions`, `remaining`
+and `context`, all `#[serde(default)]`, and the run instruction
+(`report::run_instruction`) asks for them. **Finish task** (TicketCard,
+`work_link { wrap_up }`, `service/work/wrapup.rs`) writes a `wrapup`-role
+task with the session as worker and types the run instruction into an idle
+REPL; the Stop hook resolves it as a run (D2). `wrapup` is outside
+`RUN_ROLES` and attempts count per role, so it is never an attempt. The
+gate (`service/work/gate.rs`, D3) is `passed` / `unverified` / `blocked`
+over `done_when` and open native children; `status::set_status` refuses
+an agent's `done` on a local item past it (`E_INVALID_STATE`, naming the
+lines), never a person's. `work { result }` (`service/work/result.rs`,
+`TaskResultView`) joins report, evidence, gate (fenced per scope), the
+worker's PR and follow-ups, worker text fenced for a per-host token. A
+follow-up (`work_link { followup }`, `service/work/followup.rs`,
+`Store::create_followup`) is a sibling local item with
+`work_items.origin_task_id` (migration 199); the same title twice answers
+one item (D4). A follow-up's start brief opens with `OriginFacts` (decisions,
+remaining, context, ≤ 10 commits, ≤ 15 files, PR; no conversation text)
+under `BRIEF_MAX_CHARS` (D5). `TaskResultPanel.svelte` replaces
+`ReportCard` in the conversation for the turn that carries the result and
+shows as *Result* on the task page, above *Last outcome* (D6). Not built
+(the spec's §4, ordered in its §7): results from every dispatch and child
+results to the parent, asking about a result, Create PR / Merge PR buttons,
+one automation policy, lifecycle hooks and skills per task, Jev context
+selection, project memory, sub-agent results, action detection, and the
+phone.
+
 The Jev evaluation (TypeSafe's decision model as an optional reader for
 closed-set decisions) has started with a local language census: `fleet-hub
 census languages` over `service::nl` (cargo feature `nl-detect`, lingua, ON
@@ -763,7 +878,7 @@ C0: the operator is born with the `fleet-brainstorm` skill
 needed): Diverge → Converge → Decide → Plan, each stage closed by the
 person; the plan becomes a task (`work_link create`, the plan in `notes`)
 with proposed subtasks a person accepts. An operator born before C0 gets
-it at its next birth. Not yet: plan rows, decision rows, the worker
+it at its next start or restart (F13). Not yet: plan rows, decision rows, the worker
 catalog copy (C1).
 A3 (part): a start writes its steps to the new session's timeline
 (P-5): `start_spawned` (detail: `tickets::StartSpawned` JSON),
@@ -870,13 +985,20 @@ its `test:<command>` lines as `Bash(<command>)`, everything else denied
 `done_when` reads it unchanged; its cost is booked as `headless_check` on
 the mission. A checkout that moved or is dirty, a command with shell syntax,
 or a host outside the grant takes the session path.
-Control's chat goes on by itself (ON by default, `control.auto_continue`):
-when the agent's reply ends on a `choices` card with an option marked
-`recommended`, the desktop sends it after `control.auto_continue_minutes`
-(10) of nobody answering, with a countdown, *Send now* and *Cancel* above
-the box (`src/lib/auto_continue.ts`). Never a risky option, never a card
-more than a day old, only while the app is open; fleet-mobile does not do
-it.
+Control's chat goes on by itself (ON by default, `control.auto_continue`;
+moved to the fleet by review F17, 2026-10-17): when the agent's reply ends
+on a `choices` card with an option marked `recommended`, the operator's Stop
+hook records it (`service/control_continue.rs`, the `control.auto_continue_state`
+setting, no migration) and loop `control_continue` sends it as a `[fleet]`
+note after `control.auto_continue_minutes` (10) of nobody answering, once
+(the state moves to `sent` before the prompt is queued), with no window
+open. Never at *Ask first*, nor at Custom, which acts as it
+(`autonomy::position`, the chip's own reading), never a risky
+option, never a card more than a day old, never over a newer turn or a busy
+agent. Clients read and settle it with `control_auto_continue` (`status`,
+`cancel`, `take`); the desktop draws the countdown with *Send now* and
+*Cancel* (`AutoContinueBar.svelte`), and typing cancels it. fleet-mobile
+does not draw it yet (F19).
 
 Routines are landed (`service/routines/`, migrations 131 and 139, redesign
 8.5 to 8.10): a saved prompt that starts a session on a cron schedule, on a
@@ -1037,6 +1159,42 @@ person sends; the phone lists the instances with Revoke. Step 6 in part: the
 and comments and new items on trackers other than Jira; not `pr_review`,
 polling other trackers, or restating the built-in agents.
 
+The self debug agent (thread "Self debug agent", 2026-10-17), the hub and
+desktop parts: a fleet agent definition that sets `run.diagnostics` gets
+`fleet-diagnostics` (`service/fleet_agents/diagnostics.rs`,
+`/agent-diagnostics`, a run token like `fleet-records`), a read-only view
+of the fleet: `hub_log` (the hub's log files by window, level, target and
+text), `errors` (`error_reports`, grouped), `timeline` (runs, notable
+session events and error reports on one clock), `fleet` (hub version, host
+health and last probe error, update phases), `host_log` (a host's journal,
+OOM kills, fleet-agent log, a docker container's or the updater's log,
+through fixed quoted scripts), `session` (row, events, pane, transcript)
+and `client_log` (the apps' own log, sent to `POST /log` only while a
+request is open: `service/client_logs.rs`; the desktop polls every 30 s
+under `CLAUDE_FLEET_HUB_REPORTS`). Every answer is redacted with every
+secret the store knows and capped at 48 KiB. A manual run takes a scope
+(`agents {action: run, request, run_scope}`: minutes, host, session,
+component), from Run now's panel or `/debug` in Control. The
+`self-debug` definition ships in `catalog-seed/fleet-agents/self-debug/`
+(findings kept in a `findings` store, a tracker issue only proposed).
+The phone's log ring, Run with focus and findings card are fleet-mobile#233.
+
+Proposals from analysis (same thread, Martin's "Both"): four fleet-own
+action kinds, `work_task`, `fix_session`, `setting` and `session_recover`
+(`fleet_agents/fleet_ops.rs`), run only after a person's Approve through
+the same services as the matching buttons (`settings_review` as
+`Actor::Agent`, which refuses `AiPolicy::Never` and owned keys;
+`restore_host_sessions` / `restart_session`; `start_work`). Only
+`work_task` may be `auto`. An action's `each: <answer array>` fans it out
+per item (`{{item.…}}`, `when` per item, at most 10), so self-debug
+proposes one step per finding. `fleet-diagnostics` adds `analyses` (recent
+fleet-agent answers with their findings) and `proposals` (the last 30
+days of agent actions and what a person did). Three more seeds:
+`proposer` (daily 07:00 and `/propose <focus>`; merges by fingerprint,
+skips pending, done, or rejected in the last 14 days; at most five),
+`simplify` and `refactor` (manual, read a project's checkout, propose a
+task or fix session per finding). No migration.
+
 Session state machine hardening (plan A, #343) is landed: a `working` row
 with no activity for `reconcile.stale_working_secs` turns `idle` with
 `stale_working_at` (migration 065); a StopFailure reads as failed; one
@@ -1152,6 +1310,20 @@ up, dashed down), and Link a hub is the two-step
 hubs trade keys (11.12). The link protocol has no step that waits on the
 other side's approval — its operator mints the code first, and redeeming it
 completes the link — so the wizard never says "waiting for … to sign".
+
+Desktop multi-hub, Phase 1 (design
+`docs/superpowers/specs/2026-10-17-desktop-multi-hub-design.md`): one window
+can show extra hubs beside its launch-time fleet. Settings → Hub & sync →
+Fleets adds (pairing code) and removes them at runtime; each has its own
+token item, event bridge and contract gate (`backend/fleets.rs`), and its
+sessions show in the sidebar under a coloured fleet badge with a fleet
+switcher, with prompt / rename / pin / close / start / copy-attach routed to
+its hub (`FLEET_SCOPED`). No flag: nothing runs until a second hub is added,
+and an existing pairing is hub #1 with no migration. Not yet (Phase 2): the
+session view (conversation, terminal) for an extra fleet's session, a fleet
+picker in New session with org-based defaults, Hosts / Projects / Inbox /
+PRs per fleet, and federation addresses rendered by fleet (needs `fleet_id`
+in the `/events` ready frame).
 
 Application updates: design
 `docs/superpowers/specs/2026-09-28-update-channel-design.md` (with

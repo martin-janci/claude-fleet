@@ -718,6 +718,15 @@ fn sessions_has_pinned_at(conn: &Connection) -> rusqlite::Result<bool> {
 }
 
 /// `already_applied` guard of migration 191.
+fn control_handoffs_has_approval(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('control_handoffs') WHERE name = 'approval'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn hosts_has_agent_hook_port(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'agent_hook_port'",
@@ -744,6 +753,16 @@ fn env_vars_has_person_scope(conn: &Connection) -> rusqlite::Result<bool> {
 fn hosts_has_cpu_pct(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'cpu_busy_ticks'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 197.
+fn hosts_has_signed_out_logins(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'signed_out_logins'",
         [],
         |r| r.get(0),
     )?;
@@ -931,6 +950,15 @@ fn downloads_has_owner(conn: &Connection) -> rusqlite::Result<bool> {
 fn hosts_has_worktree_at(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'worktree_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+fn work_items_has_origin_task_id(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'origin_task_id'",
         [],
         |r| r.get(0),
     )?;
@@ -2192,12 +2220,41 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/194_run_trace.sql"),
         already_applied: None,
     },
+    // The operator's live `ux-agent` token, minted person-less before
+    // `ensure_operator` bound it, becomes the personal owner's. An UPDATE
+    // over a NULL `person_id`, so a re-run changes nothing.
+    Migration {
+        version: 195,
+        sql: include_str!("../../migrations/195_operator_token_person.sql"),
+        already_applied: None,
+    },
+    // How Control's handoff was let through: a person's card or the
+    // autonomy position (review 2026-10-17, F1/F2). An ADD COLUMN, so guarded.
+    Migration {
+        version: 196,
+        sql: include_str!("../../migrations/196_control_handoff_approval.sql"),
+        already_applied: Some(control_handoffs_has_approval),
+    },
+    // Login health: the host's signed-out Claude logins (`hosts`
+    // `signed_out_logins`, control review F6). An ADD COLUMN, so guarded.
+    Migration {
+        version: 197,
+        sql: include_str!("../../migrations/197_host_signed_out_logins.sql"),
+        already_applied: Some(hosts_has_signed_out_logins),
+    },
     // Autofix: `autofix_findings`, one row per episode of a detected broken
     // state (service/autofix). A new table.
     Migration {
-        version: 195,
-        sql: include_str!("../../migrations/195_autofix.sql"),
+        version: 198,
+        sql: include_str!("../../migrations/198_autofix.sql"),
         already_applied: None,
+    },
+    // Task result D4: a follow-up item names the task whose result it came
+    // from (`work_items.origin_task_id`). An ADD COLUMN, guarded on it.
+    Migration {
+        version: 199,
+        sql: include_str!("../../migrations/199_followup_origin.sql"),
+        already_applied: Some(work_items_has_origin_task_id),
     },
 ];
 
@@ -3876,6 +3933,60 @@ mod tests {
         assert!(old.touch_session_viewed(id, stamped + 5).unwrap());
         assert_eq!(row().last_viewed_at, Some(stamped + 5));
         assert_eq!(row().row_version, before + 1, "the trigger watches it");
+    }
+
+    /// 195 on a database stopped at 194: the live, person-less `ux-agent`
+    /// token becomes the personal owner's, and nothing else moves — a
+    /// revoked operator token, another unbound client, a peer link and a
+    /// token already bound to someone else all keep their `person_id`.
+    #[test]
+    fn migration_195_binds_the_live_operator_token_to_the_owner() {
+        let old = Store::open_in_memory().expect("open");
+        let owner = old.personal_owner_id().unwrap().expect("an owner");
+        let ada = old.create_person("ada", None).unwrap().id;
+        old.insert_client_token("ux-agent", &"a".repeat(64), "full")
+            .unwrap();
+        old.revoke_client_token("ux-agent").unwrap();
+        old.insert_client_token("ux-agent", &"b".repeat(64), "full")
+            .unwrap();
+        old.insert_client_token("phone", &"c".repeat(64), "full")
+            .unwrap();
+        old.insert_client_token("peer-hub", &"d".repeat(64), "peer")
+            .unwrap();
+        old.insert_client_token("ada-laptop", &"e".repeat(64), "full")
+            .unwrap();
+        old.set_client_person("ada-laptop", Some(ada)).unwrap();
+        old.conn
+            .execute_batch(
+                "UPDATE client_tokens SET person_id = NULL \
+                   WHERE name IN ('ux-agent', 'phone', 'peer-hub');\
+                 DELETE FROM schema_version WHERE version >= 195;",
+            )
+            .unwrap();
+        old.migrate().expect("195 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let person = |sha: &str| -> Option<i64> {
+            old.conn
+                .query_row(
+                    "SELECT person_id FROM client_tokens WHERE token_sha256 = ?1",
+                    [sha],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            person(&"b".repeat(64)),
+            Some(owner),
+            "the live operator token"
+        );
+        assert_eq!(person(&"a".repeat(64)), None, "a revoked one is history");
+        assert_eq!(person(&"c".repeat(64)), None, "only the operator's token");
+        assert_eq!(person(&"d".repeat(64)), None, "a peer link is no device");
+        assert_eq!(
+            person(&"e".repeat(64)),
+            Some(ada),
+            "a bound token keeps its person"
+        );
     }
 
     /// 193 on a database stopped at 192: every host arrives with its load

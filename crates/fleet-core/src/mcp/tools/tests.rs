@@ -4702,7 +4702,13 @@ fn the_served_definition_budget_stays_bounded() {
     /// client full surface measured 126,178 bytes for 150 tools (841 a
     /// tool, 0 bytes of headroom) and the master 120,969 bytes for 147
     /// tools (822 a tool).
-    const BYTES_PER_TOOL: usize = 851;
+    /// Raised to 862 on 2026-10-17: merging main (its new agents, control
+    /// and diagnostics tools) into the task-result branch (`work { result }`
+    /// with `item_id`, `work_link { wrap_up | followup }` with `index`), each
+    /// inside the old budget, together over it: Buildkite #36 measured the
+    /// client full surface at 129,611 bytes for 152 tools (852 a tool) and
+    /// the master at 123,534 bytes for 149 tools (829 a tool).
+    const BYTES_PER_TOOL: usize = 862;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -8450,11 +8456,22 @@ fn the_operator_must_confirm_starts_kills_and_every_confirm_tool() {
         "run_prompt",
         "queue_prompt",
     ] {
-        assert!(guard::operator_must_confirm(true, tool), "{tool}");
-        assert!(!guard::operator_must_confirm(false, tool), "{tool}");
+        let ask = crate::service::autonomy::Position::Ask;
+        assert!(
+            guard::caller_must_confirm(true, tool, ask, false, false),
+            "{tool}"
+        );
+        assert!(
+            !guard::caller_must_confirm(false, tool, ask, false, false),
+            "{tool}"
+        );
     }
     for tool in ["list_sessions", "work", "discover_lost_sessions"] {
-        assert!(!guard::operator_must_confirm(true, tool), "{tool}");
+        let ask = crate::service::autonomy::Position::Ask;
+        assert!(
+            !guard::caller_must_confirm(true, tool, ask, false, false),
+            "{tool}"
+        );
     }
     let op = client_caller(
         crate::service::operator::OPERATOR_CLIENT_NAME,
@@ -8468,6 +8485,115 @@ fn the_operator_must_confirm_starts_kills_and_every_confirm_tool() {
         TokenMode::Full
     )
     .is_operator());
+}
+
+/// Review 2026-10-17, F2: at "Within your brief" the operator's prompt into
+/// a session it started goes without a card, is audited on that session and
+/// its receipt says pre-approved; into a session that is not its handoff it
+/// still asks, and at Ask first everything asks.
+#[tokio::test]
+async fn within_the_brief_the_operators_prompt_to_its_own_session_is_pre_approved() {
+    let (s, _, on_b) = two_host_store();
+    let stranger = s
+        .upsert_session("dev-c", "hostb", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.conn_ref()
+        .execute(
+            "UPDATE sessions SET origin = 'operator' WHERE id = ?1",
+            [on_b],
+        )
+        .unwrap();
+    let t = guarded_tools(s, true);
+    let queue = |id: i64| {
+        serde_json::from_value::<QueuePromptParams>(serde_json::json!({
+            "session_id": id, "prompt": "Work on PD-1",
+        }))
+        .unwrap()
+    };
+    // Ask first (a fresh store): a card.
+    let asked = t
+        .queue_prompt(Extension(operator()), Parameters(queue(on_b)))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
+    {
+        let st = t.store.lock().unwrap();
+        st.set_setting(crate::service::settings::ORCHESTRATOR_MAX_LEVEL, "2")
+            .unwrap();
+        st.set_setting(crate::service::settings::CONTROL_AUTO_CONTINUE, "true")
+            .unwrap();
+        assert_eq!(
+            crate::service::autonomy::position(&st),
+            crate::service::autonomy::Position::Brief
+        );
+    }
+    let (out, approval) =
+        guard::tracking_approval(t.queue_prompt(Extension(operator()), Parameters(queue(on_b))))
+            .await;
+    if let Err(e) = &out {
+        assert!(
+            !e.message.starts_with("E_CONFIRM_REQUIRED"),
+            "{}",
+            e.message
+        );
+    }
+    assert_eq!(approval, Some(crate::store::APPROVAL_PRE_APPROVED));
+    let events = t
+        .store
+        .lock()
+        .unwrap()
+        .list_session_events(on_b, 20)
+        .unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind == super::support::EVENT_PRE_APPROVED),
+        "a pre-approved call is audited on its target"
+    );
+    let other = t
+        .queue_prompt(Extension(operator()), Parameters(queue(stranger)))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&other);
+}
+
+/// Review 2026-10-17, F1: the operator is told to wait, not to retry, and
+/// its own retry after fleet took the approval neither runs it nor gets a
+/// fresh card.
+#[tokio::test]
+async fn an_approval_fleet_runs_is_not_run_again_by_the_operators_retry() {
+    let (s, _, on_b) = two_host_store();
+    let t = guarded_tools(s, true);
+    let queue = |nonce: Option<&str>| {
+        serde_json::from_value::<QueuePromptParams>(serde_json::json!({
+            "session_id": on_b, "prompt": "Work on PD-1", "confirm_nonce": nonce,
+        }))
+        .unwrap()
+    };
+    let asked = t
+        .queue_prompt(Extension(operator()), Parameters(queue(None)))
+        .await
+        .unwrap_err();
+    assert!(asked.message.contains("Do not retry"), "{}", asked.message);
+    let nonce = confirm_nonce_of(&asked);
+    let ran = Arc::new(Mutex::new(Vec::new()));
+    let log = ran.clone();
+    assert!(t.guards.confirms.attach_replay(
+        &nonce,
+        Box::new(move |approved| Box::pin(async move { log.lock().unwrap().push(approved) })),
+    ));
+    assert!(t.guards.confirms.answer(&nonce, true));
+    let retry = t
+        .queue_prompt(Extension(operator()), Parameters(queue(Some(&nonce))))
+        .await
+        .unwrap_err();
+    assert!(
+        retry.message.starts_with("E_INVALID_STATE"),
+        "{}",
+        retry.message
+    );
+    assert!(retry.message.contains("fleet runs it"), "{}", retry.message);
+    assert!(t.guards.confirms.pending().is_empty(), "no fresh card");
 }
 
 fn guarded_tools(s: Store, approver: bool) -> FleetTools {
@@ -11514,7 +11640,8 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     ("wait_for_session", &["Read"]),
     ("wait_for_task", &["Read"]),
     ("work", &["Read"]),
-    ("work_link", &["Drive", "Own"]),
+    // `followup` reads its origin task under `Read` (`task_visible_at`).
+    ("work_link", &["Drive", "Own", "Read"]),
     // repo.rs — every `repo_*` read is `watch` on the session whose
     // worktree it opens.
     //
@@ -12215,6 +12342,11 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     // The tree's own tasks, counted (persona dashboards).
     ("work", "stats", &["ViewScope"]),
     ("work", "task", &["ViewScope"]),
+    // One item's task result (design 2026-10-13). `{ session_id }` reads one
+    // named session's item and is gated per row (`Read`); in both forms the
+    // worker session and its PR are shown only when the caller's whole view
+    // sees that session (`hide_unseen_worker`).
+    ("work", "result", &["Read", "ViewScope"]),
     ("work", "review", &["ViewScope"]),
     ("work", "context", &["ViewScope"]),
     ("work", "resume_plan", &["ViewScope"]),
@@ -12289,6 +12421,12 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     ("work_link", "decide_batch", &["Drive"]),
     // Types a prompt into the pane and waits for the reply.
     ("work_link", "handover", &["Drive"]),
+    // Finish task: the same pane write as `handover` (design 2026-10-13 D2).
+    ("work_link", "wrap_up", &["Drive"]),
+    // A follow-up is made from its task's text: the task is read under
+    // `task_visible_at`, as `work { result }` serves it, and the source item
+    // is fenced by the org scope inside `followup::create`.
+    ("work_link", "followup", &["Read"]),
     // Names new work ON a session: a per-session work-graph write, and
     // `share.ts` already says `name_session_work: 'drive'`.
     ("work_link", "name", &["Drive"]),
@@ -12438,6 +12576,14 @@ const VIEW_SCOPE_PROOF: &[(&str, &str, &str, &str)] = &[
         "task",
         "every_view_scope_page_hides_another_persons_live_session",
         "every_view_scope_page_hides_another_persons_ended_link",
+    ),
+    // A result is its task's text, fenced as every task's is
+    // (`task_visible_at`); its own fixture carries the reported task.
+    (
+        "work",
+        "result",
+        "work_result_hides_another_persons_live_result",
+        "work_result_hides_an_ended_workers_result",
     ),
     (
         "work",
@@ -13315,8 +13461,10 @@ fn the_reaches_the_desktop_decided_are_the_ones_the_hub_enforces() {
     // `tidy_apply` is `own`, because it can safe-kill — and
     // `safe_kill_session` is `own`, so the batch form cannot be narrower
     // than the single-session one. It lives inside `work_link`, which also
-    // drives, hence both reaches on that row.
-    assert_eq!(reach_of("work_link"), vec!["Drive", "Own"]);
+    // drives, hence both reaches on that row. `Read` is `followup`'s check
+    // on its origin TASK (`task_visible_at`), not on a session, so it widens
+    // no session tier the desktop decided.
+    assert_eq!(reach_of("work_link"), vec!["Drive", "Own", "Read"]);
     assert_eq!(reach_of("safe_kill_session"), vec!["Own"]);
     // `restore_host_sessions` is `recreate_session` in bulk, and it reaches
     // the primitive at the SERVICE layer — so both rows have to say `own`,
@@ -17241,6 +17389,90 @@ async fn a_job_mirrors_own_page_hides_the_dispatch_from_a_stranger() {
         bobs_parent.contains(crate::service::work::view::JOB_TITLE_WITHHELD),
         "the mirror's row survives for Bob under the withheld label: {bobs_parent}"
     );
+}
+
+/// What Ada's session reported when it finished her item's task.
+const ADA_RESULT_SUMMARY: &str = "ada's wrap-up: the retry loop is fixed";
+
+/// [`view_pages_fixture`] plus a finished, reported task at Ada's item,
+/// worked by her live session: what `work { result }` answers.
+fn result_pages_fixture() -> (ViewPages, i64) {
+    let f = view_pages_fixture();
+    let t = crate::service::tasks::create_task(&f.store, None, Some(f.live), "wrap up").unwrap();
+    f.store.set_task_run(t.id, f.item, 1, "wrapup").unwrap();
+    f.store.finish_task(t.id, "done", Some("r"), None).unwrap();
+    f.store
+        .set_task_report(
+            t.id,
+            &crate::store::TaskReport {
+                summary: ADA_RESULT_SUMMARY.into(),
+                outcome: "done".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    (f, t.id)
+}
+
+/// **`work { result }`, the LIVE half** (owner, 2026-10-15: the person
+/// view). A result is its task's text, what Ada's worker wrote, so Bob, who
+/// sees her item but not her session, reads `null`, the answer for an item
+/// with no result: not a refusal, and none of the report. Ada reads it.
+#[tokio::test]
+async fn work_result_hides_another_persons_live_result() {
+    let (f, task) = result_pages_fixture();
+    let (ada, bob, item) = (f.ada, f.bob, f.item);
+    let t = test_tools(f.store);
+    let args = serde_json::json!({ "action": "result", "item_id": item });
+
+    let adas = sweep_text(&t, device_of(ada, ada), "work", &args).await;
+    assert!(
+        adas.contains(ADA_RESULT_SUMMARY) && adas.contains(&format!("\"task_id\":{task}")),
+        "the owner must still read her own result: {adas}"
+    );
+    let bobs = sweep_text(&t, device_of(bob, ada), "work", &args).await;
+    for secret in ADA_SECRETS.iter().chain([&ADA_RESULT_SUMMARY]) {
+        assert!(
+            !bobs.contains(secret),
+            "work {{ result }} handed Bob {secret}: {bobs}"
+        );
+    }
+    assert_eq!(
+        bobs.trim(),
+        "null",
+        "an empty answer, not a refusal: {bobs}"
+    );
+}
+
+/// **`work { result }`, the ENDED half.** Once the worker session is
+/// reaped, migration 101 detaches its task, and a detached task's text is
+/// the hub's alone (`task_visible_in_scope_pure`): no person reads the
+/// result, the owner included, exactly as a job's result. Bob's answer is
+/// still `null`, not a refusal.
+#[tokio::test]
+async fn work_result_hides_an_ended_workers_result() {
+    let (f, task) = result_pages_fixture();
+    let (ada, bob, item, live) = (f.ada, f.bob, f.item, f.live);
+    f.store.delete_session(live).unwrap();
+    assert!(
+        f.store
+            .get_task(task)
+            .unwrap()
+            .unwrap()
+            .detached_at
+            .is_some(),
+        "the reap must detach the task, or this proves nothing"
+    );
+    let t = test_tools(f.store);
+    let args = serde_json::json!({ "action": "result", "item_id": item });
+    for who in [device_of(bob, ada), device_of(ada, ada)] {
+        let out = sweep_text(&t, who, "work", &args).await;
+        assert!(
+            !out.contains(ADA_RESULT_SUMMARY),
+            "a detached result leaked: {out}"
+        );
+        assert_eq!(out.trim(), "null", "an empty answer, not a refusal: {out}");
+    }
 }
 
 /// **The ENDED half of every `ViewScope` row's proof** (see

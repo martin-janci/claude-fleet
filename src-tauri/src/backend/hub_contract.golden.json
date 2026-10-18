@@ -98,6 +98,7 @@
       "tool"
     ],
     "ControlHandoffRow": [
+      "approval",
       "at",
       "id",
       "item",

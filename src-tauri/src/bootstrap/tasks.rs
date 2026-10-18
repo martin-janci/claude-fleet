@@ -14,7 +14,9 @@
 
 use crate::app_events::AppHandleEventBus;
 use crate::backend::connection::{ConnectionReporter, ConnectionView, HubConnectionStatus};
-use crate::backend::events::{spawn_event_bridge, EventBridge, HubResync, HubSse, RealDelay};
+use crate::backend::events::{
+    spawn_event_bridge, spawn_extra_fleet_bridge, EventBridge, HubResync, HubSse, RealDelay,
+};
 use crate::backend::remote::HubBackend;
 use crate::backend::report::{spawn_report_flusher, ReportFlusher};
 use crate::backend::startup::FleetTasks;
@@ -232,17 +234,81 @@ impl FleetTasks for RealFleetTasks {
     }
 
     /// Flush `fleet_core::logging::report_ring()` to the hub's `POST
-    /// /report`. The only other background task a hub client runs;
-    /// `start_background_tasks` gates it behind `CLAUDE_FLEET_HUB_REPORTS`.
+    /// /report`, and send this app's log to `POST /log` when the self debug
+    /// agent asks for it (`fleet_core::service::client_logs`). The only
+    /// other background tasks a hub client runs; `start_background_tasks`
+    /// gates both behind `CLAUDE_FLEET_HUB_REPORTS`.
     fn start_report_flusher(&self) {
         let Some(cfg) = self.remote.clone() else {
             tracing::error!("[report] asked to flush reports with no hub configured");
             return;
         };
         let transport = HubBackend::new(cfg.clone()).transport();
+        let poller = fleet_core::service::client_logs::LogPoller {
+            url: format!("{}/log", cfg.base_url),
+            token: cfg.token.clone(),
+            app: format!("desktop {}", fleet_core::app_version::get()),
+            transport: Arc::clone(&transport),
+            dir: fleet_core::logging::active_log_dir().map(std::path::Path::to_path_buf),
+        };
+        fleet_core::rt::spawn(poller.run(self.shutdown.clone()));
         spawn_report_flusher(
             ReportFlusher::new(cfg, transport, fleet_core::logging::report_ring()),
             self.shutdown.clone(),
         );
+    }
+}
+
+/// The real [`FleetLinks`](crate::backend::fleets::FleetLinks): one event
+/// bridge per extra fleet (multi-hub design D4), built exactly like the
+/// primary's in [`RealFleetTasks::start_event_bridge`] — its own SSE stream,
+/// its own resync client, its own status — but writing into that fleet's
+/// tagged sink and stopped by that fleet's own cancellation token.
+///
+/// Not part of [`FleetTasks`]: an extra fleet is never this process's to own,
+/// so whether to follow it does not depend on the launch-time `Backend`.
+pub(crate) struct ExtraFleetLinks;
+
+impl crate::backend::fleets::FleetLinks for ExtraFleetLinks {
+    fn follow(
+        &self,
+        fleet: &str,
+        cfg: RemoteConfig,
+        hub: Arc<HubBackend>,
+        sink: Arc<dyn crate::backend::events::RemoteEventSink>,
+        status: Arc<HubConnectionStatus>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) {
+        tracing::info!(fleet, url = %cfg.base_url, "[fleets] following an extra fleet");
+        let bridge = EventBridge::new(
+            Arc::new(HubSse::new(cfg)),
+            Arc::clone(&sink),
+            Arc::new(HubResync::new(hub, sink)),
+            Arc::new(RealDelay),
+            cancel,
+        )
+        .reporting_to(Arc::clone(&status) as Arc<dyn ConnectionReporter>)
+        .waking_on(status.retry_handle());
+        spawn_extra_fleet_bridge(bridge);
+    }
+}
+
+/// The real [`FleetTokens`](crate::backend::fleets::FleetTokens): each extra
+/// fleet's own OS secret-store item (`hub-client-token.<id>`), read with the
+/// same bound as the primary's so a locked keychain marks that fleet unusable
+/// instead of hanging the thread that asked.
+pub(crate) struct OsFleetTokens {
+    pub data_dir: std::path::PathBuf,
+}
+
+impl crate::backend::fleets::FleetTokens for OsFleetTokens {
+    fn for_fleet(&self, fleet: &str) -> Arc<dyn crate::backend::TokenStore> {
+        Arc::new(crate::backend::token_store::BoundedTokenStore::new(
+            Arc::new(crate::backend::OsTokenStore::for_fleet(
+                self.data_dir.clone(),
+                fleet,
+            )),
+            crate::backend::token_store::KEYCHAIN_WAIT,
+        ))
     }
 }

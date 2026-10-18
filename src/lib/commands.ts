@@ -164,7 +164,7 @@ export function paletteCommands(ctx: CommandContext): PaletteCommand[] {
     { id: 'app.work-view', label: 'Switch Sessions and Work', section: 'Commands', description: 'Left list',
       synonyms: ['work', 'sessions', 'switch'], shortcut: 'work-view' },
     { id: 'app.theme', label: `Theme: ${themeAfter(get(theme))}`, section: 'Commands',
-      description: `Now ${get(theme)}`, synonyms: ['theme', 'dark', 'light', 'auto', 'appearance'] },
+      description: `Now ${get(theme)}`, synonyms: ['theme', 'dark', 'light', 'auto', 'sun', 'night', 'appearance'] },
     { id: 'app.shortcuts', label: 'Keyboard shortcuts', section: 'Commands', description: 'Every chord',
       synonyms: ['keys', 'keyboard', 'shortcuts', 'help'], shortcut: 'shortcut-sheet' },
     // Pause all missions pauses each active mission, as before; Pause all
@@ -192,7 +192,7 @@ export function paletteCommands(ctx: CommandContext): PaletteCommand[] {
   return out;
 }
 
-const THEME_NEXT: Record<Theme, Theme> = { auto: 'light', light: 'dark', dark: 'auto' };
+const THEME_NEXT: Record<Theme, Theme> = { sun: 'auto', auto: 'light', light: 'dark', dark: 'sun' };
 /** The theme the command switches to: the sidebar toggle's order. */
 function themeAfter(t: Theme): Theme {
   return THEME_NEXT[t];

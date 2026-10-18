@@ -699,6 +699,7 @@ mod tests {
                 estimate_unit: None,
                 archived_at: None,
                 display_key: None,
+                origin_task_id: None,
             },
             org_id: None,
             from: None,

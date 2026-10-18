@@ -19,4 +19,4 @@ CREATE TABLE IF NOT EXISTS autofix_findings (
 CREATE UNIQUE INDEX IF NOT EXISTS autofix_findings_live
   ON autofix_findings(kind, subject)
   WHERE state IN ('open', 'verifying', 'apply_failed', 'dismissed');
-INSERT OR IGNORE INTO schema_version (version) VALUES (195);
+INSERT OR IGNORE INTO schema_version (version) VALUES (198);

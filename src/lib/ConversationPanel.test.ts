@@ -7,6 +7,10 @@ vi.mock('./conversation', async () => {
   const actual = await vi.importActual<typeof import('./conversation')>('./conversation');
   return { ...actual, sessionConversation: vi.fn(), sessionActivity: vi.fn(), listConversations: vi.fn(), toolDetail: vi.fn() };
 });
+vi.mock('./task_result', async () => ({
+  ...(await vi.importActual<typeof import('./task_result')>('./task_result')),
+  workResult: vi.fn(async () => ({ ok: true, value: null })),
+}));
 vi.mock('./clipboard', async () => {
   const actual = await vi.importActual<typeof import('./clipboard')>('./clipboard');
   return { ...actual, copyText: vi.fn() };
@@ -210,6 +214,55 @@ describe('ConversationPanel', () => {
     await fireEvent.click(screen.getByTestId('rich-report-followup'));
     await settle();
     expect((screen.getByTestId('conv-composer-input') as HTMLTextAreaElement).value).toBe('Open a PR');
+  });
+
+  it('draws the report its work’s result was read from as the result panel, for linked work only', async () => {
+    const { workResult } = await import('./task_result');
+    const mockedResult = vi.mocked(workResult);
+    mockedResult.mockClear();
+    const text = 'Finished.\n\nFLEET_TASK_DONE_ab12\n```json\n{"summary": "Wrote the guide", "outcome": "done", "followups": ["Open a PR"]}\n```';
+    mockedConv.mockReturnValue(ok(conv({ turns: [{ prompt: 'go', at: null, ended_at: null, items: [{ kind: 'text', text }] }] })));
+    // Unlinked: nothing is asked, the report stays a card.
+    const first = render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    expect(mockedResult).not.toHaveBeenCalled();
+    expect(screen.getByTestId('rich-report-outcome')).toBeTruthy();
+    first.unmount();
+
+    mockedResult.mockResolvedValue({
+      ok: true,
+      value: {
+        task_id: 1,
+        item_id: 4,
+        session_id: 1,
+        role: 'wrapup',
+        at: 0,
+        marker: 'FLEET_TASK_DONE_ab12',
+        report: {
+          summary: 'Wrote the guide',
+          outcome: 'done',
+          done: [],
+          decisions: [],
+          remaining: [],
+          context: [],
+          tests_run: [],
+          warnings: [],
+          blockers: [],
+          followups: ['Open a PR'],
+          confidence: null,
+        },
+        evidence: null,
+        prs: [],
+        gate: { state: 'passed', checks: [], open_children: [] },
+        followups: [{ text: 'Open a PR', item_id: null }],
+      },
+    });
+    const linked = session({ work: { link_id: 3, item_id: 4, key: null, title: 'The guide', source: 'manual' } });
+    render(ConversationPanel, { session: linked, visible: true });
+    await settle();
+    expect(mockedResult).toHaveBeenCalledWith({ sessionId: linked.id });
+    expect(screen.getByTestId('task-result-headline').textContent).toContain('Task completed');
+    expect(screen.queryByTestId('rich-report-outcome')).toBeNull();
   });
 
   it('shows "No conversation yet" for E_NO_TRANSCRIPT', async () => {
@@ -789,6 +842,9 @@ describe('ConversationPanel composer', () => {
     expect(box.value).toBe('line one');
   });
 
+  // Review 2026-10-17, F4: the gate still never pastes a second prompt
+  // behind one Claude has not taken, but it holds the line instead of
+  // refusing it: a "queued · cancel" chip that goes when the turn ends.
   it('a gated composer holds a second prompt until Claude has taken the first', async () => {
     mockedConv.mockReturnValue(ok(conv()));
     mockedSend.mockResolvedValue({ ok: true, value: undefined });
@@ -803,11 +859,68 @@ describe('ConversationPanel composer', () => {
     await settle();
     await settle();
     await fireEvent.input(box, { target: { value: 'two' } });
-    expect(button.disabled).toBe(true);
+    expect(button.getAttribute('aria-label')).toBe('Queue prompt');
     await fireEvent.keyDown(box, { key: 'Enter' });
     await settle();
     expect(mockedSend).toHaveBeenCalledTimes(1);
-    expect(box.value).toBe('two');
+    expect(box.value).toBe('');
+    expect(screen.getByTestId('conv-held').textContent).toContain('two');
+    expect(screen.getByTestId('conv-held').textContent).toContain('queued');
+  });
+
+  it('a line held while Control works goes out when the turn ends', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    const row = session({ claude_status: 'working' });
+    sessions.set([row]);
+    const view = render(ConversationPanel, { session: row, visible: true, blockWhileBusy: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'while you work' } });
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    await settle();
+    expect(mockedSend).not.toHaveBeenCalled();
+    expect(screen.getByTestId('conv-held')).toBeTruthy();
+    const idle: SessionRow = { ...row, claude_status: 'idle' };
+    sessions.set([idle]);
+    await view.rerender({ session: idle, visible: true, blockWhileBusy: true });
+    await settle();
+    await settle();
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'while you work');
+    expect(screen.queryByTestId('conv-held')).toBeNull();
+  });
+
+  it('cancel takes a held line back into the box', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    const row = session({ claude_status: 'working' });
+    sessions.set([row]);
+    render(ConversationPanel, { session: row, visible: true, blockWhileBusy: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'never mind' } });
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    await settle();
+    await fireEvent.click(screen.getByTestId('conv-held-cancel'));
+    await settle();
+    expect(screen.queryByTestId('conv-held')).toBeNull();
+    expect(box.value).toBe('never mind');
+    expect(mockedSend).not.toHaveBeenCalled();
+  });
+
+  it('Stop interrupts the running turn with Escape, only on a gated composer', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    const row = session({ claude_status: 'working' });
+    sessions.set([row]);
+    const first = render(ConversationPanel, { session: row, visible: true });
+    await settle();
+    expect(screen.queryByTestId('conv-composer-stop')).toBeNull();
+    first.unmount();
+    render(ConversationPanel, { session: row, visible: true, blockWhileBusy: true });
+    await settle();
+    await fireEvent.click(screen.getByTestId('conv-composer-stop'));
+    await settle();
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '', { keys: 'Escape' });
   });
 
   it('a failed send stays in the thread with the reason, and Retry sends it again', async () => {
