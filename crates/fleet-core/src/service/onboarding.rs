@@ -252,6 +252,7 @@ mod tests {
             mem_pressure: None,
             mem_low: false,
             cpu_saturated: false,
+            signed_out_logins: Vec::new(),
             harnesses: None,
         }
     }

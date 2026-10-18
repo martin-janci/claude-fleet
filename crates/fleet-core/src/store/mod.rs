@@ -13,6 +13,7 @@ mod account_usage_snapshots;
 mod admin_events;
 mod agent_records;
 mod agents;
+mod autofix;
 mod aux_usage;
 pub mod backup;
 mod bench_work_link;
@@ -115,6 +116,7 @@ pub use agents::{
     NewAgentRule, AGENT_ACTION_STATES, AGENT_BINDINGS_MAX_CHARS, AGENT_CONFIG_MAX_CHARS,
     AGENT_DEFINITION_MAX_CHARS, AGENT_JOB_STATES, AGENT_KINDS, AGENT_LEVELS, AGENT_SCOPE_MAX_CHARS,
 };
+pub use autofix::{AutofixRow, NewAutofixFinding, AUTOFIX_LIVE};
 pub use aux_usage::{
     AuxUsageRow, NewAuxUsage, AUX_ORIGINS, AUX_ORIGIN_BRIEF, AUX_ORIGIN_COMMIT_MESSAGE,
     AUX_ORIGIN_CONTEXT_HELP, AUX_ORIGIN_HEADLESS_CHECK, AUX_ORIGIN_MORNING_BRIEF,
@@ -130,8 +132,8 @@ pub use clients::{
     LINE_SEPARATORS, MAX_CLIENT_NAME_LEN,
 };
 pub use control_handoffs::{
-    handoff_preview, ControlHandoffRow, FeedEventRow, HandoffItem, NewHandoff, HANDOFFS_KEEP,
-    HANDOFF_PREVIEW_MAX,
+    handoff_preview, ControlHandoffRow, FeedEventRow, HandoffItem, NewHandoff, APPROVAL_PERSON,
+    APPROVAL_PRE_APPROVED, HANDOFFS_KEEP, HANDOFF_PREVIEW_MAX,
 };
 pub use control_tokens::{ApiScope, ControlTokenRow, NewControlToken};
 pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};

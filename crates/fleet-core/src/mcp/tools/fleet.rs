@@ -310,6 +310,28 @@ impl FleetTools {
         )
     }
 
+    #[tool(description = "Where new work should run: every host and Claude \
+        login that can take it, best first, and what was left out and why. \
+        Filters hosts that answer, have claude and are under the recovery \
+        thresholds (memory, pressure, CPU), and, with project_id, have run \
+        that project; logins that are signed in, under accounts.pause_at and \
+        within their daily limit. Ranks by account headroom, then idle CPU \
+        and free memory. hosts limits it to those (a mission's grant), \
+        profile to one login (\"\" = each host's own). Returns \
+        {pause_at_pct, candidates:[{host_alias, profile?, account_uuid, \
+        email?, used_pct?, cpu_pct?, mem_avail_pct?, score, reasons}], \
+        excluded:[{host_alias, profile?, host, why}], note?}. Read-only; \
+        never fetches. Errors: E_INVALID.")]
+    pub(super) async fn suggest_placement(
+        &self,
+        Parameters(p): Parameters<crate::service::placement::SuggestArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("suggest_placement", "");
+        let now = crate::store::now_unix();
+        let s = crate::ipc_error::lock(self.reader()).map_err(to_mcp_err)?;
+        ok_json_compact(&crate::service::placement::suggest(&s, &p, now).map_err(to_mcp_err)?)
+    }
+
     #[tool(description = "Jev's host for a new session of project_id: \
         {host_alias, confidence_pct, run_id}, or null (off, one candidate, \
         unsure). E_FORBIDDEN for an org-bound client.")]
@@ -1044,7 +1066,9 @@ impl FleetTools {
     ) -> Result<CallToolResult, McpError> {
         audit("answer_mcp_confirm", &format!("approved={}", p.approved));
         refuse_operator_answer(&caller)?;
-        let answered = self.guards.confirms.resolve(&p.nonce, p.approved);
+        // `answer`, not `resolve`: an operator call waiting here runs on
+        // approval and Control is told either way (review 2026-10-17, F1).
+        let answered = self.guards.confirms.answer(&p.nonce, p.approved);
         if answered {
             if let Ok(s) = lock(&self.store) {
                 s.bus_confirm_changed();

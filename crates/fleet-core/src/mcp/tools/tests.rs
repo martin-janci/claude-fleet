@@ -2845,6 +2845,7 @@ fn router_sum_serves_every_tool() {
         include_str!("devices.rs"),
         include_str!("prs.rs"),
         include_str!("pr_shepherd.rs"),
+        include_str!("autofix.rs"),
         include_str!("agents.rs"),
         include_str!("api_tokens.rs"),
         include_str!("add_account.rs"),
@@ -8455,11 +8456,22 @@ fn the_operator_must_confirm_starts_kills_and_every_confirm_tool() {
         "run_prompt",
         "queue_prompt",
     ] {
-        assert!(guard::operator_must_confirm(true, tool), "{tool}");
-        assert!(!guard::operator_must_confirm(false, tool), "{tool}");
+        let ask = crate::service::autonomy::Position::Ask;
+        assert!(
+            guard::caller_must_confirm(true, tool, ask, false, false),
+            "{tool}"
+        );
+        assert!(
+            !guard::caller_must_confirm(false, tool, ask, false, false),
+            "{tool}"
+        );
     }
     for tool in ["list_sessions", "work", "discover_lost_sessions"] {
-        assert!(!guard::operator_must_confirm(true, tool), "{tool}");
+        let ask = crate::service::autonomy::Position::Ask;
+        assert!(
+            !guard::caller_must_confirm(true, tool, ask, false, false),
+            "{tool}"
+        );
     }
     let op = client_caller(
         crate::service::operator::OPERATOR_CLIENT_NAME,
@@ -8473,6 +8485,115 @@ fn the_operator_must_confirm_starts_kills_and_every_confirm_tool() {
         TokenMode::Full
     )
     .is_operator());
+}
+
+/// Review 2026-10-17, F2: at "Within your brief" the operator's prompt into
+/// a session it started goes without a card, is audited on that session and
+/// its receipt says pre-approved; into a session that is not its handoff it
+/// still asks, and at Ask first everything asks.
+#[tokio::test]
+async fn within_the_brief_the_operators_prompt_to_its_own_session_is_pre_approved() {
+    let (s, _, on_b) = two_host_store();
+    let stranger = s
+        .upsert_session("dev-c", "hostb", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.conn_ref()
+        .execute(
+            "UPDATE sessions SET origin = 'operator' WHERE id = ?1",
+            [on_b],
+        )
+        .unwrap();
+    let t = guarded_tools(s, true);
+    let queue = |id: i64| {
+        serde_json::from_value::<QueuePromptParams>(serde_json::json!({
+            "session_id": id, "prompt": "Work on PD-1",
+        }))
+        .unwrap()
+    };
+    // Ask first (a fresh store): a card.
+    let asked = t
+        .queue_prompt(Extension(operator()), Parameters(queue(on_b)))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
+    {
+        let st = t.store.lock().unwrap();
+        st.set_setting(crate::service::settings::ORCHESTRATOR_MAX_LEVEL, "2")
+            .unwrap();
+        st.set_setting(crate::service::settings::CONTROL_AUTO_CONTINUE, "true")
+            .unwrap();
+        assert_eq!(
+            crate::service::autonomy::position(&st),
+            crate::service::autonomy::Position::Brief
+        );
+    }
+    let (out, approval) =
+        guard::tracking_approval(t.queue_prompt(Extension(operator()), Parameters(queue(on_b))))
+            .await;
+    if let Err(e) = &out {
+        assert!(
+            !e.message.starts_with("E_CONFIRM_REQUIRED"),
+            "{}",
+            e.message
+        );
+    }
+    assert_eq!(approval, Some(crate::store::APPROVAL_PRE_APPROVED));
+    let events = t
+        .store
+        .lock()
+        .unwrap()
+        .list_session_events(on_b, 20)
+        .unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind == super::support::EVENT_PRE_APPROVED),
+        "a pre-approved call is audited on its target"
+    );
+    let other = t
+        .queue_prompt(Extension(operator()), Parameters(queue(stranger)))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&other);
+}
+
+/// Review 2026-10-17, F1: the operator is told to wait, not to retry, and
+/// its own retry after fleet took the approval neither runs it nor gets a
+/// fresh card.
+#[tokio::test]
+async fn an_approval_fleet_runs_is_not_run_again_by_the_operators_retry() {
+    let (s, _, on_b) = two_host_store();
+    let t = guarded_tools(s, true);
+    let queue = |nonce: Option<&str>| {
+        serde_json::from_value::<QueuePromptParams>(serde_json::json!({
+            "session_id": on_b, "prompt": "Work on PD-1", "confirm_nonce": nonce,
+        }))
+        .unwrap()
+    };
+    let asked = t
+        .queue_prompt(Extension(operator()), Parameters(queue(None)))
+        .await
+        .unwrap_err();
+    assert!(asked.message.contains("Do not retry"), "{}", asked.message);
+    let nonce = confirm_nonce_of(&asked);
+    let ran = Arc::new(Mutex::new(Vec::new()));
+    let log = ran.clone();
+    assert!(t.guards.confirms.attach_replay(
+        &nonce,
+        Box::new(move |approved| Box::pin(async move { log.lock().unwrap().push(approved) })),
+    ));
+    assert!(t.guards.confirms.answer(&nonce, true));
+    let retry = t
+        .queue_prompt(Extension(operator()), Parameters(queue(Some(&nonce))))
+        .await
+        .unwrap_err();
+    assert!(
+        retry.message.starts_with("E_INVALID_STATE"),
+        "{}",
+        retry.message
+    );
+    assert!(retry.message.contains("fleet runs it"), "{}", retry.message);
+    assert!(t.guards.confirms.pending().is_empty(), "no fresh card");
 }
 
 fn guarded_tools(s: Store, approver: bool) -> FleetTools {
@@ -9871,6 +9992,7 @@ fn the_settings_tools_reach_the_master_and_the_hub_owners_own_device_only() {
         "decide_setting_proposals",
         "list_pages",
         "pr_shepherd",
+        "autofix",
         "agents",
     ] {
         assert!(
@@ -10227,6 +10349,7 @@ fn settings_reach_a_persons_device_and_never_a_host_or_an_org_bound_client() {
         "set_setting",
         "decide_setting_proposals",
         "pr_shepherd",
+        "autofix",
         "agents",
     ] {
         assert!(can(&laptop, t), "{t}: reached, then trust decides");
@@ -10247,6 +10370,7 @@ fn settings_reach_a_persons_device_and_never_a_host_or_an_org_bound_client() {
         "decide_setting_proposals",
         "list_pages",
         "pr_shepherd",
+        "autofix",
         "agents",
     ] {
         assert!(!can(&colleague, t), "{t}: never a second person's device");
@@ -10293,6 +10417,7 @@ fn settings_reach_a_persons_device_and_never_a_host_or_an_org_bound_client() {
         "decide_setting_proposals",
         "list_pages",
         "pr_shepherd",
+        "autofix",
         "agents",
     ] {
         assert!(!can(&master, t), "{t}: not served to the master");
@@ -21156,4 +21281,155 @@ async fn ended_work_links_are_archived_and_removed_without_a_session() {
         "{}",
         e.message
     );
+}
+
+// ---- autofix ----
+
+fn autofix_params(action: &str, id: Option<i64>) -> AutofixParams {
+    AutofixParams {
+        action: action.into(),
+        id,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn autofix_lists_the_operator_finding_and_a_trusted_device_fixes_it() {
+    let s = Store::open_in_memory().unwrap();
+    s.insert_client_token(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        "aa11",
+        "full",
+    )
+    .unwrap();
+    let t = test_tools(s);
+    let mut dev = client_caller("laptop", TokenMode::Full);
+    dev.client.as_mut().unwrap().trusted = true;
+
+    let scan = result_json(
+        &t.autofix(
+            Extension(dev.clone()),
+            Parameters(autofix_params("scan", None)),
+        )
+        .await
+        .unwrap(),
+    );
+    let rows = scan["findings"].as_array().unwrap();
+    let op = rows
+        .iter()
+        .find(|r| r["kind"] == "operator_unbound")
+        .expect("the 2026-10-17 case is found");
+    assert_eq!(op["fix"]["safety"], "needs_approval");
+    let id = op["id"].as_i64().unwrap();
+
+    let applied = result_json(
+        &t.autofix(
+            Extension(dev),
+            Parameters(autofix_params("apply", Some(id))),
+        )
+        .await
+        .unwrap(),
+    );
+    assert_eq!(applied["state"], "cleared");
+}
+
+#[tokio::test]
+async fn the_operator_may_list_but_not_apply_or_dismiss() {
+    let s = Store::open_in_memory().unwrap();
+    s.insert_client_token(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        "aa11",
+        "full",
+    )
+    .unwrap();
+    let t = test_tools(s);
+    let mut op = client_caller(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        TokenMode::Full,
+    );
+    op.client.as_mut().unwrap().trusted = true;
+    let scan = result_json(
+        &t.autofix(
+            Extension(op.clone()),
+            Parameters(autofix_params("scan", None)),
+        )
+        .await
+        .unwrap(),
+    );
+    let id = scan["findings"][0]["id"].as_i64().unwrap();
+    for action in ["apply", "dismiss"] {
+        let err = t
+            .autofix(
+                Extension(op.clone()),
+                Parameters(autofix_params(action, Some(id))),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.message.starts_with("E_FORBIDDEN"), "{action}: {err:?}");
+    }
+}
+
+#[tokio::test]
+async fn an_untrusted_device_may_not_apply() {
+    let s = Store::open_in_memory().unwrap();
+    s.insert_client_token(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        "aa11",
+        "full",
+    )
+    .unwrap();
+    let t = test_tools(s);
+    let dev = client_caller("phone", TokenMode::Full); // trusted: false
+    let scan = result_json(
+        &t.autofix(
+            Extension(dev.clone()),
+            Parameters(autofix_params("scan", None)),
+        )
+        .await
+        .unwrap(),
+    );
+    let id = scan["findings"][0]["id"].as_i64().unwrap();
+    let err = t
+        .autofix(
+            Extension(dev),
+            Parameters(autofix_params("apply", Some(id))),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.message.starts_with("E_FORBIDDEN"), "{err:?}");
+}
+
+#[tokio::test]
+async fn dismiss_refuses_an_until_in_the_past() {
+    let s = Store::open_in_memory().unwrap();
+    s.insert_client_token(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        "aa11",
+        "full",
+    )
+    .unwrap();
+    let t = test_tools(s);
+    let mut dev = client_caller("laptop", TokenMode::Full);
+    dev.client.as_mut().unwrap().trusted = true;
+    let scan = result_json(
+        &t.autofix(
+            Extension(dev.clone()),
+            Parameters(autofix_params("scan", None)),
+        )
+        .await
+        .unwrap(),
+    );
+    let id = scan["findings"][0]["id"].as_i64().unwrap();
+    let err = t
+        .autofix(
+            Extension(dev),
+            Parameters(AutofixParams {
+                until: Some(1),
+                ..autofix_params("dismiss", Some(id))
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.message.starts_with("E_INVALID"), "{err:?}");
+    assert!(err.message.contains("in the future"), "{err:?}");
 }

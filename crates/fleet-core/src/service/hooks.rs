@@ -1178,6 +1178,16 @@ fn apply_stop_hook(
                 tracing::debug!(error = %e.message, "[work] handover not settled");
                 s.ensure_in_tx()?;
             }
+            // Control's recommended option, for auto-continue (F17).
+            if let Err(e) = crate::service::control_continue::on_stop(
+                s,
+                before.id,
+                payload.last_assistant_message.as_deref(),
+                crate::store::now_unix(),
+            ) {
+                tracing::debug!(error = %e.message, "[control-continue] pick not recorded");
+                s.ensure_in_tx()?;
+            }
             let has_open_tasks = s
                 .open_tasks_for_worker(before.id)
                 .map(|v| !v.is_empty())

@@ -54,6 +54,18 @@
             "key": "control.react_to_events",
             "truthy": true
           }
+        },
+        {
+          "type": "field",
+          "key": "control.switch_at_limit"
+        },
+        {
+          "type": "field",
+          "key": "control.sweep",
+          "when": {
+            "key": "control.react_to_events",
+            "truthy": true
+          }
         }
       ]
     }

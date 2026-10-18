@@ -449,11 +449,12 @@ impl FleetTools {
             "the session to prompt",
         )?;
         // As `send_prompt`: the operator's text waits for a person (F21).
-        self.confirm_gate(
+        self.confirm_gate_target(
             "run_prompt",
             p.confirm_nonce.as_deref(),
             &prompt_summary(&row, &p.prompt, None, true, false, p.raw),
             &caller,
+            GateTarget::Session(row.id),
         )?;
         // A stale-demoted row reads `idle` only because nothing moved; a
         // long tool call looks exactly like that. Ask the pane (S5 + F2).
@@ -607,7 +608,7 @@ impl FleetTools {
                 )?;
                 // The task's prompt is typed into the worker's pane, so the
                 // operator's needs a person as its `send_prompt` does (F21).
-                self.confirm_gate(
+                self.confirm_gate_target(
                     "dispatch_task",
                     p.confirm_nonce.as_deref(),
                     &format!(
@@ -616,6 +617,7 @@ impl FleetTools {
                         prompt_summary(&row, &p.prompt, None, true, false, p.raw)
                     ),
                     &caller,
+                    GateTarget::Session(row.id),
                 )?;
                 (row, false)
             }
@@ -628,11 +630,14 @@ impl FleetTools {
                 // wait_for_task / list_tasks / its inbox).
                 require_host(&caller, &spec.host_alias, "the new worker")?;
                 // A new worker is a start: the operator's needs a person (D12).
-                self.confirm_gate(
+                self.confirm_gate_target(
                     "dispatch_task",
                     p.confirm_nonce.as_deref(),
                     &dispatch_new_worker_summary(&spec, p.requester_session_id, p.raw, &p.prompt),
                     &caller,
+                    GateTarget::Start {
+                        host: &spec.host_alias,
+                    },
                 )?;
                 let name = spec.name.unwrap_or_default();
                 let row = sessions::new_session(

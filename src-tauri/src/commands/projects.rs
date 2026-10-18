@@ -24,9 +24,12 @@ use tokio_util::sync::CancellationToken;
 
 #[tauri::command]
 pub async fn list_projects(
+    fleet: Option<String>,
     backend: State<'_, Arc<FleetBackend>>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<Vec<ProjectTreeRow>, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::list_projects(&backend, &store).await
 }
 

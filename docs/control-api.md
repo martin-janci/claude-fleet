@@ -380,6 +380,11 @@ Index by area (names only; see the reference for details):
   or past the line fails `E_ACCOUNT_LIMIT`, naming the account and the
   login with headroom, unless `over_limit_ok: true` says the person chose
   it; `agent: "agy"` fails `E_UNSUPPORTED` until its adapter is validated),
+  `suggest_placement` (`project_id?`, `hosts?`, `profile?`: where new work should
+  run — every host and login ranked by headroom and load, each one left out
+  with its reason: down or loaded host, login signed out, account at
+  `accounts.pause_at` or spent, repo missing; read-only; see
+  [accounts.md](accounts.md#where-new-work-runs)),
   `auto_switch_account` (`enabled?`: your own answer to automatic account
   switching, on unless you turned it off; with the fleet's
   `accounts.auto_switch` on too, a session of yours paused at its
@@ -413,7 +418,12 @@ Index by area (names only; see the reference for details):
   session's shell terminals, tmux sessions `<name>--sh<N>` beside the agent
   that no session list shows; own reach), `register_self`, `whoami`, `ensure_operator` (the UX
   agent's own session, idempotent), `operator_status` (why it cannot work,
-  if it cannot).
+  if it cannot), `diagnose` (read-only: where Control runs, its host, login
+  and account, why a host cannot be reached, and each paired client's kind,
+  version and Control features, every finding `checked` or `inferred`),
+  `control_auto_continue` (Control's auto-continue, run by the fleet:
+  `status` for the countdown, `cancel`, `take` for Send now; Control itself
+  may only read it).
 - **Sharing & ownership** (multi-user M1) — `session_share` (give one
   person `watch`, `answer` or `drive` on a session you own — or, with `org` instead of
   `person`, an org you are a member of: its members and admins as of now,
@@ -1223,6 +1233,7 @@ Index by area (names only; see the reference for details):
   step (`tool_call`, or `error` when the tool failed; `actor` `claude`,
   `data.tool_use_id`, `data.tool`, `duration_ms`); the tool running now is
   the session row's `current_activity`.
+- **Autofix** — `autofix`, known broken fleet states with a plain-language explanation and a fix. Safe fixes run by themselves (`autofix.auto_safe`); the rest wait for a person's trusted device. Control may list and explain, never apply.
 - **PR shepherd** — `pr_shepherd`, the standing rules that let fleet look
   after a project's PRs (`docs/superpowers/specs/2026-10-08-pr-shepherd-design.md`):
   `status` (rules, recent episodes and merges), `explain` (what the next
@@ -2100,7 +2111,11 @@ automatically on app start.
   its `safe_kill_session`, everything it writes into a session
   (`send_prompt`, `run_prompt`, `queue_prompt`, and `dispatch_task` to a
   worker that already exists: review round 15, F21 — nothing an LLM composes
-  reaches a session without a person), and every tool above return
+  reaches a session without a person; since the 2026-10-17 review's F2 the
+  autonomy position lets those four through into a live session the operator
+  started or briefed at "Within your brief", and a Claude start inside a
+  running mission's grant at "Autopilot" — `guard::operator_must_confirm`),
+  and every tool above return
   `E_CONFIRM_REQUIRED` until a person approves them: on the desktop in its
   dialog or Control's cards, and on a hub from a fleet admin's paired device,
   which lists the waiting calls with `mcp_confirms` (each with `nonce`,

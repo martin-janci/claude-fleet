@@ -42,6 +42,8 @@ mod add_account;
 mod agents;
 mod api_tokens;
 mod assets;
+mod autofix;
+mod confirm_replay;
 mod dashboards;
 mod devices;
 mod downloads;
@@ -393,6 +395,7 @@ impl FleetTools {
             + Self::devices_router()
             + Self::prs_router()
             + Self::pr_shepherd_router()
+            + Self::autofix_router()
             + Self::agents_router()
             + Self::add_account_router()
             + Self::api_tokens_router()
@@ -452,10 +455,21 @@ impl ServerHandler for FleetTools {
                 .map(serde_json::Value::Object)
                 .unwrap_or_default()
         });
+        // F1 (review 2026-10-17): an operator call that may stop at a card
+        // keeps what it takes to run it again once a person approves it.
+        let replay_of = (caller.is_operator() && guard::operator_gated(&tool))
+            .then(|| (request.clone(), context.clone()));
         let tcc = ToolCallContext::new(self, request, context);
         // Tool-execution failures travel as `is_error` results; only rmcp's
         // own protocol errors (unknown tool, bad arguments) stay JSON-RPC.
-        let answer = bounded(&tool, tool_deadline(&tool), self.tool_router.call(tcc)).await;
+        // `approval` is how a gated call was let through (F1/F2), for its
+        // receipt.
+        let (answer, approval) = guard::tracking_approval(bounded(
+            &tool,
+            tool_deadline(&tool),
+            self.tool_router.call(tcc),
+        ))
+        .await;
         // One counter write per call, on the same dimension the rate limiter
         // and the stream cap key on — so a number on `/metrics` lines up with
         // a refusal in the log. A tool failure travels as an `is_error`
@@ -472,7 +486,29 @@ impl ServerHandler for FleetTools {
         };
         if let (Some(args), Ok(result)) = (&handoff_args, &out) {
             if !result.is_error.unwrap_or(false) {
-                crate::service::control_handoffs::record(&self.store, &tool, args, result);
+                crate::service::control_handoffs::record(
+                    &self.store,
+                    &tool,
+                    args,
+                    result,
+                    approval,
+                );
+            }
+        }
+        if let (Some((req, ctx)), Ok(result)) = (replay_of, &out) {
+            if let Some(nonce) = confirm_replay::confirm_nonce_of(result) {
+                let summary = self
+                    .guards
+                    .confirms
+                    .pending()
+                    .into_iter()
+                    .find(|r| r.nonce == nonce)
+                    .map(|r| r.summary)
+                    .unwrap_or_default();
+                let replay = self.operator_replay(nonce.clone(), summary, req, ctx);
+                // `false` when it already has one (Control presented a
+                // pending nonce again): its call still runs once.
+                let _ = self.guards.confirms.attach_replay(&nonce, replay);
             }
         }
         // Choke point 3 (spec §5.1): whatever tool answered — a result or an

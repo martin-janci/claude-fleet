@@ -121,7 +121,7 @@ Merge order: C1, C2. Then **build 3**.
 ## Wave D (orchestrator)
 
 1. Dispatch one review agent with the diff `origin/main...HEAD` and the spec, not with your conclusions: correctness of the scope fences (an item or task outside the caller's scope answers as unknown), the `wrapup` role not read as an attempt anywhere (`graft grep "work_item_id"` consumers that do not filter by role), and that the brief stays under `BRIEF_MAX_CHARS`. Fix what it confirms.
-2. `git fetch origin main`; if main took migration 196, merge `origin/main` and run `scripts/renumber-migrations.sh` (a shell script, it compiles nothing).
+2. `git fetch origin main`; if main took migration 199, merge `origin/main` and run `scripts/renumber-migrations.sh` (a shell script, it compiles nothing).
 3. Push, **build 4** on the final HEAD.
 4. Open one PR to `main`. In its body say what was not done: task plan Task 7 Step 8 (seeing the panel in the running app) needs `pnpm tauri dev`, which compiles Rust locally and is excluded by Rule 1. A person runs it, or the owner lifts the rule for that one step. Reticle is wired (`vite.config.ts`, `src/reticle-dev.ts`) and connects by itself as soon as the dev app runs.
 5. Do not merge the PR; the owner does.

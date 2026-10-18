@@ -15,6 +15,7 @@ pub mod editor;
 pub mod env_vars;
 pub mod federation;
 pub mod files;
+pub mod fleets;
 pub mod forms;
 pub mod health;
 pub mod history;

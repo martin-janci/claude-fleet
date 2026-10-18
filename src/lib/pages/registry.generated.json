@@ -301,7 +301,7 @@
         "level": "none"
       },
       "default": "true",
-      "help": "Control's chat sends the option its agent marked recommended once nobody has answered for the minutes below. Typing or Cancel stops it. Never for a push, a delete or another step hard to undo, and only while the app is open.",
+      "help": "Control's chat sends the option its agent marked recommended once nobody has answered for the minutes below, even with the app closed, and only once. Typing, Cancel or any other message stops it. Never for a push, a delete or another step hard to undo, and never at Ask first.",
       "key": "control.auto_continue",
       "kind": {
         "type": "bool"
@@ -383,6 +383,44 @@
       "danger": {
         "level": "none"
       },
+      "default": "true",
+      "help": "When Control's account hits its limit or its login is signed out, resume Control's conversation under another signed-in login with headroom: on its host first, then on another host.",
+      "key": "control.switch_at_limit",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Move Control off a spent login",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "true"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "true",
+      "help": "The note to Control's agent also names a pull request it handed out that has merge conflicts or failing checks, and a mission it handed off that made no progress for a while, once per change. Within your brief it fixes or reassigns them, asking as usual; at Ask first it only tells you.",
+      "key": "control.sweep",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Control sweeps what it handed out",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "true"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "false",
       "help": "Press Enter for sessions stuck on a \"Press Enter\" prompt. Auth menus, trust prompts and reconnects are always notify-only.",
       "key": "playbooks.press_enter",
@@ -437,6 +475,85 @@
       "unit": "count",
       "value": "2",
       "zero": "never"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "true",
+      "help": "Fix problems whose fix only touches fleet's own files and can be undone, then tell you. Fixes that touch tokens, sign-in or running sessions always wait for you.",
+      "key": "autofix.auto_safe",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Apply safe fixes automatically",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "true"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "3",
+      "help": "How many times one problem is fixed automatically before it waits for you.",
+      "key": "autofix.max_attempts",
+      "kind": {
+        "max": 10,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Automatic fix attempts",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "count",
+      "value": "3",
+      "zero": "never"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "true",
+      "help": "Notice when Control's token belongs to nobody, which leaves it unable to see any session.",
+      "key": "autofix.detector.operator_unbound",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Check Control's access",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "true"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "true",
+      "help": "Notice hosts with out-of-date fleet files, silent hooks, or an old agent or Claude Code.",
+      "key": "autofix.detector.host",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Check hosts",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "true"
     },
     {
       "ai": "suggest",
@@ -4305,6 +4422,31 @@
         {
           "items": [
             {
+              "key": "autofix.auto_safe",
+              "type": "field"
+            },
+            {
+              "key": "autofix.max_attempts",
+              "type": "field",
+              "when": {
+                "key": "autofix.auto_safe",
+                "truthy": true
+              }
+            },
+            {
+              "key": "autofix.detector.operator_unbound",
+              "type": "field"
+            },
+            {
+              "key": "autofix.detector.host",
+              "type": "field"
+            }
+          ],
+          "title": "Autofix"
+        },
+        {
+          "items": [
+            {
               "key": "recovery.auto_restore",
               "type": "field"
             },
@@ -5350,6 +5492,18 @@
             },
             {
               "key": "control.feed_min_interval_secs",
+              "type": "field",
+              "when": {
+                "key": "control.react_to_events",
+                "truthy": true
+              }
+            },
+            {
+              "key": "control.switch_at_limit",
+              "type": "field"
+            },
+            {
+              "key": "control.sweep",
               "type": "field",
               "when": {
                 "key": "control.react_to_events",

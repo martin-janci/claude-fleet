@@ -280,7 +280,10 @@ describe('the sheet feeds the one composer its live state', () => {
   // replacement asserted only that a note renders, which a broken gate passes.
   //
   // This asserts the SEND IS REFUSED, which is the thing that was lost.
-  it('refuses to send while the agent is working — the gate, not just the note', async () => {
+  // Review 2026-10-17, F4: the gate still sends nothing while the agent is
+  // working, but it holds the line ("queued · cancel") instead of refusing
+  // it, and the line goes by itself, once, when the turn ends.
+  it('holds a send while the agent is working — the gate, not just the note', async () => {
     mockedSend.mockResolvedValue({ ok: true, value: undefined });
     render(AgentPanel);
     await settle();
@@ -294,22 +297,20 @@ describe('the sheet feeds the one composer its live state', () => {
       expect(screen.getByTestId('conv-composer-status').textContent).toMatch(/working/i),
     );
 
-    expect((screen.getByTestId('conv-composer-send') as HTMLButtonElement).disabled).toBe(true);
-    // Not only the button: Enter goes down the same path and must be refused too.
+    expect(screen.getByTestId('conv-composer-send').getAttribute('aria-label')).toBe('Queue prompt');
+    // Enter goes down the same path: held, not sent.
     await fireEvent.keyDown(box, { key: 'Enter' });
     await settle();
-    await fireEvent.click(screen.getByTestId('conv-composer-send'));
-    await settle();
     expect(mockedSend).not.toHaveBeenCalled();
+    expect(screen.getByTestId('conv-held').textContent).toContain('druhy prompt');
 
-    // …and it is a gate, not a wall: the turn ends and the same draft goes.
+    // …and it is a gate, not a wall: the turn ends and the held line goes.
     applySessionEvents([
       { type: 'updated', row: row({ claude_status: 'idle', last_activity_at: 300 }) },
     ]);
-    await waitFor(() => expect(screen.queryByTestId('conv-composer-status')).toBeNull());
-    await fireEvent.click(screen.getByTestId('conv-composer-send'));
     await waitFor(() => expect(mockedSend).toHaveBeenCalledTimes(1));
     expect(mockedSend.mock.calls[0][2]).toBe('druhy prompt');
+    expect(screen.queryByTestId('conv-held')).toBeNull();
   });
 
   it('refuses to send while the agent is stuck, where the prompt may never be read', async () => {

@@ -1081,7 +1081,7 @@ a title of your own too (`work_link { action: followup, task_id, index?,
 title? }`; the desktop's `create_followup_task`). The new task is a
 **sibling** of the finished one (same parent, same project, a local task
 even when the original is a tracker ticket) and remembers the task it came
-from (`work_items.origin_task_id`, migration 196). Creating the same
+from (`work_items.origin_task_id`, migration 199). Creating the same
 follow-up twice (whitespace and case aside) answers the task made the
 first time. A report line longer than a title is cut, and kept whole in
 the new task's notes. A follow-up is made from its task's text, so it
@@ -1451,7 +1451,11 @@ tidy-up kills: each returns `E_CONFIRM_REQUIRED` until you approve it in the
 desktop's dialog. Since review round 15 (F21) **what it writes waits too**:
 `send_prompt`, `run_prompt`, `queue_prompt` and a `dispatch_task` to a
 worker that already exists, because nothing an agent composes should reach a
-session without you reading it first. The toggle does not lift any of this —
+session without you reading it first — unless you set the autonomy chip to
+Within your brief (prompts and tasks into sessions it started or briefed go
+without a card) or Autopilot (also new sessions inside a mission's grant),
+the 2026-10-17 review's F2. When you approve a card, fleet runs the call and
+tells the agent (F1). The toggle does not lift any of this —
 only a different token does: these tools are `confirm: false`, so the master
 token and your other paired clients send prompts ungated. On a hub there is nobody to approve, so the operator's
 starts and kills are refused (`E_FORBIDDEN`); there it offers archive or

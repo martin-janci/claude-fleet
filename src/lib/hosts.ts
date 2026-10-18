@@ -98,6 +98,18 @@ export interface HostRow {
    *  the sample is fresh (`healthSampleFresh`). */
   mem_low?: boolean;
   cpu_saturated?: boolean;
+  /** The host's Claude logins known to be signed out (migration 197,
+   *  `service::login_health`): `profile` null is the host's own. Absent when
+   *  none, and from an older hub. */
+  signed_out_logins?: SignedOutLogin[];
+}
+
+/** One signed-out login on a host. */
+export interface SignedOutLogin {
+  profile: string | null;
+  /** When fleet first saw it signed out (unix seconds). */
+  since: number;
+  checked_at?: number;
 }
 
 /** One login profile on a host. */

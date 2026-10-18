@@ -280,6 +280,10 @@ pub fn spawn_reconcile_tick(
                 // After the restore, so a session brought back this pass is in
                 // it. Detached and single-flight; stops while paused.
                 service::operator_feed::maybe_run(store, ssh);
+                // Control's recommended option goes out once nobody answered
+                // for `control.auto_continue_minutes` (F17): here, not in a
+                // window, so it runs with none open and only once.
+                service::control_continue::maybe_run(store, ssh);
                 // PR shepherd: projects a person granted a rule for get their
                 // sessions' conflicting or red PRs recorded, and nudged at
                 // `nudge`. No rule, no work: one indexed read and out. Stops
@@ -348,6 +352,8 @@ pub fn spawn_reconcile_tick(
                 // Opt-in (`repair.auto_on_tick`): re-add vanished worktrees with
                 // the create-only automatic policy. Detached and rate-limited.
                 service::repair_tick::maybe_run(store, ssh);
+                // Detect broken fleet states; apply the safe fixes by itself.
+                service::autofix::tick::maybe_run(store, ssh);
                 // Drop remote worktree rows whose checkout is gone and no longer
                 // registered with git (removed without ExitWorktree). One
                 // read-only probe per reachable host; detached and rate-limited.
@@ -356,6 +362,9 @@ pub fn spawn_reconcile_tick(
                 // account ran out under the login with the most headroom.
                 // Detached and rate-limited.
                 service::account_switch::maybe_run(store, ssh);
+                // On by default (`control.switch_at_limit`): resume Control
+                // under another login when its own account ran out.
+                service::operator_account::maybe_run(store, ssh);
             }
         })
         .await;

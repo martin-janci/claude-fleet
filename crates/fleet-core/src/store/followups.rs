@@ -1,4 +1,4 @@
-//! Follow-up items: a sibling work item born from a task's result (`work_items.origin_task_id`, migration 196).
+//! Follow-up items: a sibling work item born from a task's result (`work_items.origin_task_id`, migration 199).
 //!
 //! Design 2026-10-13 D4: the follow-up sits beside the task's item (same
 //! parent, same project) and names the task as its origin; the origin

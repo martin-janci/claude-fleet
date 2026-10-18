@@ -328,6 +328,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Control review F5: where new work should run (host and login), from
+    // the store's hosts, usage and login health. Same reach as
+    // `check_account_headroom`.
+    ToolPolicy {
+        name: "suggest_placement",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // Gap plan G7.3: Jev's host for a new session, for the phone's New
     // session. Reads the store and asks the decision model; writes only the
     // decision record. A per-host token does not place sessions.
@@ -781,6 +791,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Autofix: known broken fleet states. The owner's own device; apply and
+    // dismiss also need a trusted full device, and never Control.
+    ToolPolicy {
+        name: "autofix",
+        access: Access::PersonDevice,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
     // Agents (reviewer, support): a person's standing rule per repo or
     // Jira project, which lets an agent read and write outside fleet, and
     // a person's answer to a write an agent proposes. The owner's own
@@ -945,6 +964,20 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         name: "operator_status",
         access: Access::Client,
         readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "diagnose",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "control_auto_continue",
+        access: Access::Client,
+        readonly: false,
         confirm: false,
         deadline: Deadline::Quick,
     },
@@ -1772,9 +1805,12 @@ pub fn needs_confirmation(name: &str) -> bool {
 /// service's own confirm token is presented — and that one needs a person
 /// for every caller but a paired, non-operator client, not just the operator.
 /// `send_prompt`, `run_prompt` and `queue_prompt` type the operator's own
-/// text into another session, so a person confirms each one (review round
-/// 15, F21: nothing an LLM writes reaches a session without a person), and
-/// `dispatch_task` to an existing worker is gated for the same reason.
+/// text into another session, so a person confirms each one at "Ask first",
+/// and `dispatch_task` to an existing worker is gated for the same reason.
+/// Review round 15, F21 ("nothing an LLM writes reaches a session without a
+/// person") held at every position until the 2026-10-17 review's F2, which
+/// the owner approved: the autonomy position now pre-approves some of these
+/// — see [`operator_must_confirm`].
 pub const OPERATOR_CONFIRMS: &[&str] = &[
     "add_project",
     "new_session",
@@ -1793,10 +1829,71 @@ pub const OPERATOR_CONFIRMS: &[&str] = &[
     "queue_prompt",
 ];
 
-/// Whether a call by this caller must be approved on the desktop even with
-/// `mcp.confirm_destructive` off.
-pub fn operator_must_confirm(is_operator: bool, name: &str) -> bool {
-    is_operator && (needs_confirmation(name) || OPERATOR_CONFIRMS.contains(&name))
+/// The operator's calls that type its text into a session: pre-approved at
+/// "Within your brief" and "Autopilot" when the session is one of Control's
+/// open handoffs (review 2026-10-17, F2).
+pub const OPERATOR_PROMPT_TOOLS: &[&str] =
+    &["send_prompt", "queue_prompt", "run_prompt", "dispatch_task"];
+
+/// The operator's calls that start a Claude session: pre-approved at
+/// "Autopilot" inside a running mission's grant (F2). `dispatch_task` is here
+/// for its `new_worker` form.
+pub const OPERATOR_START_TOOLS: &[&str] = &["new_session", "dispatch_task"];
+
+/// Whether a tool the operator calls is one a person approves at "Ask
+/// first": every `confirm: true` tool and every [`OPERATOR_CONFIRMS`] one.
+pub fn operator_gated(name: &str) -> bool {
+    needs_confirmation(name) || OPERATOR_CONFIRMS.contains(&name)
+}
+
+/// PURE: whether the operator's call of `name` must be approved by a person,
+/// even with `mcp.confirm_destructive` off, at autonomy `position`.
+///
+/// - `own_handoff`: the call's target is a live session Control started or
+///   briefed (`Store::is_open_control_handoff`);
+/// - `inside_grant`: the call starts a session inside a running mission's
+///   grant (`Store::start_inside_mission_grant`).
+///
+/// At **Ask first** (and **Custom**, which grants what Ask first does) every
+/// gated tool asks, as before. **Within your brief** lets a prompt or task
+/// to an open handoff through ([`OPERATOR_PROMPT_TOOLS`]). **Autopilot** also
+/// lets a start inside a grant through ([`OPERATOR_START_TOOLS`]). Kills,
+/// restarts, rewinds, restores, new projects and every `confirm: true` tool
+/// ask at every position. This reverses review round 15, F21 for those two
+/// cases only (the 2026-10-17 review's F2, approved by the owner).
+pub fn operator_must_confirm(
+    name: &str,
+    position: crate::service::autonomy::Position,
+    own_handoff: bool,
+    inside_grant: bool,
+) -> bool {
+    use crate::service::autonomy::Position;
+    if !operator_gated(name) {
+        return false;
+    }
+    if needs_confirmation(name) {
+        return true;
+    }
+    let prompt = OPERATOR_PROMPT_TOOLS.contains(&name) && own_handoff;
+    let start = OPERATOR_START_TOOLS.contains(&name) && inside_grant;
+    match position.grants() {
+        Position::Brief => !prompt,
+        Position::Autopilot => !(prompt || start),
+        _ => true,
+    }
+}
+
+/// [`operator_must_confirm`] for any caller: only the operator's calls are
+/// forced to a person; for anyone else these tools are ungated here (a
+/// `confirm: true` one still waits when `mcp.confirm_destructive` is on).
+pub fn caller_must_confirm(
+    is_operator: bool,
+    name: &str,
+    position: crate::service::autonomy::Position,
+    own_handoff: bool,
+    inside_grant: bool,
+) -> bool {
+    is_operator && operator_must_confirm(name, position, own_handoff, inside_grant)
 }
 
 /// WHY the operator's call needs a person, in the words of the rule that
@@ -1810,10 +1907,11 @@ pub fn operator_must_confirm(is_operator: bool, name: &str) -> bool {
 /// consulted here — see [`operator_must_confirm`]).
 pub fn operator_confirm_reason(tool: &str) -> &'static str {
     match tool {
-        // Review round 15, F21.
+        // Review round 15, F21, narrowed by the 2026-10-17 review's F2.
         "send_prompt" | "run_prompt" | "queue_prompt" | "dispatch_task" => {
-            "nothing the operator writes reaches a session without a person, \
-             whatever mcp.confirm_destructive says"
+            "what the operator writes reaches a session without a person only at \
+             \"Within your brief\" or \"Autopilot\", and only into a session it \
+             started or briefed, whatever mcp.confirm_destructive says"
         }
         // D12.
         _ => {
@@ -2129,6 +2227,53 @@ pub enum ConfirmState {
     Pending,
     /// Never issued, expired, already consumed, or issued for another tool.
     Unknown,
+    /// Approved, and fleet runs (or ran) the call itself (review
+    /// 2026-10-17, F1): the caller's own retry must not run it a second
+    /// time, nor be handed a fresh card for a call already approved.
+    RunByFleet,
+}
+
+/// What fleet does with an answered confirmation of the operator's (F1):
+/// called once with the answer, it runs the approved call and tells
+/// Control the result, or tells it the call was denied. Attached by
+/// `FleetTools::call_tool` to the nonce it just minted.
+pub type ConfirmReplay =
+    Box<dyn FnOnce(bool) -> futures_util::future::BoxFuture<'static, ()> + Send + 'static>;
+
+tokio::task_local! {
+    /// The nonce whose approved call fleet is running now ([`as_replay`]).
+    static REPLAY_NONCE: String;
+    /// How the call running in this task was let through, when it was
+    /// gated: [`crate::store::APPROVAL_PERSON`] or
+    /// [`crate::store::APPROVAL_PRE_APPROVED`] ([`tracking_approval`]).
+    static CALL_APPROVAL: std::cell::Cell<Option<&'static str>>;
+}
+
+/// Run `f` as fleet's replay of the call approved under `nonce` (F1): the
+/// gate it reaches lets exactly this one consume the approval.
+pub async fn as_replay<F: std::future::Future>(nonce: String, f: F) -> F::Output {
+    REPLAY_NONCE.scope(nonce, f).await
+}
+
+fn replaying(nonce: &str) -> bool {
+    REPLAY_NONCE.try_with(|n| n == nonce).unwrap_or(false)
+}
+
+/// Run `f` and answer how its gated call was let through, if it said
+/// ([`note_approval`]).
+pub async fn tracking_approval<F: std::future::Future>(f: F) -> (F::Output, Option<&'static str>) {
+    CALL_APPROVAL
+        .scope(std::cell::Cell::new(None), async {
+            let out = f.await;
+            (out, CALL_APPROVAL.with(std::cell::Cell::get))
+        })
+        .await
+}
+
+/// Say how the call running in this task was let through; a no-op outside
+/// [`tracking_approval`].
+pub fn note_approval(how: &'static str) {
+    let _ = CALL_APPROVAL.try_with(|c| c.set(Some(how)));
 }
 
 struct Pending {
@@ -2142,6 +2287,19 @@ struct Pending {
     summary: String,
     created: Instant,
     approved: Option<bool>,
+    /// F1: what fleet does once this is answered (the operator's calls).
+    replay: Option<ConfirmReplay>,
+    /// F1: approved with a replay attached, so fleet consumes it: any other
+    /// presentation reads [`ConfirmState::RunByFleet`]. Kept until the TTL
+    /// after the answer, so a late retry is still told.
+    run_by_fleet: bool,
+}
+
+impl Pending {
+    /// Not answered yet: what the cards and the dialog show.
+    fn waiting(&self) -> bool {
+        self.approved.is_none() && !self.run_by_fleet
+    }
 }
 
 /// In-memory registry of outstanding confirmation nonces.
@@ -2188,6 +2346,8 @@ impl PendingConfirms {
                 summary: summary.to_string(),
                 created: Instant::now(),
                 approved: None,
+                replay: None,
+                run_by_fleet: false,
             },
         );
         ConfirmRequest {
@@ -2217,13 +2377,67 @@ impl PendingConfirms {
         let now = Instant::now();
         prune(&mut entries, now);
         match entries.get_mut(nonce) {
-            Some(p) if p.approved.is_none() => {
+            Some(p) if p.waiting() => {
                 p.approved = Some(approved);
                 p.created = now;
                 true
             }
             _ => false,
         }
+    }
+
+    /// Attach what fleet does once `nonce` is answered (F1). `false` (and
+    /// `replay` dropped) when the nonce is unknown, expired, already
+    /// answered or already has one: a request carries at most one, so its
+    /// call runs at most once.
+    pub fn attach_replay(&self, nonce: &str, replay: ConfirmReplay) -> bool {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        prune(&mut entries, Instant::now());
+        match entries.get_mut(nonce) {
+            Some(p) if p.waiting() && p.replay.is_none() => {
+                p.replay = Some(replay);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Answer `nonce` as a person ([`Self::resolve`]) and, when fleet holds
+    /// a replay for it (F1), hand that the answer on a task of its own: an
+    /// approved call runs once, on the hub, and Control is told. Every
+    /// answer path calls this — the hub's `answer_mcp_confirm` and the
+    /// desktop's own `mcp_confirm`.
+    pub fn answer(&self, nonce: &str, approved: bool) -> bool {
+        let replay = {
+            let mut entries = self
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let now = Instant::now();
+            prune(&mut entries, now);
+            match entries.get_mut(nonce) {
+                Some(p) if p.waiting() => {
+                    p.approved = Some(approved);
+                    p.created = now;
+                    let r = p.replay.take();
+                    p.run_by_fleet = approved && r.is_some();
+                    r
+                }
+                _ => return false,
+            }
+        };
+        if let Some(run) = replay {
+            match tokio::runtime::Handle::try_current() {
+                Ok(h) => {
+                    h.spawn(run(approved));
+                }
+                Err(_) => tracing::warn!("confirm answered outside a runtime; not replayed"),
+            }
+        }
+        true
     }
 
     /// Present a nonce on the retry call. An answered nonce is consumed
@@ -2243,6 +2457,18 @@ impl PendingConfirms {
         };
         if p.tool != tool || p.summary != summary {
             return ConfirmState::Unknown;
+        }
+        if p.run_by_fleet {
+            if !replaying(nonce) {
+                return ConfirmState::RunByFleet;
+            }
+            // Fleet's own replay spends it once; the entry stays, so a late
+            // retry by the caller still reads `RunByFleet`.
+            let p = entries.get_mut(nonce).expect("present");
+            if p.approved.take().is_some() {
+                return ConfirmState::Approved;
+            }
+            return ConfirmState::RunByFleet;
         }
         match p.approved {
             None => ConfirmState::Pending,
@@ -2266,9 +2492,9 @@ impl PendingConfirms {
             .entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let before = entries.values().filter(|p| p.approved.is_none()).count();
+        let before = entries.values().filter(|p| p.waiting()).count();
         prune(&mut entries, Instant::now());
-        before - entries.values().filter(|p| p.approved.is_none()).count()
+        before - entries.values().filter(|p| p.waiting()).count()
     }
 
     /// Outstanding (unanswered) requests in full, oldest first: what the
@@ -2280,10 +2506,7 @@ impl PendingConfirms {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         prune(&mut entries, Instant::now());
-        let mut v: Vec<(&String, &Pending)> = entries
-            .iter()
-            .filter(|(_, p)| p.approved.is_none())
-            .collect();
+        let mut v: Vec<(&String, &Pending)> = entries.iter().filter(|(_, p)| p.waiting()).collect();
         v.sort_by_key(|(_, p)| p.created);
         v.into_iter()
             .map(|(n, p)| ConfirmRequest {
@@ -2304,10 +2527,7 @@ impl PendingConfirms {
             .entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut v: Vec<(&String, &Pending)> = entries
-            .iter()
-            .filter(|(_, p)| p.approved.is_none())
-            .collect();
+        let mut v: Vec<(&String, &Pending)> = entries.iter().filter(|(_, p)| p.waiting()).collect();
         v.sort_by_key(|(_, p)| p.created);
         v.into_iter()
             .map(|(n, p)| (n.clone(), p.tool.clone()))
@@ -2664,6 +2884,59 @@ pub fn redact_args(args: Option<&serde_json::Map<String, serde_json::Value>>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::autonomy::Position;
+
+    /// Review 2026-10-17, F2: the whole table. Rows are (tool, position,
+    /// own_handoff, inside_grant) → must a person approve.
+    #[test]
+    fn operator_pre_approval_truth_table() {
+        use Position::{Ask, Autopilot, Brief, Custom};
+        let prompts = ["send_prompt", "queue_prompt", "run_prompt", "dispatch_task"];
+        let always = [
+            "add_project",
+            "new_shell_session",
+            "new_bg_session",
+            "spawn_review",
+            "restore_host_sessions",
+            "recreate_session",
+            "restart_session",
+            "rewind_conversation",
+            "safe_kill_session",
+            "work_link",
+            "kill_session",
+            "broadcast_prompt",
+            "move_session",
+        ];
+        for pos in [Ask, Brief, Autopilot, Custom] {
+            for own in [false, true] {
+                for grant in [false, true] {
+                    for t in always {
+                        assert!(
+                            operator_must_confirm(t, pos, own, grant),
+                            "{t} always asks ({pos:?}, own={own}, grant={grant})"
+                        );
+                    }
+                    for t in prompts {
+                        let free = own && matches!(pos, Brief | Autopilot);
+                        // dispatch_task's new_worker form is a start.
+                        let start = t == "dispatch_task" && grant && pos == Autopilot;
+                        assert_eq!(
+                            operator_must_confirm(t, pos, own, grant),
+                            !(free || start),
+                            "{t} ({pos:?}, own={own}, grant={grant})"
+                        );
+                    }
+                    assert_eq!(
+                        operator_must_confirm("new_session", pos, own, grant),
+                        !(grant && pos == Autopilot),
+                        "new_session ({pos:?}, own={own}, grant={grant})"
+                    );
+                    // An ungated tool stays ungated.
+                    assert!(!operator_must_confirm("list_sessions", pos, own, grant));
+                }
+            }
+        }
+    }
 
     #[test]
     fn a_master_with_no_named_owner_is_refused_a_person_tool() {
@@ -2750,7 +3023,7 @@ mod tests {
     fn the_operators_refusal_never_calls_a_prompt_a_start_or_a_kill() {
         for t in ["send_prompt", "run_prompt", "queue_prompt", "dispatch_task"] {
             assert!(
-                operator_must_confirm(true, t),
+                caller_must_confirm(true, t, Position::Ask, false, false),
                 "{t} is gated for the operator"
             );
             let why = operator_confirm_reason(t);
@@ -2767,9 +3040,13 @@ mod tests {
                 operator_confirm_reason(t).contains("mcp.confirm_destructive"),
                 "{t} must say the toggle is not the answer"
             );
-            assert!(operator_must_confirm(true, t), "{t}");
             assert!(
-                !operator_must_confirm(false, t) || needs_confirmation(t),
+                caller_must_confirm(true, t, Position::Ask, false, false),
+                "{t}"
+            );
+            assert!(
+                !caller_must_confirm(false, t, Position::Autopilot, true, true)
+                    || needs_confirmation(t),
                 "{t} must be ungated for a master caller unless it is confirm: true"
             );
         }
@@ -2828,6 +3105,93 @@ mod tests {
         // Same length, different content ⇒ different digest.
         assert_ne!(content_digest("rm -rf /"), content_digest("ls -la ~"));
         assert!(content_digest("x").chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// A replay that records the answers it was handed.
+    fn recording(log: &Arc<Mutex<Vec<bool>>>) -> ConfirmReplay {
+        let log = log.clone();
+        Box::new(move |approved| {
+            Box::pin(async move {
+                log.lock().unwrap().push(approved);
+            })
+        })
+    }
+
+    /// Review 2026-10-17, F1: an approval hands the call to fleet exactly
+    /// once; the caller's own retry neither runs it again nor gets a card.
+    #[tokio::test]
+    async fn an_approved_replay_runs_once_and_a_retry_is_told() {
+        let pc = PendingConfirms::new();
+        let req = pc.request_from("send_prompt", "s=1", "client:ux-agent", true);
+        let log = Arc::new(Mutex::new(Vec::new()));
+        assert!(pc.attach_replay(&req.nonce, recording(&log)));
+        assert!(
+            !pc.attach_replay(&req.nonce, recording(&log)),
+            "one replay per request"
+        );
+        assert!(pc.answer(&req.nonce, true));
+        assert!(!pc.answer(&req.nonce, false), "the first answer wins");
+        tokio::task::yield_now().await;
+        for _ in 0..50 {
+            if !log.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(*log.lock().unwrap(), vec![true]);
+        assert!(
+            pc.pending().is_empty(),
+            "an answered request leaves the cards"
+        );
+        // Control retrying on its own: told, not run, no fresh card.
+        assert_eq!(
+            pc.consume(&req.nonce, "send_prompt", "s=1"),
+            ConfirmState::RunByFleet
+        );
+        // Fleet's replay spends it once …
+        let n = req.nonce.clone();
+        let first = as_replay(n.clone(), async { pc.consume(&n, "send_prompt", "s=1") }).await;
+        assert_eq!(first, ConfirmState::Approved);
+        let again = as_replay(n.clone(), async { pc.consume(&n, "send_prompt", "s=1") }).await;
+        assert_eq!(again, ConfirmState::RunByFleet, "… and only once");
+        assert_eq!(
+            pc.consume(&req.nonce, "send_prompt", "s=1"),
+            ConfirmState::RunByFleet
+        );
+        assert!(pc.pending().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_denied_replay_is_told_and_the_retry_reads_denied() {
+        let pc = PendingConfirms::new();
+        let req = pc.request_from("send_prompt", "s=1", "client:ux-agent", true);
+        let log = Arc::new(Mutex::new(Vec::new()));
+        assert!(pc.attach_replay(&req.nonce, recording(&log)));
+        assert!(pc.answer(&req.nonce, false));
+        for _ in 0..50 {
+            if !log.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(*log.lock().unwrap(), vec![false]);
+        assert_eq!(
+            pc.consume(&req.nonce, "send_prompt", "s=1"),
+            ConfirmState::Denied
+        );
+    }
+
+    #[test]
+    fn an_answer_without_a_replay_is_a_plain_resolve() {
+        let pc = PendingConfirms::new();
+        let req = pc.request("kill_session", "x", "master");
+        assert!(pc.answer(&req.nonce, true));
+        assert_eq!(
+            pc.consume(&req.nonce, "kill_session", "x"),
+            ConfirmState::Approved
+        );
+        assert!(!pc.answer("nope", true), "an unknown nonce answers nothing");
+        assert!(!pc.attach_replay("nope", Box::new(|_| Box::pin(async {}))));
     }
 
     #[test]
@@ -3106,6 +3470,8 @@ mod tests {
                 summary: String::new(),
                 created: now,
                 approved: None,
+                replay: None,
+                run_by_fleet: false,
             },
         );
         prune(&mut entries, now + CONFIRM_TTL);

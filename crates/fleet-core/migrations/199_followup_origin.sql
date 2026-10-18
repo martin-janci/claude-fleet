@@ -7,4 +7,4 @@ ALTER TABLE work_items ADD COLUMN origin_task_id INTEGER REFERENCES tasks(id) ON
 CREATE INDEX IF NOT EXISTS idx_work_items_origin_task
   ON work_items(origin_task_id) WHERE origin_task_id IS NOT NULL;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (196);
+INSERT OR IGNORE INTO schema_version (version) VALUES (199);

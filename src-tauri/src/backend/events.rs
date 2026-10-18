@@ -1203,6 +1203,19 @@ pub fn spawn_event_bridge(bridge: EventBridge) {
     fleet_core::rt::spawn(async move { bridge.run().await });
 }
 
+/// [`spawn_event_bridge`] for an extra fleet's bridge (`backend::fleets`,
+/// multi-hub design D4): one per extra hub, each until its own cancellation
+/// token fires (the fleet is removed, or the app quits).
+///
+/// A separate name rather than a second call of the one above, so the source
+/// tests can still hold "the primary's bridge is started exactly once" and
+/// hold this one to `bootstrap/tasks.rs` as well. An extra fleet is never
+/// this process's to own, so this does not go through
+/// `backend::startup::start_background_tasks`.
+pub fn spawn_extra_fleet_bridge(bridge: EventBridge) {
+    fleet_core::rt::spawn(async move { bridge.run().await });
+}
+
 #[cfg(test)]
 #[path = "tests_events.rs"]
 mod tests;
