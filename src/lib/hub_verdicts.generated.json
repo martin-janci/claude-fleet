@@ -310,6 +310,7 @@
     "session_history",
     "session_narrow",
     "session_presence",
+    "session_prompt_tune",
     "session_share",
     "session_summary_since",
     "session_tool_detail",

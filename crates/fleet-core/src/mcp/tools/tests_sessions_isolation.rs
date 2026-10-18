@@ -766,6 +766,7 @@ async fn call(fx: &Fx, who: Who, tool: &str, args: Value) -> Answer {
         "session_tool_detail" => fx.t.session_tool_detail(ext, p!()).await,
         "session_summary_since" => fx.t.session_summary_since(ext, p!()).await,
         "session_context_help" => fx.t.session_context_help(ext, p!()).await,
+        "session_prompt_tune" => fx.t.session_prompt_tune(ext, p!()).await,
         "run_prompt" => fx.t.run_prompt(ext, p!()).await,
         "dispatch_task" => fx.t.dispatch_task(ext, p!()).await,
         "wait_for_task" => fx.t.wait_for_task(ext, p!()).await,
@@ -1434,6 +1435,12 @@ async fn run_matrix() {
         "session_context_help",
         Reach::Answer,
         |fx, _| json!({ "session_id": fx.row, "line": "/plan" }),
+    )
+    .await;
+    m.gated(
+        "session_prompt_tune",
+        Reach::Answer,
+        |fx, _| json!({ "session_id": fx.row, "draft": "fix the tests" }),
     )
     .await;
     m.gated(

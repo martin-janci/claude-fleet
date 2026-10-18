@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, within } from '@testing-library/svelte';
+import { render, screen, fireEvent, within, cleanup } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tick } from 'svelte';
 import { get } from 'svelte/store';
@@ -5076,6 +5076,53 @@ describe('ConversationPanel composer access (multi-user M1)', () => {
       }
     });
   }
+
+  // The prompt tuner on a shared session: the hub runs it
+  // (`session_prompt_tune`), and the rewrite lands in the box only on
+  // "Use this", never sent.
+  it('an answer grantee tunes the draft through the hub and nothing is sent', async () => {
+    fleetSettings.set({ ...SETTING_DEFAULTS, 'work.prompt_tune': 'true' });
+    mockedInvoke.mockImplementation(async (cmd: string, payload?: unknown) =>
+      cmd === 'session_prompt_tune'
+        ? { prompt: 'Fix the login test.', notes: 'Named it.', unchanged: false, model: 'haiku', host_alias: 'h', at: 1 }
+        : baseInvoke(cmd, payload as Record<string, unknown> | undefined),
+    );
+    mockedInvoke.mockClear();
+    try {
+      await renderShared('answer');
+      await fireEvent.input(box(), { target: { value: 'fix test' } });
+      const tune = screen.getByTestId('conv-tune-button') as HTMLButtonElement;
+      expect(tune.disabled).toBe(false);
+      await fireEvent.click(tune);
+      await settle();
+      await fireEvent.keyDown(screen.getByTestId('conv-tune-ask'), { key: 'Enter' });
+      await settle();
+      const asked = mockedInvoke.mock.calls.filter((c) => c[0] === 'session_prompt_tune');
+      expect(asked).toHaveLength(1);
+      expect((asked[0][1] as { args: Record<string, unknown> }).args).toMatchObject({ session_id: 1, draft: 'fix test' });
+      await fireEvent.click(screen.getByTestId('conv-tune-accept'));
+      await settle();
+      expect(box().value).toBe('Fix the login test.');
+      expect(names()).not.toContain('send_prompt');
+    } finally {
+      fleetSettings.set({ ...SETTING_DEFAULTS });
+    }
+  });
+
+  it('the tune button is absent while Prompt tuner is off, and a watcher’s is disabled', async () => {
+    await renderShared('answer');
+    expect(screen.queryByTestId('conv-tune-button')).toBeNull();
+    cleanup();
+    fleetSettings.set({ ...SETTING_DEFAULTS, 'work.prompt_tune': 'true' });
+    try {
+      await renderShared('watch');
+      const tune = screen.getByTestId('conv-tune-button') as HTMLButtonElement;
+      expect(tune.disabled).toBe(true);
+      expect(tune.title).toMatch(/answer/i);
+    } finally {
+      fleetSettings.set({ ...SETTING_DEFAULTS });
+    }
+  });
 
   it('a watch grantee’s ? is disabled and names the level it needs', async () => {
     fleetSettings.set({ ...SETTING_DEFAULTS, 'work.context_help': 'true' });

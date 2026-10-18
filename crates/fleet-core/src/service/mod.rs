@@ -90,6 +90,7 @@ pub mod presence;
 pub mod project_picks;
 pub mod projects;
 pub mod prompt_origin;
+pub mod prompt_tune;
 pub mod provision;
 pub mod prs;
 pub mod quick_replies;

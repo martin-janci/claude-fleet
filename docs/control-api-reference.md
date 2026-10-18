@@ -685,9 +685,9 @@ Parameters: `anchor_uuid`, `confirm_nonce`, `mode`, `new_worktree`, `session_id`
 
 ### `routines`
 
-Routines: a saved prompt that starts a session on cron, a session or PR event or Run now. list; get {routine_id}: runs and fixes; runs {routine_id, limit?}; failing: Inbox; budget: fleet spend today; save {routine, routine_id?}: the whole routine; preview: save's dry run; delete; set_enabled {enabled}; skip_next {skip?}; run_now; set_run_outcome {run_id, outcome}: a person's did_work | nothing | needs_person (needs_person lands it in the Inbox). Debugging, nothing written: explain {routine_id, limit?}: why it does or does not fire, check by check, its recent events judged and its decision trace; decisions {routine_id, limit?}: the trace alone; dry_run {routine_id, event_id?}: what a fire now would start and the exact prompt. Pause all stops the schedule, not run_now. E_NOTFOUND, E_INVALID.
+Routines: a saved prompt that starts a session on cron, a session or PR event or Run now. list; get {routine_id}: runs and fixes; runs {routine_id, limit?}; failing: Inbox; budget: fleet spend today; save {routine, routine_id?}: the whole routine; preview: save's dry run; delete; set_enabled {enabled}; skip_next {skip?}; run_now; set_run_outcome {run_id, outcome}: a person's did_work | nothing | needs_person (needs_person lands it in the Inbox). Debugging, nothing written: explain {routine_id, limit?}: why it does or does not fire, check by check, its recent events judged and its decision trace; decisions {routine_id, limit?}: the trace alone; dry_run {routine_id, event_id?}: what a fire now would start and the exact prompt. tune_prompt {routine, ask?}: the prompt tuner on a draft routine's prompt, on its host and profile: { prompt, notes, unchanged, model, host_alias, at }, a proposal never saved (E_INVALID_STATE while work.prompt_tune is off). Pause all stops the schedule, not run_now. E_NOTFOUND, E_INVALID.
 
-Parameters: `action`, `enabled`, `event_id`, `limit`, `outcome`, `routine`, `routine_id`, `run_id`, `skip`
+Parameters: `action`, `ask`, `enabled`, `event_id`, `limit`, `outcome`, `routine`, `routine_id`, `run_id`, `skip`
 
 ### `run_prompt`
 
@@ -796,6 +796,12 @@ Parameters: `org`, `person`, `session_id`
 Presence: report that you have a session open (again every heartbeat_secs; leaving: true when you close it) and read who else has. The owner sees everyone; others see the owner and themselves. Returns { session_id, viewers: [{ person_id, name, device?, since, you? }], heartbeat_secs }.
 
 Parameters: `leaving`, `session_id`
+
+### `session_prompt_tune`
+
+The prompt tuner at a session's composer: a model rewrites the draft into a clearer prompt for the session's agent, with the earlier prompts, the commands the composer accepts and an optional ask ("shorter") as context. Returns { prompt, notes, unchanged, model, host_alias, at }: a proposal for the composer, never sent. Runs one claude -p on the session's host under its account, on work.help_model (booked as context_help), for the owner or an answer/drive grant. Errors: E_INVALID_STATE (work.prompt_tune off), E_FORBIDDEN (a watch grant), E_INVALID (an empty draft), E_CLAUDE_CLI, E_TIMEOUT, as session_conversation.
+
+Parameters: `ask`, `commands`, `draft`, `history`, `session_id`
 
 ### `session_share`
 
@@ -1445,6 +1451,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::windows::open_terminal_window`
 - `commands::context_help::context_help`
 - `commands::context_help::session_context_help`
+- `commands::context_help::session_prompt_tune`
 - `commands::voice::voice_claim`
 - `commands::voice::voice_release`
 - `cancel_command`

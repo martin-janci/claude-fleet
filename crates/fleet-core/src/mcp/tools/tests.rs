@@ -11634,6 +11634,7 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     ("session_conversation", &["Read"]),
     ("session_summary_since", &["Read"]),
     ("session_context_help", &["Answer"]),
+    ("session_prompt_tune", &["Answer"]),
     ("session_tool_detail", &["Read"]),
     ("session_transcript", &["Read"]),
     ("set_session_tags", &["Own"]),

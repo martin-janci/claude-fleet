@@ -658,6 +658,9 @@ pub const WORK_CATCH_UP_SUMMARIES: &str = "work.catch_up_summaries";
 /// Context help at a shell or composer prompt line
 /// (`service::context_help`).
 pub const WORK_CONTEXT_HELP: &str = "work.context_help";
+/// The prompt tuner at the composer and a routine's prompt field
+/// (`service::prompt_tune`).
+pub const WORK_PROMPT_TUNE: &str = "work.prompt_tune";
 
 /// Task attachments: the largest file a task takes, in MiB (at most
 /// [`crate::store::ATTACHMENT_MAX_MB_CEILING`], what the desktop↔hub
@@ -1736,7 +1739,15 @@ pub const SPECS: &[Spec] = &[
         "haiku",
         Kind::Choice(SUMMARY_MODELS),
         "Context help model",
-        "The model that answers a question asked at a terminal or composer prompt line, on the session's own host and account.",
+        "The model that answers a question asked at a terminal or composer prompt line, and that tunes a prompt, on the session's own host and account.",
+    )
+    .tags(&[Tag::Ai]),
+    Spec::new(
+        WORK_PROMPT_TUNE,
+        "false",
+        Kind::Bool,
+        "Prompt tuner",
+        "Composer and routine prompt: Tune has a model rewrite your draft into a clearer prompt for the agent, on the session's or routine's host. You see the rewrite beside your draft and accept, edit or discard it; nothing is sent.",
     )
     .tags(&[Tag::Ai]),
     Spec::new(

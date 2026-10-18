@@ -18,7 +18,7 @@ use tauri::State;
 /// The `routines` tool's arguments, as the tool reads them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RoutinesArgs {
-    /// list | get | runs | failing | budget | save | preview | delete | set_enabled | skip_next | run_now | set_run_outcome | explain | decisions | dry_run
+    /// list | get | runs | failing | budget | save | preview | delete | set_enabled | skip_next | run_now | set_run_outcome | explain | decisions | dry_run | tune_prompt
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routine_id: Option<i64>,
@@ -36,6 +36,9 @@ pub struct RoutinesArgs {
     pub run_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
+    /// tune_prompt: what the person wants from the rewrite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask: Option<String>,
 }
 
 /// One `routines` action; the answer is the tool's JSON.
@@ -105,6 +108,22 @@ pub(crate) mod routed {
                     input,
                     fleet_core::store::now_unix(),
                 )?)
+            }
+            "tune_prompt" => {
+                let input = args
+                    .routine
+                    .as_ref()
+                    .ok_or_else(|| IpcError::new(codes::E_INVALID, "tune_prompt needs routine"))?;
+                json(
+                    fleet_core::service::prompt_tune::tune_for_routine(
+                        store,
+                        ssh.as_ref(),
+                        &scope,
+                        input,
+                        args.ask.as_deref().unwrap_or(""),
+                    )
+                    .await?,
+                )
             }
             "delete" => json(serde_json::json!({ "removed": svc::delete(store, &scope, id()?)? })),
             "set_enabled" => {

@@ -423,6 +423,53 @@ impl FleetTools {
         ok_json_compact(&answer)
     }
 
+    #[tool(description = "The prompt tuner at a session's composer: a model \
+        rewrites the draft into a clearer prompt for the session's agent, \
+        with the earlier prompts, the commands the composer accepts and an \
+        optional ask (\"shorter\") as context. Returns { prompt, notes, \
+        unchanged, model, host_alias, at }: a proposal for the composer, \
+        never sent. Runs one claude -p on the session's host under its \
+        account, on work.help_model (booked as context_help), for the owner \
+        or an answer/drive grant. Errors: E_INVALID_STATE (work.prompt_tune \
+        off), E_FORBIDDEN (a watch grant), E_INVALID (an empty draft), \
+        E_CLAUDE_CLI, E_TIMEOUT, as session_conversation.")]
+    pub(super) async fn session_prompt_tune(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<SessionPromptTuneParams>,
+    ) -> Result<CallToolResult, McpError> {
+        // The draft is the person's text: not logged.
+        audit(
+            "session_prompt_tune",
+            &format!("session_id={}", p.session_id),
+        );
+        // `answer`, as context help: the rewrite is text for the composer,
+        // and the run spends the owner's account.
+        let row = self.resolve_target_row(
+            &caller,
+            Some(p.session_id),
+            None,
+            None,
+            Reach::Answer,
+            "the session",
+        )?;
+        let request = crate::service::prompt_tune::TuneRequest {
+            draft: p.draft,
+            ask: p.ask,
+            history: p.history,
+            commands: p.commands,
+        };
+        let answer = crate::service::prompt_tune::tune_for_session(
+            &self.store,
+            self.ssh.as_ref(),
+            &row,
+            &request,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json_compact(&answer)
+    }
+
     #[tool(description = "send_prompt + wait_for_session(turn_gt) + \
         session_transcript in one call. Returns { turn_seq, status: \
         satisfied | timeout, transcript } (the reply as plain text; null \
