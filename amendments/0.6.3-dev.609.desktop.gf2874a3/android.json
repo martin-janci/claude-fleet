@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "version": "0.6.3-dev.609.desktop.gf2874a3",
+  "mobile_accepts": [
+    0,
+    18
+  ],
+  "components": {
+    "android": {
+      "version": "0.6.3-dev.609.desktop.gf2874a3",
+      "artifacts": [
+        {
+          "kind": "apk",
+          "url": "https://github.com/martin-janci/fleet-mobile/releases/download/v0.6.3-dev.609.desktop.gf2874a3/fleet-mobile-0.6.3-dev.609.desktop.gf2874a3.apk",
+          "sha256": "fceda32255a1d7df6f4a653cd228ca23f11d3deb00017c175ebed2fdba050721",
+          "size": 18204936,
+          "version_code": 418631,
+          "signer_sha256": "87081ff376e7ad2cb3082bf8f48dac2f451bffda66693b575c31cd4c354b9a15"
+        }
+      ]
+    }
+  }
+}
