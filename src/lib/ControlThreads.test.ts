@@ -141,6 +141,9 @@ describe('ControlThreads', () => {
     await fireEvent.click(bell());
     await waitFor(() => expect(row().dataset.muted).toBe('true'));
     expect(row().textContent).toContain('Muted ·');
+    // A toggle keeps its name; only the pressed state says it is muted.
+    expect(bell().getAttribute('aria-pressed')).toBe('true');
+    expect(bell().getAttribute('aria-label')).toBe('Mute fix-flake');
     expect(inv).toHaveBeenCalledWith('control_journal', { args: { action: 'mute', thread: 'session', id: flake.id } });
     await fireEvent.click(bell());
     await waitFor(() => expect(row().dataset.muted).toBeUndefined());

@@ -15,6 +15,7 @@ import {
   canApplyFixes,
   findings,
   findingsByHost,
+  findingsError,
   findingsLoaded,
   fixedRecently,
   loadFindings,
@@ -62,6 +63,7 @@ beforeEach(() => {
   findings.set([]);
   fixedRecently.set([]);
   findingsLoaded.set(false);
+  findingsError.set(null);
   canApplyFixes.set(false);
   inv.mockReset();
   inv.mockImplementation(async (cmd: string, args: unknown) => {
@@ -171,6 +173,17 @@ describe('the fix chat card', () => {
     render(RichText, { props: { source: ui({ finding_id: 5 }), sessionId: 1 } });
     const line = await screen.findByTestId('rich-fix-resolved');
     expect(line.textContent).toContain('Already resolved');
+  });
+
+  it('says the read failed rather than calling the problem resolved', async () => {
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd === 'autofix_findings') throw { code: 'E_HUB_UNREACHABLE', message: 'hub unreachable' };
+      return null;
+    });
+    render(RichText, { props: { source: ui({ finding_id: 5 }), sessionId: 1 } });
+    const line = await screen.findByTestId('rich-fix-error');
+    expect(line.textContent).toContain('Could not read the problem');
+    expect(screen.queryByTestId('rich-fix-resolved')).toBeNull();
   });
 
   it('says what fleet fixed', async () => {

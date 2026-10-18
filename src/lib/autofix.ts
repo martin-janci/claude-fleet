@@ -5,7 +5,7 @@
 // person's Fix. The panel's "Problems & fixes", the `fix` chat card, the
 // host chip's count and Control's own finding all read this one store.
 import { derived, get, writable } from 'svelte/store';
-import { invokeCmd, type Result } from './result';
+import { invokeCmd, type IpcError, type Result } from './result';
 
 export type Safety = 'safe' | 'needs_approval';
 
@@ -62,6 +62,10 @@ export const fixedRecently = writable<Finding[]>([]);
 export const canApplyFixes = writable<boolean>(false);
 /** The list was read at least once. */
 export const findingsLoaded = writable<boolean>(false);
+/** The last read failed (the hub unreachable, timed out, or without the
+ *  tool): what the store holds is not the hub's answer, so a finding missing
+ *  from it is unknown, not resolved. Null once a read succeeds. */
+export const findingsError = writable<IpcError | null>(null);
 
 /** The findings a person is asked about: everything live but the dismissed. */
 export const openFindings = derived(findings, ($f) => $f.filter((x) => x.state !== 'dismissed'));
@@ -84,6 +88,7 @@ export async function loadFindings(): Promise<Result<Findings>> {
     fixedRecently.set(r.value.fixed ?? []);
     canApplyFixes.set(r.value.can_apply === true);
   }
+  findingsError.set(r.ok ? null : r.error);
   findingsLoaded.set(true);
   return r;
 }

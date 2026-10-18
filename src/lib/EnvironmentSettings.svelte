@@ -6,6 +6,7 @@
   // device, the shared ones on a trusted one — and, with more than one fleet,
   // which fleet's variables it shows. An extra fleet's list and actions are
   // routed by `fleet` (multi-hub design D6), like its sessions.
+  import { untrack } from 'svelte';
   import PageView from './pages/PageView.svelte';
   import type { Descriptor, Page, PageAction, SourceSpec } from './pages/pages';
   import type { ResourceType } from './pages/resources';
@@ -55,6 +56,8 @@
   let accessLoaded = $state(false);
   /** Bumped after the Git & tokens form wrote: the list re-reads. */
   let tick = $state(0);
+  /** Bumped by Try again after an access read that did not get through. */
+  let retry = $state(0);
 
   // A duplicate is the other fleet twice over: its calls are refused.
   const choices = $derived($fleets.filter((f) => !f.duplicate_of));
@@ -67,6 +70,7 @@
 
   $effect(() => {
     const f = fleet;
+    void retry;
     if (own) {
       access = OWN_FLEET;
       accessLoaded = true;
@@ -102,6 +106,16 @@
   let gitError = $state<string | null>(null);
   let git = $state({ name: '', email: '', ghToken: '', jiraEmail: '', jiraToken: '' });
   const gitWrites = $derived(gitIdentityWrites(git));
+  // What was typed is meant for the fleet it was typed under: a switch
+  // empties the form, so a token cannot be Set on the newly picked hub.
+  $effect(() => {
+    void fleet;
+    untrack(() => {
+      git = { name: '', email: '', ghToken: '', jiraEmail: '', jiraToken: '' };
+      gitError = null;
+      gitOpen = false;
+    });
+  });
 
   async function saveGit(e: SubmitEvent) {
     e.preventDefault();
@@ -151,6 +165,10 @@
       {onnavigate} />
   {/key}
 
+  {#if accessLoaded && access.error}
+    <button type="button" class="btn btn--quiet retry" data-testid="env-access-retry" onclick={() => (retry += 1)}>Try again</button>
+  {/if}
+
   {#if accessLoaded && access.person}
     <section class="git" data-testid="env-git">
       {#if !gitOpen}
@@ -191,6 +209,9 @@
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
+  }
+  .retry {
+    align-self: flex-start;
   }
   .fleet-pick {
     display: flex;

@@ -9,7 +9,15 @@
 -->
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import { ESCALATIONS_SHOWN, controlSessionIds, escalationScope, escalations, laterEscalations, putOff } from './control_escalations';
+  import {
+    ESCALATIONS_SHOWN,
+    controlSessionIds,
+    escalationScope,
+    escalations,
+    forgetRecoveredHosts,
+    laterEscalations,
+    putOff,
+  } from './control_escalations';
   import { visibleFleet, selectView } from './control_views';
   import { operatorSession } from './operator';
   import { openInControl } from './control_room';
@@ -24,6 +32,10 @@
   // state with the receipts (F10).
   const stopFollows = handoffs.subscribe(() => void refreshMutes());
   onDestroy(stopFollows);
+  // A host back up ends the Later on its outage card, so its next outage
+  // raises a card again.
+  const stopHosts = hosts.subscribe((h) => forgetRecoveredHosts(h));
+  onDestroy(stopHosts);
 
   const mine = $derived(controlSessionIds($visibleFleet.rows, $handoffs, $threadFollows));
   const opId = $derived($operatorSession?.id ?? null);
@@ -69,7 +81,6 @@
             type="button"
             class="more scope"
             data-testid="control-escalations-scope"
-            aria-pressed={$escalationScope === 'fleet'}
             onclick={() => escalationScope.set($escalationScope === 'fleet' ? 'control' : 'fleet')}
             >{$escalationScope === 'fleet' ? "Only Control's threads" : `All fleet (${others} more)`}</button
           >

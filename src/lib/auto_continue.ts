@@ -13,7 +13,7 @@
 // What keeps it from acting where a person must lives there too: the
 // setting, "Ask first" on the autonomy dial, risky words, a newer turn, a
 // busy agent, and cards older than a day.
-import { invokeCmd, type Result } from './result';
+import { invokeCmd, type IpcError, type Result } from './result';
 
 export type PickState = 'waiting' | 'sent' | 'taken' | 'cancelled' | 'superseded' | 'failed';
 
@@ -38,6 +38,14 @@ export interface AutoContinueView {
 
 export function autoContinue(action: 'status' | 'cancel' | 'take', turnSeq?: number): Promise<Result<AutoContinueView>> {
   return invokeCmd<AutoContinueView>('control_auto_continue', { action, turnSeq: turnSeq ?? null });
+}
+
+/** A hub from before the fleet ran the clock (2026-10-17) has no
+ *  `control_auto_continue` tool and refuses it as a protocol error
+ *  (`wire_contract.rs`, revision 18): no clock runs anywhere, so the bar
+ *  says the hub needs updating rather than drawing nothing. */
+export function hubLacksAutoContinue(e: IpcError): boolean {
+  return e.code === 'E_HUB_PROTOCOL';
 }
 
 /** The pick to draw a countdown for in `sessionId`'s chat, or null. */

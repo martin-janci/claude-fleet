@@ -6,7 +6,8 @@
   // few seconds, and settles the card when the person acts. Typing answers
   // the card in the person's own words, so it cancels it.
   import { onDestroy } from 'svelte';
-  import { autoContinue, countdown, liveCountdown, type AutoContinueView } from './auto_continue';
+  import { autoContinue, countdown, hubLacksAutoContinue, liveCountdown, type AutoContinueView } from './auto_continue';
+  import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
 
   let {
     sessionId,
@@ -26,10 +27,33 @@
 
   let view = $state<AutoContinueView | null>(null);
   let now = $state(Date.now());
+  /** The hub predates `control_auto_continue` (it runs no clock): say so
+   *  instead of drawing nothing, and stop asking. */
+  let unsupported = $state(false);
+
+  // Answers can land out of order (the poll, a new turn, the post-due read,
+  // Cancel, Send now): only the newest request's answer is applied, so an
+  // older 'waiting' snapshot never brings back a card already settled. The
+  // Result is still handed back: a stale 'take' answer still carries the
+  // prompt this window must send.
+  let seq = 0;
+  let applied = 0;
+  async function call(action: 'status' | 'cancel' | 'take', turnSeq?: number) {
+    const mine = ++seq;
+    const r = await autoContinue(action, turnSeq);
+    if (mine < applied) return r;
+    applied = mine;
+    if (r.ok) view = r.value;
+    else if (hubLacksAutoContinue(r.error)) {
+      unsupported = true;
+      view = null;
+    }
+    return r;
+  }
 
   async function refresh() {
-    const r = await autoContinue('status');
-    if (r.ok) view = r.value;
+    if (unsupported) return;
+    await call('status');
   }
 
   $effect(() => {
@@ -46,10 +70,13 @@
 
   const live = $derived(liveCountdown(view, sessionId));
   const left = $derived(live ? live.dueAt * 1000 - now : null);
+  // A boolean, not `left`: `left` changes every second, and an effect on it
+  // would clear and re-arm the timeout below on each tick so it never fires.
+  const overdue = $derived(left !== null && left <= 0);
 
   // Once due the fleet sends it; read again shortly after to clear the bar.
   $effect(() => {
-    if (left !== null && left <= 0) {
+    if (overdue) {
       const t = setTimeout(() => void refresh(), 3000);
       return () => clearTimeout(t);
     }
@@ -61,9 +88,8 @@
 
   async function go() {
     if (!live) return;
-    const r = await autoContinue('take', live.pick.turn_seq);
+    const r = await call('take', live.pick.turn_seq);
     if (r.ok) {
-      view = r.value;
       // `pending` is the card only when this window settled it: a send by the
       // fleet or another window already happened.
       if (r.value.pending) onSend(r.value.pending.prompt);
@@ -73,8 +99,7 @@
 
   async function cancel() {
     if (!live) return;
-    const r = await autoContinue('cancel', live.pick.turn_seq);
-    if (r.ok) view = r.value;
+    await call('cancel', live.pick.turn_seq);
   }
 </script>
 
@@ -87,6 +112,10 @@
     >
     <button type="button" class="btn btn--chip" data-testid="auto-continue-now" onclick={() => void go()}>Send now</button>
     <button type="button" class="btn btn--quiet" data-testid="auto-continue-cancel" onclick={() => void cancel()}>Cancel</button>
+  </div>
+{:else if unsupported && settingBool($fleetSettings, SETTING_KEYS.controlAutoContinue)}
+  <div class="auto-continue" role="note" data-testid="auto-continue-unsupported">
+    <span class="line">Going on with a recommended option needs a newer hub: update the hub to use it.</span>
   </div>
 {/if}
 
