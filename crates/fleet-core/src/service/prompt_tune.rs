@@ -17,10 +17,12 @@
 //!
 //! **Bounded and untrusted.** The draft, the person's ask and each history
 //! entry are capped ([`DRAFT_MAX_CHARS`], [`ASK_MAX_CHARS`],
-//! [`super::context_help::HISTORY_MAX_ITEMS`]), the whole context is the
-//! newest [`super::context_help::CONTEXT_MAX_BYTES`] with the draft kept,
-//! and the reply is redacted and capped ([`PROMPT_MAX_CHARS`],
-//! [`NOTES_MAX_CHARS`]). Nothing is stored but the run's cost.
+//! [`super::context_help::HISTORY_MAX_ITEMS`]); a draft too long to send
+//! whole is refused, never cut, and only history is cut to keep the context
+//! within [`super::context_help::CONTEXT_MAX_BYTES`]. The reply is redacted
+//! (sparing values the draft itself holds) and capped at the target's
+//! limit ([`PROMPT_MAX_CHARS`], [`NOTES_MAX_CHARS`]). Nothing is stored but
+//! the run's cost.
 
 use crate::ipc_error::{codes, IpcError};
 use crate::service::context_help::{
@@ -114,11 +116,10 @@ fn cut(text: &str, max: usize) -> String {
     s
 }
 
-/// PURE: the context the model reads on stdin. The newest
-/// [`context_help::CONTEXT_MAX_BYTES`] are kept; the draft and the ask are
-/// last, so only the oldest history is ever cut.
-pub fn context_text(target: &TuneTarget, req: &TuneRequest) -> String {
-    let mut out = String::from("## Where it goes\n");
+/// The context in three parts: where it goes, the history and commands,
+/// and the draft with the ask. Only the middle one may be cut.
+fn sections(target: &TuneTarget, req: &TuneRequest) -> (String, String, String) {
+    let mut head = String::from("## Where it goes\n");
     let what = match target.kind {
         "routine" => {
             "a routine: a saved prompt that starts a new session on a schedule or an \
@@ -126,26 +127,27 @@ pub fn context_text(target: &TuneTarget, req: &TuneRequest) -> String {
         }
         _ => "the message box of a running session; the agent has the conversation so far",
     };
-    out.push_str(&format!("- {what}\n- agent: {}\n", target.agent));
-    out.push_str(&format!("- host: {}\n", target.host_alias));
+    head.push_str(&format!("- {what}\n- agent: {}\n", target.agent));
+    head.push_str(&format!("- host: {}\n", target.host_alias));
     if let Some(p) = target.project.as_deref().filter(|p| !p.is_empty()) {
-        out.push_str(&format!("- project: {p}\n"));
+        head.push_str(&format!("- project: {p}\n"));
     }
-    out.push_str(&format!(
+    head.push_str(&format!(
         "- the prompt may be at most {} characters\n",
         target.max_chars
     ));
+    let mut middle = String::new();
     let from = req.history.len().saturating_sub(HISTORY_MAX_ITEMS);
     let kept: Vec<&String> = req.history[from..]
         .iter()
         .filter(|h| !h.trim().is_empty())
         .collect();
     if !kept.is_empty() {
-        out.push_str("\n## Earlier prompts (oldest first)\n");
+        middle.push_str("\n## Earlier prompts (oldest first)\n");
         for h in kept {
-            out.push_str("- ");
-            out.push_str(&cut(h.trim(), HISTORY_ITEM_MAX_CHARS).replace('\n', "\n  "));
-            out.push('\n');
+            middle.push_str("- ");
+            middle.push_str(&cut(h.trim(), HISTORY_ITEM_MAX_CHARS).replace('\n', "\n  "));
+            middle.push('\n');
         }
     }
     let commands: Vec<&String> = req
@@ -155,30 +157,116 @@ pub fn context_text(target: &TuneTarget, req: &TuneRequest) -> String {
         .take(context_help::COMMANDS_MAX_ITEMS)
         .collect();
     if !commands.is_empty() {
-        out.push_str("\n## Commands\n");
+        middle.push_str("\n## Commands\n");
         for c in commands {
-            out.push_str(&cut(c.trim(), 300));
-            out.push('\n');
+            middle.push_str(&cut(c.trim(), 300));
+            middle.push('\n');
         }
     }
-    out.push_str("\n## Draft\n");
-    out.push_str(&cut(req.draft.trim(), DRAFT_MAX_CHARS));
-    out.push_str("\n\n## What I want from the rewrite\n");
+    let mut tail = String::from("\n## Draft\n");
+    tail.push_str(&cut(req.draft.trim(), DRAFT_MAX_CHARS));
+    tail.push_str("\n\n## What I want from the rewrite\n");
     let ask = req.ask.trim();
     if ask.is_empty() {
-        out.push_str("Make it clearer and more complete for the agent.");
+        tail.push_str("Make it clearer and more complete for the agent.");
     } else {
-        out.push_str(&cut(ask, ASK_MAX_CHARS));
+        tail.push_str(&cut(ask, ASK_MAX_CHARS));
     }
-    out.push('\n');
+    tail.push('\n');
+    (head, middle, tail)
+}
+
+/// PURE: whether the draft is too long to tune whole: over
+/// [`DRAFT_MAX_CHARS`], or so many bytes that where it goes, the draft and
+/// the ask do not fit in [`context_help::CONTEXT_MAX_BYTES`] together.
+/// [`tune`] refuses such a draft rather than rewrite a cut one, since
+/// accepting the rewrite replaces the whole box.
+pub fn draft_too_long(target: &TuneTarget, req: &TuneRequest) -> bool {
+    if req.draft.trim().chars().count() > DRAFT_MAX_CHARS {
+        return true;
+    }
+    let (head, _, tail) = sections(target, req);
+    head.len() + tail.len() > context_help::CONTEXT_MAX_BYTES
+}
+
+/// PURE: the context the model reads on stdin, at most
+/// [`context_help::CONTEXT_MAX_BYTES`]. Where it goes comes first and the
+/// draft and the ask last; only the oldest history (then the commands) is
+/// cut to fit. A draft too long to fit with them ([`draft_too_long`]) is
+/// refused by [`tune`] before this runs.
+pub fn context_text(target: &TuneTarget, req: &TuneRequest) -> String {
+    let (head, middle, tail) = sections(target, req);
+    let budget = context_help::CONTEXT_MAX_BYTES.saturating_sub(head.len() + tail.len());
+    let out = format!("{head}{}{tail}", tail_bytes(&middle, budget));
     tail_bytes(&out, context_help::CONTEXT_MAX_BYTES).to_string()
+}
+
+/// Opens and closes a stand-in for a value of the draft's own while the
+/// rewrite is redacted (Unicode private use; never in a reply we keep).
+const KEEP_OPEN: char = '\u{E000}';
+const KEEP_CLOSE: char = '\u{E001}';
+
+/// The values in `draft` that [`crate::logging::redact`] would mask: each
+/// word, its pieces around `=`, `:`, `?`, `&`, `/` and quotes, and each
+/// pair of words (`Bearer <token>`). Longest first.
+fn draft_secrets(draft: &str) -> Vec<String> {
+    let words: Vec<&str> = draft.split_whitespace().collect();
+    let mut cands: Vec<String> = Vec::new();
+    for (i, w) in words.iter().enumerate() {
+        cands.push((*w).to_string());
+        if let Some(next) = words.get(i + 1) {
+            cands.push(format!("{w} {next}"));
+        }
+        let bare = w.trim_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '_');
+        cands.push(bare.to_string());
+        cands.extend(
+            bare.split([
+                '=', ':', '?', '&', '/', '"', '\'', ',', ';', '(', ')', '<', '>',
+            ])
+            .map(str::to_string),
+        );
+    }
+    let mut keep: Vec<String> = cands
+        .into_iter()
+        .filter(|c| !c.is_empty() && crate::logging::redact(c) != c.as_str())
+        .collect();
+    keep.sort_by_key(|c| std::cmp::Reverse(c.len()));
+    keep.dedup();
+    keep
+}
+
+/// [`crate::logging::redact`], except for values the draft itself holds:
+/// the person's own checksum or key in their own prompt is theirs, and
+/// masking it would hand them back a proposal with `[REDACTED]` in place of
+/// what they wrote. Anything else the model added is still masked.
+fn redact_keeping_draft(text: &str, draft: &str) -> String {
+    let keep = draft_secrets(draft);
+    if keep.is_empty() || text.contains(KEEP_OPEN) || text.contains(KEEP_CLOSE) {
+        return crate::logging::redact(text).into_owned();
+    }
+    let mut masked = text.to_string();
+    let mut used = Vec::new();
+    for value in &keep {
+        if masked.contains(value.as_str()) {
+            let stand_in = format!("{KEEP_OPEN}{}{KEEP_CLOSE}", used.len());
+            masked = masked.replace(value.as_str(), &stand_in);
+            used.push((stand_in, value));
+        }
+    }
+    let mut out = crate::logging::redact(&masked).into_owned();
+    for (stand_in, value) in used.iter().rev() {
+        out = out.replace(stand_in.as_str(), value);
+    }
+    out
 }
 
 /// PURE: the reply as the person sees it: the JSON the instruction asked
 /// for, or, when there is none, the whole text as the rewrite. A code fence
 /// around the rewrite is stripped; control characters other than newline
-/// and tab are refused. Redacted and capped; `None` when no rewrite is left.
-pub fn parse_reply(reply: &str) -> Option<(String, String)> {
+/// and tab are refused. Redacted (except for values `draft` itself holds)
+/// and capped at `max_chars` (at most [`PROMPT_MAX_CHARS`]), saying so in
+/// the notes when it was cut; `None` when no rewrite is left.
+pub fn parse_reply(reply: &str, draft: &str, max_chars: usize) -> Option<(String, String)> {
     let reply = reply.trim();
     let json = reply
         .find('{')
@@ -206,15 +294,34 @@ pub fn parse_reply(reply: &str) -> Option<(String, String)> {
     if p.is_empty() || p.chars().any(|c| c.is_control() && c != '\n' && c != '\t') {
         return None;
     }
-    let prompt = crate::logging::redact(p)
-        .chars()
-        .take(PROMPT_MAX_CHARS)
-        .collect::<String>();
-    let notes = crate::logging::redact(notes.trim())
+    let max = max_chars.clamp(1, PROMPT_MAX_CHARS);
+    let draft = draft.trim();
+    let redacted = if p == draft {
+        p.to_string()
+    } else {
+        redact_keeping_draft(p, draft)
+    };
+    let over = redacted.chars().count() > max;
+    let prompt = if over {
+        let mut s: String = redacted.chars().take(max - 1).collect();
+        s.push('…');
+        s
+    } else {
+        redacted
+    };
+    let mut notes = redact_keeping_draft(notes.trim(), draft)
         .chars()
         .filter(|c| !c.is_control() || *c == '\n')
         .take(NOTES_MAX_CHARS)
         .collect::<String>();
+    if over {
+        if !notes.is_empty() {
+            notes.push('\n');
+        }
+        notes.push_str(&format!(
+            "The rewrite ran past the {max}-character limit and was cut there."
+        ));
+    }
     Some((prompt, notes))
 }
 
@@ -230,9 +337,18 @@ pub async fn tune(
             "write a draft first: the tuner rewrites what is in the box",
         ));
     }
+    if draft_too_long(target, req) {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "the draft is too long to tune (at most {DRAFT_MAX_CHARS} characters, \
+                 fewer for non-Latin text): tune a shorter part of it"
+            ),
+        ));
+    }
     let context = context_text(target, req);
     let done = model.complete(TUNE_INSTRUCTION, &context).await?;
-    let (prompt, notes) = parse_reply(&done.text)
+    let (prompt, notes) = parse_reply(&done.text, &req.draft, target.max_chars)
         .ok_or_else(|| IpcError::new(codes::E_CLAUDE_CLI, "the tuner run proposed no prompt"))?;
     let unchanged = prompt.trim() == req.draft.trim();
     Ok((
