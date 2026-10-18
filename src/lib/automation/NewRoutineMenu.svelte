@@ -1,11 +1,17 @@
 <script lang="ts">
   // + New on Automation's head (board Automation): a routine from a template
   // (Morning PR sweep first) or a blank one. It asks the Routines to open
-  // the editor (`openRoutines`), so it works from every Automation tab.
+  // the editor (`openRoutines`), so it works from every Automation tab. The
+  // editor's footer opens the same menu upwards as "Use a template…".
   import Button from '../kit/Button.svelte';
   import { TEMPLATES } from '../routines';
 
-  let { onpick }: { onpick: (template: string) => void } = $props();
+  let {
+    onpick,
+    label = '+ New',
+    testid = 'routine-new',
+    up = false,
+  }: { onpick: (template: string) => void; label?: string; testid?: string; up?: boolean } = $props();
   let open = $state(false);
 
   function pick(id: string) {
@@ -17,9 +23,9 @@
 <svelte:window onkeydown={(e) => open && e.key === 'Escape' && (open = false)} />
 
 <div class="new">
-  <Button testid="routine-new" onclick={() => (open = !open)}>+ New</Button>
+  <Button variant={up ? 'quiet' : 'default'} {testid} onclick={() => (open = !open)}>{label}</Button>
   {#if open}
-    <div class="menu" role="menu" data-testid="routine-new-menu">
+    <div class="menu" class:up role="menu" data-testid="routine-new-menu">
       {#each TEMPLATES as t (t.id)}
         <button type="button" role="menuitem" data-testid={`routine-template-${t.id}`} onclick={() => pick(t.id)}>
           <span>{t.label}</span><span class="muted">{t.description}</span>
@@ -35,6 +41,7 @@
 <style>
   .new { position: relative; }
   .menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 5; min-width: 260px; display: flex; flex-direction: column; background: var(--bg-pane); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 4px; box-shadow: var(--shadow-pop, 0 8px 24px rgb(0 0 0 / 0.25)); }
+  .menu.up { right: auto; left: 0; top: auto; bottom: calc(100% + 4px); }
   .menu button { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; padding: 6px 8px; border: 0; background: none; color: var(--fg); border-radius: var(--radius-sm); cursor: pointer; font: inherit; }
   .menu button:hover, .menu button:focus-visible { background: var(--bg-hover); }
   .muted { color: var(--fg-muted); font-size: var(--text-xs, 11.5px); }
