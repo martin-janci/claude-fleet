@@ -110,7 +110,21 @@
     if (id) await invoke('pty_close', { args: { id } }).catch(() => {});
   }
 
-  async function attach() {
+  // Attaches run one at a time: an overflow re-attach and a "Try again"
+  // click otherwise race, and the backend takes `pty_close` by id alone, so
+  // a late close or open of one lands on the other's terminal. An attach
+  // still waiting on `pty_open` at unmount must not start a drain nothing
+  // will stop, and the close queued behind it must end what it opened.
+  let destroyed = false;
+  let attaching: Promise<void> = Promise.resolve();
+
+  function attach(): Promise<void> {
+    attaching = attaching.then(attachNow);
+    return attaching;
+  }
+
+  async function attachNow() {
+    if (destroyed) return;
     await close();
     measure();
     const dim = size();
@@ -126,11 +140,13 @@
         args: { id: ptyId, session_name: session.tmux_name, host_alias: session.host_alias, cols, rows },
       });
       generation = typeof opened === 'number' ? opened : null;
+      // Unmounted meanwhile: the close queued behind this attach ends it.
+      if (destroyed) return;
       open = true;
       drain.start();
       grid?.focus();
     } catch (e) {
-      error = toIpcError(e).message;
+      if (!destroyed) error = toIpcError(e).message;
     }
   }
 
@@ -167,9 +183,11 @@
   });
 
   onDestroy(() => {
+    destroyed = true;
     ro?.disconnect();
     drain.stop();
-    void close();
+    // After any attach in flight, so its open is closed too.
+    void attaching.then(close);
   });
 </script>
 
