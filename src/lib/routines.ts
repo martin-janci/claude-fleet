@@ -52,6 +52,8 @@ export interface RoutineRow {
   event_author?: string;
   /** At most one run per PR (or session) in this many seconds. */
   event_rate_secs?: number;
+  /** Only events on this host (migration 201): a host event, a session or a PR there. */
+  event_host?: string;
   /** The IANA zone it was saved in, shown with the schedule (M15 G3.8). */
   time_zone?: string;
   /** A run still going after this many seconds is stopped and failed. */
@@ -170,6 +172,7 @@ export interface RoutineInput {
   event_repo?: string;
   event_author?: EventAuthor;
   event_rate_secs?: number;
+  event_host?: string;
   time_zone?: string;
   run_max_secs?: number;
   fallback_host?: string;
@@ -211,6 +214,7 @@ export function routineInputOf(r: RoutineRow): RoutineInput {
     event_repo: r.event_repo,
     event_author: r.event_author === 'anyone' ? 'anyone' : undefined,
     event_rate_secs: r.event_rate_secs,
+    event_host: r.event_host,
     time_zone: r.time_zone,
     run_max_secs: r.run_max_secs,
     fallback_host: r.fallback_host,
@@ -269,7 +273,10 @@ export interface RoutineCheck {
 export interface EventVerdict {
   event_id: number;
   kind: string;
-  session_id: number;
+  /** Absent for a fleet event. */
+  session_id?: number;
+  /** What a fleet event is about: `host:mac`, `account:…`, `mission:4`. */
+  subject?: string;
   at: number;
   /** The routine's cursor is past it. */
   read: boolean;
@@ -597,21 +604,51 @@ export function cronWords(cron: string | undefined): string {
 /** When it runs, in words. */
 export function triggerWords(r: Pick<RoutineRow, 'trigger' | 'cron' | 'event'>): string {
   if (r.trigger === 'cron') return cronWords(r.cron);
-  if (r.trigger === 'event') {
-    if (isPrEvent(r.event)) return `When ${eventLabel(r.event).replace(/^A /, 'a ')}`;
-    return `When a session is ${eventWords(r.event)}`;
-  }
+  if (r.trigger === 'event') return `When ${eventLabel(r.event).replace(/^(A|An) /, (a) => a.toLowerCase())}`;
   return 'Run now only';
 }
 
+// Session events (fleet-core `routines::EVENTS`): "A session is …".
 const EVENT_WORDS: Record<string, string> = {
   turn_done: 'done with a turn',
+  needs_you: 'waiting for you',
   stuck: 'stuck',
   lost: 'lost',
-  needs_input: 'waiting for you',
+  stop_failure: 'failed',
+  task_done: 'done with its task',
+  task_failed: 'failed at its task',
+  session_restore_failed: 'not restored after a reboot',
+  workspace_repair_failed: 'left with a broken workspace',
+  auto_restored: 'brought back automatically',
+  auto_restore_failed: 'past bringing back',
+  account_switched: 'moved to another account',
+  account_switch_failed: 'stuck on an account it could not leave',
+  session_moved: 'moved to another host',
 };
 export function eventWords(e: string | undefined): string {
   return (e && EVENT_WORDS[e]) || e || 'event';
+}
+
+// Fleet events (fleet-core `routines::FLEET_EVENTS`, migration 201): what
+// happened to a host, an account or a mission, written once per change.
+const FLEET_EVENT_LABELS: Record<string, string> = {
+  host_offline: 'A host goes offline',
+  host_online: 'A host is back online',
+  host_low: 'A host runs low on disk or memory',
+  account_limited: 'An account hits its limit',
+  account_available: 'An account is under its limit again',
+  login_signed_out: 'A Claude login is signed out',
+  mission_done: 'A mission completes',
+  mission_failed: 'A mission fails',
+};
+/** The fleet events about no host: they take no host filter. */
+const HOSTLESS_EVENTS = new Set(['account_limited', 'account_available', 'mission_done', 'mission_failed']);
+export function isFleetEvent(e: string | undefined): boolean {
+  return !!e && e in FLEET_EVENT_LABELS;
+}
+/** Whether an event may narrow to one host. */
+export function takesHostFilter(e: string | undefined): boolean {
+  return !!e && !HOSTLESS_EVENTS.has(e);
 }
 
 // Pull request triggers (M15 step G2.4; fleet-core `routines::PR_EVENTS`):
@@ -620,19 +657,26 @@ export function eventWords(e: string | undefined): string {
 // `anyone`; every event may hold a rate.
 export type EventAuthor = 'me' | 'anyone';
 const PR_EVENT_LABELS: Record<string, string> = {
+  pr_opened: 'A pull request is opened',
   pr_review: 'A pull request gets a review',
   pr_ci_failed: 'A pull request’s checks fail',
   pr_ci_passed: 'A pull request’s checks pass',
   pr_merged: 'A pull request is merged',
 };
-/** The events the editor offers, session ones first. */
-export const EVENT_CHOICES: readonly string[] = ['stuck', 'lost', 'turn_done', ...Object.keys(PR_EVENT_LABELS)];
+/** The events the editor offers, in its groups: sessions, pull requests, the fleet. */
+export const EVENT_GROUPS: readonly { label: string; events: readonly string[] }[] = [
+  { label: 'Sessions', events: Object.keys(EVENT_WORDS) },
+  { label: 'Pull requests', events: Object.keys(PR_EVENT_LABELS) },
+  { label: 'Hosts, accounts and missions', events: Object.keys(FLEET_EVENT_LABELS) },
+];
+/** Every event the editor offers, in order. */
+export const EVENT_CHOICES: readonly string[] = EVENT_GROUPS.flatMap((g) => g.events);
 export function isPrEvent(e: string | undefined): boolean {
   return !!e && e in PR_EVENT_LABELS;
 }
 /** An event as the editor's select names it. */
 export function eventLabel(e: string | undefined): string {
-  return (e && PR_EVENT_LABELS[e]) || `A session is ${eventWords(e)}`;
+  return (e && (PR_EVENT_LABELS[e] || FLEET_EVENT_LABELS[e])) || `A session is ${eventWords(e)}`;
 }
 /** The rate choices: absent is "every time". */
 export const RATE_CHOICES: readonly { secs?: number; label: string }[] = [
@@ -646,43 +690,60 @@ export const RATE_CHOICES: readonly { secs?: number; label: string }[] = [
 export interface EventFilter {
   repo: string;
   author: EventAuthor;
+  /** A host alias, '' for any host. */
+  host: string;
   /** Seconds as text, '' for every time. */
   rate: string;
 }
-export function eventFilterOf(r: Pick<RoutineInput, 'event_repo' | 'event_author' | 'event_rate_secs'>): EventFilter {
+export function eventFilterOf(
+  r: Pick<RoutineInput, 'event_repo' | 'event_author' | 'event_rate_secs' | 'event_host'>,
+): EventFilter {
   return {
     repo: r.event_repo ?? '',
     author: r.event_author === 'anyone' ? 'anyone' : 'me',
+    host: r.event_host ?? '',
     rate: r.event_rate_secs ? String(r.event_rate_secs) : '',
   };
 }
-/** The fields `save` sends for `event`: none for another trigger, and the
+/** The fields `save` sends for `event`: none for another trigger, the
  *  repo and author only for a pull request event (the hub refuses them on
- *  a session one). */
+ *  a session one), and the host only for an event about a host. */
 export function eventFilterInput(
   trigger: string,
   event: string | undefined,
   f: EventFilter,
-): Pick<RoutineInput, 'event_repo' | 'event_author' | 'event_rate_secs'> {
+): Pick<RoutineInput, 'event_repo' | 'event_author' | 'event_rate_secs' | 'event_host'> {
   if (trigger !== 'event') return {};
   const rate = Number(f.rate);
-  const out: Pick<RoutineInput, 'event_repo' | 'event_author' | 'event_rate_secs'> =
+  const out: Pick<RoutineInput, 'event_repo' | 'event_author' | 'event_rate_secs' | 'event_host'> =
     Number.isInteger(rate) && rate > 0 ? { event_rate_secs: rate } : {};
+  const host = (f.host ?? '').trim();
+  if (host && takesHostFilter(event)) out.event_host = host;
   if (!isPrEvent(event)) return out;
   const repo = f.repo.trim();
   if (repo) out.event_repo = repo;
   if (f.author === 'anyone') out.event_author = 'anyone';
   return out;
 }
-/** "only in acme/web · anyone's · once per PR per hour", or '' when nothing narrows it. */
-export function eventFilterWords(r: Pick<RoutineRow, 'event' | 'event_repo' | 'event_author' | 'event_rate_secs'>): string {
+/** What one rate counts: a PR, a session, or what a fleet event is about. */
+export function rateSubject(e: string | undefined): string {
+  if (isPrEvent(e)) return 'PR';
+  if (!isFleetEvent(e)) return 'session';
+  if (e?.startsWith('host_') || e === 'login_signed_out') return 'host';
+  return e?.startsWith('account_') ? 'account' : 'mission';
+}
+/** "only in acme/web · on mac · anyone's · once per PR per hour", or '' when nothing narrows it. */
+export function eventFilterWords(
+  r: Pick<RoutineRow, 'event' | 'event_repo' | 'event_author' | 'event_rate_secs' | 'event_host'>,
+): string {
   const pr = isPrEvent(r.event);
   const parts: string[] = [];
   if (pr && r.event_repo) parts.push(`only in ${r.event_repo}`);
+  if (r.event_host) parts.push(`on ${r.event_host}`);
   if (pr) parts.push(r.event_author === 'anyone' ? 'anyone’s' : 'mine');
   const rate = RATE_CHOICES.find((c) => c.secs === r.event_rate_secs);
   if (r.event_rate_secs)
-    parts.push(rate ? rate.label.replace('once per', `once per ${pr ? 'PR' : 'session'} per`) : `once per ${r.event_rate_secs}s`);
+    parts.push(rate ? rate.label.replace('once per', `once per ${rateSubject(r.event)} per`) : `once per ${r.event_rate_secs}s`);
   return parts.join(' · ');
 }
 

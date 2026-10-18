@@ -392,6 +392,15 @@ fn routines_has_event_rate(conn: &Connection) -> rusqlite::Result<bool> {
 
 /// `already_applied` guard of migration 159: `routine_runs` already has its
 /// `host_alias` column (the last column it adds).
+fn routines_has_event_host(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('routines') WHERE name = 'event_host'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn routine_runs_has_host(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('routine_runs') WHERE name = 'host_alias'",
@@ -2262,6 +2271,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 200,
         sql: include_str!("../../migrations/200_control_journal.sql"),
         already_applied: None,
+    },
+    Migration {
+        version: 201,
+        sql: include_str!("../../migrations/201_fleet_events.sql"),
+        already_applied: Some(routines_has_event_host),
     },
 ];
 

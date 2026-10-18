@@ -84,7 +84,7 @@
       </p>
       {#if dry.event}
         <p class="line meta" data-testid="routine-dry-run-event">
-          Tried on {dry.event.kind} #{dry.event.event_id} (session {dry.event.session_id}): {dry.event.fires ? 'it fires the routine' : `it does not fire: ${dry.event.reason}`}
+          Tried on {dry.event.kind} #{dry.event.event_id} ({dry.event.session_id !== undefined ? `session ${dry.event.session_id}` : dry.event.subject}): {dry.event.fires ? 'it fires the routine' : `it does not fire: ${dry.event.reason}`}
         </p>
       {/if}
       {#each dry.scheduled_only.filter((c) => c.state !== 'ok') as c (c.name)}

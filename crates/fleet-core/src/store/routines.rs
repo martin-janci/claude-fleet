@@ -92,6 +92,10 @@ pub struct RoutineRow {
     /// 0 report only | 1 ask before push | 2 push and open PRs; absent = 2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autonomy: Option<i64>,
+    /// An event fires only on this host (migration 201): a host event of
+    /// it, a session on it, a pull request seen there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_host: Option<String>,
 }
 
 /// What a person writes: every field of a routine but its identity and the
@@ -119,6 +123,7 @@ pub struct RoutineFields {
     pub fallback_host: Option<String>,
     pub retry_once: bool,
     pub autonomy: Option<i64>,
+    pub event_host: Option<String>,
 }
 
 /// One run of a routine.
@@ -191,7 +196,7 @@ const COLS: &str = "id, org_id, owner_person_id, name, enabled, trigger, cron, u
                     budget_run_micros, budget_day_micros, overlap, next_run_at, skip_next, \
                     paused_reason, created_at, updated_at, event_repo, event_author, \
                     event_rate_secs, time_zone, run_max_secs, fallback_host, retry_once, \
-                    autonomy";
+                    autonomy, event_host";
 
 fn routine(r: &rusqlite::Row<'_>) -> rusqlite::Result<RoutineRow> {
     Ok(RoutineRow {
@@ -225,6 +230,7 @@ fn routine(r: &rusqlite::Row<'_>) -> rusqlite::Result<RoutineRow> {
         fallback_host: r.get(27)?,
         retry_once: r.get::<_, i64>(28)? != 0,
         autonomy: r.get(29)?,
+        event_host: r.get(30)?,
     })
 }
 
@@ -270,9 +276,9 @@ impl Store {
                utc_offset_min, event, event_cursor, host_alias, project_id, profile, prompt, \
                budget_run_micros, budget_day_micros, overlap, next_run_at, created_at, updated_at, \
                event_repo, event_author, event_rate_secs, time_zone, run_max_secs, fallback_host, \
-               retry_once, autonomy) \
+               retry_once, autonomy, event_host) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?18, \
-               ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
+               ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
             rusqlite::params![
                 org_id,
                 owner_person_id,
@@ -299,7 +305,8 @@ impl Store {
                 f.run_max_secs,
                 f.fallback_host,
                 f.retry_once as i64,
-                f.autonomy
+                f.autonomy,
+                f.event_host
             ],
         )?;
         let id = self.conn.last_insert_rowid();
@@ -322,7 +329,7 @@ impl Store {
                budget_day_micros = ?13, overlap = ?14, next_run_at = ?15, skip_next = 0, \
                paused_reason = NULL, updated_at = ?16, event_repo = ?18, event_author = ?19, \
                event_rate_secs = ?20, time_zone = ?21, run_max_secs = ?22, fallback_host = ?23, \
-               retry_once = ?24, autonomy = ?25 \
+               retry_once = ?24, autonomy = ?25, event_host = ?26 \
              WHERE id = ?17",
             rusqlite::params![
                 f.name,
@@ -349,7 +356,8 @@ impl Store {
                 f.run_max_secs,
                 f.fallback_host,
                 f.retry_once as i64,
-                f.autonomy
+                f.autonomy,
+                f.event_host
             ],
         )?;
         self.get_routine(id)

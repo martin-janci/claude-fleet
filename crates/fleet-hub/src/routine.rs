@@ -105,9 +105,13 @@ fn run_on(store: &Mutex<Store>, cmd: RoutineCmd, now: i64) -> Result<ExitCode, S
                 ));
                 for v in &ev.recent {
                     out::line(&format!(
-                        "  #{}\tsession {}\t{}\t{}",
+                        "  #{}\t{}\t{}\t{}",
                         v.event_id,
-                        v.session_id,
+                        match (v.session_id, v.subject.as_deref()) {
+                            (Some(sid), _) => format!("session {sid}"),
+                            (None, Some(subject)) => subject.to_string(),
+                            (None, None) => "-".to_string(),
+                        },
                         if v.fires { "fires" } else { "no" },
                         v.reason.as_deref().unwrap_or("-")
                     ));

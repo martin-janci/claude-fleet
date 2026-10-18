@@ -30,6 +30,7 @@ mod deferred_prompts;
 mod diagnostics;
 mod downloads;
 mod env_vars;
+pub mod fleet_events;
 mod followups;
 mod forms;
 mod guides;
@@ -163,6 +164,7 @@ pub use host_setup::{AgentInstallRow, HostSetupRow, SetupCheck};
 #[allow(unused_imports)]
 pub(crate) use admin_events::record_admin_event_in_tx;
 pub use diagnostics::WindowEventRow;
+pub use fleet_events::{FleetEventRow, NewFleetEvent, FLEET_EVENTS, FLEET_EVENTS_CAP};
 /// How follow-up titles compare: the same line twice, whitespace and case aside.
 pub(crate) use followups::norm as followup_norm;
 pub use identities::{normalize_issuer, IdentityRow, MAX_IDENTITY_FIELD_LEN};
@@ -220,7 +222,7 @@ pub use pr_shepherd::{
 pub use project_picks::{ProjectPickRow, PROJECT_GROUP_MAX_CHARS, PROJECT_VIS};
 pub use pull_requests::{
     pr_events, repo_and_number, PrSeenBy, PullRequestRow, PR_EVENT_CI_FAILED, PR_EVENT_CI_PASSED,
-    PR_EVENT_MERGED, PR_EVENT_REVIEW,
+    PR_EVENT_MERGED, PR_EVENT_OPENED, PR_EVENT_REVIEW,
 };
 pub use read_cursors::CursorRow;
 pub use read_pool::{read_via, ReadPool, READ_POOL_SIZE};

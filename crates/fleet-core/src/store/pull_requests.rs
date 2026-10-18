@@ -71,8 +71,11 @@ pub const PR_EVENT_REVIEW: &str = "pr_review";
 pub const PR_EVENT_CI_FAILED: &str = "pr_ci_failed";
 pub const PR_EVENT_CI_PASSED: &str = "pr_ci_passed";
 pub const PR_EVENT_MERGED: &str = "pr_merged";
+/// A PR fleet sees for the first time, open.
+pub const PR_EVENT_OPENED: &str = "pr_opened";
 
-/// What one change of a PR row is, as timeline kinds: a review decision
+/// What one change of a PR row is, as timeline kinds: a PR first seen open,
+/// a review decision
 /// (approved, changes requested) it did not have, checks that turned
 /// failing or passing, and a merge. A PR seen for the first time is news
 /// for its review and checks only while open; one first seen merged or
@@ -81,6 +84,9 @@ pub fn pr_events(before: Option<&PullRequestRow>, after: &PullRequestRow) -> Vec
     let mut out = Vec::new();
     if before.is_none() && after.state != "OPEN" {
         return out;
+    }
+    if before.is_none() {
+        out.push(PR_EVENT_OPENED);
     }
     let review = after.review_decision.as_deref();
     if matches!(review, Some("APPROVED" | "CHANGES_REQUESTED"))

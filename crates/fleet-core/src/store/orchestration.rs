@@ -851,6 +851,28 @@ impl Store {
                 ..Default::default()
             },
         )?;
+        // Event routines may fire on a mission that finished
+        // (`service::routines::FLEET_EVENTS`).
+        let kind = match to {
+            "completed" => Some(super::fleet_events::MISSION_DONE),
+            "failed" => Some(super::fleet_events::MISSION_FAILED),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            let subject = format!("mission:{id}");
+            let detail = format!("mission #{id} \"{}\" {to}", before.name);
+            self.insert_fleet_event_at(
+                &super::NewFleetEvent {
+                    kind,
+                    subject: &subject,
+                    detail: Some(&detail),
+                    org_id: before.org_id,
+                    person_id: before.owner_person_id,
+                    ..Default::default()
+                },
+                now,
+            )?;
+        }
         tx.commit()?;
         self.require_mission(id)
     }

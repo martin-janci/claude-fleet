@@ -1064,7 +1064,7 @@ Index by area (names only; see the reference for details):
 - **Routines** — `routines`, by `action` (Orbit Fleet 8.5): a person's
   saved prompt that starts a session on a cron schedule (`trigger: cron`,
   five fields read at the `utc_offset_min` the device had when it was
-  saved), on a session timeline event (`trigger: event`, one of `turn_done`,
+  saved), on an event (`trigger: event`, a session timeline event: one of `turn_done`,
   `stop_failure`, `stuck`, `lost`, `task_done`, `task_failed`,
   `session_restore_failed`, `workspace_repair_failed`, written for a
   session its owner owns and not started by a routine), on a pull
@@ -1076,9 +1076,23 @@ Index by area (names only; see the reference for details):
   `event_repo` (`owner/name`, or `name` of any owner) and widen with
   `event_author: anyone` from its owner's PRs to those of any session on a
   host of its org, never one a routine's session opened; its run's prompt
-  ends with a line naming the PR. Any event routine may set
-  `event_rate_secs` (up to a week): at most one run per PR, or per
-  session, in that window; a fire inside it is dropped. `list`; `get {
+  ends with a line naming the PR; `pr_opened` fires when fleet first sees
+  a PR open. Session events also include `needs_you` (a `notification`
+  that waits on a person: a permission prompt or a dialog),
+  `auto_restored`, `auto_restore_failed`, `account_switched`,
+  `account_switch_failed` and `session_moved`. Fleet events (migration
+  201, `service::fleet_events`) are about a host, an account or a mission
+  rather than a session: `host_offline`, `host_online`, `host_low` (disk
+  or memory), `account_limited`, `account_available`, `login_signed_out`,
+  `mission_done`, `mission_failed`; each is written once when the
+  condition starts (and for a host down or an account at its limit, once
+  when it ends), a flapping one again only after ten minutes, and fires a
+  routine of the org it belongs to (a mission's, only its owner's). Any
+  event routine may set `event_host` (not on an account or mission event):
+  only a host event of that host, a session on it, a PR seen there; and
+  `event_rate_secs` (up to a week): at most one run per PR, per session,
+  or per host, account or mission, in that window; a fire inside it is
+  dropped. `list`; `get {
   routine_id }` with its last runs; `runs { routine_id, limit? }`; `save {
   routine, routine_id? }` writes the whole routine (host, project,
   `profile` = the account it bills, prompt, `budget_run_micros`,

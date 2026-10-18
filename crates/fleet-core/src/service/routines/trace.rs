@@ -23,6 +23,15 @@ pub fn trigger_words(trigger: &str, trigger_ref: Option<&str>) -> String {
             let sid = r.split(':').nth(1).unwrap_or_default();
             format!("Fired by an event on session {sid}")
         }
+        ("event", Some(r)) if r.starts_with("fleet:") => {
+            // `fleet:<subject>:<event id>`, the subject itself `kind:what`.
+            let subject = r
+                .strip_prefix("fleet:")
+                .and_then(|t| t.rsplit_once(':'))
+                .map(|(subject, _)| subject.replacen(':', " ", 1))
+                .unwrap_or_default();
+            format!("Fired by a fleet event on {subject}")
+        }
         ("event", _) => "Fired by an event".into(),
         (other, _) => format!("Fired by {other}"),
     }
