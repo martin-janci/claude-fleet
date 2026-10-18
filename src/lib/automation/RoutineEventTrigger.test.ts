@@ -68,7 +68,7 @@ describe('pull request triggers in the routine editor', () => {
     await screen.findByTestId('routines-empty');
     await fireEvent.click(screen.getByTestId('routine-new'));
     await fireEvent.click(screen.getByTestId('routine-template-morning-pr-sweep'));
-    await fireEvent.change(screen.getByTestId('routine-trigger'), { target: { value: 'event' } });
+    await fireEvent.click(screen.getByTestId('routine-trigger-event'));
     // A session event offers no repo or author.
     expect(screen.queryByTestId('routine-event-repo')).toBeNull();
     await fireEvent.change(screen.getByTestId('routine-event'), { target: { value: 'pr_review' } });

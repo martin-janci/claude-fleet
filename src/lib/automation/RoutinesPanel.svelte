@@ -28,7 +28,8 @@
   import StatusDot from '../kit/StatusDot.svelte';
   import type { OfState } from '../kit/status';
   import NewRoutineMenu from './NewRoutineMenu.svelte';
-  import RoutineEventTrigger from './RoutineEventTrigger.svelte';
+  import RoutineEditor from './RoutineEditor.svelte';
+  import { draftInput, draftMissing, draftOf, type RoutineDraft } from './routine_draft';
   import RoutineDebug from './RoutineDebug.svelte';
   import DestructiveConfirm from '../forms/DestructiveConfirm.svelte';
   import type { IpcError } from '../result';
@@ -39,43 +40,24 @@
   import { savedWithUndo } from '../forms/form_frame';
   import {
     averageRun,
-    AUTONOMY_CHOICES,
     autonomyWords,
-    capSecsOf,
     capWords,
     fixLabel,
     hostWords,
     onFailureWords,
     OUTCOME_ROUTING,
     startedByWords,
-    clockChange,
     cronParts,
     deviceZone,
-    dryRunLine,
-    nextRunLabel,
-    offsetWords,
     routineInputOf,
-    zoneChoices,
-    zoneOffsetMin,
-    previewRoutine,
-    SCHEDULE_DAYS,
-    scheduleCron,
-    schedulePick,
-    type RoutineAccount,
-    type RoutinePreview,
-    type ScheduleDays,
     deleteRoutine,
     dollars,
-    eventFilterInput,
-    eventFilterOf,
     eventFilterWords,
-    type EventFilter,
     fixRoutine,
     getRoutine,
     lastRunByRoutine,
     listRoutines,
     loadFailing,
-    microsOf,
     morningPrSweep,
     nextRunWords,
     routineAccountLabel,
@@ -97,11 +79,9 @@
     spentSince,
     triggerWords,
     type RoutineDetail,
-    type RoutineInput,
     type RoutineRow,
     type RoutineRunRow,
     type RoutineTab,
-    type RoutineTrigger,
   } from '../routines';
   import { proposedByLabel } from '../ai_proposal';
 
@@ -122,32 +102,9 @@
   /** Each routine's newest run, for the list's dot and line. */
   let lastRuns = $state<Map<number, RunRow>>(new Map());
   /** The editor's draft: a new routine (`id` absent) or a change. */
-  let draft = $state<(Draft & { id?: number }) | null>(null);
-
-  interface Draft {
-    name: string;
-    trigger: RoutineTrigger;
-    /** The picker's days and time; `custom` edits `cron` as text. */
-    days: ScheduleDays;
-    time: string;
-    cron: string;
-    event: string;
-    host_alias: string;
-    project_id: string;
-    profile: string;
-    prompt: string;
-    budget_run: string;
-    budget_day: string;
-    overlap: 'skip' | 'parallel';
-    filter: EventFilter;
-    /** Time cap in minutes; empty = none (G3.8). */
-    cap_min: string;
-    fallback_host: string;
-    retry_once: boolean;
-    autonomy: number;
-    /** The schedule's zone (G7.4's Time zone select); '' = this device's. */
-    zone: string;
-  }
+  let draft = $state<RoutineDraft | null>(null);
+  /** Saving the draft failed: the editor's banner (input kept). */
+  let saveError = $state<IpcError | null>(null);
 
   const pickable = $derived($projects.filter((p) => !p.project.system));
   const projectName = (id: number) => {
@@ -233,41 +190,11 @@
 
   // ---- the editor -----------------------------------------------------------
 
-  function dollarsField(m: number | undefined): string {
-    return m === undefined ? '' : (m / 1_000_000).toFixed(2);
-  }
-
-  function fromInput(i: RoutineInput, id?: number): Draft & { id?: number } {
-    const pick = schedulePick(i.cron);
-    return {
-      id,
-      name: i.name,
-      trigger: i.trigger,
-      days: pick.days,
-      time: pick.time,
-      cron: i.cron ?? '',
-      event: i.event ?? 'stuck',
-      host_alias: i.host_alias,
-      project_id: i.project_id ? String(i.project_id) : '',
-      profile: i.profile ?? '',
-      prompt: i.prompt,
-      budget_run: dollarsField(i.budget_run_micros),
-      budget_day: dollarsField(i.budget_day_micros),
-      overlap: i.overlap === 'parallel' ? 'parallel' : 'skip',
-      filter: eventFilterOf(i),
-      cap_min: i.run_max_secs ? String(Math.round(i.run_max_secs / 60)) : '',
-      fallback_host: i.fallback_host ?? '',
-      retry_once: i.retry_once ?? false,
-      autonomy: i.autonomy ?? 2,
-      zone: i.time_zone ?? '',
-    };
-  }
-
   /** Open the editor on `d`, remembering it to tell an unsaved change. */
-  function open(d: Draft & { id?: number }) {
+  function open(d: RoutineDraft) {
     draft = d;
     draftBase = JSON.stringify(d);
-    preview = null;
+    saveError = null;
   }
 
   function newFrom(template: string | null) {
@@ -275,63 +202,29 @@
     const host = $hosts.find((h) => !h.hidden)?.alias ?? '';
     const proj = pickable[0]?.project;
     if (template === 'morning-pr-sweep') {
-      open(fromInput(morningPrSweep(host, proj?.id ?? 0, proj ? `${proj.owner}/${proj.repo}` : undefined)));
+      open(draftOf(morningPrSweep(host, proj?.id ?? 0, proj ? `${proj.owner}/${proj.repo}` : undefined)));
     } else {
-      open(fromInput({ name: '', trigger: 'cron', cron: '0 9 * * 1-5', host_alias: host, project_id: proj?.id ?? 0, prompt: '' }));
+      open(draftOf({ name: '', trigger: 'cron', cron: '0 9 * * 1-5', host_alias: host, project_id: proj?.id ?? 0, prompt: '' }));
     }
   }
 
   function edit(r: RoutineRow, copy = false) {
-    open(fromInput({ ...routineInputOf(r), name: copy ? `${r.name} copy` : r.name }, copy ? undefined : r.id));
+    open(draftOf({ ...routineInputOf(r), name: copy ? `${r.name} copy` : r.name }, copy ? undefined : r.id));
   }
 
-  /** The cron line the draft means: the picker's, or the text of Custom. */
-  const cronOf = (d: Draft) => (d.days === 'custom' ? d.cron.trim() : (scheduleCron(d.days, d.time) ?? ''));
-
-  const draftReady = $derived(
-    !!draft &&
-      draft.name.trim() !== '' &&
-      draft.prompt.trim() !== '' &&
-      draft.host_alias !== '' &&
-      draft.project_id !== '' &&
-      (draft.trigger !== 'cron' || cronOf(draft) !== ''),
-  );
-
-  /** The routine as `save` and `preview` read it. */
-  function inputOf(d: Draft & { id?: number }): RoutineInput {
-    const was = d.id !== undefined ? list.find((x) => x.id === d.id) : undefined;
-    return {
-      name: d.name.trim(),
-      enabled: was ? was.enabled : true,
-      trigger: d.trigger,
-      cron: d.trigger === 'cron' ? cronOf(d) : undefined,
-      utc_offset_min: zoneOffsetMin(Date.now() / 1000, zoneOf(d)),
-      event: d.trigger === 'event' ? d.event : undefined,
-      host_alias: d.host_alias,
-      project_id: Number(d.project_id),
-      profile: d.profile.trim() || undefined,
-      prompt: d.prompt.trim(),
-      budget_run_micros: microsOf(d.budget_run),
-      budget_day_micros: microsOf(d.budget_day),
-      overlap: d.overlap,
-      ...eventFilterInput(d.trigger, d.event, d.filter),
-      ...(zoneOf(d) ? { time_zone: zoneOf(d) } : {}),
-      run_max_secs: capSecsOf(d.cap_min),
-      fallback_host: d.fallback_host || undefined,
-      retry_once: d.retry_once,
-      autonomy: d.autonomy < 2 ? d.autonomy : undefined,
-    };
-  }
+  /** The saved routine's switch, kept by an edit; a new one starts on. */
+  const enabledOf = (d: RoutineDraft) => (d.id !== undefined ? (list.find((x) => x.id === d.id)?.enabled ?? true) : true);
 
   /** Save the draft; answers the saved routine, or null on a refusal. */
   async function saveDraft(undoable = true): Promise<RoutineRow | null> {
-    if (!draft || !draftReady) return null;
+    if (!draft || draftMissing(draft)) return null;
     const d = draft;
     busy = true;
-    const r = await saveRoutine(inputOf(d), d.id);
+    saveError = null;
+    const r = await saveRoutine(draftInput(d, enabledOf(d), deviceZone()), d.id);
     busy = false;
     if (!r.ok) {
-      pushError(r.error, 'Saving the routine failed');
+      saveError = r.error;
       return null;
     }
     draft = null;
@@ -350,39 +243,11 @@
     return r.value;
   }
 
-  // ---- the dry run, next run and Run once now (gap plan G2.3) ------------------
+  // ---- Run once now (gap plan G2.3) ------------------------------------------
 
   /** The editor's draft as it was opened, to tell an unsaved change. */
   let draftBase = $state('');
   const dirty = $derived(!!draft && JSON.stringify(draft) !== draftBase);
-  /** The backend's dry run of the draft (`routines { preview }`). */
-  let preview = $state<RoutinePreview | null>(null);
-  let previewSeq = 0;
-  const zone = deviceZone();
-  /** The zone the draft's schedule is read in: its own, else the device's. */
-  const zoneOf = (d: Draft) => d.zone || zone || undefined;
-
-  $effect(() => {
-    if (!draft) return;
-    const input = inputOf(draft);
-    const id = draft.id;
-    const seq = ++previewSeq;
-    const t = setTimeout(async () => {
-      const r = await previewRoutine(input, id);
-      if (seq === previewSeq) preview = r.ok ? r.value : null;
-    }, 250);
-    return () => clearTimeout(t);
-  });
-
-  /** The Account picker's value: the login the profile names, else `?`. */
-  const accountPick = $derived(
-    !draft || !preview ? '' : preview.logins.some((l) => (l.profile ?? '') === draft!.profile.trim()) ? draft.profile.trim() : '?',
-  );
-  /** The account a login bills, by its nickname or email, not the profile. */
-  const accountName = (l: RoutineAccount) => routineAccountLabel({ ...l, profile: null }, $accountByUuid.get(l.account_uuid));
-  const loginLabel = (l: RoutineAccount) => `${accountName(l)} · ${l.profile ? `profile ${l.profile}` : "the host's own login"}`;
-
-  const moved = $derived(preview && draft?.trigger === 'cron' ? clockChange(preview.next_runs, preview.utc_offset_min, zoneOf(draft)) : null);
 
   /** Run once now: the saved routine as it is; a new or changed one is
    *  saved first, since a run is a saved routine's. */
@@ -655,148 +520,16 @@
 
   <div class="detail">
     {#if draft}
-      <form class="editor" data-testid="routine-editor" onsubmit={(e) => (e.preventDefault(), void saveDraft())}>
-        <h3>{draft.id === undefined ? 'New routine' : `Edit ${draft.name}`}</h3>
-        <label>Name <input data-testid="routine-name" bind:value={draft.name} maxlength="80" /></label>
-        <label
-          >When
-          <select data-testid="routine-trigger" bind:value={draft.trigger}>
-            <option value="cron">On a schedule</option>
-            <option value="event">On an event</option>
-            <option value="manual">Only with Run now</option>
-          </select>
-        </label>
-        {#if draft.trigger === 'cron'}
-          <div class="pair">
-            <label
-              >Schedule
-              <select data-testid="routine-days" bind:value={draft.days}>
-                {#each SCHEDULE_DAYS as d (d.id)}<option value={d.id}>{d.label}</option>{/each}
-              </select>
-            </label>
-            {#if draft.days === 'custom'}
-              <label
-                >Cron line <input data-testid="routine-cron" bind:value={draft.cron} placeholder="30 7 * * 1-5" spellcheck="false" />
-              </label>
-            {:else if draft.days === 'hourly'}
-              <label>At minute <input data-testid="routine-time" bind:value={draft.time} placeholder="00" inputmode="numeric" /></label>
-            {:else}
-              <label>At <input data-testid="routine-time" type="time" bind:value={draft.time} /></label>
-            {/if}
-          </div>
-          <p class="hint" data-testid="routine-next-run">
-            {triggerWords({ trigger: 'cron', cron: cronOf(draft) })}{#if preview?.next_runs.length}{' · next run '}{nextRunLabel(preview.next_runs[0], zoneOf(draft))}{:else if preview && cronOf(draft)}{' · never runs'}{/if}{#if draft.days === 'custom'}{' · minute hour day month weekday'}{/if}
-          </p>
-          {#if moved}
-            <p class="hint warn" data-testid="routine-clock-change">
-              From {nextRunLabel(moved.at, zoneOf(draft))} it runs {Math.abs(moved.shiftMin) === 60 ? 'an hour' : `${Math.abs(moved.shiftMin)} minutes`}
-              {moved.shiftMin > 0 ? 'later' : 'earlier'} on your clock: the clocks change and a routine keeps the UTC offset it was saved at. Save it
-              again after the change.
-            </p>
-          {/if}
-          <label
-            >Time zone
-            <select data-testid="routine-zone-select" bind:value={draft.zone}>
-              <option value="">{zone ? `${zone} (this device)` : 'This device'}</option>
-              {#each zoneChoices(draft.zone) as z (z)}{#if z !== zone || draft.zone === z}<option value={z}>{z}</option>{/if}{/each}
-            </select>
-          </label>
-          <p class="hint" data-testid="routine-zone">
-            Time zone: {zoneOf(draft) ?? 'this device'}{!draft.zone && zone ? ' (this device)' : ''} · saved as {offsetWords(zoneOffsetMin(Date.now() / 1000, zoneOf(draft)))}
-          </p>
-        {:else if draft.trigger === 'event'}
-          <RoutineEventTrigger bind:event={draft.event} bind:filter={draft.filter} repos={pickable.map((p) => `${p.project.owner}/${p.project.repo}`)} />
-        {/if}
-        <label
-          >Host
-          <select data-testid="routine-host" bind:value={draft.host_alias}>
-            {#each $hosts.filter((h) => !h.hidden) as h (h.alias)}<option value={h.alias}>{h.alias}</option>{/each}
-          </select>
-        </label>
-        <label
-          >Project
-          <select data-testid="routine-project" bind:value={draft.project_id}>
-            {#each pickable as p (p.project.id)}<option value={String(p.project.id)}>{p.project.owner}/{p.project.repo}</option>{/each}
-          </select>
-        </label>
-        <label
-          >Account
-          <select
-            data-testid="routine-account"
-            value={accountPick}
-            onchange={(e) => {
-              const v = (e.currentTarget as HTMLSelectElement).value;
-              if (draft && v !== '?') draft.profile = v;
-            }}>
-            {#each preview?.logins ?? [] as l (l.profile ?? '')}<option value={l.profile ?? ''}>{loginLabel(l)}</option>{/each}
-            {#if accountPick === '?' || !preview}<option value="?">{draft.profile.trim() ? `Profile ${draft.profile.trim()} · no known account yet` : "The host's own login · no known account yet"}</option>{/if}
-          </select>
-        </label>
-        <label>Prompt <textarea data-testid="routine-prompt" rows="4" bind:value={draft.prompt}></textarea></label>
-        <div class="pair">
-          <label>Per run, $ <input data-testid="routine-budget-run" bind:value={draft.budget_run} placeholder="no limit" /></label>
-          <label>Per day, $ <input data-testid="routine-budget-day" bind:value={draft.budget_day} placeholder="no limit" /></label>
-        </div>
-        <div class="pair">
-          <label
-            >Time cap, min <input data-testid="routine-cap" bind:value={draft.cap_min} placeholder="no cap" inputmode="numeric" />
-          </label>
-          <label
-            >Fallback host
-            <select data-testid="routine-fallback" bind:value={draft.fallback_host}>
-              <option value="">None</option>
-              {#each $hosts.filter((h) => !h.hidden && h.alias !== draft!.host_alias) as h (h.alias)}<option value={h.alias}>{h.alias}</option>{/each}
-            </select>
-          </label>
-        </div>
-        <p class="hint">A run past its time cap is stopped and fails. The fallback host takes a run when its host is unreachable, its login is past the line, or its start fails.</p>
-        <label class="check"
-          ><input type="checkbox" data-testid="routine-retry-once" bind:checked={draft.retry_once} /> On failure, retry once before it goes to the Inbox</label
-        >
-        <label
-          >Autonomy
-          <select data-testid="routine-autonomy" bind:value={draft.autonomy}>
-            {#each AUTONOMY_CHOICES as c (c.level)}<option value={c.level}>{c.label}</option>{/each}
-          </select>
-          <span class="hint">Told to the agent under the prompt. Sessions run without permission prompts, so this is an instruction, not a sandbox.</span>
-        </label>
-        <label
-          >Overlap
-          <select data-testid="routine-overlap" bind:value={draft.overlap}>
-            <option value="skip">Skip if the last run is still going</option>
-            <option value="parallel">Run alongside it</option>
-          </select>
-        </label>
-        <label
-          >Profile <span class="hint">optional</span>
-          <input data-testid="routine-profile" bind:value={draft.profile} placeholder="the host's own" spellcheck="false" />
-          <span class="hint">A claude profile on the host (~/.claude-profiles); picking an Account fills it.</span>
-        </label>
-        {#if preview}
-          {#if preview.problem}
-            <p class="dry bad" data-testid="routine-dry-run" role="status">Dry run: it would not save: {preview.problem}.</p>
-          {:else}
-            {@const inp = inputOf(draft)}
-            <p class="dry" data-testid="routine-dry-run" role="status">
-              {dryRunLine(
-                inp,
-                projectName(inp.project_id),
-                preview.account ? accountName(preview.account) : null,
-              )}
-            </p>
-          {/if}
-        {/if}
-        <div class="actions">
-          <Button testid="routine-run-once" disabled={!draftReady || busy || !!preview?.problem} onclick={() => void runOnce()}
-            >{draft.id === undefined || dirty ? 'Save and run once' : 'Run once now'}</Button
-          >
-          <span class="grow"></span>
-          <button type="button" class="btn btn--quiet" onclick={() => (draft = null)}>Cancel</button>
-          <button type="submit" class="btn btn--primary" data-testid="routine-save" disabled={!draftReady || busy}
-            >{draft.id === undefined ? 'Create routine' : 'Save'}</button
-          >
-        </div>
-      </form>
+      <RoutineEditor
+        bind:draft
+        enabled={enabledOf(draft)}
+        {dirty}
+        {busy}
+        error={saveError}
+        onsave={() => void saveDraft()}
+        onrunonce={() => void runOnce()}
+        oncancel={() => (draft = null)}
+        ontemplate={(t) => newFrom(t === 'blank' ? null : t)} />
     {:else if loop}
       {@const stands = paused && loop.pausable}
       <div class="main" data-testid="automation-loop-detail">
@@ -1129,16 +862,6 @@
   .usage { display: flex; flex-direction: column; gap: 6px; }
   .of-sec.flat { padding: 0; }
   .inspector-foot { margin-top: auto; padding-top: 12px; border-top: 1px solid var(--border); display: flex; gap: 6px; flex-wrap: wrap; }
-  .editor { flex: 1; min-width: 0; overflow: auto; padding: var(--space-4) var(--space-6); max-width: 720px; display: flex; flex-direction: column; gap: var(--space-2); }
-  .editor h3 { font-size: var(--text-lg); }
-  .editor label { display: flex; flex-direction: column; gap: 4px; font-size: var(--text-sm); }
-  .editor .hint { color: var(--fg-muted); font-size: var(--text-xs); margin: 0; }
-  .editor .hint.warn { color: var(--status-waiting, var(--fg-2)); }
-  .dry { margin: 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-pane); font-size: var(--text-xs); color: var(--fg-2); }
-  .dry.bad { color: var(--status-failed); }
-  .editor label.check { flex-direction: row; align-items: center; gap: 6px; }
-  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); }
-  .actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
   @media (max-width: 1180px) {
     .detail { flex-direction: column; overflow: auto; }
     .main { overflow: visible; flex: none; }
