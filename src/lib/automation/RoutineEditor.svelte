@@ -39,6 +39,10 @@
     type RoutineTrigger,
   } from '../routines';
   import { draftCron, draftInput, draftMissing, draftZone, type RoutineDraft } from './routine_draft';
+  import PromptTune from '../PromptTune.svelte';
+  import { tuneRoutinePrompt } from '../prompt_tune';
+  import { helpModel } from '../context_help';
+  import { fleetSettings, settingBool, SETTING_KEYS } from '../fleet_settings';
 
   let {
     draft = $bindable(),
@@ -73,6 +77,11 @@
   ];
 
   const isNew = $derived(draft.id === undefined);
+  // The prompt tuner (`prompt_tune.ts`): a model rewrites the prompt on the
+  // routine's host and profile, saved or not; "Use this" writes draft.prompt.
+  const tuneOn = $derived(settingBool($fleetSettings, SETTING_KEYS.workPromptTune));
+  let tuneOpen = $state(false);
+  const tuneWhy = $derived(draft.host_alias ? null : 'Pick a host first: the tune runs there');
   const visibleHosts = $derived($hosts.filter((h) => !h.hidden));
   const pickable = $derived($projects.filter((p) => !p.project.system));
   const projectName = (id: number) => {
@@ -286,6 +295,28 @@
     </label>
     <!-- The prompt tuner (PromptTune) mounts here, under the prompt; its
          accept writes draft.prompt. -->
+    {#if tuneOn}
+      {#if tuneOpen}
+        <PromptTune
+          model={helpModel($fleetSettings)}
+          draft={draft.prompt}
+          tune={(ask) => tuneRoutinePrompt(draftInput(draft, enabled, deviceZone()), ask)}
+          testid="routine-tune"
+          onaccept={(p) => (draft.prompt = p)}
+          onclose={() => (tuneOpen = false)}
+        />
+      {:else}
+        <div>
+          <Button
+            size="sm"
+            testid="routine-tune-open"
+            disabled={tuneWhy !== null || draft.prompt.trim() === ''}
+            title={tuneWhy ?? `Tune: ${helpModel($fleetSettings)} rewrites the prompt into a clearer one. You choose whether to use it.`}
+            onclick={() => (tuneOpen = true)}>✦ Tune prompt</Button
+          >
+        </div>
+      {/if}
+    {/if}
 
     <h4 class="grp">Limits</h4>
     <div class="three">

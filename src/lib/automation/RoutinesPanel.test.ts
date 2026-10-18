@@ -12,6 +12,7 @@ import { get } from 'svelte/store';
 import { destination } from '../destination';
 import { automationTab } from '../automation';
 import { clearToasts, toasts } from '../toasts';
+import { fleetSettings, SETTING_DEFAULTS } from '../fleet_settings';
 import { deviceOffsetMin, failing, nextRunLabel, zoneChoices, zoneOffsetMin, type RoutineRow, type RoutineRunRow } from '../routines';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
@@ -405,6 +406,35 @@ describe('the routine editor (G2.3: schedule picker, next run, account, dry run,
     await fireEvent.input(screen.getByTestId('routine-cron'), { target: { value: '0 */2 * * *' } });
     await fireEvent.click(screen.getByTestId('routine-save'));
     await waitFor(() => expect(argsOf('save')?.routine.cron).toBe('0 */2 * * *'));
+  });
+
+  it('tunes the prompt on the routine host, unsaved, and writes it back only on Use this', async () => {
+    fleetSettings.set({ ...SETTING_DEFAULTS, 'work.prompt_tune': 'true' });
+    try {
+      route([]);
+      const base = inv.getMockImplementation()!;
+      inv.mockImplementation(async (cmd: string, a: { args: { action: string } }) =>
+        cmd === 'routines' && a.args.action === 'tune_prompt'
+          ? { prompt: 'Tidy up the repo. Done when CI is green.', notes: 'Said when done.', unchanged: false, model: 'haiku', host_alias: 'mac', at: 1 }
+          : base(cmd, a),
+      );
+      render(RoutinesPanel);
+      await screen.findByTestId('routines-empty');
+      await fireEvent.click(screen.getByTestId('routine-new'));
+      await fireEvent.click(screen.getByTestId('routine-template-blank'));
+      await fireEvent.input(screen.getByTestId('routine-prompt'), { target: { value: 'Tidy up.' } });
+      await fireEvent.click(screen.getByTestId('routine-tune-open'));
+      await fireEvent.keyDown(screen.getByTestId('routine-tune-ask'), { key: 'Enter' });
+      await waitFor(() => expect(argsOf('tune_prompt')?.routine.prompt).toBe('Tidy up.'));
+      expect(argsOf('tune_prompt')?.routine.host_alias).toBe('mac');
+      await screen.findByTestId('routine-tune-accept');
+      expect((screen.getByTestId('routine-prompt') as HTMLTextAreaElement).value).toBe('Tidy up.');
+      await fireEvent.click(screen.getByTestId('routine-tune-accept'));
+      expect((screen.getByTestId('routine-prompt') as HTMLTextAreaElement).value).toBe('Tidy up the repo. Done when CI is green.');
+      expect(argsOf('save')).toBeUndefined();
+    } finally {
+      fleetSettings.set({ ...SETTING_DEFAULTS });
+    }
   });
 
   it('picks the Account from the host logins, apart from the Profile, and the dry run names it', async () => {
