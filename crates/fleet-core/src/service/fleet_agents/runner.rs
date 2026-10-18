@@ -48,6 +48,14 @@ pub const AGENT: &str = "fleet";
 pub const POLL_MAX_ISSUES: usize = 100;
 /// Seconds a poll window reaches back past the last poll (clock skew).
 pub const POLL_SLACK_SECS: i64 = 120;
+/// Items one poll of a tracker that is not Jira reads at most: each is one
+/// comments call.
+pub const ITEM_POLL_MAX: usize = 25;
+/// Comments read per item on such a tracker.
+pub const ITEM_COMMENTS: usize = 20;
+/// Seconds such a poll reaches back further than a Jira one: it reads the
+/// hub's synced copy of the tracker, which lags it by up to a sync.
+pub const SYNC_LAG_SECS: i64 = 30 * 60;
 /// New scan entries one poll turns into jobs, at most.
 pub const SCAN_MAX_JOBS: usize = 10;
 /// Seconds a scan's tool call may take.
@@ -176,8 +184,36 @@ pub fn issue_subject(
     v
 }
 
+/// An item of a tracker that is not Jira, as its poll reads it: the thread
+/// and the item's web URL.
+#[derive(Debug, Clone)]
+pub struct ItemThread {
+    pub thread: IssueThread,
+    pub url: Option<String>,
+}
+
+/// PURE: the subject a job found on a tracker that is not Jira keeps: the
+/// item, and the comment the job's key names.
+pub fn item_subject(tracker: i64, it: &ItemThread, dedup_key: &str) -> Value {
+    let t = &it.thread;
+    let comment = dedup_key
+        .rsplit_once("#c")
+        .and_then(|(_, id)| t.comments.iter().find(|c| c.id == id));
+    let mut v = issue_subject(tracker, None, t, comment);
+    v["url"] = json!(it.url);
+    v
+}
+
 fn job_subject(tracker: i64, key: &str) -> String {
     format!("tracker:{tracker}:{key}")
+}
+
+/// PURE: the key of a job subject `tracker:<tracker>:<key>`, any key (a
+/// GitHub item's is `owner/repo#42`).
+pub fn parse_job_key(subject: &str, tracker: i64) -> Option<&str> {
+    subject
+        .strip_prefix("tracker:")?
+        .strip_prefix(&format!("{tracker}:"))
 }
 
 /// PURE: `tracker:<id>:<KEY>` as `(id, KEY)`; a key is letters, digits,
@@ -495,6 +531,14 @@ pub trait FleetHost: Send + Sync {
     async fn list_tools(&self, host: &str, entry: &Value) -> Result<Vec<Value>, String>;
     /// A tracker's provider (`jira_cloud`, `github`, `linear` …).
     fn tracker_provider(&self, tracker: i64) -> Option<String>;
+    /// A tracker that is not Jira: the items its sync saw updated at or
+    /// after `since`, at most `max`, each with its newest comments.
+    async fn item_threads(
+        &self,
+        tracker: i64,
+        since: i64,
+        max: usize,
+    ) -> Result<Vec<ItemThread>, String>;
     /// GitHub, with `host`'s `gh`: a repo's open pull requests.
     async fn open_prs(&self, host: &str, repo: &str) -> Result<Vec<OpenPr>, String>;
     /// GitHub: a repo's issue and PR comments updated since `since` (RFC 3339).
@@ -579,6 +623,64 @@ impl FleetHost for LiveFleetHost {
     fn tracker_provider(&self, tracker: i64) -> Option<String> {
         let s = lock(&self.store).ok()?;
         Some(s.get_tracker(tracker).ok()??.provider)
+    }
+
+    async fn item_threads(
+        &self,
+        tracker: i64,
+        since: i64,
+        max: usize,
+    ) -> Result<Vec<ItemThread>, String> {
+        use crate::service::trackers::{IssueComment, ItemRef};
+        let items = {
+            let s = lock(&self.store).map_err(|e| e.message)?;
+            s.tracker_items_updated_since(tracker, since, max)
+                .map_err(|e| e.message)?
+        };
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        let provider = self.base.provider(tracker)?;
+        let mut out = Vec::new();
+        for (row, meta) in items {
+            let Some(key) = row.key.clone() else {
+                continue;
+            };
+            let r = match &row.external_id {
+                Some(id) => ItemRef::Id(id.clone()),
+                None => ItemRef::parse(&key),
+            };
+            // An item whose comments cannot be read is still assigned.
+            let comments = match provider.comments(&r, ITEM_COMMENTS).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(tracker, key, error = %e.explain(), "[agents] fleet: comments");
+                    Vec::new()
+                }
+            };
+            out.push(ItemThread {
+                thread: IssueThread {
+                    key,
+                    summary: row.title,
+                    description: meta.description.unwrap_or_default(),
+                    assignee_id: meta.assignee_id,
+                    status: row.status_name.unwrap_or(row.status_category),
+                    updated: row.updated_ext,
+                    comments: comments
+                        .into_iter()
+                        .map(|c| IssueComment {
+                            id: c.id,
+                            author_id: None,
+                            author: c.author,
+                            body: c.body,
+                            created: Some(c.created_at),
+                        })
+                        .collect(),
+                },
+                url: row.url,
+            });
+        }
+        Ok(out)
     }
 
     async fn open_prs(&self, host: &str, repo: &str) -> Result<Vec<OpenPr>, String> {
@@ -866,6 +968,38 @@ pub struct FleetPoller {
 }
 
 impl FleetPoller {
+    /// The planned jobs whose subject is not kept yet, keeping it: a job
+    /// already found is not found again. One without a subject is dropped.
+    fn keep_new(
+        &self,
+        rule_id: i64,
+        planned: Vec<(NewAgentJob, Value)>,
+        now: i64,
+    ) -> Result<Vec<NewAgentJob>, String> {
+        let mut jobs = Vec::new();
+        for (job, subject) in planned {
+            if subject.is_null() {
+                continue;
+            }
+            let seen = {
+                let s = lock(&self.store).map_err(|e| e.message)?;
+                s.agent_record(
+                    &subjects_namespace(rule_id),
+                    SUBJECT_KIND,
+                    &job.dedup_key,
+                    now,
+                )
+                .map_err(|e| e.to_string())?
+                .is_some()
+            };
+            if !seen {
+                keep_subject(&self.store, rule_id, &job.dedup_key, &subject, now)?;
+                jobs.push(job);
+            }
+        }
+        Ok(jobs)
+    }
+
     async fn scan(
         &self,
         rule: &AgentRuleRow,
@@ -950,13 +1084,44 @@ impl AgentPoller for FleetPoller {
         let jobs = match d.trigger.source {
             TriggerSource::TrackerComments | TriggerSource::TrackerAssigned => {
                 let tracker = tracker_id(&inst, &ctx)?;
-                let jql = poll_jql(&render_opt(d.trigger.query.as_deref(), &ctx), c.since, now);
-                let threads = self
-                    .host
-                    .base()
-                    .threads(tracker, &jql, POLL_MAX_ISSUES)
-                    .await?;
-                plan_tracker_jobs(rule.id, &inst, &ctx, tracker, &threads, c.since, now)?
+                let query = render_opt(d.trigger.query.as_deref(), &ctx);
+                if super::actions::is_jira(self.host.tracker_provider(tracker).as_deref()) {
+                    let jql = poll_jql(&query, c.since, now);
+                    let threads = self
+                        .host
+                        .base()
+                        .threads(tracker, &jql, POLL_MAX_ISSUES)
+                        .await?;
+                    plan_tracker_jobs(rule.id, &inst, &ctx, tracker, &threads, c.since, now)?
+                } else {
+                    // GitHub, Linear, Asana: the hub's synced items, read
+                    // further back by a sync's lag; the job keys dedup.
+                    if !query.trim().is_empty() {
+                        return Err(format!(
+                            "trigger › query is JQL: tracker {tracker} is not Jira"
+                        ));
+                    }
+                    let since = c.since - SYNC_LAG_SECS;
+                    let items = self
+                        .host
+                        .item_threads(tracker, since - POLL_SLACK_SECS, ITEM_POLL_MAX)
+                        .await?;
+                    let threads: Vec<IssueThread> =
+                        items.iter().map(|i| i.thread.clone()).collect();
+                    let planned =
+                        plan_tracker_jobs(rule.id, &inst, &ctx, tracker, &threads, since, now)?
+                            .into_iter()
+                            .map(|job| {
+                                let key = parse_job_key(&job.subject, tracker);
+                                let it = items.iter().find(|i| Some(i.thread.key.as_str()) == key);
+                                let subject = it
+                                    .map(|i| item_subject(tracker, i, &job.dedup_key))
+                                    .unwrap_or(Value::Null);
+                                (job, subject)
+                            })
+                            .collect();
+                    self.keep_new(rule.id, planned, now)?
+                }
             }
             TriggerSource::McpScan => {
                 let every = d.trigger.every_mins.unwrap_or(60) * 60;
@@ -1004,25 +1169,7 @@ impl AgentPoller for FleetPoller {
                         .await?;
                     super::github::plan_comment_jobs(rule.id, &inst, &ctx, &repo, &comments, now)?
                 };
-                let mut jobs = Vec::new();
-                for (job, subject) in planned {
-                    let seen = {
-                        let s = lock(&self.store).map_err(|e| e.message)?;
-                        s.agent_record(
-                            &subjects_namespace(rule.id),
-                            SUBJECT_KIND,
-                            &job.dedup_key,
-                            now,
-                        )
-                        .map_err(|e| e.to_string())?
-                        .is_some()
-                    };
-                    if !seen {
-                        keep_subject(&self.store, rule.id, &job.dedup_key, &subject, now)?;
-                        jobs.push(job);
-                    }
-                }
-                jobs
+                self.keep_new(rule.id, planned, now)?
             }
             TriggerSource::Manual => Vec::new(),
             other => return Err(format!("trigger source {} is not built yet", other.word())),
@@ -1058,6 +1205,10 @@ impl FleetRunner {
         rule: &AgentRuleRow,
         now: i64,
     ) -> Result<Value, RunOutcome> {
+        // A job found on a tracker that is not Jira kept its subject.
+        if let Some(kept) = kept_subject(&self.store, job, rule.id, now) {
+            return Ok(kept);
+        }
         if let Some((tracker, key)) = parse_tracker_subject(&job.subject) {
             let mut threads = self
                 .host

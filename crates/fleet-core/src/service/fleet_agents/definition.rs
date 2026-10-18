@@ -218,14 +218,14 @@ impl TriggerSource {
     /// them it needs.
     fn keys(self) -> (&'static [&'static str], &'static [&'static str]) {
         match self {
-            TriggerSource::TrackerComments => (
-                &["tracker", "query", "match"],
-                &["tracker", "query", "match"],
-            ),
-            TriggerSource::TrackerAssigned => (
-                &["tracker", "query", "match"],
-                &["tracker", "query", "match"],
-            ),
+            // The query is JQL, so a poll of Jira only: on GitHub, Linear or
+            // Asana it is left out (`runner`).
+            TriggerSource::TrackerComments => {
+                (&["tracker", "query", "match"], &["tracker", "match"])
+            }
+            TriggerSource::TrackerAssigned => {
+                (&["tracker", "query", "match"], &["tracker", "match"])
+            }
             TriggerSource::TrackerQuery => (&["tracker", "query"], &["tracker", "query"]),
             TriggerSource::GithubPrs => (&["repo"], &["repo"]),
             TriggerSource::GithubComments => (&["repo", "match"], &["repo", "match"]),
