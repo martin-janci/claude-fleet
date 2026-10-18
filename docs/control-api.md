@@ -380,6 +380,11 @@ Index by area (names only; see the reference for details):
   or past the line fails `E_ACCOUNT_LIMIT`, naming the account and the
   login with headroom, unless `over_limit_ok: true` says the person chose
   it; `agent: "agy"` fails `E_UNSUPPORTED` until its adapter is validated),
+  `suggest_placement` (`project_id?`, `hosts?`, `profile?`: where new work should
+  run — every host and login ranked by headroom and load, each one left out
+  with its reason: down or loaded host, login signed out, account at
+  `accounts.pause_at` or spent, repo missing; read-only; see
+  [accounts.md](accounts.md#where-new-work-runs)),
   `auto_switch_account` (`enabled?`: your own answer to automatic account
   switching, on unless you turned it off; with the fleet's
   `accounts.auto_switch` on too, a session of yours paused at its
@@ -413,7 +418,12 @@ Index by area (names only; see the reference for details):
   session's shell terminals, tmux sessions `<name>--sh<N>` beside the agent
   that no session list shows; own reach), `register_self`, `whoami`, `ensure_operator` (the UX
   agent's own session, idempotent), `operator_status` (why it cannot work,
-  if it cannot).
+  if it cannot), `diagnose` (read-only: where Control runs, its host, login
+  and account, why a host cannot be reached, and each paired client's kind,
+  version and Control features, every finding `checked` or `inferred`),
+  `control_auto_continue` (Control's auto-continue, run by the fleet:
+  `status` for the countdown, `cancel`, `take` for Send now; Control itself
+  may only read it).
 - **Sharing & ownership** (multi-user M1) — `session_share` (give one
   person `watch`, `answer` or `drive` on a session you own — or, with `org` instead of
   `person`, an org you are a member of: its members and admins as of now,

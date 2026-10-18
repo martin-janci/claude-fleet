@@ -519,20 +519,28 @@ pub async fn refresh_if_operator(
     }
 }
 
-/// The sections other parts of fleet add to Control's CLAUDE.md, each a
-/// `## …` block of its own, after [`claude_md`]. One line per section, so a
-/// new one is a one-line change here and its text stays in its module.
-pub const CLAUDE_MD_SECTIONS: &[&str] = &[crate::service::autonomy::SECTION];
+/// The operator's CLAUDE.md sections beyond [`claude_md`], each a module's
+/// own `SECTION` (one line per section, so the workers that add them merge
+/// trivially). Appended in this order by [`claude_md_full`].
+pub const CLAUDE_MD_SECTIONS: &[&str] = &[
+    crate::service::autonomy::SECTION,
+    crate::service::placement::SECTION,
+    crate::service::operator_account::SECTION,
+    crate::service::control_rules::SECTION,
+];
 
-/// The operator's CLAUDE.md as written: [`claude_md`] and every
-/// [`CLAUDE_MD_SECTIONS`] entry, `\n`-separated.
+/// PURE: the operator's whole CLAUDE.md: [`claude_md`], then every
+/// [`CLAUDE_MD_SECTIONS`] entry, a blank line between.
 pub fn claude_md_full() -> &'static str {
     static FULL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     FULL.get_or_init(|| {
-        std::iter::once(claude_md())
-            .chain(CLAUDE_MD_SECTIONS.iter().copied())
-            .collect::<Vec<_>>()
-            .join("\n")
+        let mut out = claude_md().trim_end().to_string();
+        for section in CLAUDE_MD_SECTIONS {
+            out.push_str("\n\n");
+            out.push_str(section.trim());
+        }
+        out.push('\n');
+        out
     })
 }
 
@@ -752,6 +760,10 @@ struct LiveHost {
     store: Arc<Mutex<Store>>,
     ssh: Arc<SshClient>,
     reg: Arc<CancellationRegistry>,
+    /// The login the session starts under: `Some(None)` = the host's own,
+    /// `Some(Some(p))` = profile `p`, `None` = fleet's choice on the home
+    /// it lands on (`operator_account::birth_profile`, control review F7).
+    profile: Option<Option<String>>,
 }
 
 #[async_trait::async_trait]
@@ -818,6 +830,17 @@ impl OperatorHost for LiveHost {
     }
 
     async fn start_session(&self, host: &str, project_id: i64) -> Result<SessionRow, IpcError> {
+        // Not the host's default login unless it is the best one there: the
+        // login it had on this host, else the signed-in one with the most
+        // headroom (control review F7).
+        let profile = match &self.profile {
+            Some(p) => p.clone(),
+            None => crate::service::operator_account::birth_profile(
+                &*lock(&self.store)?,
+                host,
+                crate::store::now_unix(),
+            ),
+        };
         // An ordinary work session, which is the whole point: transcript,
         // conversation view, restart and reboot survival all come for free.
         crate::service::sessions::new_session(
@@ -835,7 +858,7 @@ impl OperatorHost for LiveHost {
                 friendly_name: Some("fleet operator".to_string()),
                 model: None,
                 effort: None,
-                profile: None,
+                profile,
                 agent: None,
                 origin: None,
                 // Whose the operator's session is (multi-user M1, T5): the
@@ -903,6 +926,12 @@ pub struct OperatorStatus {
     /// never moved the operator.
     #[serde(default)]
     pub fallback: Option<String>,
+    /// The login Control runs under, its account and usage, and whether it
+    /// is at its limit or signed out (control review F7,
+    /// `operator_account`). `null` without a session. Defaulted on read: a
+    /// hub from before the field does not report it.
+    #[serde(default)]
+    pub account: Option<crate::service::operator_account::OperatorAccount>,
 }
 
 fn default_operator_host() -> String {
@@ -958,9 +987,12 @@ pub(crate) fn operator_status_with(
             local_enabled,
         )
     };
+    let now = crate::store::now_unix();
+    let account_of = |row: &SessionRow| crate::service::operator_account::account_of(&s, row, now);
     let blocked =
         |why: &str, session: Option<SessionRow>, fallback: Option<String>| OperatorStatus {
             ready: false,
+            account: session.as_ref().and_then(account_of),
             session,
             blocked: Some(why.to_string()),
             host: host.clone(),
@@ -1026,6 +1058,7 @@ pub(crate) fn operator_status_with(
     }
     Ok(OperatorStatus {
         ready: true,
+        account: account_of(&row),
         session: Some(row),
         blocked: None,
         host,
@@ -1064,8 +1097,64 @@ pub async fn ensure_operator(
         store: Arc::clone(store),
         ssh: Arc::clone(ssh),
         reg: Arc::clone(reg),
+        profile: None,
     };
     ensure_operator_on(store, &host).await
+}
+
+/// Where a birth should land, beyond [`ensure_operator_on`]'s own rule.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct BirthPlan {
+    /// Born here when it is usable, before the configured home.
+    pub prefer: Option<String>,
+    /// A live operator on this host is left (treated as stranded): a move
+    /// off a host that still answers (control review F7, its login spent).
+    pub leave: Option<String>,
+}
+
+/// Start Control on `host` under `profile` (`None` = the host's own),
+/// leaving its live session on `from`: the operator move, for a Control
+/// whose account ran out with no other login on its host
+/// (`operator_account`). The session left behind is ended once the new one
+/// runs; its token was revoked by the birth.
+pub async fn move_operator_to(
+    store: &Arc<Mutex<Store>>,
+    ssh: &Arc<SshClient>,
+    host: &str,
+    profile: Option<&str>,
+    from: &str,
+) -> Result<SessionRow, IpcError> {
+    let old = {
+        let s = lock(store)?;
+        operator_ref(&s).filter(|r| r.host_alias == from)
+    };
+    let live = LiveHost {
+        store: Arc::clone(store),
+        ssh: Arc::clone(ssh),
+        reg: CancellationRegistry::new(),
+        profile: Some(profile.map(str::to_string)),
+    };
+    let plan = BirthPlan {
+        prefer: Some(host.to_string()),
+        leave: Some(from.to_string()),
+    };
+    let row = ensure_operator_with(store, &live, &plan).await?;
+    if let Some(old) = old.filter(|o| o.host_alias != row.host_alias) {
+        let ended = crate::service::sessions::kill_session(
+            crate::service::sessions::KillSessionArgs {
+                host_alias: old.host_alias.clone(),
+                name: old.tmux_name.clone(),
+                force: false,
+            },
+            store,
+            ssh,
+        )
+        .await;
+        if let Err(e) = ended {
+            tracing::warn!(host = %old.host_alias, error = %e.message, "[operator] the session left behind was not ended");
+        }
+    }
+    Ok(row)
 }
 
 type BirthLocks = Mutex<std::collections::HashMap<usize, Arc<tokio::sync::Mutex<()>>>>;
@@ -1118,6 +1207,15 @@ pub(crate) async fn ensure_operator_on(
     store: &Arc<Mutex<Store>>,
     host: &dyn OperatorHost,
 ) -> Result<SessionRow, IpcError> {
+    ensure_operator_with(store, host, &BirthPlan::default()).await
+}
+
+/// [`ensure_operator_on`] with a [`BirthPlan`].
+pub(crate) async fn ensure_operator_with(
+    store: &Arc<Mutex<Store>>,
+    host: &dyn OperatorHost,
+    plan: &BirthPlan,
+) -> Result<SessionRow, IpcError> {
     // 0. One birth at a time. Everything below — guard #1 included — runs
     //    inside this, so a second press that arrives mid-birth waits and
     //    then finds the session the first one created. See
@@ -1144,7 +1242,9 @@ pub(crate) async fn ensure_operator_on(
                 let host_row = s
                     .get_host_row(&r.host_alias)
                     .map_err(|e| IpcError::new(codes::E_SQLITE, format!("operator's host: {e}")))?;
-                if !home_usable(host_row.as_ref(), &r.host_alias, local_enabled) {
+                if !home_usable(host_row.as_ref(), &r.host_alias, local_enabled)
+                    || plan.leave.as_deref() == Some(r.host_alias.as_str())
+                {
                     stranded = Some(r.host_alias);
                 } else if row.lost_at.is_none() {
                     return Ok(row);
@@ -1177,10 +1277,17 @@ pub(crate) async fn ensure_operator_on(
     //    host qualifies is the birth refused, naming the obstacle.
     let (home, endpoint) = {
         let s = lock(store)?;
-        let preferred = read_operator_host(&s);
         let hosts = s
             .list_hosts()
             .map_err(|e| IpcError::new(codes::E_SQLITE, format!("list hosts: {e}")))?;
+        let preferred = plan
+            .prefer
+            .clone()
+            .filter(|p| {
+                Some(p.as_str()) != stranded.as_deref()
+                    && home_usable(hosts.iter().find(|h| h.alias == *p), p, local_enabled)
+            })
+            .unwrap_or_else(|| read_operator_host(&s));
         let Some(home) = pick_operator_home(&hosts, &preferred, local_enabled, stranded.as_deref())
         else {
             return Err(if let Some(down) = &stranded {

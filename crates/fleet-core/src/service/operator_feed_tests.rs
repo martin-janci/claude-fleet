@@ -417,3 +417,48 @@ async fn pause_all_stops_the_operator_feed() {
         None
     ));
 }
+
+/// Control review F9: an account switch done or failed is a line, worded
+/// apart from a failure of the session itself.
+#[test]
+fn an_account_switch_is_reported_done_or_failed() {
+    use crate::service::account_switch::{EVENT_SWITCHED, EVENT_SWITCH_FAILED};
+    assert_eq!(
+        classify(EVENT_SWITCHED, Some("{}")),
+        Some(What::AccountSwitch(true))
+    );
+    assert_eq!(
+        classify(EVENT_SWITCH_FAILED, None),
+        Some(What::AccountSwitch(false))
+    );
+    assert!(KINDS.contains(&EVENT_SWITCHED) && KINDS.contains(&EVENT_SWITCH_FAILED));
+}
+
+/// Control review F9: a login going signed out is told once with the
+/// command, and its coming back is told too.
+#[tokio::test]
+async fn a_signed_out_login_is_told_once_and_its_return_too() {
+    let w = world();
+    let fake = Fake::default();
+    let now = crate::store::now_unix();
+    run_with(&w.store, &fake, &CFG, now).await;
+    let obs = |out: bool| crate::service::login_health::Observation {
+        host_alias: "h".into(),
+        profile: None,
+        signed_out: out,
+    };
+    crate::service::login_health::record(&w.store.lock().unwrap(), &[obs(true)], now).unwrap();
+    assert!(run_with(&w.store, &fake, &CFG, now + 120).await.sent);
+    assert!(fake.sent.lock().unwrap()[0]
+        .1
+        .contains("Claude login expired on h (since "));
+    assert!(
+        !run_with(&w.store, &fake, &CFG, now + 240).await.sent,
+        "once"
+    );
+    crate::service::login_health::record(&w.store.lock().unwrap(), &[obs(false)], now).unwrap();
+    assert!(run_with(&w.store, &fake, &CFG, now + 360).await.sent);
+    assert!(fake.sent.lock().unwrap()[1]
+        .1
+        .contains("the Claude login on h is signed in again"));
+}

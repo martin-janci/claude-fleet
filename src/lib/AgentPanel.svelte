@@ -34,6 +34,8 @@
     ensureAgent,
     restartOperator,
     replaceOperator,
+    operatorAccount,
+    operatorAccountLine,
     type OperatorBlocked,
   } from './operator';
   import { openSettingsAt, requestHostsView, requestNewSessionOnHost } from './app_views';
@@ -184,9 +186,16 @@
   let firstRunClosed = $state(false);
   const firstRun = $derived(!!session && !session.last_prompt && !firstRunClosed);
   const firstHost = $derived($hosts.find((h) => !h.hidden)?.alias ?? $operatorHost);
+  // Control review F7: Control's own login, said only when it is in trouble.
+  const accountLine = $derived(
+    $operatorAccount && $operatorAccount.state !== 'ok' && $operatorAccount.state !== 'unknown' ? operatorAccountLine($operatorAccount) : null,
+  );
 </script>
 
 {#snippet chip()}
+  {#if accountLine}
+    <p class="account-line" data-testid="control-account" data-state={$operatorAccount?.state}>{accountLine}</p>
+  {/if}
   {#if firstRun && session}
     <!-- Thread room (board A2Empty): the empty chat's starters, centred
          under the greeting. -->
@@ -309,6 +318,12 @@
     box-sizing: border-box;
     background: var(--bg);
     color: var(--fg);
+  }
+  .account-line {
+    flex-basis: 100%;
+    margin: 0;
+    font-size: var(--text-xs);
+    color: var(--usage-warn);
   }
   .blocked-state {
     margin: auto;

@@ -129,6 +129,12 @@ A host's health checklist over SSH: tmux, the agents on PATH, fleet's hooks and 
 
 Parameters: `alias`, `base_path`
 
+### `control_auto_continue`
+
+Control's auto-continue, which fleet runs: action status (the recommended option it will send and when, due_at), cancel (stop it) or take (Send now: settles it and returns the prompt for the client to send). turn_seq names the card. Not for Control itself.
+
+Parameters: `action`, `turn_seq`
+
 ### `control_handoffs`
 
 What the agent handed on, newest first: prompts and tasks sent to sessions, new sessions, missions, tasks and proposed trees, each with its target's state now.
@@ -170,6 +176,12 @@ Parameters: `accept`, `reject`
 Delete a git worktree on its host (no --force) and drop fleet's row. Refuses if an alive session points at it, unless force. Errors: E_WORKTREE_BUSY, E_NOTFOUND, E_GIT, E_CONFIRM_REQUIRED (desktop confirmation on).
 
 Parameters: `confirm_nonce`, `force`, `worktree_id`
+
+### `diagnose`
+
+Check before you tell the person: where Control runs and whether its host, login and account are healthy, why a host cannot be reached (host), and which clients the person uses with what each can show. Each finding says checked or inferred. Read-only.
+
+Parameters: `host`
 
 ### `discover_hosts`
 
@@ -891,6 +903,12 @@ Start rules: a task key pattern (PD-*) that names the project, and optionally th
 
 Parameters: `action`, `rule`, `rule_id`
 
+### `suggest_placement`
+
+Where new work should run: every host and Claude login that can take it, best first, and what was left out and why. Filters hosts that answer, have claude and are under the recovery thresholds (memory, pressure, CPU), and, with project_id, have run that project; logins that are signed in, under accounts.pause_at and within their daily limit. Ranks by account headroom, then idle CPU and free memory. hosts limits it to those (a mission's grant), profile to one login ("" = each host's own). Returns {pause_at_pct, candidates:[{host_alias, profile?, account_uuid, email?, used_pct?, cpu_pct?, mem_avail_pct?, score, reasons}], excluded:[{host_alias, profile?, host, why}], note?}. Read-only; never fetches. Errors: E_INVALID.
+
+Parameters: `hosts`, `profile`, `project_id`
+
 ### `touch_session_viewed`
 
 Mark a session viewed now: the turns it has finished read as seen. Returns the row.
@@ -1330,6 +1348,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::mcp::control_handoffs`
 - `commands::operator::ensure_operator`
 - `commands::operator::operator_status`
+- `commands::operator::control_auto_continue`
 - `commands::operator::control_route_propose`
 - `commands::operator::control_route_follow`
 - `commands::hub::hub_status`

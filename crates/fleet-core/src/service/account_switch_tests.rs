@@ -419,3 +419,41 @@ fn early_an_idle_session_moves_past_the_line_not_only_at_the_limit() {
         .unwrap();
     assert!(plan_now(&s).is_empty(), "under the line");
 }
+
+/// Control review F8, from the real hook path: a quota notification
+/// (`quota_auto_resume_disabled`, `quota_auto_resume_stale`) marks the row
+/// blocked (`hooks::notification_effect`), and a session parked at its limit
+/// that way must still move. A permission dialog stays put.
+#[test]
+fn a_session_parked_by_a_quota_notification_still_moves() {
+    for kind in ["quota_auto_resume_disabled", "quota_auto_resume_stale"] {
+        let (s, id, _) = fleet();
+        let (status, stuck) = crate::service::hooks::notification_effect(kind).unwrap();
+        s.record_notification_hook_for_row(id, status, stuck)
+            .unwrap();
+        s.insert_session_event(id, "notification", Some(kind))
+            .unwrap();
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.claude_status.as_deref(), Some("blocked"), "{kind}");
+        let p = plan_now(&s);
+        assert_eq!(p.len(), 1, "{kind}: a quota-parked session is switched");
+        assert_eq!(p[0].session_id, id);
+    }
+    let (s, id, _) = fleet();
+    let (status, stuck) = crate::service::hooks::notification_effect("permission_prompt").unwrap();
+    s.record_notification_hook_for_row(id, status, stuck)
+        .unwrap();
+    s.insert_session_event(id, "notification", Some("permission_prompt"))
+        .unwrap();
+    assert!(plan_now(&s).is_empty(), "a permission dialog would be lost");
+    // A dialog raised after the quota note is the newer word.
+    let (s, id, _) = fleet();
+    for kind in ["quota_auto_resume_disabled", "permission_prompt"] {
+        let (status, stuck) = crate::service::hooks::notification_effect(kind).unwrap();
+        s.record_notification_hook_for_row(id, status, stuck)
+            .unwrap();
+        s.insert_session_event(id, "notification", Some(kind))
+            .unwrap();
+    }
+    assert!(plan_now(&s).is_empty());
+}

@@ -335,6 +335,23 @@ impl Store {
             .collect()
     }
 
+    /// The sessions Control answers for, as [`Store::operator_feed_events`]
+    /// counts them (started by it, or named by a receipt), live ones only
+    /// and never `exclude` (the operator's own row): what
+    /// `service::control_sweep` looks at.
+    pub fn handed_off_session_ids(&self, exclude: Option<i64>) -> Result<Vec<i64>> {
+        self.conn
+            .prepare_cached(
+                "SELECT s.id FROM sessions s \
+                 WHERE s.id IS NOT ?1 AND s.status = 'running' \
+                   AND (s.origin = 'operator' OR s.id IN \
+                        (SELECT session_id FROM control_handoffs WHERE session_id IS NOT NULL)) \
+                 ORDER BY s.id",
+            )?
+            .query_map([exclude], |r| r.get(0))?
+            .collect()
+    }
+
     fn handoff_item(&self, id: i64) -> Result<Option<HandoffItem>> {
         let item = self
             .conn
