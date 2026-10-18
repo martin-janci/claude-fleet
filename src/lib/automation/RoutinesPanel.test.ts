@@ -412,7 +412,7 @@ describe('the routine editor (G2.3: schedule picker, next run, account, dry run,
     fleetSettings.set({ ...SETTING_DEFAULTS, 'work.prompt_tune': 'true' });
     try {
       route([]);
-      const base = inv.getMockImplementation()!;
+      const base = inv.getMockImplementation() as (cmd: string, a: unknown) => Promise<unknown>;
       inv.mockImplementation(async (cmd: string, a: { args: { action: string } }) =>
         cmd === 'routines' && a.args.action === 'tune_prompt'
           ? { prompt: 'Tidy up the repo. Done when CI is green.', notes: 'Said when done.', unchanged: false, model: 'haiku', host_alias: 'mac', at: 1 }
