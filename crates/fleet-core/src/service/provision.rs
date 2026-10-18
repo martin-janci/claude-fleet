@@ -274,20 +274,7 @@ pub async fn provision_one_with(
     //     the user editing CLAUDE.md by hand.
     provision_claude_md(ssh, host).await?;
     // 2. MCP entry: read → merge (preserve siblings) → back up → write.
-    let existing = read_host_file(ssh, host, CLAUDE_JSON).await?;
-    let merged = merge_mcp_entry(&existing, &base.mcp_url(), token)?; // errors before any write
-    if !existing.trim().is_empty() {
-        // The backup carries the previous token too — same mode.
-        write_host_file_secret(
-            ssh,
-            host,
-            CLAUDE_DIR,
-            &format!("{CLAUDE_JSON}.fleet-bak"),
-            &existing,
-        )
-        .await?;
-    }
-    write_host_file_secret(ssh, host, CLAUDE_DIR, CLAUDE_JSON, &merged).await?;
+    rewrite_mcp_entry(ssh, host, base, token).await?;
     // 3. Ensure tmux clipboard passthrough for OSC 52.
     provision_tmux_clipboard(ssh, host).await?;
     // 4. Stop / WorktreeCreate hooks. Required for safe-kill finalization on
@@ -306,6 +293,34 @@ pub async fn provision_one_with(
     //    cannot be written never keeps the host's own files from landing.
     provision_profiles(ssh, host, base, token).await?;
     Ok(())
+}
+
+/// Step 2 of [`provision_one`] alone: read the host's `~/.claude.json`,
+/// merge fleet's entry with `base.mcp_url()` and `token` ([`merge_mcp_entry`],
+/// siblings kept), back the old file up to `~/.claude.json.fleet-bak` and
+/// write it back, both `0600`. A file that does not parse aborts before any
+/// write. Autofix's `host_mcp_entry` fix runs this with the host's stored
+/// token.
+pub async fn rewrite_mcp_entry(
+    ssh: &dyn SshExec,
+    host: &str,
+    base: &HubBase,
+    token: &str,
+) -> Result<(), IpcError> {
+    let existing = read_host_file(ssh, host, CLAUDE_JSON).await?;
+    let merged = merge_mcp_entry(&existing, &base.mcp_url(), token)?; // errors before any write
+    if !existing.trim().is_empty() {
+        // The backup carries the previous token too — same mode.
+        write_host_file_secret(
+            ssh,
+            host,
+            CLAUDE_DIR,
+            &format!("{CLAUDE_JSON}.fleet-bak"),
+            &existing,
+        )
+        .await?;
+    }
+    write_host_file_secret(ssh, host, CLAUDE_DIR, CLAUDE_JSON, &merged).await
 }
 
 /// Shell script listing the host's login profile dirs, one `@@P\t<name>`

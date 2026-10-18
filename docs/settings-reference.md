@@ -80,6 +80,8 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `autofix.max_attempts` | `3` | 0–10, `0` = never | fleet | How many times one problem is fixed automatically before it waits for you. |
 | `autofix.detector.operator_unbound` | `true` | on / off | fleet | Notice when Control's token belongs to nobody, which leaves it unable to see any session. |
 | `autofix.detector.host` | `true` | on / off | fleet | Notice hosts with out-of-date fleet files, silent hooks, or an old agent or Claude Code. |
+| `autofix.detector.host_mcp_entry` | `true` | on / off | fleet | Every 10 minutes, read the fleet entry in each host's ~/.claude.json (its token is hashed on the host and never sent) and notice one that is missing, points elsewhere or carries the wrong token. |
+| `autofix.detector.stuck` | `true` | on / off | fleet | Notice sessions stuck on a reconnect, a trust or sign-in prompt, a Press Enter wait or out of memory, and offer the fix. |
 
 ## recovery
 

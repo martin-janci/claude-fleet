@@ -59,6 +59,13 @@
   import { openInControl } from './control_room';
   import { selectView } from './control_views';
   import type { ChatRef } from './chat_refs';
+  import FixCard from './FixCard.svelte';
+  import { operatorFinding, watchFindings } from './autofix';
+  import { onMount } from 'svelte';
+
+  // Autofix detector 1: the agent's token belongs to nobody, so it sees no
+  // sessions. Shown under the operator status, with its one-click fix.
+  onMount(() => watchFindings());
 
   // Gap plan G3.9: the box's words in Control. `#KEY` names a task and
   // `@name` a host or session in Control's commands; `/` opens them.
@@ -258,6 +265,11 @@
 {/snippet}
 
 <div class="agent-panel" role="region" aria-label="Agent" data-testid="control-agent">
+  {#if $operatorFinding}
+    <div class="operator-finding" data-testid="agent-operator-finding">
+      <FixCard finding={$operatorFinding} />
+    </div>
+  {/if}
   {#if blocked}
    <!-- One empty state with one primary step (UX audit 2026-10-09, C4). -->
    <div class="blocked-state" data-testid="agent-blocked">
@@ -308,6 +320,9 @@
 </div>
 
 <style>
+  .operator-finding {
+    padding: var(--space-2) var(--space-3) 0;
+  }
   /* Fills Control's centre: the chat's own column centres itself. */
   .agent-panel {
     display: flex;

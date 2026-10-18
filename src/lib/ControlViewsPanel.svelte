@@ -46,6 +46,9 @@
   import ControlOrbitView from './ControlOrbitView.svelte';
   import { openRuns } from './automation';
   import LimitActions from './LimitActions.svelte';
+  import FixCard from './FixCard.svelte';
+  import { fixedRecently, openFindings, watchFindings } from './autofix';
+  import { onMount } from 'svelte';
   import { classify } from './attention';
   import { attentionFacts } from './attention_facts';
   import { accountByUuid, accountLabel } from './accounts';
@@ -66,6 +69,9 @@
     toggleView,
     type ControlViewId,
   } from './control_views';
+
+  // Problems & fixes (autofix): kept fresh while the panel is up.
+  onMount(() => watchFindings());
 
   const shown = $derived(shownViews($controlViews));
   const active = $derived($controlViews.active);
@@ -252,6 +258,22 @@
           <input type="search" placeholder="Search sessions" aria-label="Search sessions" bind:value={query} data-testid="control-views-search" />
         </label>
       </div>
+      {#if $openFindings.length > 0 || $fixedRecently.length > 0}
+        <section class="problems" aria-label="Problems & fixes" data-testid="control-problems">
+          <h3 class="problems-title">Problems &amp; fixes{#if $openFindings.length > 0}{' '}<span class="count">{$openFindings.length}</span>{/if}</h3>
+          {#each $openFindings as f (f.id)}
+            <FixCard finding={f} compact={true} />
+          {/each}
+          {#if $fixedRecently.length > 0}
+            <details class="fold" data-testid="control-problems-fixed">
+              <summary>Fixed automatically <span class="fold-n">{$fixedRecently.length}</span></summary>
+              <ul class="fixed">
+                {#each $fixedRecently as f (f.id)}<li>{f.title ?? f.kind}</li>{/each}
+              </ul>
+            </details>
+          {/if}
+        </section>
+      {/if}
       {#if folds.needs.length === 0}
         <p class="empty">{query.trim() ? 'Nothing that needs you matches.' : 'Nothing needs you.'}</p>
       {:else}
@@ -483,6 +505,25 @@
   .row-age {
     grid-column: 2;
     grid-row: 1;
+  }
+  .problems {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--border);
+  }
+  .problems-title {
+    margin: 0;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--fg-2);
+  }
+  .fixed {
+    margin: var(--space-1) 0 0;
+    padding-left: 1.1rem;
+    font-size: var(--text-xs);
+    color: var(--fg-muted);
   }
   .fleet {
     padding: var(--space-2) var(--space-3);

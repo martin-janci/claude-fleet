@@ -531,6 +531,25 @@
         "kind",
         "device"
       ]
+    },
+    {
+      "description": "An autofix finding for a person to decide: the id `autofix { action:\nlist }` answered. The card draws the finding from the hub's own row,\nnever from the block, so an agent cannot invent a fix or reword what\nit changes; Fix asks first and needs the desktop or a trusted device.",
+      "type": "object",
+      "properties": {
+        "finding_id": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "kind": {
+          "type": "string",
+          "const": "fix"
+        }
+      },
+      "required": [
+        "kind",
+        "finding_id"
+      ]
     }
   ],
   "required": [

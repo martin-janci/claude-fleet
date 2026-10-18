@@ -49,6 +49,7 @@ it closes.
 | run one of the app's wizards (add a project, a host, a session, …) | `wizard` |
 | keep a view of work to come back to (a sprint, a release, an epic) | `dashboard` |
 | look at a debug device you are testing on (its state, its screen) | `device` |
+| decide a fleet problem autofix found (Fix, Later, Details) | `fix` |
 
 A block's form is not `ask`: you do not wait for it, and its answers arrive
 as the person's next prompt. Use it when the answers can wait for the next
@@ -265,6 +266,25 @@ call). *Not now* writes nothing: the proposal still waits in Settings ›
 Review. After Apply, *Undo in Settings* opens the setting where it lives.
 A proposal that was already decided shows as such; a device that may not
 change settings shows the change with no Apply.
+
+### `fix`: a fleet problem with its fix
+
+| Key | Required | Meaning |
+|---|---|---|
+| `finding_id` | yes | The `id` of a finding `autofix { action: list }` answered (a whole number ≥ 1) |
+
+```json
+{ "spec": "fleet.ui/1", "kind": "fix", "finding_id": 42 }
+```
+
+The card reads the finding from the hub by its id: the title, the
+plain-language explanation, the evidence and what the fix changes. Nothing
+comes from the block, so write only the id and say in your own words why you
+show it. **Fix** asks first, listing what it changes, and only the desktop or
+a trusted device may press it (Control itself cannot apply a fix). **Later**
+hides it for a day. **Details** opens the evidence. A finding fleet has no
+fix for may offer a login on its host instead. A finding that is resolved, or
+that this hub does not have, shows as one quiet line.
 
 ### `wizard`: one of the app's wizards
 

@@ -947,6 +947,22 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "autofix_findings",
+            "autofix",
+            json!({ "action": "list" }),
+            r#"{"findings":[{"id":3,"kind":"operator_unbound","subject":"token:ux-agent","severity":"blocking","state":"open","first_seen_at":1,"last_seen_at":2,"attempts":0,"title":"T","evidence":[]}],"can_apply":false}"#,
+            Box::new(|b, s, _| {
+                let f = block_on(commands::autofix::routed::autofix_findings(b, s))?;
+                assert_eq!(f.findings[0].id, 3);
+                assert!(
+                    !f.can_apply,
+                    "the hub decides whether this device may apply"
+                );
+                assert!(f.fixed.is_empty());
+                Ok(())
+            }),
+        ),
+        (
             "list_guides",
             "guide",
             json!({ "action": "list" }),
@@ -3551,6 +3567,28 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     true,
                 ))
                 .map(|_| ())
+            }),
+        ),
+        (
+            "autofix_apply",
+            "autofix",
+            json!({ "action": "apply", "id": 3 }),
+            r#"{"id":3,"kind":"operator_unbound","subject":"token:ux-agent","severity":"blocking","state":"cleared","first_seen_at":1,"last_seen_at":2,"attempts":1}"#,
+            Box::new(|b, s, h| {
+                let r = block_on(commands::autofix::routed::autofix_apply(b, s, h, 3))?;
+                assert_eq!(r.state, "cleared");
+                Ok(())
+            }),
+        ),
+        (
+            "autofix_dismiss",
+            "autofix",
+            json!({ "action": "dismiss", "id": 3, "until": null }),
+            r#"{"id":3,"kind":"operator_unbound","subject":"token:ux-agent","severity":"blocking","state":"dismissed","first_seen_at":1,"last_seen_at":2,"attempts":0,"dismissed_until":9}"#,
+            Box::new(|b, s, _| {
+                let r = block_on(commands::autofix::routed::autofix_dismiss(b, s, 3, None))?;
+                assert_eq!(r.dismissed_until, Some(9));
+                Ok(())
             }),
         ),
         (
@@ -7668,6 +7706,10 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../commands/account_usage.rs"),
     ),
     ("commands/agents.rs", include_str!("../commands/agents.rs")),
+    (
+        "commands/autofix.rs",
+        include_str!("../commands/autofix.rs"),
+    ),
     ("commands/assets.rs", include_str!("../commands/assets.rs")),
     ("commands/cancel.rs", include_str!("../commands/cancel.rs")),
     (

@@ -3481,6 +3481,30 @@
     },
     {
       "default_widget": "switch",
+      "key": "autofix.detector.host_mcp_entry",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Check each host's fleet connection",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "autofix.detector.stuck",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Check stuck sessions",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
       "key": "recovery.auto_restore",
       "kind": {
         "type": "bool"

@@ -29,6 +29,14 @@ pub struct AutofixRow {
     pub last_error: Option<String>,
 }
 
+/// Attempts on every episode of one `(kind, subject)` in a window
+/// ([`Store::autofix_budget`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AutofixBudget {
+    pub attempts: i64,
+    pub last_attempt_at: Option<i64>,
+}
+
 pub struct NewAutofixFinding<'a> {
     pub kind: &'a str,
     pub subject: &'a str,
@@ -153,6 +161,65 @@ impl Store {
         Ok(n == 1)
     }
 
+    /// The attempts of row `id` plus those of every other episode of
+    /// `(kind, subject)` last tried at or after `since`, and the latest try.
+    pub fn autofix_budget(
+        &self,
+        id: i64,
+        kind: &str,
+        subject: &str,
+        since: i64,
+    ) -> Result<AutofixBudget> {
+        self.conn.query_row(
+            "SELECT COALESCE(SUM(attempts), 0), MAX(last_attempt_at) FROM autofix_findings
+             WHERE kind = ?2 AND subject = ?3 AND (id = ?1 OR last_attempt_at >= ?4)",
+            rusqlite::params![id, kind, subject, since],
+            |r| {
+                Ok(AutofixBudget {
+                    attempts: r.get(0)?,
+                    last_attempt_at: r.get(1)?,
+                })
+            },
+        )
+    }
+
+    /// Delete cleared episodes last seen before `before`. Live rows are
+    /// never touched.
+    pub fn prune_autofix_findings(&self, before: i64) -> Result<usize> {
+        self.conn.execute(
+            "DELETE FROM autofix_findings WHERE state = 'cleared' AND last_seen_at < ?1",
+            [before],
+        )
+    }
+
+    /// Episodes cleared at or after `since` that a fix was tried on, newest
+    /// first: what fleet fixed (or what went away after a fix).
+    pub fn recently_fixed_autofix_findings(&self, since: i64) -> Result<Vec<AutofixRow>> {
+        let mut st = self.conn.prepare(&format!(
+            "SELECT {COLS} FROM autofix_findings
+             WHERE state = 'cleared' AND attempts > 0 AND last_seen_at >= ?1
+             ORDER BY last_seen_at DESC, id DESC LIMIT 50"
+        ))?;
+        let rows = st.query_map([since], row)?;
+        rows.collect()
+    }
+
+    /// Tests: put a session in a stuck state, as reconcile would.
+    #[cfg(test)]
+    pub(crate) fn set_session_stuck_for_test(
+        &self,
+        id: i64,
+        stuck_kind: Option<&str>,
+        claude_status: Option<&str>,
+    ) {
+        self.conn
+            .execute(
+                "UPDATE sessions SET stuck_kind = ?2, stuck_since = 1, claude_status = ?3 WHERE id = ?1",
+                rusqlite::params![id, stuck_kind, claude_status],
+            )
+            .unwrap();
+    }
+
     pub fn dismiss_autofix_finding(&self, id: i64, until: i64) -> Result<bool> {
         let n = self.conn.execute(
             &format!(
@@ -232,6 +299,60 @@ mod tests {
             (row.state.as_str(), row.dismissed_until),
             ("dismissed", Some(999))
         );
+    }
+
+    #[test]
+    fn the_budget_sums_episodes_in_the_window() {
+        let s = Store::open_in_memory().unwrap();
+        let (a, _) = s.upsert_autofix_finding(&new("k", "hub"), 10).unwrap();
+        s.mark_autofix_attempt(a, 20).unwrap();
+        s.mark_autofix_attempt(a, 30).unwrap();
+        s.set_autofix_state(a, "cleared", None, 31).unwrap();
+        let (b, _) = s.upsert_autofix_finding(&new("k", "hub"), 40).unwrap();
+        s.mark_autofix_attempt(b, 50).unwrap();
+        let (other, _) = s.upsert_autofix_finding(&new("k", "host:x"), 40).unwrap();
+        s.mark_autofix_attempt(other, 50).unwrap();
+        assert_eq!(
+            s.autofix_budget(b, "k", "hub", 0).unwrap(),
+            AutofixBudget {
+                attempts: 3,
+                last_attempt_at: Some(50)
+            }
+        );
+        assert_eq!(
+            s.autofix_budget(b, "k", "hub", 35).unwrap().attempts,
+            1,
+            "the cleared episode's tries fell out of the window"
+        );
+    }
+
+    #[test]
+    fn prune_drops_old_cleared_rows_only() {
+        let s = Store::open_in_memory().unwrap();
+        let (a, _) = s.upsert_autofix_finding(&new("k", "hub"), 10).unwrap();
+        s.set_autofix_state(a, "cleared", None, 11).unwrap();
+        let (b, _) = s.upsert_autofix_finding(&new("k2", "hub"), 5).unwrap();
+        assert_eq!(s.prune_autofix_findings(100).unwrap(), 1);
+        assert!(s.autofix_finding(a).unwrap().is_none());
+        assert!(s.autofix_finding(b).unwrap().is_some(), "live rows stay");
+    }
+
+    #[test]
+    fn recently_fixed_lists_cleared_rows_a_fix_was_tried_on() {
+        let s = Store::open_in_memory().unwrap();
+        let (a, _) = s.upsert_autofix_finding(&new("k", "hub"), 10).unwrap();
+        s.mark_autofix_attempt(a, 12).unwrap();
+        s.set_autofix_state(a, "cleared", None, 20).unwrap();
+        let (b, _) = s.upsert_autofix_finding(&new("k2", "hub"), 10).unwrap();
+        s.set_autofix_state(b, "cleared", None, 20).unwrap();
+        let ids: Vec<_> = s
+            .recently_fixed_autofix_findings(15)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(ids, vec![a]);
+        assert!(s.recently_fixed_autofix_findings(21).unwrap().is_empty());
     }
 
     #[test]
