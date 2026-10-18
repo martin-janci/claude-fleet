@@ -420,7 +420,7 @@ impl ContinueExec for RealContinueExec {
 
 /// One pass. `true` when a prompt was queued.
 pub async fn run_with(store: &Mutex<Store>, exec: &dyn ContinueExec, now: i64) -> bool {
-    let (sid, body) = {
+    let (sid, seq, body) = {
         let Ok(s) = store.lock() else {
             return false;
         };
@@ -442,14 +442,19 @@ pub async fn run_with(store: &Mutex<Store>, exec: &dyn ContinueExec, now: i64) -
         let Ok(Some(p)) = settle(&s, p.map(|p| p.turn_seq), PickState::Sent, now) else {
             return false;
         };
-        (p.session_id, prompt_for(&p, minutes))
+        (p.session_id, p.turn_seq, prompt_for(&p, minutes))
     };
     match exec.queue(sid, body).await {
         Ok(()) => true,
         Err(e) => {
             tracing::debug!(error = %e.message, "[control-continue] not queued");
             if let Ok(s) = store.lock() {
-                if let Some(mut p) = load(&s) {
+                // Only the pick that was sent: a newer one saved while the
+                // send was in flight (Control finished another turn) is not
+                // this failure's.
+                if let Some(mut p) = load(&s).filter(|p| {
+                    p.state == PickState::Sent && p.turn_seq == seq && p.session_id == sid
+                }) {
                     p.state = PickState::Failed;
                     let _ = save(&s, Some(&p));
                 }

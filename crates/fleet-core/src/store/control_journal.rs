@@ -18,6 +18,13 @@ pub const JOURNAL_SAID_MAX: usize = 200;
 pub const CONTROL_JOURNAL_KINDS: [&str; 3] = ["said", "ask", "note"];
 /// The kinds of thread a mute names.
 pub const MUTE_KINDS: [&str; 2] = ["session", "mission"];
+/// How long before a session's `created_at` a receipt or a mute naming its
+/// id may be and still be its own. `sessions.id` is reused (INTEGER PRIMARY
+/// KEY, no AUTOINCREMENT), and neither `control_handoffs.session_id` nor
+/// `control_mutes.target_id` is removed with the row, so one written before
+/// the session existed is an earlier session's. `created_at` is the remote
+/// host's tmux clock, hence the slack.
+pub const SESSION_ID_REUSE_SLACK_SECS: i64 = 600;
 
 /// One journal row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +122,19 @@ impl Store {
     /// Mute (`on`) or unmute a thread; answers whether anything changed.
     pub fn set_control_mute(&self, kind: &str, target_id: i64, on: bool, now: i64) -> Result<bool> {
         let n = if on {
+            // A mute an earlier session with this id left behind is not
+            // this session's: drop it so this one is set.
+            self.conn
+                .prepare_cached(
+                    "DELETE FROM control_mutes WHERE kind = 'session' AND kind = ?1 \
+                       AND target_id = ?2 AND at < (SELECT created_at - ?3 FROM sessions \
+                                                    WHERE id = ?2)",
+                )?
+                .execute(rusqlite::params![
+                    kind,
+                    target_id,
+                    SESSION_ID_REUSE_SLACK_SECS
+                ])?;
             self.conn
                 .prepare_cached(
                     "INSERT OR IGNORE INTO control_mutes (kind, target_id, at) VALUES (?1, ?2, ?3)",
@@ -128,29 +148,45 @@ impl Store {
         Ok(n > 0)
     }
 
-    /// Every muted thread, as `(kind, id)`.
+    /// Every muted thread, as `(kind, id)`. A session mute set before the
+    /// session now holding that id existed is an earlier session's and is
+    /// left out ([`SESSION_ID_REUSE_SLACK_SECS`]).
     pub fn control_mutes(&self) -> Result<Vec<(String, i64)>> {
         self.conn
-            .prepare_cached("SELECT kind, target_id FROM control_mutes ORDER BY kind, target_id")?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .prepare_cached(
+                "SELECT m.kind, m.target_id FROM control_mutes m \
+                 WHERE NOT (m.kind = 'session' AND EXISTS \
+                       (SELECT 1 FROM sessions s WHERE s.id = m.target_id \
+                          AND m.at < s.created_at - ?1)) \
+                 ORDER BY m.kind, m.target_id",
+            )?
+            .query_map([SESSION_ID_REUSE_SLACK_SECS], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?
             .collect()
     }
 
     /// The sessions Control may follow: those it started (`origin =
     /// 'operator'`) and those a receipt names, with the newest receipt's
     /// time (`0` for one it started and never briefed), `exclude` (its own
-    /// row) left out. The follow decision itself is
-    /// `service::control_follow`'s.
+    /// row) left out. A receipt written before the session now holding its
+    /// id existed is an earlier session's and counts for nothing
+    /// ([`SESSION_ID_REUSE_SLACK_SECS`]). The receipts are grouped once
+    /// (at most `HANDOFFS_KEEP` rows), not scanned per session. The follow
+    /// decision itself is `service::control_follow`'s.
     pub fn control_follow_candidates(&self, exclude: Option<i64>) -> Result<Vec<(i64, i64)>> {
         self.conn
             .prepare_cached(
-                "SELECT id, COALESCE((SELECT MAX(h.at) FROM control_handoffs h \
-                                      WHERE h.session_id = s.id), 0) \
-                 FROM sessions s \
-                 WHERE s.id IS NOT ?1 AND (s.origin = 'operator' OR s.id IN \
-                       (SELECT session_id FROM control_handoffs WHERE session_id IS NOT NULL))",
+                "WITH b AS (SELECT h.session_id AS sid, MAX(h.at) AS at \
+                            FROM control_handoffs h JOIN sessions s ON s.id = h.session_id \
+                            WHERE h.at >= s.created_at - ?2 GROUP BY h.session_id) \
+                 SELECT s.id, COALESCE(b.at, 0) FROM sessions s LEFT JOIN b ON b.sid = s.id \
+                 WHERE s.id IS NOT ?1 AND (s.origin = 'operator' OR b.sid IS NOT NULL)",
             )?
-            .query_map([exclude], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .query_map(
+                rusqlite::params![exclude, SESSION_ID_REUSE_SLACK_SECS],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?
             .collect()
     }
 
@@ -169,13 +205,19 @@ impl Store {
     }
 
     /// Control's newest receipt naming `session_id`: when, and its preview.
+    /// One an earlier session with the same id left is not it.
     pub fn latest_brief_of(&self, session_id: i64) -> Result<Option<(i64, Option<String>)>> {
         self.conn
             .prepare_cached(
-                "SELECT at, preview FROM control_handoffs WHERE session_id = ?1 \
-                 ORDER BY id DESC LIMIT 1",
+                "SELECT h.at, h.preview FROM control_handoffs h \
+                 WHERE h.session_id = ?1 AND h.at >= COALESCE( \
+                       (SELECT created_at - ?2 FROM sessions WHERE id = ?1), h.at) \
+                 ORDER BY h.id DESC LIMIT 1",
             )?
-            .query_row([session_id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .query_row(
+                rusqlite::params![session_id, SESSION_ID_REUSE_SLACK_SECS],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .optional()
     }
 
@@ -276,5 +318,44 @@ mod tests {
         assert!(s.set_control_mute("session", 3, false, 3).unwrap());
         assert!(!s.set_control_mute("session", 3, false, 3).unwrap());
         assert_eq!(s.control_mutes().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_reused_session_id_inherits_no_brief_and_no_mute() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let old = s
+            .upsert_session("old", "h", None, None, 1_000, 1_000, "running", None)
+            .unwrap();
+        s.insert_control_handoff(
+            &crate::store::NewHandoff {
+                tool: "send_prompt".into(),
+                session_id: Some(old),
+                ..Default::default()
+            },
+            1_100,
+        )
+        .unwrap();
+        s.set_control_mute("session", old, true, 1_200).unwrap();
+        assert_eq!(
+            s.control_follow_candidates(None).unwrap(),
+            vec![(old, 1_100)]
+        );
+        assert_eq!(s.control_mutes().unwrap(), vec![("session".into(), old)]);
+        // The row goes; a new, unrelated session takes its id a day later.
+        s.conn_ref()
+            .execute("DELETE FROM sessions WHERE id = ?1", [old])
+            .unwrap();
+        let later = 1_000 + 86_400;
+        let new = s
+            .upsert_session("new", "h", None, None, later, later, "running", None)
+            .unwrap();
+        assert_eq!(new, old, "SQLite reuses the deleted max id");
+        assert!(s.control_follow_candidates(None).unwrap().is_empty());
+        assert!(s.latest_brief_of(new).unwrap().is_none());
+        assert!(s.control_mutes().unwrap().is_empty());
+        // Muting the new session takes, over the stale row.
+        assert!(s.set_control_mute("session", new, true, later).unwrap());
+        assert_eq!(s.control_mutes().unwrap(), vec![("session".into(), new)]);
     }
 }

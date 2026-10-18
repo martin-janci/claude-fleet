@@ -252,8 +252,10 @@ fn add_and_mute_check_their_words() {
         add(&w.store, "ask", "  ", 1).unwrap_err().code,
         codes::E_INVALID
     );
-    assert!(mute(&w.store, "session", w.child, true, 1).unwrap());
-    assert!(!mute(&w.store, "session", w.child, true, 1).unwrap());
+    // Muted now: a mute older than the session is an earlier session's.
+    let now = crate::store::now_unix();
+    assert!(mute(&w.store, "session", w.child, true, now).unwrap());
+    assert!(!mute(&w.store, "session", w.child, true, now).unwrap());
     assert_eq!(
         mute(&w.store, "task", 1, true, 1).unwrap_err().code,
         codes::E_INVALID
@@ -263,4 +265,31 @@ fn add_and_mute_check_their_words() {
     assert!(f.follow.muted);
     assert_eq!(f.follow.state, FollowState::Muted);
     assert_eq!(v.notes[0].text, "keep #4 in mind");
+}
+
+#[tokio::test]
+async fn a_read_error_leaves_the_cursor_and_the_next_pass_still_sends() {
+    let w = world();
+    let fake = Fake::default();
+    let now = crate::store::now_unix();
+    run_with(&w.store, &fake, now).await;
+    event(&w, w.op, "compact_done", Some("auto"));
+    let before = JournalState::load(&w.store.lock().unwrap());
+    assert!(before.cursor.is_some());
+    // The events cannot be read: nothing sent, the cursor neither rewound
+    // to 0 nor moved past the new conversation.
+    let rename = |from: &str, to: &str| {
+        w.store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute_batch(&format!("ALTER TABLE {from} RENAME TO {to}"))
+            .unwrap();
+    };
+    rename("session_events", "session_events_away");
+    assert!(!run_with(&w.store, &fake, now).await.sent);
+    assert_eq!(JournalState::load(&w.store.lock().unwrap()), before);
+    rename("session_events_away", "session_events");
+    assert!(run_with(&w.store, &fake, now).await.sent);
+    assert_eq!(fake.sent.lock().unwrap().len(), 1);
 }

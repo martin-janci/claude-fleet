@@ -276,3 +276,55 @@ async fn controls_stop_hook_records_the_pick_and_one_pass_sends_it_once() {
     on_stop(&s, id, Some("done."), due + 60).unwrap();
     assert!(load(&s).is_none());
 }
+
+/// Fails the send, after Control finished another turn mid-send when
+/// `newer` is set (its Stop hook saved a new card).
+struct FailAfter {
+    store: Arc<Mutex<Store>>,
+    newer: bool,
+}
+
+#[async_trait::async_trait]
+impl ContinueExec for FailAfter {
+    async fn queue(&self, _session_id: i64, _body: String) -> Result<(), IpcError> {
+        if self.newer {
+            let s = self.store.lock().unwrap();
+            save(&s, Some(&pending(5, 2_000))).unwrap();
+        }
+        Err(IpcError::new(codes::E_INVALID, "ssh down"))
+    }
+}
+
+#[tokio::test]
+async fn a_failed_send_marks_only_its_own_pick_failed() {
+    for newer in [false, true] {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("h").unwrap();
+            s.set_setting(settings::ORCHESTRATOR_MAX_LEVEL, "2")
+                .unwrap();
+            s.set_setting(
+                crate::service::operator::SETTING_OPERATOR_SESSION,
+                "h/fleet-operator",
+            )
+            .unwrap();
+            let id = s
+                .upsert_session("fleet-operator", "h", None, None, 1, 1, "running", None)
+                .unwrap();
+            on_stop(&s, id, Some(CARD), 1000).unwrap();
+        }
+        let exec = FailAfter {
+            store: store.clone(),
+            newer,
+        };
+        assert!(!run_with(&store, &exec, 1000 + 10 * 60).await);
+        let s = store.lock().unwrap();
+        let p = load(&s).unwrap();
+        if newer {
+            assert_eq!((p.turn_seq, p.state), (5, PickState::Waiting), "{p:?}");
+        } else {
+            assert_eq!(p.state, PickState::Failed);
+        }
+    }
+}
