@@ -1,16 +1,21 @@
 {
   "schema": 1,
   "track": "nightly",
-  "sequence": 50,
-  "generated_at": "2026-10-17T14:39:13Z",
-  "expires_at": "2026-10-31T14:39:13Z",
-  "current": "0.6.3-dev.477.desktop.g33bd7de",
-  "recommended": "0.6.3-dev.477.desktop.g33bd7de",
+  "sequence": 51,
+  "generated_at": "2026-10-18T02:27:52Z",
+  "expires_at": "2026-11-01T02:27:52Z",
+  "current": "0.6.3-dev.493.desktop.g8a044d5",
+  "recommended": "0.6.3-dev.493.desktop.g8a044d5",
   "minimum_supported": {},
   "mandatory": [],
   "rollback": null,
   "withdrawn": [],
   "releases": [
+    {
+      "version": "0.6.3-dev.493.desktop.g8a044d5",
+      "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.3-dev.493.desktop.g8a044d5/release-manifest.json",
+      "manifest_sha256": "9c3929fb6e9e59f5a8da6f745b8a1ec40116a2150f3a1b33fa072b48d37c60f1"
+    },
     {
       "version": "0.6.3-dev.477.desktop.g33bd7de",
       "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.3-dev.477.desktop.g33bd7de/release-manifest.json",
@@ -171,18 +176,6 @@
       "version": "0.6.3-dev.352.desktop.g95d63c2",
       "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.3-dev.352.desktop.g95d63c2/release-manifest.json",
       "manifest_sha256": "2ff31125b5e712f5a1f9461e95b1ab82a8be789bd34571a16522dc6e43d93f2d"
-    },
-    {
-      "version": "0.6.3-dev.350.desktop.gae0aba1",
-      "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.3-dev.350.desktop.gae0aba1/release-manifest.json",
-      "manifest_sha256": "38bd86da9e08771c3befd72158acb7502269827d9f71e1c1531e1d74432a3b81",
-      "amendments": [
-        {
-          "component": "android",
-          "manifest": "https://raw.githubusercontent.com/martin-janci/claude-fleet/update-channels/amendments/0.6.3-dev.350.desktop.gae0aba1/android.json",
-          "manifest_sha256": "f1c4f9d656e0fadd64dd89ede1292844afaae4464bfcbdc9e1f2404731009cc1"
-        }
-      ]
     }
   ],
   "next_keys": []
