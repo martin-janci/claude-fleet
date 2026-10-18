@@ -35,8 +35,8 @@ The core plan (PR 1) departs from the text below in these ways:
   is refused for `AUTOFIX_INFLIGHT_SECS` (60 s) after the attempt.
 - Detector 1 vs PR #932: #932 binds at birth and backfills; detector 1
   catches later regressions. Autofix adds no backfill.
-- Migration 195 collides with PR #932's 195; whichever merges second
-  renumbers with `scripts/renumber-migrations.sh`.
+- Migration is 198: main took 195 (#932), 196 and 197 first, so this branch
+  was renumbered with `scripts/renumber-migrations.sh`.
 - Detectors 2 and 3 and the surfaces (chat card, panel, feed) are PR 2.
 
 ## Problem
@@ -143,8 +143,7 @@ pub struct Fix {
 
 ### Store
 
-Migration `195_autofix.sql` (renumber with `scripts/renumber-migrations.sh`
-if main takes it first):
+Migration `198_autofix.sql`:
 
 ```sql
 CREATE TABLE autofix_findings (
