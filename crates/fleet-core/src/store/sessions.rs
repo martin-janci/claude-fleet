@@ -1842,6 +1842,25 @@ impl Store {
         Ok(self.emit_session(row_id)?)
     }
 
+    /// A Stop the hook answered `block`: Claude goes on in the same turn
+    /// and no UserPromptSubmit follows, so the `idle` the Stop wrote is put
+    /// back to `working`. Without it a queued prompt, a wake or a dispatch
+    /// would type into the continuing turn.
+    pub fn resume_turn_after_blocked_stop(
+        &self,
+        row_id: i64,
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        let changed = self.conn.execute(
+            "UPDATE sessions SET claude_status = 'working', idle_since = NULL \
+             WHERE id = ?1 AND claude_status = 'idle'",
+            [row_id],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        Ok(self.emit_session(row_id)?)
+    }
+
     /// The UserPromptSubmit hook's write: a turn is starting. Sets
     /// `claude_status = working`, clears `idle_since` so "idle because
     /// never started" and "idle after a turn" are distinguishable from

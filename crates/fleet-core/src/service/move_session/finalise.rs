@@ -140,6 +140,11 @@ pub(super) async fn finalise_source(
                 None => None,
             }
         };
+        // Prompts queued for the source (Send later, or behind a busy turn)
+        // follow it too: the source's row is deleted with them otherwise.
+        let repointed_prompts = lock(store)?
+            .repoint_deferred_prompts(a.source_row_id, a.target_row_id)
+            .map_err(|e| tag_step("re-pointing the queued prompts", e.into()))?;
         // A pin follows the session: the target took it at the carry step,
         // so the source's is lifted, or its kill would refuse (E_PINNED).
         // Kept, to put back if the kill fails: the source then lives on, and
@@ -188,6 +193,17 @@ pub(super) async fn finalise_source(
             // guesswork; it follows the identity back to the source, which is
             // where the live endpoint is.) A failure here can only be logged:
             // the kill error is the one that has to reach the caller.
+            if repointed_prompts > 0 {
+                if let Err(re) = lock(store)
+                    .and_then(|s| Ok(s.repoint_deferred_prompts(a.target_row_id, a.source_row_id)?))
+                {
+                    tracing::warn!(
+                        session_id = a.source_row_id,
+                        error = %re.message,
+                        "move_session: the kill failed and the queued prompts stay on the target"
+                    );
+                }
+            }
             if let Some(pid) = repointed {
                 match lock(store).and_then(|s| s.repoint_participant(pid, a.source_row_id)) {
                     Ok(()) => tracing::info!(
