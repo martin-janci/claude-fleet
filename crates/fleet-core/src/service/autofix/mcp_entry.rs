@@ -525,7 +525,10 @@ mod tests {
     }
 
     /// Runs the real script against a fixture `~/.claude.json` (needs bash
-    /// and jq or python3; skipped when neither tool exists).
+    /// and jq or python3; skipped when neither tool exists). Unix only, like
+    /// the other host-script tests: the script runs on a Unix host, and a
+    /// Windows runner's `bash` cannot read the native `HOME` path.
+    #[cfg(unix)]
     #[test]
     fn the_probe_hashes_the_bearer_on_the_host_and_prints_only_the_hash() {
         let has = |t: &str| {
