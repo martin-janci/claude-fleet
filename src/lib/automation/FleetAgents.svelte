@@ -10,6 +10,8 @@
   // ends an instance; Run now opens a small panel under the instance: what
   // to look into (the request) and where (the scope: a window, a host, a
   // session, a part of the fleet), and Run queues the manual agent's job.
+  // The gallery lists the definitions claude-fleet ships that the catalog
+  // does not have yet; Add to catalog copies one in, listed above from then.
   import { onMount } from 'svelte';
   import WizardDialog from '../forms/WizardDialog.svelte';
   import StatusDot from '../kit/StatusDot.svelte';
@@ -18,8 +20,10 @@
   import {
     fleetDefinitions,
     fleetForm,
+    fleetGallery,
     fleetWizard,
     grantFleet,
+    installFleet,
     loadAgents,
     revokeAgentRule,
     ruleLine,
@@ -28,12 +32,14 @@
     SCOPE_WINDOWS,
     type AgentRule,
     type FleetDefinition,
+    type GalleryEntry,
     type RunScope,
   } from '../agents';
 
   let { rules }: { rules: AgentRule[] } = $props();
 
   let defs = $state<FleetDefinition[] | null>(null);
+  let gallery = $state<GalleryEntry[]>([]);
   let loadError = $state<string | null>(null);
   let open = $state<{ wizard: Wizard; definition: string } | null>(null);
   let busy = $state(false);
@@ -44,13 +50,21 @@
   let queuing = $state(false);
 
   async function load() {
-    const r = await fleetDefinitions();
+    const [r, g] = await Promise.all([fleetDefinitions(), fleetGallery()]);
     if (r.ok) {
       defs = r.value ?? [];
       loadError = null;
     } else {
       loadError = r.error?.message ?? 'Could not read the catalog';
     }
+    gallery = g.ok && Array.isArray(g.value) ? g.value.filter((e) => !e.installed) : [];
+  }
+
+  async function install(name: string) {
+    note = null;
+    const r = await installFleet(name);
+    note = r.ok ? `${name} added to the catalog: start an instance of it above.` : (r.error?.message ?? 'Could not add it');
+    void load();
   }
 
   onMount(() => void load());
@@ -188,6 +202,23 @@
           </li>
         {/if}
       {/each}
+    {/each}
+  </ul>
+{/if}
+{#if gallery.length}
+  <h3 class="sub">Gallery</h3>
+  <ul class="table agents" data-testid="fleet-gallery">
+    {#each gallery as g (g.name)}
+      <li data-testid="fleet-gallery-entry">
+        <span class="main">
+          <strong>{g.name}</strong>
+          <span class="summary">{g.description}</span>
+          <span class="summary">{g.trigger} · {g.writes}</span>
+        </span>
+        <button class="act" type="button" data-testid="fleet-gallery-install" onclick={() => void install(g.name)}
+          >Add to catalog</button
+        >
+      </li>
     {/each}
   </ul>
 {/if}

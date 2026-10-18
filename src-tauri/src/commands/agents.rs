@@ -116,11 +116,11 @@ pub(crate) mod routed {
         let action = &call.action;
         if !matches!(
             action.as_str(),
-            "definitions" | "form" | "grant" | "revoke" | "run"
+            "definitions" | "gallery" | "form" | "grant" | "install" | "revoke" | "run"
         ) {
             return Err(IpcError::new(
                 fleet_core::ipc_error::codes::E_INVALID,
-                format!("agents_fleet action must be definitions | form | grant | revoke | run, got {action:?}"),
+                format!("agents_fleet action must be definitions | gallery | form | grant | install | revoke | run, got {action:?}"),
             ));
         }
         let args = fleet_args(call);

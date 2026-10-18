@@ -1195,7 +1195,11 @@ person sends; the phone lists the instances with Revoke. Step 6 in part: the
 and comments and new items on trackers other than Jira, whose
 `tracker_comments` and `tracker_assigned` polls read the hub's synced items
 (updated since the poll, less a sync's lag) and each one's comments through
-its provider; not `pr_review` or restating the built-in agents.
+its provider; the gallery (`fleet_agents/gallery.rs`: the
+`catalog-seed/fleet-agents/` definitions embedded, listed under Automation ›
+Agents › Gallery and added to the catalog with *Add to catalog*, `agents {
+install }`), with `issue-triage`, `pr-questions` and `daily-digest` added to
+it; not `pr_review` or restating the built-in agents.
 
 The self debug agent (thread "Self debug agent", 2026-10-17), the hub and
 desktop parts: a fleet agent definition that sets `run.diagnostics` gets

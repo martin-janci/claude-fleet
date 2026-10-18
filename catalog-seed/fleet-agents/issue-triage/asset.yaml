@@ -1,0 +1,51 @@
+kind: fleet_agent
+name: issue-triage
+description: "Triages an issue when someone asks for it in a comment (/triage by default): reads the project's code, says what kind of issue it is, how severe, where in the code it likely lives and what to do next, and asks for what is missing."
+inputs:
+  - { name: tracker, type: tracker, label: Tracker, required: true }
+  - { name: query, type: text, label: "Jira only: JQL the issues must match (optional)", help: 'e.g. project = "WEB". Leave it empty on GitHub, Linear or Asana.' }
+  - { name: phrases, type: text, label: Trigger phrases, value: "/triage" }
+stores:
+  - { role: seen, kind: fleet, label: Issues triaged before }
+trigger:
+  source: tracker_comments
+  tracker: "{{tracker}}"
+  query: "{{query}}"
+  match: { any_phrase: "{{phrases}}" }
+run:
+  workspace: project
+  max_turns: 30
+  timeout_secs: 900
+  context:
+    - { store: seen, key: "{{subject.key}}" }
+  output_schema:
+    type: object
+    required: [summary, kind, severity, next]
+    properties:
+      summary: { type: string, maxLength: 400 }
+      kind: { enum: [bug, feature, question, chore, duplicate] }
+      severity: { enum: [critical, major, minor] }
+      where: { type: array, items: { type: string, maxLength: 200 } }
+      next: { type: string, maxLength: 1500 }
+      needsMoreInfo: { type: string, maxLength: 1000 }
+actions:
+  - id: ask
+    when: { field: needsMoreInfo, truthy: true }
+    do: tracker_comment
+    target: "{{subject.key}}"
+    body: "Before this can be triaged: {{answer.needsMoreInfo}}"
+    auto: true
+    stop: true
+  - id: triage
+    do: tracker_comment
+    target: "{{subject.key}}"
+    body: "Triage: {{answer.kind}}, {{answer.severity}}.\n\n{{answer.summary}}\n\nWhere: {{answer.where}}\n\nNext: {{answer.next}}"
+    auto: true
+  - id: remember
+    do: record
+    store: seen
+    key: "{{subject.key}}"
+    value: { kind: "{{answer.kind}}", severity: "{{answer.severity}}", triaged: "{{now}}" }
+    auto: true
+limits:
+  max_body_chars: 3000

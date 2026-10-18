@@ -2,8 +2,8 @@
 
 Status: steps 1 to 5 built, and step 6's GitHub sources, PR comments and
 labels, and writes to other trackers, 2026-10-14 (the phone's part in
-martin-janci/fleet-mobile); polling other trackers, 2026-10-18. The rest of
-step 6 not built.
+martin-janci/fleet-mobile); polling other trackers and the gallery,
+2026-10-18. The rest of step 6 not built.
 Asked for by the owner after the built-in reviewer and support agent landed
 (`2026-10-11-review-and-support-agents-design.md`, PRs
 martin-janci/claude-fleet#871, martin-janci/fleet-mobile#217,
@@ -598,7 +598,23 @@ run real instances.
    `tracker_issue` creates an item in the project (`WriteOp::CreateItem`);
    an issue link is Jira's, so a link, or an issue with one, is refused
    there. Not built: `pr_review` (the reviewer's placed, verified review
-   stays the PR reviewer's), restating the built-in agents, and a gallery.
+   stays the PR reviewer's) and restating the built-in agents.
+
+   The gallery, built 2026-10-18 (`service/fleet_agents/gallery.rs`): the
+   definitions in `catalog-seed/fleet-agents/`, embedded in fleet-core
+   (`SEEDS`; a test checks it lists the directory and that each loads
+   clean). The `agents` tool's `gallery` lists them, each marked whether the
+   catalog has one of that name; `install {definition}` adds one to the
+   personal catalog as a commit (`catalog::author::install_in`), private and
+   with no source, and refuses a name the catalog has, so an edited copy is
+   never overwritten. Automation › Agents shows the ones not installed under
+   *Gallery* with *Add to catalog*. Next to the self debug agent, the
+   proposer, simplify and refactor, it ships three for everyday work:
+   `issue-triage` (`tracker_comments` on `/triage`: a triage comment, or a
+   question when the issue is too vague), `pr-questions` (`github_comments`
+   on `/ask`: an answer from the code as a `pr_comment`) and `daily-digest`
+   (a workday `schedule` reading `fleet-diagnostics`, kept in a fleet
+   store).
 
    Polling a tracker that is not Jira, built 2026-10-18: no provider grows
    `issue_threads`. The poll reads the items the hub's tracker sync saw
