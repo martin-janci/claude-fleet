@@ -1623,6 +1623,22 @@ pub struct DebugDevicesParams {
     pub shared: Option<bool>,
 }
 
+/// `autofix`: known broken fleet states, by `action`.
+#[derive(Default, serde::Deserialize, schemars::JsonSchema)]
+pub struct AutofixParams {
+    /// list | explain | scan | apply | dismiss.
+    pub action: String,
+    /// explain, apply, dismiss: the finding's id.
+    #[serde(default)]
+    pub id: Option<i64>,
+    /// dismiss: until when (unix seconds); default 24 hours from now.
+    #[serde(default)]
+    pub until: Option<i64>,
+    /// list: only findings in this state (open | verifying | apply_failed | dismissed).
+    #[serde(default)]
+    pub state: Option<String>,
+}
+
 /// `runs`: one tool, by `action` (only `list` today), so the Automation
 /// screen's later actions stay one entry.
 #[derive(serde::Deserialize, schemars::JsonSchema)]

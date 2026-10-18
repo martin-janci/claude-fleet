@@ -1,5 +1,5 @@
 //! Control's journal and thread mutes (`control_journal`, `control_mutes`,
-//! migration 198; Control review F10 and F12). What to write and when is
+//! migration 200; Control review F10 and F12). What to write and when is
 //! `service::control_journal`'s and `service::control_follow`'s; this is the
 //! two tables.
 

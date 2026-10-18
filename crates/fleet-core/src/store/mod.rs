@@ -13,6 +13,7 @@ mod account_usage_snapshots;
 mod admin_events;
 mod agent_records;
 mod agents;
+mod autofix;
 mod aux_usage;
 pub mod backup;
 mod bench_work_link;
@@ -29,6 +30,7 @@ mod deferred_prompts;
 mod diagnostics;
 mod downloads;
 mod env_vars;
+mod followups;
 mod forms;
 mod guides;
 mod host_setup;
@@ -115,6 +117,7 @@ pub use agents::{
     NewAgentRule, AGENT_ACTION_STATES, AGENT_BINDINGS_MAX_CHARS, AGENT_CONFIG_MAX_CHARS,
     AGENT_DEFINITION_MAX_CHARS, AGENT_JOB_STATES, AGENT_KINDS, AGENT_LEVELS, AGENT_SCOPE_MAX_CHARS,
 };
+pub use autofix::{AutofixRow, NewAutofixFinding, AUTOFIX_LIVE};
 pub use aux_usage::{
     AuxUsageRow, NewAuxUsage, AUX_ORIGINS, AUX_ORIGIN_BRIEF, AUX_ORIGIN_COMMIT_MESSAGE,
     AUX_ORIGIN_CONTEXT_HELP, AUX_ORIGIN_HEADLESS_CHECK, AUX_ORIGIN_MORNING_BRIEF,
@@ -160,6 +163,8 @@ pub use host_setup::{AgentInstallRow, HostSetupRow, SetupCheck};
 #[allow(unused_imports)]
 pub(crate) use admin_events::record_admin_event_in_tx;
 pub use diagnostics::WindowEventRow;
+/// How follow-up titles compare: the same line twice, whitespace and case aside.
+pub(crate) use followups::norm as followup_norm;
 pub use identities::{normalize_issuer, IdentityRow, MAX_IDENTITY_FIELD_LEN};
 pub use item_deps::{ItemDepRow, DEP_SOURCES};
 pub use item_verify::{

@@ -306,6 +306,8 @@ pub(super) struct NativeRow<'a> {
     pub proposal_state: Option<&'a str>,
     pub proposed_by: Option<&'a str>,
     pub proposal_why: Option<&'a str>,
+    /// The task whose result this item follows up (migration 199).
+    pub origin_task_id: Option<i64>,
 }
 
 impl Store {
@@ -404,9 +406,9 @@ impl Store {
         self.conn.execute(
             "INSERT INTO work_items (source, key, title, origin, parent_id, project_id, notes, task_id, \
                                      status_category, status_set_by, status_set_at, proposal_state, \
-                                     proposed_by, proposal_why, created_at, updated_at) \
+                                     proposed_by, proposal_why, created_at, updated_at, origin_task_id) \
              VALUES ('local', NULL, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, \
-                     CASE WHEN ?8 IS NULL THEN NULL ELSE ?12 END, ?9, ?10, ?11, ?12, ?12)",
+                     CASE WHEN ?8 IS NULL THEN NULL ELSE ?12 END, ?9, ?10, ?11, ?12, ?12, ?13)",
             rusqlite::params![
                 r.title,
                 r.origin,
@@ -419,7 +421,8 @@ impl Store {
                 r.proposal_state,
                 r.proposed_by,
                 r.proposal_why,
-                now
+                now,
+                r.origin_task_id
             ],
         )?;
         let id = self.conn.last_insert_rowid();
@@ -473,6 +476,16 @@ impl Store {
 
     /// A task or subtask a person writes: `origin = 'manual'`, `todo`.
     pub fn create_native_item(&self, n: &NativeItem<'_>) -> Result<WorkItemRow, IpcError> {
+        self.insert_manual_item(n, None)
+    }
+
+    /// [`Self::create_native_item`], naming the task whose result it
+    /// follows up (`Store::create_followup`).
+    pub(super) fn insert_manual_item(
+        &self,
+        n: &NativeItem<'_>,
+        origin_task_id: Option<i64>,
+    ) -> Result<WorkItemRow, IpcError> {
         let title = validate_local_work_title(n.title)?;
         if let Some(p) = n.parent_id {
             self.parent_for_new_child(p)?;
@@ -495,6 +508,7 @@ impl Store {
             proposal_state: None,
             proposed_by: None,
             proposal_why: None,
+            origin_task_id,
         })
     }
 
@@ -530,6 +544,7 @@ impl Store {
             proposal_state: None,
             proposed_by: None,
             proposal_why: None,
+            origin_task_id: None,
         })
     }
 
@@ -659,6 +674,7 @@ impl Store {
             proposal_state: Some("proposed"),
             proposed_by: Some(&by),
             proposal_why: why.as_deref(),
+            origin_task_id: None,
         })?;
         match mission {
             Some(m) => {

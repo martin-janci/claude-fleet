@@ -449,6 +449,23 @@ bullet for the area you are about to change.
   the orbit map (`src/lib/runs.ts`, `orbit_map.ts`, `automation/`); the
   orbit is also Control's ◌ view (`ControlOrbitView.svelte`), whose ⤢
   hands Automation a `runsRequest`.
+- **Autofix** (`service/autofix/`, `store/autofix.rs`, migration 198, MCP
+  `autofix`, loop `autofix`, settings `autofix.*`): known broken states, each
+  found by a pure detector over a `ScanCx` the runner gathers under one lock,
+  stored as an episode in `autofix_findings` (`(kind, subject)` unique while
+  live: open → verifying → cleared / apply_failed, or dismissed; a verifying
+  row still reported after `AUTOFIX_VERIFY_SECS` becomes apply_failed). A fix
+  is a `FixPlan` the hub wrote itself, run by `FixExec` (`SshFixExec` in
+  production), followed at once by a re-scan of its detector. Safe fixes with
+  `auto: true` run on the reconcile tick (fixed 60 s, retries spaced by
+  `AUTOFIX_RETRY_SECS`, up to `autofix.max_attempts`) when `autofix.auto_safe`
+  is on; the rest wait for a trusted full device's `autofix { apply }`. The
+  tool is `Access::PersonDevice`: served to a fleet admin's paired person
+  devices (the bound operator among them), never to per-host tokens or the
+  master; the operator may list, explain and scan but never apply or dismiss.
+  Every apply is in the admin audit log (`autofix.apply`). Detectors:
+  `operator_unbound`, `host.*`. Spec:
+  `docs/superpowers/specs/2026-10-17-autofix-design.md`.
 - **Debug devices** (guide `docs/debug-devices.md`; `service/debug_devices/`,
   `store/debug_devices.rs`, migration 120, `mcp/tools/devices.rs`, contract
   revision 10): a scan runs `scripts::scan_script` on a host (adb,
@@ -584,3 +601,18 @@ bullet for the area you are about to change.
   pasted sentence), then `REGEN_HUB_VERDICTS=1`, then — for a `LocalOnly`
   command the UI can reach — a `REASONS` entry in `src/lib/hub.ts` or an
   allowlist line in `src/lib/hub_verdicts.test.ts`.
+- **Extra fleets** (`src-tauri/src/backend/fleets.rs`, `commands/fleets.rs`,
+  `src/lib/fleets.ts`; spec
+  `docs/superpowers/specs/2026-10-17-desktop-multi-hub-design.md`): further
+  hubs one window shows beside the launch-time one (the "primary", slot
+  `primary`, unchanged). Rows in the `hub.fleets` setting, tokens per slot
+  (`OsTokenStore::for_fleet`). Each gets its own `HubBackend` +
+  `HubConnectionStatus` + event bridge (`bootstrap/tasks.rs`
+  `ExtraFleetLinks`, `spawn_extra_fleet_bridge`), its events tagged as
+  `fleet:event` so no primary store ever sees a foreign id. A command in
+  `FLEET_SCOPED` takes `fleet` and picks its backend with `Fleets::select`,
+  then calls the same `routed::` function; an extra fleet's `FleetBackend`
+  is always a hub, so it has no local arm. Adding a command to the scope:
+  `fleet: Option<String>` + `fleets.select(backend.inner(), fleet.as_deref())?`,
+  a `FLEET_SCOPED` entry in both `fleets.rs` and `fleets.ts`
+  (`tests_fleets`, `fleets.test.ts` hold them together).

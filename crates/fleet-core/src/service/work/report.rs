@@ -2,8 +2,9 @@
 //! worker is asked for, and the evidence fleet reads from git itself.
 //!
 //! - **The report.** A run's prompt asks the worker to follow its done
-//!   marker with one fenced JSON block (`summary`, `outcome`, `tests_run`,
-//!   `warnings`, `blockers`, `followups`, `confidence`). [`parse_report`] is
+//!   marker with one fenced JSON block (`summary`, `outcome`, `done`,
+//!   `decisions`, `remaining`, `context`, `tests_run`, `warnings`,
+//!   `blockers`, `followups`, `confidence`). [`parse_report`] is
 //!   tolerant: a missing or broken block leaves the paragraph in
 //!   `tasks.result` as before and no report. What it parses is capped and
 //!   stored as `tasks.result_json`; it is what the worker said, and nothing
@@ -35,10 +36,13 @@ pub fn run_instruction(nonce: &str) -> String {
     format!(
         "When finished, print exactly {} on its own line, followed by one fenced \
          ```json block with these keys: \"summary\" (one paragraph), \"outcome\" \
-         (done | partial | blocked | failed), \"tests_run\" (the commands you ran), \
-         \"warnings\", \"blockers\", \"followups\" (lists of short strings) and \
-         \"confidence\" (low | medium | high). Fleet reads your commits and changed \
-         files from git itself; do not list them.",
+         (done | partial | blocked | failed), \"done\" (what you did), \
+         \"decisions\" (choices the next task must keep), \"remaining\" (work \
+         left), \"context\" (facts a fresh session needs to continue), \
+         \"tests_run\" (the commands you ran), \"warnings\", \"blockers\", \
+         \"followups\" (each a task title) — all lists of short strings — and \
+         \"confidence\" (low | medium | high). Fleet reads your commits and \
+         changed files from git itself; do not list them.",
         crate::service::tasks::done_marker(nonce)
     )
 }
@@ -92,6 +96,10 @@ pub fn report_from_value(v: &serde_json::Value) -> Option<TaskReport> {
             .map(|s| clip(s, SUMMARY_MAX_CHARS))
             .unwrap_or_default(),
         outcome,
+        done: list(o.get("done")),
+        decisions: list(o.get("decisions")),
+        remaining: list(o.get("remaining")),
+        context: list(o.get("context")),
         tests_run: list(o.get("tests_run")),
         warnings: list(o.get("warnings")),
         blockers: list(o.get("blockers")),

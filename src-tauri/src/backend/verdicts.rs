@@ -364,6 +364,11 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "request_work_handover",
         Verdict::Routed { tool: "work_link" },
     ),
+    // Task result (design 2026-10-13): Finish task, the result view and a
+    // follow-up made from it, each the same on a paired desktop.
+    ("request_work_result", Verdict::Routed { tool: "work_link" }),
+    ("work_result", Verdict::Routed { tool: "work" }),
+    ("create_followup_task", Verdict::Routed { tool: "work_link" }),
     // Work graph M13.4c: a Claude-written summary of past work (on demand,
     // D10). Routed: the run happens on the session's own host, which the
     // hub reaches.
@@ -1663,6 +1668,36 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             why: "asks THIS machine's own token store whether a pairing that crashed before \
                   writing its URL left a credential behind. There is no hub to ask — the \
                   whole state is that no hub is configured",
+        },
+    ),
+    // ── extra fleets (multi-hub design) — about THIS process's windows ─────
+    (
+        "fleets_list",
+        Verdict::SameInBoth {
+            why: "lists which hubs THIS window shows and how each link is doing. Each extra \
+                  fleet is its own hub client; asking any one hub would be circular",
+        },
+    ),
+    (
+        "fleet_add",
+        Verdict::SameInBoth {
+            why: "pairs THIS process with another hub through that hub's POST /pair and keeps \
+                  the token in this machine's secure storage. It changes nothing on the \
+                  launch-time fleet and owns nothing on the new one",
+        },
+    ),
+    (
+        "fleet_remove",
+        Verdict::SameInBoth {
+            why: "stops showing an extra fleet and forgets its token on THIS machine. It \
+                  revokes nothing on that hub, as hub_disconnect revokes nothing on the primary",
+        },
+    ),
+    (
+        "fleet_retry_now",
+        Verdict::SameInBoth {
+            why: "cuts THIS process's wait before it reconnects to an extra fleet's hub, or \
+                  re-reads that fleet's token after a locked keychain",
         },
     ),
     (

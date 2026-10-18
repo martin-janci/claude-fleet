@@ -828,7 +828,31 @@ interface Exemption {
   pins: readonly { file: string; needle: string }[];
 }
 
+/** Why an extra fleet's row actions carry no `$sessionBlocked` gate (multi-hub
+ *  design, Phase 1): `access.ts` holds THIS window's grants on the PRIMARY
+ *  hub, keyed by the primary's ids, and an extra fleet's ids collide with
+ *  them — asking it about a company-fleet row would answer for a different
+ *  session. The extra fleet's own hub is the gate: it resolves the person
+ *  from this desktop's token on that hub and refuses with `E_FORBIDDEN`,
+ *  which the group shows as an error toast. Per-fleet access answers come
+ *  with the per-fleet session view (Phase 2). */
+const EXTRA_FLEET_WHY =
+  "An extra fleet's row is gated by that fleet's own hub, not by access.ts: access.ts answers for " +
+  "the primary hub's ids, which collide with the extra fleet's, so asking it would answer for a " +
+  'different session. The hub resolves the person from this desktop’s token there and refuses ' +
+  'with E_FORBIDDEN, shown as a toast; per-fleet access answers are Phase 2 of the multi-hub design.';
+const EXTRA_FLEET_PINS = [
+  { file: './fleets.ts', needle: 'return invokeCmd<T>(cmd, { ...args, fleet });' },
+  { file: './FleetSessionGroups.svelte', needle: "push({ kind: 'error', message: `${what} failed`" },
+] as const;
+
 const EXEMPT_SITES: Record<string, readonly Exemption[]> = {
+  './FleetSessionGroups.svelte': [
+    { writer: 'fleetPinSession', action: 'pin_session', sites: ['fleetPinSession(f.id, s, !s.pinned_at)'], why: EXTRA_FLEET_WHY, pins: EXTRA_FLEET_PINS },
+    { writer: 'fleetSendPrompt', action: 'send_prompt', sites: ['fleetSendPrompt(f.id, s, text)'], why: EXTRA_FLEET_WHY, pins: EXTRA_FLEET_PINS },
+    { writer: 'fleetRenameSession', action: 'set_friendly_name', sites: ['fleetRenameSession(f.id, s, text)'], why: EXTRA_FLEET_WHY, pins: EXTRA_FLEET_PINS },
+    { writer: 'fleetKillSession', action: 'kill_session', sites: ['fleetKillSession(f.id, s)'], why: EXTRA_FLEET_WHY, pins: EXTRA_FLEET_PINS },
+  ],
   './ReplyActions.svelte': [
     {
       writer: 'rewindConversation',

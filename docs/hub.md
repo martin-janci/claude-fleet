@@ -3835,6 +3835,44 @@ the missing parameters, route it then.
   the real login keychain (`token_store::keychain_tests`). Report anything
   that does not match this page.
 
+### More than one hub in one window
+
+A desktop can show further hubs beside the one it resolved to at launch —
+say a personal fleet and a company one — without re-pairing or restarting
+(design: `docs/superpowers/specs/2026-10-17-desktop-multi-hub-design.md`).
+Settings → **Hub & sync** → *Fleets* → *Add a hub*: run
+`fleet-hub pair --name <this machine>` on **that** hub and paste its code.
+
+- **The launch-time fleet stays the primary.** It is this app's own fleet when
+  standalone, or the hub paired above. Nothing about it changes, and an
+  install from before this feature needs no migration: its pairing is "hub
+  #1" where it already is.
+- **Each extra hub is its own pairing.** Its token is its own item in the
+  keychain, Credential Manager or 0600 file (`hub-client-token.<id>`), never
+  in `state.db`; its plain-http opt-in is its own; its trust is that hub's
+  decision — a desktop trusted on one hub is not trusted on another, and a
+  prompt sent to an extra fleet is marked untrusted unless *its* operator
+  trusted this client there.
+- **One link per hub.** Each extra hub has its own event stream, reconnect
+  backoff, call breaker and wire-contract check. A hub that is down or on a
+  contract this build does not read shows that on its own badge and refuses
+  its own calls; the others carry on.
+- **Rows stay with their hub.** The sidebar's fleet switcher (shown once a
+  second hub is added) filters to one fleet or shows all; an extra fleet's
+  sessions sit in their own group under its coloured badge, and every action
+  on them — prompt, rename, pin, close, start — goes to that hub. The
+  argument mapping is the primary's, so *parity or refusal* holds unchanged:
+  a command that is local-only refuses for an extra fleet as it does for any
+  hub.
+- **Adding the same hub twice is refused**, by its normalised URL, before the
+  code is spent.
+- **Remove does not revoke**, exactly like Disconnect: it forgets the URL and
+  the token on this machine; revoke the client on that hub.
+
+Phase 1 limits: an extra fleet's session opens no conversation or terminal
+tab yet (use *Copy attach*), and Hosts, Projects, Inbox and PRs show the
+primary only.
+
 ### Going back
 
 Disconnect in Settings and restart. Disconnect is also offered while the

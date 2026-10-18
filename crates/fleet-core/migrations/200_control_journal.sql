@@ -31,4 +31,4 @@ CREATE TABLE IF NOT EXISTS control_mutes (
   PRIMARY KEY (kind, target_id)
 ) WITHOUT ROWID;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (198);
+INSERT OR IGNORE INTO schema_version (version) VALUES (200);

@@ -382,7 +382,7 @@ instead of being dropped. At most one per `control.feed_min_interval_secs`
 (900 since F11, was 60) and 6 an hour; none while one is still queued, none
 while paused, never about the operator itself, and never a session's own
 words (names and vocabulary only). Since F10 (`service/control_follow.rs`,
-migration 198) Control follows a session only while it matters: not once it
+migration 200) Control follows a session only while it matters: not once it
 is done, killed or removed, its PR merged after the last brief, or quiet for
 `control.follow_quiet_hours` (24), nor a thread muted from the Control
 threads column's bell or `control_journal { action: mute }`; a PR's merge
@@ -420,7 +420,7 @@ stopped following the session (done, quiet, merged): a red or conflicting
 PR is still Control's to fix or report.
 
 **Control's journal** is landed and ON by default (`control.journal`,
-`service/control_journal.rs`, migration 198, loop `control_journal`;
+`service/control_journal.rs`, migration 200, loop `control_journal`;
 Control review F12): the hub keeps what Control follows (read live from
 the receipts), the questions it asked the person and is waiting on (`ask`,
 cleared when the person next speaks), the last thing the person said to it
@@ -748,6 +748,38 @@ priority, estimate and labels, GitHub labels, Asana tags) and shown in the
 task page's rail and header ([work-graph.md](work-graph.md#priority-labels-and-estimate)).
 Not yet: writing them back to a tracker, filtering or sorting by them, the
 Board card and the phone.
+
+Task result, completion gate and follow-ups (spec
+`docs/superpowers/specs/2026-10-13-task-result-handover-design.md`, plans
+`docs/superpowers/plans/2026-10-13-task-result-handover*.md`, mission CF-7
+to CF-20; [work-graph.md](work-graph.md#task-result-gate-and-follow-ups)).
+A result is the newest finished `tasks` row of an item that carries
+`result_json` (D1); `TaskReport` gained `done`, `decisions`, `remaining`
+and `context`, all `#[serde(default)]`, and the run instruction
+(`report::run_instruction`) asks for them. **Finish task** (TicketCard,
+`work_link { wrap_up }`, `service/work/wrapup.rs`) writes a `wrapup`-role
+task with the session as worker and types the run instruction into an idle
+REPL; the Stop hook resolves it as a run (D2). `wrapup` is outside
+`RUN_ROLES` and attempts count per role, so it is never an attempt. The
+gate (`service/work/gate.rs`, D3) is `passed` / `unverified` / `blocked`
+over `done_when` and open native children; `status::set_status` refuses
+an agent's `done` on a local item past it (`E_INVALID_STATE`, naming the
+lines), never a person's. `work { result }` (`service/work/result.rs`,
+`TaskResultView`) joins report, evidence, gate (fenced per scope), the
+worker's PR and follow-ups, worker text fenced for a per-host token. A
+follow-up (`work_link { followup }`, `service/work/followup.rs`,
+`Store::create_followup`) is a sibling local item with
+`work_items.origin_task_id` (migration 199); the same title twice answers
+one item (D4). A follow-up's start brief opens with `OriginFacts` (decisions,
+remaining, context, ≤ 10 commits, ≤ 15 files, PR; no conversation text)
+under `BRIEF_MAX_CHARS` (D5). `TaskResultPanel.svelte` replaces
+`ReportCard` in the conversation for the turn that carries the result and
+shows as *Result* on the task page, above *Last outcome* (D6). Not built
+(the spec's §4, ordered in its §7): results from every dispatch and child
+results to the parent, asking about a result, Create PR / Merge PR buttons,
+one automation policy, lifecycle hooks and skills per task, Jev context
+selection, project memory, sub-agent results, action detection, and the
+phone.
 
 The Jev evaluation (TypeSafe's decision model as an optional reader for
 closed-set decisions) has started with a local language census: `fleet-hub
@@ -1314,6 +1346,20 @@ up, dashed down), and Link a hub is the two-step
 hubs trade keys (11.12). The link protocol has no step that waits on the
 other side's approval — its operator mints the code first, and redeeming it
 completes the link — so the wizard never says "waiting for … to sign".
+
+Desktop multi-hub, Phase 1 (design
+`docs/superpowers/specs/2026-10-17-desktop-multi-hub-design.md`): one window
+can show extra hubs beside its launch-time fleet. Settings → Hub & sync →
+Fleets adds (pairing code) and removes them at runtime; each has its own
+token item, event bridge and contract gate (`backend/fleets.rs`), and its
+sessions show in the sidebar under a coloured fleet badge with a fleet
+switcher, with prompt / rename / pin / close / start / copy-attach routed to
+its hub (`FLEET_SCOPED`). No flag: nothing runs until a second hub is added,
+and an existing pairing is hub #1 with no migration. Not yet (Phase 2): the
+session view (conversation, terminal) for an extra fleet's session, a fleet
+picker in New session with org-based defaults, Hosts / Projects / Inbox /
+PRs per fleet, and federation addresses rendered by fleet (needs `fleet_id`
+in the `/events` ready frame).
 
 Application updates: design
 `docs/superpowers/specs/2026-09-28-update-channel-design.md` (with

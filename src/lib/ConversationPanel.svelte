@@ -127,6 +127,8 @@
   import { pointInRect, dropPoint } from './geometry';
   import Markdown from './MarkdownView.svelte';
   import RichText from './RichText.svelte';
+  import { workResult, type TaskResultView } from './task_result';
+  import { showTaskInWorkView } from './work_view';
   import BackgroundDetail from './BackgroundDetail.svelte';
   import Loader from './Loader.svelte';
   import Skeleton from './states/Skeleton.svelte';
@@ -1219,6 +1221,30 @@
   // A reply's cards (rich_blocks.ts) act by filling this composer, so they
   // act only where it is drawn and holds the conversation on screen.
   const cardsAct = $derived(showComposer && canPrompt && bgEntry === null && viewing === null);
+
+  // The result of the task this session works on (design 2026-10-13, D6):
+  // the reply whose done marker it was read from draws as the result panel.
+  // Re-read when the session's row says a turn ended (the Stop hook settles
+  // a wrap-up) or its work link moved; nothing is read for unlinked work.
+  let taskResult = $state<TaskResultView | null>(null);
+  let resultSeq = 0;
+  async function loadTaskResult(id: number, linked: boolean) {
+    const mine = ++resultSeq;
+    if (!linked) {
+      taskResult = null;
+      return;
+    }
+    const r = await workResult({ sessionId: id });
+    if (mine !== resultSeq) return;
+    taskResult = r.ok ? r.value : null;
+  }
+  const workLinkId = $derived(session.work?.link_id ?? null);
+  $effect(() => {
+    const id = session.id;
+    const linked = workLinkId !== null;
+    void session.turn_seq;
+    untrack(() => void loadTaskResult(id, linked));
+  });
   const emptyHint = $derived(
     gone
       ? 'The host no longer keeps this conversation’s transcript file.'
@@ -2500,7 +2526,15 @@
                 {#each groups as g, j (j)}
                   {#if g.kind === 'text'}
                     <div class="text" data-testid="conv-text">
-                      <RichText source={g.text} sessionId={cardsAct ? session.id : null} answered={!isLast} />
+                      <RichText
+                        source={g.text}
+                        sessionId={cardsAct ? session.id : null}
+                        answered={!isLast}
+                        result={taskResult}
+                        resultTitle={session.work?.title ?? ''}
+                        onOpenTask={(id) => showTaskInWorkView(`item:${id}`)}
+                        onResultChanged={() => void loadTaskResult(session.id, workLinkId !== null)}
+                      />
                     </div>
                   {:else if g.kind === 'tools'}
                     <!-- One structure for a lone call and a folded group, so a

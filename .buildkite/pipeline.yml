@@ -10,4 +10,6 @@ steps:
       queue: rust-persistent
     concurrency_group: "claude-fleet/verify"
     concurrency: 1
-    timeout_in_minutes: 45
+    # A cold test compile alone takes ~23 min (after a main merge or a
+    # toolchain bump); the warm suite ~40. 45 killed build #19 mid-test.
+    timeout_in_minutes: 75

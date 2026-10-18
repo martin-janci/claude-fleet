@@ -49,6 +49,9 @@
   import AgentActions from './automation/AgentActions.svelte';
   import { loadAgents, pendingAgentCount } from './agents';
   import ProposedBy from './ProposedBy.svelte';
+  import FleetSwitcher from './FleetSwitcher.svelte';
+  import FleetSessionGroups from './FleetSessionGroups.svelte';
+  import { showPrimary } from './fleets';
   import { failingCount, loadFailing, loadNextRoutine, nextRoutine, nextRoutineLine } from './routines';
   import { loadWaitingMissions, waitingMissionCount } from './mission_waits';
   import { matchesAllWords, sessionMatchesSearch } from './search';
@@ -1612,6 +1615,7 @@
     >+ New…{#if isMac}<kbd class="of-kbd">⌘N</kbd>{/if}</button>
   {/snippet}
 
+  <FleetSwitcher />
   <SidebarFilters
     {headActions}
     listView={$sidebarView}
@@ -1751,6 +1755,9 @@
         <SummarizeButton workKey={key} link={l} />
       </div>
     {/snippet}
+    <!-- The fleet filter hides this window's own (primary) list when it
+         names an extra fleet (multi-hub design). -->
+    {#if $showPrimary}
     {#if pinnedRows.length > 0}
       <div class="orphan-section pinned-section" data-testid="pinned-sessions">
         <button
@@ -2213,6 +2220,10 @@
         </p>
       </div>
     {/if}
+    {/if}
+    <!-- Extra fleets (multi-hub design): each fleet the filter shows, under
+         its own badge, after this window's own list. -->
+    <FleetSessionGroups />
   </div>
   {/if}
 

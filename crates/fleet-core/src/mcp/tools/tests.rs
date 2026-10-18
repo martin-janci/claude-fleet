@@ -2845,6 +2845,7 @@ fn router_sum_serves_every_tool() {
         include_str!("devices.rs"),
         include_str!("prs.rs"),
         include_str!("pr_shepherd.rs"),
+        include_str!("autofix.rs"),
         include_str!("agents.rs"),
         include_str!("api_tokens.rs"),
         include_str!("add_account.rs"),
@@ -4701,7 +4702,13 @@ fn the_served_definition_budget_stays_bounded() {
     /// client full surface measured 126,178 bytes for 150 tools (841 a
     /// tool, 0 bytes of headroom) and the master 120,969 bytes for 147
     /// tools (822 a tool).
-    const BYTES_PER_TOOL: usize = 851;
+    /// Raised to 862 on 2026-10-17: merging main (its new agents, control
+    /// and diagnostics tools) into the task-result branch (`work { result }`
+    /// with `item_id`, `work_link { wrap_up | followup }` with `index`), each
+    /// inside the old budget, together over it: Buildkite #36 measured the
+    /// client full surface at 129,611 bytes for 152 tools (852 a tool) and
+    /// the master at 123,534 bytes for 149 tools (829 a tool).
+    const BYTES_PER_TOOL: usize = 862;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -9985,6 +9992,7 @@ fn the_settings_tools_reach_the_master_and_the_hub_owners_own_device_only() {
         "decide_setting_proposals",
         "list_pages",
         "pr_shepherd",
+        "autofix",
         "agents",
     ] {
         assert!(
@@ -10341,6 +10349,7 @@ fn settings_reach_a_persons_device_and_never_a_host_or_an_org_bound_client() {
         "set_setting",
         "decide_setting_proposals",
         "pr_shepherd",
+        "autofix",
         "agents",
     ] {
         assert!(can(&laptop, t), "{t}: reached, then trust decides");
@@ -10361,6 +10370,7 @@ fn settings_reach_a_persons_device_and_never_a_host_or_an_org_bound_client() {
         "decide_setting_proposals",
         "list_pages",
         "pr_shepherd",
+        "autofix",
         "agents",
     ] {
         assert!(!can(&colleague, t), "{t}: never a second person's device");
@@ -10407,6 +10417,7 @@ fn settings_reach_a_persons_device_and_never_a_host_or_an_org_bound_client() {
         "decide_setting_proposals",
         "list_pages",
         "pr_shepherd",
+        "autofix",
         "agents",
     ] {
         assert!(!can(&master, t), "{t}: not served to the master");
@@ -11629,7 +11640,8 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     ("wait_for_session", &["Read"]),
     ("wait_for_task", &["Read"]),
     ("work", &["Read"]),
-    ("work_link", &["Drive", "Own"]),
+    // `followup` reads its origin task under `Read` (`task_visible_at`).
+    ("work_link", &["Drive", "Own", "Read"]),
     // repo.rs — every `repo_*` read is `watch` on the session whose
     // worktree it opens.
     //
@@ -12330,6 +12342,11 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     // The tree's own tasks, counted (persona dashboards).
     ("work", "stats", &["ViewScope"]),
     ("work", "task", &["ViewScope"]),
+    // One item's task result (design 2026-10-13). `{ session_id }` reads one
+    // named session's item and is gated per row (`Read`); in both forms the
+    // worker session and its PR are shown only when the caller's whole view
+    // sees that session (`hide_unseen_worker`).
+    ("work", "result", &["Read", "ViewScope"]),
     ("work", "review", &["ViewScope"]),
     ("work", "context", &["ViewScope"]),
     ("work", "resume_plan", &["ViewScope"]),
@@ -12404,6 +12421,12 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     ("work_link", "decide_batch", &["Drive"]),
     // Types a prompt into the pane and waits for the reply.
     ("work_link", "handover", &["Drive"]),
+    // Finish task: the same pane write as `handover` (design 2026-10-13 D2).
+    ("work_link", "wrap_up", &["Drive"]),
+    // A follow-up is made from its task's text: the task is read under
+    // `task_visible_at`, as `work { result }` serves it, and the source item
+    // is fenced by the org scope inside `followup::create`.
+    ("work_link", "followup", &["Read"]),
     // Names new work ON a session: a per-session work-graph write, and
     // `share.ts` already says `name_session_work: 'drive'`.
     ("work_link", "name", &["Drive"]),
@@ -12553,6 +12576,14 @@ const VIEW_SCOPE_PROOF: &[(&str, &str, &str, &str)] = &[
         "task",
         "every_view_scope_page_hides_another_persons_live_session",
         "every_view_scope_page_hides_another_persons_ended_link",
+    ),
+    // A result is its task's text, fenced as every task's is
+    // (`task_visible_at`); its own fixture carries the reported task.
+    (
+        "work",
+        "result",
+        "work_result_hides_another_persons_live_result",
+        "work_result_hides_an_ended_workers_result",
     ),
     (
         "work",
@@ -13430,8 +13461,10 @@ fn the_reaches_the_desktop_decided_are_the_ones_the_hub_enforces() {
     // `tidy_apply` is `own`, because it can safe-kill — and
     // `safe_kill_session` is `own`, so the batch form cannot be narrower
     // than the single-session one. It lives inside `work_link`, which also
-    // drives, hence both reaches on that row.
-    assert_eq!(reach_of("work_link"), vec!["Drive", "Own"]);
+    // drives, hence both reaches on that row. `Read` is `followup`'s check
+    // on its origin TASK (`task_visible_at`), not on a session, so it widens
+    // no session tier the desktop decided.
+    assert_eq!(reach_of("work_link"), vec!["Drive", "Own", "Read"]);
     assert_eq!(reach_of("safe_kill_session"), vec!["Own"]);
     // `restore_host_sessions` is `recreate_session` in bulk, and it reaches
     // the primitive at the SERVICE layer — so both rows have to say `own`,
@@ -17358,6 +17391,90 @@ async fn a_job_mirrors_own_page_hides_the_dispatch_from_a_stranger() {
     );
 }
 
+/// What Ada's session reported when it finished her item's task.
+const ADA_RESULT_SUMMARY: &str = "ada's wrap-up: the retry loop is fixed";
+
+/// [`view_pages_fixture`] plus a finished, reported task at Ada's item,
+/// worked by her live session: what `work { result }` answers.
+fn result_pages_fixture() -> (ViewPages, i64) {
+    let f = view_pages_fixture();
+    let t = crate::service::tasks::create_task(&f.store, None, Some(f.live), "wrap up").unwrap();
+    f.store.set_task_run(t.id, f.item, 1, "wrapup").unwrap();
+    f.store.finish_task(t.id, "done", Some("r"), None).unwrap();
+    f.store
+        .set_task_report(
+            t.id,
+            &crate::store::TaskReport {
+                summary: ADA_RESULT_SUMMARY.into(),
+                outcome: "done".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    (f, t.id)
+}
+
+/// **`work { result }`, the LIVE half** (owner, 2026-10-15: the person
+/// view). A result is its task's text, what Ada's worker wrote, so Bob, who
+/// sees her item but not her session, reads `null`, the answer for an item
+/// with no result: not a refusal, and none of the report. Ada reads it.
+#[tokio::test]
+async fn work_result_hides_another_persons_live_result() {
+    let (f, task) = result_pages_fixture();
+    let (ada, bob, item) = (f.ada, f.bob, f.item);
+    let t = test_tools(f.store);
+    let args = serde_json::json!({ "action": "result", "item_id": item });
+
+    let adas = sweep_text(&t, device_of(ada, ada), "work", &args).await;
+    assert!(
+        adas.contains(ADA_RESULT_SUMMARY) && adas.contains(&format!("\"task_id\":{task}")),
+        "the owner must still read her own result: {adas}"
+    );
+    let bobs = sweep_text(&t, device_of(bob, ada), "work", &args).await;
+    for secret in ADA_SECRETS.iter().chain([&ADA_RESULT_SUMMARY]) {
+        assert!(
+            !bobs.contains(secret),
+            "work {{ result }} handed Bob {secret}: {bobs}"
+        );
+    }
+    assert_eq!(
+        bobs.trim(),
+        "null",
+        "an empty answer, not a refusal: {bobs}"
+    );
+}
+
+/// **`work { result }`, the ENDED half.** Once the worker session is
+/// reaped, migration 101 detaches its task, and a detached task's text is
+/// the hub's alone (`task_visible_in_scope_pure`): no person reads the
+/// result, the owner included, exactly as a job's result. Bob's answer is
+/// still `null`, not a refusal.
+#[tokio::test]
+async fn work_result_hides_an_ended_workers_result() {
+    let (f, task) = result_pages_fixture();
+    let (ada, bob, item, live) = (f.ada, f.bob, f.item, f.live);
+    f.store.delete_session(live).unwrap();
+    assert!(
+        f.store
+            .get_task(task)
+            .unwrap()
+            .unwrap()
+            .detached_at
+            .is_some(),
+        "the reap must detach the task, or this proves nothing"
+    );
+    let t = test_tools(f.store);
+    let args = serde_json::json!({ "action": "result", "item_id": item });
+    for who in [device_of(bob, ada), device_of(ada, ada)] {
+        let out = sweep_text(&t, who, "work", &args).await;
+        assert!(
+            !out.contains(ADA_RESULT_SUMMARY),
+            "a detached result leaked: {out}"
+        );
+        assert_eq!(out.trim(), "null", "an empty answer, not a refusal: {out}");
+    }
+}
+
 /// **The ENDED half of every `ViewScope` row's proof** (see
 /// [`VIEW_SCOPE_PROOF`]): the live session is gone, so every one of these
 /// pages has nothing but the link's SNAPSHOT to go on — the shape that was
@@ -21164,4 +21281,155 @@ async fn ended_work_links_are_archived_and_removed_without_a_session() {
         "{}",
         e.message
     );
+}
+
+// ---- autofix ----
+
+fn autofix_params(action: &str, id: Option<i64>) -> AutofixParams {
+    AutofixParams {
+        action: action.into(),
+        id,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn autofix_lists_the_operator_finding_and_a_trusted_device_fixes_it() {
+    let s = Store::open_in_memory().unwrap();
+    s.insert_client_token(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        "aa11",
+        "full",
+    )
+    .unwrap();
+    let t = test_tools(s);
+    let mut dev = client_caller("laptop", TokenMode::Full);
+    dev.client.as_mut().unwrap().trusted = true;
+
+    let scan = result_json(
+        &t.autofix(
+            Extension(dev.clone()),
+            Parameters(autofix_params("scan", None)),
+        )
+        .await
+        .unwrap(),
+    );
+    let rows = scan["findings"].as_array().unwrap();
+    let op = rows
+        .iter()
+        .find(|r| r["kind"] == "operator_unbound")
+        .expect("the 2026-10-17 case is found");
+    assert_eq!(op["fix"]["safety"], "needs_approval");
+    let id = op["id"].as_i64().unwrap();
+
+    let applied = result_json(
+        &t.autofix(
+            Extension(dev),
+            Parameters(autofix_params("apply", Some(id))),
+        )
+        .await
+        .unwrap(),
+    );
+    assert_eq!(applied["state"], "cleared");
+}
+
+#[tokio::test]
+async fn the_operator_may_list_but_not_apply_or_dismiss() {
+    let s = Store::open_in_memory().unwrap();
+    s.insert_client_token(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        "aa11",
+        "full",
+    )
+    .unwrap();
+    let t = test_tools(s);
+    let mut op = client_caller(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        TokenMode::Full,
+    );
+    op.client.as_mut().unwrap().trusted = true;
+    let scan = result_json(
+        &t.autofix(
+            Extension(op.clone()),
+            Parameters(autofix_params("scan", None)),
+        )
+        .await
+        .unwrap(),
+    );
+    let id = scan["findings"][0]["id"].as_i64().unwrap();
+    for action in ["apply", "dismiss"] {
+        let err = t
+            .autofix(
+                Extension(op.clone()),
+                Parameters(autofix_params(action, Some(id))),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.message.starts_with("E_FORBIDDEN"), "{action}: {err:?}");
+    }
+}
+
+#[tokio::test]
+async fn an_untrusted_device_may_not_apply() {
+    let s = Store::open_in_memory().unwrap();
+    s.insert_client_token(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        "aa11",
+        "full",
+    )
+    .unwrap();
+    let t = test_tools(s);
+    let dev = client_caller("phone", TokenMode::Full); // trusted: false
+    let scan = result_json(
+        &t.autofix(
+            Extension(dev.clone()),
+            Parameters(autofix_params("scan", None)),
+        )
+        .await
+        .unwrap(),
+    );
+    let id = scan["findings"][0]["id"].as_i64().unwrap();
+    let err = t
+        .autofix(
+            Extension(dev),
+            Parameters(autofix_params("apply", Some(id))),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.message.starts_with("E_FORBIDDEN"), "{err:?}");
+}
+
+#[tokio::test]
+async fn dismiss_refuses_an_until_in_the_past() {
+    let s = Store::open_in_memory().unwrap();
+    s.insert_client_token(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        "aa11",
+        "full",
+    )
+    .unwrap();
+    let t = test_tools(s);
+    let mut dev = client_caller("laptop", TokenMode::Full);
+    dev.client.as_mut().unwrap().trusted = true;
+    let scan = result_json(
+        &t.autofix(
+            Extension(dev.clone()),
+            Parameters(autofix_params("scan", None)),
+        )
+        .await
+        .unwrap(),
+    );
+    let id = scan["findings"][0]["id"].as_i64().unwrap();
+    let err = t
+        .autofix(
+            Extension(dev),
+            Parameters(AutofixParams {
+                until: Some(1),
+                ..autofix_params("dismiss", Some(id))
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.message.starts_with("E_INVALID"), "{err:?}");
+    assert!(err.message.contains("in the future"), "{err:?}");
 }
