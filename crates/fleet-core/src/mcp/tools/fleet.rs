@@ -324,11 +324,30 @@ impl FleetTools {
         never fetches. Errors: E_INVALID.")]
     pub(super) async fn suggest_placement(
         &self,
-        Parameters(p): Parameters<crate::service::placement::SuggestArgs>,
+        Extension(caller): Extension<Caller>,
+        Parameters(mut p): Parameters<crate::service::placement::SuggestArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit("suggest_placement", "");
         let now = crate::store::now_unix();
         let s = crate::ipc_error::lock(self.reader()).map_err(to_mcp_err)?;
+        // Only the hosts of the caller's orgs are weighed: a client bound to
+        // an org, or a per-host token, never sees another org's hosts, their
+        // load or the logins behind them. Everything for an unbound caller.
+        for h in p.hosts.iter().flatten() {
+            crate::validate::host_alias(h).map_err(to_mcp_err)?;
+        }
+        let org = caller.org_scope(&s).map_err(to_mcp_err)?;
+        let seen: Vec<String> = s
+            .list_hosts()
+            .map_err(|e| to_mcp_err(IpcError::from(e)))?
+            .into_iter()
+            .filter(|h| org.sees_org(h.org_id))
+            .map(|h| h.alias)
+            .collect();
+        p.hosts = Some(match p.hosts.take() {
+            Some(asked) => asked.into_iter().filter(|h| seen.contains(h)).collect(),
+            None => seen,
+        });
         ok_json_compact(&crate::service::placement::suggest(&s, &p, now).map_err(to_mcp_err)?)
     }
 

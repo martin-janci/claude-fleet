@@ -2013,6 +2013,11 @@ pub const NOT_FOR_HOST_TOKENS: &[&str] = &[
     "runs",
     // Control's journal and its owner's words to Control (review F12).
     "control_journal",
+    // Control's pending auto-continue pick and its prompt, and the
+    // owner's paired clients and Control's login: the owner's, and a
+    // host's Claude proves no person.
+    "control_auto_continue",
+    "diagnose",
 ];
 
 // --- legacy name lists -------------------------------------------------------
