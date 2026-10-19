@@ -460,7 +460,7 @@
         "level": "none"
       },
       "default": "false",
-      "help": "Within your brief, Control restarts a session it started or briefed that is stuck, or brings it back under another login after a limit, without asking. At Autopilot it also retires one whose work is done: it commits and pushes first, and only then closes it. Off: both wait for you. At Ask first nothing changes.",
+      "help": "Within your brief, Control restarts a stuck session it started or briefed without asking, also under another login after a limit. At Autopilot it also retires one whose work is done, after committing and pushing it. Off, or at Ask first: both wait for you.",
       "key": "control.session_care",
       "kind": {
         "type": "bool"
