@@ -407,6 +407,11 @@ pub const CONTROL_SWITCH_AT_LIMIT: &str = "control.switch_at_limit";
 /// conflicts or went red and a handed-off mission that stalled
 /// (`service::control_sweep`), so Control fixes or reports it.
 pub const CONTROL_SWEEP: &str = "control.sweep";
+/// Session care: at "Within your brief" Control restarts a session it
+/// started or briefed (a wedged REPL, or under another login after a limit)
+/// without a card, and at "Autopilot" also retires one with
+/// `safe_kill_session` (`mcp::guard::OPERATOR_CARE_TOOLS`). Off: both ask.
+pub const CONTROL_SESSION_CARE: &str = "control.session_care";
 /// Control review F10: hours without a turn after which Control stops
 /// following a session it started or briefed (`service::control_follow`).
 pub const CONTROL_FOLLOW_QUIET_HOURS: &str = "control.follow_quiet_hours";
@@ -1062,6 +1067,13 @@ pub const SPECS: &[Spec] = &[
         Kind::Bool,
         "Control sweeps what it handed out",
         "The note to Control's agent also names a pull request it handed out that has merge conflicts or failing checks, and a mission it handed off that made no progress for a while, once per change. Within your brief it fixes or reassigns them, asking as usual; at Ask first it only tells you.",
+    ),
+    Spec::new(
+        CONTROL_SESSION_CARE,
+        "false",
+        Kind::Bool,
+        "Control looks after its sessions",
+        "Within your brief, Control restarts a session it started or briefed that is stuck, or brings it back under another login after a limit, without asking. At Autopilot it also retires one whose work is done: it commits and pushes first, and only then closes it. Off: both wait for you. At Ask first nothing changes.",
     ),
     Spec::new(
         CONTROL_FOLLOW_QUIET_HOURS,

@@ -21476,3 +21476,198 @@ async fn dismiss_refuses_an_until_in_the_past() {
     assert!(err.message.starts_with("E_INVALID"), "{err:?}");
     assert!(err.message.contains("in the future"), "{err:?}");
 }
+
+/// Puts the dial at `position` the way the chip does.
+fn set_position(t: &FleetTools, position: crate::service::autonomy::Position) {
+    let p = crate::service::autonomy::PRESETS
+        .iter()
+        .find(|p| p.position == position)
+        .unwrap();
+    let st = t.store.lock().unwrap();
+    use crate::service::settings as k;
+    st.set_setting(k::ORCHESTRATOR_MAX_LEVEL, &p.max_level.to_string())
+        .unwrap();
+    st.set_setting(k::CONTROL_AUTO_CONTINUE, &p.auto_continue.to_string())
+        .unwrap();
+    st.set_setting(k::CONTROL_AUTO_CONTINUE_MINUTES, &p.minutes.to_string())
+        .unwrap();
+    st.set_setting(k::CONTROL_REACT_TO_EVENTS, &p.react_to_events.to_string())
+        .unwrap();
+    assert_eq!(crate::service::autonomy::position(&st), position);
+}
+
+/// Session care (`control.session_care`): off, the operator's restart of
+/// its own session asks at every position; on, it goes without a card at
+/// Within your brief (audited on the session), retiring one only at
+/// Autopilot, and a session that is not its handoff still asks.
+#[tokio::test]
+async fn session_care_lets_the_operator_restart_and_retire_its_own_sessions() {
+    use super::params::{RestartSessionParams, SafeKillSessionParams};
+    use crate::service::autonomy::Position;
+    let (s, _, on_b) = two_host_store();
+    let stranger = s
+        .upsert_session("dev-c", "hostb", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.conn_ref()
+        .execute(
+            "UPDATE sessions SET origin = 'operator' WHERE id = ?1",
+            [on_b],
+        )
+        .unwrap();
+    let t = guarded_tools(s, true);
+    let restart = |id: i64| {
+        serde_json::from_value::<RestartSessionParams>(serde_json::json!({ "session_id": id }))
+            .unwrap()
+    };
+    let retire = |id: i64| {
+        serde_json::from_value::<SafeKillSessionParams>(serde_json::json!({ "session_id": id }))
+            .unwrap()
+    };
+    let not_asked = |out: &Result<CallToolResult, McpError>| {
+        if let Err(e) = out {
+            assert!(
+                !e.message.starts_with("E_CONFIRM_REQUIRED"),
+                "{}",
+                e.message
+            );
+        }
+    };
+
+    // Care off: a restart asks even at Autopilot.
+    set_position(&t, Position::Autopilot);
+    let asked = t
+        .restart_session(Extension(operator()), Parameters(restart(on_b)))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
+
+    t.store
+        .lock()
+        .unwrap()
+        .set_setting(crate::service::settings::CONTROL_SESSION_CARE, "true")
+        .unwrap();
+
+    // Within your brief: a restart of its own session goes; retiring asks.
+    set_position(&t, Position::Brief);
+    let (out, approval) = guard::tracking_approval(
+        t.restart_session(Extension(operator()), Parameters(restart(on_b))),
+    )
+    .await;
+    not_asked(&out);
+    assert_eq!(approval, Some(crate::store::APPROVAL_PRE_APPROVED));
+    assert!(
+        t.store
+            .lock()
+            .unwrap()
+            .list_session_events(on_b, 20)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == super::support::EVENT_PRE_APPROVED),
+        "a pre-approved restart is audited on its session"
+    );
+    let asked = t
+        .safe_kill_session(Extension(operator()), Parameters(retire(on_b)))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
+    // Not its handoff: asks.
+    let asked = t
+        .restart_session(Extension(operator()), Parameters(restart(stranger)))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
+
+    // Autopilot: retiring its own session goes too.
+    set_position(&t, Position::Autopilot);
+    let (out, approval) = guard::tracking_approval(
+        t.safe_kill_session(Extension(operator()), Parameters(retire(on_b))),
+    )
+    .await;
+    not_asked(&out);
+    assert_eq!(approval, Some(crate::store::APPROVAL_PRE_APPROVED));
+
+    // Ask first: everything asks again, care or not.
+    set_position(&t, Position::Ask);
+    let asked = t
+        .restart_session(Extension(operator()), Parameters(restart(on_b)))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
+}
+
+/// A task's start is a start like `new_session`'s (F2): at Autopilot,
+/// inside a running mission's grant, the operator's `work_link start` goes
+/// without a card even with `mcp.confirm_destructive` on (that toggle is
+/// for `work_link`'s tidy kills); outside a grant, or at Within your brief,
+/// it asks.
+#[tokio::test]
+async fn at_autopilot_the_operator_starts_a_task_inside_a_grant_without_a_card() {
+    use crate::service::autonomy::Position;
+    use crate::service::work::WorkLinkArgs;
+    let (s, _, _) = two_host_store();
+    s.set_setting(guard::SETTING_CONFIRM_DESTRUCTIVE, "true")
+        .unwrap();
+    let t = guarded_tools(s, true);
+    // An unknown item: the start itself fails locally, after the gate.
+    let start = |host: Option<&str>| WorkLinkArgs {
+        action: "start".into(),
+        item_id: Some(9_999),
+        host_alias: host.map(String::from),
+        ..Default::default()
+    };
+    set_position(&t, Position::Autopilot);
+    let asked = t
+        .work_link(Extension(operator()), Parameters(start(Some("hostb"))))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
+
+    {
+        let st = t.store.lock().unwrap();
+        let m = st
+            .create_mission(
+                &crate::store::NewMission {
+                    name: "m",
+                    goal: "g",
+                    ..Default::default()
+                },
+                "fleet",
+            )
+            .unwrap()
+            .id;
+        st.add_grant(
+            m,
+            &crate::store::NewGrant {
+                level: 3,
+                granted_by: "person:1",
+                hosts: Some(vec!["hostb".into()]),
+                expires_at: crate::store::now_unix() + 3600,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        st.set_mission_state(m, None, "active", "fleet").unwrap();
+    }
+    let (out, approval) = guard::tracking_approval(
+        t.work_link(Extension(operator()), Parameters(start(Some("hostb")))),
+    )
+    .await;
+    let e = out.unwrap_err();
+    assert!(e.message.starts_with("E_NOTFOUND"), "{}", e.message);
+    assert_eq!(approval, Some(crate::store::APPROVAL_PRE_APPROVED));
+    // A host the grant does not name, or none (fleet would place it): asks.
+    for host in [Some("hosta"), None] {
+        let asked = t
+            .work_link(Extension(operator()), Parameters(start(host)))
+            .await
+            .unwrap_err();
+        confirm_nonce_of(&asked);
+    }
+    // Within your brief: a start always asks.
+    set_position(&t, Position::Brief);
+    let asked = t
+        .work_link(Extension(operator()), Parameters(start(Some("hostb"))))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
+}

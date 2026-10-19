@@ -14,7 +14,25 @@ fn ev(id: i64, sid: i64, at: i64, kind: &str, detail: Option<&str>) -> FeedEvent
         tmux_name: format!("s{sid}"),
         host_alias: "h".into(),
         started_by_control: sid == 1,
+        task_key: None,
     }
+}
+
+#[test]
+fn a_line_names_the_task_its_session_works_on() {
+    let mut e = ev(1, 1, 100, "turn_done", None);
+    e.task_key = Some("FLEET-12".into());
+    let lines = session_lines(&[e.clone()], 100);
+    assert_eq!(
+        lines[0].text,
+        "session s1 on h (#1, you started it, task FLEET-12) finished its turn"
+    );
+    // A key is data: one line, cut short.
+    e.task_key = Some(format!("A\nB{}", "x".repeat(100)));
+    let text = session_lines(&[e], 100).remove(0).text;
+    assert!(!text.contains('\n'), "{text}");
+    assert!(text.contains(", task AB"), "{text}");
+    assert!(text.len() < 120, "{text}");
 }
 
 const CFG: FeedConfig = FeedConfig {

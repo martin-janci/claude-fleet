@@ -69,6 +69,10 @@
         },
         {
           "type": "field",
+          "key": "control.session_care"
+        },
+        {
+          "type": "field",
           "key": "control.follow_quiet_hours",
           "when": {
             "key": "control.react_to_events",

@@ -129,6 +129,9 @@ pub struct FeedEventRow {
     /// Control started it (`origin = 'operator'`), rather than only handed
     /// it work.
     pub started_by_control: bool,
+    /// The task it works on now: its live primary link's key, so the digest
+    /// can say which task a finished turn or a failure belongs to.
+    pub task_key: Option<String>,
 }
 
 /// The first non-empty line of `text`, cut to [`HANDOFF_PREVIEW_MAX`]
@@ -266,7 +269,13 @@ impl Store {
             .join(", ");
         let sql = format!(
             "SELECT e.id, e.session_id, e.at, e.kind, e.detail, s.tmux_name, s.host_alias, \
-                    s.origin = 'operator' \
+                    s.origin = 'operator', \
+                    (SELECT COALESCE(i.key, l.ref_key) FROM work_links l \
+                       JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
+                       LEFT JOIN work_items i ON i.id = l.item_id \
+                      WHERE p.session_id = s.id AND l.ended_at IS NULL \
+                        AND l.state = 'confirmed' \
+                      ORDER BY l.is_primary DESC, l.id DESC LIMIT 1) \
              FROM session_events e JOIN sessions s ON s.id = e.session_id \
              WHERE e.id > ?1 AND e.session_id IS NOT ?2 AND e.kind IN ({marks}) \
                AND (s.origin = 'operator' OR e.session_id IN \
@@ -292,6 +301,7 @@ impl Store {
                     tmux_name: r.get(5)?,
                     host_alias: r.get(6)?,
                     started_by_control: r.get::<_, Option<bool>>(7)?.unwrap_or(false),
+                    task_key: r.get(8)?,
                 })
             })?
             .collect::<Result<Vec<_>>>()?;
