@@ -5,6 +5,7 @@
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
+use crate::service::tunnel::TunnelSupervisor;
 use crate::shell::quote;
 use crate::ssh::SshExec;
 use crate::ssh_config::{self, SshHost};
@@ -396,10 +397,16 @@ pub async fn probe_host(
     list_one(store, &args.alias)
 }
 
-pub fn remove_host(args: HostAliasArgs, store: &Mutex<Store>) -> Result<HostRow, IpcError> {
+/// Remove a host, and stop its reverse tunnel: the supervisor otherwise
+/// re-dials `ssh -R` to the removed alias until the app restarts.
+pub fn remove_host(
+    args: HostAliasArgs,
+    store: &Mutex<Store>,
+    tunnels: &TunnelSupervisor,
+) -> Result<HostRow, IpcError> {
     let row = list_one(store, &args.alias)?;
-    let s = lock(store)?;
-    s.delete_host(&args.alias)?;
+    lock(store)?.delete_host(&args.alias)?;
+    tunnels.stop(&args.alias);
     Ok(row)
 }
 
@@ -421,6 +428,7 @@ pub struct MergeHostArgs {
 pub fn merge_host(
     args: MergeHostArgs,
     store: &Mutex<Store>,
+    tunnels: &TunnelSupervisor,
 ) -> Result<crate::store::MergeReport, IpcError> {
     crate::validate::host_alias_syntax(&args.into)?;
     if args.from == crate::service::projects::LOCAL_HOST
@@ -431,8 +439,10 @@ pub fn merge_host(
             "local is this machine; merge it only on a hub with hub.local_host=false",
         ));
     }
-    let s = lock(store)?;
-    s.merge_host_alias(&args.from, &args.into)
+    let report = lock(store)?.merge_host_alias(&args.from, &args.into)?;
+    // `from` is deleted: its tunnel goes with it, as `remove_host`'s does.
+    tunnels.stop(&args.from);
+    Ok(report)
 }
 
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]
@@ -445,10 +455,7 @@ pub struct HideHostArgs {
 }
 
 pub fn hide_host(args: HideHostArgs, store: &Mutex<Store>) -> Result<HostRow, IpcError> {
-    {
-        let s = lock(store)?;
-        s.set_host_hidden(&args.alias, args.hidden)?;
-    }
+    lock(store)?.set_host_hidden(&args.alias, args.hidden)?;
     list_one(store, &args.alias)
 }
 
@@ -2121,5 +2128,47 @@ mod tests {
         assert!(claude_v.is_some(), "claude version must parse");
         let acct = account.expect("oauthAccount must parse");
         assert!(acct.uuid.is_some(), "parsed account must carry a uuid");
+    }
+
+    /// Removing or merging away a host stops its reverse tunnel; before,
+    /// the supervisor re-dialled the gone alias until a restart. Hiding one
+    /// keeps it: its sessions may still be running and calling the hub.
+    #[tokio::test]
+    async fn a_removed_or_merged_host_loses_its_tunnel() {
+        let tunnels = TunnelSupervisor::with_spawner(
+            Arc::new(|_argv| Box::pin(std::future::pending())),
+            Duration::from_secs(3600),
+        );
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        for h in ["gone", "old", "into", "quiet"] {
+            store.lock().unwrap().upsert_host(h).unwrap();
+            tunnels.ensure(h, 4180, 4180);
+        }
+        let alias = |a: &str| HostAliasArgs {
+            alias: a.to_string(),
+        };
+        remove_host(alias("gone"), &store, &tunnels).unwrap();
+        merge_host(
+            MergeHostArgs {
+                from: "old".into(),
+                into: "into".into(),
+                confirm_nonce: None,
+            },
+            &store,
+            &tunnels,
+        )
+        .unwrap();
+        hide_host(
+            HideHostArgs {
+                alias: "quiet".into(),
+                hidden: true,
+            },
+            &store,
+        )
+        .unwrap();
+        let mut up: Vec<String> = tunnels.snapshot().into_keys().collect();
+        up.sort();
+        assert_eq!(up, vec!["into".to_string(), "quiet".to_string()]);
+        assert!(!tunnels.health().contains_key("gone"));
     }
 }

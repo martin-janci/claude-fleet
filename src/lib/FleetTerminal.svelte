@@ -46,9 +46,6 @@
   let rows = 24;
   let cellW = $state(7.8);
   let ro: ResizeObserver | null = null;
-  // Set once the component is gone: an attach still awaiting `pty_open` then
-  // closes what it opened instead of starting a drain loop nobody stops.
-  let destroyed = false;
   // `local` on another hub is that hub's own machine; here it would be this
   // desktop's tmux, a different session that may share the name.
   const refusal = $derived(fleetAttachRefusal(session));
@@ -138,10 +135,22 @@
     if (id) await invoke('pty_close', { args: { id } }).catch(() => {});
   }
 
-  async function attach() {
-    if (refusal) return;
+  // Attaches run one at a time: an overflow re-attach and a "Try again"
+  // click otherwise race, and the backend takes `pty_close` by id alone, so
+  // a late close or open of one lands on the other's terminal. An attach
+  // still waiting on `pty_open` at unmount must not start a drain nothing
+  // will stop, and the close queued behind it must end what it opened.
+  let destroyed = false;
+  let attaching: Promise<void> = Promise.resolve();
+
+  function attach(): Promise<void> {
+    attaching = attaching.then(attachNow);
+    return attaching;
+  }
+
+  async function attachNow() {
+    if (destroyed || refusal) return;
     await close();
-    if (destroyed) return;
     measure();
     const dim = size();
     cols = dim.cols;
@@ -150,18 +159,14 @@
     version++;
     error = null;
     ended = false;
-    const id = fleetPtyId(fleet, session);
-    ptyId = id;
+    ptyId = fleetPtyId(fleet, session);
     try {
       const opened = await invoke<unknown>('pty_open', {
-        args: { id, session_name: session.tmux_name, host_alias: session.host_alias, cols, rows },
+        args: { id: ptyId, session_name: session.tmux_name, host_alias: session.host_alias, cols, rows },
       });
-      if (destroyed) {
-        // Unmounted while it opened: `onDestroy`'s close found nothing yet.
-        void invoke('pty_close', { args: { id } }).catch(() => {});
-        return;
-      }
       generation = typeof opened === 'number' ? opened : null;
+      // Unmounted meanwhile: the close queued behind this attach ends it.
+      if (destroyed) return;
       open = true;
       drain.start();
       grid?.focus();
@@ -206,7 +211,8 @@
     destroyed = true;
     ro?.disconnect();
     drain.stop();
-    void close();
+    // After any attach in flight, so its open is closed too.
+    void attaching.then(close);
   });
 </script>
 

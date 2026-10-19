@@ -1,4 +1,5 @@
-// An extra fleet's terminal: what it attaches, and what it leaves behind.
+// An extra fleet's terminal: an attach still in flight at unmount must not
+// leave this machine's ssh attach running behind a closed view.
 import { render } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { tick } from 'svelte';
@@ -9,36 +10,40 @@ import FleetTerminal from './FleetTerminal.svelte';
 import type { SessionRow } from './sessions';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
-const session = { id: 3, tmux_name: 'pos-3', host_alias: 'mac', status: 'running', last_activity_at: 1 } as SessionRow;
+const session = { id: 3, tmux_name: 'pos-3', host_alias: 'mac' } as SessionRow;
+
+function calls(cmd: string) {
+  return inv.mock.calls.filter(([c]) => c === cmd);
+}
 
 beforeEach(() => {
   inv.mockReset();
-  inv.mockResolvedValue(null);
 });
 
 describe('FleetTerminal', () => {
-  it('closes an attach that finishes opening after the view is gone, and starts no drain', async () => {
-    let opened!: (v: unknown) => void;
-    inv.mockImplementation((cmd: string) =>
-      cmd === 'pty_open' ? new Promise((r) => (opened = r)) : Promise.resolve({ data: '', bytes: 0, eof: false, overflowed: false }),
-    );
-    const view = render(FleetTerminal, { props: { fleet: 'company', session } });
-    await vi.waitFor(() => expect(inv.mock.calls.some(([cmd]) => cmd === 'pty_open')).toBe(true));
-    view.unmount();
-    inv.mockClear();
-    vi.useFakeTimers();
-    try {
-      opened(1);
-      await vi.advanceTimersByTimeAsync(1000);
-    } finally {
-      vi.useRealTimers();
-    }
-    expect(inv.mock.calls).toEqual([['pty_close', { args: { id: 'fleet-company-3' } }]]);
+  it('closes a terminal whose open was still in flight when the view went away', async () => {
+    let finishOpen: (gen: number) => void = () => {};
+    inv.mockImplementation((cmd: string) => {
+      if (cmd === 'pty_open') return new Promise((r) => (finishOpen = r));
+      return Promise.resolve(null);
+    });
+    const { unmount } = render(FleetTerminal, { props: { fleet: 'company', session } });
+    await vi.waitFor(() => expect(calls('pty_open')).toHaveLength(1));
+    unmount();
+    const closesBefore = calls('pty_close').length;
+    finishOpen(7);
+    await vi.waitFor(() => expect(calls('pty_close').length).toBeGreaterThan(closesBefore));
+    expect(calls('pty_close').at(-1)![1]).toEqual({ args: { id: 'fleet-company-3' } });
+    // Nothing drains a terminal nobody shows.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(calls('pty_drain')).toHaveLength(0);
   });
 
   it("never opens this machine's tmux for a session on that hub's own machine", async () => {
-    render(FleetTerminal, { props: { fleet: 'company', session: { ...session, host_alias: 'local' } } });
+    inv.mockResolvedValue(null);
+    const { getByTestId } = render(FleetTerminal, { props: { fleet: 'company', session: { ...session, host_alias: 'local' } } });
     await tick();
-    expect(inv.mock.calls.some(([cmd]) => cmd === 'pty_open')).toBe(false);
+    expect(calls('pty_open')).toHaveLength(0);
+    expect(getByTestId('fleet-terminal-refused')).toBeTruthy();
   });
 });

@@ -74,6 +74,7 @@
   // slow link does not pile reads up on that hub.
   let convSeq = 0;
   let convInFlight = 0;
+  let snapshotSeq = 0;
 
   async function loadConversation(opts: { poll?: boolean } = {}) {
     if (opts.poll && convInFlight > 0) return;
@@ -97,8 +98,9 @@
 
   async function loadSnapshot() {
     const at = key;
+    const seq = ++snapshotSeq;
     const r = await fleetCaptureSession(fleet.id, session);
-    if (at !== key) return;
+    if (at !== key || seq !== snapshotSeq) return;
     if (r.ok) {
       snapshot = r.value;
       snapshotError = null;
@@ -118,6 +120,7 @@
       turns = CONV_TURNS_STEP;
       snapshot = null;
       snapshotError = null;
+      snapshotSeq++;
       draft = '';
       sending = false;
       tab = 'conversation';

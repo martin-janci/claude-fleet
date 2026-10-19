@@ -676,6 +676,19 @@ impl FleetTools {
                 // (it could otherwise read another host's output back via
                 // wait_for_task / list_tasks / its inbox).
                 require_host(&caller, &spec.host_alias, "the new worker")?;
+                // A worker runs Claude on the host's own login: past
+                // `accounts.pause_at` it would stall at the limit with the
+                // task open, so it asks first, as `new_session` does.
+                if !spec.over_limit_ok.unwrap_or(false) {
+                    let s = lock(self.reader()).map_err(to_mcp_err)?;
+                    crate::service::account_limits::refuse_over_limit(
+                        &s,
+                        &spec.host_alias,
+                        None,
+                        crate::store::now_unix(),
+                    )
+                    .map_err(to_mcp_err)?;
+                }
                 // A new worker is a start: the operator's needs a person (D12).
                 self.confirm_gate_target(
                     "dispatch_task",

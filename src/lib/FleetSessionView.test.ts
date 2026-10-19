@@ -118,4 +118,28 @@ describe('FleetSessionView', () => {
     await vi.waitFor(() => expect(screen.getByTestId('fleet-terminal-refused')).toBeTruthy());
     expect(inv.mock.calls.some(([cmd]) => cmd === 'pty_open')).toBe(false);
   });
+
+  it('a late read of the session shown before does not paint over the current one', async () => {
+    const pending = new Map<number, (v: unknown) => void>();
+    const conv = (text: string) => ({
+      truncated: false,
+      context: null,
+      events: [],
+      turns: [{ prompt: text, at: null, ended_at: null, items: [{ kind: 'text', text: `reply to ${text}` }] }],
+    });
+    inv.mockImplementation((cmd: string, a: { args?: { session_id?: number } }) => {
+      if (cmd !== 'session_conversation') return Promise.resolve(null);
+      const id = a.args!.session_id!;
+      if (id === 4) return Promise.resolve(conv('second'));
+      return new Promise((r) => pending.set(id, r));
+    });
+    const { rerender } = render(FleetSessionView, { props: { fleet: company, session } });
+    await vi.waitFor(() => expect(pending.has(3)).toBe(true));
+    await rerender({ fleet: company, session: { ...session, id: 4, tmux_name: 'pos-4' } });
+    await vi.waitFor(() => expect(screen.getByTestId('fleet-session-prompt').textContent).toBe('second'));
+    pending.get(3)!(conv('first'));
+    await tick();
+    await tick();
+    expect(screen.getByTestId('fleet-session-prompt').textContent).toBe('second');
+  });
 });
