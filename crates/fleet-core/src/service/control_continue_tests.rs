@@ -47,6 +47,11 @@ fn the_recommended_option_of_the_last_choices_card_is_the_pick() {
     assert_eq!(recommended_pick(&json).unwrap().label, "Write the docs");
     let plain = CARD.replace("```fleet-ui", "```js");
     assert!(recommended_pick(&plain).is_none());
+    // A fence tagged with the spec's name, or untagged, still counts.
+    for fence in ["```fleet.ui", "```"] {
+        let alias = CARD.replace("```fleet-ui", fence);
+        assert_eq!(recommended_pick(&alias).unwrap().label, "Write the docs");
+    }
 }
 
 #[test]

@@ -136,8 +136,9 @@ fn closes(line: &str, marker: &str) -> bool {
 }
 
 /// PURE: every `fleet.ui/1` block in `text`, as `rich_blocks.ts::splitRich`
-/// finds them: a closed ```` ```fleet-ui ```` fence, or a ```` ```json ````
-/// one whose object says `"spec": "fleet.ui/1"`, that passes the check.
+/// finds them: a closed ```` ```fleet-ui ```` fence (or one tagged with the
+/// spec's own name, `fleet.ui`), or a ```` ```json ```` or untagged one whose
+/// object says `"spec": "fleet.ui/1"`, that passes the check.
 pub fn ui_blocks(text: &str) -> Vec<Value> {
     let lines: Vec<&str> = text.lines().collect();
     let mut out = Vec::new();
@@ -152,9 +153,13 @@ pub fn ui_blocks(text: &str) -> Vec<Value> {
         };
         let raw = lines[i + 1..close].join("\n");
         let raw = raw.trim();
-        let tagged = lang == "fleet-ui";
-        let json_card =
-            lang == "json" && raw.starts_with('{') && raw.contains(chat_blocks::UI_SPEC);
+        let tagged = matches!(
+            lang.as_str(),
+            "fleet-ui" | "fleet.ui" | "fleet_ui" | "fleetui"
+        );
+        let json_card = matches!(lang.as_str(), "json" | "jsonc" | "")
+            && raw.starts_with('{')
+            && raw.contains(chat_blocks::UI_SPEC);
         if (tagged || json_card) && chat_blocks::check_text(raw).is_ok() {
             if let Ok(v) = serde_json::from_str::<Value>(raw) {
                 if tagged || v.get("spec").and_then(Value::as_str) == Some(chat_blocks::UI_SPEC) {
