@@ -232,6 +232,16 @@ describe('HostDetail: fleet-agent install (4.9)', () => {
     expect((await screen.findByTestId('detail-agent-install-failed')).textContent).toBe('Failed · curl is not installed');
     expect(screen.getByTestId('detail-agent-install')).toBeTruthy();
   });
+
+  it('paired: an offline host cannot start the job, and says why (review w14-6)', async () => {
+    hubStatus.set({ ...STANDALONE, remote: true, url: 'https://hub.example' });
+    mount({ host: host('mercury', { reachable: false }), hubVersion: '0.5.4' });
+    const btn = screen.getByTestId('detail-agent-install');
+    expect(btn).toBeDisabled();
+    expect(btn.getAttribute('title')).toBe('mercury is offline: the hub installs over SSH');
+    await fireEvent.click(btn);
+    expect(inv.mock.calls.some((c) => c[0] === 'install_agent')).toBe(false);
+  });
 });
 
 describe('HostDetail: accessibility', () => {

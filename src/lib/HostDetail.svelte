@@ -152,6 +152,12 @@
   // Paired with a hub this asks the hub to refresh this one host's content;
   // blocked only while the hub is unusable or the link is down.
   const provisionBlocked = $derived(hubActionBlocked('provision_hosts', $hubStatus, $hubConnection));
+  /** The install job runs over SSH from the hub: a down link or an
+   *  unreachable host would only fail at its first step (review w14-6). */
+  const installBlocked = $derived(
+    hubActionBlocked('install_agent', $hubStatus, $hubConnection) ??
+      (!host.reachable ? `${host.alias} is offline: the hub installs over SSH` : null),
+  );
   const reprovisionAdvised = $derived(needsReprovision(checklist, host));
   // Orbit Fleet 4.13: the Hex field beside what is running, Layout: New only.
   const liveText = $derived(checklistLoaderText(host.alias, checking, provisioning));
@@ -223,6 +229,8 @@
    *  answer `null` and leave the button live over nothing this client owns. */
   const restoreBlocked = $derived(
     hubActionBlocked('restore_host_sessions', $hubStatus, $hubConnection) ??
+      // The hub refuses an unreachable host (E_HOST_OFFLINE); say so first.
+      (!host.reachable && !isLocal ? `${host.alias} is offline: restore once it answers` : null) ??
       (restorableMine.length === 0
         ? ($sessionBlocked(restorable[0], 'restore_host_sessions') ??
           'None of the lost sessions on this host are yours to restore.')
@@ -753,7 +761,13 @@
           <span class="check-detail">{row.detail}</span>
           {#if row.install}
             <span class="check-action">
-              <AgentInstallAction alias={host.alias} version={hubVersion} testid="detail-agent-install" ondone={onreprobe} />
+              <AgentInstallAction
+                alias={host.alias}
+                version={hubVersion}
+                blocked={installBlocked}
+                testid="detail-agent-install"
+                ondone={onreprobe}
+              />
             </span>
           {:else if row.key === 'skills' && row.state === 'warn'}
             <span class="check-action">
@@ -891,15 +905,8 @@
         {/if}
       </div>
     </div>
-    <div class="tab-part" hidden={tab !== 'sessions'}>
-    {#if tidyHint && onreviewtidy}
-      <p class="muted" data-testid="detail-tidy-hint">
-        {tidyHint.text}
-        <button type="button" class="small" data-testid="detail-tidy-review" onclick={() => onreviewtidy(tidyHint.sessionIds)}
-          >Review in Tidy</button
-        >
-      </p>
-    {/if}
+    <!-- The restore button sits in the head on both tabs, so its result
+         does too: never inside a part the other tab hides (review w14-5). -->
     {#if restoreError}
       <p class="error" data-testid="restore-error">{restoreError}</p>
     {/if}
@@ -907,6 +914,15 @@
       <p data-testid="restore-summary">
         Restored {restoreSummary.ok} of {restoreSummary.total}
         {#each restoreSummary.failures as f (f.name)}<br />{f.name}: {f.error}{/each}
+      </p>
+    {/if}
+    <div class="tab-part" hidden={tab !== 'sessions'}>
+    {#if tidyHint && onreviewtidy}
+      <p class="muted" data-testid="detail-tidy-hint">
+        {tidyHint.text}
+        <button type="button" class="small" data-testid="detail-tidy-review" onclick={() => onreviewtidy(tidyHint.sessionIds)}
+          >Review in Tidy</button
+        >
       </p>
     {/if}
     </div>
