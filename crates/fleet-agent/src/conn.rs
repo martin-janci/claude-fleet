@@ -478,6 +478,11 @@ pub enum SessionEnd {
     /// interval instead of the normal growing sequence: nothing on either
     /// end fixes itself by retrying sooner.
     VersionRefused(String),
+    /// The hub closed it with [`fleet_proto::SUPERSEDED_CLOSE_CODE`]: another
+    /// agent connected with this host's token. `run_with` backs off at the
+    /// maximum interval, as for a version refusal, so two agents sharing a
+    /// token stop replacing each other every second.
+    Superseded(String),
 }
 
 impl std::fmt::Display for SessionEnd {
@@ -487,6 +492,10 @@ impl std::fmt::Display for SessionEnd {
             Self::HubSilent => write!(f, "nothing from the hub for {SILENT_BEATS} heartbeats"),
             Self::Protocol(why) => write!(f, "the hub broke the protocol: {why}"),
             Self::VersionRefused(why) => write!(f, "protocol version refused: {why}"),
+            Self::Superseded(why) => write!(
+                f,
+                "replaced by another agent ({why}); is a second agent installed with this host's token?"
+            ),
         }
     }
 }
@@ -683,7 +692,7 @@ where
     // is what does it.
     inflight.lock().unwrap_or_else(|e| e.into_inner()).clear();
     match &end {
-        SessionEnd::Closed(_) => writer.abort(),
+        SessionEnd::Closed(_) | SessionEnd::Superseded(_) => writer.abort(),
         SessionEnd::HubSilent | SessionEnd::Protocol(_) | SessionEnd::VersionRefused(_) => {
             let code = match &end {
                 SessionEnd::VersionRefused(_) => CloseCode::from(VERSION_REFUSED_CLOSE_CODE),
@@ -766,6 +775,9 @@ fn close_end(frame: Option<CloseFrame>) -> SessionEnd {
     match frame {
         Some(f) if u16::from(f.code) == VERSION_REFUSED_CLOSE_CODE => {
             SessionEnd::VersionRefused(reason(&f))
+        }
+        Some(f) if u16::from(f.code) == fleet_proto::SUPERSEDED_CLOSE_CODE => {
+            SessionEnd::Superseded(reason(&f))
         }
         Some(f) if !f.reason.is_empty() => SessionEnd::Closed(reason(&f)),
         _ => SessionEnd::Closed("the hub closed it".into()),
@@ -1325,7 +1337,13 @@ where
                 notifier.status(&format!("{CONNECTED} {url} since {}", now_utc()));
                 let served = serve(ws, agent, beats()).await;
                 let version_refused = matches!(served.end, SessionEnd::VersionRefused(_));
-                if served.heard_any && !version_refused {
+                if matches!(served.end, SessionEnd::Superseded(_)) {
+                    // Another agent holds this host's connection. Dialling
+                    // back at once would only take it over again: wait the
+                    // slowest interval, so the pair settles instead of
+                    // trading the connection every second.
+                    backoff.force_max();
+                } else if served.heard_any && !version_refused {
                     backoff.reset();
                 }
                 (served.end.to_string(), version_refused)
@@ -2771,6 +2789,26 @@ mod tests {
                 assert!(reason.contains("update fleet-agent"), "{reason}");
             }
             other => panic!("expected VersionRefused, got {other:?}"),
+        }
+    }
+
+    /// A close carrying `SUPERSEDED_CLOSE_CODE` is read back as
+    /// `SessionEnd::Superseded`, which `run_with` backs off at the cap on.
+    #[tokio::test]
+    async fn a_close_carrying_the_superseded_code_is_read_as_superseded() {
+        let mut p = pair().await;
+        let frame = CloseFrame {
+            code: CloseCode::from(fleet_proto::SUPERSEDED_CLOSE_CODE),
+            reason: "another agent connected with this host's token".into(),
+        };
+        p.hub.send(Message::Close(Some(frame))).await.unwrap();
+        let served = tokio::time::timeout(PATIENCE, p.served)
+            .await
+            .unwrap()
+            .unwrap();
+        match served.end {
+            SessionEnd::Superseded(reason) => assert!(reason.contains("another agent"), "{reason}"),
+            other => panic!("expected Superseded, got {other:?}"),
         }
     }
 

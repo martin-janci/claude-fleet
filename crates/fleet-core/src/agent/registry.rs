@@ -80,6 +80,10 @@ struct Connection {
     /// replaced, disconnected or evicted — so its owner can tear the socket
     /// down even while its writer is stuck mid-send.
     gone: tokio_util::sync::CancellationToken,
+    /// Cancelled, before `gone`, when a newer connection for the same alias
+    /// replaced this one: its owner then closes the socket with
+    /// [`fleet_proto::SUPERSEDED_CLOSE_CODE`] rather than bare.
+    superseded: tokio_util::sync::CancellationToken,
 }
 
 impl Connection {
@@ -167,8 +171,19 @@ impl AgentRegistry {
             pending: DashMap::new(),
             credential,
             gone: tokio_util::sync::CancellationToken::new(),
+            superseded: tokio_util::sync::CancellationToken::new(),
         });
+        let host_name = conn.hello.host_name.clone();
         if let Some(previous) = self.conns.insert(alias.to_string(), conn) {
+            if previous.hello.host_name != host_name {
+                tracing::warn!(
+                    host = %alias,
+                    "[agent] {} replaced the agent on {}: two agents are using this host's token",
+                    fleet_proto::sanitize_for_log(&host_name, 64),
+                    fleet_proto::sanitize_for_log(&previous.hello.host_name, 64),
+                );
+            }
+            previous.superseded.cancel();
             previous.abort_pending();
         }
         id
@@ -215,6 +230,16 @@ impl AgentRegistry {
                 gone.cancel();
                 gone
             }
+        }
+    }
+
+    /// Fires when connection `conn` for `alias` was replaced by a newer one
+    /// (and not merely disconnected). Read it while `conn` is live: asked
+    /// later, it never fires.
+    pub fn superseded(&self, alias: &str, conn: ConnId) -> tokio_util::sync::CancellationToken {
+        match self.live(alias) {
+            Some(live) if live.id == conn => live.superseded.clone(),
+            _ => tokio_util::sync::CancellationToken::new(),
         }
     }
 
@@ -646,6 +671,20 @@ mod tests {
         );
         assert!(first.sent().is_empty(), "the replaced agent got nothing");
         assert_eq!(reg.snapshot().len(), 1, "one row per alias, not two");
+    }
+
+    /// Only a takeover marks the old connection superseded; a plain
+    /// disconnect, and the replacement itself, are not.
+    #[tokio::test]
+    async fn only_a_replaced_connection_is_marked_superseded() {
+        let reg = AgentRegistry::new();
+        let first = FakeAgent::connect(&reg, "laptop", answer_exit(1));
+        let replaced = reg.superseded("laptop", first.conn_id);
+        let second = FakeAgent::connect(&reg, "laptop", answer_exit(2));
+        assert!(replaced.is_cancelled(), "the first was replaced");
+        let current = reg.superseded("laptop", second.conn_id);
+        reg.disconnect("laptop", second.conn_id);
+        assert!(!current.is_cancelled(), "a disconnect is not a takeover");
     }
 
     /// The replaced connection's reader task may still be draining. Its
