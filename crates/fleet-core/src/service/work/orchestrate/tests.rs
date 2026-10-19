@@ -871,3 +871,123 @@ fn a_run_goes_to_the_best_host_inside_its_grant() {
     assert_eq!(start.host_alias.as_deref(), Some("mac"));
     assert_eq!(start.profile, None);
 }
+
+/// The fixture's mission with its planner on `mac`.
+fn planned_on_mac(fx: &Fx) -> MissionRow {
+    let mut m = fx.m.clone();
+    m.policy.planner_host = Some("mac".into());
+    m
+}
+
+/// TASK-291: the planner passes over a login at `accounts.pause_at` for the
+/// host's next login with headroom, and with none left the mission waits
+/// until the earliest reset rather than asking into the limit.
+#[test]
+fn the_planner_takes_a_login_with_headroom_or_waits_for_the_reset() {
+    let fx = fixture();
+    let m = planned_on_mac(&fx);
+    let s = lock(&fx.deps.store).unwrap();
+    let now = now_unix();
+    crate::service::account_limits::seed_usage(&s, "mac", None, "own", 95.0, now);
+    crate::service::account_limits::seed_usage(&s, "mac", Some("work"), "work", 10.0, now);
+    let own = limit::Login {
+        host: "mac".into(),
+        profile: None,
+    };
+    let work = limit::Login {
+        host: "mac".into(),
+        profile: Some("work".into()),
+    };
+    assert_eq!(
+        limit::candidates(&s, &m, None).unwrap(),
+        vec![own.clone(), work.clone()],
+        "the host's own login first, then its profiles"
+    );
+    assert_eq!(limit::choose(&s, &m, None, now).unwrap(), Ok(work.clone()));
+    crate::service::account_limits::seed_usage(&s, "mac", Some("work"), "work", 97.0, now);
+    let wait = limit::choose(&s, &m, None, now).unwrap().unwrap_err();
+    assert_eq!(wait.login, None, "the mission's wait, not one login's");
+    assert_eq!(wait.resets_at, now + 3_600, "the readings' reset");
+    assert!(wait.reset_known);
+    assert!(
+        wait.why.contains("every login") && wait.why.contains("mac's own login"),
+        "{}",
+        wait.why
+    );
+}
+
+/// TASK-291: a run that answered with Claude's limit words is a wait on that
+/// login until the reset the answer names, the loop does not ask the
+/// planner again before it, and asks again once it passed.
+#[test]
+fn a_limit_answer_is_a_wait_and_the_loop_asks_again_after_the_reset() {
+    let fx = fixture();
+    let m = planned_on_mac(&fx);
+    let s = lock(&fx.deps.store).unwrap();
+    s.insert_host("mac", None).unwrap();
+    let now = now_unix();
+    let own = limit::Login {
+        host: "mac".into(),
+        profile: None,
+    };
+    let hit = crate::service::claude_print::usage_limit(&format!(
+        "Claude AI usage limit reached|{}",
+        now + 600
+    ))
+    .unwrap();
+    // Before: the mission has never been planned, so it wants the planner.
+    let counts = s.mission_task_counts(m.id).unwrap();
+    assert!(planner_wanted(&s, &m, &[], &counts, None, now)
+        .unwrap()
+        .is_some());
+    event(&s, m.id, "planned", "loop", None, serde_json::json!({}));
+    let wait = limit::answered(&s, &own, &hit, now);
+    assert_eq!((wait.resets_at, wait.reset_known), (now + 600, true));
+    limit::record(&s, m.id, &wait);
+    assert!(limit::waiting(&s, m.id).unwrap());
+    assert_eq!(limit::wake_at(&s, m.id, now).unwrap(), Some(now + 600));
+    let e = &s.mission_events(m.id, None, 1).unwrap()[0];
+    assert_eq!(e.kind, "limit_wait", "not refused");
+    assert_eq!(e.payload.as_ref().unwrap()["login"]["host"], "mac");
+    // Waiting: the only login is in its wait, so nothing is asked.
+    assert_eq!(
+        planner_wanted(&s, &m, &[], &counts, None, now).unwrap(),
+        None
+    );
+    let all = limit::choose(&s, &m, None, now).unwrap().unwrap_err();
+    assert_eq!(all.resets_at, now + 600);
+    // Past the reset: asked again.
+    assert_eq!(
+        planner_wanted(&s, &m, &[], &counts, None, now + 601).unwrap(),
+        Some("the usage limit it waited on is over")
+    );
+    // A run after it ends the wait.
+    event(&s, m.id, "planned", "loop", None, serde_json::json!({}));
+    assert!(!limit::waiting(&s, m.id).unwrap());
+    assert_eq!(limit::wake_at(&s, m.id, now).unwrap(), None);
+}
+
+/// TASK-291: a limit nobody says the reset of (Claude's words carry no time,
+/// the account has no reading) is waited out for the guess, said as such.
+#[test]
+fn a_limit_with_no_known_reset_waits_the_guess() {
+    let fx = fixture();
+    let s = lock(&fx.deps.store).unwrap();
+    let now = now_unix();
+    let login = limit::Login {
+        host: "mac".into(),
+        profile: Some("work".into()),
+    };
+    let hit = crate::service::claude_print::usage_limit(
+        "You've hit your limit · resets 3pm (Europe/Bratislava)",
+    )
+    .unwrap();
+    let wait = limit::answered(&s, &login, &hit, now);
+    assert_eq!(wait.resets_at, now + limit::LIMIT_WAIT_GUESS_SECS);
+    assert!(!wait.reset_known);
+    assert_eq!(
+        wait.why,
+        "profile work on mac is at its usage limit (resets 3pm (Europe/Bratislava))"
+    );
+    assert_eq!(wait.said.as_deref(), Some("resets 3pm (Europe/Bratislava)"));
+}

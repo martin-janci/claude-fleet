@@ -79,6 +79,9 @@
     moveLabel,
     ownerLine,
     planMission,
+    plannerWaiting,
+    plannerLimitWait,
+    limitWaitSentence,
     plannerError,
     plannerLine,
     plannerRefusal,
@@ -142,6 +145,8 @@
   let busy = $state(false);
   /** The last planner press that failed, in words (step 1.3). */
   let plannerFailure = $state<HumanError | null>(null);
+  /** `plannerFailure` is a usage-limit wait, not a failure. */
+  let plannerIsWait = $state(false);
   let plannerDetails = $state(false);
 
   const mission = $derived(detail?.mission ?? null);
@@ -158,6 +163,7 @@
     `${proposals.ids.length} ${proposals.ids.length === 1 ? 'task' : 'tasks'}${proposals.waves > 1 ? ` · ${proposals.waves} waves` : ''}`,
   );
   const events = $derived(detail ? roomEvents(detail) : []);
+  const limitWait = $derived(detail ? plannerLimitWait(detail) : null);
   const itemById = $derived(new Map((detail?.items ?? []).map((i) => [i.id, i])));
   const needsYou = $derived(!!detail && !!mission && !isFinal(mission.state) && (!!mission.waiting_on || waitsOnPerson(detail)));
 
@@ -476,6 +482,7 @@
   async function askPlanner() {
     if (!mission) return;
     plannerFailure = null;
+    plannerIsWait = false;
     plannerDetails = false;
     busy = true;
     notice = null;
@@ -489,6 +496,10 @@
         return;
       }
       if (r.value.refused) plannerFailure = plannerRefusal(r.value.refused);
+      else if (r.value.waiting) {
+        plannerFailure = plannerWaiting(r.value.waiting);
+        plannerIsWait = true;
+      }
       await load();
     } finally {
       busy = false;
@@ -904,8 +915,12 @@
             {/each}
           </ol>
 
+          {#if limitWait && !plannerFailure}
+            <p class="limit-wait" data-testid="mission-limit-wait">{limitWaitSentence(limitWait)}</p>
+          {/if}
+
           {#if plannerFailure}
-            <div class="card planner-error" role="alert" data-testid="mission-planner-error">
+            <div class="card planner-error" class:planner-wait={plannerIsWait} role="alert" data-testid="mission-planner-error">
               <p class="title">{plannerFailure.title}</p>
               <p>{plannerFailure.text}</p>
               <div class="row">
@@ -2130,6 +2145,17 @@
   .planner-error .title {
     color: var(--danger);
     font-weight: 600;
+  }
+  .planner-wait {
+    border-color: var(--status-waiting);
+  }
+  .planner-wait .title {
+    color: var(--status-waiting);
+  }
+  .limit-wait {
+    margin: var(--space-1) 0 0;
+    font-size: var(--text-xs);
+    color: var(--status-waiting);
   }
   .planner-error .details {
     margin: var(--space-1) 0 0;

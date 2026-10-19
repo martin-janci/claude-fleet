@@ -611,6 +611,8 @@ export function eventSentence(e: MissionEvent): string {
       return `Refused: ${String(p.why ?? p.detail ?? '')}`;
     case 'planned':
       return `Asked the planner (${String(p.why ?? '')})`;
+    case 'limit_wait':
+      return limitWaitSentence(p as unknown as LimitWait);
     case 'card':
       return `Card ${String(p.card_id ?? '')} ${String(p.state ?? '')}`;
     case 'grant':
@@ -799,10 +801,69 @@ export function retryWorkItem(itemId: number, note?: string): Promise<Result<Ste
   return changed(invokeCmd<StepResult>('retry_work_item', { args: { item_id: itemId, ...(n ? { note: n } : {}) } }));
 }
 
+/** The planner waiting on a usage limit (`orchestrate::limit::LimitWait`):
+ *  one login's, or the mission's when `login` is absent. */
+export interface LimitWait {
+  login?: { host: string; profile?: string | null } | null;
+  /** When the planner may be asked again, Unix seconds. */
+  resets_at: number;
+  /** `false`: nothing said when it resets, `resets_at` is fleet's guess. */
+  reset_known: boolean;
+  /** Claude Code's own words for the reset ("resets 3pm (Europe/Bratislava)"). */
+  said?: string | null;
+  why: string;
+}
+
 export interface PlanOutcome {
   mission_id: number;
   cards?: MissionCard[];
   refused?: string | null;
+  /** Every login the planner may use is at its usage limit. */
+  waiting?: LimitWait | null;
+}
+
+function loginWords(l: NonNullable<LimitWait['login']>): string {
+  return l.profile ? `profile ${l.profile} on ${l.host}` : `${l.host}'s own login`;
+}
+
+/** "15:00", or "Oct 20, 15:00" when the reset is not today. */
+function resetWords(at: number, now: number): string {
+  const d = new Date(at * 1000);
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return d.toDateString() === new Date(now * 1000).toDateString()
+    ? time
+    : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${time}`;
+}
+
+/** A `limit_wait` event in words: "Waiting on the usage limit of mac's own
+ *  login, resets 15:00". */
+export function limitWaitSentence(w: LimitWait, now = Date.now() / 1000): string {
+  const whose = w.login ? `the usage limit of ${loginWords(w.login)}` : 'a usage limit on every login';
+  const when = w.reset_known ? `resets ${resetWords(w.resets_at, now)}` : `asks again at ${resetWords(w.resets_at, now)}`;
+  const said = !w.reset_known && w.said ? ` (Claude: ${w.said})` : '';
+  return `Waiting on ${whose}, ${when}${said}`;
+}
+
+/** The planner's open wait, when its newest word on the mission (of its runs
+ *  and waits) is a `limit_wait`: the mission's state "waiting on a limit". */
+export function plannerLimitWait(detail: Pick<MissionDetail, 'events'>): LimitWait | null {
+  const last = (detail.events ?? []).find((e) => e.kind === 'planned' || e.kind === 'limit_wait');
+  if (last?.kind !== 'limit_wait' || !last.payload) return null;
+  const w = last.payload as unknown as LimitWait;
+  return typeof w.resets_at === 'number' ? w : null;
+}
+
+/** The planner could not be asked: every login it may use is at its usage
+ *  limit (`PlanOutcome.waiting`). Not a failure; it is asked again then. */
+export function plannerWaiting(w: LimitWait, now = Date.now() / 1000): HumanError {
+  const at = resetWords(w.resets_at, now);
+  return {
+    title: 'The planner is waiting on a usage limit',
+    text: w.reset_known
+      ? `Its Claude accounts are at their usage limit until ${at}. Fleet asks the planner again then, or sooner on a login with headroom.`
+      : `Its Claude accounts are at their usage limit${w.said ? ` (${w.said})` : ''}. Fleet asks the planner again at ${at}, or sooner on a login with headroom.`,
+    details: w.why,
+  };
 }
 
 export function planMission(missionId: number): Promise<Result<PlanOutcome>> {
