@@ -25,6 +25,7 @@
   } from './sessions';
   import { diskMeter } from './hosts_view';
   import { hosts, hostFilter, effectiveHostFilter } from './hosts';
+  import { fleetHostFilterOptions, hostFilterLabel, showPrimary } from './fleets';
   import { hintAnchor } from './hints';
   import { accountByUuid, accounts, accountLabel as accountName } from './accounts';
   import { attentionIdleMinutes } from './notify';
@@ -158,7 +159,10 @@
   );
 
   // ── The summary strip and the panel ──
-  const visibleHosts = $derived($hosts.filter((h) => !h.hidden));
+  // With more than one hub the fleet filter decides whose machines are
+  // offered: this window's own when it shows them, then each extra fleet's
+  // under its label.
+  const visibleHosts = $derived($showPrimary ? $hosts.filter((h) => !h.hidden) : []);
   const scopeLabel = $derived(
     $effectiveScope === UNASSIGNED ? 'Unassigned' : ($scopes.find((s) => s.id === $effectiveScope)?.label ?? $effectiveScope),
   );
@@ -168,6 +172,7 @@
           scope: $scopeSelectorShown ? $effectiveScope : 'all',
           scopeLabel,
           host: $effectiveHostFilter,
+          hostLabel: $hostFilterLabel($effectiveHostFilter),
           agent: $agentFilter === 'any' ? undefined : agentFilterLabel($agentFilter),
           recency,
           search,
@@ -304,6 +309,12 @@
                   title: hostTitle(h),
                   dot: h.reachable ? ('on' as const) : ('off' as const),
                   alert: diskMeter(h)?.level === 'crit' ? 'disk almost full' : undefined,
+                })),
+                ...$fleetHostFilterOptions.map((o) => ({
+                  id: o.id,
+                  label: `${o.fleet.label} · ${o.host.alias}`,
+                  title: `${o.host.alias} on ${o.fleet.label}${o.host.reachable ? '' : ' (unreachable)'}`,
+                  dot: o.host.reachable ? ('on' as const) : ('off' as const),
                 })),
               ]}
               testidFor={(id) => `filter-host-${id}`}
