@@ -211,6 +211,48 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// A moved session's open tasks follow it to its new row: the ones it
+    /// works on and the ones it waits on. Answers the task ids moved for each
+    /// role, so a move that fails at the kill can put exactly those back.
+    pub fn repoint_open_tasks(
+        &self,
+        from: i64,
+        to: i64,
+    ) -> Result<(Vec<i64>, Vec<i64>), crate::ipc_error::IpcError> {
+        let moved = |col: &str| -> Result<Vec<i64>, crate::ipc_error::IpcError> {
+            let mut stmt = self.conn.prepare(&format!(
+                "UPDATE tasks SET {col} = ?2 \
+                 WHERE {col} = ?1 AND state IN ('queued','running') RETURNING id"
+            ))?;
+            let ids = stmt.query_map(rusqlite::params![from, to], |r| r.get(0))?;
+            Ok(ids.collect::<rusqlite::Result<Vec<i64>>>()?)
+        };
+        let worker = moved("worker_session_id")?;
+        let requester = moved("requester_session_id")?;
+        Ok((worker, requester))
+    }
+
+    /// Undo [`Self::repoint_open_tasks`] for the given tasks.
+    pub fn restore_task_sessions(
+        &self,
+        worker: &[i64],
+        requester: &[i64],
+        to: i64,
+    ) -> Result<(), crate::ipc_error::IpcError> {
+        for (col, ids) in [
+            ("worker_session_id", worker),
+            ("requester_session_id", requester),
+        ] {
+            for id in ids {
+                self.conn.execute(
+                    &format!("UPDATE tasks SET {col} = ?1 WHERE id = ?2"),
+                    rusqlite::params![to, id],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     /// `queued → running`; stamps `started_at`. A no-op (returns the current
     /// row) for any other state.
     pub fn mark_task_running(
@@ -268,6 +310,40 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A move carries the open tasks the session works on and waits on;
+    /// finished ones stay as history, and the undo puts back exactly those.
+    #[test]
+    fn open_tasks_follow_a_moved_session_and_come_back_on_undo() {
+        let s = Store::open_in_memory().unwrap();
+        let work = s.insert_task(Some(9), Some(2), "w", "n1").unwrap();
+        let wait = s.insert_task(Some(2), Some(9), "r", "n2").unwrap();
+        let done = s.insert_task(Some(9), Some(2), "d", "n3").unwrap();
+        s.finish_task(done.id, "done", Some("ok"), None).unwrap();
+        let (w, r) = s.repoint_open_tasks(2, 7).unwrap();
+        assert_eq!((w, r), (vec![work.id], vec![wait.id]));
+        assert_eq!(
+            s.get_task(work.id).unwrap().unwrap().worker_session_id,
+            Some(7)
+        );
+        assert_eq!(
+            s.get_task(wait.id).unwrap().unwrap().requester_session_id,
+            Some(7)
+        );
+        assert_eq!(
+            s.get_task(done.id).unwrap().unwrap().worker_session_id,
+            Some(2)
+        );
+        s.restore_task_sessions(&[work.id], &[wait.id], 2).unwrap();
+        assert_eq!(
+            s.get_task(work.id).unwrap().unwrap().worker_session_id,
+            Some(2)
+        );
+        assert_eq!(
+            s.get_task(wait.id).unwrap().unwrap().requester_session_id,
+            Some(2)
+        );
+    }
 
     #[test]
     fn tasks_crud_and_terminal_transitions() {

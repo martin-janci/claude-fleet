@@ -2399,7 +2399,7 @@ mod tests {
         send(&mut ws, &result_of("r", &vec![b'x'; 512 * 1024], b"")).await;
 
         let err = call.await.unwrap().unwrap_err();
-        assert_eq!(err.code, crate::ipc_error::codes::E_AGENT_OFFLINE);
+        assert_eq!(err.code, crate::ipc_error::codes::E_AGENT_PROTOCOL);
         assert!(
             started.elapsed() < Duration::from_secs(1),
             "refused at once, not at the 10 s wall clock: {:?}",
@@ -2437,7 +2437,7 @@ mod tests {
         let call = dispatch(&hub, &mut ws, exec("capped", Some(1024))).await;
         send(&mut ws, &result_of("capped", &vec![b'x'; 512 * 1024], b"")).await;
         let err = call.await.unwrap().unwrap_err();
-        assert_eq!(err.code, crate::ipc_error::codes::E_AGENT_OFFLINE);
+        assert_eq!(err.code, crate::ipc_error::codes::E_AGENT_PROTOCOL);
     }
 
     /// The `hello` is judged against the floor, not whatever the connection's
@@ -2831,7 +2831,7 @@ mod tests {
         }
 
         let err = call.await.unwrap().unwrap_err();
-        assert_eq!(err.code, crate::ipc_error::codes::E_AGENT_OFFLINE);
+        assert_eq!(err.code, crate::ipc_error::codes::E_AGENT_PROTOCOL);
     }
 
     // ── the budget table, without a socket ─────────────────────────────────
