@@ -2,6 +2,9 @@
   import HubProjectsPick from './HubProjectsPick.svelte';
   import FleetsSettings from './FleetsSettings.svelte';
   import EnvironmentSettings from './EnvironmentSettings.svelte';
+  import CompanySettings from './CompanySettings.svelte';
+  import { COMPANY_PAGES } from './company_access';
+  import { PRIMARY } from './fleets';
   import Icon from './kit/Icon.svelte';
   import Loader from './Loader.svelte';
   import WorkSettings from './WorkSettings.svelte';
@@ -134,6 +137,9 @@
   // client, but it owns no fleet either, and the backend refuses the same
   // panels. See `ownsTheFleet`.
   const ownsFleet = $derived(ownsTheFleet($hubStatus));
+  /** The fleet Settings › Company shows (its Fleet picker), kept while
+   *  moving between Organisations, Devices, People and Groups. */
+  let companyFleet = $state<string>(PRIMARY);
   /** The URL the link wizard opens with: the configured hub's, to pair again. */
   let hubUrlDraft = $state('');
   /** The hub link wizard (step 10.12: one fleet.form/1 spec, `link_hub`). */
@@ -1068,6 +1074,25 @@
             actions={$pagesBundle.actions}
             section={leaf?.section}
             {ownsFleet}
+            onnavigate={(id) => select(id)} />
+        {/key}
+      {:else if COMPANY_PAGES.includes(currentPage.id)}
+        <!-- Company decides per fleet what this device may change, as the
+             hub's org_admin does: a fleet admin's or an org admin's device,
+             trusted to change anything (`company_access.ts`), on any fleet
+             shown here; the pick holds across the Company pages. -->
+        {#key view}
+          <CompanySettings
+            page={currentPage}
+            pages={$allPages}
+            descs={$descriptors}
+            values={$settingValues}
+            sources={$pagesBundle.sources}
+            resources={$pagesBundle.resources}
+            actions={$pagesBundle.actions}
+            section={leaf?.section}
+            {ownsFleet}
+            bind:fleet={companyFleet}
             onnavigate={(id) => select(id)} />
         {/key}
       {:else if !ownsFleet && currentPage.layout === 'master_detail'}
