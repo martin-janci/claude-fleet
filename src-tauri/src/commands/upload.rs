@@ -119,6 +119,32 @@ impl UploadAllowList {
             .is_some_and(|(at, origin)| now.saturating_duration_since(*at) < origin.ttl())
     }
 
+    /// Move still-live *dropped* paths onto the tray TTL, because the
+    /// composer took them into its attachment tray (`attachment_describe`):
+    /// from here they wait for the prompt around them exactly as a picked
+    /// file does, and a drop's ten minutes refused a screenshot that sat in
+    /// the tray while the user typed. Once only — an entry already on the
+    /// tray TTL is left as it was, so describing again cannot keep a path
+    /// authorised forever — and an expired or unknown path stays refused.
+    pub fn adopt_into_tray(&self, paths: &[String]) {
+        self.adopt_into_tray_at(paths, Instant::now());
+    }
+
+    pub fn adopt_into_tray_at(&self, paths: &[String], now: Instant) {
+        let mut e = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for p in paths {
+            if let Some(entry) = e.get_mut(Path::new(p)) {
+                let (at, origin) = *entry;
+                if origin == Origin::Dropped && now.saturating_duration_since(at) < origin.ttl() {
+                    *entry = (now, Origin::Picked);
+                }
+            }
+        }
+    }
+
     /// Remove `paths` from the list once an upload has used them: one
     /// drop or pick authorises one upload, not a window of re-reads.
     pub fn consume(&self, paths: &[String]) {
@@ -371,9 +397,12 @@ pub fn check_paths_allowed(allow: &UploadAllowList, paths: &[String]) -> Result<
 /// existence of an arbitrary path, which is exactly what the allow-list
 /// exists to prevent.
 ///
-/// This authorises nothing: every path here is already on the allow-list,
-/// put there by the Tauri drag-drop handler in `lib.rs` before the webview
-/// ever saw the event. It only measures what is already there.
+/// This authorises no new path: every path here is already on the
+/// allow-list, put there by the Tauri drag-drop handler in `lib.rs` before
+/// the webview ever saw the event. Its one effect on the list is to move
+/// those drops onto the tray TTL (`UploadAllowList::adopt_into_tray`) — the
+/// composer is the only caller, and a file it describes now waits in its
+/// tray for Send like a picked one, not for a terminal's instant upload.
 ///
 /// A path that fails `check_paths_allowed` fails the whole batch (SEC-9:
 /// nothing here should ever encourage assembling a batch of one allowed path
@@ -386,6 +415,7 @@ pub fn describe_for(
     paths: &[String],
 ) -> Result<Vec<PickedFile>, IpcError> {
     check_paths_allowed(allow, paths)?;
+    allow.adopt_into_tray(paths);
     let mut out = Vec::with_capacity(paths.len());
     for p in paths {
         let path = Path::new(p);
@@ -1092,5 +1122,50 @@ mod tests {
         // Still allowed afterward: describing only reads, it does not
         // consume the one-shot authorisation the way an upload does.
         assert!(allow.is_allowed(&png));
+    }
+
+    #[test]
+    fn a_drop_the_composer_describes_waits_in_the_tray_like_a_pick() {
+        let al = UploadAllowList::new();
+        let t0 = Instant::now();
+        let shot = PathBuf::from("/tmp/shot.png");
+        al.allow_at(std::slice::from_ref(&shot), t0);
+        al.adopt_into_tray_at(&["/tmp/shot.png".into()], t0 + Duration::from_secs(1));
+        // Twenty minutes of typing around it: past a drop's window.
+        assert!(
+            al.is_allowed_at(&shot, t0 + Duration::from_secs(20 * 60)),
+            "a dropped file in the composer tray must outlive UPLOAD_ALLOW_TTL"
+        );
+        assert!(!al.is_allowed_at(&shot, t0 + Duration::from_secs(1) + PICKED_ALLOW_TTL));
+    }
+
+    #[test]
+    fn adopting_into_the_tray_never_revives_or_extends() {
+        let al = UploadAllowList::new();
+        let t0 = Instant::now();
+        let late = PathBuf::from("/tmp/late.png");
+        al.allow_at(std::slice::from_ref(&late), t0);
+        al.adopt_into_tray_at(&["/tmp/late.png".into()], t0 + UPLOAD_ALLOW_TTL);
+        assert!(
+            !al.is_allowed_at(&late, t0 + UPLOAD_ALLOW_TTL),
+            "an expired drop stays expired"
+        );
+
+        let picked = PathBuf::from("/tmp/picked.png");
+        al.allow_picked_at(std::slice::from_ref(&picked), t0);
+        al.adopt_into_tray_at(
+            &["/tmp/picked.png".into()],
+            t0 + Duration::from_secs(60 * 60),
+        );
+        assert!(
+            !al.is_allowed_at(&picked, t0 + PICKED_ALLOW_TTL),
+            "describing again must not restart a tray entry's clock"
+        );
+
+        al.adopt_into_tray_at(&["/etc/passwd".into()], t0);
+        assert!(
+            !al.is_allowed_at(Path::new("/etc/passwd"), t0),
+            "adopting authorises nothing new"
+        );
     }
 }

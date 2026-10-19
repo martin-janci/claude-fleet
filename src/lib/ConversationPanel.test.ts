@@ -4993,6 +4993,16 @@ describe('ConversationPanel attachments', () => {
     const tile = screen.getByTestId('conv-attachment');
     expect(tile.getAttribute('data-state')).toBe('error');
     expect(screen.getByTestId('conv-attach-error').textContent).toContain('attach it again');
+
+    // Sending the edited message again must not re-upload the spent path:
+    // Rust refuses it ("not attached by the user"), sinking the whole send.
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    await fireEvent.click(screen.getByTestId('conv-composer-send'));
+    for (let i = 0; i < 3; i++) await settle();
+    expect(uploads()).toBe(uploadsBefore + 1);
+    expect(mockedSend).toHaveBeenCalledTimes(3);
+    expect(mockedSend.mock.calls[2][2]).toBe('look');
+    expect(screen.getByTestId('conv-attachment').getAttribute('data-state')).toBe('error');
   });
 });
 
