@@ -39,6 +39,7 @@
     type RoutineTrigger,
   } from '../routines';
   import { draftCron, draftInput, draftMissing, draftZone, type RoutineDraft } from './routine_draft';
+  import { tick, untrack } from 'svelte';
   import PromptTune from '../PromptTune.svelte';
   import { tuneRoutinePrompt } from '../prompt_tune';
   import { helpModel } from '../context_help';
@@ -81,6 +82,25 @@
   // routine's host and profile, saved or not; "Use this" writes draft.prompt.
   const tuneOn = $derived(settingBool($fleetSettings, SETTING_KEYS.workPromptTune));
   let tuneOpen = $state(false);
+  let promptBox: HTMLTextAreaElement | undefined = $state();
+  // One editor serves every draft RoutinesPanel opens (a template picked
+  // while it is open replaces `draft`): a tuner left open would write the
+  // old draft's rewrite into the new one.
+  let tunedDraft: RoutineDraft | null = null;
+  $effect.pre(() => {
+    const d = draft;
+    if (d !== tunedDraft) {
+      tunedDraft = d;
+      untrack(() => (tuneOpen = false));
+    }
+  });
+
+  /** Close the tuner and put focus back on the prompt it was tuning. */
+  async function closeTune() {
+    tuneOpen = false;
+    await tick();
+    promptBox?.focus();
+  }
   const tuneWhy = $derived(draft.host_alias ? null : 'Pick a host first: the tune runs there');
   const visibleHosts = $derived($hosts.filter((h) => !h.hidden));
   const pickable = $derived($projects.filter((p) => !p.project.system));
@@ -287,6 +307,7 @@
         class:bad={promptError}
         data-testid="routine-prompt"
         rows="6"
+        bind:this={promptBox}
         bind:value={draft.prompt}
         onblur={blur('prompt')}
         placeholder="What each run should do, e.g. go through my open PRs and fix what is small."
@@ -303,7 +324,7 @@
           tune={(ask) => tuneRoutinePrompt(draftInput(draft, enabled, deviceZone()), ask)}
           testid="routine-tune"
           onaccept={(p) => (draft.prompt = p)}
-          onclose={() => (tuneOpen = false)}
+          onclose={closeTune}
         />
       {:else}
         <div>

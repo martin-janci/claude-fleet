@@ -2,6 +2,7 @@
 // leave this machine's ssh attach running behind a closed view.
 import { render } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { tick } from 'svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
@@ -36,5 +37,13 @@ describe('FleetTerminal', () => {
     // Nothing drains a terminal nobody shows.
     await new Promise((r) => setTimeout(r, 50));
     expect(calls('pty_drain')).toHaveLength(0);
+  });
+
+  it("never opens this machine's tmux for a session on that hub's own machine", async () => {
+    inv.mockResolvedValue(null);
+    const { getByTestId } = render(FleetTerminal, { props: { fleet: 'company', session: { ...session, host_alias: 'local' } } });
+    await tick();
+    expect(calls('pty_open')).toHaveLength(0);
+    expect(getByTestId('fleet-terminal-refused')).toBeTruthy();
   });
 });

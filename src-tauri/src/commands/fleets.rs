@@ -55,7 +55,9 @@ pub fn fleet_remove(args: FleetIdArgs, fleets: State<'_, Arc<Fleets>>) -> Result
 }
 
 /// An extra fleet's Retry: reconnect now rather than after the backoff.
-#[tauri::command]
+/// `async` because rebuilding an unusable fleet reads its token from the OS
+/// keychain, which can wait on an unlock prompt — never on the main thread.
+#[tauri::command(async)]
 pub fn fleet_retry_now(args: FleetIdArgs, fleets: State<'_, Arc<Fleets>>) -> Result<(), IpcError> {
     fleets.retry(&args.id)
 }

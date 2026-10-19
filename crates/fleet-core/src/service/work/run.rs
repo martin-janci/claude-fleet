@@ -338,6 +338,43 @@ mod tests {
         );
     }
 
+    /// The undelivered run's worker is answered for stopping only when it
+    /// is the mission's own, still running, and the task was still open.
+    #[test]
+    fn an_undelivered_runs_mission_worker_is_answered_for_stopping() {
+        let (s, worker, item) = store_with_item();
+        let t = record_run(&s, worker, "do it", item, 1, "implement").unwrap();
+        let store = Mutex::new(s);
+        // Not a mission's session: left alone.
+        assert_eq!(
+            crate::service::work::resume::run_prompt_undelivered(&store, t.id),
+            None
+        );
+        let t = record_run(
+            &store.lock().unwrap(),
+            worker,
+            "again",
+            item,
+            2,
+            "implement",
+        )
+        .unwrap();
+        store
+            .lock()
+            .unwrap()
+            .set_session_origin(worker, &crate::store::SessionOrigin::mission(7))
+            .unwrap();
+        assert_eq!(
+            crate::service::work::resume::run_prompt_undelivered(&store, t.id),
+            Some(("h".to_string(), "dev-o-r--w".to_string()))
+        );
+        // Already failed: nothing more to stop.
+        assert_eq!(
+            crate::service::work::resume::run_prompt_undelivered(&store, t.id),
+            None
+        );
+    }
+
     #[test]
     fn a_first_run_is_attempt_one_and_a_second_is_the_open_one() {
         let (s, worker, item) = store_with_item();

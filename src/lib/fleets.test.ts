@@ -43,9 +43,16 @@ import {
   rememberFleetFor,
   rememberedFleetFor,
   selectedFleetSession,
+  fleetAttachRefusal,
+  fleetHostChoices,
+  defaultFleetHost,
+  fleetPinSession,
+  fleetTouchViewed,
+  onPrimaryConnection,
   type FleetInfo,
 } from './fleets';
 import type { SessionRow } from './sessions';
+import type { HostRow } from './hosts';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
 
@@ -108,14 +115,60 @@ describe('fleet rows', () => {
     expect(applyFleetEvent(rows, { name: 'session:updated', payload: 'garbage' })).toBeNull();
   });
 
-  it("re-lists a fleet after its bridge's gap and when its link comes up", async () => {
-    _setFleetsForTest([fleet(PRIMARY), fleet('company', { connection: { state: 'connecting' } })]);
-    onFleetEvent({ fleet: 'company', name: 'hub:connection', payload: { state: 'connected' } });
-    expect(get(visibleExtraFleets)[0].fleet.connection).toEqual({ state: 'connected' });
-    onFleetEvent({ fleet: 'company', name: 'hub:resynced', payload: null });
-    await Promise.resolve();
-    const listed = inv.mock.calls.filter(([cmd]) => cmd === 'list_sessions').map(([, a]) => a);
-    expect(listed).toEqual([{ fleet: 'company' }, { fleet: 'company' }]);
+  it('copies nothing for an event it does not keep', () => {
+    onFleetEvent({ fleet: 'company', name: 'session:updated', payload: session(1) });
+    const before = get(fleetRows);
+    onFleetEvent({ fleet: 'company', name: 'task:updated', payload: { id: 1 } });
+    onFleetEvent({ fleet: 'company', name: 'account:upserted', payload: { id: 1 } });
+    expect(get(fleetRows)).toBe(before);
+    onFleetEvent({ fleet: 'company', name: 'session:updated', payload: session(2) });
+    const after = get(fleetRows).get('company')!;
+    expect(after.hosts).toBe(before.get('company')!.hosts);
+    expect(after.sessions).not.toBe(before.get('company')!.sessions);
+  });
+
+  it('a session:updated queued behind a kill does not bring the session back', async () => {
+    _setFleetsForTest([fleet(PRIMARY), fleet('company')]);
+    onFleetEvent({ fleet: 'company', name: 'session:updated', payload: session(1) });
+    inv.mockResolvedValue(1);
+    await fleetKillSession('company', session(1));
+    onFleetEvent({ fleet: 'company', name: 'session:updated', payload: session(1) });
+    expect(get(fleetRows).get('company')?.sessions.has(1)).toBe(false);
+    onFleetEvent({ fleet: 'company', name: 'session:killed', payload: { id: 2 } });
+    onFleetEvent({ fleet: 'company', name: 'session:updated', payload: session(2) });
+    expect(get(fleetRows).get('company')?.sessions.has(2)).toBe(false);
+    // A new session that took the id is let through.
+    onFleetEvent({ fleet: 'company', name: 'session:created', payload: session(1, { tmux_name: 'other' }) });
+    expect(get(fleetRows).get('company')?.sessions.get(1)?.tmux_name).toBe('other');
+  });
+
+  it("a command's older snapshot does not overwrite a newer event", async () => {
+    _setFleetsForTest([fleet(PRIMARY), fleet('company')]);
+    onFleetEvent({ fleet: 'company', name: 'session:updated', payload: session(1, { row_version: 5, claude_status: 'idle' }) });
+    inv.mockResolvedValue(session(1, { row_version: 4, claude_status: 'working' }));
+    await fleetTouchViewed('company', session(1));
+    expect(get(fleetRows).get('company')?.sessions.get(1)?.claude_status).toBe('idle');
+    inv.mockResolvedValue(session(1, { row_version: 6, pinned_at: 9 }));
+    await fleetPinSession('company', session(1), true);
+    expect(get(fleetRows).get('company')?.sessions.get(1)?.pinned_at).toBe(9);
+  });
+
+  it('a list answer does not undo what changed while it was out', async () => {
+    _setFleetsForTest([fleet(PRIMARY), fleet('company')]);
+    onFleetEvent({ fleet: 'company', name: 'session:updated', payload: session(1) });
+    let answer!: (v: unknown) => void;
+    inv.mockImplementation((cmd: string) =>
+      cmd === 'list_sessions' ? new Promise((r) => (answer = r)) : Promise.resolve([]),
+    );
+    const listing = loadFleetRows('company');
+    onFleetEvent({ fleet: 'company', name: 'session:killed', payload: { id: 1 } });
+    onFleetEvent({ fleet: 'company', name: 'session:updated', payload: session(2, { claude_status: 'idle' }) });
+    answer([session(1), session(2, { claude_status: 'working' }), session(3)]);
+    await listing;
+    const rows = get(fleetRows).get('company')!;
+    expect(rows.sessions.has(1)).toBe(false);
+    expect(rows.sessions.get(2)?.claude_status).toBe('idle');
+    expect(rows.sessions.has(3)).toBe(true);
   });
 
   // Each list_sessions call parks until the test answers it, in any order.
@@ -215,6 +268,24 @@ describe('routing', () => {
     expect([...FLEET_SCOPED]).toEqual(backend);
   });
 
+  it("refuses to attach a session on another hub's own machine", () => {
+    expect(fleetAttachRefusal({ host_alias: 'local' })).toMatch(/local/);
+    expect(fleetAttachRefusal({ host_alias: 'mac' })).toBeNull();
+  });
+
+  it("starts the New… form on a host its picker shows", () => {
+    const rows = emptyRows();
+    rows.hosts.set('secret', { alias: 'secret', hidden: true, reachable: true } as HostRow);
+    rows.hosts.set('down', { alias: 'down', hidden: false, reachable: false } as HostRow);
+    rows.hosts.set('up', { alias: 'up', hidden: false, reachable: true } as HostRow);
+    expect(fleetHostChoices(rows).map((h) => h.alias)).toEqual(['down', 'up']);
+    expect(defaultFleetHost(rows)).toBe('up');
+    rows.hosts.delete('up');
+    expect(defaultFleetHost(rows)).toBe('down');
+    rows.hosts.delete('down');
+    expect(defaultFleetHost(rows)).toBe('');
+  });
+
   it('quotes the attach command for a shell', () => {
     expect(fleetAttachCommand({ host_alias: 'mac', tmux_name: 'dev-x' })).toBe("ssh -t mac tmux attach -t =dev-x");
     expect(fleetAttachCommand({ host_alias: 'mac', tmux_name: "it's" })).toBe(
@@ -271,6 +342,17 @@ describe('Phase 2: an extra fleet as a window', () => {
     );
     onFleetEvent({ fleet: 'company', name: 'hub:connection', payload: { state: 'connected' } });
     await vi.waitFor(() => expect(get(visibleExtraFleets)[0].fleet.fleet_id).toBe('f-1'));
+  });
+
+  it("re-reads the fleet list when the primary's own link comes up, so a same-hub-twice fleet is caught", async () => {
+    _setFleetsForTest([fleet(PRIMARY), fleet('again')]);
+    inv.mockImplementation(async (cmd: string) =>
+      cmd === 'fleets_list' ? [fleet(PRIMARY), fleet('again', { duplicate_of: 'primary' })] : [],
+    );
+    onPrimaryConnection({ state: 'connecting' });
+    expect(inv).not.toHaveBeenCalled();
+    onPrimaryConnection({ state: 'connected' });
+    await vi.waitFor(() => expect(get(visibleExtraFleets)[0].fleet.duplicate_of).toBe('primary'));
   });
 
   it("never shows a duplicate fleet's rows", () => {

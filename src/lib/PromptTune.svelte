@@ -47,6 +47,8 @@
   const blocked = $derived(tuneBlocked(draft));
   const diff = $derived(answer ? lineDiff(tunedFrom, edited) : null);
   const meta = $derived(answer ? draftedBy(answer.model, answer.host_alias || null) : '');
+  /** The box changed since this tune: accepting would drop what was typed. */
+  const stale = $derived(answer !== null && draft !== tunedFrom);
 
   onMount(() => input?.focus());
 
@@ -85,13 +87,23 @@
   }
 
   function accept() {
-    if (!answer || edited.trim() === '') return;
+    if (!answer || stale || edited.trim() === '') return;
     onaccept(edited);
+    onclose();
+  }
+
+  // Esc anywhere in the panel (a chip, Use this, ×) closes the tuner and
+  // goes no further: under it is a composer or a form whose Esc does more.
+  function onPanelKey(e: KeyboardEvent) {
+    if (e.key !== 'Escape' || e.defaultPrevented) return;
+    e.preventDefault();
+    e.stopPropagation();
     onclose();
   }
 </script>
 
-<section class="tune" data-testid={testid} aria-label="Tune prompt with {model}">
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+<section class="tune" data-testid={testid} aria-label="Tune prompt with {model}" onkeydown={onPanelKey}>
   <div class="head">
     <h3>Tune prompt</h3>
     <span class="muted">{model} rewrites your draft for the agent. Nothing is sent.</span>
@@ -187,13 +199,18 @@
                 : `${r.kind === 'add' ? '+' : r.kind === 'del' ? '−' : ' '} ${r.text}`}
 </span>{/each}</pre>
       {/if}
+      {#if stale}
+        <p class="muted" data-testid="{testid}-stale">Your draft changed since this tune. Tune again to use it.</p>
+      {/if}
       <div class="actions">
         <button
           type="button"
           class="btn btn--primary"
           data-testid="{testid}-accept"
-          disabled={edited.trim() === ''}
-          title="Replace the draft in the box with this. It is not sent: your Send sends it."
+          disabled={stale || edited.trim() === ''}
+          title={stale
+            ? 'Your draft changed since this tune: tune again so nothing you typed is lost.'
+            : 'Replace the draft in the box with this. It is not sent: your Send sends it.'}
           onclick={accept}>{acceptLabel}</button
         >
         <button type="button" class="btn" data-testid="{testid}-discard" onclick={onclose}>Discard</button>

@@ -758,7 +758,11 @@ fn digest_pending(s: &Store, session_id: i64) -> bool {
 /// Every standing condition now: hosts as `fleet_health` judges them (the
 /// hidden and disabled left out), and the handed-off missions waiting on a
 /// person.
-fn conditions(s: &Store, now: i64) -> Vec<Condition> {
+fn conditions(
+    s: &Store,
+    follows: &[crate::service::control_follow::Follow],
+    now: i64,
+) -> Vec<Condition> {
     use crate::service::health;
     let local = crate::service::hub::local_host_enabled();
     let hosts = crate::service::hosts::active_hosts(s.list_hosts().unwrap_or_default(), local);
@@ -800,6 +804,7 @@ fn conditions(s: &Store, now: i64) -> Vec<Condition> {
     out.extend(crate::service::control_sweep::conditions(
         s,
         operator_row(s).map(|r| r.id),
+        follows,
         now,
     ));
     out
@@ -857,11 +862,17 @@ pub async fn run_with(
             .operator_feed_events(cursor, Some(op.id), &KINDS, READ_LIMIT)
             .unwrap_or_default();
         state.cursor = Some(events.last().map_or(cursor, |e| e.id));
-        // F10: only the sessions Control still follows ([`told_of`]).
-        let follows = crate::service::control_follow::follows(&s, Some(op.id), now);
+        // F10: only the sessions Control still follows ([`told_of`]). Read
+        // once per pass: the sweep's conditions reuse it, and with nothing
+        // read and the sweep off nobody needs it.
+        let follows = if events.is_empty() && !settings::get_bool(&s, settings::CONTROL_SWEEP) {
+            Vec::new()
+        } else {
+            crate::service::control_follow::follows(&s, Some(op.id), now)
+        };
         events.retain(|e| told_of(&follows, e.session_id, &e.kind));
         fold(&mut state, &events, now);
-        let now_raised = conditions(&s, now);
+        let now_raised = conditions(&s, &follows, now);
         let mut fresh: Vec<String> = now_raised
             .iter()
             .filter(|c| !state.raised.contains(&c.key))

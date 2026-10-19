@@ -112,9 +112,11 @@ impl SweepState {
 }
 
 /// PURE: since when `m`'s done count has stood still, updating `state`.
+/// Time spent waiting on a person is not standing still: while the mission
+/// waits the clock stays at `now`, so it starts again when the wait ends.
 pub fn progress_since(state: &mut SweepState, m: &MissionRow, now: i64) -> i64 {
     let e = state.missions.entry(m.id).or_insert((m.done, now));
-    if e.0 != m.done {
+    if e.0 != m.done || m.waiting_on.is_some() {
         *e = (m.done, now);
     }
     e.1
@@ -173,19 +175,25 @@ pub fn pr_swept(follows: &[crate::service::control_follow::Follow], id: i64) -> 
 }
 
 /// Every sweep condition now, for the feed's standing conditions. Empty
-/// with `control.sweep` off. `exclude` is the operator's own row.
-pub fn conditions(s: &Store, exclude: Option<i64>, now: i64) -> Vec<Condition> {
+/// with `control.sweep` off. `exclude` is the operator's own row;
+/// `follows` is `control_follow::follows` for it, which the feed's pass
+/// already read.
+pub fn conditions(
+    s: &Store,
+    exclude: Option<i64>,
+    follows: &[crate::service::control_follow::Follow],
+    now: i64,
+) -> Vec<Condition> {
     if !settings::get_bool(s, settings::CONTROL_SWEEP) {
         return Vec::new();
     }
     let ask = crate::service::autonomy::position(s).is_ask_first();
     // F10: a muted thread is never swept; a mission only while followed;
     // a session's PR whether or not the session is still followed.
-    let follows = crate::service::control_follow::follows(s, exclude, now);
-    let followed = |kind: &str, id: i64| swept(&follows, kind, id);
+    let followed = |kind: &str, id: i64| swept(follows, kind, id);
     let mut out = Vec::new();
     for id in s.handed_off_session_ids(exclude).unwrap_or_default() {
-        if !pr_swept(&follows, id) {
+        if !pr_swept(follows, id) {
             continue;
         }
         if let Ok(Some(row)) = s.get_session_by_id(id) {
@@ -195,24 +203,36 @@ pub fn conditions(s: &Store, exclude: Option<i64>, now: i64) -> Vec<Condition> {
     let mut state = SweepState::load(s);
     let before = state.clone();
     let mut seen = Vec::new();
-    for id in s.handed_off_mission_ids().unwrap_or_default() {
+    // A mission that could not be read keeps its clock (`seen`); without
+    // the list itself nothing is forgotten. Else one read error would
+    // restart a stalled mission's STALL_SECS window.
+    let ids = s.handed_off_mission_ids();
+    let listed = ids.is_ok();
+    for id in ids.unwrap_or_default() {
         if !followed("mission", id) {
             continue;
         }
-        let Ok(Some(mut m)) = s.get_mission(id) else {
-            continue;
+        let mut m = match s.get_mission(id) {
+            Ok(Some(m)) => m,
+            Ok(None) => continue,
+            Err(_) => {
+                seen.push(id);
+                continue;
+            }
         };
         if m.state != "active" {
             continue;
         }
+        seen.push(m.id);
         if crate::service::work::orchestrate::fill_spend(s, &mut m, now).is_err() {
             continue;
         }
-        seen.push(m.id);
         let since = progress_since(&mut state, &m, now);
         out.extend(mission_condition(&m, since, now, ask));
     }
-    state.missions.retain(|id, _| seen.contains(id));
+    if listed {
+        state.missions.retain(|id, _| seen.contains(id));
+    }
     if state != before {
         state.save(s);
     }

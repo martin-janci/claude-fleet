@@ -4,7 +4,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
-import { tuneBlocked, tuneComposerPrompt, tuneRoutinePrompt } from './prompt_tune';
+import { TUNE_DRAFT_MAX_CHARS, tuneBlocked, tuneComposerPrompt, tuneRoutinePrompt } from './prompt_tune';
 import { HELP_HISTORY_MAX } from './context_help';
 import type { RoutineInput } from './routines';
 
@@ -38,5 +38,7 @@ describe('prompt_tune', () => {
   it('an empty draft is blocked', () => {
     expect(tuneBlocked(' \n')).toMatch(/draft/);
     expect(tuneBlocked('x')).toBeNull();
+    expect(tuneBlocked('a'.repeat(TUNE_DRAFT_MAX_CHARS))).toBeNull();
+    expect(tuneBlocked('a'.repeat(TUNE_DRAFT_MAX_CHARS + 1))).toMatch(/too long/);
   });
 });

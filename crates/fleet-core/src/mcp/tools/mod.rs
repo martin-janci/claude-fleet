@@ -80,6 +80,8 @@ mod tests_catalog_admin;
 #[cfg(test)]
 mod tests_changesets;
 #[cfg(test)]
+mod tests_control_gates;
+#[cfg(test)]
 mod tests_env_vars;
 #[cfg(test)]
 mod tests_isolation;

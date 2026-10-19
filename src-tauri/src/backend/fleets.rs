@@ -335,6 +335,10 @@ pub struct Fleets {
     links: Arc<dyn FleetLinks>,
     shutdown: CancellationToken,
     handles: RwLock<BTreeMap<String, FleetHandle>>,
+    /// Serialises every read-modify-write of the stored rows, so an add
+    /// whose pairing was in flight cannot write back a stale list over a
+    /// concurrent add or remove. Never held across an `.await`.
+    records_lock: Mutex<()>,
     /// See [`PrimaryIdentity`]; `None` in tests that are not about it.
     primary_identity: Option<PrimaryIdentity>,
 }
@@ -354,6 +358,7 @@ impl Fleets {
             links,
             shutdown,
             handles: RwLock::new(BTreeMap::new()),
+            records_lock: Mutex::new(()),
             primary_identity: None,
         }
     }
@@ -623,26 +628,41 @@ impl Fleets {
                 format!("a fleet's label is at most {LABEL_MAX} characters"),
             ));
         }
-        let color = match args
+        let chosen_color = match args
             .color
             .as_deref()
             .map(str::trim)
             .filter(|c| !c.is_empty())
         {
-            Some(c) if valid_color(c) => c.to_ascii_lowercase(),
+            Some(c) if valid_color(c) => Some(c.to_ascii_lowercase()),
             Some(c) => {
                 return Err(IpcError::new(
                     codes::E_INVALID,
                     format!("{c:?} is not a colour of the form #rrggbb"),
                 ))
             }
-            None => next_color(&records),
+            None => None,
         };
-        let taken: Vec<&str> = records.iter().map(|r| r.id.as_str()).collect();
-        let id = slot_for(&label, &taken);
 
         let client = pairing::redeem(transport, &url, &code).await?;
-        // From here the code is spent.
+        // From here the code is spent. The rows are read again, under the
+        // lock: another add or a remove may have written them while the
+        // pairing was in flight, and writing back the earlier read would
+        // undo it. The slot and the colour are chosen from this read.
+        let rows_guard = self.records_lock.lock().unwrap_or_else(|p| p.into_inner());
+        let records = read_records(&self.store)?;
+        if let Some(dup) = duplicate_of(&url, primary, &records) {
+            return Err(IpcError::new(
+                codes::E_EXISTS,
+                format!(
+                    "{url} was added as {dup} while this pairing was in flight — the code is \
+                     spent, and the fleet is already shown"
+                ),
+            ));
+        }
+        let color = chosen_color.unwrap_or_else(|| next_color(&records));
+        let taken: Vec<&str> = records.iter().map(|r| r.id.as_str()).collect();
+        let id = slot_for(&label, &taken);
         let tokens = self.tokens.for_fleet(&id);
         tokens.clear().map_err(|e| {
             IpcError::new(
@@ -675,6 +695,8 @@ impl Fleets {
             )
         })?;
         if let Err(e) = tokens.set(&client.token) {
+            // Still under the lock, so this read is the list as it stands
+            // without this call's row, not a stale snapshot.
             let _ = write_records(&self.store, &records);
             return Err(IpcError::new(
                 codes::E_IO,
@@ -685,6 +707,7 @@ impl Fleets {
                 ),
             ));
         }
+        drop(rows_guard);
         let handle = self.connect(record);
         self.write().insert(id.clone(), handle);
         self.list(primary)
@@ -707,6 +730,7 @@ impl Fleets {
         if let Some(handle) = self.write().remove(id) {
             handle.cancel.cancel();
         }
+        let _rows = self.records_lock.lock().unwrap_or_else(|p| p.into_inner());
         let records = read_records(&self.store)?;
         if !records.iter().any(|r| r.id == id) {
             return Err(IpcError::new(

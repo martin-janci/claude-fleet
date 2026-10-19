@@ -18,11 +18,21 @@
     open = false;
     onpick(id);
   }
+
+  // Esc inside the menu (on its trigger or an item) closes only the menu:
+  // the editor's footer sits in a form whose own Esc cancels the routine.
+  function menuKey(e: KeyboardEvent) {
+    if (!open || e.key !== 'Escape') return;
+    e.preventDefault();
+    e.stopPropagation();
+    open = false;
+  }
 </script>
 
 <svelte:window onkeydown={(e) => open && e.key === 'Escape' && (open = false)} />
 
-<div class="new">
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="new" onkeydown={menuKey}>
   <Button variant={up ? 'quiet' : 'default'} {testid} onclick={() => (open = !open)}>{label}</Button>
   {#if open}
     <div class="menu" class:up role="menu" data-testid="routine-new-menu">

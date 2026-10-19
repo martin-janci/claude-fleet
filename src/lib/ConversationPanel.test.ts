@@ -5035,8 +5035,9 @@ describe('ConversationPanel composer access (multi-user M1)', () => {
     // which is where the panel's own selection comes from in the app. A row
     // the store has not got fails closed, by design.
     sessions.set([row]);
-    render(ConversationPanel, { session: row, visible: true });
+    const view = render(ConversationPanel, { session: row, visible: true });
     await settle();
+    return view;
   }
 
   const box = () => screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
@@ -5104,6 +5105,35 @@ describe('ConversationPanel composer access (multi-user M1)', () => {
       await settle();
       expect(box().value).toBe('Fix the login test.');
       expect(names()).not.toContain('send_prompt');
+    } finally {
+      fleetSettings.set({ ...SETTING_DEFAULTS });
+    }
+  });
+
+  // One panel serves every session: a rewrite tuned for session 1 must not
+  // stay on screen, ready to "Use this" into session 2's draft.
+  it('a session switch closes the tuner, so one session’s rewrite cannot land in another’s draft', async () => {
+    fleetSettings.set({ ...SETTING_DEFAULTS, 'work.prompt_tune': 'true' });
+    mockedInvoke.mockImplementation(async (cmd: string, payload?: unknown) =>
+      cmd === 'session_prompt_tune'
+        ? { prompt: 'Fix the login test.', notes: '', unchanged: false, model: 'haiku', host_alias: 'h', at: 1 }
+        : baseInvoke(cmd, payload as Record<string, unknown> | undefined),
+    );
+    try {
+      const { rerender } = await renderShared('answer');
+      await fireEvent.input(box(), { target: { value: 'fix test' } });
+      await fireEvent.click(screen.getByTestId('conv-tune-button'));
+      await settle();
+      await fireEvent.keyDown(screen.getByTestId('conv-tune-ask'), { key: 'Enter' });
+      await settle();
+      expect(screen.getByTestId('conv-tune-accept')).toBeTruthy();
+      myGrants.set(new Map([[1, 'answer'], [2, 'answer']]));
+      const other = session({ id: 2, owner_person_id: 7, visibility: 'private' });
+      sessions.set([session({ owner_person_id: 7, visibility: 'private' }), other]);
+      await rerender({ session: other, visible: true });
+      await settle();
+      expect(screen.queryByTestId('conv-tune')).toBeNull();
+      expect(box().value).not.toBe('Fix the login test.');
     } finally {
       fleetSettings.set({ ...SETTING_DEFAULTS });
     }

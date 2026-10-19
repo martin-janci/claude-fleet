@@ -465,15 +465,21 @@ pub async fn run_with(store: &Mutex<Store>, exec: &dyn JournalExec, now: i64) ->
             return JournalReport::default();
         }
         let op = op.expect("checked");
-        let newest = s.newest_session_event_id().unwrap_or(0);
+        // A read error leaves the cursor where it is: falling back to 0
+        // would rewind it onto every past new conversation, and an empty
+        // list would skip a real one.
+        let Ok(newest) = s.newest_session_event_id() else {
+            return JournalReport::default();
+        };
         let Some(cursor) = state.cursor else {
             state.cursor = Some(newest);
             state.save(&s);
             return JournalReport::default();
         };
-        let started = s
-            .session_events_of_kinds_after(op.id, &NEW_CONVERSATION_KINDS, cursor)
-            .unwrap_or_default();
+        let Ok(started) = s.session_events_of_kinds_after(op.id, &NEW_CONVERSATION_KINDS, cursor)
+        else {
+            return JournalReport::default();
+        };
         if started.is_empty() {
             if newest != cursor {
                 state.cursor = Some(newest);

@@ -26,6 +26,7 @@
     closeFleetSession,
     connectionWord,
     fleetAttachCommand,
+    fleetAttachRefusal,
     fleetCaptureSession,
     fleetSendKey,
     fleetSendPrompt,
@@ -64,17 +65,29 @@
   const cw = $derived(connectionWord(fleet));
   const name = $derived(session.friendly_name || session.tmux_name);
   const key = $derived(`${fleet.id}:${session.id}`);
+  const attachRefusal = $derived(fleetAttachRefusal(session));
 
-  // Each read is numbered and only the newest one lands: a read for the
-  // session this view showed before (or an older poll that came back late)
-  // must not paint over the current one.
+  // Every read goes to another hub over the network, so an answer can land
+  // after the person moved to another session, or after a newer read: only
+  // the latest read for the session still on screen is applied. A poll tick
+  // is skipped while a read is out (ConversationPanel's `inFlight`), so a
+  // slow link does not pile reads up on that hub.
   let convSeq = 0;
+  let convInFlight = 0;
   let snapshotSeq = 0;
 
-  async function loadConversation() {
+  async function loadConversation(opts: { poll?: boolean } = {}) {
+    if (opts.poll && convInFlight > 0) return;
+    const at = key;
     const seq = ++convSeq;
-    const r = await sessionConversation(session.id, turns, undefined, fleet.id);
-    if (seq !== convSeq) return;
+    convInFlight++;
+    let r: Awaited<ReturnType<typeof sessionConversation>>;
+    try {
+      r = await sessionConversation(session.id, turns, undefined, fleet.id);
+    } finally {
+      convInFlight--;
+    }
+    if (at !== key || seq !== convSeq) return;
     if (r.ok) {
       convError = null;
       if (!sameConversation(conv, r.value)) conv = reuseTurns(conv, r.value);
@@ -84,9 +97,10 @@
   }
 
   async function loadSnapshot() {
+    const at = key;
     const seq = ++snapshotSeq;
     const r = await fleetCaptureSession(fleet.id, session);
-    if (seq !== snapshotSeq) return;
+    if (at !== key || seq !== snapshotSeq) return;
     if (r.ok) {
       snapshot = r.value;
       snapshotError = null;
@@ -95,7 +109,9 @@
     }
   }
 
-  // A new session (or fleet) starts over: its conversation, its window.
+  // A new session (or fleet) starts over: its conversation, its window, and
+  // an empty composer — text typed for one session must never be sent to
+  // the next one by an Enter.
   $effect(() => {
     void key;
     untrack(() => {
@@ -105,6 +121,8 @@
       snapshot = null;
       snapshotError = null;
       snapshotSeq++;
+      draft = '';
+      sending = false;
       tab = 'conversation';
       void loadConversation();
       void fleetTouchViewed(fleet.id, session);
@@ -112,17 +130,22 @@
   });
 
   // Re-read when the row says something moved, and on the panel's cadence.
+  // Not on its first run for a session: the effect above has just read it.
+  let activityKey: string | null = null;
   $effect(() => {
     void session.last_activity_at;
     void session.claude_status;
+    const k = key;
     untrack(() => {
-      if (tab === 'conversation') void loadConversation();
+      const fresh = activityKey !== k;
+      activityKey = k;
+      if (!fresh && tab === 'conversation') void loadConversation();
     });
   });
 
   timer = setInterval(() => {
     nowMs = Date.now();
-    if (tab === 'conversation' && typeof document !== 'undefined' && !document.hidden) void loadConversation();
+    if (tab === 'conversation' && typeof document !== 'undefined' && !document.hidden) void loadConversation({ poll: true });
   }, CONVERSATION_POLL_MS);
 
   onDestroy(() => {
@@ -137,14 +160,17 @@
   async function send() {
     const text = draft.trim();
     if (!text || sending) return;
+    const at = key;
+    const who = `${name} on ${fleet.label}`;
     sending = true;
     const r = await fleetSendPrompt(fleet.id, session, text);
+    if (!r.ok) push({ kind: 'error', message: `Sending to ${who} failed`, detail: r.error.message });
+    // Moved to another session meanwhile: its composer is not this one's.
+    if (at !== key) return;
     sending = false;
     if (r.ok) {
       draft = '';
       void loadConversation();
-    } else {
-      push({ kind: 'error', message: `Sending to ${name} on ${fleet.label} failed`, detail: r.error.message });
     }
   }
 
@@ -167,6 +193,7 @@
   }
 
   async function copyAttach() {
+    if (attachRefusal) return;
     if (await copyText(fleetAttachCommand(session))) push({ kind: 'success', message: 'Attach command copied' });
   }
 </script>
@@ -191,7 +218,14 @@
         >
       {/each}
     </div>
-    <Button size="sm" variant="quiet" onclick={() => void copyAttach()}>Copy attach</Button>
+    <Button
+      size="sm"
+      variant="quiet"
+      testid="fleet-session-copy-attach"
+      disabled={!!attachRefusal}
+      title={attachRefusal ?? undefined}
+      onclick={() => void copyAttach()}>Copy attach</Button
+    >
     <Button size="sm" variant="quiet" testid="fleet-session-close" onclick={closeFleetSession}>Close</Button>
   </header>
 

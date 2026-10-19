@@ -2560,6 +2560,29 @@ impl Store {
         let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?)))?;
         rows.collect()
     }
+
+    /// Live Claude sessions with no account link yet, per `(host, profile)`
+    /// login. A run just started under a profile has its link dropped by
+    /// [`Self::set_session_profile`] until a later reconcile fills it, so
+    /// [`Self::live_sessions_per_account`] does not see it; placement charges
+    /// these to the account the login holds.
+    pub fn live_unlinked_sessions_per_login(
+        &self,
+    ) -> Result<std::collections::HashMap<(String, Option<String>), u32>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT host_alias, claude_profile, COUNT(*) FROM sessions \
+             WHERE status = 'running' AND lost_at IS NULL \
+               AND account_uuid IS NULL AND kind != 'shell' \
+             GROUP BY host_alias, claude_profile",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok((
+                (r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?),
+                r.get::<_, u32>(2)?,
+            ))
+        })?;
+        rows.collect()
+    }
 }
 
 #[cfg(test)]

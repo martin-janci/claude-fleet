@@ -151,3 +151,27 @@ describe('Later', () => {
     expect(get(again.laterEscalations).has('7:waiting:3')).toBe(true);
   });
 });
+
+describe('a host-down card put off with Later', () => {
+  const hostRow = (alias: string, reachable: boolean) => ({ alias, reachable, hidden: false }) as unknown as HostRow;
+
+  it('is forgotten once the host is up again, so its next outage raises a card', async () => {
+    const { vi } = await import('vitest');
+    vi.resetModules();
+    const m = await import('./control_escalations');
+    const { get } = await import('svelte/store');
+    m.putOff('host:mac');
+    m.putOff('7:waiting:3');
+    m.forgetRecoveredHosts([hostRow('mac', false)]);
+    expect(get(m.laterEscalations).has('host:mac')).toBe(true);
+    m.forgetRecoveredHosts([hostRow('mac', true)]);
+    expect(get(m.laterEscalations).has('host:mac')).toBe(false);
+    expect(get(m.laterEscalations).has('7:waiting:3')).toBe(true);
+  });
+
+  it('dropRecoveredHosts keeps every other card', async () => {
+    const { dropRecoveredHosts } = await import('./control_escalations');
+    const entries: [string, number][] = [['host:mac', 1], ['host:htz', 2], ['login:mac::5', 3]];
+    expect(dropRecoveredHosts(entries, [hostRow('mac', true), hostRow('htz', false)])).toEqual([['host:htz', 2], ['login:mac::5', 3]]);
+  });
+});

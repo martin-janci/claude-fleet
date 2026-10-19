@@ -16,7 +16,7 @@
   import { keyToBytes, detectMac } from './terminal_keys';
   import { createDrainLoop } from './terminal_drain';
   import { fitCells } from './terminal_size';
-  import { fleetPtyId } from './fleets';
+  import { fleetAttachRefusal, fleetPtyId } from './fleets';
   import { toIpcError } from './result';
   import type { SessionRow } from './sessions';
   import Button from './kit/Button.svelte';
@@ -46,12 +46,37 @@
   let rows = 24;
   let cellW = $state(7.8);
   let ro: ResizeObserver | null = null;
+  // `local` on another hub is that hub's own machine; here it would be this
+  // desktop's tmux, a different session that may share the name.
+  const refusal = $derived(fleetAttachRefusal(session));
 
+  // Each row's runs, re-derived only when `Screen.rowVersion` says the row
+  // changed (as TerminalView's `visibleRows` does): a drain that touched two
+  // rows re-encodes two rows, not the whole grid.
+  let rowCache: { ver: number; runs: Run[] }[] = [];
+  let cacheScreen: Screen | null = null;
   const view = $derived.by(() => {
     void version;
     const scr = screen;
     if (!scr) return [] as Run[][];
-    return scr.cells.map((r) => rowToRuns(r));
+    if (cacheScreen !== scr) {
+      rowCache = [];
+      cacheScreen = scr;
+    }
+    const out: Run[][] = new Array(scr.rows);
+    for (let r = 0; r < scr.rows; r++) {
+      const ver = scr.rowVersion[r];
+      const cached = rowCache[r];
+      if (cached !== undefined && cached.ver === ver) {
+        out[r] = cached.runs;
+        continue;
+      }
+      const runs = rowToRuns(scr.cells[r]);
+      rowCache[r] = { ver, runs };
+      out[r] = runs;
+    }
+    if (rowCache.length > scr.rows) rowCache.length = scr.rows;
+    return out;
   });
 
   function measure() {
@@ -124,7 +149,7 @@
   }
 
   async function attachNow() {
-    if (destroyed) return;
+    if (destroyed || refusal) return;
     await close();
     measure();
     const dim = size();
@@ -192,7 +217,9 @@
 </script>
 
 <div class="fleet-term" data-testid="fleet-terminal">
-  {#if error}
+  {#if refusal}
+    <p class="note err" data-testid="fleet-terminal-refused">{refusal}</p>
+  {:else if error}
     <p class="note err" data-testid="fleet-terminal-error">
       Couldn't attach from this machine: {error}. The attach uses this machine's ssh with the
       host alias <code>{session.host_alias}</code>, which has to resolve here too.
