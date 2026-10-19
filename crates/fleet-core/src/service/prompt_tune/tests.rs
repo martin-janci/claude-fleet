@@ -110,23 +110,16 @@ fn the_draft_survives_a_long_history() {
 
 #[test]
 fn the_reply_is_read_as_json_or_as_plain_text() {
-    let (p, n) = parse_reply(
-        r#"Sure: {"prompt": "Do X.\nThen Y.", "notes": "Split it."}"#,
-        "",
-        DRAFT_MAX_CHARS,
-    )
-    .unwrap();
+    let parse = |reply: &str| parse_reply(reply, "", DRAFT_MAX_CHARS);
+    let (p, n) = parse(r#"Sure: {"prompt": "Do X.\nThen Y.", "notes": "Split it."}"#).unwrap();
     assert_eq!((p.as_str(), n.as_str()), ("Do X.\nThen Y.", "Split it."));
-    let (p, n) = parse_reply("Just do X.", "", DRAFT_MAX_CHARS).unwrap();
+    let (p, n) = parse("Just do X.").unwrap();
     assert_eq!((p.as_str(), n.as_str()), ("Just do X.", ""));
-    let (p, _) = parse_reply(r#"{"prompt": "```\nDo X.\n```"}"#, "", DRAFT_MAX_CHARS).unwrap();
+    let (p, _) = parse(r#"{"prompt": "```\nDo X.\n```"}"#).unwrap();
     assert_eq!(p, "Do X.", "a fence is stripped");
+    assert_eq!(parse(r#"{"prompt": "", "notes": "n"}"#), None);
     assert_eq!(
-        parse_reply(r#"{"prompt": "", "notes": "n"}"#, "", DRAFT_MAX_CHARS),
-        None
-    );
-    assert_eq!(
-        parse_reply("{\"prompt\": \"a\\u0007b\"}", "", DRAFT_MAX_CHARS),
+        parse("{\"prompt\": \"a\\u0007b\"}"),
         None,
         "a bell is refused"
     );

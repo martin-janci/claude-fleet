@@ -337,6 +337,11 @@ impl Fx {
     }
 }
 
+/// A small definition on `trigger`, with no stores, inputs or bindings.
+fn trigger_fx(trigger: Value) -> Fx {
+    fx(small(trigger, json!([])), json!({}), json!([]), false)
+}
+
 fn l2_fx() -> Fx {
     fx(
         l2(),
@@ -507,6 +512,17 @@ fn a_schedule_fires_once_for_its_newest_missed_slot() {
     assert!(schedule_fire("not cron", 0, 1).is_err());
 }
 
+#[test]
+fn a_kept_subject_is_seen_however_long_its_dedup_key() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let long = "k".repeat(400);
+    assert!(!subject_seen(&store, 1, &long, 10).unwrap());
+    keep_subject(&store, 1, &long, &json!({ "n": 1 }), 10).unwrap();
+    // The record keeps the key cut to 300 characters; the lookup must cut it too.
+    assert!(subject_seen(&store, 1, &long, 10).unwrap());
+    assert!(!subject_seen(&store, 2, &long, 10).unwrap());
+}
+
 const GOOD: &str = r#"Here it is: {"summary":"Gateway key expired","rootCause":"The key","confidence":"high","severity":"critical","extra":"dropped"}"#;
 
 #[tokio::test]
@@ -634,12 +650,7 @@ async fn an_answer_off_the_schema_fails_the_job() {
 
 #[tokio::test]
 async fn a_person_runs_a_manual_agent_with_a_request() {
-    let f = fx(
-        small(json!({ "source": "manual" }), json!([])),
-        json!({}),
-        json!([]),
-        false,
-    );
+    let f = trigger_fx(json!({ "source": "manual" }));
     let src = super::definition::TriggerSource::Manual;
     // The subject is kept for its TTL from now; the run reads it at now.
     let now = crate::store::now_unix();
@@ -757,15 +768,7 @@ fn run_now_on_a_scheduled_agent_keeps_its_focus() {
     let src = super::definition::TriggerSource::Schedule;
     let now = crate::store::now_unix();
     for request in [Some("the hub"), None] {
-        let f = fx(
-            small(
-                json!({ "source": "schedule", "cron": "0 7 * * *" }),
-                json!([]),
-            ),
-            json!({}),
-            json!([]),
-            false,
-        );
+        let f = trigger_fx(json!({ "source": "schedule", "cron": "0 7 * * *" }));
         queue_manual(&f.store, &f.rule, src, request, None, now).unwrap();
         let jobs = f
             .store
@@ -1466,16 +1469,8 @@ fn gh_item(updated: i64, comments: &[(&str, &str, i64)]) -> ItemThread {
 
 #[tokio::test]
 async fn another_trackers_synced_items_are_polled_and_their_subject_kept() {
-    let f = fx(
-        small(
-            json!({ "source": "tracker_comments", "tracker": "3",
-                "match": { "any_phrase": "/ask" } }),
-            json!([]),
-        ),
-        json!({}),
-        json!([]),
-        false,
-    );
+    let f = trigger_fx(json!({ "source": "tracker_comments", "tracker": "3",
+        "match": { "any_phrase": "/ask" } }));
     *f.world.provider.lock().unwrap() = Some("github".into());
     let now = crate::store::now_unix();
     let since = now - 300;
@@ -1533,16 +1528,8 @@ async fn another_trackers_synced_items_are_polled_and_their_subject_kept() {
 
 #[tokio::test]
 async fn another_tracker_takes_an_assignment_and_refuses_a_jql_query() {
-    let assigned = fx(
-        small(
-            json!({ "source": "tracker_assigned", "tracker": "3",
-                "match": { "assignee": "octocat" } }),
-            json!([]),
-        ),
-        json!({}),
-        json!([]),
-        false,
-    );
+    let assigned = trigger_fx(json!({ "source": "tracker_assigned", "tracker": "3",
+        "match": { "assignee": "octocat" } }));
     *assigned.world.provider.lock().unwrap() = Some("linear".into());
     let now = crate::store::now_unix();
     *assigned.world.items.lock().unwrap() = vec![gh_item(now - 5, &[])];

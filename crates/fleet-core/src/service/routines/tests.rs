@@ -193,6 +193,18 @@ fn routine(f: &Fx, id: i64) -> RoutineRow {
     lock(&f.store).unwrap().get_routine(id).unwrap().unwrap()
 }
 
+/// A routine that retries a failed run once.
+fn retrying_routine(f: &Fx) -> RoutineRow {
+    let mut i = input(f);
+    i.retry_once = Some(true);
+    new_routine(f, i)
+}
+
+/// `run` is the retry of run `failed`.
+fn assert_retry_of(run: &RoutineRunRow, failed: i64) {
+    assert_eq!(run.trigger_ref, Some(format!("retry:{failed}")), "{run:?}");
+}
+
 fn runs_of(f: &Fx, id: i64) -> Vec<RoutineRunRow> {
     let mut r = lock(&f.store).unwrap().routine_runs(id, 50).unwrap();
     r.reverse();
@@ -747,10 +759,7 @@ async fn an_event_routine_fires_on_its_owners_sessions_only() {
         id
     };
     event(&f, old, "stuck");
-    let mut i = input(&f);
-    i.trigger = "event".into();
-    i.cron = None;
-    i.event = Some("stuck".into());
+    let mut i = event_input(&f, "stuck");
     i.overlap = Some("parallel".into());
     let r = new_routine(&f, i);
     assert_eq!(r.next_run_at, None);
@@ -795,10 +804,7 @@ async fn an_event_routine_fires_on_its_owners_sessions_only() {
 #[tokio::test]
 async fn an_event_routine_with_nothing_to_fire_moves_its_cursor_on() {
     let f = fx();
-    let mut i = input(&f);
-    i.trigger = "event".into();
-    i.cron = None;
-    i.event = Some("stuck".into());
+    let i = event_input(&f, "stuck");
     let r = new_routine(&f, i);
     let mine = {
         let s = lock(&f.store).unwrap();
@@ -824,10 +830,7 @@ async fn an_event_routine_with_nothing_to_fire_moves_its_cursor_on() {
 #[tokio::test]
 async fn an_event_routine_turned_off_during_a_pass_does_not_fire() {
     let f = fx();
-    let mut i = input(&f);
-    i.trigger = "event".into();
-    i.cron = None;
-    i.event = Some("stuck".into());
+    let i = event_input(&f, "stuck");
     let r = new_routine(&f, i);
     let mine = {
         let s = lock(&f.store).unwrap();
@@ -1322,11 +1325,17 @@ fn see_pr(f: &Fx, sid: i64, url: &str, state: &str, review: Option<&str>, ci: Op
     .unwrap();
 }
 
-fn pr_routine(f: &Fx, event: &str, change: impl FnOnce(&mut RoutineInput)) -> RoutineRow {
+/// `input` turned into an event routine on `event`.
+fn event_input(f: &Fx, event: &str) -> RoutineInput {
     let mut i = input(f);
     i.trigger = "event".into();
     i.cron = None;
     i.event = Some(event.into());
+    i
+}
+
+fn pr_routine(f: &Fx, event: &str, change: impl FnOnce(&mut RoutineInput)) -> RoutineRow {
+    let mut i = event_input(f, event);
     i.overlap = Some("parallel".into());
     change(&mut i);
     new_routine(f, i)
@@ -1810,10 +1819,7 @@ async fn pause_all_still_stops_retries_and_fires() {
         .unwrap();
     tick_once(&f.deps, OCT8 + 40).await;
     let runs = runs_of(&f, r.id);
-    assert_eq!(
-        runs[1].trigger_ref.as_deref(),
-        Some(&*format!("retry:{}", failed.id))
-    );
+    assert_retry_of(&runs[1], failed.id);
     lock(&f.store)
         .unwrap()
         .set_setting(crate::service::settings::AUTOMATION_PAUSED, "true")
@@ -1828,9 +1834,7 @@ async fn pause_all_still_stops_retries_and_fires() {
 #[tokio::test]
 async fn a_failed_run_is_retried_once_and_never_again() {
     let f = fx();
-    let mut i = input(&f);
-    i.retry_once = Some(true);
-    let r = new_routine(&f, i);
+    let r = retrying_routine(&f);
     let ana = person(&f.store, None, f.ana);
     f.fake.fail.store(true, Ordering::SeqCst);
     let first = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
@@ -1841,10 +1845,7 @@ async fn a_failed_run_is_retried_once_and_never_again() {
     let runs = runs_of(&f, r.id);
     assert_eq!(runs.len(), 2, "one retry, which failed too: {runs:?}");
     assert_eq!(runs[1].trigger, "run_now");
-    assert_eq!(
-        runs[1].trigger_ref.as_deref(),
-        Some(&*format!("retry:{}", first.id))
-    );
+    assert_retry_of(&runs[1], first.id);
     assert_eq!(runs[1].state, "failed");
     // Without retry_once a failure stays as it is.
     let plain = new_routine(&f, input(&f));
@@ -1852,9 +1853,7 @@ async fn a_failed_run_is_retried_once_and_never_again() {
     tick_once(&f.deps, OCT8 + 120).await;
     assert_eq!(runs_of(&f, plain.id).len(), 1);
     // A failure older than the retry window is not started again.
-    let mut late = input(&f);
-    late.retry_once = Some(true);
-    let late = new_routine(&f, late);
+    let late = retrying_routine(&f);
     run_now(&f.deps, &ana, late.id, OCT8).await.unwrap();
     tick_once(&f.deps, OCT8 + tick::RETRY_WITHIN_SECS + 60).await;
     assert_eq!(runs_of(&f, late.id).len(), 1);
@@ -1866,9 +1865,7 @@ async fn a_failed_run_is_retried_once_and_never_again() {
 #[tokio::test]
 async fn a_rate_limited_run_is_still_retried_after_the_hour() {
     let f = fx();
-    let mut i = input(&f);
-    i.retry_once = Some(true);
-    let r = new_routine(&f, i);
+    let r = retrying_routine(&f);
     let ana = person(&f.store, None, f.ana);
     f.fake.fail.store(true, Ordering::SeqCst);
     let first = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
@@ -1880,10 +1877,7 @@ async fn a_rate_limited_run_is_still_retried_after_the_hour() {
     tick_once(&f.deps, OCT8 + 3 * 3600).await;
     let runs = runs_of(&f, r.id);
     assert_eq!(runs.len(), 2, "{runs:?}");
-    assert_eq!(
-        runs[1].trigger_ref.as_deref(),
-        Some(&*format!("retry:{}", first.id))
-    );
+    assert_retry_of(&runs[1], first.id);
 }
 
 #[tokio::test]
@@ -2777,9 +2771,7 @@ async fn a_fire_at_a_limit_holds_the_next_until_the_reset() {
 #[tokio::test]
 async fn a_retry_held_at_a_limit_outlasts_the_retry_window() {
     let f = fx();
-    let mut i = input(&f);
-    i.retry_once = Some(true);
-    let r = new_routine(&f, i);
+    let r = retrying_routine(&f);
     let ana = person(&f.store, None, f.ana);
     let run = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
     let seed = |pct: f64, at: i64| {
@@ -2816,10 +2808,7 @@ async fn a_retry_held_at_a_limit_outlasts_the_retry_window() {
     tick_once(&f.deps, OCT8 + 3 * H).await;
     let runs = runs_of(&f, r.id);
     assert_eq!(runs.len(), 2, "{runs:?}");
-    assert_eq!(
-        runs[1].trigger_ref.as_deref(),
-        Some(&*format!("retry:{}", run.id))
-    );
+    assert_retry_of(&runs[1], run.id);
 }
 
 #[tokio::test]
@@ -2972,10 +2961,7 @@ async fn a_host_filter_narrows_fleet_and_session_events() {
     tick_once(&f.deps, OCT8 + 20).await;
     assert!(runs_of(&f, stuck.id).is_empty());
     // An account event takes no host filter.
-    let mut i = input(&f);
-    i.trigger = "event".into();
-    i.cron = None;
-    i.event = Some("account_limited".into());
+    let mut i = event_input(&f, "account_limited");
     i.event_host = Some("mac".into());
     let err = save(&f.store, &person(&f.store, None, f.ana), None, &i).unwrap_err();
     assert_eq!(err.code, codes::E_INVALID);
@@ -2994,10 +2980,7 @@ async fn a_fleet_event_host_filter_stays_in_the_routines_org() {
         s.set_host_org("nas", Some(o.id)).unwrap();
         o.id
     };
-    let mut i = input(&f);
-    i.trigger = "event".into();
-    i.cron = None;
-    i.event = Some("host_offline".into());
+    let mut i = event_input(&f, "host_offline");
     i.event_host = Some("nas".into());
     // The routine runs on mac (no org); nas's events are of `other` and
     // would be filtered on every fire.
@@ -3100,10 +3083,7 @@ async fn a_routine_switched_to_a_fleet_event_starts_after_the_newest_one() {
             ..Default::default()
         },
     );
-    let mut i = input(&f);
-    i.trigger = "event".into();
-    i.cron = None;
-    i.event = Some("account_limited".into());
+    let i = event_input(&f, "account_limited");
     let saved = save(&f.store, &person(&f.store, None, f.ana), Some(r.id), &i).unwrap();
     assert_eq!(routine(&f, saved.id).event_cursor, id);
     tick_once(&f.deps, OCT8).await;

@@ -797,6 +797,29 @@ pub fn agent(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> AgentImpl {
     }
 }
 
+/// A subject record's key: the job's dedup key, cut to what a record keeps.
+fn subject_key(dedup_key: &str) -> String {
+    dedup_key.chars().take(300).collect()
+}
+
+/// Whether a job with this dedup key was already found (its subject is kept).
+pub(super) fn subject_seen(
+    store: &Mutex<Store>,
+    rule_id: i64,
+    dedup_key: &str,
+    now: i64,
+) -> Result<bool, String> {
+    let s = lock(store).map_err(|e| e.message)?;
+    s.agent_record(
+        &subjects_namespace(rule_id),
+        SUBJECT_KIND,
+        &subject_key(dedup_key),
+        now,
+    )
+    .map(|row| row.is_some())
+    .map_err(|e| e.to_string())
+}
+
 pub(super) fn keep_subject(
     store: &Mutex<Store>,
     rule_id: i64,
@@ -809,7 +832,7 @@ pub(super) fn keep_subject(
         &NewAgentRecord {
             namespace: subjects_namespace(rule_id),
             kind: SUBJECT_KIND.into(),
-            key: dedup_key.chars().take(300).collect(),
+            key: subject_key(dedup_key),
             value: subject.to_string(),
             expires_at: Some(now + SUBJECT_TTL_SECS),
             written_by_job: None,
@@ -826,9 +849,13 @@ pub(super) fn kept_subject(
     now: i64,
 ) -> Option<Value> {
     let s = lock(store).ok()?;
-    let key: String = job.dedup_key.chars().take(300).collect();
     let row = s
-        .agent_record(&subjects_namespace(rule_id), SUBJECT_KIND, &key, now)
+        .agent_record(
+            &subjects_namespace(rule_id),
+            SUBJECT_KIND,
+            &subject_key(&job.dedup_key),
+            now,
+        )
         .ok()??;
     serde_json::from_str(&row.value).ok()
 }
@@ -981,17 +1008,7 @@ impl FleetPoller {
             if subject.is_null() {
                 continue;
             }
-            let seen = {
-                let s = lock(&self.store).map_err(|e| e.message)?;
-                s.agent_record(
-                    &subjects_namespace(rule_id),
-                    SUBJECT_KIND,
-                    &job.dedup_key,
-                    now,
-                )
-                .map_err(|e| e.to_string())?
-                .is_some()
-            };
+            let seen = subject_seen(&self.store, rule_id, &job.dedup_key, now)?;
             if !seen {
                 keep_subject(&self.store, rule_id, &job.dedup_key, &subject, now)?;
                 jobs.push(job);
@@ -1036,17 +1053,7 @@ impl FleetPoller {
         let planned = plan_scan_jobs(rule.id, inst, &scan_entries(&text)?, now);
         let mut jobs = Vec::new();
         for (job, subject) in planned {
-            let seen = {
-                let s = lock(&self.store).map_err(|e| e.message)?;
-                s.agent_record(
-                    &subjects_namespace(rule.id),
-                    SUBJECT_KIND,
-                    &job.dedup_key,
-                    now,
-                )
-                .map_err(|e| e.to_string())?
-                .is_some()
-            };
+            let seen = subject_seen(&self.store, rule.id, &job.dedup_key, now)?;
             if seen || jobs.len() >= SCAN_MAX_JOBS {
                 continue;
             }

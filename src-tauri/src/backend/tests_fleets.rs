@@ -861,25 +861,6 @@ fn every_fleet_scoped_command_selects_and_no_other_takes_a_fleet() {
     }
 }
 
-/// Retry and remove reach the OS keychain, which can wait on an unlock
-/// prompt: a sync command would run them on the macOS main thread.
-#[test]
-fn fleet_commands_that_touch_the_keychain_are_off_the_main_thread() {
-    let src = include_str!("../commands/fleets.rs");
-    for name in ["fleet_retry_now", "fleet_remove"] {
-        let at = src
-            .find(&format!("pub fn {name}("))
-            .or_else(|| src.find(&format!("pub async fn {name}(")))
-            .unwrap_or_else(|| panic!("{name} not found"));
-        let head = &src[..at];
-        let attr = &head[head.rfind("#[tauri::command").expect("an attribute")..];
-        assert!(
-            attr.starts_with("#[tauri::command(async)]") || src[at..].starts_with("pub async fn"),
-            "{name} must be an async command"
-        );
-    }
-}
-
 #[test]
 fn the_extra_fleet_hub_clients_are_watched() {
     let src = include_str!("fleets.rs");

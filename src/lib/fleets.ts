@@ -17,7 +17,7 @@ import { derived, get, writable, type Readable } from 'svelte/store';
 import { listen } from '@tauri-apps/api/event';
 import { invokeCmd, type IpcError, type Result } from './result';
 import type { HubConnection } from './hub_connection';
-import type { SessionRow } from './sessions';
+import { sessionIdentity, sessionIsStale, type SessionRow } from './sessions';
 import { applyPing, type HostPing, type HostRow } from './hosts';
 import type { ProjectRow, ProjectTreeRow } from './projects';
 import { readPref, writePref } from './prefs';
@@ -196,20 +196,6 @@ type RowPart = keyof FleetRaces;
 /** How long a killed session's id refuses a late `session:updated`. */
 export const FLEET_TOMBSTONE_MS = 5000;
 
-/** The same rule as `sessions.ts::sessionIsStale`: only a KNOWN older
- *  version of the SAME session (ids are reused after a kill) is stale. */
-function fleetSessionIdentity(s: SessionRow): string {
-  return `${s.host_alias}\u0000${s.tmux_name}\u0000${s.created_at}`;
-}
-function fleetSessionIsStale(incoming: SessionRow, current: SessionRow): boolean {
-  return (
-    fleetSessionIdentity(incoming) === fleetSessionIdentity(current) &&
-    incoming.row_version !== undefined &&
-    current.row_version !== undefined &&
-    incoming.row_version < current.row_version
-  );
-}
-
 /** Per fleet, per killed id: until when, and which session it was (null when
  *  the kill named only the id of a row this window never held). */
 const tombstones = new Map<string, Map<number, { until: number; identity: string | null }>>();
@@ -236,11 +222,11 @@ function admitSession(
   const tomb = liveTombstone(fleet, row.id);
   if (tomb) {
     if (how === 'updated') return false;
-    if (tomb.identity === null || tomb.identity === fleetSessionIdentity(row)) return false;
+    if (tomb.identity === null || tomb.identity === sessionIdentity(row)) return false;
     tombstones.get(fleet!)?.delete(row.id);
   }
   const current = rows.sessions.get(row.id);
-  return !(current && fleetSessionIsStale(row, current));
+  return !(current && sessionIsStale(row, current));
 }
 
 function putSession(fleet: string | undefined, rows: FleetRows, row: SessionRow, how: 'updated' | 'created' | 'command'): void {
@@ -256,7 +242,7 @@ function dropSession(fleet: string | undefined, rows: FleetRows, id: number): vo
   racesFor(fleet).sessions.touch(id);
   let m = tombstones.get(fleet);
   if (!m) tombstones.set(fleet, (m = new Map()));
-  m.set(id, { until: Date.now() + FLEET_TOMBSTONE_MS, identity: current ? fleetSessionIdentity(current) : null });
+  m.set(id, { until: Date.now() + FLEET_TOMBSTONE_MS, identity: current ? sessionIdentity(current) : null });
 }
 
 /** The event names that change an extra fleet's rows, and which of its
@@ -428,7 +414,7 @@ export async function loadFleetRows(fleet: string): Promise<void> {
       // brings it back or rolls it back.
       // (An older one stays listed so `keepCurrent` keeps the held row.)
       const listed = s.value.filter((r) => admitSession(fleet, rows, r, 'command') || rows.sessions.has(r.id));
-      const out = race.sessions.mergeList([...rows.sessions.values()], listed, ts, (r) => r.id, (r, cur) => fleetSessionIsStale(r, cur));
+      const out = race.sessions.mergeList([...rows.sessions.values()], listed, ts, (r) => r.id, sessionIsStale);
       if (out) rows.sessions = new Map(out.map((r) => [r.id, r]));
     }
     if (h.ok && Array.isArray(h.value)) {
