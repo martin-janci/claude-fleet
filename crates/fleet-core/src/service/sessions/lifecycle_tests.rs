@@ -2067,3 +2067,24 @@ async fn a_login_switch_restart_does_not_revive_a_killed_session() {
         "{err:?}"
     );
 }
+
+/// The re-check after a login-switch relaunch: a row killed (or removed)
+/// while the relaunch ran reads as killed; a live one, or a ghost lost for
+/// another reason, does not.
+#[test]
+fn a_kill_during_a_login_switch_restart_is_seen_by_the_recheck() {
+    use super::lifecycle::killed_since_switch_began;
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("h").unwrap();
+    let id = s
+        .upsert_session("dev-a", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    assert!(!killed_since_switch_began(&s, id).unwrap());
+    s.mark_session_killed(id, 2).unwrap();
+    assert!(killed_since_switch_began(&s, id).unwrap());
+    assert!(killed_since_switch_began(&s, id + 99).unwrap());
+    let lost = s
+        .upsert_session("dev-b", "h", None, None, 1, 1, "ghost", None)
+        .unwrap();
+    assert!(!killed_since_switch_began(&s, lost).unwrap());
+}

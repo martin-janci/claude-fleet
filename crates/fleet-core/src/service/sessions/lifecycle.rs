@@ -2531,6 +2531,27 @@ pub async fn restart_session(
                 .await?
             }
         }
+        // The killed-row guard above ran once, before the seconds of SSH
+        // this relaunch took: a person's kill landing in between must not
+        // be revived on the other login either. Their word is the newer
+        // one, as in `recreate_session`: the pane just started goes again,
+        // the kill stays remembered, and the new login is never recorded.
+        if let (Some(id), Some(_)) = (session_id, switch.as_ref()) {
+            let killed = killed_since_switch_began(&*lock(store)?, id)?;
+            if killed {
+                let _ = tmux.kill_session(&args.name).await;
+                if let Ok(s) = store.lock() {
+                    s.note_kill(&args.host_alias, &args.name, now_unix());
+                }
+                return Err(IpcError::new(
+                    codes::E_INVALID_STATE,
+                    format!(
+                        "session {} on {} was killed while it was being restarted on another login; left it killed",
+                        args.name, args.host_alias
+                    ),
+                ));
+            }
+        }
         Ok(())
     })
     .await?;
@@ -2565,6 +2586,17 @@ pub async fn restart_session(
                 args.name, args.host_alias
             ),
         )
+    })
+}
+
+/// [`restart_session`]'s re-check after a login-switch relaunch: whether
+/// the row was killed (ghosted as `killed`) or removed since the guard at
+/// the top let the switch through. That guard refuses a row already killed,
+/// so a killed row here was killed meanwhile.
+pub(super) fn killed_since_switch_began(s: &Store, session_id: i64) -> Result<bool, IpcError> {
+    Ok(match s.get_session_by_id(session_id)? {
+        None => true,
+        Some(r) => r.status == "ghost" && r.lost_reason.as_deref() == Some("killed"),
     })
 }
 
