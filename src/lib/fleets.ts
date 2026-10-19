@@ -25,6 +25,7 @@ import { attentionState, byTriage, countsTowardBadge } from './attention';
 import { attentionFactsFrom } from './attention_facts';
 import { attentionIdleMinutes } from './notify';
 import type { PrFilter, PrList } from './prs';
+import type { OrgDetail } from './orgs';
 import { createListRace, type ListRace } from './row_store';
 
 /** The slot id of the launch-time fleet (`backend::fleets::PRIMARY`). */
@@ -55,6 +56,8 @@ export const FLEET_SCOPED = [
   'env_var_unset',
   'my_grants',
   'setting_proposals',
+  // Phase 3a: the sidebar's Organisation filter, per fleet.
+  'list_orgs',
 ] as const;
 export type FleetScopedCommand = (typeof FLEET_SCOPED)[number];
 
@@ -85,6 +88,10 @@ export interface FleetRows {
   sessions: Map<number, SessionRow>;
   hosts: Map<string, HostRow>;
   projects: ProjectTreeRow[];
+  /** Its orgs as that hub lists them to this device (Phase 3a: the
+   *  sidebar's Organisation filter). Absent until read; a hub that will not
+   *  list them leaves it absent, which is not an error. */
+  orgs?: OrgDetail[];
   /** A list call failed; shown on the fleet's header. */
   error: string | null;
 }
@@ -348,6 +355,7 @@ function patchRows(fleet: string, fn: (rows: FleetRows) => void, parts: readonly
       sessions: parts.includes('sessions') ? new Map(rows.sessions) : rows.sessions,
       hosts: parts.includes('hosts') ? new Map(rows.hosts) : rows.hosts,
       projects: parts.includes('projects') ? [...rows.projects] : rows.projects,
+      orgs: rows.orgs,
       error: rows.error,
     };
     fn(copy);
@@ -417,10 +425,11 @@ export async function loadFleetRows(fleet: string): Promise<void> {
   const ts = race.sessions.begin();
   const th = race.hosts.begin();
   const tp = race.projects.begin();
-  const [s, h, p] = await Promise.all([
+  const [s, h, p, o] = await Promise.all([
     invokeCmd<SessionRow[]>('list_sessions', { fleet }),
     invokeCmd<HostRow[]>('list_hosts', { fleet }),
     invokeCmd<ProjectTreeRow[]>('list_projects', { fleet }),
+    invokeCmd<OrgDetail[]>('list_orgs', { fleet }),
   ]);
   patchRows(fleet, (rows) => {
     if (s.ok && Array.isArray(s.value)) {
@@ -438,6 +447,9 @@ export async function loadFleetRows(fleet: string): Promise<void> {
     if (p.ok && Array.isArray(p.value)) {
       rows.projects = race.projects.mergeList(rows.projects, p.value, tp, (t) => t.project.id) ?? rows.projects;
     }
+    // Orgs only name the Organisation filter's chips: a hub that will not
+    // list them to this device keeps the last answer and raises nothing.
+    if (o.ok && Array.isArray(o.value)) rows.orgs = o.value;
     const failed = [s, h, p].find((r) => !r.ok) as { ok: false; error: IpcError } | undefined;
     rows.error = failed ? failed.error.message : null;
   });

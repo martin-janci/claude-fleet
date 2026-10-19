@@ -1370,7 +1370,14 @@ follow the fleet filter, and the hub's `ready` frame names its `fleet_id`
 (minted at `serve` start) so one hub added twice is refused. The fleet id
 needs a hub with this change; an older one just never reads as a duplicate.
 Settings › Environment is per fleet too (a Fleet picker); the other Settings
-pages still act on the primary only.
+pages still act on the primary only. Phase 3a landed: the sidebar's Machine
+and Organisation filters list every shown fleet's machines and orgs under
+that fleet's label and colour (`list_orgs` joined `FLEET_SCOPED`); a choice
+belongs to one fleet (`src/lib/fleet_filters.ts`) and hides the other
+fleets' rows with a counted "hidden by the … filter · Show every fleet"
+line rather than silently; the shared filters (search, Last active, Needs
+you, Agent, Background agents) apply to the extra fleets' groups too; the
+primary's list sits under a folding fleet header beside another fleet.
 Phase 3 (one id space, the full panes per fleet) is not started.
 
 Application updates: design

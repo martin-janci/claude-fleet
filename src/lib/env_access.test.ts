@@ -110,8 +110,11 @@ describe('resource commands addressed to a fleet', () => {
 
   it('refuse any other command rather than let it reach the primary', async () => {
     const inv = mockedInvoke as ReturnType<typeof vi.fn>;
+    // The org list is fleet-scoped (Phase 3a); its Add is not. A tracker's
+    // list is neither.
     const org = bundle.resources.find((r) => r.id === 'org') as ResourceType;
-    const r = await listRecords(org, 'company');
+    const tracker = bundle.resources.find((r) => r.id === 'tracker') as ResourceType;
+    const r = await listRecords(tracker, 'company');
     expect(r.ok).toBe(false);
     const a = await runAction(org.create!, {}, 'company');
     expect(a.ok).toBe(false);

@@ -51,7 +51,9 @@
   import ProposedBy from './ProposedBy.svelte';
   import FleetSwitcher from './FleetSwitcher.svelte';
   import FleetSessionGroups from './FleetSessionGroups.svelte';
-  import { showPrimary, fleetInboxCount } from './fleets';
+  import { showPrimary, fleetInboxCount, multiFleet } from './fleets';
+  import PrimaryFleetHeader from './PrimaryFleetHeader.svelte';
+  import { anchor, primaryFleetOpen, primaryHiddenByAnchor } from './fleet_filters';
   import FleetInbox from './FleetInbox.svelte';
   import { failingCount, loadFailing, loadNextRoutine, nextRoutine, nextRoutineLine } from './routines';
   import { loadWaitingMissions, waitingMissionCount } from './mission_waits';
@@ -1762,8 +1764,17 @@
       </div>
     {/snippet}
     <!-- The fleet filter hides this window's own (primary) list when it
-         names an extra fleet (multi-hub design). -->
-    {#if $showPrimary}
+         names an extra fleet (multi-hub design). Beside another fleet the
+         list sits under its own fleet header, which folds it, and which
+         says so when another fleet's Machine / Organisation choice hides it
+         (Phase 3a, fleet_filters.ts). -->
+    {#if $multiFleet && $showPrimary}
+      <PrimaryFleetHeader
+        count={visibleIds.size + sharedWithMe.length}
+        hiddenCount={$sessions.filter((s) => s.kind !== 'external' && s.status !== 'lost').length}
+      />
+    {/if}
+    {#if $showPrimary && !primaryHiddenByAnchor($anchor) && (!$multiFleet || $primaryFleetOpen)}
     {#if pinnedRows.length > 0}
       <div class="orphan-section pinned-section" data-testid="pinned-sessions">
         <button
@@ -2229,7 +2240,7 @@
     {/if}
     <!-- Extra fleets (multi-hub design): each fleet the filter shows, under
          its own badge, after this window's own list. -->
-    <FleetSessionGroups />
+    <FleetSessionGroups search={searchQuery} {recency} {needsYouOnly} />
   </div>
   {/if}
 

@@ -543,11 +543,17 @@ pub async fn org_member_grants(
 
 // --- reads (routed) ------------------------------------------------------------
 
+/// Every org this caller may read. `fleet` picks which hub answers (multi-hub
+/// Phase 3a: the sidebar's Organisation filter lists each extra fleet's orgs
+/// under that fleet's badge); that hub still answers for its own connection.
 #[tauri::command]
 pub async fn list_orgs(
+    fleet: Option<String>,
     backend: State<'_, Arc<FleetBackend>>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<Vec<OrgDetail>, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::list_orgs(&backend, &store).await
 }
 

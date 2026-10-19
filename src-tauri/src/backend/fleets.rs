@@ -83,6 +83,8 @@ pub const FLEET_SCOPED: &[&str] = &[
     "env_var_unset",
     "my_grants",
     "setting_proposals",
+    // Phase 3a: the sidebar's Organisation filter, per fleet.
+    "list_orgs",
 ];
 
 /// Colours offered to a new fleet, in order; the first one no fleet uses is

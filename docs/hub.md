@@ -3915,6 +3915,21 @@ Settings → **Hub & sync** → *Fleets* → *Add a hub*: run
   (`<fleet-uuid>/session/<host>/<name>`) reads `company › mac/dev-x` when
   this window shows that fleet, and opens that session.
 
+- **The sidebar's filters know every fleet** (Phase 3a). *Machine* and
+  *Organisation* list each shown fleet's machines and orgs in a group of
+  their own, under the fleet's label and colour (`Machine · Papaya POS
+  (hub)`), because a host alias or an org id means something on one hub
+  only. A choice belongs to that one fleet: picking a machine or org in one
+  fleet clears the Machine and Organisation choice of every other, and while
+  it stands every other fleet's rows are hidden **with a line saying so** —
+  "1 session on Papaya POS (hub) hidden: the org filter (Org: Papaya POS on
+  rlt) applies to that fleet only · Show every fleet". The fleet switcher
+  wins over both: a choice in a fleet it hides is ignored. Search, Last
+  active, Needs you, Agent and Background agents apply to every fleet alike.
+  Beside another fleet this window's own list sits under its fleet header,
+  which folds, and every fleet's group (background agents included) lists
+  its sessions in the Sessions list, not only in the Inbox.
+
 Limits (Phase 3): this window's own panes — the full Conversation panel,
 Files, Repo, Rewind and Fork, forms, the session's terminals — are still
 about its own fleet only; an extra fleet's session has the lighter view
