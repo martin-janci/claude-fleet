@@ -72,7 +72,9 @@
     rememberFleetFor,
     fleetNewSession,
     openFleetSession,
+    multiFleet,
   } from './fleets';
+  import { fleetProfiles, loadProfile, profileLines } from './fleet_profiles';
 
   let {
     project,
@@ -884,6 +886,15 @@
   });
   let fleetBranch = $state('');
 
+  // Phase 3b: which profile the session runs as — this device's person on
+  // the chosen fleet, under the label given here.
+  const runsOnFleet = $derived(fleetChoice ? fleetChoice.fleet.id : PRIMARY);
+  const runsAs = $derived($multiFleet ? ($profileLines.get(runsOnFleet)?.line ?? null) : null);
+  $effect(() => {
+    const id = runsOnFleet;
+    if ($multiFleet && !untrack(() => $fleetProfiles.has(id))) void loadProfile(id);
+  });
+
   function pickFleet(id: string) {
     fleetPicked = true;
     chosenFleet = id;
@@ -1444,6 +1455,9 @@
       {/each}
     </div>
   {/if}
+  {#if runsAs && !ticket && !asBackground}
+    <p class="runs-as" data-testid="new-session-profile">Runs as {runsAs}</p>
+  {/if}
 
   <div class="fields">
     <label for="friendly-name">Name</label>
@@ -1958,6 +1972,11 @@
     min-height: 0;
   }
   .dialog h3 { margin: 0 0 0.3rem 0; font-size: var(--text-sm); flex: 0 0 auto; }
+  .runs-as {
+    margin: 0 0 var(--space-2);
+    color: var(--fg-muted);
+    font-size: var(--text-xs);
+  }
   .fleet-pick {
     display: flex;
     align-items: center;

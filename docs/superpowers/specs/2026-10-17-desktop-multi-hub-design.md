@@ -266,6 +266,20 @@ background agent shows nowhere else, since it never needs you).
 Not changed: Inbox (needs-you is never hidden by a scope, plan decision 6),
 the Hosts page, the Work view.
 
+### Phase 3b — profiles: one human, several fleet identities (landed)
+
+The owner is the same human on both fleets but deliberately a different
+person on each: work on the company hub (its GitHub token, its e-mail, its
+SSO account) and private on the personal one. The window now says which.
+
+| # | Decision | Why |
+|---|----------|-----|
+| D20 | **A hub answers "who am I here?" with a new read, `my_profile`**: the caller's own person (id, name, display name, e-mail, whether it owns the hub), its linked SSO accounts **by issuer** (the subject is not served), the NAMES of its own person-scope variables with `secret` / `is_ref`, and its git identity from its own plain `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL`. No argument names a person: the answer is the connection's own (`owner_for`, as `my_grants`); a caller that proves no person gets `person_id: null` and nothing else. `Access::Client`, read-only, refused to a per-host token. | `my_grants` gives only an id; the person's name and sign-in live on the hub. Secrets never cross: names only, and the two git values are ones the person set in plain and `env_vars list` already shows them. |
+| D21 | **No contract bump.** A hub without the tool answers `E_HUB_PROTOCOL`; the desktop then pieces the profile together from `my_grants` (who) and `env_vars_list` (its own person rows' names) and says sign-in is unknown. | Additive tool with a working fallback, the rule `wire_contract.rs` states for such tools. |
+| D22 | **The desktop command `my_profile` is `Routed` and fleet-scoped** (`FLEET_SCOPED` grows by it); standalone it answers this fleet's own person (the personal owner). | Each fleet's profile is read from that fleet's own hub, with the argument mapping every fleet-scoped read uses. |
+| D23 | **A profile's label is local**: `fleets.profileLabels` in this desktop's own prefs, keyed by fleet slot id, defaulting to the fleet's label. It is never sent to any hub, and nothing about one fleet is sent to another. | A label is how this window tells two of the person's identities apart, like the fleet colour (D13). |
+| D24 | **Where it shows**: the fleet switcher's chips (the label, when given, under the fleet's; the person and e-mail in the tooltip), Settings › Hub & sync › Fleets › *Profiles* (rename, person, e-mail, sign-in, git identity, a ✓/— list of `GH_TOKEN`, `GIT_AUTHOR_*`, `JIRA_EMAIL`, `JIRA_API_TOKEN` and any other own variable by name), and New session ("Runs as Work · Martin · martin@…" for the fleet the dialog will start on, which the Phase 2 picker defaults by the repository's owner). | Each place a person decides where work runs. Setting the variables stays in Settings › Environment with that fleet picked (#948). |
+
 ### Phase 3 — one id space
 
 - Re-key every store to `(fleet, id)`; the primary becomes an ordinary slot,

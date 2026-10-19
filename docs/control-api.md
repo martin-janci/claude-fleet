@@ -433,7 +433,10 @@ Index by area (names only; see the reference for details):
   `session_access` (who holds a live grant on your session), `my_grants`
   (who *you* are on this fleet and every live grant to you, which is what a
   client derives access from together with each row's `owner_person_id` and
-  `visibility`), `session_ask_access` (someone a session is shared with
+  `visibility`), `my_profile` (who *you* are on this fleet in words, for a
+  desktop showing several fleets: your person's name and e-mail, the
+  sign-in issuers linked to it, the names — never the values — of your own
+  person-scope variables, and your commit identity), `session_ask_access` (someone a session is shared with
   asks its owner for `answer` or `drive`; it confers nothing, one open ask
   each, and a decline holds a repeat back an hour), `access_requests` (the
   owner's open asks: `list`, then `grant`, which revokes the asker's share

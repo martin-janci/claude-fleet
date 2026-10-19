@@ -3930,6 +3930,18 @@ Settings → **Hub & sync** → *Fleets* → *Add a hub*: run
   which folds, and every fleet's group (background agents included) lists
   its sessions in the Sessions list, not only in the Inbox.
 
+- **Each fleet carries a profile** (Phase 3b). One human is often a
+  different person on each hub — work on the company's, private on their
+  own. Settings → **Hub & sync** → *Fleets* → *Profiles* shows, per fleet,
+  the person this device is there, its e-mail, the sign-in issuers linked
+  to it, its git identity, and which of its own variables are set (by name:
+  `GH_TOKEN ✓`, `JIRA_API_TOKEN —`; a value never leaves the hub). A label
+  ("Work", "Private") is kept on this desktop only. The fleet switcher's
+  chips carry it, and New session says which profile the session will run
+  as. The hub's side is the read-only `my_profile` tool: the caller's own
+  person only, never anyone else's. A hub without it is read through
+  `my_grants` and `env_vars` instead, without name or sign-in.
+
 Limits (Phase 3): this window's own panes — the full Conversation panel,
 Files, Repo, Rewind and Fork, forms, the session's terminals — are still
 about its own fleet only; an extra fleet's session has the lighter view

@@ -85,6 +85,8 @@ pub const FLEET_SCOPED: &[&str] = &[
     "setting_proposals",
     // Phase 3a: the sidebar's Organisation filter, per fleet.
     "list_orgs",
+    // Phase 3b: who this device is on each fleet.
+    "my_profile",
 ];
 
 /// Colours offered to a new fleet, in order; the first one no fleet uses is

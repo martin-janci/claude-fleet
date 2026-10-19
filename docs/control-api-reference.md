@@ -397,6 +397,10 @@ Parameters: `clean_target`, `confirm_nonce`, `dry_run`, `force_cross_org`, `keep
 
 Who you are on this fleet and every live grant TO you: { person_id, grants: [{ session_id, level }] }. With each row's owner_person_id and visibility, this is what a client derives its access from. Re-read after a reconnect the hub could not replay.
 
+### `my_profile`
+
+Who you are on this fleet, for a client that shows several fleets: { person_id, name, display_name, email, is_owner, sso: [{ issuer }], env: [{ name, secret, is_ref }], git: { name, email } } — your own person only. Variables are listed by name, never by value (the git name and e-mail excepted, when plain).
+
 ### `new_bg_session`
 
 Launch a supervised headless (background) Claude session on a host with an initial prompt, which becomes its default friendly name. Returns the claude_session_id AND the fleet row (`session`; absent until reconcile matches it, on the next tick) for session_transcript { session_id }. agent "codex" needs project_id and takes no read_only or stop limits.
@@ -1212,6 +1216,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::session_narrow`
 - `commands::sessions::session_access`
 - `commands::sessions::my_grants`
+- `commands::sessions::my_profile`
 - `commands::sessions::session_ask_access`
 - `commands::sessions::access_requests`
 - `commands::sessions::restart_session`

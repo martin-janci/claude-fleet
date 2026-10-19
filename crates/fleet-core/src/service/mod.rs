@@ -70,6 +70,7 @@ pub mod login_health;
 pub mod loops;
 pub mod messages;
 pub mod move_session;
+pub mod my_profile;
 pub mod names;
 #[cfg(feature = "nl-detect")]
 pub mod nl;

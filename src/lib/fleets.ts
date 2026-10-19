@@ -58,6 +58,8 @@ export const FLEET_SCOPED = [
   'setting_proposals',
   // Phase 3a: the sidebar's Organisation filter, per fleet.
   'list_orgs',
+  // Phase 3b: who this device is on each fleet.
+  'my_profile',
 ] as const;
 export type FleetScopedCommand = (typeof FLEET_SCOPED)[number];
 

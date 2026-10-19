@@ -2545,6 +2545,19 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             r#"{"person_id":1,"grants":[{"session_id":42,"level":"drive"}]}"#,
             Box::new(|b, s, _| block_on(commands::sessions::routed::my_grants(b, s)).map(|_| ())),
         ),
+        // Multi-hub Phase 3b: the same rule — no argument names a person.
+        (
+            "my_profile",
+            "my_profile",
+            json!({}),
+            r#"{"person_id":4,"name":"martin","sso":[{"issuer":"https://sso.example/realms/work"}],"env":[{"name":"GH_TOKEN","secret":true,"is_ref":false}]}"#,
+            Box::new(|b, s, _| {
+                let p = block_on(commands::sessions::routed::my_profile(b, s))?;
+                assert_eq!(p.person_id, Some(4), "the hub's answer, not this app's");
+                assert_eq!(p.env[0].name, "GH_TOKEN");
+                Ok(())
+            }),
+        ),
     ]
 }
 
@@ -6147,6 +6160,14 @@ fn the_standalone_sharing_arm_is_this_fleets_own_person() {
         .personal_owner_id()
         .unwrap()
         .expect("a fresh store has a personal owner (migration 100)");
+
+    let profile =
+        block_on(commands::sessions::routed::my_profile(&local, &st)).expect("my_profile");
+    assert_eq!(
+        profile.person_id,
+        Some(owner),
+        "standalone, this app's own profile is the fleet's own person"
+    );
 
     let mine = block_on(commands::sessions::routed::my_grants(&local, &st)).expect("my_grants");
     assert_eq!(

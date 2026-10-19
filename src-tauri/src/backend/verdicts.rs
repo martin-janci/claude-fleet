@@ -719,6 +719,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     ("my_grants", Verdict::Routed { tool: "my_grants" }),
+    // Multi-hub Phase 3b: this device's own profile on a hub.
+    ("my_profile", Verdict::Routed { tool: "my_profile" }),
     // Gap plan G4.2: a recipient's ask for a wider level, and the owner's
     // list and answer. Both route; the hub gates each per request.
     (
